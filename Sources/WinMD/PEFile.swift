@@ -86,10 +86,6 @@ internal struct PEFile {
       throw WinMDError.fileTooSmall
     }
 
-    guard Header32.Signature == IMAGE_NT_OPTIONAL_HDR32_MAGIC else {
-      throw WinMDError.invalidNTSignature
-    }
-
     guard 0...100 ~= Header32.FileHeader.NumberOfSections else {
       throw WinMDError.tooManySections
     }

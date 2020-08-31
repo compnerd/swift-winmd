@@ -100,3 +100,89 @@ internal struct COR20File {
 }
 
 internal var COR20_METADATA_SIGNATURE: DWORD { 0x424a5342 }
+
+/// COR20 Metadata Root
+///     uint32_t Signature          ; +0
+///     uint16_t MajorVersion       ; +4
+///     uint16_t MinorVersion       ; +6
+///     uint32_t Reserved           ; +8
+///     uint32_t Length             ; +12
+///      uint8_t Version[]          ; +16
+///     uint16_t Flags              ; +16 + Length
+///     uint16_t Streams            ; +18 + Length
+///     COR20 Stream Headers        ; +20 + Length
+internal struct COR20Metadata {
+  private let data: Data
+
+  public init(parsing data: Data) {
+    self.data = data
+  }
+
+  private func read<T: FixedWidthInteger>(offset: Data.Index) -> T {
+    var value: T = 0
+    withUnsafeMutableBytes(of: &value) {
+      let begin: Data.Index = data.index(data.startIndex, offsetBy: offset)
+      let end: Data.Index = data.index(begin, offsetBy: $0.count)
+      data.copyBytes(to: $0, from: begin..<end)
+    }
+    return value
+  }
+
+  public var Signature: UInt32 {
+    return read(offset: 0)
+  }
+
+  public var MajorVersion: UInt16 {
+    return read(offset: 4)
+  }
+
+  public var MinorVersion: UInt16 {
+    return read(offset: 6)
+  }
+
+  public var Reserved: UInt32 {
+    return read(offset: 8)
+  }
+
+  public var Length: UInt32 {
+    return read(offset: 12)
+  }
+
+  public var Streams: UInt16 {
+    return read(offset: 18 + Int(Length))
+  }
+}
+
+/// COR20 Stream Header
+///     uint32_t Offset     ; +0
+///     uint32_t Size       ; +4
+///      uint8_t Name[]     ; +8
+internal struct COR20StreamHeader {
+  private let data: Data
+
+  public init(parsing data: Data) {
+    self.data = data
+  }
+
+  private func read<T: FixedWidthInteger>(offset: Data.Index) -> T {
+    var value: T = 0
+    withUnsafeMutableBytes(of: &value) {
+      let begin: Data.Index = data.index(data.startIndex, offsetBy: offset)
+      let end: Data.Index = data.index(begin, offsetBy: $0.count)
+      data.copyBytes(to: $0, from: begin..<end)
+    }
+    return value
+  }
+
+  public var Offset: UInt32 {
+    return read(offset: 0)
+  }
+
+  public var Size: UInt32 {
+    return read(offset: 4)
+  }
+
+  public var Name: String {
+    return String(decoding: data.suffix(from: 8), as: Unicode.ASCII.self)
+  }
+}

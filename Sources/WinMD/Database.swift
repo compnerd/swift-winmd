@@ -45,11 +45,8 @@ public class Database {
     case .failure(let error):
       throw error
     case .success(let metadata):
-      var signature: DWORD = 0
-      _ = withUnsafeMutableBytes(of: &signature) {
-        metadata.copyBytes(to: $0, count: $0.count)
-      }
-      guard signature == COR20_METADATA_SIGNATURE else {
+      let metadata: COR20Metadata = COR20Metadata(parsing: metadata)
+      guard metadata.Signature == COR20_METADATA_SIGNATURE else {
         throw WinMDError.invalidCLRSignature
       }
     }

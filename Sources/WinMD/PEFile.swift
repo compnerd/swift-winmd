@@ -56,7 +56,7 @@ internal struct PEFile {
         let nbytes: Int = NumberOfSections * MemoryLayout<IMAGE_SECTION_HEADER>.size
         let begin: Data.Index = data.index(data.startIndex, offsetBy: Offset)
         let end: Data.Index = data.index(begin, offsetBy: nbytes)
-        data.copyBytes(to: $0, from: begin...end)
+        data.copyBytes(to: $0, from: begin ..< end)
         $1 = NumberOfSections
       })
     case WORD(IMAGE_NT_OPTIONAL_HDR64_MAGIC):
@@ -68,7 +68,7 @@ internal struct PEFile {
         let nbytes: Int = NumberOfSections * MemoryLayout<IMAGE_SECTION_HEADER>.size
         let begin: Data.Index = data.index(data.startIndex, offsetBy: Offset)
         let end: Data.Index = data.index(begin, offsetBy: nbytes)
-        data.copyBytes(to: $0, from: begin...end)
+        data.copyBytes(to: $0, from: begin ..< end)
         $1 = NumberOfSections
       })
     default:

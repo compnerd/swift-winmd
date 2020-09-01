@@ -123,7 +123,7 @@ internal struct COR20Metadata {
     withUnsafeMutableBytes(of: &value) {
       let begin: Data.Index = data.index(data.startIndex, offsetBy: offset)
       let end: Data.Index = data.index(begin, offsetBy: $0.count)
-      data.copyBytes(to: $0, from: begin..<end)
+      data.copyBytes(to: $0, from: begin ..< end)
     }
     return value
   }
@@ -146,6 +146,17 @@ internal struct COR20Metadata {
 
   public var Length: UInt32 {
     return read(offset: 12)
+  }
+
+  public var Version: String {
+    let length: Int = Int(Length)
+    let buffer: [UInt8] = Array<UInt8>(unsafeUninitializedCapacity: length) {
+      let begin: Data.Index = data.index(data.startIndex, offsetBy: 16)
+      let end: Data.Index = data.index(begin, offsetBy: length)
+      data.copyBytes(to: $0, from: begin ..< end)
+      $1 = length
+    }
+    return String(decodingCString: buffer, as: Unicode.ASCII.self)
   }
 
   public var Streams: UInt16 {

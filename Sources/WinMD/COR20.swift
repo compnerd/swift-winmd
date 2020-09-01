@@ -40,52 +40,50 @@ internal struct COR20File {
     }
   }
 
-  public var Metadata: Result<Data, WinMDError> {
+  public var Metadata: Result<COR20Metadata, WinMDError> {
     let metadata: IMAGE_DATA_DIRECTORY = Header.MetaData
-    var section: IMAGE_SECTION_HEADER!
 
+    let VA: DWORD = metadata.VirtualAddress
+
+    var LA: DWORD = 0
     switch envelope.Sections {
     case .failure(let error):
       return .failure(error)
     case .success(let sections):
-      let headers: [IMAGE_SECTION_HEADER] =
-          sections.containing(rva: metadata.VirtualAddress)
+      let headers: [IMAGE_SECTION_HEADER] = sections.containing(rva: VA)
       guard headers.count == 1 else { return .failure(WinMDError.tooManySections) }
-      section = headers.first
+      LA = headers.first!.offset(from: VA)
     }
 
-    return .success(envelope.data.suffix(from: numericCast(section.offset(from: metadata.VirtualAddress))))
+    let data: Data = envelope.data.suffix(from: numericCast(LA))
+    return .success(COR20Metadata(parsing: data))
   }
 
   public init(from envelope: PEFile) throws {
-    self.envelope = envelope
-
-    var COMDescriptor: IMAGE_DATA_DIRECTORY!
-
+    var VA: DWORD = 0
     switch envelope.Header32.OptionalHeader.Magic {
     case WORD(IMAGE_NT_OPTIONAL_HDR32_MAGIC):
       let PE: IMAGE_NT_HEADERS32 = envelope.Header32
-      COMDescriptor = PE.OptionalHeader.DataDirectory.14
+      VA = PE.OptionalHeader.DataDirectory.14.VirtualAddress
     case WORD(IMAGE_NT_OPTIONAL_HDR64_MAGIC):
       let PE: IMAGE_NT_HEADERS64 = envelope.Header64
-      COMDescriptor = PE.OptionalHeader.DataDirectory.14
+      VA = PE.OptionalHeader.DataDirectory.14.VirtualAddress
     default:
       throw WinMDError.invalidNTSignature
     }
 
-    var section: IMAGE_SECTION_HEADER!
+    var LA: DWORD = 0
     switch envelope.Sections {
     case .failure(let error):
       throw error
     case .success(let sections):
-      let headers: [IMAGE_SECTION_HEADER] =
-          sections.containing(rva: COMDescriptor.VirtualAddress)
+      let headers: [IMAGE_SECTION_HEADER] = sections.containing(rva: VA)
       guard headers.count == 1 else { throw WinMDError.COMDescriptorNotFound }
-      section = headers.first
+      LA = headers.first!.offset(from: VA)
     }
 
-    self.data =
-        envelope.data.suffix(from: numericCast(section.offset(from: COMDescriptor.VirtualAddress)))
+    self.data = envelope.data.suffix(from: numericCast(LA))
+    self.envelope = envelope
   }
 
   public func validate() throws {

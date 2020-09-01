@@ -31,24 +31,25 @@ import WinSDK
 import Foundation
 
 public class Database {
+  private let dos: DOSFile
+  private let pe: PEFile
+  private let cor20: COR20File
+
   private init(data: Data) throws {
-    let dos: DOSFile = DOSFile(data: data)
+    dos = DOSFile(data: data)
     try dos.validate()
 
-    let pe: PEFile = PEFile(from: dos)
+    pe = PEFile(from: dos)
     try pe.validate()
 
-    let cor20: COR20File = try COR20File(from: pe)
+    cor20 = try COR20File(from: pe)
     try cor20.validate()
 
-    switch cor20.Metadata {
-    case .failure(let error):
-      throw error
-    case .success(let metadata):
-      let metadata: COR20Metadata = COR20Metadata(parsing: metadata)
-      guard metadata.Signature == COR20_METADATA_SIGNATURE else {
-        throw WinMDError.invalidCLRSignature
-      }
+    guard case let .success(metadata) = cor20.Metadata else {
+      throw WinMDError.failure
+    }
+    guard metadata.Signature == COR20_METADATA_SIGNATURE else {
+      throw WinMDError.invalidCLRSignature
     }
   }
 

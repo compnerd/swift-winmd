@@ -33,7 +33,7 @@ import Foundation
 public class Database {
   private let dos: DOSFile
   private let pe: PEFile
-  private let cor20: COR20File
+  private let cil: Assembly
 
   private init(data: Data) throws {
     dos = DOSFile(data: data)
@@ -42,15 +42,8 @@ public class Database {
     pe = PEFile(from: dos)
     try pe.validate()
 
-    cor20 = try COR20File(from: pe)
-    try cor20.validate()
-
-    guard case let .success(metadata) = cor20.Metadata else {
-      throw WinMDError.failure
-    }
-    guard metadata.Signature == COR20_METADATA_SIGNATURE else {
-      throw WinMDError.invalidCLRSignature
-    }
+    cil = try Assembly(from: pe)
+    try cil.validate()
   }
 
   public convenience init(at path: URL) throws {

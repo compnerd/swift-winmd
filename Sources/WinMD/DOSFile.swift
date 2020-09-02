@@ -41,11 +41,11 @@ internal struct DOSFile {
 
   public func validate() throws {
     guard data.count > MemoryLayout<IMAGE_DOS_HEADER>.size else {
-      throw WinMDError.fileTooSmall
+      throw WinMDError.BadImageFormat
     }
 
     guard Header.e_magic == IMAGE_DOS_SIGNATURE else {
-      throw WinMDError.invalidDOSSignature
+      throw WinMDError.BadImageFormat
     }
   }
 }

@@ -30,9 +30,5 @@
 import Foundation
 import WinMD
 
-let FileManager: Foundation.FileManager = Foundation.FileManager.default
-_ = try FileManager.contentsOfDirectory(atPath: "C:\\Windows\\System32\\WinMetadata").map {
-  print($0)
-}
-
-let database: WinMD.Database? = try! WinMD.Database(atPath: "C:\\Windows\\System32\\WinMetadata\\Windows.Foundation.winmd")
+let database: WinMD.Database? =
+    try! WinMD.Database(atPath: "C:\\Windows\\System32\\WinMetadata\\Windows.Foundation.winmd")

@@ -72,22 +72,21 @@ internal struct PEFile {
         $1 = NumberOfSections
       })
     default:
-      return .failure(WinMDError.invalidNTSignature)
+      return .failure(WinMDError.BadImageFormat)
     }
   }
 
-  public init(from envelope: DOSFile) {
-    self.data =
-        envelope.data.suffix(from: numericCast(envelope.Header.e_lfanew))
+  public init(from dos: DOSFile) {
+    self.data = dos.data.suffix(from: numericCast(dos.Header.e_lfanew))
   }
 
   public func validate() throws {
     guard data.count > MemoryLayout<IMAGE_NT_HEADERS32>.size else {
-      throw WinMDError.fileTooSmall
+      throw WinMDError.BadImageFormat
     }
 
-    guard 0...100 ~= Header32.FileHeader.NumberOfSections else {
-      throw WinMDError.tooManySections
+    guard Header32.Signature == IMAGE_NT_SIGNATURE else {
+      throw WinMDError.BadImageFormat
     }
   }
 }

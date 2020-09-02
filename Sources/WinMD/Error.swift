@@ -28,11 +28,8 @@
  **/
 
 public enum WinMDError: Error {
-case failure
-case fileTooSmall
-case invalidDOSSignature
-case COMDescriptorNotFound
-case invalidNTSignature
-case tooManySections
-case invalidCLRSignature
+case BadImageFormat
+
+case invalidStream
+case tableNotFound
 }

@@ -99,7 +99,25 @@ internal struct COR20File {
 
 internal var COR20_METADATA_SIGNATURE: DWORD { 0x424a5342 }
 
-/// COR20 Metadata Root
+internal class COR20DataModel {
+  let data: Data
+
+  public init(parsing data: Data) {
+    self.data = data
+  }
+
+  internal func read<T: FixedWidthInteger>(offset: Data.Index) -> T {
+    var value: T = 0
+    withUnsafeMutableBytes(of: &value) {
+      let begin: Data.Index = data.index(data.startIndex, offsetBy: offset)
+      let end: Data.Index = data.index(begin, offsetBy: $0.count)
+      data.copyBytes(to: $0, from: begin..<end)
+    }
+    return value
+  }
+}
+
+/// COR20 Metadata
 ///     uint32_t Signature          ; +0
 ///     uint16_t MajorVersion       ; +4
 ///     uint16_t MinorVersion       ; +6
@@ -109,23 +127,7 @@ internal var COR20_METADATA_SIGNATURE: DWORD { 0x424a5342 }
 ///     uint16_t Flags              ; +16 + Length
 ///     uint16_t Streams            ; +18 + Length
 ///     COR20 Stream Headers        ; +20 + Length
-internal struct COR20Metadata {
-  private let data: Data
-
-  public init(parsing data: Data) {
-    self.data = data
-  }
-
-  private func read<T: FixedWidthInteger>(offset: Data.Index) -> T {
-    var value: T = 0
-    withUnsafeMutableBytes(of: &value) {
-      let begin: Data.Index = data.index(data.startIndex, offsetBy: offset)
-      let end: Data.Index = data.index(begin, offsetBy: $0.count)
-      data.copyBytes(to: $0, from: begin ..< end)
-    }
-    return value
-  }
-
+internal class COR20Metadata: COR20DataModel {
   public var Signature: UInt32 {
     return read(offset: 0)
   }
@@ -166,23 +168,7 @@ internal struct COR20Metadata {
 ///     uint32_t Offset     ; +0
 ///     uint32_t Size       ; +4
 ///      uint8_t Name[]     ; +8
-internal struct COR20StreamHeader {
-  private let data: Data
-
-  public init(parsing data: Data) {
-    self.data = data
-  }
-
-  private func read<T: FixedWidthInteger>(offset: Data.Index) -> T {
-    var value: T = 0
-    withUnsafeMutableBytes(of: &value) {
-      let begin: Data.Index = data.index(data.startIndex, offsetBy: offset)
-      let end: Data.Index = data.index(begin, offsetBy: $0.count)
-      data.copyBytes(to: $0, from: begin..<end)
-    }
-    return value
-  }
-
+internal class COR20StreamHeader: COR20DataModel {
   public var Offset: UInt32 {
     return read(offset: 0)
   }
@@ -192,6 +178,40 @@ internal struct COR20StreamHeader {
   }
 
   public var Name: String {
-    return String(decoding: data.suffix(from: 8), as: Unicode.ASCII.self)
+    let begin: Data.Index = data.index(data.startIndex, offsetBy: 8)
+    return data[begin...].withUnsafeBytes {
+      String(decodingCString: $0, as: Unicode.ASCII.self)
+    }
+  }
+}
+
+/// COR20 MetaData Tables
+///     uint32_t Reserved           ; +0 [0]
+///      uint8_t MajorVersion       ; +4
+///      uint8_t MinorVersion       ; +5
+///      uint8_t HeapOffsetSizes    ; +6
+///      uint8_t Reserved           ; +7 [1]
+///     uint64_t Valid              ; +8
+///     uint64_t Sorted             ; +16
+///     uint32_t Rows[]             ; +24
+internal class COR20MetaDataTables: COR20DataModel {
+  public var MajorVersion: UInt8 {
+    return read(offset: 4)
+  }
+
+  public var MinorVersion: UInt8 {
+    return read(offset: 5)
+  }
+
+  public var HeapOffsetSizes: UInt8 {
+    return read(offset: 6)
+  }
+
+  public var Valid: UInt64 {
+    return read(offset: 8)
+  }
+
+  public var Sorted: UInt64 {
+    return read(offset: 16)
   }
 }

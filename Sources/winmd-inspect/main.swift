@@ -30,5 +30,6 @@
 import Foundation
 import WinMD
 
-let database: WinMD.Database? =
-    try! WinMD.Database(atPath: "C:\\Windows\\System32\\WinMetadata\\Windows.Foundation.winmd")
+if let database = try? WinMD.Database(atPath: "C:\\Windows\\System32\\WinMetadata\\Windows.Foundation.winmd") {
+  database.dump()
+}

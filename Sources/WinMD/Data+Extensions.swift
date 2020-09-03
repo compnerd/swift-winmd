@@ -27,39 +27,15 @@
  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  **/
 
-import WinSDK
 import Foundation
 
-public class Database {
-  private let dos: DOSFile
-  private let pe: PEFile
-  private let cil: Assembly
-
-  private init(data: Data) throws {
-    dos = DOSFile(data: data)
-    try dos.validate()
-
-    pe = PEFile(from: dos)
-    try pe.validate()
-
-    cil = try Assembly(from: pe)
-    try cil.validate()
-  }
-
-  public convenience init(at path: URL) throws {
-    let buffer: Data = try NSData(contentsOf: path, options: .alwaysMapped) as Data
-    try self.init(data: buffer)
-  }
-
-  public convenience init(atPath path: String) throws {
-    try self.init(at: URL(fileURLWithPath: path))
-  }
-
-  public func dump() {
-    guard case let .success(metadata) = cil.Metadata else { return }
-
-    print("Version: \(metadata.Version)")
-    print("Streams: \(metadata.Streams)")
-    _ = metadata.StreamHeaders.map { print($0) }
+extension Data {
+  internal func read<T>(offset: Data.Index) -> T {
+    let begin: Data.Index = self.index(self.startIndex, offsetBy: offset)
+    let end: Data.Index = self.index(begin, offsetBy: MemoryLayout<T>.stride)
+    return Array<T>(unsafeUninitializedCapacity: 1) {
+      self.copyBytes(to: $0, from: begin ..< end)
+      $1 = 1
+    }[0]
   }
 }

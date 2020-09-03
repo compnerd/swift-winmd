@@ -106,16 +106,6 @@ internal struct Assembly {
   }
 }
 
-fileprivate func read<T: FixedWidthInteger>(_ data: Data, offset: Data.Index) -> T {
-  var value: T = 0
-  withUnsafeMutableBytes(of: &value) {
-    let begin: Data.Index = data.index(data.startIndex, offsetBy: offset)
-    let end: Data.Index = data.index(begin, offsetBy: $0.count)
-    data.copyBytes(to: $0, from: begin ..< end)
-  }
-  return value
-}
-
 private var CIL_METADATA_SIGNATURE: DWORD { 0x424a5342 }
 
 /// Stream Header
@@ -126,11 +116,11 @@ internal struct StreamHeader {
   internal let data: Data
 
   public var Offset: UInt32 {
-    return read(data, offset: 0)
+    return data.read(offset: 0)
   }
 
   public var Size: UInt32 {
-    return read(data, offset: 4)
+    return data.read(offset: 4)
   }
 
   public var Name: String {
@@ -162,23 +152,23 @@ internal struct Metadata {
   internal let data: Data
 
   public var Signature: UInt32 {
-    return read(data, offset: 0)
+    return data.read(offset: 0)
   }
 
   public var MajorVersion: UInt16 {
-    return read(data, offset: 4)
+    return data.read(offset: 4)
   }
 
   public var MinorVersion: UInt16 {
-    return read(data, offset: 6)
+    return data.read(offset: 6)
   }
 
   public var Reserved: UInt32 {
-    return read(data, offset: 8)
+    return data.read(offset: 8)
   }
 
   public var Length: UInt32 {
-    return read(data, offset: 12)
+    return data.read(offset: 12)
   }
 
   public var Version: String {
@@ -193,7 +183,7 @@ internal struct Metadata {
   }
 
   public var Streams: UInt16 {
-    return read(data, offset: 18 + Int(Length))
+    return data.read(offset: 18 + Int(Length))
   }
 
   public var StreamHeaders: [StreamHeader] {
@@ -316,23 +306,23 @@ internal struct MetadataTablesStream {
   internal let data: Data
 
   public var MajorVersion: UInt8 {
-    return read(data, offset: 4)
+    return data.read(offset: 4)
   }
 
   public var MinorVersion: UInt8 {
-    return read(data, offset: 5)
+    return data.read(offset: 5)
   }
 
   public var HeapOffsetSizes: UInt8 {
-    return read(data, offset: 6)
+    return data.read(offset: 6)
   }
 
   public var Valid: UInt64 {
-    return read(data, offset: 8)
+    return data.read(offset: 8)
   }
 
   public var Sorted: UInt64 {
-    return read(data, offset: 16)
+    return data.read(offset: 16)
   }
 
   public var Rows: [DWORD] {

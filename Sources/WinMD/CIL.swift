@@ -55,7 +55,9 @@ internal struct Assembly {
       LA = headers.first!.offset(from: VA)
     }
 
-    let data: Data = envelope.data.suffix(from: numericCast(LA))
+    let begin: Data.Index = Data.Index(LA)
+    let end: Data.Index = data.index(begin, offsetBy: Int(Header.MetaData.Size))
+    let data: Data = envelope.data[begin ..< end]
 
     let metadata = WinMD.Metadata(data: data)
     do {

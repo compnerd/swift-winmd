@@ -56,10 +56,17 @@ public class Database {
   }
 
   public func dump() {
-    guard case let .success(metadata) = cil.Metadata else { return }
-
+    let metadata = cil.Metadata
     print("Version: \(metadata.Version)")
     print("Streams: \(metadata.Streams)")
     _ = metadata.StreamHeaders.map { print($0) }
+
+    if let stream = metadata.stream(named: Metadata.Stream.Tables) {
+      let ts = TablesStream(data: stream)
+
+      print("MajorVersion: \(String(ts.MajorVersion, radix: 16))")
+      print("MinorVersion: \(String(ts.MinorVersion, radix: 16))")
+      print("Tables: \(ts.Tables)")
+    }
   }
 }

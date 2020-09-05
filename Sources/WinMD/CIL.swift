@@ -30,85 +30,57 @@
 import WinSDK
 import Foundation
 
+private var CIL_METADATA_SIGNATURE: DWORD { 0x424a5342 }
+
 internal struct Assembly {
-  internal let envelope: PEFile
-  internal let data: Data
+  private let header: Data
+  private let metadata: Data
 
   public var Header: IMAGE_COR20_HEADER {
-    return data.withUnsafeBytes {
+    header.withUnsafeBytes {
       $0.bindMemory(to: IMAGE_COR20_HEADER.self).baseAddress!.pointee
     }
   }
 
-  public var Metadata: Result<Metadata, WinMDError> {
-    let VA: DWORD = Header.MetaData.VirtualAddress
-
-    var LA: DWORD = 0
-    switch envelope.Sections {
-    case .failure(let error):
-      return .failure(error)
-    case .success(let sections):
-      let headers: [IMAGE_SECTION_HEADER] = sections.containing(rva: VA)
-      guard headers.count == 1 else {
-        return .failure(WinMDError.BadImageFormat)
-      }
-      LA = headers.first!.offset(from: VA)
-    }
-
-    let begin: Data.Index = Data.Index(LA)
-    let end: Data.Index = data.index(begin, offsetBy: Int(Header.MetaData.Size))
-    let data: Data = envelope.data[begin ..< end]
-
-    let metadata = WinMD.Metadata(data: data)
-    do {
-      try metadata.validate()
-    } catch(let error) {
-      return .failure(error as! WinMDError)
-    }
-    return .success(metadata)
+  public var Metadata: MetadataRoot {
+    MetadataRoot(data: metadata)
   }
 
   public init(from pe: PEFile) throws {
-    var VA: DWORD = 0
-    switch pe.Header32.OptionalHeader.Magic {
-    case WORD(IMAGE_NT_OPTIONAL_HDR32_MAGIC):
-      let PE: IMAGE_NT_HEADERS32 = pe.Header32
-      VA = PE.OptionalHeader.DataDirectory.14.VirtualAddress
-    case WORD(IMAGE_NT_OPTIONAL_HDR64_MAGIC):
-      let PE: IMAGE_NT_HEADERS64 = pe.Header64
-      VA = PE.OptionalHeader.DataDirectory.14.VirtualAddress
-    default:
-      throw WinMDError.BadImageFormat
-    }
-
-    var LA: DWORD = 0
-    switch pe.Sections {
-    case .failure(let error):
-      throw error
-    case .success(let sections):
-      let headers: [IMAGE_SECTION_HEADER] = sections.containing(rva: VA)
-      guard headers.count == 1 else {
+    func data(VA: DWORD, Size: DWORD) throws -> Data {
+      let sections = pe.Sections.containing(rva: VA)
+      guard sections.count == 1, let LA = sections.first?.offset(from: VA) else {
         throw WinMDError.BadImageFormat
       }
-      LA = headers.first!.offset(from: VA)
+
+      let begin: Data.Index = Data.Index(LA)
+      let end: Data.Index = pe.data.index(begin, offsetBy: Int(Size))
+      return pe.data[begin ..< end]
     }
 
-    self.data = pe.data.suffix(from: numericCast(LA))
-    self.envelope = pe
+    // CLI Header
+    let COMDescriptor: IMAGE_DATA_DIRECTORY = pe.DataDirectory.14
+    self.header =
+        try data(VA: COMDescriptor.VirtualAddress, Size: COMDescriptor.Size)
+
+    let Header = header.withUnsafeBytes {
+      $0.bindMemory(to: IMAGE_COR20_HEADER.self).baseAddress!.pointee
+    }
+
+    // CLI Metadata
+    self.metadata =
+        try data(VA: Header.MetaData.VirtualAddress, Size: Header.MetaData.Size)
   }
 
   public func validate() throws {
-    guard data.count > MemoryLayout<IMAGE_COR20_HEADER>.size else {
+    guard Header.cb == MemoryLayout<IMAGE_COR20_HEADER>.size else {
       throw WinMDError.BadImageFormat
     }
-
-    guard Header.cb == MemoryLayout<IMAGE_COR20_HEADER>.size else {
+    guard Metadata.Signature == CIL_METADATA_SIGNATURE else {
       throw WinMDError.BadImageFormat
     }
   }
 }
-
-private var CIL_METADATA_SIGNATURE: DWORD { 0x424a5342 }
 
 /// Stream Header
 ///     uint32_t Offset     ; +0
@@ -140,7 +112,7 @@ extension StreamHeader: CustomDebugStringConvertible {
   }
 }
 
-/// Metadata
+/// Metadata Root
 ///     uint32_t Signature              ; +0
 ///     uint16_t MajorVersion           ; +4
 ///     uint16_t MinorVersion           ; +6
@@ -150,8 +122,12 @@ extension StreamHeader: CustomDebugStringConvertible {
 ///     uint16_t Flags                  ; +16 + Length
 ///     uint16_t Streams                ; +18 + Length
 ///              StreamHeaders[Streams] ; +20 + Length
-internal struct Metadata {
-  internal let data: Data
+internal struct MetadataRoot {
+  private let data: Data
+
+  public init(data: Data) {
+    self.data = data
+  }
 
   public var Signature: UInt32 {
     return data.read(offset: 0)
@@ -175,9 +151,9 @@ internal struct Metadata {
 
   public var Version: String {
     let length: Int = Int(Length)
+    let begin: Data.Index = data.index(data.startIndex, offsetBy: 16)
+    let end: Data.Index = data.index(begin, offsetBy: length)
     let buffer: [UInt8] = Array<UInt8>(unsafeUninitializedCapacity: length) {
-      let begin: Data.Index = data.index(data.startIndex, offsetBy: 16)
-      let end: Data.Index = data.index(begin, offsetBy: length)
       data.copyBytes(to: $0, from: begin ..< end)
       $1 = length
     }
@@ -213,32 +189,13 @@ internal struct Metadata {
   }
 }
 
-extension Metadata {
-  public func validate() throws {
-    guard Signature == CIL_METADATA_SIGNATURE else {
-      throw WinMDError.BadImageFormat
-    }
-  }
-}
-
-extension Metadata {
-  internal enum Stream: String {
-  case Tables = "#~"
-  case Strings = "#Strings"
-  case Blob = "#Blob"
-  case GUID = "#GUID"
-  case UserStrings = "#US"
-  case PDB = "#Pdb"
-  }
-}
-
-extension Metadata {
+extension MetadataRoot {
   public func stream(named name: Metadata.Stream) -> Data? {
     return stream(named: name.rawValue)
   }
 
   public func stream(named name: String) -> Data? {
-    let headers = StreamHeaders.filter({ $0.Name == name })
+    let headers = StreamHeaders.filter { $0.Name == name }
     guard headers.count == 1, let header = headers.first else {
       return nil
     }
@@ -250,62 +207,22 @@ extension Metadata {
   }
 }
 
-extension Metadata {
-  internal enum Table: Int {
-  case Module = 0
-  case TypeRef = 1
-  case TypeDef = 2
-  case Field = 4
-  case MethodDef = 6
-  case Param = 8
-  case InterfaceImpl = 9
-  case MemberRef = 10
-  case Constant = 11
-  case CustomAttribute = 12
-  case FieldMarshal = 13
-  case DeclSecurity = 14
-  case ClassLayout = 15
-  case FieldLayout = 16
-  case StandAloneSig = 17
-  case EventMap = 18
-  case Event = 20
-  case PropertyMap = 21
-  case Property = 23
-  case MethodSemantics = 24
-  case MethodImpl = 25
-  case ModuleRef = 26
-  case TypeSpec = 27
-  case ImplMap = 28
-  case FieldRVA = 29
-  case Assembly = 32
-  case AssemblyProcessor = 33
-  case AssemblyOS = 34
-  case AssemblyRef = 35
-  case AssemblyRefProcessor = 36
-  case AssemblyRefOS = 37
-  case File = 38
-  case ExportedType = 39
-  case ManifestResource = 40
-  case NestedClass = 41
-  case GenericParam = 42
-  case GenericParamConstraint = 44
-  }
-}
-
-extension Metadata.Table: CaseIterable {
-}
-
-/// MetaData Tables Stream
+/// Tables Stream
 ///     uint32_t Reserved           ; +0 [0]
 ///      uint8_t MajorVersion       ; +4
 ///      uint8_t MinorVersion       ; +5
-///      uint8_t HeapOffsetSizes    ; +6
+///      uint8_t HeapSizes          ; +v
 ///      uint8_t Reserved           ; +7 [1]
 ///     uint64_t Valid              ; +8
 ///     uint64_t Sorted             ; +16
 ///     uint32_t Rows[]             ; +24
-internal struct MetadataTablesStream {
-  internal let data: Data
+///      uint8_t Tables[]
+internal struct TablesStream {
+  private let data: Data
+
+  public init(data: Data) {
+    self.data = data
+  }
 
   public var MajorVersion: UInt8 {
     return data.read(offset: 4)
@@ -315,7 +232,7 @@ internal struct MetadataTablesStream {
     return data.read(offset: 5)
   }
 
-  public var HeapOffsetSizes: UInt8 {
+  public var HeapSizes: UInt8 {
     return data.read(offset: 6)
   }
 
@@ -337,30 +254,101 @@ internal struct MetadataTablesStream {
       $1 = tables
     }
   }
-}
 
-extension MetadataTablesStream {
-  public var tables: [Metadata.Table] {
-    let valid:  UInt64 = Valid
+  public var Tables: [Table] {
+    let valid: UInt64 = Valid
+    let rows: [DWORD] = Rows
 
-    var tables: [Metadata.Table] = []
+    var tables: [Table] = []
     tables.reserveCapacity(valid.nonzeroBitCount)
 
-    for table in Metadata.Table.allCases {
-      if valid & (1 << table.rawValue) == (1 << table.rawValue) {
-        tables.append(table)
+    let strides: [TableIndex:Int] = self.strides(tables: valid, rows: rows)
+
+    let offset = 24 + valid.nonzeroBitCount * MemoryLayout<DWORD>.size 
+    var content = data[data.index(data.startIndex, offsetBy: offset)...]
+
+    Metadata.Tables.forEach { table in
+      if valid & (1 << table.number) == (1 << table.number) {
+        let records = rows[(valid & ((1 << table.number) - 1)).nonzeroBitCount]
+        tables.append(table.init(from: content, rows: records, strides: strides))
+        content = content[content.index(content.startIndex, offsetBy: tables.last!.data.count)...]
       }
     }
 
     return tables
   }
+}
 
-  public func rows(in table: Metadata.Table) throws -> DWORD {
-    let index = table.rawValue
+extension TablesStream {
+  private func strides(tables: UInt64, rows: [DWORD]) -> [TableIndex:Int] {
+    var strides: [TableIndex:Int] = [:]
 
-    guard Valid & (1 << index) == (1 << index) else {
-      throw WinMDError.tableNotFound
+    func IndexSize(for set: [Table.Type]) -> Int {
+      let TagLength = (set.count - 1).nonzeroBitCount
+      return set.map {
+        let count = rows[(tables & ((1 << $0.number) - 1)).nonzeroBitCount]
+        let range = 1 << (16 - TagLength)
+        return count < range
+      }.contains(false) ? 4 : 2
     }
-    return Rows[(Valid & ((1 << index) - 1)).nonzeroBitCount]
+
+    // Required Heaps
+    strides[.blob] = BlobIndexSize
+    strides[.guid] = GUIDIndexSize
+    strides[.string] = StringIndexSize
+
+    // Simple Indices
+    Metadata.Tables.forEach { table in
+      if tables & (1 << table.number) == (1 << table.number) {
+        strides[.simple(table)] =
+            rows[(tables & ((1 << table.number) - 1)).nonzeroBitCount] < (1 << 16)
+                ? 2
+                : 4
+      }
+    }
+
+    // Coded Indices
+    strides[.coded(HasConstant)] = IndexSize(for: HasConstantTables)
+    strides[.coded(HasCustomAttribute)] = IndexSize(for: HasCustomAttributeTables)
+    strides[.coded(CustomAttributeType)] = IndexSize(for: CustomAttributeTypeTables)
+    strides[.coded(HasDeclSecurity)] = IndexSize(for: HasDeclSecurityTables)
+    strides[.coded(TypeDefOrRef)] = IndexSize(for: TypeDefOrRefTables)
+    strides[.coded(Implementation)] = IndexSize(for: ImplementationTables)
+    strides[.coded(HasFieldMarshal)] = IndexSize(for: HasFieldMarshalTables)
+    strides[.coded(TypeOrMethodDef)] = IndexSize(for: TypeOrMethodDefTables)
+    strides[.coded(MemberForwarded)] = IndexSize(for: MemberForwardedTables)
+    strides[.coded(MemberRefParent)] = IndexSize(for: MemberRefParentTables)
+    strides[.coded(HasSemantics)] = IndexSize(for: HasSemanticsTables)
+    strides[.coded(MethodDefOrRef)] = IndexSize(for: MethodDefOrRefTables)
+    strides[.coded(ResolutionScope)] = IndexSize(for: ResolutionScopeTables)
+
+    return strides
+  }
+}
+
+extension TablesStream {
+  internal var StringIndexSize: Int {
+    (HeapSizes >> 0) & 1 == 1 ? 4 : 2
+  }
+
+  internal var GUIDIndexSize: Int {
+    (HeapSizes >> 1) & 1 == 1 ? 4 : 2
+  }
+
+  internal var BlobIndexSize: Int {
+    (HeapSizes >> 2) & 1 == 1 ? 4 : 2
+  }
+}
+
+internal enum Metadata {
+}
+
+extension Metadata {
+  internal enum Stream: String {
+  case Tables = "#~"
+  case Strings = "#Strings"
+  case Blob = "#Blob"
+  case GUID = "#GUID"
+  case UserStrings = "#US"
   }
 }

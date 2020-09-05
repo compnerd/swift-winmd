@@ -45,34 +45,43 @@ internal struct PEFile {
     }
   }
 
-  public var Sections: Result<[IMAGE_SECTION_HEADER], WinMDError> {
+  public var DataDirectory: (IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY) {
+    switch Header32.OptionalHeader.Magic {
+    case WORD(IMAGE_NT_OPTIONAL_HDR32_MAGIC):
+      return Header32.OptionalHeader.DataDirectory
+    case WORD(IMAGE_NT_OPTIONAL_HDR64_MAGIC):
+      return Header64.OptionalHeader.DataDirectory
+    default: fatalError("BAD_IMAGE_FORMAT")
+    }
+  }
+
+  public var Sections: [IMAGE_SECTION_HEADER] {
     switch Header32.OptionalHeader.Magic {
     case WORD(IMAGE_NT_OPTIONAL_HDR32_MAGIC):
       let PE: IMAGE_NT_HEADERS32 = Header32
       let NumberOfSections: Int = Int(PE.FileHeader.NumberOfSections)
       let Offset: Int = MemoryLayout.size(ofValue: PE)
 
-      return .success(Array<IMAGE_SECTION_HEADER>(unsafeUninitializedCapacity: NumberOfSections) {
+      return Array<IMAGE_SECTION_HEADER>(unsafeUninitializedCapacity: NumberOfSections) {
         let nbytes: Int = NumberOfSections * MemoryLayout<IMAGE_SECTION_HEADER>.size
         let begin: Data.Index = data.index(data.startIndex, offsetBy: Offset)
         let end: Data.Index = data.index(begin, offsetBy: nbytes)
         data.copyBytes(to: $0, from: begin ..< end)
         $1 = NumberOfSections
-      })
+      }
     case WORD(IMAGE_NT_OPTIONAL_HDR64_MAGIC):
       let PE: IMAGE_NT_HEADERS64 = Header64
       let NumberOfSections: Int = Int(PE.FileHeader.NumberOfSections)
       let Offset: Int = MemoryLayout.size(ofValue: PE)
 
-      return .success(Array<IMAGE_SECTION_HEADER>(unsafeUninitializedCapacity: NumberOfSections) {
+      return Array<IMAGE_SECTION_HEADER>(unsafeUninitializedCapacity: NumberOfSections) {
         let nbytes: Int = NumberOfSections * MemoryLayout<IMAGE_SECTION_HEADER>.size
         let begin: Data.Index = data.index(data.startIndex, offsetBy: Offset)
         let end: Data.Index = data.index(begin, offsetBy: nbytes)
         data.copyBytes(to: $0, from: begin ..< end)
         $1 = NumberOfSections
-      })
-    default:
-      return .failure(WinMDError.BadImageFormat)
+      }
+    default: fatalError("BAD_IMAGE_FORMAT")
     }
   }
 

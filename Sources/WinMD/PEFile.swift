@@ -101,7 +101,7 @@ internal struct PEFile {
 }
 
 extension Array where Array.Element == IMAGE_SECTION_HEADER {
-  internal func containing(rva: DWORD) -> [IMAGE_SECTION_HEADER] {
+  internal func containing(rva: UInt32) -> [IMAGE_SECTION_HEADER] {
     return self.filter {
       rva >= $0.VirtualAddress && rva < $0.VirtualAddress + $0.Misc.VirtualSize
     }
@@ -109,7 +109,7 @@ extension Array where Array.Element == IMAGE_SECTION_HEADER {
 }
 
 extension IMAGE_SECTION_HEADER {
-  internal func offset(from rva: DWORD) -> DWORD {
+  internal func offset(from rva: UInt32) -> UInt32 {
     return rva - self.VirtualAddress + self.PointerToRawData
   }
 }

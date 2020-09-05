@@ -30,7 +30,7 @@
 import WinSDK
 import Foundation
 
-private var CIL_METADATA_SIGNATURE: DWORD { 0x424a5342 }
+private var CIL_METADATA_SIGNATURE: UInt32 { 0x424a5342 }
 
 internal struct Assembly {
   private let header: Data
@@ -47,7 +47,7 @@ internal struct Assembly {
   }
 
   public init(from pe: PEFile) throws {
-    func data(VA: DWORD, Size: DWORD) throws -> Data {
+    func data(VA: UInt32, Size: UInt32) throws -> Data {
       let sections = pe.Sections.containing(rva: VA)
       guard sections.count == 1, let LA = sections.first?.offset(from: VA) else {
         throw WinMDError.BadImageFormat

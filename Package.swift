@@ -2,8 +2,8 @@
 
 import PackageDescription
 
-let SwiftWinUI = Package(
-  name: "SwiftWinUI",
+let SwiftWinMD = Package(
+  name: "SwiftWinMD",
   products: [
     .executable(name: "winmd-inspect", targets: ["winmd-inspect"]),
   ],

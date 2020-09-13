@@ -29,108 +29,20 @@
 
 import Foundation
 
-extension Set where Element == ObjectIdentifier {
-  fileprivate init(_ metatypes: [Table.Type]) {
-    self.init(metatypes.map { ObjectIdentifier($0) })
-  }
+internal protocol Table {
+  static var number: Int { get }
+
+  var data: Data { get }
+
+  init(from data: Data, rows: UInt32, strides: [TableIndex:Int])
 }
-
-internal let HasConstantTables: [Table.Type] = [
-  Metadata.Tables.Param.self,
-  Metadata.Tables.Field.self,
-  Metadata.Tables.Property.self,
-]
-internal let HasConstant: Set<ObjectIdentifier> = Set(HasConstantTables)
-
-internal let HasCustomAttributeTables: [Table.Type] = [
-  Metadata.Tables.MethodDef.self,
-  Metadata.Tables.MemberRef.self,
-]
-internal let HasCustomAttribute: Set<ObjectIdentifier> =
-    Set(HasCustomAttributeTables)
-
-internal let CustomAttributeTypeTables: [Table.Type] = [
-  Metadata.Tables.MethodDef.self,
-  Metadata.Tables.MemberRef.self,
-]
-internal let CustomAttributeType: Set<ObjectIdentifier> =
-    Set(CustomAttributeTypeTables)
-
-internal let HasDeclSecurityTables: [Table.Type] = [
-  Metadata.Tables.TypeDef.self,
-  Metadata.Tables.MethodDef.self,
-  Metadata.Tables.Assembly.self,
-]
-internal let HasDeclSecurity: Set<ObjectIdentifier> = Set(HasDeclSecurityTables)
-
-internal let TypeDefOrRefTables: [Table.Type] = [
-  Metadata.Tables.TypeDef.self,
-  Metadata.Tables.TypeRef.self,
-  Metadata.Tables.TypeSpec.self,
-]
-internal let TypeDefOrRef: Set<ObjectIdentifier> = Set(TypeDefOrRefTables)
-
-// FIXME(compnerd) Exported vs Manifest Resource
-internal let ImplementationTables: [Table.Type] = [
-  Metadata.Tables.File.self,
-  Metadata.Tables.ExportedType.self,
-  Metadata.Tables.AssemblyRef.self,
-]
-internal let Implementation: Set<ObjectIdentifier> = Set(ImplementationTables)
-
-internal let HasFieldMarshalTables: [Table.Type] = [
-  Metadata.Tables.Field.self,
-  Metadata.Tables.Param.self,
-]
-internal let HasFieldMarshal: Set<ObjectIdentifier> = Set(HasFieldMarshalTables)
-
-internal let TypeOrMethodDefTables: [Table.Type] = [
-  Metadata.Tables.TypeDef.self,
-  Metadata.Tables.MethodDef.self,
-]
-internal let TypeOrMethodDef: Set<ObjectIdentifier> = Set(TypeOrMethodDefTables)
-
-internal let MemberForwardedTables: [Table.Type] = [
-  Metadata.Tables.Field.self,
-  Metadata.Tables.MethodDef.self,
-]
-internal let MemberForwarded: Set<ObjectIdentifier> = Set(MemberForwardedTables)
-
-internal let MemberRefParentTables: [Table.Type] = [
-  Metadata.Tables.MethodDef.self,
-  Metadata.Tables.ModuleRef.self,
-  Metadata.Tables.TypeDef.self,
-  Metadata.Tables.TypeRef.self,
-  Metadata.Tables.TypeSpec.self,
-]
-internal let MemberRefParent: Set<ObjectIdentifier> = Set(MemberRefParentTables)
-
-internal let HasSemanticsTables: [Table.Type] = [
-  Metadata.Tables.Event.self,
-  Metadata.Tables.Property.self,
-]
-internal let HasSemantics: Set<ObjectIdentifier> = Set(HasSemanticsTables)
-
-internal let MethodDefOrRefTables: [Table.Type] = [
-  Metadata.Tables.MethodDef.self,
-  Metadata.Tables.MemberRef.self,
-]
-internal let MethodDefOrRef: Set<ObjectIdentifier> = Set(MethodDefOrRefTables)
-
-internal let ResolutionScopeTables: [Table.Type] = [
-  Metadata.Tables.Module.self,
-  Metadata.Tables.ModuleRef.self,
-  Metadata.Tables.AssemblyRef.self,
-  Metadata.Tables.TypeRef.self,
-]
-internal let ResolutionScope: Set<ObjectIdentifier> = Set(ResolutionScopeTables)
 
 enum TableIndex {
 case string
 case guid
 case blob
 case simple(Table.Type)
-case coded(Set<ObjectIdentifier>)
+case coded(ObjectIdentifier)
 }
 
 extension TableIndex: Hashable {
@@ -158,19 +70,24 @@ extension TableIndex: Hashable {
       hasher.combine(2)
     case .blob:
       hasher.combine(1)
-    case let .simple(t):
-      hasher.combine(ObjectIdentifier(t))
-    case let .coded(s):
-      s.hash(into: &hasher)
+    case let .simple(table):
+      hasher.combine(ObjectIdentifier(table))
+    case let .coded(index):
+      index.hash(into: &hasher)
     }
   }
 }
 
-internal protocol Table {
-  static var number: Int { get }
-  var data: Data { get }
+extension Dictionary where Key == TableIndex, Value == Int {
+  internal subscript(_ table: Table.Type) -> Int? {
+    get { return self[.simple(table)] }
+    set { self[.simple(table)] = newValue }
+  }
 
-  init(from data: Data, rows: UInt32, strides: [TableIndex:Int])
+  internal subscript<T: CodedIndex>(_ index: T.Type) -> Int? {
+    get { return self[.coded(ObjectIdentifier(index))] }
+    set { self[.coded(ObjectIdentifier(index))] = newValue }
+  }
 }
 
 extension Metadata {
@@ -292,7 +209,7 @@ internal struct AssemblyRefOS: Table {
   public static var number: Int { 37 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (4, 4, 4, strides[.simple(AssemblyRef.self)]!)
+    self.layout = (4, 4, 4, strides[AssemblyRef.self]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -312,7 +229,7 @@ internal struct AssemblyRefProcessor: Table {
   public static var number: Int { 36 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (4, strides[.simple(AssemblyRef.self)]!)
+    self.layout = (4, strides[AssemblyRef.self]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -333,7 +250,7 @@ internal struct ClassLayout: Table {
   public static var number: Int { 15 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (2, 4, strides[.simple(TypeDef.self)]!)
+    self.layout = (2, 4, strides[TypeDef.self]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -354,7 +271,7 @@ internal struct Constant: Table {
   public static var number: Int { 11 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (1, 1, strides[.coded(HasConstant)]!, strides[.blob]!)
+    self.layout = (1, 1, strides[HasConstant.self]!, strides[.blob]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -375,7 +292,7 @@ internal struct CustomAttribute: Table {
   public static var number: Int { 12 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (strides[.coded(HasCustomAttribute)]!, strides[.coded(CustomAttributeType)]!, strides[.blob]!)
+    self.layout = (strides[HasCustomAttribute.self]!, strides[CustomAttributeType.self]!, strides[.blob]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -396,7 +313,7 @@ internal struct DeclSecurity: Table {
   public static var number: Int { 14 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (2, strides[.coded(HasDeclSecurity)]!, strides[.blob]!)
+    self.layout = (2, strides[HasDeclSecurity.self]!, strides[.blob]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -416,7 +333,7 @@ internal struct EventMap: Table {
   public static var number: Int { 18 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (strides[.simple(TypeDef.self)]!, strides[.simple(Event.self)]!)
+    self.layout = (strides[TypeDef.self]!, strides[Event.self]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -437,7 +354,7 @@ internal struct Event: Table {
   public static var number: Int { 20 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (2, strides[.string]!, strides[.coded(TypeDefOrRef)]!)
+    self.layout = (2, strides[.string]!, strides[TypeDefOrRef.self]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -460,7 +377,7 @@ internal struct ExportedType: Table {
   public static var number: Int { 39 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (4, 4, strides[.string]!, strides[.string]!, strides[.coded(Implementation)]!)
+    self.layout = (4, 4, strides[.string]!, strides[.string]!, strides[Implementation.self]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -501,7 +418,7 @@ internal struct FieldLayout: Table {
   public static var number: Int { 16 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (4, strides[.simple(Field.self)]!)
+    self.layout = (4, strides[Field.self]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -521,7 +438,7 @@ internal struct FieldMarshal: Table {
   public static var number: Int { 13 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (strides[.coded(HasFieldMarshal)]!, strides[.blob]!)
+    self.layout = (strides[HasFieldMarshal.self]!, strides[.blob]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -541,7 +458,7 @@ internal struct FieldRVA: Table {
   public static var number: Int { 29 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (4, strides[.simple(Field.self)]!)
+    self.layout = (4, strides[Field.self]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -584,7 +501,7 @@ internal struct GenericParam: Table {
   public static var number: Int { 42 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (2, 2, strides[.coded(TypeOrMethodDef)]!, strides[.string]!)
+    self.layout = (2, 2, strides[TypeOrMethodDef.self]!, strides[.string]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -604,7 +521,7 @@ internal struct GenericParamConstraint: Table {
   public static var number: Int { 44 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (strides[.simple(GenericParam.self)]!, strides[.coded(TypeDefOrRef)]!)
+    self.layout = (strides[GenericParam.self]!, strides[TypeDefOrRef.self]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -626,7 +543,7 @@ internal struct ImplMap: Table {
   public static var number: Int { 28 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (2, strides[.coded(MemberForwarded)]!, strides[.string]!, strides[.simple(ModuleRef.self)]!)
+    self.layout = (2, strides[MemberForwarded.self]!, strides[.string]!, strides[ModuleRef.self]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -646,7 +563,7 @@ internal struct InterfaceImpl: Table {
   public static var number: Int { 9 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (strides[.simple(TypeDef.self)]!, strides[.coded(TypeDefOrRef)]!)
+    self.layout = (strides[TypeDef.self]!, strides[TypeDefOrRef.self]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -668,7 +585,7 @@ internal struct ManifestResource: Table {
   public static var number: Int { 40 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (4, 4, strides[.string]!, strides[.coded(Implementation)]!)
+    self.layout = (4, 4, strides[.string]!, strides[Implementation.self]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -689,7 +606,7 @@ internal struct MemberRef: Table {
   public static var number: Int { 10 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (strides[.coded(MemberRefParent)]!, strides[.string]!, strides[.blob]!)
+    self.layout = (strides[MemberRefParent.self]!, strides[.string]!, strides[.blob]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -713,7 +630,7 @@ internal struct MethodDef: Table {
   public static var number: Int { 6 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (4, 2, 2, strides[.string]!, strides[.blob]!, strides[.simple(Param.self)]!)
+    self.layout = (4, 2, 2, strides[.string]!, strides[.blob]!, strides[Param.self]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -734,7 +651,7 @@ internal struct MethodImpl: Table {
   public static var number: Int { 25 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (strides[.simple(TypeDef.self)]!, strides[.coded(MethodDefOrRef)]!, strides[.coded(MethodDefOrRef)]!)
+    self.layout = (strides[TypeDef.self]!, strides[MethodDefOrRef.self]!, strides[MethodDefOrRef.self]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -755,7 +672,7 @@ internal struct MethodSemantics: Table {
   public static var number: Int { 24 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (2, strides[.simple(MethodDef.self)]!, strides[.coded(HasSemantics)]!)
+    self.layout = (2, strides[MethodDef.self]!, strides[HasSemantics.self]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -775,7 +692,7 @@ internal struct MethodSpec: Table {
   public static var number: Int { 43 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (strides[.coded(MethodDefOrRef)]!, strides[.blob]!)
+    self.layout = (strides[MethodDefOrRef.self]!, strides[.blob]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -837,7 +754,7 @@ internal struct NestedClass: Table {
   public static var number: Int { 41 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (strides[.simple(TypeDef.self)]!, strides[.simple(TypeDef.self)]!)
+    self.layout = (strides[TypeDef.self]!, strides[TypeDef.self]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -899,7 +816,7 @@ internal struct PropertyMap: Table {
   public static var number: Int { 21 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (strides[.simple(TypeDef.self)]!, strides[.simple(Property.self)]!)
+    self.layout = (strides[TypeDef.self]!, strides[Property.self]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -942,7 +859,7 @@ internal struct TypeDef: Table {
   public static var number: Int { 2 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (4, strides[.string]!, strides[.string]!, strides[.coded(TypeDefOrRef)]!, strides[.simple(Field.self)]!, strides[.simple(MethodDef.self)]!)
+    self.layout = (4, strides[.string]!, strides[.string]!, strides[TypeDefOrRef.self]!, strides[Field.self]!, strides[MethodDef.self]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -963,7 +880,7 @@ internal struct TypeRef: Table {
   public static var number: Int { 1 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (strides[.coded(ResolutionScope)]!, strides[.string]!, strides[.string]!)
+    self.layout = (strides[ResolutionScope.self]!, strides[.string]!, strides[.string]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))

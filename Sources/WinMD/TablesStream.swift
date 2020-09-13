@@ -102,12 +102,26 @@ internal struct TablesStream {
 }
 
 extension TablesStream {
+  internal var StringIndexSize: Int {
+    (HeapSizes >> 0) & 1 == 1 ? 4 : 2
+  }
+
+  internal var GUIDIndexSize: Int {
+    (HeapSizes >> 1) & 1 == 1 ? 4 : 2
+  }
+
+  internal var BlobIndexSize: Int {
+    (HeapSizes >> 2) & 1 == 1 ? 4 : 2
+  }
+}
+
+extension TablesStream {
   private func strides(tables: UInt64, rows: [UInt32]) -> [TableIndex:Int] {
     var strides: [TableIndex:Int] = [:]
 
-    func IndexSize(for set: [Table.Type]) -> Int {
-      let TagLength = (set.count - 1).nonzeroBitCount
-      return set.map {
+    func TableIndexSize<T: CodedIndex>(_ index: T.Type) -> Int {
+      let TagLength = (index.tables.count - 1).nonzeroBitCount
+      return index.tables.map {
         let count = rows[(tables & ((1 << $0.number) - 1)).nonzeroBitCount]
         let range = 1 << (16 - TagLength)
         return count < range
@@ -130,34 +144,20 @@ extension TablesStream {
     }
 
     // Coded Indices
-    strides[.coded(HasConstant)] = IndexSize(for: HasConstantTables)
-    strides[.coded(HasCustomAttribute)] = IndexSize(for: HasCustomAttributeTables)
-    strides[.coded(CustomAttributeType)] = IndexSize(for: CustomAttributeTypeTables)
-    strides[.coded(HasDeclSecurity)] = IndexSize(for: HasDeclSecurityTables)
-    strides[.coded(TypeDefOrRef)] = IndexSize(for: TypeDefOrRefTables)
-    strides[.coded(Implementation)] = IndexSize(for: ImplementationTables)
-    strides[.coded(HasFieldMarshal)] = IndexSize(for: HasFieldMarshalTables)
-    strides[.coded(TypeOrMethodDef)] = IndexSize(for: TypeOrMethodDefTables)
-    strides[.coded(MemberForwarded)] = IndexSize(for: MemberForwardedTables)
-    strides[.coded(MemberRefParent)] = IndexSize(for: MemberRefParentTables)
-    strides[.coded(HasSemantics)] = IndexSize(for: HasSemanticsTables)
-    strides[.coded(MethodDefOrRef)] = IndexSize(for: MethodDefOrRefTables)
-    strides[.coded(ResolutionScope)] = IndexSize(for: ResolutionScopeTables)
+    strides[HasConstant] = TableIndexSize(HasConstant.self)
+    strides[HasCustomAttribute] = TableIndexSize(HasCustomAttribute.self)
+    strides[CustomAttributeType] = TableIndexSize(CustomAttributeType.self)
+    strides[HasDeclSecurity] = TableIndexSize(HasDeclSecurity.self)
+    strides[TypeDefOrRef] = TableIndexSize(TypeDefOrRef.self)
+    strides[Implementation] = TableIndexSize(Implementation.self)
+    strides[HasFieldMarshal] = TableIndexSize(HasFieldMarshal.self)
+    strides[TypeOrMethodDef] = TableIndexSize(TypeOrMethodDef.self)
+    strides[MemberForwarded] = TableIndexSize(MemberForwarded.self)
+    strides[MemberRefParent] = TableIndexSize(MemberRefParent.self)
+    strides[HasSemantics] = TableIndexSize(HasSemantics.self)
+    strides[MethodDefOrRef] = TableIndexSize(MethodDefOrRef.self)
+    strides[ResolutionScope] = TableIndexSize(ResolutionScope.self)
 
     return strides
-  }
-}
-
-extension TablesStream {
-  internal var StringIndexSize: Int {
-    (HeapSizes >> 0) & 1 == 1 ? 4 : 2
-  }
-
-  internal var GUIDIndexSize: Int {
-    (HeapSizes >> 1) & 1 == 1 ? 4 : 2
-  }
-
-  internal var BlobIndexSize: Int {
-    (HeapSizes >> 2) & 1 == 1 ? 4 : 2
   }
 }

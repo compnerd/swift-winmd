@@ -5,9 +5,20 @@
  * SPDX-License-Identifier: BSD-3-Clause
  **/
 
-import Foundation
+import ArgumentParser
 import WinMD
 
-if let database = try? WinMD.Database(atPath: "C:\\Windows\\System32\\WinMetadata\\Windows.Foundation.winmd") {
-  database.dump()
+struct Inspect: ParsableCommand {
+  @Argument
+  var database: String
+
+  func run() throws {
+    // "C:\\Windows\\System32\\WinMetadata\\Windows.Foundation.winmd"
+    print("inspect: \(self.database)")
+    if let database = try? WinMD.Database(atPath: self.database) {
+      database.dump()
+    }
+  }
 }
+
+Inspect.main()

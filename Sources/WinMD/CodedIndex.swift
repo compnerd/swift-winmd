@@ -13,8 +13,8 @@ internal struct HasConstant: CodedIndex {
   public static var tables: [Table.Type] {
     return [
       Metadata.Tables.Param.self,
-      Metadata.Tables.Field.self,
-      Metadata.Tables.Property.self,
+      Metadata.Tables.FieldDef.self,
+      Metadata.Tables.PropertyDef.self,
     ]
   }
 }
@@ -71,7 +71,7 @@ internal struct Implementation: CodedIndex {
 internal struct HasFieldMarshal: CodedIndex {
   public static var tables: [Table.Type] {
     return [
-      Metadata.Tables.Field.self,
+      Metadata.Tables.FieldDef.self,
       Metadata.Tables.Param.self,
     ]
   }
@@ -89,7 +89,7 @@ internal struct TypeOrMethodDef: CodedIndex {
 internal struct MemberForwarded: CodedIndex {
   public static var tables: [Table.Type] {
     return [
-      Metadata.Tables.Field.self,
+      Metadata.Tables.FieldDef.self,
       Metadata.Tables.MethodDef.self,
     ]
   }
@@ -110,8 +110,8 @@ internal struct MemberRefParent: CodedIndex {
 internal struct HasSemantics: CodedIndex {
   public static var tables: [Table.Type] {
     return [
-      Metadata.Tables.Event.self,
-      Metadata.Tables.Property.self,
+      Metadata.Tables.EventDef.self,
+      Metadata.Tables.PropertyDef.self,
     ]
   }
 }

@@ -311,14 +311,14 @@ internal struct EventMap: Table {
   public static var number: Int { 18 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (strides[TypeDef.self]!, strides[Event.self]!)
+    self.layout = (strides[TypeDef.self]!, strides[EventDef.self]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
   }
 }
 
-internal struct Event: Table {
+internal struct EventDef: Table {
   /// Record Layout
   ///   EventFlags (2-byte bitmask EventAttributes)
   ///   Name (String Heap Index)
@@ -362,7 +362,7 @@ internal struct ExportedType: Table {
   }
 }
 
-internal struct Field: Table {
+internal struct FieldDef: Table {
   /// Record Layout
   ///   Flags (2-byte bitmask of FieldAttributes)
   ///   Name (String Heap Index)
@@ -396,7 +396,7 @@ internal struct FieldLayout: Table {
   public static var number: Int { 16 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (4, strides[Field.self]!)
+    self.layout = (4, strides[FieldDef.self]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -436,7 +436,7 @@ internal struct FieldRVA: Table {
   public static var number: Int { 29 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (4, strides[Field.self]!)
+    self.layout = (4, strides[FieldDef.self]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -760,7 +760,7 @@ internal struct Param: Table {
   }
 }
 
-internal struct Property: Table {
+internal struct PropertyDef: Table {
   /// Record Layout
   ///   Flags (2-byte bitmask of PropertyAttributes)
   ///   Name (String Heap Index)
@@ -794,7 +794,7 @@ internal struct PropertyMap: Table {
   public static var number: Int { 21 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (strides[TypeDef.self]!, strides[Property.self]!)
+    self.layout = (strides[TypeDef.self]!, strides[PropertyDef.self]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -837,7 +837,7 @@ internal struct TypeDef: Table {
   public static var number: Int { 2 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (4, strides[.string]!, strides[.string]!, strides[TypeDefOrRef.self]!, strides[Field.self]!, strides[MethodDef.self]!)
+    self.layout = (4, strides[.string]!, strides[.string]!, strides[TypeDefOrRef.self]!, strides[FieldDef.self]!, strides[MethodDef.self]!)
     self.rows = rows
 
     self.data = data.prefix(Int(rows) * stride(of: self.layout))
@@ -899,9 +899,9 @@ extension Metadata.Tables {
       CustomAttribute.self,
       DeclSecurity.self,
       EventMap.self,
-      Event.self,
+      EventDef.self,
       ExportedType.self,
-      Field.self,
+      FieldDef.self,
       FieldLayout.self,
       FieldMarshal.self,
       FieldRVA.self,
@@ -920,7 +920,7 @@ extension Metadata.Tables {
       ModuleRef.self,
       NestedClass.self,
       Param.self,
-      Property.self,
+      PropertyDef.self,
       PropertyMap.self,
       StandAloneSig.self,
       TypeDef.self,

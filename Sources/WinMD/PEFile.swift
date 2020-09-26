@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: BSD-3-Clause
  **/
 
-import WinSDK
+import CPE
 import Foundation
 
 internal struct PEFile {
@@ -25,9 +25,9 @@ internal struct PEFile {
 
   public var DataDirectory: (IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY) {
     switch Header32.OptionalHeader.Magic {
-    case WORD(IMAGE_NT_OPTIONAL_HDR32_MAGIC):
+    case UInt16(IMAGE_NT_OPTIONAL_HDR32_MAGIC):
       return Header32.OptionalHeader.DataDirectory
-    case WORD(IMAGE_NT_OPTIONAL_HDR64_MAGIC):
+    case UInt16(IMAGE_NT_OPTIONAL_HDR64_MAGIC):
       return Header64.OptionalHeader.DataDirectory
     default: fatalError("BAD_IMAGE_FORMAT")
     }
@@ -35,7 +35,7 @@ internal struct PEFile {
 
   public var Sections: [IMAGE_SECTION_HEADER] {
     switch Header32.OptionalHeader.Magic {
-    case WORD(IMAGE_NT_OPTIONAL_HDR32_MAGIC):
+    case UInt16(IMAGE_NT_OPTIONAL_HDR32_MAGIC):
       let PE: IMAGE_NT_HEADERS32 = Header32
       let NumberOfSections: Int = Int(PE.FileHeader.NumberOfSections)
       let Offset: Int = MemoryLayout.size(ofValue: PE)
@@ -47,7 +47,7 @@ internal struct PEFile {
         data.copyBytes(to: $0, from: begin ..< end)
         $1 = NumberOfSections
       }
-    case WORD(IMAGE_NT_OPTIONAL_HDR64_MAGIC):
+    case UInt16(IMAGE_NT_OPTIONAL_HDR64_MAGIC):
       let PE: IMAGE_NT_HEADERS64 = Header64
       let NumberOfSections: Int = Int(PE.FileHeader.NumberOfSections)
       let Offset: Int = MemoryLayout.size(ofValue: PE)

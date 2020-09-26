@@ -10,7 +10,8 @@ let SwiftWinMD = Package(
   dependencies: [
   ],
   targets: [
-    .target(name: "WinMD", dependencies: []),
+    .target(name: "CPE", dependencies: []),
+    .target(name: "WinMD", dependencies: ["CPE"]),
     .target(name: "winmd-inspect", dependencies: ["WinMD"]),
   ]
 )

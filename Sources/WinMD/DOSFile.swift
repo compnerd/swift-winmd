@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: BSD-3-Clause
  **/
 
-import WinSDK
+import CPE
 import Foundation
 
 internal struct DOSFile {

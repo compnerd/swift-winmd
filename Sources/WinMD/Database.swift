@@ -5,7 +5,6 @@
  * SPDX-License-Identifier: BSD-3-Clause
  **/
 
-import WinSDK
 import Foundation
 
 public class Database {

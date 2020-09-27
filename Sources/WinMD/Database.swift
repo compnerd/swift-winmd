@@ -43,7 +43,8 @@ public class Database {
 
       print("MajorVersion: \(String(ts.MajorVersion, radix: 16))")
       print("MinorVersion: \(String(ts.MinorVersion, radix: 16))")
-      print("Tables: \(ts.Tables)")
+      print("Tables: ")
+      ts.Tables.forEach { print("  - \($0)") }
     }
   }
 }

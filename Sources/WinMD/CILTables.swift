@@ -10,7 +10,9 @@ import Foundation
 internal protocol Table {
   static var number: Int { get }
 
-  var rows: UInt32 { get }
+  var stride: Int { get }
+  var rows: Int { get }
+
   var data: Data { get }
 
   init(from data: Data, rows: UInt32, strides: [TableIndex:Int])
@@ -93,16 +95,18 @@ internal struct Assembly: Table {
   typealias RecordLayout = (Int, Int, Int, Int, Int, Int, Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 32 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4, 2, 2, 2, 2, 4, strides[.blob]!, strides[.string]!, strides[.string]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -114,16 +118,18 @@ internal struct AssemblyOS: Table {
   typealias RecordLayout = (Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 34 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4, 4, 4)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -133,16 +139,18 @@ internal struct AssemblyProcessor: Table {
   typealias RecordLayout = (Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 33 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4)
-    self.rows = rows
+    self.stride = 4
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -160,16 +168,18 @@ internal struct AssemblyRef: Table {
   typealias RecordLayout = (Int, Int, Int, Int, Int, Int, Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 35 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (2, 2, 2, 2, 4, strides[.blob]!, strides[.string]!, strides[.string]!, strides[.blob]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -182,16 +192,18 @@ internal struct AssemblyRefOS: Table {
   typealias RecordLayout = (Int, Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 37 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4, 4, 4, strides[AssemblyRef.self]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -202,16 +214,18 @@ internal struct AssemblyRefProcessor: Table {
   typealias RecordLayout = (Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 36 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4, strides[AssemblyRef.self]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -223,16 +237,18 @@ internal struct ClassLayout: Table {
   typealias RecordLayout = (Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 15 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (2, 4, strides[TypeDef.self]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -244,16 +260,18 @@ internal struct Constant: Table {
   typealias RecordLayout = (Int, Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 11 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (1, 1, strides[HasConstant.self]!, strides[.blob]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -265,16 +283,18 @@ internal struct CustomAttribute: Table {
   typealias RecordLayout = (Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 12 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[HasCustomAttribute.self]!, strides[CustomAttributeType.self]!, strides[.blob]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -286,16 +306,18 @@ internal struct DeclSecurity: Table {
   typealias RecordLayout = (Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 14 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (2, strides[HasDeclSecurity.self]!, strides[.blob]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -306,16 +328,18 @@ internal struct EventMap: Table {
   typealias RecordLayout = (Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 18 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[TypeDef.self]!, strides[EventDef.self]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -327,16 +351,18 @@ internal struct EventDef: Table {
   typealias RecordLayout = (Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 20 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (2, strides[.string]!, strides[TypeDefOrRef.self]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -350,16 +376,18 @@ internal struct ExportedType: Table {
   typealias RecordLayout = (Int, Int, Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 39 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4, 4, strides[.string]!, strides[.string]!, strides[Implementation.self]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -371,16 +399,18 @@ internal struct FieldDef: Table {
   typealias RecordLayout = (Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 4 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (2, strides[.string]!, strides[.blob]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -391,16 +421,18 @@ internal struct FieldLayout: Table {
   typealias RecordLayout = (Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 16 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4, strides[FieldDef.self]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -411,16 +443,18 @@ internal struct FieldMarshal: Table {
   typealias RecordLayout = (Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 13 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[HasFieldMarshal.self]!, strides[.blob]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -431,16 +465,18 @@ internal struct FieldRVA: Table {
   typealias RecordLayout = (Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 29 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4, strides[FieldDef.self]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -452,16 +488,18 @@ internal struct File: Table {
   typealias RecordLayout = (Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 38 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4, strides[.string]!, strides[.blob]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -474,16 +512,18 @@ internal struct GenericParam: Table {
   typealias RecordLayout = (Int, Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 42 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (2, 2, strides[TypeOrMethodDef.self]!, strides[.string]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -494,16 +534,18 @@ internal struct GenericParamConstraint: Table {
   typealias RecordLayout = (Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 44 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[GenericParam.self]!, strides[TypeDefOrRef.self]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -516,16 +558,18 @@ internal struct ImplMap: Table {
   typealias RecordLayout = (Int, Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 28 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (2, strides[MemberForwarded.self]!, strides[.string]!, strides[ModuleRef.self]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -536,16 +580,18 @@ internal struct InterfaceImpl: Table {
   typealias RecordLayout = (Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 9 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[TypeDef.self]!, strides[TypeDefOrRef.self]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -558,16 +604,18 @@ internal struct ManifestResource: Table {
   typealias RecordLayout = (Int, Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 40 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4, 4, strides[.string]!, strides[Implementation.self]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -579,16 +627,18 @@ internal struct MemberRef: Table {
   typealias RecordLayout = (Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 10 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[MemberRefParent.self]!, strides[.string]!, strides[.blob]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -603,16 +653,18 @@ internal struct MethodDef: Table {
   typealias RecordLayout = (Int, Int, Int, Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 6 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4, 2, 2, strides[.string]!, strides[.blob]!, strides[Param.self]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -624,16 +676,18 @@ internal struct MethodImpl: Table {
   typealias RecordLayout = (Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 25 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[TypeDef.self]!, strides[MethodDefOrRef.self]!, strides[MethodDefOrRef.self]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -645,16 +699,18 @@ internal struct MethodSemantics: Table {
   typealias RecordLayout = (Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 24 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (2, strides[MethodDef.self]!, strides[HasSemantics.self]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -665,16 +721,18 @@ internal struct MethodSpec: Table {
   typealias RecordLayout = (Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 43 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[MethodDefOrRef.self]!, strides[.blob]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -688,16 +746,18 @@ internal struct Module: Table {
   typealias RecordLayout = (Int, Int, Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 0 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (2, strides[.string]!, strides[.guid]!, strides[.guid]!, strides[.guid]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -707,16 +767,18 @@ internal struct ModuleRef: Table {
   typealias RecordLayout = (Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 26 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[.string]!)
-    self.rows = rows
+    self.stride = strides[.string]!
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -727,16 +789,18 @@ internal struct NestedClass: Table {
   typealias RecordLayout = (Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 41 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[TypeDef.self]!, strides[TypeDef.self]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -748,16 +812,18 @@ internal struct Param: Table {
   typealias RecordLayout = (Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 8 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (2, 2, strides[.string]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -769,16 +835,18 @@ internal struct PropertyDef: Table {
   typealias RecordLayout = (Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 23 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (2, strides[.string]!, strides[.blob]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -789,16 +857,18 @@ internal struct PropertyMap: Table {
   typealias RecordLayout = (Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 21 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[TypeDef.self]!, strides[PropertyDef.self]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -808,16 +878,18 @@ internal struct StandAloneSig: Table {
   typealias RecordLayout = (Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 17 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[.blob]!)
-    self.rows = rows
+    self.stride = strides[.blob]!
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -832,16 +904,18 @@ internal struct TypeDef: Table {
   typealias RecordLayout = (Int, Int, Int, Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 2 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4, strides[.string]!, strides[.string]!, strides[TypeDefOrRef.self]!, strides[FieldDef.self]!, strides[MethodDef.self]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -853,16 +927,18 @@ internal struct TypeRef: Table {
   typealias RecordLayout = (Int, Int, Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 1 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[ResolutionScope.self]!, strides[.string]!, strides[.string]!)
-    self.rows = rows
+    self.stride = WinMD.stride(of: self.layout)
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 
@@ -872,16 +948,18 @@ internal struct TypeSpec: Table {
   typealias RecordLayout = (Int)
 
   let layout: RecordLayout
-  let rows: UInt32
+  let stride: Int
+  let rows: Int
   let data: Data
 
   public static var number: Int { 27 }
 
   public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[.blob]!)
-    self.rows = rows
+    self.stride = strides[.blob]!
 
-    self.data = data.prefix(Int(rows) * stride(of: self.layout))
+    self.rows = Int(rows)
+    self.data = data.prefix(self.rows * self.stride)
   }
 }
 }

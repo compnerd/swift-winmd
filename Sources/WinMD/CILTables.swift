@@ -10,6 +10,7 @@ import Foundation
 internal protocol Table {
   static var number: Int { get }
 
+  var rows: UInt32 { get }
   var data: Data { get }
 
   init(from data: Data, rows: UInt32, strides: [TableIndex:Int])

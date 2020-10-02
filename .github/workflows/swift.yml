@@ -12,8 +12,8 @@ jobs:
     runs-on: windows-latest
 
     steps:
-    - run: git config --global core.autocrlf input
-    - run: git config --global core.symlink true
+    # - run: git config --global core.autocrlf input
+    # - run: git config --global core.symlink true
 
     - uses: actions/checkout@v2
     - uses: seanmiddleditch/gha-setup-vsdevenv@master
@@ -38,5 +38,5 @@ jobs:
 
     - name: Build
       run: swift build -v
-    - name: Run tests
-      run: swift test -v
+    # - name: Run tests
+    #  run: swift test -v

@@ -16,7 +16,7 @@ jobs:
     # - run: git config --global core.symlink true
 
     - uses: actions/checkout@v2
-    - uses: seanmiddleditch/gha-setup-vsdevenv@master
+    - uses: microsoft/setup-msbuild@v1.0.1
 
     - name: Install swift-DEVELOPMENT-SNAPSHOT-2020-09-22-a
       run: |

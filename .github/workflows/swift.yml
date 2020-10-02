@@ -13,6 +13,7 @@ jobs:
 
     steps:
     - uses: actions/checkout@v2
+
     - name: Install Swift 5.3
       run: |
         Install-Binary -Url "https://swift.org/builds/development/windows10/swift-DEVELOPMENT-SNAPSHOT-2020-09-22-a/swift-DEVELOPMENT-SNAPSHOT-2020-09-22-a-windows10.exe" -Name "installer.exe" -ArgumentList ("-q")
@@ -20,11 +21,12 @@ jobs:
       run: |
         echo "::set-env name=SDKROOT::C:\Library\Developer\Platforms\Windows.platform\Developer\SDKs\Windows.sdk"
         echo "::set-env name=DEVELOPER_DIR::C:\Library\Developer"
-        echo "::add-path::C:\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain\usr\bin"
-        echo "::add-path::C:\Library\Swift-development\usr\bin"
-        echo "::add-path::C:\Library\icu-67\usr\bin"
-    - name: Toolchain Info
-      run: swift --version
+    - name: Adjust Paths
+      run: |
+        echo ::add-path::C:\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain\usr\bin
+        echo ::add-path::C:\Library\Swift-development\usr\bin
+        echo ::add-path::C:\Library\icu-67\usr\bin
+
     - name: Build
       run: swift build -v
     - name: Run tests

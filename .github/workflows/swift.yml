@@ -21,6 +21,8 @@ jobs:
         echo "::set-env name=SDKROOT::C:\Library\Developer\Platforms\Windows.platform\Developer\SDKs\Windows.sdk"
         echo "::set-env name=DEVELOPER_DIR::C:\Library\Developer"
         echo "::add-path::C:\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain\usr\bin"
+        echo "::add-path::C:\Library\Swift-development\usr\bin"
+        echo "::add-path::C:\Library\icu-67\usr\bin"
     - name: Toolchain Info
       run: swift --version
     - name: Build

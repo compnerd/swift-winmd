@@ -22,8 +22,9 @@ jobs:
       run: |
         echo "##[add-path]C:\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain\usr\bin;C:\Library\Swift-development\usr\bin;C:\Library\icu-67\usr\bin"
     - name: Show Path
+      shell: cmd
       run: |
-        echo $PATH
+        path
         exit 1
     - name: Install swift-DEVELOPMENT-SNAPSHOT-2020-09-22-a
       run: |

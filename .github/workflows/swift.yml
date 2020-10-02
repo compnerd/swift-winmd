@@ -14,10 +14,10 @@ jobs:
     steps:
     - uses: actions/checkout@v2
 
-    - name: Install Swift 5.3
+    - name: Install swift-DEVELOPMENT-SNAPSHOT-2020-09-22-a
       run: |
         Install-Binary -Url "https://swift.org/builds/development/windows10/swift-DEVELOPMENT-SNAPSHOT-2020-09-22-a/swift-DEVELOPMENT-SNAPSHOT-2020-09-22-a-windows10.exe" -Name "installer.exe" -ArgumentList ("-q")
-    - name: Set environment variables
+    - name: Set Environment Variables
       run: |
         echo "::set-env name=SDKROOT::C:\Library\Developer\Platforms\Windows.platform\Developer\SDKs\Windows.sdk"
         echo "::set-env name=DEVELOPER_DIR::C:\Library\Developer"
@@ -26,6 +26,12 @@ jobs:
         echo ::add-path::C:\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain\usr\bin
         echo ::add-path::C:\Library\Swift-development\usr\bin
         echo ::add-path::C:\Library\icu-67\usr\bin
+    - name: Install Supporting Files
+      run: |
+        copy "%SDKROOT%\usr\share\ucrt.modulemap" "%UniversalCRTSdkDir%\Include\%UCRTVersion%\ucrt\module.modulemap"
+        copy "%SDKROOT%\usr\share\visualc.modulemap" "%VCToolsInstallDir%\include\module.modulemap"
+        copy "%SDKROOT%\usr\share\visualc.apinotes" "%VCToolsInstallDir%\include\visualc.apinotes"
+        copy "%SDKROOT%\usr\share\winsdk.modulemap" "%UniversalCRTSdkDir%\Include\%UCRTVersion%\um\module.modulemap"
 
     - name: Build
       run: swift build -v

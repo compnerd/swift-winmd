@@ -20,7 +20,7 @@ jobs:
 
     - name: Adjust Paths
       run: |
-        echo "##[add-path]C:\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain\usr\bin;C:\Library\Swift-development\usr\bin;C:\Library\icu-67\usr\bin"
+        echo "::add-path::C:\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain\usr\bin;C:\Library\Swift-development\bin;C:\Library\icu-67\usr\bin"
     - name: Show Path
       shell: cmd
       run: |

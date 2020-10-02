@@ -12,6 +12,9 @@ jobs:
     runs-on: windows-latest
 
     steps:
+    - run: git config --global core.autocrlf input
+    - run: git config --global core.symlink true
+
     - uses: actions/checkout@v2
     - uses: seanmiddleditch/gha-setup-vsdevenv@master
 
@@ -21,9 +24,7 @@ jobs:
         echo "::set-env name=DEVELOPER_DIR::C:\Library\Developer"
     - name: Adjust Paths
       run: |
-        echo ::add-path::C:\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain\usr\bin
-        echo ::add-path::C:\Library\Swift-development\usr\bin
-        echo ::add-path::C:\Library\icu-67\usr\bin
+        echo ##[add-path]C:\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain\usr\bin;C:\Library\Swift-development\usr\bin;C:\Library\icu-67\usr\bin
     - name: Show Path
       run: |
         echo $PATH

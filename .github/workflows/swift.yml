@@ -13,6 +13,7 @@ jobs:
 
     steps:
     - uses: actions/checkout@v2
+    - uses: seanmiddleditch/gha-setup-vsdevenv@master
 
     - name: Install swift-DEVELOPMENT-SNAPSHOT-2020-09-22-a
       run: |
@@ -27,6 +28,7 @@ jobs:
         echo ::add-path::C:\Library\Swift-development\usr\bin
         echo ::add-path::C:\Library\icu-67\usr\bin
     - name: Install Supporting Files
+      shell: cmd
       run: |
         copy "%SDKROOT%\usr\share\ucrt.modulemap" "%UniversalCRTSdkDir%\Include\%UCRTVersion%\ucrt\module.modulemap"
         copy "%SDKROOT%\usr\share\visualc.modulemap" "%VCToolsInstallDir%\include\module.modulemap"

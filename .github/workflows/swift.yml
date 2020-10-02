@@ -18,13 +18,9 @@ jobs:
     - uses: actions/checkout@v2
     - uses: seanmiddleditch/gha-setup-vsdevenv@master
 
-    - name: Set Environment Variables
-      run: |
-        echo "::set-env name=SDKROOT::C:\Library\Developer\Platforms\Windows.platform\Developer\SDKs\Windows.sdk"
-        echo "::set-env name=DEVELOPER_DIR::C:\Library\Developer"
     - name: Adjust Paths
       run: |
-        echo ##[add-path]C:\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain\usr\bin;C:\Library\Swift-development\usr\bin;C:\Library\icu-67\usr\bin
+        echo "##[add-path]C:\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain\usr\bin;C:\Library\Swift-development\usr\bin;C:\Library\icu-67\usr\bin"
     - name: Show Path
       run: |
         echo $PATH
@@ -32,6 +28,11 @@ jobs:
     - name: Install swift-DEVELOPMENT-SNAPSHOT-2020-09-22-a
       run: |
         Install-Binary -Url "https://swift.org/builds/development/windows10/swift-DEVELOPMENT-SNAPSHOT-2020-09-22-a/swift-DEVELOPMENT-SNAPSHOT-2020-09-22-a-windows10.exe" -Name "installer.exe" -ArgumentList ("-q")
+    - name: Set Environment Variables
+      run: |
+        echo "::set-env name=SDKROOT::C:\Library\Developer\Platforms\Windows.platform\Developer\SDKs\Windows.sdk"
+        echo "::set-env name=DEVELOPER_DIR::C:\Library\Developer"
+      if: "false"
     - name: Install Supporting Files
       shell: cmd
       run: |

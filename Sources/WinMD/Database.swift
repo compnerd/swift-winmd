@@ -36,7 +36,7 @@ public class Database {
     let metadata = cil.Metadata
     print("Version: \(metadata.Version)")
     print("Streams: \(metadata.Streams)")
-    _ = metadata.StreamHeaders.map { print($0) }
+    metadata.StreamHeaders.forEach { print($0) }
 
     if let stream = metadata.stream(named: Metadata.Stream.Tables) {
       let ts = TablesStream(data: stream)

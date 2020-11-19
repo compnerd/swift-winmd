@@ -8,13 +8,18 @@
 import Foundation
 
 internal protocol Table {
+  /// The CIL defined table number.
   static var number: Int { get }
 
+  /// The stride of a single row.
   var stride: Int { get }
+  /// The number of rows in the table.
   var rows: Int { get }
 
+  /// The data backing the table model.
   var data: Data { get }
 
+  /// Constructs a new table model.
   init(from data: Data, rows: UInt32, strides: [TableIndex:Int])
 }
 

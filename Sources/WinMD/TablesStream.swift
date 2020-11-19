@@ -64,7 +64,7 @@ internal struct TablesStream {
 
     let strides: [TableIndex:Int] = self.strides(tables: valid, rows: rows)
 
-    let offset = 24 + valid.nonzeroBitCount * MemoryLayout<UInt32>.size 
+    let offset = 24 + tables.count * MemoryLayout<UInt32>.size
     var content = data[data.index(data.startIndex, offsetBy: offset)...]
 
     Metadata.Tables.forEach { table in

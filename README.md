@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://github.com/compnerd/swift-winmd/actions?query=workflow%3ASwift"><img alt="Windows Status" src="https://github.com/compnerd/swift-winmd/workflows/Swift/badge.svg"></a>
+  <a href="https://github.com/compnerd/swift-winmd/actions?query=workflow%3Awindows"><img alt="Windows Status" src="https://github.com/compnerd/swift-winmd/workflows/windows/badge.svg"></a>
 </p>
 
 # Swift/WinMD

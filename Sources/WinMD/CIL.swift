@@ -80,8 +80,11 @@ internal struct StreamHeader {
   public var Name: String {
     let begin: Data.Index = data.index(data.startIndex, offsetBy: 8)
     return data[begin...].withUnsafeBytes {
-      String(decodingCString: $0.baseAddress!.assumingMemoryBound(to: Unicode.ASCII.CodeUnit.self),
-             as: Unicode.ASCII.self)
+      if let name =
+          $0.baseAddress?.assumingMemoryBound(to: Unicode.ASCII.CodeUnit.self) {
+        return String(decodingCString: name, as: Unicode.ASCII.self)
+      }
+      return ""
     }
   }
 }

@@ -9,7 +9,7 @@ let SwiftWinMD = Package(
   ],
   dependencies: [
     .package(url: "http://github.com/apple/swift-argument-parser",
-             .revision("8492882b030ad1c8e0bb4ca9d9ce06b07a8150b2")),
+             .branch("main")),
   ],
   targets: [
     .target(name: "CPE", dependencies: []),

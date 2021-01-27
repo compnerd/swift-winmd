@@ -35,7 +35,7 @@ internal struct Assembly {
 
       let begin: Data.Index = Data.Index(LA)
       let end: Data.Index = pe.data.index(begin, offsetBy: Int(Size))
-      return pe.data[begin ..< end]
+      return Data(pe.data[begin ..< end])
     }
 
     // CLI Header

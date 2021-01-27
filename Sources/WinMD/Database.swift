@@ -28,12 +28,9 @@ public class Database {
     try self.init(data: buffer)
   }
 
-  public convenience init(atPath path: String) throws {
-    try self.init(at: URL(fileURLWithPath: path))
-  }
-
   public func dump() {
-    let metadata = cil.Metadata
+    let metadata = self.cil.Metadata
+
     print("Version: \(metadata.Version)")
     print("Streams: \(metadata.Streams)")
     metadata.StreamHeaders.forEach { print($0) }
@@ -43,8 +40,7 @@ public class Database {
 
       print("MajorVersion: \(String(ts.MajorVersion, radix: 16))")
       print("MinorVersion: \(String(ts.MinorVersion, radix: 16))")
-      print("Tables: ")
-      ts.Tables.forEach { print("  - \($0)") }
+      print("Tables:\n\(ts.Tables.map { "  - \($0)" }.joined(separator: "\n"))")
     }
   }
 }

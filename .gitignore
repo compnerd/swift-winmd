@@ -7,4 +7,5 @@
 *~
 
 /build/
-.build/
+/.build/
+/.swiftpm/xcode/

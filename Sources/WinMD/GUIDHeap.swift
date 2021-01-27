@@ -15,10 +15,9 @@ internal struct GUIDHeap {
   }
 
   public subscript(index: Int) -> UUID {
-    let index = data.index(data.startIndex, offsetBy: 16 * (index - 1))
-    return data[index...].withUnsafeBytes {
-      UUID(uuid: $0.baseAddress!.assumingMemoryBound(to: uuid_t.self).pointee)
-    }
+    UUID(uuid: data.withUnsafeBytes {
+      $0.load(fromByteOffset: MemoryLayout<uuid_t>.stride * (index - 1), as: uuid_t.self)
+    })
   }
 }
 

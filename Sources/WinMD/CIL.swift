@@ -190,10 +190,10 @@ internal enum Metadata {
 
 extension Metadata {
   internal enum Stream: String {
-  case Tables = "#~"
-  case Strings = "#Strings"
-  case Blob = "#Blob"
-  case GUID = "#GUID"
-  case UserStrings = "#US"
+    case Tables = "#~"
+    case Strings = "#Strings"
+    case Blob = "#Blob"
+    case GUID = "#GUID"
+    case UserStrings = "#US"
   }
 }

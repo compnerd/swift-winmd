@@ -24,11 +24,11 @@ internal protocol Table {
 }
 
 enum TableIndex {
-case string
-case guid
-case blob
-case simple(Table.Type)
-case coded(ObjectIdentifier)
+  case string
+  case guid
+  case blob
+  case simple(Table.Type)
+  case coded(ObjectIdentifier)
 }
 
 extension TableIndex: Hashable {

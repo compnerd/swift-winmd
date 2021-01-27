@@ -1,5 +1,4 @@
 // swift-tools-version:5.3
-
 import PackageDescription
 
 let SwiftWinMD = Package(
@@ -12,11 +11,15 @@ let SwiftWinMD = Package(
   ],
   targets: [
     .target(name: "CPE", dependencies: []),
-    .target(name: "WinMD", dependencies: ["CPE"]),
-    .target(name: "winmd-inspect",
-            dependencies: [
-              "WinMD",
-              .product(name: "ArgumentParser", package: "swift-argument-parser"),
-            ]),
+    .target(name: "WinMD", dependencies: [
+      .target(name: "CPE")
+    ]),
+    .target(
+      name: "winmd-inspect",
+      dependencies: [
+        .target(name: "WinMD"),
+        .product(name: "ArgumentParser", package: "swift-argument-parser"),
+      ]
+    ),
   ]
 )

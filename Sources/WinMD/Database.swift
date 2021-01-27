@@ -14,8 +14,7 @@ public class Database {
 
   private init(data: [UInt8]) throws {
     self.dos = try DOSFile(from: data)
-    self.pe = PEFile(from: self.dos)
-    try pe.validate()
+    self.pe = try PEFile(from: self.dos)
     self.cil = try Assembly(from: self.pe)
     try cil.validate()
   }

@@ -9,19 +9,10 @@ import CPE
 import Foundation
 
 internal struct PEFile {
-  internal let data: Data
+  internal let data: ArraySlice<UInt8>
 
-  public var Header32: IMAGE_NT_HEADERS32 {
-    return data.withUnsafeBytes {
-      $0.bindMemory(to: IMAGE_NT_HEADERS32.self).baseAddress!.pointee
-    }
-  }
-
-  public var Header64: IMAGE_NT_HEADERS64 {
-    return data.withUnsafeBytes {
-      $0.bindMemory(to: IMAGE_NT_HEADERS64.self).baseAddress!.pointee
-    }
-  }
+  public var Header32: IMAGE_NT_HEADERS32 { self.data[unsafelyCasting: 0] }
+  public var Header64: IMAGE_NT_HEADERS64 { self.data[unsafelyCasting: 0] }
 
   public var DataDirectory: (IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY) {
     switch Header32.OptionalHeader.Magic {
@@ -34,45 +25,31 @@ internal struct PEFile {
   }
 
   public var Sections: [IMAGE_SECTION_HEADER] {
-    switch Header32.OptionalHeader.Magic {
+    let NumberOfSections: Int
+    let Offset: Int
+    
+    switch self.Header32.OptionalHeader.Magic {
     case UInt16(IMAGE_NT_OPTIONAL_HDR32_MAGIC):
-      let PE: IMAGE_NT_HEADERS32 = Header32
-      let NumberOfSections: Int = Int(PE.FileHeader.NumberOfSections)
-      let Offset: Int = MemoryLayout.size(ofValue: PE)
-
-      return Array<IMAGE_SECTION_HEADER>(unsafeUninitializedCapacity: NumberOfSections) {
-        let nbytes: Int = NumberOfSections * MemoryLayout<IMAGE_SECTION_HEADER>.size
-        let begin: Data.Index = data.index(data.startIndex, offsetBy: Offset)
-        let end: Data.Index = data.index(begin, offsetBy: nbytes)
-        data.copyBytes(to: $0, from: begin ..< end)
-        $1 = NumberOfSections
-      }
+      let PE: IMAGE_NT_HEADERS32 = self.Header32
+      NumberOfSections = Int(PE.FileHeader.NumberOfSections)
+      Offset = MemoryLayout.size(ofValue: PE)
     case UInt16(IMAGE_NT_OPTIONAL_HDR64_MAGIC):
-      let PE: IMAGE_NT_HEADERS64 = Header64
-      let NumberOfSections: Int = Int(PE.FileHeader.NumberOfSections)
-      let Offset: Int = MemoryLayout.size(ofValue: PE)
-
-      return Array<IMAGE_SECTION_HEADER>(unsafeUninitializedCapacity: NumberOfSections) {
-        let nbytes: Int = NumberOfSections * MemoryLayout<IMAGE_SECTION_HEADER>.size
-        let begin: Data.Index = data.index(data.startIndex, offsetBy: Offset)
-        let end: Data.Index = data.index(begin, offsetBy: nbytes)
-        data.copyBytes(to: $0, from: begin ..< end)
-        $1 = NumberOfSections
-      }
+      let PE: IMAGE_NT_HEADERS64 = self.Header64
+      NumberOfSections = Int(PE.FileHeader.NumberOfSections)
+      Offset = MemoryLayout.size(ofValue: PE)
     default: fatalError("BAD_IMAGE_FORMAT")
     }
+    
+    return (0..<NumberOfSections).map { self.data[Offset...][unsafelyCasting: $0] }
   }
 
-  public init(from dos: DOSFile) {
-    self.data = dos.data.suffix(from: numericCast(dos.Header.e_lfanew))
-  }
-
-  public func validate() throws {
-    guard data.count > MemoryLayout<IMAGE_NT_HEADERS32>.size else {
+  public init(from dos: DOSFile) throws {
+    self.data = dos.contentsWithoutStub
+    
+    guard self.data.count > MemoryLayout<IMAGE_NT_HEADERS32>.size else {
       throw WinMDError.BadImageFormat
     }
-
-    guard Header32.Signature == IMAGE_NT_SIGNATURE else {
+    guard self.Header32.Signature == IMAGE_NT_SIGNATURE else {
       throw WinMDError.BadImageFormat
     }
   }
@@ -80,9 +57,7 @@ internal struct PEFile {
 
 extension Array where Array.Element == IMAGE_SECTION_HEADER {
   internal func containing(rva: UInt32) -> [IMAGE_SECTION_HEADER] {
-    return self.filter {
-      rva >= $0.VirtualAddress && rva < $0.VirtualAddress + $0.Misc.VirtualSize
-    }
+    return self.filter { ($0.VirtualAddress..<($0.VirtualAddress + $0.Misc.VirtualSize)).contains(rva) }
   }
 }
 

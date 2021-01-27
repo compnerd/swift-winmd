@@ -11,17 +11,17 @@ import Foundation
 import CPE
 
 internal struct PEFile {
-  internal let data: Data
+  internal let data: ArraySlice<UInt8>
 
   public var Header32: IMAGE_NT_HEADERS32 {
     return data.withUnsafeBytes {
-      $0.bindMemory(to: IMAGE_NT_HEADERS32.self).baseAddress!.pointee
+      $0.bindMemory(to: IMAGE_NT_HEADERS32.self)[0]
     }
   }
 
   public var Header64: IMAGE_NT_HEADERS64 {
     return data.withUnsafeBytes {
-      $0.bindMemory(to: IMAGE_NT_HEADERS64.self).baseAddress!.pointee
+      $0.bindMemory(to: IMAGE_NT_HEADERS64.self)[0]
     }
   }
 
@@ -65,16 +65,14 @@ internal struct PEFile {
     }
   }
 
-  public init(from dos: DOSFile) {
-    self.data = dos.data.suffix(from: numericCast(dos.Header.e_lfanew))
-  }
+  public init(from dos: DOSFile) throws {
+    self.data = dos.NewExecutable
 
-  public func validate() throws {
-    guard data.count > MemoryLayout<IMAGE_NT_HEADERS32>.size else {
+    guard self.data.count > MemoryLayout<IMAGE_NT_HEADERS32>.size else {
       throw WinMDError.BadImageFormat
     }
 
-    guard Header32.Signature == IMAGE_NT_SIGNATURE else {
+    guard self.Header32.Signature == IMAGE_NT_SIGNATURE else {
       throw WinMDError.BadImageFormat
     }
   }

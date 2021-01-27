@@ -8,12 +8,11 @@
 import Foundation
 
 extension Data {
-  internal func read<T>(offset: Data.Index) -> T {
-    let begin: Data.Index = self.index(self.startIndex, offsetBy: offset)
-    let end: Data.Index = self.index(begin, offsetBy: MemoryLayout<T>.stride)
-    return Array<T>(unsafeUninitializedCapacity: 1) {
-      self.copyBytes(to: $0, from: begin ..< end)
-      $1 = 1
-    }[0]
+  internal func read<T>(offset: Data.Index, as _: T.Type = T.self) -> T {
+    return self.withUnsafeBytes { $0.load(fromByteOffset: offset, as: T.self) }
+  }
+  
+  internal func read<T>(index: Array<T>.Index, as _: T.Type = T.self) -> T {
+    return self.read(offset: index * MemoryLayout<T>.stride)
   }
 }

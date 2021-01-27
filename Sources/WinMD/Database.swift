@@ -12,20 +12,18 @@ public class Database {
   private let pe: PEFile
   private let cil: Assembly
 
-  private init(data: Data) throws {
-    dos = DOSFile(data: data)
-    try dos.validate()
-
-    pe = PEFile(from: dos)
+  private init(data: [UInt8]) throws {
+    self.dos = try DOSFile(from: data)
+    self.pe = PEFile(from: self.dos)
     try pe.validate()
-
-    cil = try Assembly(from: pe)
+    self.cil = try Assembly(from: self.pe)
     try cil.validate()
   }
 
   public convenience init(at path: URL) throws {
-    let buffer: Data = try NSData(contentsOf: path, options: .alwaysMapped) as Data
-    try self.init(data: buffer)
+    // It's rather a pain to read data from a file without using `Data`, but at any point after that it's usually a bit
+    // easier to work with a straight array of bytes. Unfortunately, the conversion is likely to incur a pointless copy.
+    try self.init(data: Array(Data(contentsOf: path, options: .alwaysMapped)))
   }
 
   public func dump() {

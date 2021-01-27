@@ -8,8 +8,7 @@ let SwiftWinMD = Package(
     .executable(name: "winmd-inspect", targets: ["winmd-inspect"]),
   ],
   dependencies: [
-    .package(url: "http://github.com/apple/swift-argument-parser",
-             .revision("8492882b030ad1c8e0bb4ca9d9ce06b07a8150b2")),
+    .package(url: "http://github.com/apple/swift-argument-parser", from: "0.3.2"),
   ],
   targets: [
     .target(name: "CPE", dependencies: []),

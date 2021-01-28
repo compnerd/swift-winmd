@@ -44,7 +44,7 @@ internal struct PEFile {
   }
 
   public init(from dos: DOSFile) throws {
-    self.data = dos.contentsWithoutStub
+    self.data = dos.NewExecutable
     
     guard self.data.count > MemoryLayout<IMAGE_NT_HEADERS32>.size else {
       throw WinMDError.BadImageFormat

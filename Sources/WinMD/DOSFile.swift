@@ -39,7 +39,7 @@ internal struct DOSFile {
   }
   
   /// The complete content of the file, minus the leading MS-DOS stub. Returns a slice to help avoid excess copying.
-  public var contentsWithoutStub: ArraySlice<UInt8> {
+  public var NewExecutable: ArraySlice<UInt8> {
     return self.data[numericCast(self.Header.e_lfanew)...]
   }
 }

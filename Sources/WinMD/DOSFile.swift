@@ -35,11 +35,11 @@ internal struct DOSFile {
 
   /// The raw MS-DOS stub image header.
   public var Header: IMAGE_DOS_HEADER {
-    return self.data[offset: 0]
+    return self.data[offset: self.data.startIndex]
   }
   
   /// The complete content of the file, minus the leading MS-DOS stub. Returns a slice to help avoid excess copying.
   public var NewExecutable: ArraySlice<UInt8> {
-    return self.data[numericCast(self.Header.e_lfanew)...]
+    return self.data[self.data.index(self.data.startIndex, offsetBy: numericCast(self.Header.e_lfanew))...]
   }
 }

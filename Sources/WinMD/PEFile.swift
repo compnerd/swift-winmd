@@ -40,7 +40,7 @@ internal struct PEFile {
     default: fatalError("BAD_IMAGE_FORMAT")
     }
     
-    return (0..<NumberOfSections).map { self.data[Offset...][unsafelyCasting: $0] }
+    return (0..<NumberOfSections).map { self.data[self.data.index(self.data.startIndex, offsetBy: Offset)...][unsafelyCasting: $0] }
   }
 
   public init(from dos: DOSFile) throws {

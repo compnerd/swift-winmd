@@ -24,11 +24,11 @@ internal struct TablesStream {
     self.data = data
   }
 
-  public var MajorVersion: UInt8 { self.data[offset: 4] }
-  public var MinorVersion: UInt8 { self.data[offset: 5] }
-  public var HeapSizes: UInt8 { self.data[offset: 6] }
-  public var Valid: UInt64 { self.data[offset: 8] }
-  public var Sorted: UInt64 { self.data[offset: 16] }
+  public var MajorVersion: UInt8 { self.data[offset: self.data.index(self.data.startIndex, offsetBy: 4)] }
+  public var MinorVersion: UInt8 { self.data[offset: self.data.index(self.data.startIndex, offsetBy: 5)] }
+  public var HeapSizes: UInt8 { self.data[offset: self.data.index(self.data.startIndex, offsetBy: 6)] }
+  public var Valid: UInt64 { self.data[offset: self.data.index(self.data.startIndex, offsetBy: 8)] }
+  public var Sorted: UInt64 { self.data[offset: self.data.index(self.data.startIndex, offsetBy: 16)] }
 
   internal var tableCount: Int { self.Valid.nonzeroBitCount }
   

@@ -32,7 +32,7 @@ internal struct Assembly {
   private let header: ArraySlice<UInt8>
   private let metadata: ArraySlice<UInt8>
 
-  public var Header: IMAGE_COR20_HEADER { self.header[offset: 0] }
+  public let Header: IMAGE_COR20_HEADER
   public let Metadata: MetadataRoot
 
   public init(from pe: PEFile) throws {
@@ -40,11 +40,11 @@ internal struct Assembly {
     guard
       // COM descriptor/CLI Header
       let header = try pe.DataOfSection(containing: pe.DataDirectory.14),
-      let cliHeader = Optional.some(header[offset: 0, unsafelyCastTo: IMAGE_COR20_HEADER.self]),
-      cliHeader.cb == MemoryLayout<IMAGE_COR20_HEADER>.size,
+      let Header = Optional.some(header[offset: header.startIndex, unsafelyCastTo: IMAGE_COR20_HEADER.self]),
+      Header.cb == MemoryLayout<IMAGE_COR20_HEADER>.size,
       
       // CLI Metadata
-      let metadata = try pe.DataOfSection(containing: cliHeader.MetaData),
+      let metadata = try pe.DataOfSection(containing: Header.MetaData),
       let Metadata = Optional.some(try MetadataRoot(data: metadata)),
       Metadata.Signature == CIL_METADATA_SIGNATURE
     else {
@@ -52,6 +52,7 @@ internal struct Assembly {
     }
     
     self.header = header
+    self.Header = Header
     self.metadata = metadata
     self.Metadata = Metadata
   }
@@ -67,7 +68,7 @@ internal struct StreamHeader {
   
   /// `MetadataRoot` uses this to make tracking the "next header offset" value easier.
   fileprivate static func sequenceParse(from data: ArraySlice<UInt8>, offset: inout Int) throws -> Self {
-    let parsedHeader = try self.init(data: data[offset...])
+    let parsedHeader = try self.init(data: data[data.index(data.startIndex, offsetBy: offset)...])
     offset += parsedHeader.data.count
     return parsedHeader
   }
@@ -104,8 +105,8 @@ internal struct StreamHeader {
     self.Name = Name
   }
   
-  public var Offset: UInt32 { self.data[offset: 0] }
-  public var Size: UInt32 { self.data[offset: 4] }
+  public var Offset: UInt32 { self.data[offset: self.data.startIndex] }
+  public var Size: UInt32 { self.data[offset: self.data.index(self.data.startIndex, offsetBy: 4)] }
   public let Name: String
 }
 
@@ -135,11 +136,13 @@ internal struct MetadataRoot {
   /// cached in the same fashion. The caching only costs a few extra bytes per instance.
   public init(data: ArraySlice<UInt8>) throws {
     // Enforce that version strings must contain only valid ASCII codepoints.
-    let versionLength = data[offset: 12, unsafelyCastTo: UInt32.self]
-    guard let version = String(bytes: data[16..<(16 + numericCast(versionLength))], encoding: .ascii) else {
+    let versionLength = data[offset: data.index(data.startIndex, offsetBy: 12), unsafelyCastTo: UInt32.self]
+    guard let version = String(bytes: data[
+      data.index(data.startIndex, offsetBy: 16)..<data.index(data.startIndex, offsetBy: 16 + numericCast(versionLength))
+    ], encoding: .ascii) else {
       throw WinMDError.BadImageFormat
     }
-    let streamCount = data[offset: 18 + numericCast(versionLength), unsafelyCastTo: UInt16.self]
+    let streamCount = data[offset: data.index(data.startIndex, offsetBy: 18 + numericCast(versionLength)), unsafelyCastTo: UInt16.self]
     var offset = 20 + numericCast(versionLength)
     let streamHeaders = try (0 ..< streamCount).map { _ in try StreamHeader.sequenceParse(from: data, offset: &offset) }
     // Enforce that all streams must have unique names.
@@ -154,10 +157,10 @@ internal struct MetadataRoot {
     self.data = data
   }
 
-  public var Signature: UInt32 { self.data[offset: 0] }
-  public var MajorVersion: UInt16 { self.data[offset: 4] }
-  public var MinorVersion: UInt16 { self.data[offset: 6] }
-  public var Reserved: UInt32 { self.data[offset: 8] }
+  public var Signature: UInt32 { self.data[offset: self.data.index(self.data.startIndex, offsetBy: 0)] }
+  public var MajorVersion: UInt16 { self.data[offset: self.data.index(self.data.startIndex, offsetBy: 4)] }
+  public var MinorVersion: UInt16 { self.data[offset: self.data.index(self.data.startIndex, offsetBy: 6)] }
+  public var Reserved: UInt32 { self.data[offset: self.data.index(self.data.startIndex, offsetBy: 8)] }
   public let Length: UInt32
   public let Version: String
   public var Streams: UInt16

@@ -18,79 +18,55 @@ import Foundation
 ///     uint32_t Rows[]             ; +24
 ///      uint8_t Tables[]
 internal struct TablesStream {
-  private let data: Data
+  private let data: ArraySlice<UInt8>
 
-  public init(data: Data) {
+  public init(data: ArraySlice<UInt8>) {
     self.data = data
   }
 
-  public var MajorVersion: UInt8 {
-    return data.read(offset: 4)
-  }
+  public var MajorVersion: UInt8 { self.data[offset: 4] }
+  public var MinorVersion: UInt8 { self.data[offset: 5] }
+  public var HeapSizes: UInt8 { self.data[offset: 6] }
+  public var Valid: UInt64 { self.data[offset: 8] }
+  public var Sorted: UInt64 { self.data[offset: 16] }
 
-  public var MinorVersion: UInt8 {
-    return data.read(offset: 5)
-  }
-
-  public var HeapSizes: UInt8 {
-    return data.read(offset: 6)
-  }
-
-  public var Valid: UInt64 {
-    return data.read(offset: 8)
-  }
-
-  public var Sorted: UInt64 {
-    return data.read(offset: 16)
-  }
-
+  internal var tableCount: Int { self.Valid.nonzeroBitCount }
+  
   public var Rows: [UInt32] {
-    let tables: Int = Valid.nonzeroBitCount
-    let nbytes: Int = tables * MemoryLayout<UInt32>.size
-    let begin: Data.Index = data.index(data.startIndex, offsetBy: 24)
-    let end: Data.Index = data.index(begin, offsetBy: nbytes)
-    return Array<UInt32>(unsafeUninitializedCapacity: tables) {
-      data.copyBytes(to: $0, from: begin ..< end)
-      $1 = tables
+    let enterIndex = self.data.index(self.data.startIndex, offsetBy: 24)
+    let exitIndex = self.data.index(enterIndex, offsetBy: self.tableCount * MemoryLayout<UInt32>.size)
+    
+    return .init(unsafeUninitializedCapacity: self.tableCount) {
+      self.data.copyBytes(to: $0, from: enterIndex ..< exitIndex)
+      $1 = self.tableCount
     }
   }
 
   public var Tables: [Table] {
-    let valid: UInt64 = Valid
-    let rows: [UInt32] = Rows
-
     var tables: [Table] = []
-    tables.reserveCapacity(valid.nonzeroBitCount)
+    tables.reserveCapacity(self.tableCount)
 
-    let strides: [TableIndex:Int] = self.strides(tables: valid, rows: rows)
+    let strides: [TableIndex:Int] = self.strides(tables: self.Valid, rows: self.Rows)
 
     let offset = 24 + tables.count * MemoryLayout<UInt32>.size
     var content = data[data.index(data.startIndex, offsetBy: offset)...]
 
-    Metadata.Tables.forEach { table in
-      if valid & (1 << table.number) == (1 << table.number) {
-        let records = rows[(valid & ((1 << table.number) - 1)).nonzeroBitCount]
-        tables.append(table.init(from: content, rows: records, strides: strides))
-        content = content[content.index(content.startIndex, offsetBy: tables.last!.data.count)...]
-      }
+    return Metadata.Tables.all.compactMap { tableType in
+      guard (self.Valid & (1 << tableType.number)) == (1 << tableType.number) else { return nil }
+      
+      let records = self.Rows[(self.Valid & ((1 << tableType.number) - 1)).nonzeroBitCount]
+      let table = tableType.init(from: content, rows: records, strides: strides)
+      
+      content = content[content.index(content.startIndex, offsetBy: table.data.count)...]
+      return table
     }
-
-    return tables
   }
 }
 
 extension TablesStream {
-  internal var StringIndexSize: Int {
-    (HeapSizes >> 0) & 1 == 1 ? 4 : 2
-  }
-
-  internal var GUIDIndexSize: Int {
-    (HeapSizes >> 1) & 1 == 1 ? 4 : 2
-  }
-
-  internal var BlobIndexSize: Int {
-    (HeapSizes >> 2) & 1 == 1 ? 4 : 2
-  }
+  internal var StringIndexSize: Int { self.HeapSizes & 0x01 == 0x01 ? 4 : 2 }
+  internal var GUIDIndexSize: Int { self.HeapSizes & 0x02 == 0x02 ? 4 : 2 }
+  internal var BlobIndexSize: Int { self.HeapSizes & 0x04 == 0x04 ? 4 : 2 }
 }
 
 extension TablesStream {

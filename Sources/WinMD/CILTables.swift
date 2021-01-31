@@ -17,10 +17,10 @@ internal protocol Table {
   var rows: Int { get }
 
   /// The data backing the table model.
-  var data: Data { get }
+  var data: ArraySlice<UInt8> { get }
 
   /// Constructs a new table model.
-  init(from data: Data, rows: UInt32, strides: [TableIndex:Int])
+  init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int])
 }
 
 enum TableIndex {
@@ -86,6 +86,7 @@ func stride<RecordLayout>(of layout: RecordLayout) -> Int {
 }
 
 extension Metadata.Tables {
+
 internal struct Assembly: Table {
   /// Record Layout
   ///   HashAlgId (4-byte constant of type AssemblyHashAlgorithm)
@@ -102,11 +103,11 @@ internal struct Assembly: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 32 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4, 2, 2, 2, 2, 4, strides[.blob]!, strides[.string]!, strides[.string]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -125,11 +126,11 @@ internal struct AssemblyOS: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 34 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4, 4, 4)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -146,11 +147,11 @@ internal struct AssemblyProcessor: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 33 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4)
     self.stride = 4
 
@@ -175,11 +176,11 @@ internal struct AssemblyRef: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 35 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (2, 2, 2, 2, 4, strides[.blob]!, strides[.string]!, strides[.string]!, strides[.blob]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -199,11 +200,11 @@ internal struct AssemblyRefOS: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 37 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4, 4, 4, strides[AssemblyRef.self]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -221,11 +222,11 @@ internal struct AssemblyRefProcessor: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 36 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4, strides[AssemblyRef.self]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -244,11 +245,11 @@ internal struct ClassLayout: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 15 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (2, 4, strides[TypeDef.self]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -267,11 +268,11 @@ internal struct Constant: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 11 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (1, 1, strides[HasConstant.self]!, strides[.blob]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -290,11 +291,11 @@ internal struct CustomAttribute: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 12 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[HasCustomAttribute.self]!, strides[CustomAttributeType.self]!, strides[.blob]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -313,11 +314,11 @@ internal struct DeclSecurity: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 14 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (2, strides[HasDeclSecurity.self]!, strides[.blob]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -335,11 +336,11 @@ internal struct EventMap: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 18 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[TypeDef.self]!, strides[EventDef.self]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -358,11 +359,11 @@ internal struct EventDef: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 20 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (2, strides[.string]!, strides[TypeDefOrRef.self]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -383,11 +384,11 @@ internal struct ExportedType: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 39 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4, 4, strides[.string]!, strides[.string]!, strides[Implementation.self]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -406,11 +407,11 @@ internal struct FieldDef: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 4 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (2, strides[.string]!, strides[.blob]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -428,11 +429,11 @@ internal struct FieldLayout: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 16 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4, strides[FieldDef.self]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -450,11 +451,11 @@ internal struct FieldMarshal: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 13 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[HasFieldMarshal.self]!, strides[.blob]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -472,11 +473,11 @@ internal struct FieldRVA: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 29 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4, strides[FieldDef.self]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -495,11 +496,11 @@ internal struct File: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 38 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4, strides[.string]!, strides[.blob]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -519,11 +520,11 @@ internal struct GenericParam: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 42 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (2, 2, strides[TypeOrMethodDef.self]!, strides[.string]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -541,11 +542,11 @@ internal struct GenericParamConstraint: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 44 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[GenericParam.self]!, strides[TypeDefOrRef.self]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -565,11 +566,11 @@ internal struct ImplMap: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 28 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (2, strides[MemberForwarded.self]!, strides[.string]!, strides[ModuleRef.self]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -587,11 +588,11 @@ internal struct InterfaceImpl: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 9 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[TypeDef.self]!, strides[TypeDefOrRef.self]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -611,11 +612,11 @@ internal struct ManifestResource: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 40 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4, 4, strides[.string]!, strides[Implementation.self]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -634,11 +635,11 @@ internal struct MemberRef: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 10 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[MemberRefParent.self]!, strides[.string]!, strides[.blob]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -660,11 +661,11 @@ internal struct MethodDef: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 6 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4, 2, 2, strides[.string]!, strides[.blob]!, strides[Param.self]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -683,11 +684,11 @@ internal struct MethodImpl: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 25 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[TypeDef.self]!, strides[MethodDefOrRef.self]!, strides[MethodDefOrRef.self]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -706,11 +707,11 @@ internal struct MethodSemantics: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 24 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (2, strides[MethodDef.self]!, strides[HasSemantics.self]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -728,11 +729,11 @@ internal struct MethodSpec: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 43 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[MethodDefOrRef.self]!, strides[.blob]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -753,11 +754,11 @@ internal struct Module: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 0 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (2, strides[.string]!, strides[.guid]!, strides[.guid]!, strides[.guid]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -774,11 +775,11 @@ internal struct ModuleRef: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 26 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[.string]!)
     self.stride = strides[.string]!
 
@@ -796,11 +797,11 @@ internal struct NestedClass: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 41 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[TypeDef.self]!, strides[TypeDef.self]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -819,11 +820,11 @@ internal struct Param: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 8 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (2, 2, strides[.string]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -842,11 +843,11 @@ internal struct PropertyDef: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 23 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (2, strides[.string]!, strides[.blob]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -864,11 +865,11 @@ internal struct PropertyMap: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 21 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[TypeDef.self]!, strides[PropertyDef.self]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -885,11 +886,11 @@ internal struct StandAloneSig: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 17 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[.blob]!)
     self.stride = strides[.blob]!
 
@@ -911,11 +912,11 @@ internal struct TypeDef: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 2 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (4, strides[.string]!, strides[.string]!, strides[TypeDefOrRef.self]!, strides[FieldDef.self]!, strides[MethodDef.self]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -934,11 +935,11 @@ internal struct TypeRef: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 1 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[ResolutionScope.self]!, strides[.string]!, strides[.string]!)
     self.stride = WinMD.stride(of: self.layout)
 
@@ -955,11 +956,11 @@ internal struct TypeSpec: Table {
   let layout: RecordLayout
   let stride: Int
   let rows: Int
-  let data: Data
+  let data: ArraySlice<UInt8>
 
   public static var number: Int { 27 }
 
-  public init(from data: Data, rows: UInt32, strides: [TableIndex:Int]) {
+  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
     self.layout = (strides[.blob]!)
     self.stride = strides[.blob]!
 
@@ -967,11 +968,12 @@ internal struct TypeSpec: Table {
     self.data = data.prefix(self.rows * self.stride)
   }
 }
-}
+
+} // extension Metadata.Tables
 
 extension Metadata.Tables {
-  static func forEach(_ body: (Table.Type) -> Void) {
-    _ = Array<Table.Type>([
+  static var all: [Table.Type] {
+    [
       Assembly.self,
       AssemblyOS.self,
       AssemblyProcessor.self,
@@ -1010,6 +1012,10 @@ extension Metadata.Tables {
       TypeDef.self,
       TypeRef.self,
       TypeSpec.self,
-    ]).sorted(by: { $0.number < $1.number }).map(body)
+    ].sorted(by: { $0.number < $1.number })
+  }
+  
+  static func forEach(_ body: (Table.Type) -> Void) {
+    self.all.forEach(body)
   }
 }

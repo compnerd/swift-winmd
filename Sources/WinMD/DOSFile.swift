@@ -35,7 +35,7 @@ internal struct DOSFile {
 
   /// The raw MS-DOS stub image header.
   public var Header: IMAGE_DOS_HEADER {
-    return self.data.withUnsafeBufferPointer { $0.withMemoryRebound(to: IMAGE_DOS_HEADER.self) { $0.first! } }
+    return self.data[offset: 0]
   }
   
   /// The complete content of the file, minus the leading MS-DOS stub. Returns a slice to help avoid excess copying.

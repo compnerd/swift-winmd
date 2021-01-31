@@ -54,10 +54,10 @@ extension Collection where Element == UInt8 {
   ///   performs the cast on that.
   fileprivate func unsafeCastRead<T>(_: T.Type, offset: Self.Index) -> T {
     return
-      self[offset...].withContiguousStorageIfAvailable { $0.withMemoryRebound(to: T.self) { $0[0] } }
+      self[offset...].withContiguousStorageIfAvailable { UnsafeRawBufferPointer($0).bindMemory(to: T.self)[0] }
       ??
       Array(self[offset..<self.index(offset, offsetBy: MemoryLayout<T>.stride)])
-        .withUnsafeBufferPointer { $0.withMemoryRebound(to: T.self) { $0[0] } }
+        .withUnsafeBufferPointer { UnsafeRawBufferPointer($0).bindMemory(to: T.self)[0] }
   }
 }
 

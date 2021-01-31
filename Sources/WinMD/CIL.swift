@@ -20,8 +20,14 @@ extension PEFile {
     guard let LogicalAddress = containingSections.first?.offset(from: directory.VirtualAddress) else {
       return nil
     }
-    
-    let enterIndex = self.data.index(self.data.startIndex, offsetBy: numericCast(LogicalAddress))
+    // A section's PointerToRawData is a raw file offset, so we have to double back on the slice indexing... the problem
+    // is that this involves explicit knowledge in offset handling code that the underlying storage is a slice, which is
+    // highly undesirable. If a String index couldn't be tricked this way and make sense, we shouldn't be doing it. The
+    // easiest "solution" would be to store the original data _including_ the stub in the `PEFile` as another slice. It
+    // wouldn't waste any space, since slices don't copy, but it's not exactly the cleanest way to deal with things.
+    // Then again, there's probably no such thing as "clean" when dealing with binary format parsers anyway.
+    // N.B.: The "problem" in this code right here specifically is that there's no independent basis for the "0" value.
+    let enterIndex = self.data.index(self.data.startIndex, offsetBy: self.data.distance(from: self.data.startIndex, to: 0) + numericCast(LogicalAddress))
     let exitIndex = self.data.index(enterIndex, offsetBy: numericCast(directory.Size))
     
     return self.data[enterIndex..<exitIndex]
@@ -85,7 +91,7 @@ internal struct StreamHeader {
       // remaining to reach the next word boundary is a parse error.
       let wordBoundaryIndex = data.index(nulIndex,
         offsetBy: (4 - data.distance(from: data.startIndex, to: nulIndex) % 4),
-        limitedBy: data.index(before: data.endIndex)
+        limitedBy: data.endIndex
       ),
 
       // Verify that any alignment bytes beyond the first NUL are also NUL.
@@ -93,13 +99,13 @@ internal struct StreamHeader {
       //data[nulIndex...wordBoundaryIndex].allSatisfy({ $0 == 0 }),
       
       // Parse the name as ASCII with a validating parse.
-      let Name = String.init(bytes: data[nameIndex...nulIndex], encoding: .ascii)
+      let Name = String.init(bytes: data[nameIndex..<nulIndex], encoding: .ascii)
     else {
       throw WinMDError.BadImageFormat
     }
 
     // Save the slice holding the data for this one header only.
-    self.data = data[data.startIndex...wordBoundaryIndex]
+    self.data = data[data.startIndex..<wordBoundaryIndex]
     
     // Save the parsed name string so we don't end up parsing it over and over.
     self.Name = Name

@@ -1,3 +1,0 @@
-module CPE {
-  header "CPE.h"
-}

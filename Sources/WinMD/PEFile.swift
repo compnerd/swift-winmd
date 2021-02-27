@@ -5,8 +5,10 @@
  * SPDX-License-Identifier: BSD-3-Clause
  **/
 
-import CPE
 import Foundation
+
+@_implementationOnly
+import CPE
 
 internal struct PEFile {
   internal let data: Data

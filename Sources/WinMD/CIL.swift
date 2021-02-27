@@ -5,8 +5,10 @@
  * SPDX-License-Identifier: BSD-3-Clause
  **/
 
-import CPE
 import Foundation
+
+@_implementationOnly
+import CPE
 
 private var CIL_METADATA_SIGNATURE: UInt32 { 0x424a5342 }
 

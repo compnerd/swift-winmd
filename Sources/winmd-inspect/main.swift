@@ -8,6 +8,7 @@
 import ArgumentParser
 import WinMD
 
+@main
 struct Inspect: ParsableCommand {
   @Argument
   var database: FileURL
@@ -26,5 +27,3 @@ struct Inspect: ParsableCommand {
     }
   }
 }
-
-Inspect.main()

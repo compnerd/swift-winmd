@@ -17,6 +17,11 @@ let SwiftWinMD = Package(
             dependencies: [
               "WinMD",
               .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            swiftSettings: [
+              .unsafeFlags([
+                "-parse-as-library",
+              ]),
             ]),
   ]
 )

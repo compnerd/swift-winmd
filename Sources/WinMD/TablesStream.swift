@@ -18,9 +18,9 @@ import Foundation
 ///     uint32_t Rows[]             ; +24
 ///      uint8_t Tables[]
 internal struct TablesStream {
-  private let data: Data
+  private let data: ArraySlice<UInt8>
 
-  public init(data: Data) {
+  public init(data: ArraySlice<UInt8>) {
     self.data = data
   }
 
@@ -47,8 +47,8 @@ internal struct TablesStream {
   public var Rows: [UInt32] {
     let tables: Int = Valid.nonzeroBitCount
     let nbytes: Int = tables * MemoryLayout<UInt32>.size
-    let begin: Data.Index = data.index(data.startIndex, offsetBy: 24)
-    let end: Data.Index = data.index(begin, offsetBy: nbytes)
+    let begin: ArraySlice<UInt8>.Index = data.index(data.startIndex, offsetBy: 24)
+    let end: ArraySlice<UInt8>.Index = data.index(begin, offsetBy: nbytes)
     return Array<UInt32>(unsafeUninitializedCapacity: tables) {
       data.copyBytes(to: $0, from: begin ..< end)
       $1 = tables

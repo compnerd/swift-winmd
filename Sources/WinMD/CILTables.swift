@@ -7,22 +7,6 @@
 
 import Foundation
 
-internal protocol Table {
-  /// The CIL defined table number.
-  static var number: Int { get }
-
-  /// The stride of a single row.
-  var stride: Int { get }
-  /// The number of rows in the table.
-  var rows: Int { get }
-
-  /// The data backing the table model.
-  var data: ArraySlice<UInt8> { get }
-
-  /// Constructs a new table model.
-  init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int])
-}
-
 extension Dictionary where Key == TableIndex, Value == Int {
   internal subscript(_ table: Table.Type) -> Int? {
     get { return self[.simple(table)] }

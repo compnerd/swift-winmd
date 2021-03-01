@@ -8,9 +8,9 @@
 import Foundation
 
 internal struct GUIDHeap {
-  let data: Data
+  let data: ArraySlice<UInt8>
 
-  public init(data: Data) {
+  public init(data: ArraySlice<UInt8>) {
     self.data = data
   }
 

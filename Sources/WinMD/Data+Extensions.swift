@@ -17,3 +17,14 @@ extension Data {
     }[0]
   }
 }
+
+extension ArraySlice where Element == UInt8 {
+  internal func read<T>(offset: Self.Index) -> T {
+    let begin: Self.Index = self.index(self.startIndex, offsetBy: offset)
+    let end: Self.Index = self.index(begin, offsetBy: MemoryLayout<T>.stride)
+    return Array<T>(unsafeUninitializedCapacity: 1) {
+      self.copyBytes(to: $0, from: begin ..< end)
+      $1 = 1
+    }[0]
+  }
+}

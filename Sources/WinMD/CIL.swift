@@ -13,8 +13,8 @@ import CPE
 private var CIL_METADATA_SIGNATURE: UInt32 { 0x424a5342 }
 
 internal struct Assembly {
-  private let header: Data
-  private let metadata: Data
+  private let header: ArraySlice<UInt8>
+  private let metadata: ArraySlice<UInt8>
 
   public var Header: IMAGE_COR20_HEADER {
     header.withUnsafeBytes {
@@ -27,15 +27,15 @@ internal struct Assembly {
   }
 
   public init(from pe: PEFile) throws {
-    func data(VA: UInt32, Size: UInt32) throws -> Data {
+    func data(VA: UInt32, Size: UInt32) throws -> ArraySlice<UInt8> {
       let sections = pe.Sections.containing(rva: VA)
       guard sections.count == 1, let LA = sections.first?.offset(from: VA) else {
         throw WinMDError.BadImageFormat
       }
 
-      let begin: Data.Index = Data.Index(LA)
-      let end: Data.Index = pe.data.index(begin, offsetBy: Int(Size))
-      return Data(pe.data[begin ..< end])
+      let begin: ArraySlice<UInt8>.Index = ArraySlice<UInt8>.Index(LA)
+      let end: ArraySlice<UInt8>.Index = pe.data.index(begin, offsetBy: Int(Size))
+      return pe.data[begin ..< end]
     }
 
     // CLI Header
@@ -67,7 +67,7 @@ internal struct Assembly {
 ///     uint32_t Size       ; +4
 ///      uint8_t Name[]     ; +8
 internal struct StreamHeader {
-  internal let data: Data
+  internal let data: ArraySlice<UInt8>
 
   public var Offset: UInt32 {
     return data.read(offset: 0)
@@ -78,7 +78,7 @@ internal struct StreamHeader {
   }
 
   public var Name: String {
-    let begin: Data.Index = data.index(data.startIndex, offsetBy: 8)
+    let begin: ArraySlice<UInt8>.Index = data.index(data.startIndex, offsetBy: 8)
     return data[begin...].withUnsafeBytes {
       if let name =
           $0.baseAddress?.assumingMemoryBound(to: Unicode.ASCII.CodeUnit.self) {
@@ -106,9 +106,9 @@ extension StreamHeader: CustomDebugStringConvertible {
 ///     uint16_t Streams                ; +18 + Length
 ///              StreamHeaders[Streams] ; +20 + Length
 internal struct MetadataRoot {
-  private let data: Data
+  private let data: ArraySlice<UInt8>
 
-  public init(data: Data) {
+  public init(data: ArraySlice<UInt8>) {
     self.data = data
   }
 
@@ -134,8 +134,8 @@ internal struct MetadataRoot {
 
   public var Version: String {
     let length: Int = Int(Length)
-    let begin: Data.Index = data.index(data.startIndex, offsetBy: 16)
-    let end: Data.Index = data.index(begin, offsetBy: length)
+    let begin: ArraySlice<UInt8>.Index = data.index(data.startIndex, offsetBy: 16)
+    let end: ArraySlice<UInt8>.Index = data.index(begin, offsetBy: length)
     let buffer: [UInt8] = Array<UInt8>(unsafeUninitializedCapacity: length) {
       data.copyBytes(to: $0, from: begin ..< end)
       $1 = length
@@ -155,7 +155,7 @@ internal struct MetadataRoot {
 
     var offset: Int = 20 + Int(Length)
     for _ in 0 ..< count {
-      let begin: Data.Index = data.index(data.startIndex, offsetBy: offset)
+      let begin: ArraySlice<UInt8>.Index = data.index(data.startIndex, offsetBy: offset)
 
       // FIXME(compnerd) truncate to the actual length of the header
       let header: StreamHeader = StreamHeader(data: data[begin...])
@@ -173,19 +173,19 @@ internal struct MetadataRoot {
 }
 
 extension MetadataRoot {
-  public func stream(named name: Metadata.Stream) -> Data? {
+  public func stream(named name: Metadata.Stream) -> ArraySlice<UInt8>? {
     return stream(named: name.rawValue)
   }
 
-  public func stream(named name: String) -> Data? {
+  public func stream(named name: String) -> ArraySlice<UInt8>? {
     let headers = StreamHeaders.filter { $0.Name == name }
     guard headers.count == 1, let header = headers.first else {
       return nil
     }
 
-    let begin: Data.Index =
+    let begin: ArraySlice<UInt8>.Index =
         data.index(data.startIndex, offsetBy: Int(header.Offset))
-    let end: Data.Index = data.index(begin, offsetBy: Int(header.Size))
+    let end: ArraySlice<UInt8>.Index = data.index(begin, offsetBy: Int(header.Size))
     return data[begin ..< end]
   }
 }

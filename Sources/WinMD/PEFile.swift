@@ -44,8 +44,8 @@ internal struct PEFile {
 
       return Array<IMAGE_SECTION_HEADER>(unsafeUninitializedCapacity: NumberOfSections) {
         let nbytes: Int = NumberOfSections * MemoryLayout<IMAGE_SECTION_HEADER>.size
-        let begin: Data.Index = data.index(data.startIndex, offsetBy: Offset)
-        let end: Data.Index = data.index(begin, offsetBy: nbytes)
+        let begin: ArraySlice<UInt8>.Index = data.index(data.startIndex, offsetBy: Offset)
+        let end: ArraySlice<UInt8>.Index = data.index(begin, offsetBy: nbytes)
         data.copyBytes(to: $0, from: begin ..< end)
         $1 = NumberOfSections
       }
@@ -56,8 +56,8 @@ internal struct PEFile {
 
       return Array<IMAGE_SECTION_HEADER>(unsafeUninitializedCapacity: NumberOfSections) {
         let nbytes: Int = NumberOfSections * MemoryLayout<IMAGE_SECTION_HEADER>.size
-        let begin: Data.Index = data.index(data.startIndex, offsetBy: Offset)
-        let end: Data.Index = data.index(begin, offsetBy: nbytes)
+        let begin: ArraySlice<UInt8>.Index = data.index(data.startIndex, offsetBy: Offset)
+        let end: ArraySlice<UInt8>.Index = data.index(begin, offsetBy: nbytes)
         data.copyBytes(to: $0, from: begin ..< end)
         $1 = NumberOfSections
       }

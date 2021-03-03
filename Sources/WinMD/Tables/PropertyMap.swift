@@ -6,7 +6,7 @@ internal struct PropertyMap: Table {
   /// Record Layout
   ///   Parent (TypeDef Index)
   ///   PropertyList (Property Index)
-  typealias RecordLayout = (Int, Int)
+  typealias RecordLayout = (Parent: Int, PropertyList: Int)
 
   let layout: RecordLayout
   let stride: Int

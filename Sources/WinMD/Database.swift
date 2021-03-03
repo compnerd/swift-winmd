@@ -30,13 +30,50 @@ public class Database {
     print("Streams: \(metadata.Streams)")
     metadata.StreamHeaders.forEach { print("  - \($0)") }
 
-    if let tables = TablesStream(from: self.cil), let _ = BlobsHeap(from: self.cil),
-        let _ = StringsHeap(from: self.cil), let _ = GUIDHeap(from: self.cil) {
+    if let tables = TablesStream(from: self.cil), let blobs = BlobsHeap(from: self.cil),
+        let strings = StringsHeap(from: self.cil), let guids = GUIDHeap(from: self.cil) {
       print("MajorVersion: \(String(tables.MajorVersion, radix: 16))")
       print("MinorVersion: \(String(tables.MinorVersion, radix: 16))")
       print("Tables:")
       tables.forEach {
         print("  - \($0)")
+
+        switch $0 {
+        case let Module as Metadata.Tables.Module:
+          Module.forEach {
+            print("    - \($0.Generation), \(strings[$0.Name]), \(guids[$0.Mvid]), \($0.EncId), \($0.EncBaseId)")
+          }
+        case let TypeRef as Metadata.Tables.TypeRef:
+          TypeRef.forEach {
+            print("    - \($0.ResolutionScope), \(strings[$0.TypeName]), \(strings[$0.TypeNamespace])")
+          }
+        case let TypeDef as Metadata.Tables.TypeDef:
+          TypeDef.forEach {
+            print("    - \($0.Flags), \(strings[$0.TypeName]), \(strings[$0.TypeNamespace]), \($0.Extends), \($0.FieldList), \($0.MethodList)")
+          }
+        case let FieldDef as Metadata.Tables.FieldDef:
+          FieldDef.forEach {
+            print("    - \($0.Flags), \(strings[$0.Name]), \(blobs[$0.Signature])")
+          }
+        case let MethodDef as Metadata.Tables.MethodDef:
+          MethodDef.forEach {
+            print("    - 0x\(String($0.RVA, radix: 16)), \($0.ImplFlags), \($0.Flags), \(strings[$0.Name]), \($0.Signature), \($0.ParamList)")
+          }
+        case let Param as Metadata.Tables.Param:
+          Param.forEach {
+            print("    - \($0.Flags), \($0.Sequence), \(strings[$0.Name])")
+          }
+        case let InterfaceImpl as Metadata.Tables.InterfaceImpl:
+          InterfaceImpl.forEach {
+            print("    - \($0.Class), \($0.Interface)")
+          }
+        case let MemberRef as Metadata.Tables.MemberRef:
+          MemberRef.forEach {
+            print("    - \($0.Class), \(strings[$0.Name]), \($0.Signature)")
+          }
+        default:
+          break
+        }
       }
     }
   }

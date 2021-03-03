@@ -6,7 +6,7 @@ internal struct NestedClass: Table {
   /// Record Layout
   ///   NestedClass (TypeDef Index)
   ///   EnclosingClass (TypeDef Index)
-  typealias RecordLayout = (Int, Int)
+  typealias RecordLayout = (NestedClass: Int, EnclosingClass: Int)
 
   let layout: RecordLayout
   let stride: Int

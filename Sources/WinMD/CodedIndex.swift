@@ -6,11 +6,11 @@
  **/
 
 internal protocol CodedIndex: Hashable {
-  static var tables: [Table.Type] { get }
+  static var tables: [TableBase.Type] { get }
 }
 
 internal struct HasConstant: CodedIndex {
-  public static var tables: [Table.Type] {
+  public static var tables: [TableBase.Type] {
     return [
       Metadata.Tables.Param.self,
       Metadata.Tables.FieldDef.self,
@@ -20,7 +20,7 @@ internal struct HasConstant: CodedIndex {
 }
 
 internal struct HasCustomAttribute: CodedIndex {
-  public static var tables: [Table.Type] {
+  public static var tables: [TableBase.Type] {
     return [
       Metadata.Tables.MethodDef.self,
       Metadata.Tables.MemberRef.self,
@@ -29,7 +29,7 @@ internal struct HasCustomAttribute: CodedIndex {
 }
 
 internal struct CustomAttributeType: CodedIndex {
-  public static var tables: [Table.Type] {
+  public static var tables: [TableBase.Type] {
     return [
       Metadata.Tables.MethodDef.self,
       Metadata.Tables.MemberRef.self,
@@ -38,7 +38,7 @@ internal struct CustomAttributeType: CodedIndex {
 }
 
 internal struct HasDeclSecurity: CodedIndex {
-  public static var tables: [Table.Type] {
+  public static var tables: [TableBase.Type] {
     return [
       Metadata.Tables.TypeDef.self,
       Metadata.Tables.MethodDef.self,
@@ -48,7 +48,7 @@ internal struct HasDeclSecurity: CodedIndex {
 }
 
 internal struct TypeDefOrRef: CodedIndex {
-  public static var tables: [Table.Type] {
+  public static var tables: [TableBase.Type] {
     return [
       Metadata.Tables.TypeDef.self,
       Metadata.Tables.TypeRef.self,
@@ -59,7 +59,7 @@ internal struct TypeDefOrRef: CodedIndex {
 
 // FIXME(compnerd) Exported vs Manifest Resource
 internal struct Implementation: CodedIndex {
-  public static var tables: [Table.Type] {
+  public static var tables: [TableBase.Type] {
     return [
       Metadata.Tables.File.self,
       Metadata.Tables.ExportedType.self,
@@ -69,7 +69,7 @@ internal struct Implementation: CodedIndex {
 }
 
 internal struct HasFieldMarshal: CodedIndex {
-  public static var tables: [Table.Type] {
+  public static var tables: [TableBase.Type] {
     return [
       Metadata.Tables.FieldDef.self,
       Metadata.Tables.Param.self,
@@ -78,7 +78,7 @@ internal struct HasFieldMarshal: CodedIndex {
 }
 
 internal struct TypeOrMethodDef: CodedIndex {
-  public static var tables: [Table.Type] {
+  public static var tables: [TableBase.Type] {
     return [
       Metadata.Tables.TypeDef.self,
       Metadata.Tables.MethodDef.self,
@@ -87,7 +87,7 @@ internal struct TypeOrMethodDef: CodedIndex {
 }
 
 internal struct MemberForwarded: CodedIndex {
-  public static var tables: [Table.Type] {
+  public static var tables: [TableBase.Type] {
     return [
       Metadata.Tables.FieldDef.self,
       Metadata.Tables.MethodDef.self,
@@ -96,7 +96,7 @@ internal struct MemberForwarded: CodedIndex {
 }
 
 internal struct MemberRefParent: CodedIndex {
-  public static var tables: [Table.Type] {
+  public static var tables: [TableBase.Type] {
     return [
       Metadata.Tables.MethodDef.self,
       Metadata.Tables.ModuleRef.self,
@@ -108,7 +108,7 @@ internal struct MemberRefParent: CodedIndex {
 }
 
 internal struct HasSemantics: CodedIndex {
-  public static var tables: [Table.Type] {
+  public static var tables: [TableBase.Type] {
     return [
       Metadata.Tables.EventDef.self,
       Metadata.Tables.PropertyDef.self,
@@ -117,7 +117,7 @@ internal struct HasSemantics: CodedIndex {
 }
 
 internal struct MethodDefOrRef: CodedIndex {
-  public static var tables: [Table.Type] {
+  public static var tables: [TableBase.Type] {
     return [
       Metadata.Tables.MethodDef.self,
       Metadata.Tables.MemberRef.self,
@@ -126,7 +126,7 @@ internal struct MethodDefOrRef: CodedIndex {
 }
 
 internal struct ResolutionScope: CodedIndex {
-  public static var tables: [Table.Type] {
+  public static var tables: [TableBase.Type] {
     return [
       Metadata.Tables.Module.self,
       Metadata.Tables.ModuleRef.self,

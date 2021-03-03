@@ -55,11 +55,11 @@ internal struct TablesStream {
     }
   }
 
-  public var Tables: [Table] {
+  public var Tables: [TableBase] {
     let valid: UInt64 = Valid
     let rows: [UInt32] = Rows
 
-    var tables: [Table] = []
+    var tables: [TableBase] = []
     tables.reserveCapacity(valid.nonzeroBitCount)
 
     let strides: [TableIndex:Int] = self.strides(tables: valid, rows: rows)

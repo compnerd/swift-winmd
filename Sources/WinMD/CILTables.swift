@@ -8,7 +8,7 @@
 import Foundation
 
 extension Dictionary where Key == TableIndex, Value == Int {
-  internal subscript(_ table: Table.Type) -> Int? {
+  internal subscript(_ table: TableBase.Type) -> Int? {
     get { return self[.simple(table)] }
     set { self[.simple(table)] = newValue }
   }
@@ -29,8 +29,8 @@ func stride<RecordLayout>(of layout: RecordLayout) -> Int {
 }
 
 extension Metadata.Tables {
-  static func forEach(_ body: (Table.Type) -> Void) {
-    _ = Array<Table.Type>([
+  static func forEach(_ body: (TableBase.Type) -> Void) {
+    _ = Array<TableBase.Type>([
       Assembly.self,
       AssemblyOS.self,
       AssemblyProcessor.self,

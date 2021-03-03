@@ -9,7 +9,7 @@ enum TableIndex {
   case string
   case guid
   case blob
-  case simple(Table.Type)
+  case simple(TableBase.Type)
   case coded(ObjectIdentifier)
 }
 

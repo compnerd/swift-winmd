@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: BSD-3-Clause
  **/
 
-internal protocol Table {
+internal protocol TableBase {
   /// The CIL defined table number.
   static var number: Int { get }
 
@@ -20,4 +20,13 @@ internal protocol Table {
 
   /// Constructs a new table model.
   init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int])
+}
+
+internal protocol Table: TableBase, CustomStringConvertible {
+}
+
+extension Table {
+  internal var description: String {
+    "\(String(describing: Self.self)): rows: \(self.rows), stride: \(self.stride) bytes, data: \(self.data.count) bytes"
+  }
 }

@@ -16,7 +16,6 @@ public class Database {
     self.dos = try DOSFile(from: data)
     self.pe = try PEFile(from: self.dos)
     self.cil = try Assembly(from: self.pe)
-    try cil.validate()
   }
 
   public convenience init(at path: URL) throws {

@@ -12,13 +12,29 @@ import CPE
 
 private var CIL_METADATA_SIGNATURE: UInt32 { 0x424a5342 }
 
+extension PEFile {
+  internal func contents(_ directory: IMAGE_DATA_DIRECTORY)
+      throws -> ArraySlice<UInt8> {
+    let sections = self.Sections.containing(rva: directory.VirtualAddress)
+    guard sections.count == 1 else { throw WinMDError.BadImageFormat }
+
+    let LogicalAddress = sections.first!.offset(from: directory.VirtualAddress)
+
+    let begin: ArraySlice<UInt8>.Index = ArraySlice<UInt8>.Index(LogicalAddress)
+    let end: ArraySlice<UInt8>.Index =
+        self.data.index(begin, offsetBy: numericCast(directory.Size))
+
+    return self.data[begin ..< end]
+  }
+}
+
 internal struct Assembly {
   private let header: ArraySlice<UInt8>
   private let metadata: ArraySlice<UInt8>
 
   public var Header: IMAGE_COR20_HEADER {
     header.withUnsafeBytes {
-      $0.bindMemory(to: IMAGE_COR20_HEADER.self).baseAddress!.pointee
+      $0.load(as: IMAGE_COR20_HEADER.self)
     }
   }
 
@@ -27,35 +43,22 @@ internal struct Assembly {
   }
 
   public init(from pe: PEFile) throws {
-    func data(VA: UInt32, Size: UInt32) throws -> ArraySlice<UInt8> {
-      let sections = pe.Sections.containing(rva: VA)
-      guard sections.count == 1, let LA = sections.first?.offset(from: VA) else {
-        throw WinMDError.BadImageFormat
-      }
-
-      let begin: ArraySlice<UInt8>.Index = ArraySlice<UInt8>.Index(LA)
-      let end: ArraySlice<UInt8>.Index = pe.data.index(begin, offsetBy: Int(Size))
-      return pe.data[begin ..< end]
-    }
+    let COMDescriptor: IMAGE_DATA_DIRECTORY = pe.DataDirectory.14
 
     // CLI Header
-    let COMDescriptor: IMAGE_DATA_DIRECTORY = pe.DataDirectory.14
-    self.header =
-        try data(VA: COMDescriptor.VirtualAddress, Size: COMDescriptor.Size)
+    self.header = try pe.contents(COMDescriptor)
 
     let Header = header.withUnsafeBytes {
-      $0.bindMemory(to: IMAGE_COR20_HEADER.self).baseAddress!.pointee
+      $0.load(as: IMAGE_COR20_HEADER.self)
     }
 
-    // CLI Metadata
-    self.metadata =
-        try data(VA: Header.MetaData.VirtualAddress, Size: Header.MetaData.Size)
-  }
-
-  public func validate() throws {
     guard Header.cb == MemoryLayout<IMAGE_COR20_HEADER>.size else {
       throw WinMDError.BadImageFormat
     }
+
+    // CLI Metadata
+    self.metadata = try pe.contents(Header.MetaData)
+
     guard Metadata.Signature == CIL_METADATA_SIGNATURE else {
       throw WinMDError.BadImageFormat
     }

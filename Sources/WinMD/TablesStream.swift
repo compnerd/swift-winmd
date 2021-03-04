@@ -11,7 +11,7 @@ import Foundation
 ///     uint32_t Reserved           ; +0 [0]
 ///      uint8_t MajorVersion       ; +4
 ///      uint8_t MinorVersion       ; +5
-///      uint8_t HeapSizes          ; +v
+///      uint8_t HeapSizes          ; +6
 ///      uint8_t Reserved           ; +7 [1]
 ///     uint64_t Valid              ; +8
 ///     uint64_t Sorted             ; +16

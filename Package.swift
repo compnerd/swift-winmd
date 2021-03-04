@@ -12,7 +12,13 @@ let SwiftWinMD = Package(
   ],
   targets: [
     .target(name: "CPE", dependencies: []),
-    .target(name: "WinMD", dependencies: ["CPE"]),
+    .target(name: "WinMD",
+            dependencies: ["CPE"],
+            swiftSettings: [
+              .unsafeFlags([
+                "-Xfrontend", "-validate-tbd-against-ir=none",
+              ]),
+            ]),
     .target(name: "winmd-inspect",
             dependencies: [
               "WinMD",

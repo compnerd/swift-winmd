@@ -73,11 +73,11 @@ internal struct StreamHeader {
   internal let data: ArraySlice<UInt8>
 
   public var Offset: UInt32 {
-    return data.read(offset: 0)
+    self.data[0, UInt32.self]
   }
 
   public var Size: UInt32 {
-    return data.read(offset: 4)
+    self.data[4, UInt32.self]
   }
 
   public var Name: String {
@@ -116,38 +116,35 @@ internal struct MetadataRoot {
   }
 
   public var Signature: UInt32 {
-    return data.read(offset: 0)
+    self.data[0, UInt32.self]
   }
 
   public var MajorVersion: UInt16 {
-    return data.read(offset: 4)
+    self.data[4, UInt16.self]
   }
 
   public var MinorVersion: UInt16 {
-    return data.read(offset: 6)
+    self.data[6, UInt16.self]
   }
 
   public var Reserved: UInt32 {
-    return data.read(offset: 8)
+    self.data[8, UInt32.self]
   }
 
   public var Length: UInt32 {
-    return data.read(offset: 12)
+    self.data[12, UInt32.self]
   }
 
   public var Version: String {
-    let length: Int = Int(Length)
-    let begin: ArraySlice<UInt8>.Index = data.index(data.startIndex, offsetBy: 16)
-    let end: ArraySlice<UInt8>.Index = data.index(begin, offsetBy: length)
-    let buffer: [UInt8] = Array<UInt8>(unsafeUninitializedCapacity: length) {
-      data.copyBytes(to: $0, from: begin ..< end)
-      $1 = length
-    }
-    return String(decodingCString: buffer, as: Unicode.ASCII.self)
+    let begin: ArraySlice<UInt8>.Index =
+        data.index(data.startIndex, offsetBy: 16)
+    let end: ArraySlice<UInt8>.Index =
+        data.index(begin, offsetBy: numericCast(Length))
+    return String(bytes: data[begin ..< end], encoding: .ascii)!
   }
 
   public var Streams: UInt16 {
-    return data.read(offset: 18 + Int(Length))
+    self.data[18 + Int(Length), UInt16.self]
   }
 
   public var StreamHeaders: [StreamHeader] {
@@ -156,17 +153,18 @@ internal struct MetadataRoot {
     var headers: [StreamHeader] = []
     headers.reserveCapacity(count)
 
+    func align(_ value: Int, to: Int) -> Int {
+      return value + (to - value % to)
+    }
+
     var offset: Int = 20 + Int(Length)
-    for _ in 0 ..< count {
-      let begin: ArraySlice<UInt8>.Index = data.index(data.startIndex, offsetBy: offset)
+    (0 ..< count).forEach { _ in
+      let begin: ArraySlice<UInt8>.Index =
+          data.index(data.startIndex, offsetBy: offset)
 
       // FIXME(compnerd) truncate to the actual length of the header
       let header: StreamHeader = StreamHeader(data: data[begin...])
       headers.append(header)
-
-      func align(_ value: Int, to: Int) -> Int {
-        return value + (to - value % to)
-      }
 
       offset = offset + 8 + align(header.Name.count, to: 4)
     }
@@ -188,7 +186,8 @@ extension MetadataRoot {
 
     let begin: ArraySlice<UInt8>.Index =
         data.index(data.startIndex, offsetBy: Int(header.Offset))
-    let end: ArraySlice<UInt8>.Index = data.index(begin, offsetBy: Int(header.Size))
+    let end: ArraySlice<UInt8>.Index =
+        data.index(begin, offsetBy: Int(header.Size))
     return data[begin ..< end]
   }
 }

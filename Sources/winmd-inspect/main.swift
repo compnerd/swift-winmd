@@ -21,7 +21,7 @@ struct Inspect: ParsableCommand {
 
   func run() throws {
     // "C:\\Windows\\System32\\WinMetadata\\Windows.Foundation.winmd"
-    print("inspect: \(self.database)")
+    print("Database: \(self.database.url.path)")
     if let database = try? WinMD.Database(at: self.database.url) {
       database.dump()
     }

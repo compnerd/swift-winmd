@@ -5,8 +5,6 @@
  * SPDX-License-Identifier: BSD-3-Clause
  **/
 
-import Foundation
-
 @_implementationOnly
 import CPE
 

@@ -5,7 +5,8 @@
  * SPDX-License-Identifier: BSD-3-Clause
  **/
 
-import Foundation
+import struct Foundation.UUID
+import typealias Foundation.uuid_t
 
 internal struct GUIDHeap {
   let data: ArraySlice<UInt8>

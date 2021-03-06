@@ -5,8 +5,6 @@
  * SPDX-License-Identifier: BSD-3-Clause
  **/
 
-import Foundation
-
 internal struct StringsHeap {
   let data: ArraySlice<UInt8>
 

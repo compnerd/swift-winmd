@@ -5,7 +5,8 @@
  * SPDX-License-Identifier: BSD-3-Clause
  **/
 
-import Foundation
+import struct Foundation.Data
+import struct Foundation.URL
 
 public class Database {
   private let dos: DOSFile

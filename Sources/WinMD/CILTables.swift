@@ -5,8 +5,6 @@
  * SPDX-License-Identifier: BSD-3-Clause
  **/
 
-import Foundation
-
 extension Dictionary where Key == TableIndex, Value == Int {
   internal subscript(_ table: TableBase.Type) -> Int? {
     get { return self[.simple(table)] }

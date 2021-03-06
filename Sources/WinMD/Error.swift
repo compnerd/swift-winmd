@@ -7,7 +7,4 @@
 
 public enum WinMDError: Error {
   case BadImageFormat
-
-  case invalidStream
-  case tableNotFound
 }

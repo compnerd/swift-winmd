@@ -34,13 +34,14 @@ public class Database {
     print("Streams: \(metadata.Streams)")
     metadata.StreamHeaders.forEach { print("  - \($0)") }
 
-    if let tables = metadata.stream(named: Metadata.Stream.Tables),
-        let blobs = metadata.stream(named: Metadata.Stream.Blob),
-        let guids = metadata.stream(named: Metadata.Stream.GUID),
-        let strings = metadata.stream(named: Metadata.Stream.Strings) {
-      let tables = TablesStream(data: tables)
-      let _ = StringsHeap(data: strings)
-      let _ = GUIDHeap(data: guids)
+    if let TableStream = metadata.stream(named: Metadata.Stream.Tables),
+        let BlobStream = metadata.stream(named: Metadata.Stream.Blob),
+        let GUIDStream = metadata.stream(named: Metadata.Stream.GUID),
+        let StringsStream = metadata.stream(named: Metadata.Stream.Strings) {
+      let tables = TablesStream(data: TableStream)
+      let _ = StringsHeap(data: StringsStream)
+      let _ = GUIDHeap(data: GUIDStream)
+      let _ = BlobsHeap(data: BlobStream)
 
       print("MajorVersion: \(String(tables.MajorVersion, radix: 16))")
       print("MinorVersion: \(String(tables.MinorVersion, radix: 16))")

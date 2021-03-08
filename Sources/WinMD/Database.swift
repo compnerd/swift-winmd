@@ -41,6 +41,7 @@ public class Database {
       let tables = TablesStream(data: TablesStream)
       let _ = StringsHeap(data: StringsStream)
       let _ = GUIDHeap(data: GUIDStream)
+      let _ = BlobsHeap(data: BlobStream)
 
       print("MajorVersion: \(String(tables.MajorVersion, radix: 16))")
       print("MinorVersion: \(String(tables.MinorVersion, radix: 16))")

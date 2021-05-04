@@ -13,15 +13,12 @@ jobs:
     strategy:
       matrix:
         include:
-         - version: 5.4
-           tag: RELEASE
-           type: swift-5.4-release
-         - version: 5.5
-           tag: DEVELOPMENT-SNAPSHOT-2021-04-19-a
-           type: swift-5.5-branch
-         - version: development
-           tag: DEVELOPMENT-SNAPSHOT-2021-04-26-a
-           type: development
+         - tag: 5.4-RELEASE
+           branch: swift-5.4-release
+         - tag: 5.5-DEVELOPMENT-SNAPSHOT-2021-04-19-a
+           branch: swift-5.5-branch
+         - tag: DEVELOPMENT-SNAPSHOT-2021-04-26-a
+           branch: development
 
     steps:
     # - run: git config --global core.autocrlf input
@@ -30,9 +27,9 @@ jobs:
     - uses: actions/checkout@v2
     - uses: seanmiddleditch/gha-setup-vsdevenv@master
 
-    - name: Install Swift ${{ matrix.version }} (${{ matrix.tag }})
+    - name: Install Swift ${{ matrix.tag }}
       run: |
-        Install-Binary -Url "https://swift.org/builds/${{ matrix.type }}/windows10/swift-${{ matrix.version }}-${{ matrix.tag }}/swift-${{ matrix.version }}-${{ matrix.tag }}-windows10.exe" -Name "installer.exe" -ArgumentList ("-q")
+        Install-Binary -Url "https://swift.org/builds/${{ matrix.branch }}/windows10/swift-${{ matrix.tag }}/swift-${{ matrix.tag }}-windows10.exe" -Name "installer.exe" -ArgumentList ("-q")
     - name: Set Environment Variables
       run: |
         echo "SDKROOT=C:\Library\Developer\Platforms\Windows.platform\Developer\SDKs\Windows.sdk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append

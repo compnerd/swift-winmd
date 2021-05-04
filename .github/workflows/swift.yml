@@ -12,9 +12,16 @@ jobs:
     
     strategy:
       matrix:
-        version: [5.4, 5.5, development]
-        type: [swift-5.4-release, swift-5.5-branch, development]
-        tag: [RELEASE, DEVELOPMENT-SNAPSHOT-2021-04-19-a, DEVELOPMENT-SNAPSHOT-2021-04-26-a]
+        include:
+         - version: 5.4
+           tag: RELEASE
+           type: swift-5.4-release
+         - version: 5.5
+           tag: DEVELOPMENT-SNAPSHOT-2021-04-19-a
+           type: swift-5.5-branch
+         - version: development
+           tag: DEVELOPMENT-SNAPSHOT-2021-04-26-a
+           type: development
 
     steps:
     # - run: git config --global core.autocrlf input

@@ -2,8 +2,16 @@
 // All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
+
 internal protocol CodedIndex: Hashable {
+  /// The tables that the coded index may index.
   static var tables: [TableBase.Type] { get }
+
+  /// The value of the coded index.
+  var rawValue: Int { get }
+
+  /// Creates a new instance with the specified value.
+  init(rawValue: Int)
 }
 
 internal struct HasConstant: CodedIndex {
@@ -14,6 +22,8 @@ internal struct HasConstant: CodedIndex {
       Metadata.Tables.PropertyDef.self,
     ]
   }
+
+  internal var rawValue: Int
 }
 
 internal struct HasCustomAttribute: CodedIndex {
@@ -23,6 +33,8 @@ internal struct HasCustomAttribute: CodedIndex {
       Metadata.Tables.MemberRef.self,
     ]
   }
+
+  internal var rawValue: Int
 }
 
 internal struct CustomAttributeType: CodedIndex {
@@ -32,6 +44,8 @@ internal struct CustomAttributeType: CodedIndex {
       Metadata.Tables.MemberRef.self,
     ]
   }
+
+  internal var rawValue: Int
 }
 
 internal struct HasDeclSecurity: CodedIndex {
@@ -42,6 +56,8 @@ internal struct HasDeclSecurity: CodedIndex {
       Metadata.Tables.Assembly.self,
     ]
   }
+
+  internal var rawValue: Int
 }
 
 internal struct TypeDefOrRef: CodedIndex {
@@ -52,6 +68,8 @@ internal struct TypeDefOrRef: CodedIndex {
       Metadata.Tables.TypeSpec.self,
     ]
   }
+
+  internal var rawValue: Int
 }
 
 // FIXME(compnerd) Exported vs Manifest Resource
@@ -63,6 +81,8 @@ internal struct Implementation: CodedIndex {
       Metadata.Tables.AssemblyRef.self,
     ]
   }
+
+  internal var rawValue: Int
 }
 
 internal struct HasFieldMarshal: CodedIndex {
@@ -72,6 +92,8 @@ internal struct HasFieldMarshal: CodedIndex {
       Metadata.Tables.Param.self,
     ]
   }
+
+  internal var rawValue: Int
 }
 
 internal struct TypeOrMethodDef: CodedIndex {
@@ -81,6 +103,8 @@ internal struct TypeOrMethodDef: CodedIndex {
       Metadata.Tables.MethodDef.self,
     ]
   }
+
+  internal var rawValue: Int
 }
 
 internal struct MemberForwarded: CodedIndex {
@@ -90,6 +114,8 @@ internal struct MemberForwarded: CodedIndex {
       Metadata.Tables.MethodDef.self,
     ]
   }
+
+  internal var rawValue: Int
 }
 
 internal struct MemberRefParent: CodedIndex {
@@ -102,6 +128,8 @@ internal struct MemberRefParent: CodedIndex {
       Metadata.Tables.TypeSpec.self,
     ]
   }
+
+  internal var rawValue: Int
 }
 
 internal struct HasSemantics: CodedIndex {
@@ -111,6 +139,8 @@ internal struct HasSemantics: CodedIndex {
       Metadata.Tables.PropertyDef.self,
     ]
   }
+
+  internal var rawValue: Int
 }
 
 internal struct MethodDefOrRef: CodedIndex {
@@ -120,6 +150,8 @@ internal struct MethodDefOrRef: CodedIndex {
       Metadata.Tables.MemberRef.self,
     ]
   }
+
+  internal var rawValue: Int
 }
 
 internal struct ResolutionScope: CodedIndex {
@@ -131,4 +163,6 @@ internal struct ResolutionScope: CodedIndex {
       Metadata.Tables.TypeRef.self,
     ]
   }
+
+  internal var rawValue: Int
 }

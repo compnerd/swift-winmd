@@ -19,6 +19,13 @@ internal struct TablesStream {
     self.data = data
   }
 
+  public init?(from assembly: Assembly) {
+    guard let stream = assembly.Metadata.stream(named: Metadata.Stream.Tables) else {
+      return nil
+    }
+    self.init(data: stream)
+  }
+
   public var MajorVersion: UInt8 {
     return self.data[4, UInt8.self]
   }

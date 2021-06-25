@@ -14,6 +14,20 @@ internal protocol CodedIndex: Hashable {
   init(rawValue: Int)
 }
 
+extension CodedIndex {
+  internal static var mask: Int {
+    (1 << (64 - (Self.tables.count - 1).leadingZeroBitCount)) - 1
+  }
+
+  internal var tag: Int {
+    self.rawValue & Self.mask
+  }
+
+  internal var row: Int {
+    self.rawValue >> Self.mask.nonzeroBitCount
+  }
+}
+
 internal struct HasConstant: CodedIndex {
   public static var tables: [TableBase.Type] {
     return [

@@ -1,9 +1,6 @@
-/**
- * Copyright © 2021 Saleem Abdulrasool <compnerd@compnerd.org>
- * All rights reserved.
- *
- * SPDX-License-Identifier: BSD-3-Clause
- **/
+// Copyright © 2021 Saleem Abdulrasool <compnerd@compnerd.org>
+// All rights reserved.
+// SPDX-License-Identifier: BSD-3-Clause
 
 internal struct BlobsHeap {
   let data: ArraySlice<UInt8>

@@ -22,24 +22,21 @@ internal struct FileURL: ExpressibleByArgument {
 
   /// A trivial existence check. Returns `false` on any error. Same caveats as
   /// `FileManager.fileExists(atPath:)`.
-  ///
-  /// NOTE: this is not safe against TOCTOU
+  // NOTE: this is not safe against TOCTOU
   public var existsOnDisk: Bool {
     return (try? self.url.checkResourceIsReachable()) ?? false
   }
 
   /// A trivial "is a directory" check. Returns `false` on any error, which is
   /// not terribly helpful.
-  ///
-  /// NOTE: this is not safe against TOCTOU
+  // NOTE: this is not safe against TOCTOU
   public var isDirectory: Bool {
     return (try? self.url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
   }
 
   /// A trivial "is a plain file" check. Returns `false` on any error, which is
   /// not terribly helpful.
-  ///
-  /// NOTE: this is not safe against TOCTOU
+  // NOTE: this is not safe against TOCTOU
   public var isRegularFile: Bool {
     return (try? self.url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false
   }

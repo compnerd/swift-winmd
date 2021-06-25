@@ -9,6 +9,13 @@ internal struct BlobsHeap {
     self.data = data
   }
 
+  public init?(from assembly: Assembly) {
+    guard let stream = assembly.Metadata.stream(named: Metadata.Stream.Blob) else {
+      return nil
+    }
+    self.init(data: stream)
+  }
+
   public subscript(offset: Int) -> ArraySlice<UInt8> {
     let begin: ArraySlice<UInt8>.Index
     let end: ArraySlice<UInt8>.Index

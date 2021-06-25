@@ -9,6 +9,13 @@ internal struct StringsHeap {
     self.data = data
   }
 
+  public init?(from assembly: Assembly) {
+    guard let stream = assembly.Metadata.stream(named: Metadata.Stream.Strings) else {
+      return nil
+    }
+    self.init(data: stream)
+  }
+
   public subscript(offset: Int) -> String {
     let index = data.index(data.startIndex, offsetBy: offset)
     return data[index...].withUnsafeBytes {

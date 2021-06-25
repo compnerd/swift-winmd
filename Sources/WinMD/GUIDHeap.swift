@@ -12,6 +12,13 @@ internal struct GUIDHeap {
     self.data = data
   }
 
+  public init?(from assembly: Assembly) {
+    guard let stream = assembly.Metadata.stream(named: Metadata.Stream.GUID) else {
+      return nil
+    }
+    self.init(data: stream)
+  }
+
   public subscript(index: Int) -> UUID {
     UUID(uuid: data.withUnsafeBytes {
       $0.load(fromByteOffset: MemoryLayout<uuid_t>.stride * (index - 1), as: uuid_t.self)

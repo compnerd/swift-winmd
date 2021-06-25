@@ -39,11 +39,24 @@ extension CodedIndex {
   }
 }
 
+
+internal struct TypeDefOrRef: CodedIndex {
+  public static var tables: [TableBase.Type] {
+    return [
+      Metadata.Tables.TypeDef.self,
+      Metadata.Tables.TypeRef.self,
+      Metadata.Tables.TypeSpec.self,
+    ]
+  }
+
+  internal var rawValue: Int
+}
+
 internal struct HasConstant: CodedIndex {
   public static var tables: [TableBase.Type] {
     return [
-      Metadata.Tables.Param.self,
       Metadata.Tables.FieldDef.self,
+      Metadata.Tables.Param.self,
       Metadata.Tables.PropertyDef.self,
     ]
   }
@@ -55,18 +68,38 @@ internal struct HasCustomAttribute: CodedIndex {
   public static var tables: [TableBase.Type] {
     return [
       Metadata.Tables.MethodDef.self,
+      Metadata.Tables.FieldDef.self,
+      Metadata.Tables.TypeRef.self,
+      Metadata.Tables.TypeDef.self,
+      Metadata.Tables.Param.self,
+      Metadata.Tables.InterfaceImpl.self,
       Metadata.Tables.MemberRef.self,
+      Metadata.Tables.Module.self,
+      Metadata.Tables.DeclSecurity.self,
+      Metadata.Tables.PropertyDef.self,
+      Metadata.Tables.EventDef.self,
+      Metadata.Tables.StandAloneSig.self,
+      Metadata.Tables.ModuleRef.self,
+      Metadata.Tables.TypeSpec.self,
+      Metadata.Tables.Assembly.self,
+      Metadata.Tables.AssemblyRef.self,
+      Metadata.Tables.File.self,
+      Metadata.Tables.ExportedType.self,
+      Metadata.Tables.ManifestResource.self,
+      Metadata.Tables.GenericParam.self,
+      Metadata.Tables.GenericParamConstraint.self,
+      Metadata.Tables.MethodSpec.self,
     ]
   }
 
   internal var rawValue: Int
 }
 
-internal struct CustomAttributeType: CodedIndex {
+internal struct HasFieldMarshal: CodedIndex {
   public static var tables: [TableBase.Type] {
     return [
-      Metadata.Tables.MethodDef.self,
-      Metadata.Tables.MemberRef.self,
+      Metadata.Tables.FieldDef.self,
+      Metadata.Tables.Param.self,
     ]
   }
 
@@ -85,71 +118,13 @@ internal struct HasDeclSecurity: CodedIndex {
   internal var rawValue: Int
 }
 
-internal struct TypeDefOrRef: CodedIndex {
-  public static var tables: [TableBase.Type] {
-    return [
-      Metadata.Tables.TypeDef.self,
-      Metadata.Tables.TypeRef.self,
-      Metadata.Tables.TypeSpec.self,
-    ]
-  }
-
-  internal var rawValue: Int
-}
-
-// FIXME(compnerd) Exported vs Manifest Resource
-internal struct Implementation: CodedIndex {
-  public static var tables: [TableBase.Type] {
-    return [
-      Metadata.Tables.File.self,
-      Metadata.Tables.ExportedType.self,
-      Metadata.Tables.AssemblyRef.self,
-    ]
-  }
-
-  internal var rawValue: Int
-}
-
-internal struct HasFieldMarshal: CodedIndex {
-  public static var tables: [TableBase.Type] {
-    return [
-      Metadata.Tables.FieldDef.self,
-      Metadata.Tables.Param.self,
-    ]
-  }
-
-  internal var rawValue: Int
-}
-
-internal struct TypeOrMethodDef: CodedIndex {
-  public static var tables: [TableBase.Type] {
-    return [
-      Metadata.Tables.TypeDef.self,
-      Metadata.Tables.MethodDef.self,
-    ]
-  }
-
-  internal var rawValue: Int
-}
-
-internal struct MemberForwarded: CodedIndex {
-  public static var tables: [TableBase.Type] {
-    return [
-      Metadata.Tables.FieldDef.self,
-      Metadata.Tables.MethodDef.self,
-    ]
-  }
-
-  internal var rawValue: Int
-}
-
 internal struct MemberRefParent: CodedIndex {
   public static var tables: [TableBase.Type] {
     return [
-      Metadata.Tables.MethodDef.self,
-      Metadata.Tables.ModuleRef.self,
       Metadata.Tables.TypeDef.self,
       Metadata.Tables.TypeRef.self,
+      Metadata.Tables.ModuleRef.self,
+      Metadata.Tables.MethodDef.self,
       Metadata.Tables.TypeSpec.self,
     ]
   }
@@ -179,6 +154,44 @@ internal struct MethodDefOrRef: CodedIndex {
   internal var rawValue: Int
 }
 
+internal struct MemberForwarded: CodedIndex {
+  public static var tables: [TableBase.Type] {
+    return [
+      Metadata.Tables.FieldDef.self,
+      Metadata.Tables.MethodDef.self,
+    ]
+  }
+
+  internal var rawValue: Int
+}
+
+// FIXME(compnerd) Exported vs Manifest Resource
+internal struct Implementation: CodedIndex {
+  public static var tables: [TableBase.Type] {
+    return [
+      Metadata.Tables.File.self,
+      Metadata.Tables.AssemblyRef.self,
+      Metadata.Tables.ExportedType.self,
+    ]
+  }
+
+  internal var rawValue: Int
+}
+
+internal struct CustomAttributeType: CodedIndex {
+  public static var tables: [TableBase.Type] {
+    return [
+      Metadata.Tables.Module.self,      // unused
+      Metadata.Tables.Module.self,      // unused
+      Metadata.Tables.MethodDef.self,
+      Metadata.Tables.MemberRef.self,
+      Metadata.Tables.Module.self,      // unused
+    ]
+  }
+
+  internal var rawValue: Int
+}
+
 internal struct ResolutionScope: CodedIndex {
   public static var tables: [TableBase.Type] {
     return [
@@ -186,6 +199,17 @@ internal struct ResolutionScope: CodedIndex {
       Metadata.Tables.ModuleRef.self,
       Metadata.Tables.AssemblyRef.self,
       Metadata.Tables.TypeRef.self,
+    ]
+  }
+
+  internal var rawValue: Int
+}
+
+internal struct TypeOrMethodDef: CodedIndex {
+  public static var tables: [TableBase.Type] {
+    return [
+      Metadata.Tables.TypeDef.self,
+      Metadata.Tables.MethodDef.self,
     ]
   }
 

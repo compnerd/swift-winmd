@@ -122,19 +122,19 @@ extension TablesStream {
     }
 
     // Coded Indices
-    strides[HasConstant] = TableIndexSize(HasConstant.self)
-    strides[HasCustomAttribute] = TableIndexSize(HasCustomAttribute.self)
-    strides[CustomAttributeType] = TableIndexSize(CustomAttributeType.self)
-    strides[HasDeclSecurity] = TableIndexSize(HasDeclSecurity.self)
-    strides[TypeDefOrRef] = TableIndexSize(TypeDefOrRef.self)
-    strides[Implementation] = TableIndexSize(Implementation.self)
-    strides[HasFieldMarshal] = TableIndexSize(HasFieldMarshal.self)
-    strides[TypeOrMethodDef] = TableIndexSize(TypeOrMethodDef.self)
-    strides[MemberForwarded] = TableIndexSize(MemberForwarded.self)
-    strides[MemberRefParent] = TableIndexSize(MemberRefParent.self)
-    strides[HasSemantics] = TableIndexSize(HasSemantics.self)
-    strides[MethodDefOrRef] = TableIndexSize(MethodDefOrRef.self)
-    strides[ResolutionScope] = TableIndexSize(ResolutionScope.self)
+    strides[HasConstant.self] = TableIndexSize(HasConstant.self)
+    strides[HasCustomAttribute.self] = TableIndexSize(HasCustomAttribute.self)
+    strides[CustomAttributeType.self] = TableIndexSize(CustomAttributeType.self)
+    strides[HasDeclSecurity.self] = TableIndexSize(HasDeclSecurity.self)
+    strides[TypeDefOrRef.self] = TableIndexSize(TypeDefOrRef.self)
+    strides[Implementation.self] = TableIndexSize(Implementation.self)
+    strides[HasFieldMarshal.self] = TableIndexSize(HasFieldMarshal.self)
+    strides[TypeOrMethodDef.self] = TableIndexSize(TypeOrMethodDef.self)
+    strides[MemberForwarded.self] = TableIndexSize(MemberForwarded.self)
+    strides[MemberRefParent.self] = TableIndexSize(MemberRefParent.self)
+    strides[HasSemantics.self] = TableIndexSize(HasSemantics.self)
+    strides[MethodDefOrRef.self] = TableIndexSize(MethodDefOrRef.self)
+    strides[ResolutionScope.self] = TableIndexSize(ResolutionScope.self)
 
     return strides
   }

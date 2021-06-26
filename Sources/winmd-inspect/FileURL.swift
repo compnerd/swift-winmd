@@ -1,5 +1,4 @@
-// Copyright © 2021 Gwynne Raskind <gwynne@darkrainfall.org>
-// All rights reserved.
+// Copyright © 2021 Gwynne Raskind <gwynne@darkrainfall.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
 import struct Foundation.URL

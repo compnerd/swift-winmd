@@ -1,5 +1,4 @@
-// Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>
-// All rights reserved.
+// Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
 import struct Foundation.UUID

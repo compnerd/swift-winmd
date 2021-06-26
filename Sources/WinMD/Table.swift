@@ -38,3 +38,9 @@ extension Table {
     return Row(table: self)
   }
 }
+
+extension Table {
+  internal subscript<Index: CodedIndex>(_ index: Index) -> Row<Self> {
+    return Row(table: self, row: index.row - 1)
+  }
+}

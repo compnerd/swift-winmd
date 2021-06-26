@@ -89,6 +89,13 @@ extension TablesStream {
 }
 
 extension TablesStream {
+  internal subscript<Index: CodedIndex>(_ index: Index) -> TableBase {
+    let table: TableBase.Type = Index.tables[index.tag]
+    return Tables[(Valid & ((1 << table.number) - 1)).nonzeroBitCount]
+  }
+}
+
+extension TablesStream {
   internal var StringIndexSize: Int {
     (HeapSizes >> 0) & 1 == 1 ? 4 : 2
   }

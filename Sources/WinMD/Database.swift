@@ -39,6 +39,12 @@ public class Database {
         print("  - \($0)")
 
         switch $0 {
+        case let Constant as Metadata.Tables.Constant:
+          Constant.forEach {
+            let index = HasConstant(rawValue: $0.Parent)
+            print("    - \(CorElementType(rawValue: CorElementType.RawValue($0.Type))), \(strings[(tables[index] as! Metadata.Tables.FieldDef)[index].Name]), \(blobs[$0.Value])")
+          }
+#if false
         case let Module as Metadata.Tables.Module:
           Module.forEach {
             print("    - \($0.Generation), \(strings[$0.Name]), \(guids[$0.Mvid]), \($0.EncId), \($0.EncBaseId)")
@@ -71,6 +77,7 @@ public class Database {
           MemberRef.forEach {
             print("    - \($0.Class), \(strings[$0.Name]), \($0.Signature)")
           }
+#endif
         default:
           break
         }

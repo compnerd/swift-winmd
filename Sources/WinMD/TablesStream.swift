@@ -83,6 +83,12 @@ internal struct TablesStream {
 }
 
 extension TablesStream {
+  public func forEach(_ body: (TableBase) throws -> Void) rethrows {
+    return try self.Tables.forEach(body)
+  }
+}
+
+extension TablesStream {
   internal var StringIndexSize: Int {
     (HeapSizes >> 0) & 1 == 1 ? 4 : 2
   }

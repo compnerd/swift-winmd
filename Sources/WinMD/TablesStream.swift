@@ -104,6 +104,7 @@ extension TablesStream {
     func TableIndexSize<T: CodedIndex>(_ index: T.Type) -> Int {
       let TagLength = (index.tables.count - 1).nonzeroBitCount
       return index.tables.map {
+        guard Valid & (1 << $0.number) == (1 << $0.number) else { return true }
         let count = rows[(tables & ((1 << $0.number) - 1)).nonzeroBitCount]
         let range = 1 << (16 - TagLength)
         return count < range

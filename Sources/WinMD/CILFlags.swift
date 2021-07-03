@@ -317,3 +317,54 @@ public struct CorGenericParamAttr: OptionSet {
   static let gpNotNullableValueTypeConstraint: CorGenericParamAttr = .init(rawValue: 0x0008)
   static let gpDefaultConstructorConstraint: CorGenericParamAttr = .init(rawValue: 0x0010)
 }
+
+public struct CorElementType: OptionSet {
+  public let rawValue: UInt8
+
+  public init(rawValue: RawValue) {
+    self.rawValue = rawValue
+  }
+
+  static let etEnd: CorElementType = .init(rawValue: 0x00)
+  static let etVoid: CorElementType = .init(rawValue: 0x01)
+  static let etBoolean: CorElementType = .init(rawValue: 0x02)
+  static let etChar: CorElementType = .init(rawValue: 0x03)
+  static let etInt1: CorElementType = .init(rawValue: 0x04)
+  static let etUInt1: CorElementType = .init(rawValue: 0x05)
+  static let etInt2: CorElementType = .init(rawValue: 0x06)
+  static let etUInt2: CorElementType = .init(rawValue: 0x07)
+  static let etInt4: CorElementType = .init(rawValue: 0x08)
+  static let etUInt4: CorElementType = .init(rawValue: 0x09)
+  static let etInt8: CorElementType = .init(rawValue: 0x0a)
+  static let etUInt8: CorElementType = .init(rawValue: 0x0b)
+  static let etFloat: CorElementType = .init(rawValue: 0x0c)
+  static let etDouble: CorElementType = .init(rawValue: 0x0d)
+  static let etString: CorElementType = .init(rawValue: 0x0e)
+
+  static let etPtr: CorElementType = .init(rawValue: 0x0f)
+  static let etByRef: CorElementType = .init(rawValue: 0x10)
+
+  static let etValueType: CorElementType = .init(rawValue: 0x11)
+  static let etClass: CorElementType = .init(rawValue: 0x12)
+  static let etVar: CorElementType = .init(rawValue: 0x13)
+  static let etArray: CorElementType = .init(rawValue: 0x14)
+  static let etGenericInst: CorElementType = .init(rawValue: 0x15)
+  static let etTypedByRef: CorElementType = .init(rawValue: 0x16)
+
+  static let etInt: CorElementType = .init(rawValue: 0x18)
+  static let etUInt: CorElementType = .init(rawValue: 0x19)
+  static let etFnPtr: CorElementType = .init(rawValue: 0x1b)
+  static let etObject: CorElementType = .init(rawValue: 0x1c)
+  static let etSzArray: CorElementType = .init(rawValue: 0x1d)
+  static let etMVar: CorElementType = .init(rawValue: 0x1e)
+
+  static let etCModReqd: CorElementType = .init(rawValue: 0x1f)
+  static let etCModOpt: CorElementType = .init(rawValue: 0x20)
+
+  static let etInternal: CorElementType = .init(rawValue: 0x21)
+  static let etMax: CorElementType = .init(rawValue: 0x22)
+
+  static let etModifier: CorElementType = .init(rawValue: 0x40)
+  static let etSentinel: CorElementType = .init(rawValue: 0x01 | CorElementType.etModifier.rawValue)
+  static let etPinned: CorElementType = .init(rawValue: 0x05 | CorElementType.etModifier.rawValue)
+}

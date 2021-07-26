@@ -3,7 +3,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 public struct CorTypeAttr: OptionSet {
-  public let rawValue: UInt32
+  public typealias RawValue = UInt32
+
+  public let rawValue: RawValue
 
   public init(rawValue: RawValue) {
     self.rawValue = rawValue
@@ -52,7 +54,9 @@ public struct CorTypeAttr: OptionSet {
 }
 
 public struct CorFieldAttr: OptionSet {
-  public let rawValue: UInt16
+  public typealias RawValue = UInt16
+
+  public let rawValue: RawValue
 
   public init(rawValue: RawValue) {
     self.rawValue = rawValue
@@ -84,7 +88,9 @@ public struct CorFieldAttr: OptionSet {
 }
 
 public struct CorMethodImpl: OptionSet {
-  public let rawValue: UInt16
+  public typealias RawValue = UInt16
+
+  public let rawValue: RawValue
 
   public init(rawValue: RawValue) {
     self.rawValue = rawValue
@@ -112,7 +118,9 @@ public struct CorMethodImpl: OptionSet {
 }
 
 public struct CorMethodAttr: OptionSet {
-  public let rawValue: UInt16
+  public typealias RawValue = UInt16
+
+  public let rawValue: RawValue
 
   public init(rawValue: RawValue) {
     self.rawValue = rawValue
@@ -150,7 +158,9 @@ public struct CorMethodAttr: OptionSet {
 }
 
 public struct CorParamAttr: OptionSet {
-  public let rawValue: UInt16
+  public typealias RawValue = UInt16
+
+  public let rawValue: RawValue
 
   public init(rawValue: RawValue) {
     self.rawValue = rawValue
@@ -168,7 +178,9 @@ public struct CorParamAttr: OptionSet {
 }
 
 public struct CorEventAttr: OptionSet {
-  public let rawValue: UInt16
+  public typealias RawValue = UInt16
+
+  public let rawValue: RawValue
 
   public init(rawValue: RawValue) {
     self.rawValue = rawValue
@@ -181,7 +193,9 @@ public struct CorEventAttr: OptionSet {
 }
 
 public struct CorPropertyAttr: OptionSet {
-  public let rawValue: UInt16
+  public typealias RawValue = UInt16
+
+  public let rawValue: RawValue
 
   public init(rawValue: RawValue) {
     self.rawValue = rawValue
@@ -196,7 +210,9 @@ public struct CorPropertyAttr: OptionSet {
 }
 
 public struct CorMethodSemanticsAttr: OptionSet {
-  public let rawValue: UInt16
+  public typealias RawValue = UInt16
+
+  public let rawValue: RawValue
 
   public init(rawValue: RawValue) {
     self.rawValue = rawValue
@@ -211,7 +227,9 @@ public struct CorMethodSemanticsAttr: OptionSet {
 }
 
 public struct CorPinvokeMap: OptionSet {
-  public let rawValue: UInt16
+  public typealias RawValue = UInt16
+
+  public let rawValue: RawValue
 
   public init(rawValue: RawValue) {
     self.rawValue = rawValue
@@ -248,7 +266,9 @@ public struct CorPinvokeMap: OptionSet {
 }
 
 public struct CorAssemblyFlags: OptionSet {
-  public let rawValue: UInt16
+  public typealias RawValue = UInt16
+
+  public let rawValue: RawValue
 
   public init(rawValue: RawValue) {
     self.rawValue = rawValue
@@ -277,7 +297,9 @@ public struct CorAssemblyFlags: OptionSet {
 }
 
 public struct CorFileFlags: OptionSet {
-  public let rawValue: UInt16
+  public typealias RawValue = UInt16
+
+  public let rawValue: RawValue
 
   public init(rawValue: RawValue) {
     self.rawValue = rawValue
@@ -288,7 +310,9 @@ public struct CorFileFlags: OptionSet {
 }
 
 public struct CorManifestResourceFlags: OptionSet {
-  public let rawValue: UInt32
+  public typealias RawValue = UInt32
+
+  public let rawValue: RawValue
 
   public init(rawValue: RawValue) {
     self.rawValue = rawValue
@@ -300,7 +324,9 @@ public struct CorManifestResourceFlags: OptionSet {
 }
 
 public struct CorGenericParamAttr: OptionSet {
-  public let rawValue: UInt16
+  public typealias RawValue = UInt16
+
+  public let rawValue: RawValue
 
   public init(rawValue: RawValue) {
     self.rawValue = rawValue
@@ -319,7 +345,9 @@ public struct CorGenericParamAttr: OptionSet {
 }
 
 public struct CorElementType: OptionSet {
-  public let rawValue: UInt8
+  public typealias RawValue = UInt8
+
+  public let rawValue: RawValue
 
   public init(rawValue: RawValue) {
     self.rawValue = rawValue

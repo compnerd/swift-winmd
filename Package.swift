@@ -12,6 +12,8 @@ let SwiftWinMD = Package(
   ],
   targets: [
     .target(name: "CPE", dependencies: []),
+
+    // WinMD
     .target(name: "WinMD",
             dependencies: ["CPE"],
             swiftSettings: [
@@ -19,6 +21,9 @@ let SwiftWinMD = Package(
                 "-Xfrontend", "-validate-tbd-against-ir=none",
               ]),
             ]),
+    .testTarget(name: "WinMDTests", dependencies: ["WinMD"]),
+
+    // winmd-inspect
     .target(name: "winmd-inspect",
             dependencies: [
               "WinMD",

@@ -32,7 +32,7 @@ func stride<RecordLayout>(of layout: RecordLayout) -> Int {
 
 extension Metadata.Tables {
   static func forEach(_ body: (TableBase.Type) -> Void) {
-    _ = Array<TableBase.Type>([
+    Array<TableBase.Type>([
       Assembly.self,
       AssemblyOS.self,
       AssemblyProcessor.self,
@@ -71,6 +71,6 @@ extension Metadata.Tables {
       TypeDef.self,
       TypeRef.self,
       TypeSpec.self,
-    ]).sorted(by: { $0.number < $1.number }).map(body)
+    ]).sorted(by: { $0.number < $1.number }).forEach(body)
   }
 }

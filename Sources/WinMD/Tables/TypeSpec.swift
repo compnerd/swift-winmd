@@ -2,24 +2,21 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 extension Metadata.Tables {
-internal struct TypeSpec: Table {
-  /// Record Layout
-  ///   Signature (Blob Heap Index)
-  typealias RecordLayout = (Int)
-
-  let layout: RecordLayout
-  let stride: Int
-  let rows: Int
-  let data: ArraySlice<UInt8>
-
+internal final class TypeSpec: Table {
   public static var number: Int { 27 }
 
-  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (strides[.blob]!)
-    self.stride = strides[.blob]!
+  /// Record Layout
+  ///   Signature (Blob Heap Index)
+  static let columns: [Column] = [
+    Column(name: "Signature", type: .index(.heap(.blob))),
+  ]
 
-    self.rows = Int(rows)
-    self.data = data.prefix(self.rows * self.stride)
+  let rows: UInt32
+  let data: ArraySlice<UInt8>
+
+  public required init(rows: UInt32, data: ArraySlice<UInt8>) {
+    self.rows = rows
+    self.data = data
   }
 }
 }

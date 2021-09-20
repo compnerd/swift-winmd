@@ -1,38 +1,14 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-extension Dictionary where Key == TableIndex, Value == Int {
-  internal subscript(_ table: TableBase.Type) -> Int? {
-    get { return self[.simple(table)] }
-    set { self[.simple(table)] = newValue }
-  }
-
-  internal subscript<T: CodedIndex>(_ index: T.Type) -> Int? {
-    get { return self[.coded(ObjectIdentifier(index))] }
-    set { self[.coded(ObjectIdentifier(index))] = newValue }
-  }
-}
-
 extension Metadata {
   internal enum Tables {
   }
 }
 
-func element<RecordLayout>(of layout: RecordLayout, index: Int) -> Int {
-  return Mirror(reflecting: layout).children[AnyIndex(index)].value as! Int
-}
-
-func scan<RecordLayout>(of layout: RecordLayout, length: Int) -> Int {
-  return Mirror(reflecting: layout).children.lazy.prefix(length).map { $0.value as! Int }.reduce(0, +)
-}
-
-func stride<RecordLayout>(of layout: RecordLayout) -> Int {
-  return Mirror(reflecting: layout).children.lazy.map { $0.value as! Int }.reduce(0, +)
-}
-
 extension Metadata.Tables {
-  static func forEach(_ body: (TableBase.Type) -> Void) {
-    Array<TableBase.Type>([
+  static func forEach(_ body: (Table.Type) -> Void) {
+    [
       Assembly.self,
       AssemblyOS.self,
       AssemblyProcessor.self,
@@ -71,6 +47,6 @@ extension Metadata.Tables {
       TypeDef.self,
       TypeRef.self,
       TypeSpec.self,
-    ]).sorted(by: { $0.number < $1.number }).forEach(body)
+    ].sorted(by: { $0.number < $1.number }).forEach(body)
   }
 }

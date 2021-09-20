@@ -2,25 +2,23 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 extension Metadata.Tables {
-internal struct GenericParamConstraint: Table {
+internal final class GenericParamConstraint: Table {
+  public static var number: Int { 44 }
+
   /// Record Layout
   ///   Owner (GenericParam Index)
   ///   Constraint (TypeDefOrRef Coded Index)
-  typealias RecordLayout = (Int, Int)
+  static let columns: [Column] = [
+    Column(name: "Owner", type: .index(.simple(GenericParam.self))),
+    Column(name: "Constraint", type: .index(.coded(TypeDefOrRef.self))),
+  ]
 
-  let layout: RecordLayout
-  let stride: Int
-  let rows: Int
+  let rows: UInt32
   let data: ArraySlice<UInt8>
 
-  public static var number: Int { 44 }
-
-  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (strides[GenericParam.self]!, strides[TypeDefOrRef.self]!)
-    self.stride = WinMD.stride(of: self.layout)
-
-    self.rows = Int(rows)
-    self.data = data.prefix(self.rows * self.stride)
+  public required init(rows: UInt32, data: ArraySlice<UInt8>) {
+    self.rows = rows
+    self.data = data
   }
 }
 }

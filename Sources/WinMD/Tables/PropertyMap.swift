@@ -2,25 +2,23 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 extension Metadata.Tables {
-internal struct PropertyMap: Table {
+internal final class PropertyMap: Table {
+  public static var number: Int { 21 }
+
   /// Record Layout
   ///   Parent (TypeDef Index)
   ///   PropertyList (Property Index)
-  typealias RecordLayout = (Int, Int)
+  static let columns: [Column] = [
+    Column(name: "Parent", type: .index(.simple(TypeDef.self))),
+    Column(name: "PropertyList", type: .index(.simple(PropertyDef.self))),
+  ]
 
-  let layout: RecordLayout
-  let stride: Int
-  let rows: Int
+  let rows: UInt32
   let data: ArraySlice<UInt8>
 
-  public static var number: Int { 21 }
-
-  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (strides[TypeDef.self]!, strides[PropertyDef.self]!)
-    self.stride = WinMD.stride(of: self.layout)
-
-    self.rows = Int(rows)
-    self.data = data.prefix(self.rows * self.stride)
+  public required init(rows: UInt32, data: ArraySlice<UInt8>) {
+    self.rows = rows
+    self.data = data
   }
 }
 }

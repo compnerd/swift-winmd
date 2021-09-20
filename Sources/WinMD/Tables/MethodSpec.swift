@@ -2,25 +2,23 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 extension Metadata.Tables {
-internal struct MethodSpec: Table {
+internal final class MethodSpec: Table {
+  public static var number: Int { 43 }
+
   /// Record Layout
   ///   Method (MethodDefOrRef Coded Index)
   ///   Instantiation (Blob Heap Index)
-  typealias RecordLayout = (Int, Int)
+  static let columns: [Column] = [
+    Column(name: "Method", type: .index(.coded(MethodDefOrRef.self))),
+    Column(name: "Instantiation", type: .index(.heap(.blob))),
+  ]
 
-  let layout: RecordLayout
-  let stride: Int
-  let rows: Int
+  let rows: UInt32
   let data: ArraySlice<UInt8>
 
-  public static var number: Int { 43 }
-
-  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (strides[MethodDefOrRef.self]!, strides[.blob]!)
-    self.stride = WinMD.stride(of: self.layout)
-
-    self.rows = Int(rows)
-    self.data = data.prefix(self.rows * self.stride)
+  public init(rows: UInt32, data: ArraySlice<UInt8>) {
+    self.rows = rows
+    self.data = data
   }
 }
 }

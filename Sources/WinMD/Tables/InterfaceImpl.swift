@@ -2,25 +2,23 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 extension Metadata.Tables {
-internal struct InterfaceImpl: Table {
+internal final class InterfaceImpl: Table {
+  public static var number: Int { 9 }
+
   /// Record Layout
   ///   Class (TypeDef Index)
   ///   Interface (TypeDefOrRef Coded Index)
-  typealias RecordLayout = (Int, Int)
+  static let columns: [Column] = [
+    Column(name: "Class", type: .index(.simple(TypeDef.self))),
+    Column(name: "Interface", type: .index(.coded(TypeDefOrRef.self))),
+  ]
 
-  let layout: RecordLayout
-  let stride: Int
-  let rows: Int
+  let rows: UInt32
   let data: ArraySlice<UInt8>
 
-  public static var number: Int { 9 }
-
-  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (strides[TypeDef.self]!, strides[TypeDefOrRef.self]!)
-    self.stride = WinMD.stride(of: self.layout)
-
-    self.rows = Int(rows)
-    self.data = data.prefix(self.rows * self.stride)
+  public required init(rows: UInt32, data: ArraySlice<UInt8>) {
+    self.rows = rows
+    self.data = data
   }
 }
 }

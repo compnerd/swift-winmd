@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 extension Metadata.Tables {
-internal struct AssemblyRef: Table {
+internal final class AssemblyRef: Table {
+  public static var number: Int { 35 }
+
   /// Record Layout
   ///   MajorVersion (2-byte value)
   ///   MinorVersion (2-byte value)
@@ -13,21 +15,24 @@ internal struct AssemblyRef: Table {
   ///   Name (String Heap Index)
   ///   Culutre (String Heap Index)
   ///   HashValue (Blob Heap Index)
-  typealias RecordLayout = (Int, Int, Int, Int, Int, Int, Int, Int, Int)
+  static let columns: [Column] = [
+    Column(name: "MajorVersion", type: .constant(2)),
+    Column(name: "MinorVersion", type: .constant(2)),
+    Column(name: "BuildNumber", type: .constant(2)),
+    Column(name: "RevisionNumber", type: .constant(2)),
+    Column(name: "Flags", type: .constant(4)),
+    Column(name: "PublicKeyOrToken", type: .index(.heap(.blob))),
+    Column(name: "Name", type: .index(.heap(.string))),
+    Column(name: "Culture", type: .index(.heap(.string))),
+    Column(name: "HashValue", type: .index(.heap(.blob))),
+  ]
 
-  let layout: RecordLayout
-  let stride: Int
-  let rows: Int
+  let rows: UInt32
   let data: ArraySlice<UInt8>
 
-  public static var number: Int { 35 }
-
-  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (2, 2, 2, 2, 4, strides[.blob]!, strides[.string]!, strides[.string]!, strides[.blob]!)
-    self.stride = WinMD.stride(of: self.layout)
-
-    self.rows = Int(rows)
-    self.data = data.prefix(self.rows * self.stride)
+  public required init(rows: UInt32, data: ArraySlice<UInt8>) {
+    self.rows = rows
+    self.data = data
   }
 }
 }

@@ -2,26 +2,25 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 extension Metadata.Tables {
-internal struct AssemblyOS: Table {
+internal final class AssemblyOS: Table {
+  public static var number: Int { 34 }
+
   /// Record Layout
   ///   OSPlatformID (4-byte constant)
   ///   OSMajorVersion (4-byte constant)
   ///   OSMinorVersion (4-byte constant)
-  typealias RecordLayout = (Int, Int, Int)
+  static let columns: [Column] = [
+    Column(name: "OSPlatformID", type: .constant(4)),
+    Column(name: "OSMajorVersion", type: .constant(4)),
+    Column(name: "OSMinorVersion", type: .constant(4)),
+  ]
 
-  let layout: RecordLayout
-  let stride: Int
-  let rows: Int
+  let rows: UInt32
   let data: ArraySlice<UInt8>
 
-  public static var number: Int { 34 }
-
-  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (4, 4, 4)
-    self.stride = WinMD.stride(of: self.layout)
-
-    self.rows = Int(rows)
-    self.data = data.prefix(self.rows * self.stride)
+  public required init(rows: UInt32, data: ArraySlice<UInt8>) {
+    self.rows = rows
+    self.data = data
   }
 }
 }

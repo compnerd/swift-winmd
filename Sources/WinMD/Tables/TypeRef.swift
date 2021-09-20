@@ -2,26 +2,25 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 extension Metadata.Tables {
-internal struct TypeRef: Table {
+internal final class TypeRef: Table {
+  public static var number: Int { 1 }
+
   /// Record Layout
   ///   ResolutionScope (ResolutionScope Coded Index)
   ///   TypeName (String Heap Index)
   ///   TypeNamespace (String Heap Index)
-  typealias RecordLayout = (Int, Int, Int)
+  static let columns: [Column] = [
+    Column(name: "ResolutionScope", type: .index(.coded(ResolutionScope.self))),
+    Column(name: "TypeName", type: .index(.heap(.string))),
+    Column(name: "TypeNamespace", type: .index(.heap(.string))),
+  ]
 
-  let layout: RecordLayout
-  let stride: Int
-  let rows: Int
+  let rows: UInt32
   let data: ArraySlice<UInt8>
 
-  public static var number: Int { 1 }
-
-  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (strides[ResolutionScope.self]!, strides[.string]!, strides[.string]!)
-    self.stride = WinMD.stride(of: self.layout)
-
-    self.rows = Int(rows)
-    self.data = data.prefix(self.rows * self.stride)
+  public init(rows: UInt32, data: ArraySlice<UInt8>) {
+    self.rows = rows
+    self.data = data
   }
 }
 }

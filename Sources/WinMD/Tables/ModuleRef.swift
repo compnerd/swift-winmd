@@ -2,24 +2,21 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 extension Metadata.Tables {
-internal struct ModuleRef: Table {
-  /// Record Layout
-  ///   Name (String Heap Index)
-  typealias RecordLayout = (Int)
-
-  let layout: RecordLayout
-  let stride: Int
-  let rows: Int
-  let data: ArraySlice<UInt8>
-
+internal final class ModuleRef: Table {
   public static var number: Int { 26 }
 
-  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (strides[.string]!)
-    self.stride = strides[.string]!
+  /// Record Layout
+  ///   Name (String Heap Index)
+  static let columns: [Column] = [
+    Column(name: "Name", type: .index(.heap(.string))),
+  ]
 
-    self.rows = Int(rows)
-    self.data = data.prefix(self.rows * self.stride)
+  let rows: UInt32
+  let data: ArraySlice<UInt8>
+
+  public init(rows: UInt32, data: ArraySlice<UInt8>) {
+    self.rows = rows
+    self.data = data
   }
 }
 }

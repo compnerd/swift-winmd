@@ -30,13 +30,21 @@ public class Database {
     print("Streams: \(metadata.Streams)")
     metadata.StreamHeaders.forEach { print("  - \($0)") }
 
-    if let tables = TablesStream(from: self.cil), let _ = BlobsHeap(from: self.cil),
-        let _ = StringsHeap(from: self.cil), let _ = GUIDHeap(from: self.cil) {
+    if let tables = TablesStream(from: self.cil),
+        let blobs = BlobsHeap(from: self.cil),
+        let strings = StringsHeap(from: self.cil),
+        let guids = GUIDHeap(from: self.cil) {
+      let decoder: DatabaseDecoder = DatabaseDecoder(tables)
+      let heaps = (blobs: blobs, guids: guids, strings: strings)
+
       print("MajorVersion: \(String(tables.MajorVersion, radix: 16))")
       print("MinorVersion: \(String(tables.MinorVersion, radix: 16))")
       print("Tables:")
       tables.forEach {
         print("  - \($0)")
+        for record in Records(of: $0, decoder: decoder, heaps: heaps) {
+          print("    - \(record)")
+        }
       }
     }
   }

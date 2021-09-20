@@ -2,28 +2,29 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 extension Metadata.Tables {
-internal struct Module: Table {
+internal final class Module: Table {
+  public static var number: Int { 0 }
+
   /// Record Layout
   ///   Generation (2-byte value, reserved, MBZ)
   ///   Name (String Heap Index)
   ///   Mvid (Module Version ID) (GUID Heap Index)
   ///   EncId (GUID Heap Index, reserved, MBZ)
   ///   EncBaseId (GUID Heap Index, reserved, MBZ)
-  typealias RecordLayout = (Int, Int, Int, Int, Int)
+  static let columns: [Column] = [
+    Column(name: "Generation", type: .constant(2)),
+    Column(name: "Name", type: .index(.heap(.string))),
+    Column(name: "Mvid", type: .index(.heap(.guid))),
+    Column(name: "EncId", type: .index(.heap(.guid))),
+    Column(name: "EncBaseId", type: .index(.heap(.guid))),
+  ]
 
-  let layout: RecordLayout
-  let stride: Int
-  let rows: Int
+  let rows: UInt32
   let data: ArraySlice<UInt8>
 
-  public static var number: Int { 0 }
-
-  public init(from data: ArraySlice<UInt8>, rows: UInt32, strides: [TableIndex:Int]) {
-    self.layout = (2, strides[.string]!, strides[.guid]!, strides[.guid]!, strides[.guid]!)
-    self.stride = WinMD.stride(of: self.layout)
-
-    self.rows = Int(rows)
-    self.data = data.prefix(self.rows * self.stride)
+  public init(rows: UInt32, data: ArraySlice<UInt8>) {
+    self.rows = rows
+    self.data = data
   }
 }
 }

@@ -58,23 +58,30 @@ internal struct TablesStream {
     }
   }
 
-  public var Tables: [TableBase] {
+  public var Tables: [Table] {
     let valid: UInt64 = Valid
     let rows: [UInt32] = Rows
 
-    var tables: [TableBase] = []
+    var tables: [Table] = []
     tables.reserveCapacity(valid.nonzeroBitCount)
-
-    let strides: [TableIndex:Int] = self.strides(tables: valid, rows: rows)
 
     let offset = 24 + rows.count * MemoryLayout<UInt32>.size
     var content = data[data.index(data.startIndex, offsetBy: offset)...]
+    let decoder: DatabaseDecoder = DatabaseDecoder(self)
 
     Metadata.Tables.forEach { table in
       if valid & (1 << table.number) == (1 << table.number) {
         let records = rows[(valid & ((1 << table.number) - 1)).nonzeroBitCount]
-        tables.append(table.init(from: content, rows: records, strides: strides))
-        content = content[content.index(content.startIndex, offsetBy: tables.last!.data.count)...]
+
+        let startIndex = content.startIndex
+        let endIndex =
+            content.index(startIndex,
+                          offsetBy: Int(records) * decoder.stride(of: table))
+
+        tables.append(table.init(rows: records,
+                                 data: content.prefix(upTo: endIndex)))
+
+        content = content[endIndex...]
       }
     }
 
@@ -83,7 +90,7 @@ internal struct TablesStream {
 }
 
 extension TablesStream {
-  public func forEach(_ body: (TableBase) throws -> Void) rethrows {
+  public func forEach(_ body: (Table) throws -> Void) rethrows {
     return try self.Tables.forEach(body)
   }
 }
@@ -99,53 +106,5 @@ extension TablesStream {
 
   internal var BlobIndexSize: Int {
     (HeapSizes >> 2) & 1 == 1 ? 4 : 2
-  }
-}
-
-extension TablesStream {
-  private func strides(tables: UInt64, rows: [UInt32]) -> [TableIndex:Int] {
-    var strides: [TableIndex:Int] = [:]
-
-    func TableIndexSize<T: CodedIndex>(_ index: T.Type) -> Int {
-      let TagLength = (index.tables.count - 1).nonzeroBitCount
-      return index.tables.map {
-        guard Valid & (1 << $0.number) == (1 << $0.number) else { return true }
-        let count = rows[(tables & ((1 << $0.number) - 1)).nonzeroBitCount]
-        let range = 1 << (16 - TagLength)
-        return count < range
-      }.contains(false) ? 4 : 2
-    }
-
-    // Required Heaps
-    strides[.blob] = BlobIndexSize
-    strides[.guid] = GUIDIndexSize
-    strides[.string] = StringIndexSize
-
-    // Simple Indices
-    Metadata.Tables.forEach { table in
-      if tables & (1 << table.number) == (1 << table.number) {
-        strides[.simple(table)] =
-            rows[(tables & ((1 << table.number) - 1)).nonzeroBitCount] < (1 << 16)
-                ? 2
-                : 4
-      }
-    }
-
-    // Coded Indices
-    strides[HasConstant.self] = TableIndexSize(HasConstant.self)
-    strides[HasCustomAttribute.self] = TableIndexSize(HasCustomAttribute.self)
-    strides[CustomAttributeType.self] = TableIndexSize(CustomAttributeType.self)
-    strides[HasDeclSecurity.self] = TableIndexSize(HasDeclSecurity.self)
-    strides[TypeDefOrRef.self] = TableIndexSize(TypeDefOrRef.self)
-    strides[Implementation.self] = TableIndexSize(Implementation.self)
-    strides[HasFieldMarshal.self] = TableIndexSize(HasFieldMarshal.self)
-    strides[TypeOrMethodDef.self] = TableIndexSize(TypeOrMethodDef.self)
-    strides[MemberForwarded.self] = TableIndexSize(MemberForwarded.self)
-    strides[MemberRefParent.self] = TableIndexSize(MemberRefParent.self)
-    strides[HasSemantics.self] = TableIndexSize(HasSemantics.self)
-    strides[MethodDefOrRef.self] = TableIndexSize(MethodDefOrRef.self)
-    strides[ResolutionScope.self] = TableIndexSize(ResolutionScope.self)
-
-    return strides
   }
 }

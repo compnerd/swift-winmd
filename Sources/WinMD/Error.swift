@@ -3,4 +3,5 @@
 
 public enum WinMDError: Error {
   case BadImageFormat
+  case InvalidIndex
 }

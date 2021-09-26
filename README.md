@@ -10,9 +10,7 @@ An ECMA 335 parser in Swift
 
 ## Build Requirements
 
-- Swift 5.4 or newer
-
-This project requires Swift 5.4 or newer as it requires Swift Package Manager, which is only available since 5.4 on Windows.  This ensures that we have the same supported language on all platforms.  However, the CI only tests on 5.5 or newer due to improvements in the packaging.
+- Swift 5.5 or newer
 
 ## Debugging
 

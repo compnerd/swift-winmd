@@ -19,9 +19,12 @@ internal struct GUIDHeap {
   }
 
   public subscript(index: Int) -> UUID {
-    UUID(uuid: data.withUnsafeBytes {
-      $0.load(fromByteOffset: MemoryLayout<uuid_t>.stride * (index - 1), as: uuid_t.self)
-    })
+    get throws {
+      guard index > 0 else { throw WinMDError.InvalidIndex }
+      return UUID(uuid: data.withUnsafeBytes {
+        $0.load(fromByteOffset: MemoryLayout<uuid_t>.stride * (index - 1), as: uuid_t.self)
+      })
+    }
   }
 }
 

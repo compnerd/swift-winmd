@@ -186,11 +186,11 @@ internal struct Record: IteratorProtocol {
   private let stride: Int
   private var cursor: Int
 
-  private let heaps: (blobs: BlobsHeap, guids: GUIDHeap, strings: StringsHeap)
+  private let heaps: (blobs: BlobsHeap, guids: GUIDHeap, strings: StringsHeap)?
 
   internal init(table: Table, layout: [String:(Int, Int)], stride: Int,
                 row cursor: Int,
-                heaps: (blobs: BlobsHeap, guids: GUIDHeap, strings: StringsHeap)) {
+                heaps: (blobs: BlobsHeap, guids: GUIDHeap, strings: StringsHeap)?) {
     self.table = table
     self.layout = layout
     self.stride = stride
@@ -256,7 +256,11 @@ extension Record: CustomDebugStringConvertible {
       switch columns[$0.0].type {
       case let .index(.heap(heap)) where heap == .string:
         let index = self[dynamicMember: $0.1.0]
-        return "\($0.1.0): \(self.heaps.strings[index])"
+        if let strings = self.heaps?.strings {
+          return "\($0.1.0): \(strings[index])"
+        } else {
+          return "\($0.1.0): \(index)"
+        }
       default:
         return "\($0.1.0): \(self[dynamicMember: $0.1.0])"
       }
@@ -276,10 +280,10 @@ internal struct Records: Sequence {
   private let layout: [String:(Int, Int)]
   private let stride: Int
 
-  private let heaps: (blobs: BlobsHeap, guids: GUIDHeap, strings: StringsHeap)
+  private let heaps: (blobs: BlobsHeap, guids: GUIDHeap, strings: StringsHeap)?
 
   internal init(of table: Table, decoder: DatabaseDecoder,
-                heaps: (blobs: BlobsHeap, guids: GUIDHeap, strings: StringsHeap)) {
+                heaps: (blobs: BlobsHeap, guids: GUIDHeap, strings: StringsHeap)? = nil) {
     self.table = table
 
     var scan: Int = 0

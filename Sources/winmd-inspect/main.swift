@@ -9,6 +9,9 @@ struct Inspect: ParsableCommand {
   @Argument
   var database: FileURL
 
+  @Flag
+  var dump: Bool = false
+
   func validate() throws {
     guard self.database.existsOnDisk && self.database.isRegularFile else {
       throw ValidationError("Database must be an existing file.")
@@ -19,7 +22,7 @@ struct Inspect: ParsableCommand {
     // "C:\\Windows\\System32\\WinMetadata\\Windows.Foundation.winmd"
     print("Database: \(self.database.url.path)")
     if let database = try? WinMD.Database(at: self.database.url) {
-      database.dump()
+      if dump { database.dump() }
     }
   }
 }

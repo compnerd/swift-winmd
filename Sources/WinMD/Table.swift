@@ -178,6 +178,8 @@ internal protocol Table: AnyObject {
 /// an iterable entity in the record collection of a table.
 @dynamicMemberLookup
 internal struct Record: IteratorProtocol {
+  internal typealias HeapRefs = (blob: BlobsHeap, guid: GUIDHeap, string: StringsHeap)
+
   public typealias Element = Self
 
   private let table: Table
@@ -186,11 +188,10 @@ internal struct Record: IteratorProtocol {
   private let stride: Int
   private var cursor: Int
 
-  private let heaps: (blobs: BlobsHeap, guids: GUIDHeap, strings: StringsHeap)?
+  private let heaps: HeapRefs?
 
   internal init(table: Table, layout: [String:(Int, Int)], stride: Int,
-                row cursor: Int,
-                heaps: (blobs: BlobsHeap, guids: GUIDHeap, strings: StringsHeap)?) {
+                row cursor: Int, heaps: HeapRefs?) {
     self.table = table
     self.layout = layout
     self.stride = stride
@@ -256,7 +257,7 @@ extension Record: CustomDebugStringConvertible {
       switch columns[$0.0].type {
       case let .index(.heap(heap)) where heap == .string:
         let index = self[dynamicMember: $0.1.0]
-        if let strings = self.heaps?.strings {
+        if let strings = self.heaps?.string {
           return "\($0.1.0): \(strings[index])"
         } else {
           return "\($0.1.0): \(index)"
@@ -280,10 +281,10 @@ internal struct Records: Sequence {
   private let layout: [String:(Int, Int)]
   private let stride: Int
 
-  private let heaps: (blobs: BlobsHeap, guids: GUIDHeap, strings: StringsHeap)?
+  private let heaps: Record.HeapRefs?
 
   internal init(of table: Table, decoder: DatabaseDecoder,
-                heaps: (blobs: BlobsHeap, guids: GUIDHeap, strings: StringsHeap)? = nil) {
+                heaps: Record.HeapRefs? = nil) {
     self.table = table
 
     var scan: Int = 0

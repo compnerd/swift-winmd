@@ -35,7 +35,7 @@ public class Database {
         let strings = StringsHeap(from: self.cil),
         let guids = GUIDHeap(from: self.cil) {
       let decoder: DatabaseDecoder = DatabaseDecoder(tables)
-      let heaps = (blobs: blobs, guids: guids, strings: strings)
+      let heaps: Record.HeapRefs = Record.HeapRefs(blob: blobs, guid: guids, string: strings)
 
       print("MajorVersion: \(String(tables.MajorVersion, radix: 16))")
       print("MinorVersion: \(String(tables.MinorVersion, radix: 16))")

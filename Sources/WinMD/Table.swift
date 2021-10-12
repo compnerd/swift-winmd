@@ -1,6 +1,8 @@
 // Copyright © 2021 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
+import OrderedCollections
+
 internal enum Heap {
   case blob
   case guid
@@ -183,15 +185,14 @@ internal struct Record: IteratorProtocol {
   public typealias Element = Self
 
   private let table: Table
-  // FIXME(compnerd) this should be an OrderedDictionary (from swift-collections)
-  private let layout: [String:(Int, Int)]
+  private let layout: OrderedDictionary<String, (Int, Int)>
   private let stride: Int
   private var cursor: Int
 
   private let heaps: HeapRefs?
 
-  internal init(table: Table, layout: [String:(Int, Int)], stride: Int,
-                row cursor: Int, heaps: HeapRefs?) {
+  internal init(table: Table, layout: OrderedDictionary<String, (Int, Int)>,
+                stride: Int, row cursor: Int, heaps: HeapRefs?) {
     self.table = table
     self.layout = layout
     self.stride = stride
@@ -253,7 +254,7 @@ extension Record: CustomDebugStringConvertible {
   /// See `CustomDebugStringConvertible.debugDescription`.
   public var debugDescription: String {
     let columns: [Column] = type(of: self.table).columns
-    return self.layout.sorted(by: { $0.value.0 < $1.value.0 }).enumerated().map {
+    return self.layout.enumerated().map {
       switch columns[$0.0].type {
       case let .index(.heap(heap)) where heap == .string:
         let index = self[dynamicMember: $0.1.0]
@@ -278,7 +279,7 @@ internal struct Records: Sequence {
 
   private let table: Table
 
-  private let layout: [String:(Int, Int)]
+  private let layout: OrderedDictionary<String, (Int, Int)>
   private let stride: Int
 
   private let heaps: Record.HeapRefs?
@@ -288,12 +289,11 @@ internal struct Records: Sequence {
     self.table = table
 
     var scan: Int = 0
-    // FIXME(compnerd) this should be an OrderedDictionary (from swift-collections)
-    self.layout = Dictionary<String, (Int, Int)>(uniqueKeysWithValues: type(of: table).columns.map {
+    self.layout = OrderedDictionary<String, (Int, Int)>(uniqueKeysWithValues: Array<(String, (Int, Int))>(type(of: table).columns.map {
       let width = decoder.width(of: $0.type)
       defer { scan = scan + width }
       return (String(describing: $0.name), (scan, width))
-    })
+    }))
     self.stride = scan
 
     self.heaps = heaps

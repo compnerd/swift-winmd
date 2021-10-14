@@ -9,8 +9,6 @@ import OrderedCollections
 /// an iterable entity in the record collection of a table.
 @dynamicMemberLookup
 internal struct Record: IteratorProtocol {
-  internal typealias HeapRefs = (blob: BlobsHeap, guid: GUIDHeap, string: StringsHeap)
-
   public typealias Element = Self
 
   private let table: Table
@@ -18,10 +16,10 @@ internal struct Record: IteratorProtocol {
   private let stride: Int
   private var cursor: Int
 
-  private let heaps: HeapRefs?
+  private let heaps: RecordReader.HeapRefs?
 
   internal init(table: Table, layout: OrderedDictionary<String, (Int, Int)>,
-                stride: Int, row cursor: Int, heaps: HeapRefs?) {
+                stride: Int, row cursor: Int, heaps: RecordReader.HeapRefs?) {
     self.table = table
     self.layout = layout
     self.stride = stride
@@ -103,21 +101,27 @@ extension Record: CustomDebugStringConvertible {
 ///
 /// Decodes and provides a set of records which can be iterated.  This requires
 /// the database compression state to be able to decode the table data.
-internal struct Records: Sequence {
+internal struct RecordReader: Sequence {
+  internal typealias HeapRefs = (blob: BlobsHeap, guid: GUIDHeap, string: StringsHeap)
+
   public typealias Iterator = Record
 
-  private let table: Table
+  private let decoder: DatabaseDecoder
+  private let heaps: HeapRefs?
 
-  private let layout: OrderedDictionary<String, (Int, Int)>
-  private let stride: Int
+  private var table: Table?
+  private var layout: OrderedDictionary<String, (Int, Int)>?
+  private var stride: Int?
 
-  private let heaps: Record.HeapRefs?
+  internal init(decoder: DatabaseDecoder, heaps: HeapRefs? = nil) {
+    self.decoder = decoder
+    self.heaps = heaps
+  }
 
-  internal init(of table: Table, decoder: DatabaseDecoder,
-                heaps: Record.HeapRefs? = nil) {
-    self.table = table
-
+  internal mutating func rows(_ table: Table) -> Self {
     var scan: Int = 0
+
+    self.table = table
     self.layout = OrderedDictionary<String, (Int, Int)>(uniqueKeysWithValues: Array<(String, (Int, Int))>(type(of: table).columns.map {
       let width = decoder.width(of: $0.type)
       defer { scan = scan + width }
@@ -125,13 +129,16 @@ internal struct Records: Sequence {
     }))
     self.stride = scan
 
-    self.heaps = heaps
+    return self
   }
 
   /// See `Sequence.makeIterator()`.
   @inlinable
   public __consuming func makeIterator() -> Self.Iterator {
-    Self.Iterator(table: self.table, layout: self.layout, stride: self.stride,
-                  row: 0, heaps: self.heaps)
+    guard let table = table, let layout = layout, let stride = stride else {
+      fatalError("Table not read")
+    }
+    return Self.Iterator(table: table, layout: layout, stride: stride, row: 0,
+                         heaps: self.heaps)
   }
 }

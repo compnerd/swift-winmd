@@ -35,14 +35,18 @@ public class Database {
         let strings = StringsHeap(from: self.cil),
         let guids = GUIDHeap(from: self.cil) {
       let decoder: DatabaseDecoder = DatabaseDecoder(tables)
-      let heaps: Record.HeapRefs = Record.HeapRefs(blob: blobs, guid: guids, string: strings)
+      var reader: RecordReader =
+          RecordReader(decoder: decoder,
+                       heaps: RecordReader.HeapRefs(blob: blobs,
+                                                    guid: guids,
+                                                    string: strings))
 
       print("MajorVersion: \(String(tables.MajorVersion, radix: 16))")
       print("MinorVersion: \(String(tables.MinorVersion, radix: 16))")
       print("Tables:")
       tables.forEach {
         print("  - \($0)")
-        for record in Records(of: $0, decoder: decoder, heaps: heaps) {
+        for record in reader.rows($0) {
           print("    - \(record)")
         }
       }

@@ -17,13 +17,13 @@ extension ColumnType: Hashable {
 /// 
 /// Accessible columns have a name which the user can use to reference the
 /// column, and a type which indicates how to read the value of the column.
-internal struct Column {
+public struct Column {
   let name: StaticString
   let type: ColumnType
 }
 
 /// CIL Table Representation
-internal protocol Table: AnyObject {
+public protocol Table: AnyObject {
   /// The CIL defined table number.
   static var number: Int { get }
 

@@ -1,7 +1,7 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-internal struct StringsHeap {
+public struct StringsHeap {
   let data: ArraySlice<UInt8>
 
   public init(data: ArraySlice<UInt8>) {

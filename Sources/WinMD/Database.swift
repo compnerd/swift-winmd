@@ -22,34 +22,4 @@ public class Database {
     // incur a pointless copy.
     try self.init(data: Array(Data(contentsOf: path, options: .alwaysMapped)))
   }
-
-  public func dump() {
-    let metadata = self.cil.Metadata
-
-    print("Version: \(metadata.Version)")
-    print("Streams: \(metadata.Streams)")
-    metadata.StreamHeaders.forEach { print("  - \($0)") }
-
-    if let tables = TablesStream(from: self.cil),
-        let blobs = BlobsHeap(from: self.cil),
-        let strings = StringsHeap(from: self.cil),
-        let guids = GUIDHeap(from: self.cil) {
-      let decoder: DatabaseDecoder = DatabaseDecoder(tables)
-      var reader: RecordReader =
-          RecordReader(decoder: decoder,
-                       heaps: RecordReader.HeapRefs(blob: blobs,
-                                                    guid: guids,
-                                                    string: strings))
-
-      print("MajorVersion: \(String(tables.MajorVersion, radix: 16))")
-      print("MinorVersion: \(String(tables.MinorVersion, radix: 16))")
-      print("Tables:")
-      tables.forEach {
-        print("  - \($0)")
-        for record in reader.rows($0) {
-          print("    - \(record)")
-        }
-      }
-    }
-  }
 }

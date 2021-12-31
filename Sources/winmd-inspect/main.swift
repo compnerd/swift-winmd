@@ -4,6 +4,37 @@
 import ArgumentParser
 import WinMD
 
+private func dump(database: WinMD.Database) throws {
+  guard let tables = TablesStream(from: database.cil) else {
+    throw ValidationError("No tables stream found.")
+  }
+  guard let blobs = BlobsHeap(from: database.cil) else {
+    throw ValidationError("No blobs heap found.")
+  }
+  guard let strings = StringsHeap(from: database.cil) else {
+    throw ValidationError("No strings heap found.")
+  }
+  guard let guids = GUIDHeap(from: database.cil) else {
+    throw ValidationError("No GUID heap found.")
+  }
+
+  let decoder = DatabaseDecoder(tables)
+  var reader = RecordReader(decoder: decoder,
+                            heaps: RecordReader.HeapRefs(blob: blobs,
+                                                          guid: guids,
+                                                          string: strings))
+
+  print("MajorVersion: \(String(tables.MajorVersion, radix: 16))")
+  print("MinorVersion: \(String(tables.MinorVersion, radix: 16))")
+  print("Tables:")
+  tables.forEach {
+    print("  - \($0)")
+    for record in reader.rows($0) {
+      print("    - \(record)")
+    }
+  }
+}
+
 @main
 struct Inspect: ParsableCommand {
   @Argument
@@ -22,7 +53,7 @@ struct Inspect: ParsableCommand {
     // "C:\\Windows\\System32\\WinMetadata\\Windows.Foundation.winmd"
     print("Database: \(self.database.url.path)")
     if let database = try? WinMD.Database(at: self.database.url) {
-      if dump { database.dump() }
+      if dump { try winmd_inspect.dump(database: database) }
     }
   }
 }

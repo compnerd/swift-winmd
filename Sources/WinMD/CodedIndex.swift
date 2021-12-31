@@ -6,7 +6,7 @@
 /// The tagged-union is formed by encoding the descriminator in the bottom
 /// log(n) bits and the index in the remaining bits.  The raw value is either
 /// 16-bits if all the tables use a 16-bit index or 32-bit otherwise.
-internal protocol CodedIndex {
+public protocol CodedIndex {
   /// The tables that the `CodedIndex` descriminates across.
   ///
   /// The order of the tables is important.  The tag identifies the table and

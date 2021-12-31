@@ -11,7 +11,7 @@
 ///     uint64_t Sorted             ; +16
 ///     uint32_t Rows[]             ; +24
 ///      uint8_t Tables[]
-internal struct TablesStream {
+public struct TablesStream {
   private let data: ArraySlice<UInt8>
 
   public init(data: ArraySlice<UInt8>) {

@@ -8,7 +8,7 @@ import OrderedCollections
 /// A record, or colloquailly a row, is a singular entity in a table.  This is
 /// an iterable entity in the record collection of a table.
 @dynamicMemberLookup
-internal struct Record: IteratorProtocol {
+public struct Record: IteratorProtocol {
   public typealias Element = Self
 
   private let table: Table
@@ -18,6 +18,7 @@ internal struct Record: IteratorProtocol {
 
   private let heaps: RecordReader.HeapRefs?
 
+  @usableFromInline
   internal init(table: Table, layout: OrderedDictionary<String, (Int, Int)>,
                 stride: Int, row cursor: Int, heaps: RecordReader.HeapRefs?) {
     self.table = table
@@ -101,24 +102,24 @@ extension Record: CustomDebugStringConvertible {
 ///
 /// Decodes and provides a set of records which can be iterated.  This requires
 /// the database compression state to be able to decode the table data.
-internal struct RecordReader: Sequence {
-  internal typealias HeapRefs = (blob: BlobsHeap, guid: GUIDHeap, string: StringsHeap)
+public struct RecordReader: Sequence {
+  public typealias HeapRefs = (blob: BlobsHeap, guid: GUIDHeap, string: StringsHeap)
 
   public typealias Iterator = Record
 
   private let decoder: DatabaseDecoder
-  private let heaps: HeapRefs?
+  public let heaps: HeapRefs?
 
-  private var table: Table?
-  private var layout: OrderedDictionary<String, (Int, Int)>?
-  private var stride: Int?
+  public private(set) var table: Table?
+  public private(set) var layout: OrderedDictionary<String, (Int, Int)>?
+  public private(set) var stride: Int?
 
-  internal init(decoder: DatabaseDecoder, heaps: HeapRefs? = nil) {
+  public init(decoder: DatabaseDecoder, heaps: HeapRefs? = nil) {
     self.decoder = decoder
     self.heaps = heaps
   }
 
-  internal mutating func rows(_ table: Table) -> Self {
+  public mutating func rows(_ table: Table) -> Self {
     var scan: Int = 0
 
     self.table = table

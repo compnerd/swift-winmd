@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 /// Identifies the well-known heap.
-internal enum Heap {
+public enum Heap {
   /// The blob heap.
   case blob
 
@@ -14,7 +14,7 @@ internal enum Heap {
 }
 
 /// A foreign-key index.
-internal enum Index {
+public enum Index {
   /// Index into a well known heap.
   case heap(Heap)
 

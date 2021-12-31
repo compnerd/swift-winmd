@@ -7,7 +7,7 @@
 /// provides the context for the decompression of the database. The compression
 /// state is expensive to compute, and this simply serves as a cache for the
 /// data.
-internal class DatabaseDecoder {
+public class DatabaseDecoder {
   public private(set) var strides: [Index:Int] = [:]
 
   public init(_ stream: TablesStream) {

@@ -4,7 +4,7 @@
 import struct Foundation.UUID
 import typealias Foundation.uuid_t
 
-internal struct GUIDHeap {
+public struct GUIDHeap {
   let data: ArraySlice<UInt8>
 
   public init(data: ArraySlice<UInt8>) {

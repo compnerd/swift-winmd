@@ -1,10 +1,9 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-@_implementationOnly
 import CPE
 
-internal struct PEFile {
+public struct PEFile {
   internal let data: ArraySlice<UInt8>
 
   public var Header32: IMAGE_NT_HEADERS32 {

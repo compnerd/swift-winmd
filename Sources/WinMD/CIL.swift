@@ -1,7 +1,6 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-@_implementationOnly
 import CPE
 
 private var CIL_METADATA_SIGNATURE: UInt32 { 0x424a5342 }
@@ -22,7 +21,7 @@ extension PEFile {
   }
 }
 
-internal struct Assembly {
+public struct Assembly {
   private let header: ArraySlice<UInt8>
   private let metadata: ArraySlice<UInt8>
 
@@ -63,7 +62,7 @@ internal struct Assembly {
 ///     uint32_t Offset     ; +0
 ///     uint32_t Size       ; +4
 ///      uint8_t Name[]     ; +8
-internal struct StreamHeader {
+public struct StreamHeader {
   internal let data: ArraySlice<UInt8>
 
   public var Offset: UInt32 {
@@ -102,7 +101,7 @@ extension StreamHeader: CustomDebugStringConvertible {
 ///     uint16_t Flags                  ; +16 + Length
 ///     uint16_t Streams                ; +18 + Length
 ///              StreamHeaders[Streams] ; +20 + Length
-internal struct MetadataRoot {
+public struct MetadataRoot {
   private let data: ArraySlice<UInt8>
 
   public init(data: ArraySlice<UInt8>) {
@@ -186,11 +185,11 @@ extension MetadataRoot {
   }
 }
 
-internal enum Metadata {
+public enum Metadata {
 }
 
 extension Metadata {
-  internal enum Stream: String {
+  public enum Stream: String {
     case Tables = "#~"
     case Strings = "#Strings"
     case Blob = "#Blob"

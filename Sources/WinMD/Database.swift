@@ -5,9 +5,9 @@ import struct Foundation.Data
 import struct Foundation.URL
 
 public class Database {
-  private let dos: DOSFile
-  private let pe: PEFile
-  private let cil: Assembly
+  public let dos: DOSFile
+  public let pe: PEFile
+  public let cil: Assembly
 
   private init(data: [UInt8]) throws {
     self.dos = try DOSFile(from: data)

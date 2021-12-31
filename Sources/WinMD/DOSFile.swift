@@ -1,10 +1,9 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-@_implementationOnly
 import CPE
 
-internal struct DOSFile {
+public struct DOSFile {
   internal let data: [UInt8]
 
   public init(from data: [UInt8]) throws {

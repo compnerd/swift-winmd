@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 extension Metadata.Tables {
-internal final class AssemblyRef: Table {
+public final class AssemblyRef: Table {
   public static var number: Int { 35 }
 
   /// Record Layout
@@ -15,7 +15,7 @@ internal final class AssemblyRef: Table {
   ///   Name (String Heap Index)
   ///   Culutre (String Heap Index)
   ///   HashValue (Blob Heap Index)
-  static let columns: [Column] = [
+  public static let columns: [Column] = [
     Column(name: "MajorVersion", type: .constant(2)),
     Column(name: "MinorVersion", type: .constant(2)),
     Column(name: "BuildNumber", type: .constant(2)),
@@ -27,8 +27,8 @@ internal final class AssemblyRef: Table {
     Column(name: "HashValue", type: .index(.heap(.blob))),
   ]
 
-  let rows: UInt32
-  let data: ArraySlice<UInt8>
+  public let rows: UInt32
+  public let data: ArraySlice<UInt8>
 
   public required init(rows: UInt32, data: ArraySlice<UInt8>) {
     self.rows = rows

@@ -2,21 +2,21 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 extension Metadata.Tables {
-internal final class MemberRef: Table {
+public final class MemberRef: Table {
   public static var number: Int { 10 }
 
   /// Record Layout
   ///   Class (MemberRefParent Coded Index)
   ///   Name (String Heap Index)
   ///   Signature (Blob Heap Index)
-  static let columns: [Column] = [
+  public static let columns: [Column] = [
     Column(name: "Class", type: .index(.coded(MemberRefParent.self))),
     Column(name: "Name", type: .index(.heap(.string))),
     Column(name: "Signature", type: .index(.heap(.blob))),
   ]
 
-  let rows: UInt32
-  let data: ArraySlice<UInt8>
+  public let rows: UInt32
+  public let data: ArraySlice<UInt8>
 
   public required init(rows: UInt32, data: ArraySlice<UInt8>) {
     self.rows = rows

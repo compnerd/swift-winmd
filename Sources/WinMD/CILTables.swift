@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 extension Metadata {
-  internal enum Tables {
+  public enum Tables {
   }
 }
 

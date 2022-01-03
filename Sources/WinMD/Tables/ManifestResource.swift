@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 extension Metadata.Tables {
-internal final class ManifestResource: Table {
+public final class ManifestResource: Table {
   public static var number: Int { 40 }
 
   /// Record Layout
@@ -10,15 +10,15 @@ internal final class ManifestResource: Table {
   ///   Flags (4-byte bitmask of ManifestResourceAttributes)
   ///   Name (String Heap Index)
   ///   Implementation (Implementation Coded Index)
-  static let columns: [Column] = [
+  public static let columns: [Column] = [
     Column(name: "Offset", type: .constant(4)),
     Column(name: "Flags", type: .constant(4)),
     Column(name: "Name", type: .index(.heap(.string))),
     Column(name: "Implementation", type: .index(.coded(Implementation.self))),
   ]
 
-  let rows: UInt32
-  let data: ArraySlice<UInt8>
+  public let rows: UInt32
+  public let data: ArraySlice<UInt8>
 
   public required init(rows: UInt32, data: ArraySlice<UInt8>) {
     self.rows = rows

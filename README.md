@@ -3,7 +3,12 @@
 An ECMA 335 parser in Swift
 
 <p align="center">
-  <a href="https://github.com/compnerd/swift-winmd/actions?query=workflow%3Awindows"><img alt="Windows Status" src="https://github.com/compnerd/swift-winmd/workflows/windows/badge.svg"></a>
+  <a href="https://github.com/compnerd/swift-winmd/actions?query=workflow%3Awindows">
+    <img alt="Windows Status" src="https://github.com/compnerd/swift-winmd/workflows/windows/badge.svg">
+  </a>
+  <a href="https://codecov.io/gh/compnerd/swift-winmd">
+    <img src="https://codecov.io/gh/compnerd/swift-winmd/branch/main/graph/badge.svg?token=35H0KMEOAF"/>
+  </a>
 </p>
 
 [Windows Metadata](https://docs.microsoft.com/en-us/uwp/winrt-cref/winmd-files) provides the necessary metadata for Windows APIs to enable generating bindings for different languages.  In order to generate the bindings, one must be able to process the metadata.  [Swift/WinMD](https://github.com/compnerd/swift-winmd) provides an implementation of such a parser in Swift.

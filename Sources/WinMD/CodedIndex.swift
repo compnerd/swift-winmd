@@ -23,23 +23,23 @@ public protocol CodedIndex {
 
 extension CodedIndex {
   /// The mask to extract the descriminator from the `CodedIndex`.
-  internal static var mask: Int {
+  public static var mask: Int {
     (1 << (64 - (Self.tables.count - 1).leadingZeroBitCount)) - 1
   }
 
   /// The table descriminator used to select between the tables.
-  internal var tag: Int {
+  public var tag: Int {
     self.rawValue & Self.mask
   }
 
   /// The row for the selected table that the index identifies.
-  internal var row: Int {
+  public var row: Int {
     self.rawValue >> Self.mask.nonzeroBitCount
   }
 }
 
 
-internal struct TypeDefOrRef: CodedIndex {
+public struct TypeDefOrRef: CodedIndex {
   public static var tables: [Table.Type] {
     return [
       Metadata.Tables.TypeDef.self,
@@ -48,7 +48,11 @@ internal struct TypeDefOrRef: CodedIndex {
     ]
   }
 
-  internal var rawValue: Int
+  public let rawValue: Int
+
+  public init(rawValue: Int) {
+    self.rawValue = rawValue
+  }
 }
 
 internal struct HasConstant: CodedIndex {

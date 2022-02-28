@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 /// Tables Stream
+///
+/// The layout of the tables stream is as follows:
 ///     uint32_t Reserved           ; +0 [0]
 ///      uint8_t MajorVersion       ; +4
 ///      uint8_t MinorVersion       ; +5
@@ -11,6 +13,13 @@
 ///     uint64_t Sorted             ; +16
 ///     uint32_t Rows[]             ; +24
 ///      uint8_t Tables[]
+///
+/// The most common operation is access of `Rows` and `Tables`, which are both
+/// computationally expensive.  The `Rows` computation is expensive due to the
+/// allocation of the returned `Array`.  The `Tables` computation is expensive
+/// as it requires the re-creationg of the table data.
+///
+/// TODO(compnerd) add caching support for the `Tables` array.
 public struct TablesStream {
   private let data: ArraySlice<UInt8>
 
@@ -65,24 +74,30 @@ public struct TablesStream {
     var tables: [Table] = []
     tables.reserveCapacity(valid.nonzeroBitCount)
 
-    let offset = 24 + rows.count * MemoryLayout<UInt32>.size
-    var content = data[data.index(data.startIndex, offsetBy: offset)...]
+    // The row data begins at offset 24 (see the structure layout above).  The
+    // rows are stored in a packaed series of 32-bit words, one-per-table.  We
+    // re-use the `rows.count` as we have already computed the value for reuse
+    // in the subseuquent loop.
+    let offset: Int = 24 + rows.count * MemoryLayout<UInt32>.size
+    var content: ArraySlice<UInt8> =
+        data[data.index(data.startIndex, offsetBy: offset)...]
     let decoder: DatabaseDecoder = DatabaseDecoder(self)
 
     Metadata.Tables.forEach { table in
-      if valid & (1 << table.number) == (1 << table.number) {
-        let records = rows[(valid & ((1 << table.number) - 1)).nonzeroBitCount]
+      guard valid & (1 << table.number) == (1 << table.number) else { return }
 
-        let startIndex = content.startIndex
-        let endIndex =
-            content.index(startIndex,
-                          offsetBy: Int(records) * decoder.stride(of: table))
+      let records: UInt32 =
+          rows[(valid & ((1 << table.number) - 1)).nonzeroBitCount]
 
-        tables.append(table.init(rows: records,
-                                 data: content.prefix(upTo: endIndex)))
+      let startIndex: Int = content.startIndex
+      let endIndex: Int =
+          content.index(startIndex,
+                        offsetBy: Int(records) * decoder.stride(of: table))
 
-        content = content[endIndex...]
-      }
+      tables.append(table.init(rows: records,
+                               data: content.prefix(upTo: endIndex)))
+
+      content = content[endIndex...]
     }
 
     return tables
@@ -90,6 +105,7 @@ public struct TablesStream {
 }
 
 extension TablesStream {
+  /// Execute `body` over each table in the stream.
   public func forEach(_ body: (Table) throws -> Void) rethrows {
     return try self.Tables.forEach(body)
   }

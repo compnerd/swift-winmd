@@ -1,6 +1,9 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
+/// Convenience wrapper for the "Strings" heap.
+///
+/// Allows for easy access into the contents of the "Strings" heap.
 public struct StringsHeap {
   let data: ArraySlice<UInt8>
 

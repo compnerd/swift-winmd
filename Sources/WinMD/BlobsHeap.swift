@@ -1,6 +1,9 @@
 // Copyright © 2021 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
+/// Conveiniece wrapper for the "Blobs" heap.
+///
+/// Allows for easy access into the contents of the "Blobs" heap.
 public struct BlobsHeap {
   let data: ArraySlice<UInt8>
 

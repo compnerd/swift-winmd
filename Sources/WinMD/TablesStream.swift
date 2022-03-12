@@ -4,6 +4,7 @@
 /// Tables Stream
 ///
 /// The layout of the tables stream is as follows:
+///
 ///     uint32_t Reserved           ; +0 [0]
 ///      uint8_t MajorVersion       ; +4
 ///      uint8_t MinorVersion       ; +5

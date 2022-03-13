@@ -69,11 +69,10 @@ public struct TablesStream {
   }
 
   public var Tables: [Table] {
-    let valid: UInt64 = Valid
     let rows: [UInt32] = Rows
 
     var tables: [Table] = []
-    tables.reserveCapacity(valid.nonzeroBitCount)
+    tables.reserveCapacity(Valid.nonzeroBitCount)
 
     // The row data begins at offset 24 (see the structure layout above).  The
     // rows are stored in a packaed series of 32-bit words, one-per-table.  We
@@ -85,10 +84,10 @@ public struct TablesStream {
     let decoder: DatabaseDecoder = DatabaseDecoder(self)
 
     Metadata.Tables.forEach { table in
-      guard valid & (1 << table.number) == (1 << table.number) else { return }
+      guard Valid & (1 << table.number) == (1 << table.number) else { return }
 
       let records: UInt32 =
-          rows[(valid & ((1 << table.number) - 1)).nonzeroBitCount]
+          rows[(Valid & ((1 << table.number) - 1)).nonzeroBitCount]
 
       let startIndex: Int = content.startIndex
       let endIndex: Int =

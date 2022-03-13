@@ -19,8 +19,6 @@
 /// computationally expensive.  The `Rows` computation is expensive due to the
 /// allocation of the returned `Array`.  The `Tables` computation is expensive
 /// as it requires the re-creationg of the table data.
-///
-/// TODO(compnerd) add caching support for the `Tables` array.
 public struct TablesStream {
   private let data: ArraySlice<UInt8>
 
@@ -68,6 +66,7 @@ public struct TablesStream {
     }
   }
 
+  // TODO(compnerd) add caching support for the `Tables` array.
   public var Tables: [Table] {
     get throws {
       var tables: [Table] = []

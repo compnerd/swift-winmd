@@ -69,42 +69,47 @@ public struct TablesStream {
   }
 
   public var Tables: [Table] {
-    let rows: [UInt32] = Rows
+    get throws {
+      var tables: [Table] = []
+      tables.reserveCapacity(Valid.nonzeroBitCount)
 
-    var tables: [Table] = []
-    tables.reserveCapacity(Valid.nonzeroBitCount)
+      let rows: [UInt32] = Rows
+      let decoder: DatabaseDecoder = DatabaseDecoder(self)
 
-    // The row data begins at offset 24 (see the structure layout above).  The
-    // rows are stored in a packaed series of 32-bit words, one-per-table.  We
-    // re-use the `rows.count` as we have already computed the value for reuse
-    // in the subseuquent loop.
-    let offset: Int = 24 + rows.count * MemoryLayout<UInt32>.size
-    var content: ArraySlice<UInt8> = data.dropFirst(offset)
-    let decoder: DatabaseDecoder = DatabaseDecoder(self)
+      // The row data begins at offset 24 (see the structure layout above).  The
+      // rows are stored in a packaed series of 32-bit words, one-per-table.  We
+      // re-use the `rows.count` as we have already computed the value for reuse
+      // in the subseuquent loop.
+      var offset: Int = 24 + rows.count * MemoryLayout<UInt32>.size
 
-    Metadata.Tables.forEach { table in
-      guard Valid & (1 << table.number) == (1 << table.number) else { return }
+      try Metadata.Tables.forEach { table in
+        guard Valid & (1 << table.number) == (1 << table.number) else { return }
 
-      let records: UInt32 =
-          rows[(Valid & ((1 << table.number) - 1)).nonzeroBitCount]
+        let records: UInt32 =
+            rows[(Valid & ((1 << table.number) - 1)).nonzeroBitCount]
+        let words: Int = Int(records) * decoder.stride(of: table)
 
-      let startIndex: Int = content.startIndex
-      let endIndex: Int =
-          content.index(startIndex,
-                        offsetBy: Int(records) * decoder.stride(of: table))
+        guard let startIndex: ArraySlice<UInt8>.Index =
+            data.index(data.startIndex, offsetBy: offset,
+                       limitedBy: data.endIndex),
+            let endIndex: ArraySlice<UInt8>.Index =
+                data.index(startIndex, offsetBy: words,
+                           limitedBy: data.endIndex) else {
+          throw WinMDError.InvalidIndex
+        }
 
-      tables.append(table.init(rows: records, data: content[..<endIndex]))
+        tables.append(table.init(rows: records, data: data[startIndex ..< endIndex]))
+        offset = offset + Int(records) * decoder.stride(of: table)
+      }
 
-      content = content[endIndex...]
+      return tables
     }
-
-    return tables
   }
 }
 
 extension TablesStream {
   /// Execute `body` over each table in the stream.
-  public func forEach(_ body: (Table) throws -> Void) rethrows {
+  public func forEach(_ body: (Table) throws -> Void) throws {
     return try self.Tables.forEach(body)
   }
 }

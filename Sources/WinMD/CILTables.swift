@@ -7,8 +7,8 @@ extension Metadata {
 }
 
 extension Metadata.Tables {
-  static func forEach(_ body: (Table.Type) -> Void) {
-    [
+  static func forEach(_ body: (Table.Type) throws -> Void) rethrows {
+    try [
       Assembly.self,
       AssemblyOS.self,
       AssemblyProcessor.self,

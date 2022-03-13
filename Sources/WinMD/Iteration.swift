@@ -46,7 +46,7 @@ public struct Record: IteratorProtocol {
   /// in the record data.  Because the CIL database is a compressed database of
   /// tables which encodes everything as integers, the return type is always an
   /// integer.  This may be a value or an index into another table (or index).
-  internal subscript(dynamicMember field: String) -> Int {
+  public subscript(dynamicMember field: String) -> Int {
     guard let (offset, size) = self.layout[field] else {
       fatalError("Unknown field \(field)")
     }

@@ -79,8 +79,7 @@ public struct TablesStream {
     // re-use the `rows.count` as we have already computed the value for reuse
     // in the subseuquent loop.
     let offset: Int = 24 + rows.count * MemoryLayout<UInt32>.size
-    var content: ArraySlice<UInt8> =
-        data[data.index(data.startIndex, offsetBy: offset)...]
+    var content: ArraySlice<UInt8> = data.dropFirst(offset)
     let decoder: DatabaseDecoder = DatabaseDecoder(self)
 
     Metadata.Tables.forEach { table in
@@ -94,8 +93,7 @@ public struct TablesStream {
           content.index(startIndex,
                         offsetBy: Int(records) * decoder.stride(of: table))
 
-      tables.append(table.init(rows: records,
-                               data: content.prefix(upTo: endIndex)))
+      tables.append(table.init(rows: records, data: content[..<endIndex]))
 
       content = content[endIndex...]
     }

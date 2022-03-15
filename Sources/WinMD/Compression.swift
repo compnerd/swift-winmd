@@ -52,10 +52,10 @@ public class DatabaseDecoder {
     self.strides[.coded(TypeDefOrRef.self)] = TableIndexSize(TypeDefOrRef.self)
     self.strides[.coded(TypeOrMethodDef.self)] = TableIndexSize(TypeOrMethodDef.self)
     // Simple Indicies
-    Metadata.Tables.forEach {
-      if valid & (1 << $0.number) == (1 << $0.number) {
-        self.strides[.simple($0)] =
-            rows[(valid & ((1 << $0.number) - 1)).nonzeroBitCount] < (1 << 16)
+    for table in kRegisteredTables {
+      if valid & (1 << table.number) == (1 << table.number) {
+        self.strides[.simple(table)] =
+            rows[(valid & ((1 << table.number) - 1)).nonzeroBitCount] < (1 << 16)
                 ? 2
                 : 4
       }

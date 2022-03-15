@@ -38,9 +38,9 @@ struct Dump: ParsableCommand {
     print("MajorVersion: \(String(tables.MajorVersion, radix: 16))")
     print("MinorVersion: \(String(tables.MinorVersion, radix: 16))")
     print("Tables:")
-    try tables.forEach {
-      print("  - \($0)")
-      for record in reader.rows($0) {
+    for table in try tables.Tables {
+      print("  - \(table)")
+      for record in reader.rows(table) {
         print("    - \(record)")
       }
     }

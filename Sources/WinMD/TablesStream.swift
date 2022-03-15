@@ -81,8 +81,8 @@ public struct TablesStream {
       // in the subseuquent loop.
       var offset: Int = 24 + rows.count * MemoryLayout<UInt32>.size
 
-      try Metadata.Tables.forEach { table in
-        guard Valid & (1 << table.number) == (1 << table.number) else { return }
+      for table in kRegisteredTables {
+        guard Valid & (1 << table.number) == (1 << table.number) else { continue }
 
         let records: UInt32 =
             rows[(Valid & ((1 << table.number) - 1)).nonzeroBitCount]
@@ -103,13 +103,6 @@ public struct TablesStream {
 
       return tables
     }
-  }
-}
-
-extension TablesStream {
-  /// Execute `body` over each table in the stream.
-  public func forEach(_ body: (Table) throws -> Void) throws {
-    return try self.Tables.forEach(body)
   }
 }
 

@@ -47,6 +47,54 @@ struct Dump: ParsableCommand {
   }
 }
 
+struct PrintNamespaces: ParsableCommand {
+  static var configuration: CommandConfiguration {
+    CommandConfiguration(abstract: "Print namespaces referenced in the databse")
+  }
+
+  @OptionGroup
+  var options: InspectOptions
+
+  func run() throws {
+    guard let database = try? Database(at: options.database.url) else { return }
+
+    guard let tables = TablesStream(from: database.cil) else {
+      throw ValidationError("No tables stream found.")
+    }
+    guard let blobs = BlobsHeap(from: database.cil) else {
+      throw ValidationError("No blobs heap found.")
+    }
+    guard let strings = StringsHeap(from: database.cil) else {
+      throw ValidationError("No strings heap found.")
+    }
+    guard let guids = GUIDHeap(from: database.cil) else {
+      throw ValidationError("No GUID heap found.")
+    }
+
+    let decoder = DatabaseDecoder(tables)
+    var reader = RecordReader(decoder: decoder,
+                              heaps: RecordReader.HeapRefs(blob: blobs,
+                                                           guid: guids,
+                                                           string: strings))
+
+    guard let typedef = try tables.Tables.first(where: { $0 is Metadata.Tables.TypeDef }) else {
+      throw ValidationError("No TypeDef table found.")
+    }
+
+    var namespaces: Set<String> = []
+    for record in reader.rows(typedef) {
+      let namespace = strings[record.TypeNamespace]
+      if !namespace.isEmpty {
+        namespaces.insert(namespace)
+      }
+    }
+
+    for namespace in namespaces.sorted() {
+      print(namespace)
+    }
+  }
+}
+
 struct InspectOptions: ParsableArguments {
   // "C:\\Windows\\System32\\WinMetadata\\Windows.Foundation.winmd"
   @Argument
@@ -59,6 +107,7 @@ struct Inspect: ParsableCommand {
     CommandConfiguration(abstract: "Windows Metadata File Inspection Utility",
                          subcommands: [
                            Dump.self,
+                           PrintNamespaces.self,
                          ])
   }
 

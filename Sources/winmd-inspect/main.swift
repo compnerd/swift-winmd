@@ -50,7 +50,7 @@ struct Dump: ParsableCommand {
 
 struct PrintNamespaces: ParsableCommand {
   static var configuration: CommandConfiguration {
-    CommandConfiguration(abstract: "Print namespaces referenced in the databse")
+    CommandConfiguration(abstract: "Print namespaces referenced in the database.")
   }
 
   @OptionGroup

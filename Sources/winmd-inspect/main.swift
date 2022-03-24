@@ -4,6 +4,31 @@
 import ArgumentParser
 import WinMD
 
+private func open(_ path: FileURL) throws -> (Database, DatabaseDecoder, TablesStream, RecordReader) {
+  let database = try Database(at: path.url)
+
+  guard let tables = TablesStream(from: database.cil) else {
+    throw ValidationError("No tables stream found.")
+  }
+  guard let blobs = BlobsHeap(from: database.cil) else {
+    throw ValidationError("No blobs heap found.")
+  }
+  guard let strings = StringsHeap(from: database.cil) else {
+    throw ValidationError("No strings heap found.")
+  }
+  guard let guids = GUIDHeap(from: database.cil) else {
+    throw ValidationError("No GUID heap found.")
+  }
+
+  let decoder = DatabaseDecoder(tables)
+  let reader = RecordReader(decoder: decoder,
+                            heaps: RecordReader.HeapRefs(blob: blobs,
+                                                          guid: guids,
+                                                          string: strings))
+
+  return (database, decoder, tables, reader)
+}
+
 struct Dump: ParsableCommand {
   static var configuration: CommandConfiguration {
     CommandConfiguration(abstract: "Dump the contents of the database.")
@@ -13,28 +38,12 @@ struct Dump: ParsableCommand {
   var options: InspectOptions
 
   func run() throws {
-    guard let database = try? Database(at: options.database.url) else {return }
+    let tables: TablesStream
+    var reader: RecordReader
+
+    (_, _, tables, reader) = try open(options.database)
+
     print("Database: \(options.database.url.path)")
-
-    guard let tables = TablesStream(from: database.cil) else {
-      throw ValidationError("No tables stream found.")
-    }
-    guard let blobs = BlobsHeap(from: database.cil) else {
-      throw ValidationError("No blobs heap found.")
-    }
-    guard let strings = StringsHeap(from: database.cil) else {
-      throw ValidationError("No strings heap found.")
-    }
-    guard let guids = GUIDHeap(from: database.cil) else {
-      throw ValidationError("No GUID heap found.")
-    }
-
-    let decoder = DatabaseDecoder(tables)
-    var reader = RecordReader(decoder: decoder,
-                              heaps: RecordReader.HeapRefs(blob: blobs,
-                                                           guid: guids,
-                                                           string: strings))
-
     print("MajorVersion: \(String(tables.MajorVersion, radix: 16))")
     print("MinorVersion: \(String(tables.MinorVersion, radix: 16))")
     print("Tables:")
@@ -56,26 +65,10 @@ struct PrintNamespaces: ParsableCommand {
   var options: InspectOptions
 
   func run() throws {
-    guard let database = try? Database(at: options.database.url) else { return }
+    let tables: TablesStream
+    var reader: RecordReader
 
-    guard let tables = TablesStream(from: database.cil) else {
-      throw ValidationError("No tables stream found.")
-    }
-    guard let blobs = BlobsHeap(from: database.cil) else {
-      throw ValidationError("No blobs heap found.")
-    }
-    guard let strings = StringsHeap(from: database.cil) else {
-      throw ValidationError("No strings heap found.")
-    }
-    guard let guids = GUIDHeap(from: database.cil) else {
-      throw ValidationError("No GUID heap found.")
-    }
-
-    let decoder = DatabaseDecoder(tables)
-    var reader = RecordReader(decoder: decoder,
-                              heaps: RecordReader.HeapRefs(blob: blobs,
-                                                           guid: guids,
-                                                           string: strings))
+    (_, _, tables, reader) = try open(options.database)
 
     guard let typedef = try tables.Tables.first(where: { $0 is Metadata.Tables.TypeDef }) else {
       throw ValidationError("No TypeDef table found.")
@@ -83,9 +76,10 @@ struct PrintNamespaces: ParsableCommand {
 
     var namespaces: Set<String> = []
     for record in reader.rows(typedef) {
-      let namespace = strings[record.TypeNamespace]
-      if !namespace.isEmpty {
-        namespaces.insert(namespace)
+      if let namespace = reader.heaps?.string[record.TypeNamespace] {
+        if !namespace.isEmpty {
+          namespaces.insert(namespace)
+        }
       }
     }
 

@@ -6,7 +6,7 @@
 /// The tagged-union is formed by encoding the descriminator in the bottom
 /// log(n) bits and the index in the remaining bits.  The raw value is either
 /// 16-bits if all the tables use a 16-bit index or 32-bit otherwise.
-public protocol CodedIndex {
+public protocol CodedIndex: CustomDebugStringConvertible {
   /// The tables that the `CodedIndex` descriminates across.
   ///
   /// The order of the tables is important.  The tag identifies the table and
@@ -35,6 +35,13 @@ extension CodedIndex {
   /// The row for the selected table that the index identifies.
   public var row: Int {
     self.rawValue >> Self.mask.nonzeroBitCount
+  }
+}
+
+extension CodedIndex {
+  /// See `CustomDebugStringConvertible.debugDescription`.
+  public var debugDescription: String {
+    "\(Self.tables[self.tag]) Row \(self.row)"
   }
 }
 

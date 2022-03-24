@@ -26,4 +26,9 @@ final class CodedIndexTest: XCTestCase {
     XCTAssertEqual(ResolutionScope.descriminatorBitWidth, 2)
     XCTAssertEqual(TypeOrMethodDef.descriminatorBitWidth, 1)
   }
+
+  func testDebugDescription() {
+    XCTAssertEqual(TypeDefOrRef(rawValue: 909).debugDescription,
+                   "TypeRef Row 227")
+  }
 }

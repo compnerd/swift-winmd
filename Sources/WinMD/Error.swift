@@ -8,4 +8,5 @@ public enum WinMDError: Error {
   case InvalidIndex
   case MissingTableStream
   case StringsHeapNotFound
+  case TableNotFound
 }

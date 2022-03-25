@@ -3,5 +3,9 @@
 
 public enum WinMDError: Error {
   case BadImageFormat
+  case BlobsHeapNotFound
+  case GUIDHeapNotFound
   case InvalidIndex
+  case MissingTableStream
+  case StringsHeapNotFound
 }

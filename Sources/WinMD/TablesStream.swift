@@ -26,9 +26,9 @@ public struct TablesStream {
     self.data = data
   }
 
-  public init?(from assembly: Assembly) {
+  public init(from assembly: Assembly) throws {
     guard let stream = assembly.Metadata.stream(named: Metadata.Stream.Tables) else {
-      return nil
+      throw WinMDError.MissingTableStream
     }
     self.init(data: stream)
   }

@@ -11,9 +11,9 @@ public struct BlobsHeap {
     self.data = data
   }
 
-  public init?(from assembly: Assembly) {
+  public init(from assembly: Assembly) throws {
     guard let stream = assembly.Metadata.stream(named: Metadata.Stream.Blob) else {
-      return nil
+      throw WinMDError.BlobsHeapNotFound
     }
     self.init(data: stream)
   }

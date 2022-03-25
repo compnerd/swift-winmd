@@ -7,18 +7,10 @@ import WinMD
 private func open(_ path: FileURL) throws -> (Database, DatabaseDecoder, TablesStream, RecordReader) {
   let database = try Database(at: path.url)
 
-  guard let tables = TablesStream(from: database.cil) else {
-    throw ValidationError("No tables stream found.")
-  }
-  guard let blobs = BlobsHeap(from: database.cil) else {
-    throw ValidationError("No blobs heap found.")
-  }
-  guard let strings = StringsHeap(from: database.cil) else {
-    throw ValidationError("No strings heap found.")
-  }
-  guard let guids = GUIDHeap(from: database.cil) else {
-    throw ValidationError("No GUID heap found.")
-  }
+  let tables = try TablesStream(from: database.cil)
+  let blobs = try BlobsHeap(from: database.cil)
+  let strings = try StringsHeap(from: database.cil)
+  let guids = try GUIDHeap(from: database.cil)
 
   let decoder = DatabaseDecoder(tables)
   let reader = RecordReader(decoder: decoder,

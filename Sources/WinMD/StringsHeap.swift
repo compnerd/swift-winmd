@@ -11,9 +11,9 @@ public struct StringsHeap {
     self.data = data
   }
 
-  public init?(from assembly: Assembly) {
+  public init(from assembly: Assembly) throws {
     guard let stream = assembly.Metadata.stream(named: Metadata.Stream.Strings) else {
-      return nil
+      throw WinMDError.StringsHeapNotFound
     }
     self.init(data: stream)
   }

@@ -4,23 +4,6 @@
 import ArgumentParser
 import WinMD
 
-private func open(_ path: FileURL) throws -> (Database, DatabaseDecoder, TablesStream, RecordReader) {
-  let database = try Database(at: path.url)
-
-  let tables = try TablesStream(from: database.cil)
-  let blobs = try BlobsHeap(from: database.cil)
-  let strings = try StringsHeap(from: database.cil)
-  let guids = try GUIDHeap(from: database.cil)
-
-  let decoder = DatabaseDecoder(tables)
-  let reader = RecordReader(decoder: decoder,
-                            heaps: RecordReader.HeapRefs(blob: blobs,
-                                                          guid: guids,
-                                                          string: strings))
-
-  return (database, decoder, tables, reader)
-}
-
 struct Dump: ParsableCommand {
   static var configuration: CommandConfiguration {
     CommandConfiguration(abstract: "Dump the contents of the database.")
@@ -30,20 +13,28 @@ struct Dump: ParsableCommand {
   var options: InspectOptions
 
   func run() throws {
-    let tables: TablesStream
-    var reader: RecordReader
-
-    (_, _, tables, reader) = try open(options.database)
+    let database = try Database(at: options.database.url)
 
     print("Database: \(options.database.url.path)")
-    print("MajorVersion: \(String(tables.MajorVersion, radix: 16))")
-    print("MinorVersion: \(String(tables.MinorVersion, radix: 16))")
+
+    let stream = try database.stream.get()
+    print("MajorVersion: \(String(stream.MajorVersion, radix: 16))")
+    print("MinorVersion: \(String(stream.MinorVersion, radix: 16))")
+
+#if HAVE_GENERIC_TABLE_ITERATION
+    let heaps: Database.Heaps =
+        try (blob: database.blobs.get(), guid: database.guids.get(),
+             string: database.strings.get())
+#endif
+
     print("Tables:")
-    for table in try tables.Tables {
+    for table in try database.tables.get() {
       print("  - \(table)")
-      for record in reader.rows(table) {
-        print("    - \(record)")
+#if HAVE_GENERIC_TABLE_ITERATION
+      for row in try TableIterator(table, database.decoder.get(), heaps) {
+        print("    - \(row)")
       }
+#endif
     }
   }
 }
@@ -57,21 +48,12 @@ struct PrintNamespaces: ParsableCommand {
   var options: InspectOptions
 
   func run() throws {
-    let tables: TablesStream
-    var reader: RecordReader
-
-    (_, _, tables, reader) = try open(options.database)
-
-    guard let typedef = try tables.Tables.first(where: { $0 is Metadata.Tables.TypeDef }) else {
-      throw ValidationError("No TypeDef table found.")
-    }
+    let database = try Database(at: options.database.url)
 
     var namespaces: Set<String> = []
-    for record in reader.rows(typedef) {
-      if let namespace = reader.heaps?.string[record.TypeNamespace] {
-        if !namespace.isEmpty {
-          namespaces.insert(namespace)
-        }
+    for row in try database.rows(of: Metadata.Tables.TypeDef.self) {
+      if !row.TypeNamespace.isEmpty {
+        namespaces.insert(row.TypeNamespace)
       }
     }
 

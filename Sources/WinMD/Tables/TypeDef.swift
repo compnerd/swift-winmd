@@ -30,3 +30,9 @@ public final class TypeDef: Table {
   }
 }
 }
+
+extension Record where Table == Metadata.Tables.TypeDef {
+  public var TypeNamespace: String {
+    self.heaps.string[self.row[2]]
+  }
+}

@@ -10,8 +10,6 @@ let SwiftWinMD = Package(
   dependencies: [
     .package(url: "http://github.com/apple/swift-argument-parser",
              .upToNextMinor(from: "1.0.0")),
-    .package(url: "https://github.com/apple/swift-collections.git",
-             .upToNextMinor(from: "1.0.0")),
   ],
   targets: [
     .target(name: "CPE", dependencies: []),
@@ -20,7 +18,6 @@ let SwiftWinMD = Package(
     .target(name: "WinMD",
             dependencies: [
               "CPE",
-              .product(name: "OrderedCollections", package: "swift-collections"),
             ],
             swiftSettings: [
               .unsafeFlags([

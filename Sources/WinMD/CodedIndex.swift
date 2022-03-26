@@ -7,6 +7,8 @@
 /// log(n) bits and the index in the remaining bits.  The raw value is either
 /// 16-bits if all the tables use a 16-bit index or 32-bit otherwise.
 public protocol CodedIndex: CustomDebugStringConvertible {
+  typealias RawValue = Int
+
   /// The tables that the `CodedIndex` descriminates across.
   ///
   /// The order of the tables is important.  The tag identifies the table and
@@ -15,25 +17,25 @@ public protocol CodedIndex: CustomDebugStringConvertible {
   static var tables: [Table.Type] { get }
 
   /// The value of the coded index.
-  var rawValue: Int { get }
+  var rawValue: RawValue { get }
 
   /// Creates a new instance with the specified value.
-  init(rawValue: Int)
+  init(rawValue: RawValue)
 }
 
 extension CodedIndex {
   /// The mask to extract the descriminator from the `CodedIndex`.
-  public static var mask: Int {
+  public static var mask: RawValue {
     (1 << (64 - (Self.tables.count - 1).leadingZeroBitCount)) - 1
   }
 
   /// The table descriminator used to select between the tables.
-  public var tag: Int {
+  public var tag: RawValue {
     self.rawValue & Self.mask
   }
 
   /// The row for the selected table that the index identifies.
-  public var row: Int {
+  public var row: RawValue {
     self.rawValue >> Self.mask.nonzeroBitCount
   }
 }
@@ -55,14 +57,14 @@ public struct TypeDefOrRef: CodedIndex {
     ]
   }
 
-  public let rawValue: Int
+  public let rawValue: RawValue
 
-  public init(rawValue: Int) {
+  public init(rawValue: RawValue) {
     self.rawValue = rawValue
   }
 }
 
-internal struct HasConstant: CodedIndex {
+public struct HasConstant: CodedIndex {
   public static var tables: [Table.Type] {
     return [
       Metadata.Tables.FieldDef.self,
@@ -71,10 +73,14 @@ internal struct HasConstant: CodedIndex {
     ]
   }
 
-  internal var rawValue: Int
+  public let rawValue: RawValue
+
+  public init(rawValue: RawValue) {
+    self.rawValue = rawValue
+  }
 }
 
-internal struct HasCustomAttribute: CodedIndex {
+public struct HasCustomAttribute: CodedIndex {
   public static var tables: [Table.Type] {
     return [
       Metadata.Tables.MethodDef.self,
@@ -102,10 +108,14 @@ internal struct HasCustomAttribute: CodedIndex {
     ]
   }
 
-  internal var rawValue: Int
+  public let rawValue: RawValue
+
+  public init(rawValue: RawValue) {
+    self.rawValue = rawValue
+  }
 }
 
-internal struct HasFieldMarshal: CodedIndex {
+public struct HasFieldMarshal: CodedIndex {
   public static var tables: [Table.Type] {
     return [
       Metadata.Tables.FieldDef.self,
@@ -113,10 +123,14 @@ internal struct HasFieldMarshal: CodedIndex {
     ]
   }
 
-  internal var rawValue: Int
+  public let rawValue: RawValue
+
+  public init(rawValue: RawValue) {
+    self.rawValue = rawValue
+  }
 }
 
-internal struct HasDeclSecurity: CodedIndex {
+public struct HasDeclSecurity: CodedIndex {
   public static var tables: [Table.Type] {
     return [
       Metadata.Tables.TypeDef.self,
@@ -125,10 +139,14 @@ internal struct HasDeclSecurity: CodedIndex {
     ]
   }
 
-  internal var rawValue: Int
+  public let rawValue: RawValue
+
+  public init(rawValue: RawValue) {
+    self.rawValue = rawValue
+  }
 }
 
-internal struct MemberRefParent: CodedIndex {
+public struct MemberRefParent: CodedIndex {
   public static var tables: [Table.Type] {
     return [
       Metadata.Tables.TypeDef.self,
@@ -139,10 +157,14 @@ internal struct MemberRefParent: CodedIndex {
     ]
   }
 
-  internal var rawValue: Int
+  public let rawValue: RawValue
+
+  public init(rawValue: RawValue) {
+    self.rawValue = rawValue
+  }
 }
 
-internal struct HasSemantics: CodedIndex {
+public struct HasSemantics: CodedIndex {
   public static var tables: [Table.Type] {
     return [
       Metadata.Tables.EventDef.self,
@@ -150,10 +172,14 @@ internal struct HasSemantics: CodedIndex {
     ]
   }
 
-  internal var rawValue: Int
+  public let rawValue: RawValue
+
+  public init(rawValue: RawValue) {
+    self.rawValue = rawValue
+  }
 }
 
-internal struct MethodDefOrRef: CodedIndex {
+public struct MethodDefOrRef: CodedIndex {
   public static var tables: [Table.Type] {
     return [
       Metadata.Tables.MethodDef.self,
@@ -161,10 +187,14 @@ internal struct MethodDefOrRef: CodedIndex {
     ]
   }
 
-  internal var rawValue: Int
+  public let rawValue: RawValue
+
+  public init(rawValue: RawValue) {
+    self.rawValue = rawValue
+  }
 }
 
-internal struct MemberForwarded: CodedIndex {
+public struct MemberForwarded: CodedIndex {
   public static var tables: [Table.Type] {
     return [
       Metadata.Tables.FieldDef.self,
@@ -172,11 +202,15 @@ internal struct MemberForwarded: CodedIndex {
     ]
   }
 
-  internal var rawValue: Int
+  public let rawValue: RawValue
+
+  public init(rawValue: RawValue) {
+    self.rawValue = rawValue
+  }
 }
 
 // FIXME(compnerd) Exported vs Manifest Resource
-internal struct Implementation: CodedIndex {
+public struct Implementation: CodedIndex {
   public static var tables: [Table.Type] {
     return [
       Metadata.Tables.File.self,
@@ -185,10 +219,14 @@ internal struct Implementation: CodedIndex {
     ]
   }
 
-  internal var rawValue: Int
+  public let rawValue: RawValue
+
+  public init(rawValue: RawValue) {
+    self.rawValue = rawValue
+  }
 }
 
-internal struct CustomAttributeType: CodedIndex {
+public struct CustomAttributeType: CodedIndex {
   public static var tables: [Table.Type] {
     return [
       Metadata.Tables.Module.self,      // unused
@@ -199,10 +237,14 @@ internal struct CustomAttributeType: CodedIndex {
     ]
   }
 
-  internal var rawValue: Int
+  public let rawValue: RawValue
+
+  public init(rawValue: RawValue) {
+    self.rawValue = rawValue
+  }
 }
 
-internal struct ResolutionScope: CodedIndex {
+public struct ResolutionScope: CodedIndex {
   public static var tables: [Table.Type] {
     return [
       Metadata.Tables.Module.self,
@@ -212,10 +254,14 @@ internal struct ResolutionScope: CodedIndex {
     ]
   }
 
-  internal var rawValue: Int
+  public let rawValue: RawValue
+
+  public init(rawValue: RawValue) {
+    self.rawValue = rawValue
+  }
 }
 
-internal struct TypeOrMethodDef: CodedIndex {
+public struct TypeOrMethodDef: CodedIndex {
   public static var tables: [Table.Type] {
     return [
       Metadata.Tables.TypeDef.self,
@@ -223,5 +269,9 @@ internal struct TypeOrMethodDef: CodedIndex {
     ]
   }
 
-  internal var rawValue: Int
+  public let rawValue: Int
+
+  public init(rawValue: RawValue) {
+    self.rawValue = rawValue
+  }
 }

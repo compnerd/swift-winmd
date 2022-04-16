@@ -17,7 +17,7 @@ jobs:
           - branch: swift-5.5-release
             tag: 5.5-RELEASE
 
-          - branch: swift-5.6-release
+          - branch: swift-5.6.1-release
             tag: 5.6.1-RELEASE
 
           - branch: development

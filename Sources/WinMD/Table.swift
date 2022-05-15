@@ -39,3 +39,31 @@ public protocol Table: AnyObject {
   /// Constructs a new table model.
   init(rows: UInt32, data: ArraySlice<UInt8>)
 }
+
+extension Table {
+  public subscript(_ row: Int, _ decoder: DatabaseDecoder,
+                   _ heaps: Database.Heaps) -> Record<Self> {
+    var scan: Int = 0
+    let layout: [(Int, Int)] = Self.columns.map {
+      let width = decoder.width(of: $0.type)
+      defer { scan = scan + width }
+      return (scan, width)
+    }
+
+    let begin: ArraySlice<UInt8>.Index =
+        self.data.index(self.data.startIndex, offsetBy: row * scan)
+    let end: ArraySlice<UInt8>.Index = self.data.index(begin, offsetBy: scan)
+    let data: ArraySlice<UInt8> = self.data[begin ..< end]
+
+    let record: [Int] = layout.map { (offset, size) in
+      switch size {
+      case 1: return Int(data[offset, UInt8.self])
+      case 2: return Int(data[offset, UInt16.self])
+      case 4: return Int(data[offset, UInt32.self])
+      default: fatalError("unsupported column size '\(size)'")
+      }
+    }
+
+    return Record<Self>(record, heaps)
+  }
+}

@@ -31,7 +31,7 @@ struct Dump: ParsableCommand {
     for table in try database.tables.get() {
       print("  - \(table)")
 #if HAVE_GENERIC_TABLE_ITERATION
-      for row in try TableIterator(table, database.decoder.get(), heaps) {
+      for row in try TableIterator(table, heaps, database.decoder.get()) {
         print("    - \(row)")
       }
 #endif

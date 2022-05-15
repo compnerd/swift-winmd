@@ -47,6 +47,6 @@ public class Database {
     }
     let heaps: Heaps =
         try (blob: blobs.get(), guid: guids.get(), string: strings.get())
-    return try TableIterator<Table>(table, decoder.get(), heaps)
+    return try TableIterator<Table>(table, heaps, decoder.get())
   }
 }

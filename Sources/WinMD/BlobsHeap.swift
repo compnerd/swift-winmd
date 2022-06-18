@@ -1,6 +1,8 @@
 // Copyright © 2021 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
+public typealias Blob = ArraySlice<UInt8>
+
 /// Conveiniece wrapper for the "Blobs" heap.
 ///
 /// Allows for easy access into the contents of the "Blobs" heap.
@@ -18,7 +20,7 @@ public struct BlobsHeap {
     self.init(data: stream)
   }
 
-  public subscript(offset: Int) -> ArraySlice<UInt8> {
+  public subscript(offset: Int) -> Blob {
     let begin: ArraySlice<UInt8>.Index
     let end: ArraySlice<UInt8>.Index
 

@@ -6,18 +6,18 @@
 /// A record, or colloquailly a row, is a singular entity in a table.  This is
 /// an iterable entity in the record collection of a table.
 public struct Record<Table: WinMD.Table> {
-  internal let row: [Int]
+  internal let columns: [Int]
   internal let heaps: Database.Heaps
 
-  internal init(_ row: [Int], _ heaps: Database.Heaps) {
-    self.row = row
+  internal init(_ columns: [Int], _ heaps: Database.Heaps) {
+    self.columns = columns
     self.heaps = heaps
   }
 }
 
 extension Record: CustomDebugStringConvertible {
   public var debugDescription: String {
-    return row.enumerated().map { (column, value) in
+    return columns.enumerated().map { (column, value) in
       switch Table.columns[column].type {
       case let .index(.heap(heap)) where heap == .string:
         return "\(Table.columns[column].name): \(heaps.string[value])"

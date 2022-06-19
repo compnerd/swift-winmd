@@ -13,7 +13,7 @@ public final class AssemblyRef: Table {
   ///   Flags (4-byte value, CorAssemblyFlags)
   ///   PublicKeyOrToken (Blob Heap Index)
   ///   Name (String Heap Index)
-  ///   Culutre (String Heap Index)
+  ///   Culture (String Heap Index)
   ///   HashValue (Blob Heap Index)
   public static let columns: [Column] = [
     Column(name: "MajorVersion", type: .constant(2)),

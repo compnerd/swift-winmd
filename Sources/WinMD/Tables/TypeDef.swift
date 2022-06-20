@@ -33,6 +33,8 @@ public final class TypeDef: Table {
 
 extension Record where Table == Metadata.Tables.TypeDef {
   public var TypeNamespace: String {
-    self.heaps.string[self.columns[2]]
+    get throws {
+      try self.database.strings.get()[self[2]]
+    }
   }
 }

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 /// The column type in a table.
-/// 
+///
 /// All columns contain integral values.  The width of the column may be
 /// constant or a variable width index.
 internal enum ColumnType {

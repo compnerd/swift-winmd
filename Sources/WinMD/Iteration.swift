@@ -7,11 +7,11 @@
 /// an iterable entity in the record collection of a table.
 public struct Record<Table: WinMD.Table> {
   internal let columns: [Int]
-  internal let heaps: Database.Heaps
+  internal let database: Database
 
-  internal init(_ columns: [Int], _ heaps: Database.Heaps) {
+  internal init(_ columns: [Int], _ database: Database) {
     self.columns = columns
-    self.heaps = heaps
+    self.database = database
   }
 }
 
@@ -20,7 +20,8 @@ extension Record: CustomDebugStringConvertible {
     return columns.enumerated().map { (column, value) in
       switch Table.columns[column].type {
       case let .index(.heap(heap)) where heap == .string:
-        return "\(Table.columns[column].name): \(heaps.string[value])"
+        let value: String = (try? database.strings.get()[value]) ?? "<unknown>"
+        return "\(Table.columns[column].name): \(value)"
       default:
         return "\(Table.columns[column].name): \(value)"
       }
@@ -37,16 +38,13 @@ public struct TableIterator<Table: WinMD.Table>: IteratorProtocol, Sequence {
   public typealias Element = Record<Table>
 
   private let table: Table
-  private let heaps: Database.Heaps
-  private let decoder: DatabaseDecoder
+  private let database: Database
 
   private var cursor: Int
 
-  public init(_ table: Table, _ heaps: Database.Heaps,
-              _ decoder: DatabaseDecoder, from row: Int = 0) {
+  public init(_ database: Database, _ table: Table, from row: Int = 0) {
+    self.database = database
     self.table = table
-    self.heaps = heaps
-    self.decoder = decoder
     self.cursor = row
   }
 
@@ -54,6 +52,6 @@ public struct TableIterator<Table: WinMD.Table>: IteratorProtocol, Sequence {
   public mutating func next() -> Self.Element? {
     guard self.cursor < self.table.rows else { return nil }
     defer { self.cursor = self.cursor + 1}
-    return self.table[cursor, decoder, heaps]
+    return self.table[cursor, database]
   }
 }

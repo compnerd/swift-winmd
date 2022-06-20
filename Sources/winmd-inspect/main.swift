@@ -21,17 +21,11 @@ struct Dump: ParsableCommand {
     print("MajorVersion: \(String(stream.MajorVersion, radix: 16))")
     print("MinorVersion: \(String(stream.MinorVersion, radix: 16))")
 
-#if HAVE_GENERIC_TABLE_ITERATION
-    let heaps: Database.Heaps =
-        try (blob: database.blobs.get(), guid: database.guids.get(),
-             string: database.strings.get())
-#endif
-
     print("Tables:")
     for table in try database.tables.get() {
       print("  - \(table)")
 #if HAVE_GENERIC_TABLE_ITERATION
-      for row in try TableIterator(table, heaps, database.decoder.get()) {
+      for row in try TableIterator(database, table) {
         print("    - \(row)")
       }
 #endif
@@ -52,8 +46,8 @@ struct PrintNamespaces: ParsableCommand {
 
     var namespaces: Set<String> = []
     for row in try database.rows(of: Metadata.Tables.TypeDef.self) {
-      if !row.TypeNamespace.isEmpty {
-        namespaces.insert(row.TypeNamespace)
+      if let namespace = try? row.TypeNamespace {
+        namespaces.insert(namespace)
       }
     }
 

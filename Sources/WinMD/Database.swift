@@ -41,12 +41,11 @@ public class Database {
     try self.init(data: Array(Data(contentsOf: path, options: .alwaysMapped)))
   }
 
-  public func rows<Table: WinMD.Table>(of table: Table.Type) throws -> TableIterator<Table> {
+  public func rows<Table: WinMD.Table>(of table: Table.Type) throws
+      -> TableIterator<Table> {
     guard let table = try tables.get().first(where: { $0 is Table }) as? Table else {
       throw WinMDError.TableNotFound
     }
-    let heaps: Heaps =
-        try (blob: blobs.get(), guid: guids.get(), string: strings.get())
-    return try TableIterator<Table>(table, heaps, decoder.get())
+    return TableIterator<Table>(self, table)
   }
 }

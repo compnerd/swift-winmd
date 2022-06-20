@@ -41,8 +41,9 @@ public protocol Table: AnyObject {
 }
 
 extension Table {
-  public subscript(_ row: Int, _ decoder: DatabaseDecoder,
-                   _ heaps: Database.Heaps) -> Record<Self> {
+  public subscript(_ row: Int, _ database: Database) -> Record<Self> {
+    let decoder = try! database.decoder.get()
+
     var scan: Int = 0
     let layout: [(Int, Int)] = Self.columns.map {
       let width = decoder.width(of: $0.type)
@@ -64,6 +65,6 @@ extension Table {
       }
     }
 
-    return Record<Self>(record, heaps)
+    return Record<Self>(record, database)
   }
 }

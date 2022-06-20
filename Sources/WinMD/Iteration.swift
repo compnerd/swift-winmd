@@ -6,10 +6,12 @@
 /// A record, or colloquailly a row, is a singular entity in a table.  This is
 /// an iterable entity in the record collection of a table.
 public struct Record<Table: WinMD.Table> {
+  internal let row: Int
   internal let columns: [Int]
   internal let database: Database
 
-  internal init(_ columns: [Int], _ database: Database) {
+  internal init(_ row: Int, _ columns: [Int], _ database: Database) {
+    self.row = row
     self.columns = columns
     self.database = database
   }

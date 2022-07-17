@@ -16,15 +16,19 @@ jobs:
         include:
           - branch: swift-5.5-release
             tag: 5.5-RELEASE
+            syntax: release/5.5
 
           - branch: swift-5.6.2-release
             tag: 5.6.2-RELEASE
+            syntax: release/5.6
 
           - branch: swift-5.7-branch
             tag: 5.7-DEVELOPMENT-SNAPSHOT-2022-06-04-a
+            syntax: release/5.7
 
           - branch: development
             tag: DEVELOPMENT-SNAPSHOT-2022-06-08-a
+            syntax: main
 
     steps:
       - uses: compnerd/gha-setup-swift@main
@@ -37,5 +41,6 @@ jobs:
         run: swift build -v
         env:
           AR: llvm-ar
+          SWIFT_SYNTAX_BRANCH: ${{ matrix.syntax }}
       - name: Run tests
         run: swift test -v

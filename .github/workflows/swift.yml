@@ -20,8 +20,8 @@ jobs:
           - branch: swift-5.6.2-release
             tag: 5.6.2-RELEASE
 
-          - branch: swift-5.7-branch
-            tag: 5.7-DEVELOPMENT-SNAPSHOT-2022-06-04-a
+          - branch: swift-5.7-release
+            tag: 5.7-RELEASE
 
           - branch: development
             tag: DEVELOPMENT-SNAPSHOT-2022-06-08-a

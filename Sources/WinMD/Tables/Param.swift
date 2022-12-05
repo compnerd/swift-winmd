@@ -25,3 +25,19 @@ public final class Param: Table {
   }
 }
 }
+
+extension Record where Table == Metadata.Tables.Param {
+  public var Flags: CorParamAttr {
+    .init(rawValue: CorParamAttr.RawValue(self.columns[0]))
+  }
+
+  public var Sequence: UInt16 {
+    UInt16(self.columns[1])
+  }
+
+  public var Name: String {
+    get throws {
+      try self.database.strings[self.columns[2]]
+    }
+  }
+}

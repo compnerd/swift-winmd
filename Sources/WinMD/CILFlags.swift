@@ -718,6 +718,13 @@ public struct CorPinvokeMap: OptionSet {
   }
 }
 
+/// Contains values that describe the hash algorithm.  See §II.23.1.1.
+public enum CorHashAlgorithm: UInt32 {
+  case none = 0x0000
+  case md5  = 0x8003
+  case sha1 = 0x8004
+}
+
 /// Contains values that describe the metadata applied to an assembly
 /// compilation.  See §II.23.1.2.
 public struct CorAssemblyFlags: OptionSet {

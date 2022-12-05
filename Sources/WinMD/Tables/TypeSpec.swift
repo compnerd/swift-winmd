@@ -21,3 +21,11 @@ public final class TypeSpec: Table {
   }
 }
 }
+
+extension Record where Table == Metadata.Tables.TypeSpec {
+  public var Signature: Blob {
+    get throws {
+      try self.database.blobs[self.columns[0]]
+    }
+  }
+}

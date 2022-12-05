@@ -23,3 +23,17 @@ public final class EventMap: Table {
   }
 }
 }
+
+extension Record where Table == Metadata.Tables.EventMap {
+  public var Parent: Record<Metadata.Tables.TypeDef> {
+    get throws {
+      try self.database.rows(of: Metadata.Tables.TypeDef.self)[self.columns[0]]!
+    }
+  }
+
+  public var EventList: TableIterator<Metadata.Tables.EventDef> {
+    get throws {
+      try list(for: 1)
+    }
+  }
+}

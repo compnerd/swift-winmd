@@ -25,3 +25,15 @@ public final class PropertyDef: Table {
   }
 }
 }
+
+extension Record where Table == Metadata.Tables.PropertyDef {
+  public var Flags: CorPropertyAttr {
+    .init(rawValue: CorPropertyAttr.RawValue(self.columns[0]))
+  }
+
+  public var Name: String {
+    get throws {
+      try self.database.strings[self.columns[1]]
+    }
+  }
+}

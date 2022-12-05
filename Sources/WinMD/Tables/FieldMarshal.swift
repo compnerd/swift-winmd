@@ -23,3 +23,11 @@ public final class FieldMarshal: Table {
   }
 }
 }
+
+extension Record where Table == Metadata.Tables.FieldMarshal {
+  public var NativeType: Blob {
+    get throws {
+      try self.database.blobs[self.columns[1]]
+    }
+  }
+}

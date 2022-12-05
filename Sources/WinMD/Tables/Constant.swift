@@ -26,3 +26,15 @@ public final class Constant: Table {
   }
 }
 }
+
+extension Record where Table == Metadata.Tables.Constant {
+  public var `Type`: CorElementType {
+    .init(rawValue: CorElementType.RawValue(columns[0]))
+  }
+
+  public var Value: Blob {
+    get throws {
+      try self.database.blobs[self.columns[4]]
+    }
+  }
+}

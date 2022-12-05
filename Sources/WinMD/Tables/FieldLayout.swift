@@ -23,3 +23,15 @@ public final class FieldLayout: Table {
   }
 }
 }
+
+extension Record where Table == Metadata.Tables.FieldLayout {
+  public var Offset: UInt32 {
+    UInt32(self.columns[0])
+  }
+
+  public var Field: Record<Metadata.Tables.FieldDef> {
+    get throws {
+      try self.database.rows(of: Metadata.Tables.FieldDef.self)[self.columns[1]]!
+    }
+  }
+}

@@ -27,3 +27,23 @@ public final class AssemblyRefOS: Table {
   }
 }
 }
+
+extension Record where Table == Metadata.Tables.AssemblyRefOS {
+  public var OSPlatformId: UInt32 {
+    UInt32(self.columns[0])
+  }
+
+  public var OSMajorVersion: UInt32 {
+    UInt32(self.columns[1])
+  }
+
+  public var OSMinorVerison: UInt32 {
+    UInt32(self.columns[2])
+  }
+
+  public var AssemblyRef: Record<Metadata.Tables.AssemblyRef> {
+    get throws {
+      try self.database.rows(of: Metadata.Tables.AssemblyRef.self)[self.columns[3]]!
+    }
+  }
+}

@@ -25,3 +25,17 @@ public final class TypeRef: Table {
   }
 }
 }
+
+extension Record where Table == Metadata.Tables.TypeRef {
+  public var TypeName: String {
+    get throws {
+      try self.database.strings[self.columns[1]]
+    }
+  }
+
+  public var TypeNamespace: String {
+    get throws {
+      try self.database.strings[self.columns[2]]
+    }
+  }
+}

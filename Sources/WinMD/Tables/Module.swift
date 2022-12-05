@@ -1,6 +1,8 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
+import struct Foundation.UUID
+
 extension Metadata.Tables {
 /// See §II.22.30.
 public final class Module: Table {
@@ -28,4 +30,34 @@ public final class Module: Table {
     self.data = data
   }
 }
+}
+
+extension Record where Table == Metadata.Tables.Module {
+  public var Generation: UInt16 {
+    UInt16(self.columns[0])
+  }
+
+  public var Name: String {
+    get throws {
+      try self.database.strings[self.columns[1]]
+    }
+  }
+
+  public var Mvid: UUID {
+    get throws {
+      try self.database.guids[self.columns[2]]
+    }
+  }
+
+  public var EncId: UUID {
+    get throws {
+      try self.database.guids[self.columns[3]]
+    }
+  }
+
+  public var EncBaseId: UUID {
+    get throws {
+      try self.database.guids[self.columns[4]]
+    }
+  }
 }

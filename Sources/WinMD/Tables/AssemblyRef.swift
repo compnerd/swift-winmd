@@ -37,3 +37,55 @@ public final class AssemblyRef: Table {
   }
 }
 }
+
+extension Record where Table == Metadata.Tables.AssemblyRef {
+  public var MajorVersion: UInt16 {
+    UInt16(self.columns[0])
+  }
+
+  public var MinorVersion: UInt16 {
+    UInt16(self.columns[1])
+  }
+
+  public var BuildNumber: UInt16 {
+    UInt16(self.columns[2])
+  }
+
+  public var RevisionNumber: UInt16 {
+    UInt16(self.columns[3])
+  }
+
+  public var Flags: CorAssemblyFlags {
+    .init(rawValue: CorAssemblyFlags.RawValue(self.columns[4]))
+  }
+
+  public var PublicKeyOrToken: Blob {
+    get throws {
+      try self.database.blobs[self.columns[5]]
+    }
+  }
+
+  public var Name: String {
+    get throws {
+      try self.database.strings[self.columns[6]]
+    }
+  }
+
+  public var Culture: String {
+    get throws {
+      try self.database.strings[self.columns[7]]
+    }
+  }
+
+  public var HashValue: Blob {
+    get throws {
+      try self.database.blobs[self.columns[8]]
+    }
+  }
+}
+
+extension Record where Table == Metadata.Tables.AssemblyRef {
+  internal var Version: AssemblyVersion  {
+    AssemblyVersion(MajorVersion, MinorVersion, BuildNumber, RevisionNumber)
+  }
+}

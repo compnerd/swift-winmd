@@ -23,3 +23,11 @@ public final class GenericParamConstraint: Table {
   }
 }
 }
+
+extension Record where Table == Metadata.Tables.GenericParamConstraint {
+  public var Owner: Record<Metadata.Tables.GenericParam> {
+    get throws {
+      try self.database.rows(of: Metadata.Tables.GenericParam.self)[self.columns[0]]!
+    }
+  }
+}

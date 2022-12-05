@@ -25,7 +25,7 @@ public final class ModuleRef: Table {
 extension Record where Table == Metadata.Tables.ModuleRef {
   public var Name: String {
     get throws {
-      try self.database.strings[self.columns[0]]
+      try database.strings[columns[0]]
     }
   }
 }

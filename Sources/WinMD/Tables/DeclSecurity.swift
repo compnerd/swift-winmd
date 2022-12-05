@@ -28,12 +28,12 @@ public final class DeclSecurity: Table {
 
 extension Record where Table == Metadata.Tables.DeclSecurity {
   public var Action: UInt16 {
-    UInt16(self.columns[0])
+    UInt16(columns[0])
   }
 
   public var PermissionSet: Blob {
     get throws {
-      try self.database.blobs[self.columns[2]]
+      try database.blobs[columns[2]]
     }
   }
 }

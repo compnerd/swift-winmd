@@ -27,7 +27,7 @@ public final class MethodSpec: Table {
 extension Record where Table == Metadata.Tables.MethodSpec {
   public var Instantiation: Blob {
     get throws {
-      try self.database.blobs[self.columns[1]]
+      try database.blobs[columns[1]]
     }
   }
 }

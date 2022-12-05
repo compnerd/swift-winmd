@@ -34,26 +34,26 @@ public final class MethodDef: Table {
 
 extension Record where Table == Metadata.Tables.MethodDef {
   public var RVA: UInt32 {
-    UInt32(self.columns[0])
+    UInt32(columns[0])
   }
 
   public var ImplFlags: CorMethodImpl {
-    .init(rawValue: CorMethodImpl.RawValue(self.columns[1]))
+    .init(rawValue: CorMethodImpl.RawValue(columns[1]))
   }
 
   public var Flags: CorMethodAttr {
-    .init(rawValue: CorMethodAttr.RawValue(self.columns[2]))
+    .init(rawValue: CorMethodAttr.RawValue(columns[2]))
   }
 
   public var Name: String {
     get throws {
-      try self.database.strings[self.columns[3]]
+      try database.strings[columns[3]]
     }
   }
 
   public var Signature: Blob {
     get throws {
-      try self.database.blobs[self.columns[4]]
+      try database.blobs[columns[4]]
     }
   }
 

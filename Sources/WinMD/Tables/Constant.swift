@@ -34,7 +34,7 @@ extension Record where Table == Metadata.Tables.Constant {
 
   public var Value: Blob {
     get throws {
-      try self.database.blobs[self.columns[4]]
+      try database.blobs[columns[4]]
     }
   }
 }

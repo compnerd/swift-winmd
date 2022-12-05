@@ -40,46 +40,46 @@ public final class AssemblyRef: Table {
 
 extension Record where Table == Metadata.Tables.AssemblyRef {
   public var MajorVersion: UInt16 {
-    UInt16(self.columns[0])
+    UInt16(columns[0])
   }
 
   public var MinorVersion: UInt16 {
-    UInt16(self.columns[1])
+    UInt16(columns[1])
   }
 
   public var BuildNumber: UInt16 {
-    UInt16(self.columns[2])
+    UInt16(columns[2])
   }
 
   public var RevisionNumber: UInt16 {
-    UInt16(self.columns[3])
+    UInt16(columns[3])
   }
 
   public var Flags: CorAssemblyFlags {
-    .init(rawValue: CorAssemblyFlags.RawValue(self.columns[4]))
+    .init(rawValue: CorAssemblyFlags.RawValue(columns[4]))
   }
 
   public var PublicKeyOrToken: Blob {
     get throws {
-      try self.database.blobs[self.columns[5]]
+      try database.blobs[columns[5]]
     }
   }
 
   public var Name: String {
     get throws {
-      try self.database.strings[self.columns[6]]
+      try database.strings[columns[6]]
     }
   }
 
   public var Culture: String {
     get throws {
-      try self.database.strings[self.columns[7]]
+      try self.database.strings[columns[7]]
     }
   }
 
   public var HashValue: Blob {
     get throws {
-      try self.database.blobs[self.columns[8]]
+      try self.database.blobs[columns[8]]
     }
   }
 }

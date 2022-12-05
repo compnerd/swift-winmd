@@ -30,18 +30,18 @@ public final class ImplMap: Table {
 
 extension Record where Table == Metadata.Tables.ImplMap {
   public var MappingFlags: CorPinvokeMap {
-    .init(rawValue: CorPinvokeMap.RawValue(self.columns[0]))
+    .init(rawValue: CorPinvokeMap.RawValue(columns[0]))
   }
 
   public var ImportName: String {
     get throws {
-      try self.database.strings[self.columns[2]]
+      try database.strings[columns[2]]
     }
   }
 
   public var ImportScope: Record<Metadata.Tables.ModuleRef> {
     get throws {
-      try self.database.rows(of: Metadata.Tables.ModuleRef.self)[self.columns[3]]!
+      try database.rows(of: Metadata.Tables.ModuleRef.self)[columns[3]]!
     }
   }
 }

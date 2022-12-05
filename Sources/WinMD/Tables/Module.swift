@@ -34,30 +34,30 @@ public final class Module: Table {
 
 extension Record where Table == Metadata.Tables.Module {
   public var Generation: UInt16 {
-    UInt16(self.columns[0])
+    UInt16(columns[0])
   }
 
   public var Name: String {
     get throws {
-      try self.database.strings[self.columns[1]]
+      try database.strings[columns[1]]
     }
   }
 
   public var Mvid: UUID {
     get throws {
-      try self.database.guids[self.columns[2]]
+      try database.guids[columns[2]]
     }
   }
 
   public var EncId: UUID {
     get throws {
-      try self.database.guids[self.columns[3]]
+      try database.guids[columns[3]]
     }
   }
 
   public var EncBaseId: UUID {
     get throws {
-      try self.database.guids[self.columns[4]]
+      try database.guids[columns[4]]
     }
   }
 }

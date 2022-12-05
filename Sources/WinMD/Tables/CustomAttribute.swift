@@ -29,7 +29,7 @@ public final class CustomAttribute: Table {
 extension Record where Table == Metadata.Tables.CustomAttribute {
   public var Value: Blob {
     get throws {
-      try self.database.blobs[self.columns[2]]
+      try database.blobs[columns[2]]
     }
   }
 }

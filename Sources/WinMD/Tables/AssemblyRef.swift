@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 extension Metadata.Tables {
+/// See §II.22.5.
 public final class AssemblyRef: Table {
   public static var number: Int { 35 }
 

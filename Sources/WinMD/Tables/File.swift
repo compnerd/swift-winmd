@@ -28,18 +28,18 @@ public final class File: Table {
 
 extension Record where Table == Metadata.Tables.File {
   public var Flags: CorFileFlags {
-    .init(rawValue: CorFileFlags.RawValue(self.columns[0]))
+    .init(rawValue: CorFileFlags.RawValue(columns[0]))
   }
 
   public var Name: String {
     get throws {
-      try self.database.strings[self.columns[1]]
+      try database.strings[columns[1]]
     }
   }
 
   public var HashValue: Blob {
     get throws {
-      try self.database.blobs[self.columns[2]]
+      try database.blobs[columns[2]]
     }
   }
 }

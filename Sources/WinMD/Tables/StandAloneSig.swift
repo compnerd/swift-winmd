@@ -25,7 +25,7 @@ public final class StandAloneSig: Table {
 extension Record where Table == Metadata.Tables.StandAloneSig {
   public var Signature: Blob {
     get throws {
-      try self.database.blobs[self.columns[0]]
+      try database.blobs[columns[0]]
     }
   }
 }

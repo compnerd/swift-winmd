@@ -30,16 +30,16 @@ public final class GenericParam: Table {
 
 extension Record where Table == Metadata.Tables.GenericParam {
   public var Number: UInt16 {
-    UInt16(self.columns[0])
+    UInt16(columns[0])
   }
 
   public var Flags: CorGenericParamAttr {
-    .init(rawValue: CorGenericParamAttr.RawValue(self.columns[1]))
+    .init(rawValue: CorGenericParamAttr.RawValue(columns[1]))
   }
 
   public var Name: String {
     get throws {
-      try self.database.strings[self.columns[3]]
+      try database.strings[columns[3]]
     }
   }
 }

@@ -26,12 +26,12 @@ public final class AssemblyRefProcessor: Table {
 
 extension Record where Table == Metadata.Tables.AssemblyRefProcessor {
   public var Processor: UInt32 {
-    UInt32(self.columns[0])
+    UInt32(columns[0])
   }
 
   public var AssemblyRef: Record<Metadata.Tables.AssemblyRef> {
     get throws {
-      try self.database.rows(of: Metadata.Tables.AssemblyRef.self)[self.columns[1]]!
+      try database.rows(of: Metadata.Tables.AssemblyRef.self)[columns[1]]!
     }
   }
 }

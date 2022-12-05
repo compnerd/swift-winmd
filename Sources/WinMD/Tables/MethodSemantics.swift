@@ -28,12 +28,12 @@ public final class MethodSemantics: Table {
 
 extension Record where Table == Metadata.Tables.MethodSemantics {
   public var Semantics: CorMethodSemanticsAttr {
-    .init(rawValue: CorMethodSemanticsAttr.RawValue(self.columns[0]))
+    .init(rawValue: CorMethodSemanticsAttr.RawValue(columns[0]))
   }
 
   public var Method: Record<Metadata.Tables.MethodDef> {
     get throws {
-      try self.database.rows(of: Metadata.Tables.MethodDef.self)[self.columns[1]]!
+      try database.rows(of: Metadata.Tables.MethodDef.self)[columns[1]]!
     }
   }
 }

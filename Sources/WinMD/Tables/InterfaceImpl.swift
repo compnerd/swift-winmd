@@ -27,7 +27,7 @@ public final class InterfaceImpl: Table {
 extension Record where Table == Metadata.Tables.InterfaceImpl {
   public var Class: Record<Metadata.Tables.TypeDef> {
     get throws {
-      try self.database.rows(of: Metadata.Tables.TypeDef.self)[self.columns[0]]!
+      try database.rows(of: Metadata.Tables.TypeDef.self)[columns[0]]!
     }
   }
 }

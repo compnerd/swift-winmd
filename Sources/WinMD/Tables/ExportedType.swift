@@ -32,18 +32,18 @@ public final class ExportedType: Table {
 
 extension Record where Table == Metadata.Tables.ExportedType {
   public var Flags: CorTypeAttr {
-    .init(rawValue: CorTypeAttr.RawValue(self.columns[0]))
+    .init(rawValue: CorTypeAttr.RawValue(columns[0]))
   }
 
   public var TypeName: String {
     get throws {
-      try self.database.strings[self.columns[2]]
+      try database.strings[columns[2]]
     }
   }
 
   public var TypeNamespace: String {
     get throws {
-      try self.database.strings[self.columns[3]]
+      try database.strings[columns[3]]
     }
   }
 }

@@ -40,44 +40,44 @@ public final class Assembly: Table {
 
 extension Record where Table == Metadata.Tables.Assembly {
   public var HashAlgId: CorHashAlgorithm {
-    .init(rawValue: CorHashAlgorithm.RawValue(self.columns[0]))!
+    .init(rawValue: CorHashAlgorithm.RawValue(columns[0]))!
   }
 
   public var MajorVersion: UInt16 {
-    UInt16(self.columns[1])
+    UInt16(columns[1])
   }
 
   public var MinorVersion: UInt16 {
-    UInt16(self.columns[2])
+    UInt16(columns[2])
   }
 
   public var BuildNumber: UInt16 {
-    UInt16(self.columns[3])
+    UInt16(columns[3])
   }
 
   public var RevisionNumber: UInt16 {
-    UInt16(self.columns[4])
+    UInt16(columns[4])
   }
 
   public var Flags: CorAssemblyFlags {
-    .init(rawValue: CorAssemblyFlags.RawValue(self.columns[5]))
+    .init(rawValue: CorAssemblyFlags.RawValue(columns[5]))
   }
 
   public var PublicKey: Blob {
     get throws {
-      try self.database.blobs[self.columns[6]]
+      try database.blobs[columns[6]]
     }
   }
 
   public var Name: String {
     get throws {
-      try self.database.strings[self.columns[7]]
+      try database.strings[columns[7]]
     }
   }
 
   public var Culture: String {
     get throws {
-      try self.database.strings[self.columns[8]]
+      try database.strings[columns[8]]
     }
   }
 }

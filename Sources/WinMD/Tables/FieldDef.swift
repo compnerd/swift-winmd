@@ -28,18 +28,18 @@ public final class FieldDef: Table {
 
 extension Record where Table == Metadata.Tables.FieldDef {
   public var Flags: CorFieldAttr {
-    .init(rawValue: CorFieldAttr.RawValue(self.columns[0]))
+    .init(rawValue: CorFieldAttr.RawValue(columns[0]))
   }
 
   public var Name: String {
     get throws {
-      try self.database.strings[self.columns[1]]
+      try database.strings[columns[1]]
     }
   }
 
   public var Signature: Blob {
     get throws {
-      try self.database.blobs[self.columns[2]]
+      try database.blobs[columns[2]]
     }
   }
 }

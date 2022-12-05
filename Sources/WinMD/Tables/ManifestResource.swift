@@ -27,3 +27,19 @@ public final class ManifestResource: Table {
   }
 }
 }
+
+extension Record where Table == Metadata.Tables.ManifestResource {
+  public var Offset: UInt32 {
+    UInt32(self.columns[0])
+  }
+
+  public var Flags: CorManifestResourceFlags {
+    .init(rawValue: CorManifestResourceFlags.RawValue(self.columns[1]))
+  }
+
+  public var Name: String {
+    get throws {
+      try self.database.strings[self.columns[2]]
+    }
+  }
+}

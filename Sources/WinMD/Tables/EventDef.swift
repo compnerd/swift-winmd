@@ -25,3 +25,15 @@ public final class EventDef: Table {
   }
 }
 }
+
+extension Record where Table == Metadata.Tables.EventDef {
+  public var EventFlags: CorEventAttr {
+    .init(rawValue: CorEventAttr.RawValue(self.columns[0]))
+  }
+
+  public var Name: String {
+    get throws {
+      try self.database.strings[self.columns[1]]
+    }
+  }
+}

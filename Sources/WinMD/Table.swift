@@ -65,6 +65,6 @@ extension Table {
       }
     }
 
-    return Record<Self>(row, record, database)
+    return Record<Self>(row, record, database, self)
   }
 }

@@ -24,3 +24,17 @@ public final class AssemblyOS: Table {
   }
 }
 }
+
+extension Record where Table == Metadata.Tables.AssemblyOS {
+  public var OSPlatformID: UInt32 {
+    UInt32(self.columns[0])
+  }
+
+  public var OSMajorVersion: UInt32 {
+    UInt32(self.columns[1])
+  }
+
+  public var OSMinorVersion: UInt32 {
+    UInt32(self.columns[2])
+  }
+}

@@ -21,3 +21,9 @@ public final class AssemblyProcessor: Table {
   }
 }
 }
+
+extension Record where Table == Metadata.Tables.AssemblyProcessor {
+  public var Processor: UInt32 {
+    UInt32(self.columns[0])
+  }
+}

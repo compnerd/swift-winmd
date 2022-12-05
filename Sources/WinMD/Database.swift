@@ -70,11 +70,13 @@ public class Database {
 
   // MARK - subscripting
 
-  public func rows<Table: WinMD.Table>(of table: Table.Type) throws
+  public func rows<Table: WinMD.Table>(of table: Table.Type,
+                                       from begin: Int = 0,
+                                       to end: Int? = nil) throws
       -> TableIterator<Table> {
     guard let table = try tables.first(where: { $0 is Table }) as? Table else {
       throw WinMDError.TableNotFound
     }
-    return TableIterator<Table>(self, table)
+    return TableIterator<Table>(self, table, from: begin, to: end)
   }
 }

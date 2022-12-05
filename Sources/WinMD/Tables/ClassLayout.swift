@@ -25,3 +25,19 @@ public final class ClassLayout: Table {
   }
 }
 }
+
+extension Record where Table == Metadata.Tables.ClassLayout {
+  public var PackingSize: UInt16 {
+    UInt16(self.columns[0])
+  }
+
+  public var ClassSize: UInt32 {
+    UInt32(self.columns[1])
+  }
+
+  public var Parent: Record<Metadata.Tables.TypeDef> {
+    get throws {
+      try self.database.rows(of: Metadata.Tables.TypeDef.self)[self.columns[2]]!
+    }
+  }
+}

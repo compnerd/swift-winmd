@@ -25,3 +25,11 @@ public final class MethodImpl: Table {
   }
 }
 }
+
+extension Record where Table == Metadata.Tables.MethodImpl {
+  public var Class: Record<Metadata.Tables.TypeDef> {
+    get throws {
+      try self.database.rows(of: Metadata.Tables.TypeDef.self)[self.columns[0]]!
+    }
+  }
+}

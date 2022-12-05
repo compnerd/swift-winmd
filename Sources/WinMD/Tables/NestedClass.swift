@@ -23,3 +23,17 @@ public final class NestedClass: Table {
   }
 }
 }
+
+extension Record where Table == Metadata.Tables.NestedClass {
+  public var NestedClass: Record<Metadata.Tables.TypeDef> {
+    get throws {
+      try self.database.rows(of: Metadata.Tables.TypeDef.self)[self.columns[0]]!
+    }
+  }
+
+  public var EnclosingClass: Record<Metadata.Tables.TypeDef> {
+    get throws {
+      try self.database.rows(of: Metadata.Tables.TypeDef.self)[self.columns[1]]!
+    }
+  }
+}

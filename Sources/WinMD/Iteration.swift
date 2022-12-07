@@ -22,7 +22,7 @@ extension Record: CustomDebugStringConvertible {
     return columns.enumerated().map { (column, value) in
       switch Table.columns[column].type {
       case let .index(.heap(heap)) where heap == .string:
-        let value: String = (try? database.strings.get()[value]) ?? "<unknown>"
+        let value: String = (try? database.strings[value]) ?? "<unknown>"
         return "\(Table.columns[column].name): \(value)"
       default:
         return "\(Table.columns[column].name): \(value)"

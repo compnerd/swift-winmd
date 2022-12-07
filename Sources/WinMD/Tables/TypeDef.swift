@@ -35,7 +35,7 @@ public final class TypeDef: Table {
 extension Record where Table == Metadata.Tables.TypeDef {
   public var TypeNamespace: String {
     get throws {
-      try self.database.strings.get()[self.columns[2]]
+      try self.database.strings[self.columns[2]]
     }
   }
 }

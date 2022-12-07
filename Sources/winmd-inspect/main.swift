@@ -17,12 +17,12 @@ struct Dump: ParsableCommand {
 
     print("Database: \(options.database.url.path)")
 
-    let stream = try database.stream.get()
+    let stream = try database.stream
     print("MajorVersion: \(String(stream.MajorVersion, radix: 16))")
     print("MinorVersion: \(String(stream.MinorVersion, radix: 16))")
 
     print("Tables:")
-    for table in try database.tables.get() {
+    for table in try database.tables {
       print("  - \(table)")
 #if HAVE_GENERIC_TABLE_ITERATION
       for row in try TableIterator(database, table) {

@@ -8,24 +8,51 @@ public class Database {
   public typealias Heaps =
       (blob: BlobsHeap, guid: GUIDHeap, string: StringsHeap)
 
-  public let dos: DOSFile
-  public let pe: PEFile
-  public let cil: Assembly
+  private let dos: DOSFile
+  private let pe: PEFile
+  private let cil: Assembly
 
-  public private(set) lazy var stream: Result<TablesStream, Error> =
-      Result { try TablesStream(from: self.cil) }
-  public private(set) lazy var decoder: Result<DatabaseDecoder, Error> =
-      Result { try DatabaseDecoder(self.stream.get()) }
+  public var stream: TablesStream {
+    get throws {
+      try TablesStream(from: self.cil)
+    }
+  }
 
-  public private(set) lazy var blobs: Result<BlobsHeap, Error> =
-      Result { try BlobsHeap(from: self.cil) }
-  public private(set) lazy var guids: Result<GUIDHeap, Error> =
-      Result { try GUIDHeap(from: self.cil) }
-  public private(set) lazy var strings: Result<StringsHeap, Error> =
-      Result { try StringsHeap(from: self.cil) }
+  public var decoder: DatabaseDecoder {
+    get throws {
+      try DatabaseDecoder(self.stream)
+    }
+  }
 
-  public lazy var tables: Result<[WinMD.Table], Error> =
-      Result { try self.stream.get().Tables }
+  // MARK - Heaps
+
+  public var blobs: BlobsHeap {
+    get throws {
+      try BlobsHeap(from: self.cil)
+    }
+  }
+
+  public var guids: GUIDHeap {
+    get throws {
+      try GUIDHeap(from: self.cil)
+    }
+  }
+
+  public var strings: StringsHeap {
+    get throws {
+      try StringsHeap(from: self.cil)
+    }
+  }
+
+  // MARK - Tables
+
+  public var tables: [WinMD.Table] {
+    get throws {
+      try self.stream.Tables
+    }
+  }
+
+  // MARK - Initializers
 
   private init(data: [UInt8]) throws {
     self.dos = try DOSFile(from: data)
@@ -41,9 +68,11 @@ public class Database {
     try self.init(data: Array(Data(contentsOf: path, options: .alwaysMapped)))
   }
 
+  // MARK - subscripting
+
   public func rows<Table: WinMD.Table>(of table: Table.Type) throws
       -> TableIterator<Table> {
-    guard let table = try tables.get().first(where: { $0 is Table }) as? Table else {
+    guard let table = try tables.first(where: { $0 is Table }) as? Table else {
       throw WinMDError.TableNotFound
     }
     return TableIterator<Table>(self, table)

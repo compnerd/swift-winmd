@@ -96,7 +96,7 @@ public struct TablesStream {
         }
 
         tables.append(table.init(rows: records, data: data[startIndex ..< endIndex]))
-        offset = offset + Int(records) * decoder.stride(of: table)
+        offset = offset + words
       }
 
       return tables

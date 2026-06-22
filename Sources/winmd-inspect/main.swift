@@ -17,7 +17,7 @@ struct Dump: ParsableCommand {
 
     print("Database: \(options.database.url.path)")
 
-    let stream = try database.stream
+    let stream = database.stream
     print("MajorVersion: \(String(stream.MajorVersion, radix: 16))")
     print("MinorVersion: \(String(stream.MinorVersion, radix: 16))")
 

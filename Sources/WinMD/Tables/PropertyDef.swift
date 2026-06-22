@@ -3,7 +3,7 @@
 
 extension Metadata.Tables {
 /// See §II.22.34.
-public final class PropertyDef: Table {
+public enum PropertyDef: TableSchema {
   public static var number: Int { 23 }
 
   /// Record Layout
@@ -15,18 +15,10 @@ public final class PropertyDef: Table {
     Column(name: "Name", type: .index(.heap(.string))),
     Column(name: "Type", type: .index(.heap(.blob))),
   ]
-
-  public let rows: UInt32
-  public let data: ArraySlice<UInt8>
-
-  public required init(rows: UInt32, data: ArraySlice<UInt8>) {
-    self.rows = rows
-    self.data = data
-  }
 }
 }
 
-extension Record where Table == Metadata.Tables.PropertyDef {
+extension Record where Schema == Metadata.Tables.PropertyDef {
   public var Flags: CorPropertyAttr {
     CorPropertyAttr(rawValue: CorPropertyAttr.RawValue(columns[0]))
   }

@@ -3,7 +3,7 @@
 
 extension Metadata.Tables {
 /// See §II.22.36.
-public final class StandAloneSig: Table {
+public enum StandAloneSig: TableSchema {
   public static var number: Int { 17 }
 
   /// Record Layout
@@ -11,18 +11,10 @@ public final class StandAloneSig: Table {
   public static let columns = [
     Column(name: "Signature", type: .index(.heap(.blob))),
   ]
-
-  public let rows: UInt32
-  public let data: ArraySlice<UInt8>
-
-  public required init(rows: UInt32, data: ArraySlice<UInt8>) {
-    self.rows = rows
-    self.data = data
-  }
 }
 }
 
-extension Record where Table == Metadata.Tables.StandAloneSig {
+extension Record where Schema == Metadata.Tables.StandAloneSig {
   public var Signature: Blob {
     get throws {
       try database.blobs[columns[0]]

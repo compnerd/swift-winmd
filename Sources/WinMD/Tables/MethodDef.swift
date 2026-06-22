@@ -3,7 +3,7 @@
 
 extension Metadata.Tables {
 /// See §II.22.26.
-public final class MethodDef: Table {
+public enum MethodDef: TableSchema {
   public static var number: Int { 6 }
 
   /// Record Layout
@@ -21,18 +21,10 @@ public final class MethodDef: Table {
     Column(name: "Signature", type: .index(.heap(.blob))),
     Column(name: "ParamList", type: .index(.simple(Param.self))),
   ]
-
-  public let rows: UInt32
-  public let data: ArraySlice<UInt8>
-
-  public required init(rows: UInt32, data: ArraySlice<UInt8>) {
-    self.rows = rows
-    self.data = data
-  }
 }
 }
 
-extension Record where Table == Metadata.Tables.MethodDef {
+extension Record where Schema == Metadata.Tables.MethodDef {
   public var RVA: UInt32 {
     UInt32(columns[0])
   }

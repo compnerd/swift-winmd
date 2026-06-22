@@ -56,19 +56,14 @@ public class DatabaseDecoder {
       if valid & (1 << table.number) == (1 << table.number) {
         strides[.simple(table)] =
             rows[(valid & ((1 << table.number) - 1)).nonzeroBitCount] < (1 << 16)
-                ? 2
-                : 4
+            ? 2
+            : 4
       }
     }
   }
 }
 
 extension DatabaseDecoder {
-  /// The stride of a table in the database, which is the byte count of a row.
-  internal func stride(of table: Table.Type) -> Int {
-    table.columns.reduce(0) { $0 + width(of: $1.type) }
-  }
-
   /// The width, in bytes, of a given column type.
   internal func width(of type: ColumnType) -> Int {
     switch type {

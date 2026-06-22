@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 extension Metadata.Tables {
-public final class AssemblyOS: Table {
+public enum AssemblyOS: TableSchema {
   public static var number: Int { 34 }
 
   /// Record Layout
@@ -14,18 +14,10 @@ public final class AssemblyOS: Table {
     Column(name: "OSMajorVersion", type: .constant(4)),
     Column(name: "OSMinorVersion", type: .constant(4)),
   ]
-
-  public let rows: UInt32
-  public let data: ArraySlice<UInt8>
-
-  public required init(rows: UInt32, data: ArraySlice<UInt8>) {
-    self.rows = rows
-    self.data = data
-  }
 }
 }
 
-extension Record where Table == Metadata.Tables.AssemblyOS {
+extension Record where Schema == Metadata.Tables.AssemblyOS {
   public var OSPlatformID: UInt32 {
     UInt32(columns[0])
   }

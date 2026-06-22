@@ -22,7 +22,7 @@ struct Dump: ParsableCommand {
     print("MinorVersion: \(String(stream.MinorVersion, radix: 16))")
 
     print("Tables:")
-    for table in try database.tables {
+    for table in database.tables {
       print("  - \(table)")
 #if HAVE_GENERIC_TABLE_ITERATION
       for row in try TableIterator(database, table) {

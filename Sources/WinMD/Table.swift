@@ -22,32 +22,50 @@ public struct Column: Sendable {
   let type: ColumnType
 }
 
-/// CIL Table Representation
-public protocol Table: AnyObject, Sendable {
+/// The schema of a CIL metadata table.
+///
+/// This is the static, compile-time description of a table as defined by the
+/// CIL specification (ECMA-335 §II.22). It carries no data; an open table is
+/// represented by a `Table`.
+public protocol TableSchema: Sendable {
   /// The CIL defined table number.
   static var number: Int { get }
 
   /// The columns of the table as defined by the CIL specification.
   static var columns: Array<Column> { get }
-
-  /// The number of rows in the table.
-  var rows: UInt32 { get }
-
-  /// The data backing the table.
-  var data: ArraySlice<UInt8> { get }
-
-  /// Constructs a new table model.
-  init(rows: UInt32, data: ArraySlice<UInt8>)
 }
 
-extension Table {
-  public subscript(_ row: Int, _ database: Database) -> Record<Self> {
-    let descriptor = TupleDescriptor(Self.columns, database.decoder)
+/// An open metadata table: the records of one `TableSchema` within a database.
+///
+/// The physical layout of the records — the `TupleDescriptor` — is resolved
+/// once when the table is opened and shared by every record read from it.
+public final class Table {
+  /// The schema this table is an instance of.
+  internal let schema: TableSchema.Type
 
-    let begin = data.index(data.startIndex, offsetBy: row * descriptor.stride)
-    let end = data.index(begin, offsetBy: descriptor.stride)
+  /// The physical layout of the table's records.
+  internal let descriptor: TupleDescriptor
 
-    return Record<Self>(row, data[begin ..< end], descriptor, database,
-                        self)
+  /// The number of records in the table.
+  internal let rows: UInt32
+
+  /// The records, as a packed sequence of fixed-width tuples.
+  internal let data: ArraySlice<UInt8>
+
+  internal var number: Int { schema.number }
+  internal var columns: Array<Column> { schema.columns }
+
+  internal init(_ schema: TableSchema.Type, rows: UInt32,
+                data: ArraySlice<UInt8>, descriptor: TupleDescriptor) {
+    self.schema = schema
+    self.descriptor = descriptor
+    self.rows = rows
+    self.data = data
+  }
+}
+
+extension Table: CustomStringConvertible {
+  public var description: String {
+    String(describing: schema)
   }
 }

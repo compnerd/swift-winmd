@@ -3,7 +3,7 @@
 
 extension Metadata.Tables {
 /// See §II.22.5.
-public final class AssemblyRef: Table {
+public enum AssemblyRef: TableSchema {
   public static var number: Int { 35 }
 
   /// Record Layout
@@ -27,18 +27,10 @@ public final class AssemblyRef: Table {
     Column(name: "Culture", type: .index(.heap(.string))),
     Column(name: "HashValue", type: .index(.heap(.blob))),
   ]
-
-  public let rows: UInt32
-  public let data: ArraySlice<UInt8>
-
-  public required init(rows: UInt32, data: ArraySlice<UInt8>) {
-    self.rows = rows
-    self.data = data
-  }
 }
 }
 
-extension Record where Table == Metadata.Tables.AssemblyRef {
+extension Record where Schema == Metadata.Tables.AssemblyRef {
   public var MajorVersion: UInt16 {
     UInt16(columns[0])
   }
@@ -84,7 +76,7 @@ extension Record where Table == Metadata.Tables.AssemblyRef {
   }
 }
 
-extension Record where Table == Metadata.Tables.AssemblyRef {
+extension Record where Schema == Metadata.Tables.AssemblyRef {
   internal var Version: AssemblyVersion {
     AssemblyVersion(MajorVersion, MinorVersion, BuildNumber, RevisionNumber)
   }

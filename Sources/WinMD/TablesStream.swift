@@ -64,43 +64,46 @@ public struct TablesStream {
     }
   }
 
-  // TODO(compnerd) add caching support for the `Tables` array.
-  public var Tables: Array<Table> {
-    get throws {
-      var tables = Array<Table>()
-      tables.reserveCapacity(Valid.nonzeroBitCount)
+  /// Opens the tables present in the stream.
+  ///
+  /// Each table's record layout is resolved against `decoder` once, here, and
+  /// carried by the returned `Table` for the lifetime of the database.
+  internal func relations(_ decoder: DatabaseDecoder) throws -> Array<Table> {
+    var relations = Array<Table>()
+    relations.reserveCapacity(Valid.nonzeroBitCount)
 
-      let rows = Rows
-      let decoder = DatabaseDecoder(self)
+    let rows = Rows
 
-      // The row data begins at offset 24 (see the structure layout above). The
-      // rows are stored in a packaed series of 32-bit words, one-per-table. We
-      // re-use the `rows.count` as we have already computed the value for reuse
-      // in the subseuquent loop.
-      var offset = 24 + rows.count * MemoryLayout<UInt32>.size
+    // The row data begins at offset 24 (see the structure layout above). The
+    // rows are stored in a packaed series of 32-bit words, one-per-table. We
+    // re-use the `rows.count` as we have already computed the value for reuse
+    // in the subseuquent loop.
+    var offset = 24 + rows.count * MemoryLayout<UInt32>.size
 
-      for table in kRegisteredTables {
-        guard Valid & (1 << table.number) == (1 << table.number) else { continue }
+    for schema in kRegisteredTables {
+      guard Valid & (1 << schema.number) == (1 << schema.number) else { continue }
 
-        let records =
-            rows[(Valid & ((1 << table.number) - 1)).nonzeroBitCount]
-        let words = Int(records) * decoder.stride(of: table)
+      let records =
+          rows[(Valid & ((1 << schema.number) - 1)).nonzeroBitCount]
+      let descriptor = TupleDescriptor(schema.columns, decoder)
+      let words = Int(records) * descriptor.stride
 
-        guard let startIndex =
-            data.index(data.startIndex, offsetBy: offset,
-                       limitedBy: data.endIndex),
-            let endIndex =
-                data.index(startIndex, offsetBy: words,
-                           limitedBy: data.endIndex) else {
-          throw WinMDError.InvalidIndex
-        }
-
-        tables.append(table.init(rows: records, data: data[startIndex ..< endIndex]))
-        offset = offset + words
+      guard let startIndex =
+          data.index(data.startIndex, offsetBy: offset,
+                     limitedBy: data.endIndex),
+          let endIndex =
+              data.index(startIndex, offsetBy: words,
+                         limitedBy: data.endIndex) else {
+        throw WinMDError.InvalidIndex
       }
 
-      return tables
+      relations.append(Table(schema, rows: records,
+                             data: data[startIndex ..< endIndex],
+                             descriptor: descriptor))
+      offset = offset + words
     }
+
+    return relations
   }
 }
 

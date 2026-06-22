@@ -3,7 +3,7 @@
 
 extension Metadata.Tables {
 /// See §II.22.14.
-public final class ExportedType: Table {
+public enum ExportedType: TableSchema {
   public static var number: Int { 39 }
 
   /// Record Layout
@@ -19,18 +19,10 @@ public final class ExportedType: Table {
     Column(name: "TypeNamespace", type: .index(.heap(.string))),
     Column(name: "Implementation", type: .index(.coded(Implementation.self))),
   ]
-
-  public let rows: UInt32
-  public let data: ArraySlice<UInt8>
-
-  public required init(rows: UInt32, data: ArraySlice<UInt8>) {
-    self.rows = rows
-    self.data = data
-  }
 }
 }
 
-extension Record where Table == Metadata.Tables.ExportedType {
+extension Record where Schema == Metadata.Tables.ExportedType {
   public var Flags: CorTypeAttr {
     CorTypeAttr(rawValue: CorTypeAttr.RawValue(columns[0]))
   }

@@ -3,7 +3,7 @@
 
 extension Metadata.Tables {
 /// See §II.22.13.
-public final class EventDef: Table {
+public enum EventDef: TableSchema {
   public static var number: Int { 20 }
 
   /// Record Layout
@@ -15,18 +15,10 @@ public final class EventDef: Table {
     Column(name: "Name", type: .index(.heap(.string))),
     Column(name: "EventType", type: .index(.coded(TypeDefOrRef.self)))
   ]
-
-  public let rows: UInt32
-  public let data: ArraySlice<UInt8>
-
-  public required init(rows: UInt32, data: ArraySlice<UInt8>) {
-    self.rows = rows
-    self.data = data
-  }
 }
 }
 
-extension Record where Table == Metadata.Tables.EventDef {
+extension Record where Schema == Metadata.Tables.EventDef {
   public var EventFlags: CorEventAttr {
     CorEventAttr(rawValue: CorEventAttr.RawValue(columns[0]))
   }

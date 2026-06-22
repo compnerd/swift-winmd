@@ -3,7 +3,7 @@
 
 extension Metadata.Tables {
 /// See §II.22.33.
-public final class Param: Table {
+public enum Param: TableSchema {
   public static var number: Int { 8 }
 
   /// Record Layout
@@ -15,18 +15,10 @@ public final class Param: Table {
     Column(name: "Sequence", type: .constant(2)),
     Column(name: "Name", type: .index(.heap(.string))),
   ]
-
-  public let rows: UInt32
-  public let data: ArraySlice<UInt8>
-
-  public init(rows: UInt32, data: ArraySlice<UInt8>) {
-    self.rows = rows
-    self.data = data
-  }
 }
 }
 
-extension Record where Table == Metadata.Tables.Param {
+extension Record where Schema == Metadata.Tables.Param {
   public var Flags: CorParamAttr {
     CorParamAttr(rawValue: CorParamAttr.RawValue(columns[0]))
   }

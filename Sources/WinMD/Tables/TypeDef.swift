@@ -3,7 +3,7 @@
 
 extension Metadata.Tables {
 /// See §II.22.37.
-public final class TypeDef: Table {
+public enum TypeDef: TableSchema {
   public static var number: Int { 2 }
 
   /// Record Layout
@@ -21,18 +21,10 @@ public final class TypeDef: Table {
     Column(name: "FieldList", type: .index(.simple(FieldDef.self))),
     Column(name: "MethodList", type: .index(.simple(MethodDef.self))),
   ]
-
-  public let rows: UInt32
-  public let data: ArraySlice<UInt8>
-
-  public required init(rows: UInt32, data: ArraySlice<UInt8>) {
-    self.rows = rows
-    self.data = data
-  }
 }
 }
 
-extension Record where Table == Metadata.Tables.TypeDef {
+extension Record where Schema == Metadata.Tables.TypeDef {
   public var Flags: CorTypeAttr {
     CorTypeAttr(rawValue: CorTypeAttr.RawValue(columns[0]))
   }

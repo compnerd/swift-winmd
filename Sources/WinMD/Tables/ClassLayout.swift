@@ -3,7 +3,7 @@
 
 extension Metadata.Tables {
 /// See §II.22.8.
-public final class ClassLayout: Table {
+public enum ClassLayout: TableSchema {
   public static var number: Int { 15 }
 
   /// Record Layout
@@ -15,18 +15,10 @@ public final class ClassLayout: Table {
     Column(name: "ClassSize", type: .constant(4)),
     Column(name: "Parent", type: .index(.simple(TypeDef.self))),
   ]
-
-  public let rows: UInt32
-  public let data: ArraySlice<UInt8>
-
-  public required init(rows: UInt32, data: ArraySlice<UInt8>) {
-    self.rows = rows
-    self.data = data
-  }
 }
 }
 
-extension Record where Table == Metadata.Tables.ClassLayout {
+extension Record where Schema == Metadata.Tables.ClassLayout {
   public var PackingSize: UInt16 {
     UInt16(columns[0])
   }

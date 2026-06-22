@@ -3,7 +3,7 @@
 
 extension Metadata.Tables {
 /// See §II.22.21.
-public final class GenericParamConstraint: Table {
+public enum GenericParamConstraint: TableSchema {
   public static var number: Int { 44 }
 
   /// Record Layout
@@ -13,18 +13,10 @@ public final class GenericParamConstraint: Table {
     Column(name: "Owner", type: .index(.simple(GenericParam.self))),
     Column(name: "Constraint", type: .index(.coded(TypeDefOrRef.self))),
   ]
-
-  public let rows: UInt32
-  public let data: ArraySlice<UInt8>
-
-  public required init(rows: UInt32, data: ArraySlice<UInt8>) {
-    self.rows = rows
-    self.data = data
-  }
 }
 }
 
-extension Record where Table == Metadata.Tables.GenericParamConstraint {
+extension Record where Schema == Metadata.Tables.GenericParamConstraint {
   public var Owner: Record<Metadata.Tables.GenericParam> {
     get throws {
       try database.rows(of: Metadata.Tables.GenericParam.self)[columns[0]]!

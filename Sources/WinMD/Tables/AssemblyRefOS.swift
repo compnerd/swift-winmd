@@ -39,6 +39,7 @@ extension Record where Schema == Metadata.Tables.AssemblyRefOS {
   }
 
   public var AssemblyRef: Record<Metadata.Tables.AssemblyRef> {
+    @_lifetime(copy self)
     get throws(WinMDError) {
       try database.rows(of: Metadata.Tables.AssemblyRef.self)[columns[3]]!
     }

@@ -47,10 +47,12 @@ extension Record where Schema == Metadata.Tables.MethodDef {
   }
 
   public var Signature: Blob {
-    database.blobs[columns[4]]
+    @_lifetime(copy self)
+    get { database.blobs[columns[4]] }
   }
 
   public var ParamList: TableIterator<Metadata.Tables.Param> {
+    @_lifetime(copy self)
     get throws(WinMDError) {
       try list(for: 5)
     }

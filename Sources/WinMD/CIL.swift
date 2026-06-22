@@ -1,55 +1,63 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-public import CPE
+internal import CPE
 
 private var CIL_METADATA_SIGNATURE: UInt32 { 0x424a5342 }
 
+/// An absolute byte region within the backing buffer.
+internal struct Region {
+  internal let offset: Int
+  internal let size: Int
+}
+
 extension PEFile {
   internal func contents(_ directory: IMAGE_DATA_DIRECTORY)
-      throws(WinMDError) -> ArraySlice<UInt8> {
+      throws(WinMDError) -> Region {
     let sections = Sections.containing(rva: directory.VirtualAddress)
     guard sections.count == 1 else { throw .BadImageFormat }
 
-    let LogicalAddress = sections.first!.offset(from: directory.VirtualAddress)
-
-    let begin = ArraySlice<UInt8>.Index(LogicalAddress)
-    let end = data.index(begin, offsetBy: numericCast(directory.Size))
-
-    return data[begin ..< end]
+    let address = sections.first!.offset(from: directory.VirtualAddress)
+    return Region(offset: Int(address), size: Int(directory.Size))
   }
 }
 
-public struct Assembly {
-  private let header: ArraySlice<UInt8>
-  private let metadata: ArraySlice<UInt8>
+/// A borrowed view over the CLI (COR20) contents of a PE image.
+///
+/// Used transiently during database parsing. It operates on the whole-buffer
+/// span; `header` and `metadata` are absolute byte regions within the buffer.
+internal struct Assembly: ~Escapable {
+  internal let bytes: RawSpan
+  private let header: Region
+  private let metadata: Region
 
-  public var Header: IMAGE_COR20_HEADER {
-    header.withUnsafeBytes {
-      $0.load(as: IMAGE_COR20_HEADER.self)
-    }
+  internal var Header: IMAGE_COR20_HEADER {
+    bytes.load(at: header.offset, as: IMAGE_COR20_HEADER.self)
   }
 
-  public var Metadata: MetadataRoot {
-    MetadataRoot(data: metadata)
+  internal var Metadata: MetadataRoot {
+    @_lifetime(copy self)
+    get { MetadataRoot(bytes, base: metadata.offset) }
   }
 
-  public init(from pe: PEFile) throws(WinMDError) {
-    let COMDescriptor = pe.DataDirectory.14
+  @_lifetime(copy pe)
+  internal init(from pe: PEFile) throws(WinMDError) {
+    self.bytes = pe.bytes
+
+    let directory = pe.DataDirectory.14
 
     // CLI Header
-    self.header = try pe.contents(COMDescriptor)
+    self.header = try pe.contents(directory)
 
-    let Header = header.withUnsafeBytes {
-      $0.load(as: IMAGE_COR20_HEADER.self)
-    }
+    let header =
+        pe.bytes.load(at: self.header.offset, as: IMAGE_COR20_HEADER.self)
 
-    guard Header.cb == MemoryLayout<IMAGE_COR20_HEADER>.size else {
+    guard header.cb == MemoryLayout<IMAGE_COR20_HEADER>.size else {
       throw .BadImageFormat
     }
 
     // CLI Metadata
-    self.metadata = try pe.contents(Header.MetaData)
+    self.metadata = try pe.contents(header.MetaData)
 
     guard Metadata.Signature == CIL_METADATA_SIGNATURE else {
       throw .BadImageFormat
@@ -61,32 +69,34 @@ public struct Assembly {
 ///     uint32_t Offset     ; +0
 ///     uint32_t Size       ; +4
 ///      uint8_t Name[]     ; +8
-public struct StreamHeader {
-  internal let data: ArraySlice<UInt8>
+internal struct StreamHeader: ~Escapable {
+  internal let bytes: RawSpan
+  /// The absolute byte offset of the header within the buffer.
+  internal let base: Int
 
-  public var Offset: UInt32 {
-    data[0, UInt32.self]
+  @_lifetime(copy bytes)
+  internal init(_ bytes: RawSpan, base: Int) {
+    self.bytes = bytes
+    self.base = base
   }
 
-  public var Size: UInt32 {
-    data[4, UInt32.self]
+  internal var Offset: UInt32 {
+    bytes.read(at: base + 0, as: UInt32.self)
   }
 
-  public var Name: String {
-    let begin = data.index(data.startIndex, offsetBy: 8)
-    return data[begin...].withUnsafeBytes {
-      if let name =
-          $0.baseAddress?.assumingMemoryBound(to: Unicode.ASCII.CodeUnit.self) {
-        return String(decodingCString: name, as: Unicode.ASCII.self)
-      }
-      return ""
+  internal var Size: UInt32 {
+    bytes.read(at: base + 4, as: UInt32.self)
+  }
+
+  internal var Name: String {
+    // The name is a null-terminated ASCII string beginning at offset 8.
+    var end = base + 8
+    while end < bytes.byteCount,
+        bytes.read(at: end, as: UInt8.self) != 0 {
+      end += 1
     }
-  }
-}
-
-extension StreamHeader: CustomDebugStringConvertible {
-  public var debugDescription: String {
-    "Offset: \(String(Offset, radix: 16)), Size: \(String(Size, radix: 16)), Name: \(Name)"
+    return String(decoding: bytes.extracting((base + 8) ..< end),
+                  as: Unicode.ASCII.self)
   }
 }
 
@@ -100,82 +110,81 @@ extension StreamHeader: CustomDebugStringConvertible {
 ///     uint16_t Flags                  ; +16 + Length
 ///     uint16_t Streams                ; +18 + Length
 ///              StreamHeaders[Streams] ; +20 + Length
-public struct MetadataRoot {
-  private let data: ArraySlice<UInt8>
+internal struct MetadataRoot: ~Escapable {
+  internal let bytes: RawSpan
+  /// The absolute byte offset of the metadata root within the buffer.
+  internal let base: Int
 
-  public init(data: ArraySlice<UInt8>) {
-    self.data = data
+  @_lifetime(copy bytes)
+  internal init(_ bytes: RawSpan, base: Int) {
+    self.bytes = bytes
+    self.base = base
   }
 
-  public var Signature: UInt32 {
-    data[0, UInt32.self]
+  internal var Signature: UInt32 {
+    bytes.read(at: base + 0, as: UInt32.self)
   }
 
-  public var MajorVersion: UInt16 {
-    data[4, UInt16.self]
+  internal var MajorVersion: UInt16 {
+    bytes.read(at: base + 4, as: UInt16.self)
   }
 
-  public var MinorVersion: UInt16 {
-    data[6, UInt16.self]
+  internal var MinorVersion: UInt16 {
+    bytes.read(at: base + 6, as: UInt16.self)
   }
 
-  public var Reserved: UInt32 {
-    data[8, UInt32.self]
+  internal var Reserved: UInt32 {
+    bytes.read(at: base + 8, as: UInt32.self)
   }
 
-  public var Length: UInt32 {
-    data[12, UInt32.self]
+  internal var Length: UInt32 {
+    bytes.read(at: base + 12, as: UInt32.self)
   }
 
-  public var Version: String {
-    let begin = data.index(data.startIndex, offsetBy: 16)
-    let end = data.index(begin, offsetBy: numericCast(Length))
-    return String(bytes: data[begin ..< end], encoding: .ascii)!
+  internal var Version: String {
+    let begin = base + 16
+    let end = begin + numericCast(Length)
+    return String(decoding: bytes.extracting(begin ..< end),
+                  as: Unicode.ASCII.self)
   }
 
-  public var Streams: UInt16 {
-    data[18 + Int(Length), UInt16.self]
-  }
-
-  public var StreamHeaders: Array<StreamHeader> {
-    let count = Int(Streams)
-
-    var headers = Array<StreamHeader>()
-    headers.reserveCapacity(count)
-
-    func align(_ value: Int, to: Int) -> Int {
-      value + (to - value % to)
-    }
-
-    var offset = 20 + Int(Length)
-    (0 ..< count).forEach { _ in
-      let begin = data.index(data.startIndex, offsetBy: offset)
-
-      // FIXME(compnerd) truncate to the actual length of the header
-      let header = StreamHeader(data: data[begin...])
-      headers.append(header)
-
-      offset = offset + 8 + align(header.Name.count, to: 4)
-    }
-
-    return headers
+  internal var Streams: UInt16 {
+    bytes.read(at: base + 18 + Int(Length), as: UInt16.self)
   }
 }
 
 extension MetadataRoot {
-  public func stream(named name: Metadata.Stream) -> ArraySlice<UInt8>? {
+  private func align(_ value: Int, to: Int) -> Int {
+    value + (to - value % to)
+  }
+
+  /// The absolute byte offset of each stream header within the buffer.
+  private var offsets: Array<Int> {
+    var offsets = Array<Int>()
+    offsets.reserveCapacity(Int(Streams))
+
+    var offset = base + 20 + Int(Length)
+    for _ in 0 ..< Int(Streams) {
+      offsets.append(offset)
+      let header = StreamHeader(bytes, base: offset)
+      offset = offset + 8 + align(header.Name.count, to: 4)
+    }
+    return offsets
+  }
+
+  internal func stream(named name: Metadata.Stream) -> Region? {
     stream(named: name.rawValue)
   }
 
-  public func stream(named name: String) -> ArraySlice<UInt8>? {
-    let headers = StreamHeaders.filter { $0.Name == name }
-    guard headers.count == 1, let header = headers.first else {
-      return nil
+  internal func stream(named name: String) -> Region? {
+    for offset in offsets {
+      let header = StreamHeader(bytes, base: offset)
+      if header.Name == name {
+        return Region(offset: base + Int(header.Offset),
+                      size: Int(header.Size))
+      }
     }
-
-    let begin = data.index(data.startIndex, offsetBy: Int(header.Offset))
-    let end = data.index(begin, offsetBy: Int(header.Size))
-    return data[begin ..< end]
+    return nil
   }
 }
 

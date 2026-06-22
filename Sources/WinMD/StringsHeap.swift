@@ -4,25 +4,21 @@
 /// Convenience wrapper for the "Strings" heap.
 ///
 /// Allows for easy access into the contents of the "Strings" heap.
-public struct StringsHeap {
-  let data: ArraySlice<UInt8>
+public struct StringsHeap: ~Escapable {
+  internal let bytes: RawSpan
 
-  public init(data: ArraySlice<UInt8>) {
-    self.data = data
-  }
-
-  public init(from assembly: Assembly) throws(WinMDError) {
-    guard let stream = assembly.Metadata.stream(named: Metadata.Stream.Strings) else {
-      throw .StringsHeapNotFound
-    }
-    self.init(data: stream)
+  @_lifetime(copy bytes)
+  public init(_ bytes: RawSpan) {
+    self.bytes = bytes
   }
 
   public subscript(offset: Int) -> String {
-    let index = data.index(data.startIndex, offsetBy: offset)
-    return data[index...].withUnsafeBytes {
-      String(decodingCString: $0.baseAddress!.assumingMemoryBound(to: UTF8.CodeUnit.self),
-          as: UTF8.self)
+    // The strings are stored as null-terminated UTF-8 sequences.
+    var end = offset
+    while end < bytes.byteCount,
+        bytes.read(at: end, as: UInt8.self) != 0 {
+      end += 1
     }
+    return String(decoding: bytes.extracting(offset ..< end), as: UTF8.self)
   }
 }

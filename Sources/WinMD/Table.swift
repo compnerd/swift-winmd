@@ -49,17 +49,20 @@ public final class Table {
   /// The number of records in the table.
   internal let rows: UInt32
 
-  /// The records, as a packed sequence of fixed-width tuples.
-  internal let data: ArraySlice<UInt8>
+  /// The absolute byte range of the records within the backing buffer.
+  ///
+  /// The records are a packed sequence of fixed-width tuples; `range` locates
+  /// them within `Database.bytes`.
+  internal let range: Range<Int>
 
   internal var number: Int { schema.number }
 
   internal init(_ schema: TableSchema.Type, rows: UInt32,
-                data: ArraySlice<UInt8>, descriptor: TupleDescriptor) {
+                range: Range<Int>, descriptor: TupleDescriptor) {
     self.schema = schema
     self.descriptor = descriptor
     self.rows = rows
-    self.data = data
+    self.range = range
   }
 }
 

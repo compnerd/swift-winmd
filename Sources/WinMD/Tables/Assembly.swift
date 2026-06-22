@@ -61,7 +61,8 @@ extension Record where Schema == Metadata.Tables.Assembly {
   }
 
   public var PublicKey: Blob {
-    database.blobs[columns[6]]
+    @_lifetime(copy self)
+    get { database.blobs[columns[6]] }
   }
 
   public var Name: String {

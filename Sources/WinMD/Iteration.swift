@@ -5,7 +5,7 @@
 ///
 /// A record, or colloquailly a row, is a singular entity in a table. This is
 /// an iterable entity in the record collection of a table.
-public struct Record<Schema: TableSchema> {
+public struct Record<Schema: TableSchema>: ~Escapable {
   internal let row: Int
   // The open table the record belongs to.  It carries the shared record layout
   // and backing storage, and is also used to reach the following record, which
@@ -19,9 +19,11 @@ public struct Record<Schema: TableSchema> {
   /// materialised, so accessing a record does not allocate and only the columns
   /// that are read are decoded.
   internal var columns: Columns {
-    Columns(table, row)
+    @_lifetime(copy self)
+    get { Columns(database, table, row) }
   }
 
+  @_lifetime(copy database)
   internal init(_ row: Int, _ table: Table, _ database: Database) {
     self.row = row
     self.table = table
@@ -31,25 +33,29 @@ public struct Record<Schema: TableSchema> {
 
 extension Record {
   /// A zero-allocation view over the columns of a record.
-  internal struct Columns: RandomAccessCollection {
+  internal struct Columns: ~Escapable {
+    private let database: Database
     private let table: Table
     private let row: Int
 
-    internal init(_ table: Table, _ row: Int) {
+    @_lifetime(copy database)
+    internal init(_ database: Database, _ table: Table, _ row: Int) {
+      self.database = database
       self.table = table
       self.row = row
     }
 
     internal var startIndex: Int { 0 }
     internal var endIndex: Int { table.descriptor.columns.count }
+    internal var count: Int { endIndex }
 
     internal subscript(_ column: Int) -> Int {
-      let base = row * table.descriptor.stride
+      let base = table.range.lowerBound + row * table.descriptor.stride
       let (offset, width) = table.descriptor.columns[column]
       switch width {
-      case 1: return Int(table.data[base + offset, UInt8.self])
-      case 2: return Int(table.data[base + offset, UInt16.self])
-      case 4: return Int(table.data[base + offset, UInt32.self])
+      case 1: return Int(database.bytes.read(at: base + offset, as: UInt8.self))
+      case 2: return Int(database.bytes.read(at: base + offset, as: UInt16.self))
+      case 4: return Int(database.bytes.read(at: base + offset, as: UInt32.self))
       default: fatalError("unsupported column size '\(width)'")
       }
     }
@@ -57,12 +63,15 @@ extension Record {
 }
 
 extension Record {
+  @_lifetime(copy self)
   internal func list<Target: TableSchema>(for column: Int) throws(WinMDError)
       -> TableIterator<Target> {
     // Lists are stored as a single index in the current row. This marks the
     // beginning of the list, and the next row indicates the index of one past
-    // the end.
-    let begin = columns[column]
+    // the end. ECMA-335 row indices are 1-based, so the stored value `N` is the
+    // 0-based start `N - 1`; the next row's stored start is the 0-based
+    // exclusive upper bound of this run.
+    let begin = columns[column] - 1
     let end: Int? = if row + 1 < table.rows {
       Record(row + 1, table, database).columns[column] - 1
     } else {
@@ -73,17 +82,21 @@ extension Record {
   }
 }
 
-extension Record: CustomDebugStringConvertible {
+extension Record {
   public var debugDescription: String {
-    columns.enumerated().map { (column, value) in
+    var fields = Array<String>()
+    let columns = self.columns
+    for column in 0 ..< columns.count {
+      let value = columns[column]
       switch Schema.columns[column].type {
       case let .index(.heap(heap)) where heap == .string:
-        let value = database.strings[value]
-        return "\(Schema.columns[column].name): \(value)"
+        let string = database.strings[value]
+        fields.append("\(Schema.columns[column].name): \(string)")
       default:
-        return "\(Schema.columns[column].name): \(value)"
+        fields.append("\(Schema.columns[column].name): \(value)")
       }
-    }.joined(separator: ", ")
+    }
+    return fields.joined(separator: ", ")
   }
 }
 
@@ -91,32 +104,36 @@ extension Record: CustomDebugStringConvertible {
 ///
 /// Provides a way to iterate a given table in a type-safe manner. It walks the
 /// records of an open `Table`, yielding a typed `Record` for each row.
-public struct TableIterator<Schema: TableSchema>: IteratorProtocol, Sequence {
-  public typealias Element = Record<Schema>
-
+///
+/// A `~Escapable` view cannot conform to `Sequence`/`IteratorProtocol`, so
+/// iteration is index-based: walk `0 ..< count`, reading `self[i]`.
+public struct TableIterator<Schema: TableSchema>: ~Escapable {
   private let table: Table
   private let database: Database
   private let rows: Int
 
-  private var cursor: Int
-
+  @_lifetime(copy database)
   public init(_ database: Database, _ table: Table,
               from row: Int = 0, to count: Int? = nil) {
     self.database = database
     self.table = table
-    self.cursor = row
-    self.rows = count ?? Int(table.rows)
+    self.rows = (count ?? Int(table.rows)) - row
+    self.start = row
   }
 
-  /// See `IteratorProtocol.next`
-  public mutating func next() -> Self.Element? {
-    guard cursor < rows else { return nil }
-    defer { cursor = cursor + 1}
-    return Record(cursor, table, database)
+  /// The first row, within the table, that this iterator yields.
+  private let start: Int
+
+  /// The number of records the iterator yields.
+  public var count: Int {
+    rows
   }
 
-  public subscript(_ offset: Int) -> Self.Element? {
-    guard (cursor + offset) < rows else { return nil }
-    return Record(cursor + offset, table, database)
+  public subscript(_ offset: Int) -> Record<Schema>? {
+    @_lifetime(copy self)
+    get {
+      guard offset < rows else { return nil }
+      return Record(start + offset, table, database)
+    }
   }
 }

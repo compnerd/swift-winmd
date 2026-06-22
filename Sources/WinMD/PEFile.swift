@@ -1,24 +1,26 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-public import CPE
+internal import CPE
 
-public struct PEFile {
-  internal let data: ArraySlice<UInt8>
+/// A borrowed view over a PE/COFF image.
+///
+/// Used transiently during database parsing. It operates on the whole-buffer
+/// span; `base` is the absolute byte offset, within the buffer, of the PE
+/// image (i.e. just past the MS-DOS stub).
+internal struct PEFile: ~Escapable {
+  internal let bytes: RawSpan
+  internal let base: Int
 
-  public var Header32: IMAGE_NT_HEADERS32 {
-    data.withUnsafeBytes {
-      $0.bindMemory(to: IMAGE_NT_HEADERS32.self)[0]
-    }
+  internal var Header32: IMAGE_NT_HEADERS32 {
+    bytes.load(at: base, as: IMAGE_NT_HEADERS32.self)
   }
 
-  public var Header64: IMAGE_NT_HEADERS64 {
-    data.withUnsafeBytes {
-      $0.bindMemory(to: IMAGE_NT_HEADERS64.self)[0]
-    }
+  internal var Header64: IMAGE_NT_HEADERS64 {
+    bytes.load(at: base, as: IMAGE_NT_HEADERS64.self)
   }
 
-  public var DataDirectory: (IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY) {
+  internal var DataDirectory: (IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY, IMAGE_DATA_DIRECTORY) {
     switch Header32.OptionalHeader.Magic {
     case UInt16(IMAGE_NT_OPTIONAL_HDR32_MAGIC):
       Header32.OptionalHeader.DataDirectory
@@ -28,40 +30,36 @@ public struct PEFile {
     }
   }
 
-  public var Sections: Array<IMAGE_SECTION_HEADER> {
+  internal var Sections: Array<IMAGE_SECTION_HEADER> {
     switch Header32.OptionalHeader.Magic {
     case UInt16(IMAGE_NT_OPTIONAL_HDR32_MAGIC):
       let PE = Header32
       let NumberOfSections = Int(PE.FileHeader.NumberOfSections)
-      let Offset = MemoryLayout.size(ofValue: PE)
+      let Offset = base + MemoryLayout.size(ofValue: PE)
 
-      return Array<IMAGE_SECTION_HEADER>(unsafeUninitializedCapacity: NumberOfSections) {
-        let nbytes = NumberOfSections * MemoryLayout<IMAGE_SECTION_HEADER>.size
-        let begin = data.index(data.startIndex, offsetBy: Offset)
-        let end = data.index(begin, offsetBy: nbytes)
-        data.copyBytes(to: $0, from: begin ..< end)
-        $1 = NumberOfSections
+      return (0 ..< NumberOfSections).map {
+        bytes.load(at: Offset + $0 * MemoryLayout<IMAGE_SECTION_HEADER>.size,
+                   as: IMAGE_SECTION_HEADER.self)
       }
     case UInt16(IMAGE_NT_OPTIONAL_HDR64_MAGIC):
       let PE = Header64
       let NumberOfSections = Int(PE.FileHeader.NumberOfSections)
-      let Offset = MemoryLayout.size(ofValue: PE)
+      let Offset = base + MemoryLayout.size(ofValue: PE)
 
-      return Array<IMAGE_SECTION_HEADER>(unsafeUninitializedCapacity: NumberOfSections) {
-        let nbytes = NumberOfSections * MemoryLayout<IMAGE_SECTION_HEADER>.size
-        let begin = data.index(data.startIndex, offsetBy: Offset)
-        let end = data.index(begin, offsetBy: nbytes)
-        data.copyBytes(to: $0, from: begin ..< end)
-        $1 = NumberOfSections
+      return (0 ..< NumberOfSections).map {
+        bytes.load(at: Offset + $0 * MemoryLayout<IMAGE_SECTION_HEADER>.size,
+                   as: IMAGE_SECTION_HEADER.self)
       }
     default: fatalError("BAD_IMAGE_FORMAT")
     }
   }
 
-  public init(from dos: DOSFile) throws(WinMDError) {
-    self.data = dos.NewExecutable
+  @_lifetime(copy dos)
+  internal init(from dos: DOSFile) throws(WinMDError) {
+    self.bytes = dos.bytes
+    self.base = dos.NewExecutable
 
-    guard data.count > MemoryLayout<IMAGE_NT_HEADERS32>.size else {
+    guard bytes.byteCount - base > MemoryLayout<IMAGE_NT_HEADERS32>.size else {
       throw .BadImageFormat
     }
 

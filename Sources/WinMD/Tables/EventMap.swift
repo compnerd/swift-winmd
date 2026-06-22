@@ -23,12 +23,14 @@ public enum EventMap: TableSchema {
 
 extension Record where Schema == Metadata.Tables.EventMap {
   public var Parent: Record<Metadata.Tables.TypeDef> {
+    @_lifetime(copy self)
     get throws(WinMDError) {
       try database.rows(of: Metadata.Tables.TypeDef.self)[columns[0]]!
     }
   }
 
   public var EventList: TableIterator<Metadata.Tables.EventDef> {
+    @_lifetime(copy self)
     get throws(WinMDError) {
       try list(for: 1)
     }

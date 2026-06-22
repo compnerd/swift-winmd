@@ -42,28 +42,12 @@ public protocol Table: AnyObject, Sendable {
 
 extension Table {
   public subscript(_ row: Int, _ database: Database) -> Record<Self> {
-    let decoder = database.decoder
+    let descriptor = TupleDescriptor(Self.columns, database.decoder)
 
-    var scan = 0
-    let layout = Self.columns.map {
-      let width = decoder.width(of: $0.type)
-      defer { scan = scan + width }
-      return (scan, width)
-    }
+    let begin = data.index(data.startIndex, offsetBy: row * descriptor.stride)
+    let end = data.index(begin, offsetBy: descriptor.stride)
 
-    let begin = data.index(data.startIndex, offsetBy: row * scan)
-    let end = data.index(begin, offsetBy: scan)
-    let data = self.data[begin ..< end]
-
-    let record = layout.map { (offset, size) in
-      switch size {
-      case 1: return Int(data[offset, UInt8.self])
-      case 2: return Int(data[offset, UInt16.self])
-      case 4: return Int(data[offset, UInt32.self])
-      default: fatalError("unsupported column size '\(size)'")
-      }
-    }
-
-    return Record<Self>(row, record, database, self)
+    return Record<Self>(row, data[begin ..< end], descriptor, database,
+                        self)
   }
 }

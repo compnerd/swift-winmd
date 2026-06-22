@@ -30,25 +30,25 @@ extension Record where Schema == Metadata.Tables.TypeDef {
   }
 
   public var TypeName: String {
-    get throws {
+    get throws(WinMDError) {
       try database.strings[columns[1]]
     }
   }
 
   public var TypeNamespace: String {
-    get throws {
+    get throws(WinMDError) {
       try database.strings[columns[2]]
     }
   }
 
   public var FieldList: TableIterator<Metadata.Tables.FieldDef> {
-    get throws {
+    get throws(WinMDError) {
       try list(for: 4)
     }
   }
 
   public var MethodList: TableIterator<Metadata.Tables.MethodDef> {
-    get throws {
+    get throws(WinMDError) {
       try list(for: 5)
     }
   }

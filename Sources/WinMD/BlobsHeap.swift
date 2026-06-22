@@ -13,9 +13,9 @@ public struct BlobsHeap {
     self.data = data
   }
 
-  public init(from assembly: Assembly) throws {
+  public init(from assembly: Assembly) throws(WinMDError) {
     guard let stream = assembly.Metadata.stream(named: Metadata.Stream.Blob) else {
-      throw WinMDError.BlobsHeapNotFound
+      throw .BlobsHeapNotFound
     }
     self.init(data: stream)
   }
@@ -24,7 +24,7 @@ public struct BlobsHeap {
     let begin: ArraySlice<UInt8>.Index
     let end: ArraySlice<UInt8>.Index
 
-    switch data[offset, UInt8.self] & 0xE0 {
+    switch data[offset, UInt8.self] & 0xe0 {
     case 0x00:
       let length = Int(data[offset, UInt8.self] & 0x1f)
 
@@ -34,7 +34,7 @@ public struct BlobsHeap {
     case 0x40:
       let x = data[data.index(offset, offsetBy: 1), UInt8.self]
       let length = Int(data[offset, UInt8.self] & 0x1f) << 8
-                      + Int(x)
+          + Int(x)
 
       begin = data.index(data.startIndex, offsetBy: offset + 2)
       end = data.index(begin, offsetBy: length)
@@ -44,9 +44,9 @@ public struct BlobsHeap {
       let y = data[data.index(offset, offsetBy: 2), UInt8.self]
       let z = data[data.index(offset, offsetBy: 3), UInt8.self]
       let length = Int(data[offset, UInt8.self] & 0x1f) << 24
-                      + Int(x) << 24
-                      + Int(y) << 16
-                      + Int(z)
+          + Int(x) << 24
+          + Int(y) << 16
+          + Int(z)
 
       begin = data.index(data.startIndex, offsetBy: offset + 4)
       end = data.index(begin, offsetBy: length)

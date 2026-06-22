@@ -57,7 +57,7 @@ extension Record {
 }
 
 extension Record {
-  internal func list<Target: TableSchema>(for column: Int) throws
+  internal func list<Target: TableSchema>(for column: Int) throws(WinMDError)
       -> TableIterator<Target> {
     // Lists are stored as a single index in the current row. This marks the
     // beginning of the list, and the next row indicates the index of one past

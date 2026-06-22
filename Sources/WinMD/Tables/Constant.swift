@@ -25,7 +25,7 @@ extension Record where Schema == Metadata.Tables.Constant {
   }
 
   public var Value: Blob {
-    get throws {
+    get throws(WinMDError) {
       try database.blobs[columns[4]]
     }
   }

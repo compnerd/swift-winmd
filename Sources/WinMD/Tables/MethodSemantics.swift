@@ -24,7 +24,7 @@ extension Record where Schema == Metadata.Tables.MethodSemantics {
   }
 
   public var Method: Record<Metadata.Tables.MethodDef> {
-    get throws {
+    get throws(WinMDError) {
       try database.rows(of: Metadata.Tables.MethodDef.self)[columns[1]]!
     }
   }

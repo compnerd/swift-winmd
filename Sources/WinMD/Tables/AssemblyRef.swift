@@ -52,25 +52,25 @@ extension Record where Schema == Metadata.Tables.AssemblyRef {
   }
 
   public var PublicKeyOrToken: Blob {
-    get throws {
+    get throws(WinMDError) {
       try database.blobs[columns[5]]
     }
   }
 
   public var Name: String {
-    get throws {
+    get throws(WinMDError) {
       try database.strings[columns[6]]
     }
   }
 
   public var Culture: String {
-    get throws {
+    get throws(WinMDError) {
       try database.strings[columns[7]]
     }
   }
 
   public var HashValue: Blob {
-    get throws {
+    get throws(WinMDError) {
       try database.blobs[columns[8]]
     }
   }

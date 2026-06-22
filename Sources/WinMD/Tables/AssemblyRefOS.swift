@@ -34,7 +34,7 @@ extension Record where Schema == Metadata.Tables.AssemblyRefOS {
   }
 
   public var AssemblyRef: Record<Metadata.Tables.AssemblyRef> {
-    get throws {
+    get throws(WinMDError) {
       try database.rows(of: Metadata.Tables.AssemblyRef.self)[columns[3]]!
     }
   }

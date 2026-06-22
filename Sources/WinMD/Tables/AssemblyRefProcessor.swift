@@ -22,7 +22,7 @@ extension Record where Schema == Metadata.Tables.AssemblyRefProcessor {
   }
 
   public var AssemblyRef: Record<Metadata.Tables.AssemblyRef> {
-    get throws {
+    get throws(WinMDError) {
       try database.rows(of: Metadata.Tables.AssemblyRef.self)[columns[1]]!
     }
   }

@@ -18,7 +18,7 @@ public enum MethodSpec: TableSchema {
 
 extension Record where Schema == Metadata.Tables.MethodSpec {
   public var Instantiation: Blob {
-    get throws {
+    get throws(WinMDError) {
       try database.blobs[columns[1]]
     }
   }

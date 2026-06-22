@@ -39,22 +39,22 @@ public class Database {
   // MARK: - Heaps
 
   public var blobs: BlobsHeap {
-    get throws {
-      guard let blob = self.blob else { throw WinMDError.BlobsHeapNotFound }
+    get throws(WinMDError) {
+      guard let blob = blob else { throw .BlobsHeapNotFound }
       return blob
     }
   }
 
   public var guids: GUIDHeap {
-    get throws {
-      guard let guid = self.guid else { throw WinMDError.GUIDHeapNotFound }
+    get throws(WinMDError) {
+      guard let guid = guid else { throw .GUIDHeapNotFound }
       return guid
     }
   }
 
   public var strings: StringsHeap {
-    get throws {
-      guard let string = self.string else { throw WinMDError.StringsHeapNotFound }
+    get throws(WinMDError) {
+      guard let string = string else { throw .StringsHeapNotFound }
       return string
     }
   }
@@ -93,11 +93,11 @@ public class Database {
 
   public func rows<Schema: TableSchema>(of schema: Schema.Type,
                                         from begin: Int = 0,
-                                        to end: Int? = nil) throws
+                                        to end: Int? = nil) throws(WinMDError)
       -> TableIterator<Schema> {
     guard let table =
         relations.first(where: { $0.number == Schema.number }) else {
-      throw WinMDError.TableNotFound
+      throw .TableNotFound
     }
     return TableIterator<Schema>(self, table, from: begin, to: end)
   }

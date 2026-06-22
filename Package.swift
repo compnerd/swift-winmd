@@ -1,4 +1,4 @@
-// swift-tools-version:5.3
+// swift-tools-version: 6.4
 
 import PackageDescription
 
@@ -8,8 +8,8 @@ let SwiftWinMD = Package(
     .executable(name: "winmd-inspect", targets: ["winmd-inspect"]),
   ],
   dependencies: [
-    .package(url: "http://github.com/apple/swift-argument-parser",
-             .upToNextMinor(from: "1.0.0")),
+    .package(url: "https://github.com/apple/swift-argument-parser",
+             from: "1.5.0"),
   ],
   targets: [
     .target(name: "CPE", dependencies: []),
@@ -18,16 +18,11 @@ let SwiftWinMD = Package(
     .target(name: "WinMD",
             dependencies: [
               "CPE",
-            ],
-            swiftSettings: [
-              .unsafeFlags([
-                "-Xfrontend", "-validate-tbd-against-ir=none",
-              ]),
             ]),
     .testTarget(name: "WinMDTests", dependencies: ["WinMD"]),
 
     // winmd-inspect
-    .target(name: "winmd-inspect",
+    .executableTarget(name: "winmd-inspect",
             dependencies: [
               "WinMD",
               .product(name: "ArgumentParser", package: "swift-argument-parser"),

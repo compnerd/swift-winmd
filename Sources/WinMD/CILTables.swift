@@ -7,7 +7,7 @@ extension Metadata {
 }
 
 @usableFromInline
-internal var kRegisteredTables: [Table.Type] = [
+internal let kRegisteredTables: Array<Table.Type> = [
   Metadata.Tables.Assembly.self,
   Metadata.Tables.AssemblyOS.self,
   Metadata.Tables.AssemblyProcessor.self,

@@ -4,6 +4,9 @@ import PackageDescription
 
 let SwiftWinMD = Package(
   name: "SwiftWinMD",
+  platforms: [
+    .macOS(.v26),
+  ],
   products: [
     .executable(name: "winmd-inspect", targets: ["winmd-inspect"]),
   ],
@@ -18,6 +21,9 @@ let SwiftWinMD = Package(
     .target(name: "WinMD",
             dependencies: [
               "CPE",
+            ],
+            swiftSettings: [
+              .enableExperimentalFeature("Lifetimes"),
             ]),
     .testTarget(name: "WinMDTests", dependencies: ["WinMD"]),
 

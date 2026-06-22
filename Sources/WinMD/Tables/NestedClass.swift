@@ -1,18 +1,23 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
+/// Record Layout
+///   NestedClass (TypeDef Index)
+///   EnclosingClass (TypeDef Index)
+// TODO(compnerd) fold into the accessor when immortal inline spans land.
+private let _columns: InlineArray<_, Column> = [
+  Column(name: "NestedClass", type: .index(.simple(Metadata.Tables.TypeDef.self))),
+  Column(name: "EnclosingClass", type: .index(.simple(Metadata.Tables.TypeDef.self))),
+]
+
 extension Metadata.Tables {
 /// See §II.22.32.
 public enum NestedClass: TableSchema {
   public static var number: Int { 41 }
 
-  /// Record Layout
-  ///   NestedClass (TypeDef Index)
-  ///   EnclosingClass (TypeDef Index)
-  public static let columns = [
-    Column(name: "NestedClass", type: .index(.simple(TypeDef.self))),
-    Column(name: "EnclosingClass", type: .index(.simple(TypeDef.self))),
-  ]
+  public static var columns: Span<Column> {
+    @_lifetime(immortal) get { _columns.span }
+  }
 }
 }
 

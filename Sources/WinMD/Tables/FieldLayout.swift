@@ -1,18 +1,23 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
+/// Record Layout
+///   Offset (4-byte constant)
+///   Field (Field Index)
+// TODO(compnerd) fold into the accessor when immortal inline spans land.
+private let _columns: InlineArray<_, Column> = [
+  Column(name: "Offset", type: .constant(4)),
+  Column(name: "Field", type: .index(.simple(Metadata.Tables.FieldDef.self))),
+]
+
 extension Metadata.Tables {
 /// See §II.22.16.
 public enum FieldLayout: TableSchema {
   public static var number: Int { 16 }
 
-  /// Record Layout
-  ///   Offset (4-byte constant)
-  ///   Field (Field Index)
-  public static let columns = [
-    Column(name: "Offset", type: .constant(4)),
-    Column(name: "Field", type: .index(.simple(FieldDef.self))),
-  ]
+  public static var columns: Span<Column> {
+    @_lifetime(immortal) get { _columns.span }
+  }
 }
 }
 

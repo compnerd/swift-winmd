@@ -1,18 +1,23 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
+/// Record Layout
+///   Class (TypeDef Index)
+///   Interface (TypeDefOrRef Coded Index)
+// TODO(compnerd) fold into the accessor when immortal inline spans land.
+private let _columns: InlineArray<_, Column> = [
+  Column(name: "Class", type: .index(.simple(Metadata.Tables.TypeDef.self))),
+  Column(name: "Interface", type: .index(.coded(TypeDefOrRef.self))),
+]
+
 extension Metadata.Tables {
 /// See §II.22.23.
 public enum InterfaceImpl: TableSchema {
   public static var number: Int { 9 }
 
-  /// Record Layout
-  ///   Class (TypeDef Index)
-  ///   Interface (TypeDefOrRef Coded Index)
-  public static let columns = [
-    Column(name: "Class", type: .index(.simple(TypeDef.self))),
-    Column(name: "Interface", type: .index(.coded(TypeDefOrRef.self))),
-  ]
+  public static var columns: Span<Column> {
+    @_lifetime(immortal) get { _columns.span }
+  }
 }
 }
 

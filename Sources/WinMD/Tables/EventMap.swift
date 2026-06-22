@@ -1,18 +1,23 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
+/// Record Layout
+///   Parent (TypeDef Index)
+///   EventList (Event Index)
+// TODO(compnerd) fold into the accessor when immortal inline spans land.
+private let _columns: InlineArray<_, Column> = [
+  Column(name: "Parent", type: .index(.simple(Metadata.Tables.TypeDef.self))),
+  Column(name: "EventList", type: .index(.simple(Metadata.Tables.EventDef.self))),
+]
+
 extension Metadata.Tables {
 /// See §II.22.12.
 public enum EventMap: TableSchema {
   public static var number: Int { 18 }
 
-  /// Record Layout
-  ///   Parent (TypeDef Index)
-  ///   EventList (Event Index)
-  public static let columns = [
-    Column(name: "Parent", type: .index(.simple(TypeDef.self))),
-    Column(name: "EventList", type: .index(.simple(EventDef.self))),
-  ]
+  public static var columns: Span<Column> {
+    @_lifetime(immortal) get { _columns.span }
+  }
 }
 }
 

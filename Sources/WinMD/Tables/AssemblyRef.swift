@@ -57,7 +57,8 @@ extension Record where Schema == Metadata.Tables.AssemblyRef {
   }
 
   public var PublicKeyOrToken: Blob {
-    database.blobs[columns[5]]
+    @_lifetime(copy self)
+    get { database.blobs[columns[5]] }
   }
 
   public var Name: String {
@@ -69,7 +70,8 @@ extension Record where Schema == Metadata.Tables.AssemblyRef {
   }
 
   public var HashValue: Blob {
-    database.blobs[columns[8]]
+    @_lifetime(copy self)
+    get { database.blobs[columns[8]] }
   }
 }
 

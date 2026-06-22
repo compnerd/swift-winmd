@@ -19,56 +19,71 @@
 /// computationally expensive. The `Rows` computation is expensive due to the
 /// allocation of the returned `Array`. The `Tables` computation is expensive
 /// as it requires the re-creationg of the table data.
-public struct TablesStream {
-  private let data: ArraySlice<UInt8>
+///
+/// Used transiently during database parsing. It operates on the whole-buffer
+/// span; `base` is the absolute byte offset of the stream within the buffer.
+public struct TablesStream: ~Escapable {
+  internal let bytes: RawSpan
+  internal let base: Int
+  /// The absolute byte offset of the end of the stream within the buffer.
+  ///
+  /// Table ranges are bounds-checked against this, not the whole buffer, so a
+  /// malformed stream whose records run past its declared extent is rejected
+  /// rather than read out of the adjacent heaps.
+  internal let limit: Int
 
-  public init(data: ArraySlice<UInt8>) {
-    self.data = data
+  @_lifetime(copy bytes)
+  internal init(_ bytes: RawSpan, base: Int, limit: Int) {
+    self.bytes = bytes
+    self.base = base
+    self.limit = limit
   }
 
-  public init(from assembly: Assembly) throws(WinMDError) {
-    guard let stream = assembly.Metadata.stream(named: Metadata.Stream.Tables) else {
+  @_lifetime(copy assembly)
+  internal init(from assembly: Assembly) throws(WinMDError) {
+    guard let stream =
+        assembly.Metadata.stream(named: Metadata.Stream.Tables) else {
       throw .MissingTableStream
     }
-    self.init(data: stream)
+    self.init(assembly.bytes, base: stream.offset,
+              limit: stream.offset + stream.size)
   }
 
   public var MajorVersion: UInt8 {
-    data[4, UInt8.self]
+    bytes.read(at: base + 4, as: UInt8.self)
   }
 
   public var MinorVersion: UInt8 {
-    data[5, UInt8.self]
+    bytes.read(at: base + 5, as: UInt8.self)
   }
 
   public var HeapSizes: UInt8 {
-    data[6, UInt8.self]
+    bytes.read(at: base + 6, as: UInt8.self)
   }
 
   public var Valid: UInt64 {
-    data[8, UInt64.self]
+    bytes.read(at: base + 8, as: UInt64.self)
   }
 
   public var Sorted: UInt64 {
-    data[16, UInt64.self]
+    bytes.read(at: base + 16, as: UInt64.self)
   }
 
   public var Rows: Array<UInt32> {
     let tables = Valid.nonzeroBitCount
-    let nbytes = tables * MemoryLayout<UInt32>.size
-    let begin = data.index(data.startIndex, offsetBy: 24)
-    let end = data.index(begin, offsetBy: nbytes)
-    return Array<UInt32>(unsafeUninitializedCapacity: tables) {
-      data.copyBytes(to: $0, from: begin ..< end)
-      $1 = tables
+    return (0 ..< tables).map {
+      bytes.read(at: base + 24 + $0 * MemoryLayout<UInt32>.size,
+                 as: UInt32.self)
     }
   }
 
   /// Opens the tables present in the stream.
   ///
   /// Each table's record layout is resolved against `decoder` once, here, and
-  /// carried by the returned `Table` for the lifetime of the database.
-  internal func relations(_ decoder: DatabaseDecoder) throws(WinMDError) -> Array<Table> {
+  /// carried by the returned `Table` for the lifetime of the database. Each
+  /// table records its absolute byte range within the backing buffer.
+  internal func relations(_ decoder: DatabaseDecoder)
+      throws(WinMDError) -> Array<Table> {
     var relations = Array<Table>()
     relations.reserveCapacity(Valid.nonzeroBitCount)
 
@@ -77,8 +92,8 @@ public struct TablesStream {
     // The row data begins at offset 24 (see the structure layout above). The
     // rows are stored in a packaed series of 32-bit words, one-per-table. We
     // re-use the `rows.count` as we have already computed the value for reuse
-    // in the subseuquent loop.
-    var offset = 24 + rows.count * MemoryLayout<UInt32>.size
+    // in the subseuquent loop. Offsets are absolute into the backing buffer.
+    var offset = base + 24 + rows.count * MemoryLayout<UInt32>.size
 
     for schema in kRegisteredTables {
       guard Valid & (1 << schema.number) == (1 << schema.number) else { continue }
@@ -88,17 +103,12 @@ public struct TablesStream {
       let descriptor = TupleDescriptor(schema.columns, decoder)
       let words = Int(records) * descriptor.stride
 
-      guard let startIndex =
-          data.index(data.startIndex, offsetBy: offset,
-                     limitedBy: data.endIndex),
-          let endIndex =
-              data.index(startIndex, offsetBy: words,
-                         limitedBy: data.endIndex) else {
+      guard offset >= base, offset + words <= limit else {
         throw .InvalidIndex
       }
 
       relations.append(Table(schema, rows: records,
-                             data: data[startIndex ..< endIndex],
+                             range: offset ..< offset + words,
                              descriptor: descriptor))
       offset = offset + words
     }

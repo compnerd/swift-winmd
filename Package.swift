@@ -25,7 +25,10 @@ let SwiftWinMD = Package(
             swiftSettings: [
               .enableExperimentalFeature("Lifetimes"),
             ]),
-    .testTarget(name: "WinMDTests", dependencies: ["WinMD"]),
+    .testTarget(name: "WinMDTests", dependencies: ["WinMD"],
+            swiftSettings: [
+              .enableExperimentalFeature("Lifetimes"),
+            ]),
 
     // winmd-inspect
     .executableTarget(name: "winmd-inspect",
@@ -34,6 +37,7 @@ let SwiftWinMD = Package(
               .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             swiftSettings: [
+              .enableExperimentalFeature("Lifetimes"),
               .unsafeFlags([
                 "-parse-as-library",
               ]),

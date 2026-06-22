@@ -1,16 +1,21 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-import struct Foundation.Data
-import struct Foundation.URL
+/// A borrowed view over a CIL metadata database.
+///
+/// The database is a `~Escapable` view over a caller-owned byte buffer: the
+/// caller is responsible for keeping the buffer alive for as long as the
+/// database (and anything derived from it) is in use.
+public struct Database: ~Escapable {
+  /// The backing buffer.
+  internal let bytes: RawSpan
 
-public class Database {
-  /// The tables stream of the database.
+  /// The absolute byte range of the tables stream within the buffer.
   ///
   /// Locating a stream means parsing the metadata stream headers, so resolving
   /// it on each access would re-parse those headers every time. It is invariant
   /// for the file's lifetime, so it is located once when the database is opened.
-  public let stream: TablesStream
+  private let range: Range<Int>
 
   /// The decoded physical schema (index and column widths) of the database.
   ///
@@ -28,10 +33,37 @@ public class Database {
 
   // The heaps, located once when the database is opened. A heap is invariant
   // for the file's lifetime, and an absent heap fails the open rather than being
-  // tolerated and surfaced as an error on use.
-  public let blobs: BlobsHeap
-  public let guids: GUIDHeap
-  public let strings: StringsHeap
+  // tolerated and surfaced as an error on use. They are stored as borrowed
+  // sub-spans of the backing buffer.
+  private let blob: RawSpan
+  private let guid: RawSpan
+  private let string: RawSpan
+
+  // MARK: - Streams
+
+  public var stream: TablesStream {
+    @_lifetime(copy self)
+    get {
+      TablesStream(bytes, base: range.lowerBound, limit: range.upperBound)
+    }
+  }
+
+  // MARK: - Heaps
+
+  public var blobs: BlobsHeap {
+    @_lifetime(copy self)
+    get { BlobsHeap(blob) }
+  }
+
+  public var guids: GUIDHeap {
+    @_lifetime(copy self)
+    get { GUIDHeap(guid) }
+  }
+
+  public var strings: StringsHeap {
+    @_lifetime(copy self)
+    get { StringsHeap(string) }
+  }
 
   // MARK: - Tables
 
@@ -41,30 +73,39 @@ public class Database {
 
   // MARK: - Initializers
 
-  private init(data: Array<UInt8>) throws(WinMDError) {
-    let dos = try DOSFile(from: data)
+  @_lifetime(copy bytes)
+  public init(_ bytes: RawSpan) throws(WinMDError) {
+    let dos = try DOSFile(bytes)
     let pe = try PEFile(from: dos)
     let cil = try Assembly(from: pe)
 
-    self.stream = try TablesStream(from: cil)
+    self.bytes = bytes
+
+    let stream = try TablesStream(from: cil)
+    self.range = stream.base ..< stream.limit
     self.decoder = DatabaseDecoder(stream)
     self.relations = try stream.relations(decoder)
 
-    self.blobs = try BlobsHeap(from: cil)
-    self.guids = try GUIDHeap(from: cil)
-    self.strings = try StringsHeap(from: cil)
-  }
+    guard let blobs = cil.Metadata.stream(named: Metadata.Stream.Blob) else {
+      throw .BlobsHeapNotFound
+    }
+    self.blob = bytes.extracting(blobs.offset ..< blobs.offset + blobs.size)
 
-  public convenience init(at path: URL) throws {
-    // Although it is inconvenient to read data from a file without using
-    // `Data`, once the data has been read, it is usually easier to work with a
-    // byte array representation. Unfortunately, this conversion is likely to
-    // incur a pointless copy.
-    try self.init(data: Array(Data(contentsOf: path, options: .alwaysMapped)))
+    guard let guids = cil.Metadata.stream(named: Metadata.Stream.GUID) else {
+      throw .GUIDHeapNotFound
+    }
+    self.guid = bytes.extracting(guids.offset ..< guids.offset + guids.size)
+
+    guard let strings = cil.Metadata.stream(named: Metadata.Stream.Strings) else {
+      throw .StringsHeapNotFound
+    }
+    self.string =
+        bytes.extracting(strings.offset ..< strings.offset + strings.size)
   }
 
   // MARK: - subscripting
 
+  @_lifetime(copy self)
   public func rows<Schema: TableSchema>(of schema: Schema.Type,
                                         from begin: Int = 0,
                                         to end: Int? = nil) throws(WinMDError)

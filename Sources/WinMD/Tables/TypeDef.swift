@@ -43,12 +43,14 @@ extension Record where Schema == Metadata.Tables.TypeDef {
   }
 
   public var FieldList: TableIterator<Metadata.Tables.FieldDef> {
+    @_lifetime(copy self)
     get throws(WinMDError) {
       try list(for: 4)
     }
   }
 
   public var MethodList: TableIterator<Metadata.Tables.MethodDef> {
+    @_lifetime(copy self)
     get throws(WinMDError) {
       try list(for: 5)
     }

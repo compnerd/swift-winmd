@@ -1,19 +1,21 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-public import CPE
+internal import CPE
 
-public struct DOSFile {
-  internal let data: Array<UInt8>
+/// A borrowed view over a DOS/PE image.
+///
+/// Used transiently during database parsing. It operates on the whole-buffer
+/// span; the MS-DOS stub begins at offset zero.
+internal struct DOSFile: ~Escapable {
+  internal let bytes: RawSpan
 
-  public init(from data: Array<UInt8>) throws(WinMDError) {
-    // NOTE: We initialize the properties before validating the input to avoid
-    // duplicating the logic to extract the header or converting the validation
-    // into a static method.
-    self.data = data
+  @_lifetime(copy bytes)
+  internal init(_ bytes: RawSpan) throws(WinMDError) {
+    self.bytes = bytes
 
     // Must have enough data to even contain a DOS stub.
-    guard data.count >= MemoryLayout<IMAGE_DOS_HEADER>.size else {
+    guard bytes.byteCount >= MemoryLayout<IMAGE_DOS_HEADER>.size else {
       throw .BadImageFormat
     }
 
@@ -24,22 +26,19 @@ public struct DOSFile {
 
     // The LFA of the PE signature (if there is one) must be within the file's
     // bounds.
-    guard Header.e_lfanew < data.count else {
+    guard Header.e_lfanew < bytes.byteCount else {
       throw .BadImageFormat
     }
   }
 
   /// The raw MS-DOS stub image header.
-  public var Header: IMAGE_DOS_HEADER {
-    data.withUnsafeBytes {
-      $0.bindMemory(to: IMAGE_DOS_HEADER.self)[0]
-    }
+  internal var Header: IMAGE_DOS_HEADER {
+    bytes.load(at: 0, as: IMAGE_DOS_HEADER.self)
   }
 
-  /// The complete contents of the file excluding the MS-DOS stub. Returns a
-  /// slice to help avoid excess copying. This unwraps the MS-DOS stub
-  /// envelope on a PE/COFF file.
-  public var NewExecutable: ArraySlice<UInt8> {
-    data[numericCast(Header.e_lfanew)...]
+  /// The absolute byte offset, within the buffer, of the contents following the
+  /// MS-DOS stub. This unwraps the MS-DOS stub envelope on a PE/COFF file.
+  internal var NewExecutable: Int {
+    numericCast(Header.e_lfanew)
   }
 }

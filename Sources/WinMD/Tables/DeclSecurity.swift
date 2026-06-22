@@ -29,6 +29,7 @@ extension Record where Schema == Metadata.Tables.DeclSecurity {
   }
 
   public var PermissionSet: Blob {
-    database.blobs[columns[2]]
+    @_lifetime(copy self)
+    get { database.blobs[columns[2]] }
   }
 }

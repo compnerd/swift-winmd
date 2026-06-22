@@ -4,27 +4,19 @@
 public import struct Foundation.UUID
 public import typealias Foundation.uuid_t
 
-public struct GUIDHeap {
-  let data: ArraySlice<UInt8>
+public struct GUIDHeap: ~Escapable {
+  internal let bytes: RawSpan
 
-  public init(data: ArraySlice<UInt8>) {
-    self.data = data
-  }
-
-  public init(from assembly: Assembly) throws(WinMDError) {
-    guard let stream = assembly.Metadata.stream(named: Metadata.Stream.GUID) else {
-      throw .GUIDHeapNotFound
-    }
-    self.init(data: stream)
+  @_lifetime(copy bytes)
+  public init(_ bytes: RawSpan) {
+    self.bytes = bytes
   }
 
   public subscript(index: Int) -> UUID {
     get throws(WinMDError) {
       guard index > 0 else { throw .InvalidIndex }
-      return UUID(uuid: data.withUnsafeBytes {
-        $0.load(fromByteOffset: MemoryLayout<uuid_t>.stride * (index - 1), as: uuid_t.self)
-      })
+      let offset = MemoryLayout<uuid_t>.stride * (index - 1)
+      return UUID(uuid: bytes.read(at: offset, as: uuid_t.self))
     }
   }
 }
-

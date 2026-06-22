@@ -1,6 +1,8 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
+internal import struct Foundation.Data
+
 internal import ArgumentParser
 internal import WinMD
 
@@ -13,7 +15,11 @@ struct Dump: ParsableCommand {
   var options: InspectOptions
 
   func run() throws {
-    let database = try Database(at: options.database.url)
+    // The caller owns the buffer; it must outlive the database, which is a
+    // borrowed view over it.
+    let bytes = try Array(Data(contentsOf: options.database.url,
+                               options: .alwaysMapped))
+    let database = try Database(bytes.span.bytes)
 
     print("Database: \(options.database.url.path)")
 
@@ -24,11 +30,6 @@ struct Dump: ParsableCommand {
     print("Tables:")
     for table in database.tables {
       print("  - \(table)")
-#if HAVE_GENERIC_TABLE_ITERATION
-      for row in try TableIterator(database, table) {
-        print("    - \(row)")
-      }
-#endif
     }
   }
 }
@@ -42,10 +43,14 @@ struct PrintNamespaces: ParsableCommand {
   var options: InspectOptions
 
   func run() throws {
-    let database = try Database(at: options.database.url)
+    let bytes = try Array(Data(contentsOf: options.database.url,
+                               options: .alwaysMapped))
+    let database = try Database(bytes.span.bytes)
 
     var namespaces = Set<String>()
-    for row in try database.rows(of: Metadata.Tables.TypeDef.self) {
+    let rows = try database.rows(of: Metadata.Tables.TypeDef.self)
+    for i in 0 ..< rows.count {
+      let row = rows[i]!
       namespaces.insert(row.TypeNamespace)
     }
 

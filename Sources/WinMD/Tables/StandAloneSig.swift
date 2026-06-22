@@ -21,6 +21,7 @@ public enum StandAloneSig: TableSchema {
 
 extension Record where Schema == Metadata.Tables.StandAloneSig {
   public var Signature: Blob {
-    database.blobs[columns[0]]
+    @_lifetime(copy self)
+    get { database.blobs[columns[0]] }
   }
 }

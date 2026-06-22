@@ -21,6 +21,7 @@ public enum TypeSpec: TableSchema {
 
 extension Record where Schema == Metadata.Tables.TypeSpec {
   public var Signature: Blob {
-    database.blobs[columns[0]]
+    @_lifetime(copy self)
+    get { database.blobs[columns[0]] }
   }
 }

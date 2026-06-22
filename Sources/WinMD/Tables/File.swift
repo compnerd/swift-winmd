@@ -33,6 +33,7 @@ extension Record where Schema == Metadata.Tables.File {
   }
 
   public var HashValue: Blob {
-    database.blobs[columns[2]]
+    @_lifetime(copy self)
+    get { database.blobs[columns[2]] }
   }
 }

@@ -35,6 +35,7 @@ extension Record where Schema == Metadata.Tables.ImplMap {
   }
 
   public var ImportScope: Record<Metadata.Tables.ModuleRef> {
+    @_lifetime(copy self)
     get throws(WinMDError) {
       try database.rows(of: Metadata.Tables.ModuleRef.self)[columns[3]]!
     }

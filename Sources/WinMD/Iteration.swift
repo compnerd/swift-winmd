@@ -7,18 +7,56 @@
 /// an iterable entity in the record collection of a table.
 public struct Record<Table: WinMD.Table> {
   internal let row: Int
-  internal let columns: Array<Int>
+  internal let data: ArraySlice<UInt8>
+  internal let descriptor: TupleDescriptor
   internal let database: Database
   // Do not expose the table to even internal users as this is used soley to get
   // a reference to the next record, which is required for list processing.
   private let table: Table
 
-  internal init(_ row: Int, _ columns: Array<Int>, _ database: Database,
+  /// The decoded columns of the record.
+  ///
+  /// The values are read from the backing storage on demand rather than
+  /// materialised, so accessing a record does not allocate and only the columns
+  /// that are read are decoded.
+  internal var columns: Columns {
+    Columns(data: data, descriptor: descriptor)
+  }
+
+  internal init(_ row: Int, _ data: ArraySlice<UInt8>,
+                _ descriptor: TupleDescriptor, _ database: Database,
                 _ table: Table) {
     self.row = row
-    self.columns = columns
+    self.data = data
+    self.descriptor = descriptor
     self.database = database
     self.table = table
+  }
+}
+
+extension Record {
+  /// A zero-allocation view over the columns of a record.
+  internal struct Columns: RandomAccessCollection {
+    private let data: ArraySlice<UInt8>
+    private let descriptor: TupleDescriptor
+
+    internal init(data: ArraySlice<UInt8>, descriptor: TupleDescriptor) {
+      self.data = data
+      self.descriptor = descriptor
+    }
+
+    internal var startIndex: Int { 0 }
+    internal var endIndex: Int { descriptor.columns.count }
+
+    internal subscript(_ column: Int) -> Int {
+      let (offset, width) = descriptor.columns[column]
+      switch width {
+      case 1: return Int(data[offset, UInt8.self])
+      case 2: return Int(data[offset, UInt16.self])
+      case 4: return Int(data[offset, UInt32.self])
+      default: fatalError("unsupported column size '\(width)'")
+      }
+    }
   }
 }
 
@@ -29,12 +67,10 @@ extension Record {
     // beginning of the list, and the next row indicates the index of one past
     // the end.
     let begin = columns[column]
-    let end: Int?
-
-    if row + 1 < table.rows {
-      end = table[row + 1, database].columns[column] - 1
+    let end: Int? = if row + 1 < table.rows {
+      table[row + 1, database].columns[column] - 1
     } else {
-      end = nil
+      nil
     }
 
     return try database.rows(of: Target.self, from: begin, to: end)

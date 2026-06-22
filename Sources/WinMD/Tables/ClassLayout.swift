@@ -28,7 +28,7 @@ extension Record where Schema == Metadata.Tables.ClassLayout {
   }
 
   public var Parent: Record<Metadata.Tables.TypeDef> {
-    get throws {
+    get throws(WinMDError) {
       try database.rows(of: Metadata.Tables.TypeDef.self)[columns[2]]!
     }
   }

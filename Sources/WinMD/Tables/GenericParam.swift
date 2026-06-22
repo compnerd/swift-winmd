@@ -30,7 +30,7 @@ extension Record where Schema == Metadata.Tables.GenericParam {
   }
 
   public var Name: String {
-    get throws {
+    get throws(WinMDError) {
       try database.strings[columns[3]]
     }
   }

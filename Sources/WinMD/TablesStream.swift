@@ -26,9 +26,9 @@ public struct TablesStream {
     self.data = data
   }
 
-  public init(from assembly: Assembly) throws {
+  public init(from assembly: Assembly) throws(WinMDError) {
     guard let stream = assembly.Metadata.stream(named: Metadata.Stream.Tables) else {
-      throw WinMDError.MissingTableStream
+      throw .MissingTableStream
     }
     self.init(data: stream)
   }
@@ -68,7 +68,7 @@ public struct TablesStream {
   ///
   /// Each table's record layout is resolved against `decoder` once, here, and
   /// carried by the returned `Table` for the lifetime of the database.
-  internal func relations(_ decoder: DatabaseDecoder) throws -> Array<Table> {
+  internal func relations(_ decoder: DatabaseDecoder) throws(WinMDError) -> Array<Table> {
     var relations = Array<Table>()
     relations.reserveCapacity(Valid.nonzeroBitCount)
 
@@ -94,7 +94,7 @@ public struct TablesStream {
           let endIndex =
               data.index(startIndex, offsetBy: words,
                          limitedBy: data.endIndex) else {
-        throw WinMDError.InvalidIndex
+        throw .InvalidIndex
       }
 
       relations.append(Table(schema, rows: records,

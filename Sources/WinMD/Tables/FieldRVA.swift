@@ -22,7 +22,7 @@ extension Record where Schema == Metadata.Tables.FieldRVA {
   }
 
   public var Field: Record<Metadata.Tables.FieldDef> {
-    get throws {
+    get throws(WinMDError) {
       try database.rows(of: Metadata.Tables.FieldDef.self)[columns[1]]!
     }
   }

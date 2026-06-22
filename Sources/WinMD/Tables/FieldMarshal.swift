@@ -18,7 +18,7 @@ public enum FieldMarshal: TableSchema {
 
 extension Record where Schema == Metadata.Tables.FieldMarshal {
   public var NativeType: Blob {
-    get throws {
+    get throws(WinMDError) {
       try database.blobs[columns[1]]
     }
   }

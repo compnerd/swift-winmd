@@ -24,13 +24,13 @@ extension Record where Schema == Metadata.Tables.File {
   }
 
   public var Name: String {
-    get throws {
+    get throws(WinMDError) {
       try database.strings[columns[1]]
     }
   }
 
   public var HashValue: Blob {
-    get throws {
+    get throws(WinMDError) {
       try database.blobs[columns[2]]
     }
   }

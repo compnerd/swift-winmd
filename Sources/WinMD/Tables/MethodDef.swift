@@ -38,19 +38,19 @@ extension Record where Schema == Metadata.Tables.MethodDef {
   }
 
   public var Name: String {
-    get throws {
+    get throws(WinMDError) {
       try database.strings[columns[3]]
     }
   }
 
   public var Signature: Blob {
-    get throws {
+    get throws(WinMDError) {
       try database.blobs[columns[4]]
     }
   }
 
   public var ParamList: TableIterator<Metadata.Tables.Param> {
-    get throws {
+    get throws(WinMDError) {
       try list(for: 5)
     }
   }

@@ -28,13 +28,13 @@ extension Record where Schema == Metadata.Tables.ExportedType {
   }
 
   public var TypeName: String {
-    get throws {
+    get throws(WinMDError) {
       try database.strings[columns[2]]
     }
   }
 
   public var TypeNamespace: String {
-    get throws {
+    get throws(WinMDError) {
       try database.strings[columns[3]]
     }
   }

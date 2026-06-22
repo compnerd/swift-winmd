@@ -30,25 +30,25 @@ extension Record where Schema == Metadata.Tables.Module {
   }
 
   public var Name: String {
-    get throws {
+    get throws(WinMDError) {
       try database.strings[columns[1]]
     }
   }
 
   public var Mvid: UUID {
-    get throws {
+    get throws(WinMDError) {
       try database.guids[columns[2]]
     }
   }
 
   public var EncId: UUID {
-    get throws {
+    get throws(WinMDError) {
       try database.guids[columns[3]]
     }
   }
 
   public var EncBaseId: UUID {
-    get throws {
+    get throws(WinMDError) {
       try database.guids[columns[4]]
     }
   }

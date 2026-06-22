@@ -24,13 +24,13 @@ extension Record where Schema == Metadata.Tables.FieldDef {
   }
 
   public var Name: String {
-    get throws {
+    get throws(WinMDError) {
       try database.strings[columns[1]]
     }
   }
 
   public var Signature: Blob {
-    get throws {
+    get throws(WinMDError) {
       try database.blobs[columns[2]]
     }
   }

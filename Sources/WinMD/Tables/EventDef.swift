@@ -24,7 +24,7 @@ extension Record where Schema == Metadata.Tables.EventDef {
   }
 
   public var Name: String {
-    get throws {
+    get throws(WinMDError) {
       try database.strings[columns[1]]
     }
   }

@@ -7,9 +7,9 @@ private var CIL_METADATA_SIGNATURE: UInt32 { 0x424a5342 }
 
 extension PEFile {
   internal func contents(_ directory: IMAGE_DATA_DIRECTORY)
-      throws -> ArraySlice<UInt8> {
+      throws(WinMDError) -> ArraySlice<UInt8> {
     let sections = Sections.containing(rva: directory.VirtualAddress)
-    guard sections.count == 1 else { throw WinMDError.BadImageFormat }
+    guard sections.count == 1 else { throw .BadImageFormat }
 
     let LogicalAddress = sections.first!.offset(from: directory.VirtualAddress)
 
@@ -34,7 +34,7 @@ public struct Assembly {
     MetadataRoot(data: metadata)
   }
 
-  public init(from pe: PEFile) throws {
+  public init(from pe: PEFile) throws(WinMDError) {
     let COMDescriptor = pe.DataDirectory.14
 
     // CLI Header
@@ -45,14 +45,14 @@ public struct Assembly {
     }
 
     guard Header.cb == MemoryLayout<IMAGE_COR20_HEADER>.size else {
-      throw WinMDError.BadImageFormat
+      throw .BadImageFormat
     }
 
     // CLI Metadata
     self.metadata = try pe.contents(Header.MetaData)
 
     guard Metadata.Signature == CIL_METADATA_SIGNATURE else {
-      throw WinMDError.BadImageFormat
+      throw .BadImageFormat
     }
   }
 }

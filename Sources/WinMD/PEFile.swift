@@ -58,15 +58,15 @@ public struct PEFile {
     }
   }
 
-  public init(from dos: DOSFile) throws {
+  public init(from dos: DOSFile) throws(WinMDError) {
     self.data = dos.NewExecutable
 
     guard data.count > MemoryLayout<IMAGE_NT_HEADERS32>.size else {
-      throw WinMDError.BadImageFormat
+      throw .BadImageFormat
     }
 
     guard Header32.Signature == IMAGE_NT_SIGNATURE else {
-      throw WinMDError.BadImageFormat
+      throw .BadImageFormat
     }
   }
 }

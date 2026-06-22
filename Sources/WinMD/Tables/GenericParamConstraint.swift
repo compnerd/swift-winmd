@@ -18,7 +18,7 @@ public enum GenericParamConstraint: TableSchema {
 
 extension Record where Schema == Metadata.Tables.GenericParamConstraint {
   public var Owner: Record<Metadata.Tables.GenericParam> {
-    get throws {
+    get throws(WinMDError) {
       try database.rows(of: Metadata.Tables.GenericParam.self)[columns[0]]!
     }
   }

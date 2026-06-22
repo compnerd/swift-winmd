@@ -28,7 +28,7 @@ extension Record where Schema == Metadata.Tables.Param {
   }
 
   public var Name: String {
-    get throws {
+    get throws(WinMDError) {
       try database.strings[columns[2]]
     }
   }

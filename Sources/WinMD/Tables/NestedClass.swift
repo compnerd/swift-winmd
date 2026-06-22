@@ -18,13 +18,13 @@ public enum NestedClass: TableSchema {
 
 extension Record where Schema == Metadata.Tables.NestedClass {
   public var NestedClass: Record<Metadata.Tables.TypeDef> {
-    get throws {
+    get throws(WinMDError) {
       try database.rows(of: Metadata.Tables.TypeDef.self)[columns[0]]!
     }
   }
 
   public var EnclosingClass: Record<Metadata.Tables.TypeDef> {
-    get throws {
+    get throws(WinMDError) {
       try database.rows(of: Metadata.Tables.TypeDef.self)[columns[1]]!
     }
   }

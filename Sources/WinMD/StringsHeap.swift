@@ -11,9 +11,9 @@ public struct StringsHeap {
     self.data = data
   }
 
-  public init(from assembly: Assembly) throws {
+  public init(from assembly: Assembly) throws(WinMDError) {
     guard let stream = assembly.Metadata.stream(named: Metadata.Stream.Strings) else {
-      throw WinMDError.StringsHeapNotFound
+      throw .StringsHeapNotFound
     }
     self.init(data: stream)
   }
@@ -22,7 +22,7 @@ public struct StringsHeap {
     let index = data.index(data.startIndex, offsetBy: offset)
     return data[index...].withUnsafeBytes {
       String(decodingCString: $0.baseAddress!.assumingMemoryBound(to: UTF8.CodeUnit.self),
-             as: UTF8.self)
+          as: UTF8.self)
     }
   }
 }

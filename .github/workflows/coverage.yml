@@ -17,7 +17,7 @@ jobs:
       matrix:
         include:
           - branch: development
-            tag: DEVELOPMENT-SNAPSHOT-2022-02-22-a
+            tag: DEVELOPMENT-SNAPSHOT-2026-05-04-a
 
     steps:
       - uses: compnerd/gha-setup-swift@main
@@ -31,7 +31,12 @@ jobs:
       - name: Run tests
         run: swift test -v --enable-code-coverage
       - name: Process Coverage Information
-        run: llvm-cov export -format lcov -ignore-filename-regex ".build|Tests" -instr-profile .build\x86_64-unknown-windows-msvc\debug\codecov\default.profdata .build\x86_64-unknown-windows-msvc\debug\SwiftWinMDPackageTests.xctest > coverage.lcov
+        run: |
+          $bin = swift build --show-bin-path
+          $objects = (swift package describe --type json | ConvertFrom-Json).targets |
+            Where-Object { $_.type -eq 'test' } |
+            ForEach-Object { '-object'; "$bin\$($_.name)-test-runner.exe" }
+          llvm-cov export -format lcov -ignore-filename-regex ".build|Tests" -instr-profile "$bin\codecov\default.profdata" @objects > coverage.lcov
       - uses: codecov/codecov-action@v1.5.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 /// Identifies the well-known heap.
-public enum Heap {
+public enum Heap: Sendable {
   /// The blob heap.
   case blob
 
@@ -14,7 +14,7 @@ public enum Heap {
 }
 
 /// A foreign-key index.
-public enum Index {
+public enum Index: Sendable {
   /// Index into a well known heap.
   case heap(Heap)
 
@@ -30,13 +30,13 @@ extension Index: Equatable {
   public static func == (lhs: Index, rhs: Index) -> Bool {
     switch (lhs, rhs) {
     case let (.heap(lhs), .heap(rhs)):
-      return lhs == rhs
+      lhs == rhs
     case let (.simple(lhs), .simple(rhs)):
-      return lhs == rhs
+      lhs == rhs
     case let (.coded(lhs), .coded(rhs)):
-      return lhs == rhs
+      lhs == rhs
     default:
-      return false
+      false
     }
   }
 }

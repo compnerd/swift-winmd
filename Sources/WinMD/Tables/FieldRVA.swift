@@ -3,7 +3,7 @@
 
 extension Metadata.Tables {
 /// See §II.22.18.
-public final class FieldRVA: Table {
+public enum FieldRVA: TableSchema {
   public static var number: Int { 29 }
 
   /// Record Layout
@@ -13,18 +13,10 @@ public final class FieldRVA: Table {
     Column(name: "RVA", type: .constant(4)),
     Column(name: "Field", type: .index(.simple(FieldDef.self))),
   ]
-
-  public let rows: UInt32
-  public let data: ArraySlice<UInt8>
-
-  public init(rows: UInt32, data: ArraySlice<UInt8>) {
-    self.rows = rows
-    self.data = data
-  }
 }
 }
 
-extension Record where Table == Metadata.Tables.FieldRVA {
+extension Record where Schema == Metadata.Tables.FieldRVA {
   public var RVA: UInt32 {
     UInt32(columns[0])
   }

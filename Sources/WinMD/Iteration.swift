@@ -5,14 +5,13 @@
 ///
 /// A record, or colloquailly a row, is a singular entity in a table. This is
 /// an iterable entity in the record collection of a table.
-public struct Record<Table: WinMD.Table> {
+public struct Record<Schema: TableSchema> {
   internal let row: Int
-  internal let data: ArraySlice<UInt8>
-  internal let descriptor: TupleDescriptor
+  // The open table the record belongs to.  It carries the shared record layout
+  // and backing storage, and is also used to reach the following record, which
+  // is required for list processing.
+  internal let table: Table
   internal let database: Database
-  // Do not expose the table to even internal users as this is used soley to get
-  // a reference to the next record, which is required for list processing.
-  private let table: Table
 
   /// The decoded columns of the record.
   ///
@@ -20,40 +19,37 @@ public struct Record<Table: WinMD.Table> {
   /// materialised, so accessing a record does not allocate and only the columns
   /// that are read are decoded.
   internal var columns: Columns {
-    Columns(data: data, descriptor: descriptor)
+    Columns(table, row)
   }
 
-  internal init(_ row: Int, _ data: ArraySlice<UInt8>,
-                _ descriptor: TupleDescriptor, _ database: Database,
-                _ table: Table) {
+  internal init(_ row: Int, _ table: Table, _ database: Database) {
     self.row = row
-    self.data = data
-    self.descriptor = descriptor
-    self.database = database
     self.table = table
+    self.database = database
   }
 }
 
 extension Record {
   /// A zero-allocation view over the columns of a record.
   internal struct Columns: RandomAccessCollection {
-    private let data: ArraySlice<UInt8>
-    private let descriptor: TupleDescriptor
+    private let table: Table
+    private let row: Int
 
-    internal init(data: ArraySlice<UInt8>, descriptor: TupleDescriptor) {
-      self.data = data
-      self.descriptor = descriptor
+    internal init(_ table: Table, _ row: Int) {
+      self.table = table
+      self.row = row
     }
 
     internal var startIndex: Int { 0 }
-    internal var endIndex: Int { descriptor.columns.count }
+    internal var endIndex: Int { table.descriptor.columns.count }
 
     internal subscript(_ column: Int) -> Int {
-      let (offset, width) = descriptor.columns[column]
+      let base = row * table.descriptor.stride
+      let (offset, width) = table.descriptor.columns[column]
       switch width {
-      case 1: return Int(data[offset, UInt8.self])
-      case 2: return Int(data[offset, UInt16.self])
-      case 4: return Int(data[offset, UInt32.self])
+      case 1: return Int(table.data[base + offset, UInt8.self])
+      case 2: return Int(table.data[base + offset, UInt16.self])
+      case 4: return Int(table.data[base + offset, UInt32.self])
       default: fatalError("unsupported column size '\(width)'")
       }
     }
@@ -61,14 +57,14 @@ extension Record {
 }
 
 extension Record {
-  internal func list<Target: WinMD.Table>(for column: Int) throws
+  internal func list<Target: TableSchema>(for column: Int) throws
       -> TableIterator<Target> {
     // Lists are stored as a single index in the current row. This marks the
     // beginning of the list, and the next row indicates the index of one past
     // the end.
     let begin = columns[column]
     let end: Int? = if row + 1 < table.rows {
-      table[row + 1, database].columns[column] - 1
+      Record(row + 1, table, database).columns[column] - 1
     } else {
       nil
     }
@@ -80,12 +76,12 @@ extension Record {
 extension Record: CustomDebugStringConvertible {
   public var debugDescription: String {
     columns.enumerated().map { (column, value) in
-      switch Table.columns[column].type {
+      switch Schema.columns[column].type {
       case let .index(.heap(heap)) where heap == .string:
         let value = (try? database.strings[value]) ?? "<unknown>"
-        return "\(Table.columns[column].name): \(value)"
+        return "\(Schema.columns[column].name): \(value)"
       default:
-        return "\(Table.columns[column].name): \(value)"
+        return "\(Schema.columns[column].name): \(value)"
       }
     }.joined(separator: ", ")
   }
@@ -93,11 +89,10 @@ extension Record: CustomDebugStringConvertible {
 
 /// Iterator for a `Table`
 ///
-/// Provides a way to iterate a given table in a type-safe manner. It decodes a
-/// particular table to provide access to the records. This requires an instance
-/// of a `DatabaseDecoder` to be able to decompress the table and records.
-public struct TableIterator<Table: WinMD.Table>: IteratorProtocol, Sequence {
-  public typealias Element = Record<Table>
+/// Provides a way to iterate a given table in a type-safe manner. It walks the
+/// records of an open `Table`, yielding a typed `Record` for each row.
+public struct TableIterator<Schema: TableSchema>: IteratorProtocol, Sequence {
+  public typealias Element = Record<Schema>
 
   private let table: Table
   private let database: Database
@@ -117,11 +112,11 @@ public struct TableIterator<Table: WinMD.Table>: IteratorProtocol, Sequence {
   public mutating func next() -> Self.Element? {
     guard cursor < rows else { return nil }
     defer { cursor = cursor + 1}
-    return table[cursor, database]
+    return Record(cursor, table, database)
   }
 
   public subscript(_ offset: Int) -> Self.Element? {
     guard (cursor + offset) < rows else { return nil }
-    return table[cursor + offset, database]
+    return Record(cursor + offset, table, database)
   }
 }

@@ -3,7 +3,7 @@
 
 extension Metadata.Tables {
 /// See §II.22.31.
-public final class ModuleRef: Table {
+public enum ModuleRef: TableSchema {
   public static var number: Int { 26 }
 
   /// Record Layout
@@ -11,18 +11,10 @@ public final class ModuleRef: Table {
   public static let columns = [
     Column(name: "Name", type: .index(.heap(.string))),
   ]
-
-  public let rows: UInt32
-  public let data: ArraySlice<UInt8>
-
-  public init(rows: UInt32, data: ArraySlice<UInt8>) {
-    self.rows = rows
-    self.data = data
-  }
 }
 }
 
-extension Record where Table == Metadata.Tables.ModuleRef {
+extension Record where Schema == Metadata.Tables.ModuleRef {
   public var Name: String {
     get throws {
       try database.strings[columns[0]]

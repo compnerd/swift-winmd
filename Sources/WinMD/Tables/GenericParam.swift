@@ -3,7 +3,7 @@
 
 extension Metadata.Tables {
 /// See §II.22.20.
-public final class GenericParam: Table {
+public enum GenericParam: TableSchema {
   public static var number: Int { 42 }
 
   /// Record Layout
@@ -17,18 +17,10 @@ public final class GenericParam: Table {
     Column(name: "Owner", type: .index(.coded(TypeOrMethodDef.self))),
     Column(name: "Name", type: .index(.heap(.string))),
   ]
-
-  public let rows: UInt32
-  public let data: ArraySlice<UInt8>
-
-  public required init(rows: UInt32, data: ArraySlice<UInt8>) {
-    self.rows = rows
-    self.data = data
-  }
 }
 }
 
-extension Record where Table == Metadata.Tables.GenericParam {
+extension Record where Schema == Metadata.Tables.GenericParam {
   public var Number: UInt16 {
     UInt16(columns[0])
   }

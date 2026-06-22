@@ -3,7 +3,7 @@
 
 extension Metadata.Tables {
 /// See §II.22.9.
-public final class Constant: Table {
+public enum Constant: TableSchema {
   public static var number: Int { 11 }
 
   /// Record Layout
@@ -16,18 +16,10 @@ public final class Constant: Table {
     Column(name: "Parent", type: .index(.coded(HasConstant.self))),
     Column(name: "Value", type: .index(.heap(.blob))),
   ]
-
-  public let rows: UInt32
-  public let data: ArraySlice<UInt8>
-
-  public required init( rows: UInt32, data: ArraySlice<UInt8>) {
-    self.rows = rows
-    self.data = data
-  }
 }
 }
 
-extension Record where Table == Metadata.Tables.Constant {
+extension Record where Schema == Metadata.Tables.Constant {
   public var `Type`: CorElementType {
     CorElementType(rawValue: CorElementType.RawValue(columns[0]))
   }

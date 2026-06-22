@@ -3,7 +3,7 @@
 
 extension Metadata.Tables {
 /// See §II.22.39.
-public final class TypeSpec: Table {
+public enum TypeSpec: TableSchema {
   public static var number: Int { 27 }
 
   /// Record Layout
@@ -11,18 +11,10 @@ public final class TypeSpec: Table {
   public static let columns = [
     Column(name: "Signature", type: .index(.heap(.blob))),
   ]
-
-  public let rows: UInt32
-  public let data: ArraySlice<UInt8>
-
-  public required init(rows: UInt32, data: ArraySlice<UInt8>) {
-    self.rows = rows
-    self.data = data
-  }
 }
 }
 
-extension Record where Table == Metadata.Tables.TypeSpec {
+extension Record where Schema == Metadata.Tables.TypeSpec {
   public var Signature: Blob {
     get throws {
       try database.blobs[columns[0]]

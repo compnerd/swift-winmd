@@ -3,7 +3,7 @@
 
 extension Metadata.Tables {
 /// See §II.22.16.
-public final class FieldLayout: Table {
+public enum FieldLayout: TableSchema {
   public static var number: Int { 16 }
 
   /// Record Layout
@@ -13,18 +13,10 @@ public final class FieldLayout: Table {
     Column(name: "Offset", type: .constant(4)),
     Column(name: "Field", type: .index(.simple(FieldDef.self))),
   ]
-
-  public let rows: UInt32
-  public let data: ArraySlice<UInt8>
-
-  public required init(rows: UInt32, data: ArraySlice<UInt8>) {
-    self.rows = rows
-    self.data = data
-  }
 }
 }
 
-extension Record where Table == Metadata.Tables.FieldLayout {
+extension Record where Schema == Metadata.Tables.FieldLayout {
   public var Offset: UInt32 {
     UInt32(columns[0])
   }

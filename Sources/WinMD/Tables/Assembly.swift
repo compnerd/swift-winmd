@@ -3,7 +3,7 @@
 
 extension Metadata.Tables {
 /// See §II.22.2.
-public final class Assembly: Table {
+public enum Assembly: TableSchema {
   public static var number: Int { 32 }
 
   /// Record Layout
@@ -27,18 +27,10 @@ public final class Assembly: Table {
     Column(name: "Name", type: .index(.heap(.string))),
     Column(name: "Culture", type: .index(.heap(.string))),
   ]
-
-  public let rows: UInt32
-  public let data: ArraySlice<UInt8>
-
-  public required init(rows: UInt32, data: ArraySlice<UInt8>) {
-    self.rows = rows
-    self.data = data
-  }
 }
 }
 
-extension Record where Table == Metadata.Tables.Assembly {
+extension Record where Schema == Metadata.Tables.Assembly {
   public var HashAlgId: CorHashAlgorithm {
     CorHashAlgorithm(rawValue: CorHashAlgorithm.RawValue(columns[0]))!
   }
@@ -82,8 +74,8 @@ extension Record where Table == Metadata.Tables.Assembly {
   }
 }
 
-extension Record where Table == Metadata.Tables.Assembly {
-  internal var Version: AssemblyVersion {
+extension Record where Schema == Metadata.Tables.Assembly {
+  internal var Version: AssemblyVersion  {
     AssemblyVersion(MajorVersion, MinorVersion, BuildNumber, RevisionNumber)
   }
 }

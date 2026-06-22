@@ -5,7 +5,7 @@ public import struct Foundation.UUID
 
 extension Metadata.Tables {
 /// See §II.22.30.
-public final class Module: Table {
+public enum Module: TableSchema {
   public static var number: Int { 0 }
 
   /// Record Layout
@@ -21,18 +21,10 @@ public final class Module: Table {
     Column(name: "EncId", type: .index(.heap(.guid))),
     Column(name: "EncBaseId", type: .index(.heap(.guid))),
   ]
-
-  public let rows: UInt32
-  public let data: ArraySlice<UInt8>
-
-  public init(rows: UInt32, data: ArraySlice<UInt8>) {
-    self.rows = rows
-    self.data = data
-  }
 }
 }
 
-extension Record where Table == Metadata.Tables.Module {
+extension Record where Schema == Metadata.Tables.Module {
   public var Generation: UInt16 {
     UInt16(columns[0])
   }

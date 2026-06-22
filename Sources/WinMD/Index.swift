@@ -19,7 +19,7 @@ public enum Index: Sendable {
   case heap(Heap)
 
   /// A simple index to a table.
-  case simple(Table.Type)
+  case simple(TableSchema.Type)
 
   /// A coded-index.
   case coded(CodedIndex.Type)

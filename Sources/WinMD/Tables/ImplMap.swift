@@ -3,7 +3,7 @@
 
 extension Metadata.Tables {
 /// See §II.22.22.
-public final class ImplMap: Table {
+public enum ImplMap: TableSchema {
   public static var number: Int { 28 }
 
   /// Record Layout
@@ -17,18 +17,10 @@ public final class ImplMap: Table {
     Column(name: "ImportName", type: .index(.heap(.string))),
     Column(name: "ImportScope", type: .index(.simple(ModuleRef.self))),
   ]
-
-  public let rows: UInt32
-  public let data: ArraySlice<UInt8>
-
-  public required init(rows: UInt32, data: ArraySlice<UInt8>) {
-    self.rows = rows
-    self.data = data
-  }
 }
 }
 
-extension Record where Table == Metadata.Tables.ImplMap {
+extension Record where Schema == Metadata.Tables.ImplMap {
   public var MappingFlags: CorPinvokeMap {
     CorPinvokeMap(rawValue: CorPinvokeMap.RawValue(columns[0]))
   }

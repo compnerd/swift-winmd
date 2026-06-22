@@ -3,7 +3,7 @@
 
 extension Metadata.Tables {
 /// See §II.22.3.
-public final class AssemblyRefOS: Table {
+public enum AssemblyRefOS: TableSchema {
   public static var number: Int { 37 }
 
   /// Record Layout
@@ -17,18 +17,10 @@ public final class AssemblyRefOS: Table {
     Column(name: "OSMinorVersion", type: .constant(4)),
     Column(name: "AssemblyRef", type: .index(.simple(AssemblyRef.self))),
   ]
-
-  public let rows: UInt32
-  public let data: ArraySlice<UInt8>
-
-  public required init(rows: UInt32, data: ArraySlice<UInt8>) {
-    self.rows = rows
-    self.data = data
-  }
 }
 }
 
-extension Record where Table == Metadata.Tables.AssemblyRefOS {
+extension Record where Schema == Metadata.Tables.AssemblyRefOS {
   public var OSPlatformId: UInt32 {
     UInt32(columns[0])
   }

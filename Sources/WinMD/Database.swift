@@ -19,6 +19,13 @@ public class Database {
   /// the database is opened rather than rebuilt on every record access.
   public let decoder: DatabaseDecoder
 
+  /// The open tables of the database.
+  ///
+  /// The tables present in a database and their record layouts are fixed once
+  /// the file is mapped, so they are opened once when the database is opened and
+  /// reused for every query rather than reconstructed on each access.
+  private let relations: Array<Table>
+
   public var stream: TablesStream {
     get throws {
       try TablesStream(from: cil)
@@ -47,10 +54,8 @@ public class Database {
 
   // MARK: - Tables
 
-  public var tables: Array<WinMD.Table> {
-    get throws {
-      try stream.Tables
-    }
+  public var tables: Array<Table> {
+    relations
   }
 
   // MARK: - Initializers
@@ -59,7 +64,10 @@ public class Database {
     self.dos = try DOSFile(from: data)
     self.pe = try PEFile(from: dos)
     self.cil = try Assembly(from: pe)
-    self.decoder = try DatabaseDecoder(TablesStream(from: cil))
+
+    let stream = try TablesStream(from: self.cil)
+    self.decoder = DatabaseDecoder(stream)
+    self.relations = try stream.relations(self.decoder)
   }
 
   public convenience init(at path: URL) throws {
@@ -72,13 +80,14 @@ public class Database {
 
   // MARK: - subscripting
 
-  public func rows<Table: WinMD.Table>(of table: Table.Type,
-                                       from begin: Int = 0,
-                                       to end: Int? = nil) throws
-      -> TableIterator<Table> {
-    guard let table = try tables.first(where: { $0 is Table }) as? Table else {
+  public func rows<Schema: TableSchema>(of schema: Schema.Type,
+                                        from begin: Int = 0,
+                                        to end: Int? = nil) throws
+      -> TableIterator<Schema> {
+    guard let table =
+        relations.first(where: { $0.number == Schema.number }) else {
       throw WinMDError.TableNotFound
     }
-    return TableIterator<Table>(self, table, from: begin, to: end)
+    return TableIterator<Schema>(self, table, from: begin, to: end)
   }
 }

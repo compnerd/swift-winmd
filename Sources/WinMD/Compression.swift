@@ -65,23 +65,8 @@ public class DatabaseDecoder {
 
 extension DatabaseDecoder {
   /// The stride of a table in the database, which is the byte count of a row.
-  internal func stride(of table: Table) -> Int {
-    stride(of: type(of: table))
-  }
-
-  /// The stride of a table in the database, which is the byte count of a row.
   internal func stride(of table: Table.Type) -> Int {
-    layout(of: table).reduce(0, +)
-  }
-
-  /// The layout of a record of the table, byte count of each column.
-  internal func layout(of table: Table) -> Array<Int> {
-    layout(of: type(of: table))
-  }
-
-  /// The layout of a record of the table, byte count of each column.
-  internal func layout(of table: Table.Type) -> Array<Int> {
-    table.columns.lazy.map { width(of: $0.type) }
+    table.columns.reduce(0) { $0 + width(of: $1.type) }
   }
 
   /// The width, in bytes, of a given column type.

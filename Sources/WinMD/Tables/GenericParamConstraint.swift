@@ -1,18 +1,23 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
+/// Record Layout
+///   Owner (GenericParam Index)
+///   Constraint (TypeDefOrRef Coded Index)
+// TODO(compnerd) fold into the accessor when immortal inline spans land.
+private let _columns: InlineArray<_, Column> = [
+  Column(name: "Owner", type: .index(.simple(Metadata.Tables.GenericParam.self))),
+  Column(name: "Constraint", type: .index(.coded(TypeDefOrRef.self))),
+]
+
 extension Metadata.Tables {
 /// See §II.22.21.
 public enum GenericParamConstraint: TableSchema {
   public static var number: Int { 44 }
 
-  /// Record Layout
-  ///   Owner (GenericParam Index)
-  ///   Constraint (TypeDefOrRef Coded Index)
-  public static let columns = [
-    Column(name: "Owner", type: .index(.simple(GenericParam.self))),
-    Column(name: "Constraint", type: .index(.coded(TypeDefOrRef.self))),
-  ]
+  public static var columns: Span<Column> {
+    @_lifetime(immortal) get { _columns.span }
+  }
 }
 }
 

@@ -1,26 +1,31 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
+/// Record Layout
+///   RVA (4-byte constant)
+///   ImplFlags (2-byte bitmask of MethodImplAttributes)
+///   Flags (2-byte bitmask of MethodAttributes)
+///   Name (String Heap Index)
+///   Signature (Blob Heap Index)
+///   ParamList (Param Index)
+// TODO(compnerd) fold into the accessor when immortal inline spans land.
+private let _columns: InlineArray<_, Column> = [
+  Column(name: "RVA", type: .constant(4)),
+  Column(name: "ImplFlags", type: .constant(2)),
+  Column(name: "Flags", type: .constant(2)),
+  Column(name: "Name", type: .index(.heap(.string))),
+  Column(name: "Signature", type: .index(.heap(.blob))),
+  Column(name: "ParamList", type: .index(.simple(Metadata.Tables.Param.self))),
+]
+
 extension Metadata.Tables {
 /// See §II.22.26.
 public enum MethodDef: TableSchema {
   public static var number: Int { 6 }
 
-  /// Record Layout
-  ///   RVA (4-byte constant)
-  ///   ImplFlags (2-byte bitmask of MethodImplAttributes)
-  ///   Flags (2-byte bitmask of MethodAttributes)
-  ///   Name (String Heap Index)
-  ///   Signature (Blob Heap Index)
-  ///   ParamList (Param Index)
-  public static let columns = [
-    Column(name: "RVA", type: .constant(4)),
-    Column(name: "ImplFlags", type: .constant(2)),
-    Column(name: "Flags", type: .constant(2)),
-    Column(name: "Name", type: .index(.heap(.string))),
-    Column(name: "Signature", type: .index(.heap(.blob))),
-    Column(name: "ParamList", type: .index(.simple(Param.self))),
-  ]
+  public static var columns: Span<Column> {
+    @_lifetime(immortal) get { _columns.span }
+  }
 }
 }
 

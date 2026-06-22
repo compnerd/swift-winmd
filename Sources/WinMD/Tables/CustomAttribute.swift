@@ -1,20 +1,25 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
+/// Record Layout
+///   Parent (HasCustomAttribute Coded Index)
+///   Type (CustomAttributeType Coded Index)
+///   Value (Blob Heap Index)
+// TODO(compnerd) fold into the accessor when immortal inline spans land.
+private let _columns: InlineArray<_, Column> = [
+  Column(name: "Parent", type: .index(.coded(HasCustomAttribute.self))),
+  Column(name: "Type", type: .index(.coded(CustomAttributeType.self))),
+  Column(name: "Value", type: .index(.heap(.blob))),
+]
+
 extension Metadata.Tables {
 /// See §II.22.10.
 public enum CustomAttribute: TableSchema {
   public static var number: Int { 12 }
 
-  /// Record Layout
-  ///   Parent (HasCustomAttribute Coded Index)
-  ///   Type (CustomAttributeType Coded Index)
-  ///   Value (Blob Heap Index)
-  public static let columns = [
-    Column(name: "Parent", type: .index(.coded(HasCustomAttribute.self))),
-    Column(name: "Type", type: .index(.coded(CustomAttributeType.self))),
-    Column(name: "Value", type: .index(.heap(.blob))),
-  ]
+  public static var columns: Span<Column> {
+    @_lifetime(immortal) get { _columns.span }
+  }
 }
 }
 

@@ -32,7 +32,7 @@ public protocol TableSchema: Sendable {
   static var number: Int { get }
 
   /// The columns of the table as defined by the CIL specification.
-  static var columns: Array<Column> { get }
+  static var columns: Span<Column> { get }
 }
 
 /// An open metadata table: the records of one `TableSchema` within a database.
@@ -53,7 +53,6 @@ public final class Table {
   internal let data: ArraySlice<UInt8>
 
   internal var number: Int { schema.number }
-  internal var columns: Array<Column> { schema.columns }
 
   internal init(_ schema: TableSchema.Type, rows: UInt32,
                 data: ArraySlice<UInt8>, descriptor: TupleDescriptor) {

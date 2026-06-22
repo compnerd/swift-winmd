@@ -2,14 +2,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 extension ArraySlice where Element == UInt8 {
-  internal subscript<T>(_ offset: Self.Index, _ as: T.Type = T.self) -> T {
-    let begin: Self.Index = self.index(self.startIndex, offsetBy: offset)
-    let end: Self.Index = self.index(begin, offsetBy: MemoryLayout<T>.stride)
-
-    return self[begin ..< end].withContiguousStorageIfAvailable {
-       UnsafeRawBufferPointer($0).bindMemory(to: T.self)[0]
-    } ?? Array(self[begin ..< end]).withUnsafeBufferPointer {
-      UnsafeRawBufferPointer($0).bindMemory(to: T.self)[0]
-    }
+  internal subscript<T: BitwiseCopyable>(_ offset: Self.Index,
+                                         _ as: T.Type = T.self) -> T {
+    // `ArraySlice` is always contiguously stored, so `withUnsafeBytes` never
+    // needs a fallback copy.  The metadata fields are packed and therefore
+    // unaligned, so the value must be read with an unaligned load.
+    let begin = index(startIndex, offsetBy: offset)
+    return self[begin...].withUnsafeBytes { $0.loadUnaligned(as: T.self) }
   }
 }

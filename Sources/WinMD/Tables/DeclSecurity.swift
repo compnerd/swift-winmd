@@ -29,8 +29,6 @@ extension Record where Schema == Metadata.Tables.DeclSecurity {
   }
 
   public var PermissionSet: Blob {
-    get throws(WinMDError) {
-      try database.blobs[columns[2]]
-    }
+    database.blobs[columns[2]]
   }
 }

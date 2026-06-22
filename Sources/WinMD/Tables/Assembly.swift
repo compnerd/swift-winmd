@@ -61,21 +61,15 @@ extension Record where Schema == Metadata.Tables.Assembly {
   }
 
   public var PublicKey: Blob {
-    get throws(WinMDError) {
-      try database.blobs[columns[6]]
-    }
+    database.blobs[columns[6]]
   }
 
   public var Name: String {
-    get throws(WinMDError) {
-      try database.strings[columns[7]]
-    }
+    database.strings[columns[7]]
   }
 
   public var Culture: String {
-    get throws(WinMDError) {
-      try database.strings[columns[8]]
-    }
+    database.strings[columns[8]]
   }
 }
 

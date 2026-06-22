@@ -30,8 +30,6 @@ extension Record where Schema == Metadata.Tables.Constant {
   }
 
   public var Value: Blob {
-    get throws(WinMDError) {
-      try database.blobs[columns[4]]
-    }
+    database.blobs[columns[4]]
   }
 }

@@ -25,8 +25,6 @@ public enum CustomAttribute: TableSchema {
 
 extension Record where Schema == Metadata.Tables.CustomAttribute {
   public var Value: Blob {
-    get throws(WinMDError) {
-      try database.blobs[columns[2]]
-    }
+    database.blobs[columns[2]]
   }
 }

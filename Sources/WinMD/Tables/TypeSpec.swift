@@ -21,8 +21,6 @@ public enum TypeSpec: TableSchema {
 
 extension Record where Schema == Metadata.Tables.TypeSpec {
   public var Signature: Blob {
-    get throws(WinMDError) {
-      try database.blobs[columns[0]]
-    }
+    database.blobs[columns[0]]
   }
 }

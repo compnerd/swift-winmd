@@ -46,9 +46,7 @@ struct PrintNamespaces: ParsableCommand {
 
     var namespaces = Set<String>()
     for row in try database.rows(of: Metadata.Tables.TypeDef.self) {
-      if let namespace = try? row.TypeNamespace {
-        namespaces.insert(namespace)
-      }
+      namespaces.insert(row.TypeNamespace)
     }
 
     for namespace in namespaces.sorted() {

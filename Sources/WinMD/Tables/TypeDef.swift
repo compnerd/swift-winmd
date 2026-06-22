@@ -35,15 +35,11 @@ extension Record where Schema == Metadata.Tables.TypeDef {
   }
 
   public var TypeName: String {
-    get throws(WinMDError) {
-      try database.strings[columns[1]]
-    }
+    database.strings[columns[1]]
   }
 
   public var TypeNamespace: String {
-    get throws(WinMDError) {
-      try database.strings[columns[2]]
-    }
+    database.strings[columns[2]]
   }
 
   public var FieldList: TableIterator<Metadata.Tables.FieldDef> {

@@ -35,9 +35,7 @@ extension Record where Schema == Metadata.Tables.Module {
   }
 
   public var Name: String {
-    get throws(WinMDError) {
-      try database.strings[columns[1]]
-    }
+    database.strings[columns[1]]
   }
 
   public var Mvid: UUID {

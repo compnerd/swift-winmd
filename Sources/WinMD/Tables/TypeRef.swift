@@ -25,14 +25,10 @@ public enum TypeRef: TableSchema {
 
 extension Record where Schema == Metadata.Tables.TypeRef {
   public var TypeName: String {
-    get throws(WinMDError) {
-      try database.strings[columns[1]]
-    }
+    database.strings[columns[1]]
   }
 
   public var TypeNamespace: String {
-    get throws(WinMDError) {
-      try database.strings[columns[2]]
-    }
+    database.strings[columns[2]]
   }
 }

@@ -35,8 +35,6 @@ extension Record where Schema == Metadata.Tables.ManifestResource {
   }
 
   public var Name: String {
-    get throws(WinMDError) {
-      try database.strings[columns[2]]
-    }
+    database.strings[columns[2]]
   }
 }

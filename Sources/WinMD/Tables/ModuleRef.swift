@@ -21,8 +21,6 @@ public enum ModuleRef: TableSchema {
 
 extension Record where Schema == Metadata.Tables.ModuleRef {
   public var Name: String {
-    get throws(WinMDError) {
-      try database.strings[columns[0]]
-    }
+    database.strings[columns[0]]
   }
 }

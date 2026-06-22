@@ -21,8 +21,6 @@ public enum StandAloneSig: TableSchema {
 
 extension Record where Schema == Metadata.Tables.StandAloneSig {
   public var Signature: Blob {
-    get throws(WinMDError) {
-      try database.blobs[columns[0]]
-    }
+    database.blobs[columns[0]]
   }
 }

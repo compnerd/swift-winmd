@@ -31,9 +31,7 @@ extension Record where Schema == Metadata.Tables.ImplMap {
   }
 
   public var ImportName: String {
-    get throws(WinMDError) {
-      try database.strings[columns[2]]
-    }
+    database.strings[columns[2]]
   }
 
   public var ImportScope: Record<Metadata.Tables.ModuleRef> {

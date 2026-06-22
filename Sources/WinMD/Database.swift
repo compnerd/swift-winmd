@@ -5,9 +5,6 @@ import struct Foundation.Data
 import struct Foundation.URL
 
 public class Database {
-  public typealias Heaps =
-      (blob: BlobsHeap, guid: GUIDHeap, string: StringsHeap)
-
   /// The tables stream of the database.
   ///
   /// Locating a stream means parsing the metadata stream headers, so resolving
@@ -29,35 +26,12 @@ public class Database {
   /// reused for every query rather than reconstructed on each access.
   private let relations: Array<Table>
 
-  // The heaps, located once when the database is opened.  A heap is absent when
-  // its stream is, in which case the corresponding accessor throws on use rather
-  // than failing the open.
-  private let blob: BlobsHeap?
-  private let guid: GUIDHeap?
-  private let string: StringsHeap?
-
-  // MARK: - Heaps
-
-  public var blobs: BlobsHeap {
-    get throws(WinMDError) {
-      guard let blob = blob else { throw .BlobsHeapNotFound }
-      return blob
-    }
-  }
-
-  public var guids: GUIDHeap {
-    get throws(WinMDError) {
-      guard let guid = guid else { throw .GUIDHeapNotFound }
-      return guid
-    }
-  }
-
-  public var strings: StringsHeap {
-    get throws(WinMDError) {
-      guard let string = string else { throw .StringsHeapNotFound }
-      return string
-    }
-  }
+  // The heaps, located once when the database is opened. A heap is invariant
+  // for the file's lifetime, and an absent heap fails the open rather than being
+  // tolerated and surfaced as an error on use.
+  public let blobs: BlobsHeap
+  public let guids: GUIDHeap
+  public let strings: StringsHeap
 
   // MARK: - Tables
 
@@ -67,7 +41,7 @@ public class Database {
 
   // MARK: - Initializers
 
-  private init(data: Array<UInt8>) throws {
+  private init(data: Array<UInt8>) throws(WinMDError) {
     let dos = try DOSFile(from: data)
     let pe = try PEFile(from: dos)
     let cil = try Assembly(from: pe)
@@ -76,9 +50,9 @@ public class Database {
     self.decoder = DatabaseDecoder(stream)
     self.relations = try stream.relations(decoder)
 
-    self.blob = try? BlobsHeap(from: cil)
-    self.guid = try? GUIDHeap(from: cil)
-    self.string = try? StringsHeap(from: cil)
+    self.blobs = try BlobsHeap(from: cil)
+    self.guids = try GUIDHeap(from: cil)
+    self.strings = try StringsHeap(from: cil)
   }
 
   public convenience init(at path: URL) throws {

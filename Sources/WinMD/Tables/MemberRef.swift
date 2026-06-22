@@ -25,14 +25,10 @@ public enum MemberRef: TableSchema {
 
 extension Record where Schema == Metadata.Tables.MemberRef {
   public var Name: String {
-    get throws(WinMDError) {
-      try database.strings[columns[1]]
-    }
+    database.strings[columns[1]]
   }
 
   public var Signature: Blob {
-    get throws(WinMDError) {
-      try database.blobs[columns[2]]
-    }
+    database.blobs[columns[2]]
   }
 }

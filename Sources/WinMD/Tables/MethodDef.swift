@@ -43,15 +43,11 @@ extension Record where Schema == Metadata.Tables.MethodDef {
   }
 
   public var Name: String {
-    get throws(WinMDError) {
-      try database.strings[columns[3]]
-    }
+    database.strings[columns[3]]
   }
 
   public var Signature: Blob {
-    get throws(WinMDError) {
-      try database.blobs[columns[4]]
-    }
+    database.blobs[columns[4]]
   }
 
   public var ParamList: TableIterator<Metadata.Tables.Param> {

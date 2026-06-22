@@ -78,7 +78,7 @@ extension Record: CustomDebugStringConvertible {
     columns.enumerated().map { (column, value) in
       switch Schema.columns[column].type {
       case let .index(.heap(heap)) where heap == .string:
-        let value = (try? database.strings[value]) ?? "<unknown>"
+        let value = database.strings[value]
         return "\(Schema.columns[column].name): \(value)"
       default:
         return "\(Schema.columns[column].name): \(value)"

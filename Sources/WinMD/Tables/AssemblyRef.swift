@@ -57,27 +57,19 @@ extension Record where Schema == Metadata.Tables.AssemblyRef {
   }
 
   public var PublicKeyOrToken: Blob {
-    get throws(WinMDError) {
-      try database.blobs[columns[5]]
-    }
+    database.blobs[columns[5]]
   }
 
   public var Name: String {
-    get throws(WinMDError) {
-      try database.strings[columns[6]]
-    }
+    database.strings[columns[6]]
   }
 
   public var Culture: String {
-    get throws(WinMDError) {
-      try database.strings[columns[7]]
-    }
+    database.strings[columns[7]]
   }
 
   public var HashValue: Blob {
-    get throws(WinMDError) {
-      try database.blobs[columns[8]]
-    }
+    database.blobs[columns[8]]
   }
 }
 

@@ -29,14 +29,10 @@ extension Record where Schema == Metadata.Tables.File {
   }
 
   public var Name: String {
-    get throws(WinMDError) {
-      try database.strings[columns[1]]
-    }
+    database.strings[columns[1]]
   }
 
   public var HashValue: Blob {
-    get throws(WinMDError) {
-      try database.blobs[columns[2]]
-    }
+    database.blobs[columns[2]]
   }
 }

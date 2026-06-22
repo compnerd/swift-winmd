@@ -12,15 +12,16 @@ public class Database {
   private let pe: PEFile
   private let cil: Assembly
 
+  /// The decoded physical schema (index and column widths) of the database.
+  ///
+  /// This is invariant for the lifetime of the database — it depends only on
+  /// which tables are present and their row counts — so it is decoded once when
+  /// the database is opened rather than rebuilt on every record access.
+  public let decoder: DatabaseDecoder
+
   public var stream: TablesStream {
     get throws {
       try TablesStream(from: cil)
-    }
-  }
-
-  public var decoder: DatabaseDecoder {
-    get throws {
-      try DatabaseDecoder(stream)
     }
   }
 
@@ -58,6 +59,7 @@ public class Database {
     self.dos = try DOSFile(from: data)
     self.pe = try PEFile(from: dos)
     self.cil = try Assembly(from: pe)
+    self.decoder = try DatabaseDecoder(TablesStream(from: cil))
   }
 
   public convenience init(at path: URL) throws {

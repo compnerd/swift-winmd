@@ -42,7 +42,7 @@ public protocol Table: AnyObject, Sendable {
 
 extension Table {
   public subscript(_ row: Int, _ database: Database) -> Record<Self> {
-    let decoder = try! database.decoder
+    let decoder = database.decoder
 
     var scan = 0
     let layout = Self.columns.map {

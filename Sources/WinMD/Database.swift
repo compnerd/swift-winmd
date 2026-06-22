@@ -8,9 +8,12 @@ public class Database {
   public typealias Heaps =
       (blob: BlobsHeap, guid: GUIDHeap, string: StringsHeap)
 
-  private let dos: DOSFile
-  private let pe: PEFile
-  private let cil: Assembly
+  /// The tables stream of the database.
+  ///
+  /// Locating a stream means parsing the metadata stream headers, so resolving
+  /// it on each access would re-parse those headers every time. It is invariant
+  /// for the file's lifetime, so it is located once when the database is opened.
+  public let stream: TablesStream
 
   /// The decoded physical schema (index and column widths) of the database.
   ///
@@ -26,29 +29,33 @@ public class Database {
   /// reused for every query rather than reconstructed on each access.
   private let relations: Array<Table>
 
-  public var stream: TablesStream {
-    get throws {
-      try TablesStream(from: cil)
-    }
-  }
+  // The heaps, located once when the database is opened.  A heap is absent when
+  // its stream is, in which case the corresponding accessor throws on use rather
+  // than failing the open.
+  private let blob: BlobsHeap?
+  private let guid: GUIDHeap?
+  private let string: StringsHeap?
 
   // MARK: - Heaps
 
   public var blobs: BlobsHeap {
     get throws {
-      try BlobsHeap(from: cil)
+      guard let blob = self.blob else { throw WinMDError.BlobsHeapNotFound }
+      return blob
     }
   }
 
   public var guids: GUIDHeap {
     get throws {
-      try GUIDHeap(from: cil)
+      guard let guid = self.guid else { throw WinMDError.GUIDHeapNotFound }
+      return guid
     }
   }
 
   public var strings: StringsHeap {
     get throws {
-      try StringsHeap(from: cil)
+      guard let string = self.string else { throw WinMDError.StringsHeapNotFound }
+      return string
     }
   }
 
@@ -61,13 +68,17 @@ public class Database {
   // MARK: - Initializers
 
   private init(data: Array<UInt8>) throws {
-    self.dos = try DOSFile(from: data)
-    self.pe = try PEFile(from: dos)
-    self.cil = try Assembly(from: pe)
+    let dos = try DOSFile(from: data)
+    let pe = try PEFile(from: dos)
+    let cil = try Assembly(from: pe)
 
-    let stream = try TablesStream(from: self.cil)
+    self.stream = try TablesStream(from: cil)
     self.decoder = DatabaseDecoder(stream)
-    self.relations = try stream.relations(self.decoder)
+    self.relations = try stream.relations(decoder)
+
+    self.blob = try? BlobsHeap(from: cil)
+    self.guid = try? GUIDHeap(from: cil)
+    self.string = try? StringsHeap(from: cil)
   }
 
   public convenience init(at path: URL) throws {

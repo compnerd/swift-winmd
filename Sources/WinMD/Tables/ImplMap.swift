@@ -34,13 +34,25 @@ public enum ImplMap: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.ImplMap {
+  public static var MappingFlags: Column<Schema, CorPinvokeMap> {
+    Column<Schema, CorPinvokeMap>(0) {
+      CorPinvokeMap(rawValue: CorPinvokeMap.RawValue($0.columns[0]))
+    }
+  }
+
+  public static var ImportName: Column<Schema, String> {
+    Column<Schema, String>(2) { $0.strings[$0.columns[2]] }
+  }
+}
+
 extension Row where Schema == Metadata.Tables.ImplMap {
   public var MappingFlags: CorPinvokeMap {
-    CorPinvokeMap(rawValue: CorPinvokeMap.RawValue(columns[0]))
+    self[.MappingFlags]
   }
 
   public var ImportName: String {
-    strings[columns[2]]
+    self[.ImportName]
   }
 
   public var ImportScope: Row<Metadata.Tables.ModuleRef> {

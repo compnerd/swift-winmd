@@ -29,12 +29,22 @@ public enum TypeRef: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.TypeRef {
+  public static var TypeName: Column<Schema, String> {
+    Column<Schema, String>(1) { $0.strings[$0.columns[1]] }
+  }
+
+  public static var TypeNamespace: Column<Schema, String> {
+    Column<Schema, String>(2) { $0.strings[$0.columns[2]] }
+  }
+}
+
 extension Row where Schema == Metadata.Tables.TypeRef {
   public var TypeName: String {
-    strings[columns[1]]
+    self[.TypeName]
   }
 
   public var TypeNamespace: String {
-    strings[columns[2]]
+    self[.TypeNamespace]
   }
 }

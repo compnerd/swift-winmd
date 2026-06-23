@@ -29,16 +29,32 @@ public enum Param: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.Param {
+  public static var Flags: Column<Schema, CorParamAttr> {
+    Column<Schema, CorParamAttr>(0) {
+      CorParamAttr(rawValue: CorParamAttr.RawValue($0.columns[0]))
+    }
+  }
+
+  public static var Sequence: Column<Schema, UInt16> {
+    Column<Schema, UInt16>(1) { UInt16($0.columns[1]) }
+  }
+
+  public static var Name: Column<Schema, String> {
+    Column<Schema, String>(2) { $0.strings[$0.columns[2]] }
+  }
+}
+
 extension Row where Schema == Metadata.Tables.Param {
   public var Flags: CorParamAttr {
-    CorParamAttr(rawValue: CorParamAttr.RawValue(columns[0]))
+    self[.Flags]
   }
 
   public var Sequence: UInt16 {
-    UInt16(columns[1])
+    self[.Sequence]
   }
 
   public var Name: String {
-    strings[columns[2]]
+    self[.Name]
   }
 }

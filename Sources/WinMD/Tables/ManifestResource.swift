@@ -31,16 +31,32 @@ public enum ManifestResource: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.ManifestResource {
+  public static var Offset: Column<Schema, UInt32> {
+    Column<Schema, UInt32>(0) { UInt32($0.columns[0]) }
+  }
+
+  public static var Flags: Column<Schema, CorManifestResourceFlags> {
+    Column<Schema, CorManifestResourceFlags>(1) {
+      CorManifestResourceFlags(rawValue: UInt32($0.columns[1]))
+    }
+  }
+
+  public static var Name: Column<Schema, String> {
+    Column<Schema, String>(2) { $0.strings[$0.columns[2]] }
+  }
+}
+
 extension Row where Schema == Metadata.Tables.ManifestResource {
   public var Offset: UInt32 {
-    UInt32(columns[0])
+    self[.Offset]
   }
 
   public var Flags: CorManifestResourceFlags {
-    CorManifestResourceFlags(rawValue: UInt32(columns[1]))
+    self[.Flags]
   }
 
   public var Name: String {
-    strings[columns[2]]
+    self[.Name]
   }
 }

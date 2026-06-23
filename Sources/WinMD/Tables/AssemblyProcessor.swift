@@ -25,8 +25,14 @@ public enum AssemblyProcessor: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.AssemblyProcessor {
+  public static var Processor: Column<Schema, UInt32> {
+    Column<Schema, UInt32>(0) { UInt32($0.columns[0]) }
+  }
+}
+
 extension Row where Schema == Metadata.Tables.AssemblyProcessor {
   public var Processor: UInt32 {
-    UInt32(columns[0])
+    self[.Processor]
   }
 }

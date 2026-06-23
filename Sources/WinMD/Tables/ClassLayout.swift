@@ -32,13 +32,23 @@ public enum ClassLayout: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.ClassLayout {
+  public static var PackingSize: Column<Schema, UInt16> {
+    Column<Schema, UInt16>(0) { UInt16($0.columns[0]) }
+  }
+
+  public static var ClassSize: Column<Schema, UInt32> {
+    Column<Schema, UInt32>(1) { UInt32($0.columns[1]) }
+  }
+}
+
 extension Row where Schema == Metadata.Tables.ClassLayout {
   public var PackingSize: UInt16 {
-    UInt16(columns[0])
+    self[.PackingSize]
   }
 
   public var ClassSize: UInt32 {
-    UInt32(columns[1])
+    self[.ClassSize]
   }
 
   public var Parent: Row<Metadata.Tables.TypeDef> {

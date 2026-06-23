@@ -29,17 +29,33 @@ public enum File: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.File {
+  public static var Flags: Column<Schema, CorFileFlags> {
+    Column<Schema, CorFileFlags>(0) {
+      CorFileFlags(rawValue: CorFileFlags.RawValue($0.columns[0]))
+    }
+  }
+
+  public static var Name: Column<Schema, String> {
+    Column<Schema, String>(1) { $0.strings[$0.columns[1]] }
+  }
+}
+
+extension BlobColumn where Schema == Metadata.Tables.File {
+  public static var HashValue: BlobColumn<Schema> { BlobColumn<Schema>(2) }
+}
+
 extension Row where Schema == Metadata.Tables.File {
   public var Flags: CorFileFlags {
-    CorFileFlags(rawValue: CorFileFlags.RawValue(columns[0]))
+    self[.Flags]
   }
 
   public var Name: String {
-    strings[columns[1]]
+    self[.Name]
   }
 
   public var HashValue: Blob {
     @_lifetime(copy self)
-    get { blobs[columns[2]] }
+    get { self[.HashValue] }
   }
 }

@@ -30,9 +30,15 @@ public enum FieldRVA: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.FieldRVA {
+  public static var RVA: Column<Schema, UInt32> {
+    Column<Schema, UInt32>(0) { UInt32($0.columns[0]) }
+  }
+}
+
 extension Row where Schema == Metadata.Tables.FieldRVA {
   public var RVA: UInt32 {
-    UInt32(columns[0])
+    self[.RVA]
   }
 
   public var Column: Row<Metadata.Tables.FieldDef> {

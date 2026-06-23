@@ -33,13 +33,25 @@ public enum Constant: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.Constant {
+  public static var `Type`: Column<Schema, CorElementType> {
+    Column<Schema, CorElementType>(0) {
+      CorElementType(rawValue: CorElementType.RawValue($0.columns[0]))
+    }
+  }
+}
+
+extension BlobColumn where Schema == Metadata.Tables.Constant {
+  public static var Value: BlobColumn<Schema> { BlobColumn<Schema>(3) }
+}
+
 extension Row where Schema == Metadata.Tables.Constant {
   public var `Type`: CorElementType {
-    CorElementType(rawValue: CorElementType.RawValue(columns[0]))
+    self[.Type]
   }
 
   public var Value: Blob {
     @_lifetime(copy self)
-    get { blobs[columns[4]] }
+    get { self[.Value] }
   }
 }

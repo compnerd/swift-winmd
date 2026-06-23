@@ -35,13 +35,23 @@ public enum Module: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.Module {
+  public static var Generation: Column<Schema, UInt16> {
+    Column<Schema, UInt16>(0) { UInt16($0.columns[0]) }
+  }
+
+  public static var Name: Column<Schema, String> {
+    Column<Schema, String>(1) { $0.strings[$0.columns[1]] }
+  }
+}
+
 extension Row where Schema == Metadata.Tables.Module {
   public var Generation: UInt16 {
-    UInt16(columns[0])
+    self[.Generation]
   }
 
   public var Name: String {
-    strings[columns[1]]
+    self[.Name]
   }
 
   public var Mvid: UUID {

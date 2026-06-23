@@ -27,9 +27,13 @@ public enum MethodSpec: TableSchema {
 }
 }
 
+extension BlobColumn where Schema == Metadata.Tables.MethodSpec {
+  public static var Instantiation: BlobColumn<Schema> { BlobColumn<Schema>(1) }
+}
+
 extension Row where Schema == Metadata.Tables.MethodSpec {
   public var Instantiation: Blob {
     @_lifetime(copy self)
-    get { blobs[columns[1]] }
+    get { self[.Instantiation] }
   }
 }

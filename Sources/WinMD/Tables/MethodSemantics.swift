@@ -32,9 +32,17 @@ public enum MethodSemantics: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.MethodSemantics {
+  public static var Semantics: Column<Schema, CorMethodSemanticsAttr> {
+    Column<Schema, CorMethodSemanticsAttr>(0) {
+      CorMethodSemanticsAttr(rawValue: UInt16($0.columns[0]))
+    }
+  }
+}
+
 extension Row where Schema == Metadata.Tables.MethodSemantics {
   public var Semantics: CorMethodSemanticsAttr {
-    CorMethodSemanticsAttr(rawValue: UInt16(columns[0]))
+    self[.Semantics]
   }
 
   public var Method: Row<Metadata.Tables.MethodDef> {

@@ -35,17 +35,33 @@ public enum TypeDef: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.TypeDef {
+  public static var Flags: Column<Schema, CorTypeAttr> {
+    Column<Schema, CorTypeAttr>(0) {
+      CorTypeAttr(rawValue: CorTypeAttr.RawValue($0.columns[0]))
+    }
+  }
+
+  public static var TypeName: Column<Schema, String> {
+    Column<Schema, String>(1) { $0.strings[$0.columns[1]] }
+  }
+
+  public static var TypeNamespace: Column<Schema, String> {
+    Column<Schema, String>(2) { $0.strings[$0.columns[2]] }
+  }
+}
+
 extension Row where Schema == Metadata.Tables.TypeDef {
   public var Flags: CorTypeAttr {
-    CorTypeAttr(rawValue: CorTypeAttr.RawValue(columns[0]))
+    self[.Flags]
   }
 
   public var TypeName: String {
-    strings[columns[1]]
+    self[.TypeName]
   }
 
   public var TypeNamespace: String {
-    strings[columns[2]]
+    self[.TypeNamespace]
   }
 
   public var FieldList: TableIterator<Metadata.Tables.FieldDef> {

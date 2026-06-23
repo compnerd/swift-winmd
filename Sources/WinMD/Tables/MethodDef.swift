@@ -35,26 +35,52 @@ public enum MethodDef: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.MethodDef {
+  public static var RVA: Column<Schema, UInt32> {
+    Column<Schema, UInt32>(0) { UInt32($0.columns[0]) }
+  }
+
+  public static var ImplFlags: Column<Schema, CorMethodImpl> {
+    Column<Schema, CorMethodImpl>(1) {
+      CorMethodImpl(rawValue: CorMethodImpl.RawValue($0.columns[1]))
+    }
+  }
+
+  public static var Flags: Column<Schema, CorMethodAttr> {
+    Column<Schema, CorMethodAttr>(2) {
+      CorMethodAttr(rawValue: CorMethodAttr.RawValue($0.columns[2]))
+    }
+  }
+
+  public static var Name: Column<Schema, String> {
+    Column<Schema, String>(3) { $0.strings[$0.columns[3]] }
+  }
+}
+
+extension BlobColumn where Schema == Metadata.Tables.MethodDef {
+  public static var Signature: BlobColumn<Schema> { BlobColumn<Schema>(4) }
+}
+
 extension Row where Schema == Metadata.Tables.MethodDef {
   public var RVA: UInt32 {
-    UInt32(columns[0])
+    self[.RVA]
   }
 
   public var ImplFlags: CorMethodImpl {
-    CorMethodImpl(rawValue: CorMethodImpl.RawValue(columns[1]))
+    self[.ImplFlags]
   }
 
   public var Flags: CorMethodAttr {
-    CorMethodAttr(rawValue: CorMethodAttr.RawValue(columns[2]))
+    self[.Flags]
   }
 
   public var Name: String {
-    strings[columns[3]]
+    self[.Name]
   }
 
   public var Signature: Blob {
     @_lifetime(copy self)
-    get { blobs[columns[4]] }
+    get { self[.Signature] }
   }
 
   public var ParamList: TableIterator<Metadata.Tables.Param> {

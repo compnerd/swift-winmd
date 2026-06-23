@@ -30,9 +30,15 @@ public enum FieldLayout: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.FieldLayout {
+  public static var Offset: Column<Schema, UInt32> {
+    Column<Schema, UInt32>(0) { UInt32($0.columns[0]) }
+  }
+}
+
 extension Row where Schema == Metadata.Tables.FieldLayout {
   public var Offset: UInt32 {
-    UInt32(columns[0])
+    self[.Offset]
   }
 
   public var Column: Row<Metadata.Tables.FieldDef> {

@@ -32,13 +32,23 @@ public enum DeclSecurity: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.DeclSecurity {
+  public static var Action: Column<Schema, UInt16> {
+    Column<Schema, UInt16>(0) { UInt16($0.columns[0]) }
+  }
+}
+
+extension BlobColumn where Schema == Metadata.Tables.DeclSecurity {
+  public static var PermissionSet: BlobColumn<Schema> { BlobColumn<Schema>(2) }
+}
+
 extension Row where Schema == Metadata.Tables.DeclSecurity {
   public var Action: UInt16 {
-    UInt16(columns[0])
+    self[.Action]
   }
 
   public var PermissionSet: Blob {
     @_lifetime(copy self)
-    get { blobs[columns[2]] }
+    get { self[.PermissionSet] }
   }
 }

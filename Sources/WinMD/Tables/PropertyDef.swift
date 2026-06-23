@@ -29,12 +29,28 @@ public enum PropertyDef: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.PropertyDef {
+  public static var Flags: Column<Schema, CorPropertyAttr> {
+    Column<Schema, CorPropertyAttr>(0) {
+      CorPropertyAttr(rawValue: CorPropertyAttr.RawValue($0.columns[0]))
+    }
+  }
+
+  public static var Name: Column<Schema, String> {
+    Column<Schema, String>(1) { $0.strings[$0.columns[1]] }
+  }
+}
+
+extension BlobColumn where Schema == Metadata.Tables.PropertyDef {
+  public static var `Type`: BlobColumn<Schema> { BlobColumn<Schema>(2) }
+}
+
 extension Row where Schema == Metadata.Tables.PropertyDef {
   public var Flags: CorPropertyAttr {
-    CorPropertyAttr(rawValue: CorPropertyAttr.RawValue(columns[0]))
+    self[.Flags]
   }
 
   public var Name: String {
-    strings[columns[1]]
+    self[.Name]
   }
 }

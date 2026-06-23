@@ -33,16 +33,36 @@ public enum ExportedType: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.ExportedType {
+  public static var Flags: Column<Schema, CorTypeAttr> {
+    Column<Schema, CorTypeAttr>(0) {
+      CorTypeAttr(rawValue: CorTypeAttr.RawValue($0.columns[0]))
+    }
+  }
+
+  public static var TypeDefId: Column<Schema, UInt32> {
+    Column<Schema, UInt32>(1) { UInt32($0.columns[1]) }
+  }
+
+  public static var TypeName: Column<Schema, String> {
+    Column<Schema, String>(2) { $0.strings[$0.columns[2]] }
+  }
+
+  public static var TypeNamespace: Column<Schema, String> {
+    Column<Schema, String>(3) { $0.strings[$0.columns[3]] }
+  }
+}
+
 extension Row where Schema == Metadata.Tables.ExportedType {
   public var Flags: CorTypeAttr {
-    CorTypeAttr(rawValue: CorTypeAttr.RawValue(columns[0]))
+    self[.Flags]
   }
 
   public var TypeName: String {
-    strings[columns[2]]
+    self[.TypeName]
   }
 
   public var TypeNamespace: String {
-    strings[columns[3]]
+    self[.TypeNamespace]
   }
 }

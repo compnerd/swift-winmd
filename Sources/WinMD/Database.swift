@@ -130,10 +130,14 @@ public struct Database: ~Escapable {
                                         from begin: Int = 0,
                                         to end: Int? = nil) throws(WinMDError)
       -> TableIterator<Schema> {
-    guard let table =
-        relations.first(where: { $0.number == Schema.number }) else {
+    // `relations` is dense and ordered by table number, so a present table's
+    // slot is the number of present tables below it: the population count of
+    // the lower bits of `Valid` (the same slot the row counts are read from).
+    let valid = stream.Valid
+    guard valid & (1 << Schema.number) == (1 << Schema.number) else {
       throw .TableNotFound
     }
-    return TableIterator<Schema>(self, table, from: begin, to: end)
+    let slot = (valid & ((1 << Schema.number) - 1)).nonzeroBitCount
+    return TableIterator<Schema>(self, relations[slot], from: begin, to: end)
   }
 }

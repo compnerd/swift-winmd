@@ -154,22 +154,8 @@ internal struct MetadataRoot: ~Escapable {
 }
 
 extension MetadataRoot {
-  private func align(_ value: Int, to: Int) -> Int {
-    value + (to - value % to)
-  }
-
-  /// The absolute byte offset of each stream header within the buffer.
-  private var offsets: Array<Int> {
-    var offsets = Array<Int>()
-    offsets.reserveCapacity(Int(Streams))
-
-    var offset = base + 20 + Int(Length)
-    for _ in 0 ..< Int(Streams) {
-      offsets.append(offset)
-      let header = StreamHeader(bytes, base: offset)
-      offset = offset + 8 + align(header.Name.count, to: 4)
-    }
-    return offsets
+  private func padded(_ value: Int, to: Int) -> Int {
+    (value + to - 1) / to * to
   }
 
   internal func stream(named name: Metadata.Stream) -> Region? {
@@ -177,12 +163,16 @@ extension MetadataRoot {
   }
 
   internal func stream(named name: String) -> Region? {
-    for offset in offsets {
+    var offset = base + 20 + Int(Length)
+    for _ in 0 ..< Int(Streams) {
       let header = StreamHeader(bytes, base: offset)
-      if header.Name == name {
+      let label = header.Name
+      if label == name {
         return Region(offset: base + Int(header.Offset),
                       size: Int(header.Size))
       }
+      // name + NUL, padded to 4
+      offset = offset + 8 + padded(label.count + 1, to: 4)
     }
     return nil
   }

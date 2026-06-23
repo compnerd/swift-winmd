@@ -15,7 +15,7 @@ internal struct TupleDescriptor {
   /// The byte offset and width of each column, in column order.
   internal let columns: Array<(offset: Int, width: Int)>
 
-  internal init(_ columns: Span<Column>, _ catalog: PhysicalSchema) {
+  internal init(_ columns: Span<Column>, _ catalog: borrowing PhysicalSchema) {
     var offset = 0
     var columns_ = Array<(offset: Int, width: Int)>()
     columns_.reserveCapacity(columns.count)

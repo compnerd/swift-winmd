@@ -15,11 +15,6 @@
 ///     uint32_t Rows[]             ; +24
 ///      uint8_t Tables[]
 ///
-/// The most common operation is access of `Rows` and `Tables`, which are both
-/// computationally expensive. The `Rows` computation is expensive due to the
-/// allocation of the returned `Array`. The `Tables` computation is expensive
-/// as it requires the re-creationg of the table data.
-///
 /// Used transiently during database parsing. It operates on the whole-buffer
 /// span; `base` is the absolute byte offset of the stream within the buffer.
 public struct TablesStream: ~Escapable {
@@ -69,36 +64,28 @@ public struct TablesStream: ~Escapable {
     bytes.read(at: base + 16, as: UInt64.self)
   }
 
-  public var Rows: Array<UInt32> {
-    let tables = Valid.nonzeroBitCount
-    return (0 ..< tables).map {
-      bytes.read(at: base + 24 + $0 * MemoryLayout<UInt32>.size,
-                 as: UInt32.self)
-    }
-  }
-
   /// Opens the tables present in the stream.
   ///
   /// Each table's record layout is resolved against `catalog` once, here, and
   /// carried by the returned `Table` for the lifetime of the database. Each
   /// table records its absolute byte range within the backing buffer.
-  internal func relations(_ catalog: PhysicalSchema) throws(WinMDError) -> Array<Table> {
+  internal func relations(_ catalog: borrowing PhysicalSchema)
+      throws(WinMDError) -> Array<Table> {
     var relations = Array<Table>()
     relations.reserveCapacity(Valid.nonzeroBitCount)
 
-    let rows = Rows
-
     // The row data begins at offset 24 (see the structure layout above). The
-    // rows are stored in a packaed series of 32-bit words, one-per-table. We
-    // re-use the `rows.count` as we have already computed the value for reuse
-    // in the subseuquent loop. Offsets are absolute into the backing buffer.
-    var offset = base + 24 + rows.count * MemoryLayout<UInt32>.size
+    // rows are stored in a packed series of 32-bit words, one-per-table.
+    // Offsets are absolute into the backing buffer.
+    var offset = base + 24 + Valid.nonzeroBitCount * MemoryLayout<UInt32>.size
 
     for schema in kRegisteredTables {
       guard Valid & (1 << schema.number) == (1 << schema.number) else { continue }
 
+      let slot = (Valid & ((1 << schema.number) - 1)).nonzeroBitCount
       let records =
-          rows[(Valid & ((1 << schema.number) - 1)).nonzeroBitCount]
+          bytes.read(at: base + 24 + slot * MemoryLayout<UInt32>.size,
+                     as: UInt32.self)
       let descriptor = TupleDescriptor(schema.columns, catalog)
       let words = Int(records) * descriptor.stride
 

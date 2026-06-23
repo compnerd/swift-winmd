@@ -25,12 +25,26 @@ public protocol TableSchema: Sendable {
   /// The columns of the table as defined by the CIL specification.
   static var fields: Span<Field> { get }
 
+  /// The ordinal of the column the table is physically ordered by, or `nil`.
+  ///
+  /// ECMA-335 §II.22 defines a sort key for certain tables; this is the
+  /// ordinal of that column within `columns`. It is intrinsic — it names which
+  /// column the table *would* be sorted on — whereas whether a given database
+  /// actually sorts the table is the runtime `Sorted` bit of the tables stream.
+  /// A table the specification does not sort has no key (`nil`).
+  static var key: Int? { get }
+
   /// The narrow byte offset of column `i` within a record.
   ///
   /// This is the prefix sum of the preceding columns' narrow widths (a
   /// compile-time property of the schema); a database's wide indices shift it
   /// by its width bitset at read time.
   static func offset(_ i: Int) -> Int
+}
+
+extension TableSchema {
+  /// A table the specification does not sort has no key.
+  public static var key: Int? { nil }
 }
 
 /// An open metadata table: the records of one `TableSchema` within a database.

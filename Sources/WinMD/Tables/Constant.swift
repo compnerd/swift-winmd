@@ -20,6 +20,9 @@ extension Metadata.Tables {
 public enum Constant: TableSchema {
   public static var number: Int { 11 }
 
+  /// Sorted by `Parent`. See §II.22.9.
+  public static var key: Int? { 2 }
+
   public static var fields: Span<Field> {
     @_lifetime(immortal) get { _fields.span }
   }

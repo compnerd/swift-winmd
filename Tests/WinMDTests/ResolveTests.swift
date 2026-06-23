@@ -54,7 +54,7 @@ struct ResolveTests {
                           strings: ResolveTests.strings.span.bytes,
                           blob: ResolveTests.empty.span.bytes,
                           guid: ResolveTests.empty.span.bytes,
-                          valid: ResolveTests.valid)
+                          valid: ResolveTests.valid, sorted: 0)
     try body(storage)
   }
 
@@ -134,10 +134,170 @@ struct ResolveTests {
                           strings: ResolveTests.empty.span.bytes,
                           blob: ResolveTests.empty.span.bytes,
                           guid: ResolveTests.empty.span.bytes,
-                          valid: 1 << 2)
+                          valid: 1 << 2, sorted: 0)
     let source = Tuple(0, relations[0], storage)
     // `Extends` names a non-null row through tag 3, which selects no table; the
     // resolve must throw rather than trap on the out-of-bounds table lookup.
     #expect(throws: WinMDError.BadImageFormat) { _ = try source.resolve(3) }
+  }
+
+  // A single NestedClass row (#41) whose `NestedClass` (ordinal 0, a simple
+  // `TypeDef` index) names row 999 — non-null but far past the single TypeDef
+  // row. `storage.tuple` returns nil for the out-of-range row; resolution must
+  // surface that as a malformed image rather than as "no relationship".
+  @Test("rejects a simple foreign key whose row is out of range")
+  func simpleIndexOutOfRange() throws {
+    // TypeDef[0] (the target table) before NestedClass[0] (the source): the
+    // relations are ordered by table number. The NestedClass row points its
+    // `NestedClass` simple index at row 999, well past the one TypeDef row.
+    let row = 999
+    let record: Array<UInt8> = [
+      // NestedClass[0]: NestedClass = 999 (out of range), EnclosingClass = 0.
+      UInt8(row & 0xff), UInt8(row >> 8), 0x00, 0x00,
+      // TypeDef[0]: a 14-byte row, all zero (only the row count matters).
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00,
+    ]
+    let relations: Array<Table> = [
+      Table(Metadata.Tables.TypeDef.self, rows: 1, range: 4 ..< 18,
+            wide: 0, stride: 14),
+      Table(Metadata.Tables.NestedClass.self, rows: 1, range: 0 ..< 4,
+            wide: 0, stride: 4),
+    ]
+    let storage = Storage(bytes: record.span.bytes,
+                          relations: relations.span,
+                          strings: ResolveTests.empty.span.bytes,
+                          blob: ResolveTests.empty.span.bytes,
+                          guid: ResolveTests.empty.span.bytes,
+                          valid: (1 << 2) | (1 << 41), sorted: 0)
+    let source = Tuple(0, relations[1], storage)
+    // The index is non-null (so it is not the null-FK case) but out of range, so
+    // `storage.tuple` returns nil; resolution must throw rather than report no
+    // relationship.
+    #expect(throws: WinMDError.BadImageFormat) { _ = try source.resolve(0) }
+  }
+
+  @Test("rejects a coded foreign key whose row is out of range")
+  func codedIndexOutOfRange() throws {
+    // TypeDef[0].Extends (ordinal 3, a `TypeDefOrRef` coded index) names a
+    // non-null row through tag 1 (`TypeRef`), but row 999 is far past the single
+    // TypeRef row. Encoding: `(999 << 2) | 1`.
+    let row = (999 << 2) | 1
+    let record: Array<UInt8> = [
+      // TypeRef[0]: ResolutionScope, TypeName, TypeNamespace — all zero.
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      // TypeDef[0]: Flags (4) = 0, TypeName = 0, TypeNamespace = 0,
+      //             Extends = row, FieldList = 0, MethodList = 0.
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      UInt8(row & 0xff), UInt8(row >> 8), 0x00, 0x00, 0x00, 0x00,
+    ]
+    let relations: Array<Table> = [
+      Table(Metadata.Tables.TypeRef.self, rows: 1, range: 0 ..< 6,
+            wide: 0, stride: 6),
+      Table(Metadata.Tables.TypeDef.self, rows: 1, range: 6 ..< 20,
+            wide: 0, stride: 14),
+    ]
+    let storage = Storage(bytes: record.span.bytes,
+                          relations: relations.span,
+                          strings: ResolveTests.empty.span.bytes,
+                          blob: ResolveTests.empty.span.bytes,
+                          guid: ResolveTests.empty.span.bytes,
+                          valid: (1 << 1) | (1 << 2), sorted: 0)
+    let source = Tuple(0, relations[1], storage)
+    // Non-null coded row, in-range tag, but the named TypeRef row does not exist;
+    // `storage.tuple` returns nil and resolution must throw.
+    #expect(throws: WinMDError.BadImageFormat) { _ = try source.resolve(3) }
+  }
+
+  @Test("rejects a simple foreign key whose target table is absent")
+  func simpleIndexAbsentTable() throws {
+    // A NestedClass row (#41) whose `NestedClass` (ordinal 0, a simple `TypeDef`
+    // index) names a non-null row, but the `TypeDef` table (#2) is absent from
+    // the `Valid` mask. A dangling foreign-key target is a malformed image, not a
+    // missing user-requested table, so resolution must throw `.BadImageFormat`
+    // (not `.TableNotFound`).
+    let record: Array<UInt8> = [
+      // NestedClass[0]: NestedClass = 1 (non-null), EnclosingClass = 0.
+      0x01, 0x00, 0x00, 0x00,
+    ]
+    let relations: Array<Table> = [
+      Table(Metadata.Tables.NestedClass.self, rows: 1, range: 0 ..< 4,
+            wide: 0, stride: 4),
+    ]
+    let storage = Storage(bytes: record.span.bytes,
+                          relations: relations.span,
+                          strings: ResolveTests.empty.span.bytes,
+                          blob: ResolveTests.empty.span.bytes,
+                          guid: ResolveTests.empty.span.bytes,
+                          valid: 1 << 41, sorted: 0)
+    let source = Tuple(0, relations[0], storage)
+    // The index is non-null, but its target `TypeDef` table is absent; resolution
+    // must surface that as a malformed image.
+    #expect(throws: WinMDError.BadImageFormat) { _ = try source.resolve(0) }
+  }
+
+  @Test("rejects a coded foreign key whose target table is absent")
+  func codedIndexAbsentTable() throws {
+    // TypeDef[0].Extends (ordinal 3, a `TypeDefOrRef` coded index) names a
+    // non-null row through tag 1 (`TypeRef`), but the `TypeRef` table (#1) is
+    // absent from the `Valid` mask. Encoding: `(1 << 2) | 1 = 5`.
+    let record: Array<UInt8> = [
+      // TypeDef[0]: Flags (4) = 0, TypeName = 0, TypeNamespace = 0,
+      //             Extends = 5, FieldList = 0, MethodList = 0.
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x05, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ]
+    let relations: Array<Table> = [
+      Table(Metadata.Tables.TypeDef.self, rows: 1, range: 0 ..< 14,
+            wide: 0, stride: 14),
+    ]
+    let storage = Storage(bytes: record.span.bytes,
+                          relations: relations.span,
+                          strings: ResolveTests.empty.span.bytes,
+                          blob: ResolveTests.empty.span.bytes,
+                          guid: ResolveTests.empty.span.bytes,
+                          valid: 1 << 2, sorted: 0)
+    let source = Tuple(0, relations[0], storage)
+    // Non-null coded row, in-range tag, but the named `TypeRef` table is absent;
+    // resolution must throw rather than report no relationship.
+    #expect(throws: WinMDError.BadImageFormat) { _ = try source.resolve(3) }
+  }
+
+  @Test("rejects a TypeDefOrRef reference whose target table is absent")
+  func resolveAbsentTable() throws {
+    // A `TypeDefOrRef` carried in a signature with tag 1 (`TypeRef`) and row 1:
+    // `(1 << 2) | 1`. `Database.resolve(_:)`'s tag guard passes (the tag names a
+    // real table), but the `TypeRef` table is absent from the `Valid` mask.
+    let reference = TypeDefOrRef(rawValue: (1 << 2) | 1)
+    #expect(reference.row == 1)
+    #expect(reference.tag < TypeDefOrRef.tables.count)
+
+    let record: Array<UInt8> = [
+      // TypeDef[0]: a 14-byte row, all zero (only the row count matters).
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00,
+    ]
+    let relations: Array<Table> = [
+      Table(Metadata.Tables.TypeDef.self, rows: 1, range: 0 ..< 14,
+            wide: 0, stride: 14),
+    ]
+    let storage = Storage(bytes: record.span.bytes,
+                          relations: relations.span,
+                          strings: ResolveTests.empty.span.bytes,
+                          blob: ResolveTests.empty.span.bytes,
+                          guid: ResolveTests.empty.span.bytes,
+                          valid: 1 << 2, sorted: 0)
+    // `Database.resolve(_:)`'s body against an in-memory storage: the tag guard
+    // admits the reference, but the absent target table makes `storage.tuple`
+    // return nil, which must be surfaced as a malformed image.
+    #expect(throws: WinMDError.BadImageFormat) {
+      guard reference.row != 0 else { return }
+      guard reference.tag < TypeDefOrRef.tables.count,
+          let schema = TypeDefOrRef.tables[reference.tag]
+      else { throw WinMDError.BadImageFormat }
+      guard let _ = try storage.tuple(reference.row - 1, of: schema) else {
+        throw WinMDError.BadImageFormat
+      }
+    }
   }
 }

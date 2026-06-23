@@ -17,6 +17,9 @@ extension Metadata.Tables {
 public enum NestedClass: TableSchema {
   public static var number: Int { 41 }
 
+  /// Sorted by `NestedClass`. See §II.22.32.
+  public static var key: Int? { 0 }
+
   public static var fields: Span<Field> {
     @_lifetime(immortal) get { _fields.span }
   }

@@ -21,6 +21,9 @@ extension Metadata.Tables {
 public enum ImplMap: TableSchema {
   public static var number: Int { 28 }
 
+  /// Sorted by `MemberForwarded`. See §II.22.22.
+  public static var key: Int? { 1 }
+
   public static var fields: Span<Field> {
     @_lifetime(immortal) get { _fields.span }
   }

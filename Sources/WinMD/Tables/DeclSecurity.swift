@@ -19,6 +19,9 @@ extension Metadata.Tables {
 public enum DeclSecurity: TableSchema {
   public static var number: Int { 14 }
 
+  /// Sorted by `Parent`. See §II.22.11.
+  public static var key: Int? { 1 }
+
   public static var fields: Span<Field> {
     @_lifetime(immortal) get { _fields.span }
   }

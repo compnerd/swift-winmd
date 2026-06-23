@@ -14,6 +14,8 @@ private let _columns: InlineArray<_, Column> = [
   Column(name: "Implementation", type: .index(.coded(Implementation.self))),
 ]
 
+private let _offsets = offsets(_columns)
+
 extension Metadata.Tables {
 /// See §II.22.24.
 public enum ManifestResource: TableSchema {
@@ -21,6 +23,10 @@ public enum ManifestResource: TableSchema {
 
   public static var columns: Span<Column> {
     @_lifetime(immortal) get { _columns.span }
+  }
+
+  public static func offset(_ i: Int) -> Int {
+    _offsets[i]
   }
 }
 }

@@ -46,16 +46,19 @@ extension Row {
     }
 
     internal var startIndex: Int { 0 }
-    internal var endIndex: Int { table.descriptor.columns.count }
+    internal var endIndex: Int { table.schema.columns.count }
     internal var count: Int { endIndex }
 
     internal subscript(_ column: Int) -> Int {
-      let base = table.range.lowerBound + row * table.descriptor.stride
-      let (offset, width) = table.descriptor.columns[column]
+      // Recover the column's offset and width from the schema's narrow layout
+      // and the table's width bitset.
+      let base = table.range.lowerBound + row * table.stride
+                    + table.offset(column)
+      let width = table.width(column)
       switch width {
-      case 1: return Int(database.bytes.read(at: base + offset, as: UInt8.self))
-      case 2: return Int(database.bytes.read(at: base + offset, as: UInt16.self))
-      case 4: return Int(database.bytes.read(at: base + offset, as: UInt32.self))
+      case 1: return Int(database.bytes.read(at: base, as: UInt8.self))
+      case 2: return Int(database.bytes.read(at: base, as: UInt16.self))
+      case 4: return Int(database.bytes.read(at: base, as: UInt32.self))
       default: fatalError("unsupported column size '\(width)'")
       }
     }

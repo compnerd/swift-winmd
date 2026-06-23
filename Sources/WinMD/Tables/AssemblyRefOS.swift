@@ -14,6 +14,8 @@ private let _columns: InlineArray<_, Column> = [
   Column(name: "AssemblyRef", type: .index(.simple(Metadata.Tables.AssemblyRef.self))),
 ]
 
+private let _offsets = offsets(_columns)
+
 extension Metadata.Tables {
 /// See §II.22.3.
 public enum AssemblyRefOS: TableSchema {
@@ -21,6 +23,10 @@ public enum AssemblyRefOS: TableSchema {
 
   public static var columns: Span<Column> {
     @_lifetime(immortal) get { _columns.span }
+  }
+
+  public static func offset(_ i: Int) -> Int {
+    _offsets[i]
   }
 }
 }

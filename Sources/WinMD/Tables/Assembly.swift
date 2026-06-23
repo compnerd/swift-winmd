@@ -24,6 +24,8 @@ private let _columns: InlineArray<_, Column> = [
   Column(name: "Culture", type: .index(.heap(.string))),
 ]
 
+private let _offsets = offsets(_columns)
+
 extension Metadata.Tables {
 /// See §II.22.2.
 public enum Assembly: TableSchema {
@@ -31,6 +33,10 @@ public enum Assembly: TableSchema {
 
   public static var columns: Span<Column> {
     @_lifetime(immortal) get { _columns.span }
+  }
+
+  public static func offset(_ i: Int) -> Int {
+    _offsets[i]
   }
 }
 }

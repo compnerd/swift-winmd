@@ -86,8 +86,21 @@ public struct TablesStream: ~Escapable {
       let records =
           bytes.read(at: base + 24 + slot * MemoryLayout<UInt32>.size,
                      as: UInt32.self)
-      let descriptor = TupleDescriptor(schema.columns, catalog)
-      let words = Int(records) * descriptor.stride
+
+      // Resolve the record layout into a width bitset and a stride: bit `i` is
+      // set iff column `i` is an index the catalog widened to 4 bytes.
+      let columns = schema.columns
+      var wide: UInt32 = 0
+      var stride = 0
+      for index in columns.indices {
+        let type = columns[index].type
+        let width = catalog.width(of: type)
+        if case .index = type, width == 4 {
+          wide |= 1 << index
+        }
+        stride = stride + width
+      }
+      let words = Int(records) * stride
 
       guard offset >= base, offset + words <= limit else {
         throw .InvalidIndex
@@ -95,7 +108,7 @@ public struct TablesStream: ~Escapable {
 
       relations.append(Table(schema, rows: records,
                              range: offset ..< offset + words,
-                             descriptor: descriptor))
+                             wide: wide, stride: stride))
       offset = offset + words
     }
 

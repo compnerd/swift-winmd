@@ -12,12 +12,18 @@ private let _columns: InlineArray<_, Column> = [
   Column(name: "OSMinorVersion", type: .constant(4)),
 ]
 
+private let _offsets = offsets(_columns)
+
 extension Metadata.Tables {
 public enum AssemblyOS: TableSchema {
   public static var number: Int { 34 }
 
   public static var columns: Span<Column> {
     @_lifetime(immortal) get { _columns.span }
+  }
+
+  public static func offset(_ i: Int) -> Int {
+    _offsets[i]
   }
 }
 }

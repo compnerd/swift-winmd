@@ -10,6 +10,8 @@ private let _columns: InlineArray<_, Column> = [
   Column(name: "Instantiation", type: .index(.heap(.blob))),
 ]
 
+private let _offsets = offsets(_columns)
+
 extension Metadata.Tables {
 /// See §II.22.29.
 public enum MethodSpec: TableSchema {
@@ -17,6 +19,10 @@ public enum MethodSpec: TableSchema {
 
   public static var columns: Span<Column> {
     @_lifetime(immortal) get { _columns.span }
+  }
+
+  public static func offset(_ i: Int) -> Int {
+    _offsets[i]
   }
 }
 }

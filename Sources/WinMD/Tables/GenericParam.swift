@@ -50,6 +50,12 @@ extension Column where Schema == Metadata.Tables.GenericParam {
   }
 }
 
+extension CodedReference where Schema == Metadata.Tables.GenericParam {
+  public static var Owner: CodedReference<Schema> {
+    CodedReference<Schema>(2)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.GenericParam {
   public var Number: UInt16 {
     self[.Number]

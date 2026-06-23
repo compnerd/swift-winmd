@@ -36,6 +36,16 @@ extension BlobColumn where Schema == Metadata.Tables.CustomAttribute {
   public static var Value: BlobColumn<Schema> { BlobColumn<Schema>(2) }
 }
 
+extension CodedReference where Schema == Metadata.Tables.CustomAttribute {
+  public static var Parent: CodedReference<Schema> {
+    CodedReference<Schema>(0)
+  }
+
+  public static var `Type`: CodedReference<Schema> {
+    CodedReference<Schema>(1)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.CustomAttribute {
   public var Value: Blob {
     @_lifetime(copy self)

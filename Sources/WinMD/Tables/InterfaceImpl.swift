@@ -30,11 +30,23 @@ public enum InterfaceImpl: TableSchema {
 }
 }
 
+extension Reference where Schema == Metadata.Tables.InterfaceImpl {
+  public static var Class: Reference<Schema, Metadata.Tables.TypeDef> {
+    Reference<Schema, Metadata.Tables.TypeDef>(0)
+  }
+}
+
+extension CodedReference where Schema == Metadata.Tables.InterfaceImpl {
+  public static var Interface: CodedReference<Schema> {
+    CodedReference<Schema>(1)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.InterfaceImpl {
   public var Class: Row<Metadata.Tables.TypeDef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try rows(of: Metadata.Tables.TypeDef.self)[columns[0]]!
+      try required(.Class)
     }
   }
 }

@@ -45,6 +45,12 @@ extension Column where Schema == Metadata.Tables.AssemblyRefOS {
   }
 }
 
+extension Reference where Schema == Metadata.Tables.AssemblyRefOS {
+  public static var AssemblyRef: Reference<Schema, Metadata.Tables.AssemblyRef> {
+    Reference<Schema, Metadata.Tables.AssemblyRef>(3)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.AssemblyRefOS {
   public var OSPlatformId: UInt32 {
     self[.OSPlatformId]
@@ -61,7 +67,7 @@ extension Row where Schema == Metadata.Tables.AssemblyRefOS {
   public var AssemblyRef: Row<Metadata.Tables.AssemblyRef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try rows(of: Metadata.Tables.AssemblyRef.self)[columns[3]]!
+      try required(.AssemblyRef)
     }
   }
 }

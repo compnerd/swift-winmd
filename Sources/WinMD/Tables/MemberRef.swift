@@ -39,6 +39,12 @@ extension BlobColumn where Schema == Metadata.Tables.MemberRef {
   public static var Signature: BlobColumn<Schema> { BlobColumn<Schema>(2) }
 }
 
+extension CodedReference where Schema == Metadata.Tables.MemberRef {
+  public static var Class: CodedReference<Schema> {
+    CodedReference<Schema>(0)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.MemberRef {
   public var Name: String {
     self[.Name]

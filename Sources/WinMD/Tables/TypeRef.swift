@@ -39,6 +39,12 @@ extension Column where Schema == Metadata.Tables.TypeRef {
   }
 }
 
+extension CodedReference where Schema == Metadata.Tables.TypeRef {
+  public static var ResolutionScope: CodedReference<Schema> {
+    CodedReference<Schema>(0)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.TypeRef {
   public var TypeName: String {
     self[.TypeName]

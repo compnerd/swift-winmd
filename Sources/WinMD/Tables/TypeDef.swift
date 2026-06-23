@@ -51,6 +51,22 @@ extension Column where Schema == Metadata.Tables.TypeDef {
   }
 }
 
+extension CodedReference where Schema == Metadata.Tables.TypeDef {
+  public static var Extends: CodedReference<Schema> {
+    CodedReference<Schema>(3)
+  }
+}
+
+extension List where Schema == Metadata.Tables.TypeDef {
+  public static var FieldList: List<Schema, Metadata.Tables.FieldDef> {
+    List<Schema, Metadata.Tables.FieldDef>(4)
+  }
+
+  public static var MethodList: List<Schema, Metadata.Tables.MethodDef> {
+    List<Schema, Metadata.Tables.MethodDef>(5)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.TypeDef {
   public var Flags: CorTypeAttr {
     self[.Flags]
@@ -67,14 +83,14 @@ extension Row where Schema == Metadata.Tables.TypeDef {
   public var FieldList: TableIterator<Metadata.Tables.FieldDef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try list(for: 4)
+      try list(.FieldList)
     }
   }
 
   public var MethodList: TableIterator<Metadata.Tables.MethodDef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try list(for: 5)
+      try list(.MethodList)
     }
   }
 }

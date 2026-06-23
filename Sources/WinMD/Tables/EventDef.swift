@@ -41,6 +41,12 @@ extension Column where Schema == Metadata.Tables.EventDef {
   }
 }
 
+extension CodedReference where Schema == Metadata.Tables.EventDef {
+  public static var EventType: CodedReference<Schema> {
+    CodedReference<Schema>(2)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.EventDef {
   public var EventFlags: CorEventAttr {
     self[.EventFlags]

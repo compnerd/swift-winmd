@@ -31,6 +31,12 @@ extension BlobColumn where Schema == Metadata.Tables.MethodSpec {
   public static var Instantiation: BlobColumn<Schema> { BlobColumn<Schema>(1) }
 }
 
+extension CodedReference where Schema == Metadata.Tables.MethodSpec {
+  public static var Method: CodedReference<Schema> {
+    CodedReference<Schema>(0)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.MethodSpec {
   public var Instantiation: Blob {
     @_lifetime(copy self)

@@ -36,6 +36,12 @@ extension Column where Schema == Metadata.Tables.FieldLayout {
   }
 }
 
+extension Reference where Schema == Metadata.Tables.FieldLayout {
+  public static var Column: Reference<Schema, Metadata.Tables.FieldDef> {
+    Reference<Schema, Metadata.Tables.FieldDef>(1)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.FieldLayout {
   public var Offset: UInt32 {
     self[.Offset]
@@ -44,7 +50,7 @@ extension Row where Schema == Metadata.Tables.FieldLayout {
   public var Column: Row<Metadata.Tables.FieldDef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try rows(of: Metadata.Tables.FieldDef.self)[columns[1]]!
+      try required(.Column)
     }
   }
 }

@@ -47,6 +47,12 @@ extension Column where Schema == Metadata.Tables.ManifestResource {
   }
 }
 
+extension CodedReference where Schema == Metadata.Tables.ManifestResource {
+  public static var Implementation: CodedReference<Schema> {
+    CodedReference<Schema>(3)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.ManifestResource {
   public var Offset: UInt32 {
     self[.Offset]

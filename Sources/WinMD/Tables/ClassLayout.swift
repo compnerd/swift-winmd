@@ -42,6 +42,12 @@ extension Column where Schema == Metadata.Tables.ClassLayout {
   }
 }
 
+extension Reference where Schema == Metadata.Tables.ClassLayout {
+  public static var Parent: Reference<Schema, Metadata.Tables.TypeDef> {
+    Reference<Schema, Metadata.Tables.TypeDef>(2)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.ClassLayout {
   public var PackingSize: UInt16 {
     self[.PackingSize]
@@ -54,7 +60,7 @@ extension Row where Schema == Metadata.Tables.ClassLayout {
   public var Parent: Row<Metadata.Tables.TypeDef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try rows(of: Metadata.Tables.TypeDef.self)[columns[2]]!
+      try required(.Parent)
     }
   }
 }

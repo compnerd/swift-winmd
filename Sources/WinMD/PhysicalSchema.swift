@@ -34,11 +34,9 @@ extension PhysicalSchema {
   private func width<T: CodedIndex>(of index: T.Type) -> Int {
     let valid = stream.Valid
     let tables = index.tables
-    // The number of tables that the index can refer to is the number of bits
-    // required to select between then - [0 ..< count].
-    let bits = (tables.count - 1).nonzeroBitCount
-    // The remaining bits serve as the index for the selected table.
-    let range = 1 << (16 - bits)
+    // The tag occupies `index.bits` bits, leaving `16 - bits` for a compressed
+    // index; a row count that reaches that range forces the full 32-bit index.
+    let range = 1 << (16 - index.bits)
     for tag in tables.indices {
       let table = tables[tag]
       // A table is not required to be present; if it is absent the number of

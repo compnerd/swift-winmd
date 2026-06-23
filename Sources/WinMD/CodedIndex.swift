@@ -24,9 +24,17 @@ public protocol CodedIndex: CustomDebugStringConvertible, Sendable {
 }
 
 extension CodedIndex {
+  /// The number of tag bits needed to select among the index's tables.
+  ///
+  /// The tag occupies the low `ceil(log2(n))` bits — "log n" in ECMA-335
+  /// §II.24.2.6 — and the remaining bits hold the row.
+  public static var bits: Int {
+    64 - (Self.tables.count - 1).leadingZeroBitCount
+  }
+
   /// The mask to extract the discriminator from the `CodedIndex`.
   public static var mask: RawValue {
-    (1 << (64 - (Self.tables.count - 1).leadingZeroBitCount)) - 1
+    (1 << bits) - 1
   }
 
   /// The table discriminator used to select between the tables.
@@ -36,7 +44,7 @@ extension CodedIndex {
 
   /// The row for the selected table that the index identifies.
   public var row: RawValue {
-    rawValue >> Self.mask.nonzeroBitCount
+    rawValue >> Self.bits
   }
 }
 

@@ -1,13 +1,14 @@
 // Copyright © 2021 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-/// The state of compression for a particular database instance.
+/// The physical schema of a database instance.
 ///
-/// The CIL metadata represents a compressed database format. This type
-/// provides the context for the decompression of the database. The compression
-/// state is expensive to compute, and this simply serves as a cache for the
-/// data.
-public class DatabaseDecoder {
+/// ECMA-335 §II.24 describes the on-disk physical layout of the metadata: the
+/// width of each heap and coded index depends on which tables are present and
+/// their row counts. This is the database's physical schema (the RDBMS catalog
+/// loaded when the database is opened) — immutable data with no identity. It is
+/// computed once at open and read thereafter.
+public struct PhysicalSchema {
   public private(set) var strides = Dictionary<Index, Int>()
 
   public init(_ stream: TablesStream) {
@@ -56,14 +57,14 @@ public class DatabaseDecoder {
       if valid & (1 << table.number) == (1 << table.number) {
         strides[.simple(table)] =
             rows[(valid & ((1 << table.number) - 1)).nonzeroBitCount] < (1 << 16)
-            ? 2
-            : 4
+                ? 2
+                : 4
       }
     }
   }
 }
 
-extension DatabaseDecoder {
+extension PhysicalSchema {
   /// The width, in bytes, of a given column type.
   internal func width(of type: ColumnType) -> Int {
     switch type {

@@ -79,11 +79,10 @@ public struct TablesStream: ~Escapable {
 
   /// Opens the tables present in the stream.
   ///
-  /// Each table's record layout is resolved against `decoder` once, here, and
+  /// Each table's record layout is resolved against `catalog` once, here, and
   /// carried by the returned `Table` for the lifetime of the database. Each
   /// table records its absolute byte range within the backing buffer.
-  internal func relations(_ decoder: DatabaseDecoder)
-      throws(WinMDError) -> Array<Table> {
+  internal func relations(_ catalog: PhysicalSchema) throws(WinMDError) -> Array<Table> {
     var relations = Array<Table>()
     relations.reserveCapacity(Valid.nonzeroBitCount)
 
@@ -100,7 +99,7 @@ public struct TablesStream: ~Escapable {
 
       let records =
           rows[(Valid & ((1 << schema.number) - 1)).nonzeroBitCount]
-      let descriptor = TupleDescriptor(schema.columns, decoder)
+      let descriptor = TupleDescriptor(schema.columns, catalog)
       let words = Int(records) * descriptor.stride
 
       guard offset >= base, offset + words <= limit else {

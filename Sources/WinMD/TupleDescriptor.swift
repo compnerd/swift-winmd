@@ -15,12 +15,12 @@ internal struct TupleDescriptor {
   /// The byte offset and width of each column, in column order.
   internal let columns: Array<(offset: Int, width: Int)>
 
-  internal init(_ columns: Span<Column>, _ decoder: DatabaseDecoder) {
+  internal init(_ columns: Span<Column>, _ catalog: PhysicalSchema) {
     var offset = 0
     var columns_ = Array<(offset: Int, width: Int)>()
     columns_.reserveCapacity(columns.count)
     for index in columns.indices {
-      let width = decoder.width(of: columns[index].type)
+      let width = catalog.width(of: columns[index].type)
       columns_.append((offset, width))
       offset = offset + width
     }

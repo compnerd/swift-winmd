@@ -22,7 +22,7 @@ public struct Database: ~Escapable {
   /// This is invariant for the lifetime of the database — it depends only on
   /// which tables are present and their row counts — so it is decoded once when
   /// the database is opened rather than rebuilt on every record access.
-  public let decoder: DatabaseDecoder
+  public let catalog: PhysicalSchema
 
   /// The open tables of the database.
   ///
@@ -83,8 +83,8 @@ public struct Database: ~Escapable {
 
     let stream = try TablesStream(from: cil)
     self.range = stream.base ..< stream.limit
-    self.decoder = DatabaseDecoder(stream)
-    self.relations = try stream.relations(decoder)
+    self.catalog = PhysicalSchema(stream)
+    self.relations = try stream.relations(catalog)
 
     guard let blobs = cil.Metadata.stream(named: Metadata.Stream.Blob) else {
       throw .BlobsHeapNotFound

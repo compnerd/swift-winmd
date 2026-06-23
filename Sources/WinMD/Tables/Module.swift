@@ -29,7 +29,7 @@ public enum Module: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.Module {
+extension Row where Schema == Metadata.Tables.Module {
   public var Generation: UInt16 {
     UInt16(columns[0])
   }

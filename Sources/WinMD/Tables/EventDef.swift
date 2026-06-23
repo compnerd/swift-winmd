@@ -23,7 +23,7 @@ public enum EventDef: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.EventDef {
+extension Row where Schema == Metadata.Tables.EventDef {
   public var EventFlags: CorEventAttr {
     CorEventAttr(rawValue: CorEventAttr.RawValue(columns[0]))
   }

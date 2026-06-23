@@ -19,7 +19,7 @@ public enum AssemblyProcessor: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.AssemblyProcessor {
+extension Row where Schema == Metadata.Tables.AssemblyProcessor {
   public var Processor: UInt32 {
     UInt32(columns[0])
   }

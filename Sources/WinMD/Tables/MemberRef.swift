@@ -23,7 +23,7 @@ public enum MemberRef: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.MemberRef {
+extension Row where Schema == Metadata.Tables.MemberRef {
   public var Name: String {
     database.strings[columns[1]]
   }

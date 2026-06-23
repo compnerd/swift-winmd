@@ -29,7 +29,7 @@ public enum MethodDef: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.MethodDef {
+extension Row where Schema == Metadata.Tables.MethodDef {
   public var RVA: UInt32 {
     UInt32(columns[0])
   }

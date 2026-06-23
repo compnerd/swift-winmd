@@ -23,7 +23,7 @@ public enum FieldDef: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.FieldDef {
+extension Row where Schema == Metadata.Tables.FieldDef {
   public var Flags: CorFieldAttr {
     CorFieldAttr(rawValue: CorFieldAttr.RawValue(columns[0]))
   }

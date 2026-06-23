@@ -24,7 +24,7 @@ public enum Constant: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.Constant {
+extension Row where Schema == Metadata.Tables.Constant {
   public var `Type`: CorElementType {
     CorElementType(rawValue: CorElementType.RawValue(columns[0]))
   }

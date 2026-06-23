@@ -21,12 +21,12 @@ public enum FieldRVA: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.FieldRVA {
+extension Row where Schema == Metadata.Tables.FieldRVA {
   public var RVA: UInt32 {
     UInt32(columns[0])
   }
 
-  public var Field: Record<Metadata.Tables.FieldDef> {
+  public var Field: Row<Metadata.Tables.FieldDef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
       try database.rows(of: Metadata.Tables.FieldDef.self)[columns[1]]!

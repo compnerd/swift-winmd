@@ -23,7 +23,7 @@ public enum File: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.File {
+extension Row where Schema == Metadata.Tables.File {
   public var Flags: CorFileFlags {
     CorFileFlags(rawValue: CorFileFlags.RawValue(columns[0]))
   }

@@ -23,7 +23,7 @@ public enum Param: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.Param {
+extension Row where Schema == Metadata.Tables.Param {
   public var Flags: CorParamAttr {
     CorParamAttr(rawValue: CorParamAttr.RawValue(columns[0]))
   }

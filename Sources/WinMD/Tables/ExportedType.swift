@@ -27,7 +27,7 @@ public enum ExportedType: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.ExportedType {
+extension Row where Schema == Metadata.Tables.ExportedType {
   public var Flags: CorTypeAttr {
     CorTypeAttr(rawValue: CorTypeAttr.RawValue(columns[0]))
   }

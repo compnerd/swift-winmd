@@ -23,7 +23,7 @@ public enum DeclSecurity: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.DeclSecurity {
+extension Row where Schema == Metadata.Tables.DeclSecurity {
   public var Action: UInt16 {
     UInt16(columns[0])
   }

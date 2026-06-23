@@ -15,11 +15,11 @@ struct Dump: ParsableCommand {
   var options: InspectOptions
 
   func run() throws {
-    // The caller owns the buffer; it must outlive the database, which is a
+    // The caller owns the mapping; it must outlive the database, which is a
     // borrowed view over it.
-    let bytes = try Array(Data(contentsOf: options.database.url,
-                               options: .alwaysMapped))
-    let database = try Database(bytes.span.bytes)
+    let data = try Data(contentsOf: options.database.url,
+                        options: .alwaysMapped)
+    let database = try Database(data.span.bytes)
 
     print("Database: \(options.database.url.path)")
 
@@ -43,9 +43,9 @@ struct PrintNamespaces: ParsableCommand {
   var options: InspectOptions
 
   func run() throws {
-    let bytes = try Array(Data(contentsOf: options.database.url,
-                               options: .alwaysMapped))
-    let database = try Database(bytes.span.bytes)
+    let data = try Data(contentsOf: options.database.url,
+                        options: .alwaysMapped)
+    let database = try Database(data.span.bytes)
 
     var namespaces = Set<String>()
     let rows = try database.rows(of: Metadata.Tables.TypeDef.self)

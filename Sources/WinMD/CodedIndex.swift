@@ -14,7 +14,7 @@ public protocol CodedIndex: CustomDebugStringConvertible, Sendable {
   /// The order of the tables is important. The tag identifies the table and
   /// indexes through them, therefore, it is critical the index of the table
   /// corresponds to the tag value.
-  static var tables: Array<TableSchema.Type> { get }
+  static var tables: Span<TableSchema.Type> { get }
 
   /// The value of the coded index.
   var rawValue: RawValue { get }
@@ -47,13 +47,17 @@ extension CodedIndex {
   }
 }
 
+// TODO(compnerd) fold into the accessor when immortal inline spans land.
+private let _typeDefOrRef: InlineArray<_, TableSchema.Type> = [
+  Metadata.Tables.TypeDef.self,
+  Metadata.Tables.TypeRef.self,
+  Metadata.Tables.TypeSpec.self,
+]
+
 public struct TypeDefOrRef: CodedIndex {
-  public static var tables: Array<TableSchema.Type> {
-    [
-      Metadata.Tables.TypeDef.self,
-      Metadata.Tables.TypeRef.self,
-      Metadata.Tables.TypeSpec.self,
-    ]
+  public static var tables: Span<TableSchema.Type> {
+    @_lifetime(immortal)
+    get { _typeDefOrRef.span }
   }
 
   public let rawValue: RawValue
@@ -62,14 +66,18 @@ public struct TypeDefOrRef: CodedIndex {
     self.rawValue = rawValue
   }
 }
+
+// TODO(compnerd) fold into the accessor when immortal inline spans land.
+private let _hasConstant: InlineArray<_, TableSchema.Type> = [
+  Metadata.Tables.FieldDef.self,
+  Metadata.Tables.Param.self,
+  Metadata.Tables.PropertyDef.self,
+]
 
 public struct HasConstant: CodedIndex {
-  public static var tables: Array<TableSchema.Type> {
-    [
-      Metadata.Tables.FieldDef.self,
-      Metadata.Tables.Param.self,
-      Metadata.Tables.PropertyDef.self,
-    ]
+  public static var tables: Span<TableSchema.Type> {
+    @_lifetime(immortal)
+    get { _hasConstant.span }
   }
 
   public let rawValue: RawValue
@@ -78,33 +86,37 @@ public struct HasConstant: CodedIndex {
     self.rawValue = rawValue
   }
 }
+
+// TODO(compnerd) fold into the accessor when immortal inline spans land.
+private let _hasCustomAttribute: InlineArray<_, TableSchema.Type> = [
+  Metadata.Tables.MethodDef.self,
+  Metadata.Tables.FieldDef.self,
+  Metadata.Tables.TypeRef.self,
+  Metadata.Tables.TypeDef.self,
+  Metadata.Tables.Param.self,
+  Metadata.Tables.InterfaceImpl.self,
+  Metadata.Tables.MemberRef.self,
+  Metadata.Tables.Module.self,
+  Metadata.Tables.DeclSecurity.self,
+  Metadata.Tables.PropertyDef.self,
+  Metadata.Tables.EventDef.self,
+  Metadata.Tables.StandAloneSig.self,
+  Metadata.Tables.ModuleRef.self,
+  Metadata.Tables.TypeSpec.self,
+  Metadata.Tables.Assembly.self,
+  Metadata.Tables.AssemblyRef.self,
+  Metadata.Tables.File.self,
+  Metadata.Tables.ExportedType.self,
+  Metadata.Tables.ManifestResource.self,
+  Metadata.Tables.GenericParam.self,
+  Metadata.Tables.GenericParamConstraint.self,
+  Metadata.Tables.MethodSpec.self,
+]
 
 public struct HasCustomAttribute: CodedIndex {
-  public static var tables: Array<TableSchema.Type> {
-    [
-      Metadata.Tables.MethodDef.self,
-      Metadata.Tables.FieldDef.self,
-      Metadata.Tables.TypeRef.self,
-      Metadata.Tables.TypeDef.self,
-      Metadata.Tables.Param.self,
-      Metadata.Tables.InterfaceImpl.self,
-      Metadata.Tables.MemberRef.self,
-      Metadata.Tables.Module.self,
-      Metadata.Tables.DeclSecurity.self,
-      Metadata.Tables.PropertyDef.self,
-      Metadata.Tables.EventDef.self,
-      Metadata.Tables.StandAloneSig.self,
-      Metadata.Tables.ModuleRef.self,
-      Metadata.Tables.TypeSpec.self,
-      Metadata.Tables.Assembly.self,
-      Metadata.Tables.AssemblyRef.self,
-      Metadata.Tables.File.self,
-      Metadata.Tables.ExportedType.self,
-      Metadata.Tables.ManifestResource.self,
-      Metadata.Tables.GenericParam.self,
-      Metadata.Tables.GenericParamConstraint.self,
-      Metadata.Tables.MethodSpec.self,
-    ]
+  public static var tables: Span<TableSchema.Type> {
+    @_lifetime(immortal)
+    get { _hasCustomAttribute.span }
   }
 
   public let rawValue: RawValue
@@ -113,13 +125,17 @@ public struct HasCustomAttribute: CodedIndex {
     self.rawValue = rawValue
   }
 }
+
+// TODO(compnerd) fold into the accessor when immortal inline spans land.
+private let _hasFieldMarshal: InlineArray<_, TableSchema.Type> = [
+  Metadata.Tables.FieldDef.self,
+  Metadata.Tables.Param.self,
+]
 
 public struct HasFieldMarshal: CodedIndex {
-  public static var tables: Array<TableSchema.Type> {
-    [
-      Metadata.Tables.FieldDef.self,
-      Metadata.Tables.Param.self,
-    ]
+  public static var tables: Span<TableSchema.Type> {
+    @_lifetime(immortal)
+    get { _hasFieldMarshal.span }
   }
 
   public let rawValue: RawValue
@@ -128,14 +144,18 @@ public struct HasFieldMarshal: CodedIndex {
     self.rawValue = rawValue
   }
 }
+
+// TODO(compnerd) fold into the accessor when immortal inline spans land.
+private let _hasDeclSecurity: InlineArray<_, TableSchema.Type> = [
+  Metadata.Tables.TypeDef.self,
+  Metadata.Tables.MethodDef.self,
+  Metadata.Tables.Assembly.self,
+]
 
 public struct HasDeclSecurity: CodedIndex {
-  public static var tables: Array<TableSchema.Type> {
-    [
-      Metadata.Tables.TypeDef.self,
-      Metadata.Tables.MethodDef.self,
-      Metadata.Tables.Assembly.self,
-    ]
+  public static var tables: Span<TableSchema.Type> {
+    @_lifetime(immortal)
+    get { _hasDeclSecurity.span }
   }
 
   public let rawValue: RawValue
@@ -144,16 +164,20 @@ public struct HasDeclSecurity: CodedIndex {
     self.rawValue = rawValue
   }
 }
+
+// TODO(compnerd) fold into the accessor when immortal inline spans land.
+private let _memberRefParent: InlineArray<_, TableSchema.Type> = [
+  Metadata.Tables.TypeDef.self,
+  Metadata.Tables.TypeRef.self,
+  Metadata.Tables.ModuleRef.self,
+  Metadata.Tables.MethodDef.self,
+  Metadata.Tables.TypeSpec.self,
+]
 
 public struct MemberRefParent: CodedIndex {
-  public static var tables: Array<TableSchema.Type> {
-    [
-      Metadata.Tables.TypeDef.self,
-      Metadata.Tables.TypeRef.self,
-      Metadata.Tables.ModuleRef.self,
-      Metadata.Tables.MethodDef.self,
-      Metadata.Tables.TypeSpec.self,
-    ]
+  public static var tables: Span<TableSchema.Type> {
+    @_lifetime(immortal)
+    get { _memberRefParent.span }
   }
 
   public let rawValue: RawValue
@@ -162,13 +186,17 @@ public struct MemberRefParent: CodedIndex {
     self.rawValue = rawValue
   }
 }
+
+// TODO(compnerd) fold into the accessor when immortal inline spans land.
+private let _hasSemantics: InlineArray<_, TableSchema.Type> = [
+  Metadata.Tables.EventDef.self,
+  Metadata.Tables.PropertyDef.self,
+]
 
 public struct HasSemantics: CodedIndex {
-  public static var tables: Array<TableSchema.Type> {
-    [
-      Metadata.Tables.EventDef.self,
-      Metadata.Tables.PropertyDef.self,
-    ]
+  public static var tables: Span<TableSchema.Type> {
+    @_lifetime(immortal)
+    get { _hasSemantics.span }
   }
 
   public let rawValue: RawValue
@@ -177,13 +205,17 @@ public struct HasSemantics: CodedIndex {
     self.rawValue = rawValue
   }
 }
+
+// TODO(compnerd) fold into the accessor when immortal inline spans land.
+private let _methodDefOrRef: InlineArray<_, TableSchema.Type> = [
+  Metadata.Tables.MethodDef.self,
+  Metadata.Tables.MemberRef.self,
+]
 
 public struct MethodDefOrRef: CodedIndex {
-  public static var tables: Array<TableSchema.Type> {
-    [
-      Metadata.Tables.MethodDef.self,
-      Metadata.Tables.MemberRef.self,
-    ]
+  public static var tables: Span<TableSchema.Type> {
+    @_lifetime(immortal)
+    get { _methodDefOrRef.span }
   }
 
   public let rawValue: RawValue
@@ -193,12 +225,16 @@ public struct MethodDefOrRef: CodedIndex {
   }
 }
 
+// TODO(compnerd) fold into the accessor when immortal inline spans land.
+private let _memberForwarded: InlineArray<_, TableSchema.Type> = [
+  Metadata.Tables.FieldDef.self,
+  Metadata.Tables.MethodDef.self,
+]
+
 public struct MemberForwarded: CodedIndex {
-  public static var tables: Array<TableSchema.Type> {
-    [
-      Metadata.Tables.FieldDef.self,
-      Metadata.Tables.MethodDef.self,
-    ]
+  public static var tables: Span<TableSchema.Type> {
+    @_lifetime(immortal)
+    get { _memberForwarded.span }
   }
 
   public let rawValue: RawValue
@@ -209,13 +245,17 @@ public struct MemberForwarded: CodedIndex {
 }
 
 // FIXME(compnerd) Exported vs Manifest Resource
+// TODO(compnerd) fold into the accessor when immortal inline spans land.
+private let _implementation: InlineArray<_, TableSchema.Type> = [
+  Metadata.Tables.File.self,
+  Metadata.Tables.AssemblyRef.self,
+  Metadata.Tables.ExportedType.self,
+]
+
 public struct Implementation: CodedIndex {
-  public static var tables: Array<TableSchema.Type> {
-    [
-      Metadata.Tables.File.self,
-      Metadata.Tables.AssemblyRef.self,
-      Metadata.Tables.ExportedType.self,
-    ]
+  public static var tables: Span<TableSchema.Type> {
+    @_lifetime(immortal)
+    get { _implementation.span }
   }
 
   public let rawValue: RawValue
@@ -224,16 +264,20 @@ public struct Implementation: CodedIndex {
     self.rawValue = rawValue
   }
 }
+
+// TODO(compnerd) fold into the accessor when immortal inline spans land.
+private let _customAttributeType: InlineArray<_, TableSchema.Type> = [
+  Metadata.Tables.Module.self,      // unused
+  Metadata.Tables.Module.self,      // unused
+  Metadata.Tables.MethodDef.self,
+  Metadata.Tables.MemberRef.self,
+  Metadata.Tables.Module.self,      // unused
+]
 
 public struct CustomAttributeType: CodedIndex {
-  public static var tables: Array<TableSchema.Type> {
-    [
-      Metadata.Tables.Module.self,      // unused
-      Metadata.Tables.Module.self,      // unused
-      Metadata.Tables.MethodDef.self,
-      Metadata.Tables.MemberRef.self,
-      Metadata.Tables.Module.self,      // unused
-    ]
+  public static var tables: Span<TableSchema.Type> {
+    @_lifetime(immortal)
+    get { _customAttributeType.span }
   }
 
   public let rawValue: RawValue
@@ -242,15 +286,19 @@ public struct CustomAttributeType: CodedIndex {
     self.rawValue = rawValue
   }
 }
+
+// TODO(compnerd) fold into the accessor when immortal inline spans land.
+private let _resolutionScope: InlineArray<_, TableSchema.Type> = [
+  Metadata.Tables.Module.self,
+  Metadata.Tables.ModuleRef.self,
+  Metadata.Tables.AssemblyRef.self,
+  Metadata.Tables.TypeRef.self,
+]
 
 public struct ResolutionScope: CodedIndex {
-  public static var tables: Array<TableSchema.Type> {
-    [
-      Metadata.Tables.Module.self,
-      Metadata.Tables.ModuleRef.self,
-      Metadata.Tables.AssemblyRef.self,
-      Metadata.Tables.TypeRef.self,
-    ]
+  public static var tables: Span<TableSchema.Type> {
+    @_lifetime(immortal)
+    get { _resolutionScope.span }
   }
 
   public let rawValue: RawValue
@@ -260,12 +308,16 @@ public struct ResolutionScope: CodedIndex {
   }
 }
 
+// TODO(compnerd) fold into the accessor when immortal inline spans land.
+private let _typeOrMethodDef: InlineArray<_, TableSchema.Type> = [
+  Metadata.Tables.TypeDef.self,
+  Metadata.Tables.MethodDef.self,
+]
+
 public struct TypeOrMethodDef: CodedIndex {
-  public static var tables: Array<TableSchema.Type> {
-    [
-      Metadata.Tables.TypeDef.self,
-      Metadata.Tables.MethodDef.self,
-    ]
+  public static var tables: Span<TableSchema.Type> {
+    @_lifetime(immortal)
+    get { _typeOrMethodDef.span }
   }
 
   public let rawValue: Int

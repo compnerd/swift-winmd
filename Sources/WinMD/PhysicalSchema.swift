@@ -33,19 +33,22 @@ extension PhysicalSchema {
   /// The width, in bytes, of a coded index over `index`'s tables.
   private func width<T: CodedIndex>(of index: T.Type) -> Int {
     let valid = stream.Valid
+    let tables = index.tables
     // The number of tables that the index can refer to is the number of bits
     // required to select between then - [0 ..< count].
-    let bits = (index.tables.count - 1).nonzeroBitCount
+    let bits = (tables.count - 1).nonzeroBitCount
     // The remaining bits serve as the index for the selected table.
     let range = 1 << (16 - bits)
-    return index.tables.contains {
+    for tag in tables.indices {
+      let table = tables[tag]
       // A table is not required to be present; if it is absent the number of
-      // rows that can be indexed is unknown, so we must assume a wide index.
-      guard valid & (1 << $0.number) == (1 << $0.number) else { return true }
-      // A present table forces the full 32-bit index once its row count reaches
+      // rows that can be indexed is unknown, so we must assume a wide index. A
+      // present table forces the full 32-bit index once its row count reaches
       // the range; below it the compressed width suffices.
-      return rows(of: $0.number) >= range
-    } ? 4 : 2
+      guard valid & (1 << table.number) == (1 << table.number) else { return 4 }
+      if rows(of: table.number) >= range { return 4 }
+    }
+    return 2
   }
 }
 

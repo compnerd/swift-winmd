@@ -53,4 +53,23 @@ internal struct Storage: ~Escapable {
     let slot = (valid & ((1 << Schema.number) - 1)).nonzeroBitCount
     return TableIterator<Schema>(self, relations[slot], from: begin, to: end)
   }
+
+  /// The `Tuple` at the 0-based `row` of the table described by `schema`.
+  ///
+  /// This is the runtime (non-generic) sibling of `rows(of:)`: it opens a table
+  /// from a `TableSchema.Type` *value* rather than a static `Schema`, which is
+  /// what foreign-key navigation needs — the target table of an index is only
+  /// known at runtime, off the column's `Index`. The present table's slot is
+  /// found by the same population-count math as `rows(of:)`, off `schema.number`
+  /// read from the metatype. `row` is bounds-checked against the table's row
+  /// count; an absent table or an out-of-range row yields `nil`.
+  @_lifetime(copy self)
+  internal func tuple(_ row: Int, of schema: TableSchema.Type)
+      throws(WinMDError) -> Tuple? {
+    guard valid & (1 << schema.number) != 0 else { return nil }
+    let slot = (valid & ((1 << schema.number) - 1)).nonzeroBitCount
+    let table = relations[slot]
+    guard row >= 0, row < Int(table.rows) else { return nil }
+    return Tuple(row, table, self)
+  }
 }

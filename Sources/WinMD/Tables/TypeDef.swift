@@ -29,7 +29,7 @@ public enum TypeDef: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.TypeDef {
+extension Row where Schema == Metadata.Tables.TypeDef {
   public var Flags: CorTypeAttr {
     CorTypeAttr(rawValue: CorTypeAttr.RawValue(columns[0]))
   }

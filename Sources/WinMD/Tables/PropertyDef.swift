@@ -23,7 +23,7 @@ public enum PropertyDef: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.PropertyDef {
+extension Row where Schema == Metadata.Tables.PropertyDef {
   public var Flags: CorPropertyAttr {
     CorPropertyAttr(rawValue: CorPropertyAttr.RawValue(columns[0]))
   }

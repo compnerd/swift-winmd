@@ -21,7 +21,7 @@ public enum FieldMarshal: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.FieldMarshal {
+extension Row where Schema == Metadata.Tables.FieldMarshal {
   public var NativeType: Blob {
     @_lifetime(copy self)
     get { database.blobs[columns[1]] }

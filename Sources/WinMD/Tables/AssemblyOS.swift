@@ -22,7 +22,7 @@ public enum AssemblyOS: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.AssemblyOS {
+extension Row where Schema == Metadata.Tables.AssemblyOS {
   public var OSPlatformID: UInt32 {
     UInt32(columns[0])
   }

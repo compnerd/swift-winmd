@@ -35,7 +35,7 @@ public enum AssemblyRef: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.AssemblyRef {
+extension Row where Schema == Metadata.Tables.AssemblyRef {
   public var MajorVersion: UInt16 {
     UInt16(columns[0])
   }
@@ -75,7 +75,7 @@ extension Record where Schema == Metadata.Tables.AssemblyRef {
   }
 }
 
-extension Record where Schema == Metadata.Tables.AssemblyRef {
+extension Row where Schema == Metadata.Tables.AssemblyRef {
   internal var Version: AssemblyVersion {
     AssemblyVersion(MajorVersion, MinorVersion, BuildNumber, RevisionNumber)
   }

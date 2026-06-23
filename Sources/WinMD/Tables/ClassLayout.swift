@@ -23,7 +23,7 @@ public enum ClassLayout: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.ClassLayout {
+extension Row where Schema == Metadata.Tables.ClassLayout {
   public var PackingSize: UInt16 {
     UInt16(columns[0])
   }
@@ -32,7 +32,7 @@ extension Record where Schema == Metadata.Tables.ClassLayout {
     UInt32(columns[1])
   }
 
-  public var Parent: Record<Metadata.Tables.TypeDef> {
+  public var Parent: Row<Metadata.Tables.TypeDef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
       try database.rows(of: Metadata.Tables.TypeDef.self)[columns[2]]!

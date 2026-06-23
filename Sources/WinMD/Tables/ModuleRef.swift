@@ -19,7 +19,7 @@ public enum ModuleRef: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.ModuleRef {
+extension Row where Schema == Metadata.Tables.ModuleRef {
   public var Name: String {
     database.strings[columns[0]]
   }

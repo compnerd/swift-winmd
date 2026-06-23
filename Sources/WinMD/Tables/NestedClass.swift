@@ -21,15 +21,15 @@ public enum NestedClass: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.NestedClass {
-  public var NestedClass: Record<Metadata.Tables.TypeDef> {
+extension Row where Schema == Metadata.Tables.NestedClass {
+  public var NestedClass: Row<Metadata.Tables.TypeDef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
       try database.rows(of: Metadata.Tables.TypeDef.self)[columns[0]]!
     }
   }
 
-  public var EnclosingClass: Record<Metadata.Tables.TypeDef> {
+  public var EnclosingClass: Row<Metadata.Tables.TypeDef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
       try database.rows(of: Metadata.Tables.TypeDef.self)[columns[1]]!

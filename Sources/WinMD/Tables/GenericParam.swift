@@ -25,7 +25,7 @@ public enum GenericParam: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.GenericParam {
+extension Row where Schema == Metadata.Tables.GenericParam {
   public var Number: UInt16 {
     UInt16(columns[0])
   }

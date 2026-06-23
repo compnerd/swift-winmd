@@ -19,7 +19,7 @@ public enum TypeSpec: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.TypeSpec {
+extension Row where Schema == Metadata.Tables.TypeSpec {
   public var Signature: Blob {
     @_lifetime(copy self)
     get { database.blobs[columns[0]] }

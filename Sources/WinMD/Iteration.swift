@@ -1,22 +1,22 @@
 // Copyright © 2021 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-/// A singular record from a table.
+/// A singular row from a table.
 ///
-/// A record, or colloquailly a row, is a singular entity in a table. This is
-/// an iterable entity in the record collection of a table.
-public struct Record<Schema: TableSchema>: ~Escapable {
+/// A row is a singular entity in a table. This is an iterable entity in the
+/// row collection of a table.
+public struct Row<Schema: TableSchema>: ~Escapable {
   internal let row: Int
-  // The open table the record belongs to.  It carries the shared record layout
-  // and backing storage, and is also used to reach the following record, which
+  // The open table the row belongs to. It carries the shared record layout
+  // and backing storage, and is also used to reach the following row, which
   // is required for list processing.
   internal let table: Table
   internal let database: Database
 
-  /// The decoded columns of the record.
+  /// The decoded columns of the row.
   ///
   /// The values are read from the backing storage on demand rather than
-  /// materialised, so accessing a record does not allocate and only the columns
+  /// materialised, so accessing a row does not allocate and only the columns
   /// that are read are decoded.
   internal var columns: Columns {
     @_lifetime(copy self)
@@ -31,8 +31,8 @@ public struct Record<Schema: TableSchema>: ~Escapable {
   }
 }
 
-extension Record {
-  /// A zero-allocation view over the columns of a record.
+extension Row {
+  /// A zero-allocation view over the columns of a row.
   internal struct Columns: ~Escapable {
     private let database: Database
     private let table: Table
@@ -62,7 +62,7 @@ extension Record {
   }
 }
 
-extension Record {
+extension Row {
   @_lifetime(copy self)
   internal func list<Target: TableSchema>(for column: Int) throws(WinMDError)
       -> TableIterator<Target> {
@@ -73,7 +73,7 @@ extension Record {
     // exclusive upper bound of this run.
     let begin = columns[column] - 1
     let end: Int? = if row + 1 < table.rows {
-      Record(row + 1, table, database).columns[column] - 1
+      Row(row + 1, table, database).columns[column] - 1
     } else {
       nil
     }
@@ -82,7 +82,7 @@ extension Record {
   }
 }
 
-extension Record {
+extension Row {
   public var debugDescription: String {
     var fields = Array<String>()
     let columns = self.columns
@@ -103,7 +103,7 @@ extension Record {
 /// Iterator for a `Table`
 ///
 /// Provides a way to iterate a given table in a type-safe manner. It walks the
-/// records of an open `Table`, yielding a typed `Record` for each row.
+/// rows of an open `Table`, yielding a typed `Row` for each row.
 ///
 /// A `~Escapable` view cannot conform to `Sequence`/`IteratorProtocol`, so
 /// iteration is index-based: walk `0 ..< count`, reading `self[i]`.
@@ -124,16 +124,16 @@ public struct TableIterator<Schema: TableSchema>: ~Escapable {
   /// The first row, within the table, that this iterator yields.
   private let start: Int
 
-  /// The number of records the iterator yields.
+  /// The number of rows the iterator yields.
   public var count: Int {
     rows
   }
 
-  public subscript(_ offset: Int) -> Record<Schema>? {
+  public subscript(_ offset: Int) -> Row<Schema>? {
     @_lifetime(copy self)
     get {
       guard offset < rows else { return nil }
-      return Record(start + offset, table, database)
+      return Row(start + offset, table, database)
     }
   }
 }

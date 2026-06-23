@@ -23,7 +23,7 @@ public enum TypeRef: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.TypeRef {
+extension Row where Schema == Metadata.Tables.TypeRef {
   public var TypeName: String {
     database.strings[columns[1]]
   }

@@ -35,7 +35,7 @@ public enum Assembly: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.Assembly {
+extension Row where Schema == Metadata.Tables.Assembly {
   public var HashAlgId: CorHashAlgorithm {
     CorHashAlgorithm(rawValue: CorHashAlgorithm.RawValue(columns[0]))!
   }
@@ -74,7 +74,7 @@ extension Record where Schema == Metadata.Tables.Assembly {
   }
 }
 
-extension Record where Schema == Metadata.Tables.Assembly {
+extension Row where Schema == Metadata.Tables.Assembly {
   internal var Version: AssemblyVersion  {
     AssemblyVersion(MajorVersion, MinorVersion, BuildNumber, RevisionNumber)
   }

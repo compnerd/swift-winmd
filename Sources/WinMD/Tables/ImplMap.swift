@@ -25,7 +25,7 @@ public enum ImplMap: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.ImplMap {
+extension Row where Schema == Metadata.Tables.ImplMap {
   public var MappingFlags: CorPinvokeMap {
     CorPinvokeMap(rawValue: CorPinvokeMap.RawValue(columns[0]))
   }
@@ -34,7 +34,7 @@ extension Record where Schema == Metadata.Tables.ImplMap {
     database.strings[columns[2]]
   }
 
-  public var ImportScope: Record<Metadata.Tables.ModuleRef> {
+  public var ImportScope: Row<Metadata.Tables.ModuleRef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
       try database.rows(of: Metadata.Tables.ModuleRef.self)[columns[3]]!

@@ -21,12 +21,12 @@ public enum AssemblyRefProcessor: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.AssemblyRefProcessor {
+extension Row where Schema == Metadata.Tables.AssemblyRefProcessor {
   public var Processor: UInt32 {
     UInt32(columns[0])
   }
 
-  public var AssemblyRef: Record<Metadata.Tables.AssemblyRef> {
+  public var AssemblyRef: Row<Metadata.Tables.AssemblyRef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
       try database.rows(of: Metadata.Tables.AssemblyRef.self)[columns[1]]!

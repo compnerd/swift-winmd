@@ -25,7 +25,7 @@ public enum ManifestResource: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.ManifestResource {
+extension Row where Schema == Metadata.Tables.ManifestResource {
   public var Offset: UInt32 {
     UInt32(columns[0])
   }

@@ -25,7 +25,7 @@ public enum AssemblyRefOS: TableSchema {
 }
 }
 
-extension Record where Schema == Metadata.Tables.AssemblyRefOS {
+extension Row where Schema == Metadata.Tables.AssemblyRefOS {
   public var OSPlatformId: UInt32 {
     UInt32(columns[0])
   }
@@ -38,7 +38,7 @@ extension Record where Schema == Metadata.Tables.AssemblyRefOS {
     UInt32(columns[2])
   }
 
-  public var AssemblyRef: Record<Metadata.Tables.AssemblyRef> {
+  public var AssemblyRef: Row<Metadata.Tables.AssemblyRef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
       try database.rows(of: Metadata.Tables.AssemblyRef.self)[columns[3]]!

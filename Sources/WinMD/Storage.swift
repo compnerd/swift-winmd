@@ -47,7 +47,7 @@ internal struct Storage: ~Escapable {
     // `relations` is dense and ordered by table number, so a present table's
     // slot is the number of present tables below it: the population count of
     // the lower bits of `Valid` (the same slot the row counts are read from).
-    guard valid & (1 << Schema.number) == (1 << Schema.number) else {
+    guard valid & (1 << Schema.number) != 0 else {
       throw .TableNotFound
     }
     let slot = (valid & ((1 << Schema.number) - 1)).nonzeroBitCount

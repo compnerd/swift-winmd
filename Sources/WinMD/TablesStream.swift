@@ -80,12 +80,9 @@ public struct TablesStream: ~Escapable {
     var offset = base + 24 + Valid.nonzeroBitCount * MemoryLayout<UInt32>.size
 
     for schema in kRegisteredTables {
-      guard Valid & (1 << schema.number) == (1 << schema.number) else { continue }
+      guard Valid & (1 << schema.number) != 0 else { continue }
 
-      let slot = (Valid & ((1 << schema.number) - 1)).nonzeroBitCount
-      let records =
-          bytes.read(at: base + 24 + slot * MemoryLayout<UInt32>.size,
-                     as: UInt32.self)
+      let records = catalog.rows(of: schema.number)
 
       // Resolve the record layout into a width bitset and a stride: bit `i` is
       // set iff column `i` is an index the catalog widened to 4 bytes.

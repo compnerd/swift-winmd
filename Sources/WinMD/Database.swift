@@ -153,4 +153,31 @@ public struct Database: ~Escapable {
   public func rows(of table: Table) -> Cursor {
     Cursor(storage, table)
   }
+
+  /// The rows of `schema` whose foreign-key `column` references `target`.
+  ///
+  /// This is reverse navigation: the inverse of `Tuple.resolve`. Where
+  /// `resolve` follows a row's foreign key forward to the one row it names,
+  /// `referencing` finds every row of `schema` whose `column` names `target`.
+  ///
+  /// The stored cell an owning row holds to point at `target` is computed from
+  /// `column`'s type and `target`'s 0-based row (ECMA-335 rows are 1-based, so
+  /// the stored row is `target.row + 1`):
+  ///   - a `simple` index to table `S` requires `S` to be `target`'s table and
+  ///     stores `target.row + 1`;
+  ///   - a `coded` index `C` stores `((target.row + 1) << C.bits) | tag`, where
+  ///     `tag` is the position of `target`'s table within `C.tables`.
+  /// A column of any other kind is not a foreign key and is a usage error.
+  ///
+  /// When `schema` is physically sorted on this very column — its intrinsic
+  /// `key` is `column` and the runtime `Sorted` bit is set — the matching rows
+  /// form a contiguous run, found by binary search in `O(log n)`. Otherwise the
+  /// result is an `O(rows)` linear scan that yields the same matches.
+  @_lifetime(borrow self)
+  public func referencing(_ target: borrowing Tuple,
+                          in schema: TableSchema.Type,
+                          by column: Int) throws(WinMDError) -> Filter {
+    let storage = self.storage
+    return try storage.referencing(target, in: schema, by: column)
+  }
 }

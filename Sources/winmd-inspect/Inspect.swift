@@ -30,6 +30,10 @@ struct Dump: ParsableCommand {
     print("Tables:")
     for table in database.tables {
       print("  - \(table)")
+      let rows = database.rows(of: table)
+      for offset in 0 ..< rows.count {
+        if let row = rows[offset] { print("    - \(row.debugDescription)") }
+      }
     }
   }
 }

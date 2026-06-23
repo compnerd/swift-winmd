@@ -86,11 +86,11 @@ public struct TablesStream: ~Escapable {
 
       // Resolve the record layout into a width bitset and a stride: bit `i` is
       // set iff column `i` is an index the catalog widened to 4 bytes.
-      let columns = schema.columns
+      let fields = schema.fields
       var wide: UInt32 = 0
       var stride = 0
-      for index in columns.indices {
-        let type = columns[index].type
+      for index in fields.indices {
+        let type = fields[index].type
         let width = catalog.width(of: type)
         if case .index = type, width == 4 {
           wide |= 1 << index

@@ -13,15 +13,6 @@ public enum ColumnType: Sendable {
 extension ColumnType: Hashable {
 }
 
-/// A table column.
-///
-/// Accessible columns have a name which the user can use to reference the
-/// column, and a type which indicates how to read the value of the column.
-public struct Column: Sendable {
-  public let name: StaticString
-  public let type: ColumnType
-}
-
 /// The schema of a CIL metadata table.
 ///
 /// This is the static, compile-time description of a table as defined by the
@@ -32,7 +23,7 @@ public protocol TableSchema: Sendable {
   static var number: Int { get }
 
   /// The columns of the table as defined by the CIL specification.
-  static var columns: Span<Column> { get }
+  static var fields: Span<Field> { get }
 
   /// The narrow byte offset of column `i` within a record.
   ///
@@ -94,7 +85,7 @@ public struct Table: Sendable {
   ///
   /// A column widens by two bytes beyond its narrow width when its bit is set.
   internal func width(_ i: Int) -> Int {
-    schema.columns[i].width + 2 * Int((wide >> i) & 1)
+    schema.fields[i].width + 2 * Int((wide >> i) & 1)
   }
 }
 

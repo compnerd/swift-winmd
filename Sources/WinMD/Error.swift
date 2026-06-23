@@ -5,6 +5,7 @@ public enum WinMDError: Error {
   case BadImageFormat
   case BlobsHeapNotFound
   case GUIDHeapNotFound
+  case InvalidColumn
   case InvalidIndex
   case MissingTableStream
   case StringsHeapNotFound

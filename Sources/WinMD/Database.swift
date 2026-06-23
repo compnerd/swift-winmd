@@ -33,9 +33,9 @@ public struct Database: ~Escapable {
   private let string: RawSpan
 
   // The "User Strings" (`#US`) heap is optional: metadata-only files frequently
-  // omit it.  Its absence is tolerated at open and surfaced as an error only on
+  // omit it. Its absence is tolerated at open and surfaced as an error only on
   // use, so its location is stored as an optional region rather than a borrowed
-  // sub-span.  `Region` is escapable, so it can be held by an `Optional`.
+  // sub-span. `Region` is escapable, so it can be held by an `Optional`.
   private let user: Region?
 
   // MARK: - Streams

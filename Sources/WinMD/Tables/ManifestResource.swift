@@ -7,22 +7,22 @@
 ///   Name (String Heap Index)
 ///   Implementation (Implementation Coded Index)
 // TODO(compnerd) fold into the accessor when immortal inline spans land.
-private let _columns: InlineArray<_, Column> = [
-  Column(name: "Offset", type: .constant(4)),
-  Column(name: "Flags", type: .constant(4)),
-  Column(name: "Name", type: .index(.heap(.string))),
-  Column(name: "Implementation", type: .index(.coded(Implementation.self))),
+private let _fields: InlineArray<_, Field> = [
+  Field(name: "Offset", type: .constant(4)),
+  Field(name: "Flags", type: .constant(4)),
+  Field(name: "Name", type: .index(.heap(.string))),
+  Field(name: "Implementation", type: .index(.coded(Implementation.self))),
 ]
 
-private let _offsets = offsets(_columns)
+private let _offsets = offsets(_fields)
 
 extension Metadata.Tables {
 /// See §II.22.24.
 public enum ManifestResource: TableSchema {
   public static var number: Int { 40 }
 
-  public static var columns: Span<Column> {
-    @_lifetime(immortal) get { _columns.span }
+  public static var fields: Span<Field> {
+    @_lifetime(immortal) get { _fields.span }
   }
 
   public static func offset(_ i: Int) -> Int {

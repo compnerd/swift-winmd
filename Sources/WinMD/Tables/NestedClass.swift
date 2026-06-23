@@ -5,20 +5,20 @@
 ///   NestedClass (TypeDef Index)
 ///   EnclosingClass (TypeDef Index)
 // TODO(compnerd) fold into the accessor when immortal inline spans land.
-private let _columns: InlineArray<_, Column> = [
-  Column(name: "NestedClass", type: .index(.simple(Metadata.Tables.TypeDef.self))),
-  Column(name: "EnclosingClass", type: .index(.simple(Metadata.Tables.TypeDef.self))),
+private let _fields: InlineArray<_, Field> = [
+  Field(name: "NestedClass", type: .index(.simple(Metadata.Tables.TypeDef.self))),
+  Field(name: "EnclosingClass", type: .index(.simple(Metadata.Tables.TypeDef.self))),
 ]
 
-private let _offsets = offsets(_columns)
+private let _offsets = offsets(_fields)
 
 extension Metadata.Tables {
 /// See §II.22.32.
 public enum NestedClass: TableSchema {
   public static var number: Int { 41 }
 
-  public static var columns: Span<Column> {
-    @_lifetime(immortal) get { _columns.span }
+  public static var fields: Span<Field> {
+    @_lifetime(immortal) get { _fields.span }
   }
 
   public static func offset(_ i: Int) -> Int {

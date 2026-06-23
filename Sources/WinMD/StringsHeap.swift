@@ -21,4 +21,18 @@ public struct StringsHeap: ~Escapable {
     }
     return String(decoding: bytes.extracting(offset ..< end), as: UTF8.self)
   }
+
+  /// Opens the null-terminated UTF-8 string at `offset`, validating its bounds
+  /// and terminator, so a malformed entry throws `.BadImageFormat` rather than
+  /// trapping.
+  public func string(at offset: Int) throws(WinMDError) -> String {
+    guard offset >= 0, offset < bytes.byteCount else { throw .BadImageFormat }
+    var end = offset
+    while end < bytes.byteCount,
+        bytes.read(at: end, as: UInt8.self) != 0 {
+      end += 1
+    }
+    guard end < bytes.byteCount else { throw .BadImageFormat }
+    return String(decoding: bytes.extracting(offset ..< end), as: UTF8.self)
+  }
 }

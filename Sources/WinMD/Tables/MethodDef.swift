@@ -9,24 +9,24 @@
 ///   Signature (Blob Heap Index)
 ///   ParamList (Param Index)
 // TODO(compnerd) fold into the accessor when immortal inline spans land.
-private let _columns: InlineArray<_, Column> = [
-  Column(name: "RVA", type: .constant(4)),
-  Column(name: "ImplFlags", type: .constant(2)),
-  Column(name: "Flags", type: .constant(2)),
-  Column(name: "Name", type: .index(.heap(.string))),
-  Column(name: "Signature", type: .index(.heap(.blob))),
-  Column(name: "ParamList", type: .index(.simple(Metadata.Tables.Param.self))),
+private let _fields: InlineArray<_, Field> = [
+  Field(name: "RVA", type: .constant(4)),
+  Field(name: "ImplFlags", type: .constant(2)),
+  Field(name: "Flags", type: .constant(2)),
+  Field(name: "Name", type: .index(.heap(.string))),
+  Field(name: "Signature", type: .index(.heap(.blob))),
+  Field(name: "ParamList", type: .index(.simple(Metadata.Tables.Param.self))),
 ]
 
-private let _offsets = offsets(_columns)
+private let _offsets = offsets(_fields)
 
 extension Metadata.Tables {
 /// See §II.22.26.
 public enum MethodDef: TableSchema {
   public static var number: Int { 6 }
 
-  public static var columns: Span<Column> {
-    @_lifetime(immortal) get { _columns.span }
+  public static var fields: Span<Field> {
+    @_lifetime(immortal) get { _fields.span }
   }
 
   public static func offset(_ i: Int) -> Int {

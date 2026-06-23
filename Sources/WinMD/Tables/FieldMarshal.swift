@@ -5,20 +5,20 @@
 ///   Parent (HasFieldMarshal Coded Index)
 ///   NativeType (Blob Heap Index)
 // TODO(compnerd) fold into the accessor when immortal inline spans land.
-private let _columns: InlineArray<_, Column> = [
-  Column(name: "Parent", type: .index(.coded(HasFieldMarshal.self))),
-  Column(name: "NativeType", type: .index(.heap(.blob))),
+private let _fields: InlineArray<_, Field> = [
+  Field(name: "Parent", type: .index(.coded(HasFieldMarshal.self))),
+  Field(name: "NativeType", type: .index(.heap(.blob))),
 ]
 
-private let _offsets = offsets(_columns)
+private let _offsets = offsets(_fields)
 
 extension Metadata.Tables {
 /// See §II.22.17.
 public enum FieldMarshal: TableSchema {
   public static var number: Int { 13 }
 
-  public static var columns: Span<Column> {
-    @_lifetime(immortal) get { _columns.span }
+  public static var fields: Span<Field> {
+    @_lifetime(immortal) get { _fields.span }
   }
 
   public static func offset(_ i: Int) -> Int {

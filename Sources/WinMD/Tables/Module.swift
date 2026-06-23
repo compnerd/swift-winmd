@@ -10,23 +10,23 @@ public import struct Foundation.UUID
 ///   EncId (GUID Heap Index, reserved, MBZ)
 ///   EncBaseId (GUID Heap Index, reserved, MBZ)
 // TODO(compnerd) fold into the accessor when immortal inline spans land.
-private let _columns: InlineArray<_, Column> = [
-  Column(name: "Generation", type: .constant(2)),
-  Column(name: "Name", type: .index(.heap(.string))),
-  Column(name: "Mvid", type: .index(.heap(.guid))),
-  Column(name: "EncId", type: .index(.heap(.guid))),
-  Column(name: "EncBaseId", type: .index(.heap(.guid))),
+private let _fields: InlineArray<_, Field> = [
+  Field(name: "Generation", type: .constant(2)),
+  Field(name: "Name", type: .index(.heap(.string))),
+  Field(name: "Mvid", type: .index(.heap(.guid))),
+  Field(name: "EncId", type: .index(.heap(.guid))),
+  Field(name: "EncBaseId", type: .index(.heap(.guid))),
 ]
 
-private let _offsets = offsets(_columns)
+private let _offsets = offsets(_fields)
 
 extension Metadata.Tables {
 /// See §II.22.30.
 public enum Module: TableSchema {
   public static var number: Int { 0 }
 
-  public static var columns: Span<Column> {
-    @_lifetime(immortal) get { _columns.span }
+  public static var fields: Span<Field> {
+    @_lifetime(immortal) get { _fields.span }
   }
 
   public static func offset(_ i: Int) -> Int {

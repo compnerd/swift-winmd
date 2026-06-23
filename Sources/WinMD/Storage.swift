@@ -80,4 +80,97 @@ internal struct Storage: ~Escapable {
     guard row >= 0, row < Int(table.rows) else { return nil }
     return Tuple(row, table, self)
   }
+
+  /// The rows of `schema` whose foreign-key `column` references `target`.
+  ///
+  /// The runtime (non-generic) sibling of `Database.referencing`: it opens the
+  /// owning table from a `TableSchema.Type` value, computes the encoded key an
+  /// owning row would hold to point at `target`, and returns the matching rows.
+  /// The cost is `O(log n)` when the table is sorted on `column` and `O(rows)`
+  /// otherwise; see `Database.referencing` for the encoding and the contract.
+  @_lifetime(copy self)
+  internal func referencing(_ target: borrowing Tuple,
+                            in schema: TableSchema.Type,
+                            by column: Int) throws(WinMDError) -> Filter {
+    guard valid & (1 << schema.number) != 0 else {
+      throw .TableNotFound
+    }
+    let slot = (valid & ((1 << schema.number) - 1)).nonzeroBitCount
+    let table = relations[slot]
+
+    // The stored cell an owning row holds to name `target`. ECMA-335 rows are
+    // 1-based, so `target`'s 0-based row is stored as `target.row + 1`.
+    let row = target.row + 1
+    guard column >= 0, column < schema.fields.count else { throw .InvalidColumn }
+    let encoded: Int = switch schema.fields[column].type {
+    case let .index(.simple(referent)):
+      // A simple index must name `target`'s own table.
+      if referent == target.table.schema {
+        row
+      } else {
+        throw .InvalidColumn
+      }
+    case let .index(.coded(coded)):
+      // A coded index tags the row with the position of `target`'s table among
+      // the index's tables: `(row << bits) | tag`.
+      if let tag = tag(of: target.table.schema, in: coded) {
+        (row << coded.bits) | tag
+      } else {
+        throw .InvalidColumn
+      }
+    default:
+      throw .InvalidColumn
+    }
+
+    // A table physically sorted on this very column holds its matches as a
+    // contiguous run; binary-search the `[lower, upper)` bound of `encoded`.
+    if schema.key == column, sorted & (1 << schema.number) != 0 {
+      let count = Int(table.rows)
+      let lower = bound(table, column, encoded, count, strict: false)
+      let upper = bound(table, column, encoded, count, strict: true)
+      let cursor = Cursor(self, table, from: lower, to: upper)
+      return Filter(cursor, { _ in true })
+    }
+
+    // Otherwise scan, matching the raw cell against the encoded key.
+    let cursor = Cursor(self, table)
+    return cursor.where { $0[column] == encoded }
+  }
+
+  /// The partition point of `column` against `value` over `[0, count)`.
+  ///
+  /// `column` is the sorted key of `table`, so its cells are non-decreasing.
+  /// With `strict == false` this is the lower bound (the first row whose cell is
+  /// `>= value`); with `strict == true` the upper bound (the first row whose
+  /// cell is `> value`). Together they bracket the run equal to `value`. The
+  /// search is `O(log count)`.
+  private func bound(_ table: Table, _ column: Int, _ value: Int, _ count: Int,
+                     strict: Bool) -> Int {
+    var lo = 0
+    var hi = count
+    while lo < hi {
+      let mid = lo + (hi - lo) / 2
+      let cell = Tuple(mid, table, self)[column]
+      if cell < value || (strict && cell == value) {
+        lo = mid + 1
+      } else {
+        hi = mid
+      }
+    }
+    return lo
+  }
+
+  /// The tag of `schema` within the tables of `coded`, or `nil` if absent.
+  ///
+  /// The tag is the position of the table in the coded index's table list,
+  /// found by a linear metatype comparison (`Span` admits no `firstIndex`).
+  private func tag(of schema: TableSchema.Type,
+                   in coded: CodedIndex.Type) -> Int? {
+    for index in 0 ..< coded.tables.count {
+      if let table = coded.tables[index], table == schema {
+        return index
+      }
+    }
+    return nil
+  }
 }

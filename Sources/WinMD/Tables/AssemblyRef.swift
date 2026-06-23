@@ -41,43 +41,85 @@ public enum AssemblyRef: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.AssemblyRef {
+  public static var MajorVersion: Column<Schema, UInt16> {
+    Column<Schema, UInt16>(0) { UInt16($0.columns[0]) }
+  }
+
+  public static var MinorVersion: Column<Schema, UInt16> {
+    Column<Schema, UInt16>(1) { UInt16($0.columns[1]) }
+  }
+
+  public static var BuildNumber: Column<Schema, UInt16> {
+    Column<Schema, UInt16>(2) { UInt16($0.columns[2]) }
+  }
+
+  public static var RevisionNumber: Column<Schema, UInt16> {
+    Column<Schema, UInt16>(3) { UInt16($0.columns[3]) }
+  }
+
+  public static var Flags: Column<Schema, CorAssemblyFlags> {
+    Column<Schema, CorAssemblyFlags>(4) {
+      CorAssemblyFlags(rawValue: CorAssemblyFlags.RawValue($0.columns[4]))
+    }
+  }
+
+  public static var Name: Column<Schema, String> {
+    Column<Schema, String>(6) { $0.strings[$0.columns[6]] }
+  }
+
+  public static var Culture: Column<Schema, String> {
+    Column<Schema, String>(7) { $0.strings[$0.columns[7]] }
+  }
+}
+
+extension BlobColumn where Schema == Metadata.Tables.AssemblyRef {
+  public static var PublicKeyOrToken: BlobColumn<Schema> {
+    BlobColumn<Schema>(5)
+  }
+
+  public static var HashValue: BlobColumn<Schema> {
+    BlobColumn<Schema>(8)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.AssemblyRef {
   public var MajorVersion: UInt16 {
-    UInt16(columns[0])
+    self[.MajorVersion]
   }
 
   public var MinorVersion: UInt16 {
-    UInt16(columns[1])
+    self[.MinorVersion]
   }
 
   public var BuildNumber: UInt16 {
-    UInt16(columns[2])
+    self[.BuildNumber]
   }
 
   public var RevisionNumber: UInt16 {
-    UInt16(columns[3])
+    self[.RevisionNumber]
   }
 
   public var Flags: CorAssemblyFlags {
-    CorAssemblyFlags(rawValue: CorAssemblyFlags.RawValue(columns[4]))
+    self[.Flags]
   }
 
   public var PublicKeyOrToken: Blob {
     @_lifetime(copy self)
-    get { blobs[columns[5]] }
+    get { self[.PublicKeyOrToken] }
   }
 
   public var Name: String {
-    strings[columns[6]]
+    self[.Name]
   }
 
   public var Culture: String {
-    strings[columns[7]]
+    self[.Culture]
   }
 
   public var HashValue: Blob {
     @_lifetime(copy self)
-    get { blobs[columns[8]] }
+    get { self[.HashValue] }
   }
 }
 

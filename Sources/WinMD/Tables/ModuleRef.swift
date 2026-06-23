@@ -25,8 +25,14 @@ public enum ModuleRef: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.ModuleRef {
+  public static var Name: Column<Schema, String> {
+    Column<Schema, String>(0) { $0.strings[$0.columns[0]] }
+  }
+}
+
 extension Row where Schema == Metadata.Tables.ModuleRef {
   public var Name: String {
-    strings[columns[0]]
+    self[.Name]
   }
 }

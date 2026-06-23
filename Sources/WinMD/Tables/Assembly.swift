@@ -41,42 +41,86 @@ public enum Assembly: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.Assembly {
+  public static var HashAlgId: Column<Schema, CorHashAlgorithm> {
+    Column<Schema, CorHashAlgorithm>(0) {
+      CorHashAlgorithm(rawValue: CorHashAlgorithm.RawValue($0.columns[0]))!
+    }
+  }
+
+  public static var MajorVersion: Column<Schema, UInt16> {
+    Column<Schema, UInt16>(1) { UInt16($0.columns[1]) }
+  }
+
+  public static var MinorVersion: Column<Schema, UInt16> {
+    Column<Schema, UInt16>(2) { UInt16($0.columns[2]) }
+  }
+
+  public static var BuildNumber: Column<Schema, UInt16> {
+    Column<Schema, UInt16>(3) { UInt16($0.columns[3]) }
+  }
+
+  public static var RevisionNumber: Column<Schema, UInt16> {
+    Column<Schema, UInt16>(4) { UInt16($0.columns[4]) }
+  }
+
+  public static var Flags: Column<Schema, CorAssemblyFlags> {
+    Column<Schema, CorAssemblyFlags>(5) {
+      CorAssemblyFlags(rawValue: CorAssemblyFlags.RawValue($0.columns[5]))
+    }
+  }
+
+  public static var Name: Column<Schema, String> {
+    Column<Schema, String>(7) { $0.strings[$0.columns[7]] }
+  }
+
+  public static var Culture: Column<Schema, String> {
+    Column<Schema, String>(8) { $0.strings[$0.columns[8]] }
+  }
+}
+
+extension BlobColumn where Schema == Metadata.Tables.Assembly {
+  public static var PublicKey: BlobColumn<Schema> {
+    BlobColumn<Schema>(6)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.Assembly {
   public var HashAlgId: CorHashAlgorithm {
-    CorHashAlgorithm(rawValue: CorHashAlgorithm.RawValue(columns[0]))!
+    self[.HashAlgId]
   }
 
   public var MajorVersion: UInt16 {
-    UInt16(columns[1])
+    self[.MajorVersion]
   }
 
   public var MinorVersion: UInt16 {
-    UInt16(columns[2])
+    self[.MinorVersion]
   }
 
   public var BuildNumber: UInt16 {
-    UInt16(columns[3])
+    self[.BuildNumber]
   }
 
   public var RevisionNumber: UInt16 {
-    UInt16(columns[4])
+    self[.RevisionNumber]
   }
 
   public var Flags: CorAssemblyFlags {
-    CorAssemblyFlags(rawValue: CorAssemblyFlags.RawValue(columns[5]))
+    self[.Flags]
   }
 
   public var PublicKey: Blob {
     @_lifetime(copy self)
-    get { blobs[columns[6]] }
+    get { self[.PublicKey] }
   }
 
   public var Name: String {
-    strings[columns[7]]
+    self[.Name]
   }
 
   public var Culture: String {
-    strings[columns[8]]
+    self[.Culture]
   }
 }
 

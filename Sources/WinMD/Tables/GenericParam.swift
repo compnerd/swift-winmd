@@ -34,16 +34,32 @@ public enum GenericParam: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.GenericParam {
+  public static var Number: Column<Schema, UInt16> {
+    Column<Schema, UInt16>(0) { UInt16($0.columns[0]) }
+  }
+
+  public static var Flags: Column<Schema, CorGenericParamAttr> {
+    Column<Schema, CorGenericParamAttr>(1) {
+      CorGenericParamAttr(rawValue: CorGenericParamAttr.RawValue($0.columns[1]))
+    }
+  }
+
+  public static var Name: Column<Schema, String> {
+    Column<Schema, String>(3) { $0.strings[$0.columns[3]] }
+  }
+}
+
 extension Row where Schema == Metadata.Tables.GenericParam {
   public var Number: UInt16 {
-    UInt16(columns[0])
+    self[.Number]
   }
 
   public var Flags: CorGenericParamAttr {
-    CorGenericParamAttr(rawValue: CorGenericParamAttr.RawValue(columns[1]))
+    self[.Flags]
   }
 
   public var Name: String {
-    strings[columns[3]]
+    self[.Name]
   }
 }

@@ -28,16 +28,30 @@ public enum AssemblyOS: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.AssemblyOS {
+  public static var OSPlatformID: Column<Schema, UInt32> {
+    Column<Schema, UInt32>(0) { UInt32($0.columns[0]) }
+  }
+
+  public static var OSMajorVersion: Column<Schema, UInt32> {
+    Column<Schema, UInt32>(1) { UInt32($0.columns[1]) }
+  }
+
+  public static var OSMinorVersion: Column<Schema, UInt32> {
+    Column<Schema, UInt32>(2) { UInt32($0.columns[2]) }
+  }
+}
+
 extension Row where Schema == Metadata.Tables.AssemblyOS {
   public var OSPlatformID: UInt32 {
-    UInt32(columns[0])
+    self[.OSPlatformID]
   }
 
   public var OSMajorVersion: UInt32 {
-    UInt32(columns[1])
+    self[.OSMajorVersion]
   }
 
   public var OSMinorVersion: UInt32 {
-    UInt32(columns[2])
+    self[.OSMinorVersion]
   }
 }

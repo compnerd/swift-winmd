@@ -29,13 +29,23 @@ public enum MemberRef: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.MemberRef {
+  public static var Name: Column<Schema, String> {
+    Column<Schema, String>(1) { $0.strings[$0.columns[1]] }
+  }
+}
+
+extension BlobColumn where Schema == Metadata.Tables.MemberRef {
+  public static var Signature: BlobColumn<Schema> { BlobColumn<Schema>(2) }
+}
+
 extension Row where Schema == Metadata.Tables.MemberRef {
   public var Name: String {
-    strings[columns[1]]
+    self[.Name]
   }
 
   public var Signature: Blob {
     @_lifetime(copy self)
-    get { blobs[columns[2]] }
+    get { self[.Signature] }
   }
 }

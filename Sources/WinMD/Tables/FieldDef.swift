@@ -29,17 +29,35 @@ public enum FieldDef: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.FieldDef {
+  public static var Flags: Column<Schema, CorFieldAttr> {
+    Column<Schema, CorFieldAttr>(0) {
+      CorFieldAttr(rawValue: CorFieldAttr.RawValue($0.columns[0]))
+    }
+  }
+
+  public static var Name: Column<Schema, String> {
+    Column<Schema, String>(1) { $0.strings[$0.columns[1]] }
+  }
+}
+
+extension BlobColumn where Schema == Metadata.Tables.FieldDef {
+  public static var Signature: BlobColumn<Schema> {
+    BlobColumn<Schema>(2)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.FieldDef {
   public var Flags: CorFieldAttr {
-    CorFieldAttr(rawValue: CorFieldAttr.RawValue(columns[0]))
+    self[.Flags]
   }
 
   public var Name: String {
-    strings[columns[1]]
+    self[.Name]
   }
 
   public var Signature: Blob {
     @_lifetime(copy self)
-    get { blobs[columns[2]] }
+    get { self[.Signature] }
   }
 }

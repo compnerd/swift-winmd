@@ -29,12 +29,24 @@ public enum EventDef: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.EventDef {
+  public static var EventFlags: Column<Schema, CorEventAttr> {
+    Column<Schema, CorEventAttr>(0) {
+      CorEventAttr(rawValue: CorEventAttr.RawValue($0.columns[0]))
+    }
+  }
+
+  public static var Name: Column<Schema, String> {
+    Column<Schema, String>(1) { $0.strings[$0.columns[1]] }
+  }
+}
+
 extension Row where Schema == Metadata.Tables.EventDef {
   public var EventFlags: CorEventAttr {
-    CorEventAttr(rawValue: CorEventAttr.RawValue(columns[0]))
+    self[.EventFlags]
   }
 
   public var Name: String {
-    strings[columns[1]]
+    self[.Name]
   }
 }

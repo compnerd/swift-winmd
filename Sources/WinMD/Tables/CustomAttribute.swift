@@ -32,9 +32,13 @@ public enum CustomAttribute: TableSchema {
 }
 }
 
+extension BlobColumn where Schema == Metadata.Tables.CustomAttribute {
+  public static var Value: BlobColumn<Schema> { BlobColumn<Schema>(2) }
+}
+
 extension Row where Schema == Metadata.Tables.CustomAttribute {
   public var Value: Blob {
     @_lifetime(copy self)
-    get { blobs[columns[2]] }
+    get { self[.Value] }
   }
 }

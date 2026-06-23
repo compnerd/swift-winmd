@@ -31,17 +31,31 @@ public enum AssemblyRefOS: TableSchema {
 }
 }
 
+extension Column where Schema == Metadata.Tables.AssemblyRefOS {
+  public static var OSPlatformId: Column<Schema, UInt32> {
+    Column<Schema, UInt32>(0) { UInt32($0.columns[0]) }
+  }
+
+  public static var OSMajorVersion: Column<Schema, UInt32> {
+    Column<Schema, UInt32>(1) { UInt32($0.columns[1]) }
+  }
+
+  public static var OSMinorVerison: Column<Schema, UInt32> {
+    Column<Schema, UInt32>(2) { UInt32($0.columns[2]) }
+  }
+}
+
 extension Row where Schema == Metadata.Tables.AssemblyRefOS {
   public var OSPlatformId: UInt32 {
-    UInt32(columns[0])
+    self[.OSPlatformId]
   }
 
   public var OSMajorVersion: UInt32 {
-    UInt32(columns[1])
+    self[.OSMajorVersion]
   }
 
   public var OSMinorVerison: UInt32 {
-    UInt32(columns[2])
+    self[.OSMinorVerison]
   }
 
   public var AssemblyRef: Row<Metadata.Tables.AssemblyRef> {

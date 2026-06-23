@@ -25,9 +25,13 @@ public enum StandAloneSig: TableSchema {
 }
 }
 
+extension BlobColumn where Schema == Metadata.Tables.StandAloneSig {
+  public static var Signature: BlobColumn<Schema> { BlobColumn<Schema>(0) }
+}
+
 extension Row where Schema == Metadata.Tables.StandAloneSig {
   public var Signature: Blob {
     @_lifetime(copy self)
-    get { blobs[columns[0]] }
+    get { self[.Signature] }
   }
 }

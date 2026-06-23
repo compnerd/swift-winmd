@@ -28,6 +28,18 @@ struct CodedIndexTests {
     #expect(TypeOrMethodDef.discriminatorBitWidth == 1)
   }
 
+  @Test("derives tag width from the table count, not its popcount")
+  func tagBits() {
+    // `PhysicalSchema.width(of:)` selects the coded-index width from the tag
+    // width. It once derived that from the population count of the table count,
+    // which is only `ceil(log2(n))` when `n` is a power of two; for the others
+    // it under-counted and over-sized the compressed range, mis-selecting a
+    // 2-byte index where 4 are required. Pin the diverging cases.
+    #expect(TypeDefOrRef.bits == 2)        // 3 tables; popcount(2) is 1
+    #expect(MemberRefParent.bits == 3)     // 5 tables; popcount(4) is 1
+    #expect(HasCustomAttribute.bits == 5)  // 22 tables; popcount(21) is 3
+  }
+
   @Test("splits a TypeDefOrRef into tag and row")
   func typeDefOrRef() {
     let index = TypeDefOrRef(rawValue: 909)

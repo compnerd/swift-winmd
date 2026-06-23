@@ -185,3 +185,139 @@ struct NavigationTests {
     }
   }
 }
+
+// Typed reverse navigation over a simple-index owner. `NestedClass.NestedClass`
+// (a `Reference<NestedClass, TypeDef>`) is the table's sort key, so the rows
+// referencing a given `TypeDef` form a contiguous run. ECMA-335 rows are
+// 1-based, so a stored value `N` names the 0-based TypeDef row `N - 1`:
+//   NestedClass[0].NestedClass = 1  → TypeDef[0]
+//   NestedClass[1].NestedClass = 2  → TypeDef[1]
+//   NestedClass[2].NestedClass = 2  → TypeDef[1]
+//   NestedClass[3].NestedClass = 4  → TypeDef[3]
+struct ReverseNavigationTests {
+  private static let record: Array<UInt8> = [
+    // TypeDef[0..3]: four 14-byte rows, all zero (only the row count matters).
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // NestedClass[0..3]: NestedClass then EnclosingClass, ordered by NestedClass.
+    0x01, 0x00, 0x09, 0x00,
+    0x02, 0x00, 0x09, 0x00,
+    0x02, 0x00, 0x09, 0x00,
+    0x04, 0x00, 0x09, 0x00,
+  ]
+
+  private static let empty = Array<UInt8>()
+
+  private static let relations: Array<Table> = [
+    Table(Metadata.Tables.TypeDef.self, rows: 4, range: 0 ..< 56,
+          wide: 0, stride: 14),
+    Table(Metadata.Tables.NestedClass.self, rows: 4, range: 56 ..< 72,
+          wide: 0, stride: 4),
+  ]
+
+  private static let valid: UInt64 = (1 << 2) | (1 << 41)
+
+  private static func with(_ sorted: UInt64,
+                           _ body: (borrowing Storage) throws -> Void)
+      rethrows {
+    let storage =
+        Storage(bytes: ReverseNavigationTests.record.span.bytes,
+                relations: ReverseNavigationTests.relations.span,
+                strings: ReverseNavigationTests.empty.span.bytes,
+                blob: ReverseNavigationTests.empty.span.bytes,
+                guid: ReverseNavigationTests.empty.span.bytes,
+                valid: ReverseNavigationTests.valid, sorted: sorted)
+    try body(storage)
+  }
+
+  @Test("reverse-navigates a simple-index token to its owners")
+  func simpleReverse() throws {
+    // The token names the owning `NestedClass` table and the `NestedClass`
+    // ordinal, so the call site needs no schema or ordinal; the rows naming
+    // TypeDef[1] are the contiguous run [1, 3).
+    try ReverseNavigationTests.with(1 << 41) { storage in
+      let target = Row<Metadata.Tables.TypeDef>(1,
+                                                ReverseNavigationTests.relations[0],
+                                                storage)
+      var rows = Array<Int>()
+      let filter = try storage.referencing(target, by: .NestedClass)
+      filter.forEach { rows.append($0.row) }
+      #expect(rows == [1, 2])
+    }
+  }
+
+  @Test("the typed reverse token agrees with the ordinal form")
+  func tokenAgreesWithOrdinal() throws {
+    try ReverseNavigationTests.with(0) { storage in
+      let target = Row<Metadata.Tables.TypeDef>(1,
+                                                ReverseNavigationTests.relations[0],
+                                                storage)
+      var byToken = Array<Int>()
+      let tokenFilter = try storage.referencing(target, by: .NestedClass)
+      tokenFilter.forEach { byToken.append($0.row) }
+
+      var byOrdinal = Array<Int>()
+      let ordinalFilter =
+          try storage.referencing(target.columns,
+                                  in: Metadata.Tables.NestedClass.self, by: 0)
+      ordinalFilter.forEach { byOrdinal.append($0.row) }
+
+      #expect(byToken == byOrdinal)
+    }
+  }
+}
+
+// Typed reverse navigation over a coded-index owner. `CustomAttribute.Parent`
+// (a `CodedReference<CustomAttribute>`) is a `HasCustomAttribute` coded index;
+// `TypeDef` is its fourth table (tag 3) over 5 tag bits, so a row naming
+// TypeDef[r] stores `((r + 1) << 5) | 3`.
+struct ReverseCodedNavigationTests {
+  private static let record: Array<UInt8> = [
+    // TypeDef[0..1]: two 14-byte rows (only the row count matters).
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // CustomAttribute[0]: Parent = 0x23 → TypeDef[0].
+    0x23, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // CustomAttribute[1]: Parent = 0x43 → TypeDef[1].
+    0x43, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // CustomAttribute[2]: Parent = 0x23 → TypeDef[0] again.
+    0x23, 0x00, 0x00, 0x00, 0x00, 0x00,
+  ]
+
+  private static let empty = Array<UInt8>()
+
+  private static let relations: Array<Table> = [
+    Table(Metadata.Tables.TypeDef.self, rows: 2, range: 0 ..< 28,
+          wide: 0, stride: 14),
+    Table(Metadata.Tables.CustomAttribute.self, rows: 3, range: 28 ..< 46,
+          wide: 0, stride: 6),
+  ]
+
+  private static let valid: UInt64 = (1 << 2) | (1 << 12)
+
+  @Test("reverse-navigates a coded-index token to its owners")
+  func codedReverse() throws {
+    // CustomAttribute is left unsorted, so the typed reverse lookup scans; the
+    // rows naming TypeDef[0] through `Parent` are 0 and 2.
+    let storage =
+        Storage(bytes: ReverseCodedNavigationTests.record.span.bytes,
+                relations: ReverseCodedNavigationTests.relations.span,
+                strings: ReverseCodedNavigationTests.empty.span.bytes,
+                blob: ReverseCodedNavigationTests.empty.span.bytes,
+                guid: ReverseCodedNavigationTests.empty.span.bytes,
+                valid: ReverseCodedNavigationTests.valid, sorted: 0)
+    let target = Row<Metadata.Tables.TypeDef>(0,
+                                              ReverseCodedNavigationTests.relations[0],
+                                              storage)
+    var rows = Array<Int>()
+    // The owning table is named explicitly: `CustomAttribute.Parent` is a
+    // `CodedReference<CustomAttribute>` carrying the owner and the ordinal.
+    let token =
+        CodedReference<Metadata.Tables.CustomAttribute>.Parent
+    let filter = try storage.referencing(target, by: token)
+    filter.forEach { rows.append($0.row) }
+    #expect(rows == [0, 2])
+  }
+}

@@ -200,4 +200,33 @@ public struct Database: ~Escapable {
     let storage = self.storage
     return try storage.referencing(target, in: schema, by: column)
   }
+
+  /// The rows whose simple-index foreign-key `column` references `target`.
+  ///
+  /// Typed reverse navigation: the owning column descriptor — a `Reference`
+  /// token naming the owning `Owner` table and the column's ordinal — supplies
+  /// both the owning relation and the ordinal, so the call site needs no
+  /// string or ordinal: `database.referencing(row, by: NestedClass.NestedClass)`.
+  /// This is the typed wrapper over the generic `referencing(_:in:by:)`; see it
+  /// for the encoding and the `O(log n)` / `O(rows)` contract.
+  @_lifetime(borrow self)
+  public func referencing<Owner, Target>(_ target: borrowing Row<Target>,
+                                         by column: Reference<Owner, Target>)
+      throws(WinMDError) -> Filter {
+    let storage = self.storage
+    return try storage.referencing(target, by: column)
+  }
+
+  /// The rows whose coded-index foreign-key `column` references `target`.
+  ///
+  /// As above, but the owning column is a coded index, so the descriptor is a
+  /// `CodedReference` token and the `target` can be any table the index admits:
+  /// `database.referencing(row, by: CustomAttribute.Parent)`.
+  @_lifetime(borrow self)
+  public func referencing<Owner, Target>(_ target: borrowing Row<Target>,
+                                         by column: CodedReference<Owner>)
+      throws(WinMDError) -> Filter {
+    let storage = self.storage
+    return try storage.referencing(target, by: column)
+  }
 }

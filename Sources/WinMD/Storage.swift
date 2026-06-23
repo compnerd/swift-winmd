@@ -137,6 +137,28 @@ internal struct Storage: ~Escapable {
     return cursor.where { $0[column] == encoded }
   }
 
+  /// The rows whose simple-index foreign-key column the `column` token
+  /// addresses references `target`.
+  ///
+  /// Typed reverse navigation: the `Reference` token names the owning `Owner`
+  /// table and the column's ordinal, so this resolves to the generic
+  /// `referencing(_:in:by:)` with no string or ordinal at the call site.
+  @_lifetime(copy self)
+  internal func referencing<Owner, Target>(_ target: borrowing Row<Target>,
+                                           by column: Reference<Owner, Target>)
+      throws(WinMDError) -> Filter {
+    try referencing(target.columns, in: Owner.self, by: column.ordinal)
+  }
+
+  /// The rows whose coded-index foreign-key column the `column` token addresses
+  /// references `target`.
+  @_lifetime(copy self)
+  internal func referencing<Owner, Target>(_ target: borrowing Row<Target>,
+                                           by column: CodedReference<Owner>)
+      throws(WinMDError) -> Filter {
+    try referencing(target.columns, in: Owner.self, by: column.ordinal)
+  }
+
   /// The partition point of `column` against `value` over `[0, count)`.
   ///
   /// `column` is the sorted key of `table`, so its cells are non-decreasing.

@@ -27,18 +27,30 @@ public enum EventMap: TableSchema {
 }
 }
 
+extension Reference where Schema == Metadata.Tables.EventMap {
+  public static var Parent: Reference<Schema, Metadata.Tables.TypeDef> {
+    Reference<Schema, Metadata.Tables.TypeDef>(0)
+  }
+}
+
+extension List where Schema == Metadata.Tables.EventMap {
+  public static var EventList: List<Schema, Metadata.Tables.EventDef> {
+    List<Schema, Metadata.Tables.EventDef>(1)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.EventMap {
   public var Parent: Row<Metadata.Tables.TypeDef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try rows(of: Metadata.Tables.TypeDef.self)[columns[0]]!
+      try required(.Parent)
     }
   }
 
   public var EventList: TableIterator<Metadata.Tables.EventDef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try list(for: 1)
+      try list(.EventList)
     }
   }
 }

@@ -61,6 +61,12 @@ extension BlobColumn where Schema == Metadata.Tables.MethodDef {
   public static var Signature: BlobColumn<Schema> { BlobColumn<Schema>(4) }
 }
 
+extension List where Schema == Metadata.Tables.MethodDef {
+  public static var ParamList: List<Schema, Metadata.Tables.Param> {
+    List<Schema, Metadata.Tables.Param>(5)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.MethodDef {
   public var RVA: UInt32 {
     self[.RVA]
@@ -86,7 +92,7 @@ extension Row where Schema == Metadata.Tables.MethodDef {
   public var ParamList: TableIterator<Metadata.Tables.Param> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try list(for: 5)
+      try list(.ParamList)
     }
   }
 }

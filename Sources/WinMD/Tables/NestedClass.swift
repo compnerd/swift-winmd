@@ -30,18 +30,28 @@ public enum NestedClass: TableSchema {
 }
 }
 
+extension Reference where Schema == Metadata.Tables.NestedClass {
+  public static var NestedClass: Reference<Schema, Metadata.Tables.TypeDef> {
+    Reference<Schema, Metadata.Tables.TypeDef>(0)
+  }
+
+  public static var EnclosingClass: Reference<Schema, Metadata.Tables.TypeDef> {
+    Reference<Schema, Metadata.Tables.TypeDef>(1)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.NestedClass {
   public var NestedClass: Row<Metadata.Tables.TypeDef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try rows(of: Metadata.Tables.TypeDef.self)[columns[0]]!
+      try required(.NestedClass)
     }
   }
 
   public var EnclosingClass: Row<Metadata.Tables.TypeDef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try rows(of: Metadata.Tables.TypeDef.self)[columns[1]]!
+      try required(.EnclosingClass)
     }
   }
 }

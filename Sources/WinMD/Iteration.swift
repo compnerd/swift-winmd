@@ -183,6 +183,24 @@ public struct Tuple: ~Escapable {
       throw .InvalidColumn
     }
   }
+
+}
+
+extension Row {
+  /// A typed row recovered from a type-erased `Tuple`, or `nil` on a table
+  /// mismatch.
+  ///
+  /// A `Tuple` is a type-erased view; `resolve` over a coded index yields one
+  /// because the target table is chosen at runtime by the tag. When the caller
+  /// knows the target table — e.g. after selecting a coded-index tag —
+  /// `Row<Target>(tuple)` recovers the typed row: it checks the tuple's runtime
+  /// table identity against `Schema` (`table.number == Schema.number`) and, on a
+  /// match, wraps the tuple's `(row, table, storage)`. A mismatch yields `nil`.
+  @_lifetime(copy tuple)
+  public init?(_ tuple: borrowing Tuple) {
+    guard tuple.table.number == Schema.number else { return nil }
+    self.init(tuple.row, tuple.table, tuple.storage)
+  }
 }
 
 // A row dumped column-by-column is a debugging representation, so this would be
@@ -228,8 +246,8 @@ extension Row {
   /// The rows of the named table.
   @_lifetime(copy self)
   internal func rows<Target: TableSchema>(of schema: Target.Type,
-                                          from begin: Int = 0,
-                                          to end: Int? = nil) throws(WinMDError)
+                                        from begin: Int = 0,
+                                        to end: Int? = nil) throws(WinMDError)
       -> TableIterator<Target> {
     let storage = self.storage
     return try storage.rows(of: schema, from: begin, to: end)

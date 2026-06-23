@@ -53,6 +53,12 @@ extension Column where Schema == Metadata.Tables.ExportedType {
   }
 }
 
+extension CodedReference where Schema == Metadata.Tables.ExportedType {
+  public static var Implementation: CodedReference<Schema> {
+    CodedReference<Schema>(4)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.ExportedType {
   public var Flags: CorTypeAttr {
     self[.Flags]

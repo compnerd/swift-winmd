@@ -45,6 +45,12 @@ extension BlobColumn where Schema == Metadata.Tables.Constant {
   public static var Value: BlobColumn<Schema> { BlobColumn<Schema>(3) }
 }
 
+extension CodedReference where Schema == Metadata.Tables.Constant {
+  public static var Parent: CodedReference<Schema> {
+    CodedReference<Schema>(2)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.Constant {
   public var `Type`: CorElementType {
     self[.Type]

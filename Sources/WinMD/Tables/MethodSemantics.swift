@@ -40,6 +40,18 @@ extension Column where Schema == Metadata.Tables.MethodSemantics {
   }
 }
 
+extension Reference where Schema == Metadata.Tables.MethodSemantics {
+  public static var Method: Reference<Schema, Metadata.Tables.MethodDef> {
+    Reference<Schema, Metadata.Tables.MethodDef>(1)
+  }
+}
+
+extension CodedReference where Schema == Metadata.Tables.MethodSemantics {
+  public static var Association: CodedReference<Schema> {
+    CodedReference<Schema>(2)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.MethodSemantics {
   public var Semantics: CorMethodSemanticsAttr {
     self[.Semantics]
@@ -48,7 +60,7 @@ extension Row where Schema == Metadata.Tables.MethodSemantics {
   public var Method: Row<Metadata.Tables.MethodDef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try rows(of: Metadata.Tables.MethodDef.self)[columns[1]]!
+      try required(.Method)
     }
   }
 }

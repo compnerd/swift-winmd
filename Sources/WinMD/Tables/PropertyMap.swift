@@ -27,18 +27,30 @@ public enum PropertyMap: TableSchema {
 }
 }
 
+extension Reference where Schema == Metadata.Tables.PropertyMap {
+  public static var Parent: Reference<Schema, Metadata.Tables.TypeDef> {
+    Reference<Schema, Metadata.Tables.TypeDef>(0)
+  }
+}
+
+extension List where Schema == Metadata.Tables.PropertyMap {
+  public static var PropertyList: List<Schema, Metadata.Tables.PropertyDef> {
+    List<Schema, Metadata.Tables.PropertyDef>(1)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.PropertyMap {
   public var Parent: Row<Metadata.Tables.TypeDef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try rows(of: Metadata.Tables.TypeDef.self)[columns[0]]!
+      try required(.Parent)
     }
   }
 
   public var PropertyList: TableIterator<Metadata.Tables.PropertyDef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try list(for: 1)
+      try list(.PropertyList)
     }
   }
 }

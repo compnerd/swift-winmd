@@ -76,3 +76,103 @@ extension Row {
     try blobs.blob(at: columns[field.ordinal])
   }
 }
+
+/// A typed token addressing a simple-index foreign-key column of a
+/// `Row<Schema>`.
+///
+/// Where a `Column` names a value column, a `Reference` names a *navigation*
+/// column: a `simple` index whose target table is statically known. The token
+/// carries the column's ordinal and, through its `Target` parameter, the
+/// referenced schema, so `row.resolve(.Col)` recovers a typed `Row<Target>`
+/// without an annotation. It is the forward, single-row counterpart of the
+/// value `Column` token, and the owning-column descriptor a reverse
+/// `database.referencing(_:by:)` consumes.
+public struct Reference<Schema: TableSchema, Target: TableSchema> {
+  /// The ordinal of the column within the schema.
+  internal let ordinal: Int
+
+  internal init(_ ordinal: Int) {
+    self.ordinal = ordinal
+  }
+}
+
+/// A typed token addressing a coded-index foreign-key column of a
+/// `Row<Schema>`.
+///
+/// A coded index selects its target table at runtime from the stored tag, so
+/// unlike `Reference` it carries no static `Target`: resolving it yields the
+/// type-erased `Tuple`, which the caller narrows with `Row<Target>(_:)` once
+/// the tag's table is known. The token still carries the owning `Schema` and
+/// the column's ordinal, so it doubles as the owning-column descriptor for a
+/// reverse `database.referencing(_:by:)`.
+public struct CodedReference<Schema: TableSchema> {
+  /// The ordinal of the column within the schema.
+  internal let ordinal: Int
+
+  internal init(_ ordinal: Int) {
+    self.ordinal = ordinal
+  }
+}
+
+/// A typed token addressing a list-valued foreign-key column of a
+/// `Row<Schema>`.
+///
+/// A list column stores the start of a `[start, next-row's start)` run into the
+/// `Target` table; `row.list(.Col)` opens a typed `TableIterator<Target>` over
+/// that run. It is the forward, multi-row navigation counterpart of
+/// `Reference`.
+public struct List<Schema: TableSchema, Target: TableSchema> {
+  /// The ordinal of the column within the schema.
+  internal let ordinal: Int
+
+  internal init(_ ordinal: Int) {
+    self.ordinal = ordinal
+  }
+}
+
+extension Row {
+  /// The row the simple-index column the `reference` token addresses names, or
+  /// `nil` if the reference is null.
+  ///
+  /// `row.resolve(.Col)` decodes the simple index through the generic
+  /// `Tuple.resolve` and narrows the result to the token's statically known
+  /// `Target`. The narrowing always succeeds for a well-formed simple index, so
+  /// the result is `nil` only when the reference itself is null.
+  @_lifetime(copy self)
+  public func resolve<Target>(_ reference: Reference<Schema, Target>)
+      throws(WinMDError) -> Row<Target>? {
+    guard let tuple = try columns.resolve(reference.ordinal) else {
+      return nil
+    }
+    return Row<Target>(tuple)
+  }
+
+  /// Resolves a REQUIRED reference, throwing `.BadImageFormat` if the column
+  /// holds the null value — a required reference must name a row.
+  @_lifetime(copy self)
+  public func required<Target>(_ reference: Reference<Schema, Target>)
+      throws(WinMDError) -> Row<Target> {
+    guard let row = try resolve(reference) else { throw .BadImageFormat }
+    return row
+  }
+
+  /// The tuple the coded-index column the `reference` token addresses names, or
+  /// `nil` if the reference is null.
+  ///
+  /// A coded index's target table is chosen at runtime by its tag, so the
+  /// result is the type-erased `Tuple`; narrow it with `Row<Target>(_:)` once
+  /// the target table is known.
+  @_lifetime(copy self)
+  public func resolve(_ reference: CodedReference<Schema>)
+      throws(WinMDError) -> Tuple? {
+    try columns.resolve(reference.ordinal)
+  }
+
+  /// The rows of the `[start, next-row's start)` run the list column the `list`
+  /// token addresses delimits.
+  @_lifetime(copy self)
+  public func list<Target>(_ list: List<Schema, Target>)
+      throws(WinMDError) -> TableIterator<Target> {
+    try self.list(for: list.ordinal)
+  }
+}

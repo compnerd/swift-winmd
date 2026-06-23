@@ -46,6 +46,18 @@ extension Column where Schema == Metadata.Tables.ImplMap {
   }
 }
 
+extension CodedReference where Schema == Metadata.Tables.ImplMap {
+  public static var MemberForwarded: CodedReference<Schema> {
+    CodedReference<Schema>(1)
+  }
+}
+
+extension Reference where Schema == Metadata.Tables.ImplMap {
+  public static var ImportScope: Reference<Schema, Metadata.Tables.ModuleRef> {
+    Reference<Schema, Metadata.Tables.ModuleRef>(3)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.ImplMap {
   public var MappingFlags: CorPinvokeMap {
     self[.MappingFlags]
@@ -58,7 +70,7 @@ extension Row where Schema == Metadata.Tables.ImplMap {
   public var ImportScope: Row<Metadata.Tables.ModuleRef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try rows(of: Metadata.Tables.ModuleRef.self)[columns[3]]!
+      try required(.ImportScope)
     }
   }
 }

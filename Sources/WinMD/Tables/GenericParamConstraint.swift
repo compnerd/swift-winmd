@@ -30,11 +30,23 @@ public enum GenericParamConstraint: TableSchema {
 }
 }
 
+extension Reference where Schema == Metadata.Tables.GenericParamConstraint {
+  public static var Owner: Reference<Schema, Metadata.Tables.GenericParam> {
+    Reference<Schema, Metadata.Tables.GenericParam>(0)
+  }
+}
+
+extension CodedReference where Schema == Metadata.Tables.GenericParamConstraint {
+  public static var Constraint: CodedReference<Schema> {
+    CodedReference<Schema>(1)
+  }
+}
+
 extension Row where Schema == Metadata.Tables.GenericParamConstraint {
   public var Owner: Row<Metadata.Tables.GenericParam> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try rows(of: Metadata.Tables.GenericParam.self)[columns[0]]!
+      try required(.Owner)
     }
   }
 }

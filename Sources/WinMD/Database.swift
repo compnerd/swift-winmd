@@ -17,13 +17,6 @@ public struct Database: ~Escapable {
   /// for the file's lifetime, so it is located once when the database is opened.
   private let range: Range<Int>
 
-  /// The decoded physical schema (index and column widths) of the database.
-  ///
-  /// This is invariant for the lifetime of the database — it depends only on
-  /// which tables are present and their row counts — so it is decoded once when
-  /// the database is opened rather than rebuilt on every record access.
-  public let catalog: PhysicalSchema
-
   /// The open tables of the database.
   ///
   /// The tables present in a database and their record layouts are fixed once
@@ -52,6 +45,16 @@ public struct Database: ~Escapable {
     get {
       TablesStream(bytes, base: range.lowerBound, limit: range.upperBound)
     }
+  }
+
+  /// The physical schema (index and column widths) of the database.
+  ///
+  /// This is a thin view over the tables stream: the widths it computes depend
+  /// only on which tables are present and their row counts, both of which are
+  /// invariant for the file's lifetime, so it carries no state of its own.
+  public var catalog: PhysicalSchema {
+    @_lifetime(copy self)
+    get { PhysicalSchema(stream) }
   }
 
   // MARK: - Heaps
@@ -97,8 +100,7 @@ public struct Database: ~Escapable {
 
     let stream = try TablesStream(from: cil)
     self.range = stream.base ..< stream.limit
-    self.catalog = PhysicalSchema(stream)
-    self.relations = try stream.relations(catalog)
+    self.relations = try stream.relations(PhysicalSchema(stream))
 
     guard let blobs = cil.Metadata.stream(named: Metadata.Stream.Blob) else {
       throw .BlobsHeapNotFound

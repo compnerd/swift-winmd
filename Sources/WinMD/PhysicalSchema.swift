@@ -7,75 +7,74 @@
 /// width of each heap and coded index depends on which tables are present and
 /// their row counts. This is the database's physical schema (the RDBMS catalog
 /// loaded when the database is opened) — immutable data with no identity. It is
-/// computed once at open and read thereafter.
-public struct PhysicalSchema {
-  public private(set) var strides = Dictionary<Index, Int>()
+/// a thin view over the tables stream; widths are derived from the stream bytes
+/// on demand rather than cached.
+public struct PhysicalSchema: ~Escapable {
+  private let stream: TablesStream
 
+  @_lifetime(copy stream)
   public init(_ stream: TablesStream) {
-    let valid = stream.Valid
-    let rows = stream.Rows
-
-    func TableIndexSize<T: CodedIndex>(_ index: T.Type) -> Int {
-      // The number of tables that the index can refer to is the number of bits
-      // required to select between then - [0 ..< count].
-      let bits = (index.tables.count - 1).nonzeroBitCount
-      // The remaining bits serve as the index for the selected table.
-      let range = 1 << (16 - bits)
-      return index.tables.map {
-        // Ensure that the table is present, as not all tables are required to
-        // be present. If the table is not present, the number of rows that can
-        // be indexed is unknown, so we must assume that we need a wide index.
-        guard valid & (1 << $0.number) == (1 << $0.number) else { return false }
-        let count = rows[(valid & ((1 << $0.number) - 1)).nonzeroBitCount]
-        // If the number of rows in the table is less than the range, we can use
-        // the compressed width, otherwise, we need the full 32-bits for the
-        // index.
-        return count < range
-      }.contains(false) ? 4 : 2
-    }
-
-    // Well-known Heaps
-    strides[.heap(.blob)] = stream.BlobIndexSize
-    strides[.heap(.guid)] = stream.GUIDIndexSize
-    strides[.heap(.string)] = stream.StringIndexSize
-    // Well-known Coded Indicies
-    strides[.coded(CustomAttributeType.self)] = TableIndexSize(CustomAttributeType.self)
-    strides[.coded(HasConstant.self)] = TableIndexSize(HasConstant.self)
-    strides[.coded(HasCustomAttribute.self)] = TableIndexSize(HasCustomAttribute.self)
-    strides[.coded(HasDeclSecurity.self)] = TableIndexSize(HasDeclSecurity.self)
-    strides[.coded(HasFieldMarshal.self)] = TableIndexSize(HasFieldMarshal.self)
-    strides[.coded(HasSemantics.self)] = TableIndexSize(HasSemantics.self)
-    strides[.coded(Implementation.self)] = TableIndexSize(Implementation.self)
-    strides[.coded(MemberForwarded.self)] = TableIndexSize(MemberForwarded.self)
-    strides[.coded(MemberRefParent.self)] = TableIndexSize(MemberRefParent.self)
-    strides[.coded(MethodDefOrRef.self)] = TableIndexSize(MethodDefOrRef.self)
-    strides[.coded(ResolutionScope.self)] = TableIndexSize(ResolutionScope.self)
-    strides[.coded(TypeDefOrRef.self)] = TableIndexSize(TypeDefOrRef.self)
-    strides[.coded(TypeOrMethodDef.self)] = TableIndexSize(TypeOrMethodDef.self)
-    // Simple Indicies
-    for table in kRegisteredTables {
-      if valid & (1 << table.number) == (1 << table.number) {
-        strides[.simple(table)] =
-            rows[(valid & ((1 << table.number) - 1)).nonzeroBitCount] < (1 << 16)
-                ? 2
-                : 4
-      }
-    }
+    self.stream = stream
   }
 }
 
 extension PhysicalSchema {
+  /// The number of rows in a table, read from the stream's row-count array.
+  ///
+  /// `Valid` is a bitmask of the present tables; the row counts are stored in
+  /// table-number order for the present tables only, so the slot for a table is
+  /// the population count of the lower bits of `Valid`.
+  private func rows(of number: Int) -> UInt32 {
+    let slot = (stream.Valid & ((1 << number) - 1)).nonzeroBitCount
+    let offset = stream.base + 24 + slot * MemoryLayout<UInt32>.size
+    return stream.bytes.read(at: offset, as: UInt32.self)
+  }
+
+  /// The width, in bytes, of a coded index over `index`'s tables.
+  private func width<T: CodedIndex>(of index: T.Type) -> Int {
+    let valid = stream.Valid
+    // The number of tables that the index can refer to is the number of bits
+    // required to select between then - [0 ..< count].
+    let bits = (index.tables.count - 1).nonzeroBitCount
+    // The remaining bits serve as the index for the selected table.
+    let range = 1 << (16 - bits)
+    return index.tables.contains {
+      // A table is not required to be present; if it is absent the number of
+      // rows that can be indexed is unknown, so we must assume a wide index.
+      guard valid & (1 << $0.number) == (1 << $0.number) else { return true }
+      // A present table forces the full 32-bit index once its row count reaches
+      // the range; below it the compressed width suffices.
+      return rows(of: $0.number) >= range
+    } ? 4 : 2
+  }
+}
+
+extension PhysicalSchema {
+  /// The width, in bytes, of a given index.
+  internal func width(of index: Index) -> Int {
+    switch index {
+    case .heap(.blob):
+      stream.BlobIndexSize
+    case .heap(.guid):
+      stream.GUIDIndexSize
+    case .heap(.string):
+      stream.StringIndexSize
+    case let .simple(table):
+      // An absent table has no rows, so a compressed (2-byte) index suffices.
+      stream.Valid & (1 << table.number) != (1 << table.number)
+          || rows(of: table.number) < (1 << 16) ? 2 : 4
+    case let .coded(coded):
+      width(of: coded)
+    }
+  }
+
   /// The width, in bytes, of a given column type.
   internal func width(of type: ColumnType) -> Int {
     switch type {
-    case .constant(let size):
-      return size
-
-    case .index(let index):
-      guard let stride = strides[index] else {
-        fatalError("Unsupported index type: \(index)")
-      }
-      return stride
+    case let .constant(size):
+      size
+    case let .index(index):
+      width(of: index)
     }
   }
 }

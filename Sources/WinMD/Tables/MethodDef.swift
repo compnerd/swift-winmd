@@ -49,12 +49,12 @@ extension Row where Schema == Metadata.Tables.MethodDef {
   }
 
   public var Name: String {
-    database.strings[columns[3]]
+    strings[columns[3]]
   }
 
   public var Signature: Blob {
     @_lifetime(copy self)
-    get { database.blobs[columns[4]] }
+    get { blobs[columns[4]] }
   }
 
   public var ParamList: TableIterator<Metadata.Tables.Param> {

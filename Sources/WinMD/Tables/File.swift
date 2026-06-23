@@ -35,11 +35,11 @@ extension Row where Schema == Metadata.Tables.File {
   }
 
   public var Name: String {
-    database.strings[columns[1]]
+    strings[columns[1]]
   }
 
   public var HashValue: Blob {
     @_lifetime(copy self)
-    get { database.blobs[columns[2]] }
+    get { blobs[columns[2]] }
   }
 }

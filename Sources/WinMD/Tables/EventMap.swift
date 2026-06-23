@@ -31,7 +31,7 @@ extension Row where Schema == Metadata.Tables.EventMap {
   public var Parent: Row<Metadata.Tables.TypeDef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try database.rows(of: Metadata.Tables.TypeDef.self)[columns[0]]!
+      try rows(of: Metadata.Tables.TypeDef.self)[columns[0]]!
     }
   }
 

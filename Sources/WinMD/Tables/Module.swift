@@ -41,24 +41,24 @@ extension Row where Schema == Metadata.Tables.Module {
   }
 
   public var Name: String {
-    database.strings[columns[1]]
+    strings[columns[1]]
   }
 
   public var Mvid: UUID {
     get throws(WinMDError) {
-      try database.guids[columns[2]]
+      try guids[columns[2]]
     }
   }
 
   public var EncId: UUID {
     get throws(WinMDError) {
-      try database.guids[columns[3]]
+      try guids[columns[3]]
     }
   }
 
   public var EncBaseId: UUID {
     get throws(WinMDError) {
-      try database.guids[columns[4]]
+      try guids[columns[4]]
     }
   }
 }

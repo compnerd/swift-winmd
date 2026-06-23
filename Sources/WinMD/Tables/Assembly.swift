@@ -68,15 +68,15 @@ extension Row where Schema == Metadata.Tables.Assembly {
 
   public var PublicKey: Blob {
     @_lifetime(copy self)
-    get { database.blobs[columns[6]] }
+    get { blobs[columns[6]] }
   }
 
   public var Name: String {
-    database.strings[columns[7]]
+    strings[columns[7]]
   }
 
   public var Culture: String {
-    database.strings[columns[8]]
+    strings[columns[8]]
   }
 }
 

@@ -31,10 +31,10 @@ public enum TypeRef: TableSchema {
 
 extension Row where Schema == Metadata.Tables.TypeRef {
   public var TypeName: String {
-    database.strings[columns[1]]
+    strings[columns[1]]
   }
 
   public var TypeNamespace: String {
-    database.strings[columns[2]]
+    strings[columns[2]]
   }
 }

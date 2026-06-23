@@ -36,6 +36,6 @@ extension Row where Schema == Metadata.Tables.DeclSecurity {
 
   public var PermissionSet: Blob {
     @_lifetime(copy self)
-    get { database.blobs[columns[2]] }
+    get { blobs[columns[2]] }
   }
 }

@@ -30,6 +30,6 @@ public enum MethodSpec: TableSchema {
 extension Row where Schema == Metadata.Tables.MethodSpec {
   public var Instantiation: Blob {
     @_lifetime(copy self)
-    get { database.blobs[columns[1]] }
+    get { blobs[columns[1]] }
   }
 }

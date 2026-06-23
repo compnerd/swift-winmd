@@ -35,7 +35,7 @@ extension Row where Schema == Metadata.Tables.AssemblyRefProcessor {
   public var AssemblyRef: Row<Metadata.Tables.AssemblyRef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try database.rows(of: Metadata.Tables.AssemblyRef.self)[columns[1]]!
+      try rows(of: Metadata.Tables.AssemblyRef.self)[columns[1]]!
     }
   }
 }

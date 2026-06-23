@@ -37,6 +37,6 @@ extension Row where Schema == Metadata.Tables.Constant {
 
   public var Value: Blob {
     @_lifetime(copy self)
-    get { database.blobs[columns[4]] }
+    get { blobs[columns[4]] }
   }
 }

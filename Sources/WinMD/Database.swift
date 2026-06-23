@@ -88,6 +88,19 @@ public struct Database: ~Escapable {
     relations
   }
 
+  /// A borrowed, ARC-free projection of the readable state for the cursors.
+  ///
+  /// The row cursors only read out of the backing buffer and the open tables,
+  /// so they carry this trivial view rather than the whole `Database` and avoid
+  /// retaining the relations buffer on every copy.
+  internal var storage: Storage {
+    @_lifetime(borrow self)
+    get {
+      Storage(bytes: bytes, relations: relations.span, strings: string,
+              blob: blob, guid: guid, valid: stream.Valid)
+    }
+  }
+
   // MARK: - Initializers
 
   @_lifetime(copy bytes)
@@ -125,19 +138,12 @@ public struct Database: ~Escapable {
 
   // MARK: - subscripting
 
-  @_lifetime(copy self)
+  @_lifetime(borrow self)
   public func rows<Schema: TableSchema>(of schema: Schema.Type,
                                         from begin: Int = 0,
                                         to end: Int? = nil) throws(WinMDError)
       -> TableIterator<Schema> {
-    // `relations` is dense and ordered by table number, so a present table's
-    // slot is the number of present tables below it: the population count of
-    // the lower bits of `Valid` (the same slot the row counts are read from).
-    let valid = stream.Valid
-    guard valid & (1 << Schema.number) == (1 << Schema.number) else {
-      throw .TableNotFound
-    }
-    let slot = (valid & ((1 << Schema.number) - 1)).nonzeroBitCount
-    return TableIterator<Schema>(self, relations[slot], from: begin, to: end)
+    let storage = self.storage
+    return try storage.rows(of: schema, from: begin, to: end)
   }
 }

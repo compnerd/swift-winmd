@@ -37,7 +37,7 @@ extension Row where Schema == Metadata.Tables.MethodSemantics {
   public var Method: Row<Metadata.Tables.MethodDef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try database.rows(of: Metadata.Tables.MethodDef.self)[columns[1]]!
+      try rows(of: Metadata.Tables.MethodDef.self)[columns[1]]!
     }
   }
 }

@@ -37,13 +37,13 @@ extension Row where Schema == Metadata.Tables.ImplMap {
   }
 
   public var ImportName: String {
-    database.strings[columns[2]]
+    strings[columns[2]]
   }
 
   public var ImportScope: Row<Metadata.Tables.ModuleRef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try database.rows(of: Metadata.Tables.ModuleRef.self)[columns[3]]!
+      try rows(of: Metadata.Tables.ModuleRef.self)[columns[3]]!
     }
   }
 }

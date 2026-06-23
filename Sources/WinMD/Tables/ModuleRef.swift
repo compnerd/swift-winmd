@@ -27,6 +27,6 @@ public enum ModuleRef: TableSchema {
 
 extension Row where Schema == Metadata.Tables.ModuleRef {
   public var Name: String {
-    database.strings[columns[0]]
+    strings[columns[0]]
   }
 }

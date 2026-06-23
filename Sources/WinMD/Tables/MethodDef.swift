@@ -18,6 +18,8 @@ private let _columns: InlineArray<_, Column> = [
   Column(name: "ParamList", type: .index(.simple(Metadata.Tables.Param.self))),
 ]
 
+private let _offsets = offsets(_columns)
+
 extension Metadata.Tables {
 /// See §II.22.26.
 public enum MethodDef: TableSchema {
@@ -25,6 +27,10 @@ public enum MethodDef: TableSchema {
 
   public static var columns: Span<Column> {
     @_lifetime(immortal) get { _columns.span }
+  }
+
+  public static func offset(_ i: Int) -> Int {
+    _offsets[i]
   }
 }
 }

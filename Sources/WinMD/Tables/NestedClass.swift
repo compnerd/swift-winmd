@@ -10,6 +10,8 @@ private let _columns: InlineArray<_, Column> = [
   Column(name: "EnclosingClass", type: .index(.simple(Metadata.Tables.TypeDef.self))),
 ]
 
+private let _offsets = offsets(_columns)
+
 extension Metadata.Tables {
 /// See §II.22.32.
 public enum NestedClass: TableSchema {
@@ -17,6 +19,10 @@ public enum NestedClass: TableSchema {
 
   public static var columns: Span<Column> {
     @_lifetime(immortal) get { _columns.span }
+  }
+
+  public static func offset(_ i: Int) -> Int {
+    _offsets[i]
   }
 }
 }

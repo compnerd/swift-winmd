@@ -12,6 +12,8 @@ private let _columns: InlineArray<_, Column> = [
   Column(name: "Association", type: .index(.coded(HasSemantics.self))),
 ]
 
+private let _offsets = offsets(_columns)
+
 extension Metadata.Tables {
 /// See §II.22.28.
 public enum MethodSemantics: TableSchema {
@@ -19,6 +21,10 @@ public enum MethodSemantics: TableSchema {
 
   public static var columns: Span<Column> {
     @_lifetime(immortal) get { _columns.span }
+  }
+
+  public static func offset(_ i: Int) -> Int {
+    _offsets[i]
   }
 }
 }

@@ -10,6 +10,8 @@ private let _columns: InlineArray<_, Column> = [
   Column(name: "Interface", type: .index(.coded(TypeDefOrRef.self))),
 ]
 
+private let _offsets = offsets(_columns)
+
 extension Metadata.Tables {
 /// See §II.22.23.
 public enum InterfaceImpl: TableSchema {
@@ -17,6 +19,10 @@ public enum InterfaceImpl: TableSchema {
 
   public static var columns: Span<Column> {
     @_lifetime(immortal) get { _columns.span }
+  }
+
+  public static func offset(_ i: Int) -> Int {
+    _offsets[i]
   }
 }
 }

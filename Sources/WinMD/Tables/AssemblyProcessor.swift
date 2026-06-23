@@ -8,6 +8,8 @@ private let _columns: InlineArray<_, Column> = [
   Column(name: "Processor", type: .constant(4)),
 ]
 
+private let _offsets = offsets(_columns)
+
 extension Metadata.Tables {
 /// See §II.22.4.
 public enum AssemblyProcessor: TableSchema {
@@ -15,6 +17,10 @@ public enum AssemblyProcessor: TableSchema {
 
   public static var columns: Span<Column> {
     @_lifetime(immortal) get { _columns.span }
+  }
+
+  public static func offset(_ i: Int) -> Int {
+    _offsets[i]
   }
 }
 }

@@ -140,6 +140,42 @@ public struct Tuple: ~Escapable {
     }
     return try GUIDHeap(storage.guid)[self[column]]
   }
+
+  /// The tuple the foreign-key column `column` references, or `nil` if the
+  /// reference is null.
+  ///
+  /// Decodes the raw cell as a simple or coded index and opens the referenced
+  /// row. ECMA-335 row indices are 1-based, so a stored value `N` is the
+  /// 0-based row `N - 1`, and the value `0` (a coded index whose row is `0`) is
+  /// the null reference and yields `nil`. The column must be a `simple` or
+  /// `coded` index; a heap index or a constant column is not a foreign key and
+  /// is a usage error that throws. Resolution is `O(1)`: the target row is
+  /// addressed directly, with no scan.
+  @_lifetime(copy self)
+  public func resolve(_ column: Int) throws(WinMDError) -> Tuple? {
+    try validate(column)
+    switch type(of: column) {
+    case let .index(.simple(schema)):
+      let index = self[column]
+      guard index != 0 else { return nil }
+      guard let tuple = try storage.tuple(index - 1, of: schema) else {
+        throw .BadImageFormat
+      }
+      return tuple
+    case let .index(.coded(coded)):
+      let value: any CodedIndex = coded.init(rawValue: self[column])
+      guard value.row != 0 else { return nil }
+      guard value.tag < coded.tables.count,
+          let schema = coded.tables[value.tag]
+      else { throw .BadImageFormat }
+      guard let tuple = try storage.tuple(value.row - 1, of: schema) else {
+        throw .BadImageFormat
+      }
+      return tuple
+    default:
+      throw .InvalidColumn
+    }
+  }
 }
 
 // A row dumped column-by-column is a debugging representation, so this would be

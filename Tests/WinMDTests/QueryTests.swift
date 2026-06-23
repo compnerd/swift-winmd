@@ -112,4 +112,27 @@ struct QueryTests {
       #expect(throws: WinMDError.InvalidColumn) { _ = try tuple.string(3) }
     }
   }
+
+  @Test("rejects an out-of-bounds column ordinal without trapping")
+  func ordinalBounds() {
+    QueryTests.with { tuple in
+      // The throwing accessors index the schema's fields to recover a column's
+      // type, so an ordinal outside `0 ..< count` would trap on that lookup
+      // before the kind guard could run. A negative and a one-past-the-end
+      // ordinal must both throw `.InvalidColumn` rather than trap. The TypeDef
+      // fixture has six columns, so `tuple.count` is the first out-of-range
+      // ordinal.
+      let past = tuple.count
+      #expect(throws: WinMDError.InvalidColumn) { _ = try tuple.string(-1) }
+      #expect(throws: WinMDError.InvalidColumn) { _ = try tuple.string(past) }
+      #expect(throws: WinMDError.InvalidColumn) { _ = try tuple.blob(-1) }
+      #expect(throws: WinMDError.InvalidColumn) { _ = try tuple.blob(past) }
+      #expect(throws: WinMDError.InvalidColumn) { _ = try tuple.guid(-1) }
+      #expect(throws: WinMDError.InvalidColumn) { _ = try tuple.guid(past) }
+      #expect(throws: WinMDError.InvalidColumn) { _ = try tuple.resolve(-1) }
+      #expect(throws: WinMDError.InvalidColumn) { _ = try tuple.resolve(past) }
+      // A valid in-range column still reads.
+      #expect((try? tuple.string(1)) == "string0")
+    }
+  }
 }

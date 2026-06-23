@@ -39,7 +39,7 @@ public protocol TableSchema: Sendable {
 ///
 /// The physical layout of the records — the `TupleDescriptor` — is resolved
 /// once when the table is opened and shared by every record read from it.
-public final class Table {
+public struct Table: Sendable {
   /// The schema this table is an instance of.
   internal let schema: TableSchema.Type
 

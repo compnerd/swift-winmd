@@ -38,9 +38,6 @@ let SwiftWinMD = Package(
             ],
             swiftSettings: [
               .enableExperimentalFeature("Lifetimes"),
-              .unsafeFlags([
-                "-parse-as-library",
-              ]),
             ]),
   ]
 )

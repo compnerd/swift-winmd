@@ -24,7 +24,7 @@ extension PhysicalSchema {
   /// `Valid` is a bitmask of the present tables; the row counts are stored in
   /// table-number order for the present tables only, so the slot for a table is
   /// the population count of the lower bits of `Valid`.
-  private func rows(of number: Int) -> UInt32 {
+  internal func rows(of number: Int) -> UInt32 {
     let slot = (stream.Valid & ((1 << number) - 1)).nonzeroBitCount
     let offset = stream.base + 24 + slot * MemoryLayout<UInt32>.size
     return stream.bytes.read(at: offset, as: UInt32.self)
@@ -45,7 +45,7 @@ extension PhysicalSchema {
       // rows that can be indexed is unknown, so we must assume a wide index. A
       // present table forces the full 32-bit index once its row count reaches
       // the range; below it the compressed width suffices.
-      guard valid & (1 << table.number) == (1 << table.number) else { return 4 }
+      guard valid & (1 << table.number) != 0 else { return 4 }
       if rows(of: table.number) >= range { return 4 }
     }
     return 2
@@ -64,7 +64,7 @@ extension PhysicalSchema {
       stream.StringIndexSize
     case let .simple(table):
       // An absent table has no rows, so a compressed (2-byte) index suffices.
-      stream.Valid & (1 << table.number) != (1 << table.number)
+      stream.Valid & (1 << table.number) == 0
           || rows(of: table.number) < (1 << 16) ? 2 : 4
     case let .coded(coded):
       width(of: coded)

@@ -17,6 +17,9 @@ extension Metadata.Tables {
 public enum GenericParamConstraint: TableSchema {
   public static var number: Int { 44 }
 
+  /// Sorted by `Owner`. See §II.22.21.
+  public static var key: Int? { 0 }
+
   public static var fields: Span<Field> {
     @_lifetime(immortal) get { _fields.span }
   }

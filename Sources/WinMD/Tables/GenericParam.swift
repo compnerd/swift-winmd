@@ -21,6 +21,9 @@ extension Metadata.Tables {
 public enum GenericParam: TableSchema {
   public static var number: Int { 42 }
 
+  /// Sorted by `Owner`. See §II.22.20.
+  public static var key: Int? { 2 }
+
   public static var fields: Span<Field> {
     @_lifetime(immortal) get { _fields.span }
   }

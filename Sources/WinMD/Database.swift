@@ -97,7 +97,8 @@ public struct Database: ~Escapable {
     @_lifetime(borrow self)
     get {
       Storage(bytes: bytes, relations: relations.span, strings: string,
-              blob: blob, guid: guid, valid: stream.Valid)
+              blob: blob, guid: guid, valid: stream.Valid,
+              sorted: stream.Sorted)
     }
   }
 

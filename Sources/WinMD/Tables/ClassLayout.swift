@@ -19,6 +19,9 @@ extension Metadata.Tables {
 public enum ClassLayout: TableSchema {
   public static var number: Int { 15 }
 
+  /// Sorted by `Parent`. See §II.22.8.
+  public static var key: Int? { 2 }
+
   public static var fields: Span<Field> {
     @_lifetime(immortal) get { _fields.span }
   }

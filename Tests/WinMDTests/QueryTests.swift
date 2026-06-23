@@ -40,7 +40,7 @@ struct QueryTests {
                       range: 0 ..< record.byteCount, wide: 0, stride: 14)
     let storage = Storage(bytes: record, relations: relations.span,
                           strings: strings.span.bytes, blob: empty.span.bytes,
-                          guid: empty.span.bytes, valid: 0)
+                          guid: empty.span.bytes, valid: 0, sorted: 0)
     body(Tuple(0, table, storage))
   }
 
@@ -92,7 +92,7 @@ struct QueryTests {
                       range: 0 ..< span.byteCount, wide: 0, stride: 14)
     let storage = Storage(bytes: span, relations: relations.span,
                           strings: strings.span.bytes, blob: empty.span.bytes,
-                          guid: empty.span.bytes, valid: 0)
+                          guid: empty.span.bytes, valid: 0, sorted: 0)
     let tuple = Tuple(0, table, storage)
     // An offset past the heap end.
     #expect(throws: WinMDError.BadImageFormat) { _ = try tuple.string(1) }

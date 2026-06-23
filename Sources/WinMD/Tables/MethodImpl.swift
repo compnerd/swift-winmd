@@ -19,6 +19,9 @@ extension Metadata.Tables {
 public enum MethodImpl: TableSchema {
   public static var number: Int { 25 }
 
+  /// Sorted by `Class`. See §II.22.27.
+  public static var key: Int? { 0 }
+
   public static var fields: Span<Field> {
     @_lifetime(immortal) get { _fields.span }
   }

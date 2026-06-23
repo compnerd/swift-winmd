@@ -28,15 +28,23 @@ internal struct Storage: ~Escapable {
   /// The bitset of present tables (`TablesStream.Valid`).
   internal let valid: UInt64
 
+  /// The bitset of physically sorted tables (`TablesStream.Sorted`).
+  ///
+  /// Bit `N` is set iff table `N` is stored ordered by its sort key. A reverse
+  /// foreign-key lookup against a sorted table is a binary search; against an
+  /// unsorted one it is a linear scan.
+  internal let sorted: UInt64
+
   @_lifetime(copy bytes, copy relations, copy strings, copy blob, copy guid)
   internal init(bytes: RawSpan, relations: Span<Table>, strings: RawSpan,
-                blob: RawSpan, guid: RawSpan, valid: UInt64) {
+                blob: RawSpan, guid: RawSpan, valid: UInt64, sorted: UInt64) {
     self.bytes = bytes
     self.relations = relations
     self.strings = strings
     self.blob = blob
     self.guid = guid
     self.valid = valid
+    self.sorted = sorted
   }
 
   @_lifetime(copy self)

@@ -30,28 +30,26 @@ internal struct PEFile: ~Escapable {
     }
   }
 
-  internal var Sections: Array<IMAGE_SECTION_HEADER> {
-    switch Header32.OptionalHeader.Magic {
+  internal var NumberOfSections: Int {
+    // The file header precedes the bitness-dependent optional header, so its
+    // section count is at the same offset regardless of the image's bitness.
+    Int(Header32.FileHeader.NumberOfSections)
+  }
+
+  internal func section(at index: Int) -> IMAGE_SECTION_HEADER {
+    // Section headers follow the NT headers, whose size depends on the optional
+    // header's bitness.
+    let origin = switch Header32.OptionalHeader.Magic {
     case UInt16(IMAGE_NT_OPTIONAL_HDR32_MAGIC):
-      let PE = Header32
-      let NumberOfSections = Int(PE.FileHeader.NumberOfSections)
-      let Offset = base + MemoryLayout.size(ofValue: PE)
-
-      return (0 ..< NumberOfSections).map {
-        bytes.load(at: Offset + $0 * MemoryLayout<IMAGE_SECTION_HEADER>.size,
-                   as: IMAGE_SECTION_HEADER.self)
-      }
+      base + MemoryLayout<IMAGE_NT_HEADERS32>.size
     case UInt16(IMAGE_NT_OPTIONAL_HDR64_MAGIC):
-      let PE = Header64
-      let NumberOfSections = Int(PE.FileHeader.NumberOfSections)
-      let Offset = base + MemoryLayout.size(ofValue: PE)
-
-      return (0 ..< NumberOfSections).map {
-        bytes.load(at: Offset + $0 * MemoryLayout<IMAGE_SECTION_HEADER>.size,
-                   as: IMAGE_SECTION_HEADER.self)
-      }
-    default: fatalError("BAD_IMAGE_FORMAT")
+      base + MemoryLayout<IMAGE_NT_HEADERS64>.size
+    default:
+      fatalError("BAD_IMAGE_FORMAT")
     }
+    return bytes.load(at: origin + index
+                              * MemoryLayout<IMAGE_SECTION_HEADER>.size,
+                      as: IMAGE_SECTION_HEADER.self)
   }
 
   @_lifetime(copy dos)
@@ -65,14 +63,6 @@ internal struct PEFile: ~Escapable {
 
     guard Header32.Signature == IMAGE_NT_SIGNATURE else {
       throw .BadImageFormat
-    }
-  }
-}
-
-extension Array where Array.Element == IMAGE_SECTION_HEADER {
-  internal func containing(rva: UInt32) -> Array<IMAGE_SECTION_HEADER> {
-    filter {
-      rva >= $0.VirtualAddress && rva < $0.VirtualAddress + $0.Misc.VirtualSize
     }
   }
 }

@@ -38,12 +38,12 @@ extension PhysicalSchema {
     // index; a row count that reaches that range forces the full 32-bit index.
     let range = 1 << (16 - index.bits)
     for tag in tables.indices {
-      let table = tables[tag]
-      // A table is not required to be present; if it is absent the number of
-      // rows that can be indexed is unknown, so we must assume a wide index. A
-      // present table forces the full 32-bit index once its row count reaches
+      // A reserved tag names no table, so it contributes no rows to the width.
+      guard let table = tables[tag] else { continue }
+      // An absent target table has no rows, so it cannot force a wide index.
+      guard valid & (1 << table.number) != 0 else { continue }
+      // A present table forces the full 32-bit index once its row count reaches
       // the range; below it the compressed width suffices.
-      guard valid & (1 << table.number) != 0 else { return 4 }
       if rows(of: table.number) >= range { return 4 }
     }
     return 2

@@ -7,22 +7,22 @@
 ///   ImportName (String Heap Index)
 ///   ImportScope (ModuleRef Index)
 // TODO(compnerd) fold into the accessor when immortal inline spans land.
-private let _columns: InlineArray<_, Column> = [
-  Column(name: "MappingFlags", type: .constant(2)),
-  Column(name: "MemberForwarded", type: .index(.coded(MemberForwarded.self))),
-  Column(name: "ImportName", type: .index(.heap(.string))),
-  Column(name: "ImportScope", type: .index(.simple(Metadata.Tables.ModuleRef.self))),
+private let _fields: InlineArray<_, Field> = [
+  Field(name: "MappingFlags", type: .constant(2)),
+  Field(name: "MemberForwarded", type: .index(.coded(MemberForwarded.self))),
+  Field(name: "ImportName", type: .index(.heap(.string))),
+  Field(name: "ImportScope", type: .index(.simple(Metadata.Tables.ModuleRef.self))),
 ]
 
-private let _offsets = offsets(_columns)
+private let _offsets = offsets(_fields)
 
 extension Metadata.Tables {
 /// See §II.22.22.
 public enum ImplMap: TableSchema {
   public static var number: Int { 28 }
 
-  public static var columns: Span<Column> {
-    @_lifetime(immortal) get { _columns.span }
+  public static var fields: Span<Field> {
+    @_lifetime(immortal) get { _fields.span }
   }
 
   public static func offset(_ i: Int) -> Int {

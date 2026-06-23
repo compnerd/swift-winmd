@@ -5,20 +5,20 @@
 ///   Class (TypeDef Index)
 ///   Interface (TypeDefOrRef Coded Index)
 // TODO(compnerd) fold into the accessor when immortal inline spans land.
-private let _columns: InlineArray<_, Column> = [
-  Column(name: "Class", type: .index(.simple(Metadata.Tables.TypeDef.self))),
-  Column(name: "Interface", type: .index(.coded(TypeDefOrRef.self))),
+private let _fields: InlineArray<_, Field> = [
+  Field(name: "Class", type: .index(.simple(Metadata.Tables.TypeDef.self))),
+  Field(name: "Interface", type: .index(.coded(TypeDefOrRef.self))),
 ]
 
-private let _offsets = offsets(_columns)
+private let _offsets = offsets(_fields)
 
 extension Metadata.Tables {
 /// See §II.22.23.
 public enum InterfaceImpl: TableSchema {
   public static var number: Int { 9 }
 
-  public static var columns: Span<Column> {
-    @_lifetime(immortal) get { _columns.span }
+  public static var fields: Span<Field> {
+    @_lifetime(immortal) get { _fields.span }
   }
 
   public static func offset(_ i: Int) -> Int {

@@ -1,6 +1,8 @@
 // Copyright © 2021 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
+public import struct Foundation.UUID
+
 /// A singular row from a table.
 ///
 /// A row is a singular entity in a table. This is an iterable entity in the
@@ -51,14 +53,14 @@ public struct Tuple: ~Escapable {
   }
 
   /// The number of columns in the row.
-  public var count: Int { table.schema.columns.count }
+  public var count: Int { table.schema.fields.count }
 
   /// The raw decoded value of column `column`.
   public subscript(_ column: Int) -> Int {
     // Recover the column's offset and width from the schema's narrow layout
     // and the table's width bitset.
     let base = table.range.lowerBound + row * table.stride
-                  + table.offset(column)
+               + table.offset(column)
     let width = table.width(column)
     switch width {
     case 1: return Int(storage.bytes.read(at: base, as: UInt8.self))
@@ -70,12 +72,73 @@ public struct Tuple: ~Escapable {
 
   /// The name of column `column`.
   public func name(of column: Int) -> StaticString {
-    table.schema.columns[column].name
+    table.schema.fields[column].name
   }
 
   /// The type of column `column`.
   public func type(of column: Int) -> ColumnType {
-    table.schema.columns[column].type
+    table.schema.fields[column].type
+  }
+
+  /// The ordinal of the column named `name`, or `nil` if there is none.
+  ///
+  /// A query addresses columns by string (a parsed SQL query names them so);
+  /// the ordinal is resolved once against the schema and the cell is then read
+  /// by ordinal on each row.
+  public func ordinal(for name: String) -> Int? {
+    for column in 0 ..< count {
+      // `StaticString` describes its UTF-8 bytes; compare against the spelling
+      // without materialising it where the names differ.
+      if "\(table.schema.fields[column].name)" == name {
+        return column
+      }
+    }
+    return nil
+  }
+
+  /// Throws `.InvalidColumn` unless `column` is a valid ordinal of this row.
+  private func validate(_ column: Int) throws(WinMDError) {
+    guard 0 <= column, column < count else { throw .InvalidColumn }
+  }
+
+  /// The string the heap column `column` references.
+  ///
+  /// Reads the raw cell and resolves it through the "Strings" heap. The column
+  /// must be a `#Strings` heap index; a column of any other kind is a usage
+  /// error and throws.
+  public func string(_ column: Int) throws(WinMDError) -> String {
+    try validate(column)
+    guard case .index(.heap(.string)) = type(of: column) else {
+      throw .InvalidColumn
+    }
+    return try StringsHeap(storage.strings).string(at: self[column])
+  }
+
+  /// The blob the heap column `column` references.
+  ///
+  /// Reads the raw cell and resolves it through the "Blob" heap. The column
+  /// must be a `#Blob` heap index; a column of any other kind is a usage error
+  /// and throws.
+  @_lifetime(copy self)
+  public func blob(_ column: Int) throws(WinMDError) -> Blob {
+    try validate(column)
+    guard case .index(.heap(.blob)) = type(of: column) else {
+      throw .InvalidColumn
+    }
+    return try BlobsHeap(storage.blob).blob(at: self[column])
+  }
+
+  /// The GUID the heap column `column` references.
+  ///
+  /// Reads the raw cell and resolves it through the "GUID" heap. The column
+  /// must be a `#GUID` heap index; a column of any other kind is a usage error
+  /// and throws.
+  public func guid(_ column: Int) throws(WinMDError) -> UUID {
+    try validate(column)
+    guard case .index(.heap(.guid)) = type(of: column) else {
+      throw .InvalidColumn
+    }
+    return try GUIDHeap(storage.guid)[self[column]]
   }
 }
 
@@ -88,7 +151,7 @@ extension Tuple /* : CustomDebugStringConvertible */ {
     var fields = Array<String>()
     for column in 0 ..< count {
       let value = self[column]
-      switch table.schema.columns[column].type {
+      switch table.schema.fields[column].type {
       case let .index(.heap(heap)) where heap == .string:
         let string = StringsHeap(storage.strings)[value]
         fields.append("\(name(of: column)): \(string)")
@@ -122,8 +185,8 @@ extension Row {
   /// The rows of the named table.
   @_lifetime(copy self)
   internal func rows<Target: TableSchema>(of schema: Target.Type,
-                                        from begin: Int = 0,
-                                        to end: Int? = nil) throws(WinMDError)
+                                          from begin: Int = 0,
+                                          to end: Int? = nil) throws(WinMDError)
       -> TableIterator<Target> {
     let storage = self.storage
     return try storage.rows(of: schema, from: begin, to: end)

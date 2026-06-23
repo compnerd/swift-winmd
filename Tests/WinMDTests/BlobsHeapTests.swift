@@ -19,7 +19,7 @@ struct BlobsHeapTests {
     #expect(heap[0].count == 3)
   }
 
-  // A length of 0x20...0x7F is held in a single byte (high bit clear).  The
+  // A length of 0x20...0x7F is held in a single byte (high bit clear). The
   // previous `first & 0xE0` discriminator mis-routed these to the 2-byte form
   // (0x40...0x5F) or rejected them outright (0x20...0x3F, 0x60...0x7F).
   @Test("reads single-byte lengths across the high-bit boundary")

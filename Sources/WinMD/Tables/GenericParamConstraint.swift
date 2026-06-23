@@ -5,20 +5,20 @@
 ///   Owner (GenericParam Index)
 ///   Constraint (TypeDefOrRef Coded Index)
 // TODO(compnerd) fold into the accessor when immortal inline spans land.
-private let _columns: InlineArray<_, Column> = [
-  Column(name: "Owner", type: .index(.simple(Metadata.Tables.GenericParam.self))),
-  Column(name: "Constraint", type: .index(.coded(TypeDefOrRef.self))),
+private let _fields: InlineArray<_, Field> = [
+  Field(name: "Owner", type: .index(.simple(Metadata.Tables.GenericParam.self))),
+  Field(name: "Constraint", type: .index(.coded(TypeDefOrRef.self))),
 ]
 
-private let _offsets = offsets(_columns)
+private let _offsets = offsets(_fields)
 
 extension Metadata.Tables {
 /// See §II.22.21.
 public enum GenericParamConstraint: TableSchema {
   public static var number: Int { 44 }
 
-  public static var columns: Span<Column> {
-    @_lifetime(immortal) get { _columns.span }
+  public static var fields: Span<Field> {
+    @_lifetime(immortal) get { _fields.span }
   }
 
   public static func offset(_ i: Int) -> Int {

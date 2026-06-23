@@ -6,22 +6,22 @@
 ///   Parent (HasConstant Coded Index)
 ///   Value (Blob Heap Index)
 // TODO(compnerd) fold into the accessor when immortal inline spans land.
-private let _columns: InlineArray<_, Column> = [
-  Column(name: "Type", type: .constant(1)),
-  Column(name: StaticString(), type: .constant(1)),
-  Column(name: "Parent", type: .index(.coded(HasConstant.self))),
-  Column(name: "Value", type: .index(.heap(.blob))),
+private let _fields: InlineArray<_, Field> = [
+  Field(name: "Type", type: .constant(1)),
+  Field(name: StaticString(), type: .constant(1)),
+  Field(name: "Parent", type: .index(.coded(HasConstant.self))),
+  Field(name: "Value", type: .index(.heap(.blob))),
 ]
 
-private let _offsets = offsets(_columns)
+private let _offsets = offsets(_fields)
 
 extension Metadata.Tables {
 /// See §II.22.9.
 public enum Constant: TableSchema {
   public static var number: Int { 11 }
 
-  public static var columns: Span<Column> {
-    @_lifetime(immortal) get { _columns.span }
+  public static var fields: Span<Field> {
+    @_lifetime(immortal) get { _fields.span }
   }
 
   public static func offset(_ i: Int) -> Int {

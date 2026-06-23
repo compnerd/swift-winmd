@@ -5,20 +5,20 @@
 ///   Processor (4-byte constant)
 ///   AssemblyRef (AssemblyRef Index)
 // TODO(compnerd) fold into the accessor when immortal inline spans land.
-private let _columns: InlineArray<_, Column> = [
-  Column(name: "Processor", type: .constant(4)),
-  Column(name: "AssemblyRef", type: .index(.simple(Metadata.Tables.AssemblyRef.self))),
+private let _fields: InlineArray<_, Field> = [
+  Field(name: "Processor", type: .constant(4)),
+  Field(name: "AssemblyRef", type: .index(.simple(Metadata.Tables.AssemblyRef.self))),
 ]
 
-private let _offsets = offsets(_columns)
+private let _offsets = offsets(_fields)
 
 extension Metadata.Tables {
 /// See §II.22.7.
 public enum AssemblyRefProcessor: TableSchema {
   public static var number: Int { 36 }
 
-  public static var columns: Span<Column> {
-    @_lifetime(immortal) get { _columns.span }
+  public static var fields: Span<Field> {
+    @_lifetime(immortal) get { _fields.span }
   }
 
   public static func offset(_ i: Int) -> Int {

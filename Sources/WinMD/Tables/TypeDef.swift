@@ -6,27 +6,27 @@
 ///   TypeName (String Heap Index)
 ///   TypeNamespace (String Heap Index)
 ///   Extends (TypeDefOrRef Coded Index)
-///   FieldList (Field Index)
+///   FieldList (Column Index)
 ///   MethodList (MethodDef Index)
 // TODO(compnerd) fold into the accessor when immortal inline spans land.
-private let _columns: InlineArray<_, Column> = [
-  Column(name: "Flags", type: .constant(4)),
-  Column(name: "TypeName", type: .index(.heap(.string))),
-  Column(name: "TypeNamespace", type: .index(.heap(.string))),
-  Column(name: "Extends", type: .index(.coded(TypeDefOrRef.self))),
-  Column(name: "FieldList", type: .index(.simple(Metadata.Tables.FieldDef.self))),
-  Column(name: "MethodList", type: .index(.simple(Metadata.Tables.MethodDef.self))),
+private let _fields: InlineArray<_, Field> = [
+  Field(name: "Flags", type: .constant(4)),
+  Field(name: "TypeName", type: .index(.heap(.string))),
+  Field(name: "TypeNamespace", type: .index(.heap(.string))),
+  Field(name: "Extends", type: .index(.coded(TypeDefOrRef.self))),
+  Field(name: "FieldList", type: .index(.simple(Metadata.Tables.FieldDef.self))),
+  Field(name: "MethodList", type: .index(.simple(Metadata.Tables.MethodDef.self))),
 ]
 
-private let _offsets = offsets(_columns)
+private let _offsets = offsets(_fields)
 
 extension Metadata.Tables {
 /// See §II.22.37.
 public enum TypeDef: TableSchema {
   public static var number: Int { 2 }
 
-  public static var columns: Span<Column> {
-    @_lifetime(immortal) get { _columns.span }
+  public static var fields: Span<Field> {
+    @_lifetime(immortal) get { _fields.span }
   }
 
   public static func offset(_ i: Int) -> Int {

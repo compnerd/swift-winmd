@@ -3,13 +3,13 @@
 
 /// Convenience wrapper for the "User Strings" (`#US`) heap.
 ///
-/// Allows for easy access into the contents of the `#US` heap.  Each entry is
+/// Allows for easy access into the contents of the `#US` heap. Each entry is
 /// laid out exactly like a blob (ECMA-335 §II.24.2.4): a compressed unsigned
-/// integer length prefix followed by that many payload bytes.  For an entry of
+/// integer length prefix followed by that many payload bytes. For an entry of
 /// payload length `L`, the final payload byte is a terminal flag indicating
 /// whether any code unit has non-ASCII bits (ignored for the decoded value) and
 /// the preceding `L - 1` bytes are the string's UTF-16, little-endian code
-/// units.  A length of `0` denotes the empty string at offset `0`.
+/// units. A length of `0` denotes the empty string at offset `0`.
 public struct UserStringsHeap: ~Escapable {
   internal let bytes: RawSpan
 
@@ -26,7 +26,7 @@ public struct UserStringsHeap: ~Escapable {
     guard length > 1 else { return "" }
 
     // The final payload byte is the terminal flag; the preceding `length - 1`
-    // bytes are `(length - 1) / 2` UTF-16 little-endian code units.  `begin`
+    // bytes are `(length - 1) / 2` UTF-16 little-endian code units. `begin`
     // sits past a compressed prefix, so the code-unit range can start at an odd
     // byte offset; extract it as a single raw range and decode it through
     // unaligned, little-endian `UInt16` loads — without materialising the code

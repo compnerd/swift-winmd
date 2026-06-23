@@ -6,21 +6,21 @@
 ///   Parent (HasDeclSecurity Coded Index)
 ///   PermissionSet (Blob Heap Index)
 // TODO(compnerd) fold into the accessor when immortal inline spans land.
-private let _columns: InlineArray<_, Column> = [
-  Column(name: "Action", type: .constant(2)),
-  Column(name: "Parent", type: .index(.coded(HasDeclSecurity.self))),
-  Column(name: "PermissionSet", type: .index(.heap(.blob))),
+private let _fields: InlineArray<_, Field> = [
+  Field(name: "Action", type: .constant(2)),
+  Field(name: "Parent", type: .index(.coded(HasDeclSecurity.self))),
+  Field(name: "PermissionSet", type: .index(.heap(.blob))),
 ]
 
-private let _offsets = offsets(_columns)
+private let _offsets = offsets(_fields)
 
 extension Metadata.Tables {
 /// See §II.22.11.
 public enum DeclSecurity: TableSchema {
   public static var number: Int { 14 }
 
-  public static var columns: Span<Column> {
-    @_lifetime(immortal) get { _columns.span }
+  public static var fields: Span<Field> {
+    @_lifetime(immortal) get { _fields.span }
   }
 
   public static func offset(_ i: Int) -> Int {

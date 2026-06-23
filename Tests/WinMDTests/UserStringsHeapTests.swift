@@ -43,7 +43,7 @@ struct UserStringsHeapTests {
 
   // A multi-code-unit string whose code units begin at an odd byte offset (the
   // single-byte length prefix puts `begin` at 1), proving the unaligned read
-  // path.  "Hello" → UTF-16LE, terminal flag `00`, length `0x0b`.
+  // path. "Hello" → UTF-16LE, terminal flag `00`, length `0x0b`.
   @Test("decodes a multi-code-unit string at an odd offset")
   func multipleCodeUnits() {
     let bytes: Array<UInt8> = [0x0b, 0x48, 0x00, 0x65, 0x00, 0x6c, 0x00,
@@ -53,7 +53,7 @@ struct UserStringsHeapTests {
   }
 
   // A non-ASCII string requiring a surrogate pair, again starting at an odd
-  // `begin`.  "😀" (U+1F600) → UTF-16LE surrogates `D83D DE00` i.e. bytes
+  // `begin`. "😀" (U+1F600) → UTF-16LE surrogates `D83D DE00` i.e. bytes
   // `3D D8 00 DE`, terminal flag `01`, length `0x05`.
   @Test("decodes a surrogate-pair string at an odd offset")
   func surrogatePair() {

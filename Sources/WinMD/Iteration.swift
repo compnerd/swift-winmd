@@ -18,9 +18,9 @@ public struct Row<Schema: TableSchema>: ~Escapable {
   /// The values are read from the backing storage on demand rather than
   /// materialised, so accessing a row does not allocate and only the columns
   /// that are read are decoded.
-  internal var columns: Columns {
+  internal var columns: Tuple {
     @_lifetime(copy self)
-    get { Columns(storage.bytes, table, row) }
+    get { Tuple(row, table, storage) }
   }
 
   @_lifetime(copy storage)
@@ -31,37 +31,72 @@ public struct Row<Schema: TableSchema>: ~Escapable {
   }
 }
 
-extension Row {
-  /// A zero-allocation view over the columns of a row.
-  internal struct Columns: ~Escapable {
-    private let bytes: RawSpan
-    private let table: Table
-    private let row: Int
+/// A positional, type-erased view over the columns of a single row.
+///
+/// Reading a row is entirely layout-driven from the runtime `Table` plus the
+/// backing buffer, so a `Tuple` reads any table's row without the table's
+/// static `Schema`. The values are read from the backing storage on demand
+/// rather than materialised, so accessing a row does not allocate and only the
+/// columns that are read are decoded.
+public struct Tuple: ~Escapable {
+  internal let row: Int
+  internal let table: Table
+  internal let storage: Storage
 
-    @_lifetime(copy bytes)
-    internal init(_ bytes: RawSpan, _ table: Table, _ row: Int) {
-      self.bytes = bytes
-      self.table = table
-      self.row = row
+  @_lifetime(copy storage)
+  internal init(_ row: Int, _ table: Table, _ storage: Storage) {
+    self.row = row
+    self.table = table
+    self.storage = storage
+  }
+
+  /// The number of columns in the row.
+  public var count: Int { table.schema.columns.count }
+
+  /// The raw decoded value of column `column`.
+  public subscript(_ column: Int) -> Int {
+    // Recover the column's offset and width from the schema's narrow layout
+    // and the table's width bitset.
+    let base = table.range.lowerBound + row * table.stride
+                  + table.offset(column)
+    let width = table.width(column)
+    switch width {
+    case 1: return Int(storage.bytes.read(at: base, as: UInt8.self))
+    case 2: return Int(storage.bytes.read(at: base, as: UInt16.self))
+    case 4: return Int(storage.bytes.read(at: base, as: UInt32.self))
+    default: fatalError("unsupported column size '\(width)'")
     }
+  }
 
-    internal var startIndex: Int { 0 }
-    internal var endIndex: Int { table.schema.columns.count }
-    internal var count: Int { endIndex }
+  /// The name of column `column`.
+  public func name(of column: Int) -> StaticString {
+    table.schema.columns[column].name
+  }
 
-    internal subscript(_ column: Int) -> Int {
-      // Recover the column's offset and width from the schema's narrow layout
-      // and the table's width bitset.
-      let base = table.range.lowerBound + row * table.stride
-                    + table.offset(column)
-      let width = table.width(column)
-      switch width {
-      case 1: return Int(bytes.read(at: base, as: UInt8.self))
-      case 2: return Int(bytes.read(at: base, as: UInt16.self))
-      case 4: return Int(bytes.read(at: base, as: UInt32.self))
-      default: fatalError("unsupported column size '\(width)'")
+  /// The type of column `column`.
+  public func type(of column: Int) -> ColumnType {
+    table.schema.columns[column].type
+  }
+}
+
+// A row dumped column-by-column is a debugging representation, so this would be
+// a `CustomDebugStringConvertible` conformance — but that protocol requires
+// `Escapable`, which `Tuple` is not. Vend `debugDescription` directly and
+// restore the conformance once the protocol admits `~Escapable` types.
+extension Tuple /* : CustomDebugStringConvertible */ {
+  public var debugDescription: String {
+    var fields = Array<String>()
+    for column in 0 ..< count {
+      let value = self[column]
+      switch table.schema.columns[column].type {
+      case let .index(.heap(heap)) where heap == .string:
+        let string = StringsHeap(storage.strings)[value]
+        fields.append("\(name(of: column)): \(string)")
+      default:
+        fields.append("\(name(of: column)): \(value)")
       }
     }
+    return fields.joined(separator: ", ")
   }
 }
 
@@ -115,21 +150,11 @@ extension Row {
   }
 }
 
-extension Row {
+// As with `Tuple`, restore the `CustomDebugStringConvertible` conformance once
+// the protocol admits `~Escapable` types.
+extension Row /* : CustomDebugStringConvertible */ {
   public var debugDescription: String {
-    var fields = Array<String>()
-    let columns = self.columns
-    for column in 0 ..< columns.count {
-      let value = columns[column]
-      switch Schema.columns[column].type {
-      case let .index(.heap(heap)) where heap == .string:
-        let string = strings[value]
-        fields.append("\(Schema.columns[column].name): \(string)")
-      default:
-        fields.append("\(Schema.columns[column].name): \(value)")
-      }
-    }
-    return fields.joined(separator: ", ")
+    columns.debugDescription
   }
 }
 
@@ -168,5 +193,41 @@ public struct TableIterator<Schema: TableSchema>: ~Escapable {
       guard offset < rows else { return nil }
       return Row(start + offset, table, storage)
     }
+  }
+}
+
+/// A non-generic scan over an open table.
+///
+/// `Cursor` mirrors `TableIterator` but is driven entirely by the runtime
+/// `Table`, so it walks the rows of any table — yielding a type-erased `Tuple`
+/// for each — without the table's static `Schema`.
+///
+/// A `~Escapable` view cannot conform to `Sequence`/`IteratorProtocol`, so
+/// iteration is index-based: walk `0 ..< count`, reading `self[i]`.
+public struct Cursor: ~Escapable {
+  private let table: Table
+  private let storage: Storage
+  private let rows: Int
+
+  @_lifetime(copy storage)
+  internal init(_ storage: Storage, _ table: Table,
+                from row: Int = 0, to count: Int? = nil) {
+    self.storage = storage
+    self.table = table
+    self.rows = (count ?? Int(table.rows)) - row
+    self.start = row
+  }
+
+  /// The first row, within the table, that this cursor yields.
+  private let start: Int
+
+  /// The number of rows the cursor yields.
+  public var count: Int {
+    rows
+  }
+
+  public subscript(_ offset: Int) -> Tuple? {
+    @_lifetime(copy self)
+    get { offset < rows ? Tuple(start + offset, table, storage) : nil }
   }
 }

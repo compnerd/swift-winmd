@@ -5,7 +5,7 @@
 ///
 /// All columns contain integral values. The width of the column may be
 /// constant or a variable width index.
-internal enum ColumnType: Sendable {
+public enum ColumnType: Sendable {
   case constant(Int)
   case index(Index)
 }
@@ -18,8 +18,8 @@ extension ColumnType: Hashable {
 /// Accessible columns have a name which the user can use to reference the
 /// column, and a type which indicates how to read the value of the column.
 public struct Column: Sendable {
-  let name: StaticString
-  let type: ColumnType
+  public let name: StaticString
+  public let type: ColumnType
 }
 
 /// The schema of a CIL metadata table.

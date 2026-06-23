@@ -146,4 +146,10 @@ public struct Database: ~Escapable {
     let storage = self.storage
     return try storage.rows(of: schema, from: begin, to: end)
   }
+
+  /// The rows of an already-open table, read positionally.
+  @_lifetime(borrow self)
+  public func rows(of table: Table) -> Cursor {
+    Cursor(storage, table)
+  }
 }

@@ -39,6 +39,12 @@ public struct Database: ~Escapable {
   private let guid: RawSpan
   private let string: RawSpan
 
+  // The "User Strings" (`#US`) heap is optional: metadata-only files frequently
+  // omit it.  Its absence is tolerated at open and surfaced as an error only on
+  // use, so its location is stored as an optional region rather than a borrowed
+  // sub-span.  `Region` is escapable, so it can be held by an `Optional`.
+  private let user: Region?
+
   // MARK: - Streams
 
   public var stream: TablesStream {
@@ -63,6 +69,14 @@ public struct Database: ~Escapable {
   public var strings: StringsHeap {
     @_lifetime(copy self)
     get { StringsHeap(string) }
+  }
+
+  public var literals: UserStringsHeap {
+    @_lifetime(copy self)
+    get throws(WinMDError) {
+      guard let user else { throw .UserStringsHeapNotFound }
+      return UserStringsHeap(bytes.extracting(user.offset ..< user.offset + user.size))
+    }
   }
 
   // MARK: - Tables
@@ -101,6 +115,10 @@ public struct Database: ~Escapable {
     }
     self.string =
         bytes.extracting(strings.offset ..< strings.offset + strings.size)
+
+    // The "User Strings" heap is optional: tolerate its absence at open and
+    // surface it as an error only on use.
+    self.user = cil.Metadata.stream(named: Metadata.Stream.UserStrings)
   }
 
   // MARK: - subscripting

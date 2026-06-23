@@ -31,7 +31,7 @@ extension Row where Schema == Metadata.Tables.GenericParamConstraint {
   public var Owner: Row<Metadata.Tables.GenericParam> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try database.rows(of: Metadata.Tables.GenericParam.self)[columns[0]]!
+      try rows(of: Metadata.Tables.GenericParam.self)[columns[0]]!
     }
   }
 }

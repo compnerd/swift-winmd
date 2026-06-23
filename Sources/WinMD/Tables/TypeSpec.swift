@@ -28,6 +28,6 @@ public enum TypeSpec: TableSchema {
 extension Row where Schema == Metadata.Tables.TypeSpec {
   public var Signature: Blob {
     @_lifetime(copy self)
-    get { database.blobs[columns[0]] }
+    get { blobs[columns[0]] }
   }
 }

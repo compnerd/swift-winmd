@@ -41,6 +41,6 @@ extension Row where Schema == Metadata.Tables.GenericParam {
   }
 
   public var Name: String {
-    database.strings[columns[3]]
+    strings[columns[3]]
   }
 }

@@ -39,10 +39,10 @@ extension Row where Schema == Metadata.Tables.ExportedType {
   }
 
   public var TypeName: String {
-    database.strings[columns[2]]
+    strings[columns[2]]
   }
 
   public var TypeNamespace: String {
-    database.strings[columns[3]]
+    strings[columns[3]]
   }
 }

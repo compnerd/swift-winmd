@@ -31,14 +31,14 @@ extension Row where Schema == Metadata.Tables.NestedClass {
   public var NestedClass: Row<Metadata.Tables.TypeDef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try database.rows(of: Metadata.Tables.TypeDef.self)[columns[0]]!
+      try rows(of: Metadata.Tables.TypeDef.self)[columns[0]]!
     }
   }
 
   public var EnclosingClass: Row<Metadata.Tables.TypeDef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try database.rows(of: Metadata.Tables.TypeDef.self)[columns[1]]!
+      try rows(of: Metadata.Tables.TypeDef.self)[columns[1]]!
     }
   }
 }

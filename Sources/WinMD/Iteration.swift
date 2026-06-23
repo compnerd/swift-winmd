@@ -11,7 +11,7 @@ public struct Row<Schema: TableSchema>: ~Escapable {
   // and backing storage, and is also used to reach the following row, which
   // is required for list processing.
   internal let table: Table
-  internal let database: Database
+  internal let storage: Storage
 
   /// The decoded columns of the row.
   ///
@@ -20,27 +20,27 @@ public struct Row<Schema: TableSchema>: ~Escapable {
   /// that are read are decoded.
   internal var columns: Columns {
     @_lifetime(copy self)
-    get { Columns(database, table, row) }
+    get { Columns(storage.bytes, table, row) }
   }
 
-  @_lifetime(copy database)
-  internal init(_ row: Int, _ table: Table, _ database: Database) {
+  @_lifetime(copy storage)
+  internal init(_ row: Int, _ table: Table, _ storage: Storage) {
     self.row = row
     self.table = table
-    self.database = database
+    self.storage = storage
   }
 }
 
 extension Row {
   /// A zero-allocation view over the columns of a row.
   internal struct Columns: ~Escapable {
-    private let database: Database
+    private let bytes: RawSpan
     private let table: Table
     private let row: Int
 
-    @_lifetime(copy database)
-    internal init(_ database: Database, _ table: Table, _ row: Int) {
-      self.database = database
+    @_lifetime(copy bytes)
+    internal init(_ bytes: RawSpan, _ table: Table, _ row: Int) {
+      self.bytes = bytes
       self.table = table
       self.row = row
     }
@@ -56,12 +56,42 @@ extension Row {
                     + table.offset(column)
       let width = table.width(column)
       switch width {
-      case 1: return Int(database.bytes.read(at: base, as: UInt8.self))
-      case 2: return Int(database.bytes.read(at: base, as: UInt16.self))
-      case 4: return Int(database.bytes.read(at: base, as: UInt32.self))
+      case 1: return Int(bytes.read(at: base, as: UInt8.self))
+      case 2: return Int(bytes.read(at: base, as: UInt16.self))
+      case 4: return Int(bytes.read(at: base, as: UInt32.self))
       default: fatalError("unsupported column size '\(width)'")
       }
     }
+  }
+}
+
+extension Row {
+  /// The "Strings" (`#Strings`) heap.
+  internal var strings: StringsHeap {
+    @_lifetime(copy self)
+    get { StringsHeap(storage.strings) }
+  }
+
+  /// The "Blob" (`#Blob`) heap.
+  internal var blobs: BlobsHeap {
+    @_lifetime(copy self)
+    get { BlobsHeap(storage.blob) }
+  }
+
+  /// The "GUID" (`#GUID`) heap.
+  internal var guids: GUIDHeap {
+    @_lifetime(copy self)
+    get { GUIDHeap(storage.guid) }
+  }
+
+  /// The rows of the named table.
+  @_lifetime(copy self)
+  internal func rows<Target: TableSchema>(of schema: Target.Type,
+                                        from begin: Int = 0,
+                                        to end: Int? = nil) throws(WinMDError)
+      -> TableIterator<Target> {
+    let storage = self.storage
+    return try storage.rows(of: schema, from: begin, to: end)
   }
 }
 
@@ -76,12 +106,12 @@ extension Row {
     // exclusive upper bound of this run.
     let begin = columns[column] - 1
     let end: Int? = if row + 1 < table.rows {
-      Row(row + 1, table, database).columns[column] - 1
+      Row(row + 1, table, storage).columns[column] - 1
     } else {
       nil
     }
 
-    return try database.rows(of: Target.self, from: begin, to: end)
+    return try storage.rows(of: Target.self, from: begin, to: end)
   }
 }
 
@@ -93,7 +123,7 @@ extension Row {
       let value = columns[column]
       switch Schema.columns[column].type {
       case let .index(.heap(heap)) where heap == .string:
-        let string = database.strings[value]
+        let string = strings[value]
         fields.append("\(Schema.columns[column].name): \(string)")
       default:
         fields.append("\(Schema.columns[column].name): \(value)")
@@ -112,13 +142,13 @@ extension Row {
 /// iteration is index-based: walk `0 ..< count`, reading `self[i]`.
 public struct TableIterator<Schema: TableSchema>: ~Escapable {
   private let table: Table
-  private let database: Database
+  private let storage: Storage
   private let rows: Int
 
-  @_lifetime(copy database)
-  public init(_ database: Database, _ table: Table,
-              from row: Int = 0, to count: Int? = nil) {
-    self.database = database
+  @_lifetime(copy storage)
+  internal init(_ storage: Storage, _ table: Table,
+                from row: Int = 0, to count: Int? = nil) {
+    self.storage = storage
     self.table = table
     self.rows = (count ?? Int(table.rows)) - row
     self.start = row
@@ -136,7 +166,7 @@ public struct TableIterator<Schema: TableSchema>: ~Escapable {
     @_lifetime(copy self)
     get {
       guard offset < rows else { return nil }
-      return Row(start + offset, table, database)
+      return Row(start + offset, table, storage)
     }
   }
 }

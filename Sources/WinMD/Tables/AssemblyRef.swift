@@ -64,20 +64,20 @@ extension Row where Schema == Metadata.Tables.AssemblyRef {
 
   public var PublicKeyOrToken: Blob {
     @_lifetime(copy self)
-    get { database.blobs[columns[5]] }
+    get { blobs[columns[5]] }
   }
 
   public var Name: String {
-    database.strings[columns[6]]
+    strings[columns[6]]
   }
 
   public var Culture: String {
-    database.strings[columns[7]]
+    strings[columns[7]]
   }
 
   public var HashValue: Blob {
     @_lifetime(copy self)
-    get { database.blobs[columns[8]] }
+    get { blobs[columns[8]] }
   }
 }
 

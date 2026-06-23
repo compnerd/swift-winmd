@@ -32,6 +32,6 @@ public enum CustomAttribute: TableSchema {
 extension Row where Schema == Metadata.Tables.CustomAttribute {
   public var Value: Blob {
     @_lifetime(copy self)
-    get { database.blobs[columns[2]] }
+    get { blobs[columns[2]] }
   }
 }

@@ -41,6 +41,6 @@ extension Row where Schema == Metadata.Tables.ManifestResource {
   }
 
   public var Name: String {
-    database.strings[columns[2]]
+    strings[columns[2]]
   }
 }

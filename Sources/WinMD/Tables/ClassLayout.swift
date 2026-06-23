@@ -41,7 +41,7 @@ extension Row where Schema == Metadata.Tables.ClassLayout {
   public var Parent: Row<Metadata.Tables.TypeDef> {
     @_lifetime(copy self)
     get throws(WinMDError) {
-      try database.rows(of: Metadata.Tables.TypeDef.self)[columns[2]]!
+      try rows(of: Metadata.Tables.TypeDef.self)[columns[2]]!
     }
   }
 }

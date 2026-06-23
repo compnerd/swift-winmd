@@ -30,6 +30,6 @@ public enum FieldMarshal: TableSchema {
 extension Row where Schema == Metadata.Tables.FieldMarshal {
   public var NativeType: Blob {
     @_lifetime(copy self)
-    get { database.blobs[columns[1]] }
+    get { blobs[columns[1]] }
   }
 }

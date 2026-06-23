@@ -35,6 +35,6 @@ extension Row where Schema == Metadata.Tables.EventDef {
   }
 
   public var Name: String {
-    database.strings[columns[1]]
+    strings[columns[1]]
   }
 }

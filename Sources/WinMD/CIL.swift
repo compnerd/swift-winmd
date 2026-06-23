@@ -14,10 +14,21 @@ internal struct Region {
 extension PEFile {
   internal func contents(_ directory: IMAGE_DATA_DIRECTORY)
       throws(WinMDError) -> Region {
-    let sections = Sections.containing(rva: directory.VirtualAddress)
-    guard sections.count == 1 else { throw .BadImageFormat }
+    // Exactly one section must contain the directory's address.
+    let rva = directory.VirtualAddress
+    var match: IMAGE_SECTION_HEADER?
+    for index in 0 ..< NumberOfSections {
+      let header = section(at: index)
+      let start = header.VirtualAddress
+      guard rva >= start, rva < start + header.Misc.VirtualSize else {
+        continue
+      }
+      guard match == nil else { throw .BadImageFormat }
+      match = header
+    }
 
-    let address = sections.first!.offset(from: directory.VirtualAddress)
+    guard let match else { throw .BadImageFormat }
+    let address = match.offset(from: rva)
     return Region(offset: Int(address), size: Int(directory.Size))
   }
 }

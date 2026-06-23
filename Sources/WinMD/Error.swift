@@ -9,4 +9,5 @@ public enum WinMDError: Error {
   case MissingTableStream
   case StringsHeapNotFound
   case TableNotFound
+  case UserStringsHeapNotFound
 }

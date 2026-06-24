@@ -154,6 +154,26 @@ public struct Database: ~Escapable {
     Cursor(storage, table)
   }
 
+  /// The row a `TypeDefOrRef` coded index — e.g. one a decoded signature's
+  /// `named` type carries — references, or `nil` if it is null.
+  ///
+  /// The index's tag selects `TypeDef`/`TypeRef`/`TypeSpec` and its row is
+  /// 1-based; this opens the named table at `row - 1`. A `TypeSpec` reference,
+  /// which itself names a `#Blob` signature rather than a `TypeName`, resolves to
+  /// the `TypeSpec` row.
+  @_lifetime(borrow self)
+  public func resolve(_ reference: TypeDefOrRef) throws(WinMDError) -> Tuple? {
+    guard reference.row != 0 else { return nil }
+    guard reference.tag < TypeDefOrRef.tables.count,
+        let schema = TypeDefOrRef.tables[reference.tag]
+    else { throw .BadImageFormat }
+    let storage = self.storage
+    guard let tuple = try storage.tuple(reference.row - 1, of: schema) else {
+      throw .BadImageFormat
+    }
+    return tuple
+  }
+
   /// The rows of `schema` whose foreign-key `column` references `target`.
   ///
   /// This is reverse navigation: the inverse of `Tuple.resolve`. Where

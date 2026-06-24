@@ -9,7 +9,7 @@ public final class PropertyMap: Table {
   /// Record Layout
   ///   Parent (TypeDef Index)
   ///   PropertyList (Property Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Parent", type: .index(.simple(TypeDef.self))),
     Column(name: "PropertyList", type: .index(.simple(PropertyDef.self))),
   ]

@@ -9,7 +9,7 @@ public final class GenericParamConstraint: Table {
   /// Record Layout
   ///   Owner (GenericParam Index)
   ///   Constraint (TypeDefOrRef Coded Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Owner", type: .index(.simple(GenericParam.self))),
     Column(name: "Constraint", type: .index(.coded(TypeDefOrRef.self))),
   ]

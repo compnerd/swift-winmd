@@ -9,7 +9,7 @@ public final class InterfaceImpl: Table {
   /// Record Layout
   ///   Class (TypeDef Index)
   ///   Interface (TypeDefOrRef Coded Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Class", type: .index(.simple(TypeDef.self))),
     Column(name: "Interface", type: .index(.coded(TypeDefOrRef.self))),
   ]

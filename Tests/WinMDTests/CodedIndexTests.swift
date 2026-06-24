@@ -1,30 +1,30 @@
-// Copyright (c) 2021 Saleem Abdulrasool <compnerd@compnerd.org>
-// SPDX-License-Identifier: BSD-3
+// Copyright © 2021 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
+// SPDX-License-Identifier: BSD-3-Clause
 
 import XCTest
 @testable import WinMD
 
 extension CodedIndex {
-  fileprivate static var descriminatorBitWidth: Int {
+  fileprivate static var discriminatorBitWidth: Int {
     Self.mask.nonzeroBitCount
   }
 }
 
 final class CodedIndexTest: XCTestCase {
   func testCodedIndexWidths() {
-    XCTAssertEqual(TypeDefOrRef.descriminatorBitWidth, 2)
-    XCTAssertEqual(HasConstant.descriminatorBitWidth, 2)
-    XCTAssertEqual(HasCustomAttribute.descriminatorBitWidth, 5)
-    XCTAssertEqual(HasFieldMarshal.descriminatorBitWidth, 1)
-    XCTAssertEqual(HasDeclSecurity.descriminatorBitWidth, 2)
-    XCTAssertEqual(MemberRefParent.descriminatorBitWidth, 3)
-    XCTAssertEqual(HasSemantics.descriminatorBitWidth, 1)
-    XCTAssertEqual(MethodDefOrRef.descriminatorBitWidth, 1)
-    XCTAssertEqual(MemberForwarded.descriminatorBitWidth, 1)
-    XCTAssertEqual(Implementation.descriminatorBitWidth, 2)
-    XCTAssertEqual(CustomAttributeType.descriminatorBitWidth, 3)
-    XCTAssertEqual(ResolutionScope.descriminatorBitWidth, 2)
-    XCTAssertEqual(TypeOrMethodDef.descriminatorBitWidth, 1)
+    XCTAssertEqual(TypeDefOrRef.discriminatorBitWidth, 2)
+    XCTAssertEqual(HasConstant.discriminatorBitWidth, 2)
+    XCTAssertEqual(HasCustomAttribute.discriminatorBitWidth, 5)
+    XCTAssertEqual(HasFieldMarshal.discriminatorBitWidth, 1)
+    XCTAssertEqual(HasDeclSecurity.discriminatorBitWidth, 2)
+    XCTAssertEqual(MemberRefParent.discriminatorBitWidth, 3)
+    XCTAssertEqual(HasSemantics.discriminatorBitWidth, 1)
+    XCTAssertEqual(MethodDefOrRef.discriminatorBitWidth, 1)
+    XCTAssertEqual(MemberForwarded.discriminatorBitWidth, 1)
+    XCTAssertEqual(Implementation.discriminatorBitWidth, 2)
+    XCTAssertEqual(CustomAttributeType.discriminatorBitWidth, 3)
+    XCTAssertEqual(ResolutionScope.discriminatorBitWidth, 2)
+    XCTAssertEqual(TypeOrMethodDef.discriminatorBitWidth, 1)
   }
 
   func testTypeDefOrRef() {

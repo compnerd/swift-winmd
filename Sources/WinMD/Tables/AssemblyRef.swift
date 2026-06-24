@@ -16,7 +16,7 @@ public final class AssemblyRef: Table {
   ///   Name (String Heap Index)
   ///   Culture (String Heap Index)
   ///   HashValue (Blob Heap Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "MajorVersion", type: .constant(2)),
     Column(name: "MinorVersion", type: .constant(2)),
     Column(name: "BuildNumber", type: .constant(2)),
@@ -56,7 +56,7 @@ extension Record where Table == Metadata.Tables.AssemblyRef {
   }
 
   public var Flags: CorAssemblyFlags {
-    .init(rawValue: CorAssemblyFlags.RawValue(columns[4]))
+    CorAssemblyFlags(rawValue: CorAssemblyFlags.RawValue(columns[4]))
   }
 
   public var PublicKeyOrToken: Blob {
@@ -73,19 +73,19 @@ extension Record where Table == Metadata.Tables.AssemblyRef {
 
   public var Culture: String {
     get throws {
-      try self.database.strings[columns[7]]
+      try database.strings[columns[7]]
     }
   }
 
   public var HashValue: Blob {
     get throws {
-      try self.database.blobs[columns[8]]
+      try database.blobs[columns[8]]
     }
   }
 }
 
 extension Record where Table == Metadata.Tables.AssemblyRef {
-  internal var Version: AssemblyVersion  {
+  internal var Version: AssemblyVersion {
     AssemblyVersion(MajorVersion, MinorVersion, BuildNumber, RevisionNumber)
   }
 }

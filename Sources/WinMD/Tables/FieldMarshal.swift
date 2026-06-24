@@ -9,7 +9,7 @@ public final class FieldMarshal: Table {
   /// Record Layout
   ///   Parent (HasFieldMarshal Coded Index)
   ///   NativeType (Blob Heap Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Parent", type: .index(.coded(HasFieldMarshal.self))),
     Column(name: "NativeType", type: .index(.heap(.blob))),
   ]

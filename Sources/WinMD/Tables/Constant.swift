@@ -10,7 +10,7 @@ public final class Constant: Table {
   ///   Type (1-byte, 1-byte padding zero)
   ///   Parent (HasConstant Coded Index)
   ///   Value (Blob Heap Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Type", type: .constant(1)),
     Column(name: StaticString(), type: .constant(1)),
     Column(name: "Parent", type: .index(.coded(HasConstant.self))),
@@ -29,7 +29,7 @@ public final class Constant: Table {
 
 extension Record where Table == Metadata.Tables.Constant {
   public var `Type`: CorElementType {
-    .init(rawValue: CorElementType.RawValue(columns[0]))
+    CorElementType(rawValue: CorElementType.RawValue(columns[0]))
   }
 
   public var Value: Blob {

@@ -1,8 +1,8 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-import struct Foundation.UUID
-import typealias Foundation.uuid_t
+public import struct Foundation.UUID
+public import typealias Foundation.uuid_t
 
 public struct GUIDHeap {
   let data: ArraySlice<UInt8>

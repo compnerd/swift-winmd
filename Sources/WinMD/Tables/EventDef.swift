@@ -10,7 +10,7 @@ public final class EventDef: Table {
   ///   EventFlags (2-byte bitmask EventAttributes)
   ///   Name (String Heap Index)
   ///   EventType (TypeDefOrRef Coded Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "EventFlags", type: .constant(2)),
     Column(name: "Name", type: .index(.heap(.string))),
     Column(name: "EventType", type: .index(.coded(TypeDefOrRef.self)))
@@ -28,7 +28,7 @@ public final class EventDef: Table {
 
 extension Record where Table == Metadata.Tables.EventDef {
   public var EventFlags: CorEventAttr {
-    .init(rawValue: CorEventAttr.RawValue(columns[0]))
+    CorEventAttr(rawValue: CorEventAttr.RawValue(columns[0]))
   }
 
   public var Name: String {

@@ -11,7 +11,7 @@ public final class ManifestResource: Table {
   ///   Flags (4-byte bitmask of ManifestResourceAttributes)
   ///   Name (String Heap Index)
   ///   Implementation (Implementation Coded Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Offset", type: .constant(4)),
     Column(name: "Flags", type: .constant(4)),
     Column(name: "Name", type: .index(.heap(.string))),
@@ -34,7 +34,7 @@ extension Record where Table == Metadata.Tables.ManifestResource {
   }
 
   public var Flags: CorManifestResourceFlags {
-    .init(rawValue: CorManifestResourceFlags.RawValue(columns[1]))
+    CorManifestResourceFlags(rawValue: CorManifestResourceFlags.RawValue(columns[1]))
   }
 
   public var Name: String {

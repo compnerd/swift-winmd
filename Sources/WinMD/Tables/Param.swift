@@ -10,7 +10,7 @@ public final class Param: Table {
   ///   Flags (2-byte bitmask of ParamAttributes)
   ///   Sequence (2-byte constant)
   ///   Name (String Heap Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Flags", type: .constant(2)),
     Column(name: "Sequence", type: .constant(2)),
     Column(name: "Name", type: .index(.heap(.string))),
@@ -28,7 +28,7 @@ public final class Param: Table {
 
 extension Record where Table == Metadata.Tables.Param {
   public var Flags: CorParamAttr {
-    .init(rawValue: CorParamAttr.RawValue(columns[0]))
+    CorParamAttr(rawValue: CorParamAttr.RawValue(columns[0]))
   }
 
   public var Sequence: UInt16 {

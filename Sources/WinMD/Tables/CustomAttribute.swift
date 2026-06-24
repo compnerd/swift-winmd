@@ -10,7 +10,7 @@ public final class CustomAttribute: Table {
   ///   Parent (HasCustomAttribute Coded Index)
   ///   Type (CustomAttributeType Coded Index)
   ///   Value (Blob Heap Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Parent", type: .index(.coded(HasCustomAttribute.self))),
     Column(name: "Type", type: .index(.coded(CustomAttributeType.self))),
     Column(name: "Value", type: .index(.heap(.blob))),

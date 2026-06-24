@@ -10,7 +10,7 @@ public final class ClassLayout: Table {
   ///   PackingSize (2-byte constant)
   ///   ClassSize (4-byte constant)
   ///   Parent (TypeDef Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "PackingSize", type: .constant(2)),
     Column(name: "ClassSize", type: .constant(4)),
     Column(name: "Parent", type: .index(.simple(TypeDef.self))),

@@ -10,7 +10,7 @@ public final class MethodSemantics: Table {
   ///   Semantics (2-byte bitmask of MethodSemanticsAttributes)
   ///   Method (MethodDef Index)
   ///   Association (HasSemantics Coded Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Semantics", type: .constant(2)),
     Column(name: "Method", type: .index(.simple(MethodDef.self))),
     Column(name: "Association", type: .index(.coded(HasSemantics.self))),
@@ -28,7 +28,7 @@ public final class MethodSemantics: Table {
 
 extension Record where Table == Metadata.Tables.MethodSemantics {
   public var Semantics: CorMethodSemanticsAttr {
-    .init(rawValue: CorMethodSemanticsAttr.RawValue(columns[0]))
+    CorMethodSemanticsAttr(rawValue: CorMethodSemanticsAttr.RawValue(columns[0]))
   }
 
   public var Method: Record<Metadata.Tables.MethodDef> {

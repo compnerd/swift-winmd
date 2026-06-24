@@ -10,7 +10,7 @@ public final class MemberRef: Table {
   ///   Class (MemberRefParent Coded Index)
   ///   Name (String Heap Index)
   ///   Signature (Blob Heap Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Class", type: .index(.coded(MemberRefParent.self))),
     Column(name: "Name", type: .index(.heap(.string))),
     Column(name: "Signature", type: .index(.heap(.blob))),

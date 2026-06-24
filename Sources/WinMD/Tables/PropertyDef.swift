@@ -10,7 +10,7 @@ public final class PropertyDef: Table {
   ///   Flags (2-byte bitmask of PropertyAttributes)
   ///   Name (String Heap Index)
   ///   Type (Blob Heap Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Flags", type: .constant(2)),
     Column(name: "Name", type: .index(.heap(.string))),
     Column(name: "Type", type: .index(.heap(.blob))),
@@ -28,7 +28,7 @@ public final class PropertyDef: Table {
 
 extension Record where Table == Metadata.Tables.PropertyDef {
   public var Flags: CorPropertyAttr {
-    .init(rawValue: CorPropertyAttr.RawValue(columns[0]))
+    CorPropertyAttr(rawValue: CorPropertyAttr.RawValue(columns[0]))
   }
 
   public var Name: String {

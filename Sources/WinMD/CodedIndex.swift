@@ -3,13 +3,13 @@
 
 /// A compressed index which is an index into a predefined set of tables.
 ///
-/// The tagged-union is formed by encoding the descriminator in the bottom
+/// The tagged-union is formed by encoding the discriminator in the bottom
 /// log(n) bits and the index in the remaining bits. The raw value is either
 /// 16-bits if all the tables use a 16-bit index or 32-bit otherwise.
 public protocol CodedIndex: CustomDebugStringConvertible, Sendable {
   typealias RawValue = Int
 
-  /// The tables that the `CodedIndex` descriminates across.
+  /// The tables that the `CodedIndex` discriminates across.
   ///
   /// The order of the tables is important. The tag identifies the table and
   /// indexes through them, therefore, it is critical the index of the table
@@ -24,12 +24,12 @@ public protocol CodedIndex: CustomDebugStringConvertible, Sendable {
 }
 
 extension CodedIndex {
-  /// The mask to extract the descriminator from the `CodedIndex`.
+  /// The mask to extract the discriminator from the `CodedIndex`.
   public static var mask: RawValue {
     (1 << (64 - (Self.tables.count - 1).leadingZeroBitCount)) - 1
   }
 
-  /// The table descriminator used to select between the tables.
+  /// The table discriminator used to select between the tables.
   public var tag: RawValue {
     rawValue & Self.mask
   }
@@ -46,7 +46,6 @@ extension CodedIndex {
     "\(Self.tables[tag]) Row \(row)"
   }
 }
-
 
 public struct TypeDefOrRef: CodedIndex {
   public static var tables: Array<Table.Type> {

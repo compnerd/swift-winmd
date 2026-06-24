@@ -8,12 +8,12 @@ public final class MethodDef: Table {
 
   /// Record Layout
   ///   RVA (4-byte constant)
-  ///   ImplFlags (2-byte bitmask of MethodImplAtttributes)
+  ///   ImplFlags (2-byte bitmask of MethodImplAttributes)
   ///   Flags (2-byte bitmask of MethodAttributes)
   ///   Name (String Heap Index)
   ///   Signature (Blob Heap Index)
   ///   ParamList (Param Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "RVA", type: .constant(4)),
     Column(name: "ImplFlags", type: .constant(2)),
     Column(name: "Flags", type: .constant(2)),
@@ -38,11 +38,11 @@ extension Record where Table == Metadata.Tables.MethodDef {
   }
 
   public var ImplFlags: CorMethodImpl {
-    .init(rawValue: CorMethodImpl.RawValue(columns[1]))
+    CorMethodImpl(rawValue: CorMethodImpl.RawValue(columns[1]))
   }
 
   public var Flags: CorMethodAttr {
-    .init(rawValue: CorMethodAttr.RawValue(columns[2]))
+    CorMethodAttr(rawValue: CorMethodAttr.RawValue(columns[2]))
   }
 
   public var Name: String {

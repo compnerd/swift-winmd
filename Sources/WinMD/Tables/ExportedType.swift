@@ -12,7 +12,7 @@ public final class ExportedType: Table {
   ///   TypeName (String Heap Index)
   ///   TypeNamespace (String Heap Index)
   ///   Implementation (Implementation Coded Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Flags", type: .constant(4)),
     Column(name: "TypeDefId", type: .constant(4)),
     Column(name: "TypeName", type: .index(.heap(.string))),
@@ -32,7 +32,7 @@ public final class ExportedType: Table {
 
 extension Record where Table == Metadata.Tables.ExportedType {
   public var Flags: CorTypeAttr {
-    .init(rawValue: CorTypeAttr.RawValue(columns[0]))
+    CorTypeAttr(rawValue: CorTypeAttr.RawValue(columns[0]))
   }
 
   public var TypeName: String {

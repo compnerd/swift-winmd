@@ -9,7 +9,7 @@ public final class EventMap: Table {
   /// Record Layout
   ///   Parent (TypeDef Index)
   ///   EventList (Event Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Parent", type: .index(.simple(TypeDef.self))),
     Column(name: "EventList", type: .index(.simple(EventDef.self))),
   ]

@@ -11,7 +11,7 @@ public final class ImplMap: Table {
   ///   MemberForwarded (MemberForwarded Coded Index)
   ///   ImportName (String Heap Index)
   ///   ImportScope (ModuleRef Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "MappingFlags", type: .constant(2)),
     Column(name: "MemberForwarded", type: .index(.coded(MemberForwarded.self))),
     Column(name: "ImportName", type: .index(.heap(.string))),
@@ -30,7 +30,7 @@ public final class ImplMap: Table {
 
 extension Record where Table == Metadata.Tables.ImplMap {
   public var MappingFlags: CorPinvokeMap {
-    .init(rawValue: CorPinvokeMap.RawValue(columns[0]))
+    CorPinvokeMap(rawValue: CorPinvokeMap.RawValue(columns[0]))
   }
 
   public var ImportName: String {

@@ -9,7 +9,7 @@ public final class AssemblyRefProcessor: Table {
   /// Record Layout
   ///   Processor (4-byte constant)
   ///   AssemblyRef (AssemblyRef Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Processor", type: .constant(4)),
     Column(name: "AssemblyRef", type: .index(.simple(AssemblyRef.self))),
   ]

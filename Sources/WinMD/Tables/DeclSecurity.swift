@@ -10,7 +10,7 @@ public final class DeclSecurity: Table {
   ///   Action (2-byte value)
   ///   Parent (HasDeclSecurity Coded Index)
   ///   PermissionSet (Blob Heap Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Action", type: .constant(2)),
     Column(name: "Parent", type: .index(.coded(HasDeclSecurity.self))),
     Column(name: "PermissionSet", type: .index(.heap(.blob))),

@@ -9,7 +9,7 @@ public final class MethodSpec: Table {
   /// Record Layout
   ///   Method (MethodDefOrRef Coded Index)
   ///   Instantiation (Blob Heap Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Method", type: .index(.coded(MethodDefOrRef.self))),
     Column(name: "Instantiation", type: .index(.heap(.blob))),
   ]

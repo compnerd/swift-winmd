@@ -1,7 +1,7 @@
 // Copyright © 2021 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-import XCTest
+import Testing
 @testable import WinMD
 
 extension CodedIndex {
@@ -10,7 +10,7 @@ extension CodedIndex {
   }
 }
 
-final class StringsHeapTests: XCTestCase {
+struct StringsHeapTests {
   static let heap: Array<UInt8> = [
     0x00,
     0x53, 0x74, 0x72, 0x69, 0x6e, 0x67, 0x20, 0x31, 0x00, 0x00,
@@ -30,12 +30,13 @@ final class StringsHeapTests: XCTestCase {
     0x53, 0x74, 0x72, 0x69, 0x6e, 0x67, 0x20, 0x31, 0x35, 0x00,
   ]
 
-  func testSubscript() {
+  @Test("reads null-terminated strings by heap offset")
+  func subscriptAccess() {
     let heap = StringsHeap(data: StringsHeapTests.heap[...])
 
-    XCTAssertEqual(heap[0], "")
+    #expect(heap[0] == "")
     for string in (1 ... 15) {
-      XCTAssertEqual(heap[1 + (string - 1) * 10], "String \(string)")
+      #expect(heap[1 + (string - 1) * 10] == "String \(string)")
     }
   }
 }

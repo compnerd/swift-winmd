@@ -141,6 +141,98 @@ struct ResolveTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try source.resolve(3) }
   }
 
+  @Test("rejects a TypeDefOrRef reference whose tag is out of range")
+  func resolveBadTag() throws {
+    // A signature can carry a `TypeDefOrRef` directly (not decoded out of a row's
+    // coded-index cell), and `Database.resolve(_:)` selects its target table by
+    // tag. `TypeDefOrRef` names three tables across two tag bits, so tag 3 is the
+    // unused pattern: `(1 << 2) | 3 = 7` is a non-null row (1) with tag 3.
+    let reference = TypeDefOrRef(rawValue: (1 << 2) | 3)
+    #expect(reference.row != 0)
+    #expect(reference.tag == TypeDefOrRef.tables.count)
+
+    let storage = Storage(bytes: ResolveTests.malformed.span.bytes,
+                          relations: ResolveTests.relations.span,
+                          strings: ResolveTests.strings.span.bytes,
+                          blob: ResolveTests.empty.span.bytes,
+                          guid: ResolveTests.empty.span.bytes,
+                          valid: ResolveTests.valid, sorted: 0)
+    // `Database.resolve(_:)`'s body, against an in-memory storage: the tag guard
+    // must reject the reference rather than trap on `TypeDefOrRef.tables[tag]`.
+    #expect(throws: WinMDError.BadImageFormat) {
+      guard reference.row != 0 else { return }
+      guard reference.tag < TypeDefOrRef.tables.count,
+          let schema = TypeDefOrRef.tables[reference.tag]
+      else { throw WinMDError.BadImageFormat }
+      _ = try storage.tuple(reference.row - 1, of: schema)
+    }
+  }
+
+  // `CustomAttributeType` is the one coded index with in-range reserved tags:
+  // it names five slots across three tag bits, but tags 0, 1, and 4 are reserved
+  // (modelled as `nil` table entries) and only 2 (`MethodDef`) and 3
+  // (`MemberRef`) are real. A `CustomAttribute` row (#12) whose `Type` (ordinal
+  // 1) carries a reserved tag must be rejected, not resolved to a stray table.
+  //
+  // CustomAttribute[0]: Parent = 0, Type = the coded cell under test, Value = 0;
+  // each cell a narrow (2-byte) index, so the stride is 6.
+  private static func attribute(_ type: Int) -> Array<UInt8> {
+    [0x00, 0x00, UInt8(type & 0xff), UInt8(type >> 8), 0x00, 0x00]
+  }
+
+  // A single MethodDef row (#6) so a valid tag-2 reference has a table to land
+  // on. The narrow stride is RVA (4) + ImplFlags (2) + Flags (2) + Name (2) +
+  // Signature (2) + ParamList (2) = 14; all cells zero.
+  private static let methodRow =
+      Array<UInt8>(repeating: 0, count: 14)
+
+  @Test("rejects a CustomAttributeType with a reserved tag")
+  func customAttributeReservedTag() throws {
+    // `Type` = `(1 << CustomAttributeType.bits) | 0`: row 1, tag 0 — reserved.
+    let reserved = (1 << CustomAttributeType.bits) | 0
+    let record = ResolveTests.attribute(reserved)
+    let relations: Array<Table> = [
+      Table(Metadata.Tables.CustomAttribute.self, rows: 1, range: 0 ..< 6,
+            wide: 0, stride: 6),
+    ]
+    let storage = Storage(bytes: record.span.bytes,
+                          relations: relations.span,
+                          strings: ResolveTests.empty.span.bytes,
+                          blob: ResolveTests.empty.span.bytes,
+                          guid: ResolveTests.empty.span.bytes,
+                          valid: 1 << 12, sorted: 0)
+    let source = Tuple(0, relations[0], storage)
+    // `Type` (ordinal 1) names a non-null row through a reserved tag; the resolve
+    // must throw rather than treat the reserved slot as a real table.
+    #expect(throws: WinMDError.BadImageFormat) { _ = try source.resolve(1) }
+  }
+
+  @Test("resolves a CustomAttributeType with a valid tag")
+  func customAttributeValidTag() throws {
+    // `Type` = `(1 << CustomAttributeType.bits) | 2`: row 1, tag 2 — `MethodDef`.
+    let valid = (1 << CustomAttributeType.bits) | 2
+    let record = ResolveTests.attribute(valid) + ResolveTests.methodRow
+    let relations: Array<Table> = [
+      // MethodDef (#6) before CustomAttribute (#12): relations are ordered by
+      // table number, so the lower-numbered table's row range comes first.
+      Table(Metadata.Tables.MethodDef.self, rows: 1, range: 6 ..< 20,
+            wide: 0, stride: 14),
+      Table(Metadata.Tables.CustomAttribute.self, rows: 1, range: 0 ..< 6,
+            wide: 0, stride: 6),
+    ]
+    let storage = Storage(bytes: record.span.bytes,
+                          relations: relations.span,
+                          strings: ResolveTests.empty.span.bytes,
+                          blob: ResolveTests.empty.span.bytes,
+                          guid: ResolveTests.empty.span.bytes,
+                          valid: (1 << 6) | (1 << 12), sorted: 0)
+    let source = Tuple(0, relations[1], storage)
+    guard let target = try source.resolve(1) else {
+      Issue.record("Type did not resolve"); return
+    }
+    #expect(target.count == Metadata.Tables.MethodDef.fields.count)
+  }
+
   // A single NestedClass row (#41) whose `NestedClass` (ordinal 0, a simple
   // `TypeDef` index) names row 999 — non-null but far past the single TypeDef
   // row. `storage.tuple` returns nil for the out-of-range row; resolution must
@@ -207,6 +299,35 @@ struct ResolveTests {
     // Non-null coded row, in-range tag, but the named TypeRef row does not exist;
     // `storage.tuple` returns nil and resolution must throw.
     #expect(throws: WinMDError.BadImageFormat) { _ = try source.resolve(3) }
+  }
+
+  @Test("rejects a TypeDefOrRef reference whose row is out of range")
+  func resolveOutOfRange() throws {
+    // A `TypeDefOrRef` carried in a signature with tag 1 (`TypeRef`) but row 999:
+    // `(999 << 2) | 1`. `Database.resolve(_:)`'s tag guard passes (the tag names
+    // a real table) but the row is past the one TypeRef row.
+    let reference = TypeDefOrRef(rawValue: (999 << 2) | 1)
+    #expect(reference.row == 999)
+    #expect(reference.tag < TypeDefOrRef.tables.count)
+
+    let storage = Storage(bytes: ResolveTests.record.span.bytes,
+                          relations: ResolveTests.relations.span,
+                          strings: ResolveTests.strings.span.bytes,
+                          blob: ResolveTests.empty.span.bytes,
+                          guid: ResolveTests.empty.span.bytes,
+                          valid: ResolveTests.valid, sorted: 0)
+    // `Database.resolve(_:)`'s body against an in-memory storage: the tag guard
+    // admits the reference, but the out-of-range row makes `storage.tuple` return
+    // nil, which must be surfaced as a malformed image.
+    #expect(throws: WinMDError.BadImageFormat) {
+      guard reference.row != 0 else { return }
+      guard reference.tag < TypeDefOrRef.tables.count,
+          let schema = TypeDefOrRef.tables[reference.tag]
+      else { throw WinMDError.BadImageFormat }
+      guard let _ = try storage.tuple(reference.row - 1, of: schema) else {
+        throw WinMDError.BadImageFormat
+      }
+    }
   }
 
   @Test("rejects a simple foreign key whose target table is absent")

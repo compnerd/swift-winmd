@@ -14,61 +14,61 @@ public class Database {
 
   public var stream: TablesStream {
     get throws {
-      try TablesStream(from: self.cil)
+      try TablesStream(from: cil)
     }
   }
 
   public var decoder: DatabaseDecoder {
     get throws {
-      try DatabaseDecoder(self.stream)
+      try DatabaseDecoder(stream)
     }
   }
 
-  // MARK - Heaps
+  // MARK: - Heaps
 
   public var blobs: BlobsHeap {
     get throws {
-      try BlobsHeap(from: self.cil)
+      try BlobsHeap(from: cil)
     }
   }
 
   public var guids: GUIDHeap {
     get throws {
-      try GUIDHeap(from: self.cil)
+      try GUIDHeap(from: cil)
     }
   }
 
   public var strings: StringsHeap {
     get throws {
-      try StringsHeap(from: self.cil)
+      try StringsHeap(from: cil)
     }
   }
 
-  // MARK - Tables
+  // MARK: - Tables
 
-  public var tables: [WinMD.Table] {
+  public var tables: Array<WinMD.Table> {
     get throws {
-      try self.stream.Tables
+      try stream.Tables
     }
   }
 
-  // MARK - Initializers
+  // MARK: - Initializers
 
-  private init(data: [UInt8]) throws {
+  private init(data: Array<UInt8>) throws {
     self.dos = try DOSFile(from: data)
-    self.pe = try PEFile(from: self.dos)
-    self.cil = try Assembly(from: self.pe)
+    self.pe = try PEFile(from: dos)
+    self.cil = try Assembly(from: pe)
   }
 
   public convenience init(at path: URL) throws {
     // Although it is inconvenient to read data from a file without using
     // `Data`, once the data has been read, it is usually easier to work with a
-    // byte array representation.  Unfortunately, this conversion is likely to
+    // byte array representation. Unfortunately, this conversion is likely to
     // incur a pointless copy.
     try self.init(data: Array(Data(contentsOf: path, options: .alwaysMapped)))
   }
 
-  // MARK - subscripting
+  // MARK: - subscripting
 
   public func rows<Table: WinMD.Table>(of table: Table.Type,
                                        from begin: Int = 0,

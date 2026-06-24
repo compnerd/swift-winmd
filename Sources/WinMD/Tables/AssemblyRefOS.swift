@@ -11,7 +11,7 @@ public final class AssemblyRefOS: Table {
   ///   OSMajorVersion (4-byte constant)
   ///   OSMinorVersion (4-byte constant)
   ///   AssemblyRef (AssemblyRef Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "OSPlatformId", type: .constant(4)),
     Column(name: "OSMajorVersion", type: .constant(4)),
     Column(name: "OSMinorVersion", type: .constant(4)),

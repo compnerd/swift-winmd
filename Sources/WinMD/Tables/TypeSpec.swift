@@ -8,7 +8,7 @@ public final class TypeSpec: Table {
 
   /// Record Layout
   ///   Signature (Blob Heap Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Signature", type: .index(.heap(.blob))),
   ]
 

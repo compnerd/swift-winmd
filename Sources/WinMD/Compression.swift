@@ -8,11 +8,11 @@
 /// state is expensive to compute, and this simply serves as a cache for the
 /// data.
 public class DatabaseDecoder {
-  public private(set) var strides: [Index:Int] = [:]
+  public private(set) var strides = Dictionary<Index, Int>()
 
   public init(_ stream: TablesStream) {
-    let valid: UInt64 = stream.Valid
-    let rows: [UInt32] = stream.Rows
+    let valid = stream.Valid
+    let rows = stream.Rows
 
     func TableIndexSize<T: CodedIndex>(_ index: T.Type) -> Int {
       // The number of tables that the index can refer to is the number of bits
@@ -34,27 +34,27 @@ public class DatabaseDecoder {
     }
 
     // Well-known Heaps
-    self.strides[.heap(.blob)] = stream.BlobIndexSize
-    self.strides[.heap(.guid)] = stream.GUIDIndexSize
-    self.strides[.heap(.string)] = stream.StringIndexSize
+    strides[.heap(.blob)] = stream.BlobIndexSize
+    strides[.heap(.guid)] = stream.GUIDIndexSize
+    strides[.heap(.string)] = stream.StringIndexSize
     // Well-known Coded Indicies
-    self.strides[.coded(CustomAttributeType.self)] = TableIndexSize(CustomAttributeType.self)
-    self.strides[.coded(HasConstant.self)] = TableIndexSize(HasConstant.self)
-    self.strides[.coded(HasCustomAttribute.self)] = TableIndexSize(HasCustomAttribute.self)
-    self.strides[.coded(HasDeclSecurity.self)] = TableIndexSize(HasDeclSecurity.self)
-    self.strides[.coded(HasFieldMarshal.self)] = TableIndexSize(HasFieldMarshal.self)
-    self.strides[.coded(HasSemantics.self)] = TableIndexSize(HasSemantics.self)
-    self.strides[.coded(Implementation.self)] = TableIndexSize(Implementation.self)
-    self.strides[.coded(MemberForwarded.self)] = TableIndexSize(MemberForwarded.self)
-    self.strides[.coded(MemberRefParent.self)] = TableIndexSize(MemberRefParent.self)
-    self.strides[.coded(MethodDefOrRef.self)] = TableIndexSize(MethodDefOrRef.self)
-    self.strides[.coded(ResolutionScope.self)] = TableIndexSize(ResolutionScope.self)
-    self.strides[.coded(TypeDefOrRef.self)] = TableIndexSize(TypeDefOrRef.self)
-    self.strides[.coded(TypeOrMethodDef.self)] = TableIndexSize(TypeOrMethodDef.self)
+    strides[.coded(CustomAttributeType.self)] = TableIndexSize(CustomAttributeType.self)
+    strides[.coded(HasConstant.self)] = TableIndexSize(HasConstant.self)
+    strides[.coded(HasCustomAttribute.self)] = TableIndexSize(HasCustomAttribute.self)
+    strides[.coded(HasDeclSecurity.self)] = TableIndexSize(HasDeclSecurity.self)
+    strides[.coded(HasFieldMarshal.self)] = TableIndexSize(HasFieldMarshal.self)
+    strides[.coded(HasSemantics.self)] = TableIndexSize(HasSemantics.self)
+    strides[.coded(Implementation.self)] = TableIndexSize(Implementation.self)
+    strides[.coded(MemberForwarded.self)] = TableIndexSize(MemberForwarded.self)
+    strides[.coded(MemberRefParent.self)] = TableIndexSize(MemberRefParent.self)
+    strides[.coded(MethodDefOrRef.self)] = TableIndexSize(MethodDefOrRef.self)
+    strides[.coded(ResolutionScope.self)] = TableIndexSize(ResolutionScope.self)
+    strides[.coded(TypeDefOrRef.self)] = TableIndexSize(TypeDefOrRef.self)
+    strides[.coded(TypeOrMethodDef.self)] = TableIndexSize(TypeOrMethodDef.self)
     // Simple Indicies
     for table in kRegisteredTables {
       if valid & (1 << table.number) == (1 << table.number) {
-        self.strides[.simple(table)] =
+        strides[.simple(table)] =
             rows[(valid & ((1 << table.number) - 1)).nonzeroBitCount] < (1 << 16)
                 ? 2
                 : 4
@@ -66,22 +66,22 @@ public class DatabaseDecoder {
 extension DatabaseDecoder {
   /// The stride of a table in the database, which is the byte count of a row.
   internal func stride(of table: Table) -> Int {
-    return stride(of: type(of: table))
+    stride(of: type(of: table))
   }
 
   /// The stride of a table in the database, which is the byte count of a row.
   internal func stride(of table: Table.Type) -> Int {
-    return layout(of: table).reduce(0, +)
+    layout(of: table).reduce(0, +)
   }
 
   /// The layout of a record of the table, byte count of each column.
-  internal func layout(of table: Table) -> [Int] {
-    return layout(of: type(of: table))
+  internal func layout(of table: Table) -> Array<Int> {
+    layout(of: type(of: table))
   }
 
   /// The layout of a record of the table, byte count of each column.
-  internal func layout(of table: Table.Type) -> [Int] {
-    return table.columns.lazy.map { width(of: $0.type) }
+  internal func layout(of table: Table.Type) -> Array<Int> {
+    table.columns.lazy.map { width(of: $0.type) }
   }
 
   /// The width, in bytes, of a given column type.
@@ -91,7 +91,7 @@ extension DatabaseDecoder {
       return size
 
     case .index(let index):
-      guard let stride = self.strides[index] else {
+      guard let stride = strides[index] else {
         fatalError("Unsupported index type: \(index)")
       }
       return stride

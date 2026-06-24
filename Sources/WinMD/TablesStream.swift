@@ -16,8 +16,8 @@
 ///      uint8_t Tables[]
 ///
 /// The most common operation is access of `Rows` and `Tables`, which are both
-/// computationally expensive.  The `Rows` computation is expensive due to the
-/// allocation of the returned `Array`.  The `Tables` computation is expensive
+/// computationally expensive. The `Rows` computation is expensive due to the
+/// allocation of the returned `Array`. The `Tables` computation is expensive
 /// as it requires the re-creationg of the table data.
 public struct TablesStream {
   private let data: ArraySlice<UInt8>
@@ -34,32 +34,30 @@ public struct TablesStream {
   }
 
   public var MajorVersion: UInt8 {
-    return self.data[4, UInt8.self]
+    data[4, UInt8.self]
   }
 
   public var MinorVersion: UInt8 {
-    return self.data[5, UInt8.self]
+    data[5, UInt8.self]
   }
 
   public var HeapSizes: UInt8 {
-    return self.data[6, UInt8.self]
+    data[6, UInt8.self]
   }
 
   public var Valid: UInt64 {
-    return self.data[8, UInt64.self]
+    data[8, UInt64.self]
   }
 
   public var Sorted: UInt64 {
-    return self.data[16, UInt64.self]
+    data[16, UInt64.self]
   }
 
-  public var Rows: [UInt32] {
-    let tables: Int = Valid.nonzeroBitCount
-    let nbytes: Int = tables * MemoryLayout<UInt32>.size
-    let begin: ArraySlice<UInt8>.Index =
-        data.index(data.startIndex, offsetBy: 24)
-    let end: ArraySlice<UInt8>.Index =
-        data.index(begin, offsetBy: nbytes)
+  public var Rows: Array<UInt32> {
+    let tables = Valid.nonzeroBitCount
+    let nbytes = tables * MemoryLayout<UInt32>.size
+    let begin = data.index(data.startIndex, offsetBy: 24)
+    let end = data.index(begin, offsetBy: nbytes)
     return Array<UInt32>(unsafeUninitializedCapacity: tables) {
       data.copyBytes(to: $0, from: begin ..< end)
       $1 = tables
@@ -67,31 +65,31 @@ public struct TablesStream {
   }
 
   // TODO(compnerd) add caching support for the `Tables` array.
-  public var Tables: [Table] {
+  public var Tables: Array<Table> {
     get throws {
-      var tables: [Table] = []
+      var tables = Array<Table>()
       tables.reserveCapacity(Valid.nonzeroBitCount)
 
-      let rows: [UInt32] = Rows
-      let decoder: DatabaseDecoder = DatabaseDecoder(self)
+      let rows = Rows
+      let decoder = DatabaseDecoder(self)
 
-      // The row data begins at offset 24 (see the structure layout above).  The
-      // rows are stored in a packaed series of 32-bit words, one-per-table.  We
+      // The row data begins at offset 24 (see the structure layout above). The
+      // rows are stored in a packaed series of 32-bit words, one-per-table. We
       // re-use the `rows.count` as we have already computed the value for reuse
       // in the subseuquent loop.
-      var offset: Int = 24 + rows.count * MemoryLayout<UInt32>.size
+      var offset = 24 + rows.count * MemoryLayout<UInt32>.size
 
       for table in kRegisteredTables {
         guard Valid & (1 << table.number) == (1 << table.number) else { continue }
 
-        let records: UInt32 =
+        let records =
             rows[(Valid & ((1 << table.number) - 1)).nonzeroBitCount]
-        let words: Int = Int(records) * decoder.stride(of: table)
+        let words = Int(records) * decoder.stride(of: table)
 
-        guard let startIndex: ArraySlice<UInt8>.Index =
+        guard let startIndex =
             data.index(data.startIndex, offsetBy: offset,
                        limitedBy: data.endIndex),
-            let endIndex: ArraySlice<UInt8>.Index =
+            let endIndex =
                 data.index(startIndex, offsetBy: words,
                            limitedBy: data.endIndex) else {
           throw WinMDError.InvalidIndex

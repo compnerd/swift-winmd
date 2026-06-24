@@ -10,7 +10,7 @@ public final class MethodImpl: Table {
   ///   Class (TypeDef Index)
   ///   MethodBody (MethodDefOrRef Coded Index)
   ///   MethodDeclaration (MethodDefOrRef Coded Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Class", type: .index(.simple(TypeDef.self))),
     Column(name: "MethodBody", type: .index(.coded(MethodDefOrRef.self))),
     Column(name: "MethodDeclaration", type: .index(.coded(MethodDefOrRef.self))),

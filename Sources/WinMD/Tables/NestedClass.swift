@@ -9,7 +9,7 @@ public final class NestedClass: Table {
   /// Record Layout
   ///   NestedClass (TypeDef Index)
   ///   EnclosingClass (TypeDef Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "NestedClass", type: .index(.simple(TypeDef.self))),
     Column(name: "EnclosingClass", type: .index(.simple(TypeDef.self))),
   ]

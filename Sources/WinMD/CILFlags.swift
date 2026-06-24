@@ -1,7 +1,7 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-/// Contains values that indicate type metadata.  See §II.23.1.15.
+/// Contains values that indicate type metadata. See §II.23.1.15.
 public struct CorTypeAttr: OptionSet {
   public typealias RawValue = UInt32
 
@@ -128,7 +128,7 @@ public struct CorTypeAttr: OptionSet {
   /// Use this mask to get non-standard encoding information for native interop.
   /// The meaning of the values of these two bits is unspecified.
   public static var tdCustomFormatMask: CorTypeAttr {
-    CorTypeAttr(rawValue: 0x00C00000)
+    CorTypeAttr(rawValue: 0x00c00000)
   }
 
   /// Specifies that the type must be initialized before the first attempt to
@@ -156,7 +156,7 @@ public struct CorTypeAttr: OptionSet {
   }
 }
 
-/// Contains values that describe metadata about a field.  See §II.23.1.5.
+/// Contains values that describe metadata about a field. See §II.23.1.5.
 public struct CorFieldAttr: OptionSet {
   public typealias RawValue = UInt16
 
@@ -253,7 +253,7 @@ public struct CorFieldAttr: OptionSet {
   }
 }
 
-/// Contains values that describe method implementation features.  See
+/// Contains values that describe method implementation features. See
 /// §II.23.1.11.
 public struct CorMethodImpl: OptionSet {
   public typealias RawValue = UInt16
@@ -337,7 +337,7 @@ public struct CorMethodImpl: OptionSet {
   }
 }
 
-/// Contains values that describe the features of a method.  See §II.23.1.10.
+/// Contains values that describe the features of a method. See §II.23.1.10.
 public struct CorMethodAttr: OptionSet {
   public typealias RawValue = UInt16
 
@@ -457,7 +457,7 @@ public struct CorMethodAttr: OptionSet {
   }
 }
 
-/// Contains values that describe the metadata of a method parameter.  See
+/// Contains values that describe the metadata of a method parameter. See
 /// §II.23.1.13.
 public struct CorParamAttr: OptionSet {
   public typealias RawValue = UInt16
@@ -500,7 +500,7 @@ public struct CorParamAttr: OptionSet {
   }
 }
 
-/// Contains values that describe the metadata of an event.  See §II.23.1.4.
+/// Contains values that describe the metadata of an event. See §II.23.1.4.
 public struct CorEventAttr: OptionSet {
   public typealias RawValue = UInt16
 
@@ -526,7 +526,7 @@ public struct CorEventAttr: OptionSet {
   }
 }
 
-/// Contains values that describe the metadata of a property.  See §II.23.1.14.
+/// Contains values that describe the metadata of a property. See §II.23.1.14.
 public struct CorPropertyAttr: OptionSet {
   public typealias RawValue = UInt16
 
@@ -561,7 +561,7 @@ public struct CorPropertyAttr: OptionSet {
 }
 
 /// Contains values that describe the relationship between a method and an
-/// associated property or event.  See §II.23.1.12.
+/// associated property or event. See §II.23.1.12.
 public struct CorMethodSemanticsAttr: OptionSet {
   public typealias RawValue = UInt16
 
@@ -598,7 +598,7 @@ public struct CorMethodSemanticsAttr: OptionSet {
   }
 }
 
-/// Specifies options for a PInvoke call.  See §II.23.1.8.
+/// Specifies options for a PInvoke call. See §II.23.1.8.
 public struct CorPinvokeMap: OptionSet {
   public typealias RawValue = UInt16
 
@@ -718,7 +718,7 @@ public struct CorPinvokeMap: OptionSet {
   }
 }
 
-/// Contains values that describe the hash algorithm.  See §II.23.1.1.
+/// Contains values that describe the hash algorithm. See §II.23.1.1.
 public enum CorHashAlgorithm: UInt32 {
   case none = 0x0000
   case md5  = 0x8003
@@ -726,7 +726,7 @@ public enum CorHashAlgorithm: UInt32 {
 }
 
 /// Contains values that describe the metadata applied to an assembly
-/// compilation.  See §II.23.1.2.
+/// compilation. See §II.23.1.2.
 public struct CorAssemblyFlags: OptionSet {
   public typealias RawValue = UInt16
 
@@ -820,7 +820,7 @@ public struct CorAssemblyFlags: OptionSet {
 }
 
 /// Contains values that describe the type of file defined in a call to
-/// `IMetaDataAssemblyEmit::DefineFile`.  See §II.23.1.6.
+/// `IMetaDataAssemblyEmit::DefineFile`. See §II.23.1.6.
 public struct CorFileFlags: OptionSet {
   public typealias RawValue = UInt16
 
@@ -840,7 +840,7 @@ public struct CorFileFlags: OptionSet {
   }
 }
 
-/// Indicates the visibility of resources encoded in an assembly manifest.  See
+/// Indicates the visibility of resources encoded in an assembly manifest. See
 /// §II.23.1.9.
 public struct CorManifestResourceFlags: OptionSet {
   public typealias RawValue = UInt32
@@ -866,7 +866,7 @@ public struct CorManifestResourceFlags: OptionSet {
 }
 
 /// Contains values that describe the `Type` parameters for generic types, as
-/// used in calls to `IMetaDataEmit2::DefineGenericParam`.  See §II.23.1.7.
+/// used in calls to `IMetaDataEmit2::DefineGenericParam`. See §II.23.1.7.
 public struct CorGenericParamAttr: OptionSet {
   public typealias RawValue = UInt16
 
@@ -919,7 +919,7 @@ public struct CorGenericParamAttr: OptionSet {
 }
 
 /// Specifies a common language runtime `Type`, a type modifier, or information
-/// about a type in a metadata type signature.  See §II.23.1.16.
+/// about a type in a metadata type signature. See §II.23.1.16.
 public struct CorElementType: OptionSet {
   public typealias RawValue = UInt8
 

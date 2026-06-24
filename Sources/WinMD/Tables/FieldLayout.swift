@@ -9,7 +9,7 @@ public final class FieldLayout: Table {
   /// Record Layout
   ///   Offset (4-byte constant)
   ///   Field (Field Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Offset", type: .constant(4)),
     Column(name: "Field", type: .index(.simple(FieldDef.self))),
   ]

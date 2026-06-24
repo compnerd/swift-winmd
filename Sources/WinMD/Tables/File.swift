@@ -10,7 +10,7 @@ public final class File: Table {
   ///   Flags (4-byte bitmask of FileAttributes)
   ///   Name (String Heap Index)
   ///   HashValue (Blob Heap Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Flags", type: .constant(4)),
     Column(name: "Name", type: .index(.heap(.string))),
     Column(name: "HashValue", type: .index(.heap(.blob))),
@@ -28,7 +28,7 @@ public final class File: Table {
 
 extension Record where Table == Metadata.Tables.File {
   public var Flags: CorFileFlags {
-    .init(rawValue: CorFileFlags.RawValue(columns[0]))
+    CorFileFlags(rawValue: CorFileFlags.RawValue(columns[0]))
   }
 
   public var Name: String {

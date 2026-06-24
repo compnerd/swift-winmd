@@ -11,7 +11,7 @@ public final class GenericParam: Table {
   ///   Flags (2-byte bitmask of GenericParamAttributes)
   ///   Owner (TypeOrMethodDef Coded Index)
   ///   Name (String Heap Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Number", type: .constant(2)),
     Column(name: "Flags", type: .constant(2)),
     Column(name: "Owner", type: .index(.coded(TypeOrMethodDef.self))),
@@ -34,7 +34,7 @@ extension Record where Table == Metadata.Tables.GenericParam {
   }
 
   public var Flags: CorGenericParamAttr {
-    .init(rawValue: CorGenericParamAttr.RawValue(columns[1]))
+    CorGenericParamAttr(rawValue: CorGenericParamAttr.RawValue(columns[1]))
   }
 
   public var Name: String {

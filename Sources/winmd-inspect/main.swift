@@ -1,8 +1,8 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-import ArgumentParser
-import WinMD
+internal import ArgumentParser
+internal import WinMD
 
 struct Dump: ParsableCommand {
   static var configuration: CommandConfiguration {
@@ -44,7 +44,7 @@ struct PrintNamespaces: ParsableCommand {
   func run() throws {
     let database = try Database(at: options.database.url)
 
-    var namespaces: Set<String> = []
+    var namespaces = Set<String>()
     for row in try database.rows(of: Metadata.Tables.TypeDef.self) {
       if let namespace = try? row.TypeNamespace {
         namespaces.insert(namespace)

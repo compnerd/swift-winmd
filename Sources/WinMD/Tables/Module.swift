@@ -1,7 +1,7 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-import struct Foundation.UUID
+public import struct Foundation.UUID
 
 extension Metadata.Tables {
 /// See §II.22.30.
@@ -14,7 +14,7 @@ public final class Module: Table {
   ///   Mvid (Module Version ID) (GUID Heap Index)
   ///   EncId (GUID Heap Index, reserved, MBZ)
   ///   EncBaseId (GUID Heap Index, reserved, MBZ)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Generation", type: .constant(2)),
     Column(name: "Name", type: .index(.heap(.string))),
     Column(name: "Mvid", type: .index(.heap(.guid))),

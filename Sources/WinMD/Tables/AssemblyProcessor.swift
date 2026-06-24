@@ -8,7 +8,7 @@ public final class AssemblyProcessor: Table {
 
   /// Record Layout
   ///   Processor (4-byte constant)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Processor", type: .constant(4)),
   ]
 

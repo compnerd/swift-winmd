@@ -8,7 +8,7 @@ public final class ModuleRef: Table {
 
   /// Record Layout
   ///   Name (String Heap Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Name", type: .index(.heap(.string))),
   ]
 

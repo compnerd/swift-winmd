@@ -16,7 +16,7 @@ public final class Assembly: Table {
   ///   PublicKey (Blob Heap Index)
   ///   Name (String Heap Index)
   ///   Culture (String Heap Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "HashAlgId", type: .constant(4)),
     Column(name: "MajorVersion", type: .constant(2)),
     Column(name: "MinorVersion", type: .constant(2)),
@@ -40,7 +40,7 @@ public final class Assembly: Table {
 
 extension Record where Table == Metadata.Tables.Assembly {
   public var HashAlgId: CorHashAlgorithm {
-    .init(rawValue: CorHashAlgorithm.RawValue(columns[0]))!
+    CorHashAlgorithm(rawValue: CorHashAlgorithm.RawValue(columns[0]))!
   }
 
   public var MajorVersion: UInt16 {
@@ -60,7 +60,7 @@ extension Record where Table == Metadata.Tables.Assembly {
   }
 
   public var Flags: CorAssemblyFlags {
-    .init(rawValue: CorAssemblyFlags.RawValue(columns[5]))
+    CorAssemblyFlags(rawValue: CorAssemblyFlags.RawValue(columns[5]))
   }
 
   public var PublicKey: Blob {
@@ -83,7 +83,7 @@ extension Record where Table == Metadata.Tables.Assembly {
 }
 
 extension Record where Table == Metadata.Tables.Assembly {
-  internal var Version: AssemblyVersion  {
+  internal var Version: AssemblyVersion {
     AssemblyVersion(MajorVersion, MinorVersion, BuildNumber, RevisionNumber)
   }
 }

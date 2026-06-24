@@ -9,7 +9,7 @@ public final class AssemblyOS: Table {
   ///   OSPlatformID (4-byte constant)
   ///   OSMajorVersion (4-byte constant)
   ///   OSMinorVersion (4-byte constant)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "OSPlatformID", type: .constant(4)),
     Column(name: "OSMajorVersion", type: .constant(4)),
     Column(name: "OSMinorVersion", type: .constant(4)),

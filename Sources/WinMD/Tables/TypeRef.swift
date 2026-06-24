@@ -10,7 +10,7 @@ public final class TypeRef: Table {
   ///   ResolutionScope (ResolutionScope Coded Index)
   ///   TypeName (String Heap Index)
   ///   TypeNamespace (String Heap Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "ResolutionScope", type: .index(.coded(ResolutionScope.self))),
     Column(name: "TypeName", type: .index(.heap(.string))),
     Column(name: "TypeNamespace", type: .index(.heap(.string))),

@@ -10,7 +10,7 @@ public final class FieldDef: Table {
   ///   Flags (2-byte bitmask of FieldAttributes)
   ///   Name (String Heap Index)
   ///   Signature (Blob Heap Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Flags", type: .constant(2)),
     Column(name: "Name", type: .index(.heap(.string))),
     Column(name: "Signature", type: .index(.heap(.blob))),
@@ -28,7 +28,7 @@ public final class FieldDef: Table {
 
 extension Record where Table == Metadata.Tables.FieldDef {
   public var Flags: CorFieldAttr {
-    .init(rawValue: CorFieldAttr.RawValue(columns[0]))
+    CorFieldAttr(rawValue: CorFieldAttr.RawValue(columns[0]))
   }
 
   public var Name: String {

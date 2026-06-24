@@ -13,7 +13,7 @@ public final class TypeDef: Table {
   ///   Extends (TypeDefOrRef Coded Index)
   ///   FieldList (Field Index)
   ///   MethodList (MethodDef Index)
-  public static let columns: [Column] = [
+  public static let columns = [
     Column(name: "Flags", type: .constant(4)),
     Column(name: "TypeName", type: .index(.heap(.string))),
     Column(name: "TypeNamespace", type: .index(.heap(.string))),
@@ -34,7 +34,7 @@ public final class TypeDef: Table {
 
 extension Record where Table == Metadata.Tables.TypeDef {
   public var Flags: CorTypeAttr {
-    .init(rawValue: CorTypeAttr.RawValue(columns[0]))
+    CorTypeAttr(rawValue: CorTypeAttr.RawValue(columns[0]))
   }
 
   public var TypeName: String {

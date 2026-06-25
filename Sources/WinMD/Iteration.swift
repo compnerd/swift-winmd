@@ -55,6 +55,13 @@ public struct Tuple: ~Escapable {
   /// The number of columns in the row.
   public var count: Int { table.schema.fields.count }
 
+  /// The 0-based index of the row within its table.
+  ///
+  /// ECMA-335 row indices are 1-based; this is the 0-based index the cursor
+  /// addresses the row by. A consumer presenting the SQL `rowid` pseudo-column
+  /// (the SQLite-style 1-based row index) reads `index + 1`.
+  public var index: Int { row }
+
   /// The raw decoded value of column `column`.
   public subscript(_ column: Int) -> Int {
     // Recover the column's offset and width from the schema's narrow layout

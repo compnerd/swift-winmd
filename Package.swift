@@ -23,7 +23,10 @@ let SwiftWinMD = Package(
             swiftSettings: [
               .enableExperimentalFeature("Lifetimes"),
             ]),
-    .testTarget(name: "SQLTests", dependencies: ["SQL"]),
+    .testTarget(name: "SQLTests", dependencies: ["SQL"],
+            swiftSettings: [
+              .enableExperimentalFeature("Lifetimes"),
+            ]),
 
     // WinMD
     .target(name: "WinMD",

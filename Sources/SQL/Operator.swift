@@ -133,7 +133,8 @@ internal indirect enum Plan {
 /// outer record with every inner one; `join` re-resolves the inner relation,
 /// seeks it per outer record, and concatenates the matches. The catalog is
 /// borrowed throughout — a `~Escapable` source is never copied or stored.
-internal func execute<C: Catalog>(_ plan: Plan, _ catalog: borrowing C)
+internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
+                                               _ catalog: borrowing C)
     throws(SQLError) -> Array<Record> {
   switch plan {
   case let .scan(name, ordinals, seek):
@@ -167,9 +168,10 @@ internal func execute<C: Catalog>(_ plan: Plan, _ catalog: borrowing C)
 /// `nil`) into dense slot `Record`s.
 ///
 /// - Throws: `SQLError.relation` if the name no longer resolves.
-private func materialise<C: Catalog>(_ name: String, _ ordinals: Array<Int>,
-                                     _ seek: Range<Int>?,
-                                     _ catalog: borrowing C)
+private func materialise<C: Catalog & ~Escapable>(_ name: String,
+                                                  _ ordinals: Array<Int>,
+                                                  _ seek: Range<Int>?,
+                                                  _ catalog: borrowing C)
     throws(SQLError) -> Array<Record> {
   guard let table = catalog.table(named: name) else { throw .relation(name) }
   let cursor = table.cursor()
@@ -209,10 +211,12 @@ private func product(_ outer: Array<Record>, _ inner: Array<Record>)
 /// landing at `base` in the combined space).
 ///
 /// - Throws: `SQLError.relation` if the inner name no longer resolves.
-private func join<C: Catalog>(_ outer: Array<Record>, _ name: String,
-                              _ ordinals: Array<Int>, _ base: Int,
-                              _ column: Int, _ keys: (left: Int, right: Int),
-                              _ catalog: borrowing C)
+private func join<C: Catalog & ~Escapable>(_ outer: Array<Record>,
+                                           _ name: String,
+                                           _ ordinals: Array<Int>, _ base: Int,
+                                           _ column: Int,
+                                           _ keys: (left: Int, right: Int),
+                                           _ catalog: borrowing C)
     throws(SQLError) -> Array<Record> {
   guard let inner = catalog.table(named: name) else { throw .relation(name) }
   let cursor = inner.cursor()

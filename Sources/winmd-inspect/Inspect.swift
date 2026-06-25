@@ -77,6 +77,7 @@ struct Inspect: ParsableCommand {
                          subcommands: [
                            Dump.self,
                            PrintNamespaces.self,
+                           Query.self,
                          ])
   }
 

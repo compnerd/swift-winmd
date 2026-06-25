@@ -8,6 +8,17 @@
 #ifndef CPE_CPE_h
 #define CPE_CPE_h
 
+#if defined(_WIN32)
+
+// On Windows the PE image structures come from the platform SDK
+// (WinSDK.WinNT), which is implicitly in scope for every Swift compilation.
+// Re-declaring them here would give Clang two disagreeing module definitions
+// of the same C structs, so source them from the SDK instead.
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+#else
+
 #include <stdint.h>
 
 #define IMAGE_DOS_SIGNATURE 0x5a4d
@@ -168,5 +179,7 @@ typedef struct _IMAGE_COR20_HEADER {
     IMAGE_DATA_DIRECTORY    ExportAddressTableJumps;
     IMAGE_DATA_DIRECTORY    ManagedNativeHeader;
 } IMAGE_COR20_HEADER, *PIMAGE_COR20_HEADER;
+
+#endif
 
 #endif

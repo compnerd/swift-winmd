@@ -329,4 +329,17 @@ public struct Cursor: ~Escapable {
     @_lifetime(copy self)
     get { offset < rows ? Tuple(start + offset, table, storage) : nil }
   }
+
+  /// The open table this cursor walks.
+  ///
+  /// Exposed to the structured-query executor (`where(_: Predicate)`), which
+  /// inspects the table's schema and `Sorted` bit to decide between a binary
+  /// search and a scan.
+  internal var relation: Table { table }
+
+  /// The borrowed storage view this cursor reads from.
+  internal var backing: Storage {
+    @_lifetime(copy self)
+    get { storage }
+  }
 }

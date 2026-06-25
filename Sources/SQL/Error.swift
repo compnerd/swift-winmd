@@ -47,6 +47,12 @@ public enum SQLError: Error, Hashable, Sendable {
   case incomplete(expected: String)
   /// Tokens remain after a complete statement was parsed.
   case trailing(at: SourceLocation)
+  /// A statement names a relation the catalog does not resolve.
+  case relation(String)
+  /// A statement names a column the relation does not resolve.
+  case column(String)
+  /// A statement names an unqualified column both joined relations resolve.
+  case ambiguous(String)
 }
 
 extension SQLError: CustomStringConvertible {
@@ -64,6 +70,12 @@ extension SQLError: CustomStringConvertible {
       "expected \(expected) but reached end of input"
     case let .trailing(location):
       "unexpected trailing input at \(location)"
+    case let .relation(name):
+      "no such relation '\(name)'"
+    case let .column(name):
+      "no such column '\(name)'"
+    case let .ambiguous(name):
+      "ambiguous column '\(name)'"
     }
   }
 }

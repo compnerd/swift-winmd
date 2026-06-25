@@ -9,12 +9,16 @@
 /// and release the relations buffer on every cursor copy — they carry this
 /// trivial view: a `Span<Table>` into the relations plus the read spans. The
 /// existing `~Escapable` lifetime dependency keeps it sound.
-internal struct Storage: ~Escapable {
+///
+/// It is `package`-scoped (along with the members the query scan reads) so the
+/// SQL-engine adapter, which conforms it to the engine's `Catalog`, reaches it
+/// across the module boundary.
+package struct Storage: ~Escapable {
   /// The backing buffer.
   internal let bytes: RawSpan
 
   /// The open tables of the database, borrowed from `Database.relations`.
-  internal let relations: Span<Table>
+  package let relations: Span<Table>
 
   /// The "Strings" (`#Strings`) heap.
   internal let strings: RawSpan
@@ -26,17 +30,17 @@ internal struct Storage: ~Escapable {
   internal let guid: RawSpan
 
   /// The bitset of present tables (`TablesStream.Valid`).
-  internal let valid: UInt64
+  package let valid: UInt64
 
   /// The bitset of physically sorted tables (`TablesStream.Sorted`).
   ///
   /// Bit `N` is set iff table `N` is stored ordered by its sort key. A reverse
   /// foreign-key lookup against a sorted table is a binary search; against an
   /// unsorted one it is a linear scan.
-  internal let sorted: UInt64
+  package let sorted: UInt64
 
   @_lifetime(copy bytes, copy relations, copy strings, copy blob, copy guid)
-  internal init(bytes: RawSpan, relations: Span<Table>, strings: RawSpan,
+  package init(bytes: RawSpan, relations: Span<Table>, strings: RawSpan,
                 blob: RawSpan, guid: RawSpan, valid: UInt64, sorted: UInt64) {
     self.bytes = bytes
     self.relations = relations
@@ -165,10 +169,11 @@ internal struct Storage: ~Escapable {
   /// With `strict == false` this is the lower bound (the first row whose cell is
   /// `>= value`); with `strict == true` the upper bound (the first row whose
   /// cell is `> value`). Together they bracket the run equal to `value`. The
-  /// search is `O(log count)`. Shared by the reverse-foreign-key lookup and the
-  /// structured-query sorted-index executor (`Cursor.where(_: Predicate)`).
-  internal func bound(_ table: Table, _ column: Int, _ value: Int, _ count: Int,
-                      strict: Bool) -> Int {
+  /// search is `O(log count)`. Shared by the reverse-foreign-key lookup, the
+  /// structured-query sorted-index executor (`Cursor.where(_: Predicate)`), and
+  /// the SQL-engine adapter's seekable-column `bound`.
+  package func bound(_ table: Table, _ column: Int, _ value: Int, _ count: Int,
+                     strict: Bool) -> Int {
     var lo = 0
     var hi = count
     while lo < hi {

@@ -334,8 +334,8 @@ public struct Cursor: ~Escapable {
   private let rows: Int
 
   @_lifetime(copy storage)
-  internal init(_ storage: Storage, _ table: Table,
-                from row: Int = 0, to count: Int? = nil) {
+  package init(_ storage: Storage, _ table: Table,
+               from row: Int = 0, to count: Int? = nil) {
     self.storage = storage
     self.table = table
     self.rows = (count ?? Int(table.rows)) - row
@@ -359,11 +359,12 @@ public struct Cursor: ~Escapable {
   ///
   /// Exposed to the structured-query executor (`where(_: Predicate)`), which
   /// inspects the table's schema and `Sorted` bit to decide between a binary
-  /// search and a scan.
-  internal var relation: Table { table }
+  /// search and a scan, and to the SQL-engine adapter, which reads the table's
+  /// schema to describe the relation.
+  package var relation: Table { table }
 
   /// The borrowed storage view this cursor reads from.
-  internal var backing: Storage {
+  package var backing: Storage {
     @_lifetime(copy self)
     get { storage }
   }

@@ -44,6 +44,7 @@ let SwiftWinMD = Package(
     // winmd-inspect
     .executableTarget(name: "winmd-inspect",
             dependencies: [
+              "SQL",
               "WinMD",
               .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],

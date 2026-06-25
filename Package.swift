@@ -9,6 +9,7 @@ let SwiftWinMD = Package(
   ],
   products: [
     .executable(name: "winmd-inspect", targets: ["winmd-inspect"]),
+    .library(name: "SQL", targets: ["SQL"]),
   ],
   dependencies: [
     .package(url: "https://github.com/apple/swift-argument-parser",
@@ -16,6 +17,13 @@ let SwiftWinMD = Package(
   ],
   targets: [
     .target(name: "CPE", dependencies: []),
+
+    // SQL
+    .target(name: "SQL", dependencies: [],
+            swiftSettings: [
+              .enableExperimentalFeature("Lifetimes"),
+            ]),
+    .testTarget(name: "SQLTests", dependencies: ["SQL"]),
 
     // WinMD
     .target(name: "WinMD",

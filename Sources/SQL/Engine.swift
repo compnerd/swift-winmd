@@ -24,7 +24,8 @@ public enum Engine {
   /// - Throws: `SQLError.relation` if the catalog resolves no such relation,
   ///   `SQLError.column` if a referenced column is absent, `SQLError.ambiguous`
   ///   if an unqualified name is resolved by both relations of a join.
-  public static func run<C: Catalog>(_ select: Select, _ catalog: borrowing C)
+  public static func run<C: Catalog & ~Escapable>(_ select: Select,
+                                                  _ catalog: borrowing C)
       throws(SQLError) -> Array<Array<Value>> {
     let plan = try optimise(compile(select, catalog), catalog)
     return try execute(plan, catalog).map(\.values)
@@ -53,8 +54,8 @@ public enum Engine {
   /// merged record (outer cells ++ inner cells). The tree is logical: every scan
   /// is a full `Scan(_, _, nil)`; the optimiser turns scans into seeks and the
   /// product into a join.
-  internal static func compile<C: Catalog>(_ select: Select,
-                                           _ catalog: borrowing C)
+  internal static func compile<C: Catalog & ~Escapable>(_ select: Select,
+                                                        _ catalog: borrowing C)
       throws(SQLError) -> Plan {
     guard let table = catalog.table(named: select.from.name) else {
       throw .relation(select.from.name)
@@ -199,8 +200,8 @@ public enum Engine {
   ///     `Join` that seeks the inner per outer record, the remaining conjuncts
   ///     kept as a residual `Select`. If the inner side is not a bare `Scan`,
   ///     the product stays (a plain nested loop).
-  internal static func optimise<C: Catalog>(_ plan: Plan,
-                                            _ catalog: borrowing C)
+  internal static func optimise<C: Catalog & ~Escapable>(_ plan: Plan,
+                                                         _ catalog: borrowing C)
       throws(SQLError) -> Plan {
     switch plan {
     case .scan:
@@ -233,9 +234,10 @@ public enum Engine {
   /// the other as the residual `Select`. Everything else scans under the whole
   /// filter. The `filter` is in slot space, so a comparison's slot maps back to
   /// its table ordinal through the scan's `ordinals` before reading a boundary.
-  private static func seek<C: Catalog>(_ filter: Filter, _ name: String,
-                                       _ ordinals: Array<Int>,
-                                       _ catalog: borrowing C)
+  private static func seek<C: Catalog & ~Escapable>(_ filter: Filter,
+                                                    _ name: String,
+                                                    _ ordinals: Array<Int>,
+                                                    _ catalog: borrowing C)
       throws(SQLError) -> Plan {
     guard let table = catalog.table(named: name) else { throw .relation(name) }
     let count = table.cursor().count
@@ -297,8 +299,10 @@ public enum Engine {
   /// `bound`. The matching conjunct is consumed; any remaining conjuncts stay as
   /// a residual `Select`. When the inner side is not a bare `Scan`, the product
   /// is preserved.
-  private static func nest<C: Catalog>(_ filter: Filter, _ left: Plan,
-                                       _ right: Plan, _ catalog: borrowing C)
+  private static func nest<C: Catalog & ~Escapable>(_ filter: Filter,
+                                                    _ left: Plan,
+                                                    _ right: Plan,
+                                                    _ catalog: borrowing C)
       throws(SQLError) -> Plan {
     guard case let .scan(name, ordinals, nil) = right,
         let base = slots(left) else {

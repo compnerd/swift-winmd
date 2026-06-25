@@ -80,14 +80,19 @@ extension Table where Self: ~Escapable {
 /// The two relations of a join, addressed in one combined ordinal space.
 ///
 /// A join lays its two relations end to end: the outer (the `FROM`) relation
-/// occupies ordinals `[0, outer.width)`, the inner (the `JOIN`) relation
-/// `[outer.width, outer.width + inner.width)`. A `Scope` resolves a possibly
-/// qualified `SQL.Column` into that combined space so the engine's `Filter`,
-/// projection, and order all address cells uniformly across the pair. A
-/// qualifier names a relation by its alias, else its table name; an unqualified
-/// name resolves against both relations and is ambiguous if each has it. The
-/// scope is `~Escapable`: it borrows both `~Escapable` tables, and the engine
-/// resolves through it entirely within compilation, where the tables are live.
+/// occupies the ordinals below `base`, the inner (the `JOIN`) relation those at
+/// or above it. `base` is the outer relation's `extent` — one past the highest
+/// ordinal it can address — rather than its `width`, so the outer relation's
+/// virtual columns — ordinals at or past its real width, such as a `rowid` or a
+/// `parent` — stay on the outer side rather than colliding with the inner's
+/// space; an outer column resolves to its own ordinal, an inner column to
+/// `base + ordinal`. A `Scope` resolves a possibly qualified
+/// `SQL.Column` into that combined space so the engine's `Filter`, projection,
+/// and order all address cells uniformly across the pair. A qualifier names a
+/// relation by its alias, else its table name; an unqualified name resolves
+/// against both relations and is ambiguous if each has it. The scope is
+/// `~Escapable`: it borrows both `~Escapable` tables, and the engine resolves
+/// through it entirely within compilation, where the tables are live.
 internal struct Scope<T: Table & ~Escapable>: ~Escapable {
   /// The left (outer, `FROM`) relation reference; its alias, else its table
   /// name, is the qualifier that selects the `outer` table.
@@ -108,16 +113,18 @@ internal struct Scope<T: Table & ~Escapable>: ~Escapable {
     self.inner = copy inner
   }
 
-  /// The base ordinal of the inner relation in the combined space — the outer
-  /// relation's real width, past which inner ordinals begin.
+  /// The base ordinal of the inner relation in the combined space.
+  ///
+  /// The outer relation's `extent` — its real `width` plus the virtual columns
+  /// it exposes, i.e. one past the highest ordinal it can address — past which
+  /// inner ordinals begin. No outer ordinal — a real column below the width or a
+  /// virtual column at or just past it — reaches it, so the `< base` / `>= base`
+  /// split classifies a combined ordinal to its side even when the outer
+  /// relation contributes a virtual column. Anchoring on the outer's real extent
+  /// (rather than a fixed `1 << 32` reserve, which a 32-bit shift collapses to
+  /// zero) keeps the layout correct on every word size with no giant gap.
   internal var base: Int {
-    outer.width
-  }
-
-  /// The combined-ordinal extent of a `SELECT *`: every real outer column
-  /// followed by every real inner column.
-  internal var width: Int {
-    outer.width + inner.width
+    outer.extent
   }
 
   /// Whether `qualifier` (an alias, else a table name) names `relation`.
@@ -160,13 +167,16 @@ internal struct Scope<T: Table & ~Escapable>: ~Escapable {
   }
 
   /// The combined ordinals a projection yields: every real column of both
-  /// relations for `*` (outer then inner), the named columns' combined ordinals
-  /// otherwise, in source order.
+  /// relations for `*` (outer then inner, never a virtual column), the named
+  /// columns' combined ordinals otherwise, in source order.
   internal func projection(_ projection: Projection) throws(SQLError)
       -> Array<Int> {
     switch projection {
     case .all:
-      return Array(0 ..< width)
+      // Every real outer column, then every real inner column at its
+      // `base`-offset ordinal — never a virtual column of either side.
+      return Array(0 ..< outer.width)
+          + (0 ..< inner.width).map { base + $0 }
     case let .columns(columns):
       var ordinals = Array<Int>()
       ordinals.reserveCapacity(columns.count)

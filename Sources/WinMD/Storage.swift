@@ -143,9 +143,10 @@ internal struct Storage: ~Escapable {
   /// With `strict == false` this is the lower bound (the first row whose cell is
   /// `>= value`); with `strict == true` the upper bound (the first row whose
   /// cell is `> value`). Together they bracket the run equal to `value`. The
-  /// search is `O(log count)`.
-  private func bound(_ table: Table, _ column: Int, _ value: Int, _ count: Int,
-                     strict: Bool) -> Int {
+  /// search is `O(log count)`. Shared by the reverse-foreign-key lookup and the
+  /// structured-query sorted-index executor (`Cursor.where(_: Predicate)`).
+  internal func bound(_ table: Table, _ column: Int, _ value: Int, _ count: Int,
+                      strict: Bool) -> Int {
     var lo = 0
     var hi = count
     while lo < hi {

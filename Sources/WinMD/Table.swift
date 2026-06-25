@@ -56,7 +56,10 @@ extension TableSchema {
 /// recovered from the schema's narrow offsets and this bitset on demand.
 public struct Table: Sendable {
   /// The schema this table is an instance of.
-  internal let schema: TableSchema.Type
+  ///
+  /// `package` so the SQL-engine adapter reads the table's columns, sort key,
+  /// and number to describe the relation across the module boundary.
+  package let schema: TableSchema.Type
 
   /// The set of columns the catalog resolved to a wide (4-byte) index.
   ///
@@ -68,7 +71,7 @@ public struct Table: Sendable {
   internal let stride: Int
 
   /// The number of records in the table.
-  internal let rows: UInt32
+  package let rows: UInt32
 
   /// The absolute byte range of the records within the backing buffer.
   ///
@@ -76,7 +79,7 @@ public struct Table: Sendable {
   /// them within `Database.bytes`.
   internal let range: Range<Int>
 
-  internal var number: Int { schema.number }
+  package var number: Int { schema.number }
 
   internal init(_ schema: TableSchema.Type, rows: UInt32,
                 range: Range<Int>, wide: UInt32, stride: Int) {

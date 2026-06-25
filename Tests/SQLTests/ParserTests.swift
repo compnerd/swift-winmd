@@ -1,0 +1,349 @@
+// Copyright © 2026 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
+// SPDX-License-Identifier: BSD-3-Clause
+
+import Testing
+@testable import SQL
+
+/// Parses `text` and returns its `Select`, failing the test on any other shape.
+private func parseSelect(_ text: String) throws -> Select {
+  guard case let .select(select) = try Statement(parsing: text) else {
+    Issue.record("expected a SELECT statement")
+    throw SQLError.incomplete(expected: "a SELECT statement")
+  }
+  return select
+}
+
+struct ProjectionTests {
+  @Test("parses a SELECT * projection")
+  func star() throws {
+    let select = try parseSelect("SELECT * FROM TypeDef")
+    #expect(select.projection == .all)
+    #expect(select.table == "TypeDef")
+    #expect(select.predicate == nil)
+    #expect(select.order == nil)
+  }
+
+  @Test("parses a single-column projection")
+  func singleColumn() throws {
+    let select = try parseSelect("SELECT TypeName FROM TypeDef")
+    #expect(select.projection == .columns(["TypeName"]))
+  }
+
+  @Test("parses a comma-separated column list")
+  func columnList() throws {
+    let select =
+        try parseSelect("SELECT TypeName, TypeNamespace, Flags FROM TypeDef")
+    #expect(select.projection
+                == .columns(["TypeName", "TypeNamespace", "Flags"]))
+  }
+
+  @Test("parses a dotted column identifier")
+  func dottedColumn() throws {
+    // Simple column identifiers may carry a qualifying dot; metadata names with
+    // dots appear only as string literals.
+    let select = try parseSelect("SELECT TypeDef.TypeName FROM TypeDef")
+    #expect(select.projection == .columns(["TypeDef.TypeName"]))
+  }
+}
+
+struct KeywordTests {
+  @Test("parses lowercase keywords")
+  func caseInsensitive() throws {
+    let select =
+        try parseSelect("select TypeName from TypeDef where Flags = 1")
+    #expect(select.projection == .columns(["TypeName"]))
+    #expect(select.table == "TypeDef")
+    #expect(select.predicate == .comparison(column: "Flags", op: .equal,
+                                            value: .integer(1)))
+  }
+
+  @Test("parses mixed-case keywords")
+  func mixedCase() throws {
+    let select = try parseSelect("SeLeCt * FrOm TypeDef OrDeR By TypeName DeSc")
+    #expect(select.order == Order(column: "TypeName", ascending: false))
+  }
+}
+
+struct PredicateTests {
+  @Test("parses each comparison operator")
+  func operators() throws {
+    let cases: Array<(String, Comparison)> = [
+      ("=", .equal),
+      ("<>", .unequal),
+      ("<", .lt),
+      (">", .gt),
+      ("<=", .leq),
+      (">=", .geq),
+    ]
+    for (text, op) in cases {
+      let select =
+          try parseSelect("SELECT * FROM T WHERE Flags \(text) 1")
+      #expect(select.predicate
+                  == .comparison(column: "Flags", op: op, value: .integer(1)))
+    }
+  }
+
+  @Test("parses a string-literal operand")
+  func stringLiteral() throws {
+    let select =
+        try parseSelect(
+            "SELECT * FROM TypeDef WHERE TypeNamespace = 'Windows.Win32.Foundation'")
+    #expect(select.predicate
+                == .comparison(column: "TypeNamespace", op: .equal,
+                               value: .string("Windows.Win32.Foundation")))
+  }
+
+  @Test("parses a string with an escaped quote")
+  func escapedQuote() throws {
+    let select = try parseSelect("SELECT * FROM T WHERE name = 'O''Brien'")
+    #expect(select.predicate
+                == .comparison(column: "name", op: .equal,
+                               value: .string("O'Brien")))
+  }
+
+  @Test("binds AND tighter than OR")
+  func andBindsTighterThanOr() throws {
+    // a = 1 OR b = 2 AND c = 3  ==>  a OR (b AND c)
+    let select =
+        try parseSelect("SELECT * FROM T WHERE a = 1 OR b = 2 AND c = 3")
+    let a = Predicate.comparison(column: "a", op: .equal, value: .integer(1))
+    let b = Predicate.comparison(column: "b", op: .equal, value: .integer(2))
+    let c = Predicate.comparison(column: "c", op: .equal, value: .integer(3))
+    #expect(select.predicate == .or(a, .and(b, c)))
+  }
+
+  @Test("binds NOT tighter than AND")
+  func notBindsTighterThanAnd() throws {
+    // NOT a = 1 AND b = 2  ==>  (NOT a) AND b
+    let select =
+        try parseSelect("SELECT * FROM T WHERE NOT a = 1 AND b = 2")
+    let a = Predicate.comparison(column: "a", op: .equal, value: .integer(1))
+    let b = Predicate.comparison(column: "b", op: .equal, value: .integer(2))
+    #expect(select.predicate == .and(.not(a), b))
+  }
+
+  @Test("parentheses override operator precedence")
+  func parenthesesOverridePrecedence() throws {
+    // (a = 1 OR b = 2) AND c = 3
+    let select =
+        try parseSelect("SELECT * FROM T WHERE (a = 1 OR b = 2) AND c = 3")
+    let a = Predicate.comparison(column: "a", op: .equal, value: .integer(1))
+    let b = Predicate.comparison(column: "b", op: .equal, value: .integer(2))
+    let c = Predicate.comparison(column: "c", op: .equal, value: .integer(3))
+    #expect(select.predicate == .and(.or(a, b), c))
+  }
+
+  @Test("parses OR left-associatively")
+  func leftAssociativeOr() throws {
+    // a = 1 OR b = 2 OR c = 3  ==>  ((a OR b) OR c)
+    let select =
+        try parseSelect("SELECT * FROM T WHERE a = 1 OR b = 2 OR c = 3")
+    let a = Predicate.comparison(column: "a", op: .equal, value: .integer(1))
+    let b = Predicate.comparison(column: "b", op: .equal, value: .integer(2))
+    let c = Predicate.comparison(column: "c", op: .equal, value: .integer(3))
+    #expect(select.predicate == .or(.or(a, b), c))
+  }
+}
+
+struct OrderTests {
+  @Test("defaults ORDER BY to ascending")
+  func defaultAscending() throws {
+    let select = try parseSelect("SELECT * FROM T ORDER BY TypeName")
+    #expect(select.order == Order(column: "TypeName", ascending: true))
+  }
+
+  @Test("parses an explicit ASC order")
+  func explicitAscending() throws {
+    let select = try parseSelect("SELECT * FROM T ORDER BY TypeName ASC")
+    #expect(select.order == Order(column: "TypeName", ascending: true))
+  }
+
+  @Test("parses a DESC order")
+  func descending() throws {
+    let select = try parseSelect("SELECT * FROM T ORDER BY TypeName DESC")
+    #expect(select.order == Order(column: "TypeName", ascending: false))
+  }
+}
+
+struct CompositeTests {
+  @Test("parses a full SELECT/WHERE/ORDER BY query")
+  func fullQuery() throws {
+    let select =
+        try parseSelect("""
+            SELECT TypeName, TypeNamespace FROM TypeDef
+              WHERE TypeNamespace = 'Windows.Win32.Foundation' AND Flags >= 1
+              ORDER BY TypeName DESC
+            """)
+    #expect(select.projection == .columns(["TypeName", "TypeNamespace"]))
+    #expect(select.table == "TypeDef")
+    let namespace =
+        Predicate.comparison(column: "TypeNamespace", op: .equal,
+                             value: .string("Windows.Win32.Foundation"))
+    let flags = Predicate.comparison(column: "Flags", op: .geq,
+                                     value: .integer(1))
+    #expect(select.predicate == .and(namespace, flags))
+    #expect(select.order == Order(column: "TypeName", ascending: false))
+  }
+}
+
+struct ColumnTests {
+  @Test("splits a dotted column into qualifier and name")
+  func qualified() {
+    let column = Column("t.Name")
+    #expect(column.qualifier == "t")
+    #expect(column.name == "Name")
+  }
+
+  @Test("leaves an undotted column unqualified")
+  func unqualified() {
+    let column = Column("Name")
+    #expect(column.qualifier == nil)
+    #expect(column.name == "Name")
+  }
+
+  @Test("splits on the first dot only")
+  func firstDot() {
+    let column = Column("t.a.b")
+    #expect(column.qualifier == "t")
+    #expect(column.name == "a.b")
+  }
+}
+
+struct RelationTests {
+  @Test("parses a bare FROM relation with no alias")
+  func bare() throws {
+    let select = try parseSelect("SELECT * FROM TypeDef")
+    #expect(select.from == Relation(name: "TypeDef"))
+    #expect(select.join == nil)
+  }
+
+  @Test("parses an AS alias on the FROM relation")
+  func alias() throws {
+    let select = try parseSelect("SELECT * FROM TypeDef AS t")
+    #expect(select.from == Relation(name: "TypeDef", alias: "t"))
+  }
+
+  @Test("parses an implicit (AS-less) alias")
+  func implicitAlias() throws {
+    let select = try parseSelect("SELECT * FROM TypeDef t")
+    #expect(select.from == Relation(name: "TypeDef", alias: "t"))
+  }
+
+  @Test("does not mistake a following keyword for an alias")
+  func keywordNotAlias() throws {
+    let select = try parseSelect("SELECT * FROM TypeDef WHERE Flags = 1")
+    #expect(select.from == Relation(name: "TypeDef"))
+  }
+}
+
+struct JoinTests {
+  @Test("parses a list-shape join with aliases")
+  func listJoin() throws {
+    let select = try parseSelect("""
+        SELECT m.Name FROM TypeDef AS t
+          JOIN MethodDef AS m ON m.parent = t.rowid
+          WHERE t.TypeName = 'IUnknown'
+        """)
+    #expect(select.from == Relation(name: "TypeDef", alias: "t"))
+    #expect(select.join
+                == Join(relation: Relation(name: "MethodDef", alias: "m"),
+                        left: Column("m.parent"), right: Column("t.rowid")))
+    #expect(select.projection == .columns([Column("m.Name")]))
+    #expect(select.predicate == .comparison(column: Column("t.TypeName"),
+                                            op: .equal,
+                                            value: .string("IUnknown")))
+  }
+
+  @Test("parses a forward-key join")
+  func forwardJoin() throws {
+    let select = try parseSelect("""
+        SELECT r.TypeName FROM TypeDef AS t
+          JOIN TypeRef AS r ON t.Extends = r.rowid
+        """)
+    #expect(select.join
+                == Join(relation: Relation(name: "TypeRef", alias: "r"),
+                        left: Column("t.Extends"), right: Column("r.rowid")))
+  }
+
+  @Test("parses a join without aliases")
+  func unaliasedJoin() throws {
+    let select = try parseSelect("""
+        SELECT Name FROM MethodDef
+          JOIN Param ON Param.parent = MethodDef.rowid
+        """)
+    #expect(select.from == Relation(name: "MethodDef"))
+    #expect(select.join
+                == Join(relation: Relation(name: "Param"),
+                        left: Column("Param.parent"),
+                        right: Column("MethodDef.rowid")))
+  }
+
+  @Test("rejects a join missing ON")
+  func missingOn() {
+    #expect(throws: SQLError.self) {
+      _ = try Statement(parsing: "SELECT * FROM A JOIN B b")
+    }
+  }
+
+  @Test("rejects a join whose ON is not an equality")
+  func nonEqualityOn() {
+    #expect(throws: SQLError.self) {
+      _ = try Statement(parsing: "SELECT * FROM A JOIN B ON a.x < b.rowid")
+    }
+  }
+}
+
+struct ErrorTests {
+  @Test("rejects a query missing FROM")
+  func missingFrom() {
+    #expect(throws: SQLError.self) {
+      _ = try Statement(parsing: "SELECT TypeName TypeDef")
+    }
+  }
+
+  @Test("rejects an invalid operator")
+  func badOperator() {
+    #expect(throws: SQLError.self) {
+      _ = try Statement(parsing: "SELECT * FROM T WHERE a ! 1")
+    }
+  }
+
+  @Test("rejects an unterminated string")
+  func unterminatedString() {
+    #expect(throws: SQLError.self) {
+      _ = try Statement(parsing: "SELECT * FROM T WHERE a = 'unterminated")
+    }
+  }
+
+  @Test("rejects trailing tokens")
+  func trailingTokens() {
+    // A bare identifier after the relation is now an implicit alias, so
+    // trailing garbage must come after a clause that admits no alias — here a
+    // second identifier past the relation's (implicit) alias.
+    #expect(throws: SQLError.self) {
+      _ = try Statement(parsing: "SELECT * FROM T t garbage")
+    }
+  }
+
+  @Test("rejects an empty projection")
+  func emptyProjection() {
+    #expect(throws: SQLError.self) {
+      _ = try Statement(parsing: "SELECT FROM T")
+    }
+  }
+
+  @Test("rejects input ending after the projection")
+  func unexpectedEnd() {
+    #expect(throws: SQLError.self) {
+      _ = try Statement(parsing: "SELECT *")
+    }
+  }
+
+  @Test("rejects an identifier as a comparison operand")
+  func literalRequired() {
+    // A comparison's right operand must be a literal, not an identifier.
+    #expect(throws: SQLError.self) {
+      _ = try Statement(parsing: "SELECT * FROM T WHERE a = b")
+    }
+  }
+}

@@ -37,7 +37,7 @@ jobs:
             Where-Object { $_.type -eq 'test' } |
             ForEach-Object { '-object'; "$bin\$($_.name)-test-runner.exe" }
           llvm-cov export -format lcov -ignore-filename-regex ".build|Tests" -instr-profile "$bin\codecov\default.profdata" @objects > coverage.lcov
-      - uses: codecov/codecov-action@v1.5.0
+      - uses: codecov/codecov-action@v7.0.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.lcov

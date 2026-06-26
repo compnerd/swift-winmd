@@ -113,8 +113,10 @@ internal indirect enum Plan {
                seek: Range<Int>?)
   /// σ — keeps the records `Filter` admits, the filter in slot space.
   case select(Filter, Plan)
-  /// π — restricts and reorders each record to the projected slots.
-  case project(Array<Int>, Plan)
+  /// π — evaluates each projected `Term` (a slot read, a constant, or a scalar
+  /// call) against the record, in order, to the output row. A bare-column
+  /// projection is a list of `.slot` terms, so the simple path is a reorder.
+  case project(Array<Term>, Plan)
   /// τ — orders the records by a typed key on `slot`.
   case sort(slot: Int, ascending: Bool, Plan)
   /// × — every concatenation of an outer record with an inner one.
@@ -141,19 +143,22 @@ internal indirect enum Plan {
 /// seeks it per outer record, and concatenates the matches. The catalog is
 /// borrowed throughout — a `~Escapable` source is never copied or stored.
 internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
-                                               _ catalog: borrowing C)
+                                               _ catalog: borrowing C,
+                                               _ routines: Routines)
     throws(SQLError) -> Array<Record> {
   switch plan {
   case let .scan(name, ordinals, seek):
     try materialise(name, ordinals, seek, catalog)
   case let .derived(_, source, ordinals, seek):
-    try derive(source, ordinals, seek, catalog)
+    try derive(source, ordinals, seek, catalog, routines)
   case let .select(filter, source):
-    try execute(source, catalog).filter { evaluate(filter, $0) }
-  case let .project(slots, source):
-    try execute(source, catalog).map { $0.project(slots) }
+    try admitted(execute(source, catalog, routines), filter, routines)
+  case let .project(terms, source):
+    try execute(source, catalog, routines).map { record throws(SQLError) in
+      try project(terms, record, routines)
+    }
   case let .sort(slot, ascending, source):
-    try execute(source, catalog)
+    try execute(source, catalog, routines)
       .enumerated()
       .sorted { lhs, rhs in
         let ordered = less(lhs.element[slot], rhs.element[slot])
@@ -165,11 +170,37 @@ internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
       }
       .map(\.element)
   case let .product(outer, inner):
-    try product(execute(outer, catalog), execute(inner, catalog))
+    try product(execute(outer, catalog, routines),
+                execute(inner, catalog, routines))
   case let .join(outer, name, ordinals, base, column, keys):
-    try join(execute(outer, catalog), name, ordinals, base, column, keys,
-             catalog)
+    try join(execute(outer, catalog, routines), name, ordinals, base, column,
+             keys, catalog)
   }
+}
+
+/// Evaluates each projected `term` against `record` through `routines` to the
+/// output row, in order — slot `i` of the result is `terms[i]`.
+private func project(_ terms: Array<Term>, _ record: Record,
+                     _ routines: Routines) throws(SQLError) -> Record {
+  var cells = Array<Value>()
+  cells.reserveCapacity(terms.count)
+  for term in terms {
+    try cells.append(evaluate(term, record, routines))
+  }
+  return Record(cells)
+}
+
+/// Keeps the `records` the `filter` admits — those it evaluates to `true`,
+/// resolving scalar calls through `routines`.
+private func admitted(_ records: Array<Record>, _ filter: Filter,
+                      _ routines: Routines) throws(SQLError) -> Array<Record> {
+  var kept = Array<Record>()
+  for record in records {
+    if try evaluate(filter, record, routines) {
+      kept.append(record)
+    }
+  }
+  return kept
 }
 
 /// Re-resolves `name` against `catalog`, opens its cursor, and materialises the
@@ -202,9 +233,10 @@ private func materialise<C: Catalog & ~Escapable>(_ name: String,
 private func derive<C: Catalog & ~Escapable>(_ plan: Plan,
                                              _ ordinals: Array<Int>,
                                              _ seek: Range<Int>?,
-                                             _ catalog: borrowing C)
+                                             _ catalog: borrowing C,
+                                             _ routines: Routines)
     throws(SQLError) -> Array<Record> {
-  let rows = try execute(plan, catalog)
+  let rows = try execute(plan, catalog, routines)
   let range = seek ?? 0 ..< rows.count
   return range.map { rows[$0].project(ordinals) }
 }

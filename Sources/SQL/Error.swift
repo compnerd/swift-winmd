@@ -53,6 +53,11 @@ public enum SQLError: Error, Hashable, Sendable {
   case column(String)
   /// A statement names an unqualified column both joined relations resolve.
   case ambiguous(String)
+  /// A statement calls a scalar function the routines do not resolve.
+  case function(String)
+  /// A scalar function rejects its arguments (the wrong count, or a value it
+  /// cannot map); the string describes the fault.
+  case argument(String)
 }
 
 extension SQLError: CustomStringConvertible {
@@ -76,6 +81,10 @@ extension SQLError: CustomStringConvertible {
       "no such column '\(name)'"
     case let .ambiguous(name):
       "ambiguous column '\(name)'"
+    case let .function(name):
+      "no such function '\(name)'"
+    case let .argument(detail):
+      "invalid function argument: \(detail)"
     }
   }
 }

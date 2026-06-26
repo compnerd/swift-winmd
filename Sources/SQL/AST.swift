@@ -144,6 +144,48 @@ public enum Projection: Hashable, Sendable {
   case all
   /// `SELECT a, b, c` — the named columns, in order.
   case columns(Array<Column>)
+  /// `SELECT f(a), b` — projected expressions, in order, each an optional
+  /// alias over a scalar `Expression` (a bare column, a literal, or a call to a
+  /// registered scalar function). The parser emits this only when a projection
+  /// carries a function call or an alias; a list of bare columns stays the
+  /// simpler `columns` case.
+  case expressions(Array<Projected>)
+}
+
+/// One projected expression with an optional output alias.
+///
+/// A bare column projects as `Expression.column`; `f(a) AS x` carries the call
+/// and the alias `x`. The alias names the output column for a downstream
+/// consumer (a view's column, a template field); the engine yields positional
+/// rows and does not itself use the alias.
+public struct Projected: Hashable, Sendable {
+  /// The expression the column yields.
+  public let expression: Expression
+
+  /// The output alias, if any.
+  public let alias: String?
+
+  public init(expression: Expression, alias: String? = nil) {
+    self.expression = expression
+    self.alias = alias
+  }
+}
+
+/// A scalar expression — a value computed per row.
+///
+/// An expression is a bare column reference, a literal constant, or a call to a
+/// registered scalar function over argument expressions. The engine resolves a
+/// `column` to an ordinal, evaluates a `call` through the routines, and
+/// yields a typed `Value`. This is the layer the per-dialect decode functions
+/// (`guid`, `ret_type`, …) plug into: each is a registered scalar function the
+/// projection calls.
+public indirect enum Expression: Hashable, Sendable {
+  /// A bare column reference, resolved to an ordinal.
+  case column(Column)
+  /// A literal constant.
+  case literal(Literal)
+  /// A call to the named scalar function over its arguments, in order.
+  case call(name: String, arguments: Array<Expression>)
 }
 
 /// A row filter — a tree of comparisons composed with `AND`, `OR`, and `NOT`.
@@ -151,8 +193,9 @@ public enum Projection: Hashable, Sendable {
 /// The tree is `data`, not an opaque closure, so a consumer may inspect it (for
 /// example to lower an equality test on a sorted column to a binary search).
 public indirect enum Predicate: Hashable, Sendable {
-  /// `column <op> value`.
-  case comparison(column: Column, op: Comparison, value: Literal)
+  /// `left <op> right` — each operand a scalar `Expression` (a column, a
+  /// literal, or a call to a registered scalar function).
+  case comparison(left: Expression, op: Comparison, right: Expression)
   /// `lhs AND rhs`.
   case and(Predicate, Predicate)
   /// `lhs OR rhs`.

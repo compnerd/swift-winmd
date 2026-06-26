@@ -37,18 +37,49 @@ extension Schema {
     return ordinal
   }
 
-  internal func projection(_ projection: Projection, in relation: Relation)
-      throws(SQLError) -> Array<Int> {
+  /// The projected terms of `projection`, addressed by ordinal: a `*` or a
+  /// bare-column list yields one `.slot(ordinal)` per column; an expression list
+  /// lowers each expression to a term. The terms hold ordinals, which the
+  /// engine remaps to slots after gathering the referenced ones.
+  internal func terms(_ projection: Projection, in relation: Relation)
+      throws(SQLError) -> Array<Term> {
     switch projection {
     case .all:
-      return Array(0 ..< width)
+      return (0 ..< width).map { .slot($0) }
     case let .columns(columns):
-      var ordinals = Array<Int>()
-      ordinals.reserveCapacity(columns.count)
+      var terms = Array<Term>()
+      terms.reserveCapacity(columns.count)
       for column in columns {
-        try ordinals.append(ordinal(of: column, in: relation))
+        try terms.append(.slot(ordinal(of: column, in: relation)))
       }
-      return ordinals
+      return terms
+    case let .expressions(projected):
+      var terms = Array<Term>()
+      terms.reserveCapacity(projected.count)
+      for item in projected {
+        try terms.append(term(item.expression, in: relation))
+      }
+      return terms
+    }
+  }
+
+  /// Lowers a scalar `expression` to an ordinal-addressed `Term`: a column to a
+  /// `.slot(ordinal)`, a literal to a `.constant`, a call to an `.apply` over
+  /// its lowered arguments.
+  internal func term(_ expression: Expression, in relation: Relation)
+      throws(SQLError) -> Term {
+    switch expression {
+    case let .column(column):
+      return try .slot(ordinal(of: column, in: relation))
+    case let .literal(literal):
+      return .constant(value(of: literal))
+    case let .call(name, arguments):
+      var lowered = Array<Term>()
+      lowered.reserveCapacity(arguments.count)
+      for argument in arguments {
+        try lowered.append(term(argument, in: relation))
+      }
+      return .apply(name: name, arguments: lowered)
     }
   }
 
@@ -61,8 +92,8 @@ extension Schema {
   internal func lower(_ predicate: Predicate, in relation: Relation)
       throws(SQLError) -> Filter {
     switch predicate {
-    case let .comparison(column, op, value):
-      try .compare(ordinal(of: column, in: relation), op, value)
+    case let .comparison(left, op, right):
+      try .compare(term(left, in: relation), op, term(right, in: relation))
     case let .and(lhs, rhs):
       try .and(lower(lhs, in: relation), lower(rhs, in: relation))
     case let .or(lhs, rhs):
@@ -160,24 +191,49 @@ internal struct Scope {
     }
   }
 
-  /// The combined ordinals a projection yields: every real column of both
-  /// relations for `*` (outer then inner, never a virtual column), the named
-  /// columns' combined ordinals otherwise, in source order.
-  internal func projection(_ projection: Projection) throws(SQLError)
-      -> Array<Int> {
+  /// The combined-ordinal projected terms: every real column of both relations
+  /// for `*` (outer then inner, never a virtual column) as `.slot` terms, a
+  /// bare-column list as `.slot` terms at their combined ordinals, an expression
+  /// list as lowered terms — in source order.
+  internal func terms(_ projection: Projection) throws(SQLError)
+      -> Array<Term> {
     switch projection {
     case .all:
       // Every real outer column, then every real inner column at its
       // `base`-offset ordinal — never a virtual column of either side.
-      return Array(0 ..< outer.width)
-          + (0 ..< inner.width).map { base + $0 }
+      return (0 ..< outer.width).map { .slot($0) }
+          + (0 ..< inner.width).map { .slot(base + $0) }
     case let .columns(columns):
-      var ordinals = Array<Int>()
-      ordinals.reserveCapacity(columns.count)
+      var terms = Array<Term>()
+      terms.reserveCapacity(columns.count)
       for column in columns {
-        try ordinals.append(ordinal(of: column))
+        try terms.append(.slot(ordinal(of: column)))
       }
-      return ordinals
+      return terms
+    case let .expressions(projected):
+      var terms = Array<Term>()
+      terms.reserveCapacity(projected.count)
+      for item in projected {
+        try terms.append(term(item.expression))
+      }
+      return terms
+    }
+  }
+
+  /// Lowers a scalar `expression` to a combined-ordinal `Term`.
+  internal func term(_ expression: Expression) throws(SQLError) -> Term {
+    switch expression {
+    case let .column(column):
+      return try .slot(ordinal(of: column))
+    case let .literal(literal):
+      return .constant(value(of: literal))
+    case let .call(name, arguments):
+      var lowered = Array<Term>()
+      lowered.reserveCapacity(arguments.count)
+      for argument in arguments {
+        try lowered.append(term(argument))
+      }
+      return .apply(name: name, arguments: lowered)
     }
   }
 
@@ -199,8 +255,8 @@ internal struct Scope {
   /// column reference resolved to a combined ordinal across the join.
   internal func lower(_ predicate: Predicate) throws(SQLError) -> Filter {
     switch predicate {
-    case let .comparison(column, op, value):
-      try .compare(ordinal(of: column), op, value)
+    case let .comparison(left, op, right):
+      try .compare(term(left), op, term(right))
     case let .and(lhs, rhs):
       try .and(lower(lhs), lower(rhs))
     case let .or(lhs, rhs):
@@ -216,13 +272,14 @@ internal struct Scope {
 extension Filter {
   /// The ordinals this filter reads, accumulated into `ordinals`.
   ///
-  /// A `compare` reads its one column; a `match` reads both; the connectives
-  /// recurse. The engine unions these with the projection, order, and join keys
-  /// to materialise exactly the columns a scan's rows are read through.
+  /// A `compare` reads both operand terms, a `match` both columns; the
+  /// connectives recurse. The engine unions these with the projection, order,
+  /// and join keys to materialise exactly the columns a scan's rows read.
   internal func references(into ordinals: inout Set<Int>) {
     switch self {
-    case let .compare(column, _, _):
-      ordinals.insert(column)
+    case let .compare(lhs, _, rhs):
+      lhs.references(into: &ordinals)
+      rhs.references(into: &ordinals)
     case let .match(left, right):
       ordinals.insert(left)
       ordinals.insert(right)

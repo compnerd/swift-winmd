@@ -94,6 +94,8 @@ extension Schema {
     switch predicate {
     case let .comparison(left, op, right):
       try .compare(term(left, in: relation), op, term(right, in: relation))
+    case let .bound(left, op, parameter):
+      try .bound(term(left, in: relation), op, parameter)
     case let .and(lhs, rhs):
       try .and(lower(lhs, in: relation), lower(rhs, in: relation))
     case let .or(lhs, rhs):
@@ -257,6 +259,8 @@ internal struct Scope {
     switch predicate {
     case let .comparison(left, op, right):
       try .compare(term(left), op, term(right))
+    case let .bound(left, op, parameter):
+      try .bound(term(left), op, parameter)
     case let .and(lhs, rhs):
       try .and(lower(lhs), lower(rhs))
     case let .or(lhs, rhs):
@@ -272,14 +276,17 @@ internal struct Scope {
 extension Filter {
   /// The ordinals this filter reads, accumulated into `ordinals`.
   ///
-  /// A `compare` reads both operand terms, a `match` both columns; the
-  /// connectives recurse. The engine unions these with the projection, order,
-  /// and join keys to materialise exactly the columns a scan's rows read.
+  /// A `compare` reads both operand terms, a `bound` its left term, a `match`
+  /// both columns; the connectives recurse. The engine unions these with the
+  /// projection, order, and join keys to materialise exactly the columns a
+  /// scan's rows are read through.
   internal func references(into ordinals: inout Set<Int>) {
     switch self {
     case let .compare(lhs, _, rhs):
       lhs.references(into: &ordinals)
       rhs.references(into: &ordinals)
+    case let .bound(term, _, _):
+      term.references(into: &ordinals)
     case let .match(left, right):
       ordinals.insert(left)
       ordinals.insert(right)

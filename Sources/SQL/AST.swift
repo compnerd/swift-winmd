@@ -196,6 +196,10 @@ public indirect enum Predicate: Hashable, Sendable {
   /// `left <op> right` — each operand a scalar `Expression` (a column, a
   /// literal, or a call to a registered scalar function).
   case comparison(left: Expression, op: Comparison, right: Expression)
+  /// `left <op> :parameter` — the left a scalar `Expression`, the operand
+  /// resolved at run time from the engine's bindings (the correlated-subquery
+  /// primitive a child view keys on the parent's value).
+  case bound(left: Expression, op: Comparison, parameter: String)
   /// `lhs AND rhs`.
   case and(Predicate, Predicate)
   /// `lhs OR rhs`.

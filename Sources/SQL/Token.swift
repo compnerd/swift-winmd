@@ -35,6 +35,8 @@ extension Token {
     case identifier(String)
     case string(String)
     case integer(Int)
+    /// A bound parameter placeholder `:name`, holding the parameter's name.
+    case parameter(String)
 
     // Punctuation and operators.
     case star
@@ -70,6 +72,7 @@ extension Token.Kind {
     case let .identifier(name): name
     case let .string(value): "'\(value)'"
     case let .integer(value): "\(value)"
+    case let .parameter(name): ":\(name)"
     case .star: "*"
     case .comma: ","
     case .lparen: "("

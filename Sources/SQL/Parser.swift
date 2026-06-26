@@ -227,13 +227,19 @@ internal struct Parser: ~Escapable {
     return try comparison()
   }
 
-  /// Parses `expression op expression`.
+  /// Parses `expression op (expression | :parameter)`.
   ///
   /// Either operand may be a column, a literal, or a scalar-function call, so a
-  /// predicate can filter on a decoded value (`WHERE guid(Id) = '…'`).
+  /// predicate can filter on a decoded value (`WHERE guid(Id) = '…'`). A
+  /// `:parameter` right operand binds the comparison to a value resolved at run
+  /// time from the engine's bindings — the correlated-subquery primitive.
   private mutating func comparison() throws(SQLError) -> Predicate {
     let left = try expression()
     let op = try op()
+    if case let .parameter(name) = current?.kind {
+      _ = try advance(expecting: "a parameter")
+      return .bound(left: left, op: op, parameter: name)
+    }
     let right = try expression()
     return .comparison(left: left, op: op, right: right)
   }

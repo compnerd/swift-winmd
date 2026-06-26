@@ -123,6 +123,9 @@ internal struct Lexer: ~Escapable {
     case UInt8(ascii: "'"):
       return try string()
 
+    case UInt8(ascii: ":"):
+      return try parameter()
+
     case let b where digit(b):
       return try integer()
 
@@ -178,6 +181,24 @@ internal struct Lexer: ~Escapable {
     }
 
     throw .unterminated(at: start)
+  }
+
+  /// Scans a bound-parameter placeholder `:name` at the current position.
+  ///
+  /// The leading `:` is consumed; an identifier must follow (a letter or `_`
+  /// then identifier continuations), else the `:` begins no valid token.
+  private mutating func parameter() throws(SQLError) -> Token {
+    let start = location
+    advance()
+    guard let byte = peek(), initial(byte) else {
+      throw .character(":", at: start)
+    }
+    let begin = position
+    while let byte = peek(), continuation(byte) {
+      advance()
+    }
+    return Token(kind: .parameter(String(bytes, begin ..< position)),
+                 location: start)
   }
 
   /// Scans an integer literal at the current position.

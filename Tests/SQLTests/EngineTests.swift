@@ -246,8 +246,15 @@ private func views() throws -> Memory {
         JOIN Child ON Child.Pid = Parent.Id
       """), columns: ["Parent", "Kid"])
 
+  // SELECT Id, Name FROM Parent WHERE Id = :id — a parameterized view whose
+  // bound key seeks inside its sub-plan when :id is supplied.
+  let picked = try View(select: select("""
+      SELECT Id, Name FROM Parent WHERE Id = :id
+      """), columns: ["Key", "Label"])
+
   let catalog = family()
-  return Memory(catalog.relations, views: ["Adults": adults, "Pairs": pairs])
+  return Memory(catalog.relations,
+                views: ["Adults": adults, "Pairs": pairs, "Picked": picked])
 }
 
 /// Parses `text` to a `SELECT`, failing on any other statement.
@@ -652,7 +659,8 @@ struct EngineViewTests {
     // `.scan` (a non-nil seek) and carry no `.select` over a raw scan.
     let catalog = try views()
     let select = try parse("SELECT Key, Label FROM Adults")
-    let plan = try Engine.optimise(Engine.compile(select, catalog), catalog)
+    let plan = try Engine.optimise(Engine.compile(select, catalog), catalog,
+                                   [:])
     let sub = try #require(derived(plan))
     #expect(seeks(sub))
     #expect(!filters(sub))
@@ -829,5 +837,128 @@ struct EngineFunctionTests {
     let rows =
         try functionRun("SELECT Name FROM People WHERE add(Id, 10) = 12")
     #expect(rows == [[.text("Bob")]])
+  }
+}
+
+// MARK: - Bound-parameter / correlated-subquery tests
+
+/// Runs `text` against the `family` catalog with the given parameter bindings.
+private func boundRun(_ text: String, _ bindings: Bindings)
+    throws -> Array<Array<Value>> {
+  try Engine.run(parse(text), family(), Routines(), bindings: bindings)
+}
+
+struct EngineBoundTests {
+  @Test("a bound parameter filters rows by an outer value")
+  func filter() throws {
+    // The child relation keyed on a bound parent id — the section primitive: a
+    // template renders an interface's methods by binding the interface key and
+    // running the child query.
+    let rows = try boundRun("SELECT Name FROM Child WHERE Pid = :pid",
+                            ["pid": .integer(1)])
+    #expect(rows == [[.text("Ann")], [.text("Amy")]])
+  }
+
+  @Test("a bound text parameter compares against a text column")
+  func text() throws {
+    let rows = try boundRun("SELECT Id FROM Parent WHERE Name = :who",
+                            ["who": .text("Bee")])
+    #expect(rows == [[.integer(2)]])
+  }
+
+  @Test("an unbound parameter admits no row")
+  func unbound() throws {
+    let rows = try boundRun("SELECT Name FROM Child WHERE Pid = :pid", [:])
+    #expect(rows.isEmpty)
+  }
+
+  @Test("a bound parameter conjoined with another predicate")
+  func conjunction() throws {
+    let rows = try boundRun("""
+        SELECT Name FROM Child WHERE Pid = :pid AND Name = 'Amy'
+        """, ["pid": .integer(1)])
+    #expect(rows == [[.text("Amy")]])
+  }
+
+  @Test("a correlated section runs a child query per outer row")
+  func correlated() throws {
+    // The relational shape of a template's nested section: the outer query
+    // yields the parents; for each, the child query is re-run with the parent's
+    // key bound, producing that parent's children — exactly an interface →
+    // methods expansion.
+    let catalog = family()
+    let parents = try Engine.run(parse("SELECT Id, Name FROM Parent"), catalog)
+    let query = try parse("SELECT Name FROM Child WHERE Pid = :pid")
+
+    var sections = Array<(parent: String, children: Array<String>)>()
+    for parent in parents {
+      let key = parent[0]
+      let children = try Engine.run(query, catalog, Routines(),
+                                    bindings: ["pid": key])
+      guard case let .text(name) = parent[1] else { continue }
+      sections.append((name, children.map { row in
+        guard case let .text(child) = row[0] else { return "" }
+        return child
+      }))
+    }
+
+    #expect(sections.count == 3)
+    #expect(sections[0].parent == "Ada")
+    #expect(sections[0].children == ["Ann", "Amy"])
+    #expect(sections[1].parent == "Bee")
+    #expect(sections[1].children == ["Bob"])
+    #expect(sections[2].parent == "Cid")
+    #expect(sections[2].children.isEmpty)
+  }
+
+  @Test("an unbound parameter under NOT still admits no rows")
+  func negated() throws {
+    // A missing binding is UNKNOWN, not false; NOT preserves UNKNOWN rather
+    // than inverting it into a match, so the predicate admits nothing.
+    let rows = try boundRun("SELECT Name FROM Child WHERE NOT Pid = :pid", [:])
+    #expect(rows.isEmpty)
+  }
+
+  @Test("a bound parameter under NOT inverts the match")
+  func inverted() throws {
+    let rows = try boundRun("SELECT Name FROM Child WHERE NOT Pid = :pid",
+                            ["pid": .integer(1)])
+    #expect(rows == [[.text("Bob")], [.text("Orphan")]])
+  }
+
+  @Test("a bound key plans a seek when its value is known")
+  func seek() throws {
+    // Parent is sorted on Id; with `:id` bound the planner resolves it and
+    // seeks the run rather than scanning and filtering the whole relation.
+    let select = try parse("SELECT Name FROM Parent WHERE Id = :id")
+    let catalog = family()
+    let plan = try Engine.optimise(Engine.compile(select, catalog), catalog,
+                                   ["id": .integer(2)])
+    #expect(seeks(plan))
+    #expect(!filters(plan))
+  }
+
+  @Test("an unbound key cannot seek and scans under the filter")
+  func scan() throws {
+    let select = try parse("SELECT Name FROM Parent WHERE Id = :id")
+    let catalog = family()
+    let plan = try Engine.optimise(Engine.compile(select, catalog), catalog,
+                                   [:])
+    #expect(!seeks(plan))
+    #expect(filters(plan))
+  }
+
+  @Test("a bound key inside a view seeks when its parameter is supplied")
+  func nested() throws {
+    // A parameterized view (`… WHERE Id = :id` over sorted Parent): the bound
+    // key seeks inside the view's sub-plan rather than scanning it once :id is
+    // supplied, so a reusable view is as fast as the inlined query.
+    let select = try parse("SELECT Key, Label FROM Picked")
+    let catalog = try views()
+    let plan = try Engine.optimise(Engine.compile(select, catalog), catalog,
+                                   ["id": .integer(2)])
+    let sub = try #require(derived(plan))
+    #expect(seeks(sub))
+    #expect(!filters(sub))
   }
 }

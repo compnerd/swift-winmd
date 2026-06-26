@@ -26,10 +26,11 @@ public enum Engine {
   ///   if an unqualified name is resolved by both relations of a join.
   public static func run<C: Catalog & ~Escapable>(_ select: Select,
                                                   _ catalog: borrowing C,
-                                                  _ routines: Routines = [:])
+                                                  _ routines: Routines = [:],
+                                                  bindings: Bindings = [:])
       throws(SQLError) -> Array<Array<Value>> {
-    let plan = try optimise(compile(select, catalog), catalog)
-    return try execute(plan, catalog, routines).map(\.values)
+    let plan = try optimise(compile(select, catalog), catalog, bindings)
+    return try execute(plan, catalog, routines, bindings).map(\.values)
   }
 
   // MARK: - Compilation
@@ -137,7 +138,7 @@ public enum Engine {
                                                        _ catalog: borrowing C)
       throws(SQLError) -> Resolved {
     if let view = catalog.view(named: relation.name) {
-      let plan = try optimise(compile(view.select, catalog), catalog)
+      let plan = try compile(view.select, catalog)
       let schema = view.schema()
       return Resolved(schema: schema) { ordinals in
         .derived(name: relation.name, plan: plan, ordinals: ordinals,
@@ -202,6 +203,8 @@ public enum Engine {
     switch filter {
     case let .compare(lhs, op, rhs):
       .compare(remap(lhs, slot), op, remap(rhs, slot))
+    case let .bound(term, op, parameter):
+      .bound(remap(term, slot), op, parameter)
     case let .match(left, right):
       .match(slot[left]!, slot[right]!)
     case let .and(lhs, rhs):
@@ -238,7 +241,8 @@ public enum Engine {
   // MARK: - Optimisation
 
   /// Rewrites the logical `plan` into a physical one, re-resolving relations by
-  /// name through the borrowed `catalog` to read their seekability.
+  /// name through the borrowed `catalog` for their seekability and a bound key
+  /// through `bindings` so it seeks like a literal.
   ///
   /// Two pattern rewrites fire, the rest of the tree recursing unchanged:
   ///
@@ -254,27 +258,32 @@ public enum Engine {
   ///     kept as a residual `Select`. If the inner side is not a bare `Scan`,
   ///     the product stays (a plain nested loop).
   internal static func optimise<C: Catalog & ~Escapable>(_ plan: Plan,
-                                                         _ catalog: borrowing C)
+                                                         _ catalog: borrowing C,
+                                                         _ bindings: Bindings)
       throws(SQLError) -> Plan {
     switch plan {
     case .scan:
       plan
-    case .derived:
-      // A view's sub-plan is optimised when the view is compiled; a derived
-      // leaf carries no sort key, so it scans its result as is.
-      plan
+    case let .derived(name, plan, ordinals, seek):
+      // Optimise the view's sub-plan with the bindings so a bound predicate
+      // inside the view seeks; the derived leaf itself carries no sort key, so
+      // the outer query still scans its result as is.
+      try .derived(name: name, plan: optimise(plan, catalog, bindings),
+                   ordinals: ordinals, seek: seek)
     case let .select(filter, .scan(name, ordinals, nil)):
-      try seek(filter, name, ordinals, catalog)
+      try seek(filter, name, ordinals, catalog, bindings)
     case let .select(filter, .product(left, right)):
-      try nest(filter, left, right, catalog)
+      try nest(filter, left, right, catalog, bindings)
     case let .select(filter, source):
-      try .select(filter, optimise(source, catalog))
+      try .select(filter, optimise(source, catalog, bindings))
     case let .project(ordinals, source):
-      try .project(ordinals, optimise(source, catalog))
+      try .project(ordinals, optimise(source, catalog, bindings))
     case let .sort(slot, ascending, source):
-      try .sort(slot: slot, ascending: ascending, optimise(source, catalog))
+      try .sort(slot: slot, ascending: ascending,
+                optimise(source, catalog, bindings))
     case let .product(left, right):
-      try .product(optimise(left, catalog), optimise(right, catalog))
+      try .product(optimise(left, catalog, bindings),
+                   optimise(right, catalog, bindings))
     case .join:
       plan
     }
@@ -294,20 +303,21 @@ public enum Engine {
   private static func seek<C: Catalog & ~Escapable>(_ filter: Filter,
                                                     _ name: String,
                                                     _ ordinals: Array<Int>,
-                                                    _ catalog: borrowing C)
+                                                    _ catalog: borrowing C,
+                                                    _ bindings: Bindings)
       throws(SQLError) -> Plan {
     guard let table = catalog.table(named: name) else { throw .relation(name) }
     let count = table.cursor().count
 
-    if let range = boundaries(filter, ordinals, table, count) {
+    if let range = boundaries(filter, ordinals, table, count, bindings) {
       return .scan(name: name, ordinals: ordinals, seek: range)
     }
 
     if case let .and(lhs, rhs) = filter {
-      if let range = boundaries(lhs, ordinals, table, count) {
+      if let range = boundaries(lhs, ordinals, table, count, bindings) {
         return .select(rhs, .scan(name: name, ordinals: ordinals, seek: range))
       }
-      if let range = boundaries(rhs, ordinals, table, count) {
+      if let range = boundaries(rhs, ordinals, table, count, bindings) {
         return .select(lhs, .scan(name: name, ordinals: ordinals, seek: range))
       }
     }
@@ -315,22 +325,43 @@ public enum Engine {
     return .select(filter, .scan(name: name, ordinals: ordinals, seek: nil))
   }
 
+  /// The seekable `(slot, op, integer)` of `filter`: a `compare` against an
+  /// integer literal, or a `bound` whose parameter resolves to an integer in
+  /// `bindings`. A string operand, an unbound or non-integer parameter, or a
+  /// non-comparison does not qualify, and the relation scans.
+  private static func comparison(_ filter: Filter, _ bindings: Bindings)
+      -> (Int, Comparison, Int)? {
+    switch filter {
+    case let .compare(.slot(slot), op, .constant(.integer(value))):
+      (slot, op, value)
+    case let .bound(.slot(slot), op, parameter):
+      if case let .integer(value)? = bindings[parameter] {
+        (slot, op, value)
+      } else {
+        nil
+      }
+    default:
+      nil
+    }
+  }
+
   /// The boundaries `[lower, upper)` to seek for a sort-key comparison, or `nil`
   /// if `filter` does not qualify for the seek path.
   ///
-  /// It qualifies when `filter` is a `compare` whose operand is an `integer`,
-  /// the operator is an equality or a range, and `table.bound` reports the
-  /// column seekable (a non-`nil` boundary). The comparison's slot maps back to
-  /// its table ordinal through `ordinals` (slot `i` is `ordinals[i]`) for the
-  /// `bound` query. A `string` operand or an unseekable column never qualifies,
-  /// and the executor scans.
+  /// It qualifies when `filter` is a sort-key equality or range whose operand
+  /// is an integer — a literal, or a bound parameter resolved from `bindings`
+  /// so a correlated child seeks on its parent key — and `table.bound` reports
+  /// the column seekable (a non-`nil` boundary). The comparison's slot maps
+  /// back to its table ordinal through `ordinals` (slot `i` is `ordinals[i]`)
+  /// for the `bound` query. A `string` operand or an unseekable column never
+  /// qualifies, and the executor scans.
   private static func boundaries<T: Table & ~Escapable>(_ filter: Filter,
                                                         _ ordinals: Array<Int>,
                                                         _ table: borrowing T,
-                                                        _ count: Int)
+                                                        _ count: Int,
+                                                        _ bindings: Bindings)
       -> Range<Int>? {
-    guard case let .compare(.slot(slot), op, .constant(.integer(value)))
-        = filter,
+    guard let (slot, op, value) = comparison(filter, bindings),
         let lower = table.bound(ordinals[slot], value, strict: false),
         let upper = table.bound(ordinals[slot], value, strict: true) else {
       return nil
@@ -362,12 +393,13 @@ public enum Engine {
   private static func nest<C: Catalog & ~Escapable>(_ filter: Filter,
                                                     _ left: Plan,
                                                     _ right: Plan,
-                                                    _ catalog: borrowing C)
+                                                    _ catalog: borrowing C,
+                                                    _ bindings: Bindings)
       throws(SQLError) -> Plan {
     guard case let .scan(name, ordinals, nil) = right,
         let base = slots(left) else {
-      return try .select(filter, .product(optimise(left, catalog),
-                                          optimise(right, catalog)))
+      return try .select(filter, .product(optimise(left, catalog, bindings),
+                                          optimise(right, catalog, bindings)))
     }
 
     let conjuncts = flatten(filter)
@@ -379,7 +411,7 @@ public enum Engine {
 
       var residual = conjuncts
       residual.remove(at: index)
-      let join = try Plan.join(optimise(left, catalog), name: name,
+      let join = try Plan.join(optimise(left, catalog, bindings), name: name,
                                ordinals: ordinals, base: base,
                                column: ordinals[rightKey - base],
                                keys: (left: leftKey, right: rightKey))
@@ -387,8 +419,8 @@ public enum Engine {
       return .select(predicate, join)
     }
 
-    return try .select(filter, .product(optimise(left, catalog),
-                                        optimise(right, catalog)))
+    return try .select(filter, .product(optimise(left, catalog, bindings),
+                                        optimise(right, catalog, bindings)))
   }
 
   /// The `(outerKey, innerKey)` an equality between slots `lhs` and `rhs`

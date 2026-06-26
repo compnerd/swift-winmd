@@ -1,19 +1,28 @@
 // Copyright © 2026 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
+/// A query's parameter bindings: each `:name` parameter mapped to the value
+/// bound for this run — the operand a `bound` filter resolves, and the key the
+/// seek planner reads.
+public typealias Bindings = Dictionary<String, Value>
+
 /// The engine's ordinal-addressed row filter.
 ///
 /// `Filter` is the lowered form of the AST's name-addressed `Predicate`: a tree
 /// of comparisons composed with `AND`, `OR`, and `NOT`, with every column
-/// resolved to an ordinal once. It reuses the AST's `Comparison` and `Literal`
-/// — those are general — and addresses columns by `Int` so the executor can
-/// inspect it (to seek a sorted column) before running it. The filter is fully
+/// resolved to a slot once. Each comparison operand is a `Term` — a slot, a
+/// constant, or a scalar call — so the executor can still seek a sorted column
+/// off a bare slot before running it. The filter is fully
 /// escapable; the `~Escapable` row it reads materialises only transiently at
 /// evaluation.
 internal indirect enum Filter {
   /// `left <op> right`, both operands lowered to ordinal-addressed terms (a
   /// slot, a constant, or a scalar-function call).
   case compare(Term, Comparison, Term)
+  /// `left <op> :parameter`, the left a term and the operand resolved at run
+  /// time from the engine's bindings — the lowered form of a correlated
+  /// subquery's parent-keyed predicate.
+  case bound(Term, Comparison, String)
   /// `left = right`, both columns addressed by ordinal — a join's `ON`
   /// equality, lowered as a conjunct of the product's `Select` predicate.
   case match(Int, Int)
@@ -136,31 +145,54 @@ private func matches(_ lhs: Value, _ op: Comparison, _ rhs: Value) -> Bool {
   }
 }
 
-/// Evaluates `filter` against `row`, resolving scalar calls through `routines`.
+/// Evaluates `filter` against `row` under three-valued logic, resolving scalar
+/// calls through `routines` and any bound parameter from `bindings`.
 ///
-/// A `compare` evaluates both operand terms and matches them; a `match` reads
-/// both cells and tests them equal; the boolean connectives recurse. The
-/// `borrowing` row is non-escaping; it threads into the recursion freely and is
-/// never stored.
+/// The result is `true`, `false`, or `nil` — SQL's UNKNOWN. A `compare`
+/// evaluates both operand terms and matches them; a `bound` matches the left
+/// term against the parameter's bound value, but an unbound or absent parameter
+/// UNKNOWN (`nil`), not `false` — a missing binding cannot be inverted into a
+/// match by `NOT`. A `match` reads both cells and tests them equal; `AND` and
+/// `OR` follow Kleene logic (`false` dominates `AND`, `true` dominates `OR`,
+/// UNKNOWN otherwise) and `NOT` maps UNKNOWN to itself. The executor admits a
+/// row only when the whole predicate is `true` (its `== true` gate), so UNKNOWN
+/// and `false` both reject. The `borrowing` row is non-escaping; it threads
+/// into the recursion freely and is never stored.
 internal func evaluate<R: Row & ~Escapable>(_ filter: Filter,
                                             _ row: borrowing R,
-                                            _ routines: Routines)
-    throws(SQLError) -> Bool {
+                                            _ routines: Routines,
+                                            _ bindings: Bindings)
+    throws(SQLError) -> Bool? {
   switch filter {
   case let .compare(lhs, op, rhs):
     try matches(evaluate(lhs, row, routines), op, evaluate(rhs, row, routines))
+  case let .bound(term, op, parameter):
+    if let operand = bindings[parameter] {
+      try matches(evaluate(term, row, routines), op, operand)
+    } else {
+      nil
+    }
   case let .match(left, right):
     row[left] == row[right]
   case let .and(lhs, rhs):
     // `&&`/`||` take an `@autoclosure` right operand, which would capture the
-    // borrowed `~Escapable` row; spell the short-circuit explicitly so each
-    // branch re-borrows the row rather than capturing it.
-    if try evaluate(lhs, row, routines) { try evaluate(rhs, row, routines) }
-    else { false }
+    // borrowed `~Escapable` row; spell each connective explicitly so a branch
+    // re-borrows the row rather than capturing it. Kleene `AND`: `false`
+    // dominates, an UNKNOWN left yields `false` only against a `false` right.
+    switch try evaluate(lhs, row, routines, bindings) {
+    case false?: false
+    case true?: try evaluate(rhs, row, routines, bindings)
+    case nil: try evaluate(rhs, row, routines, bindings) == false ? false : nil
+    }
   case let .or(lhs, rhs):
-    if try evaluate(lhs, row, routines) { true }
-    else { try evaluate(rhs, row, routines) }
+    // Kleene `OR`: `true` dominates, an UNKNOWN left yields `true` only against
+    // a `true` right.
+    switch try evaluate(lhs, row, routines, bindings) {
+    case true?: true
+    case false?: try evaluate(rhs, row, routines, bindings)
+    case nil: try evaluate(rhs, row, routines, bindings) == true ? true : nil
+    }
   case let .not(operand):
-    try !evaluate(operand, row, routines)
+    try evaluate(operand, row, routines, bindings).map { !$0 }
   }
 }

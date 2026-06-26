@@ -129,4 +129,15 @@ struct LexerTests {
   func unterminatedString() {
     #expect(throws: SQLError.self) { _ = try lex("'oops") }
   }
+
+  @Test("scans a bound-parameter placeholder")
+  func parameter() throws {
+    #expect(try lex("WHERE a = :pid")
+                == [.where, .identifier("a"), .equal, .parameter("pid")])
+  }
+
+  @Test("rejects a colon not followed by an identifier")
+  func bareColon() {
+    #expect(throws: SQLError.self) { _ = try lex("SELECT : FROM T") }
+  }
 }

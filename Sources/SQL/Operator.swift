@@ -144,21 +144,22 @@ internal indirect enum Plan {
 /// borrowed throughout — a `~Escapable` source is never copied or stored.
 internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
                                                _ catalog: borrowing C,
-                                               _ routines: Routines)
+                                               _ routines: Routines,
+                                               _ bindings: Bindings)
     throws(SQLError) -> Array<Record> {
   switch plan {
   case let .scan(name, ordinals, seek):
     try materialise(name, ordinals, seek, catalog)
   case let .derived(_, source, ordinals, seek):
-    try derive(source, ordinals, seek, catalog, routines)
+    try derive(source, ordinals, seek, catalog, routines, bindings)
   case let .select(filter, source):
-    try admitted(execute(source, catalog, routines), filter, routines)
+    try admitted(execute(source, catalog, routines, bindings), filter,
+                 routines, bindings)
   case let .project(terms, source):
-    try execute(source, catalog, routines).map { record throws(SQLError) in
-      try project(terms, record, routines)
-    }
+    try execute(source, catalog, routines, bindings)
+      .map { record throws(SQLError) in try project(terms, record, routines) }
   case let .sort(slot, ascending, source):
-    try execute(source, catalog, routines)
+    try execute(source, catalog, routines, bindings)
       .enumerated()
       .sorted { lhs, rhs in
         let ordered = less(lhs.element[slot], rhs.element[slot])
@@ -170,11 +171,11 @@ internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
       }
       .map(\.element)
   case let .product(outer, inner):
-    try product(execute(outer, catalog, routines),
-                execute(inner, catalog, routines))
+    try product(execute(outer, catalog, routines, bindings),
+                execute(inner, catalog, routines, bindings))
   case let .join(outer, name, ordinals, base, column, keys):
-    try join(execute(outer, catalog, routines), name, ordinals, base, column,
-             keys, catalog)
+    try join(execute(outer, catalog, routines, bindings), name, ordinals,
+             base, column, keys, catalog)
   }
 }
 
@@ -190,13 +191,15 @@ private func project(_ terms: Array<Term>, _ record: Record,
   return Record(cells)
 }
 
-/// Keeps the `records` the `filter` admits — those it evaluates to `true`,
-/// resolving scalar calls through `routines`.
+/// Keeps the `records` the `filter` admits — those it evaluates to `true` under
+/// three-valued logic (UNKNOWN and `false` both reject), resolving scalar calls
+/// through `routines` and parameters from `bindings`.
 private func admitted(_ records: Array<Record>, _ filter: Filter,
-                      _ routines: Routines) throws(SQLError) -> Array<Record> {
+                      _ routines: Routines, _ bindings: Bindings)
+    throws(SQLError) -> Array<Record> {
   var kept = Array<Record>()
   for record in records {
-    if try evaluate(filter, record, routines) {
+    if try evaluate(filter, record, routines, bindings) == true {
       kept.append(record)
     }
   }
@@ -234,9 +237,10 @@ private func derive<C: Catalog & ~Escapable>(_ plan: Plan,
                                              _ ordinals: Array<Int>,
                                              _ seek: Range<Int>?,
                                              _ catalog: borrowing C,
-                                             _ routines: Routines)
+                                             _ routines: Routines,
+                                             _ bindings: Bindings)
     throws(SQLError) -> Array<Record> {
-  let rows = try execute(plan, catalog, routines)
+  let rows = try execute(plan, catalog, routines, bindings)
   let range = seek ?? 0 ..< rows.count
   return range.map { rows[$0].project(ordinals) }
 }

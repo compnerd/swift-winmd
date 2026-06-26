@@ -104,6 +104,13 @@ internal indirect enum Plan {
   /// A leaf over the relation `name`: its `ordinals` (defining its slots), over
   /// the seek's row range when present (else the whole relation).
   case scan(name: String, ordinals: Array<Int>, seek: Range<Int>?)
+  /// A leaf over a view: the view's compiled sub-`plan` produces its full-width
+  /// rows (its columns at slots `0 ..< columns.count`), of which `ordinals`
+  /// (slots into those columns) define this leaf's slots, over the seek's row
+  /// range when present. A view exposes no virtual column and no sort key, so
+  /// `ordinals` index its columns directly and a seek is never planned into it.
+  case derived(name: String, plan: Plan, ordinals: Array<Int>,
+               seek: Range<Int>?)
   /// σ — keeps the records `Filter` admits, the filter in slot space.
   case select(Filter, Plan)
   /// π — restricts and reorders each record to the projected slots.
@@ -139,6 +146,8 @@ internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
   switch plan {
   case let .scan(name, ordinals, seek):
     try materialise(name, ordinals, seek, catalog)
+  case let .derived(_, source, ordinals, seek):
+    try derive(source, ordinals, seek, catalog)
   case let .select(filter, source):
     try execute(source, catalog).filter { evaluate(filter, $0) }
   case let .project(slots, source):
@@ -181,6 +190,23 @@ private func materialise<C: Catalog & ~Escapable>(_ name: String,
     records.append(Record(row, ordinals))
   }
   return records
+}
+
+/// Executes a view's sub-`plan` against `catalog` and re-lays each resulting
+/// record to the referenced `ordinals` (slots into the view's columns) over the
+/// seek's row range (the whole result when `nil`).
+///
+/// The sub-plan yields full-width view records — its columns at slots
+/// `0 ..< columns.count`; this projects each to the `ordinals` the outer query
+/// reads, in the slot order the outer scan expects (slot `i` is `ordinals[i]`).
+private func derive<C: Catalog & ~Escapable>(_ plan: Plan,
+                                             _ ordinals: Array<Int>,
+                                             _ seek: Range<Int>?,
+                                             _ catalog: borrowing C)
+    throws(SQLError) -> Array<Record> {
+  let rows = try execute(plan, catalog)
+  let range = seek ?? 0 ..< rows.count
+  return range.map { rows[$0].project(ordinals) }
 }
 
 /// The Cartesian product of two materialised relations: every concatenation of

@@ -43,14 +43,21 @@ private struct Relation: Sendable {
 /// both a Span-backed source and an owned one.
 private struct Memory: Catalog {
   let relations: Dictionary<String, Relation>
+  let views: Dictionary<String, View>
 
-  init(_ relations: Dictionary<String, Relation>) {
+  init(_ relations: Dictionary<String, Relation>,
+       views: Dictionary<String, View> = [:]) {
     self.relations = relations
+    self.views = views
   }
 
   func table(named name: String) -> MemoryTable? {
     guard let relation = relations[name] else { return nil }
     return MemoryTable(relation)
+  }
+
+  func view(named name: String) -> View? {
+    views[name]
   }
 }
 
@@ -65,6 +72,12 @@ private struct MemoryTable: Table {
   /// The real columns — `rowid` is virtual and excluded from the width, so a
   /// `SELECT *` never yields it.
   var width: Int { relation.fields.count }
+
+  /// The real column names, in ordinal order.
+  var names: Array<String> { relation.fields.map(\.name) }
+
+  /// The lone virtual `rowid` column at ordinal `width`.
+  var virtuals: Array<String> { ["rowid"] }
 
   /// One past the highest ordinal — the real width plus the lone virtual
   /// `rowid` column at ordinal `width`.
@@ -216,6 +229,32 @@ private func family() -> Memory {
   ])
 }
 
+/// The view catalog: the `family` relations plus two registered views — `Adults`
+/// (a single-relation projection over `Parent`) and `Pairs` (a projection over
+/// the `Parent`/`Child` foreign-key join). A view is queried like a table, and
+/// `Pairs` proves a view whose definition is itself a join.
+private func views() throws -> Memory {
+  // SELECT Id, Name FROM Parent WHERE Id >= 2 — exposed as columns Key, Label.
+  let adults = try View(select: select("""
+      SELECT Id, Name FROM Parent WHERE Id >= 2
+      """), columns: ["Key", "Label"])
+
+  // SELECT Parent.Name, Child.Name FROM Parent JOIN Child ON … — a view over a
+  // join, its two projected columns exposed as Parent and Kid.
+  let pairs = try View(select: select("""
+      SELECT Parent.Name, Child.Name FROM Parent
+        JOIN Child ON Child.Pid = Parent.Id
+      """), columns: ["Parent", "Kid"])
+
+  let catalog = family()
+  return Memory(catalog.relations, views: ["Adults": adults, "Pairs": pairs])
+}
+
+/// Parses `text` to a `SELECT`, failing on any other statement.
+private func select(_ text: String) throws -> Select {
+  try parse(text)
+}
+
 /// Parses `text` to a `SELECT`, failing on any other statement.
 private func parse(_ text: String) throws -> Select {
   guard case let .select(select) = try Statement(parsing: text) else {
@@ -231,13 +270,18 @@ private func run(_ text: String) throws -> Array<Array<Value>> {
 }
 
 /// Runs `text` against the wide catalog.
-private func wideRun(_ text: String) throws -> Array<Array<Value>> {
+private func wide(_ text: String) throws -> Array<Array<Value>> {
   try Engine.run(parse(text), wide())
 }
 
 /// Runs `text` against the join `family` catalog.
 private func join(_ text: String) throws -> Array<Array<Value>> {
   try Engine.run(parse(text), family())
+}
+
+/// Runs `text` against the view catalog.
+private func view(_ text: String) throws -> Array<Array<Value>> {
+  try Engine.run(parse(text), views())
 }
 
 // MARK: - Single-relation tests
@@ -341,7 +385,7 @@ struct EngineProjectionPushdownTests {
     // The relation has ten columns; the query reads only C0 (filter, project),
     // C5 (project), and C8 (order). The leaf materialises just those, but the
     // result is exactly as if every column were copied.
-    let rows = try wideRun("""
+    let rows = try wide("""
         SELECT C5, C0 FROM Wide WHERE C0 >= 10 ORDER BY C8 DESC
         """)
     #expect(rows == [
@@ -539,5 +583,138 @@ struct EngineJoinTests {
       [.text("Ada"), .text("Ann")],
       [.text("Bee"), .text("Bob")],
     ])
+  }
+}
+
+// MARK: - View tests
+
+struct EngineViewTests {
+  @Test("a view resolves and queries like a table")
+  func table() throws {
+    // `SELECT * FROM Adults` runs the view's `SELECT Id, Name FROM Parent
+    // WHERE Id >= 2`, exposing the columns as `Key`/`Label`.
+    let rows = try view("SELECT * FROM Adults")
+    #expect(rows == [
+      [.integer(2), .text("Bee")],
+      [.integer(3), .text("Cid")],
+    ])
+  }
+
+  @Test("a projection over a view selects the view's columns by name")
+  func projection() throws {
+    let rows = try view("SELECT Label FROM Adults")
+    #expect(rows == [[.text("Bee")], [.text("Cid")]])
+  }
+
+  @Test("a WHERE over a view filters its rows")
+  func filter() throws {
+    let rows = try view("SELECT Label FROM Adults WHERE Key = 3")
+    #expect(rows == [[.text("Cid")]])
+  }
+
+  @Test("an ORDER BY over a view orders its rows")
+  func order() throws {
+    let rows = try view("SELECT Label FROM Adults ORDER BY Label DESC")
+    #expect(rows == [[.text("Cid")], [.text("Bee")]])
+  }
+
+  @Test("a view whose definition is a join resolves and queries")
+  func join() throws {
+    // `Pairs` denormalises the `Parent`/`Child` foreign-key join; querying it
+    // runs the inner join and exposes its two columns as `Parent`/`Kid`.
+    let rows = try view("SELECT * FROM Pairs")
+    #expect(rows == [
+      [.text("Ada"), .text("Ann")],
+      [.text("Ada"), .text("Amy")],
+      [.text("Bee"), .text("Bob")],
+    ])
+  }
+
+  @Test("a projection and filter over a join view selects across its columns")
+  func joinProjection() throws {
+    let rows = try view("SELECT Kid FROM Pairs WHERE Parent = 'Ada'")
+    #expect(rows == [[.text("Ann")], [.text("Amy")]])
+  }
+
+  @Test("an unknown column of a view is reported")
+  func unknown() throws {
+    #expect(throws: SQLError.column("Missing")) {
+      try view("SELECT Missing FROM Adults")
+    }
+  }
+
+  @Test("a view's definition is optimised — its seekable predicate seeks")
+  func optimised() throws {
+    // `Adults` is `SELECT Id, Name FROM Parent WHERE Id >= 2`, and `Parent` is
+    // sorted on `Id`, so the view's sub-plan must seek that run rather than
+    // scanning under a `Select`. Compile and optimise an outer query over the
+    // view and inspect the `.derived` leaf: its sub-plan must reach a seeked
+    // `.scan` (a non-nil seek) and carry no `.select` over a raw scan.
+    let catalog = try views()
+    let plan = try Engine.optimise(
+        Engine.compile(parse("SELECT Key, Label FROM Adults"), catalog),
+        catalog)
+    let sub = try #require(derived(plan))
+    #expect(seeks(sub))
+    #expect(!filters(sub))
+  }
+}
+
+/// The sub-plan of the first `.derived` leaf reachable from `plan`, or `nil`.
+private func derived(_ plan: Plan) -> Plan? {
+  switch plan {
+  case let .derived(_, sub, _, _):
+    sub
+  case let .select(_, source):
+    derived(source)
+  case let .project(_, source):
+    derived(source)
+  case let .sort(_, _, source):
+    derived(source)
+  case let .product(left, right):
+    derived(left) ?? derived(right)
+  case .scan, .join:
+    nil
+  }
+}
+
+/// Whether `plan` reaches a `.scan` carrying a non-nil seek.
+private func seeks(_ plan: Plan) -> Bool {
+  switch plan {
+  case let .scan(_, _, seek):
+    seek != nil
+  case let .select(_, source):
+    seeks(source)
+  case let .project(_, source):
+    seeks(source)
+  case let .sort(_, _, source):
+    seeks(source)
+  case let .derived(_, sub, _, _):
+    seeks(sub)
+  case let .product(left, right):
+    seeks(left) || seeks(right)
+  case .join:
+    false
+  }
+}
+
+/// Whether `plan` wraps a raw (unseeked) `.scan` in a `.select` — the
+/// un-optimised shape the fix eliminates from a view's sub-plan.
+private func filters(_ plan: Plan) -> Bool {
+  switch plan {
+  case .select(_, .scan(_, _, nil)):
+    true
+  case let .select(_, source):
+    filters(source)
+  case let .project(_, source):
+    filters(source)
+  case let .sort(_, _, source):
+    filters(source)
+  case let .derived(_, sub, _, _):
+    filters(sub)
+  case let .product(left, right):
+    filters(left) || filters(right)
+  case .scan, .join:
+    false
   }
 }

@@ -74,6 +74,22 @@ internal struct WinMDRelation: SQL.Table, ~Escapable {
     table.schema.fields.count
   }
 
+  /// The real column names, in ordinal order — the schema's field names.
+  internal var names: Array<String> {
+    var names = Array<String>()
+    names.reserveCapacity(table.schema.fields.count)
+    for index in 0 ..< table.schema.fields.count {
+      names.append("\(table.schema.fields[index].name)")
+    }
+    return names
+  }
+
+  /// The virtual column names, in ordinal order — `rowid` at `width`, `parent`
+  /// at `width + 1`.
+  internal var virtuals: Array<String> {
+    ["rowid", "parent"]
+  }
+
   /// One past the highest ordinal this relation can address — its real `width`
   /// plus the two virtual columns (`rowid` and `parent`) it exposes.
   internal var extent: Int {

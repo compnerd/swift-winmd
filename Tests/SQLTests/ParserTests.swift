@@ -53,8 +53,8 @@ struct KeywordTests {
         try parseSelect("select TypeName from TypeDef where Flags = 1")
     #expect(select.projection == .columns(["TypeName"]))
     #expect(select.table == "TypeDef")
-    #expect(select.predicate == .comparison(column: "Flags", op: .equal,
-                                            value: .integer(1)))
+    #expect(select.predicate == .comparison(left: .column("Flags"), op: .equal,
+                                            right: .literal(.integer(1))))
   }
 
   @Test("parses mixed-case keywords")
@@ -79,7 +79,8 @@ struct PredicateTests {
       let select =
           try parseSelect("SELECT * FROM T WHERE Flags \(text) 1")
       #expect(select.predicate
-                  == .comparison(column: "Flags", op: op, value: .integer(1)))
+                  == .comparison(left: .column("Flags"), op: op,
+                                 right: .literal(.integer(1))))
     }
   }
 
@@ -88,17 +89,27 @@ struct PredicateTests {
     let select =
         try parseSelect(
             "SELECT * FROM TypeDef WHERE TypeNamespace = 'Windows.Win32.Foundation'")
+    let value = Expression.literal(.string("Windows.Win32.Foundation"))
     #expect(select.predicate
-                == .comparison(column: "TypeNamespace", op: .equal,
-                               value: .string("Windows.Win32.Foundation")))
+                == .comparison(left: .column("TypeNamespace"), op: .equal,
+                               right: value))
   }
 
   @Test("parses a string with an escaped quote")
   func escapedQuote() throws {
     let select = try parseSelect("SELECT * FROM T WHERE name = 'O''Brien'")
     #expect(select.predicate
-                == .comparison(column: "name", op: .equal,
-                               value: .string("O'Brien")))
+                == .comparison(left: .column("name"), op: .equal,
+                               right: .literal(.string("O'Brien"))))
+  }
+
+  @Test("parses a function call as a comparison operand")
+  func functionOperand() throws {
+    let select = try parseSelect("SELECT * FROM T WHERE upper(Name) = 'X'")
+    let call = Expression.call(name: "upper", arguments: [.column("Name")])
+    #expect(select.predicate
+                == .comparison(left: call, op: .equal,
+                               right: .literal(.string("X"))))
   }
 
   @Test("binds AND tighter than OR")
@@ -106,9 +117,12 @@ struct PredicateTests {
     // a = 1 OR b = 2 AND c = 3  ==>  a OR (b AND c)
     let select =
         try parseSelect("SELECT * FROM T WHERE a = 1 OR b = 2 AND c = 3")
-    let a = Predicate.comparison(column: "a", op: .equal, value: .integer(1))
-    let b = Predicate.comparison(column: "b", op: .equal, value: .integer(2))
-    let c = Predicate.comparison(column: "c", op: .equal, value: .integer(3))
+    let a = Predicate.comparison(left: .column("a"), op: .equal,
+                                 right: .literal(.integer(1)))
+    let b = Predicate.comparison(left: .column("b"), op: .equal,
+                                 right: .literal(.integer(2)))
+    let c = Predicate.comparison(left: .column("c"), op: .equal,
+                                 right: .literal(.integer(3)))
     #expect(select.predicate == .or(a, .and(b, c)))
   }
 
@@ -117,8 +131,10 @@ struct PredicateTests {
     // NOT a = 1 AND b = 2  ==>  (NOT a) AND b
     let select =
         try parseSelect("SELECT * FROM T WHERE NOT a = 1 AND b = 2")
-    let a = Predicate.comparison(column: "a", op: .equal, value: .integer(1))
-    let b = Predicate.comparison(column: "b", op: .equal, value: .integer(2))
+    let a = Predicate.comparison(left: .column("a"), op: .equal,
+                                 right: .literal(.integer(1)))
+    let b = Predicate.comparison(left: .column("b"), op: .equal,
+                                 right: .literal(.integer(2)))
     #expect(select.predicate == .and(.not(a), b))
   }
 
@@ -127,9 +143,12 @@ struct PredicateTests {
     // (a = 1 OR b = 2) AND c = 3
     let select =
         try parseSelect("SELECT * FROM T WHERE (a = 1 OR b = 2) AND c = 3")
-    let a = Predicate.comparison(column: "a", op: .equal, value: .integer(1))
-    let b = Predicate.comparison(column: "b", op: .equal, value: .integer(2))
-    let c = Predicate.comparison(column: "c", op: .equal, value: .integer(3))
+    let a = Predicate.comparison(left: .column("a"), op: .equal,
+                                 right: .literal(.integer(1)))
+    let b = Predicate.comparison(left: .column("b"), op: .equal,
+                                 right: .literal(.integer(2)))
+    let c = Predicate.comparison(left: .column("c"), op: .equal,
+                                 right: .literal(.integer(3)))
     #expect(select.predicate == .and(.or(a, b), c))
   }
 
@@ -138,9 +157,12 @@ struct PredicateTests {
     // a = 1 OR b = 2 OR c = 3  ==>  ((a OR b) OR c)
     let select =
         try parseSelect("SELECT * FROM T WHERE a = 1 OR b = 2 OR c = 3")
-    let a = Predicate.comparison(column: "a", op: .equal, value: .integer(1))
-    let b = Predicate.comparison(column: "b", op: .equal, value: .integer(2))
-    let c = Predicate.comparison(column: "c", op: .equal, value: .integer(3))
+    let a = Predicate.comparison(left: .column("a"), op: .equal,
+                                 right: .literal(.integer(1)))
+    let b = Predicate.comparison(left: .column("b"), op: .equal,
+                                 right: .literal(.integer(2)))
+    let c = Predicate.comparison(left: .column("c"), op: .equal,
+                                 right: .literal(.integer(3)))
     #expect(select.predicate == .or(.or(a, b), c))
   }
 }
@@ -176,11 +198,11 @@ struct CompositeTests {
             """)
     #expect(select.projection == .columns(["TypeName", "TypeNamespace"]))
     #expect(select.table == "TypeDef")
-    let namespace =
-        Predicate.comparison(column: "TypeNamespace", op: .equal,
-                             value: .string("Windows.Win32.Foundation"))
-    let flags = Predicate.comparison(column: "Flags", op: .geq,
-                                     value: .integer(1))
+    let value = Expression.literal(.string("Windows.Win32.Foundation"))
+    let namespace = Predicate.comparison(left: .column("TypeNamespace"),
+                                         op: .equal, right: value)
+    let flags = Predicate.comparison(left: .column("Flags"), op: .geq,
+                                     right: .literal(.integer(1)))
     #expect(select.predicate == .and(namespace, flags))
     #expect(select.order == Order(column: "TypeName", ascending: false))
   }
@@ -249,9 +271,9 @@ struct JoinTests {
                 == Join(relation: Relation(name: "MethodDef", alias: "m"),
                         left: Column("m.parent"), right: Column("t.rowid")))
     #expect(select.projection == .columns([Column("m.Name")]))
-    #expect(select.predicate == .comparison(column: Column("t.TypeName"),
-                                            op: .equal,
-                                            value: .string("IUnknown")))
+    let value = Expression.literal(.string("IUnknown"))
+    #expect(select.predicate == .comparison(left: .column("t.TypeName"),
+                                            op: .equal, right: value))
   }
 
   @Test("parses a forward-key join")
@@ -339,11 +361,65 @@ struct ErrorTests {
     }
   }
 
-  @Test("rejects an identifier as a comparison operand")
-  func literalRequired() {
-    // A comparison's right operand must be a literal, not an identifier.
-    #expect(throws: SQLError.self) {
-      _ = try Statement(parsing: "SELECT * FROM T WHERE a = b")
-    }
+  @Test("parses a column on either side of a comparison")
+  func columnOperands() throws {
+    // Either operand may be an expression, so a column-vs-column predicate is
+    // valid SQL (`a = b`), not an error.
+    let select = try parseSelect("SELECT * FROM T WHERE a = b")
+    #expect(select.predicate
+                == .comparison(left: .column("a"), op: .equal,
+                               right: .column("b")))
+  }
+}
+
+// MARK: - Expression projections
+
+struct ExpressionTests {
+  @Test("a bare-column list stays the simpler columns projection")
+  func columns() throws {
+    let select = try parseSelect("SELECT a, b FROM T")
+    #expect(select.projection == .columns(["a", "b"]))
+  }
+
+  @Test("a function call yields an expression projection")
+  func call() throws {
+    let select = try parseSelect("SELECT guid(Name) FROM T")
+    #expect(select.projection
+                == .expressions([
+                  Projected(expression: .call(name: "guid",
+                                              arguments: [.column("Name")]))
+                ]))
+  }
+
+  @Test("an aliased column yields an expression projection")
+  func alias() throws {
+    let select = try parseSelect("SELECT Name AS label FROM T")
+    #expect(select.projection
+                == .expressions([
+                  Projected(expression: .column("Name"), alias: "label")
+                ]))
+  }
+
+  @Test("a call takes literal and nested-call arguments")
+  func arguments() throws {
+    let select = try parseSelect("SELECT f(1, g(x), 'lit') FROM T")
+    #expect(select.projection
+                == .expressions([
+                  Projected(expression:
+                    .call(name: "f", arguments: [
+                      .literal(.integer(1)),
+                      .call(name: "g", arguments: [.column("x")]),
+                      .literal(.string("lit")),
+                    ]))
+                ]))
+  }
+
+  @Test("a zero-argument call parses")
+  func nullary() throws {
+    let select = try parseSelect("SELECT now() FROM T")
+    #expect(select.projection
+                == .expressions([
+                  Projected(expression: .call(name: "now", arguments: []))
+                ]))
   }
 }

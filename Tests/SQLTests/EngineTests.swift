@@ -717,3 +717,117 @@ private func filters(_ plan: Plan) -> Bool {
     false
   }
 }
+
+// MARK: - Scalar-function tests
+
+/// Routines with two demonstration scalar functions: `upper`, which folds a
+/// text cell to upper case, and `add`, which sums two integer cells. These
+/// stand in for the per-dialect decode functions a synthesis projection calls.
+private func routines() -> Routines {
+  Routines()
+    .registering("upper") { arguments throws(SQLError) in
+      guard case let .text(text) = arguments.first else {
+        throw .argument("upper expects one text argument")
+      }
+      return .text(text.uppercased())
+    }
+    .registering("add") { arguments throws(SQLError) in
+      guard arguments.count == 2,
+          case let .integer(lhs) = arguments[0],
+          case let .integer(rhs) = arguments[1] else {
+        throw .argument("add expects two integer arguments")
+      }
+      return .integer(lhs + rhs)
+    }
+}
+
+/// Runs `text` against the `People` catalog through the demonstration routines.
+private func functionRun(_ text: String) throws -> Array<Array<Value>> {
+  try Engine.run(parse(text), people(), routines())
+}
+
+struct EngineFunctionTests {
+  @Test("a registered function projects over a column")
+  func projection() throws {
+    let rows = try functionRun("SELECT upper(Name) FROM People WHERE Id = 1")
+    #expect(rows == [[.text("ALICE")]])
+  }
+
+  @Test("a function projects beside a bare column")
+  func mixed() throws {
+    let rows =
+        try functionRun("SELECT Id, upper(Name) FROM People WHERE Id = 3")
+    #expect(rows == [[.integer(3), .text("CAROL")]])
+  }
+
+  @Test("a function takes more than one column argument")
+  func multiple() throws {
+    let rows = try functionRun("SELECT add(Id, Age) FROM People WHERE Id = 2")
+    // Bob: Id 2 + Age 25 = 27.
+    #expect(rows == [[.integer(27)]])
+  }
+
+  @Test("a function takes a literal argument")
+  func literal() throws {
+    let rows = try functionRun("SELECT add(Id, 100) FROM People WHERE Id = 4")
+    #expect(rows == [[.integer(104)]])
+  }
+
+  @Test("a function call nests another function call")
+  func nested() throws {
+    let rows =
+        try functionRun("SELECT add(add(Id, 1), Age) FROM People WHERE Id = 5")
+    // Eve: (5 + 1) + 25 = 31.
+    #expect(rows == [[.integer(31)]])
+  }
+
+  @Test("an unregistered function is reported")
+  func unknown() throws {
+    #expect(throws: SQLError.function("missing")) {
+      try functionRun("SELECT missing(Name) FROM People")
+    }
+  }
+
+  @Test("a function rejecting its arguments reports the fault")
+  func invalid() throws {
+    #expect(throws: SQLError.argument("upper expects one text argument")) {
+      try functionRun("SELECT upper(Id) FROM People WHERE Id = 1")
+    }
+  }
+
+  @Test("a function call resolves its name case-insensitively")
+  func folded() throws {
+    // `upper` is registered; the natural SQL spelling UPPER resolves to it, as
+    // table and column identifiers do.
+    let rows = try functionRun("SELECT UPPER(Name) FROM People WHERE Id = 1")
+    #expect(rows == [[.text("ALICE")]])
+  }
+
+  @Test("routine names colliding only by case merge without trapping")
+  func collision() throws {
+    // "tag" and "TAG" fold to one name; the registry merges them (the later-
+    // sorting original spelling wins) instead of trapping on the duplicate.
+    let lower: Scalar = { _ in .text("lower") }
+    let upper: Scalar = { _ in .text("upper") }
+    let routines: Routines = ["tag": lower, "TAG": upper]
+    let query = try parse("SELECT tag(Name) FROM People WHERE Id = 1")
+    let rows = try Engine.run(query, people(), routines)
+    #expect(rows == [[.text("lower")]])
+  }
+
+  @Test("a predicate filters on a scalar function call")
+  func predicate() throws {
+    // The documented contract: a predicate may call a registered function;
+    // `upper(Name) = 'ALICE'` decodes the column before comparing.
+    let rows =
+        try functionRun("SELECT Id FROM People WHERE upper(Name) = 'ALICE'")
+    #expect(rows == [[.integer(1)]])
+  }
+
+  @Test("a predicate compares a function result to an integer")
+  func arithmetic() throws {
+    let rows =
+        try functionRun("SELECT Name FROM People WHERE add(Id, 10) = 12")
+    #expect(rows == [[.text("Bob")]])
+  }
+}

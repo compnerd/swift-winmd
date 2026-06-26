@@ -25,10 +25,11 @@ public enum Engine {
   ///   `SQLError.column` if a referenced column is absent, `SQLError.ambiguous`
   ///   if an unqualified name is resolved by both relations of a join.
   public static func run<C: Catalog & ~Escapable>(_ select: Select,
-                                                  _ catalog: borrowing C)
+                                                  _ catalog: borrowing C,
+                                                  _ routines: Routines = [:])
       throws(SQLError) -> Array<Array<Value>> {
     let plan = try optimise(compile(select, catalog), catalog)
-    return try execute(plan, catalog).map(\.values)
+    return try execute(plan, catalog, routines).map(\.values)
   }
 
   // MARK: - Compilation
@@ -69,13 +70,13 @@ public enum Engine {
         order = try from.schema.order(clause, in: select.from)
       }
       let projection =
-          try from.schema.projection(select.projection, in: select.from)
+          try from.schema.terms(select.projection, in: select.from)
 
       // The referenced ordinals, in slot order: slot `i` is `ordinals[i]`.
       let ordinals = referenced(projection, filter, order)
       let slot = invert(ordinals)
       let scan = from.leaf(ordinals)
-      return shape(scan, projection.map { slot[$0]! },
+      return shape(scan, projection.map { remap($0, slot) },
                    filter.map { remap($0, slot) },
                    order.map { (slot[$0.column]!, $0.ascending) })
     }
@@ -93,7 +94,7 @@ public enum Engine {
     if let clause = select.order {
       order = try scope.order(clause)
     }
-    let projection = try scope.projection(select.projection)
+    let projection = try scope.terms(select.projection)
     let base = scope.base
 
     let combined = referenced(projection, filter, order)
@@ -112,7 +113,7 @@ public enum Engine {
 
     let outer = from.leaf(head)
     let right = inner.leaf(tail)
-    return shape(.product(outer, right), projection.map { slot[$0]! },
+    return shape(.product(outer, right), projection.map { remap($0, slot) },
                  remap(filter, slot),
                  order.map { (slot[$0.column]!, $0.ascending) })
   }
@@ -154,12 +155,17 @@ public enum Engine {
     }
   }
 
-  /// The sorted, deduplicated ordinals a query references: the union of its
-  /// `projection`, the columns its `filter` reads, and its `order` column.
-  private static func referenced(_ projection: Array<Int>, _ filter: Filter?,
+  /// The sorted, deduplicated ordinals a query references: the union of the
+  /// ordinals its `projection` terms read, the columns its `filter` reads, and
+  /// its `order` column. The projection terms hold ordinals at this stage; a
+  /// scalar call's arguments contribute their read ordinals too.
+  private static func referenced(_ projection: Array<Term>, _ filter: Filter?,
                                  _ order: (column: Int, ascending: Bool)?)
       -> Array<Int> {
-    var ordinals = Set(projection)
+    var ordinals = Set<Int>()
+    for term in projection {
+      term.references(into: &ordinals)
+    }
     filter?.references(into: &ordinals)
     if let order { ordinals.insert(order.column) }
     return ordinals.sorted()
@@ -175,12 +181,27 @@ public enum Engine {
     return slot
   }
 
+  /// `term` with every ordinal it reads remapped to a slot through `slot`: a
+  /// `.slot` holding an ordinal becomes the same slot, a constant is unchanged,
+  /// a call recurses into its arguments.
+  private static func remap(_ term: Term, _ slot: Dictionary<Int, Int>)
+      -> Term {
+    switch term {
+    case let .slot(ordinal):
+      .slot(slot[ordinal]!)
+    case .constant:
+      term
+    case let .apply(name, arguments):
+      .apply(name: name, arguments: arguments.map { remap($0, slot) })
+    }
+  }
+
   /// `filter` with every ordinal it addresses remapped to a slot through `slot`.
   private static func remap(_ filter: Filter, _ slot: Dictionary<Int, Int>)
       -> Filter {
     switch filter {
-    case let .compare(column, op, value):
-      .compare(slot[column]!, op, value)
+    case let .compare(lhs, op, rhs):
+      .compare(remap(lhs, slot), op, remap(rhs, slot))
     case let .match(left, right):
       .match(slot[left]!, slot[right]!)
     case let .and(lhs, rhs):
@@ -195,7 +216,7 @@ public enum Engine {
   /// Wraps `source` in the `Project(Sort(Select(_)))` operators, omitting the
   /// `Select` and `Sort` layers when their clause is absent. The `projection`,
   /// `filter`, and `order` are in slot space.
-  private static func shape(_ source: Plan, _ projection: Array<Int>,
+  private static func shape(_ source: Plan, _ projection: Array<Term>,
                             _ filter: Filter?,
                             _ order: (slot: Int, ascending: Bool)?) -> Plan {
     var plan = source
@@ -308,7 +329,8 @@ public enum Engine {
                                                         _ table: borrowing T,
                                                         _ count: Int)
       -> Range<Int>? {
-    guard case let .compare(slot, op, .integer(value)) = filter,
+    guard case let .compare(.slot(slot), op, .constant(.integer(value)))
+        = filter,
         let lower = table.bound(ordinals[slot], value, strict: false),
         let upper = table.bound(ordinals[slot], value, strict: true) else {
       return nil

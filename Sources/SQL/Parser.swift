@@ -113,18 +113,75 @@ internal struct Parser: ~Escapable {
 
   // MARK: - Projection
 
-  /// Parses `*` or a comma-separated list of (possibly-qualified) columns.
+  /// Parses `*` or a comma-separated list of projected items, each an
+  /// expression with an optional `AS` alias.
+  ///
+  /// A list of bare columns with no alias collapses to the simpler `columns`
+  /// projection (the backward-compatible path); a list carrying any function
+  /// call or alias is the richer `expressions` projection.
   private mutating func projection() throws(SQLError) -> Projection {
     if try match(.star) {
       return .all
     }
 
-    var columns = Array<Column>()
-    try columns.append(column())
+    var items = Array<Projected>()
+    try items.append(projected())
     while try match(.comma) {
-      try columns.append(column())
+      try items.append(projected())
+    }
+
+    // Collapse a plain column list (no calls, no aliases) to `columns`.
+    var columns = Array<Column>()
+    for item in items {
+      guard item.alias == nil, case let .column(column) = item.expression else {
+        return .expressions(items)
+      }
+      columns.append(column)
     }
     return .columns(columns)
+  }
+
+  /// Parses one projected item: an expression and an optional `AS alias`.
+  private mutating func projected() throws(SQLError) -> Projected {
+    let expression = try expression()
+    let alias: String? = if try match(.as) {
+      try identifier()
+    } else {
+      nil
+    }
+    return Projected(expression: expression, alias: alias)
+  }
+
+  /// Parses a scalar expression: a string/integer literal, a function call
+  /// (`name(args)`), or a bare (possibly-qualified) column.
+  ///
+  /// A function call is an identifier immediately followed by `(`; an identifier
+  /// not so followed is a column. The arguments are a comma-separated list of
+  /// expressions, possibly empty.
+  private mutating func expression() throws(SQLError) -> Expression {
+    if case let .string(value) = current?.kind {
+      _ = try advance(expecting: "a literal")
+      return .literal(.string(value))
+    }
+    if case let .integer(value) = current?.kind {
+      _ = try advance(expecting: "a literal")
+      return .literal(.integer(value))
+    }
+
+    let name = try identifier()
+    guard try match(.lparen) else {
+      return .column(Column(name))
+    }
+
+    var arguments = Array<Expression>()
+    if current?.kind != .rparen {
+      try arguments.append(expression())
+      while try match(.comma) {
+        try arguments.append(expression())
+      }
+    }
+    try expect(.rparen)
+    return .call(name: name, arguments: arguments)
   }
 
   // MARK: - Predicate
@@ -170,12 +227,15 @@ internal struct Parser: ~Escapable {
     return try comparison()
   }
 
-  /// Parses `column op literal`.
+  /// Parses `expression op expression`.
+  ///
+  /// Either operand may be a column, a literal, or a scalar-function call, so a
+  /// predicate can filter on a decoded value (`WHERE guid(Id) = '…'`).
   private mutating func comparison() throws(SQLError) -> Predicate {
-    let column = try column()
+    let left = try expression()
     let op = try op()
-    let value = try literal()
-    return .comparison(column: column, op: op, value: value)
+    let right = try expression()
+    return .comparison(left: left, op: op, right: right)
   }
 
   /// Parses a comparison operator.

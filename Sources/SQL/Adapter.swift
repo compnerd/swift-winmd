@@ -41,22 +41,64 @@ public enum Value: Hashable, Sendable {
   case text(String)
 }
 
+// MARK: - View
+
+/// A named `SELECT` registered as a first-class relation.
+///
+/// A view is a stored query the engine resolves wherever a base table is: its
+/// `select` is the query that produces the rows, and `columns` names the
+/// relation's columns in projection order — column `i` is the `i`th projected
+/// value of `select`. A view is fully escapable data — no borrowed storage — so
+/// it sits beside the `~Escapable` base tables in the same catalog namespace; a
+/// catalog vends one through `view(named:)`. The engine compiles a view's
+/// `select` into a sub-plan and splices it in where the view is named, the
+/// outer query addressing the view's columns by their ordinal in `columns`. A
+/// view carries no virtual column, so its `extent` is its `columns` count.
+public struct View: Hashable, Sendable {
+  /// The query the view stands for.
+  public let select: Select
+
+  /// The view's column names, in projection order — column `i` is the `i`th
+  /// projected value of `select`.
+  public let columns: Array<String>
+
+  public init(select: Select, columns: Array<String>) {
+    self.select = select
+    self.columns = columns
+  }
+}
+
 // MARK: - Catalog
 
-/// Resolves a relation name to a table.
+/// Resolves a relation name to a table or a view.
 ///
 /// The catalog is the engine's only entry into a data source: a `SELECT`'s
-/// `FROM` name is looked up here. A name the source does not know yields `nil`,
-/// which the engine reports as `SQLError.relation`. The catalog is `~Escapable`,
-/// and the `Table` it vends borrows it — a borrowed-storage source may resolve a
-/// relation to a view that never escapes the catalog's borrow.
+/// `FROM` name is looked up here. A name the source does not know as either a
+/// table or a view yields `nil` from both, which the engine reports as
+/// `SQLError.relation`. The catalog is `~Escapable`, and the `Table` it vends
+/// borrows it — a borrowed-storage source may resolve a relation to a view that
+/// never escapes the catalog's borrow. A view, by contrast, is escapable data:
+/// a catalog that registers none returns `nil` from the default `view(named:)`.
 public protocol Catalog: ~Escapable {
   /// The table this catalog vends.
   associatedtype Table: SQL.Table & ~Escapable
 
-  /// The table named `name`, or `nil` if the source has no such relation.
+  /// The table named `name`, or `nil` if the source has no such base relation.
   @_lifetime(borrow self)
   borrowing func table(named name: String) -> Table?
+
+  /// The view named `name`, or `nil` if the source registers no such view.
+  ///
+  /// The engine resolves a `FROM`/`JOIN` name against the views first: a name a
+  /// catalog registers as a view shadows a base table of the same name. The
+  /// default registers no view, so a source without stored queries need not
+  /// implement it.
+  borrowing func view(named name: String) -> View?
+}
+
+extension Catalog where Self: ~Escapable {
+  /// A catalog with no stored queries registers no view.
+  public borrowing func view(named name: String) -> View? { nil }
 }
 
 // MARK: - Table
@@ -76,6 +118,24 @@ public protocol Table: ~Escapable {
 
   /// The number of real columns — the extent of a `SELECT *` projection.
   var width: Int { get }
+
+  /// The real column names, in ordinal order — column `i` of `names` is the
+  /// name of the real column at ordinal `i`.
+  ///
+  /// A relation knows its own column names; the engine reads them to lift a
+  /// base table's resolution onto an escapable `Schema` so a join may resolve a
+  /// view against a base table uniformly. The virtual columns (`rowid`,
+  /// `parent`) are not in `names`; they resolve through `ordinal(of:)`.
+  var names: Array<String> { get }
+
+  /// The virtual column names, in ordinal order — virtual `i` of `virtuals`
+  /// sits at ordinal `width + i`.
+  ///
+  /// A virtual column is computed by the `Row` rather than stored (a `rowid`, a
+  /// `parent`); naming them lets the engine lift resolution onto an escapable
+  /// `Schema`. The default is empty — a relation overrides it only when it
+  /// computes a virtual column, and then its `extent` is `width + virtuals.count`.
+  var virtuals: Array<String> { get }
 
   /// One past the highest ordinal this table can address — its real `width`
   /// plus the virtual columns it exposes.
@@ -112,6 +172,9 @@ public protocol Table: ~Escapable {
 extension Table where Self: ~Escapable {
   /// A relation with no virtual column ends at its real `width`.
   public var extent: Int { width }
+
+  /// A relation exposes no virtual column by default.
+  public var virtuals: Array<String> { [] }
 }
 
 // MARK: - Cursor

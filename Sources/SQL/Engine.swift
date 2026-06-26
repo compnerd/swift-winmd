@@ -57,36 +57,32 @@ public enum Engine {
   internal static func compile<C: Catalog & ~Escapable>(_ select: Select,
                                                         _ catalog: borrowing C)
       throws(SQLError) -> Plan {
-    guard let table = catalog.table(named: select.from.name) else {
-      throw .relation(select.from.name)
-    }
+    let from = try resolve(select.from, catalog)
 
     guard let join = select.join else {
       var filter: Filter? = nil
       if let predicate = select.predicate {
-        filter = try table.lower(predicate, in: select.from)
+        filter = try from.schema.lower(predicate, in: select.from)
       }
       var order: (column: Int, ascending: Bool)? = nil
       if let clause = select.order {
-        order = try table.order(clause, in: select.from)
+        order = try from.schema.order(clause, in: select.from)
       }
-      let projection = try table.projection(select.projection, in: select.from)
+      let projection =
+          try from.schema.projection(select.projection, in: select.from)
 
       // The referenced ordinals, in slot order: slot `i` is `ordinals[i]`.
       let ordinals = referenced(projection, filter, order)
       let slot = invert(ordinals)
-      let scan = Plan.scan(name: select.from.name, ordinals: ordinals,
-                           seek: nil)
+      let scan = from.leaf(ordinals)
       return shape(scan, projection.map { slot[$0]! },
                    filter.map { remap($0, slot) },
                    order.map { (slot[$0.column]!, $0.ascending) })
     }
 
-    guard let inner = catalog.table(named: join.relation.name) else {
-      throw .relation(join.relation.name)
-    }
+    let inner = try resolve(join.relation, catalog)
 
-    let scope = Scope(select.from, table, join.relation, inner)
+    let scope = Scope(select.from, from.schema, join.relation, inner.schema)
     let on = try scope.match(join.left, join.right)
     var predicate: Filter? = nil
     if let clause = select.predicate {
@@ -101,25 +97,61 @@ public enum Engine {
     let base = scope.base
 
     let combined = referenced(projection, filter, order)
-    let outerOrdinals = combined.filter { $0 < base }
-    let innerOrdinals = combined.filter { $0 >= base }.map { $0 - base }
+    let head = combined.filter { $0 < base }
+    let tail = combined.filter { $0 >= base }.map { $0 - base }
 
-    // The combined slot map: the outer scan's referenced ordinals take slots
-    // `[0, outerCount)`, the inner scan's take `[outerCount, outerCount +
-    // innerCount)`, matching the merged record's outer-then-inner layout.
-    var slot = invert(outerOrdinals)
-    let split = outerOrdinals.count
-    for index in innerOrdinals.indices {
-      slot[innerOrdinals[index] + base] = split + index
+    // The combined slot map: the outer scan's referenced ordinals take the
+    // leading slots `[0, head.count)`, the inner scan's take the trailing slots
+    // `[head.count, head.count + tail.count)`, matching the merged record's
+    // outer-then-inner layout.
+    var slot = invert(head)
+    let split = head.count
+    for index in tail.indices {
+      slot[tail[index] + base] = split + index
     }
 
-    let outer = Plan.scan(name: select.from.name, ordinals: outerOrdinals,
-                          seek: nil)
-    let right = Plan.scan(name: join.relation.name, ordinals: innerOrdinals,
-                          seek: nil)
+    let outer = from.leaf(head)
+    let right = inner.leaf(tail)
     return shape(.product(outer, right), projection.map { slot[$0]! },
                  remap(filter, slot),
                  order.map { (slot[$0.column]!, $0.ascending) })
+  }
+
+  /// A relation resolved for compilation: its name-resolution `schema` and a
+  /// `leaf` factory that, given the ordinals the query references on its side,
+  /// builds the leaf `Plan` — a `scan` for a base table, a `derived` over the
+  /// view's compiled sub-plan for a view.
+  private struct Resolved {
+    let schema: Schema
+    let leaf: (Array<Int>) -> Plan
+  }
+
+  /// Resolves a `Relation` against `catalog` to its schema and leaf factory.
+  ///
+  /// A view shadows a base table of the same name: the catalog is consulted for
+  /// a view first, its `select` compiled to a sub-plan and wrapped in a
+  /// `derived` leaf; otherwise a base table resolves and scans. A name neither
+  /// resolves is `SQLError.relation`.
+  private static func resolve<C: Catalog & ~Escapable>(_ relation: Relation,
+                                                       _ catalog: borrowing C)
+      throws(SQLError) -> Resolved {
+    if let view = catalog.view(named: relation.name) {
+      let plan = try optimise(compile(view.select, catalog), catalog)
+      let schema = view.schema()
+      return Resolved(schema: schema) { ordinals in
+        .derived(name: relation.name, plan: plan, ordinals: ordinals,
+                 seek: nil)
+      }
+    }
+
+    guard let table = catalog.table(named: relation.name) else {
+      throw .relation(relation.name)
+    }
+    let schema = table.schema()
+    let name = relation.name
+    return Resolved(schema: schema) { ordinals in
+      .scan(name: name, ordinals: ordinals, seek: nil)
+    }
   }
 
   /// The sorted, deduplicated ordinals a query references: the union of its
@@ -205,6 +237,10 @@ public enum Engine {
       throws(SQLError) -> Plan {
     switch plan {
     case .scan:
+      plan
+    case .derived:
+      // A view's sub-plan is optimised when the view is compiled; a derived
+      // leaf carries no sort key, so it scans its result as is.
       plan
     case let .select(filter, .scan(name, ordinals, nil)):
       try seek(filter, name, ordinals, catalog)

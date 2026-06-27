@@ -651,9 +651,8 @@ struct EngineViewTests {
     // view and inspect the `.derived` leaf: its sub-plan must reach a seeked
     // `.scan` (a non-nil seek) and carry no `.select` over a raw scan.
     let catalog = try views()
-    let plan = try Engine.optimise(
-        Engine.compile(parse("SELECT Key, Label FROM Adults"), catalog),
-        catalog)
+    let select = try parse("SELECT Key, Label FROM Adults")
+    let plan = try Engine.optimise(Engine.compile(select, catalog), catalog)
     let sub = try #require(derived(plan))
     #expect(seeks(sub))
     #expect(!filters(sub))

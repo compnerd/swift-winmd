@@ -303,9 +303,11 @@ public enum Engine {
   /// its table ordinal through `ordinals` (slot `i` is `ordinals[i]`) for the
   /// `bound` query. A `string` operand or an unseekable column never qualifies,
   /// and the executor scans.
-  private static func boundaries<T: Table & ~Escapable>(
-      _ filter: Filter, _ ordinals: Array<Int>, _ table: borrowing T,
-      _ count: Int) -> Range<Int>? {
+  private static func boundaries<T: Table & ~Escapable>(_ filter: Filter,
+                                                        _ ordinals: Array<Int>,
+                                                        _ table: borrowing T,
+                                                        _ count: Int)
+      -> Range<Int>? {
     guard case let .compare(slot, op, .integer(value)) = filter,
         let lower = table.bound(ordinals[slot], value, strict: false),
         let upper = table.bound(ordinals[slot], value, strict: true) else {

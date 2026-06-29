@@ -10,6 +10,7 @@ extension Statement {
   /// ```sql
   /// SELECT <* | column (, column)*> FROM <table>
   ///   [WHERE <predicate>] [ORDER BY <column> [ASC|DESC]]
+  ///   (UNION [ALL] SELECT …)*
   /// ```
   ///
   /// The resulting AST is generic: it names a relation and its columns as

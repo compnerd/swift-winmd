@@ -49,27 +49,28 @@ public enum Value: Hashable, Sendable {
 
 // MARK: - View
 
-/// A named `SELECT` registered as a first-class relation.
+/// A named query registered as a first-class relation.
 ///
 /// A view is a stored query the engine resolves wherever a base table is: its
-/// `select` is the query that produces the rows, and `columns` names the
-/// relation's columns in projection order — column `i` is the `i`th projected
-/// value of `select`. A view is fully escapable data — no borrowed storage — so
-/// it sits beside the `~Escapable` base tables in the same catalog namespace; a
-/// catalog vends one through `view(named:)`. The engine compiles a view's
-/// `select` into a sub-plan and splices it in where the view is named, the
-/// outer query addressing the view's columns by their ordinal in `columns`. A
-/// view carries no virtual column, so its `extent` is its `columns` count.
+/// `query` is the `SELECT` — or `UNION` of several — that produces the rows,
+/// and `columns` names the relation's columns in projection order — column `i`
+/// is the `i`th projected value of the query's first arm. A view is fully
+/// escapable data — no borrowed storage — so it sits beside the `~Escapable`
+/// base tables in the same catalog namespace; a catalog vends one through
+/// `view(named:)`. The engine compiles a view's `query` into a sub-plan and
+/// splices it in where the view is named, the outer query addressing the view's
+/// columns by their ordinal in `columns`. A view carries no virtual column, so
+/// its `extent` is its `columns` count.
 public struct View: Hashable, Sendable {
   /// The query the view stands for.
-  public let select: Select
+  public let query: Query
 
   /// The view's column names, in projection order — column `i` is the `i`th
-  /// projected value of `select`.
+  /// projected value of the query's first arm.
   public let columns: Array<String>
 
-  public init(select: Select, columns: Array<String>) {
-    self.select = select
+  public init(query: Query, columns: Array<String>) {
+    self.query = query
     self.columns = columns
   }
 }

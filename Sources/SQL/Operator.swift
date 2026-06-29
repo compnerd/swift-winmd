@@ -128,6 +128,15 @@ internal indirect enum Plan {
   /// (for the seek `bound`).
   case join(Plan, name: String, ordinals: Array<Int>, base: Int,
             column: Int, keys: (left: Int, right: Int))
+  /// ∪ — the rows of the `left` sub-plan followed by the `right`'s, in source
+  /// order. With `all` the duplicates are kept (`UNION ALL`); without it the
+  /// whole-row duplicates of the combined rows are removed, the first occurrence
+  /// preserved (`UNION`). The node is binary and mirrors the left-associative
+  /// `Query` chain, so each `UNION`/`UNION ALL` honours its OWN `all`: a `UNION`
+  /// nested under a `UNION ALL` dedups its own pair before the outer node
+  /// appends the trailing arm. Both sides yield rows of the same width — the
+  /// result columns of the first arm.
+  case union(Plan, Plan, all: Bool)
 }
 
 // MARK: - Interpreter
@@ -140,8 +149,11 @@ internal indirect enum Plan {
 /// records; `project` rebuilds each from the projected slots; `sort` orders them
 /// by a typed key, stably and in the requested direction; `product` pairs every
 /// outer record with every inner one; `join` re-resolves the inner relation,
-/// seeks it per outer record, and concatenates the matches. The catalog is
-/// borrowed throughout — a `~Escapable` source is never copied or stored.
+/// seeks it per outer record, and concatenates the matches; `union` runs its
+/// two sides — each with its own union semantics — and concatenates their rows,
+/// deduplicating the whole row unless `all`.
+/// The catalog is borrowed throughout — a `~Escapable` source is never copied
+/// or stored.
 internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
                                                _ catalog: borrowing C,
                                                _ routines: Routines,
@@ -176,7 +188,36 @@ internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
   case let .join(outer, name, ordinals, base, column, keys):
     try join(execute(outer, catalog, routines, bindings), name, ordinals,
              base, column, keys, catalog)
+  case let .union(left, right, all):
+    try union(left, right, all, catalog, routines, bindings)
   }
+}
+
+/// Concatenates the rows of `left` followed by `right`, deduplicating the whole
+/// combined row — first occurrence kept — unless `all` (`UNION ALL`, every row
+/// kept).
+///
+/// Each side runs through the same `catalog`, `routines`, and `bindings`, so a
+/// bound parameter threads into every arm alike. A side may itself be a `union`,
+/// and it executes with its OWN semantics first — a `UNION` nested under a
+/// `UNION ALL` dedups its pair before the outer node appends `right`. A `Record`
+/// is `Hashable`, so `UNION`'s dedup keys on the materialised row.
+private func union<C: Catalog & ~Escapable>(_ left: Plan, _ right: Plan,
+                                            _ all: Bool,
+                                            _ catalog: borrowing C,
+                                            _ routines: Routines,
+                                            _ bindings: Bindings)
+    throws(SQLError) -> Array<Record> {
+  let rows = try execute(left, catalog, routines, bindings)
+      + execute(right, catalog, routines, bindings)
+  guard !all else { return rows }
+
+  var records = Array<Record>()
+  var seen = Set<Record>()
+  for record in rows where seen.insert(record).inserted {
+    records.append(record)
+  }
+  return records
 }
 
 /// Evaluates each projected `term` against `record` through `routines` to the

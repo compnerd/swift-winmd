@@ -6,7 +6,8 @@
 /// The grammar is the minimal dialect, extended with a chain of joins:
 ///
 /// ```
-/// statement   := select
+/// statement   := query
+/// query       := select (UNION [ALL] select)*
 /// select      := SELECT projection FROM relation (join)* [where] [order]
 /// relation    := identifier [AS identifier]
 /// join        := JOIN relation ON column '=' column
@@ -45,12 +46,29 @@ internal struct Parser: ~Escapable {
   // MARK: - Statement
 
   /// Parses a complete statement and asserts the input is exhausted.
+  ///
+  /// A statement is a `query` — a `SELECT` or a `UNION` of several.
   internal mutating func parse() throws(SQLError) -> Statement {
-    let statement = try Statement.select(select())
+    let statement = try Statement.select(query())
     if let token = current {
       throw .trailing(at: token.location)
     }
     return statement
+  }
+
+  /// Parses `select (UNION [ALL] select)*`, left-associative.
+  ///
+  /// The leading `SELECT` is the seed `Query`; each `UNION` (optionally `ALL`)
+  /// folds the next `SELECT` onto the right, so `a UNION b UNION c` reads in
+  /// source order. `UNION ALL` keeps duplicate rows; a bare `UNION` removes
+  /// them — the distinction the engine honours.
+  private mutating func query() throws(SQLError) -> Query {
+    var query = try Query.select(select())
+    while try match(.union) {
+      let all = try match(.all)
+      query = try .union(query, select(), all: all)
+    }
+    return query
   }
 
   /// Parses a `SELECT` query.

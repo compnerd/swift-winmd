@@ -32,6 +32,8 @@ extension Token {
     case `as`
     case `is`
     case null
+    case union
+    case all
 
     // Operands.
     case identifier(String)
@@ -73,6 +75,8 @@ extension Token.Kind {
     case .as: "AS"
     case .is: "IS"
     case .null: "NULL"
+    case .union: "UNION"
+    case .all: "ALL"
     case let .identifier(name): name
     case let .string(value): "'\(value)'"
     case let .integer(value): "\(value)"

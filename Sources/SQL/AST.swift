@@ -3,12 +3,12 @@
 
 /// A parsed SQL statement.
 ///
-/// The dialect supports a single statement shape, now with an optional join:
+/// The dialect supports a single statement shape, with zero or more joins:
 ///
 /// ```sql
 /// SELECT <* | column (, column)*>
 ///   FROM <table> [AS alias]
-///   [JOIN <table> [AS alias] ON <column> = <column>]
+///   (JOIN <table> [AS alias] ON <column> = <column>)*
 ///   [WHERE <predicate>] [ORDER BY <column> [ASC|DESC]]
 /// ```
 ///
@@ -20,7 +20,7 @@ public enum Statement: Hashable, Sendable {
   case select(Select)
 }
 
-/// A `SELECT` query: a projection over one relation or a join of two, with an
+/// A `SELECT` query: a projection over one relation or a chain of joins, with an
 /// optional predicate and ordering.
 public struct Select: Hashable, Sendable {
   /// The columns the query yields.
@@ -29,8 +29,9 @@ public struct Select: Hashable, Sendable {
   /// The primary relation the query scans.
   public let from: Relation
 
-  /// The join applied to `from`, if any.
-  public let join: Join?
+  /// The joins applied to `from`, in source order — `from JOIN joins[0] JOIN
+  /// joins[1] …`, a left-deep chain. Empty for a single-relation query.
+  public let joins: Array<Join>
 
   /// The row filter, if any.
   public let predicate: Predicate?
@@ -38,11 +39,12 @@ public struct Select: Hashable, Sendable {
   /// The ordering applied to the result, if any.
   public let order: Order?
 
-  public init(projection: Projection, from: Relation, join: Join? = nil,
-              predicate: Predicate? = nil, order: Order? = nil) {
+  public init(projection: Projection, from: Relation,
+              joins: Array<Join> = [], predicate: Predicate? = nil,
+              order: Order? = nil) {
     self.projection = projection
     self.from = from
-    self.join = join
+    self.joins = joins
     self.predicate = predicate
     self.order = order
   }

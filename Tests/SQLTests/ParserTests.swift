@@ -262,7 +262,7 @@ struct RelationTests {
   func bare() throws {
     let select = try parseSelect("SELECT * FROM TypeDef")
     #expect(select.from == Relation(name: "TypeDef"))
-    #expect(select.join == nil)
+    #expect(select.joins.isEmpty)
   }
 
   @Test("parses an AS alias on the FROM relation")
@@ -293,9 +293,10 @@ struct JoinTests {
           WHERE t.TypeName = 'IUnknown'
         """)
     #expect(select.from == Relation(name: "TypeDef", alias: "t"))
-    #expect(select.join
-                == Join(relation: Relation(name: "MethodDef", alias: "m"),
-                        left: Column("m.parent"), right: Column("t.rowid")))
+    #expect(select.joins == [
+      Join(relation: Relation(name: "MethodDef", alias: "m"),
+           left: Column("m.parent"), right: Column("t.rowid")),
+    ])
     #expect(select.projection == .columns([Column("m.Name")]))
     let value = Expression.literal(.string("IUnknown"))
     #expect(select.predicate == .comparison(left: .column("t.TypeName"),
@@ -308,9 +309,10 @@ struct JoinTests {
         SELECT r.TypeName FROM TypeDef AS t
           JOIN TypeRef AS r ON t.Extends = r.rowid
         """)
-    #expect(select.join
-                == Join(relation: Relation(name: "TypeRef", alias: "r"),
-                        left: Column("t.Extends"), right: Column("r.rowid")))
+    #expect(select.joins == [
+      Join(relation: Relation(name: "TypeRef", alias: "r"),
+           left: Column("t.Extends"), right: Column("r.rowid")),
+    ])
   }
 
   @Test("parses a join without aliases")
@@ -320,10 +322,27 @@ struct JoinTests {
           JOIN Param ON Param.parent = MethodDef.rowid
         """)
     #expect(select.from == Relation(name: "MethodDef"))
-    #expect(select.join
-                == Join(relation: Relation(name: "Param"),
-                        left: Column("Param.parent"),
-                        right: Column("MethodDef.rowid")))
+    #expect(select.joins == [
+      Join(relation: Relation(name: "Param"),
+           left: Column("Param.parent"),
+           right: Column("MethodDef.rowid")),
+    ])
+  }
+
+  @Test("parses a chain of two joins in source order")
+  func chainedJoins() throws {
+    let select = try parseSelect("""
+        SELECT Param.Name FROM TypeDef AS t
+          JOIN MethodDef AS m ON m.parent = t.rowid
+          JOIN Param ON Param.parent = m.rowid
+        """)
+    #expect(select.from == Relation(name: "TypeDef", alias: "t"))
+    #expect(select.joins == [
+      Join(relation: Relation(name: "MethodDef", alias: "m"),
+           left: Column("m.parent"), right: Column("t.rowid")),
+      Join(relation: Relation(name: "Param"),
+           left: Column("Param.parent"), right: Column("m.rowid")),
+    ])
   }
 
   @Test("rejects a join missing ON")

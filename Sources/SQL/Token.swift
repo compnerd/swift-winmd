@@ -30,6 +30,8 @@ extension Token {
     case join
     case on
     case `as`
+    case `is`
+    case null
 
     // Operands.
     case identifier(String)
@@ -69,6 +71,8 @@ extension Token.Kind {
     case .join: "JOIN"
     case .on: "ON"
     case .as: "AS"
+    case .is: "IS"
+    case .null: "NULL"
     case let .identifier(name): name
     case let .string(value): "'\(value)'"
     case let .integer(value): "\(value)"

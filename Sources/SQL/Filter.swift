@@ -26,6 +26,9 @@ internal indirect enum Filter {
   /// `left = right`, both columns addressed by ordinal — a join's `ON`
   /// equality, lowered as a conjunct of the product's `Select` predicate.
   case match(Int, Int)
+  /// `term IS NULL`, or `IS NOT NULL` when `negated` — the lowered form of the
+  /// AST's `null`, a definite two-valued test (never UNKNOWN).
+  case null(Term, negated: Bool)
   /// `lhs AND rhs`.
   case and(Filter, Filter)
   /// `lhs OR rhs`.
@@ -133,12 +136,15 @@ extension Comparison {
   }
 }
 
-/// Matches two typed values under operator `op`.
+/// Matches two typed values under operator `op`, under three-valued logic.
 ///
-/// A like-typed pair compares — two integers or two strings; a cross-typed pair
-/// (an integer against a string, or the reverse) never matches.
-private func matches(_ lhs: Value, _ op: Comparison, _ rhs: Value) -> Bool {
+/// A `NULL` on either side is UNKNOWN (`nil`): `NULL` is unordered and unequal
+/// to everything, itself included, so no comparison against it is ever true or
+/// false. A like-typed non-null pair compares — two integers or two strings; a
+/// cross-typed pair (an integer against a string, or the reverse) never matches.
+private func matches(_ lhs: Value, _ op: Comparison, _ rhs: Value) -> Bool? {
   switch (lhs, rhs) {
+  case (.null, _), (_, .null): nil
   case let (.integer(lhs), .integer(rhs)): op.apply(lhs, rhs)
   case let (.text(lhs), .text(rhs)): op.apply(lhs, rhs)
   default: false
@@ -149,11 +155,14 @@ private func matches(_ lhs: Value, _ op: Comparison, _ rhs: Value) -> Bool {
 /// calls through `routines` and any bound parameter from `bindings`.
 ///
 /// The result is `true`, `false`, or `nil` — SQL's UNKNOWN. A `compare`
-/// evaluates both operand terms and matches them; a `bound` matches the left
-/// term against the parameter's bound value, but an unbound or absent parameter
-/// UNKNOWN (`nil`), not `false` — a missing binding cannot be inverted into a
-/// match by `NOT`. A `match` reads both cells and tests them equal; `AND` and
-/// `OR` follow Kleene logic (`false` dominates `AND`, `true` dominates `OR`,
+/// evaluates both operand terms and matches them — a `NULL` operand making the
+/// comparison UNKNOWN; a `bound` matches the left term against the parameter's
+/// bound value, but an unbound or absent parameter is UNKNOWN (`nil`), not
+/// `false` — a missing binding cannot be inverted into a match by `NOT`. A
+/// `match` tests both cells equal under the same three-valued rule, so a `NULL`
+/// join key matches nothing; a `null` is a definite test of whether its term
+/// is `NULL` (`true`/`false`, never UNKNOWN), negated for `IS NOT NULL`. `AND`
+/// and `OR` follow Kleene logic (`false` dominates `AND`, `true` dominates `OR`,
 /// UNKNOWN otherwise) and `NOT` maps UNKNOWN to itself. The executor admits a
 /// row only when the whole predicate is `true` (its `== true` gate), so UNKNOWN
 /// and `false` both reject. The `borrowing` row is non-escaping; it threads
@@ -173,7 +182,9 @@ internal func evaluate<R: Row & ~Escapable>(_ filter: Filter,
       nil
     }
   case let .match(left, right):
-    row[left] == row[right]
+    matches(row[left], .equal, row[right])
+  case let .null(term, negated):
+    try (evaluate(term, row, routines) == .null) != negated
   case let .and(lhs, rhs):
     // `&&`/`||` take an `@autoclosure` right operand, which would capture the
     // borrowed `~Escapable` row; spell each connective explicitly so a branch

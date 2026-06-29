@@ -152,6 +152,32 @@ struct PredicateTests {
     #expect(select.predicate == .and(.or(a, b), c))
   }
 
+  @Test("parses IS NULL")
+  func isNull() throws {
+    let select = try parseSelect("SELECT * FROM T WHERE Note IS NULL")
+    #expect(select.predicate == .null(.column("Note"), negated: false))
+  }
+
+  @Test("parses IS NOT NULL")
+  func isNotNull() throws {
+    let select = try parseSelect("SELECT * FROM T WHERE Note IS NOT NULL")
+    #expect(select.predicate == .null(.column("Note"), negated: true))
+  }
+
+  @Test("parses IS NULL over a function-call operand")
+  func isNullCall() throws {
+    let select = try parseSelect("SELECT * FROM T WHERE iid(Id) IS NULL")
+    let call = Expression.call(name: "iid", arguments: [.column("Id")])
+    #expect(select.predicate == .null(call, negated: false))
+  }
+
+  @Test("rejects IS without NULL")
+  func isWithoutNull() {
+    #expect(throws: SQLError.self) {
+      _ = try Statement(parsing: "SELECT * FROM T WHERE Note IS 1")
+    }
+  }
+
   @Test("parses OR left-associatively")
   func leftAssociativeOr() throws {
     // a = 1 OR b = 2 OR c = 3  ==>  ((a OR b) OR c)

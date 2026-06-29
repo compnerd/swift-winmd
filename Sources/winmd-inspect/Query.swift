@@ -49,9 +49,12 @@ internal struct Query: ParsableCommand {
   }
 
   /// Renders a typed cell value to its display string: text verbatim, an
-  /// integer as its decimal spelling.
+  /// integer as its decimal spelling, a `NULL` as the empty string (the way
+  /// `sqlite3`'s list mode shows it).
   private static func render(_ value: Value) -> String {
     switch value {
+    case .null:
+      ""
     case let .integer(integer):
       "\(integer)"
     case let .text(text):

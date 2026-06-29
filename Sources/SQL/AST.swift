@@ -200,6 +200,11 @@ public indirect enum Predicate: Hashable, Sendable {
   /// resolved at run time from the engine's bindings (the correlated-subquery
   /// primitive a child view keys on the parent's value).
   case bound(left: Expression, op: Comparison, parameter: String)
+  /// `operand IS NULL`, or `IS NOT NULL` when `negated` — a definite test of
+  /// whether the operand evaluates to `NULL` (never itself UNKNOWN), the way a
+  /// nullable column — an absent decoded attribute — is filtered (`WHERE iid IS
+  /// NOT NULL`).
+  case null(Expression, negated: Bool)
   /// `lhs AND rhs`.
   case and(Predicate, Predicate)
   /// `lhs OR rhs`.

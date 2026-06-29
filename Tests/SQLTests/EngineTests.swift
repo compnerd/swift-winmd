@@ -257,6 +257,50 @@ private func views() throws -> Memory {
                 views: ["Adults": adults, "Pairs": pairs, "Picked": picked])
 }
 
+/// A catalog with NULL cells: a `Maybe` relation whose `Note` text column is
+/// `NULL` in some rows, to exercise three-valued comparison and `IS [NOT] NULL`.
+private func nullable() -> Memory {
+  let fields = [
+    Field(name: "Id", kind: .integer),
+    Field(name: "Note", kind: .text),
+  ]
+  let records = [
+    [.integer(1), .text("alpha")],
+    [.integer(2), .null],
+    [.integer(3), .text("gamma")],
+    [.integer(4), .null],
+  ] as Array<Array<Value>>
+  return Memory(["Maybe": Relation(fields, records)])
+}
+
+/// The null-key join catalog: a `Parent` sorted on `Id` and a `Child` one of
+/// whose foreign keys is `NULL`, to prove a `NULL` join key matches nothing.
+private func nullableKeys() -> Memory {
+  let parent = [
+    Field(name: "Id", kind: .integer),
+    Field(name: "Name", kind: .text),
+  ]
+  let parents = [
+    [.integer(1), .text("Ada")],
+    [.integer(2), .text("Bee")],
+  ] as Array<Array<Value>>
+
+  let child = [
+    Field(name: "Pid", kind: .integer),
+    Field(name: "Name", kind: .text),
+  ]
+  let children = [
+    [.integer(1), .text("Ann")],
+    [.null, .text("Nobody")],
+    [.integer(2), .text("Bob")],
+  ] as Array<Array<Value>>
+
+  return Memory([
+    "Parent": Relation(parent, parents, sorted: 0),
+    "Child": Relation(child, children),
+  ])
+}
+
 /// Parses `text` to a `SELECT`, failing on any other statement.
 private func select(_ text: String) throws -> Select {
   try parse(text)
@@ -289,6 +333,11 @@ private func join(_ text: String) throws -> Array<Array<Value>> {
 /// Runs `text` against the view catalog.
 private func view(_ text: String) throws -> Array<Array<Value>> {
   try Engine.run(parse(text), views())
+}
+
+/// Runs `text` against the nullable `Maybe` catalog.
+private func nullable(_ text: String) throws -> Array<Array<Value>> {
+  try Engine.run(parse(text), nullable())
 }
 
 // MARK: - Single-relation tests
@@ -837,6 +886,74 @@ struct EngineFunctionTests {
     let rows =
         try functionRun("SELECT Name FROM People WHERE add(Id, 10) = 12")
     #expect(rows == [[.text("Bob")]])
+  }
+}
+
+// MARK: - NULL tests
+
+struct EngineNullTests {
+  @Test("IS NULL admits only the NULL rows")
+  func isNull() throws {
+    let rows = try nullable("SELECT Id FROM Maybe WHERE Note IS NULL")
+    #expect(rows == [[.integer(2)], [.integer(4)]])
+  }
+
+  @Test("IS NOT NULL admits only the non-NULL rows")
+  func isNotNull() throws {
+    let rows = try nullable("SELECT Id FROM Maybe WHERE Note IS NOT NULL")
+    #expect(rows == [[.integer(1)], [.integer(3)]])
+  }
+
+  @Test("a comparison against a NULL cell is UNKNOWN and rejects")
+  func comparison() throws {
+    // For the NULL rows (2, 4) `Note = 'alpha'` is UNKNOWN, not false, so they
+    // are not admitted; only the row whose Note equals 'alpha' survives.
+    let rows = try nullable("SELECT Id FROM Maybe WHERE Note = 'alpha'")
+    #expect(rows == [[.integer(1)]])
+  }
+
+  @Test("NOT of a NULL comparison stays UNKNOWN and rejects")
+  func negated() throws {
+    // The NULL rows are UNKNOWN; NOT UNKNOWN is UNKNOWN, so they still reject —
+    // only the non-null, non-'alpha' row survives.
+    let rows = try nullable("SELECT Id FROM Maybe WHERE NOT Note = 'alpha'")
+    #expect(rows == [[.integer(3)]])
+  }
+
+  @Test("a NULL cell projects as a NULL value")
+  func projection() throws {
+    let rows = try nullable("SELECT Note FROM Maybe WHERE Id = 2")
+    #expect(rows == [[.null]])
+  }
+
+  @Test("ORDER BY ascending sorts NULL keys first, then by value")
+  func orderAscending() throws {
+    // NULL holds a stable position — first in ascending order — so the non-null
+    // notes still sort among themselves ('alpha' before 'gamma') rather than
+    // tying with the nulls and leaving the order undefined.
+    let rows = try nullable("SELECT Id FROM Maybe ORDER BY Note ASC")
+    #expect(rows == [[.integer(2)], [.integer(4)], [.integer(1)], [.integer(3)]])
+  }
+
+  @Test("ORDER BY descending sorts NULL keys last")
+  func orderDescending() throws {
+    let rows = try nullable("SELECT Id FROM Maybe ORDER BY Note DESC")
+    #expect(rows == [[.integer(3)], [.integer(1)], [.integer(2)], [.integer(4)]])
+  }
+
+  @Test("a NULL outer join key matches no inner row")
+  func join() throws {
+    // The child with a NULL foreign key is the outer row; a NULL key equi-joins
+    // to nothing, so it contributes no pair — `Parent` is sorted, so the inner
+    // is seeked and the NULL key is skipped before probing.
+    let rows = try Engine.run(parse("""
+        SELECT Child.Name, Parent.Name FROM Child
+          JOIN Parent ON Parent.Id = Child.Pid
+        """), nullableKeys())
+    #expect(rows == [
+      [.text("Ann"), .text("Ada")],
+      [.text("Bob"), .text("Bee")],
+    ])
   }
 }
 

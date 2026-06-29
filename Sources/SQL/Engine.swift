@@ -207,6 +207,8 @@ public enum Engine {
       .bound(remap(term, slot), op, parameter)
     case let .match(left, right):
       .match(slot[left]!, slot[right]!)
+    case let .null(term, negated):
+      .null(remap(term, slot), negated: negated)
     case let .and(lhs, rhs):
       .and(remap(lhs, slot), remap(rhs, slot))
     case let .or(lhs, rhs):

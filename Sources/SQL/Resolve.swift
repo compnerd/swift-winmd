@@ -96,6 +96,8 @@ extension Schema {
       try .compare(term(left, in: relation), op, term(right, in: relation))
     case let .bound(left, op, parameter):
       try .bound(term(left, in: relation), op, parameter)
+    case let .null(expression, negated):
+      try .null(term(expression, in: relation), negated: negated)
     case let .and(lhs, rhs):
       try .and(lower(lhs, in: relation), lower(rhs, in: relation))
     case let .or(lhs, rhs):
@@ -261,6 +263,8 @@ internal struct Scope {
       try .compare(term(left), op, term(right))
     case let .bound(left, op, parameter):
       try .bound(term(left), op, parameter)
+    case let .null(expression, negated):
+      try .null(term(expression), negated: negated)
     case let .and(lhs, rhs):
       try .and(lower(lhs), lower(rhs))
     case let .or(lhs, rhs):
@@ -290,6 +294,8 @@ extension Filter {
     case let .match(left, right):
       ordinals.insert(left)
       ordinals.insert(right)
+    case let .null(term, _):
+      term.references(into: &ordinals)
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.references(into: &ordinals)
       rhs.references(into: &ordinals)

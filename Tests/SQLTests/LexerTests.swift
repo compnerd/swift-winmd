@@ -42,6 +42,12 @@ struct LexerTests {
     #expect(try lex("join on As") == [.join, .on, .as])
   }
 
+  @Test("lexes the NULL-test keywords")
+  func nullKeywords() throws {
+    #expect(try lex("IS NOT NULL") == [.is, .not, .null])
+    #expect(try lex("is null") == [.is, .null])
+  }
+
   @Test("lexes the comparison operators")
   func operators() throws {
     #expect(try lex("= <> < > <= >=")

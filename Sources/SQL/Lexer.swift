@@ -241,6 +241,8 @@ internal struct Lexer: ~Escapable {
     case "JOIN": .join
     case "ON": .on
     case "AS": .as
+    case "IS": .is
+    case "NULL": .null
     default: .identifier(text)
     }
     return Token(kind: kind, location: start)

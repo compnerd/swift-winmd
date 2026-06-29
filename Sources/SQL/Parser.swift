@@ -17,7 +17,7 @@
 /// conjunction := negation (AND negation)*
 /// negation    := NOT negation | primary
 /// primary     := '(' predicate ')' | comparison
-/// comparison  := column op literal
+/// comparison  := expression (op (expression | param) | IS [NOT] NULL)
 /// order       := ORDER BY column [ASC | DESC]
 /// column      := identifier        // a dotted identifier is qualified
 /// ```
@@ -227,14 +227,21 @@ internal struct Parser: ~Escapable {
     return try comparison()
   }
 
-  /// Parses `expression op (expression | :parameter)`.
+  /// Parses `expression (op (expression | :parameter) | IS [NOT] NULL)`.
   ///
   /// Either operand may be a column, a literal, or a scalar-function call, so a
   /// predicate can filter on a decoded value (`WHERE guid(Id) = '…'`). A
   /// `:parameter` right operand binds the comparison to a value resolved at run
-  /// time from the engine's bindings — the correlated-subquery primitive.
+  /// time from the engine's bindings — the correlated-subquery primitive. An
+  /// `IS NULL` (or `IS NOT NULL`) tail tests the left expression for `NULL`
+  /// rather than comparing it — the way a nullable column is filtered.
   private mutating func comparison() throws(SQLError) -> Predicate {
     let left = try expression()
+    if try match(.is) {
+      let negated = try match(.not)
+      try expect(.null)
+      return .null(left, negated: negated)
+    }
     let op = try op()
     if case let .parameter(name) = current?.kind {
       _ = try advance(expecting: "a parameter")

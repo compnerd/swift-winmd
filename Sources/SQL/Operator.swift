@@ -286,6 +286,9 @@ private func join<C: Catalog & ~Escapable>(_ outer: Array<Record>,
   var records = Array<Record>()
   for left in outer {
     let value = left[keys.left]
+    // A NULL key equi-joins to nothing — NULL is unequal to every value,
+    // itself included — so it contributes no pair and need not probe.
+    if case .null = value { continue }
     let range = probe(inner, column, value, cursor.count)
     for index in range {
       guard let row = cursor.row(index) else { continue }
@@ -314,10 +317,17 @@ private func probe<T: Table & ~Escapable>(_ table: borrowing T, _ column: Int,
 
 /// Orders two typed sort keys ascending, by their value.
 ///
-/// Both keys are read from the same slot, so they share a `Value` kind; a kind
-/// mismatch (which a single-slot key never produces) orders as equal.
+/// `NULL` sorts before every non-null value — consistently first in ascending
+/// order, last in descending — so a nullable sort key holds a stable, total
+/// position rather than tying with every value (which is not a strict ordering
+/// and leaves the rest unsorted). Otherwise both keys share a `Value` kind, as
+/// they are read from the same slot, and compare by value; a kind mismatch a
+/// single-slot key never produces orders as equal.
 internal func less(_ lhs: Value, _ rhs: Value) -> Bool {
   switch (lhs, rhs) {
+  case (.null, .null): false
+  case (.null, _): true
+  case (_, .null): false
   case let (.integer(lhs), .integer(rhs)): lhs < rhs
   case let (.text(lhs), .text(rhs)): lhs < rhs
   default: false

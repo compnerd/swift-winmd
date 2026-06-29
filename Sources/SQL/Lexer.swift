@@ -228,6 +228,8 @@ internal struct Lexer: ~Escapable {
 
     let text = String(bytes, start.offset ..< position)
     let kind: Token.Kind = switch text.uppercased() {
+    case "CREATE": .create
+    case "VIEW": .view
     case "SELECT": .select
     case "FROM": .from
     case "WHERE": .where

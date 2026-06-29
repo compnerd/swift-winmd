@@ -58,6 +58,21 @@ public enum SQLError: Error, Hashable, Sendable {
   /// A scalar function rejects its arguments (the wrong count, or a value it
   /// cannot map); the string describes the fault.
   case argument(String)
+  /// A `CREATE VIEW` projects a column whose name cannot be inferred — a
+  /// `SELECT *`, or an unaliased non-column expression — and no explicit column
+  /// list names it; the string describes the offending projection.
+  case named(String)
+  /// A `CREATE VIEW`'s explicit column list does not match the view query's
+  /// output width — the list must name exactly one column per projected value —
+  /// carrying the `expected` query arity and the `got` list count. Caught at
+  /// parse when the projection's arity is known, and as an engine backstop when
+  /// a view (a `SELECT *` whose width is known only at resolution) is compiled.
+  case columns(expected: Int, got: Int)
+  /// A `CREATE VIEW` names two columns that collide — supplied explicitly or
+  /// inferred from the projection — under the case-insensitive resolution
+  /// `Schema.ordinal(of:)` performs, so the shadowed column would be
+  /// unreachable; the string is the offending name.
+  case duplicate(String)
   /// A `UNION` combines two `SELECT`s of differing column counts — the result
   /// columns of every arm must align — carrying the first arm's width and the
   /// offending arm's.
@@ -89,6 +104,13 @@ extension SQLError: CustomStringConvertible {
       "no such function '\(name)'"
     case let .argument(detail):
       "invalid function argument: \(detail)"
+    case let .named(detail):
+      "view column cannot be named: \(detail)"
+    case let .columns(expected, got):
+      "view column list count does not match the query: "
+          + "expected \(expected), got \(got)"
+    case let .duplicate(name):
+      "duplicate view column '\(name)'"
     case let .arity(expected, found):
       "UNION arms project differing column counts: "
           + "expected \(expected), found \(found)"

@@ -19,6 +19,11 @@
 public enum Statement: Hashable, Sendable {
   /// A `SELECT` query — one `SELECT`, or several combined with `UNION`.
   case select(Query)
+  /// A `CREATE VIEW name AS query`: the view's `name` and the `View` it binds
+  /// — the stored `query` and the column names (explicit or inferred from the
+  /// projection). A consumer registers the `View` under `name` in a catalog so
+  /// a later `SELECT … FROM name` resolves it.
+  case create(name: String, view: View)
 }
 
 /// A query: one `SELECT`, or several combined left-associatively with `UNION`.
@@ -37,7 +42,7 @@ public indirect enum Query: Hashable, Sendable {
 
   /// The first `SELECT` of the query — the leftmost arm, reached by descending
   /// the left-associative chain. Its projection names the result columns (the
-  /// ISO rule).
+  /// ISO rule), so a `CREATE VIEW` infers a union's columns from it.
   public var first: Select {
     switch self {
     case let .select(select): select

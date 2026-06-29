@@ -40,8 +40,11 @@ internal struct Query: ParsableCommand {
     // catalog, returning the projected, filtered, and ordered rows as typed
     // values.
     let rows = switch statement {
-    case let .select(select):
-      try Engine.run(select, database.storage)
+    case let .select(query):
+      try Engine.run(query, database.storage)
+    case .create:
+      throw ValidationError("CREATE VIEW is not a query; the query "
+                            + "subcommand runs a single SELECT")
     }
     for row in rows {
       print(row.map(Query.render).joined(separator: "\t"))

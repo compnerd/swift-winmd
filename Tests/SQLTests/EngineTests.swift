@@ -907,6 +907,30 @@ struct EngineViewTests {
     }
   }
 
+  @Test("a SELECT * view over-declaring its columns is rejected at resolution")
+  func wideStar() throws {
+    // `Parent` is two columns wide, but the view declares three. A `SELECT *`
+    // has no statically known arity, so the parser admits the list; the engine
+    // catches the mismatch at resolution rather than indexing past a row.
+    let star = try View(query: select("SELECT * FROM Parent"),
+                        columns: ["a", "b", "c"])
+    let catalog = Memory(family().relations, views: ["Star": star])
+    #expect(throws: SQLError.columns(expected: 2, got: 3)) {
+      try Engine.run(parse("SELECT a FROM Star"), catalog)
+    }
+  }
+
+  @Test("a SELECT * view whose explicit list matches the width resolves")
+  func matchedStar() throws {
+    // The same `SELECT *` view declared with the right number of columns
+    // resolves and queries — the backstop passes the well-formed view through.
+    let star = try View(query: select("SELECT * FROM Parent"),
+                        columns: ["a", "b"])
+    let catalog = Memory(family().relations, views: ["Star": star])
+    let rows = try Engine.run(parse("SELECT b FROM Star WHERE a = 1"), catalog)
+    #expect(rows == [[.text("Ada")]])
+  }
+
   @Test("a view's definition is optimised — its seekable predicate seeks")
   func optimised() throws {
     // `Adults` is `SELECT Id, Name FROM Parent WHERE Id >= 2`, and `Parent` is

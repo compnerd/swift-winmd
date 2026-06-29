@@ -17,6 +17,8 @@ extension Token {
   /// to a dedicated case; an identifier therefore never holds a keyword.
   internal enum Kind: Hashable, Sendable {
     // Keywords.
+    case create
+    case view
     case select
     case from
     case `where`
@@ -60,6 +62,8 @@ extension Token.Kind {
   /// A human-readable spelling of the token, for diagnostics.
   internal var description: String {
     switch self {
+    case .create: "CREATE"
+    case .view: "VIEW"
     case .select: "SELECT"
     case .from: "FROM"
     case .where: "WHERE"

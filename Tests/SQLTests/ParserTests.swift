@@ -470,6 +470,144 @@ struct ExpressionTests {
   }
 }
 
+// MARK: - CREATE VIEW
+
+/// Parses `text` and returns its `(name, view)`, failing on any other shape.
+private func parseCreate(_ text: String) throws -> (String, View) {
+  guard case let .create(name, view) = try Statement(parsing: text) else {
+    Issue.record("expected a CREATE VIEW statement")
+    throw SQLError.incomplete(expected: "a CREATE VIEW statement")
+  }
+  return (name, view)
+}
+
+struct CreateViewTests {
+  @Test("infers a view's columns from a bare-column projection")
+  func inferred() throws {
+    let (name, view) = try parseCreate("CREATE VIEW v AS SELECT a, b FROM t")
+    #expect(name == "v")
+    #expect(view.columns == ["a", "b"])
+    #expect(view.query == .select(Select(projection: .columns(["a", "b"]),
+                                         from: Relation(name: "t"))))
+  }
+
+  @Test("drops a qualifier when inferring a column name")
+  func qualified() throws {
+    let (_, view) = try parseCreate("CREATE VIEW v AS SELECT t.a FROM t")
+    #expect(view.columns == ["a"])
+  }
+
+  @Test("takes an explicit column list over the projection")
+  func explicit() throws {
+    let (name, view) =
+        try parseCreate("CREATE VIEW v (x, y) AS SELECT a, b FROM t")
+    #expect(name == "v")
+    #expect(view.columns == ["x", "y"])
+  }
+
+  @Test("rejects an explicit list wider than the projection")
+  func tooWide() {
+    // (a, b) names two columns over a one-value projection — the view would
+    // claim a column its rows lack.
+    #expect(throws: SQLError.columns(expected: 1, got: 2)) {
+      _ = try Statement(parsing: "CREATE VIEW v (a, b) AS SELECT id FROM t")
+    }
+  }
+
+  @Test("rejects an explicit list narrower than the projection")
+  func tooNarrow() {
+    // (a) names one column over a two-value projection — the projected `name`
+    // would have no view column.
+    #expect(throws: SQLError.columns(expected: 2, got: 1)) {
+      _ = try Statement(parsing: "CREATE VIEW v (a) AS SELECT id, name FROM t")
+    }
+  }
+
+  @Test("accepts an explicit list matching the projection arity")
+  func matched() throws {
+    let (_, view) =
+        try parseCreate("CREATE VIEW v (a, b) AS SELECT id, name FROM t")
+    #expect(view.columns == ["a", "b"])
+  }
+
+  @Test("defers a SELECT * view's column-count check to the engine")
+  func starExplicit() throws {
+    // A `SELECT *` has no statically known arity, so the parser admits any
+    // explicit list; the engine validates it against the relation at
+    // resolution.
+    let (_, view) =
+        try parseCreate("CREATE VIEW v (a, b) AS SELECT * FROM t")
+    #expect(view.columns == ["a", "b"])
+  }
+
+  @Test("infers a column name from an expression's alias")
+  func aliased() throws {
+    let (_, view) =
+        try parseCreate("CREATE VIEW v AS SELECT guid(Id) AS iid FROM t")
+    #expect(view.columns == ["iid"])
+  }
+
+  @Test("infers a bare column's name in an expression projection")
+  func mixed() throws {
+    // A projection carrying any alias is the richer expressions form; a bare
+    // column in it still infers to its own name.
+    let (_, view) =
+        try parseCreate("CREATE VIEW v AS SELECT Name, guid(Id) AS iid FROM t")
+    #expect(view.columns == ["Name", "iid"])
+  }
+
+  @Test("parses lowercase CREATE VIEW keywords")
+  func caseInsensitive() throws {
+    let (name, view) =
+        try parseCreate("create view v as select a from t")
+    #expect(name == "v")
+    #expect(view.columns == ["a"])
+  }
+
+  @Test("rejects a SELECT * view with no explicit columns")
+  func star() {
+    #expect(throws: SQLError.self) {
+      _ = try Statement(parsing: "CREATE VIEW v AS SELECT * FROM t")
+    }
+  }
+
+  @Test("rejects an unaliased expression with no explicit columns")
+  func unnamed() {
+    #expect(throws: SQLError.self) {
+      _ = try Statement(parsing: "CREATE VIEW v AS SELECT guid(Id) FROM t")
+    }
+  }
+
+  @Test("rejects an explicit duplicate column name")
+  func duplicateExplicit() {
+    #expect(throws: SQLError.duplicate("x")) {
+      _ = try Statement(parsing: "CREATE VIEW v (x, x) AS SELECT a, b FROM t")
+    }
+  }
+
+  @Test("rejects a case-insensitive explicit duplicate column name")
+  func duplicateExplicitFolded() {
+    #expect(throws: SQLError.duplicate("x")) {
+      _ = try Statement(parsing: "CREATE VIEW v (X, x) AS SELECT a, b FROM t")
+    }
+  }
+
+  @Test("rejects an inferred duplicate column name")
+  func duplicateInferred() {
+    #expect(throws: SQLError.duplicate("Name")) {
+      _ = try Statement(
+          parsing: "CREATE VIEW v AS SELECT t.Name, u.Name FROM t "
+              + "JOIN u ON t.Id = u.Id")
+    }
+  }
+
+  @Test("accepts a distinct inferred column list")
+  func distinctInferred() throws {
+    let (_, view) = try parseCreate("CREATE VIEW v AS SELECT a, b FROM t")
+    #expect(view.columns == ["a", "b"])
+  }
+}
+
 // MARK: - UNION
 
 /// Parses `text` and returns its `Query`, failing on any other statement shape.
@@ -514,5 +652,18 @@ struct UnionTests {
     let left = Select(projection: .columns(["a"]), from: Relation(name: "t"))
     let right = Select(projection: .columns(["b"]), from: Relation(name: "u"))
     #expect(query == .union(.select(left), right, all: true))
+  }
+
+  @Test("a CREATE VIEW over a UNION stores the query and the first arm's names")
+  func view() throws {
+    let (name, view) = try parseCreate(
+        "CREATE VIEW v AS SELECT a, b FROM t UNION SELECT c, d FROM u")
+    let left = Select(projection: .columns(["a", "b"]),
+                      from: Relation(name: "t"))
+    let right = Select(projection: .columns(["c", "d"]),
+                       from: Relation(name: "u"))
+    #expect(name == "v")
+    #expect(view.columns == ["a", "b"])
+    #expect(view.query == .union(.select(left), right, all: false))
   }
 }

@@ -6,7 +6,9 @@
 /// The grammar is the minimal dialect, extended with a chain of joins:
 ///
 /// ```
-/// statement   := query
+/// statement   := query | create
+/// create      := CREATE VIEW identifier ['(' identifier (',' identifier)* ')']
+///                  AS query
 /// query       := select (UNION [ALL] select)*
 /// select      := SELECT projection FROM relation (join)* [where] [order]
 /// relation    := identifier [AS identifier]
@@ -47,9 +49,14 @@ internal struct Parser: ~Escapable {
 
   /// Parses a complete statement and asserts the input is exhausted.
   ///
-  /// A statement is a `query` — a `SELECT` or a `UNION` of several.
+  /// A leading `CREATE` selects the `CREATE VIEW` form; anything else is a
+  /// `query` — a `SELECT` or a `UNION` of several.
   internal mutating func parse() throws(SQLError) -> Statement {
-    let statement = try Statement.select(query())
+    let statement = if current?.kind == .create {
+      try create()
+    } else {
+      try Statement.select(query())
+    }
     if let token = current {
       throw .trailing(at: token.location)
     }
@@ -69,6 +76,101 @@ internal struct Parser: ~Escapable {
       query = try .union(query, select(), all: all)
     }
     return query
+  }
+
+  /// Parses `CREATE VIEW identifier ['(' identifier (, identifier)* ')'] AS
+  /// query` (the leading `CREATE` is the next token).
+  ///
+  /// An explicit `(col, col, …)` list names the view's columns; absent one, the
+  /// names are inferred from the FIRST arm's projection (the ISO rule for a
+  /// union's result columns). A projection whose names cannot be inferred — a
+  /// `SELECT *`, or an unaliased non-column expression — faults with
+  /// `SQLError.named`. An explicit list that does not name exactly one column
+  /// per projected value, when the first arm's arity is statically known (a
+  /// `.columns` or `.expressions` projection, but not a `SELECT *`), faults with
+  /// `SQLError.columns`; a `SELECT *` view's width is checked by the engine at
+  /// resolution instead. The final names — explicit or inferred — must be
+  /// case-insensitively unique, matching `Schema.ordinal(of:)`'s resolution; a
+  /// collision faults with `SQLError.duplicate`.
+  private mutating func create() throws(SQLError) -> Statement {
+    try expect(.create)
+    try expect(.view)
+    let name = try identifier()
+
+    var explicit: Array<String>? = nil
+    if try match(.lparen) {
+      var columns = Array<String>()
+      try columns.append(identifier())
+      while try match(.comma) {
+        try columns.append(identifier())
+      }
+      try expect(.rparen)
+      explicit = columns
+    }
+
+    try expect(.as)
+    let query = try query()
+    let columns: Array<String>
+    if let explicit {
+      if let arity = arity(query.first.projection), explicit.count != arity {
+        throw .columns(expected: arity, got: explicit.count)
+      }
+      columns = explicit
+    } else {
+      columns = try infer(query.first.projection)
+    }
+    // A view's columns must be case-insensitively unique — explicit or
+    // inferred — to match the resolution `Schema.ordinal(of:)` performs; a
+    // collision would shadow the later column and make it unreachable.
+    var seen = Set<String>()
+    for column in columns where !seen.insert(column.lowercased()).inserted {
+      throw .duplicate(column)
+    }
+    return .create(name: name, view: View(query: query, columns: columns))
+  }
+
+  /// The number of values `projection` projects, or `nil` when it is not
+  /// statically known — a `SELECT *`, whose width depends on the relations it is
+  /// resolved against. A `.columns` or `.expressions` projection has a fixed
+  /// item count.
+  private func arity(_ projection: Projection) -> Int? {
+    switch projection {
+    case .all:
+      nil
+    case let .columns(columns):
+      columns.count
+    case let .expressions(items):
+      items.count
+    }
+  }
+
+  /// Infers a view's column names from its `projection`.
+  ///
+  /// A `columns` projection yields each reference's name (the qualifier
+  /// dropped); an `expressions` projection yields each item's alias, or — for a
+  /// bare column with no alias — the column's name; a non-column expression with
+  /// no alias, and a `SELECT *`, have no inferable name and fault with
+  /// `SQLError.named`.
+  private func infer(_ projection: Projection) throws(SQLError)
+      -> Array<String> {
+    switch projection {
+    case .all:
+      throw .named("SELECT *")
+    case let .columns(columns):
+      return columns.map(\.name)
+    case let .expressions(items):
+      var names = Array<String>()
+      for item in items {
+        if let alias = item.alias {
+          names.append(alias)
+        } else if case let .column(column) = item.expression {
+          names.append(column.name)
+        } else {
+          throw .named("an unaliased expression")
+        }
+      }
+      return names
+    }
   }
 
   /// Parses a `SELECT` query.

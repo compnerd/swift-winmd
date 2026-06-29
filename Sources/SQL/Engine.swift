@@ -237,11 +237,21 @@ public enum Engine {
   /// a view first, its `select` compiled to a sub-plan and wrapped in a
   /// `derived` leaf; otherwise a base table resolves and scans. A name neither
   /// resolves is `SQLError.relation`.
+  ///
+  /// A view's `columns` must name exactly one column per value its query
+  /// projects, or the view's schema would let a query index past a sub-plan row.
+  /// The parser checks this whenever the projection's arity is statically known;
+  /// this is the backstop for a `SELECT *` view, whose width is known only here,
+  /// after the sub-plan compiles — a mismatch is `SQLError.columns`.
   private static func resolve<C: Catalog & ~Escapable>(_ relation: Relation,
                                                        _ catalog: borrowing C)
       throws(SQLError) -> Resolved {
     if let view = catalog.view(named: relation.name) {
       let plan = try compile(view.query, catalog)
+      let projected = width(plan)
+      guard view.columns.count == projected else {
+        throw .columns(expected: projected, got: view.columns.count)
+      }
       let schema = view.schema()
       return Resolved(schema: schema) { ordinals in
         .derived(name: relation.name, plan: plan, ordinals: ordinals,
@@ -256,6 +266,26 @@ public enum Engine {
     let name = relation.name
     return Resolved(schema: schema) { ordinals in
       .scan(name: name, ordinals: ordinals, seek: nil)
+    }
+  }
+
+  /// The number of values a compiled `plan` projects — its output column count.
+  ///
+  /// `compile` shapes every arm as `Project(…)`, so the projected width is the
+  /// `project`'s term count; a `union` is as wide as its (left) arm, every arm
+  /// aligned by the arity check. This measures a view's sub-plan against its
+  /// declared `columns` so the view never claims a width its rows lack.
+  private static func width(_ plan: Plan) -> Int {
+    switch plan {
+    case let .project(terms, _):
+      terms.count
+    case let .union(left, _, _):
+      width(left)
+    default:
+      // `compile` always tops an arm with a `project`; nothing else reaches a
+      // view's sub-plan root. Measuring nil would mask a width mismatch, so a
+      // zero (which never equals a non-empty column list) surfaces it.
+      0
     }
   }
 

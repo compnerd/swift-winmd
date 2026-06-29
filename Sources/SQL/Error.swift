@@ -58,6 +58,10 @@ public enum SQLError: Error, Hashable, Sendable {
   /// A scalar function rejects its arguments (the wrong count, or a value it
   /// cannot map); the string describes the fault.
   case argument(String)
+  /// A `UNION` combines two `SELECT`s of differing column counts — the result
+  /// columns of every arm must align — carrying the first arm's width and the
+  /// offending arm's.
+  case arity(Int, Int)
 }
 
 extension SQLError: CustomStringConvertible {
@@ -85,6 +89,9 @@ extension SQLError: CustomStringConvertible {
       "no such function '\(name)'"
     case let .argument(detail):
       "invalid function argument: \(detail)"
+    case let .arity(expected, found):
+      "UNION arms project differing column counts: "
+          + "expected \(expected), found \(found)"
     }
   }
 }

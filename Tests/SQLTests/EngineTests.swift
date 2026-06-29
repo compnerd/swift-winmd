@@ -235,20 +235,20 @@ private func family() -> Memory {
 /// `Pairs` proves a view whose definition is itself a join.
 private func views() throws -> Memory {
   // SELECT Id, Name FROM Parent WHERE Id >= 2 — exposed as columns Key, Label.
-  let adults = try View(select: select("""
+  let adults = try View(query: select("""
       SELECT Id, Name FROM Parent WHERE Id >= 2
       """), columns: ["Key", "Label"])
 
   // SELECT Parent.Name, Child.Name FROM Parent JOIN Child ON … — a view over a
   // join, its two projected columns exposed as Parent and Kid.
-  let pairs = try View(select: select("""
+  let pairs = try View(query: select("""
       SELECT Parent.Name, Child.Name FROM Parent
         JOIN Child ON Child.Pid = Parent.Id
       """), columns: ["Parent", "Kid"])
 
   // SELECT Id, Name FROM Parent WHERE Id = :id — a parameterized view whose
   // bound key seeks inside its sub-plan when :id is supplied.
-  let picked = try View(select: select("""
+  let picked = try View(query: select("""
       SELECT Id, Name FROM Parent WHERE Id = :id
       """), columns: ["Key", "Label"])
 
@@ -388,18 +388,18 @@ private func shared() -> Memory {
   ])
 }
 
-/// Parses `text` to a `SELECT`, failing on any other statement.
-private func select(_ text: String) throws -> Select {
+/// Parses `text` to a query, failing on any other statement.
+private func select(_ text: String) throws -> Query {
   try parse(text)
 }
 
-/// Parses `text` to a `SELECT`, failing on any other statement.
-private func parse(_ text: String) throws -> Select {
-  guard case let .select(select) = try Statement(parsing: text) else {
+/// Parses `text` to a query, failing on any other statement.
+private func parse(_ text: String) throws -> Query {
+  guard case let .select(query) = try Statement(parsing: text) else {
     Issue.record("expected a SELECT statement")
     throw SQLError.incomplete(expected: "a SELECT statement")
   }
-  return select
+  return query
 }
 
 /// Runs `text` against the single-relation `People` catalog.
@@ -937,6 +937,8 @@ private func derived(_ plan: Plan) -> Plan? {
     derived(source)
   case let .product(left, right):
     derived(left) ?? derived(right)
+  case let .union(left, right, _):
+    derived(left) ?? derived(right)
   case .scan, .join:
     nil
   }
@@ -956,6 +958,8 @@ private func seeks(_ plan: Plan) -> Bool {
   case let .derived(_, sub, _, _):
     seeks(sub)
   case let .product(left, right):
+    seeks(left) || seeks(right)
+  case let .union(left, right, _):
     seeks(left) || seeks(right)
   case .join:
     false
@@ -977,6 +981,8 @@ private func filters(_ plan: Plan) -> Bool {
   case let .derived(_, sub, _, _):
     filters(sub)
   case let .product(left, right):
+    filters(left) || filters(right)
+  case let .union(left, right, _):
     filters(left) || filters(right)
   case .scan, .join:
     false
@@ -1285,5 +1291,129 @@ struct EngineBoundTests {
     let sub = try #require(derived(plan))
     #expect(seeks(sub))
     #expect(!filters(sub))
+  }
+}
+
+// MARK: - UNION tests
+
+/// A three-relation catalog for `UNION`: `Left` and `Right` each hold a single
+/// `Tag` text column, sharing the value `shared` so a union across them proves
+/// cross-relation dedup; the values are otherwise distinct. `Extra` repeats the
+/// `a` already in `Left`, so a trailing `UNION ALL Extra` keeps it a second
+/// time — proving an inner `UNION`'s dedup survives an outer `UNION ALL`.
+private func tags() -> Memory {
+  let fields = [Field(name: "Tag", kind: .text)]
+  let left = [
+    [.text("a")],
+    [.text("shared")],
+  ] as Array<Array<Value>>
+  let right = [
+    [.text("shared")],
+    [.text("b")],
+  ] as Array<Array<Value>>
+  let extra = [
+    [.text("a")],
+  ] as Array<Array<Value>>
+  return Memory([
+    "Left": Relation(fields, left),
+    "Right": Relation(fields, right),
+    "Extra": Relation(fields, extra),
+  ])
+}
+
+struct EngineUnionTests {
+  @Test("UNION removes whole-row duplicates, keeping the first occurrence")
+  func dedup() throws {
+    // People's Age repeats (30 for Alice and Carol, 25 for Bob and Eve); a
+    // UNION of the relation with itself collapses every duplicate row.
+    let rows = try Engine.run(parse("""
+        SELECT Age FROM People UNION SELECT Age FROM People
+        """), people())
+    #expect(rows == [[.integer(30)], [.integer(25)], [.integer(40)]])
+  }
+
+  @Test("UNION ALL keeps every row of every arm in source order")
+  func all() throws {
+    let rows = try Engine.run(parse("""
+        SELECT Age FROM People UNION ALL SELECT Age FROM People
+        """), people())
+    let ages = [30, 25, 30, 40, 25].map { Value.integer($0) }
+    #expect(rows == (ages + ages).map { [$0] })
+  }
+
+  @Test("a UNION across two relations of matching arity merges and dedups")
+  func merge() throws {
+    let rows = try Engine.run(parse("""
+        SELECT Tag FROM Left UNION SELECT Tag FROM Right
+        """), tags())
+    // `shared` appears in both arms but survives once, first occurrence kept.
+    #expect(rows == [[.text("a")], [.text("shared")], [.text("b")]])
+  }
+
+  @Test("a UNION ALL across two relations keeps the shared row twice")
+  func mergeAll() throws {
+    let rows = try Engine.run(parse("""
+        SELECT Tag FROM Left UNION ALL SELECT Tag FROM Right
+        """), tags())
+    #expect(rows == [
+      [.text("a")],
+      [.text("shared")],
+      [.text("shared")],
+      [.text("b")],
+    ])
+  }
+
+  @Test("an inner UNION dedups before a trailing UNION ALL appends its arm")
+  func nestedAll() throws {
+    // (Left UNION Right) UNION ALL Extra. The inner UNION dedups `shared`
+    // across Left and Right to one row — `a, shared, b` — and the outer UNION
+    // ALL then appends Extra's `a` WITHOUT deduplicating, so `a` recurs. A
+    // chain flattened to the trailing `all` would instead keep both copies of
+    // `shared`; honouring each node's own flag keeps exactly one.
+    let rows = try Engine.run(parse("""
+        SELECT Tag FROM Left UNION SELECT Tag FROM Right
+          UNION ALL SELECT Tag FROM Extra
+        """), tags())
+    #expect(rows == [
+      [.text("a")],
+      [.text("shared")],
+      [.text("b")],
+      [.text("a")],
+    ])
+  }
+
+  @Test("a UNION of arms projecting differing column counts is rejected")
+  func arity() throws {
+    #expect(throws: SQLError.arity(1, 2)) {
+      try Engine.run(parse("""
+          SELECT Id FROM People UNION SELECT Id, Name FROM People
+          """), people())
+    }
+  }
+
+  @Test("a view defined as a UNION resolves and queries")
+  func view() throws {
+    let both = try View(query: select("""
+        SELECT Tag FROM Left UNION SELECT Tag FROM Right
+        """), columns: ["Tag"])
+    let catalog = Memory(tags().relations, views: ["Both": both])
+    let rows = try Engine.run(parse("SELECT Tag FROM Both"), catalog)
+    #expect(rows == [[.text("a")], [.text("shared")], [.text("b")]])
+  }
+
+  @Test("a bound parameter threads into every arm of a UNION")
+  func bound() throws {
+    // Both arms key on the same `:pid`; the binding reaches each alike, so the
+    // union is the parent's children drawn from two queries over the relation.
+    let rows = try Engine.run(parse("""
+        SELECT Name FROM Child WHERE Pid = :pid
+          UNION ALL SELECT Name FROM Child WHERE Pid = :pid
+        """), family(), Routines(), bindings: ["pid": .integer(1)])
+    #expect(rows == [
+      [.text("Ann")],
+      [.text("Amy")],
+      [.text("Ann")],
+      [.text("Amy")],
+    ])
   }
 }

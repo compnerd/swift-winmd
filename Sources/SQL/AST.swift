@@ -17,7 +17,33 @@
 /// relations it names; resolving the table, alias, and column identifiers is
 /// the consumer's responsibility.
 public enum Statement: Hashable, Sendable {
+  /// A `SELECT` query — one `SELECT`, or several combined with `UNION`.
+  case select(Query)
+}
+
+/// A query: one `SELECT`, or several combined left-associatively with `UNION`.
+///
+/// A bare `SELECT` is the `select` case; `a UNION b UNION c` nests left —
+/// `union(union(select(a), b, all:), c, all:)` — so the arms read in source
+/// order. `UNION` removes duplicate result rows; `UNION ALL` (`all` true) keeps
+/// them. Every arm must project the same number of columns, and the result
+/// columns are the FIRST arm's projection (the ISO rule).
+public indirect enum Query: Hashable, Sendable {
+  /// A single `SELECT`.
   case select(Select)
+  /// A `UNION` (or `UNION ALL` when `all`) of a query and a further `SELECT`,
+  /// the new arm appended on the right so the chain reads left to right.
+  case union(Query, Select, all: Bool)
+
+  /// The first `SELECT` of the query — the leftmost arm, reached by descending
+  /// the left-associative chain. Its projection names the result columns (the
+  /// ISO rule).
+  public var first: Select {
+    switch self {
+    case let .select(select): select
+    case let .union(query, _, _): query.first
+    }
+  }
 }
 
 /// A `SELECT` query: a projection over one relation or a chain of joins, with an

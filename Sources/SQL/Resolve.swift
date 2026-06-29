@@ -110,103 +110,95 @@ extension Schema {
 
 // MARK: - Join scope
 
-/// The two relations of a join, addressed in one combined ordinal space.
+/// The relations of a join chain, addressed in one combined ordinal space.
 ///
-/// A join lays its two relations end to end: the outer (the `FROM`) relation
-/// occupies the ordinals below `base`, the inner (the `JOIN`) relation those at
-/// or above it. `base` is the outer relation's `extent` — one past the highest
-/// ordinal it can address — rather than its `width`, so the outer relation's
-/// virtual columns — ordinals at or past its real width, such as a `rowid` or a
-/// `parent` — stay on the outer side rather than colliding with the inner's
-/// space; an outer column resolves to its own ordinal, an inner column to
-/// `base + ordinal`. A `Scope` resolves a possibly qualified `SQL.Column` into
-/// that combined space so the engine's `Filter`, projection, and order all
-/// address cells uniformly across the pair. A qualifier names a relation by its
-/// alias, else its table name; an unqualified name resolves against both
-/// relations and is ambiguous if each has it. Resolution reads only schemas, so
-/// the scope is escapable data over the two relations' `Schema`s.
+/// A join chain lays its relations end to end: relation `i` occupies the
+/// combined ordinals `[offset_i, offset_i + extent_i)`, where `offset_i` is the
+/// sum of the `extent`s of the relations before it. Using each relation's
+/// `extent` — its real `width` plus the virtual columns it exposes — rather than
+/// its `width` keeps a relation's virtual columns (a `rowid`, a `parent`) on its
+/// own side rather than colliding with the next relation's space. A `Scope`
+/// resolves a possibly qualified `SQL.Column` into that combined space so the
+/// engine's `Filter`, projection, and order all address cells uniformly across
+/// the chain. A qualifier names a relation by its alias, else its table name; an
+/// unqualified name resolves against every relation and is ambiguous if more
+/// than one resolves it — as is a qualified name two relations share an alias or
+/// table name for (a self-join or a duplicated alias). Resolution reads only
+/// schemas, so the scope is escapable data over the relations' `Schema`s.
 internal struct Scope {
-  /// The left (outer, `FROM`) relation reference; its alias, else its table
-  /// name, is the qualifier that selects the `outer` schema.
-  private let left: Relation
-  /// The right (inner, `JOIN`) relation reference; its qualifier selects the
-  /// `inner` schema.
-  private let right: Relation
-  /// The outer and inner schemas, laid end to end.
-  private let outer: Schema
-  private let inner: Schema
-
-  internal init(_ left: Relation, _ outer: Schema,
-                _ right: Relation, _ inner: Schema) {
-    self.left = left
-    self.right = right
-    self.outer = outer
-    self.inner = inner
+  /// One relation of the chain: its reference (for qualifier matching), its
+  /// name-resolution schema, and its base offset in the combined space.
+  private struct Member {
+    let relation: Relation
+    let schema: Schema
+    let offset: Int
   }
 
-  /// The base ordinal of the inner relation in the combined space.
-  ///
-  /// The outer relation's `extent` — its real `width` plus the virtual columns
-  /// it exposes, i.e. one past the highest ordinal it can address — past which
-  /// inner ordinals begin. No outer ordinal — a real column below the width or a
-  /// virtual column at or just past it — reaches it, so the `< base` / `>= base`
-  /// split classifies a combined ordinal to its side even when the outer
-  /// relation contributes a virtual column.
-  internal var base: Int {
-    outer.extent
-  }
+  private let members: Array<Member>
 
-  /// Whether `qualifier` (an alias, else a table name) names `relation`.
-  private func names(_ relation: Relation, _ qualifier: String) -> Bool {
-    (relation.alias ?? relation.name) == qualifier
-  }
-
-  /// Whether `column`'s qualifier admits `relation`: an unqualified name admits
-  /// either relation, a qualified one only the relation its qualifier names.
-  private func admits(_ relation: Relation, _ column: Column) -> Bool {
-    if let qualifier = column.qualifier {
-      names(relation, qualifier)
-    } else {
-      true
+  /// Builds a scope over `relations` — the `FROM` relation first, then each
+  /// joined relation in source order — laying each past the previous one's
+  /// `extent`.
+  internal init(_ relations: Array<(Relation, Schema)>) {
+    var members = Array<Member>()
+    members.reserveCapacity(relations.count)
+    var offset = 0
+    for (relation, schema) in relations {
+      members.append(Member(relation: relation, schema: schema, offset: offset))
+      offset += schema.extent
     }
+    self.members = members
+  }
+
+  /// The combined-space base offset and extent of each relation, in chain order
+  /// — the layout the engine packs referenced ordinals against.
+  internal var layout: Array<(offset: Int, extent: Int)> {
+    members.map { ($0.offset, $0.schema.extent) }
+  }
+
+  /// Whether `column`'s qualifier admits `member`: an unqualified name admits
+  /// every relation, a qualified one only a relation its qualifier (an alias,
+  /// else a table name) names.
+  private func admits(_ member: Member, _ column: Column) -> Bool {
+    guard let qualifier = column.qualifier else { return true }
+    return (member.relation.alias ?? member.relation.name) == qualifier
   }
 
   /// The combined ordinal `column` resolves to.
   ///
-  /// A qualifier admits only the relation it names; an unqualified name admits
-  /// both. Within the admitted relations the name resolves: present in exactly
-  /// one it yields that ordinal; in both — two relations sharing a qualifier (a
-  /// self-join or a duplicated alias), or an unqualified name sitting in each —
-  /// it is `SQLError.ambiguous`; in neither it is `SQLError.column`.
+  /// The name resolves against every admitted relation: present in exactly one
+  /// it yields that relation's `offset` plus the local ordinal; present in more
+  /// than one — an unqualified name in several relations, or a qualified name
+  /// two relations share a name for — it is `SQLError.ambiguous`; in none it is
+  /// `SQLError.column`.
   internal func ordinal(of column: Column) throws(SQLError) -> Int {
-    let here =
-        admits(left, column) ? outer.ordinal(of: column.name) : nil
-    let there =
-        admits(right, column) ? inner.ordinal(of: column.name) : nil
-    switch (here, there) {
-    case let (.some(ordinal), nil):
-      return ordinal
-    case let (nil, .some(ordinal)):
-      return base + ordinal
-    case (.some, .some):
-      throw .ambiguous(column.name)
-    case (nil, nil):
-      throw .column(column.name)
+    var resolved: Int? = nil
+    for member in members where admits(member, column) {
+      guard let local = member.schema.ordinal(of: column.name) else { continue }
+      if resolved != nil { throw .ambiguous(column.name) }
+      resolved = member.offset + local
     }
+    guard let resolved else { throw .column(column.name) }
+    return resolved
   }
 
-  /// The combined-ordinal projected terms: every real column of both relations
-  /// for `*` (outer then inner, never a virtual column) as `.slot` terms, a
+  /// The combined-ordinal projected terms: every real column of every relation
+  /// for `*` (in chain order, never a virtual column) as `.slot` terms, a
   /// bare-column list as `.slot` terms at their combined ordinals, an expression
   /// list as lowered terms — in source order.
   internal func terms(_ projection: Projection) throws(SQLError)
       -> Array<Term> {
     switch projection {
     case .all:
-      // Every real outer column, then every real inner column at its
-      // `base`-offset ordinal — never a virtual column of either side.
-      return (0 ..< outer.width).map { .slot($0) }
-          + (0 ..< inner.width).map { .slot(base + $0) }
+      // Every real column of every relation, at its combined ordinal — in chain
+      // order, never a virtual column of any relation.
+      var terms = Array<Term>()
+      for member in members {
+        for ordinal in 0 ..< member.schema.width {
+          terms.append(.slot(member.offset + ordinal))
+        }
+      }
+      return terms
     case let .columns(columns):
       var terms = Array<Term>()
       terms.reserveCapacity(columns.count)
@@ -249,14 +241,14 @@ internal struct Scope {
   }
 
   /// Lowers a join's `ON left = right` to a `match` conjunct, each side
-  /// resolved to a combined ordinal across the pair.
+  /// resolved to a combined ordinal across the chain.
   internal func match(_ left: Column, _ right: Column) throws(SQLError)
       -> Filter {
     try .match(ordinal(of: left), ordinal(of: right))
   }
 
   /// Lowers the name-addressed AST `predicate` to the engine's `Filter`, each
-  /// column reference resolved to a combined ordinal across the join.
+  /// column reference resolved to a combined ordinal across the chain.
   internal func lower(_ predicate: Predicate) throws(SQLError) -> Filter {
     switch predicate {
     case let .comparison(left, op, right):

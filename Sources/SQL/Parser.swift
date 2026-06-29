@@ -3,11 +3,11 @@
 
 /// A recursive-descent parser over a token stream.
 ///
-/// The grammar is the minimal dialect, extended with a single binary join:
+/// The grammar is the minimal dialect, extended with a chain of joins:
 ///
 /// ```
 /// statement   := select
-/// select      := SELECT projection FROM relation [join] [where] [order]
+/// select      := SELECT projection FROM relation (join)* [where] [order]
 /// relation    := identifier [AS identifier]
 /// join        := JOIN relation ON column '=' column
 /// projection  := '*' | column (',' column)*
@@ -60,10 +60,9 @@ internal struct Parser: ~Escapable {
     try expect(.from)
     let from = try relation()
 
-    let join: Join? = if try match(.join) {
-      try join()
-    } else {
-      nil
+    var joins = Array<Join>()
+    while try match(.join) {
+      try joins.append(join())
     }
     let predicate: Predicate? = if try match(.where) {
       try predicate()
@@ -76,7 +75,7 @@ internal struct Parser: ~Escapable {
       nil
     }
 
-    return Select(projection: projection, from: from, join: join,
+    return Select(projection: projection, from: from, joins: joins,
                   predicate: predicate, order: order)
   }
 

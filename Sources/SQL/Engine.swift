@@ -13,17 +13,17 @@
 /// seekability and rewrites scans into seeks and the product into an
 /// index-nested-loop join; `execute` re-resolves to open cursors and
 /// materialise. A single relation compiles to `Project(Sort(Select(Scan)))`; a
-/// join compiles to a `Select` over the Cartesian `Product` of two scans, the
-/// `ON` equality folded into the `Select` predicate. Absent layers are omitted.
-/// Executing the plan yields the result records' typed values; formatting them
-/// is a client's job.
+/// chain of joins compiles to a left-deep tree of `Product`s, each level's `ON`
+/// equality a `Select` over its product, with the `WHERE` wrapping the whole
+/// chain. Absent layers are omitted. Executing the plan yields the result
+/// records' typed values; formatting them is a client's job.
 public enum Engine {
   /// Runs `select` against `catalog`, returning the projected, filtered, and
   /// ordered rows as typed values.
   ///
   /// - Throws: `SQLError.relation` if the catalog resolves no such relation,
   ///   `SQLError.column` if a referenced column is absent, `SQLError.ambiguous`
-  ///   if an unqualified name is resolved by both relations of a join.
+  ///   if an unqualified name is resolved by more than one relation of a chain.
   public static func run<C: Catalog & ~Escapable>(_ select: Select,
                                                   _ catalog: borrowing C,
                                                   _ routines: Routines = [:],
@@ -39,29 +39,31 @@ public enum Engine {
   /// space.
   ///
   /// The relation(s) resolve through the borrowed catalog (`SQLError.relation`
-  /// on a miss). A single relation shapes `Project(Sort(Select(Scan)))`; a join
-  /// shapes `Project(Sort(Select(Product(Scan, Scan))))`, the `ON` equality
-  /// conjoined onto the `WHERE` predicate over the product. The `Select` and
+  /// on a miss). A single relation shapes `Project(Sort(Select(Scan)))`; a chain
+  /// of joins shapes a left-deep tree, each join level a `Select(match,
+  /// Product(chain, Scan))` on that join's `ON` equality, with the `WHERE`
+  /// wrapped outside as `Project(Sort(Select(where, chain)))`. The `Select` and
   /// `Sort` layers are present only when a predicate or an `ORDER BY` is. Each
   /// scan carries the set of ordinals the query references on its side
-  /// (projection ∪ filter ∪ order ∪ join keys, reals and virtuals) so the
+  /// (projection ∪ every match ∪ filter ∪ order, reals and virtuals) so the
   /// executor materialises exactly those, in a fixed order that defines a dense
   /// SLOT for each — slot `i` is the scan's `i`th referenced ordinal.
   ///
   /// The operators run in slot space: `compile` remaps every ordinal it lowered
-  /// (the projection, the `filter`, the order column, and a join's keys) through
-  /// `ordinal → slot` so the records the operators address are dense arrays.
-  /// A join's combined slot space lays the outer scan's slots `[0, outerCount)`
-  /// then the inner scan's `[outerCount, outerCount + innerCount)`, matching the
-  /// merged record (outer cells ++ inner cells). The tree is logical: every scan
-  /// is a full `Scan(_, _, nil)`; the optimiser turns scans into seeks and the
-  /// product into a join.
+  /// (the projection, the `filter`, the order column, and each join's keys)
+  /// through `ordinal → slot` so the records the operators address are dense
+  /// arrays. The combined slot space lays the relations end to end in chain
+  /// order — relation `i`'s referenced ordinals take a contiguous slot run after
+  /// every earlier relation's — matching the merged record (each relation's
+  /// cells concatenated in order). The tree is logical: every scan is a full
+  /// `Scan(_, _, nil)`; the optimiser turns scans into seeks and each product
+  /// into a join.
   internal static func compile<C: Catalog & ~Escapable>(_ select: Select,
                                                         _ catalog: borrowing C)
       throws(SQLError) -> Plan {
     let from = try resolve(select.from, catalog)
 
-    guard let join = select.join else {
+    guard !select.joins.isEmpty else {
       var filter: Filter? = nil
       if let predicate = select.predicate {
         filter = try from.schema.lower(predicate, in: select.from)
@@ -82,40 +84,85 @@ public enum Engine {
                    order.map { (slot[$0.column]!, $0.ascending) })
     }
 
-    let inner = try resolve(join.relation, catalog)
+    // Resolve every joined relation and lay all relations — the FROM relation
+    // first, then each joined one in source order — end to end in one combined
+    // ordinal space.
+    var joined = Array<Resolved>()
+    joined.reserveCapacity(select.joins.count)
+    for join in select.joins {
+      try joined.append(resolve(join.relation, catalog))
+    }
 
-    let scope = Scope(select.from, from.schema, join.relation, inner.schema)
-    let on = try scope.match(join.left, join.right)
+    var relations = [(select.from, from.schema)]
+    for index in select.joins.indices {
+      relations.append((select.joins[index].relation, joined[index].schema))
+    }
+    let scope = Scope(relations)
+
+    // Each join's ON equality lowers to a `match` at its own chain level,
+    // resolved against only the prefix already in scope plus the relation that
+    // join introduces — the FROM relation and joins `0…index` — never a
+    // relation joined later. Since `Scope` lays relations at cumulative offsets
+    // from 0, a prefix scope yields the same global combined ordinals as the
+    // full-chain scope, so the match ordinals remap through `slot` as before;
+    // resolving against the prefix rejects a reference to a not-yet-joined
+    // relation (`SQLError.column`) and judges ambiguity only within the prefix.
+    // The WHERE and ORDER lower against the whole chain, which legitimately
+    // sees every relation.
+    var matches = Array<Filter>()
+    matches.reserveCapacity(select.joins.count)
+    for index in select.joins.indices {
+      let prefix = Scope(Array(relations[0 ... index + 1]))
+      let join = select.joins[index]
+      try matches.append(prefix.match(join.left, join.right))
+    }
     var predicate: Filter? = nil
     if let clause = select.predicate {
       predicate = try scope.lower(clause)
     }
-    let filter = conjoin(on, predicate)
     var order: (column: Int, ascending: Bool)? = nil
     if let clause = select.order {
       order = try scope.order(clause)
     }
     let projection = try scope.terms(select.projection)
-    let base = scope.base
 
-    let combined = referenced(projection, filter, order)
-    let head = combined.filter { $0 < base }
-    let tail = combined.filter { $0 >= base }.map { $0 - base }
+    // The combined referenced ordinals — projection ∪ every match ∪ WHERE ∪
+    // order — packed per relation in chain order: relation i's referenced
+    // ordinals take a contiguous slot run after every earlier relation's,
+    // building the combined-ordinal → slot map and each relation's leaf ordinals.
+    var references = Set<Int>()
+    for term in projection { term.references(into: &references) }
+    for match in matches { match.references(into: &references) }
+    predicate?.references(into: &references)
+    if let order { references.insert(order.column) }
+    let combined = references.sorted()
 
-    // The combined slot map: the outer scan's referenced ordinals take the
-    // leading slots `[0, head.count)`, the inner scan's take the trailing slots
-    // `[head.count, head.count + tail.count)`, matching the merged record's
-    // outer-then-inner layout.
-    var slot = invert(head)
-    let split = head.count
-    for index in tail.indices {
-      slot[tail[index] + base] = split + index
+    var slot = Dictionary<Int, Int>(minimumCapacity: combined.count)
+    var locals = Array<Array<Int>>()
+    var packed = 0
+    for (offset, extent) in scope.layout {
+      let local = combined.compactMap {
+        offset <= $0 && $0 < offset + extent ? $0 - offset : nil
+      }
+      for index in local.indices {
+        slot[offset + local[index]] = packed + index
+      }
+      locals.append(local)
+      packed += local.count
     }
 
-    let outer = from.leaf(head)
-    let right = inner.leaf(tail)
-    return shape(.product(outer, right), projection.map { remap($0, slot) },
-                 remap(filter, slot),
+    // The left-deep chain: starting from the FROM relation's leaf, each join
+    // folds in the next relation's scan as a `Select` on that join's match over
+    // their product. The optimiser turns each `Select`-over-`Product` level into
+    // an index-nested-loop join.
+    let seed = from.leaf(locals[0])
+    let chain = select.joins.indices.reduce(seed) { chain, index in
+      .select(remap(matches[index], slot),
+              .product(chain, joined[index].leaf(locals[index + 1])))
+    }
+
+    return shape(chain, projection.map { remap($0, slot) },
+                 predicate.map { remap($0, slot) },
                  order.map { (slot[$0.column]!, $0.ascending) })
   }
 
@@ -232,12 +279,6 @@ public enum Engine {
       plan = .sort(slot: order.slot, ascending: order.ascending, plan)
     }
     return .project(projection, plan)
-  }
-
-  /// `on` conjoined with `predicate` when present, else `on` alone.
-  private static func conjoin(_ on: Filter, _ predicate: Filter?) -> Filter {
-    guard let predicate else { return on }
-    return .and(on, predicate)
   }
 
   // MARK: - Optimisation
@@ -440,15 +481,30 @@ public enum Engine {
     }
   }
 
-  /// The slot count of `plan`'s left-side scan — the outer relation's slots,
-  /// the boundary past which inner slots begin in the combined space — or `nil`
-  /// if the side is not a scan the boundary reads from.
+  /// The combined-space slot count of `plan` — the boundary past which a newly
+  /// joined relation's slots begin — or `nil` if a side's width is not known.
+  ///
+  /// A scan or a derived view's width is its referenced-ordinal count; a
+  /// `select` is as wide as its source; a `product` is the sum of its sides and
+  /// a `join` the sum of its outer side and the inner's referenced ordinals — so
+  /// a left-deep chain of products or joins measures correctly, letting the
+  /// nest rewrite recurse into a multi-relation chain.
   private static func slots(_ plan: Plan) -> Int? {
     switch plan {
     case let .scan(_, ordinals, _):
       ordinals.count
+    case let .derived(_, _, ordinals, _):
+      ordinals.count
     case let .select(_, source):
       slots(source)
+    case let .product(left, right):
+      if let left = slots(left), let right = slots(right) {
+        left + right
+      } else {
+        nil
+      }
+    case let .join(outer, _, ordinals, _, _, _):
+      slots(outer).map { $0 + ordinals.count }
     default:
       nil
     }

@@ -301,6 +301,93 @@ private func nullableKeys() -> Memory {
   ])
 }
 
+/// A three-level catalog for multi-way joins: `House` → `Room` → `Item`, each
+/// child carrying a foreign key to its parent's `Id`. `House` and `Room` are
+/// sorted on `Id`, so a join keyed on `Id` seeks; `Item` is unsorted and scans.
+private func lineage() -> Memory {
+  let house = [
+    Field(name: "Id", kind: .integer),
+    Field(name: "House", kind: .text),
+  ]
+  let houses = [
+    [.integer(1), .text("Burrow")],
+    [.integer(2), .text("Manor")],
+  ] as Array<Array<Value>>
+
+  let room = [
+    Field(name: "Id", kind: .integer),
+    Field(name: "Hid", kind: .integer),
+    Field(name: "Room", kind: .text),
+  ]
+  let rooms = [
+    [.integer(1), .integer(1), .text("Kitchen")],
+    [.integer(2), .integer(1), .text("Attic")],
+    [.integer(3), .integer(2), .text("Hall")],
+  ] as Array<Array<Value>>
+
+  let item = [
+    Field(name: "Rid", kind: .integer),
+    Field(name: "Item", kind: .text),
+  ]
+  let items = [
+    [.integer(1), .text("Kettle")],
+    [.integer(1), .text("Pot")],
+    [.integer(3), .text("Banner")],
+    [.integer(9), .text("Lost")],
+  ] as Array<Array<Value>>
+
+  return Memory([
+    "House": Relation(house, houses, sorted: 0),
+    "Room": Relation(room, rooms, sorted: 0),
+    "Item": Relation(item, items),
+  ])
+}
+
+/// A chain whose first join's `ON` uses an unqualified column that is unique in
+/// the prefix it resolves against but shared by a relation joined only later.
+///
+/// `Author(Aid, Code)` sorted on `Aid`; `Book(Bid, Aid)` sorted on `Aid`;
+/// `Sale(Sid, Code)`. The first join `Author JOIN Book ON Code = Book.Aid` reads
+/// the unqualified `Code`, which only `Author` carries within the prefix
+/// `{Author, Book}` — yet `Sale`, joined afterwards, also exposes `Code`.
+/// Resolving the match against the prefix binds `Code` unambiguously; resolving
+/// it against the whole chain would (wrongly) see `Code` in two relations and
+/// report `SQLError.ambiguous`.
+private func shared() -> Memory {
+  let author = [
+    Field(name: "Aid", kind: .integer),
+    Field(name: "Code", kind: .integer),
+  ]
+  let authors = [
+    [.integer(1), .integer(10)],
+    [.integer(2), .integer(20)],
+  ] as Array<Array<Value>>
+
+  let book = [
+    Field(name: "Bid", kind: .integer),
+    Field(name: "Aid", kind: .integer),
+  ]
+  let books = [
+    [.integer(100), .integer(10)],
+    [.integer(101), .integer(20)],
+  ] as Array<Array<Value>>
+
+  let sale = [
+    Field(name: "Sid", kind: .integer),
+    Field(name: "Code", kind: .integer),
+  ]
+  let sales = [
+    [.integer(100), .integer(900)],
+    [.integer(101), .integer(901)],
+  ] as Array<Array<Value>>
+
+  return Memory([
+    "Author": Relation(author, authors, sorted: 0),
+    "Book": Relation(book, books, sorted: 1),
+    "Sale": Relation(sale, sales),
+  ])
+}
+
 /// Parses `text` to a `SELECT`, failing on any other statement.
 private func select(_ text: String) throws -> Select {
   try parse(text)
@@ -338,6 +425,16 @@ private func view(_ text: String) throws -> Array<Array<Value>> {
 /// Runs `text` against the nullable `Maybe` catalog.
 private func nullable(_ text: String) throws -> Array<Array<Value>> {
   try Engine.run(parse(text), nullable())
+}
+
+/// Runs `text` against the three-level `lineage` catalog.
+private func lineage(_ text: String) throws -> Array<Array<Value>> {
+  try Engine.run(parse(text), lineage())
+}
+
+/// Runs `text` against the `shared`-column chain catalog.
+private func shared(_ text: String) throws -> Array<Array<Value>> {
+  try Engine.run(parse(text), shared())
 }
 
 // MARK: - Single-relation tests
@@ -638,6 +735,117 @@ struct EngineJoinTests {
       [.text("Ada"), .text("Amy")],
       [.text("Ada"), .text("Ann")],
       [.text("Bee"), .text("Bob")],
+    ])
+  }
+}
+
+// MARK: - Multi-way join tests
+
+struct EngineMultiJoinTests {
+  @Test("a three-relation chain joins across two foreign keys")
+  func chain() throws {
+    let rows = try lineage("""
+        SELECT House.House, Room.Room, Item.Item FROM House
+          JOIN Room ON Room.Hid = House.Id
+          JOIN Item ON Item.Rid = Room.Id
+        """)
+    // Burrow's Kitchen holds the Kettle and Pot; its Attic is empty. Manor's
+    // Hall holds the Banner. The item with no room (Rid 9) drops out.
+    #expect(rows == [
+      [.text("Burrow"), .text("Kitchen"), .text("Kettle")],
+      [.text("Burrow"), .text("Kitchen"), .text("Pot")],
+      [.text("Manor"), .text("Hall"), .text("Banner")],
+    ])
+  }
+
+  @Test("a chain seeks each inner relation keyed on its sorted column")
+  func seeked() throws {
+    // Walking the chain the other way: `Item` is the outer scan, and both inner
+    // relations are seeked on their sorted `Id` — the multi-way nest rewrite
+    // turning every `Select`-over-`Product` level into an index-nested loop.
+    let rows = try lineage("""
+        SELECT Item.Item, Room.Room, House.House FROM Item
+          JOIN Room ON Room.Id = Item.Rid
+          JOIN House ON House.Id = Room.Hid
+        """)
+    #expect(rows == [
+      [.text("Kettle"), .text("Kitchen"), .text("Burrow")],
+      [.text("Pot"), .text("Kitchen"), .text("Burrow")],
+      [.text("Banner"), .text("Hall"), .text("Manor")],
+    ])
+  }
+
+  @Test("a WHERE filters across a three-relation chain")
+  func filtered() throws {
+    let rows = try lineage("""
+        SELECT Item.Item FROM House
+          JOIN Room ON Room.Hid = House.Id
+          JOIN Item ON Item.Rid = Room.Id
+          WHERE House.House = 'Burrow' AND Item.Item = 'Pot'
+        """)
+    #expect(rows == [[.text("Pot")]])
+  }
+
+  @Test("an unqualified name in more than one relation of a chain is ambiguous")
+  func ambiguous() throws {
+    // `Id` sits in both `House` and `Room`; across the chain it resolves in more
+    // than one relation, so an unqualified reference is ambiguous.
+    #expect(throws: SQLError.ambiguous("Id")) {
+      try lineage("""
+          SELECT Id FROM House
+            JOIN Room ON Room.Hid = House.Id
+            JOIN Item ON Item.Rid = Room.Id
+          """)
+    }
+  }
+
+  @Test("an early ON referencing a not-yet-joined relation is rejected")
+  func premature() throws {
+    // The first join's `ON` qualifies a column with `Item`, a relation joined
+    // only LATER. Resolving the match against just the prefix — `House` and
+    // `Room` — the qualifier names no relation in scope, so the query is
+    // rejected (`SQLError.column`) rather than resolving `Item`'s slot from a
+    // product that does not yet contain it and trapping or indexing wrong.
+    #expect(throws: SQLError.column("Rid")) {
+      try lineage("""
+          SELECT House.House FROM House
+            JOIN Room ON Item.Rid = House.Id
+            JOIN Item ON Item.Rid = Room.Id
+          """)
+    }
+  }
+
+  @Test("a valid early ON whose columns are all in its prefix runs")
+  func prefixed() throws {
+    // Each `ON` references only the prefix it resolves against, so the whole
+    // chain compiles and runs — mirroring `chain`, which the prefix-scope fix
+    // leaves unchanged.
+    let rows = try lineage("""
+        SELECT House.House, Room.Room, Item.Item FROM House
+          JOIN Room ON Room.Hid = House.Id
+          JOIN Item ON Item.Rid = Room.Id
+        """)
+    #expect(rows == [
+      [.text("Burrow"), .text("Kitchen"), .text("Kettle")],
+      [.text("Burrow"), .text("Kitchen"), .text("Pot")],
+      [.text("Manor"), .text("Hall"), .text("Banner")],
+    ])
+  }
+
+  @Test("an unqualified early-ON column a later relation shares is not ambiguous")
+  func disambiguated() throws {
+    // The first join's `ON` reads unqualified `Code`, unique within its prefix
+    // `{Author, Book}` even though `Sale` — joined only later — also carries a
+    // `Code`. Resolving the match against the prefix binds it; resolving against
+    // the whole chain would see two `Code`s and report `SQLError.ambiguous`.
+    let rows = try shared("""
+        SELECT Author.Aid, Book.Bid, Sale.Code FROM Author
+          JOIN Book ON Code = Book.Aid
+          JOIN Sale ON Sale.Sid = Book.Bid
+        """)
+    #expect(rows == [
+      [.integer(1), .integer(100), .integer(900)],
+      [.integer(2), .integer(101), .integer(901)],
     ])
   }
 }

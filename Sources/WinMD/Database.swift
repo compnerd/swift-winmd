@@ -165,15 +165,8 @@ public struct Database: ~Escapable {
   /// the `TypeSpec` row.
   @_lifetime(borrow self)
   public func resolve(_ reference: TypeDefOrRef) throws(WinMDError) -> Tuple? {
-    guard reference.row != 0 else { return nil }
-    guard reference.tag < TypeDefOrRef.tables.count,
-        let schema = TypeDefOrRef.tables[reference.tag]
-    else { throw .BadImageFormat }
     let storage = self.storage
-    guard let tuple = try storage.tuple(reference.row - 1, of: schema) else {
-      throw .BadImageFormat
-    }
-    return tuple
+    return try storage.resolve(reference)
   }
 
   /// The rows of `schema` whose foreign-key `column` references `target`.

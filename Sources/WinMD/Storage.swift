@@ -85,6 +85,26 @@ package struct Storage: ~Escapable {
     return Tuple(row, table, self)
   }
 
+  /// The row a `TypeDefOrRef` coded index references, or `nil` if it is null.
+  ///
+  /// The storage-level sibling of `Database.resolve`: the index's tag selects
+  /// `TypeDef`/`TypeRef`/`TypeSpec` and its row is 1-based, so this opens the
+  /// named table at `row - 1`. A null reference (`row == 0`) yields `nil`. It is
+  /// `package` so the `WinMDSynthesis` decode helper resolves the references a
+  /// signature names against a borrowed `Storage` rather than a `Database`.
+  @_lifetime(copy self)
+  package func resolve(_ reference: TypeDefOrRef) throws(WinMDError) -> Tuple? {
+    guard reference.row != 0 else { return nil }
+    guard reference.tag < TypeDefOrRef.tables.count,
+        let schema = TypeDefOrRef.tables[reference.tag] else {
+      throw .BadImageFormat
+    }
+    guard let tuple = try tuple(reference.row - 1, of: schema) else {
+      throw .BadImageFormat
+    }
+    return tuple
+  }
+
   /// The rows of `schema` whose foreign-key `column` references `target`.
   ///
   /// The runtime (non-generic) sibling of `Database.referencing`: it opens the

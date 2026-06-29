@@ -10,6 +10,7 @@ let _ =
             products: [
               .executable(name: "winmd-inspect", targets: ["winmd-inspect"]),
               .library(name: "SQL", targets: ["SQL"]),
+              .library(name: "WinMDSynthesis", targets: ["WinMDSynthesis"]),
             ],
             dependencies: [
               .package(url: "https://github.com/apple/swift-argument-parser",
@@ -41,11 +42,20 @@ let _ =
                             .enableExperimentalFeature("Lifetimes"),
                           ]),
 
+              // WinMDSynthesis
+              .target(name: "WinMDSynthesis",
+                      dependencies: [
+                        "WinMD",
+                      ]),
+              .testTarget(name: "WinMDSynthesisTests",
+                          dependencies: ["WinMDSynthesis"]),
+
               // winmd-inspect
               .executableTarget(name: "winmd-inspect",
                                 dependencies: [
                                   "SQL",
                                   "WinMD",
+                                  "WinMDSynthesis",
                                   .product(name: "ArgumentParser",
                                            package: "swift-argument-parser"),
                                 ],

@@ -36,7 +36,7 @@ jobs:
           $objects = (swift package describe --type json | ConvertFrom-Json).targets `
                    | Where-Object { $_.type -eq 'test' } `
                    | ForEach-Object { '-object'; "$bin\$($_.name)-test-runner.exe" }
-          llvm-cov export -format lcov -ignore-filename-regex ".build|Tests" -instr-profile "$bin\codecov\default.profdata" @objects | Out-File -Encoding ascii coverage.lcov
+          llvm-cov export -format lcov -ignore-filename-regex ".build|Tests" -instr-profile "$bin\codecov\default.profdata" @objects | Set-Content -Encoding ascii -Path coverage.lcov
       - uses: codecov/codecov-action@v7.0.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

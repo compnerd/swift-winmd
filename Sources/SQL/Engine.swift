@@ -135,8 +135,8 @@ public enum Engine {
       let ordinals = referenced(projection, filter, order)
       let slot = invert(ordinals)
       let scan = from.leaf(ordinals)
-      return shape(scan, projection.map { remap($0, slot) },
-                   filter.map { remap($0, slot) },
+      return shape(scan, projection.map { $0.remapped(through: slot) },
+                   filter.map { $0.remapped(through: slot) },
                    order.map { (slot[$0.column]!, $0.ascending) })
     }
 
@@ -213,12 +213,12 @@ public enum Engine {
     // an index-nested-loop join.
     let seed = from.leaf(locals[0])
     let chain = select.joins.indices.reduce(seed) { chain, index in
-      .select(remap(matches[index], slot),
+      .select(matches[index].remapped(through: slot),
               .product(chain, joined[index].leaf(locals[index + 1])))
     }
 
-    return shape(chain, projection.map { remap($0, slot) },
-                 predicate.map { remap($0, slot) },
+    return shape(chain, projection.map { $0.remapped(through: slot) },
+                 predicate.map { $0.remapped(through: slot) },
                  order.map { (slot[$0.column]!, $0.ascending) })
   }
 
@@ -248,7 +248,7 @@ public enum Engine {
       throws(SQLError) -> Resolved {
     if let view = catalog.view(named: relation.name) {
       let plan = try compile(view.query, catalog)
-      let projected = width(plan)
+      let projected = plan.width
       guard view.columns.count == projected else {
         throw .columns(expected: projected, got: view.columns.count)
       }
@@ -266,26 +266,6 @@ public enum Engine {
     let name = relation.name
     return Resolved(schema: schema) { ordinals in
       .scan(name: name, ordinals: ordinals, seek: nil)
-    }
-  }
-
-  /// The number of values a compiled `plan` projects — its output column count.
-  ///
-  /// `compile` shapes every arm as `Project(…)`, so the projected width is the
-  /// `project`'s term count; a `union` is as wide as its (left) arm, every arm
-  /// aligned by the arity check. This measures a view's sub-plan against its
-  /// declared `columns` so the view never claims a width its rows lack.
-  private static func width(_ plan: Plan) -> Int {
-    switch plan {
-    case let .project(terms, _):
-      terms.count
-    case let .union(left, _, _):
-      width(left)
-    default:
-      // `compile` always tops an arm with a `project`; nothing else reaches a
-      // view's sub-plan root. Measuring nil would mask a width mismatch, so a
-      // zero (which never equals a non-empty column list) surfaces it.
-      0
     }
   }
 
@@ -313,42 +293,6 @@ public enum Engine {
       slot[ordinals[index]] = index
     }
     return slot
-  }
-
-  /// `term` with every ordinal it reads remapped to a slot through `slot`: a
-  /// `.slot` holding an ordinal becomes the same slot, a constant is unchanged,
-  /// a call recurses into its arguments.
-  private static func remap(_ term: Term, _ slot: Dictionary<Int, Int>)
-      -> Term {
-    switch term {
-    case let .slot(ordinal):
-      .slot(slot[ordinal]!)
-    case .constant:
-      term
-    case let .apply(name, arguments):
-      .apply(name: name, arguments: arguments.map { remap($0, slot) })
-    }
-  }
-
-  /// `filter` with every ordinal it addresses remapped to a slot through `slot`.
-  private static func remap(_ filter: Filter, _ slot: Dictionary<Int, Int>)
-      -> Filter {
-    switch filter {
-    case let .compare(lhs, op, rhs):
-      .compare(remap(lhs, slot), op, remap(rhs, slot))
-    case let .bound(term, op, parameter):
-      .bound(remap(term, slot), op, parameter)
-    case let .match(left, right):
-      .match(slot[left]!, slot[right]!)
-    case let .null(term, negated):
-      .null(remap(term, slot), negated: negated)
-    case let .and(lhs, rhs):
-      .and(remap(lhs, slot), remap(rhs, slot))
-    case let .or(lhs, rhs):
-      .or(remap(lhs, slot), remap(rhs, slot))
-    case let .not(operand):
-      .not(remap(operand, slot))
-    }
   }
 
   /// Wraps `source` in the `Project(Sort(Select(_)))` operators, omitting the
@@ -532,12 +476,12 @@ public enum Engine {
                                                     _ bindings: Bindings)
       throws(SQLError) -> Plan {
     guard case let .scan(name, ordinals, nil) = right,
-        let base = slots(left) else {
+        let base = left.slots else {
       return try .select(filter, .product(optimise(left, catalog, bindings),
                                           optimise(right, catalog, bindings)))
     }
 
-    let conjuncts = flatten(filter)
+    let conjuncts = filter.conjuncts
     for index in conjuncts.indices {
       guard case let .match(lhs, rhs) = conjuncts[index],
           let (leftKey, rightKey) = keys(lhs, rhs, base) else {
@@ -550,7 +494,7 @@ public enum Engine {
                                ordinals: ordinals, base: base,
                                column: ordinals[rightKey - base],
                                keys: (left: leftKey, right: rightKey))
-      guard let predicate = rebuild(residual) else { return join }
+      guard let predicate = residual.conjunction else { return join }
       return .select(predicate, join)
     }
 
@@ -573,50 +517,4 @@ public enum Engine {
     }
   }
 
-  /// The combined-space slot count of `plan` — the boundary past which a newly
-  /// joined relation's slots begin — or `nil` if a side's width is not known.
-  ///
-  /// A scan or a derived view's width is its referenced-ordinal count; a
-  /// `select` is as wide as its source; a `product` is the sum of its sides and
-  /// a `join` the sum of its outer side and the inner's referenced ordinals — so
-  /// a left-deep chain of products or joins measures correctly, letting the
-  /// nest rewrite recurse into a multi-relation chain.
-  private static func slots(_ plan: Plan) -> Int? {
-    switch plan {
-    case let .scan(_, ordinals, _):
-      ordinals.count
-    case let .derived(_, _, ordinals, _):
-      ordinals.count
-    case let .select(_, source):
-      slots(source)
-    case let .product(left, right):
-      if let left = slots(left), let right = slots(right) {
-        left + right
-      } else {
-        nil
-      }
-    case let .join(outer, _, ordinals, _, _, _):
-      slots(outer).map { $0 + ordinals.count }
-    case let .union(left, _, _):
-      // Both sides yield rows of the same width — the result columns — so the
-      // union's width is its left side's.
-      slots(left)
-    default:
-      nil
-    }
-  }
-
-  // MARK: - Conjunct algebra
-
-  /// The flat list of `AND`-conjuncts of `filter` (a non-`and` is a singleton).
-  private static func flatten(_ filter: Filter) -> Array<Filter> {
-    guard case let .and(lhs, rhs) = filter else { return [filter] }
-    return flatten(lhs) + flatten(rhs)
-  }
-
-  /// The right-leaning `AND` of `conjuncts`, or `nil` for an empty list.
-  private static func rebuild(_ conjuncts: Array<Filter>) -> Filter? {
-    guard let last = conjuncts.last else { return nil }
-    return conjuncts.dropLast().reversed().reduce(last) { .and($1, $0) }
-  }
 }

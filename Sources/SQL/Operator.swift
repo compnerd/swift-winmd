@@ -139,6 +139,62 @@ internal indirect enum Plan {
   case union(Plan, Plan, all: Bool)
 }
 
+extension Plan {
+  /// The number of values this plan projects — its output column count.
+  ///
+  /// `compile` shapes every arm as `Project(…)`, so the projected width is the
+  /// `project`'s term count; a `union` is as wide as its (left) arm, every arm
+  /// aligned by the arity check. This measures a view's sub-plan against its
+  /// declared `columns` so the view never claims a width its rows lack.
+  internal var width: Int {
+    switch self {
+    case let .project(terms, _):
+      terms.count
+    case let .union(left, _, _):
+      left.width
+    default:
+      // `compile` always tops an arm with a `project`; nothing else reaches a
+      // view's sub-plan root. Measuring nil would mask a width mismatch, so a
+      // zero (which never equals a non-empty column list) surfaces it.
+      0
+    }
+  }
+
+  /// The combined-space slot count of this plan — the boundary past which a
+  /// newly joined relation's slots begin — or `nil` if a side's width is not
+  /// known.
+  ///
+  /// A scan or a derived view's width is its referenced-ordinal count; a
+  /// `select` is as wide as its source; a `product` is the sum of its sides and
+  /// a `join` the sum of its outer side and the inner's referenced ordinals — so
+  /// a left-deep chain of products or joins measures correctly, letting the
+  /// nest rewrite recurse into a multi-relation chain.
+  internal var slots: Int? {
+    switch self {
+    case let .scan(_, ordinals, _):
+      ordinals.count
+    case let .derived(_, _, ordinals, _):
+      ordinals.count
+    case let .select(_, source):
+      source.slots
+    case let .product(left, right):
+      if let left = left.slots, let right = right.slots {
+        left + right
+      } else {
+        nil
+      }
+    case let .join(outer, _, ordinals, _, _, _):
+      outer.slots.map { $0 + ordinals.count }
+    case let .union(left, _, _):
+      // Both sides yield rows of the same width — the result columns — so the
+      // union's width is its left side's.
+      left.slots
+    default:
+      nil
+    }
+  }
+}
+
 // MARK: - Interpreter
 
 /// Interprets `plan` against `catalog`, producing its result records.

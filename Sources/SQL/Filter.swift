@@ -76,6 +76,61 @@ extension Term {
   }
 }
 
+extension Term {
+  /// This term with every ordinal it reads remapped to a slot through `slot`: a
+  /// `.slot` holding an ordinal becomes the same slot, a constant is unchanged,
+  /// a call recurses into its arguments.
+  internal func remapped(through slot: Dictionary<Int, Int>) -> Term {
+    switch self {
+    case let .slot(ordinal):
+      .slot(slot[ordinal]!)
+    case .constant:
+      self
+    case let .apply(name, arguments):
+      .apply(name: name,
+             arguments: arguments.map { $0.remapped(through: slot) })
+    }
+  }
+}
+
+extension Filter {
+  /// This filter with every ordinal it addresses remapped to a slot through
+  /// `slot`.
+  internal func remapped(through slot: Dictionary<Int, Int>) -> Filter {
+    switch self {
+    case let .compare(lhs, op, rhs):
+      .compare(lhs.remapped(through: slot), op, rhs.remapped(through: slot))
+    case let .bound(term, op, parameter):
+      .bound(term.remapped(through: slot), op, parameter)
+    case let .match(left, right):
+      .match(slot[left]!, slot[right]!)
+    case let .null(term, negated):
+      .null(term.remapped(through: slot), negated: negated)
+    case let .and(lhs, rhs):
+      .and(lhs.remapped(through: slot), rhs.remapped(through: slot))
+    case let .or(lhs, rhs):
+      .or(lhs.remapped(through: slot), rhs.remapped(through: slot))
+    case let .not(operand):
+      .not(operand.remapped(through: slot))
+    }
+  }
+
+  /// The flat list of `AND`-conjuncts of this filter (a non-`and` is a
+  /// singleton).
+  internal var conjuncts: Array<Filter> {
+    guard case let .and(lhs, rhs) = self else { return [self] }
+    return lhs.conjuncts + rhs.conjuncts
+  }
+}
+
+extension Array where Element == Filter {
+  /// The right-leaning `AND` of these conjuncts, or `nil` for an empty list.
+  internal var conjunction: Filter? {
+    guard let last else { return nil }
+    return dropLast().reversed().reduce(last) { .and($1, $0) }
+  }
+}
+
 /// The literal `literal` as a typed `Value`.
 internal func value(of literal: Literal) -> Value {
   switch literal {

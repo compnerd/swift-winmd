@@ -58,6 +58,11 @@ public enum SQLError: Error, Hashable, Sendable {
   /// A scalar function rejects its arguments (the wrong count, or a value it
   /// cannot map); the string describes the fault.
   case argument(String)
+  /// A binary arithmetic expression cannot be evaluated — a non-integer (text)
+  /// operand, or a division by zero (standard SQL raises rather than yielding a
+  /// value); the string describes the fault. A NULL operand is not a fault: it
+  /// propagates to a NULL result.
+  case arithmetic(String)
   /// A `CREATE VIEW` projects a column whose name cannot be inferred — a
   /// `SELECT *`, or an unaliased non-column expression — and no explicit column
   /// list names it; the string describes the offending projection.
@@ -104,6 +109,8 @@ extension SQLError: CustomStringConvertible {
       "no such function '\(name)'"
     case let .argument(detail):
       "invalid function argument: \(detail)"
+    case let .arithmetic(detail):
+      "invalid arithmetic: \(detail)"
     case let .named(detail):
       "view column cannot be named: \(detail)"
     case let .columns(expected, got):

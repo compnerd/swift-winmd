@@ -54,6 +54,9 @@ internal indirect enum Term {
   case constant(Value)
   /// A call to the named scalar function over its argument terms, in order.
   case apply(name: String, arguments: Array<Term>)
+  /// `lhs <op> rhs` — a binary arithmetic over two operand terms, the lowered
+  /// form of the AST's `Expression.binary`.
+  case binary(Arithmetic, Term, Term)
 }
 
 extension Term {
@@ -72,6 +75,9 @@ extension Term {
       for argument in arguments {
         argument.references(into: &slots)
       }
+    case let .binary(_, lhs, rhs):
+      lhs.references(into: &slots)
+      rhs.references(into: &slots)
     }
   }
 }
@@ -89,6 +95,8 @@ extension Term {
     case let .apply(name, arguments):
       .apply(name: name,
              arguments: arguments.map { $0.remapped(through: slot) })
+    case let .binary(op, lhs, rhs):
+      .binary(op, lhs.remapped(through: slot), rhs.remapped(through: slot))
     }
   }
 }
@@ -155,6 +163,8 @@ internal func evaluate<R: Row & ~Escapable>(_ term: Term, _ row: borrowing R,
     value
   case let .apply(name, arguments):
     try apply(name, arguments, row, routines)
+  case let .binary(op, lhs, rhs):
+    try op.apply(evaluate(lhs, row, routines), evaluate(rhs, row, routines))
   }
 }
 
@@ -176,6 +186,36 @@ private func apply<R: Row & ~Escapable>(_ name: String,
 }
 
 // MARK: - Evaluation
+
+extension Arithmetic {
+  /// Applies the operator to two typed operands, yielding a typed `Value`.
+  ///
+  /// Both operands must be integers: `integer ∘ integer` is an integer, with `/`
+  /// integer division. A NULL on either side propagates — the result is NULL,
+  /// not a fault. A division by zero is `SQLError.arithmetic`, as standard SQL
+  /// raises rather than yielding a value; a non-integer (text) operand is a
+  /// `SQLError.arithmetic` type error rather than a silent coercion.
+  internal func apply(_ lhs: Value, _ rhs: Value) throws(SQLError) -> Value {
+    if case .null = lhs { return .null }
+    if case .null = rhs { return .null }
+    guard case let .integer(lhs) = lhs, case let .integer(rhs) = rhs else {
+      throw .arithmetic("operands must be integers")
+    }
+    // Report overflow rather than trap: operands are parsed literals or column
+    // values that can reach the `Int` boundary (`Int.max + 1`, `Int.min / -1`),
+    // and Swift's `+`/`-`/`*`/`/` would trap — aborting the process — instead of
+    // surfacing a `SQLError`.
+    let outcome: (partialValue: Int, overflow: Bool) = switch self {
+    case .add: lhs.addingReportingOverflow(rhs)
+    case .subtract: lhs.subtractingReportingOverflow(rhs)
+    case .multiply: lhs.multipliedReportingOverflow(by: rhs)
+    case .divide where rhs == 0: throw .arithmetic("division by zero")
+    case .divide: lhs.dividedReportingOverflow(by: rhs)
+    }
+    guard !outcome.overflow else { throw .arithmetic("integer overflow") }
+    return .integer(outcome.partialValue)
+  }
+}
 
 extension Comparison {
   /// Applies the operator to two comparable operands.

@@ -80,6 +80,8 @@ extension Schema {
         try lowered.append(term(argument, in: relation))
       }
       return .apply(name: name, arguments: lowered)
+    case let .binary(op, lhs, rhs):
+      return try .binary(op, term(lhs, in: relation), term(rhs, in: relation))
     }
   }
 
@@ -230,6 +232,8 @@ internal struct Scope {
         try lowered.append(term(argument))
       }
       return .apply(name: name, arguments: lowered)
+    case let .binary(op, lhs, rhs):
+      return try .binary(op, term(lhs), term(rhs))
     }
   }
 

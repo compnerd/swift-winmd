@@ -86,6 +86,12 @@ internal struct Lexer: ~Escapable {
     switch byte {
     case UInt8(ascii: "*"):
       return punctuation(.star)
+    case UInt8(ascii: "+"):
+      return punctuation(.plus)
+    case UInt8(ascii: "-"):
+      return punctuation(.minus)
+    case UInt8(ascii: "/"):
+      return punctuation(.slash)
     case UInt8(ascii: ","):
       return punctuation(.comma)
     case UInt8(ascii: "("):

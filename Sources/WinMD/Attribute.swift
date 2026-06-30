@@ -70,3 +70,28 @@ internal struct AttributeDecoder: ~Escapable {
     return value
   }
 }
+
+// MARK: - GuidAttribute value
+
+extension Tuple {
+  /// The UUID a `GuidAttribute` `CustomAttribute` row's `Value` blob names, by
+  /// decoding the `#Blob` heap cell at `column` as an ECMA-335 §II.23.3
+  /// `GuidAttribute` value.
+  ///
+  /// A `Row`/`Tuple` is a borrowed view that cannot escape the scan, so the
+  /// blob's bytes are copied out and run through `AttributeDecoder` after. This
+  /// is the codec the SQL adapter's `guid` virtual column on `CustomAttribute`
+  /// reads (mapping a failure to SQL `NULL`); `Row<TypeDef>.iid` performs the
+  /// equivalent decode inline as it navigates to the attribute. A malformed
+  /// `Value` blob throws.
+  public func iid(_ column: Int) throws(WinMDError) -> UUID {
+    let blob = try blob(column)
+    var bytes = Array<UInt8>()
+    bytes.reserveCapacity(blob.count)
+    for i in 0 ..< blob.count {
+      bytes.append(blob.load(at: i, as: UInt8.self))
+    }
+    var decoder = AttributeDecoder(bytes.span.bytes)
+    return try decoder.guid()
+  }
+}

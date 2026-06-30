@@ -10,7 +10,7 @@
 /// create         := CREATE VIEW identifier
 ///                   ['(' identifier (',' identifier)* ')'] AS query
 /// query          := select (UNION [ALL] select)*
-/// select         := SELECT projection FROM relation (join)* [where] [order]
+/// select         := SELECT projection [FROM relation (join)* [where] [order]]
 /// relation       := identifier [AS identifier]
 /// join           := JOIN relation ON column '=' column
 /// projection     := '*' | column (',' column)*
@@ -182,10 +182,16 @@ internal struct Parser: ~Escapable {
   }
 
   /// Parses a `SELECT` query.
+  ///
+  /// `FROM` is optional: a FROM-less `SELECT <expr-list>` projects over a single
+  /// empty row (the standard way to compute a scalar, `SELECT 1 + 1`), and so
+  /// admits no relation, joins, `WHERE`, or `ORDER BY` to follow.
   private mutating func select() throws(SQLError) -> Select {
     try expect(.select)
     let projection = try projection()
-    try expect(.from)
+    guard try match(.from) else {
+      return Select(projection: projection, from: nil)
+    }
     let from = try relation()
 
     var joins = Array<Join>()

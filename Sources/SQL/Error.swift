@@ -93,6 +93,11 @@ public enum SQLError: Error, Hashable, Sendable {
   /// columns of every arm must align — carrying the first arm's width and the
   /// offending arm's.
   case arity(Int, Int)
+  /// A query uses a construct the engine does not support in the shape given — a
+  /// `SELECT *` with no `FROM`, or a `WHERE`/`ORDER BY`/`JOIN` on a FROM-less
+  /// select (which projects only expressions over a single row); the string
+  /// describes it.
+  case unsupported(String)
 }
 
 extension SQLError: CustomStringConvertible {
@@ -138,6 +143,8 @@ extension SQLError: CustomStringConvertible {
     case let .arity(expected, found):
       "UNION arms project differing column counts: "
           + "expected \(expected), found \(found)"
+    case let .unsupported(detail):
+      "unsupported query: \(detail)"
     }
   }
 }
@@ -166,6 +173,11 @@ extension SQLError {
   ///   (a scalar function's rejected argument).
   /// - `42804` (datatype mismatch) is the non-integer arithmetic operand — a
   ///   type error at evaluation rather than a value-range fault.
+  /// - Class `SS` — the implementation-defined class this engine squats on
+  ///   (SwiftSQL) for a condition with no standard ISO code — `SS001`, a query
+  ///   shape the engine does not support (a FROM-less `SELECT *`, or a clause
+  ///   with no `FROM`). ISO leaves classes whose first character is `5`–`9` or
+  ///   `I`–`Z` implementation-defined, so `SS` is a safe squat.
   public var sqlstate: String {
     switch self {
     case let .state(code, _):
@@ -195,6 +207,9 @@ extension SQLError {
       "22012"
     case .magnitude:
       "22003"
+    // Class SS — SwiftSQL, this engine's implementation-defined conditions.
+    case .unsupported:
+      "SS001"
     }
   }
 

@@ -400,10 +400,13 @@ struct ErrorTests {
     }
   }
 
-  @Test("rejects input ending after the projection")
+  @Test("rejects a FROM keyword with no following relation")
   func unexpectedEnd() {
+    // FROM is now optional, so `SELECT *` parses as a FROM-less projection (the
+    // engine rejects a `*` with no relation). A bare FROM with no relation,
+    // though, ends the input where a relation is required.
     #expect(throws: SQLError.self) {
-      _ = try Statement(parsing: "SELECT *")
+      _ = try Statement(parsing: "SELECT * FROM")
     }
   }
 
@@ -542,6 +545,58 @@ struct ArithmeticTests {
     #expect(select.predicate
                 == .comparison(left: sum, op: .equal,
                                right: .literal(.integer(26))))
+  }
+}
+
+// MARK: - Scalar (FROM-less) SELECT
+
+struct ScalarSelectTests {
+  @Test("parses a FROM-less SELECT with no relation")
+  func bare() throws {
+    let select = try parseSelect("SELECT 1")
+    #expect(select.from == nil)
+    #expect(select.joins.isEmpty)
+    #expect(select.predicate == nil)
+    #expect(select.order == nil)
+    #expect(select.projection
+                == .expressions([Projected(expression: .literal(.integer(1)))]))
+  }
+
+  @Test("parses a FROM-less arithmetic projection")
+  func arithmetic() throws {
+    let select = try parseSelect("SELECT 1 + 1")
+    let sum = Expression.binary(.add, .literal(.integer(1)),
+                                .literal(.integer(1)))
+    #expect(select.from == nil)
+    #expect(select.projection == .expressions([Projected(expression: sum)]))
+  }
+
+  @Test("parses a FROM-less multi-column projection")
+  func multiColumn() throws {
+    let select = try parseSelect("SELECT 1, 2")
+    #expect(select.from == nil)
+    #expect(select.projection == .expressions([
+      Projected(expression: .literal(.integer(1))),
+      Projected(expression: .literal(.integer(2))),
+    ]))
+  }
+
+  @Test("a FROM-less alias names the projected column")
+  func aliased() throws {
+    let select = try parseSelect("SELECT 1 + 1 AS two")
+    let sum = Expression.binary(.add, .literal(.integer(1)),
+                                .literal(.integer(1)))
+    #expect(select.projection
+                == .expressions([Projected(expression: sum, alias: "two")]))
+  }
+
+  @Test("a FROM-less query admits no trailing WHERE")
+  func noWhere() {
+    // With FROM absent there is no relation to filter, so a WHERE that follows
+    // is trailing input rather than a clause.
+    #expect(throws: SQLError.self) {
+      _ = try Statement(parsing: "SELECT 1 WHERE 1 = 1")
+    }
   }
 }
 

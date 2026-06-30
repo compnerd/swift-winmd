@@ -219,6 +219,25 @@ public indirect enum Expression: Hashable, Sendable {
   case literal(Literal)
   /// A call to the named scalar function over its arguments, in order.
   case call(name: String, arguments: Array<Expression>)
+  /// `lhs <op> rhs` — a binary arithmetic expression over two sub-expressions,
+  /// the engine evaluating it per row to a typed `Value`.
+  case binary(Arithmetic, Expression, Expression)
+}
+
+/// A binary arithmetic operator.
+///
+/// The four standard operators over integers; `*` `/` bind tighter than `+`
+/// `-`, and all four are left-associative — the precedence the parser's
+/// climbing grammar encodes and parentheses override.
+public enum Arithmetic: Hashable, Sendable {
+  /// `+`
+  case add
+  /// `-`
+  case subtract
+  /// `*`
+  case multiply
+  /// `/` — integer division.
+  case divide
 }
 
 /// A row filter — a tree of comparisons composed with `AND`, `OR`, and `NOT`.

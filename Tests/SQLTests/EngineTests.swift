@@ -1441,3 +1441,110 @@ struct EngineUnionTests {
     ])
   }
 }
+
+// MARK: - Arithmetic tests
+
+struct EngineArithmeticTests {
+  @Test("literal arithmetic evaluates over a row")
+  func literal() throws {
+    // One row of `People` drives the projection; the value is the same for each,
+    // and `Id = 1` selects exactly one.
+    let rows = try run("SELECT 2 + 3 FROM People WHERE Id = 1")
+    #expect(rows == [[.integer(5)]])
+  }
+
+  @Test("multiplication binds tighter than addition")
+  func precedence() throws {
+    let rows = try run("SELECT 2 + 3 * 4 FROM People WHERE Id = 1")
+    #expect(rows == [[.integer(14)]])
+  }
+
+  @Test("parentheses override precedence")
+  func grouping() throws {
+    let rows = try run("SELECT (2 + 3) * 4 FROM People WHERE Id = 1")
+    #expect(rows == [[.integer(20)]])
+  }
+
+  @Test("subtraction and division are left-associative")
+  func associativity() throws {
+    // (20 - 5) - 3 = 12, not 20 - (5 - 3) = 18; (100 / 5) / 2 = 10.
+    let difference = try run("SELECT 20 - 5 - 3 FROM People WHERE Id = 1")
+    #expect(difference == [[.integer(12)]])
+    let quotient = try run("SELECT 100 / 5 / 2 FROM People WHERE Id = 1")
+    #expect(quotient == [[.integer(10)]])
+  }
+
+  @Test("integer division truncates")
+  func integerDivision() throws {
+    let rows = try run("SELECT 7 / 2 FROM People WHERE Id = 1")
+    #expect(rows == [[.integer(3)]])
+  }
+
+  @Test("arithmetic over a column computes per row")
+  func column() throws {
+    let rows = try run("SELECT Age + 1 FROM People WHERE Id = 2")
+    // Bob's Age is 25; 25 + 1 = 26.
+    #expect(rows == [[.integer(26)]])
+  }
+
+  @Test("arithmetic mixes columns and a function call")
+  func mixed() throws {
+    let rows = try functionRun("SELECT add(Id, 1) * 10 FROM People WHERE Id = 3")
+    // Carol: (3 + 1) * 10 = 40.
+    #expect(rows == [[.integer(40)]])
+  }
+
+  @Test("a NULL operand propagates to a NULL result")
+  func nullPropagation() throws {
+    // `Note` is NULL for row 2; `Id + Note` mixes a present integer with a NULL,
+    // so the whole expression is NULL rather than a fault.
+    let rows = try nullable("SELECT Id + Note FROM Maybe WHERE Id = 2")
+    #expect(rows == [[.null]])
+  }
+
+  @Test("division by zero faults")
+  func divideByZero() throws {
+    #expect(throws: SQLError.arithmetic("division by zero")) {
+      try run("SELECT Id / 0 FROM People WHERE Id = 1")
+    }
+  }
+
+  @Test("arithmetic overflow faults instead of trapping")
+  func overflow() throws {
+    // `Int.max + 1` and a multiply past the boundary report overflow as a
+    // `SQLError` rather than trapping (and aborting) the process.
+    #expect(throws: SQLError.arithmetic("integer overflow")) {
+      try run("SELECT 9223372036854775807 + 1 FROM People WHERE Id = 1")
+    }
+    #expect(throws: SQLError.arithmetic("integer overflow")) {
+      try run("SELECT 9223372036854775807 * 2 FROM People WHERE Id = 1")
+    }
+  }
+
+  @Test("a parenthesised expression opens a predicate")
+  func parenthesisedExpression() throws {
+    // `(Age + 1)` is the grouped left operand of the comparison, not a predicate
+    // group; it matches Dave (40 + 1 = 41). A leading `(` no longer forces a
+    // predicate-group parse.
+    let matched = try run("SELECT Id FROM People WHERE (Age + 1) = 41")
+    #expect(matched == [[.integer(4)]])
+    // A grouped expression works before `IS NULL` too; `Id + 1` is never NULL.
+    let none = try run("SELECT Id FROM People WHERE (Id + 1) IS NULL")
+    #expect(none.isEmpty)
+  }
+
+  @Test("a text operand faults as a type error")
+  func textOperand() throws {
+    #expect(throws: SQLError.arithmetic("operands must be integers")) {
+      try run("SELECT Name + 1 FROM People WHERE Id = 1")
+    }
+  }
+
+  @Test("arithmetic in a predicate filters rows")
+  func predicate() throws {
+    // `Age + 1 = 26` holds for everyone aged 25 (Bob and Eve); the arithmetic
+    // is evaluated per row on the WHERE side too.
+    let rows = try run("SELECT Name FROM People WHERE Age + 1 = 26")
+    #expect(rows == [[.text("Bob")], [.text("Eve")]])
+  }
+}

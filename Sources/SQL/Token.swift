@@ -46,6 +46,9 @@ extension Token {
 
     // Punctuation and operators.
     case star
+    case plus
+    case minus
+    case slash
     case comma
     case lparen
     case rparen
@@ -86,6 +89,9 @@ extension Token.Kind {
     case let .integer(value): "\(value)"
     case let .parameter(name): ":\(name)"
     case .star: "*"
+    case .plus: "+"
+    case .minus: "-"
+    case .slash: "/"
     case .comma: ","
     case .lparen: "("
     case .rparen: ")"

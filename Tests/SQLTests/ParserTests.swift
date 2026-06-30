@@ -470,6 +470,81 @@ struct ExpressionTests {
   }
 }
 
+// MARK: - Arithmetic expressions
+
+struct ArithmeticTests {
+  /// The lone projected expression of a single-item projection, failing on any
+  /// other shape.
+  private func expression(_ text: String) throws -> Expression {
+    let select = try parseSelect(text)
+    guard case let .expressions(items) = select.projection,
+        items.count == 1 else {
+      Issue.record("expected a single expression projection")
+      throw SQLError.incomplete(expected: "an expression projection")
+    }
+    return items[0].expression
+  }
+
+  @Test("parses each arithmetic operator")
+  func operators() throws {
+    let cases: Array<(String, Arithmetic)> = [
+      ("+", .add),
+      ("-", .subtract),
+      ("*", .multiply),
+      ("/", .divide),
+    ]
+    for (text, op) in cases {
+      let parsed = try expression("SELECT 1 \(text) 2 FROM T")
+      #expect(parsed
+                  == .binary(op, .literal(.integer(1)), .literal(.integer(2))))
+    }
+  }
+
+  @Test("multiplication binds tighter than addition")
+  func precedence() throws {
+    // 2 + 3 * 4  ==>  2 + (3 * 4)
+    let parsed = try expression("SELECT 2 + 3 * 4 FROM T")
+    let product = Expression.binary(.multiply, .literal(.integer(3)),
+                                    .literal(.integer(4)))
+    #expect(parsed == .binary(.add, .literal(.integer(2)), product))
+  }
+
+  @Test("parentheses override precedence")
+  func grouping() throws {
+    // (2 + 3) * 4  ==>  (2 + 3) * 4
+    let parsed = try expression("SELECT (2 + 3) * 4 FROM T")
+    let sum = Expression.binary(.add, .literal(.integer(2)),
+                                .literal(.integer(3)))
+    #expect(parsed == .binary(.multiply, sum, .literal(.integer(4))))
+  }
+
+  @Test("addition is left-associative")
+  func leftAssociative() throws {
+    // 1 - 2 - 3  ==>  (1 - 2) - 3
+    let parsed = try expression("SELECT 1 - 2 - 3 FROM T")
+    let left = Expression.binary(.subtract, .literal(.integer(1)),
+                                 .literal(.integer(2)))
+    #expect(parsed == .binary(.subtract, left, .literal(.integer(3))))
+  }
+
+  @Test("arithmetic combines columns and calls")
+  func operands() throws {
+    let parsed = try expression("SELECT add(Id, 1) * 10 FROM T")
+    let call = Expression.call(name: "add",
+                               arguments: [.column("Id"), .literal(.integer(1))])
+    #expect(parsed == .binary(.multiply, call, .literal(.integer(10))))
+  }
+
+  @Test("arithmetic parses on either side of a comparison")
+  func predicate() throws {
+    let select = try parseSelect("SELECT * FROM T WHERE Age + 1 = 26")
+    let sum = Expression.binary(.add, .column("Age"), .literal(.integer(1)))
+    #expect(select.predicate
+                == .comparison(left: sum, op: .equal,
+                               right: .literal(.integer(26))))
+  }
+}
+
 // MARK: - CREATE VIEW
 
 /// Parses `text` and returns its `(name, view)`, failing on any other shape.

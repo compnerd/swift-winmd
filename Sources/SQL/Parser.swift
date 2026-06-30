@@ -6,24 +6,32 @@
 /// The grammar is the minimal dialect, extended with a chain of joins:
 ///
 /// ```
-/// statement   := query | create
-/// create      := CREATE VIEW identifier ['(' identifier (',' identifier)* ')']
-///                  AS query
-/// query       := select (UNION [ALL] select)*
-/// select      := SELECT projection FROM relation (join)* [where] [order]
-/// relation    := identifier [AS identifier]
-/// join        := JOIN relation ON column '=' column
-/// projection  := '*' | column (',' column)*
-/// where       := WHERE predicate
-/// predicate   := disjunction
-/// disjunction := conjunction (OR conjunction)*
-/// conjunction := negation (AND negation)*
-/// negation    := NOT negation | primary
-/// primary     := '(' predicate ')' | comparison
-/// comparison  := expression (op (expression | param) | IS [NOT] NULL)
-/// order       := ORDER BY column [ASC | DESC]
-/// column      := identifier        // a dotted identifier is qualified
+/// statement      := query | create
+/// create         := CREATE VIEW identifier
+///                   ['(' identifier (',' identifier)* ')'] AS query
+/// query          := select (UNION [ALL] select)*
+/// select         := SELECT projection FROM relation (join)* [where] [order]
+/// relation       := identifier [AS identifier]
+/// join           := JOIN relation ON column '=' column
+/// projection     := '*' | column (',' column)*
+/// where          := WHERE predicate
+/// predicate      := disjunction
+/// disjunction    := conjunction (OR conjunction)*
+/// conjunction    := negation (AND negation)*
+/// negation       := NOT negation | primary
+/// primary        := '(' predicate ')' | comparison
+/// comparison     := expression (op (expression | param) | IS [NOT] NULL)
+/// expression     := additive
+/// additive       := multiplicative (('+' | '-') multiplicative)*
+/// multiplicative := factor (('*' | '/') factor)*
+/// factor         := '(' expression ')' | literal | call | column
+/// order          := ORDER BY column [ASC | DESC]
+/// column         := identifier        // a dotted identifier is qualified
 /// ```
+///
+/// Arithmetic precedence is `*` `/` > `+` `-`, both levels left-associative; the
+/// cascade of `additive`/`multiplicative` encodes it, and parentheses override
+/// it through `factor`.
 ///
 /// A `column` is a single identifier token; a qualifying dot (`t.Name`) is part
 /// of the identifier the lexer scans, so `Column(_:)` splits it into qualifier
@@ -271,13 +279,60 @@ internal struct Parser: ~Escapable {
     return Projected(expression: expression, alias: alias)
   }
 
-  /// Parses a scalar expression: a string/integer literal, a function call
-  /// (`name(args)`), or a bare (possibly-qualified) column.
-  ///
-  /// A function call is an identifier immediately followed by `(`; an identifier
-  /// not so followed is a column. The arguments are a comma-separated list of
-  /// expressions, possibly empty.
+  /// Parses a scalar expression at the lowest arithmetic precedence (`+` `-`).
   private mutating func expression() throws(SQLError) -> Expression {
+    try additive()
+  }
+
+  /// Parses `multiplicative (('+' | '-') multiplicative)*`, left-associative.
+  private mutating func additive() throws(SQLError) -> Expression {
+    var lhs = try multiplicative()
+    while true {
+      let op: Arithmetic? = if try match(.plus) {
+        .add
+      } else if try match(.minus) {
+        .subtract
+      } else {
+        nil
+      }
+      guard let op else { break }
+      lhs = try .binary(op, lhs, multiplicative())
+    }
+    return lhs
+  }
+
+  /// Parses `factor (('*' | '/') factor)*`, left-associative — `*` and `/` bind
+  /// tighter than `+` and `-`.
+  private mutating func multiplicative() throws(SQLError) -> Expression {
+    var lhs = try factor()
+    while true {
+      let op: Arithmetic? = if try match(.star) {
+        .multiply
+      } else if try match(.slash) {
+        .divide
+      } else {
+        nil
+      }
+      guard let op else { break }
+      lhs = try .binary(op, lhs, factor())
+    }
+    return lhs
+  }
+
+  /// Parses an arithmetic factor: a parenthesised expression, a string/integer
+  /// literal, a function call (`name(args)`), or a bare (possibly-qualified)
+  /// column.
+  ///
+  /// Parentheses override the precedence the cascade encodes. A function call is
+  /// an identifier immediately followed by `(`; an identifier not so followed is
+  /// a column. The arguments are a comma-separated list of expressions, possibly
+  /// empty.
+  private mutating func factor() throws(SQLError) -> Expression {
+    if try match(.lparen) {
+      let expression = try expression()
+      try expect(.rparen)
+      return expression
+    }
     if case let .string(value) = current?.kind {
       _ = try advance(expecting: "a literal")
       return .literal(.string(value))
@@ -337,13 +392,28 @@ internal struct Parser: ~Escapable {
   }
 
   /// Parses a parenthesised predicate or a comparison.
+  ///
+  /// A leading `(` is ambiguous: it opens either a parenthesised predicate
+  /// (`(a = 1 AND b = 2)`) or the parenthesised left operand of a comparison
+  /// (`(Age + 1) = 26`, where `factor` consumes the `(expression)`). The
+  /// comparison is tried first; if it fails, the group was a predicate, so the
+  /// parser rewinds to the saved lexer and lookahead token and parses it as one.
   private mutating func primary() throws(SQLError) -> Predicate {
-    if try match(.lparen) {
-      let predicate = try predicate()
-      try expect(.rparen)
-      return predicate
+    guard current?.kind == .lparen else {
+      return try comparison()
     }
-    return try comparison()
+    let lexer = self.lexer
+    let token = self.current
+    do {
+      return try comparison()
+    } catch {
+      self.lexer = lexer
+      self.current = token
+    }
+    try expect(.lparen)
+    let predicate = try predicate()
+    try expect(.rparen)
+    return predicate
   }
 
   /// Parses `expression (op (expression | :parameter) | IS [NOT] NULL)`.

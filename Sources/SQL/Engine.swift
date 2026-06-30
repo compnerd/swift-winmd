@@ -79,7 +79,11 @@ public enum Engine {
       throws(SQLError) -> Int {
     switch select.projection {
     case .all:
-      var width = try resolve(select.from, catalog).schema.width
+      // `SELECT *` spans the relations in scope; a FROM-less arm has none.
+      guard let relation = select.from else {
+        throw .named("SELECT * with no FROM")
+      }
+      var width = try resolve(relation, catalog).schema.width
       for join in select.joins {
         try width += resolve(join.relation, catalog).schema.width
       }
@@ -117,19 +121,30 @@ public enum Engine {
   internal static func compile<C: Catalog & ~Escapable>(_ select: Select,
                                                         _ catalog: borrowing C)
       throws(SQLError) -> Plan {
-    let from = try resolve(select.from, catalog)
+    guard let relation = select.from else {
+      // A FROM-less select projects expressions over a single row; a `WHERE`,
+      // `ORDER BY`, or `JOIN` has no relation to apply to. The parser never
+      // produces that shape, but a direct `Select(from: nil, …)` can, so reject
+      // it rather than silently ignore the clause.
+      guard select.joins.isEmpty, select.predicate == nil,
+          select.order == nil else {
+        throw .unsupported("a WHERE, ORDER BY, or JOIN requires a FROM clause")
+      }
+      return try scalar(select.projection)
+    }
+    let from = try resolve(relation, catalog)
 
     guard !select.joins.isEmpty else {
       var filter: Filter? = nil
       if let predicate = select.predicate {
-        filter = try from.schema.lower(predicate, in: select.from)
+        filter = try from.schema.lower(predicate, in: relation)
       }
       var order: (column: Int, ascending: Bool)? = nil
       if let clause = select.order {
-        order = try from.schema.order(clause, in: select.from)
+        order = try from.schema.order(clause, in: relation)
       }
       let projection =
-          try from.schema.terms(select.projection, in: select.from)
+          try from.schema.terms(select.projection, in: relation)
 
       // The referenced ordinals, in slot order: slot `i` is `ordinals[i]`.
       let ordinals = referenced(projection, filter, order)
@@ -149,7 +164,7 @@ public enum Engine {
       try joined.append(resolve(join.relation, catalog))
     }
 
-    var relations = [(select.from, from.schema)]
+    var relations = [(relation, from.schema)]
     for index in select.joins.indices {
       relations.append((select.joins[index].relation, joined[index].schema))
     }
@@ -220,6 +235,28 @@ public enum Engine {
     return shape(chain, projection.map { $0.remapped(through: slot) },
                  predicate.map { $0.remapped(through: slot) },
                  order.map { (slot[$0.column]!, $0.ascending) })
+  }
+
+  /// Compiles a scalar (FROM-less) `SELECT <expr-list>` into `Project(single)`
+  /// — the projection evaluated against the one empty row the `single` leaf
+  /// yields.
+  ///
+  /// The projection resolves against an empty schema (no columns), so only
+  /// literals, scalar calls, and arithmetic over them lower; a `SELECT *` has no
+  /// relation to expand and a bare-column reference no column to bind, each
+  /// faulting (`SQLError.column` for a column, `SQLError.unsupported` for `*`).
+  /// The terms hold no slots, so the `single` row's empty record carries every
+  /// value the projection needs.
+  private static func scalar(_ projection: Projection)
+      throws(SQLError) -> Plan {
+    guard case .all = projection else {
+      let schema = Schema(width: 0, extent: 0, names: [], virtuals: [])
+      let terms = try schema.terms(projection, in: Relation(name: ""))
+      return .project(terms, .single)
+    }
+    // `SELECT *` names every column of the relations in scope; a FROM-less query
+    // has none, so there is nothing to expand.
+    throw .unsupported("SELECT * requires a FROM clause")
   }
 
   /// A relation resolved for compilation: its name-resolution `schema` and a
@@ -335,6 +372,8 @@ public enum Engine {
                                                          _ bindings: Bindings)
       throws(SQLError) -> Plan {
     switch plan {
+    case .single:
+      plan
     case .scan:
       plan
     case let .derived(name, plan, ordinals, seek):

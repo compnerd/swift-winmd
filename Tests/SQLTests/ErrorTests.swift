@@ -70,6 +70,15 @@ struct SQLStateTests {
         SQLError.operand("operands must be integers").sqlstate == "42804")
   }
 
+  @Test("an engine-specific condition reports the SwiftSQL SS class")
+  func unsupported() {
+    // Engine-specific faults with no standard ISO code squat on the
+    // implementation-defined `SS` (SwiftSQL) class rather than borrow a
+    // standard one.
+    #expect(SQLError.unsupported("SELECT * requires a FROM clause").sqlstate
+            == "SS001")
+  }
+
   @Test(".state round-trips its code and message")
   func passthrough() {
     let error = SQLError.state("40001", "serialization failure")

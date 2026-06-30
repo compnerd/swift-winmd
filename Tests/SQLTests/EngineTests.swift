@@ -963,7 +963,7 @@ private func derived(_ plan: Plan) -> Plan? {
     derived(left) ?? derived(right)
   case let .union(left, right, _):
     derived(left) ?? derived(right)
-  case .scan, .join:
+  case .single, .scan, .join:
     nil
   }
 }
@@ -985,7 +985,7 @@ private func seeks(_ plan: Plan) -> Bool {
     seeks(left) || seeks(right)
   case let .union(left, right, _):
     seeks(left) || seeks(right)
-  case .join:
+  case .single, .join:
     false
   }
 }
@@ -1008,7 +1008,7 @@ private func filters(_ plan: Plan) -> Bool {
     filters(left) || filters(right)
   case let .union(left, right, _):
     filters(left) || filters(right)
-  case .scan, .join:
+  case .single, .scan, .join:
     false
   }
 }
@@ -1580,5 +1580,126 @@ struct EngineArithmeticTests {
     // is evaluated per row on the WHERE side too.
     let rows = try run("SELECT Name FROM People WHERE Age + 1 = 26")
     #expect(rows == [[.text("Bob")], [.text("Eve")]])
+  }
+}
+
+// MARK: - Scalar (FROM-less) SELECT tests
+
+struct EngineScalarSelectTests {
+  @Test("a FROM-less literal yields exactly one row")
+  func literal() throws {
+    // No relation, so the projection runs against a single empty row; the
+    // catalog is never consulted for a table.
+    let rows = try run("SELECT 42")
+    #expect(rows == [[.integer(42)]])
+  }
+
+  @Test("a FROM-less arithmetic computes a scalar")
+  func arithmetic() throws {
+    let rows = try run("SELECT 1 + 1")
+    #expect(rows == [[.integer(2)]])
+  }
+
+  @Test("FROM-less arithmetic honours precedence")
+  func precedence() throws {
+    let rows = try run("SELECT 2 + 3 * 4")
+    #expect(rows == [[.integer(14)]])
+  }
+
+  @Test("a FROM-less multi-column projection yields one row of each value")
+  func multiColumn() throws {
+    let rows = try run("SELECT 1, 2, 3")
+    #expect(rows == [[.integer(1), .integer(2), .integer(3)]])
+  }
+
+  @Test("a FROM-less projection mixes text and integer expressions")
+  func mixed() throws {
+    let rows = try run("SELECT 'x', 10 / 2")
+    #expect(rows == [[.text("x"), .integer(5)]])
+  }
+
+  @Test("a FROM-less scalar call evaluates against the single row")
+  func call() throws {
+    let rows = try functionRun("SELECT add(40, 2)")
+    #expect(rows == [[.integer(42)]])
+  }
+
+  @Test("a NULL-yielding FROM-less expression projects NULL")
+  func null() throws {
+    // The bare literal NULL is not in the grammar, but a NULL arises from a
+    // function returning it; `nothing` yields NULL for the single row.
+    let routines: Routines = ["nothing": { _ in .null }]
+    let rows = try Engine.run(parse("SELECT nothing()"), people(), routines)
+    #expect(rows == [[.null]])
+  }
+
+  @Test("a FROM-less SELECT * is rejected — no relation to expand")
+  func star() throws {
+    #expect(throws: SQLError.unsupported("SELECT * requires a FROM clause")) {
+      try run("SELECT *")
+    }
+  }
+
+  @Test("a FROM-less bare column is rejected — no column to bind")
+  func column() throws {
+    #expect(throws: SQLError.column("Name")) {
+      try run("SELECT Name")
+    }
+  }
+
+  @Test("a directly-built FROM-less select with clauses is rejected")
+  func clauses() throws {
+    // The parser never builds a FROM-less select carrying a WHERE, ORDER BY, or
+    // JOIN, but `Select.init` is public, so a direct `Select(from: nil, …)` can.
+    // The engine must reject it rather than silently drop the clause — a false
+    // predicate would otherwise still return the scalar row.
+    let fault =
+        SQLError.unsupported("a WHERE, ORDER BY, or JOIN requires a FROM clause")
+    let filtered = try EngineScalarSelectTests.select(
+        "SELECT 1 FROM People WHERE Id = 99")
+    #expect(throws: fault) {
+      try Engine.run(.select(Select(projection: filtered.projection,
+                                    from: nil,
+                                    predicate: filtered.predicate)), people())
+    }
+    let ordered =
+        try EngineScalarSelectTests.select("SELECT Id FROM People ORDER BY Id")
+    #expect(throws: fault) {
+      try Engine.run(.select(Select(projection: ordered.projection, from: nil,
+                                    order: ordered.order)), people())
+    }
+    let joined = try EngineScalarSelectTests.select(
+        "SELECT Id FROM People JOIN Pets ON Pets.Owner = People.Id")
+    #expect(throws: fault) {
+      try Engine.run(.select(Select(projection: joined.projection, from: nil,
+                                    joins: joined.joins)), people())
+    }
+  }
+
+  /// The `Select` of a parsed single-`SELECT` query — for building the FROM-less
+  /// shapes the parser will not, by re-homing a clause onto a `from: nil` select.
+  private static func select(_ text: String) throws -> Select {
+    guard case let .select(select) = try parse(text) else {
+      throw SQLError.incomplete(expected: "a SELECT")
+    }
+    return select
+  }
+
+  @Test("a FROM-less arm of a UNION combines with a FROM arm")
+  func union() throws {
+    // Both arms project one integer column; the FROM-less arm contributes its
+    // single computed row, deduplicating against the People ages.
+    let rows = try Engine.run(parse("""
+        SELECT 100 UNION ALL SELECT Age FROM People WHERE Id = 1
+        """), people())
+    #expect(rows == [[.integer(100)], [.integer(30)]])
+  }
+
+  @Test("an existing SELECT … FROM … query is unaffected")
+  func regression() throws {
+    // The FROM-optional grammar leaves a normal query parsing and running
+    // exactly as before.
+    let rows = try run("SELECT Name FROM People WHERE Id = 1")
+    #expect(rows == [[.text("Alice")]])
   }
 }

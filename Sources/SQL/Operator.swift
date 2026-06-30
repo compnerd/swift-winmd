@@ -101,6 +101,10 @@ internal struct Record: Row, Hashable {
 /// named and its referenced ordinals carried for the executor to re-resolve and
 /// materialise.
 internal indirect enum Plan {
+  /// The single-row leaf of a FROM-less `SELECT`: it yields exactly one empty
+  /// record (no slots), the row a scalar projection (`SELECT 1 + 1`) computes
+  /// its expressions against.
+  case single
   /// A leaf over the relation `name`: its `ordinals` (defining its slots), over
   /// the seek's row range when present (else the whole relation).
   case scan(name: String, ordinals: Array<Int>, seek: Range<Int>?)
@@ -171,6 +175,10 @@ extension Plan {
   /// nest rewrite recurse into a multi-relation chain.
   internal var slots: Int? {
     switch self {
+    case .single:
+      // The single empty row has no slots — a FROM-less projection reads only
+      // constants and calls over them, never a slot of this row.
+      0
     case let .scan(_, ordinals, _):
       ordinals.count
     case let .derived(_, _, ordinals, _):
@@ -216,6 +224,10 @@ internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
                                                _ bindings: Bindings)
     throws(SQLError) -> Array<Record> {
   switch plan {
+  case .single:
+    // The FROM-less single row: one record with no cells, the source a scalar
+    // projection evaluates its constant/call expressions against.
+    [Record([])]
   case let .scan(name, ordinals, seek):
     try materialise(name, ordinals, seek, catalog)
   case let .derived(_, source, ordinals, seek):

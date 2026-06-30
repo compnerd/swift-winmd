@@ -53,15 +53,24 @@ public indirect enum Query: Hashable, Sendable {
 
 /// A `SELECT` query: a projection over one relation or a chain of joins, with an
 /// optional predicate and ordering.
+///
+/// `from` is optional: a FROM-less `SELECT <expr-list>` yields exactly one row
+/// whose columns are the evaluated projection expressions, the standard SQL
+/// way to compute a scalar (`SELECT 1 + 1`). A FROM-less select carries no
+/// joins, and its projection may not be a `SELECT *` — there is no relation to
+/// expand — nor a bare-column reference; only literals, calls, and arithmetic
+/// over them resolve against the empty row.
 public struct Select: Hashable, Sendable {
   /// The columns the query yields.
   public let projection: Projection
 
-  /// The primary relation the query scans.
-  public let from: Relation
+  /// The primary relation the query scans, or `nil` for a FROM-less `SELECT`
+  /// that projects over a single empty row.
+  public let from: Relation?
 
   /// The joins applied to `from`, in source order — `from JOIN joins[0] JOIN
-  /// joins[1] …`, a left-deep chain. Empty for a single-relation query.
+  /// joins[1] …`, a left-deep chain. Empty for a single-relation query and for
+  /// a FROM-less one.
   public let joins: Array<Join>
 
   /// The row filter, if any.
@@ -70,7 +79,7 @@ public struct Select: Hashable, Sendable {
   /// The ordering applied to the result, if any.
   public let order: Order?
 
-  public init(projection: Projection, from: Relation,
+  public init(projection: Projection, from: Relation?,
               joins: Array<Join> = [], predicate: Predicate? = nil,
               order: Order? = nil) {
     self.projection = projection
@@ -80,12 +89,13 @@ public struct Select: Hashable, Sendable {
     self.order = order
   }
 
-  /// The name of the primary relation.
+  /// The name of the primary relation, or the empty string for a FROM-less
+  /// `SELECT`.
   ///
   /// Retained for single-relation consumers that only ever name one table; it
   /// reads the `from` relation's name.
   public var table: String {
-    from.name
+    from?.name ?? ""
   }
 }
 

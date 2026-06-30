@@ -8,6 +8,12 @@ import Testing
 import SQL
 @testable import WinMD
 
+import struct Foundation.Data
+import struct Foundation.URL
+import class Foundation.FileManager
+import struct Foundation.UUID
+import func Foundation.NSTemporaryDirectory
+
 /// Coverage of the per-table decoded virtual columns the WinMD → SQL adapter
 /// exposes: `guid` on `CustomAttribute`, `ReturnType` on `MethodDef`, and
 /// `ParamType` on `Param`. Rather than map a `.winmd` file, the tests assemble a
@@ -344,6 +350,113 @@ struct DatabaseSQLTests {
         [.text("IMyInterface"),
          .text("0C733A30-2A1C-11CE-ADE5-00AA0044773D")],
       ])
+    }
+  }
+
+  @Test("a script's CREATE VIEW is visible to a later statement's SELECT")
+  func scriptSession() throws {
+    // The batch driver threads one shared `Session` across every statement, so a
+    // `CREATE VIEW` registered by one statement is visible to a later `SELECT`.
+    // `execute` prints rather than returning rows, so this drives the shared
+    // statement path directly — `Shell.execute` over the same session — to
+    // register the view (the `CREATE VIEW` branch), then resolves a `SELECT`
+    // naming it through the session's views, the exact session state the batch
+    // threads.
+    try DatabaseSQLTests.with { catalog in
+      var shell = Shell(catalog)
+      try shell.execute("CREATE VIEW names AS SELECT TypeName FROM TypeDef")
+      #expect(shell.session.views.keys.contains("names"))
+      let rows = try DatabaseSQLTests.run(
+          "SELECT TypeName FROM names", shell.session.views, catalog)
+      #expect(rows == [[.text("IMyInterface")], [.text("INotGuid")]])
+    }
+  }
+
+  @Test("execute routes a `.`-token to its meta-command")
+  func executeMeta() throws {
+    // The leading-token dispatch matches `.tables` to `Tables`, which lists the
+    // storage's relations; the fixture's catalog vends them, so `execute`
+    // succeeds. A SQL statement takes the parse path instead — exercised by
+    // `scriptSession` — and `.quit` throws the loop's `Stop` sentinel.
+    try DatabaseSQLTests.with { catalog in
+      var shell = Shell(catalog)
+      try shell.execute(".tables")
+      #expect(throws: Shell.Stop.self) { try shell.execute(".quit") }
+    }
+  }
+
+  @Test("execute rejects an unknown or empty-argument `.`-command")
+  func executeUnknown() {
+    // An unrecognised `.`-token is `MetaError.unknown`, and a `.read` with no
+    // path executes to the same unknown fault — the empty-argument guard the
+    // `Read` command carries.
+    DatabaseSQLTests.with { catalog in
+      var shell = Shell(catalog)
+      #expect(throws: Shell.MetaError.unknown(".bogus")) {
+        try shell.execute(".bogus")
+      }
+      #expect(throws: Shell.MetaError.unknown(".read")) {
+        try shell.execute(".read")
+      }
+    }
+  }
+
+  @Test("a `.quit` inside a `.read` file leaves the shell, not just the file")
+  func readPropagatesQuit() throws {
+    // `.read` drives the same statement stream, but a `.quit` in the file must
+    // throw `Stop` past the file reader so the whole session ends — the help's
+    // promise — not merely the included file. The statement after the `.quit`
+    // never runs; that the read throws `Stop` is the observable evidence.
+    let path = NSTemporaryDirectory()
+             + "winmd-inspect-\(UUID().uuidString).sql"
+    try Data(".quit\nSELECT TypeName FROM TypeDef;\n".utf8)
+        .write(to: URL(fileURLWithPath: path))
+    defer { try? FileManager.default.removeItem(atPath: path) }
+    DatabaseSQLTests.with { catalog in
+      var shell = Shell(catalog)
+      #expect(throws: Shell.Stop.self) {
+        try shell.execute(".read \(path)")
+      }
+    }
+  }
+
+  @Test("a `.read` fault fails an explicit batch fast")
+  func readFailsFastInBatch() throws {
+    // A `strict` shell (an explicit batch) lets an included file's fault
+    // propagate, so the run aborts rather than pressing on against a partially
+    // applied session. The bad `SELECT` is the file's only statement here; that
+    // `.read` throws is the evidence the batch would fail.
+    let path = NSTemporaryDirectory()
+             + "winmd-inspect-\(UUID().uuidString).sql"
+    try Data("SELECT Name FROM NoSuchTable;\n".utf8)
+        .write(to: URL(fileURLWithPath: path))
+    defer { try? FileManager.default.removeItem(atPath: path) }
+    DatabaseSQLTests.with { catalog in
+      var shell = Shell(catalog, strict: true)
+      #expect(throws: (any Error).self) {
+        try shell.execute(".read \(path)")
+      }
+    }
+  }
+
+  @Test("a `.read` fault is reported and skipped in shell mode")
+  func readContinuesInShell() throws {
+    // A forgiving shell (the interactive/redirected path) reports a statement's
+    // fault and reads on, so an included file behaves like its text on stdin: a
+    // bad statement does not skip the file's later valid ones. `.read` must not
+    // throw here, and the CREATE VIEW after the bad SELECT must still register.
+    let path = NSTemporaryDirectory()
+             + "winmd-inspect-\(UUID().uuidString).sql"
+    try Data("""
+      SELECT Name FROM NoSuchTable;
+      CREATE VIEW ok AS SELECT TypeName FROM TypeDef;
+
+      """.utf8).write(to: URL(fileURLWithPath: path))
+    defer { try? FileManager.default.removeItem(atPath: path) }
+    DatabaseSQLTests.with { catalog in
+      var shell = Shell(catalog)
+      #expect(throws: Never.self) { try shell.execute(".read \(path)") }
+      #expect(shell.session.views.keys.contains("ok"))
     }
   }
 

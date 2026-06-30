@@ -33,7 +33,7 @@ private let typeref0: UInt8 = 0x05
 struct SignatureTests {
   @Test("decodes (i4, string) -> void")
   func methodPrimitives() throws {
-    var bytes = [DEFAULT, 0x02, VOID, I4, STRING]
+    let bytes = [DEFAULT, 0x02, VOID, I4, STRING]
     var decoder = SignatureDecoder(bytes.span.bytes)
     let signature = try decoder.method()
 
@@ -52,7 +52,7 @@ struct SignatureTests {
 
   @Test("decodes the HASTHIS instance flag")
   func methodInstance() throws {
-    var bytes = [HASTHIS | DEFAULT, 0x00, VOID]
+    let bytes = [HASTHIS | DEFAULT, 0x00, VOID]
     var decoder = SignatureDecoder(bytes.span.bytes)
     let signature = try decoder.method()
     #expect(signature.instance)
@@ -61,7 +61,7 @@ struct SignatureTests {
 
   @Test("decodes a pointer parameter")
   func pointerParameter() throws {
-    var bytes = [DEFAULT, 0x01, VOID, PTR, I4]
+    let bytes = [DEFAULT, 0x01, VOID, PTR, I4]
     var decoder = SignatureDecoder(bytes.span.bytes)
     let signature = try decoder.method()
     guard case let .pointer(pointee) = signature.parameters[0],
@@ -72,7 +72,7 @@ struct SignatureTests {
 
   @Test("decodes a byref parameter")
   func byrefParameter() throws {
-    var bytes = [DEFAULT, 0x01, VOID, BYREF, U4]
+    let bytes = [DEFAULT, 0x01, VOID, BYREF, U4]
     var decoder = SignatureDecoder(bytes.span.bytes)
     let signature = try decoder.method()
     guard case let .reference(referent) = signature.parameters[0],
@@ -83,7 +83,7 @@ struct SignatureTests {
 
   @Test("decodes an SZARRAY return")
   func arrayReturn() throws {
-    var bytes = [DEFAULT, 0x00, SZARRAY, I4]
+    let bytes = [DEFAULT, 0x00, SZARRAY, I4]
     var decoder = SignatureDecoder(bytes.span.bytes)
     let signature = try decoder.method()
     guard case let .array(element) = signature.returns,
@@ -94,7 +94,7 @@ struct SignatureTests {
 
   @Test("decodes a CLASS parameter via a coded index")
   func namedParameter() throws {
-    var bytes = [DEFAULT, 0x01, VOID, CLASS, typeref0]
+    let bytes = [DEFAULT, 0x01, VOID, CLASS, typeref0]
     var decoder = SignatureDecoder(bytes.span.bytes)
     let signature = try decoder.method()
     guard case let .named(kind, reference) = signature.parameters[0] else {
@@ -109,7 +109,7 @@ struct SignatureTests {
   @Test("decodes a custom-modified parameter")
   func modifiedParameter() throws {
     // `const`-modified value type: CMOD_OPT TypeRef[0], then VALUETYPE TypeRef[0].
-    var bytes = [DEFAULT, 0x01, VOID, CMOD_OPT, typeref0, VALUETYPE, typeref0]
+    let bytes = [DEFAULT, 0x01, VOID, CMOD_OPT, typeref0, VALUETYPE, typeref0]
     var decoder = SignatureDecoder(bytes.span.bytes)
     let signature = try decoder.method()
     guard case let .modified(base, modifiers) = signature.parameters[0] else {
@@ -125,7 +125,7 @@ struct SignatureTests {
 
   @Test("decodes a field signature")
   func field() throws {
-    var bytes = [FIELD, I4]
+    let bytes = [FIELD, I4]
     var decoder = SignatureDecoder(bytes.span.bytes)
     let signature = try decoder.field()
     guard case .primitive(.int4) = signature.type else {
@@ -135,7 +135,7 @@ struct SignatureTests {
 
   @Test("rejects an unknown element type")
   func malformed() {
-    var bytes = [DEFAULT, 0x00, 0xff]
+    let bytes = [DEFAULT, 0x00, 0xff]
     var decoder = SignatureDecoder(bytes.span.bytes)
     #expect(throws: WinMDError.BadImageFormat) { _ = try decoder.method() }
   }
@@ -145,18 +145,18 @@ struct SignatureTests {
     // The prolog's low nibble names the calling convention (ECMA-335 §II.23.2.1);
     // 0x09 and 0x0f are not defined values, so the decoder must reject them rather
     // than silently treating them as the DEFAULT convention.
-    var nine = [0x09 as UInt8, 0x00, VOID]
+    let nine = [0x09 as UInt8, 0x00, VOID]
     var nineDecoder = SignatureDecoder(nine.span.bytes)
     #expect(throws: WinMDError.BadImageFormat) { _ = try nineDecoder.method() }
 
-    var fifteen = [0x0f as UInt8, 0x00, VOID]
+    let fifteen = [0x0f as UInt8, 0x00, VOID]
     var fifteenDecoder = SignatureDecoder(fifteen.span.bytes)
     #expect(throws: WinMDError.BadImageFormat) { _ = try fifteenDecoder.method() }
   }
 
   @Test("rejects a truncated signature")
   func truncated() {
-    var bytes = [DEFAULT, 0x01, VOID]    // missing the parameter
+    let bytes = [DEFAULT, 0x01, VOID]    // missing the parameter
     var decoder = SignatureDecoder(bytes.span.bytes)
     #expect(throws: WinMDError.BadImageFormat) { _ = try decoder.method() }
   }
@@ -165,7 +165,7 @@ struct SignatureTests {
   func compressedLeadByte() {
     // The parameter count is a compressed integer; `0xe0` is `111xxxxx`, not a
     // defined encoding, so decoding must fault rather than read past the blob.
-    var bytes = [DEFAULT, 0xe0, VOID]
+    let bytes = [DEFAULT, 0xe0, VOID]
     var decoder = SignatureDecoder(bytes.span.bytes)
     #expect(throws: WinMDError.BadImageFormat) { _ = try decoder.method() }
   }
@@ -174,11 +174,11 @@ struct SignatureTests {
   func compressedTruncated() {
     // `0x80` opens a 2-byte encoding but no second byte follows; `0xc0` opens a
     // 4-byte one with only one byte left. Either must fault, not crash.
-    var two = [DEFAULT, 0x80]
+    let two = [DEFAULT, 0x80]
     var twoDecoder = SignatureDecoder(two.span.bytes)
     #expect(throws: WinMDError.BadImageFormat) { _ = try twoDecoder.method() }
 
-    var four = [DEFAULT, 0xc0]
+    let four = [DEFAULT, 0xc0]
     var fourDecoder = SignatureDecoder(four.span.bytes)
     #expect(throws: WinMDError.BadImageFormat) { _ = try fourDecoder.method() }
   }
@@ -187,7 +187,7 @@ struct SignatureTests {
   func matrixNegativeBound() throws {
     // `i4[*]` returning from a method: rank 1, no explicit sizes, one lower
     // bound of -3 (compressed signed `0x7b`, ECMA-335 §II.23.2).
-    var bytes = [DEFAULT, 0x00, ARRAY, I4, 0x01, 0x00, 0x01, 0x7b]
+    let bytes = [DEFAULT, 0x00, ARRAY, I4, 0x01, 0x00, 0x01, 0x7b]
     var decoder = SignatureDecoder(bytes.span.bytes)
     let signature = try decoder.method()
     guard case let .matrix(element, shape) = signature.returns,
@@ -207,7 +207,7 @@ struct SignatureTests {
     // (magnitude 16384 > 2^13) encodes rotated to value 536838145, i.e. the
     // 4-byte big-endian word `0xdf 0xff 0x80 0x01` (ECMA-335 §II.23.2). A
     // 28-bit correction would decode it 2^27 (134217728) too high.
-    var bytes =
+    let bytes =
         [DEFAULT, 0x00, ARRAY, I4, 0x01, 0x00, 0x01, 0xdf, 0xff, 0x80, 0x01]
     var decoder = SignatureDecoder(bytes.span.bytes)
     let signature = try decoder.method()
@@ -224,7 +224,7 @@ struct SignatureTests {
   func matrixTooManySizes() {
     // ECMA-335 §II.23.2.13 constrains `NumSizes` to `<= Rank`. Here rank is 1 but
     // NumSizes is 2 (two sizes, no lower bounds) — the decoder must reject it.
-    var bytes = [DEFAULT, 0x00, ARRAY, I4, 0x01, 0x02, 0x01, 0x02, 0x00]
+    let bytes = [DEFAULT, 0x00, ARRAY, I4, 0x01, 0x02, 0x01, 0x02, 0x00]
     var decoder = SignatureDecoder(bytes.span.bytes)
     #expect(throws: WinMDError.BadImageFormat) { _ = try decoder.method() }
   }
@@ -233,7 +233,7 @@ struct SignatureTests {
   func matrixTooManyBounds() {
     // Likewise `NumLoBounds` must be `<= Rank`. Rank is 1 but NumLoBounds is 2
     // (no sizes, two bounds) — the decoder must reject it.
-    var bytes = [DEFAULT, 0x00, ARRAY, I4, 0x01, 0x00, 0x02, 0x01, 0x02]
+    let bytes = [DEFAULT, 0x00, ARRAY, I4, 0x01, 0x00, 0x02, 0x01, 0x02]
     var decoder = SignatureDecoder(bytes.span.bytes)
     #expect(throws: WinMDError.BadImageFormat) { _ = try decoder.method() }
   }
@@ -242,7 +242,7 @@ struct SignatureTests {
   func matrixWellFormed() throws {
     // Rank 2 with NumSizes 2 and NumLoBounds 2 — both at the rank limit — decodes
     // to a 2x3 matrix lower-bounded at (0, 1).
-    var bytes =
+    let bytes =
         [DEFAULT, 0x00, ARRAY, I4, 0x02, 0x02, 0x02, 0x03, 0x02, 0x00, 0x02]
     var decoder = SignatureDecoder(bytes.span.bytes)
     let signature = try decoder.method()
@@ -260,7 +260,7 @@ struct SignatureTests {
     // ECMA-335 §II.23.2.13 requires `Rank >= 1`. Here rank is 0 (with no sizes
     // and no lower bounds); both `<= Rank` guards pass vacuously, so the rank
     // guard itself must reject it.
-    var bytes = [DEFAULT, 0x00, ARRAY, I4, 0x00, 0x00, 0x00]
+    let bytes = [DEFAULT, 0x00, ARRAY, I4, 0x00, 0x00, 0x00]
     var decoder = SignatureDecoder(bytes.span.bytes)
     #expect(throws: WinMDError.BadImageFormat) { _ = try decoder.method() }
   }
@@ -269,7 +269,7 @@ struct SignatureTests {
   func methodExplicitWithoutInstance() {
     // ECMA-335 §II.23.2.1: EXPLICITTHIS (0x40) is only valid alongside HASTHIS
     // (0x20). A prolog of 0x40 alone — explicit but not instance — is malformed.
-    var bytes = [EXPLICITTHIS | DEFAULT, 0x00, VOID]
+    let bytes = [EXPLICITTHIS | DEFAULT, 0x00, VOID]
     var decoder = SignatureDecoder(bytes.span.bytes)
     #expect(throws: WinMDError.BadImageFormat) { _ = try decoder.method() }
   }
@@ -277,7 +277,7 @@ struct SignatureTests {
   @Test("decodes EXPLICITTHIS alongside HASTHIS")
   func methodExplicitInstance() throws {
     // A prolog of 0x60 sets both HASTHIS and EXPLICITTHIS, which is well-formed.
-    var bytes = [EXPLICITTHIS | HASTHIS | DEFAULT, 0x00, VOID]
+    let bytes = [EXPLICITTHIS | HASTHIS | DEFAULT, 0x00, VOID]
     var decoder = SignatureDecoder(bytes.span.bytes)
     let signature = try decoder.method()
     #expect(signature.instance)
@@ -711,7 +711,7 @@ struct SignatureTests {
 
   // Drives the `prototype` accessor over a one-blob heap, expecting a throw.
   private func expectPrototypeRejects(_ blob: Array<UInt8>) throws {
-    var blob = blob
+    let blob = blob
     let relations =
         [Table(Metadata.Tables.MethodDef.self, rows: 1, range: 0 ..< 14,
                wide: 0, stride: 14)]
@@ -788,7 +788,7 @@ struct SignatureTests {
     // path — must still admit the unmanaged convention without throwing, which
     // proves the shared `method()` itself is not restricted.
     let FNPTR: UInt8 = 0x1b
-    var bytes = [FNPTR, 0x03, 0x00, VOID]
+    let bytes = [FNPTR, 0x03, 0x00, VOID]
     var decoder = SignatureDecoder(bytes.span.bytes)
     let type = try decoder.type()
     guard case let .function(signature) = type else {

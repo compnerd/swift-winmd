@@ -24,7 +24,7 @@ struct AttributeTests {
 
   @Test("decodes IUnknown's IID")
   func iunknown() throws {
-    var bytes = unknown
+    let bytes = unknown
     var decoder = AttributeDecoder(bytes.span.bytes)
     let guid = try decoder.guid()
     #expect("\(guid)" == "00000000-0000-0000-C000-000000000046")
@@ -34,7 +34,7 @@ struct AttributeTests {
   func populated() throws {
     // The well-known `ISequentialStream` IID exercises every field: data1/2/3
     // are little-endian, the data4 tail is in order.
-    var bytes: Array<UInt8> = [
+    let bytes: Array<UInt8> = [
       0x01, 0x00,
       0x30, 0x3a, 0x73, 0x0c,                          // data1 -> 0c733a30
       0x1c, 0x2a,                                      // data2 -> 2a1c
@@ -56,7 +56,7 @@ struct AttributeTests {
 
   @Test("rejects a blob without the 0x0001 prolog")
   func badProlog() {
-    var bytes: Array<UInt8> = [
+    let bytes: Array<UInt8> = [
       0x00, 0x00,                                      // wrong prolog
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
       0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
@@ -70,7 +70,7 @@ struct AttributeTests {
   @Test("rejects a blob too short for the GUID")
   func truncated() {
     // The prolog and data1, then the blob ends before data2/data3/data4.
-    var bytes: Array<UInt8> = [0x01, 0x00, 0x00, 0x00, 0x00, 0x00]
+    let bytes: Array<UInt8> = [0x01, 0x00, 0x00, 0x00, 0x00, 0x00]
     var decoder = AttributeDecoder(bytes.span.bytes)
     #expect(throws: WinMDError.BadImageFormat) {
       _ = try decoder.guid()
@@ -79,7 +79,7 @@ struct AttributeTests {
 
   @Test("rejects an empty blob")
   func empty() {
-    var bytes = Array<UInt8>()
+    let bytes = Array<UInt8>()
     var decoder = AttributeDecoder(bytes.span.bytes)
     #expect(throws: WinMDError.BadImageFormat) {
       _ = try decoder.guid()
@@ -90,7 +90,7 @@ struct AttributeTests {
   func missingNumNamed() {
     // The prolog and a full GUID, but the blob ends before the mandatory
     // 2-byte `NumNamed` count (ECMA-335 §II.23.3).
-    var bytes: Array<UInt8> = [
+    let bytes: Array<UInt8> = [
       0x01, 0x00,
       0x00, 0x00, 0x00, 0x00,
       0x00, 0x00,
@@ -107,7 +107,7 @@ struct AttributeTests {
   func namedArguments() {
     // A `[Guid]` has no named arguments, so `NumNamed` must be 0; a non-zero
     // count is malformed for this attribute (ECMA-335 §II.23.3).
-    var bytes: Array<UInt8> = [
+    let bytes: Array<UInt8> = [
       0x01, 0x00,
       0x00, 0x00, 0x00, 0x00,
       0x00, 0x00,

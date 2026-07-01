@@ -235,6 +235,12 @@ internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
     try materialise(name, ordinals, seek, catalog)
   case let .derived(_, source, ordinals, seek):
     try derive(source, ordinals, seek, catalog, routines, bindings)
+  case let .select(filter, .product(outer, inner)):
+    // Fuse a residual product with its filter: stream each pair through the
+    // predicate rather than materialising the whole cross product first.
+    try sift(execute(outer, catalog, routines, bindings),
+             execute(inner, catalog, routines, bindings), filter, routines,
+             bindings)
   case let .select(filter, source):
     try admitted(execute(source, catalog, routines, bindings), filter,
                  routines, bindings)
@@ -366,6 +372,32 @@ private func product(_ outer: Array<Record>, _ inner: Array<Record>)
   for left in outer {
     for right in inner {
       records.append(left.merged(with: right))
+    }
+  }
+  return records
+}
+
+/// The Cartesian product of `outer` and `inner` filtered row by row by
+/// `filter` — the fused product-under-select, streamed.
+///
+/// A residual (non-equi) `product` under a `select` would otherwise materialise
+/// the whole `outer.count * inner.count` cross product and only then filter it,
+/// a memory blowup quadratic in the inputs. Here each pair is merged, tested,
+/// and kept or dropped in turn, so only the surviving rows — not the full
+/// product — are ever held. The order is identical to filtering the eager
+/// product: outer-major, each admitted inner in its own order. A pair the
+/// `filter` evaluates to `true` under three-valued logic is kept; UNKNOWN and
+/// `false` both drop, exactly as `admitted`.
+private func sift(_ outer: Array<Record>, _ inner: Array<Record>,
+                  _ filter: Filter, _ routines: Routines, _ bindings: Bindings)
+    throws(SQLError) -> Array<Record> {
+  var records = Array<Record>()
+  for left in outer {
+    for right in inner {
+      let record = left.merged(with: right)
+      if try evaluate(filter, record, routines, bindings) == true {
+        records.append(record)
+      }
     }
   }
   return records

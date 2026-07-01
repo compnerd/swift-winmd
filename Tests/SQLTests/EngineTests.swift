@@ -1298,6 +1298,32 @@ private func joins(_ plan: Plan) -> Bool {
   }
 }
 
+/// Whether `plan` reaches a `.select` standing directly over a `.product` — the
+/// residual product-under-select the streaming path fuses and filters row by
+/// row rather than materialising whole.
+private func residual(_ plan: Plan) -> Bool {
+  switch plan {
+  case .select(_, .product):
+    true
+  case let .select(_, source):
+    residual(source)
+  case let .project(_, source):
+    residual(source)
+  case let .sort(_, _, source):
+    residual(source)
+  case let .derived(_, sub, _, _):
+    residual(sub)
+  case let .product(left, right):
+    residual(left) || residual(right)
+  case let .join(outer, _, _, _, _, _, _):
+    residual(outer)
+  case let .union(left, right, _):
+    residual(left) || residual(right)
+  case .single, .scan:
+    false
+  }
+}
+
 // MARK: - Selection-pushdown tests
 
 /// A join catalog whose inner `Child` relation tallies its row reads, plus a
@@ -2132,6 +2158,96 @@ struct EngineHashJoinTests {
   }
 }
 
+// MARK: - Streaming-product tests
+
+struct EngineStreamingProductTests {
+  @Test("a join whose inner is a view leaves a residual product-under-select")
+  func shape() throws {
+    // The nest rewrite folds a bare scan into an index-nested join, but the
+    // inner here is the `Adults` VIEW (a `derived` leaf), so nest cannot fire
+    // and the level stays a `select` over a `product` — the shape the streaming
+    // executor fuses.
+    let catalog = try views()
+    let select = try parse("""
+        SELECT Child.Name, Adults.Label FROM Child
+          JOIN Adults ON Adults.Key = Child.Pid
+        """)
+    let plan =
+        try Engine.optimise(Engine.compile(select, catalog).pushdown(),
+                            catalog, [:])
+    #expect(residual(plan))
+  }
+
+  @Test("the streamed product filters row by row to the right rows")
+  func correctness() throws {
+    // `Adults` is Parent rows with Id >= 2 (Key 2 → Bee, 3 → Cid); only the
+    // child whose Pid equals a Key survives — Bob (Pid 2) against Bee.
+    let catalog = try views()
+    let rows = try Engine.run(parse("""
+        SELECT Child.Name, Adults.Label FROM Child
+          JOIN Adults ON Adults.Key = Child.Pid
+        """), catalog)
+    #expect(rows == [[.text("Bob"), .text("Bee")]])
+  }
+
+  @Test("the streamed product equals the eager product filtered")
+  func equivalence() throws {
+    // Cross the two inputs by hand — every child paired with every adult in
+    // outer-major order — and keep the pairs the ON equality admits. The fused
+    // streaming operator must yield exactly this, in this order.
+    let catalog = try views()
+    let children = try Engine.run(parse("SELECT Name, Pid FROM Child"), catalog)
+    let adults = try Engine.run(parse("SELECT Label, Key FROM Adults"), catalog)
+
+    var eager = Array<Array<Value>>()
+    for child in children {
+      for adult in adults where child[1] == adult[1] {
+        eager.append([child[0], adult[0]])
+      }
+    }
+
+    let streamed = try Engine.run(parse("""
+        SELECT Child.Name, Adults.Label FROM Child
+          JOIN Adults ON Adults.Key = Child.Pid
+        """), catalog)
+    #expect(streamed == eager)
+  }
+
+  @Test("a residual product with UNKNOWN pairs drops them")
+  func unknown() throws {
+    // A NULL-keyed pair evaluates the ON equality to UNKNOWN, which the fused
+    // filter drops exactly as `admitted` would — no NULL child reaches a match.
+    let child = [
+      Field(name: "Pid", kind: .integer),
+      Field(name: "Name", kind: .text),
+    ]
+    let children = [
+      [.integer(2), .text("Bob")],
+      [.null, .text("Nobody")],
+    ] as Array<Array<Value>>
+    let adults = try View(query: select("""
+        SELECT Id, Name FROM Base WHERE Id >= 2
+        """), columns: ["Key", "Label"])
+    let base = [
+      Field(name: "Id", kind: .integer),
+      Field(name: "Name", kind: .text),
+    ]
+    let bases = [
+      [.integer(2), .text("Bee")],
+      [.integer(3), .text("Cid")],
+    ] as Array<Array<Value>>
+    let catalog = Memory([
+      "Child": Relation(child, children),
+      "Base": Relation(base, bases, sorted: 0),
+    ], views: ["Adults": adults])
+    let rows = try Engine.run(parse("""
+        SELECT Child.Name, Adults.Label FROM Child
+          JOIN Adults ON Adults.Key = Child.Pid
+        """), catalog)
+    #expect(rows == [[.text("Bob"), .text("Bee")]])
+  }
+}
+
 // MARK: - Scalar-function tests
 
 /// Routines with two demonstration scalar functions: `upper`, which folds a
@@ -2822,4 +2938,5 @@ struct EngineScalarSelectTests {
     #expect(rows == [[.text("Alice")]])
   }
 }
+
 

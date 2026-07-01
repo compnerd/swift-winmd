@@ -74,7 +74,19 @@ internal struct Query: ParsableCommand {
       } catch is Shell.Stop {}
     } else {
       note("winmd-inspect — .help for commands, .quit to leave")
-      for statement in Statements(reading: { readLine() }) {
+      // The interactive shell prompts like `sqlite3` before each read: the
+      // primary prompt for a fresh statement, the continuation prompt while a
+      // statement is mid-accumulation (unterminated) — the cue that tells the
+      // user the shell is still waiting for the closing `;`. Both go to stderr,
+      // like the banner and diagnostics, so a piped run's stdout (the TSV rows)
+      // stays clean. Only this branch passes a hook; the batch and `.read`
+      // never prompt. No terminal detection: prompting on stderr is harmless if
+      // input is redirected, and `readLine()` is the cross-platform reader.
+      let statements =
+          Statements(reading: { readLine() },
+                     prompt: { pending in prompt(pending ? "   ...> "
+                                                         : "winmd> ") })
+      for statement in statements {
         do {
           try shell.attempt(statement)
         } catch is Shell.Stop {
@@ -92,4 +104,11 @@ internal struct Query: ParsableCommand {
 /// and `Shell.read` so every diagnostic lands on the same stream.
 internal func note(_ message: String) {
   FileHandle.standardError.write(Data((message + "\n").utf8))
+}
+
+/// Writes `text` to stderr with no trailing newline — the interactive shell's
+/// prompt, which sits before the line the user types. On stderr like `note`, so
+/// a piped run's stdout (the TSV rows) stays clean.
+internal func prompt(_ text: String) {
+  FileHandle.standardError.write(Data(text.utf8))
 }

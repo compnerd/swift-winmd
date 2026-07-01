@@ -101,6 +101,49 @@ struct ShellTests {
             == ["SELECT 1", ".tables", "SELECT 2"])
   }
 
+  @Test("the reading stream prompts primary then continuation while pending")
+  func promptAccumulates() {
+    // The interactive shell's prompt hook is called before each line read, told
+    // whether a statement is pending (mid-accumulation, unterminated). A fresh
+    // statement asks for the primary prompt (`false`); an unterminated one asks
+    // for the continuation (`true`) — the cue that the shell still awaits the
+    // `;`. Here a two-line statement (no `;` on the first line) prompts primary
+    // before its first line, continuation before its second (the statement is
+    // pending), then — once the `;` yields it and clears `pending` — primary
+    // again before the end-of-input read that ends the stream.
+    var script = ["SELECT 1", "FROM Module;"].makeIterator()
+    var pending = Array<Bool>()
+    let statements =
+        Statements(reading: { script.next() },
+                   prompt: { pending.append($0) })
+    #expect(Array(statements) == ["SELECT 1\nFROM Module"])
+    #expect(pending == [false, true, false])
+  }
+
+  @Test("a fresh statement each line prompts primary, never continuation")
+  func promptFresh() {
+    // Each self-terminating statement (its own `;`) leaves nothing pending, so
+    // every prompt before a read is the primary — a `.`-meta line likewise. The
+    // final read past the last line sees nothing pending too.
+    var script = ["SELECT 1;", ".tables", "SELECT 2;"].makeIterator()
+    var pending = Array<Bool>()
+    let statements =
+        Statements(reading: { script.next() },
+                   prompt: { pending.append($0) })
+    #expect(Array(statements) == ["SELECT 1", ".tables", "SELECT 2"])
+    #expect(pending.allSatisfy { $0 == false })
+  }
+
+  @Test("the batch stream carries no prompt hook and never prompts")
+  func batchIsQuiet() {
+    // `Statements(of:)` is the argument/`.read` path; it takes no prompt hook,
+    // so a batch run never prompts. Draining a multi-statement script drives
+    // the same accumulation the interactive stream does, with no prompt to
+    // observe — the assertion is that it streams correctly with no hook at all.
+    #expect(Array(Statements(of: "SELECT 1\nFROM Module;\nSELECT 2"))
+            == ["SELECT 1\nFROM Module", "SELECT 2"])
+  }
+
   @Test("the bundled views are the four COM-interface views")
   func bundled() {
     // The parse-and-register path a `CREATE VIEW` reuses; the four bundled

@@ -35,6 +35,12 @@ extension SourceLocation: CustomStringConvertible {
 /// Most cases carry the `SourceLocation` at which the fault was detected, so a
 /// consumer can point at the offending span.
 public enum SQLError: Error, Hashable, Sendable {
+  /// An error carrying an explicit ISO SQLSTATE and message, for a fault whose
+  /// code the raiser knows but which no semantic case models. The first string
+  /// is the 5-character class+subclass code (e.g. `"42601"`); the second is the
+  /// human-readable message. This is the passthrough that lets a caller surface
+  /// any SQLSTATE without extending the enum.
+  case state(String, String)
   /// A character that begins no valid token.
   case character(Character, at: SourceLocation)
   /// A string literal whose closing quote is missing.
@@ -58,11 +64,16 @@ public enum SQLError: Error, Hashable, Sendable {
   /// A scalar function rejects its arguments (the wrong count, or a value it
   /// cannot map); the string describes the fault.
   case argument(String)
-  /// A binary arithmetic expression cannot be evaluated — a non-integer (text)
-  /// operand, or a division by zero (standard SQL raises rather than yielding a
-  /// value); the string describes the fault. A NULL operand is not a fault: it
-  /// propagates to a NULL result.
-  case arithmetic(String)
+  /// A binary arithmetic expression applies to a non-integer (text) operand —
+  /// the operands must be integers, not a silent coercion; the string describes
+  /// the fault. A NULL operand is not a fault: it propagates to a NULL result.
+  case operand(String)
+  /// A binary arithmetic expression divides by zero — standard SQL raises rather
+  /// than yielding a value.
+  case divide
+  /// A binary arithmetic expression's integer result exceeds the platform `Int`
+  /// — reported rather than trapped; the string describes the fault.
+  case magnitude(String)
   /// A `CREATE VIEW` projects a column whose name cannot be inferred — a
   /// `SELECT *`, or an unaliased non-column expression — and no explicit column
   /// list names it; the string describes the offending projection.
@@ -87,6 +98,8 @@ public enum SQLError: Error, Hashable, Sendable {
 extension SQLError: CustomStringConvertible {
   public var description: String {
     switch self {
+    case let .state(_, message):
+      message
     case let .character(character, location):
       "unexpected character '\(character)' at \(location)"
     case let .unterminated(location):
@@ -109,7 +122,11 @@ extension SQLError: CustomStringConvertible {
       "no such function '\(name)'"
     case let .argument(detail):
       "invalid function argument: \(detail)"
-    case let .arithmetic(detail):
+    case let .operand(detail):
+      "invalid arithmetic: \(detail)"
+    case .divide:
+      "invalid arithmetic: division by zero"
+    case let .magnitude(detail):
       "invalid arithmetic: \(detail)"
     case let .named(detail):
       "view column cannot be named: \(detail)"
@@ -122,5 +139,69 @@ extension SQLError: CustomStringConvertible {
       "UNION arms project differing column counts: "
           + "expected \(expected), found \(found)"
     }
+  }
+}
+
+// MARK: - SQLSTATE
+
+extension SQLError {
+  /// The ISO SQLSTATE for this error: a 5-character string whose first two
+  /// characters are the class and whose last three are the subclass. Every case
+  /// maps to a code, so any `SQLError` exposes one.
+  ///
+  /// The codes draw on ISO/IEC 9075-2 Annex B (SQLSTATE class values) and, where
+  /// ISO leaves the subclass implementation-defined, the de-facto PostgreSQL
+  /// assignments:
+  ///
+  /// - Class `42` — syntax error or access rule violation — covers the
+  ///   lexer/parser faults (`42601` syntax error), the undefined-object faults
+  ///   (`42P01` table, `42703` column, `42883` function), and the name-collision
+  ///   faults (`42702` ambiguous, `42701` duplicate). `42P01` is a PostgreSQL
+  ///   subclass; ISO itself leaves the `42` subclass implementation-defined, so
+  ///   this is a deliberate choice noted alongside `42703`/`42883`, which are
+  ///   likewise PostgreSQL subclasses on the same class.
+  /// - Class `22` — data exception — covers the value faults: `22003` numeric
+  ///   value out of range (the out-of-range integer literal and the arithmetic
+  ///   overflow), `22012` division by zero, and `22023` invalid parameter value
+  ///   (a scalar function's rejected argument).
+  /// - `42804` (datatype mismatch) is the non-integer arithmetic operand — a
+  ///   type error at evaluation rather than a value-range fault.
+  public var sqlstate: String {
+    switch self {
+    case let .state(code, _):
+      code
+    // Class 42 — syntax error or access rule violation.
+    case .character, .unterminated, .unexpected, .incomplete, .trailing,
+         .named, .columns, .arity:
+      "42601"
+    case .relation:
+      "42P01"
+    case .column:
+      "42703"
+    case .ambiguous:
+      "42702"
+    case .duplicate:
+      "42701"
+    case .function:
+      "42883"
+    // Class 22 — data exception.
+    case .overflow:
+      "22003"
+    case .argument:
+      "22023"
+    case .operand:
+      "42804"
+    case .divide:
+      "22012"
+    case .magnitude:
+      "22003"
+    }
+  }
+
+  /// The human-readable message for this error — the same text as
+  /// `description`. Paired with `sqlstate`, it gives every error a uniform
+  /// `(sqlstate, message)` surface.
+  public var message: String {
+    description
   }
 }

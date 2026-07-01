@@ -50,13 +50,26 @@ private struct Relation: Sendable {
   /// rejects.
   let coded: Int?
 
+  /// A shared tally the cursor bumps on each row read, or `nil` when a fixture
+  /// does not instrument its reads — the proof selection pushdown and hash join
+  /// materialise fewer rows.
+  let counter: Counter?
+
   init(_ fields: Array<Field>, _ records: Array<Array<Value>>,
-       sorted: Int? = nil, coded: Int? = nil) {
+       sorted: Int? = nil, coded: Int? = nil, counter: Counter? = nil) {
     self.fields = fields
     self.records = records
     self.sorted = sorted
     self.coded = coded
+    self.counter = counter
   }
+}
+
+/// A mutable tally of the rows a cursor reads, shared by reference so a test can
+/// inspect it after a run. Tests run serially, so the unchecked `Sendable` is
+/// sound.
+private final class Counter: @unchecked Sendable {
+  var reads = 0
 }
 
 /// A `Catalog` over a dictionary of named relations.
@@ -180,6 +193,7 @@ private struct MemoryCursor: Cursor {
 
   func row(_ index: Int) -> MemoryRow? {
     guard index < relation.records.count else { return nil }
+    relation.counter?.reads += 1
     return MemoryRow(relation, index)
   }
 }
@@ -1184,9 +1198,13 @@ private func seeks(_ plan: Plan) -> Bool {
     seeks(sub)
   case let .product(left, right):
     seeks(left) || seeks(right)
+  case let .join(outer, _, _, _, _, _, _):
+    // A pushed-down key seeks the join's OUTER leaf, so a seek can live inside
+    // the join rather than only atop a bare scan.
+    seeks(outer)
   case let .union(left, right, _):
     seeks(left) || seeks(right)
-  case .single, .join:
+  case .single:
     false
   }
 }
@@ -1211,6 +1229,641 @@ private func filters(_ plan: Plan) -> Bool {
     filters(left) || filters(right)
   case .single, .scan, .join:
     false
+  }
+}
+
+/// Whether a single-relation filter rides below a `join` or `product` boundary —
+/// the shape selection pushdown produces (a `.select` or a seeked `.scan` inside
+/// a join's outer operand or a product's arm), as opposed to a `WHERE` left
+/// floating atop the whole chain.
+private func pushed(_ plan: Plan) -> Bool {
+  switch plan {
+  case let .join(outer, _, _, _, _, _, _):
+    seeks(outer) || floats(outer) || pushed(outer)
+  case let .product(left, right):
+    seeks(left) || floats(left) || pushed(left) || seeks(right)
+        || floats(right) || pushed(right)
+  case let .select(_, source):
+    pushed(source)
+  case let .project(_, source):
+    pushed(source)
+  case let .sort(_, _, source):
+    pushed(source)
+  case let .derived(_, sub, _, _):
+    pushed(sub)
+  case let .union(left, right, _):
+    pushed(left) || pushed(right)
+  case .single, .scan:
+    false
+  }
+}
+
+/// Whether `plan` is (or reaches through unary operators) a `.select` — a filter
+/// standing over a source.
+private func floats(_ plan: Plan) -> Bool {
+  switch plan {
+  case .select:
+    true
+  case let .project(_, source):
+    floats(source)
+  case let .sort(_, _, source):
+    floats(source)
+  case let .derived(_, sub, _, _):
+    floats(sub)
+  default:
+    false
+  }
+}
+
+/// Whether `plan` reaches a `.join` node — the index-nested-loop/hash join path,
+/// as opposed to a residual `.product` filtered by the ON predicate.
+private func joins(_ plan: Plan) -> Bool {
+  switch plan {
+  case .join:
+    true
+  case let .select(_, source):
+    joins(source)
+  case let .project(_, source):
+    joins(source)
+  case let .sort(_, _, source):
+    joins(source)
+  case let .derived(_, sub, _, _):
+    joins(sub)
+  case let .product(left, right):
+    joins(left) || joins(right)
+  case let .union(left, right, _):
+    joins(left) || joins(right)
+  case .single, .scan:
+    false
+  }
+}
+
+// MARK: - Selection-pushdown tests
+
+/// A join catalog whose inner `Child` relation tallies its row reads, plus a
+/// view `Kin` over the `Parent`/`Child` join — to prove a `WHERE` over the view
+/// prunes the join's inputs BEFORE the join runs rather than after.
+private func counted() throws -> (catalog: Memory, reads: Counter) {
+  let reads = Counter()
+  let parent = [
+    Field(name: "Id", kind: .integer),
+    Field(name: "Name", kind: .text),
+  ]
+  let parents = [
+    [.integer(1), .text("Ada")],
+    [.integer(2), .text("Bee")],
+    [.integer(3), .text("Cid")],
+  ] as Array<Array<Value>>
+
+  let child = [
+    Field(name: "Pid", kind: .integer),
+    Field(name: "Kid", kind: .text),
+  ]
+  let children = [
+    [.integer(1), .text("Ann")],
+    [.integer(1), .text("Amy")],
+    [.integer(2), .text("Bob")],
+    [.integer(3), .text("Cody")],
+  ] as Array<Array<Value>>
+
+  let kin = try View(query: select("""
+      SELECT Parent.Name, Child.Kid FROM Parent
+        JOIN Child ON Child.Pid = Parent.Id
+      """), columns: ["Name", "Kid"])
+  let catalog =
+      Memory([
+        "Parent": Relation(parent, parents, sorted: 0),
+        "Child": Relation(child, children, counter: reads),
+      ], views: ["Kin": kin])
+  return (catalog, reads)
+}
+
+/// A catalog for pushing a filter through a UNION view's arms: two relations
+/// whose shared output column `Key` sits at DIFFERENT body ordinals — `Alpha`
+/// has it first (sorted, so seekable), `Beta` last (unsorted) — exposed by a
+/// `Both` view as one column. A `WHERE Key = ?` over the view must rebase PER
+/// arm (each arm maps `Key` to its own body slot), pushing below every arm's
+/// projection and seeking inside the `Alpha` arm.
+private func spanned() throws -> Memory {
+  let alpha = [
+    Field(name: "Key", kind: .integer),
+    Field(name: "Tag", kind: .text),
+  ]
+  let alphas = [
+    [.integer(1), .text("a1")],
+    [.integer(2), .text("a2")],
+    [.integer(3), .text("a3")],
+  ] as Array<Array<Value>>
+
+  let beta = [
+    Field(name: "Tag", kind: .text),
+    Field(name: "Key", kind: .integer),
+  ]
+  let betas = [
+    [.text("b1"), .integer(1)],
+    [.text("b2"), .integer(2)],
+  ] as Array<Array<Value>>
+
+  // Arm 1 projects Alpha.Key (body slot 0, seekable) then Tag; arm 2 projects
+  // Beta.Key (body slot 1, unseekable) then Tag — the same output `Key` at
+  // differing body slots.
+  let both = try View(query: select("""
+      SELECT Key, Tag FROM Alpha UNION ALL SELECT Key, Tag FROM Beta
+      """), columns: ["Key", "Tag"])
+  return Memory([
+    "Alpha": Relation(alpha, alphas, sorted: 0),
+    "Beta": Relation(beta, betas),
+  ], views: ["Both": both])
+}
+
+/// Whether `plan` reaches a `.union` every arm of which carries a filter pushed
+/// below its projection — a seeked scan or a `.select` over its scan inside each
+/// arm's body, the per-arm rebase this fix enables.
+private func injected(_ plan: Plan) -> Bool {
+  switch plan {
+  case let .union(left, right, _):
+    (seeks(left) || floats(left)) && (seeks(right) || floats(right))
+  case let .select(_, source):
+    injected(source)
+  case let .project(_, source):
+    injected(source)
+  case let .sort(_, _, source):
+    injected(source)
+  case let .derived(_, sub, _, _):
+    injected(sub)
+  case let .product(left, right):
+    injected(left) || injected(right)
+  case let .join(outer, _, _, _, _, _, _):
+    injected(outer)
+  case .single, .scan:
+    false
+  }
+}
+
+struct EnginePushdownTests {
+  @Test("a single-relation WHERE conjunct rides below the join")
+  func placement() throws {
+    // `WHERE Parent.Name = 'Ada'` references only the outer relation, so it
+    // pushes to the Parent leaf inside the join rather than filtering the whole
+    // product afterwards — `pushed` sees a filter within the join's outer.
+    let catalog = family()
+    let select = try parse("""
+        SELECT Child.Name FROM Parent JOIN Child ON Child.Pid = Parent.Id
+          WHERE Parent.Name = 'Ada'
+        """)
+    let plan =
+        try Engine.optimise(Engine.compile(select, catalog).pushdown(),
+                            catalog, [:])
+    #expect(pushed(plan))
+  }
+
+  @Test("pushdown down a seekable outer key seeks that leaf inside the join")
+  func seeked() throws {
+    // `WHERE Parent.Id = 2` is seekable; pushed to the Parent leaf it becomes a
+    // seek inside the join's outer, not a scan-then-filter atop the product.
+    let catalog = family()
+    let select = try parse("""
+        SELECT Child.Name FROM Parent JOIN Child ON Child.Pid = Parent.Id
+          WHERE Parent.Id = 2
+        """)
+    let plan =
+        try Engine.optimise(Engine.compile(select, catalog).pushdown(),
+                            catalog, [:])
+    #expect(seeks(plan))
+    #expect(pushed(plan))
+  }
+
+  @Test("a trailing seekable conjunct survives a rebuilt three-term AND")
+  func seekable() throws {
+    // Pushdown flattens a single-table filter through `conjuncts` and rebuilds
+    // it via `conjunction`. A right-leaning rebuild would bury the trailing
+    // `Id = 5` under a nested AND, hidden from `seek` (which inspects only a
+    // top-level AND's two immediate children); the left-leaning rebuild keeps it
+    // the immediate RHS, as the parser produced it, so the sort-key seek
+    // survives the three-term AND.
+    let catalog = Memory([
+      "T": Relation([
+        Field(name: "Name", kind: .text),
+        Field(name: "Age", kind: .integer),
+        Field(name: "Id", kind: .integer),
+      ], [
+        [.text("a"), .integer(1), .integer(5)],
+        [.text("b"), .integer(2), .integer(6)],
+      ] as Array<Array<Value>>, sorted: 2),
+    ])
+    let select = try parse("""
+        SELECT Name FROM T WHERE Name <> 'x' AND Age > 0 AND Id = 5
+        """)
+    let plan =
+        try Engine.optimise(Engine.compile(select, catalog).pushdown(),
+                            catalog, [:])
+    #expect(seeks(plan))
+  }
+
+  @Test("a seekable conjunct grouped after an unsafe one does not bypass its throw")
+  func grouped() throws {
+    // The left fold rebuilds `(1 / x) = 0 AND (name <> 'z' AND id < 0)` — parsed
+    // as `A AND (B AND C)` — into `((A AND B) AND C)`, promoting the seekable
+    // `id < 0` to the top-level RHS `seek` inspects. On an id-sorted table whose
+    // `id < 0` run is empty, seeking that run drops every row before the earlier
+    // `(1 / x) = 0` division runs, suppressing the throw the scan owes. `seek`
+    // seeks a conjunct only when the residual is safe, so the unsafe division
+    // residual bars the seek: the plan scans, and it raises.
+    let catalog = Memory([
+      "T": Relation([
+        Field(name: "x", kind: .integer),
+        Field(name: "name", kind: .text),
+        Field(name: "id", kind: .integer),
+      ], [
+        [.integer(0), .text("a"), .integer(5)],
+      ] as Array<Array<Value>>, sorted: 2),
+    ])
+    let select = try parse("""
+        SELECT id FROM T WHERE (1 / x) = 0 AND (name <> 'z' AND id < 0)
+        """)
+
+    // The unsafe `(1 / x) = 0` residual bars the `id < 0` seek — the plan scans.
+    let plan =
+        try Engine.optimise(Engine.compile(select, catalog).pushdown(),
+                            catalog, [:])
+    #expect(!seeks(plan))
+
+    // …and the scan raises the division rather than seeking past the empty run.
+    #expect(throws: SQLError.self) {
+      _ = try Engine.run(select, catalog)
+    }
+  }
+
+  @Test("pushdown preserves the join's result")
+  func correctness() throws {
+    // The pushed plan must return exactly the un-pushed join's rows.
+    let rows = try join("""
+        SELECT Child.Name FROM Parent JOIN Child ON Child.Pid = Parent.Id
+          WHERE Parent.Name = 'Ada'
+        """)
+    #expect(rows == [[.text("Ann")], [.text("Amy")]])
+  }
+
+  @Test("a non-key predicate on the joined-in relation still uses the join")
+  func inner() throws {
+    // `WHERE Parent.Name <> 'zz'` references only the joined-in `Parent`, so
+    // pushdown wraps that inner leaf as `Select(_, Scan(Parent))` before the
+    // join folds it in. `nest` must look through that pushed filter and still
+    // form a `Join` — not fall back to a residual product filtered by the ON
+    // predicate (O(left × filtered-right)).
+    let catalog = family()
+    let select = try parse("""
+        SELECT Child.Name, Parent.Name FROM Child
+          JOIN Parent ON Parent.Id = Child.Pid WHERE Parent.Name <> 'zz'
+        """)
+    let plan =
+        try Engine.optimise(Engine.compile(select, catalog).pushdown(),
+                            catalog, [:])
+    #expect(joins(plan))
+
+    // …and it returns the correct rows: every child with a matching parent,
+    // the joined-in predicate keeping all of them (no parent is named 'zz').
+    let rows = try join("""
+        SELECT Child.Name, Parent.Name FROM Child
+          JOIN Parent ON Parent.Id = Child.Pid WHERE Parent.Name <> 'zz'
+        """)
+    #expect(rows == [
+      [.text("Ann"), .text("Ada")],
+      [.text("Amy"), .text("Ada")],
+      [.text("Bob"), .text("Bee")],
+    ])
+  }
+
+  @Test("a spanning WHERE leaves the join path with a residual above it")
+  func spanning() throws {
+    // `WHERE Parent.Name <> Child.Name` references BOTH joined relations, so it
+    // descends no further than the product and stays as a residual. The ON
+    // match must remain adjacent to the product — folded in with the spanning
+    // conjunct — so `nest` still finds it and forms a `Join`, keeping the
+    // spanning predicate as a `Select` ABOVE the join rather than degrading to a
+    // filtered Cartesian `product`.
+    let catalog = family()
+    let select = try parse("""
+        SELECT Child.Name, Parent.Name FROM Parent
+          JOIN Child ON Child.Pid = Parent.Id WHERE Parent.Name <> Child.Name
+        """)
+    let plan =
+        try Engine.optimise(Engine.compile(select, catalog).pushdown(),
+                            catalog, [:])
+    #expect(joins(plan))
+    #expect(floats(plan))
+
+    // …and it returns the join's rows filtered by the spanning predicate: every
+    // matched pair survives, none sharing a name across the two relations.
+    let rows = try join("""
+        SELECT Child.Name, Parent.Name FROM Parent
+          JOIN Child ON Child.Pid = Parent.Id WHERE Parent.Name <> Child.Name
+        """)
+    #expect(rows == [
+      [.text("Ann"), .text("Ada")],
+      [.text("Amy"), .text("Ada")],
+      [.text("Bob"), .text("Bee")],
+    ])
+  }
+
+  @Test("a WHERE over a join view prunes its rows before the join runs")
+  func view() throws {
+    // `Kin` is the Parent/Child join; `WHERE Name = 'Ada'` over it must push
+    // INTO the view's sub-plan and prune Parent to Ada before joining, so the
+    // join probes the inner `Child` for only ONE outer parent — not all three.
+    let (culled, pruned) = try counted()
+    let rows = try Engine.run(parse("SELECT Kid FROM Kin WHERE Name = 'Ada'"),
+                              culled)
+    #expect(rows == [[.text("Ann")], [.text("Amy")]])
+
+    // The un-pushed baseline: the same view with no `WHERE` runs the join over
+    // every parent, probing the four-row inner once per parent — twelve reads.
+    let (whole, full) = try counted()
+    _ = try Engine.run(parse("SELECT Kid FROM Kin"), whole)
+    #expect(full.reads == 12)
+
+    // Pushed, the join probes the inner for Ada alone — one parent's four-row
+    // inner scan — a third of the baseline's reads.
+    #expect(pruned.reads == 4)
+  }
+
+  @Test("the pushed view result matches the unfiltered view filtered late")
+  func equivalence() throws {
+    // Running the view then filtering must agree with the pushed plan.
+    let (catalog, _) = try counted()
+    let all = try Engine.run(parse("SELECT Name, Kid FROM Kin"), catalog)
+    let culled = all.filter { $0[0] == .text("Ada") }.map { [$0[1]] }
+    let filtered =
+        try Engine.run(parse("SELECT Kid FROM Kin WHERE Name = 'Ada'"), catalog)
+    #expect(filtered == culled)
+  }
+
+  @Test("a slotless predicate stays above the join and skips an empty product")
+  func slotless() throws {
+    // `WHERE (1 / 0) = 0` reads no slots, so it must stay at the product level
+    // and run per pair — not ride down to the left input. `B` is empty, so the
+    // join's product is empty and the throwing expression is never evaluated;
+    // the query returns no rows. Pushed to the left, it would run once per left
+    // row and raise `SQLError.divide`.
+    let catalog = Memory([
+      "A": Relation([Field(name: "x", kind: .integer)],
+                    [[.integer(1)]] as Array<Array<Value>>),
+      "B": Relation([Field(name: "y", kind: .integer)],
+                    [] as Array<Array<Value>>),
+    ])
+    let rows = try Engine.run(parse("""
+        SELECT A.x FROM A JOIN B ON A.x = B.y WHERE (1 / 0) = 0
+        """), catalog)
+    #expect(rows.isEmpty)
+  }
+
+  @Test("a throwing single-side predicate stays above the join, skips an empty product")
+  func hazardous() throws {
+    // `WHERE (1 / A.x) = 0` reads only `A`'s slot but CAN throw (division), so —
+    // like a slotless throwing predicate — it must stay at the product level, not
+    // ride down to `A`. `B` is empty, so the product is empty and the division is
+    // never evaluated; the query returns no rows. Pushed to `A` (x = 0) it would
+    // divide by zero and raise `SQLError.divide`.
+    let catalog = Memory([
+      "A": Relation([Field(name: "x", kind: .integer)],
+                    [[.integer(0)]] as Array<Array<Value>>),
+      "B": Relation([Field(name: "y", kind: .integer)],
+                    [] as Array<Array<Value>>),
+    ])
+    let rows = try Engine.run(parse("""
+        SELECT A.x FROM A JOIN B ON A.x = B.y WHERE (1 / A.x) = 0
+        """), catalog)
+    #expect(rows.isEmpty)
+  }
+
+  @Test("an unsafe conjunct bars a later safe one from suppressing its throw")
+  func barrier() throws {
+    // `WHERE (1 / A.x) = 0 AND A.x <> 0`: left-to-right, the division runs first
+    // and raises on the matching pair (`A.x = 0` joined to `B.y = 0`). The safe
+    // `A.x <> 0` must NOT ride down to `A` — doing so would drop the row before
+    // the division runs, silently returning no rows. The earlier unsafe conjunct
+    // is an ordering barrier, so the query raises as the un-pushed `AND` would.
+    let catalog = Memory([
+      "A": Relation([Field(name: "x", kind: .integer)],
+                    [[.integer(0)]] as Array<Array<Value>>),
+      "B": Relation([Field(name: "y", kind: .integer)],
+                    [[.integer(0)]] as Array<Array<Value>>),
+    ])
+    #expect(throws: SQLError.self) {
+      _ = try Engine.run(parse("""
+          SELECT A.x FROM A JOIN B ON A.x = B.y WHERE (1 / A.x) = 0 AND A.x <> 0
+          """), catalog)
+    }
+  }
+
+  @Test("a lifted inner filter keeps its place before a later unsafe residual")
+  func lifted() throws {
+    // `WHERE Parent.Name = 'nope' AND (1 / Child.x) = 0`: left-to-right, the
+    // false `Parent.Name` check short-circuits before the division on the
+    // matching pair (Child.x = 0). `Parent.Name = 'nope'` is a single-side inner
+    // filter that nest lifts out of the join — it must stay BEFORE the unsafe
+    // division in the residual, not be appended after it, or the division runs
+    // first and raises. The matching Parent is named 'other', so the row is
+    // excluded with no throw.
+    let catalog = Memory([
+      "Child": Relation([Field(name: "Pid", kind: .integer),
+                         Field(name: "x", kind: .integer)],
+                        [[.integer(1), .integer(0)]] as Array<Array<Value>>),
+      "Parent": Relation([Field(name: "Id", kind: .integer),
+                          Field(name: "Name", kind: .text)],
+                         [[.integer(1), .text("other")]]
+                             as Array<Array<Value>>),
+    ])
+    let rows = try Engine.run(parse("""
+        SELECT Child.x FROM Child JOIN Parent ON Parent.Id = Child.Pid
+          WHERE Parent.Name = 'nope' AND (1 / Child.x) = 0
+        """), catalog)
+    #expect(rows.isEmpty)
+  }
+
+  @Test("a WHERE over a UNION view pushes into every arm's projection")
+  func union() throws {
+    // `Both` unions `Alpha` and `Beta`, whose shared `Key` output column sits at
+    // DIFFERING body slots. `WHERE Key = 2` must rebase PER ARM — the union root
+    // fails a single pre-rebased filter — pushing below each arm's projection
+    // and seeking the sorted `Alpha` arm.
+    let catalog = try spanned()
+    let select = try parse("SELECT Tag FROM Both WHERE Key = 2")
+    let plan =
+        try Engine.optimise(Engine.compile(select, catalog).pushdown(),
+                            catalog, [:])
+    #expect(injected(plan))
+    #expect(seeks(plan))
+
+    // …and the rows are exactly the union filtered late: `a2` from Alpha and
+    // `b2` from Beta.
+    let rows = try Engine.run(select, catalog)
+    #expect(rows == [[.text("a2")], [.text("b2")]])
+  }
+
+  @Test("a view's throwing projection term is not suppressed by a pushed filter")
+  func throwingView() throws {
+    // The view projects `1 / z`, which raises on the `z = 0` row. `derive`
+    // evaluates every projected column for every view row, so `SELECT id FROM V
+    // WHERE id <> 0` raises even though `id <> 0` would exclude that row —
+    // pushing `id <> 0` below the view's Project would filter the row first and
+    // silently skip the division, so a view whose projection can throw is never
+    // pushed into.
+    let t = [Field(name: "id", kind: .integer),
+             Field(name: "z", kind: .integer)]
+    let rows = [[.integer(0), .integer(0)]] as Array<Array<Value>>
+    let view = try View(query: select("SELECT id, 1 / z FROM T"),
+                        columns: ["id", "q"])
+    let catalog = Memory(["T": Relation(t, rows)], views: ["V": view])
+    #expect(throws: SQLError.self) {
+      _ = try Engine.run(parse("SELECT id FROM V WHERE id <> 0"), catalog)
+    }
+  }
+
+  @Test("an unsafe outer conjunct bars a later push into a view")
+  func gated() throws {
+    // `V` is `SELECT x FROM T` with `T.x` sorted and a single `x = 0` row.
+    // `SELECT x FROM V WHERE (1 / x) = 0 AND x = 1`: left-to-right, the division
+    // runs on the `x = 0` row and raises. The safe seekable `x = 1` must NOT push
+    // into the view past the earlier unsafe `(1 / x) = 0` — doing so would SEEK
+    // the view (`T.x` sorted) to `x = 1`, dropping the `x = 0` row before the
+    // outer division ever runs, silently returning no rows. The unsafe outer
+    // conjunct is an ordering barrier, so the query raises as the un-pushed `AND`
+    // would.
+    let t = [Field(name: "x", kind: .integer)]
+    let rows = [[.integer(0)]] as Array<Array<Value>>
+    let view = try View(query: select("SELECT x FROM T"), columns: ["x"])
+    let catalog = Memory(["T": Relation(t, rows, sorted: 0)],
+                         views: ["V": view])
+    #expect(throws: SQLError.self) {
+      _ = try Engine.run(parse("SELECT x FROM V WHERE (1 / x) = 0 AND x = 1"),
+                         catalog)
+    }
+  }
+
+  @Test("a nullable conjunct is not pushed below a later unsafe conjunct")
+  func nullable() throws {
+    // `WHERE A.x = 1 AND (1 / B.y) = 0`: the evaluator's `AND` does not short-
+    // circuit, so on the matching pair (A.x NULL, B.y = 0) the UNKNOWN left
+    // still runs the right, and the division raises. The safe `A.x = 1`
+    // references a slot, so a NULL there makes it UNKNOWN — pushing it to `A`'s
+    // scan would drop the A.x-NULL row before the join, so the later unsafe
+    // `(1 / B.y) = 0` never runs and the throw the `AND` owes is suppressed. A
+    // nullable conjunct must NOT ride past a LATER unsafe conjunct, so `A.x = 1`
+    // stays a product-level residual and the query raises.
+    let catalog = Memory([
+      "A": Relation([Field(name: "x", kind: .integer),
+                     Field(name: "k", kind: .integer)],
+                    [[.null, .integer(0)]] as Array<Array<Value>>),
+      "B": Relation([Field(name: "y", kind: .integer),
+                     Field(name: "k", kind: .integer)],
+                    [[.integer(0), .integer(0)]] as Array<Array<Value>>),
+    ])
+    let select = try parse("""
+        SELECT A.x FROM A JOIN B ON A.k = B.k
+          WHERE A.x = 1 AND (1 / B.y) = 0
+        """)
+
+    // `A.x = 1` is nullable and precedes the unsafe division, so it is NOT
+    // pushed to the `A` leaf — it floats at the product level.
+    let plan =
+        try Engine.optimise(Engine.compile(select, catalog).pushdown(),
+                            catalog, [:])
+    #expect(!pushed(plan))
+    #expect(floats(plan))
+
+    // …and the query raises rather than silently dropping the row.
+    #expect(throws: SQLError.self) {
+      _ = try Engine.run(select, catalog)
+    }
+  }
+
+  @Test("a nullable conjunct is not pushed into a view below a later unsafe one")
+  func nullableView() throws {
+    // `V` exposes safe columns `x` and `y`. `SELECT x FROM V WHERE x = 1 AND
+    // (1 / y) = 0`: the `AND` does not short-circuit, so on the (x NULL, y = 0)
+    // row the UNKNOWN left still runs the division, which raises. Pushing the
+    // nullable `x = 1` into the view would drop the x-NULL row before the outer
+    // division runs, suppressing the throw. A nullable conjunct must NOT be
+    // injected past a LATER unsafe outer conjunct, so `x = 1` stays outer and
+    // the query raises.
+    let t = [Field(name: "x", kind: .integer),
+             Field(name: "y", kind: .integer)]
+    let rows = [[.null, .integer(0)]] as Array<Array<Value>>
+    let view = try View(query: select("SELECT x, y FROM T"),
+                        columns: ["x", "y"])
+    let catalog = Memory(["T": Relation(t, rows)], views: ["V": view])
+    let select = try parse("SELECT x FROM V WHERE x = 1 AND (1 / y) = 0")
+
+    // `x = 1` is nullable and precedes the unsafe division, so it is NOT
+    // injected into the view — it floats above the derived leaf.
+    let plan =
+        try Engine.optimise(Engine.compile(select, catalog).pushdown(),
+                            catalog, [:])
+    #expect(floats(plan))
+
+    // …and the query raises rather than silently dropping the row.
+    #expect(throws: SQLError.self) {
+      _ = try Engine.run(select, catalog)
+    }
+  }
+
+  @Test("a slotless bound conjunct is not pushed into a view below a later unsafe one")
+  func boundView() throws {
+    // A `.bound` predicate compares against a run-time `:parameter` and reads no
+    // slot, yet it is UNKNOWN when the parameter is unbound (or bound to NULL).
+    // `SELECT x FROM V WHERE 1 = :missing AND (1 / y) = 0` with `:missing`
+    // unbound: the outer `AND` does not short-circuit, so on the (y = 0) row the
+    // UNKNOWN left still runs the division, which raises. Injecting the slotless
+    // `1 = :missing` into the view would drop every row first, suppressing the
+    // throw. A bound conjunct is nullable despite reading no slot, so it stays
+    // outer and the query raises.
+    let t = [Field(name: "x", kind: .integer),
+             Field(name: "y", kind: .integer)]
+    let rows = [[.integer(1), .integer(0)]] as Array<Array<Value>>
+    let view = try View(query: select("SELECT x, y FROM T"),
+                        columns: ["x", "y"])
+    let catalog = Memory(["T": Relation(t, rows)], views: ["V": view])
+    let select = try parse("SELECT x FROM V WHERE 1 = :missing AND (1 / y) = 0")
+
+    // `1 = :missing` is a slotless bound predicate, hence nullable; it precedes
+    // the unsafe division, so it is NOT injected into the view — it floats above
+    // the derived leaf.
+    let plan =
+        try Engine.optimise(Engine.compile(select, catalog).pushdown(),
+                            catalog, [:])
+    #expect(floats(plan))
+
+    // …and the query raises rather than silently dropping the row.
+    #expect(throws: SQLError.self) {
+      _ = try Engine.run(select, catalog)
+    }
+  }
+
+  @Test("a throwing WHERE is not evaluated for a pair an UNKNOWN ON rejects")
+  func gatedMatch() throws {
+    // `A JOIN V ON A.k = V.k WHERE (1 / A.x) = 0` where `V` is a derived view,
+    // so `nest` cannot fold the product into a `Join`. On the `A` row with a
+    // NULL `k` and `x = 0`, the ON match is UNKNOWN — the join forms no pair for
+    // it — but `evaluate(.and)` does not short-circuit, so folding the match and
+    // WHERE into one AND would evaluate `(1 / 0)` and raise. Keeping the match a
+    // separate inner gate drops that pair before the WHERE runs, so the query
+    // does not raise: the matched `x = 1` row fails `(1 / 1) = 0`, leaving no
+    // rows.
+    let a = [Field(name: "x", kind: .integer), Field(name: "k", kind: .integer)]
+    let catalog = Memory([
+      "A": Relation(a, [[.integer(1), .integer(1)],
+                        [.integer(0), .null]] as Array<Array<Value>>),
+      "T": Relation([Field(name: "k", kind: .integer)],
+                    [[.integer(1)]] as Array<Array<Value>>),
+    ], views: ["V": try View(query: select("SELECT k FROM T"),
+                             columns: ["k"])])
+    let select =
+        try parse("SELECT A.x FROM A JOIN V ON A.k = V.k WHERE (1 / A.x) = 0")
+
+    // The UNKNOWN-ON pair (A.k NULL) is dropped by the match gate before the
+    // division runs, so the query returns rows rather than raising.
+    #expect(try Engine.run(select, catalog) == [])
   }
 }
 
@@ -1904,3 +2557,4 @@ struct EngineScalarSelectTests {
     #expect(rows == [[.text("Alice")]])
   }
 }
+

@@ -99,6 +99,17 @@ extension Term {
       .binary(op, lhs.remapped(through: slot), rhs.remapped(through: slot))
     }
   }
+
+  /// Whether evaluating this term cannot throw — it is a bare slot read or a
+  /// constant. A `binary` arithmetic (`/` raises on a zero divisor) or an
+  /// `apply` (a scalar function may raise) is NOT known safe, whatever its
+  /// operands.
+  internal var safe: Bool {
+    switch self {
+    case .slot, .constant: true
+    case .apply, .binary: false
+    }
+  }
 }
 
 extension Filter {
@@ -129,13 +140,87 @@ extension Filter {
     guard case let .and(lhs, rhs) = self else { return [self] }
     return lhs.conjuncts + rhs.conjuncts
   }
+
+  /// The set of slots this filter addresses — the slot form of
+  /// `references(into:)`, used by selection pushdown to decide which relation a
+  /// conjunct belongs to.
+  internal var slots: Set<Int> {
+    var slots = Set<Int>()
+    references(into: &slots)
+    return slots
+  }
+
+  /// This filter with each slot `s` shifted to `s - offset` — the remap that
+  /// rebases a conjunct from combined slot space into a right-hand child's own
+  /// slot space (whose first slot is `offset`).
+  internal func shifted(by offset: Int) -> Filter {
+    var map = Dictionary<Int, Int>(minimumCapacity: slots.count)
+    for slot in slots { map[slot] = slot - offset }
+    return remapped(through: map)
+  }
+
+  /// Whether evaluating this filter cannot throw — every term it reads is a bare
+  /// slot or a constant. Selection pushdown keeps a filter that is NOT safe at
+  /// the product level (evaluated per pair), so a division or scalar-call
+  /// predicate raises only when a pair exists — never on an empty product it
+  /// would have skipped had it stayed above the join.
+  internal var safe: Bool {
+    switch self {
+    case let .compare(lhs, _, rhs): lhs.safe && rhs.safe
+    case let .bound(term, _, _): term.safe
+    case .match: true
+    case let .null(term, _): term.safe
+    case let .and(lhs, rhs): lhs.safe && rhs.safe
+    case let .or(lhs, rhs): lhs.safe && rhs.safe
+    case let .not(operand): operand.safe
+    }
+  }
+
+  /// Whether evaluating this filter can be UNKNOWN — it reads at least one slot
+  /// (a NULL cell there makes a comparison against it UNKNOWN) or compares against
+  /// a run-time `:parameter` (which may be unbound or bound to NULL, likewise
+  /// UNKNOWN). Only a filter over constants alone is definite. Selection pushdown
+  /// must not ride a nullable conjunct below a join or into a view when a LATER
+  /// conjunct is unsafe: the evaluator's `AND` does not short-circuit, so the
+  /// un-pushed query evaluates the later conjunct even when this one is UNKNOWN —
+  /// pushing this one down would drop the UNKNOWN row before the later conjunct
+  /// runs, suppressing a throw the left-to-right `AND` owes (`A.x = 1 AND (1 /
+  /// B.y) = 0`, `A.x` NULL and `B.y = 0` on a matching pair; or `1 = :missing AND
+  /// (1 / y) = 0` over a view, `:missing` unbound — slotless yet UNKNOWN).
+  internal var nullable: Bool {
+    !slots.isEmpty || parameterised
+  }
+
+  /// Whether this filter compares against a run-time `:parameter` — a `.bound`
+  /// anywhere in it. Such a predicate reads no slot yet can be UNKNOWN, because
+  /// the parameter may be unbound (or bound to NULL), so `nullable` counts it
+  /// even when `slots` is empty.
+  private var parameterised: Bool {
+    switch self {
+    case .bound: true
+    case .compare, .match, .null: false
+    case let .and(lhs, rhs): lhs.parameterised || rhs.parameterised
+    case let .or(lhs, rhs): lhs.parameterised || rhs.parameterised
+    case let .not(operand): operand.parameterised
+    }
+  }
 }
 
 extension Array where Element == Filter {
-  /// The right-leaning `AND` of these conjuncts, or `nil` for an empty list.
+  /// The left-leaning `AND` of these conjuncts, or `nil` for an empty list —
+  /// `[a, b, c]` folds to `(a AND b) AND c`, matching the parser's own
+  /// association.
+  ///
+  /// The left fold is deliberate: `seek` only inspects a top-level `AND`'s two
+  /// immediate children, so a trailing sort-key comparison must remain the
+  /// immediate right operand to be seekable. A right-leaning rebuild (`a AND (b
+  /// AND c)`) would bury it under a nested `AND` and defeat the seek — so when
+  /// pushdown flattens a filter through `conjuncts` and rebuilds it here, the
+  /// association it restores is the parser's, keeping a seekable conjunct
+  /// visible.
   internal var conjunction: Filter? {
-    guard let last else { return nil }
-    return dropLast().reversed().reduce(last) { .and($1, $0) }
+    guard let first else { return nil }
+    return dropFirst().reduce(first) { .and($0, $1) }
   }
 }
 

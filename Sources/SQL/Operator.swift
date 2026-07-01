@@ -129,9 +129,12 @@ internal indirect enum Plan {
   /// `keys.right == outer[keys.left]` and concatenates each match. `keys.left`
   /// and `keys.right` are combined-space slots, `base` the inner's first slot
   /// in that combined space, and `column` the inner ordinal `keys.right` reads
-  /// (for the seek `bound`).
+  /// (for the seek `bound`). `filter` is a single-relation predicate pushed onto
+  /// the inner — in the inner's OWN 0-based standalone slot space — applied WHILE
+  /// each inner row is materialised, so an inner row that fails it is never
+  /// paired.
   case join(Plan, name: String, ordinals: Array<Int>, base: Int,
-            column: Int, keys: (left: Int, right: Int))
+            column: Int, keys: (left: Int, right: Int), filter: Filter?)
   /// ∪ — the rows of the `left` sub-plan followed by the `right`'s, in source
   /// order. With `all` the duplicates are kept (`UNION ALL`); without it the
   /// whole-row duplicates of the combined rows are removed, the first occurrence
@@ -191,7 +194,7 @@ extension Plan {
       } else {
         nil
       }
-    case let .join(outer, _, ordinals, _, _, _):
+    case let .join(outer, _, ordinals, _, _, _, _):
       outer.slots.map { $0 + ordinals.count }
     case let .union(left, _, _):
       // Both sides yield rows of the same width — the result columns — so the
@@ -253,9 +256,9 @@ internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
   case let .product(outer, inner):
     try product(execute(outer, catalog, routines, bindings),
                 execute(inner, catalog, routines, bindings))
-  case let .join(outer, name, ordinals, base, column, keys):
+  case let .join(outer, name, ordinals, base, column, keys, filter):
     try join(execute(outer, catalog, routines, bindings), name, ordinals,
-             base, column, keys, catalog)
+             base, column, keys, filter, catalog, routines, bindings)
   case let .union(left, right, all):
     try union(left, right, all, catalog, routines, bindings)
   }
@@ -375,11 +378,13 @@ private func product(_ outer: Array<Record>, _ inner: Array<Record>)
 /// and the inner reports `column` (the inner ordinal `keys.right` reads)
 /// seekable, the inner is seeked to its `[lower, upper)` run; otherwise the
 /// whole inner is scanned. Each candidate is materialised over the referenced
-/// `ordinals` into inner slots `0 ..< ordinals.count`, then re-tested for the
-/// inner's `keys.right` slot — `keys.right - base` in the standalone inner
-/// record — equal to `value`, the seek narrowing the scan but the equality
-/// being the join's truth, and a match is concatenated (the inner's slots
-/// landing at `base` in the combined space).
+/// `ordinals` into inner slots `0 ..< ordinals.count`; a candidate is admitted
+/// only when the pushed inner `filter` (in the inner's standalone slot space)
+/// also holds — applied WHILE the inner row is materialised, so a filtered inner
+/// row is never paired — then re-tested for the inner's `keys.right` slot —
+/// `keys.right - base` in the standalone inner record — equal to `value`, the
+/// seek narrowing the scan but the equality being the join's truth, and a match
+/// is concatenated (the inner's slots landing at `base` in the combined space).
 ///
 /// - Throws: `SQLError.relation` if the inner name no longer resolves.
 private func join<C: Catalog & ~Escapable>(_ outer: Array<Record>,
@@ -387,7 +392,10 @@ private func join<C: Catalog & ~Escapable>(_ outer: Array<Record>,
                                            _ ordinals: Array<Int>, _ base: Int,
                                            _ column: Int,
                                            _ keys: (left: Int, right: Int),
-                                           _ catalog: borrowing C)
+                                           _ filter: Filter?,
+                                           _ catalog: borrowing C,
+                                           _ routines: Routines,
+                                           _ bindings: Bindings)
     throws(SQLError) -> Array<Record> {
   guard let inner = catalog.table(named: name) else { throw .relation(name) }
   let cursor = inner.cursor()
@@ -402,6 +410,10 @@ private func join<C: Catalog & ~Escapable>(_ outer: Array<Record>,
     for index in range {
       guard let row = cursor.row(index) else { continue }
       let right = Record(row, ordinals)
+      // A pushed inner filter is applied as each candidate materialises, before
+      // it can pair — an inner row it rejects joins to nothing.
+      if let filter,
+          try evaluate(filter, right, routines, bindings) != true { continue }
       if right[slot] == value {
         records.append(left.merged(with: right))
       }

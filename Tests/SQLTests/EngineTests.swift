@@ -1536,7 +1536,7 @@ struct EngineArithmeticTests {
 
   @Test("division by zero faults")
   func divideByZero() throws {
-    #expect(throws: SQLError.arithmetic("division by zero")) {
+    #expect(throws: SQLError.divide) {
       try run("SELECT Id / 0 FROM People WHERE Id = 1")
     }
   }
@@ -1545,10 +1545,10 @@ struct EngineArithmeticTests {
   func overflow() throws {
     // `Int.max + 1` and a multiply past the boundary report overflow as a
     // `SQLError` rather than trapping (and aborting) the process.
-    #expect(throws: SQLError.arithmetic("integer overflow")) {
+    #expect(throws: SQLError.magnitude("integer overflow")) {
       try run("SELECT 9223372036854775807 + 1 FROM People WHERE Id = 1")
     }
-    #expect(throws: SQLError.arithmetic("integer overflow")) {
+    #expect(throws: SQLError.magnitude("integer overflow")) {
       try run("SELECT 9223372036854775807 * 2 FROM People WHERE Id = 1")
     }
   }
@@ -1567,7 +1567,7 @@ struct EngineArithmeticTests {
 
   @Test("a text operand faults as a type error")
   func textOperand() throws {
-    #expect(throws: SQLError.arithmetic("operands must be integers")) {
+    #expect(throws: SQLError.operand("operands must be integers")) {
       try run("SELECT Name + 1 FROM People WHERE Id = 1")
     }
   }

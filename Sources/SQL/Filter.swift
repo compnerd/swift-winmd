@@ -192,14 +192,15 @@ extension Arithmetic {
   ///
   /// Both operands must be integers: `integer ∘ integer` is an integer, with `/`
   /// integer division. A NULL on either side propagates — the result is NULL,
-  /// not a fault. A division by zero is `SQLError.arithmetic`, as standard SQL
+  /// not a fault. A division by zero is `SQLError.divide`, as standard SQL
   /// raises rather than yielding a value; a non-integer (text) operand is a
-  /// `SQLError.arithmetic` type error rather than a silent coercion.
+  /// `SQLError.operand` type error rather than a silent coercion; an integer
+  /// result past the `Int` boundary is `SQLError.magnitude`.
   internal func apply(_ lhs: Value, _ rhs: Value) throws(SQLError) -> Value {
     if case .null = lhs { return .null }
     if case .null = rhs { return .null }
     guard case let .integer(lhs) = lhs, case let .integer(rhs) = rhs else {
-      throw .arithmetic("operands must be integers")
+      throw .operand("operands must be integers")
     }
     // Report overflow rather than trap: operands are parsed literals or column
     // values that can reach the `Int` boundary (`Int.max + 1`, `Int.min / -1`),
@@ -209,10 +210,10 @@ extension Arithmetic {
     case .add: lhs.addingReportingOverflow(rhs)
     case .subtract: lhs.subtractingReportingOverflow(rhs)
     case .multiply: lhs.multipliedReportingOverflow(by: rhs)
-    case .divide where rhs == 0: throw .arithmetic("division by zero")
+    case .divide where rhs == 0: throw .divide
     case .divide: lhs.dividedReportingOverflow(by: rhs)
     }
-    guard !outcome.overflow else { throw .arithmetic("integer overflow") }
+    guard !outcome.overflow else { throw .magnitude("integer overflow") }
     return .integer(outcome.partialValue)
   }
 }

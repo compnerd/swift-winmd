@@ -15,6 +15,8 @@ let _ =
             dependencies: [
               .package(url: "https://github.com/apple/swift-argument-parser",
                        from: "1.5.0"),
+              .package(url: "https://github.com/hummingbird-project/swift-mustache",
+                       from: "2.0.0"),
             ],
             targets: [
               .target(name: "CPE", dependencies: []),
@@ -58,9 +60,16 @@ let _ =
                                   "WinMDSynthesis",
                                   .product(name: "ArgumentParser",
                                            package: "swift-argument-parser"),
+                                  .product(name: "Mustache",
+                                           package: "swift-mustache"),
+                                ],
+                                resources: [
+                                  .copy("Resources"),
                                 ],
                                 swiftSettings: [
                                   .enableExperimentalFeature("Lifetimes"),
+                                  .enableUpcomingFeature(
+                                      "InternalImportsByDefault"),
                                 ]),
               .testTarget(name: "winmd-inspectTests",
                           dependencies: [

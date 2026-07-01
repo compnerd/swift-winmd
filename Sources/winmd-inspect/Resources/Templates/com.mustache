@@ -1,0 +1,7 @@
+{{! language: swift }}
+@com(interface: "{{{iid}}}")
+public protocol {{{name}}}{{#base}}: {{{.}}}{{/base}} {
+{{#methods}}
+    func {{{name}}}({{#params}}_ {{{name}}}: {{{type}}}{{^last}}, {{/last}}{{/params}}){{#returns}} -> {{{.}}}{{/returns}}
+{{/methods}}
+}

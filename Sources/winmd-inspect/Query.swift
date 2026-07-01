@@ -37,6 +37,13 @@ internal struct Query: ParsableCommand {
   @OptionGroup
   internal var options: InspectOptions
 
+  @Option(name: .customShort("I"),
+          help: ArgumentHelp("A directory searched before the built-in "
+                           + "resources for query, view, and template files "
+                           + "(`<dir>/{Render,Queries,Templates}/<name>"
+                           + ".<ext>`); repeatable, the last directory wins."))
+  internal var search: Array<String> = []
+
   @Argument(help: ArgumentHelp("The SQL script to run; omit it to read one "
                              + "from stdin or open an interactive shell."))
   internal var sql: String?
@@ -57,7 +64,7 @@ internal struct Query: ParsableCommand {
     // reading. `.quit`'s `Shell.Stop` is caught either way to end cleanly. The
     // policy lives in `attempt` so `.read` inherits it too.
     let storage = database.storage
-    var shell = Shell(storage, strict: sql != nil)
+    var shell = Shell(storage, strict: sql != nil, search: search)
     if let sql {
       do {
         for statement in Statements(of: sql) { try shell.attempt(statement) }

@@ -1,0 +1,106 @@
+# The Swift target spec, selected by a template's `{{! language: swift }}`
+# directive: the escape delimiters, the no-value return spelling, the COM-root
+# base, the reserved words an identifier is escaped against, and the type
+# spellings a signature decodes to (the primitive leaves, the pointer family, the
+# delimiters, and the well-known projections). The render's ESCAPE UDF and its
+# type Dialect read it, so this — not the binary — carries what is Swift-specific.
+# A `-I` directory's `Languages/swift.lang` shadows it.
+escape-prefix `
+escape-suffix `
+void Void
+root IUnknown
+
+# The primitive leaf spellings, keyed by neutral name. `ELEMENT_TYPE_STRING` is
+# the WinRT `String` — an `HSTRING` handle, not a `PCWSTR` buffer.
+type void Void
+type bool CBool
+type char Unicode.UTF16.CodeUnit
+type i1 CChar
+type u1 CUnsignedChar
+type i2 CShort
+type u2 CUnsignedShort
+type i4 CInt
+type u4 CUnsignedInt
+type i8 CLongLong
+type u8 CUnsignedLongLong
+type f4 CFloat
+type f8 CDouble
+type iptr Int
+type uptr UInt
+type string HSTRING
+type object UnsafeMutableRawPointer
+type typedref UnsafeMutableRawPointer
+
+# The type-composition conventions: the pointer family, the generic delimiters,
+# the optional marker, the generic-variable scope prefixes, the opaque spelling
+# an unresolvable type degrades to, and the `System.Guid` classification names.
+pointer-mutable UnsafeMutablePointer
+pointer-const UnsafePointer
+rawpointer-mutable UnsafeMutableRawPointer
+rawpointer-const UnsafeRawPointer
+optional ?
+generic-open <
+generic-close >
+var-type T
+var-method M
+opaque UnsafeMutableRawPointer
+guid-iid IID
+guid-clsid CLSID
+
+# The well-known projection of resolved CLR types to `COM` module symbols.
+wellknown Windows.Win32.Foundation.HRESULT HRESULT
+wellknown Windows.Win32.Foundation.BOOL BOOL
+keyword Any
+keyword as
+keyword associatedtype
+keyword await
+keyword break
+keyword case
+keyword catch
+keyword class
+keyword continue
+keyword default
+keyword defer
+keyword deinit
+keyword do
+keyword else
+keyword enum
+keyword extension
+keyword fallthrough
+keyword false
+keyword fileprivate
+keyword for
+keyword func
+keyword guard
+keyword if
+keyword import
+keyword in
+keyword init
+keyword inout
+keyword internal
+keyword is
+keyword let
+keyword nil
+keyword operator
+keyword precedencegroup
+keyword private
+keyword protocol
+keyword public
+keyword repeat
+keyword rethrows
+keyword return
+keyword self
+keyword Self
+keyword static
+keyword struct
+keyword subscript
+keyword super
+keyword switch
+keyword throw
+keyword throws
+keyword true
+keyword try
+keyword typealias
+keyword var
+keyword where
+keyword while

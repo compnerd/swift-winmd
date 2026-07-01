@@ -6,6 +6,8 @@ import Testing
 @testable import winmd_inspect
 
 import SQL
+import WinMDSynthesis
+import WinMD
 
 struct ShellTests {
   @Test("each meta-command answers to its `.`-prefixed spelling")
@@ -16,6 +18,7 @@ struct ShellTests {
     #expect(Help.spelling == ".help")
     #expect(Quit.spelling == ".quit")
     #expect(Read.spelling == ".read")
+    #expect(Render.spelling == ".render")
   }
 
   @Test("`.read` parses its trailing path, trimming surrounding whitespace")
@@ -26,6 +29,18 @@ struct ShellTests {
     #expect(Read("  spaced.sql ").path == "spaced.sql")
     // No argument leaves an empty path — `execute` rejects it as unknown.
     #expect(Read("").path.isEmpty)
+  }
+
+  @Test("`.render` parses its interface and template arguments")
+  func render() {
+    // `Render.init` splits the rest of the statement into interface then
+    // template; both are required, so anything but two fields leaves them empty
+    // and `execute` rejects it.
+    let render = Render(" IFoo com ")
+    #expect(render.interface == "IFoo")
+    #expect(render.template == "com")
+    #expect(Render("IFoo").interface.isEmpty)
+    #expect(Render("").template.isEmpty)
   }
 
   @Test("a `;`-separated script streams into trimmed, non-empty statements")
@@ -86,6 +101,14 @@ struct ShellTests {
             == ["SELECT 1", ".tables", "SELECT 2"])
   }
 
+  @Test("the bundled views are the four COM-interface views")
+  func bundled() {
+    // The parse-and-register path a `CREATE VIEW` reuses; the four bundled
+    // views register under their case-folded names.
+    let views = Session.bundled()
+    #expect(Set(views.keys) == ["interfaces", "methods", "params", "bases"])
+  }
+
   @Test("a streamed CREATE VIEW statement parses and registers a view")
   func register() throws {
     // A batch run runs each streamed statement through `execute`, whose `CREATE
@@ -104,5 +127,68 @@ struct ShellTests {
       views[name.lowercased()] = view
     }
     #expect(views.keys.contains("v"))
+  }
+
+  @Test("a language spec parses its escape, void, root, keyword, and type keys")
+  func languageParses() {
+    let swift = Language(parsing: """
+      # a comment
+      escape-prefix `
+      escape-suffix `
+      void Void
+      root IUnknown
+      keyword class
+      keyword in
+
+      keyword default
+      type i4 CInt
+      type string HSTRING
+      pointer-mutable UnsafeMutablePointer
+      generic-open <
+      generic-close >
+      opaque UnsafeMutableRawPointer
+      wellknown Windows.Win32.Foundation.HRESULT HRESULT
+      """)
+    // A keyword identifier is wrapped in the escape delimiters; the match is
+    // exact, so a name merely containing a keyword is spelled verbatim.
+    #expect(swift.escape("class") == "`class`")
+    #expect(swift.escape("in") == "`in`")
+    #expect(swift.escape("classname") == "classname")
+    #expect(swift.escape("MyMethod") == "MyMethod")
+    // A value-carrying return passes through; the `void` spelling is `nil`.
+    #expect(swift.returned("CInt") == "CInt")
+    #expect(swift.returned("Void") == nil)
+    #expect(swift.returned("") == nil)
+    // The COM root is the parsed default base.
+    #expect(swift.root == "IUnknown")
+    // The type keys feed the `Dialect`: a couple of primitives, the pointer
+    // family, and the well-known projection map through.
+    let dialect = swift.dialect
+    #expect(SignatureType.primitive(.int4)
+                .decode(with: Resolver([:]), dialect: dialect) == "CInt")
+    #expect(SignatureType.pointer(.primitive(.int4))
+                .decode(with: Resolver([:]), dialect: dialect)
+                == "UnsafeMutablePointer<CInt>")
+    let hresult = TypeDefOrRef(rawValue: 1)
+    let resolver = Resolver([
+      hresult.rawValue: Identity(namespace: "Windows.Win32.Foundation",
+                                 name: "HRESULT"),
+    ])
+    #expect(SignatureType.named(kind: .value, hresult)
+                .decode(with: resolver, dialect: dialect) == "HRESULT")
+  }
+
+  @Test("the identity spec escapes nothing and applies no conventions")
+  func languageIdentity() {
+    // A template that declares no language (or names a spec with no resource)
+    // gets the identity `Language`: every identifier and return is verbatim, no
+    // root default applies, and its `Dialect` falls a primitive back to its
+    // neutral name (empty maps ⇒ no crash).
+    let identity = Language()
+    #expect(identity.escape("class") == "class")
+    #expect(identity.returned("Void") == "Void")
+    #expect(identity.root.isEmpty)
+    #expect(SignatureType.primitive(.int4)
+                .decode(with: Resolver([:]), dialect: identity.dialect) == "i4")
   }
 }

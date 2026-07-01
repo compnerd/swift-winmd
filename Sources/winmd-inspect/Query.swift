@@ -30,12 +30,16 @@ internal struct Query: ParsableCommand {
                                  + "shell.")
   }
 
-  // The database is the required positional and must be declared before the
-  // optional `sql`: ArgumentParser binds positionals in declaration order, so
-  // with `sql` first, `query db` would bind `db` to `sql` and report the
-  // database missing — making the omit-SQL shell form unreachable.
-  @OptionGroup
-  internal var options: InspectOptions
+  // `sql` is declared before the `<database>` group so a trailing script binds
+  // to it. The database is not a positional of `query` itself: it leads the
+  // command line — `winmd-inspect <database> query …` — as the root's
+  // positional, which ArgumentParser propagates into this subcommand's shared
+  // `InspectOptions`. With the group declared first, that propagated positional
+  // swallows a trailing `<sql>` and reports it "unexpected"; declaring `sql`
+  // first lets the script bind while the database still arrives by propagation.
+  @Argument(help: ArgumentHelp("The SQL script to run; omit it to read one "
+                             + "from stdin or open an interactive shell."))
+  internal var sql: String?
 
   @Option(name: .customShort("I"),
           help: ArgumentHelp("A directory searched before the built-in "
@@ -44,9 +48,8 @@ internal struct Query: ParsableCommand {
                            + ".<ext>`); repeatable, the last directory wins."))
   internal var search: Array<String> = []
 
-  @Argument(help: ArgumentHelp("The SQL script to run; omit it to read one "
-                             + "from stdin or open an interactive shell."))
-  internal var sql: String?
+  @OptionGroup
+  internal var options: InspectOptions
 
   internal func run() throws {
     // The caller owns the mapping; it must outlive the database, which is a

@@ -512,21 +512,33 @@ internal struct Statements: Sequence {
   /// lines for the argument and `.read`.
   private let lines: () -> String?
 
-  /// Streams statements read line-by-line from `lines`.
-  internal init(reading lines: @escaping () -> String?) {
+  /// A hook called before each line is read, told whether a statement is
+  /// pending (a mid-accumulation, unterminated statement). The interactive
+  /// shell passes one to emit its primary/continuation prompt; the argument and
+  /// `.read` paths leave it `nil` so a batch never prompts.
+  private let prompt: ((Bool) -> Void)?
+
+  /// Streams statements read line-by-line from `lines`, optionally calling
+  /// `prompt` before each read with whether a statement is pending — the
+  /// interactive shell's prompt hook.
+  internal init(reading lines: @escaping () -> String?,
+                prompt: ((Bool) -> Void)? = nil) {
     self.lines = lines
+    self.prompt = prompt
   }
 
-  /// Streams the statements of `text`, reading its lines.
+  /// Streams the statements of `text`, reading its lines. A batch never
+  /// prompts, so it has no prompt hook.
   internal init(of text: String) {
     var lines = text.split(separator: "\n", omittingEmptySubsequences: false)
                     .map(String.init)
                     .makeIterator()
     self.lines = { lines.next() }
+    prompt = nil
   }
 
   internal func makeIterator() -> Iterator {
-    Iterator(lines)
+    Iterator(lines, prompt)
   }
 
   /// The statement iterator — the `;`-accumulator over the line source.
@@ -534,11 +546,17 @@ internal struct Statements: Sequence {
     /// The line source the iterator pulls from.
     private let lines: () -> String?
 
+    /// The prompt hook, called before each read with whether a statement is
+    /// pending; `nil` for a batch, which never prompts.
+    private let prompt: ((Bool) -> Void)?
+
     /// The SQL accumulated across lines, not yet closed by a `;`.
     private var pending: String
 
-    internal init(_ lines: @escaping () -> String?) {
+    internal init(_ lines: @escaping () -> String?,
+                  _ prompt: ((Bool) -> Void)?) {
       self.lines = lines
+      self.prompt = prompt
       pending = ""
     }
 
@@ -558,6 +576,10 @@ internal struct Statements: Sequence {
           guard statement.isEmpty else { return statement }
           continue
         }
+        // Prompt before the read (the interactive shell only): a pending,
+        // unterminated statement asks for its continuation; an empty one asks
+        // for a fresh statement. A batch's hook is `nil`, so it never prompts.
+        prompt?(!pending.trimmed.isEmpty)
         guard let line = lines() else {
           // End of input: flush a final unterminated statement (the closing
           // `;` is optional), then clear `pending` so the next call stops.

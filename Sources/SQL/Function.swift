@@ -40,10 +40,14 @@ public struct Routines: Sendable {
       }
   }
 
-  /// The function named `name`, or `nil` if no such function is registered —
-  /// the name folded to lower case, like every other SQL identifier.
+  /// The function named `name`, folded to lower case like every other SQL
+  /// identifier, or `nil` if neither a built-in nor a registered function bears
+  /// it. An engine built-in resolves AHEAD of a registered function of the same
+  /// name: an unqualified scalar call can never shadow a built-in. (A future
+  /// PATH / search-order mechanism — à la DB2 or PostgreSQL — would let a
+  /// qualified call reach a user's redefinition.)
   public func function(named name: String) -> Scalar? {
-    functions[name.lowercased()]
+    Routines.builtins[name.lowercased()] ?? functions[name.lowercased()]
   }
 
   /// A copy of these routines with `function` bound to `name` (folded to lower
@@ -53,6 +57,29 @@ public struct Routines: Sendable {
     var functions = self.functions
     functions[name.lowercased()] = function
     return Routines(functions)
+  }
+
+  /// The engine's built-in scalar functions, available to every `Routines` —
+  /// even the empty one — and resolved ahead of a registered function of the
+  /// same name (see `function(named:)`), so an unqualified call always reaches
+  /// the built-in. `BITAND` is the portable, standards-compliant spelling
+  /// (Oracle's) of a bitwise AND, an operation ISO SQL and this grammar
+  /// otherwise lack; it is a built-in so any dialect gets it without registering
+  /// a closure.
+  private static let builtins: Dictionary<String, Scalar> = ["bitand": bitand]
+
+  /// `BITAND(x, y)` — the bitwise AND of two integers. A NULL argument yields
+  /// NULL (SQL null propagation); a non-integer argument is `SQLError.argument`
+  /// and the wrong arity `SQLError.arity`.
+  private static let bitand: Scalar = { arguments in
+    guard arguments.count == 2 else { throw .arity(2, arguments.count) }
+    if case .null = arguments[0] { return .null }
+    if case .null = arguments[1] { return .null }
+    guard case let .integer(x) = arguments[0],
+        case let .integer(y) = arguments[1] else {
+      throw .argument("BITAND requires integer arguments")
+    }
+    return .integer(x & y)
   }
 }
 

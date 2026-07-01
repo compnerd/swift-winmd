@@ -1098,6 +1098,38 @@ struct EngineFunctionTests {
     #expect(rows == [[.text("ALICE")]])
   }
 
+  @Test("the built-in BITAND yields the bitwise AND of two integers")
+  func bitand() throws {
+    // BITAND is an engine built-in: `routines()` never registers it, yet the
+    // call resolves and folds case-insensitively. 12 & 10 = 8; 6 & 3 = 2.
+    #expect(try functionRun("SELECT BITAND(12, 10) FROM People WHERE Id = 1")
+            == [[.integer(8)]])
+    #expect(try functionRun("SELECT bitand(6, 3) FROM People WHERE Id = 1")
+            == [[.integer(2)]])
+  }
+
+  @Test("BITAND rejects the wrong arity and non-integer arguments")
+  func bitandFaults() throws {
+    #expect(throws: SQLError.arity(2, 1)) {
+      try functionRun("SELECT BITAND(1) FROM People WHERE Id = 1")
+    }
+    #expect(throws: SQLError.argument("BITAND requires integer arguments")) {
+      try functionRun("SELECT BITAND('a', 1) FROM People WHERE Id = 1")
+    }
+  }
+
+  @Test("a registered function cannot shadow the built-in BITAND")
+  func bitandNotShadowed() throws {
+    // A built-in resolves ahead of a registered function of the same name, so
+    // an unqualified `BITAND` is always the built-in, not the user's closure.
+    let user = Routines().registering("bitand") { _ throws(SQLError) in
+      .integer(-1)
+    }
+    let query = try parse("SELECT BITAND(6, 3) FROM People WHERE Id = 1")
+    let rows = try Engine.run(query, people(), user)
+    #expect(rows == [[.integer(2)]])
+  }
+
   @Test("routine names colliding only by case merge without trapping")
   func collision() throws {
     // "tag" and "TAG" fold to one name; the registry merges them (the later-

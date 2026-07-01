@@ -469,10 +469,14 @@ public enum Engine {
   /// It qualifies when `filter` is a sort-key equality or range whose operand
   /// is an integer — a literal, or a bound parameter resolved from `bindings`
   /// so a correlated child seeks on its parent key — and `table.bound` reports
-  /// the column seekable (a non-`nil` boundary). The comparison's slot maps
-  /// back to its table ordinal through `ordinals` (slot `i` is `ordinals[i]`)
-  /// for the `bound` query. A `string` operand or an unseekable column never
-  /// qualifies, and the executor scans.
+  /// the column seekable (a non-`nil` boundary). A range additionally requires
+  /// the column `ordered`: a `bound` boundary partitions a range correctly only
+  /// when the seeked column is monotonic, so a range on a seekable, unordered
+  /// column (a decoded coded-index key) does not qualify and scans, while its
+  /// equality still seeks. The comparison's slot maps back to its table ordinal
+  /// through `ordinals` (slot `i` is `ordinals[i]`) for the `bound` query. A
+  /// `string` operand or an unseekable column never qualifies, and the executor
+  /// scans.
   private static func boundaries<T: Table & ~Escapable>(_ filter: Filter,
                                                         _ ordinals: Array<Int>,
                                                         _ table: borrowing T,
@@ -485,12 +489,20 @@ public enum Engine {
       return nil
     }
 
+    // A range takes the rows on one side of the boundary, which is correct only
+    // when the column is ordered — every row on that side compares that way. An
+    // equality takes only the boundary's own run, which `bound` brackets
+    // exactly even for an unordered seek (a decoded coded-index key: the sorted
+    // raw run brackets one tag's value, and the join re-tests the decoded key
+    // per row), so equality always seeks; a range on an unordered column
+    // returns `nil` and the engine scans and filters.
+    let ordered = table.ordered(ordinals[slot])
     return switch op {
     case .equal: lower ..< upper
-    case .lt: 0 ..< lower
-    case .leq: 0 ..< upper
-    case .gt: upper ..< count
-    case .geq: lower ..< count
+    case .lt: ordered ? 0 ..< lower : nil
+    case .leq: ordered ? 0 ..< upper : nil
+    case .gt: ordered ? upper ..< count : nil
+    case .geq: ordered ? lower ..< count : nil
     case .unequal: nil   // a split run is two scans; let the scan handle it
     }
   }

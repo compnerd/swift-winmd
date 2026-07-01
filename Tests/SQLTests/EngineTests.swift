@@ -12,6 +12,17 @@ private struct Field: Sendable {
   let kind: ValueKind
 }
 
+/// The coded-index encoding the in-memory harness models — a raw cell is
+/// `(rowid << bits) | tag`, with the tag in the low `bits` (a real coded index's
+/// tag is likewise a small low field, e.g. `HasCustomAttribute.bits == 5`). Two
+/// bits keep the fixtures small while still being wide enough that a decoded
+/// rowid past `Int.max >> bits` shifts its high bits out of the word and aliases
+/// a real low cell — the truncation `WinMDRelation.bound`'s upper-bound guard
+/// rejects and this harness mirrors.
+private enum Coded {
+  static let bits = 2
+}
+
 /// An in-memory relation: a fixed schema plus rows of typed values.
 ///
 /// The `sorted` flag marks a single integral column whose rows are stored in
@@ -26,12 +37,25 @@ private struct Relation: Sendable {
   let records: Array<Array<Value>>
   /// The ordinal of the sorted column, or `nil` if the relation is unsorted.
   let sorted: Int?
+  /// A seekable-but-unordered coded column, modelling a decoded coded-index key
+  /// (e.g. `CustomAttribute.Parent_TypeDef`): its stored cell is the raw coded
+  /// value `(rowid << bits) | tag`, physically sorted, and `bound` brackets it —
+  /// but the `Row` decodes it (a null reference `rowid == 0` or any non-`0` tag
+  /// → `NULL`, else its `rowid`), so the decoded column is not monotonic in row
+  /// order. `ordered` reports `false` for it, so the engine seeks only an
+  /// equality and scans a range. The tag occupies `Coded.bits` low bits — wide
+  /// enough (like a real coded index) that a decoded rowid past
+  /// `Int.max >> Coded.bits` shifts its high bits entirely out of the word and
+  /// aliases a real low cell, the truncation the seek's upper-bound guard
+  /// rejects.
+  let coded: Int?
 
   init(_ fields: Array<Field>, _ records: Array<Array<Value>>,
-       sorted: Int? = nil) {
+       sorted: Int? = nil, coded: Int? = nil) {
     self.fields = fields
     self.records = records
     self.sorted = sorted
+    self.coded = coded
   }
 }
 
@@ -90,12 +114,31 @@ private struct MemoryTable: Table {
   }
 
   func bound(_ column: Int, _ value: Int, strict: Bool) -> Int? {
-    // Only the relation's sorted column is seekable; anything else falls back
-    // to a scan.
-    guard relation.sorted == column else { return nil }
+    // The sorted column seeks against `value` directly; the coded column seeks
+    // against the encoded raw cell `(value << Coded.bits) | 0` — the tag-0
+    // (TypeDef) encoding of the target `rowid` — exactly as `WinMDRelation`
+    // brackets a decoded coded-index key's equal run in the sorted raw column. A
+    // decoded row is 1-based, so the coded column reports no boundary for a
+    // non-positive `value`: it is a null reference (`rowid == 0`) that no cell
+    // equals, so the engine scans and filters rather than seeking the raw run
+    // encoding row zero — mirroring `WinMDRelation.bound`'s `value >= 1` guard.
+    // It likewise reports no boundary for a `value` past `Int.max >> Coded.bits`,
+    // whose shift would truncate its high bits out of the word and alias a real
+    // low cell — mirroring the adapter's upper-bound guard, so the engine scans
+    // and filters (the huge value matches no decoded cell) instead of seeking the
+    // aliased run. Any other column falls back to a scan.
+    let target: Int
+    switch column {
+    case relation.sorted:
+      target = value
+    case relation.coded where value >= 1 && value <= Int.max >> Coded.bits:
+      target = (value << Coded.bits) | 0
+    default:
+      return nil
+    }
 
-    // Partition the ascending column: the first row whose cell is `>= value`
-    // (non-strict) or `> value` (strict).
+    // Partition the ascending column: the first row whose cell is `>= target`
+    // (non-strict) or `> target` (strict).
     var lower = 0
     var upper = relation.records.count
     while lower < upper {
@@ -103,7 +146,7 @@ private struct MemoryTable: Table {
       guard case let .integer(cell) = relation.records[middle][column] else {
         return nil
       }
-      let before = strict ? cell <= value : cell < value
+      let before = strict ? cell <= target : cell < target
       if before {
         lower = middle + 1
       } else {
@@ -111,6 +154,13 @@ private struct MemoryTable: Table {
       }
     }
     return lower
+  }
+
+  func ordered(_ column: Int) -> Bool {
+    // The coded column is seekable but not ordered — its stored raw cells are
+    // sorted, but the value the `Row` decodes is not monotonic in row order, so
+    // a range must scan rather than consume a boundary.
+    relation.coded != column
   }
 
   func cursor() -> MemoryCursor {
@@ -151,6 +201,17 @@ private struct MemoryRow: Row {
   subscript(_ column: Int) -> Value {
     borrowing get {
       if column == relation.fields.count { return .integer(index + 1) }
+      // The coded column decodes its raw cell `(rowid << Coded.bits) | tag` the
+      // way a coded-index key does: a tag-`0` (TypeDef) cell whose row is
+      // non-null yields the target `rowid`; any other tag (a cell pointing at a
+      // different table) or a null reference (`rowid == 0`) yields `NULL` — the
+      // same `row == 0` → `NULL` rule `WinMDRow.key` decodes a coded index by.
+      if column == relation.coded,
+          case let .integer(raw) = relation.records[index][column] {
+        let mask = (1 << Coded.bits) - 1
+        return raw & mask == 0 && raw >> Coded.bits != 0
+            ? .integer(raw >> Coded.bits) : .null
+      }
       return relation.records[index][column]
     }
   }
@@ -173,6 +234,42 @@ private func people() -> Memory {
     [.integer(5), .text("Eve"), .integer(25)],
   ] as Array<Array<Value>>
   return Memory(["People": Relation(fields, records, sorted: 0)])
+}
+
+/// A catalog modelling a decoded coded-index key: an `Attribute` relation whose
+/// `Parent` column is seekable but not ordered. It stands in for a
+/// `CustomAttribute` physically sorted on its raw `Parent` coded index with
+/// mixed tags — each row's stored `Parent` is the raw coded cell
+/// `(rowid << Coded.bits) | tag` (tag `0` a `TypeDef`, tag `1` another table),
+/// sorted ascending; the `Row` decodes it, so the column reads as the target
+/// `TypeDef` `rowid` (tag `0`) or `NULL` (tag `1`). The raw run brackets one
+/// tag's equal value, but the tag-1 rows interleaved by row decode to `NULL`, so
+/// a range on the decoded column must not seek the raw boundary — it would
+/// return other-tag rows that decode outside the range.
+private func attributes() -> Memory {
+  let fields = [
+    Field(name: "Parent", kind: .integer),
+    Field(name: "Name", kind: .text),
+  ]
+  // Stored `Parent` = `(rowid << 2) | tag` (Coded.bits == 2), ascending.
+  // Decoded `Parent`:
+  //   raw  0 = (0<<2)|0 → NULL (null reference — row 0)
+  //   raw  4 = (1<<2)|0 → TypeDef 1     raw  5 = (1<<2)|1 → NULL
+  //   raw  8 = (2<<2)|0 → TypeDef 2     raw 13 = (3<<2)|1 → NULL
+  //   raw 16 = (4<<2)|0 → TypeDef 4     raw 17 = (4<<2)|1 → NULL
+  //   raw 20 = (5<<2)|0 → TypeDef 5     raw 24 = (6<<2)|0 → TypeDef 6
+  let records = [
+    [.integer(0), .text("null-ref")],
+    [.integer(4), .text("td1")],
+    [.integer(5), .text("other-a")],
+    [.integer(8), .text("td2")],
+    [.integer(13), .text("other-b")],
+    [.integer(16), .text("td4")],
+    [.integer(17), .text("other-c")],
+    [.integer(20), .text("td5")],
+    [.integer(24), .text("td6")],
+  ] as Array<Array<Value>>
+  return Memory(["Attribute": Relation(fields, records, coded: 0)])
 }
 
 /// A wide catalog: a `Wide` relation of ten columns, to prove a query that
@@ -412,6 +509,11 @@ private func wide(_ text: String) throws -> Array<Array<Value>> {
   try Engine.run(parse(text), wide())
 }
 
+/// Runs `text` against the coded-key `Attribute` catalog.
+private func attributes(_ text: String) throws -> Array<Array<Value>> {
+  try Engine.run(parse(text), attributes())
+}
+
 /// Runs `text` against the join `family` catalog.
 private func join(_ text: String) throws -> Array<Array<Value>> {
   try Engine.run(parse(text), family())
@@ -560,6 +662,105 @@ struct EngineSeekTests {
     let scan =
         try run("SELECT Id FROM People WHERE Name >= 'Bob' AND Name <= 'Dave'")
     #expect(scan == seek)
+  }
+}
+
+/// A seekable but unordered column (a decoded coded-index key) is
+/// equality-seekable only: an equality seeks its exact run and the join
+/// re-tests per row, but a range must not consume the raw boundary — the raw
+/// run brackets one tag's value while the other tags interleaved by row decode
+/// to `NULL` and lie inside the raw range. `bound` returns a boundary for both,
+/// so before the fix `Engine.boundaries` consumed a range as a standalone seek
+/// and leaked the other-tag rows (no residual recheck on the scan-seek path).
+/// The fix gates the range cases on `Table.ordered`, so a range scans and
+/// filters instead.
+///
+/// The scenario is driven through the in-memory `Attribute` table rather than a
+/// sorted `WinMD.Storage` fixture: assembling a physically-sorted mixed-tag
+/// `CustomAttribute` in the byte-buffer harness is impractical, and the leak is
+/// purely a property of `boundaries`/`bound` over an unordered seekable column,
+/// which the memory table models faithfully (stored raw
+/// `(rowid << Coded.bits) | tag`, decoded to the `TypeDef` `rowid` or `NULL`).
+/// The engine-level plan-shape assertion complements the two result assertions.
+struct EngineCodedKeyTests {
+  @Test("a range on an unordered coded key scans and admits only its own rows")
+  func range() throws {
+    // `Parent < 5` must return only the TypeDef-tagged rows whose decoded
+    // `rowid` is `< 5` (td1, td2, td4) — never the other-tag rows (other-a, -b,
+    // -c), which decode to NULL. Before the fix the raw boundary
+    // `0 ..< bound(5)` seeked the low raw run, sweeping in the interleaved NULLs.
+    let rows = try attributes("SELECT Name FROM Attribute WHERE Parent < 5")
+    #expect(rows == [[.text("td1")], [.text("td2")], [.text("td4")]])
+  }
+
+  @Test("a range equals the correct scan-and-filter result")
+  func equivalence() throws {
+    // The seek path (`Parent < 5`) must equal a filter that cannot seek at all
+    // (`Name < 'z'` over the same rows, restricted to the tagged ones) — i.e.
+    // the range yields exactly the rows a full scan-and-filter would.
+    let seek = try attributes("SELECT Name FROM Attribute WHERE Parent < 5")
+    let scan = try attributes("""
+        SELECT Name FROM Attribute WHERE Parent < 5 AND Name < 'z'
+        """)
+    #expect(seek == scan)
+  }
+
+  @Test("an equality on an unordered coded key still seeks its exact run")
+  func equality() throws {
+    // Equality is always seekable — the exact coded run brackets exactly the
+    // rows that decode to the value, and a join rechecks — so `Parent = 4`
+    // returns just td4.
+    let rows = try attributes("SELECT Name FROM Attribute WHERE Parent = 4")
+    #expect(rows == [[.text("td4")]])
+  }
+
+  @Test("an equality on zero rejects a null coded reference rather than seeking")
+  func null() throws {
+    // A decoded row is 1-based, so `Parent = 0` is `NULL = 0` for every row —
+    // UNKNOWN, admitting none. Row 0's stored raw cell is `(0 << 2) | 0 == 0`,
+    // which encodes exactly the target the equality would seek; before the fix
+    // `bound(0, …)` bracketed that raw run and `Engine.seek` consumed it with no
+    // residual recheck, leaking the null-reference row. The fix returns `nil`
+    // for a non-positive decoded rowid, so the query scans and filters, and the
+    // decoded `NULL` correctly fails `= 0`.
+    let rows = try attributes("SELECT Name FROM Attribute WHERE Parent = 0")
+    #expect(rows.isEmpty)
+  }
+
+  @Test("an equality too large to encode rejects rather than seeking an alias")
+  func overflow() throws {
+    // A decoded rowid must be encodable without truncation. `(1 << 62) + 6` is
+    // positive but past `Int.max >> Coded.bits`, so `(value << 2) | 0` shifts the
+    // high `1` clear out of the word and aliases raw `24` — the same raw cell as
+    // `td6` (`(6 << 2) | 0`). Before the upper-bound guard, `bound` bracketed
+    // that aliased run and `Engine.seek` consumed the standalone equality with no
+    // residual recheck, returning td6 for a value no decoded key equals. The
+    // guard returns `nil` for the unencodable value, so the query scans and
+    // filters — every decoded key is a small rowid or NULL, none equals the huge
+    // value — and admits nothing.
+    let alias = (1 << 62) + 6
+    let rows =
+        try attributes("SELECT Name FROM Attribute WHERE Parent = \(alias)")
+    #expect(rows.isEmpty)
+  }
+
+  @Test("an equality plans a seek, a range plans a scan-and-filter")
+  func plan() throws {
+    // The plan shape proves the gate directly: equality reaches a seeked scan
+    // with no residual filter; a range reaches a raw scan under a filter.
+    let catalog = attributes()
+
+    let equal = try parse("SELECT Name FROM Attribute WHERE Parent = 4")
+    let equalPlan =
+        try Engine.optimise(Engine.compile(equal, catalog), catalog, [:])
+    #expect(seeks(equalPlan))
+    #expect(!filters(equalPlan))
+
+    let less = try parse("SELECT Name FROM Attribute WHERE Parent < 5")
+    let lessPlan =
+        try Engine.optimise(Engine.compile(less, catalog), catalog, [:])
+    #expect(!seeks(lessPlan))
+    #expect(filters(lessPlan))
   }
 }
 

@@ -22,16 +22,19 @@ internal import WinMD
 /// `width`: `rowid` enables foreign-key joins — an FK is a real column holding a
 /// `rowid`.
 ///
-/// Three tables expose a further per-table virtual column that decodes
-/// WinMD-specific data, at ordinals `width + 1` onward: `ReturnType` on
-/// `MethodDef` (the decoded type spelling of the signature's return), `ParamType`
-/// on `Param` (the decoded type spelling of the parameter, navigated through its
-/// owning method's signature), and `guid` on `CustomAttribute` (the UUID its
-/// `Value` blob names, or `NULL` when the blob is not GUID-shaped — the
-/// `interfaces` view navigates to a type's `GuidAttribute` and selects this
-/// codec to spell its IID). The extras are keyed by the relation's schema name;
-/// they are computed in `WinMDRow` and, being decoded rather than stored, are
-/// never seekable.
+/// One table exposes a further per-table virtual column that decodes
+/// WinMD-specific data, at ordinals `width + 1` onward: `guid` on
+/// `CustomAttribute` (the UUID its `Value` blob names, or `NULL` when the blob is
+/// not GUID-shaped — the `interfaces` view navigates to a type's `GuidAttribute`
+/// and selects this codec to spell its IID). The extras are keyed by the
+/// relation's schema name; they are computed in `WinMDRow` and, being decoded
+/// rather than stored, are never seekable.
+///
+/// Type spellings are *not* virtual columns: they are language-specific, so the
+/// adapter — the neutral conceptual layer — does not bake them. The render spells
+/// a return/parameter at render time through the free `decodedReturn`/
+/// `decodedParameter` functions, which navigate a method/parameter's signature
+/// and apply a target `Dialect`.
 ///
 /// Past the extras sit a relation's join keys, at ordinals `width + 1 + extras`
 /// onward — the columns a view equi-joins across. A list-owned table leads the
@@ -77,14 +80,14 @@ extension WinMD.Storage: SQL.Catalog {
 ///
 /// The shell lets a session define views (`CREATE VIEW`) and query them. A
 /// `Session` borrows the base `storage` and carries the escapable `views` the
-/// session has registered, and a `CREATE VIEW` `register`s another.
-/// `table(named:)` delegates to the storage, while `view(named:)` resolves the
-/// views case-insensitively (relation names resolve case-insensitively
-/// elsewhere), so a registered view shadows a base table of the same name. It is
-/// the single state model and does no console I/O; `Shell` drives it. It mirrors
-/// the `~Escapable`/`@_lifetime(borrow …)` + `copy storage` pattern of
-/// `WinMDRelation`, vending the storage's own `WinMDRelation` so the engine plans
-/// over the same source.
+/// session has registered — seeded at `init` with the bundled COM-interface
+/// views — and a `CREATE VIEW` `register`s another. `table(named:)` delegates to
+/// the storage, while `view(named:)` resolves the views case-insensitively
+/// (relation names resolve case-insensitively elsewhere), so a registered view
+/// shadows a base table of the same name. It is the single state model and does
+/// no console I/O; `Shell` drives it. It mirrors the `~Escapable`/`@_lifetime(
+/// borrow …)` + `copy storage` pattern of `WinMDRelation`, vending the storage's
+/// own `WinMDRelation` so the engine plans over the same source.
 internal struct Session: SQL.Catalog, ~Escapable {
   /// The borrowed base storage the session's tables read from.
   internal let storage: WinMD.Storage
@@ -92,8 +95,18 @@ internal struct Session: SQL.Catalog, ~Escapable {
   /// The views the session has registered, keyed case-folded.
   internal var views: Dictionary<String, View>
 
+  /// Opens a session over `storage`, seeding the bundled COM-interface views —
+  /// or, where a `-I` `search` directory shadows or adds one, its view.
+  @_lifetime(borrow storage)
+  internal init(_ storage: borrowing WinMD.Storage,
+                search: Array<String> = []) {
+    self.storage = copy storage
+    self.views = Session.bundled(search: search)
+  }
+
   /// Opens a session over `storage` with an explicit `views` set — the seam a
-  /// test drives to register a custom or overriding view set.
+  /// test drives to register a custom or overriding view set without the
+  /// bundled seed.
   @_lifetime(borrow storage)
   internal init(_ storage: borrowing WinMD.Storage,
                 _ views: Dictionary<String, View>) {
@@ -123,7 +136,7 @@ internal struct Session: SQL.Catalog, ~Escapable {
 ///
 /// Its real columns are the table's fields; the virtual columns follow, past the
 /// `SELECT *` extent: `rowid` at `width`, then the table's per-table decoded
-/// extras (`ReturnType`/`ParamType`/`guid`) at `width + 1` onward, then the join
+/// extras (`guid`) at `width + 1` onward, then the join
 /// keys — `parent` (on a list-owned table only) leading the coded-index join
 /// keys. A real cell is typed from its field's `ColumnType`: a `#Strings` index
 /// is `.text`, every other column (a constant, a foreign-key index, another
@@ -292,12 +305,11 @@ extension WinMDRelation {
   /// and `ordinal(of:)` derive from (keyed by the table's schema name, through
   /// the shared `extras(of:)` core).
   ///
-  /// Three tables decode a WinMD-specific column past `rowid`: `MethodDef` a
-  /// `ReturnType` (the signature's decoded return), `Param` a `ParamType` (the
-  /// parameter's decoded type), and `CustomAttribute` a `guid` (the GUID its
-  /// `Value` blob names, for the `GuidAttribute` rows the `interfaces` view
-  /// selects). Every other table exposes only `rowid` and `parent`, so it has
-  /// no extras. `WinMDRow.extras` computes the same list by the same keying.
+  /// One table decodes a WinMD-specific column past `rowid`: `CustomAttribute` a
+  /// `guid` (the GUID its `Value` blob names, for the `GuidAttribute` rows the
+  /// `interfaces` view selects). Every other table exposes only `rowid` and
+  /// `parent`, so it has no extras. `WinMDRow.extras` computes the same list by
+  /// the same keying.
   internal var extras: Array<String> {
     WinMDRelation.extras(of: table.description)
   }
@@ -309,8 +321,6 @@ extension WinMDRelation {
   /// extras.
   internal static func extras(of schema: String) -> Array<String> {
     switch schema {
-    case "MethodDef":       ["ReturnType"]
-    case "Param":           ["ParamType"]
     case "CustomAttribute": ["guid"]
     default:                Array<String>()
     }
@@ -502,7 +512,7 @@ internal struct WinMDCursor: SQL.Cursor, ~Escapable {
 /// reads the WinMD cell — a `#Strings` heap index resolves through the heap as
 /// `.text`, every other column is `.integer`; `rowid` (`count`) is the 1-based
 /// row index; a per-table extra ordinal (`count + 1` onward) decodes the table's
-/// WinMD-specific column (`ReturnType`/`ParamType`/`guid`); and the join keys
+/// WinMD-specific column (`guid`); and the join keys
 /// follow the extras — on a list-owned table the `parent` ordinal is the owning
 /// parent row's 1-based `rowid` (zero for a row no parent owns) and the
 /// coded-index join keys follow it, while on a non-list table the coded-index
@@ -578,8 +588,6 @@ internal struct WinMDRow: SQL.Row, ~Escapable {
   /// such extra — is SQL `NULL`.
   private func extra(_ index: Int) -> Value {
     switch (schema, index) {
-    case ("MethodDef", 0):       returns()
-    case ("Param", 0):           parameter()
     case ("CustomAttribute", 0): guid()
     default:                     .null
     }
@@ -632,57 +640,86 @@ internal struct WinMDRow: SQL.Row, ~Escapable {
     }
     return .text("\(uuid)")
   }
+}
 
-  /// The `ReturnType` extra of a `MethodDef` row — the decoded type spelling of
-  /// the signature's return, or SQL `NULL` when the signature does not decode.
-  private func returns() -> Value {
-    guard let row = Row<Metadata.Tables.MethodDef>(tuple),
-        let signature = try? row.prototype else {
-      return .null
-    }
-    guard let resolver = try? Resolver(of: signature, with: storage) else {
-      return .null
-    }
-    return .text(signature.returns.decode(with: resolver))
-  }
+// MARK: - Signature decode
 
-  /// The `ParamType` extra of a `Param` row — the decoded type spelling of the
-  /// parameter, navigated through its owning method's signature.
-  ///
-  /// The `Param.Sequence` cell is the 1-based parameter position; `Sequence == 0`
-  /// is the return pseudo-parameter and `Sequence > parameters.count` is out of
-  /// range, both SQL `NULL`. The owning `MethodDef` is the `parent` virtual
-  /// column's row, opened through the list `link`.
-  private func parameter() -> Value {
-    guard let link,
-        let sequence = tuple.ordinal(for: "Sequence") else { return .null }
-    let position = tuple[sequence]
-    // The owning `MethodDef` is the `parent` virtual column's row (its 1-based
-    // `rowid`), opened positionally through the list link's parent table. An
-    // owner of zero is no parent (malformed/partial metadata: an empty
-    // `MethodDef` table, or a first `ParamList` past this row), so the
-    // parameter is unowned and yields SQL `NULL` rather than indexing a
-    // negative row through the cursor.
-    let owner = storage.owner(of: tuple.index, link)
-    guard owner != 0 else { return .null }
-    let cursor = WinMD.Cursor(storage, link.parent)
-    guard let method = cursor[owner - 1],
-        let row = Row<Metadata.Tables.MethodDef>(method),
-        let signature = try? row.prototype else {
-      return .null
+extension WinMD.Storage {
+  /// The open table whose schema name is `schema`, resolved case-insensitively
+  /// against the database's relations — the signature decode's table lookup, the
+  /// same keying `WinMDRelation.Link` uses to find a list parent.
+  internal borrowing func opened(_ schema: String) -> WinMD.Table? {
+    for index in 0 ..< relations.count
+        where relations[index].description
+                  .caseInsensitiveCompare(schema) == .orderedSame {
+      return relations[index]
     }
-    // `Sequence == 0` is the return parameter; `Sequence == N` is the 1-based
-    // `parameters[N - 1]`. Anything outside that range yields SQL `NULL`.
-    guard position >= 1, position <= signature.parameters.count else {
-      return .null
-    }
-    guard let resolver = try? Resolver(of: signature, with: storage) else {
-      return .null
-    }
-    // The parameter's own `Name` is the `System.Guid` `IID`/`CLSID` hint; for
-    // any other type the decoder ignores it, so passing it is always safe.
-    let name = tuple.ordinal(for: "Name").flatMap { try? tuple.string($0) }
-    return .text(signature.parameters[position - 1]
-        .decode(parameter: name, with: resolver))
+    return nil
   }
+}
+
+/// The decoded type spelling of the return of the `MethodDef` at 1-based
+/// `method` `rowid`, in `dialect`, or `nil` when the row or its signature does
+/// not decode.
+///
+/// This is the signature-navigation the adapter once baked as the `ReturnType`
+/// virtual column, relocated so the render can spell a return at render time
+/// with a target `Dialect`: it opens the `MethodDef` row, decodes its
+/// `prototype` signature, builds a `Resolver` over the borrowed `storage`, and
+/// decodes the return. `nil` mirrors the old NULL — an absent row, an
+/// undecodable signature, or an unresolvable one.
+internal func decodedReturn(of method: Int, in storage: borrowing WinMD.Storage,
+                            dialect: Dialect) -> String? {
+  guard let table = storage.opened("MethodDef") else { return nil }
+  let cursor = WinMD.Cursor(copy storage, table)
+  guard let tuple = cursor[method - 1],
+      let row = Row<Metadata.Tables.MethodDef>(tuple),
+      let signature = try? row.prototype,
+      let resolver = try? Resolver(of: signature, with: storage) else {
+    return nil
+  }
+  return signature.returns.decode(with: resolver, dialect: dialect)
+}
+
+/// The decoded type spelling of the `Param` at 1-based `parameter` `rowid`, in
+/// `dialect`, navigated through its owning method's signature — or `nil` when it
+/// does not decode.
+///
+/// This is the signature-navigation the adapter once baked as the `ParamType`
+/// virtual column, relocated so the render can spell a parameter at render time.
+/// The `Param.Sequence` cell is the 1-based parameter position: `Sequence == 0`
+/// is the return pseudo-parameter and `Sequence > parameters.count` is out of
+/// range, both `nil`. The owning `MethodDef` is found through the `Param` list
+/// link — an owner of zero is no parent (malformed/partial metadata), so the
+/// parameter is unowned and yields `nil` rather than indexing a negative row.
+/// The parameter's own `Name` is the `System.Guid` `IID`/`CLSID` hint; for any
+/// other type the decoder ignores it, so threading it is always safe.
+internal func decodedParameter(of parameter: Int,
+                               in storage: borrowing WinMD.Storage,
+                               dialect: Dialect) -> String? {
+  guard let table = storage.opened("Param") else { return nil }
+  let params = WinMD.Cursor(copy storage, table)
+  guard let param = params[parameter - 1],
+      let sequence = param.ordinal(for: "Sequence"),
+      let link = WinMDRelation.Link(storage, table) else {
+    return nil
+  }
+  let position = param[sequence]
+  let owner = storage.owner(of: parameter - 1, link)
+  guard owner != 0 else { return nil }
+  let methods = WinMD.Cursor(copy storage, link.parent)
+  guard let method = methods[owner - 1],
+      let row = Row<Metadata.Tables.MethodDef>(method),
+      let signature = try? row.prototype else {
+    return nil
+  }
+  guard position >= 1, position <= signature.parameters.count else {
+    return nil
+  }
+  guard let resolver = try? Resolver(of: signature, with: storage) else {
+    return nil
+  }
+  let name = param.ordinal(for: "Name").flatMap { try? param.string($0) }
+  return signature.parameters[position - 1]
+      .decode(parameter: name, with: resolver, dialect: dialect)
 }

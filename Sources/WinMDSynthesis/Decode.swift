@@ -3,44 +3,121 @@
 
 import WinMD
 
-/// The per-dialect decode functions, emitting the Swift type spelling as text.
+/// The target-specific strings the decode composes a type spelling from.
+///
+/// The composition ALGORITHM — how a pointer wraps its pointee, how a generic
+/// reads `Base<Args…>`, how a `const` void-pointer collapses to a raw pointer —
+/// is language-neutral and lives in the decode functions; only the literal
+/// spellings those functions emit are target-specific. `Dialect` carries every
+/// such string, so the same algorithm retargets to another language by handing
+/// it a different `Dialect` (built, in the tool, from the loaded language spec).
+///
+/// A `nil` primitive spelling falls back to the primitive's neutral name, so an
+/// incomplete dialect still decodes without trapping.
+public struct Dialect: Sendable {
+  /// The primitive leaf spellings, keyed by neutral name (`void`, `i4`,
+  /// `string`, …). A missing key falls back to the neutral name itself.
+  public let primitives: Dictionary<String, String>
+
+  /// The pointer spellings: the `typed` prefixes (`UnsafeMutablePointer`/
+  /// `UnsafePointer`) a non-`void` pointee wraps into, and the `untyped`
+  /// spellings (`UnsafeMutableRawPointer`/`UnsafeRawPointer`) a `void` pointer
+  /// collapses to — each in a mutable and a `const` form.
+  public let pointer: (typed: (mutable: String, constant: String),
+                       untyped: (mutable: String, constant: String))
+
+  /// The optional marker (`?`) an inner pointer slot carries.
+  public let optional: String
+
+  /// The generic delimiters (`<`/`>`).
+  public let generic: (open: String, close: String)
+
+  /// The `VAR`/`MVAR` generic-parameter scope prefixes (`T`/`M`).
+  public let variable: (type: String, method: String)
+
+  /// The spelling an unresolvable named type (and a function pointer) degrades
+  /// to (`UnsafeMutableRawPointer`).
+  public let opaque: String
+
+  /// The `System.Guid` classification names — an `iid`, or a `clsid` for a
+  /// `clsid`/`classid`-rooted parameter name.
+  public let guid: (iid: String, clsid: String)
+
+  /// The projection of a resolved CLR `Identity` to the target's own spelling
+  /// (`Windows.Win32.Foundation.HRESULT` → `HRESULT`, …).
+  public let known: Dictionary<Identity, String>
+
+  /// Escapes a spelled identifier that collides with a target keyword — the same
+  /// rule the render's `ESCAPE` applies to declaration names, applied here to a
+  /// named type's simple name so a `protocol`/`repeat`-named type spells
+  /// compilably. A non-keyword identifier returns unchanged.
+  public let escape: @Sendable (String) -> String
+
+  public init(primitives: Dictionary<String, String>,
+              pointer: (typed: (mutable: String, constant: String),
+                        untyped: (mutable: String, constant: String)),
+              optional: String,
+              generic: (open: String, close: String),
+              variable: (type: String, method: String),
+              opaque: String,
+              guid: (iid: String, clsid: String),
+              known: Dictionary<Identity, String>,
+              escape: @escaping @Sendable (String) -> String) {
+    self.primitives = primitives
+    self.pointer = pointer
+    self.optional = optional
+    self.generic = generic
+    self.variable = variable
+    self.opaque = opaque
+    self.guid = guid
+    self.known = known
+    self.escape = escape
+  }
+}
+
+/// The per-dialect decode functions, emitting a target type spelling as text.
 ///
 /// The views + templates path renders text, so the type mapping is a pure
-/// function from a decoded `SignatureType` to its Swift spelling — ABI-faithful
-/// rules serving as the synthesis oracle. A named type resolves through the
-/// injected `Resolver`
-/// table (the metaschema's component-schema mapping) and a well-known table to
-/// the `COM` module's spelling; `System.Guid` decodes to `IID`/`CLSID` by a
-/// parameter-name hint; pointers, references, and arrays decode to the
-/// `Unsafe*Pointer` family; the primitives to the `C*` typealias set. This is
-/// the decode-function tier: a registered closure per primitive, composed
-/// declaratively by the type structure.
+/// function from a decoded `SignatureType` (and a `Dialect`) to its spelling —
+/// ABI-faithful rules serving as the synthesis oracle. A named type resolves
+/// through the injected `Resolver` table (the metaschema's component-schema
+/// mapping) and the dialect's well-known table to the target module's spelling;
+/// `System.Guid` decodes to `IID`/`CLSID` by a parameter-name hint; pointers,
+/// references, and arrays decode to the pointer family; the primitives to the
+/// dialect's leaf table. This is the decode-function tier: the type structure
+/// composes the dialect's strings declaratively.
 extension SignatureType {
-  /// The Swift type spelling of `self`, resolving named types through
+  /// The type spelling of `self` in `dialect`, resolving named types through
   /// `resolver` and disambiguating a `System.Guid` by the `parameter`-name hint.
-  public func decode(parameter: String? = nil,
-                     with resolver: Resolver) -> String {
+  public func decode(parameter: String? = nil, with resolver: Resolver,
+                     dialect: Dialect) -> String {
     switch self {
     case let .primitive(primitive):
-      primitive.spelling
+      primitive.spelling(dialect)
     case let .pointer(pointee):
-      pointee.spelling(parameter: parameter, const: false, with: resolver)
+      pointee.spelling(parameter: parameter, const: false, with: resolver,
+                       dialect: dialect)
     case let .reference(referent):
-      referent.spelling(parameter: parameter, const: false, with: resolver)
+      referent.spelling(parameter: parameter, const: false, with: resolver,
+                        dialect: dialect)
     case let .array(element):
-      element.spelling(parameter: parameter, const: false, with: resolver)
+      element.spelling(parameter: parameter, const: false, with: resolver,
+                       dialect: dialect)
     case let .matrix(element, _):
-      element.spelling(parameter: parameter, const: false, with: resolver)
+      element.spelling(parameter: parameter, const: false, with: resolver,
+                       dialect: dialect)
     case let .named(kind, reference):
-      reference.spelling(kind: kind, parameter: parameter, with: resolver)
+      reference.spelling(kind: kind, parameter: parameter, with: resolver,
+                         dialect: dialect)
     case let .variable(scope, index):
-      "\(scope.prefix)\(index)"
+      "\(scope.prefix(dialect))\(index)"
     case let .instance(base, arguments):
-      base.specialized(by: arguments, parameter: parameter, with: resolver)
+      base.specialized(by: arguments, parameter: parameter, with: resolver,
+                       dialect: dialect)
     case let .modified(inner, _):
-      inner.decode(parameter: parameter, with: resolver)
+      inner.decode(parameter: parameter, with: resolver, dialect: dialect)
     case .function:
-      "UnsafeMutableRawPointer"
+      dialect.opaque
     }
   }
 }
@@ -48,33 +125,39 @@ extension SignatureType {
 // MARK: - Primitives
 
 extension PrimitiveType {
-  /// The Swift spelling of a built-in element type: the `C*` typealiases, the
-  /// opaque pointer for `object`/`typedref`, and the WinRT `HSTRING` for
-  /// `System.String` (`ELEMENT_TYPE_STRING`) — a WinMD `String` is an `HSTRING`
-  /// handle at the ABI, not a `PCWSTR` buffer. `PWSTR`/`PCWSTR` arrive as
-  /// pointer/named metadata, never `ELEMENT_TYPE_STRING`, so they decode through
-  /// those paths instead.
-  fileprivate var spelling: String {
+  /// The neutral dialect key of a built-in element type — the key the dialect's
+  /// primitive table maps to a spelling.
+  ///
+  /// `ELEMENT_TYPE_STRING` is the WinRT `String` — an `HSTRING` handle, not a
+  /// `PCWSTR` buffer (which arrives as pointer/named metadata, never
+  /// `ELEMENT_TYPE_STRING`, so it decodes through those paths instead).
+  fileprivate var key: String {
     switch self {
-    case .void:     "Void"
-    case .boolean:  "CBool"
-    case .char:     "Unicode.UTF16.CodeUnit"
-    case .int1:     "CChar"
-    case .uint1:    "CUnsignedChar"
-    case .int2:     "CShort"
-    case .uint2:    "CUnsignedShort"
-    case .int4:     "CInt"
-    case .uint4:    "CUnsignedInt"
-    case .int8:     "CLongLong"
-    case .uint8:    "CUnsignedLongLong"
-    case .float:    "CFloat"
-    case .double:   "CDouble"
-    case .intptr:   "Int"
-    case .uintptr:  "UInt"
-    case .string:   "HSTRING"
-    case .object:   "UnsafeMutableRawPointer"
-    case .typedref: "UnsafeMutableRawPointer"
+    case .void:     "void"
+    case .boolean:  "bool"
+    case .char:     "char"
+    case .int1:     "i1"
+    case .uint1:    "u1"
+    case .int2:     "i2"
+    case .uint2:    "u2"
+    case .int4:     "i4"
+    case .uint4:    "u4"
+    case .int8:     "i8"
+    case .uint8:    "u8"
+    case .float:    "f4"
+    case .double:   "f8"
+    case .intptr:   "iptr"
+    case .uintptr:  "uptr"
+    case .string:   "string"
+    case .object:   "object"
+    case .typedref: "typedref"
     }
+  }
+
+  /// The `dialect` spelling of a built-in element type — its primitive-table
+  /// entry, or (absent one) the neutral key as a fallback.
+  fileprivate func spelling(_ dialect: Dialect) -> String {
+    dialect.primitives[key] ?? key
   }
 }
 
@@ -84,7 +167,7 @@ extension SignatureType {
   /// Decodes a pointer/reference/array to a pointer over its decoded pointee,
   /// where `self` is the pointee.
   ///
-  /// `void*` collapses to `UnsafeMutableRawPointer` (or `UnsafeRawPointer` when
+  /// `void*` collapses to the mutable raw pointer (or the const raw pointer when
   /// `const`). A pointer-to-pointer keeps an *optional* inner element so a
   /// caller can pass a null inner slot: a `void**` (including `const void **`)
   /// is a pointer to an optional raw pointer (immutable when the inner `void`
@@ -92,33 +175,42 @@ extension SignatureType {
   /// Otherwise a non-`void` pointee decodes as `Unsafe{Mutable}Pointer<Pointee>`,
   /// mutable unless a `const` modifier marks the pointee.
   fileprivate func spelling(parameter: String?, const: Bool,
-                            with resolver: Resolver) -> String {
+                            with resolver: Resolver,
+                            dialect: Dialect) -> String {
     switch self {
     case .primitive(.void):
-      const ? "UnsafeRawPointer" : "UnsafeMutableRawPointer"
+      const ? dialect.pointer.untyped.constant : dialect.pointer.untyped.mutable
     case .pointer(.primitive(.void)):
-      wrap("UnsafeMutableRawPointer?", const: const)
+      wrap(dialect.pointer.untyped.mutable + dialect.optional, const: const,
+           dialect: dialect)
     case let .pointer(.modified(.primitive(.void), modifiers)):
-      wrap(modifiers.constant(with: resolver) ? "UnsafeRawPointer?"
-                                              : "UnsafeMutableRawPointer?",
-           const: const)
+      wrap((modifiers.constant(with: resolver)
+              ? dialect.pointer.untyped.constant
+              : dialect.pointer.untyped.mutable) + dialect.optional,
+           const: const, dialect: dialect)
     case .pointer:
       // A non-`void` pointer-to-pointer: the inner pointer slot is itself
       // nullable, so mark the decoded element optional (as the `void**` cases).
-      wrap(decode(parameter: parameter, with: resolver) + "?", const: const)
+      wrap(decode(parameter: parameter, with: resolver, dialect: dialect)
+               + dialect.optional,
+           const: const, dialect: dialect)
     case let .modified(inner, modifiers):
       inner.spelling(parameter: parameter,
                      const: modifiers.constant(with: resolver),
-                     with: resolver)
+                     with: resolver, dialect: dialect)
     default:
-      wrap(decode(parameter: parameter, with: resolver), const: const)
+      wrap(decode(parameter: parameter, with: resolver, dialect: dialect),
+           const: const, dialect: dialect)
     }
   }
 }
 
-/// Wraps an already-decoded `pointee` spelling in `Unsafe{Mutable}Pointer<…>`.
-private func wrap(_ pointee: String, const: Bool) -> String {
-  "\(const ? "UnsafePointer" : "UnsafeMutablePointer")<\(pointee)>"
+/// Wraps an already-decoded `pointee` spelling in the dialect's typed-pointer
+/// family (`Unsafe{Mutable}Pointer<…>`).
+private func wrap(_ pointee: String, const: Bool, dialect: Dialect) -> String {
+  let prefix = const ? dialect.pointer.typed.constant
+                     : dialect.pointer.typed.mutable
+  return "\(prefix)\(dialect.generic.open)\(pointee)\(dialect.generic.close)"
 }
 
 extension Array where Element == Modifier {
@@ -135,58 +227,50 @@ extension Array where Element == Modifier {
 }
 
 /// The `System.Runtime.CompilerServices.IsConst` modopt a `const` pointee
-/// carries — the sole custom modifier the decode treats as `const`.
+/// carries — the sole custom modifier the decode treats as `const`. This is an
+/// ABI marker, not a target spelling, so it stays fixed across dialects.
 private let kIsConst =
     Identity(namespace: "System.Runtime.CompilerServices", name: "IsConst")
 
 // MARK: - Named types
 
 extension TypeDefOrRef {
-  /// The Swift spelling of the named type `self` references, resolved through
-  /// `resolver` and the well-known table.
+  /// The `dialect` spelling of the named type `self` references, resolved
+  /// through `resolver` and the dialect's well-known table.
   ///
   /// A resolved `System.Guid` renders as `IID`/`CLSID` by the parameter-name
   /// hint; otherwise the `Identity` is looked up in the well-known table
   /// (`HRESULT`, `BOOL`, …), a miss rendering the type's own simple name. An
-  /// unresolvable reference renders an opaque pointer.
+  /// unresolvable reference renders the dialect's opaque pointer.
   fileprivate func spelling(kind: NamedKind, parameter: String?,
-                            with resolver: Resolver) -> String {
+                            with resolver: Resolver,
+                            dialect: Dialect) -> String {
     guard let identity = resolver.resolve(self, kind: kind) else {
-      return kOpaque
+      return dialect.opaque
     }
     if identity == kGuid {
-      return classification(parameter)
+      return classification(parameter, dialect: dialect)
     }
-    return kWellKnown[identity] ?? identity.name
+    // A named type's simple name is a bare identifier that may collide with a
+    // target keyword (`protocol`, `repeat`); escape it as the render escapes a
+    // declaration name. A well-known spelling is curated and never a keyword.
+    return dialect.known[identity] ?? dialect.escape(identity.name)
   }
 }
-
-/// The opaque pointer an unresolvable type degrades to — and that a generic
-/// over such a base degrades to, rather than emit a meaningless
-/// `UnsafeMutableRawPointer<…>`.
-private let kOpaque = "UnsafeMutableRawPointer"
 
 /// The `System.Guid` identity that decodes to `IID`/`CLSID`.
 private let kGuid = Identity(namespace: "System", name: "Guid")
 
-/// Classifies a `System.Guid` parameter as `IID` or `CLSID` by its name: a
-/// `clsid`/`classid`-rooted name is a `CLSID`, everything else an `IID`; the
-/// default, absent a hint, is `IID`.
-private func classification(_ parameter: String?) -> String {
-  guard let parameter else { return "IID" }
+/// Classifies a `System.Guid` parameter as the dialect's `CLSID`/`IID` by its
+/// name: a `clsid`/`classid`-rooted name is a `CLSID`, everything else an `IID`;
+/// the default, absent a hint, is `IID`.
+private func classification(_ parameter: String?, dialect: Dialect) -> String {
+  guard let parameter else { return dialect.guid.iid }
   let lowercased = parameter.lowercased()
   return lowercased.contains("clsid") || lowercased.contains("classid")
-      ? "CLSID"
-      : "IID"
+      ? dialect.guid.clsid
+      : dialect.guid.iid
 }
-
-/// The well-known projection of resolved CLR types to `COM` module symbols.
-private let kWellKnown: Dictionary<Identity, String> = [
-  Identity(namespace: "Windows.Win32.Foundation", name: "HRESULT"):
-      "HRESULT",
-  Identity(namespace: "Windows.Win32.Foundation", name: "BOOL"):
-      "BOOL",
-]
 
 // MARK: - Structural cases
 
@@ -195,32 +279,37 @@ extension SignatureType {
   /// `Base<Args…>`.
   ///
   /// A CLR generic definition's `TypeName` carries an arity suffix (e.g.
-  /// `IReference``1`); it is stripped before composing the Swift generic so the
+  /// `IReference``1`); it is stripped before composing the generic so the
   /// spelling reads `IReference<…>`, not `IReference``1<…>`. The `parameter`-name
   /// hint flows to the arguments as well, so a `System.Guid` argument of a
   /// parameter named `clsid` spells `CLSID` rather than the default `IID`.
   fileprivate func specialized(by arguments: Array<SignatureType>,
-                               parameter: String?,
-                               with resolver: Resolver) -> String {
-    let base = decode(parameter: parameter, with: resolver)
+                               parameter: String?, with resolver: Resolver,
+                               dialect: Dialect) -> String {
+    let base = decode(parameter: parameter, with: resolver, dialect: dialect)
     // An unresolved base (e.g. a TypeSpec with no identity) decodes to the
-    // opaque pointer; a generic over it is meaningless Swift, so degrade to that
+    // opaque pointer; a generic over it is meaningless, so degrade to that
     // opaque pointer rather than emit `UnsafeMutableRawPointer<…>`.
-    guard base != kOpaque else { return base }
-    let name = base.prefix { $0 != "`" }
+    guard base != dialect.opaque else { return base }
+    // Strip the CLR arity suffix, THEN escape the base identifier: the full
+    // `Foo``1` never matches a keyword, so a keyword base (`protocol``1`) must
+    // be escaped after the strip, not before, to spell `` `protocol`<…> ``.
+    let name = dialect.escape(String(base.prefix { $0 != "`" }))
     let arguments = arguments
-        .map { $0.decode(parameter: parameter, with: resolver) }
+        .map { $0.decode(parameter: parameter, with: resolver,
+                         dialect: dialect) }
         .joined(separator: ", ")
-    return "\(name)<\(arguments)>"
+    return "\(name)\(dialect.generic.open)\(arguments)\(dialect.generic.close)"
   }
 }
 
 extension VariableScope {
-  /// The `T`/`M` placeholder prefix for a `VAR`/`MVAR` generic parameter scope.
-  fileprivate var prefix: String {
+  /// The `T`/`M` placeholder prefix for a `VAR`/`MVAR` generic parameter scope,
+  /// as `dialect` spells it.
+  fileprivate func prefix(_ dialect: Dialect) -> String {
     switch self {
-    case .type:   "T"
-    case .method: "M"
+    case .type:   dialect.variable.type
+    case .method: dialect.variable.method
     }
   }
 }

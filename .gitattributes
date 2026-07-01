@@ -1,0 +1,11 @@
+# The bundled synthesis resources are read verbatim — the Mustache template's
+# line endings flow straight into the generated source, and the render tests
+# assert that output byte-for-byte. Force LF on checkout so a Windows working
+# copy does not convert them to CRLF (which diverges the rendered output from
+# the LF the tests, and the toolchain, expect). Swift sources and docs follow
+# for consistency.
+*.swift    text eol=lf
+*.sql      text eol=lf
+*.mustache text eol=lf
+*.lang     text eol=lf
+*.md       text eol=lf

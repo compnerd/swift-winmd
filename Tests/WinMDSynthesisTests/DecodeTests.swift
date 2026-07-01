@@ -5,10 +5,50 @@ import Testing
 @testable import WinMDSynthesis
 @testable import WinMD
 
+/// The Swift `Dialect` the decode tests spell against — the same strings the
+/// bundled `swift.lang` carries, so the assertions read the exact Swift spellings
+/// as before the decode was parameterised by a dialect.
+extension Dialect {
+  static var swift: Dialect {
+    Dialect(
+        primitives: [
+          "void": "Void", "bool": "CBool", "char": "Unicode.UTF16.CodeUnit",
+          "i1": "CChar", "u1": "CUnsignedChar", "i2": "CShort",
+          "u2": "CUnsignedShort", "i4": "CInt", "u4": "CUnsignedInt",
+          "i8": "CLongLong", "u8": "CUnsignedLongLong", "f4": "CFloat",
+          "f8": "CDouble", "iptr": "Int", "uptr": "UInt", "string": "HSTRING",
+          "object": "UnsafeMutableRawPointer",
+          "typedref": "UnsafeMutableRawPointer",
+        ],
+        pointer: (typed: (mutable: "UnsafeMutablePointer",
+                          constant: "UnsafePointer"),
+                  untyped: (mutable: "UnsafeMutableRawPointer",
+                            constant: "UnsafeRawPointer")),
+        optional: "?",
+        generic: (open: "<", close: ">"),
+        variable: (type: "T", method: "M"),
+        opaque: "UnsafeMutableRawPointer",
+        guid: (iid: "IID", clsid: "CLSID"),
+        known: [
+          Identity(namespace: "Windows.Win32.Foundation", name: "HRESULT"):
+              "HRESULT",
+          Identity(namespace: "Windows.Win32.Foundation", name: "BOOL"):
+              "BOOL",
+        ],
+        escape: { keyword in
+          ["class", "default", "in", "protocol", "repeat"].contains(keyword)
+              ? "`\(keyword)`" : keyword
+        })
+  }
+}
+
 struct DecodeTests {
   // A resolver that resolves nothing; the pure cases never consult it, and the
   // named cases are exercised end-to-end by the synthesizer's golden tests.
   private var resolver: Resolver { Resolver([:]) }
+
+  // The Swift dialect every case spells against.
+  private var dialect: Dialect { .swift }
 
   @Test("a primitive decodes to its C typealias spelling")
   func primitives() {
@@ -30,32 +70,35 @@ struct DecodeTests {
       (.string, "HSTRING"),
     ]
     for (primitive, spelling) in cases {
-      #expect(SignatureType.primitive(primitive).decode(with: resolver)
-                  == spelling)
+      #expect(SignatureType.primitive(primitive)
+                  .decode(with: resolver, dialect: dialect) == spelling)
     }
   }
 
   @Test("a pointer wraps its decoded pointee")
   func pointers() {
-    #expect(SignatureType.pointer(.primitive(.void)).decode(with: resolver)
+    #expect(SignatureType.pointer(.primitive(.void))
+                .decode(with: resolver, dialect: dialect)
                 == "UnsafeMutableRawPointer")
-    #expect(SignatureType.pointer(.primitive(.int4)).decode(with: resolver)
+    #expect(SignatureType.pointer(.primitive(.int4))
+                .decode(with: resolver, dialect: dialect)
                 == "UnsafeMutablePointer<CInt>")
     #expect(SignatureType.pointer(.pointer(.primitive(.void)))
-                .decode(with: resolver)
+                .decode(with: resolver, dialect: dialect)
                 == "UnsafeMutablePointer<UnsafeMutableRawPointer?>")
     // A UTF-16 buffer (a `PWSTR`-shaped char pointer) stays a pointer — the
     // `HSTRING` mapping is for `ELEMENT_TYPE_STRING`, not for char pointers.
-    #expect(SignatureType.pointer(.primitive(.char)).decode(with: resolver)
+    #expect(SignatureType.pointer(.primitive(.char))
+                .decode(with: resolver, dialect: dialect)
                 == "UnsafeMutablePointer<Unicode.UTF16.CodeUnit>")
   }
 
   @Test("a generic variable decodes to a T/M-prefixed placeholder")
   func variables() {
-    #expect(SignatureType.variable(scope: .type, 0).decode(with: resolver)
-                == "T0")
-    #expect(SignatureType.variable(scope: .method, 2).decode(with: resolver)
-                == "M2")
+    #expect(SignatureType.variable(scope: .type, 0)
+                .decode(with: resolver, dialect: dialect) == "T0")
+    #expect(SignatureType.variable(scope: .method, 2)
+                .decode(with: resolver, dialect: dialect) == "M2")
   }
 
   @Test("only an IsConst custom modifier marks a pointee const")
@@ -74,13 +117,15 @@ struct DecodeTests {
     // `*modopt(IsConst) int` decodes to a `const` pointer.
     let immutable = SignatureType.modified(.primitive(.int4),
         modifiers: [Modifier(required: false, type: marker)])
-    #expect(SignatureType.pointer(immutable).decode(with: resolver)
+    #expect(SignatureType.pointer(immutable)
+                .decode(with: resolver, dialect: dialect)
                 == "UnsafePointer<CInt>")
 
     // A non-`IsConst` modifier leaves the pointer mutable.
     let mutable = SignatureType.modified(.primitive(.int4),
         modifiers: [Modifier(required: false, type: other)])
-    #expect(SignatureType.pointer(mutable).decode(with: resolver)
+    #expect(SignatureType.pointer(mutable)
+                .decode(with: resolver, dialect: dialect)
                 == "UnsafeMutablePointer<CInt>")
   }
 
@@ -95,7 +140,8 @@ struct DecodeTests {
     // `IReference`1<int>` composes the Swift generic without the arity suffix.
     let instance = SignatureType.instance(.named(kind: .class, reference),
                                           [.primitive(.int4)])
-    #expect(instance.decode(with: resolver) == "IReference<CInt>")
+    #expect(instance.decode(with: resolver, dialect: dialect)
+                == "IReference<CInt>")
   }
 
   @Test("a generic over an unresolved base degrades to the opaque pointer")
@@ -105,7 +151,36 @@ struct DecodeTests {
     let base = TypeDefOrRef(rawValue: 1)
     let instance = SignatureType.instance(.named(kind: .class, base),
                                           [.primitive(.int4)])
-    #expect(instance.decode(with: Resolver([:])) == "UnsafeMutableRawPointer")
+    #expect(instance.decode(with: Resolver([:]), dialect: dialect)
+                == "UnsafeMutableRawPointer")
+  }
+
+  @Test("a named type whose simple name is a keyword is escaped")
+  func keywordNamedType() {
+    // A metadata type whose simple name collides with a target keyword
+    // (`protocol`, `repeat`, …) spells escaped, like a declaration name, so a
+    // parameter or return of that type still compiles.
+    let reference = TypeDefOrRef(rawValue: 1)
+    let resolver = Resolver([
+      reference.rawValue: Identity(namespace: "NS", name: "protocol"),
+    ])
+    #expect(SignatureType.named(kind: .class, reference)
+                .decode(with: resolver, dialect: dialect) == "`protocol`")
+  }
+
+  @Test("a generic base is escaped after its CLR arity is stripped")
+  func keywordGenericBase() {
+    // The generic definition's name carries the arity suffix (`protocol``1`),
+    // so it matches no keyword until the suffix is stripped; the base must be
+    // escaped after the strip, not before, or it spells `protocol<CInt>`.
+    let base = TypeDefOrRef(rawValue: 1)
+    let resolver = Resolver([
+      base.rawValue: Identity(namespace: "NS", name: "protocol`1"),
+    ])
+    let instance = SignatureType.instance(.named(kind: .class, base),
+                                          [.primitive(.int4)])
+    #expect(instance.decode(with: resolver, dialect: dialect)
+                == "`protocol`<CInt>")
   }
 
   @Test("a generic argument keeps the parameter-name class-ID hint")
@@ -121,10 +196,12 @@ struct DecodeTests {
                                            [.named(kind: .value, guid)])
 
     // The `clsid` hint reaches the `System.Guid` argument…
-    #expect(reference.decode(parameter: "clsid", with: resolver)
+    #expect(reference.decode(parameter: "clsid", with: resolver,
+                             dialect: dialect)
                 == "IReference<CLSID>")
     // …and absent a hint it defaults to `IID`.
-    #expect(reference.decode(with: resolver) == "IReference<IID>")
+    #expect(reference.decode(with: resolver, dialect: dialect)
+                == "IReference<IID>")
   }
 
   @Test("a non-void pointer-to-pointer keeps the optional inner slot")
@@ -139,19 +216,19 @@ struct DecodeTests {
 
     // `int **` → pointer to an *optional* mutable pointer.
     #expect(SignatureType.pointer(.pointer(.primitive(.int4)))
-                .decode(with: resolver)
+                .decode(with: resolver, dialect: dialect)
                 == "UnsafeMutablePointer<UnsafeMutablePointer<CInt>?>")
 
     // `const int **` → the inner pointer is immutable, the slot still optional.
     let constInt = SignatureType.pointer(.pointer(
         .modified(.primitive(.int4),
                   modifiers: [Modifier(required: false, type: marker)])))
-    #expect(constInt.decode(with: resolver)
+    #expect(constInt.decode(with: resolver, dialect: dialect)
                 == "UnsafeMutablePointer<UnsafePointer<CInt>?>")
 
     // `IFoo **` → pointer to an *optional* typed pointer.
     #expect(SignatureType.pointer(.pointer(.named(kind: .class, foo)))
-                .decode(with: resolver)
+                .decode(with: resolver, dialect: dialect)
                 == "UnsafeMutablePointer<UnsafeMutablePointer<IFoo>?>")
   }
 
@@ -166,7 +243,8 @@ struct DecodeTests {
     // `void * const *` decodes to a pointer to an immutable raw pointer.
     let immutable = SignatureType.modified(.pointer(.primitive(.void)),
         modifiers: [Modifier(required: false, type: marker)])
-    #expect(SignatureType.pointer(immutable).decode(with: resolver)
+    #expect(SignatureType.pointer(immutable)
+                .decode(with: resolver, dialect: dialect)
                 == "UnsafePointer<UnsafeMutableRawPointer?>")
   }
 
@@ -183,7 +261,8 @@ struct DecodeTests {
     let inner = SignatureType.pointer(
         .modified(.primitive(.void),
                   modifiers: [Modifier(required: false, type: marker)]))
-    #expect(SignatureType.pointer(inner).decode(with: resolver)
+    #expect(SignatureType.pointer(inner)
+                .decode(with: resolver, dialect: dialect)
                 == "UnsafeMutablePointer<UnsafeRawPointer?>")
   }
 }

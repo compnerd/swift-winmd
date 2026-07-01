@@ -7,6 +7,7 @@ import Testing
 
 import SQL
 @testable import WinMD
+import WinMDSynthesis
 
 import struct Foundation.Data
 import struct Foundation.URL
@@ -14,9 +15,47 @@ import class Foundation.FileManager
 import struct Foundation.UUID
 import func Foundation.NSTemporaryDirectory
 
-/// Coverage of the per-table decoded virtual columns the WinMD → SQL adapter
-/// exposes: `guid` on `CustomAttribute`, `ReturnType` on `MethodDef`, and
-/// `ParamType` on `Param`. Rather than map a `.winmd` file, the tests assemble a
+/// The Swift `Dialect` the render-time signature decode spells against — the same
+/// strings the bundled `swift.lang` carries, so the helper assertions read the
+/// exact Swift spellings the old `ReturnType`/`ParamType` virtual columns did.
+extension Dialect {
+  static var swift: Dialect {
+    Dialect(
+        primitives: [
+          "void": "Void", "bool": "CBool", "char": "Unicode.UTF16.CodeUnit",
+          "i1": "CChar", "u1": "CUnsignedChar", "i2": "CShort",
+          "u2": "CUnsignedShort", "i4": "CInt", "u4": "CUnsignedInt",
+          "i8": "CLongLong", "u8": "CUnsignedLongLong", "f4": "CFloat",
+          "f8": "CDouble", "iptr": "Int", "uptr": "UInt", "string": "HSTRING",
+          "object": "UnsafeMutableRawPointer",
+          "typedref": "UnsafeMutableRawPointer",
+        ],
+        pointer: (typed: (mutable: "UnsafeMutablePointer",
+                          constant: "UnsafePointer"),
+                  untyped: (mutable: "UnsafeMutableRawPointer",
+                            constant: "UnsafeRawPointer")),
+        optional: "?",
+        generic: (open: "<", close: ">"),
+        variable: (type: "T", method: "M"),
+        opaque: "UnsafeMutableRawPointer",
+        guid: (iid: "IID", clsid: "CLSID"),
+        known: [
+          Identity(namespace: "Windows.Win32.Foundation", name: "HRESULT"):
+              "HRESULT",
+          Identity(namespace: "Windows.Win32.Foundation", name: "BOOL"):
+              "BOOL",
+        ],
+        escape: { keyword in
+          ["class", "default", "in", "protocol", "repeat"].contains(keyword)
+              ? "`\(keyword)`" : keyword
+        })
+  }
+}
+
+/// Coverage of the WinMD → SQL adapter's decoded `guid` virtual column on
+/// `CustomAttribute` and the render-time signature decode (`decodedReturn`/
+/// `decodedParameter`), which the adapter no longer bakes as `ReturnType`/
+/// `ParamType` columns. Rather than map a `.winmd` file, the tests assemble a
 /// tiny COM
 /// interface in memory — a `TypeDef` carrying a `GuidAttribute` (through the
 /// `CustomAttribute` → `MemberRef` → `TypeRef` chain), a `MethodDef` whose
@@ -25,7 +64,8 @@ import func Foundation.NSTemporaryDirectory
 /// parameters), and an `InterfaceImpl` row naming the base `IInspectable`
 /// `TypeRef` (so the `bases` view derives the interface's base) — and drive a
 /// parsed `SELECT` through `Engine.run` over the `WinMD.Storage` catalog,
-/// asserting the decoded `Value`s the engine yields.
+/// asserting the decoded `Value`s the engine yields (or the spellings the render
+/// decode composes).
 struct DatabaseSQLTests {
   // The records of seven narrow (all-index 2-byte) tables, packed back to back
   // in table-number order. ECMA-335 rows are 1-based, so a stored index `N`
@@ -52,6 +92,10 @@ struct DatabaseSQLTests {
   //                the rowid directly, so 1)=IMyInterface;
   //                Interface=TypeDefOrRef(TypeRef row 2)=(2<<2)|1=9 — names the
   //                base `IInspectable`, so the `bases` view derives it.
+  //   InterfaceImpl[1]: Class=1=IMyInterface; Interface=TypeDefOrRef(TypeDef
+  //                row 2)=(2<<2)|0=8 — a second base, `INotGuid`, defined in the
+  //                SAME file, so `Interface_TypeRef` is NULL and `bases` must
+  //                resolve it through the `Interface_TypeDef` UNION arm.
   //   MemberRef[0]: Class=MemberRefParent(TypeRef row 1)=(1<<3)|1=9 — the ctor
   //                whose declaring type is the `GuidAttribute` TypeRef.
   //   CustomAttribute[0]: Parent=HasCustomAttribute(TypeDef row 1)=(1<<5)|3=35,
@@ -77,6 +121,8 @@ struct DatabaseSQLTests {
     0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
     // InterfaceImpl[0]
     0x01, 0x00, 0x09, 0x00,
+    // InterfaceImpl[1]
+    0x01, 0x00, 0x08, 0x00,
     // MemberRef[0]
     0x09, 0x00, 0x00, 0x00, 0x00, 0x00,
     // CustomAttribute[0]
@@ -128,11 +174,11 @@ struct DatabaseSQLTests {
                 wide: 0, stride: 14),
     WinMD.Table(Metadata.Tables.Param.self, rows: 3, range: 54 ..< 72,
                 wide: 0, stride: 6),
-    WinMD.Table(Metadata.Tables.InterfaceImpl.self, rows: 1, range: 72 ..< 76,
+    WinMD.Table(Metadata.Tables.InterfaceImpl.self, rows: 2, range: 72 ..< 80,
                 wide: 0, stride: 4),
-    WinMD.Table(Metadata.Tables.MemberRef.self, rows: 1, range: 76 ..< 82,
+    WinMD.Table(Metadata.Tables.MemberRef.self, rows: 1, range: 80 ..< 86,
                 wide: 0, stride: 6),
-    WinMD.Table(Metadata.Tables.CustomAttribute.self, rows: 1, range: 82 ..< 88,
+    WinMD.Table(Metadata.Tables.CustomAttribute.self, rows: 1, range: 86 ..< 92,
                 wide: 0, stride: 6),
   ]
 
@@ -183,6 +229,70 @@ struct DatabaseSQLTests {
     return try Engine.run(select, Session(catalog, views))
   }
 
+  /// Plans and runs `query` through the engine over a `Session` catalog
+  /// overlaying `views` on the storage, with `bindings` resolving any `:name`
+  /// parameter (a view's correlated-subquery predicate binds from these).
+  private static func run(_ query: String,
+                          _ views: Dictionary<String, View>,
+                          _ catalog: borrowing Storage,
+                          _ bindings: Bindings)
+      throws -> Array<Array<Value>> {
+    let statement = try Statement(parsing: query)
+    guard case let .select(select) = statement else {
+      Issue.record("not a SELECT")
+      return []
+    }
+    return try Engine.run(select, Session(catalog, views), Routines(),
+                          bindings: bindings)
+  }
+
+  @Test("the bundled `interfaces` view yields the IID-carrying TypeDef")
+  func bundledInterfaces() throws {
+    // The `interfaces` view navigates each `TypeDef` to its `GuidAttribute` IID
+    // across the coded-index join keys (`TypeDef` ← `CustomAttribute` →
+    // `MemberRef` → `TypeRef`), projecting the decoded `CustomAttribute.guid` as
+    // `iid`; the only IID-carrying type is `IMyInterface`, whose `iid` is the
+    // well-known value.
+    try DatabaseSQLTests.with { catalog in
+      let rows = try DatabaseSQLTests.run(
+          "SELECT TypeName, iid FROM interfaces", Session.bundled(), catalog)
+      #expect(rows == [
+        [.text("IMyInterface"),
+         .text("0C733A30-2A1C-11CE-ADE5-00AA0044773D")],
+      ])
+    }
+  }
+
+  @Test("the bundled `methods` view yields a method bound by its parent rowid")
+  func bundledMethods() throws {
+    // `IMyInterface` is `TypeDef` rowid 1, which owns `MethodDef` rowid 1;
+    // binding `:parent` to the interface's rowid yields the method's `rowid` and
+    // `Name` (the type is no longer a column — the render decodes it).
+    try DatabaseSQLTests.with { catalog in
+      let rows = try DatabaseSQLTests.run(
+          "SELECT rowid, Name FROM methods", Session.bundled(), catalog,
+          ["parent": .integer(1)])
+      #expect(rows == [[.integer(1), .text("MyMethod")]])
+    }
+  }
+
+  @Test("the bundled `params` view yields params bound by their method rowid")
+  func bundledParams() throws {
+    // `MethodDef` rowid 1 owns the three `Param` rows; binding `:parent` to it
+    // yields each parameter's `rowid`, `Name`, and `Sequence` (the type is no
+    // longer a column — the render navigates from these and decodes it).
+    try DatabaseSQLTests.with { catalog in
+      let rows = try DatabaseSQLTests.run(
+          "SELECT rowid, Name, Sequence FROM params", Session.bundled(),
+          catalog, ["parent": .integer(1)])
+      #expect(rows == [
+        [.integer(1), .text(""), .integer(0)],
+        [.integer(2), .text("first"), .integer(1)],
+        [.integer(3), .text(""), .integer(2)],
+      ])
+    }
+  }
+
   @Test("a registered view is queryable through the session catalog")
   func sessionView() throws {
     // `CREATE VIEW guids …` registers a view over `CustomAttribute`'s decoded
@@ -213,17 +323,70 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a view over a decoded extra joins through the session catalog")
-  func sessionViewMethod() throws {
-    // A view over `MethodDef`'s decoded `ReturnType` extra resolves and yields
-    // the decoded return spelling, proving the session catalog vends the same
-    // storage-backed relation the engine plans over.
+  @Test("the render decode spells a method's return from its signature")
+  func decodedReturnHelper() {
+    // The render decodes a return at render time (not through a virtual column):
+    // `MethodDef` rowid 1's signature `void Method(i4, string)` decodes its
+    // return to `Void`.
+    DatabaseSQLTests.with { catalog in
+      #expect(decodedReturn(of: 1, in: catalog, dialect: .swift) == "Void")
+    }
+  }
+
+  @Test("the `interfaces` view excludes a type with no GuidAttribute")
+  func interfacesViewExcludes() throws {
+    // `INotGuid` (TypeDef row 2) carries no `GuidAttribute`, so the view's
+    // navigation finds no matching `CustomAttribute` chain for it: it does not
+    // appear, leaving only `IMyInterface`.
     try DatabaseSQLTests.with { catalog in
-      let (name, view) = try DatabaseSQLTests.create(
-          "CREATE VIEW returns AS SELECT Name, ReturnType FROM MethodDef")
       let rows = try DatabaseSQLTests.run(
-          "SELECT Name, ReturnType FROM returns", [name: view], catalog)
-      #expect(rows == [[.text("MyMethod"), .text("Void")]])
+          "SELECT TypeName FROM interfaces", Session.bundled(), catalog)
+      #expect(rows == [[.text("IMyInterface")]])
+    }
+  }
+
+  @Test("the `interfaces` view resolves a same-module MethodDef-ctor IID")
+  func interfacesViewSameModuleMethodDefCtor() throws {
+    // When `GuidAttribute` is defined in the same file, a type's
+    // `CustomAttribute.Type` names the attribute's `.ctor` directly as a
+    // `MethodDef` (not a cross-module `MemberRef`), so the `MemberRef` chains
+    // find nothing: the view's `Type_MethodDef → MethodDef.parent → TypeDef`
+    // arm navigates it instead. `IThing` carries such an attribute, so the view
+    // resolves its IID.
+    try SameModuleGuidFixture.with { catalog in
+      let rows = try DatabaseSQLTests.run(
+          "SELECT iid FROM interfaces WHERE TypeName = 'IThing'",
+          Session.bundled(), catalog)
+      #expect(rows == [[.text("0C733A30-2A1C-11CE-ADE5-00AA0044773D")]])
+    }
+  }
+
+  @Test("the `interfaces` view resolves a same-module MemberRef-ctor IID")
+  func interfacesViewSameModuleMemberRefCtor() throws {
+    // A same-file constructor can also be encoded as a `MemberRef` whose
+    // `Class` points back at the in-file `GuidAttribute` `TypeDef`, so the
+    // decoded key is `Class_TypeDef`, not `Class_TypeRef`, and the cross-module
+    // `MemberRef → TypeRef` arm drops it. The view's third arm,
+    // `Type_MemberRef → MemberRef.Class_TypeDef → TypeDef`, resolves it —
+    // `IOther` carries such an attribute.
+    try SameModuleGuidFixture.with { catalog in
+      let rows = try DatabaseSQLTests.run(
+          "SELECT iid FROM interfaces WHERE TypeName = 'IOther'",
+          Session.bundled(), catalog)
+      #expect(rows == [[.text("0C733A30-2A1C-11CE-ADE5-00AA0044773D")]])
+    }
+  }
+
+  @Test("the `interfaces` view excludes a GuidAttribute-carrying non-interface")
+  func interfacesViewExcludesNonInterface() throws {
+    // `CThing` is a coclass — a `TypeDef` carrying a `GuidAttribute` yet whose
+    // `Flags` clear the `tdInterface` (0x20) bit. Not every GUID-bearing type
+    // is a COM interface, so the view's `BITAND(t.Flags, 32) = 32` filter drops
+    // it, leaving only the interfaces `IThing` and `IOther`.
+    try SameModuleGuidFixture.with { catalog in
+      let rows = try DatabaseSQLTests.run(
+          "SELECT TypeName FROM interfaces", Session.bundled(), catalog)
+      #expect(rows == [[.text("IThing")], [.text("IOther")]])
     }
   }
 
@@ -251,46 +414,178 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("vends a MethodDef's decoded ReturnType")
-  func returnType() throws {
-    // The signature `void Method(i4, string)` decodes its return to `Void`.
-    try DatabaseSQLTests.with { catalog in
-      let rows = try DatabaseSQLTests.run(
-          "SELECT Name, ReturnType FROM MethodDef", catalog)
-      #expect(rows == [[.text("MyMethod"), .text("Void")]])
+  @Test("the render decode spells a MethodDef's return")
+  func returnType() {
+    // The signature `void Method(i4, string)` decodes its return to `Void`, the
+    // render-time decode replacing the old `ReturnType` virtual column.
+    DatabaseSQLTests.with { catalog in
+      #expect(decodedReturn(of: 1, in: catalog, dialect: .swift) == "Void")
     }
   }
 
-  @Test("vends each Param's decoded ParamType, NULL for the return parameter")
-  func paramType() throws {
-    // The `Sequence == 0` return pseudo-parameter decodes to NULL; the two real
-    // parameters decode to the signature's `i4` (`CInt`) and `string`
-    // (`HSTRING`).
-    try DatabaseSQLTests.with { catalog in
-      let rows = try DatabaseSQLTests.run(
-          "SELECT Sequence, ParamType FROM Param ORDER BY Sequence", catalog)
-      #expect(rows == [
-        [.integer(0), .null],
-        [.integer(1), .text("CInt")],
-        [.integer(2), .text("HSTRING")],
-      ])
+  @Test("the render decode spells each Param, nil for the return parameter")
+  func paramType() {
+    // The `Sequence == 0` return pseudo-parameter (`Param` rowid 1) decodes to
+    // `nil`; the two real parameters (rowids 2 and 3) decode to the signature's
+    // `i4` (`CInt`) and `string` (`HSTRING`) — the render-time decode replacing
+    // the old `ParamType` virtual column.
+    DatabaseSQLTests.with { catalog in
+      #expect(decodedParameter(of: 1, in: catalog, dialect: .swift) == nil)
+      #expect(decodedParameter(of: 2, in: catalog, dialect: .swift) == "CInt")
+      #expect(decodedParameter(of: 3, in: catalog, dialect: .swift)
+                  == "HSTRING")
     }
   }
 
-  @Test("excludes the return parameter through a ParamType filter")
-  func paramTypeNotNull() throws {
-    // A guard on `ParamType IS NOT NULL` drops the `Sequence == 0` return row,
-    // leaving the two real parameters.
+  @Test("the bundled `bases` view yields the interface's derived bases")
+  func bundledBases() throws {
+    // `IMyInterface` is `TypeDef` rowid 1; binding `:parent` to its rowid
+    // navigates `InterfaceImpl.Class = :parent`, and the view UNIONs both arms
+    // of the `Interface` coded index: the cross-file `IInspectable` reached
+    // through `Interface_TypeRef` → `TypeRef`, and the same-file `INotGuid`
+    // reached through `Interface_TypeDef` → `TypeDef`.
     try DatabaseSQLTests.with { catalog in
       let rows = try DatabaseSQLTests.run(
-          "SELECT ParamType FROM Param WHERE ParamType IS NOT NULL "
-          + "ORDER BY Sequence", catalog)
-      #expect(rows == [
-        [.text("CInt")],
-        [.text("HSTRING")],
-      ])
+          "SELECT base FROM bases", Session.bundled(), catalog,
+          ["parent": .integer(1)])
+      #expect(rows == [[.text("IInspectable")], [.text("INotGuid")]])
     }
   }
+
+  @Test("the bundled `bases` view is empty for a rootless interface")
+  func bundledBasesRoot() throws {
+    // `INotGuid` is `TypeDef` rowid 2 and has no `InterfaceImpl` row, so the
+    // view yields no base — the render's `IUnknown` default path.
+    try DatabaseSQLTests.with { catalog in
+      let rows = try DatabaseSQLTests.run(
+          "SELECT base FROM bases", Session.bundled(), catalog,
+          ["parent": .integer(2)])
+      #expect(rows.isEmpty)
+    }
+  }
+
+  @Test("renders the fixture interface's `@com` protocol from the views")
+  func render() throws {
+    // The render joins the bundled views — `interfaces` → `methods` → `params`
+    // → `bases` — and the Mustache template into the `@com` protocol source.
+    // The fixture is `IMyInterface` with the well-known IID and the single
+    // `MyMethod`, whose signature decodes to `void Method(i4, string)`: two real
+    // parameters (`first: CInt` and the unnamed `string`) and a `Void` return
+    // (so no return clause). The base is derived through the `bases` view from
+    // the interface's `InterfaceImpl` row — `IInspectable`, not the `IUnknown`
+    // default.
+    try DatabaseSQLTests.with { catalog in
+      let shell = Shell(catalog)
+      let rendered = try shell.render("IMyInterface", template: "com")
+      #expect(rendered == """
+        @com(interface: "0C733A30-2A1C-11CE-ADE5-00AA0044773D")
+        public protocol IMyInterface: IInspectable {
+            func MyMethod(_ first: CInt, _ : \
+        HSTRING)
+        }
+
+        """)
+    }
+  }
+
+  @Test("renders the `IUnknown` default for a rootless interface")
+  func renderRoot() throws {
+    // A `bases`-empty interface (no `InterfaceImpl` row) falls back to the
+    // `IUnknown` COM-root convention. The fixture's only IID-carrying type has
+    // an `InterfaceImpl`, so this overrides `bases` with a never-matching view
+    // (a `Class` no row holds), exercising the default branch while still
+    // rendering `IMyInterface` from the other views.
+    try DatabaseSQLTests.with { catalog in
+      var shell = Shell(catalog)
+      let query = """
+        CREATE VIEW bases AS SELECT b.TypeName AS base FROM InterfaceImpl i
+        JOIN TypeRef b ON i.Interface_TypeRef = b.rowid
+        WHERE i.Class = :parent AND i.Class = 0
+        """
+      let (name, view) = try DatabaseSQLTests.create(query)
+      shell.session.register(name, view)
+      let rendered = try shell.render("IMyInterface", template: "com")
+      #expect(rendered.contains("public protocol IMyInterface: IUnknown {"))
+    }
+  }
+
+  @Test("the root interface renders with no base, not self-inheritance")
+  func renderRootInterface() throws {
+    // When the rendered interface is the COM root itself (`IUnknown`), it
+    // implements nothing, so `bases` is empty. The root default must not then
+    // make it its own base — `public protocol IUnknown: IUnknown` is invalid
+    // Swift and would block rendering a winmd that defines the root. The render
+    // omits the inheritance clause entirely.
+    try RootInterfaceFixture.with { catalog in
+      let shell = Shell(catalog)
+      let rendered = try shell.render("IUnknown", template: "com")
+      #expect(rendered.contains("public protocol IUnknown {"))
+      #expect(!rendered.contains("IUnknown:"))
+    }
+  }
+
+  @Test("a keyword base interface name is escaped in the inheritance clause")
+  func renderKeywordBase() throws {
+    // A base whose `TypeName` is a Swift keyword (`protocol`, `repeat`, …) must
+    // be escaped in the `: <base>` clause, exactly as the interface, method, and
+    // parameter names are — otherwise `public protocol IMyInterface: protocol`
+    // would not compile. Overriding `bases` to yield a keyword base drives the
+    // render's `ESCAPE(base)`.
+    try DatabaseSQLTests.with { catalog in
+      var shell = Shell(catalog)
+      let query = """
+        CREATE VIEW bases AS
+        SELECT 'protocol' AS base FROM TypeDef WHERE rowid = :parent
+        """
+      let (name, view) = try DatabaseSQLTests.create(query)
+      shell.session.register(name, view)
+      let rendered = try shell.render("IMyInterface", template: "com")
+      #expect(rendered.contains("public protocol IMyInterface: `protocol` {"))
+    }
+  }
+
+  @Test("an unknown interface name raises a clear render error")
+  func renderUnknown() {
+    DatabaseSQLTests.with { catalog in
+      let shell = Shell(catalog)
+      #expect(throws: Shell.RenderError.interface("IMissing")) {
+        try shell.render("IMissing", template: "com")
+      }
+    }
+  }
+
+  @Test("execute routes `.render <iface> <tmpl>` to the render command")
+  func renderCommand() throws {
+    // The leading-token dispatch matches `.render` to `Render`, which renders
+    // the named interface through the named template (here the fixture's
+    // `IMyInterface` through `com`, so `execute` succeeds). Anything but two
+    // fields `execute` rejects as unknown — the `Render` command's guard — so a
+    // no-argument `.render` and a one-argument `.render IMyInterface` (missing
+    // template) both throw.
+    try DatabaseSQLTests.with { catalog in
+      var shell = Shell(catalog)
+      try shell.execute(".render IMyInterface com")
+      #expect(throws: Shell.MetaError.unknown(".render")) {
+        try shell.execute(".render")
+      }
+      #expect(throws: Shell.MetaError.unknown(".render")) {
+        try shell.execute(".render IMyInterface")
+      }
+    }
+  }
+
+  @Test("`*` renders every interface in the views")
+  func renderAll() throws {
+    // `*` drops the name filter and loops every interface; this fixture's
+    // `interfaces` view holds only `IMyInterface` (the IID-carrying type), so
+    // the sweep emits its protocol — exercising the no-filter `*` path.
+    try DatabaseSQLTests.with { catalog in
+      let shell = Shell(catalog)
+      let rendered = try shell.render("*", template: "com")
+      #expect(rendered.contains("public protocol IMyInterface"))
+    }
+  }
+
 
   @Test("a coded-index join key decodes to the target's rowid")
   func codedKeyResolves() throws {
@@ -355,13 +650,13 @@ struct DatabaseSQLTests {
 
   @Test("a script's CREATE VIEW is visible to a later statement's SELECT")
   func scriptSession() throws {
-    // The batch driver threads one shared `Session` across every statement, so a
-    // `CREATE VIEW` registered by one statement is visible to a later `SELECT`.
-    // `execute` prints rather than returning rows, so this drives the shared
-    // statement path directly — `Shell.execute` over the same session — to
-    // register the view (the `CREATE VIEW` branch), then resolves a `SELECT`
-    // naming it through the session's views, the exact session state the batch
-    // threads.
+    // The batch driver seeds the bundled views and threads one shared `Session`
+    // across every statement, so a `CREATE VIEW` registered by one statement is
+    // visible to a later `SELECT`. `execute` prints rather than returning rows,
+    // so this drives the shared statement path directly — `Shell.execute` over
+    // the same session — to register the view (the `CREATE VIEW` branch), then
+    // resolves a `SELECT` naming it through the session's views, the exact
+    // session state the batch threads.
     try DatabaseSQLTests.with { catalog in
       var shell = Shell(catalog)
       try shell.execute("CREATE VIEW names AS SELECT TypeName FROM TypeDef")
@@ -460,6 +755,24 @@ struct DatabaseSQLTests {
     }
   }
 
+  @Test("a script SELECTing a bundled view sees it through the seeded session")
+  func scriptBundledView() throws {
+    // The `script` runner seeds `Session.bundled()`, so a statement may name a
+    // bundled view (here `interfaces`) with no explicit `CREATE VIEW` — the gap
+    // the old one-shot path (an empty view set) could not span. The session
+    // core resolves `interfaces` through the seeded catalog to the only
+    // IID-carrying type.
+    try DatabaseSQLTests.with { catalog in
+      let views = Session.bundled()
+      let rows = try DatabaseSQLTests.run(
+          "SELECT TypeName, iid FROM interfaces", views, catalog)
+      #expect(rows == [
+        [.text("IMyInterface"),
+         .text("0C733A30-2A1C-11CE-ADE5-00AA0044773D")],
+      ])
+    }
+  }
+
   @Test("a coded-index join key admits one key per candidate target table")
   func codedKeyEnumeration() {
     // `CustomAttribute.Parent` is `HasCustomAttribute`, which admits 22 target
@@ -478,39 +791,106 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("an unowned Param's ParamType is NULL and does not trap")
-  func paramTypeUnowned() throws {
+  @Test("an unowned Param's render decode is nil and does not trap")
+  func paramTypeUnowned() {
     // A `Param` no `MethodDef` run owns — the `MethodDef` table is present but
-    // has zero rows, so its owner resolves to 0 — decodes to SQL NULL rather
-    // than indexing the negative row `owner - 1` through the parent cursor.
-    try UnownedParamFixture.with { catalog in
-      let rows = try DatabaseSQLTests.run(
-          "SELECT ParamType FROM Param", catalog)
-      #expect(rows == [[.null]])
+    // has zero rows, so its owner resolves to 0 — decodes to `nil` rather than
+    // indexing the negative row `owner - 1` through the parent cursor.
+    UnownedParamFixture.with { catalog in
+      #expect(decodedParameter(of: 1, in: catalog, dialect: .swift) == nil)
     }
   }
 
   @Test("a System.Guid Param decodes to CLSID or IID by its Name")
-  func paramTypeGuidClassification() throws {
+  func paramTypeGuidClassification() {
     // The signature `void Method(Guid, Guid)` names `System.Guid` parameters;
-    // the decoder classifies each by the `Param.Name` hint — `clsid` yields
-    // `CLSID`, an unrelated name (`iid`) yields the default `IID`.
-    try GuidParamFixture.with { catalog in
-      let rows = try DatabaseSQLTests.run(
-          "SELECT Name, ParamType FROM Param WHERE ParamType IS NOT NULL "
-          + "ORDER BY Sequence", catalog)
-      #expect(rows == [
-        [.text("clsid"), .text("CLSID")],
-        [.text("iid"), .text("IID")],
-      ])
+    // the render decode classifies each by the `Param.Name` hint — `clsid`
+    // (rowid 2) yields `CLSID`, `iid` (rowid 3) yields the default `IID`.
+    GuidParamFixture.with { catalog in
+      #expect(decodedParameter(of: 2, in: catalog, dialect: .swift) == "CLSID")
+      #expect(decodedParameter(of: 3, in: catalog, dialect: .swift) == "IID")
+    }
+  }
+
+  @Test("a `-I` directory's template shadows the bundled one")
+  func searchTemplateOverride() throws {
+    // A `-I` directory's `Templates/com.mustache` is loaded in place of the
+    // bundled template, so the render emits the override's text.
+    let root = NSTemporaryDirectory() + "winmd-inspect-\(UUID().uuidString)"
+    let templates = root + "/Templates"
+    try FileManager.default.createDirectory(atPath: templates,
+                                            withIntermediateDirectories: true)
+    try Data("OVERRIDDEN {{name}}".utf8)
+        .write(to: URL(fileURLWithPath: templates + "/com.mustache"))
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    try DatabaseSQLTests.with { catalog in
+      let shell = Shell(catalog, search: [root])
+      let rendered = try shell.render("IMyInterface", template: "com")
+      #expect(rendered.contains("OVERRIDDEN"))
+    }
+  }
+
+  @Test("a `-I` directory's view joins the bundled ones in the seed")
+  func searchViewAddition() throws {
+    // A `-I` directory's `Queries/extra.sql` adds its view to the seed, while
+    // the bundled views (here `interfaces`) remain — the union.
+    let root = NSTemporaryDirectory() + "winmd-inspect-\(UUID().uuidString)"
+    let queries = root + "/Queries"
+    try FileManager.default.createDirectory(atPath: queries,
+                                            withIntermediateDirectories: true)
+    try Data("CREATE VIEW extra AS SELECT TypeName FROM TypeDef".utf8)
+        .write(to: URL(fileURLWithPath: queries + "/extra.sql"))
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    let views = Session.bundled(search: [root])
+    #expect(views.keys.contains("extra"))
+    #expect(views.keys.contains("interfaces"))
+  }
+
+  @Test("a search directory without a match falls back to the bundle")
+  func searchFallsBackToBundle() throws {
+    // A `-I` directory that holds no matching resource leaves the render on the
+    // bundled template and views, so the normal `@com` protocol still renders.
+    let root = NSTemporaryDirectory() + "winmd-inspect-\(UUID().uuidString)"
+    try FileManager.default.createDirectory(atPath: root,
+                                            withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    try DatabaseSQLTests.with { catalog in
+      let shell = Shell(catalog, search: [root])
+      let rendered = try shell.render("IMyInterface", template: "com")
+      #expect(rendered.contains("public protocol IMyInterface"))
+    }
+  }
+
+  @Test("with two `-I` directories the last one wins")
+  func searchLastWins() throws {
+    // Both directories carry a `Templates/com.mustache`; the render must use the
+    // LAST `-I`'s copy, so a later directory overrides an earlier one.
+    let first = NSTemporaryDirectory() + "winmd-inspect-\(UUID().uuidString)"
+    let last = NSTemporaryDirectory() + "winmd-inspect-\(UUID().uuidString)"
+    for (root, tag) in [(first, "FIRST"), (last, "LAST")] {
+      let templates = root + "/Templates"
+      try FileManager.default.createDirectory(atPath: templates,
+                                              withIntermediateDirectories: true)
+      try Data("\(tag) {{name}}".utf8)
+          .write(to: URL(fileURLWithPath: templates + "/com.mustache"))
+    }
+    defer {
+      try? FileManager.default.removeItem(atPath: first)
+      try? FileManager.default.removeItem(atPath: last)
+    }
+    try DatabaseSQLTests.with { catalog in
+      let shell = Shell(catalog, search: [first, last])
+      let rendered = try shell.render("IMyInterface", template: "com")
+      #expect(rendered.contains("LAST"))
+      #expect(!rendered.contains("FIRST"))
     }
   }
 }
 
 /// A fixture whose `Param` row is owned by no `MethodDef` run: the `MethodDef`
 /// table is present (so the list link resolves to it) but has zero rows, so the
-/// owner of the lone `Param` resolves to 0. `SELECT ParamType FROM Param` must
-/// then yield SQL NULL rather than index a negative `MethodDef` row.
+/// owner of the lone `Param` resolves to 0. `decodedParameter` must then yield
+/// `nil` rather than index a negative `MethodDef` row.
 private enum UnownedParamFixture {
   // Two narrow tables packed back to back. `MethodDef` contributes no records
   // (zero rows); `Param` contributes one.
@@ -543,7 +923,7 @@ private enum UnownedParamFixture {
 }
 
 /// A fixture whose method takes two `System.Guid` parameters — one named
-/// `clsid`, one named `iid` — so the `ParamType` decode exercises the
+/// `clsid`, one named `iid` — so the render decode exercises the
 /// `Param.Name` classification hint: a `clsid`-rooted name spells `CLSID`, any
 /// other Guid parameter the default `IID`.
 private enum GuidParamFixture {
@@ -605,6 +985,211 @@ private enum GuidParamFixture {
   ]
 
   private static let valid: UInt64 = (1 << 1) | (1 << 6) | (1 << 8)
+
+  /// Runs `body` over a `Storage` catalog bound to the assembled metadata.
+  static func with(_ body: (borrowing Storage) throws -> Void) rethrows {
+    let storage = Storage(bytes: bytes.span.bytes, relations: relations.span,
+                          strings: strings.span.bytes, blob: blob.span.bytes,
+                          guid: empty.span.bytes, valid: valid, sorted: 0)
+    try body(storage)
+  }
+}
+
+/// A fixture whose `GuidAttribute` is defined in the same file, so a type's
+/// `CustomAttribute.Type` names its in-file `.ctor` rather than a cross-module
+/// `MemberRef → TypeRef`: the `interfaces` view must reach the IID through one
+/// of its same-module arms. Both same-file encodings appear — the constructor as
+/// a bare `MethodDef` (`IThing`) and as a `MemberRef` whose `Class` points back
+/// at the in-file `TypeDef` (`IOther`) — alongside a GUID-bearing non-interface
+/// (`CThing`) exercising the `tdInterface` filter.
+private enum SameModuleGuidFixture {
+  // Five narrow (all-index 2-byte) tables packed back to back in table-number
+  // order; the empty `TypeRef` is present (so the view's cross-module arm plans)
+  // but contributes no rows. A stored index `N` names the 0-based row `N - 1`; a
+  // coded index is `(row << bits) | tag`.
+  //
+  //   TypeDef[0]:  Flags=0, TypeName="GuidAttribute"(35),
+  //                TypeNamespace="Windows.Win32.Foundation.Metadata"(1),
+  //                MethodList=1 — the in-file attribute, owning its `.ctor`
+  //                MethodDef[0]; the arms' owning `TypeDef` `g`.
+  //   TypeDef[1]:  Flags=0x21, TypeName="IThing"(52), TypeNamespace="NS"(49),
+  //                MethodList=2 — an interface whose attribute names the ctor
+  //                directly as a `MethodDef` (the `Type_MethodDef` arm).
+  //   TypeDef[2]:  Flags=0, TypeName="CThing"(59), TypeNamespace="NS"(49),
+  //                MethodList=2 — a coclass (tdInterface clear) also carrying
+  //                the `GuidAttribute`, so the view's flag filter excludes it.
+  //   TypeDef[3]:  Flags=0x21, TypeName="IOther"(66), TypeNamespace="NS"(49),
+  //                MethodList=2 — an interface whose attribute names the ctor as
+  //                a `MemberRef` into the in-file `TypeDef` (the `Class_TypeDef`
+  //                arm).
+  //   MethodDef[0]: Name=0, Signature=0, ParamList=1 — the `GuidAttribute`
+  //                `.ctor`, owned by TypeDef[0] (so its `parent` is rowid 1).
+  //   MemberRef[0]: Class=MemberRefParent(TypeDef row 1)=(1<<3)|0=8 — the ctor
+  //                reference whose declaring class is the in-file `GuidAttribute`
+  //                `TypeDef`, so `Class_TypeDef` (not `Class_TypeRef`) decodes.
+  //   CustomAttribute[0]: Parent=HasCustomAttribute(TypeDef row 2)=(2<<5)|3=67,
+  //                Type=CustomAttributeType(MethodDef row 1)=(1<<3)|2=10,
+  //                Value=blob[1] — `IThing`'s in-file GUID (MethodDef ctor).
+  //   CustomAttribute[1]: Parent=HasCustomAttribute(TypeDef row 3)=(3<<5)|3=99,
+  //                Type=CustomAttributeType(MethodDef row 1)=(1<<3)|2=10,
+  //                Value=blob[1] — `CThing`'s in-file GUID.
+  //   CustomAttribute[2]: Parent=HasCustomAttribute(TypeDef row 4)=(4<<5)|3=131,
+  //                Type=CustomAttributeType(MemberRef row 1)=(1<<3)|3=11,
+  //                Value=blob[1] — `IOther`'s in-file GUID (MemberRef ctor).
+  private static let bytes: Array<UInt8> = [
+    // TypeDef[0] — GuidAttribute
+    0x00, 0x00, 0x00, 0x00, 0x23, 0x00, 0x01, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+    // TypeDef[1] — IThing
+    0x21, 0x00, 0x00, 0x00, 0x34, 0x00, 0x31, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x02, 0x00,
+    // TypeDef[2] — CThing
+    0x00, 0x00, 0x00, 0x00, 0x3b, 0x00, 0x31, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x02, 0x00,
+    // TypeDef[3] — IOther
+    0x21, 0x00, 0x00, 0x00, 0x42, 0x00, 0x31, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x02, 0x00,
+    // MethodDef[0] — .ctor
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+    // MemberRef[0]
+    0x08, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // CustomAttribute[0..2]
+    0x43, 0x00, 0x0a, 0x00, 0x01, 0x00,
+    0x63, 0x00, 0x0a, 0x00, 0x01, 0x00,
+    0x83, 0x00, 0x0b, 0x00, 0x01, 0x00,
+  ]
+
+  // "\0Windows.Win32.Foundation.Metadata\0GuidAttribute\0NS\0IThing\0CThing\0
+  // IOther\0": GuidNamespace@1, GuidName@35, NS@49, IThing@52, CThing@59,
+  // IOther@66.
+  private static let strings: Array<UInt8> = [
+    0x00,
+    0x57, 0x69, 0x6e, 0x64, 0x6f, 0x77, 0x73, 0x2e, 0x57, 0x69, 0x6e, 0x33,
+    0x32, 0x2e, 0x46, 0x6f, 0x75, 0x6e, 0x64, 0x61, 0x74, 0x69, 0x6f, 0x6e,
+    0x2e, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x00,
+    0x47, 0x75, 0x69, 0x64, 0x41, 0x74, 0x74, 0x72, 0x69, 0x62, 0x75, 0x74,
+    0x65, 0x00,
+    0x4e, 0x53, 0x00,
+    0x49, 0x54, 0x68, 0x69, 0x6e, 0x67, 0x00,
+    0x43, 0x54, 0x68, 0x69, 0x6e, 0x67, 0x00,
+    0x49, 0x4f, 0x74, 0x68, 0x65, 0x72, 0x00,
+  ]
+
+  // A `#Blob` heap: offset 0 is the reserved empty blob; offset 1 is the 20-byte
+  // `GuidAttribute` value (prolog 0x0001, the GUID as `u32, u16, u16, u8×8`,
+  // then NumNamed 0), preceded by its length 0x14. The GUID is the well-known
+  // `0C733A30-2A1C-11CE-ADE5-00AA0044773D`.
+  private static let blob: Array<UInt8> = [
+    0x00,
+    0x14, 0x01, 0x00, 0x30, 0x3a, 0x73, 0x0c, 0x1c, 0x2a, 0xce, 0x11,
+    0xad, 0xe5, 0x00, 0xaa, 0x00, 0x44, 0x77, 0x3d, 0x00, 0x00,
+  ]
+
+  private static let empty = Array<UInt8>()
+
+  private static let relations: Array<WinMD.Table> = [
+    WinMD.Table(Metadata.Tables.TypeRef.self, rows: 0, range: 0 ..< 0,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 4, range: 0 ..< 56,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.MethodDef.self, rows: 1, range: 56 ..< 70,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.MemberRef.self, rows: 1, range: 70 ..< 76,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.CustomAttribute.self, rows: 3, range: 76 ..< 94,
+                wide: 0, stride: 6),
+  ]
+
+  private static let valid: UInt64 =
+      (1 << 1) | (1 << 2) | (1 << 6) | (1 << 10) | (1 << 12)
+
+  /// Runs `body` over a `Storage` catalog bound to the assembled metadata.
+  static func with(_ body: (borrowing Storage) throws -> Void) rethrows {
+    let storage = Storage(bytes: bytes.span.bytes, relations: relations.span,
+                          strings: strings.span.bytes, blob: blob.span.bytes,
+                          guid: empty.span.bytes, valid: valid, sorted: 0)
+    try body(storage)
+  }
+}
+
+/// A fixture whose sole interface is the COM root `IUnknown` itself — an
+/// in-file `GuidAttribute`-carrying `TypeDef` with no `InterfaceImpl` — so
+/// `bases` is empty and the render must omit the inheritance clause rather than
+/// make `IUnknown` inherit itself.
+private enum RootInterfaceFixture {
+  // Four narrow (all-index 2-byte) tables packed back to back in table-number
+  // order; the empty `TypeRef` and `MemberRef` are present so the `interfaces`
+  // view's cross-module arms plan. A stored index `N` names the 0-based row
+  // `N - 1`; a coded index is `(row << bits) | tag`.
+  //
+  //   TypeDef[0]:  Flags=0, TypeName="GuidAttribute"(35),
+  //                TypeNamespace="Windows.Win32.Foundation.Metadata"(1),
+  //                MethodList=1 — the in-file attribute, owning its `.ctor`.
+  //   TypeDef[1]:  Flags=0x21, TypeName="IUnknown"(52), TypeNamespace="NS"(49),
+  //                MethodList=2 — the COM root interface, carrying the
+  //                `GuidAttribute` yet implementing nothing (no `InterfaceImpl`).
+  //   MethodDef[0]: Name=0, Signature=0, ParamList=1 — the `GuidAttribute`
+  //                `.ctor`, owned by TypeDef[0].
+  //   CustomAttribute[0]: Parent=HasCustomAttribute(TypeDef row 2)=(2<<5)|3=67,
+  //                Type=CustomAttributeType(MethodDef row 1)=(1<<3)|2=10,
+  //                Value=blob[1] — `IUnknown`'s in-file GUID.
+  private static let bytes: Array<UInt8> = [
+    // TypeDef[0] — GuidAttribute
+    0x00, 0x00, 0x00, 0x00, 0x23, 0x00, 0x01, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+    // TypeDef[1] — IUnknown
+    0x21, 0x00, 0x00, 0x00, 0x34, 0x00, 0x31, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x02, 0x00,
+    // MethodDef[0] — .ctor
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+    // CustomAttribute[0]
+    0x43, 0x00, 0x0a, 0x00, 0x01, 0x00,
+  ]
+
+  // "\0Windows.Win32.Foundation.Metadata\0GuidAttribute\0NS\0IUnknown\0":
+  // GuidNamespace@1, GuidName@35, NS@49, IUnknown@52.
+  private static let strings: Array<UInt8> = [
+    0x00,
+    0x57, 0x69, 0x6e, 0x64, 0x6f, 0x77, 0x73, 0x2e, 0x57, 0x69, 0x6e, 0x33,
+    0x32, 0x2e, 0x46, 0x6f, 0x75, 0x6e, 0x64, 0x61, 0x74, 0x69, 0x6f, 0x6e,
+    0x2e, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x00,
+    0x47, 0x75, 0x69, 0x64, 0x41, 0x74, 0x74, 0x72, 0x69, 0x62, 0x75, 0x74,
+    0x65, 0x00,
+    0x4e, 0x53, 0x00,
+    0x49, 0x55, 0x6e, 0x6b, 0x6e, 0x6f, 0x77, 0x6e, 0x00,
+  ]
+
+  // A `#Blob` heap: offset 0 is the reserved empty blob; offset 1 is the 20-byte
+  // `GuidAttribute` value (prolog 0x0001, the GUID, then NumNamed 0), preceded
+  // by its length 0x14. The GUID is the well-known
+  // `0C733A30-2A1C-11CE-ADE5-00AA0044773D`.
+  private static let blob: Array<UInt8> = [
+    0x00,
+    0x14, 0x01, 0x00, 0x30, 0x3a, 0x73, 0x0c, 0x1c, 0x2a, 0xce, 0x11,
+    0xad, 0xe5, 0x00, 0xaa, 0x00, 0x44, 0x77, 0x3d, 0x00, 0x00,
+  ]
+
+  private static let empty = Array<UInt8>()
+
+  private static let relations: Array<WinMD.Table> = [
+    WinMD.Table(Metadata.Tables.TypeRef.self, rows: 0, range: 0 ..< 0,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 2, range: 0 ..< 28,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.MethodDef.self, rows: 1, range: 28 ..< 42,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.InterfaceImpl.self, rows: 0, range: 42 ..< 42,
+                wide: 0, stride: 4),
+    WinMD.Table(Metadata.Tables.MemberRef.self, rows: 0, range: 42 ..< 42,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.CustomAttribute.self, rows: 1, range: 42 ..< 48,
+                wide: 0, stride: 6),
+  ]
+
+  private static let valid: UInt64 =
+      (1 << 1) | (1 << 2) | (1 << 6) | (1 << 9) | (1 << 10) | (1 << 12)
 
   /// Runs `body` over a `Storage` catalog bound to the assembled metadata.
   static func with(_ body: (borrowing Storage) throws -> Void) rethrows {

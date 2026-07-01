@@ -171,6 +171,20 @@ public protocol Table: ~Escapable {
   /// stored sorted returns `nil`, and the executor falls back to a scan.
   func bound(_ column: Int, _ value: Int, strict: Bool) -> Int?
 
+  /// Whether `column`'s cells are monotonically non-decreasing in row order, so
+  /// a `bound` partition brackets a range as well as an equality.
+  ///
+  /// A `bound` boundary is a valid range partition only when the column the
+  /// engine reads is itself sorted — a `<`/`<=`/`>`/`>=` filter takes the rows
+  /// on one side of the boundary, which is correct only if every row on that
+  /// side compares that way. A column whose `bound` seeks a physically-sorted
+  /// *encoding* whose decoded cell is not ordered like the stored one — a
+  /// decoded coded-index key, whose raw run brackets one tag's equal value
+  /// while the other tags interleaved by row decode to `NULL` — reports
+  /// `false`, so the engine seeks only its equality and scans a range. The
+  /// default is `true` — a relation overrides it only for an unordered column.
+  func ordered(_ column: Int) -> Bool
+
   /// A cursor over the table's rows.
   @_lifetime(borrow self)
   borrowing func cursor() -> Cursor
@@ -182,6 +196,10 @@ extension Table where Self: ~Escapable {
 
   /// A relation exposes no virtual column by default.
   public var virtuals: Array<String> { [] }
+
+  /// A seekable column is ordered by default — its `bound` boundary brackets a
+  /// range as well as an equality.
+  public func ordered(_ column: Int) -> Bool { true }
 }
 
 // MARK: - Cursor

@@ -259,6 +259,39 @@ internal struct WinMDRelation: SQL.Table, ~Escapable {
       return owners(link, value, count, strict: strict)
     }
 
+    // A coded-index join key seeks when its underlying raw coded-index column is
+    // the table's intrinsic sort key and the database physically sorts the table
+    // (e.g. `CustomAttribute.Parent`, on which the table is sorted): a target
+    // `rowid` `value` encodes to the raw coded cell `(value << bits) | tag`,
+    // whose equal run the raw column's binary search brackets. The join's own
+    // equality re-tests the decoded key per row, so the seek need only bracket
+    // the run — its precision is an optimisation, not a correctness burden.
+    //
+    // A decoded row is 1-based, so only `value >= 1` is a valid target rowid: a
+    // non-positive `value` is a null coded-index reference (`WinMDRow.key`
+    // decodes any coded index whose row is zero as SQL `NULL`), which no cell can
+    // equal — `NULL = 0` is UNKNOWN. Returning `nil` for it defers to a full
+    // scan + filter, where the decoded `NULL` correctly fails the comparison,
+    // rather than seeking the raw run that encodes row zero (which `Engine.seek`
+    // would consume without a residual recheck, leaking those rows).
+    //
+    // The upper bound `value <= Int.max >> key.kind.bits` rejects a decoded
+    // rowid too large to encode without truncation: Swift's `<<` discards the
+    // bits shifted past the word, so a larger `value` would alias `encoded` to a
+    // real raw coded cell (e.g. with `bits == 5`, `(1 << 59) + 1` encodes to raw
+    // `35`, the same cell as `TypeDef` row 1), and `Engine.seek` would consume
+    // the standalone equality without a residual recheck and return the aliased
+    // run. Below the bound `value << bits` fits in `Int` and `| tag` only sets
+    // the low bits the shift cleared (`tag < 2^bits`), so `encoded <= Int.max`.
+    // Returning `nil` for an unencodable `value` defers to a full scan + filter,
+    // which rejects it (no real decoded key equals the huge value).
+    if let key = key(for: column), value >= 1,
+        value <= Int.max >> key.kind.bits, key.column == table.schema.key,
+        storage.sorted & (1 << table.number) != 0 {
+      let encoded = (value << key.kind.bits) | key.tag
+      return storage.bound(table, key.column, encoded, count, strict: strict)
+    }
+
     // A real column is seekable only when it is the table's intrinsic sort key
     // and this database physically sorts the table; otherwise the engine scans.
     guard table.schema.key == column,
@@ -266,6 +299,32 @@ internal struct WinMDRelation: SQL.Table, ~Escapable {
       return nil
     }
     return storage.bound(table, column, value, count, strict: strict)
+  }
+
+  /// A coded-index join key is seekable but not ordered: its `bound` brackets
+  /// the raw coded run for one tag, yet the raw column interleaves the other
+  /// tags by row (which decode to `NULL` for this key), so the decoded column
+  /// is not monotonic. A range must not consume its boundary — the engine seeks
+  /// its equality (the join re-tests per row) and scans a range. Every other
+  /// column is ordered where it is seekable.
+  internal func ordered(_ column: Int) -> Bool {
+    key(for: column) == nil
+  }
+
+  /// The coded-index join `Key` exposed at ordinal `column`, or `nil` when
+  /// `column` is not one of this table's coded-index join keys.
+  ///
+  /// The coded-index join keys occupy the ordinals past `rowid`, the decoded
+  /// extras, and — on a list-owned table — the `parent` key, in the order
+  /// `keys` exposes them; this maps `column` back through that layout, the
+  /// inverse of `ordinal(of:)`'s coded-index-key arm.
+  private func key(for column: Int) -> Key? {
+    let base = rowid + 1 + extras.count
+    let lead = parent == nil ? base : base + 1
+    let index = column - lead
+    let all = keys
+    guard index >= 0, index < all.count else { return nil }
+    return all[index]
   }
 
   /// The partition point of the child rows against a parent `rowid` `value`.

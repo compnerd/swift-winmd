@@ -1108,9 +1108,11 @@ struct EngineFunctionTests {
             == [[.integer(2)]])
   }
 
-  @Test("BITAND rejects the wrong arity and non-integer arguments")
+  @Test("BITAND reports a function-argument fault, not a UNION arity error")
   func bitandFaults() throws {
-    #expect(throws: SQLError.arity(2, 1)) {
+    // The wrong argument count is a function-argument fault (`.argument`), not
+    // `.arity` — whose message is the UNION column-count mismatch.
+    #expect(throws: SQLError.argument("BITAND takes two arguments")) {
       try functionRun("SELECT BITAND(1) FROM People WHERE Id = 1")
     }
     #expect(throws: SQLError.argument("BITAND requires integer arguments")) {

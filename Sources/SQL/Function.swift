@@ -69,10 +69,13 @@ public struct Routines: Sendable {
   private static let builtins: Dictionary<String, Scalar> = ["bitand": bitand]
 
   /// `BITAND(x, y)` — the bitwise AND of two integers. A NULL argument yields
-  /// NULL (SQL null propagation); a non-integer argument is `SQLError.argument`
-  /// and the wrong arity `SQLError.arity`.
+  /// NULL (SQL null propagation); the wrong argument count or a non-integer
+  /// argument is `SQLError.argument` (a function-argument fault — not
+  /// `SQLError.arity`, which is the UNION column-count mismatch).
   private static let bitand: Scalar = { arguments in
-    guard arguments.count == 2 else { throw .arity(2, arguments.count) }
+    guard arguments.count == 2 else {
+      throw .argument("BITAND takes two arguments")
+    }
     if case .null = arguments[0] { return .null }
     if case .null = arguments[1] { return .null }
     guard case let .integer(x) = arguments[0],

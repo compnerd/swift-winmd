@@ -1302,7 +1302,9 @@ private func joins(_ plan: Plan) -> Bool {
 
 /// A join catalog whose inner `Child` relation tallies its row reads, plus a
 /// view `Kin` over the `Parent`/`Child` join — to prove a `WHERE` over the view
-/// prunes the join's inputs BEFORE the join runs rather than after.
+/// prunes the join's inputs BEFORE the join runs rather than after. The counter
+/// rides the `Parent` relation (sorted on `Id`), so a pushed seekable key reads
+/// fewer of its rows regardless of the inner join strategy.
 private func counted() throws -> (catalog: Memory, reads: Counter) {
   let reads = Counter()
   let parent = [
@@ -1327,13 +1329,13 @@ private func counted() throws -> (catalog: Memory, reads: Counter) {
   ] as Array<Array<Value>>
 
   let kin = try View(query: select("""
-      SELECT Parent.Name, Child.Kid FROM Parent
+      SELECT Parent.Id, Parent.Name, Child.Kid FROM Parent
         JOIN Child ON Child.Pid = Parent.Id
-      """), columns: ["Name", "Kid"])
+      """), columns: ["Key", "Name", "Kid"])
   let catalog =
       Memory([
-        "Parent": Relation(parent, parents, sorted: 0),
-        "Child": Relation(child, children, counter: reads),
+        "Parent": Relation(parent, parents, sorted: 0, counter: reads),
+        "Child": Relation(child, children),
       ], views: ["Kin": kin])
   return (catalog, reads)
 }
@@ -1568,33 +1570,32 @@ struct EnginePushdownTests {
 
   @Test("a WHERE over a join view prunes its rows before the join runs")
   func view() throws {
-    // `Kin` is the Parent/Child join; `WHERE Name = 'Ada'` over it must push
-    // INTO the view's sub-plan and prune Parent to Ada before joining, so the
-    // join probes the inner `Child` for only ONE outer parent — not all three.
+    // `Kin` is the Parent/Child join; `WHERE Key = 2` over it must push INTO the
+    // view's sub-plan and seek Parent to the single matching row before joining,
+    // so only that parent's rows are read — not the whole relation.
     let (culled, pruned) = try counted()
-    let rows = try Engine.run(parse("SELECT Kid FROM Kin WHERE Name = 'Ada'"),
+    let rows = try Engine.run(parse("SELECT Kid FROM Kin WHERE Key = 2"),
                               culled)
-    #expect(rows == [[.text("Ann")], [.text("Amy")]])
+    #expect(rows == [[.text("Bob")]])
 
-    // The un-pushed baseline: the same view with no `WHERE` runs the join over
-    // every parent, probing the four-row inner once per parent — twelve reads.
+    // The un-pushed baseline: the same view with no `WHERE` reads every parent
+    // row — three.
     let (whole, full) = try counted()
     _ = try Engine.run(parse("SELECT Kid FROM Kin"), whole)
-    #expect(full.reads == 12)
+    #expect(full.reads == 3)
 
-    // Pushed, the join probes the inner for Ada alone — one parent's four-row
-    // inner scan — a third of the baseline's reads.
-    #expect(pruned.reads == 4)
+    // Pushed, the seek reads the one matching parent — a single row.
+    #expect(pruned.reads == 1)
   }
 
   @Test("the pushed view result matches the unfiltered view filtered late")
   func equivalence() throws {
     // Running the view then filtering must agree with the pushed plan.
     let (catalog, _) = try counted()
-    let all = try Engine.run(parse("SELECT Name, Kid FROM Kin"), catalog)
-    let culled = all.filter { $0[0] == .text("Ada") }.map { [$0[1]] }
+    let all = try Engine.run(parse("SELECT Key, Kid FROM Kin"), catalog)
+    let culled = all.filter { $0[0] == .integer(2) }.map { [$0[1]] }
     let filtered =
-        try Engine.run(parse("SELECT Kid FROM Kin WHERE Name = 'Ada'"), catalog)
+        try Engine.run(parse("SELECT Kid FROM Kin WHERE Key = 2"), catalog)
     #expect(filtered == culled)
   }
 
@@ -1864,6 +1865,270 @@ struct EnginePushdownTests {
     // The UNKNOWN-ON pair (A.k NULL) is dropped by the match gate before the
     // division runs, so the query returns rows rather than raising.
     #expect(try Engine.run(select, catalog) == [])
+  }
+}
+
+// MARK: - Hash-join tests
+
+/// A join catalog whose inner `Parent` is UNSORTED (so its join key is not
+/// seekable and the executor hashes it) and tallies its row reads — to prove the
+/// hash build scans the inner exactly once rather than once per outer record.
+private func hashable() -> (catalog: Memory, reads: Counter) {
+  let reads = Counter()
+  let parent = [
+    Field(name: "Id", kind: .integer),
+    Field(name: "Name", kind: .text),
+  ]
+  let parents = [
+    [.integer(1), .text("Ada")],
+    [.integer(2), .text("Bee")],
+    [.integer(3), .text("Cid")],
+  ] as Array<Array<Value>>
+
+  let child = [
+    Field(name: "Pid", kind: .integer),
+    Field(name: "Kid", kind: .text),
+  ]
+  let children = [
+    [.integer(1), .text("Ann")],
+    [.integer(1), .text("Amy")],
+    [.integer(2), .text("Bob")],
+    [.integer(9), .text("Orphan")],
+  ] as Array<Array<Value>>
+
+  let catalog = Memory([
+    "Parent": Relation(parent, parents, counter: reads),
+    "Child": Relation(child, children),
+  ])
+  return (catalog, reads)
+}
+
+struct EngineHashJoinTests {
+  @Test("a hash join over an unsorted inner scans it exactly once")
+  func single() throws {
+    // `Parent` is unsorted, so its `Id` is not seekable and the join hashes it.
+    // Four outer children probe the map, but the inner is read only three times
+    // — its row count — not twelve (once per outer).
+    let (catalog, reads) = hashable()
+    let rows = try Engine.run(parse("""
+        SELECT Child.Kid, Parent.Name FROM Child
+          JOIN Parent ON Parent.Id = Child.Pid
+        """), catalog)
+    #expect(rows == [
+      [.text("Ann"), .text("Ada")],
+      [.text("Amy"), .text("Ada")],
+      [.text("Bob"), .text("Bee")],
+    ])
+    #expect(reads.reads == 3)
+  }
+
+  @Test("a coded-index inner key seeks rather than hashing the whole inner")
+  func coded() throws {
+    // The join strategy is chosen by probing the inner key for seekability. A
+    // decoded coded-index column is 1-based and rejects the null reference `0`,
+    // so probing with `0` would call it unseekable and hash every inner row;
+    // probing with a valid `1` finds it seekable, so a selective join seeks the
+    // coded run instead. `Attribute.Parent` is such a column (stored raw
+    // `(rowid << 2) | tag`, decoded to a rowid), and one `Type` (Id 6) probes it.
+    let reads = Counter()
+    let type = [Field(name: "Id", kind: .integer)]
+    let types = [[.integer(6)]] as Array<Array<Value>>
+    let attribute = [
+      Field(name: "Parent", kind: .integer),
+      Field(name: "Name", kind: .text),
+    ]
+    let attributes = [
+      [.integer(0), .text("null-ref")],
+      [.integer(4), .text("td1")],
+      [.integer(8), .text("td2")],
+      [.integer(16), .text("td4")],
+      [.integer(20), .text("td5")],
+      [.integer(24), .text("td6")],
+    ] as Array<Array<Value>>
+    let catalog = Memory([
+      "Type": Relation(type, types),
+      "Attribute": Relation(attribute, attributes, coded: 0, counter: reads),
+    ])
+    let rows = try Engine.run(parse("""
+        SELECT Attribute.Name FROM Type
+          JOIN Attribute ON Attribute.Parent = Type.Id
+        """), catalog)
+    #expect(rows == [[.text("td6")]])
+    // Seeked: only the `Parent = 6` run (the single `td6` row) is read, not all
+    // six. Before the fix — probing seekability with `0` — the coded column
+    // tested unseekable and the join hashed, reading every attribute row.
+    #expect(reads.reads == 1)
+  }
+
+  @Test("an empty outer skips the hash build of an unseekable inner")
+  func empty() throws {
+    // A contradictory outer WHERE prunes every `Child`, so the outer is empty
+    // and no probe can match. The inner `Parent` is unsorted (unseekable), so
+    // the join would hash it — but with no probes the build is pointless. The
+    // empty-outer short-circuit returns before scanning, so ZERO inner rows are
+    // read; the nested-loop path this replaced already read none for an empty
+    // outer, and a large unseekable inner must not be fully scanned to answer
+    // nothing.
+    let (catalog, reads) = hashable()
+    let rows = try Engine.run(parse("""
+        SELECT Child.Kid, Parent.Name FROM Child
+          JOIN Parent ON Parent.Id = Child.Pid WHERE Child.Pid < 0
+        """), catalog)
+    #expect(rows.isEmpty)
+    #expect(reads.reads == 0)
+  }
+
+  @Test("an all-NULL-key outer skips the hash build of an unseekable inner")
+  func allNull() throws {
+    // The outer is NON-empty but every `Child.Pid` is NULL (a `WHERE Pid IS
+    // NULL` keeps only the null-keyed rows), and a NULL key joins to nothing —
+    // so no probe can match. The inner `Parent` is unsorted (unseekable), so the
+    // join would hash it; but with no non-null probe the build is pointless. The
+    // no-probe guard returns before scanning, so ZERO inner rows are read — the
+    // nested-loop path this replaced read none for an all-null outer too.
+    let reads = Counter()
+    let parent = [
+      Field(name: "Id", kind: .integer),
+      Field(name: "Name", kind: .text),
+    ]
+    let parents = [
+      [.integer(1), .text("Ada")],
+      [.integer(2), .text("Bee")],
+    ] as Array<Array<Value>>
+    let child = [
+      Field(name: "Pid", kind: .integer),
+      Field(name: "Kid", kind: .text),
+    ]
+    let children = [
+      [.integer(1), .text("Ann")],
+      [.null, .text("Nemo")],
+      [.null, .text("Nobody")],
+    ] as Array<Array<Value>>
+    let catalog = Memory([
+      "Parent": Relation(parent, parents, counter: reads),
+      "Child": Relation(child, children),
+    ])
+    let rows = try Engine.run(parse("""
+        SELECT Child.Kid, Parent.Name FROM Child
+          JOIN Parent ON Parent.Id = Child.Pid WHERE Child.Pid IS NULL
+        """), catalog)
+    #expect(rows.isEmpty)
+    #expect(reads.reads == 0)
+  }
+
+  @Test("the hash probe and the seek probe return identical results")
+  func equivalence() throws {
+    // The sorted `Parent` seeks; its unsorted twin hashes. Both inner orderings
+    // must agree — the hash preserves the seek path's outer-major, inner-cursor
+    // order.
+    let seek = try join("""
+        SELECT Parent.Name, Child.Name FROM Child
+          JOIN Parent ON Parent.Id = Child.Pid
+        """)
+    let hash = try join("""
+        SELECT P.Name, Child.Name FROM Child
+          JOIN ParentUnsorted AS P ON P.Id = Child.Pid
+        """)
+    #expect(hash == seek)
+    #expect(hash == [
+      [.text("Ada"), .text("Ann")],
+      [.text("Ada"), .text("Amy")],
+      [.text("Bee"), .text("Bob")],
+    ])
+  }
+
+  @Test("a hash join emits matches outer-major in inner cursor order")
+  func order() throws {
+    // The unsorted twin forces the hash path. Without an ORDER BY the result
+    // must be outer-major (each child in scan order), and a bucket's inner rows
+    // in the inner's cursor order — exactly the nested loop's order.
+    let forced = try join("""
+        SELECT Child.Name, P.Name FROM Child
+          JOIN ParentUnsorted AS P ON P.Id = Child.Pid
+        """)
+    #expect(forced == [
+      [.text("Ann"), .text("Ada")],
+      [.text("Amy"), .text("Ada")],
+      [.text("Bob"), .text("Bee")],
+    ])
+  }
+
+  @Test("a NULL key joins to nothing under the hash path")
+  func null() throws {
+    // The child with a NULL foreign key is the outer row; a NULL key hashes to
+    // nothing, and a NULL inner key is never bucketed. `Parent` here is unsorted
+    // so the join hashes.
+    let parent = [
+      Field(name: "Id", kind: .integer),
+      Field(name: "Name", kind: .text),
+    ]
+    let parents = [
+      [.integer(1), .text("Ada")],
+      [.integer(2), .text("Bee")],
+    ] as Array<Array<Value>>
+    let child = [
+      Field(name: "Pid", kind: .integer),
+      Field(name: "Name", kind: .text),
+    ]
+    let children = [
+      [.integer(1), .text("Ann")],
+      [.null, .text("Nobody")],
+      [.integer(2), .text("Bob")],
+    ] as Array<Array<Value>>
+    let catalog = Memory([
+      "Parent": Relation(parent, parents),
+      "Child": Relation(child, children),
+    ])
+    let rows = try Engine.run(parse("""
+        SELECT Child.Name, Parent.Name FROM Child
+          JOIN Parent ON Parent.Id = Child.Pid
+        """), catalog)
+    #expect(rows == [
+      [.text("Ann"), .text("Ada")],
+      [.text("Bob"), .text("Bee")],
+    ])
+  }
+
+  @Test("a seekable inner filter seeks the hash inner rather than scanning it")
+  func filtered() throws {
+    // `Parent.Code` (the join key) is unseekable, so the join hashes the inner;
+    // `Parent.Id` is sorted (seekable and ordered). `Child JOIN Parent ON
+    // Parent.Code = Child.Code WHERE Parent.Id < 0` pushes `Parent.Id < 0` onto
+    // the inner. Applied DURING inner materialisation, that contradictory
+    // seekable filter seeks the inner to an empty run — every `Id` is positive —
+    // so ZERO Parent rows are read and the query returns []. Before the fix the
+    // filter rode the residual ABOVE the join, so the whole inner was scanned and
+    // bucketed (three reads) before the filter matched none of it.
+    let reads = Counter()
+    let parent = [
+      Field(name: "Id", kind: .integer),
+      Field(name: "Code", kind: .integer),
+    ]
+    let parents = [
+      [.integer(1), .integer(10)],
+      [.integer(2), .integer(20)],
+      [.integer(3), .integer(30)],
+    ] as Array<Array<Value>>
+    let child = [
+      Field(name: "Code", kind: .integer),
+      Field(name: "Kid", kind: .text),
+    ]
+    let children = [
+      [.integer(10), .text("Ann")],
+      [.integer(20), .text("Bob")],
+    ] as Array<Array<Value>>
+    // `Parent` is sorted on `Id` (column 0), so `Id` seeks but the join key
+    // `Code` (column 1) does not — forcing the hash path.
+    let catalog = Memory([
+      "Parent": Relation(parent, parents, sorted: 0, counter: reads),
+      "Child": Relation(child, children),
+    ])
+    let rows = try Engine.run(parse("""
+        SELECT Child.Kid, Parent.Id FROM Child
+          JOIN Parent ON Parent.Code = Child.Code WHERE Parent.Id < 0
+        """), catalog)
+    #expect(rows.isEmpty)
+    #expect(reads.reads == 0)
   }
 }
 

@@ -490,11 +490,16 @@ public enum Engine {
   /// through `ordinals` (slot `i` is `ordinals[i]`) for the `bound` query. A
   /// `string` operand or an unseekable column never qualifies, and the executor
   /// scans.
-  private static func boundaries<T: Table & ~Escapable>(_ filter: Filter,
-                                                        _ ordinals: Array<Int>,
-                                                        _ table: borrowing T,
-                                                        _ count: Int,
-                                                        _ bindings: Bindings)
+  ///
+  /// The hash-join executor reuses this over a pushed inner filter's conjuncts
+  /// to seek the inner by a seekable conjunct before bucketing, so a
+  /// seekable/contradictory inner filter reads few or no inner rows — hence it is
+  /// `internal` rather than private to `seek`.
+  internal static func boundaries<T: Table & ~Escapable>(_ filter: Filter,
+                                                         _ ordinals: Array<Int>,
+                                                         _ table: borrowing T,
+                                                         _ count: Int,
+                                                         _ bindings: Bindings)
       -> Range<Int>? {
     guard let (slot, op, value) = comparison(filter, bindings),
         let lower = table.bound(ordinals[slot], value, strict: false),

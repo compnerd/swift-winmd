@@ -371,20 +371,25 @@ private func product(_ outer: Array<Record>, _ inner: Array<Record>)
   return records
 }
 
-/// The index-nested-loop equi-join of `outer` against the inner relation `name`.
+/// The equi-join of `outer` against the inner relation `name`, seeking the
+/// inner per outer record when its key `column` is seekable and hashing it once
+/// otherwise.
 ///
-/// The inner relation is re-resolved through `catalog`. For each outer record,
-/// the value at slot `keys.left` is the probe. When that value is an integer
-/// and the inner reports `column` (the inner ordinal `keys.right` reads)
-/// seekable, the inner is seeked to its `[lower, upper)` run; otherwise the
-/// whole inner is scanned. Each candidate is materialised over the referenced
-/// `ordinals` into inner slots `0 ..< ordinals.count`; a candidate is admitted
-/// only when the pushed inner `filter` (in the inner's standalone slot space)
-/// also holds — applied WHILE the inner row is materialised, so a filtered inner
-/// row is never paired — then re-tested for the inner's `keys.right` slot —
-/// `keys.right - base` in the standalone inner record — equal to `value`, the
-/// seek narrowing the scan but the equality being the join's truth, and a match
-/// is concatenated (the inner's slots landing at `base` in the combined space).
+/// The inner relation is re-resolved through `catalog`. When the inner reports
+/// `column` (the inner ordinal `keys.right` reads) seekable, each outer record's
+/// key seeks the inner's `[lower, upper)` run — an index-nested loop, cheap
+/// because the seek narrows the scan. When it is NOT seekable, a per-outer scan
+/// would read the whole inner once per outer record (O(n·m)); instead the inner
+/// is scanned ONCE into a hash map keyed by its join value, and each outer
+/// record probes it in O(1). Both strategies materialise a candidate over the
+/// referenced `ordinals` into inner slots `0 ..< ordinals.count`, admit it only
+/// when the pushed inner `filter` (in the inner's standalone slot space) also
+/// holds — applied WHILE the inner row is materialised, so a filtered inner row
+/// is never paired or bucketed — key on the inner's `keys.right` slot —
+/// `keys.right - base` in the standalone inner record — and concatenate a match
+/// (the inner's slots landing at `base` in the combined space). A NULL key joins
+/// to nothing under both, and both preserve outer-major order, the inner matches
+/// in cursor order within each outer.
 ///
 /// - Throws: `SQLError.relation` if the inner name no longer resolves.
 private func join<C: Catalog & ~Escapable>(_ outer: Array<Record>,
@@ -398,6 +403,11 @@ private func join<C: Catalog & ~Escapable>(_ outer: Array<Record>,
                                            _ bindings: Bindings)
     throws(SQLError) -> Array<Record> {
   guard let inner = catalog.table(named: name) else { throw .relation(name) }
+  guard seekable(inner, column) else {
+    return try hashed(outer, inner, ordinals, base, keys, filter, routines,
+                      bindings)
+  }
+
   let cursor = inner.cursor()
   let slot = keys.right - base
   var records = Array<Record>()
@@ -420,6 +430,108 @@ private func join<C: Catalog & ~Escapable>(_ outer: Array<Record>,
     }
   }
   return records
+}
+
+/// The hash equi-join of `outer` against `inner`: the inner scanned once into a
+/// value → records map keyed on its join column, then each outer record probed
+/// in O(1).
+///
+/// The inner is materialised over `ordinals` into standalone slots, its key the
+/// slot `keys.right - base`; a NULL-keyed inner record joins to nothing and is
+/// never bucketed. Each bucket keeps its rows in cursor order, so probing an
+/// outer record in outer order yields the same outer-major, inner-cursor-order
+/// result the seek path does. An outer NULL key probes nothing.
+///
+/// A pushed inner `filter` (in the inner's standalone slot space) is applied
+/// DURING this scan, before a row is bucketed: the inner is SEEKED by the
+/// filter's seekable conjunct — `Engine.boundaries` over each conjunct, the same
+/// boundary logic the scan seek uses, mapping a slot back to its table column
+/// through `ordinals` — so a seekable/contradictory inner filter reads few or no
+/// inner rows rather than scanning the whole table; when no conjunct is seekable
+/// the whole inner scans. Each read row is then admitted only when the whole
+/// `filter` holds, so a filtered inner row is never bucketed or paired.
+///
+/// An outer with no non-null key has no probe that can match — an empty outer
+/// has no probes at all, and a NULL key joins to nothing — so no match can
+/// result; return before scanning and bucketing the inner rather than reading
+/// every inner row to answer nothing. The nested-loop path this replaces read
+/// zero inner rows for such an outer, and a selective or contradictory outer
+/// WHERE (`… WHERE key IS NULL`, or one pruning every row) must not force a full
+/// scan of a large unseekable inner.
+private func hashed<T: Table & ~Escapable>(_ outer: Array<Record>,
+                                           _ inner: borrowing T,
+                                           _ ordinals: Array<Int>, _ base: Int,
+                                           _ keys: (left: Int, right: Int),
+                                           _ filter: Filter?,
+                                           _ routines: Routines,
+                                           _ bindings: Bindings)
+    throws(SQLError) -> Array<Record> {
+  guard outer.contains(where: {
+    if case .null = $0[keys.left] { false } else { true }
+  }) else { return [] }
+
+  let cursor = inner.cursor()
+  let slot = keys.right - base
+  // Seek the inner by the pushed filter's seekable conjunct, so a
+  // seekable/contradictory inner filter reads few or no rows; scan the whole
+  // inner when the filter has none (or when there is no filter).
+  let range = seek(filter, ordinals, inner, cursor.count, bindings)
+  var buckets = Dictionary<Value, Array<Record>>()
+  for index in range {
+    guard let row = cursor.row(index) else { continue }
+    let right = Record(row, ordinals)
+    // Apply the whole pushed filter before bucketing — a filtered inner row is
+    // never a join candidate.
+    if let filter,
+        try evaluate(filter, right, routines, bindings) != true { continue }
+    let key = right[slot]
+    if case .null = key { continue }
+    buckets[key, default: Array<Record>()].append(right)
+  }
+
+  var records = Array<Record>()
+  for left in outer {
+    let value = left[keys.left]
+    if case .null = value { continue }
+    for right in buckets[value] ?? [] {
+      records.append(left.merged(with: right))
+    }
+  }
+  return records
+}
+
+/// The inner row range the hash join scans and buckets: the `[lower, upper)`
+/// seeked by `filter`'s first seekable conjunct — `Engine.boundaries` over each,
+/// mapping a slot to its table column through `ordinals` — else the whole
+/// `0 ..< count` when no conjunct qualifies (or there is no filter).
+private func seek<T: Table & ~Escapable>(_ filter: Filter?,
+                                         _ ordinals: Array<Int>,
+                                         _ inner: borrowing T, _ count: Int,
+                                         _ bindings: Bindings) -> Range<Int> {
+  guard let filter else { return 0 ..< count }
+  for conjunct in filter.conjuncts {
+    if let range =
+        Engine.boundaries(conjunct, ordinals, inner, count, bindings) {
+      return range
+    }
+  }
+  return 0 ..< count
+}
+
+/// Whether the inner `column` of `table` can be seeked — the executor probes it
+/// per outer record — as opposed to needing a hash build.
+///
+/// A seekable column reports a boundary for a valid key; an unseekable one
+/// reports `nil`. The probe key must be a VALID one: a decoded coded-index join
+/// key is 1-based and reports `nil` for the null reference `0`, so probing with
+/// `0` would misclassify a seekable coded-index column as unseekable and force a
+/// hash build even for a selective join. `1` — the least valid key — answers for
+/// every seekable column (`rowid`, list `parent`, a sorted key, a coded-index
+/// key); its value is otherwise irrelevant, since this is only a capability
+/// check (the join loop seeks with the real outer key).
+private func seekable<T: Table & ~Escapable>(_ table: borrowing T,
+                                             _ column: Int) -> Bool {
+  table.bound(column, 1, strict: false) != nil
 }
 
 /// The inner range to probe for `value` on `column` of `table` of `count` rows:

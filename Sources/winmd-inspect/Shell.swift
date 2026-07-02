@@ -192,6 +192,45 @@ internal struct Render: Metacommand {
   }
 }
 
+/// `.template <name> '<body>'` — define a Mustache template inline as a single-
+/// quoted (possibly multiline) string literal, then render through it.
+///
+/// A template is usually a file; this lets one be written at the prompt with no
+/// file and no magic terminator. `arguments` is `<name> '<body>'`: the name is
+/// the first whitespace-delimited token, the body the single-quoted literal that
+/// follows — from the first `'` to its matching close, with `''` unescaped to a
+/// literal `'`. Because the body is quote-delimited DATA, `.end`, `;`, `{{…}}`,
+/// and `"` all appear verbatim; only a literal `'` needs doubling. The stream's
+/// open-quote accumulation (`Statements`) hands the whole multiline block here as
+/// one statement. `execute` stores the body in the shell's `templates`, so a
+/// later `.render <iface> <name>` renders through it (shadowing a file); the body
+/// still declares its language with a leading `{{! language: … }}` directive, the
+/// same as a file template.
+internal struct Template: Metacommand {
+  internal static let spelling = ".template"
+
+  /// The template name — the first whitespace-delimited token of `arguments`.
+  internal let name: String
+
+  /// The template body — the single-quoted literal after the name, `''`
+  /// unescaped to a literal `'`. Empty when no quoted literal follows the name.
+  internal let body: String
+
+  internal init(_ arguments: Substring) {
+    let text = arguments.trimmed
+    let split = text.firstIndex(where: \.isWhitespace)
+    name = String(split.map { text[..<$0] } ?? text[...])
+    let rest = split.map { text[$0...].trimmed } ?? ""
+    body = unquote(rest)
+  }
+
+  internal func execute(against shell: inout Shell) throws {
+    guard !name.isEmpty else { throw Shell.MetaError.unknown(Template.spelling) }
+    shell.templates[name] = body
+    note("defined template \(name)")
+  }
+}
+
 // MARK: - Shell
 
 /// The interactive `query` shell — a `sqlite3`-style REPL — driving a `Session`.
@@ -219,6 +258,11 @@ internal struct Shell: ~Escapable {
   /// :name`) resolves. Empty initially; a `CREATE VIEW` ignores them, binding
   /// only when a later `SELECT` reads the view.
   internal var bindings: Bindings = [:]
+
+  /// The inline templates `.template` has defined, keyed by name. Empty
+  /// initially; `template(named:)` returns one when present, so an inline
+  /// template shadows a `-I` directory's file and the bundle for the session.
+  internal var templates: Dictionary<String, String> = [:]
 
   /// Whether a statement fault ends the run (an explicit batch) or is reported
   /// to stderr and skipped (the interactive/redirected shell). `.read` inherits
@@ -248,7 +292,8 @@ internal struct Shell: ~Escapable {
   /// computed so the metatype array (not `Sendable`) is not a shared mutable
   /// global.
   private static var commands: Array<any Metacommand.Type> {
-    [Tables.self, Help.self, Quit.self, Read.self, Render.self, Bind.self]
+    [Tables.self, Help.self, Quit.self, Read.self, Render.self, Bind.self,
+     Template.self]
   }
 
   /// The command summary `.help` prints.
@@ -257,6 +302,9 @@ internal struct Shell: ~Escapable {
     .read <path>            run a file of `;`-separated SQL statements
     .render <iface> <tmpl>  render an interface (or `*`) through a template
     .bind <name> <value>    bind a `:name` parameter (no value clears it)
+    .template <name> '…'    define an inline Mustache template (multiline
+                            single-quoted; `''` for a literal quote; declare
+                            the language with a leading `{{! language: … }}`)
     .help                   show this help
     .quit                   leave the shell
     <sql>                   run a SQL statement (trailing `;` optional)
@@ -366,7 +414,9 @@ internal struct Shell: ~Escapable {
     // <name> }}` directive; stripping it yields the body and loads the matching
     // spec, whose render UDFs (`ESCAPE`, `RETURNS`) make identifier escaping and
     // the no-value return the queries' concern, not the binary's.
-    var body = try Shell.template(named: template, search: search)
+    // `self.` disambiguates the `template(named:)` accessor from the `template`
+    // parameter that names the one to load.
+    var body = try self.template(named: template, search: search)
     let language = Shell.language(declaredIn: &body, search: search)
     let routines = language.routines
     // The type spellings are decoded at render time from the spec's `Dialect`:
@@ -467,15 +517,18 @@ internal struct Shell: ~Escapable {
     return sources.joined(separator: "\n")
   }
 
-  /// The text of the Mustache template named `name`, loaded through the search
-  /// path (a `-I` directory's `Templates/<name>.mustache`) then the bundled
-  /// `Resources/Templates/<name>.mustache`.
+  /// The text of the Mustache template named `name` — an inline template
+  /// `.template` registered when `templates` carries one, else loaded through the
+  /// search path (a `-I` directory's `Templates/<name>.mustache`) then the
+  /// bundled `Resources/Templates/<name>.mustache`.
   ///
-  /// The render's presentation tier is a named resource, not a literal: `com`
-  /// is the one bundled template (the `@com` protocol shape), and adding a
-  /// target later is dropping in another `.mustache` beside it — or shadowing
-  /// one through a `-I` directory — no code change. A name no search directory
-  /// and no bundle resolves raises `RenderError.template`.
+  /// An inline template shadows a file of the same name, so `.template com '…'`
+  /// overrides the bundled `com` for the session. Otherwise the render's
+  /// presentation tier is a named resource, not a literal: `com` is the one
+  /// bundled template (the `@com` protocol shape), and adding a target later is
+  /// dropping in another `.mustache` beside it — or shadowing one through a `-I`
+  /// directory — no code change. A name no inline template, search directory, and
+  /// bundle resolves raises `RenderError.template`.
   ///
   /// The `com` template emits the `@com` protocol style: a leading `{{! language:
   /// swift }}` directive naming its spec, the `@com(interface:)` attribute, `public
@@ -486,8 +539,9 @@ internal struct Shell: ~Escapable {
   /// presence (`{{#base}}`/`{{#returns}}`). Its interpolations are triple-mustache
   /// (`{{{…}}}`, raw) rather than double: the output is Swift source, not HTML, so
   /// the type spellings' angle brackets (`UnsafePointer<…>`) must not be escaped.
-  private static func template(named name: String,
-                               search: Array<String>) throws -> String {
+  internal borrowing func template(named name: String,
+                                   search: Array<String>) throws -> String {
+    if let inline = templates[name] { return inline }
     guard let url = resource(name, "mustache", kind: "Templates",
                              search: search)
     else { throw RenderError.template(name) }
@@ -593,6 +647,16 @@ private func resource(_ name: String, _ ext: String, kind: String,
 /// meta statement, or a SQL statement accumulated across lines until a
 /// terminating `;`. This is the `;`-accumulation the old loop did, lifted into
 /// an ordinary iterator so the driving is a literal `for`-in.
+///
+/// A `.`-meta whose single-quoted string is still OPEN (an unbalanced `'`) is
+/// the one exception to the whole-line rule: it accumulates subsequent RAW lines
+/// verbatim until the quote closes, yielding the whole block as one statement —
+/// the shape `.template <name> '<body>'` takes, a Mustache template written
+/// inline as a multiline single-quoted literal. Because the body is
+/// quote-delimited DATA, `.end`, `;`, and `{{…}}` inside it are verbatim, never
+/// a terminator; only a literal `'` needs doubling. The open-quote test is the
+/// same quote scan `terminator(in:)` runs (`''` an escaped quote), shared as
+/// `open(in:)`.
 internal struct Statements: Sequence {
   /// The line source — `readLine` for stdin, or a closure over a string's
   /// lines for the argument and `.read`.
@@ -648,11 +712,17 @@ internal struct Statements: Sequence {
 
     /// The next statement, or `nil` at end of input.
     ///
-    /// A `.`-meta line (when no statement is pending) yields whole. Otherwise
-    /// lines accumulate until a `;` closes a statement, which yields; a trailing
-    /// unterminated statement yields at end of input — the closing `;` is
-    /// optional, so a one-shot query or a file without a final terminator runs
-    /// its last statement.
+    /// A `.`-meta line (when no statement is pending) yields whole — unless its
+    /// single-quoted string is still OPEN (an unbalanced `'`), in which case it
+    /// begins a multiline meta whose subsequent RAW lines accumulate verbatim
+    /// (joined with `\n`, no `;`-splitting, no per-line `.`-meta handling) until
+    /// the quote closes, and the whole block yields as ONE statement; the inline
+    /// `.template <name> '<body>'` command is that shape, so `.end`, `;`, and
+    /// `{{…}}` inside the body are data, never a terminator. Otherwise lines
+    /// accumulate until a `;` closes a statement, which yields; a trailing
+    /// unterminated statement (or an unterminated multiline meta) yields at end
+    /// of input — the closing `;` is optional, so a one-shot query or a file
+    /// without a final terminator runs its last statement.
     internal mutating func next() -> String? {
       while true {
         // Drain any completed statement already accumulated.
@@ -675,13 +745,40 @@ internal struct Statements: Sequence {
         }
         // A `.`-meta line yields whole when no statement is pending — a
         // whitespace-only spacer line before it is nothing, so drop it rather
-        // than gluing the meta line onto it.
+        // than gluing the meta line onto it. `.template` alone carries a single-
+        // quoted (possibly multiline) body: when ITS quote is left open, keep
+        // accumulating raw lines until the quote closes, then yield the whole
+        // block as one statement. Every other meta yields whole, so an
+        // apostrophe in an argument — a `.read /tmp/O'Brien.sql` path — is data,
+        // not an unterminated literal that would swallow the following lines.
         if pending.trimmed.isEmpty, line.trimmed.first == "." {
-          pending = ""
-          return line.trimmed
+          let meta = line.trimmed
+          let spelling = meta.prefix { !$0.isWhitespace }
+          guard spelling == Template.spelling, Iterator.open(in: meta) else {
+            pending = ""
+            return meta
+          }
+          return accumulate(meta)
         }
         pending += pending.isEmpty ? line : "\n" + line
       }
+    }
+
+    /// Accumulates the `.template` block whose single-quoted body is open,
+    /// starting from `meta` (its first, trimmed line), reading RAW lines
+    /// verbatim (joined with `\n`, no `;`-splitting, no per-line `.`-meta
+    /// handling) until the quote closes, then yielding the whole block as one
+    /// statement. End of input before the quote closes flushes what was
+    /// captured — the closing `'` is as optional as a trailing `;`.
+    private mutating func accumulate(_ meta: String) -> String {
+      var block = meta
+      while Iterator.open(in: block) {
+        prompt?(true)
+        guard let line = lines() else { break }
+        block += "\n" + line
+      }
+      pending = ""
+      return block
     }
 
     /// The index in `text` of the first `;` that terminates a statement — one
@@ -689,30 +786,57 @@ internal struct Statements: Sequence {
     /// (including when `text` trails off inside a literal whose closing quote
     /// has not arrived yet). A `;` inside `'…'` is data, not a terminator, so
     /// the split matches what the SQL lexer scans (`''` is an escaped quote).
+    ///
+    /// It runs the same single-scan quote tracking `open(in:)` does — advancing
+    /// through `'…'` (a doubled `''` an escaped quote) — and returns the first
+    /// unquoted `;`, so both share one notion of what a literal is.
     private static func terminator(in text: String) -> String.Index? {
       var index = text.startIndex
       var quoted = false
       while index < text.endIndex {
-        let character = text[index]
-        if quoted {
-          // A doubled `''` is an escaped quote: consume it and stay inside the
-          // literal. A lone `'` closes the literal.
-          if character == "'" {
-            let next = text.index(after: index)
-            if next < text.endIndex, text[next] == "'" {
-              index = next
-            } else {
-              quoted = false
-            }
-          }
-        } else if character == "'" {
-          quoted = true
-        } else if character == ";" {
-          return index
-        }
+        if Iterator.scan(text, &index, &quoted) { continue }
+        if !quoted, text[index] == ";" { return index }
         index = text.index(after: index)
       }
       return nil
+    }
+
+    /// Whether `text` ends inside an unclosed single-quoted literal — the shared
+    /// quote-state scan lifted out so the multiline meta accumulation and
+    /// `terminator(in:)` reuse one implementation. A doubled `''` is an escaped
+    /// quote (it stays inside the literal); a lone `'` toggles. `false` when
+    /// every `'` is balanced, so the line stands complete.
+    private static func open(in text: String) -> Bool {
+      var index = text.startIndex
+      var quoted = false
+      while index < text.endIndex {
+        if Iterator.scan(text, &index, &quoted) { continue }
+        index = text.index(after: index)
+      }
+      return quoted
+    }
+
+    /// Advances the quote state at `index` in `text`: enters a literal on an
+    /// opening `'`, and inside one consumes a doubled `''` as an escaped quote
+    /// (skipping both) or closes on a lone `'`. Returns `true` when it already
+    /// advanced `index` past the pair (the caller must not step again), `false`
+    /// when `index` still points at the character to consider — the single point
+    /// both scans agree on what a single-quoted literal is.
+    private static func scan(_ text: String, _ index: inout String.Index,
+                             _ quoted: inout Bool) -> Bool {
+      let character = text[index]
+      if quoted {
+        guard character == "'" else { return false }
+        let next = text.index(after: index)
+        if next < text.endIndex, text[next] == "'" {
+          index = text.index(after: next)
+          return true
+        }
+        quoted = false
+      } else if character == "'" {
+        quoted = true
+      }
+      return false
     }
   }
 }

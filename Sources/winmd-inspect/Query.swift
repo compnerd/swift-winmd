@@ -23,6 +23,13 @@ internal import WinMD
 /// `.quit`'s `Shell.Stop` breaking the loop; the explicit-argument batch stays
 /// fail-fast, propagating a statement error (only `.quit`'s `Stop` is caught, to
 /// end cleanly).
+///
+/// The shell threads its `.bind` bindings into every SQL statement, so a
+/// parameterized query (`WHERE col = :name`) resolves its `:name` at the prompt.
+/// A `.template <name> '<body>'` defines a Mustache template inline: its body is
+/// a single-quoted (possibly multiline) literal the statement stream accumulates
+/// while its quote stays open, so `.end`, `;`, and `{{…}}` inside the body are
+/// data, not terminators — only a literal `'` needs doubling.
 internal struct Query: ParsableCommand {
   internal static var configuration: CommandConfiguration {
     CommandConfiguration(commandName: "query",

@@ -15,9 +15,9 @@ import SQL
 /// — and drive a parsed `SELECT` through `Engine.run` over the `WinMD.Storage`
 /// catalog, asserting the typed `Value` rows the engine yields. They exercise a
 /// single-relation projection / filter / order with the `Id` virtual column
-/// and a sorted-key seek, a foreign-key join on `Id`, a list join on the
-/// `parent` virtual column, and a real `Parent` column shadowing that
-/// pseudo-column.
+/// and a sorted-key seek, a foreign-key join on `Id`, a list join on the owner
+/// foreign-key column (a `MethodDef`'s `TypeDef`), and a real `Parent` column
+/// that is an ordinary foreign key.
 struct AdapterTests {
   // TypeDef[0..1] (14-byte narrow rows), MethodDef[0..2] (14-byte rows), and
   // NestedClass[0..1] (4-byte rows), packed back to back. ECMA-335 rows are
@@ -37,8 +37,8 @@ struct AdapterTests {
   //   EventMap[0]: Parent=1 EventList=1   (→ TypeDef[0], Alpha)
   //   EventMap[1]: Parent=2 EventList=1   (→ TypeDef[1], Beta)
   //
-  // `EventMap` carries a *real* `Parent` field (a TypeDef index), so its name
-  // must shadow the virtual `parent` pseudo-column.
+  // `EventMap` carries a *real* `Parent` field (a TypeDef index), an ordinary
+  // foreign key; `EventMap` owns no list, so it has no owner-FK column.
   private static let bytes: Array<UInt8> = [
     // TypeDef[0]: Flags, TypeName=1, TypeNamespace=12, Extends, FieldList,
     // MethodList=1.
@@ -120,7 +120,7 @@ struct AdapterTests {
     // The string columns project as text, the constant as an integer; the
     // WHERE keeps both rows (both are in "NS"), and ORDER BY TypeName sorts
     // Alpha < Beta. `SELECT *` is the two real string heaps plus the constant
-    // and the three index columns — never `Id` or `parent`.
+    // and the three index columns — never `Id` or an owner-FK column.
     try AdapterTests.with { catalog in
       let rows = try AdapterTests.run(
           "SELECT TypeName, Flags FROM TypeDef "
@@ -132,10 +132,10 @@ struct AdapterTests {
     }
   }
 
-  @Test("excludes Id and parent from SELECT *")
+  @Test("excludes Id and the owner FK from SELECT *")
   func star() throws {
     // `SELECT *` projects exactly the real fields: a TypeDef has six. Neither
-    // the `Id` nor the `parent` virtual column appears.
+    // the `Id` nor an owner-foreign-key virtual column appears.
     try AdapterTests.with { catalog in
       let rows = try AdapterTests.run("SELECT * FROM TypeDef ORDER BY Id",
                                       catalog)
@@ -189,16 +189,16 @@ struct AdapterTests {
     }
   }
 
-  @Test("joins a list child to its owner on parent")
+  @Test("joins a list child to its owner on the owner FK")
   func listJoin() throws {
-    // The `parent` virtual column relates each MethodDef to the TypeDef whose
+    // The `TypeDef` owner-FK column relates each MethodDef to the TypeDef whose
     // MethodList run owns it: MethodDef[0,1] → TypeDef[0] (Alpha), MethodDef[2]
     // → TypeDef[1] (Beta). The join seeks TypeDef on its `Id` per method.
     try AdapterTests.with { catalog in
       let rows = try AdapterTests.run(
           "SELECT MethodDef.Name, TypeDef.TypeName "
           + "FROM MethodDef JOIN TypeDef "
-          + "ON MethodDef.parent = TypeDef.Id "
+          + "ON MethodDef.TypeDef = TypeDef.Id "
           + "ORDER BY MethodDef.Name", catalog)
       #expect(rows == [
         [.text("m0"), .text("Alpha")],
@@ -208,11 +208,11 @@ struct AdapterTests {
     }
   }
 
-  @Test("resolves a real Parent column over the parent pseudo-column")
-  func realParentShadowsPseudo() throws {
-    // EventMap carries a real `Parent` field — a TypeDef index — so the name
-    // must resolve to that foreign key, not the virtual `parent` (which is 0
-    // for a table no list owns). EventMap[0].Parent=1, EventMap[1].Parent=2.
+  @Test("resolves a real Parent foreign-key column")
+  func realParentColumn() throws {
+    // EventMap carries a real `Parent` field — a TypeDef index — and owns no
+    // list, so it has no owner-FK column: the name resolves to that ordinary
+    // foreign key. EventMap[0].Parent=1, EventMap[1].Parent=2.
     try AdapterTests.with { catalog in
       let rows = try AdapterTests.run(
           "SELECT Parent FROM EventMap ORDER BY Id", catalog)

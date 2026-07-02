@@ -351,7 +351,7 @@ struct DatabaseSQLTests {
     // When `GuidAttribute` is defined in the same file, a type's
     // `CustomAttribute.Type` names the attribute's `.ctor` directly as a
     // `MethodDef` (not a cross-module `MemberRef`), so the `MemberRef` chains
-    // find nothing: the view's `Type_MethodDef → MethodDef.parent → TypeDef`
+    // find nothing: the view's `Type_MethodDef → MethodDef.TypeDef → TypeDef`
     // arm navigates it instead. `IThing` carries such an attribute, so the view
     // resolves its IID.
     try SameModuleGuidFixture.with { catalog in
@@ -406,7 +406,7 @@ struct DatabaseSQLTests {
   @Test("excludes the virtual columns from SELECT *")
   func star() throws {
     // `SELECT *` projects exactly the six real `TypeDef` fields — neither
-    // `Id` nor `parent` appears — for each of the two fixture types.
+    // `Id` nor an owner-FK column appears — for each of the two fixture types.
     try DatabaseSQLTests.with { catalog in
       let rows = try DatabaseSQLTests.run("SELECT * FROM TypeDef", catalog)
       #expect(rows.count == 2)
@@ -1113,7 +1113,7 @@ private enum SameModuleGuidFixture {
   //                a `MemberRef` into the in-file `TypeDef` (the `Class_TypeDef`
   //                arm).
   //   MethodDef[0]: Name=0, Signature=0, ParamList=1 — the `GuidAttribute`
-  //                `.ctor`, owned by TypeDef[0] (so its `parent` is Id 1).
+  //                `.ctor`, owned by TypeDef[0] (so its `TypeDef` FK is Id 1).
   //   MemberRef[0]: Class=MemberRefParent(TypeDef row 1)=(1<<3)|0=8 — the ctor
   //                reference whose declaring class is the in-file `GuidAttribute`
   //                `TypeDef`, so `Class_TypeDef` (not `Class_TypeRef`) decodes.

@@ -142,17 +142,18 @@ public protocol Table: ~Escapable {
   ///
   /// A relation knows its own column names; the engine reads them to lift a
   /// base table's resolution onto an escapable `Schema` so a join may resolve a
-  /// view against a base table uniformly. The virtual columns (`Id`,
-  /// `parent`) are not in `names`; they resolve through `ordinal(of:)`.
+  /// view against a base table uniformly. The virtual columns (`Id`, an owner
+  /// foreign key) are not in `names`; they resolve through `ordinal(of:)`.
   var names: Array<String> { get }
 
   /// The virtual column names, in ordinal order — virtual `i` of `virtuals`
   /// sits at ordinal `width + i`.
   ///
-  /// A virtual column is computed by the `Row` rather than stored (an `Id`, a
-  /// `parent`); naming them lets the engine lift resolution onto an escapable
-  /// `Schema`. The default is empty — a relation overrides it only when it
-  /// computes a virtual column, and then its `extent` is `width + virtuals.count`.
+  /// A virtual column is computed by the `Row` rather than stored (an `Id`, an
+  /// owner foreign key); naming them lets the engine lift resolution onto an
+  /// escapable `Schema`. The default is empty — a relation overrides it only
+  /// when it computes a virtual column, and then its `extent` is `width +
+  /// virtuals.count`.
   var virtuals: Array<String> { get }
 
   /// One past the highest ordinal this table can address — its real `width`

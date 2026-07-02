@@ -33,20 +33,22 @@ internal import WinMD
 /// method/parameter's signature and apply a target `Dialect`.
 ///
 /// Past `Id` sit a relation's join keys, at ordinals `width + 1` onward —
-/// the columns a view equi-joins across. A list-owned table leads the
-/// group with `parent` (the list-child's owning parent's `Id`), which enables
-/// list joins — a list-child relates to its owner through its run rather than a
-/// stored key — and a non-list table simply has no `parent` column. The
-/// coded-index join keys follow: for every real coded-index column a relation
-/// has, one decoded column per candidate target table the coded index admits,
-/// named `<ColumnName>_<TargetSchemaName>` (e.g. a `CustomAttribute.Parent` of
-/// kind `HasCustomAttribute` admitting `TypeDef` yields `Parent_TypeDef`). Its
-/// value is the target's 1-based `Id` when the cell's coded index tags that
-/// target (and is non-null), else SQL `NULL`, so a view can equi-join across a
-/// coded index — `JOIN Target ON child.<col>_<Target> = Target.Id` matches
-/// exactly the rows whose coded index points at `Target`. These are derived
-/// purely from the schema's coded-index fields and their `CodedIndex.tables`,
-/// and — being decoded — are never seekable.
+/// the columns a view equi-joins across. A list-owned table leads the group
+/// with its owner foreign key — a column named for the owning table (e.g. a
+/// `MethodDef`'s `TypeDef`), whose value is the owning row's `Id` — which
+/// enables list joins — a list-child relates to its owner through its run
+/// rather than a stored key — and a non-list table simply has no owner column.
+/// The coded-index join keys follow: for every real coded-index column a
+/// relation has, one decoded column per candidate target table the coded index
+/// admits, named `<ColumnName>_<TargetSchemaName>` (e.g. a
+/// `CustomAttribute.Parent` of kind `HasCustomAttribute` admitting `TypeDef`
+/// yields `Parent_TypeDef`). Its value is the target's 1-based `Id` when the
+/// cell's coded index tags that target (and is non-null), else SQL `NULL`, so a
+/// view can equi-join across a coded index — `JOIN Target ON
+/// child.<col>_<Target> = Target.Id` matches exactly the rows whose coded index
+/// points at `Target`. These are derived purely from the schema's coded-index
+/// fields and their `CodedIndex.tables`, and — being decoded — are never
+/// seekable.
 
 // MARK: - Catalog
 
@@ -171,14 +173,14 @@ extension Session {
 /// A `SQL.Table` over one open WinMD table.
 ///
 /// Its real columns are the table's fields; the virtual columns follow, past the
-/// `SELECT *` extent: `Id` at `width`, then the join keys — `parent` (on a
-/// list-owned table only) leading the coded-index join keys. A real cell is
-/// typed from its field's `ColumnType`: a `#Strings` index is `.text`, a
-/// `#Blob` index is a `.blob`, every other column (a constant, a foreign-key
+/// `SELECT *` extent: `Id` at `width`, then the join keys — the owner foreign
+/// key (on a list-owned table only) leading the coded-index join keys. A real
+/// cell is typed from its field's `ColumnType`: a `#Strings` index is `.text`,
+/// a `#Blob` index is a `.blob`, every other column (a constant, a foreign-key
 /// index, another heap) is `.integer`. A seek is available on `Id` (a dense
-/// 1-based index, trivially monotonic), on `parent` over a list-child (whose
-/// owning run is monotonic in row order), and on the table's intrinsic sort key
-/// when the database physically sorts the table.
+/// 1-based index, trivially monotonic), on the owner foreign key over a
+/// list-child (whose owning run is monotonic in row order), and on the table's
+/// intrinsic sort key when the database physically sorts the table.
 internal struct WinMDRelation: SQL.Table, ~Escapable {
   /// The borrowed storage the relation reads from.
   private let storage: WinMD.Storage
@@ -193,7 +195,7 @@ internal struct WinMDRelation: SQL.Table, ~Escapable {
   }
 
   /// The number of real columns — the extent of a `SELECT *` projection. The
-  /// `Id` and `parent` virtual columns sit past it.
+  /// `Id` and owner-foreign-key virtual columns sit past it.
   internal var width: Int {
     table.schema.fields.count
   }
@@ -209,22 +211,22 @@ internal struct WinMDRelation: SQL.Table, ~Escapable {
   }
 
   /// The virtual column names, in ordinal order — `Id` at `width`, then its
-  /// join keys: `parent` (on a list-owned table only) leading the coded-index
-  /// join keys.
+  /// join keys: the owner foreign key (on a list-owned table only) leading the
+  /// coded-index join keys.
   internal var virtuals: Array<String> {
-    let parent = WinMDRelation.Link(storage, table) == nil ? [] : ["parent"]
+    let owner = self.owner.map { [$0] } ?? [] // the list-ownership key
     return ["Id"] // the universal identity, at `width`
-        + parent // the list-ownership key, present only on a list-owned table
+        + owner // present only on a list-owned table
         + keys.map(\.name) // coded-index join keys
   }
 
   /// One past the highest ordinal this relation can address — its real `width`
-  /// plus the universal `Id` and its join keys (`parent` when list-owned,
-  /// then the coded-index join keys).
+  /// plus the universal `Id` and its join keys (the owner foreign key when
+  /// list-owned, then the coded-index join keys).
   internal var extent: Int {
     width // real fields
         + 1 // `Id`
-        + (WinMDRelation.Link(storage, table) == nil ? 0 : 1) // `parent`
+        + (owner == nil ? 0 : 1) // the owner foreign key
         + keys.count // coded-index join keys
   }
 
@@ -234,13 +236,23 @@ internal struct WinMDRelation: SQL.Table, ~Escapable {
     width
   }
 
-  /// The ordinal of the `parent` virtual column on a list-owned table — the
+  /// The name of the owner foreign-key column on a list-owned table — the
+  /// owning table's schema name (e.g. `TypeDef` for a `MethodDef`) — or `nil`
+  /// when the table owns no list (it then has no owner column).
+  ///
+  /// The name comes straight from the list `Link`'s parent table, so it never
+  /// collides with a real field: no list-child schema carries a field spelled
+  /// like its owner's table.
+  private var owner: String? {
+    WinMDRelation.Link(storage, table)
+        .map { "\($0.parent.description)" }
+  }
+
+  /// The ordinal of the owner foreign-key column on a list-owned table — the
   /// first join-key ordinal, immediately past `Id` — or `nil` when the table
-  /// owns no list (it then has no `parent` column).
-  private var parent: Int? {
-    WinMDRelation.Link(storage, table) == nil
-        ? nil
-        : width + 1
+  /// owns no list (it then has no owner column).
+  private var owned: Int? {
+    owner == nil ? nil : width + 1
   }
 
   internal func ordinal(of name: String) -> Int? {
@@ -252,15 +264,16 @@ internal struct WinMDRelation: SQL.Table, ~Escapable {
     if name.caseInsensitiveCompare("Id") == .orderedSame {
       return id
     }
-    // The join keys follow `Id`. `parent` (on a list-owned table) leads
-    // them; the coded-index join keys follow at `parent + 1` onward (or, on a
-    // non-list table, at the first join-key ordinal).
+    // The join keys follow `Id`. The owner foreign key (on a list-owned table)
+    // leads them; the coded-index join keys follow at `owned + 1` onward (or,
+    // on a non-list table, at the first join-key ordinal).
     let base = id + 1
-    if let parent, name.caseInsensitiveCompare("parent") == .orderedSame {
-      return parent
+    if let owner, let owned,
+        name.caseInsensitiveCompare(owner) == .orderedSame {
+      return owned
     }
     let keys = self.keys
-    let lead = parent == nil ? base : base + 1
+    let lead = owned == nil ? base : base + 1
     for index in keys.indices
         where keys[index].name.caseInsensitiveCompare(name) == .orderedSame {
       return lead + index
@@ -279,10 +292,10 @@ internal struct WinMDRelation: SQL.Table, ~Escapable {
       return min(max(index, 0), count)
     }
 
-    // `parent` over a list-child is monotonic in row order — a parent owns a
-    // contiguous run of children — so binary-search the rows for the boundary
-    // against the computed parent `Id`.
-    if column == parent, let link = WinMDRelation.Link(storage, table) {
+    // The owner foreign key over a list-child is monotonic in row order — an
+    // owner owns a contiguous run of children — so binary-search the rows for
+    // the boundary against the computed owner `Id`.
+    if column == owned, let link = WinMDRelation.Link(storage, table) {
       return owners(link, value, count, strict: strict)
     }
 
@@ -342,22 +355,22 @@ internal struct WinMDRelation: SQL.Table, ~Escapable {
   /// `column` is not one of this table's coded-index join keys.
   ///
   /// The coded-index join keys occupy the ordinals past `Id` and — on a
-  /// list-owned table — the `parent` key, in the order `keys` exposes them;
-  /// this maps `column` back through that layout, the inverse of
+  /// list-owned table — the owner foreign key, in the order `keys` exposes
+  /// them; this maps `column` back through that layout, the inverse of
   /// `ordinal(of:)`'s coded-index-key arm.
   private func key(for column: Int) -> Key? {
     let base = id + 1
-    let lead = parent == nil ? base : base + 1
+    let lead = owned == nil ? base : base + 1
     let index = column - lead
     let all = keys
     guard index >= 0, index < all.count else { return nil }
     return all[index]
   }
 
-  /// The partition point of the child rows against a parent `Id` `value`.
+  /// The partition point of the child rows against an owner `Id` `value`.
   ///
-  /// A child row's `parent` is the 1-based row of its owning parent. The owners
-  /// are non-decreasing across the child rows (a parent's run precedes the
+  /// A child row's owner is the 1-based row of its owning parent. The owners
+  /// are non-decreasing across the child rows (an owner's run precedes the
   /// next), so the boundary is found by binary search: with `strict` false the
   /// first child whose owner is `>= value`, with `strict` true the first whose
   /// owner is `> value`.
@@ -530,7 +543,7 @@ extension WinMD.Storage {
 /// A `SQL.Cursor` over the rows of one open WinMD table.
 ///
 /// It wraps WinMD's own `~Escapable` `Cursor` and carries the relation's list
-/// link, so the rows it vends can compute the `parent` virtual column.
+/// link, so the rows it vends can compute the owner foreign-key column.
 internal struct WinMDCursor: SQL.Cursor, ~Escapable {
   /// The borrowed storage the cursor reads from.
   private let storage: WinMD.Storage
@@ -569,9 +582,9 @@ internal struct WinMDCursor: SQL.Cursor, ~Escapable {
 /// `.text`, a `#Blob` heap index as an owning `.blob` (the raw heap payload,
 /// for a scalar UDF such as `GUID` to decode), every other column `.integer`;
 /// `Id` (`count`) is the 1-based row index; and the join keys follow it — on
-/// a list-owned table the `parent` ordinal is the owning parent row's 1-based
-/// `Id` (zero for a row no parent owns) and the coded-index join keys follow
-/// it, while on a non-list table the coded-index join keys follow `Id`
+/// a list-owned table the owner foreign-key ordinal is the owning parent row's
+/// 1-based `Id` (zero for a row no owner claims) and the coded-index join keys
+/// follow it, while on a non-list table the coded-index join keys follow `Id`
 /// directly. A coded-index join-key ordinal decodes a coded-index cell to the
 /// target's 1-based `Id`, or SQL `NULL` when the cell points elsewhere or is
 /// null.
@@ -602,9 +615,9 @@ internal struct WinMDRow: SQL.Row, ~Escapable {
         return .integer(tuple.index + 1)
       }
       if column > tuple.count {
-        // Past `Id`: the join keys. On a list-owned table `parent` leads
-        // them (the owning parent's 1-based `Id`, zero for a row no parent
-        // owns) and the coded-index join keys follow it; on a non-list table
+        // Past `Id`: the join keys. On a list-owned table the owner foreign key
+        // leads them (the owning parent's 1-based `Id`, zero for a row no owner
+        // claims) and the coded-index join keys follow it; on a non-list table
         // the coded-index join keys follow `Id` directly.
         let virtual = column - (tuple.count + 1)
         guard let link else { return self.key(virtual) }

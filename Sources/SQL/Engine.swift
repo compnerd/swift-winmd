@@ -40,9 +40,143 @@ public enum Engine {
                                                   _ routines: Routines = [:],
                                                   bindings: Bindings = [:])
       throws(SQLError) -> Array<Array<Value>> {
-    let logical = try compile(query, catalog).pushdown()
-    let plan = try optimise(logical, catalog, bindings)
-    return try execute(plan, catalog, routines, bindings).map(\.values)
+    try run(query, catalog, [:], routines, bindings)
+  }
+
+  /// Runs `query` against `catalog` with the common table expressions `ctes` in
+  /// scope (empty for a query with no `WITH`), the resolution phases consulting
+  /// `ctes` before the base catalog.
+  internal static func run<C: Catalog & ~Escapable>(_ query: Query,
+                                                    _ catalog: borrowing C,
+                                                    _ ctes: CTEs,
+                                                    _ routines: Routines,
+                                                    _ bindings: Bindings)
+      throws(SQLError) -> Array<Array<Value>> {
+    let logical = try compile(query, catalog, ctes).pushdown()
+    let plan = try optimise(logical, catalog, ctes, bindings)
+    return try execute(plan, catalog, ctes, routines, bindings).map(\.values)
+  }
+
+  /// Runs a `Statement` against `catalog`, returning its result rows.
+  ///
+  /// A `select` runs its query directly; a `with` materialises its common table
+  /// expressions, in source order, into the `CTEs` the trailing query resolves
+  /// against (see `with`). A `create` defines a view rather than producing
+  /// rows, so it is not runnable and faults with `SQLError.statement`.
+  public static func run<C: Catalog & ~Escapable>(_ statement: Statement,
+                                                  _ catalog: borrowing C,
+                                                  _ routines: Routines = [:],
+                                                  bindings: Bindings = [:])
+      throws(SQLError) -> Array<Array<Value>> {
+    switch statement {
+    case let .select(query):
+      try run(query, catalog, [:], routines, bindings)
+    case let .with(ctes, query):
+      try with(ctes, query, catalog, routines, bindings)
+    case .create:
+      throw .statement("CREATE VIEW defines a view rather than producing rows")
+    }
+  }
+
+  // MARK: - WITH
+
+  /// Materialises the common table expressions `ctes`, in source order, into
+  /// the `CTEs` map and runs the trailing `query` against the base `catalog`
+  /// with that map in scope.
+  ///
+  /// Each CTE materialises against the base `catalog` plus every EARLIER CTE,
+  /// so a CTE may name one defined before it (chained CTEs); a CTE name shadows
+  /// a base relation of the same name (the resolver consults the map first). A
+  /// recursive CTE — one that names itself in its own query — iterates a
+  /// fixpoint (see `fixpoint`); every other CTE, including one a `WITH
+  /// RECURSIVE` marks recursive but which does not reference itself, runs its
+  /// query once and captures its rows. The fully materialised relations then
+  /// resolve the trailing query, run through the same `routines` and
+  /// `bindings`.
+  ///
+  /// Each CTE's body must project exactly the arity its column list declares —
+  /// the resolver advertises `cte.columns.count` columns, so a body of a
+  /// different width would index out of bounds when a later query reads it. The
+  /// body's width is known once it compiles (a `SELECT *` resolves its extent
+  /// against the relations in scope), so its compiled `Plan.width` is checked
+  /// against the declared count BEFORE the CTE materialises — regardless of how
+  /// many rows the body yields. A body filtered to zero rows still faults with
+  /// `SQLError.columns`, where a per-row check would pass it through vacuously.
+  internal static func with<C: Catalog & ~Escapable>(_ ctes: Array<CTE>,
+                                                     _ query: Query,
+                                                     _ catalog: borrowing C,
+                                                     _ routines: Routines,
+                                                     _ bindings: Bindings)
+      throws(SQLError) -> Array<Array<Value>> {
+    var relations = CTEs()
+    for cte in ctes {
+      // A query name repeated in the list (case-insensitively) would silently
+      // shadow the earlier binding in `relations`, so reject it rather than
+      // overwrite — a typo in a multi-CTE query must not change the result.
+      guard relations[cte.name.lowercased()] == nil else {
+        throw .redefinition(cte.name)
+      }
+      // A CTE that names itself iterates a fixpoint; every other one — a
+      // non-recursive CTE, or one a `WITH RECURSIVE` marks recursive but which
+      // does not reference itself — runs its query once. Each resolves against
+      // the base catalog plus the CTEs done so far, its body's compiled width
+      // checked against the declared columns first.
+      let rows: Array<Array<Value>>
+      if cte.recursive && recursive(cte) {
+        rows = try fixpoint(cte, catalog, relations, routines, bindings)
+      } else {
+        let width = try compile(cte.query, catalog, relations).width
+        guard width == cte.columns.count else {
+          throw .columns(expected: cte.columns.count, got: width)
+        }
+        rows = try run(cte.query, catalog, relations, routines, bindings)
+      }
+      relations[cte.name.lowercased()] =
+          Materialised(columns: cte.columns, rows: rows)
+    }
+    return try run(query, catalog, relations, routines, bindings)
+  }
+
+  /// Whether `cte` actually references itself — the test the fixpoint routing
+  /// turns on, distinct from the syntactic `recursive` flag a `WITH RECURSIVE`
+  /// stamps on every member.
+  ///
+  /// The parser marks each member of a `WITH RECURSIVE` list recursive whether
+  /// or not it names itself, but only a self-referential CTE has a recursive arm
+  /// to iterate; running a non-self-referential one through the fixpoint would
+  /// re-evaluate an arm that never reads the CTE, repeating its rows without end
+  /// (a `UNION ALL`) or needlessly (a `UNION`). A CTE is recursive in truth when
+  /// its recursive arm — the right member of the top-level `UNION`, the one the
+  /// fixpoint compiles with the CTE bound — names `cte.name` in a `FROM`/`JOIN`.
+  /// The anchor is the base case, compiled with the name NOT in scope, so a
+  /// `FROM <name>` there reads a base relation of that name, not the CTE.
+  /// Scanning the anchor too would misroute `WITH RECURSIVE Parent(Id) AS
+  /// (SELECT Id FROM Parent UNION ALL SELECT Id FROM Extra)` — whose anchor
+  /// merely reads the same-named base — into the fixpoint.
+  private static func recursive(_ cte: CTE) -> Bool {
+    guard case let .union(_, arm, _) = cte.query else { return false }
+    return references(arm, cte.name.lowercased())
+  }
+
+  /// Whether `select` names the relation `name` (case-folded) in its `FROM` or
+  /// any `JOIN`.
+  private static func references(_ select: Select, _ name: String) -> Bool {
+    if select.from?.name.lowercased() == name { return true }
+    return select.joins.contains { $0.relation.name.lowercased() == name }
+  }
+
+  /// Evaluates a recursive `cte` to a fixpoint over `catalog` with the earlier
+  /// `ctes` in scope.
+  ///
+  /// Not yet implemented — the fixpoint loop lands in a later phase; a recursive
+  /// CTE faults until then.
+  internal static func fixpoint<C: Catalog & ~Escapable>(_ cte: CTE,
+                                                         _ catalog: borrowing C,
+                                                         _ ctes: CTEs,
+                                                         _ routines: Routines,
+                                                         _ bindings: Bindings)
+      throws(SQLError) -> Array<Array<Value>> {
+    throw .statement("recursive WITH is not yet supported")
   }
 
   // MARK: - Compilation
@@ -59,24 +193,27 @@ public enum Engine {
   /// count as the chain's first `SELECT` — the result columns — else
   /// `SQLError.arity`.
   internal static func compile<C: Catalog & ~Escapable>(_ query: Query,
-                                                        _ catalog: borrowing C)
+                                                        _ catalog: borrowing C,
+                                                        _ ctes: CTEs = [:])
       throws(SQLError) -> Plan {
     guard case let .union(left, select, all) = query else {
-      return try compile(query.first, catalog)
+      return try compile(query.first, catalog, ctes)
     }
 
-    let width = try arity(query.first, catalog)
-    let count = try arity(select, catalog)
+    let width = try arity(query.first, catalog, ctes)
+    let count = try arity(select, catalog, ctes)
     guard count == width else { throw .arity(width, count) }
-    return try .union(compile(left, catalog), compile(.select(select), catalog),
-                      all: all)
+    return try .union(compile(left, catalog, ctes),
+                      compile(.select(select), catalog, ctes), all: all)
   }
 
   /// The number of result columns `select` projects — the extent of a `*` over
   /// its relations, else the count of its projected items — for the `UNION`
-  /// arity check. The relations resolve through the borrowed `catalog`.
+  /// arity check. The relations resolve through the borrowed `catalog`, the
+  /// `ctes` consulted first.
   private static func arity<C: Catalog & ~Escapable>(_ select: Select,
-                                                     _ catalog: borrowing C)
+                                                     _ catalog: borrowing C,
+                                                     _ ctes: CTEs)
       throws(SQLError) -> Int {
     switch select.projection {
     case .all:
@@ -84,9 +221,9 @@ public enum Engine {
       guard let relation = select.from else {
         throw .named("SELECT * with no FROM")
       }
-      var width = try resolve(relation, catalog).schema.width
+      var width = try resolve(relation, catalog, ctes).schema.width
       for join in select.joins {
-        try width += resolve(join.relation, catalog).schema.width
+        try width += resolve(join.relation, catalog, ctes).schema.width
       }
       return width
     case let .columns(columns):
@@ -120,7 +257,8 @@ public enum Engine {
   /// `Scan(_, _, nil)`; the optimiser turns scans into seeks and each product
   /// into a join.
   internal static func compile<C: Catalog & ~Escapable>(_ select: Select,
-                                                        _ catalog: borrowing C)
+                                                        _ catalog: borrowing C,
+                                                        _ ctes: CTEs = [:])
       throws(SQLError) -> Plan {
     guard let relation = select.from else {
       // A FROM-less select projects expressions over a single row; a `WHERE`,
@@ -133,7 +271,7 @@ public enum Engine {
       }
       return try scalar(select.projection)
     }
-    let from = try resolve(relation, catalog)
+    let from = try resolve(relation, catalog, ctes)
 
     guard !select.joins.isEmpty else {
       var filter: Filter? = nil
@@ -162,7 +300,7 @@ public enum Engine {
     var joined = Array<Resolved>()
     joined.reserveCapacity(select.joins.count)
     for join in select.joins {
-      try joined.append(resolve(join.relation, catalog))
+      try joined.append(resolve(join.relation, catalog, ctes))
     }
 
     var relations = [(relation, from.schema)]
@@ -269,12 +407,25 @@ public enum Engine {
     let leaf: (Array<Int>) -> Plan
   }
 
-  /// Resolves a `Relation` against `catalog` to its schema and leaf factory.
+  /// Resolves a `Relation` against `catalog` and the in-scope `ctes` to its
+  /// schema and leaf factory.
   ///
-  /// A view shadows a base table of the same name: the catalog is consulted for
-  /// a view first, its `select` compiled to a sub-plan and wrapped in a
-  /// `derived` leaf; otherwise a base table resolves and scans. A name neither
-  /// resolves is `SQLError.relation`.
+  /// A common table expression shadows a base relation of the same name:
+  /// `ctes` is consulted first, a CTE resolving to its materialised schema and
+  /// a `scan` leaf (the executor materialises its records from the rows). Else
+  /// a view shadows a base table — its `select` compiled to a sub-plan in a
+  /// `derived` leaf — and finally a base table scans. A name none resolves is
+  /// `SQLError.relation`.
+  ///
+  /// A view's body compiles OUTSIDE the statement's CTE scope — with an empty
+  /// CTE map, not the caller's `ctes` — so a stored view means exactly what it
+  /// was registered to mean regardless of the `WITH` a caller wraps around it. A
+  /// name that IS a statement CTE has already resolved above (a CTE shadows a
+  /// view, as it shadows a base table), so a name reaching the view branch is
+  /// genuinely a view; letting its body see the caller's CTEs would let an
+  /// unrelated statement-local `WITH Parent AS …` reach into a view whose own
+  /// `FROM Parent` must mean the base relation. The view's `FROM`/`JOIN` names
+  /// therefore resolve against the base catalog (and other views) alone.
   ///
   /// A view's `columns` must name exactly one column per value its query
   /// projects, or the view's schema would let a query index past a sub-plan row.
@@ -282,26 +433,33 @@ public enum Engine {
   /// this is the backstop for a `SELECT *` view, whose width is known only here,
   /// after the sub-plan compiles — a mismatch is `SQLError.columns`.
   private static func resolve<C: Catalog & ~Escapable>(_ relation: Relation,
-                                                       _ catalog: borrowing C)
+                                                       _ catalog: borrowing C,
+                                                       _ ctes: CTEs)
       throws(SQLError) -> Resolved {
-    if let view = catalog.view(named: relation.name) {
-      let plan = try compile(view.query, catalog)
+    let name = relation.name
+    if let cte = ctes[name.lowercased()] {
+      let schema = cte.schema()
+      return Resolved(schema: schema) { ordinals in
+        .scan(name: name, ordinals: ordinals, seek: nil)
+      }
+    }
+
+    if let view = catalog.view(named: name) {
+      let plan = try compile(view.query, catalog, [:])
       let projected = plan.width
       guard view.columns.count == projected else {
         throw .columns(expected: projected, got: view.columns.count)
       }
       let schema = view.schema()
       return Resolved(schema: schema) { ordinals in
-        .derived(name: relation.name, plan: plan, ordinals: ordinals,
-                 seek: nil)
+        .derived(name: name, plan: plan, ordinals: ordinals, seek: nil)
       }
     }
 
-    guard let table = catalog.table(named: relation.name) else {
-      throw .relation(relation.name)
+    guard let table = catalog.table(named: name) else {
+      throw .relation(name)
     }
     let schema = table.schema()
-    let name = relation.name
     return Resolved(schema: schema) { ordinals in
       .scan(name: name, ordinals: ordinals, seek: nil)
     }
@@ -372,6 +530,16 @@ public enum Engine {
                                                          _ catalog: borrowing C,
                                                          _ bindings: Bindings)
       throws(SQLError) -> Plan {
+    try optimise(plan, catalog, [:], bindings)
+  }
+
+  /// Rewrites `plan` into a physical one with the in-scope `ctes` (consulted
+  /// before the base `catalog` for seekability) and `bindings`.
+  internal static func optimise<C: Catalog & ~Escapable>(_ plan: Plan,
+                                                         _ catalog: borrowing C,
+                                                         _ ctes: CTEs,
+                                                         _ bindings: Bindings)
+      throws(SQLError) -> Plan {
     switch plan {
     case .single:
       plan
@@ -380,31 +548,34 @@ public enum Engine {
     case let .derived(name, plan, ordinals, seek):
       // Optimise the view's sub-plan with the bindings so a bound predicate
       // inside the view seeks; the derived leaf itself carries no sort key, so
-      // the outer query still scans its result as is.
-      try .derived(name: name, plan: optimise(plan, catalog, bindings),
+      // the outer query still scans its result as is. The sub-plan resolves
+      // OUTSIDE the statement's CTE scope (an empty CTE map, matching the empty
+      // scope it compiled under) — a view means what it was registered to mean,
+      // never seeing a caller's `WITH`.
+      try .derived(name: name, plan: optimise(plan, catalog, [:], bindings),
                    ordinals: ordinals, seek: seek)
     case let .select(filter, .scan(name, ordinals, nil)):
-      try seek(filter, name, ordinals, catalog, bindings)
+      try seek(filter, name, ordinals, catalog, ctes, bindings)
     case let .select(filter, .product(left, right)):
-      try nest(filter, left, right, catalog, bindings)
+      try nest(filter, left, right, catalog, ctes, bindings)
     case let .select(filter, source):
-      try .select(filter, optimise(source, catalog, bindings))
+      try .select(filter, optimise(source, catalog, ctes, bindings))
     case let .project(ordinals, source):
-      try .project(ordinals, optimise(source, catalog, bindings))
+      try .project(ordinals, optimise(source, catalog, ctes, bindings))
     case let .sort(slot, ascending, source):
       try .sort(slot: slot, ascending: ascending,
-                optimise(source, catalog, bindings))
+                optimise(source, catalog, ctes, bindings))
     case let .product(left, right):
-      try .product(optimise(left, catalog, bindings),
-                   optimise(right, catalog, bindings))
+      try .product(optimise(left, catalog, ctes, bindings),
+                   optimise(right, catalog, ctes, bindings))
     case .join:
       plan
     case let .union(left, right, all):
       // Optimise each side with the same bindings so a bound predicate inside an
       // arm seeks; the union itself merely concatenates and deduplicates,
       // preserving this node's own `all`.
-      try .union(optimise(left, catalog, bindings),
-                 optimise(right, catalog, bindings), all: all)
+      try .union(optimise(left, catalog, ctes, bindings),
+                 optimise(right, catalog, ctes, bindings), all: all)
     }
   }
 
@@ -426,8 +597,14 @@ public enum Engine {
                                                     _ name: String,
                                                     _ ordinals: Array<Int>,
                                                     _ catalog: borrowing C,
+                                                    _ ctes: CTEs,
                                                     _ bindings: Bindings)
       throws(SQLError) -> Plan {
+    // A materialised CTE relation stores no sort key, so it is never seekable —
+    // leave the scan under the whole filter.
+    guard ctes[name.lowercased()] == nil else {
+      return .select(filter, .scan(name: name, ordinals: ordinals, seek: nil))
+    }
     guard let table = catalog.table(named: name) else { throw .relation(name) }
     let count = table.cursor().count
 
@@ -556,6 +733,7 @@ public enum Engine {
                                                     _ left: Plan,
                                                     _ right: Plan,
                                                     _ catalog: borrowing C,
+                                                    _ ctes: CTEs,
                                                     _ bindings: Bindings)
       throws(SQLError) -> Plan {
     let inner: (name: String, ordinals: Array<Int>, filter: Filter?)?
@@ -569,8 +747,9 @@ public enum Engine {
     }
 
     guard let inner, let base = left.slots else {
-      return try gated(filter, .product(optimise(left, catalog, bindings),
-                                        optimise(right, catalog, bindings)))
+      return try gated(filter,
+                       .product(optimise(left, catalog, ctes, bindings),
+                                optimise(right, catalog, ctes, bindings)))
     }
 
     let conjuncts = filter.conjuncts
@@ -591,7 +770,7 @@ public enum Engine {
       // only when the filter holds), without letting that conjunct throw first
       // (`Parent.Name = 'nope' AND (1 / Child.x) = 0`, the false name excluding
       // the row before the division runs).
-      let join = try Plan.join(optimise(left, catalog, bindings),
+      let join = try Plan.join(optimise(left, catalog, ctes, bindings),
                                name: inner.name, ordinals: inner.ordinals,
                                base: base,
                                column: inner.ordinals[rightKey - base],
@@ -601,8 +780,9 @@ public enum Engine {
       return .select(predicate, join)
     }
 
-    return try gated(filter, .product(optimise(left, catalog, bindings),
-                                      optimise(right, catalog, bindings)))
+    return try gated(filter,
+                     .product(optimise(left, catalog, ctes, bindings),
+                              optimise(right, catalog, ctes, bindings)))
   }
 
   /// A `product` under `filter` for a join `nest` cannot fold into a `Join`,

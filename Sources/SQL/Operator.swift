@@ -646,6 +646,8 @@ internal func less(_ lhs: Value, _ rhs: Value) -> Bool {
   case (_, .null): false
   case let (.integer(lhs), .integer(rhs)): lhs < rhs
   case let (.text(lhs), .text(rhs)): lhs < rhs
+  case let (.boolean(lhs), .boolean(rhs)): !lhs && rhs
+  case let (.blob(lhs), .blob(rhs)): lhs.lexicographicallyPrecedes(rhs)
   default: false
   }
 }

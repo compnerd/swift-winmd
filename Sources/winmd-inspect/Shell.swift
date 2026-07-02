@@ -1093,6 +1093,11 @@ extension Value {
     switch self {
     case .null:                 ""
     case let .integer(integer): "\(integer)"
+    // A double renders through Swift's default `Double` description — the
+    // shortest decimal that round-trips to the same binary64 — so it is
+    // lossless and keeps a `.0` on a whole value (`1.0`, not `1`), marking the
+    // cell approximate-numeric rather than an integer.
+    case let .double(double):   "\(double)"
     case let .text(text):       text
     case let .boolean(boolean): boolean ? "TRUE" : "FALSE"
     // A blob renders as a lowercase-hex `x'…'` literal — lowercase `x` and

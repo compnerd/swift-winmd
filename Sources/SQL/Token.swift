@@ -50,7 +50,11 @@ extension Token {
     /// a bare `identifier` a dot in it is part of the name, not a qualifier.
     case quoted(String)
     case string(String)
+    /// A bare integer literal — a run of digits with no fraction or exponent.
     case integer(Int)
+    /// An approximate-numeric literal — a decimal with a `.` fraction and/or an
+    /// exponent (`3.14`, `1.0`, `1e3`, `2.5e-1`), scanned into a `Double`.
+    case decimal(Double)
     /// A bound parameter placeholder `:name`, holding the parameter's name.
     case parameter(String)
 
@@ -105,6 +109,7 @@ extension Token.Kind {
     case let .quoted(name): "\"\(name)\""
     case let .string(value): "'\(value)'"
     case let .integer(value): "\(value)"
+    case let .decimal(value): "\(value)"
     case let .parameter(name): ":\(name)"
     case .star: "*"
     case .plus: "+"

@@ -18,6 +18,23 @@ private struct BooleanDisplayTests {
   }
 }
 
+// MARK: - Double
+
+@Suite("DOUBLE display")
+private struct DoubleDisplayTests {
+  @Test("a double renders through its round-tripping description")
+  func description() {
+    #expect(Value.double(3.14).display == "3.14")
+    #expect(Value.double(2.5).display == "2.5")
+  }
+
+  @Test("a whole double keeps its .0, marking it approximate-numeric")
+  func whole() {
+    #expect(Value.double(1.0).display == "1.0")
+    #expect(Value.double(1000.0).display == "1000.0")
+  }
+}
+
 // MARK: - Blob
 
 @Suite("BLOB display")

@@ -2825,7 +2825,7 @@ struct EngineArithmeticTests {
 
   @Test("a text operand faults as a type error")
   func textOperand() throws {
-    #expect(throws: SQLError.operand("operands must be integers")) {
+    #expect(throws: SQLError.operand("operands must be numeric")) {
       try run("SELECT Name + 1 FROM People WHERE Id = 1")
     }
   }
@@ -2987,6 +2987,95 @@ struct EngineWithTests {
           SELECT Label FROM adults
         """, family())
     #expect(rows == [[.text("Bee")], [.text("Cid")]])
+  }
+
+  @Test("a JOIN matches an integer key to an equal double key")
+  func numericJoin() throws {
+    // The optimized join paths (hash bucket, seek/final check, CTE nested loop)
+    // must use the same mixed-numeric equality a predicate does: `1` and `1.0`
+    // are equal, so the row joins rather than being dropped by a raw-`Value`
+    // key comparison.
+    let rows = try statement("""
+        WITH a (x) AS (SELECT 1), b (x) AS (SELECT 1.0)
+          SELECT * FROM a JOIN b ON a.x = b.x
+        """, family())
+    #expect(rows == [[.integer(1), .double(1.0)]])
+  }
+
+  @Test("a JOIN matches a large integer to its rounded double past 2^53")
+  func numericJoinBeyondExactRange() throws {
+    // Above 2^53 an integer is not exactly representable as `Double`; the
+    // predicate treats `9007199254740993` and `9007199254740993.0` as equal by
+    // promoting the integer to `Double` (both round to 2^53), so the optimized
+    // join must too — a fold-double-to-Int key would drop the row.
+    let rows = try statement("""
+        WITH a (x) AS (SELECT 9007199254740993),
+             b (x) AS (SELECT 9007199254740993.0)
+          SELECT a.x FROM a JOIN b ON a.x = b.x
+        """, family())
+    #expect(rows == [[.integer(9007199254740993)]])
+  }
+
+  @Test("a JOIN keeps distinct large integer keys unequal (exact integers)")
+  func integerJoinStaysExact() throws {
+    // Two integers that round to the SAME Double past 2^53 are still unequal as
+    // integers, so an integer/integer join must NOT pair them — the hash bucket
+    // may collide, but the residual `matches` check keeps integer equality
+    // exact.
+    let rows = try statement("""
+        WITH a (x) AS (SELECT 9007199254740992),
+             b (x) AS (SELECT 9007199254740993)
+          SELECT a.x FROM a JOIN b ON a.x = b.x
+        """, family())
+    #expect(rows.isEmpty)
+  }
+
+  @Test("UNION deduplicates numerically-equal rows across kinds")
+  func unionNumericDedup() throws {
+    // `1` and `1.0` are the same numeric value, so UNION keeps one — the first
+    // arm's — not both; the dedup uses the numeric equality, not raw `Value`.
+    #expect(try statement("SELECT 1 UNION SELECT 1.0", family())
+            == [[.integer(1)]])
+    // UNION ALL keeps every row.
+    #expect(try statement("SELECT 1 UNION ALL SELECT 1.0", family())
+            == [[.integer(1)], [.double(1.0)]])
+  }
+
+  @Test("UNION dedup keeps distinct integers a rounded double sits between")
+  func unionExactIntegers() throws {
+    // Dedup is EXACT: `2^53.0` equals the integer `2^53` (folds to it), but NOT
+    // the integer `2^53 + 1`. So an earlier approximate row must not absorb
+    // both distinct integers — the `2^53 + 1` row survives regardless of order.
+    let rows = try statement("""
+        SELECT 9007199254740992.0
+          UNION SELECT 9007199254740992
+          UNION SELECT 9007199254740993
+        """, family())
+    #expect(rows == [[.double(9007199254740992.0)],
+                     [.integer(9007199254740993)]])
+  }
+
+  @Test("ORDER BY orders mixed integer/double keys by magnitude")
+  func orderByMixedNumeric() throws {
+    let rows = try statement("""
+        WITH a (x) AS (SELECT 3 UNION ALL SELECT 1.5) SELECT x FROM a ORDER BY x
+        """, family())
+    #expect(rows == [[.double(1.5)], [.integer(3)]])
+  }
+
+  @Test("ORDER BY over mixed keys past 2^53 stays a total order")
+  func orderByMixedNumericBeyondExactRange() throws {
+    // A double ties two distinct integers under promotion; the comparator must
+    // stay a strict weak ordering (transitive), keeping the larger integer last
+    // rather than misordering it ahead of the smaller via the stable tie-break.
+    let rows = try statement("""
+        WITH a (x) AS (SELECT 9007199254740993
+                       UNION ALL SELECT 9007199254740993.0
+                       UNION ALL SELECT 9007199254740992)
+          SELECT x FROM a ORDER BY x
+        """, family())
+    #expect(rows.count == 3)
+    #expect(rows.last == [.integer(9007199254740993)])
   }
 
   @Test("a CTE infers its columns and filters on them")

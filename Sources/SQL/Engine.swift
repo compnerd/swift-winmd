@@ -292,9 +292,9 @@ public enum Engine {
     // duplicate anchor rows collapse to their first occurrence — while `UNION
     // ALL` keeps every anchor row.
     let anchored = try run(anchor, catalog, ctes, routines, bindings)
-    var seen = Set<Array<Value>>()
+    var seen = Seen()
     var result = all ? anchored
-                     : anchored.filter { seen.insert($0).inserted }
+                     : anchored.filter { seen.insert($0) }
     var working = result
 
     var iterations = 0
@@ -311,7 +311,7 @@ public enum Engine {
           try run(.select(recursive), catalog, scope, routines, bindings)
 
       var next = Array<Array<Value>>()
-      for row in produced where all || seen.insert(row).inserted {
+      for row in produced where all || seen.insert(row) {
         next.append(row)
       }
       result += next

@@ -65,9 +65,10 @@ public enum SQLError: Error, Hashable, Sendable {
   /// A scalar function rejects its arguments (the wrong count, or a value it
   /// cannot map); the string describes the fault.
   case argument(String)
-  /// A binary arithmetic expression applies to a non-integer (text) operand —
-  /// the operands must be integers, not a silent coercion; the string describes
-  /// the fault. A NULL operand is not a fault: it propagates to a NULL result.
+  /// A binary arithmetic expression applies to a non-numeric (text, boolean, or
+  /// blob) operand — the operands must be numeric (integer or double), not a
+  /// silent coercion; the string describes the fault. A NULL operand is not a
+  /// fault: it propagates to a NULL result.
   case operand(String)
   /// A binary arithmetic expression divides by zero — standard SQL raises rather
   /// than yielding a value.
@@ -190,7 +191,7 @@ extension SQLError {
   ///   value out of range (the out-of-range integer literal and the arithmetic
   ///   overflow), `22012` division by zero, and `22023` invalid parameter value
   ///   (a scalar function's rejected argument).
-  /// - `42804` (datatype mismatch) is the non-integer arithmetic operand — a
+  /// - `42804` (datatype mismatch) is the non-numeric arithmetic operand — a
   ///   type error at evaluation rather than a value-range fault.
   /// - Class `SS` — the implementation-defined class this engine squats on
   ///   (SwiftSQL) for a condition with no standard ISO code — `SS001`, a query

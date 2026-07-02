@@ -89,6 +89,56 @@ struct LexerTests {
                 == [.integer(0), .integer(42), .integer(1024)])
   }
 
+  @Test("lexes decimal literals with a fraction")
+  func decimalFraction() throws {
+    #expect(try lex("3.14 1.0 0.5")
+                == [.decimal(3.14), .decimal(1.0), .decimal(0.5)])
+  }
+
+  @Test("lexes decimal literals with an exponent")
+  func decimalExponent() throws {
+    // A bare integer with an exponent is approximate-numeric, as is one with a
+    // signed exponent or a fraction and an exponent together.
+    #expect(try lex("1e3 2.5e-1 6E2 1.5e+2")
+                == [.decimal(1e3), .decimal(2.5e-1),
+                    .decimal(6e2), .decimal(1.5e2)])
+  }
+
+  @Test("a bare run of digits stays an integer")
+  func integerNotDecimal() throws {
+    // Neither a `.` nor an `e` follows, so each is exact numeric.
+    #expect(try lex("7 100") == [.integer(7), .integer(100)])
+  }
+
+  @Test("a dot fraction is taken only when a digit follows")
+  func fractionRequiresDigit() throws {
+    // A `.` begins a fraction only before a digit: `1.5` is one decimal, while
+    // `1.5e0` also folds the exponent in.
+    #expect(try lex("1.5") == [.decimal(1.5)])
+    #expect(try lex("1.5e0") == [.decimal(1.5)])
+  }
+
+  @Test("an e with no exponent digit is not an exponent")
+  func bareExponentLetter() throws {
+    // `1e` has no exponent digit, so the number ends at `1` and `e` begins an
+    // identifier.
+    #expect(try lex("1e") == [.integer(1), .identifier("e")])
+  }
+
+  @Test("a decimal literal past Double's range is an overflow")
+  func decimalOverflow() {
+    // `Double("1e9999")` is `inf`, not nil — reject it as an overflow, like an
+    // out-of-range integer, so no `inf` enters the token stream.
+    #expect(throws: SQLError.self) { _ = try lex("1e9999") }
+  }
+
+  @Test("a qualified reference is not read as a decimal")
+  func qualifiedReference() throws {
+    // A qualified name begins with a letter, so it never enters the numeric
+    // scanner — `Field.Flags` is one identifier, dot and all.
+    #expect(try lex("Field.Flags") == [.identifier("Field.Flags")])
+  }
+
   @Test("lexes a quoted string literal")
   func stringLiteral() throws {
     #expect(try lex("'Windows.Win32.Foundation'")

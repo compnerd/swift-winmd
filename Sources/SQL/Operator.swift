@@ -337,8 +337,8 @@ private func union<C: Catalog & ~Escapable>(_ left: Plan, _ right: Plan,
   guard !all else { return rows }
 
   var records = Array<Record>()
-  var seen = Set<Record>()
-  for record in rows where seen.insert(record).inserted {
+  var seen = Seen()
+  for record in rows where seen.insert(record.values) {
     records.append(record)
   }
   return records
@@ -483,6 +483,52 @@ private func sift(_ outer: Array<Record>, _ inner: Array<Record>,
 /// to nothing, and every path preserves outer-major order, the inner matches in
 /// cursor order within each outer.
 ///
+/// The HASH-JOIN bucket a key falls in — a grouping key, NOT the equality. A
+/// numeric value buckets by its `Double` magnitude (an `.integer` promoted), so
+/// every value equal to it under `Filter.matches` shares a bucket: `1` and
+/// `1.0`, and an integer and the double it rounds to past 2^53. A non-numeric
+/// value (text, boolean, blob, null) buckets as itself. The bucket may over-
+/// group — two distinct large integers can share a `Double` bucket — so hash
+/// probing pairs it with a RESIDUAL `matches(_,.equal,_)` check, the same exact
+/// equality the predicate uses (integer/integer exact, mixed promoted). The
+/// seek and CTE nested-loop paths compare with `matches` directly.
+private func bucket(_ value: Value) -> Value {
+  if case let .integer(number) = value { return .double(Double(number)) }
+  return value
+}
+
+/// A value folded to its EXACT canonical form for duplicate elimination: a
+/// whole `double` exactly equal to an `Int` (`Int(exactly:)`) becomes that
+/// `.integer`, so `1.0` and `1` are the same value; every other value (a
+/// fractional double, text, boolean, blob, null) is itself. Unlike the join's
+/// promoted `bucket`, this is EXACT and transitive, so two integers stay
+/// distinct even when they round to the same double — an earlier approximate
+/// row cannot absorb two unequal exact integers.
+private func canonical(_ value: Value) -> Value {
+  if case let .double(number) = value, let integer = Int(exactly: number) {
+    return .integer(integer)
+  }
+  return value
+}
+
+/// Tracks the rows already emitted for UNION / recursive-CTE duplicate
+/// elimination under the engine's EXACT numeric equality. A plain
+/// `Set<Array<Value>>` over raw cells keeps `1` and `1.0` (and would keep both)
+/// apart; keying each row by its cells' `canonical` form — exact and transitive
+/// — dedups `1`/`1.0` while keeping distinct integers separate even when they
+/// round to the same double, and (unlike a promoted key) makes the result
+/// independent of arm order. Two NULLs stay not distinct (`.null` is its own
+/// canonical). No residual check needed: exact equality is an equivalence.
+internal struct Seen {
+  private var keys = Set<Array<Value>>()
+
+  /// Records `row` and reports whether it was NEW (not a duplicate of one
+  /// already seen) — the `Set.insert(_:).inserted` shape the dedup sites use.
+  internal mutating func insert(_ row: Array<Value>) -> Bool {
+    keys.insert(row.map(canonical)).inserted
+  }
+}
+
 /// - Throws: `SQLError.relation` if the inner name resolves to neither.
 private func join<C: Catalog & ~Escapable>(_ outer: Array<Record>,
                                            _ name: String,
@@ -525,6 +571,10 @@ private func join<C: Catalog & ~Escapable>(_ outer: Array<Record>,
     // A NULL key equi-joins to nothing — NULL is unequal to every value,
     // itself included — so it contributes no pair and need not probe.
     if case .null = value { continue }
+    // Seek by the RAW value — the sorted key is a single-kind (integer) column,
+    // and a promoted double would defeat the seek; the numeric equality below
+    // still admits a mixed-kind match (a whole double past the range is caught
+    // by the residual check even if the seek scanned wide).
     let range = probe(inner, column, value, cursor.count)
     for index in range {
       guard let row = cursor.row(index) else { continue }
@@ -533,7 +583,10 @@ private func join<C: Catalog & ~Escapable>(_ outer: Array<Record>,
       // it can pair — an inner row it rejects joins to nothing.
       if let filter,
           try evaluate(filter, right, routines, bindings) != true { continue }
-      if right[slot] == value {
+      // Equal by the SAME rule the predicate uses — integer/integer exact,
+      // mixed integer/double promoted — so a seek that scanned wide still pairs
+      // exactly.
+      if matches(value, .equal, right[slot]) == true {
         records.append(left.merged(with: right))
       }
     }
@@ -593,16 +646,19 @@ private func hashed<T: Table & ~Escapable>(_ outer: Array<Record>,
     // never a join candidate.
     if let filter,
         try evaluate(filter, right, routines, bindings) != true { continue }
-    let key = right[slot]
-    if case .null = key { continue }
-    buckets[key, default: Array<Record>()].append(right)
+    if case .null = right[slot] { continue }
+    buckets[bucket(right[slot]), default: Array<Record>()].append(right)
   }
 
   var records = Array<Record>()
   for left in outer {
     let value = left[keys.left]
     if case .null = value { continue }
-    for right in buckets[value] ?? [] {
+    // Probe the bucket, then confirm each candidate with the exact `matches`
+    // equality — the bucket over-groups (two distinct large integers can share
+    // a `Double` bucket), so the residual check keeps integer/integer exact.
+    for right in buckets[bucket(value)] ?? []
+        where matches(value, .equal, right[slot]) == true {
       records.append(left.merged(with: right))
     }
   }
@@ -621,7 +677,9 @@ private func joined(_ outer: Array<Record>, _ inner: Array<Record>,
   for left in outer {
     let value = left[keys.left]
     if case .null = value { continue }
-    for right in inner where right[slot] == value {
+    // The same exact/promoted equality the predicate and the other join paths
+    // use — integer/integer exact, mixed integer/double promoted.
+    for right in inner where matches(value, .equal, right[slot]) == true {
       records.append(left.merged(with: right))
     }
   }
@@ -690,9 +748,37 @@ internal func less(_ lhs: Value, _ rhs: Value) -> Bool {
   case (.null, _): true
   case (_, .null): false
   case let (.integer(lhs), .integer(rhs)): lhs < rhs
+  case let (.double(lhs), .double(rhs)): lhs < rhs
+  // A mixed integer/double key is numeric and ordered by magnitude — but
+  // EXACTLY, not via a lossy `Double(integer)`. Past 2^53 a promotion ties a
+  // double with two distinct integers that themselves order exactly, which
+  // would make this comparator non-transitive (not a strict weak ordering);
+  // the exact form breaks the tie by the integer the double denotes.
+  case let (.integer(lhs), .double(rhs)): less(integer: lhs, double: rhs)
+  case let (.double(lhs), .integer(rhs)): less(double: lhs, integer: rhs)
   case let (.text(lhs), .text(rhs)): lhs < rhs
   case let (.boolean(lhs), .boolean(rhs)): !lhs && rhs
   case let (.blob(lhs), .blob(rhs)): lhs.lexicographicallyPrecedes(rhs)
   default: false
   }
+}
+
+/// Whether integer `lhs` is strictly less than double `rhs`, compared EXACTLY.
+/// `Double(lhs) < rhs` decides it unless the two tie under promotion — then
+/// `rhs` is integral and denotes an exact integer (`Int(exactly:)`) the
+/// integers compare against, so a value past 2^53 orders by its true magnitude.
+private func less(integer lhs: Int, double rhs: Double) -> Bool {
+  let promoted = Double(lhs)
+  guard promoted == rhs else { return promoted < rhs }
+  guard let exact = Int(exactly: rhs) else { return false }
+  return lhs < exact
+}
+
+/// Whether double `lhs` is strictly less than integer `rhs`, compared EXACTLY —
+/// the mirror of `less(integer:double:)`.
+private func less(double lhs: Double, integer rhs: Int) -> Bool {
+  let promoted = Double(rhs)
+  guard lhs == promoted else { return lhs < promoted }
+  guard let exact = Int(exactly: lhs) else { return false }
+  return exact < rhs
 }

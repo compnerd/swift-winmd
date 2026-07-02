@@ -225,10 +225,15 @@ extension Array where Element == Filter {
 }
 
 /// The literal `literal` as a typed `Value`.
-internal func value(of literal: Literal) -> Value {
-  switch literal {
+internal func value(of literal: Literal) throws(SQLError) -> Value {
+  return switch literal {
   case let .integer(integer): .integer(integer)
   case let .string(string): .text(string)
+  case let .double(double) where double.isFinite: .double(double)
+  // A directly-built `Literal.double` bypasses the lexer's finite check; reject
+  // NaN/inf at lowering so no non-finite double reaches a plan (it would break
+  // dedup and ordering — see the `Value.double` invariant).
+  case .double: throw .magnitude("double literal is not finite")
   }
 }
 
@@ -267,7 +272,16 @@ private func apply<R: Row & ~Escapable>(_ name: String,
   for argument in arguments {
     try values.append(evaluate(argument, row, routines))
   }
-  return try function(values)
+  let result = try function(values)
+  // A registered routine is a public producer of `Value`s that bypasses the
+  // literal/arithmetic finite checks; enforce the invariant here so a routine
+  // cannot return `inf`/NaN. NaN in particular is unequal to itself and would
+  // break UNION/CTE dedup and ORDER BY (and stall a recursive UNION at the
+  // cap).
+  if case let .double(number) = result, !number.isFinite {
+    throw .magnitude("function '\(name)' produced a non-finite double")
+  }
+  return result
 }
 
 // MARK: - Evaluation
@@ -275,18 +289,37 @@ private func apply<R: Row & ~Escapable>(_ name: String,
 extension Arithmetic {
   /// Applies the operator to two typed operands, yielding a typed `Value`.
   ///
-  /// Both operands must be integers: `integer ∘ integer` is an integer, with `/`
-  /// integer division. A NULL on either side propagates — the result is NULL,
-  /// not a fault. A division by zero is `SQLError.divide`, as standard SQL
-  /// raises rather than yielding a value; a non-integer (text) operand is a
+  /// The operands must be numeric — integer or double. An `integer ∘ integer`
+  /// stays an integer, with `/` integer division; any double operand makes the
+  /// result a double (a lone integer promoted to `Double`), with `/` real
+  /// division. A NULL on either side propagates — the result is NULL, not a
+  /// fault. A division by zero is `SQLError.divide`, as standard SQL raises
+  /// rather than yielding a value (`inf`/`NaN`), on either an integer or a
+  /// double divisor; a non-numeric (text/boolean/blob) operand is a
   /// `SQLError.operand` type error rather than a silent coercion; an integer
   /// result past the `Int` boundary is `SQLError.magnitude`.
   internal func apply(_ lhs: Value, _ rhs: Value) throws(SQLError) -> Value {
     if case .null = lhs { return .null }
     if case .null = rhs { return .null }
-    guard case let .integer(lhs) = lhs, case let .integer(rhs) = rhs else {
-      throw .operand("operands must be integers")
+    return switch (lhs, rhs) {
+    case let (.integer(lhs), .integer(rhs)):
+      try apply(lhs, rhs)
+    // Any double operand widens the pair to double arithmetic — both operands
+    // being numeric — with a lone integer promoted to `Double`.
+    case let (.double(lhs), .double(rhs)):
+      try apply(lhs, rhs)
+    case let (.integer(lhs), .double(rhs)):
+      try apply(Double(lhs), rhs)
+    case let (.double(lhs), .integer(rhs)):
+      try apply(lhs, Double(rhs))
+    default:
+      throw .operand("operands must be numeric")
     }
+  }
+
+  /// Applies the operator to two integers: `integer ∘ integer` is an integer,
+  /// with `/` integer division.
+  private func apply(_ lhs: Int, _ rhs: Int) throws(SQLError) -> Value {
     // Report overflow rather than trap: operands are parsed literals or column
     // values that can reach the `Int` boundary (`Int.max + 1`, `Int.min / -1`),
     // and Swift's `+`/`-`/`*`/`/` would trap — aborting the process — instead of
@@ -300,6 +333,30 @@ extension Arithmetic {
     }
     guard !outcome.overflow else { throw .magnitude("integer overflow") }
     return .integer(outcome.partialValue)
+  }
+
+  /// Applies the operator to two doubles: `double ∘ double` is a double, with
+  /// `/` real division (no truncation).
+  ///
+  /// A non-finite result is rejected rather than returned: division by zero is
+  /// `SQLError.divide` (matching the integer policy), and an overflow to `inf`
+  /// or a NaN from an indeterminate form (`inf - inf`) is `SQLError.magnitude`.
+  /// A NaN must never reach a result — it is unequal to itself, so it would
+  /// break duplicate elimination (a UNION would keep both copies) and ordering
+  /// (a non-transitive sort key), and a recursive UNION echoing it would
+  /// iterate to the recursion cap.
+  private func apply(_ lhs: Double, _ rhs: Double) throws(SQLError) -> Value {
+    let result: Double = switch self {
+    case .add: lhs + rhs
+    case .subtract: lhs - rhs
+    case .multiply: lhs * rhs
+    case .divide where rhs == 0: throw .divide
+    case .divide: lhs / rhs
+    }
+    guard result.isFinite else {
+      throw .magnitude("double result is not finite")
+    }
+    return .double(result)
   }
 }
 
@@ -339,13 +396,21 @@ extension Comparison {
 ///
 /// A `NULL` on either side is UNKNOWN (`nil`): `NULL` is unordered and unequal
 /// to everything, itself included, so no comparison against it is ever true or
-/// false. A like-typed non-null pair compares — two integers, two strings, two
-/// booleans (`false < true`), or two blobs (byte equality, lexicographic
-/// order); a cross-typed pair (an integer against a string) never matches.
-private func matches(_ lhs: Value, _ op: Comparison, _ rhs: Value) -> Bool? {
+/// false. A like-typed non-null pair compares — two integers, two doubles, two
+/// strings, two booleans (`false < true`), or two blobs (byte equality,
+/// lexicographic order). An integer against a double is numeric too — both
+/// sides are numbers — so the integer promotes to `Double` and they compare by
+/// magnitude (`1 = 1.0` is true); only a cross-*kind* pair (a number against a
+/// string) never matches.
+internal func matches(_ lhs: Value, _ op: Comparison, _ rhs: Value) -> Bool? {
   switch (lhs, rhs) {
   case (.null, _), (_, .null): nil
   case let (.integer(lhs), .integer(rhs)): op.apply(lhs, rhs)
+  case let (.double(lhs), .double(rhs)): op.apply(lhs, rhs)
+  // A mixed integer/double pair is numeric, not cross-type: promote the integer
+  // to `Double` and compare by magnitude, so `1 = 1.0` and `1 < 1.5`.
+  case let (.integer(lhs), .double(rhs)): op.apply(Double(lhs), rhs)
+  case let (.double(lhs), .integer(rhs)): op.apply(lhs, Double(rhs))
   case let (.text(lhs), .text(rhs)): op.apply(lhs, rhs)
   // `Bool` is not `Comparable`, so compare on its truth ordinal — `false` is
   // `0`, `true` is `1` — which orders `false < true` and equates like values.

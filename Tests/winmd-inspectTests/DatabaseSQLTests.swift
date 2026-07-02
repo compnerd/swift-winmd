@@ -696,6 +696,37 @@ struct DatabaseSQLTests {
     }
   }
 
+  @Test("a `.template` registers an inline body that shadows a file lookup")
+  func templateRegisters() throws {
+    // `.template` stores its body in the shell's `templates`, and
+    // `template(named:)` returns it (unescaped) when present — an inline
+    // template shadows the `-I`/bundle resolution. Registering `com` (the one
+    // bundled template) with an inline body proves the shadow: the resolver
+    // returns the inline text, not the bundled file.
+    try DatabaseSQLTests.with { catalog in
+      var shell = Shell(catalog)
+      try shell.execute(".template com 'inline: it''s {{name}}'")
+      #expect(shell.templates["com"] == "inline: it's {{name}}")
+      // The resolver returns the inline body verbatim, shadowing the bundle.
+      #expect(try shell.template(named: "com", search: []) ==
+              "inline: it's {{name}}")
+    }
+  }
+
+  @Test("a `.render` through an inline template renders the interface")
+  func templateRenders() throws {
+    // The end-to-end pipeline: define an inline template, then `.render` an
+    // interface through it. The fixture's `IMyInterface` renders through a
+    // minimal inline template (no language directive — the identity language
+    // leaves the body verbatim), proving the inline template feeds the render.
+    try DatabaseSQLTests.with { catalog in
+      var shell = Shell(catalog)
+      try shell.execute(".template mine 'interface {{name}}'")
+      let rendered = try shell.render("IMyInterface", template: "mine")
+      #expect(rendered == "interface IMyInterface")
+    }
+  }
+
   @Test("execute routes a `.`-token to its meta-command")
   func executeMeta() throws {
     // The leading-token dispatch matches `.tables` to `Tables`, which lists the

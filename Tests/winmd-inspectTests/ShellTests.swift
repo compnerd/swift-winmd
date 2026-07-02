@@ -20,6 +20,7 @@ struct ShellTests {
     #expect(Read.spelling == ".read")
     #expect(Render.spelling == ".render")
     #expect(Bind.spelling == ".bind")
+    #expect(Template.spelling == ".template")
   }
 
   @Test("`.read` parses its trailing path, trimming surrounding whitespace")
@@ -65,6 +66,26 @@ struct ShellTests {
     #expect(Bind(" n").name == "n")
     #expect(Bind(" n").value == nil)
     #expect(Bind("  ").name.isEmpty)
+  }
+
+  @Test("`.template` parses its name and unquotes the single-quoted body")
+  func template() {
+    // `Template.init` takes the name (the first whitespace token) then the
+    // single-quoted literal that follows, from its first `'` to the matching
+    // close, `''` unescaped to one `'`.
+    let simple = Template("t 'hello'")
+    #expect(simple.name == "t")
+    #expect(simple.body == "hello")
+    // A `''` inside the body round-trips to one `'`.
+    #expect(Template("t 'it''s'").body == "it's")
+    // The body is data: `.end`, `;`, `{{…}}`, and `\"` are all verbatim.
+    #expect(Template("t '.end; {{x}} \"q\"'").body == ".end; {{x}} \"q\"")
+    // A multiline literal keeps its newlines; the stream has already handed the
+    // whole block over as one statement.
+    #expect(Template("t 'a\nb'").body == "a\nb")
+    // A name with no quoted literal leaves an empty body.
+    #expect(Template("t").name == "t")
+    #expect(Template("t").body.isEmpty)
   }
 
   @Test("a `;`-separated script streams into trimmed, non-empty statements")
@@ -113,6 +134,67 @@ struct ShellTests {
             == ["SELECT 'a;''b;' AS s"])
     #expect(Array(Statements(of: "SELECT 'x;\n y;' AS s;"))
             == ["SELECT 'x;\n y;' AS s"])
+  }
+
+  @Test("an open-quote `.`-meta accumulates raw lines into one statement")
+  func streamOpenQuoteMeta() {
+    // A `.`-meta whose single-quoted string is still open is a multiline meta:
+    // the stream accumulates raw lines verbatim (joined with `\n`) until the
+    // quote closes, then yields the whole block as ONE statement — the inline
+    // `.template <name> '<body>'` shape. Because the body is quote-delimited
+    // DATA, a `.end` line and a `;` INSIDE it do NOT terminate the block (no
+    // sentinel collision), and the following `SELECT 1;` stays a separate
+    // statement. A `''` in the body is left verbatim in the meta (the command's
+    // `init` unescapes it), so the whole literal round-trips.
+    let script = """
+      .template t '{{! language: swift }}
+      protocol {{name}} {
+      .end is data; not a terminator; it''s fine
+      }'
+      SELECT 1;
+      """
+    let statements = Array(Statements(of: script))
+    #expect(statements.count == 2)
+    #expect(statements[0] == """
+      .template t '{{! language: swift }}
+      protocol {{name}} {
+      .end is data; not a terminator; it''s fine
+      }'
+      """)
+    #expect(statements[1] == "SELECT 1")
+  }
+
+  @Test("an open-quote meta with a trailing-line close still yields one block")
+  func streamOpenQuoteReading() {
+    // Fed line-by-line (the interactive/`reading:` path), the same accumulation
+    // holds: the closing `'` arriving on its own trailing line still yields the
+    // whole `.template` block as one statement, and the following `SELECT 1`
+    // stays separate. End-of-input flushes even without the trailing statement.
+    var lines = ["  .template t 'first", "  ; second", "third'",
+                 "SELECT 1"].makeIterator()
+    let statements = Array(Statements(reading: { lines.next() }))
+    #expect(statements.count == 2)
+    #expect(statements[0] == ".template t 'first\n  ; second\nthird'")
+    #expect(statements[1] == "SELECT 1")
+  }
+
+  @Test("an unclosed open-quote meta flushes at end of input")
+  func streamOpenQuoteUnterminated() {
+    // End of input before the quote closes flushes what was captured — the
+    // closing `'` is as optional as a trailing `;`.
+    #expect(Array(Statements(of: ".template t 'unterminated\nbody"))
+            == [".template t 'unterminated\nbody"])
+  }
+
+  @Test("only `.template` accumulates on an open quote; other metas yield whole")
+  func streamOpenQuoteTemplateOnly() {
+    // The open-quote accumulation is `.template`'s alone. An apostrophe in
+    // another meta-command's argument — the path in `.read /tmp/O'Brien.sql` —
+    // is data, not an unterminated literal: the `.read` yields whole and the
+    // following statement stays separate, rather than being swallowed as more
+    // of the path.
+    #expect(Array(Statements(of: ".read /tmp/O'Brien.sql\nSELECT 1;"))
+            == [".read /tmp/O'Brien.sql", "SELECT 1"])
   }
 
   @Test("a whitespace-only spacer line before a `.`-command is dropped")

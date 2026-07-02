@@ -36,6 +36,8 @@ extension Token {
     case null
     case union
     case all
+    case with
+    case recursive
 
     // Operands.
     case identifier(String)
@@ -84,6 +86,8 @@ extension Token.Kind {
     case .null: "NULL"
     case .union: "UNION"
     case .all: "ALL"
+    case .with: "WITH"
+    case .recursive: "RECURSIVE"
     case let .identifier(name): name
     case let .string(value): "'\(value)'"
     case let .integer(value): "\(value)"

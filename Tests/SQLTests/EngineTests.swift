@@ -2939,4 +2939,305 @@ struct EngineScalarSelectTests {
   }
 }
 
+// MARK: - WITH (non-recursive) tests
 
+/// Parses `text` to a statement and runs it against `catalog`.
+private func statement<C: Catalog & ~Escapable>(_ text: String,
+                                                _ catalog: borrowing C)
+    throws -> Array<Array<Value>> {
+  try Engine.run(Statement(parsing: text), catalog)
+}
+
+struct EngineWithTests {
+  @Test("a non-recursive CTE materialises as an inline view")
+  func inline() throws {
+    // The CTE `adults` is materialised once and the trailing query reads it
+    // like a table — the inline-view shape of a non-recursive WITH.
+    let rows = try statement("""
+        WITH adults (Key, Label) AS (SELECT Id, Name FROM Parent WHERE Id >= 2)
+          SELECT Label FROM adults
+        """, family())
+    #expect(rows == [[.text("Bee")], [.text("Cid")]])
+  }
+
+  @Test("a CTE infers its columns and filters on them")
+  func inferred() throws {
+    let rows = try statement("""
+        WITH grown AS (SELECT Id, Name FROM Parent)
+          SELECT Name FROM grown WHERE Id = 3
+        """, family())
+    #expect(rows == [[.text("Cid")]])
+  }
+
+  @Test("a later CTE reads an earlier one (chained CTEs)")
+  func chained() throws {
+    // `b` resolves `a` — the resolver consults the CTEs materialised so far, so
+    // a later member sees an earlier one.
+    let rows = try statement("""
+        WITH a (Id, Name) AS (SELECT Id, Name FROM Parent WHERE Id >= 2),
+             b (Who) AS (SELECT Name FROM a WHERE Id = 3)
+          SELECT Who FROM b
+        """, family())
+    #expect(rows == [[.text("Cid")]])
+  }
+
+  @Test("a CTE shadows a base relation of the same name")
+  func shadow() throws {
+    // `Parent` is a base relation; the CTE of the same name shadows it, so the
+    // trailing query reads the CTE's rows, not the base table's.
+    let rows = try statement("""
+        WITH Parent (Id, Name) AS (SELECT Id, Name FROM Parent WHERE Id = 1)
+          SELECT Name FROM Parent
+        """, family())
+    #expect(rows == [[.text("Ada")]])
+  }
+
+  @Test("the trailing query joins a CTE against a base relation")
+  func joinBase() throws {
+    // The CTE `kids` joins to the base `Parent` on the foreign key — proving a
+    // materialised relation and a base one combine in one query.
+    let rows = try statement("""
+        WITH kids (Pid, Kid) AS (SELECT Pid, Name FROM Child)
+          SELECT Parent.Name, kids.Kid FROM Parent
+            JOIN kids ON kids.Pid = Parent.Id
+        """, family())
+    #expect(rows == [
+      [.text("Ada"), .text("Ann")],
+      [.text("Ada"), .text("Amy")],
+      [.text("Bee"), .text("Bob")],
+    ])
+  }
+
+  @Test("a CTE's rowid virtual column resolves")
+  func rowid() throws {
+    let rows = try statement("""
+        WITH a (Tag) AS (SELECT Name FROM Parent)
+          SELECT rowid, Tag FROM a WHERE rowid = 2
+        """, family())
+    #expect(rows == [[.integer(2), .text("Bee")]])
+  }
+
+  @Test("a CTE column list of the wrong arity is rejected at parse")
+  func arity() throws {
+    #expect(throws: SQLError.columns(expected: 2, got: 1)) {
+      try statement("""
+          WITH a (only) AS (SELECT Id, Name FROM Parent) SELECT only FROM a
+          """, family())
+    }
+  }
+
+  @Test("an unknown column of a CTE is reported")
+  func unknown() throws {
+    #expect(throws: SQLError.column("Missing")) {
+      try statement("""
+          WITH a (Id) AS (SELECT Id FROM Parent) SELECT Missing FROM a
+          """, family())
+    }
+  }
+
+  @Test("a CTE whose body is a UNION materialises both arms")
+  func union() throws {
+    let rows = try statement("""
+        WITH both (Tag) AS (SELECT Tag FROM Left UNION SELECT Tag FROM Right)
+          SELECT Tag FROM both
+        """, tags())
+    #expect(rows == [[.text("a")], [.text("shared")], [.text("b")]])
+  }
+
+  @Test("a CTE column list wider than its SELECT * body is rejected, not trapped")
+  func widthMismatch() throws {
+    // `Parent` is a two-column relation, but the column list declares three
+    // names; the `SELECT *` body's width is known only after materialisation, so
+    // the declared arity is checked against the produced rows and faults with
+    // `SQLError.columns` rather than trapping when a later read indexes a cell
+    // the row does not have.
+    #expect(throws: SQLError.columns(expected: 3, got: 2)) {
+      try statement("""
+          WITH a (x, y, z) AS (SELECT * FROM Parent) SELECT x FROM a
+          """, family())
+    }
+  }
+
+  @Test("a WHERE pushed onto a joined-in CTE filters its rows before the join")
+  func joinPushedFilter() throws {
+    // `kids` is joined to `Parent` on the foreign key, and a single-relation
+    // `WHERE kids.Kid = 'Amy'` is pushed onto the CTE inner; only the matching
+    // CTE row may join, so a CTE row with any other `Kid` is excluded rather than
+    // paired.
+    let rows = try statement("""
+        WITH kids (Pid, Kid) AS (SELECT Pid, Name FROM Child)
+          SELECT Parent.Name, kids.Kid FROM Parent
+            JOIN kids ON kids.Pid = Parent.Id
+            WHERE kids.Kid = 'Amy'
+        """, family())
+    #expect(rows == [[.text("Ada"), .text("Amy")]])
+  }
+
+  @Test("a WITH RECURSIVE arm that never names the CTE runs once, not to a cap")
+  func nonSelfReferentialUnionAll() throws {
+    // Every member of a `WITH RECURSIVE` list is syntactically marked recursive,
+    // but neither arm of this UNION ALL reads `a`, so it is not recursive in
+    // truth: it runs once, yielding exactly its two rows, rather than re-running
+    // an arm that adds nothing new until the recursion cap fires.
+    let rows = try statement("""
+        WITH RECURSIVE a (n) AS (
+          SELECT 1 AS n FROM Extra UNION ALL SELECT 2 AS n FROM Extra
+        )
+        SELECT n FROM a
+        """, tags())
+    #expect(rows == [[.integer(1)], [.integer(2)]])
+  }
+}
+
+// MARK: - WITH RECURSIVE tests
+
+/// A one-row seed catalog: a `Seed` relation of a single row, the FROM-less
+/// `SELECT 1` the dialect lacks expressed as `SELECT 1 FROM Seed`. It also
+/// carries an `Edge(Src, Dst)` relation for a transitive-closure test.
+private func seed() -> Memory {
+  let one = [Field(name: "One", kind: .integer)]
+  let seedRows = [[.integer(1)]] as Array<Array<Value>>
+
+  let edge = [
+    Field(name: "Src", kind: .integer),
+    Field(name: "Dst", kind: .integer),
+  ]
+  // 1 -> 2 -> 3 -> 4, a simple chain whose closure is every reachable pair.
+  let edges = [
+    [.integer(1), .integer(2)],
+    [.integer(2), .integer(3)],
+    [.integer(3), .integer(4)],
+  ] as Array<Array<Value>>
+
+  return Memory([
+    "Seed": Relation(one, seedRows),
+    "Edge": Relation(edge, edges),
+  ])
+}
+
+/// Routines with an `inc` scalar — `inc(n) = n + 1` — standing in for the `+`
+/// the dialect lacks, so a recursive counter can advance.
+private func counting() -> Routines {
+  Routines().registering("inc") { arguments throws(SQLError) in
+    guard case let .integer(n) = arguments.first else {
+      throw .argument("inc expects one integer argument")
+    }
+    return .integer(n + 1)
+  }
+}
+
+struct EngineRecursiveTests {
+  @Test("a recursive counter enumerates 1..5")
+  func counter() throws {
+    // The canonical recursive CTE: seed with 1, then inc(n) while n < 5. The
+    // anchor reads the one-row Seed; the recursive arm names the CTE `c`.
+    let query = try Statement(parsing: """
+        WITH RECURSIVE c (n) AS (
+          SELECT 1 AS n FROM Seed
+          UNION ALL
+          SELECT inc(n) AS n FROM c WHERE n < 5
+        )
+        SELECT n FROM c
+        """)
+    let rows = try Engine.run(query, seed(), counting())
+    #expect(rows == [[.integer(1)], [.integer(2)], [.integer(3)],
+                     [.integer(4)], [.integer(5)]])
+  }
+
+  @Test("a recursive counter runs through Engine.run(_:statement:)")
+  func statement() throws {
+    let rows = try Engine.run(Statement(parsing: """
+        WITH RECURSIVE c (n) AS (
+          SELECT 1 AS n FROM Seed
+          UNION ALL
+          SELECT inc(n) AS n FROM c WHERE n < 3
+        )
+        SELECT n FROM c
+        """), seed(), counting())
+    #expect(rows == [[.integer(1)], [.integer(2)], [.integer(3)]])
+  }
+
+  @Test("UNION dedups rows a UNION ALL recursion would repeat")
+  func dedup() throws {
+    // The recursive arm re-derives n from 1 without a guard's monotonic bound,
+    // but a bare UNION dedups whole rows, so the fixpoint is the distinct set
+    // 1..4 reached and nothing new thereafter — it terminates where UNION ALL
+    // would loop. inc advances; the WHERE caps the run, and UNION drops dupes.
+    let query = try Statement(parsing: """
+        WITH RECURSIVE c (n) AS (
+          SELECT 1 AS n FROM Seed
+          UNION
+          SELECT inc(n) AS n FROM c WHERE n < 4
+        )
+        SELECT n FROM c
+        """)
+    let rows = try Engine.run(query, seed(), counting())
+    #expect(rows == [[.integer(1)], [.integer(2)], [.integer(3)],
+                     [.integer(4)]])
+  }
+
+  @Test("a bare UNION dedups duplicate anchor seed rows")
+  func anchorDedup() throws {
+    // The anchor is itself a UNION ALL that yields `1` twice, so the seed
+    // carries a duplicate; the recursive arm (`n < 1`) adds nothing new. A bare
+    // outer UNION dedups the seed exactly as it dedups an iteration step, so the
+    // duplicate anchor rows collapse to the single distinct row `1` rather than
+    // leaking both into the result.
+    let query = try Statement(parsing: """
+        WITH RECURSIVE c (n) AS (
+          SELECT 1 AS n FROM Seed
+          UNION ALL
+          SELECT 1 AS n FROM Seed
+          UNION
+          SELECT inc(n) AS n FROM c WHERE n < 1
+        )
+        SELECT n FROM c
+        """)
+    let rows = try Engine.run(query, seed(), counting())
+    #expect(rows == [[.integer(1)]])
+  }
+
+  @Test("a transitive-closure self-join reaches every descendant")
+  func closure() throws {
+    // The closure of the edge chain 1->2->3->4: seed with the direct edges,
+    // then extend each known reach (Src, Dst) by an edge out of Dst. The
+    // recursive arm joins the CTE to the base Edge relation.
+    let query = try Statement(parsing: """
+        WITH RECURSIVE reach (Src, Dst) AS (
+          SELECT Src, Dst FROM Edge
+          UNION ALL
+          SELECT reach.Src, Edge.Dst FROM reach
+            JOIN Edge ON Edge.Src = reach.Dst
+        )
+        SELECT Src, Dst FROM reach ORDER BY Src ASC
+        """)
+    let rows = try Engine.run(query, seed())
+    // Direct: (1,2)(2,3)(3,4); extended: (1,3)(2,4); further: (1,4).
+    let pairs = rows.map { row -> (Int, Int) in
+      guard case let .integer(a) = row[0], case let .integer(b) = row[1]
+      else { return (0, 0) }
+      return (a, b)
+    }
+    #expect(Set(pairs.map { "\($0.0)-\($0.1)" }) == [
+      "1-2", "2-3", "3-4", "1-3", "2-4", "1-4",
+    ])
+  }
+
+  @Test("a runaway recursion is capped with SQLError.recursion")
+  func runaway() throws {
+    // inc(n) with no terminating WHERE produces an unbounded sequence of new
+    // rows; UNION ALL keeps every one, so the fixpoint is never reached and the
+    // cap fires.
+    let query = try Statement(parsing: """
+        WITH RECURSIVE c (n) AS (
+          SELECT 1 AS n FROM Seed
+          UNION ALL
+          SELECT inc(n) AS n FROM c
+        )
+        SELECT n FROM c
+        """)
+    #expect(throws: SQLError.recursion("c")) {
+      try Engine.run(query, seed(), counting())
+    }
+  }
+}

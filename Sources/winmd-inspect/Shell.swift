@@ -850,18 +850,23 @@ extension Session {
   /// VIEW` is an ordinary statement here, not a special case; the shell prints
   /// whatever rows come back.
   ///
-  /// `bindings` resolve a `SELECT`'s `:name` parameters — the shell threads its
-  /// `.bind` bindings through here, so a parameterized query typed at the prompt
-  /// finds its values. A `CREATE VIEW` ignores them: it stores the view's text,
-  /// binding only when a later `SELECT` reads it.
+  /// `bindings` resolve a `:name` parameter of a `SELECT` or a `WITH` — the
+  /// shell threads its `.bind` bindings through here, so a parameterized query
+  /// typed at the prompt finds its values, whether the parameter sits in a plain
+  /// `SELECT` or in a `WITH`'s body or trailing query. A `CREATE VIEW` ignores
+  /// them: it stores the view's text, binding only when a later `SELECT` reads
+  /// it.
   internal mutating func run(_ statement: String, bindings: Bindings = [:])
       throws -> Array<Array<Value>> {
-    switch try Statement(parsing: statement) {
+    let parsed = try Statement(parsing: statement)
+    switch parsed {
     case let .create(name, view):
       register(name, view)
       return []
     case let .select(query):
       return try Engine.run(query, self, bindings: bindings)
+    case .with:
+      return try Engine.run(parsed, self, bindings: bindings)
     }
   }
 }

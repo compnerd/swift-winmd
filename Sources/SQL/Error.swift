@@ -98,6 +98,14 @@ public enum SQLError: Error, Hashable, Sendable {
   /// select (which projects only expressions over a single row); the string
   /// describes it.
   case unsupported(String)
+  /// A statement cannot be run as a query — a `CREATE VIEW` defines a view
+  /// rather than producing rows, or a malformed `WITH` member; the string
+  /// describes the fault.
+  case statement(String)
+  /// A recursive common table expression did not reach a fixpoint within the
+  /// iteration cap (`kRecursionCap`) — it produces rows without end. The string
+  /// is the offending CTE's name.
+  case recursion(String)
 }
 
 extension SQLError: CustomStringConvertible {
@@ -145,6 +153,10 @@ extension SQLError: CustomStringConvertible {
           + "expected \(expected), found \(found)"
     case let .unsupported(detail):
       "unsupported query: \(detail)"
+    case let .statement(detail):
+      "statement is not runnable as a query: \(detail)"
+    case let .recursion(name):
+      "recursive CTE '\(name)' did not terminate"
     }
   }
 }
@@ -176,8 +188,11 @@ extension SQLError {
   /// - Class `SS` — the implementation-defined class this engine squats on
   ///   (SwiftSQL) for a condition with no standard ISO code — `SS001`, a query
   ///   shape the engine does not support (a FROM-less `SELECT *`, or a clause
-  ///   with no `FROM`). ISO leaves classes whose first character is `5`–`9` or
-  ///   `I`–`Z` implementation-defined, so `SS` is a safe squat.
+  ///   with no `FROM`), `SS002`, a statement that is not runnable as a query
+  ///   (a `CREATE VIEW`, or a malformed `WITH` member), and `SS003`, a recursive
+  ///   CTE that did not reach a fixpoint within the iteration cap. ISO leaves
+  ///   classes whose first character is `5`–`9` or `I`–`Z`
+  ///   implementation-defined, so `SS` is a safe squat.
   public var sqlstate: String {
     switch self {
     case let .state(code, _):
@@ -210,6 +225,10 @@ extension SQLError {
     // Class SS — SwiftSQL, this engine's implementation-defined conditions.
     case .unsupported:
       "SS001"
+    case .statement:
+      "SS002"
+    case .recursion:
+      "SS003"
     }
   }
 

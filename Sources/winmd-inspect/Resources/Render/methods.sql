@@ -1,5 +1,5 @@
 SELECT
   rowid,
-  ESCAPE(Name) AS Name
+  SANITIZE(Name) AS Name
 FROM
   methods

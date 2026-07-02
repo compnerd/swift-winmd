@@ -2,7 +2,7 @@
 # directive: the escape delimiters, the no-value return spelling, the COM-root
 # base, the reserved words an identifier is escaped against, and the type
 # spellings a signature decodes to (the primitive leaves, the pointer family, the
-# delimiters, and the well-known projections). The render's ESCAPE UDF and its
+# delimiters, and the well-known projections). The render's SANITIZE UDF and its
 # type Dialect read it, so this — not the binary — carries what is Swift-specific.
 # A `-I` directory's `Languages/swift.lang` shadows it.
 escape-prefix `

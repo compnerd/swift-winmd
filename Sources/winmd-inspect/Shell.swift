@@ -406,14 +406,16 @@ internal struct Shell: ~Escapable {
   /// The base inheritance is derived through the `bases` view (the interface's
   /// `InterfaceImpl` rows navigated to their base type names); a rootless
   /// interface defaults to the spec's COM `root`, save the root interface
-  /// itself, which inherits nothing. Identifier escaping and the no-value return
-  /// come from the template's language spec (`ESCAPE`/`RETURNS`), not the binary.
+  /// itself, which inherits nothing. Identifier escaping comes from the
+  /// template's language spec (the `SANITIZE` UDF), and the no-value return is
+  /// decided in Swift (`returned(_:)`) — neither is baked into the binary.
   internal borrowing func render(_ interface: String,
                                  template: String) throws -> String {
     // The template names its own target language through a leading `{{! language:
     // <name> }}` directive; stripping it yields the body and loads the matching
-    // spec, whose render UDFs (`ESCAPE`, `RETURNS`) make identifier escaping and
-    // the no-value return the queries' concern, not the binary's.
+    // spec, whose render UDF (`SANITIZE`) makes identifier escaping the
+    // queries' concern, not the binary's — while the no-value return is decided
+    // in Swift.
     // `self.` disambiguates the `template(named:)` accessor from the `template`
     // parameter that names the one to load.
     var body = try self.template(named: template, search: search)

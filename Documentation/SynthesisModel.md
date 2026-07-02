@@ -106,7 +106,7 @@ layer relies on:
   binding a parent row's key into a child query is how the render walks a
   one-to-many relationship one level at a time.
 - **Registered scalar functions** (`Routines`, `Sources/SQL/Function.swift`) —
-  the engine's extension point. The render binds the target-language `ESCAPE`
+  the engine's extension point. The render binds the target-language `SANITIZE`
   UDF (below) here, so keyword-escaping is a value a query projects rather than
   logic in the binary.
 
@@ -246,16 +246,16 @@ template names its target with a leading `{{! language: <name> }}` directive tha
 selects a bundled `Resources/Languages/<name>.lang` spec (e.g. `swift.lang`): the
 reserved words, the escape delimiters, the no-value-return spelling, the COM-root
 base, and the type spellings a signature decodes to. The spec surfaces to the
-render as the `ESCAPE(identifier)` UDF (keyword-escape a synthesized name) and as
+render as the `SANITIZE(identifier)` UDF (keyword-escape a synthesized name) and as
 a `Dialect` — the type-spelling table (plus the same keyword escape) the render's
 `SignatureType` decode composes with, so a named type whose simple name is a
 keyword spells escaped just as a declaration name does. A language rule is data,
 not a branch in the binary; retargeting to Rust or C is a new template and spec,
 no code change.
 
-1. Run `interfaces` for every interface's `rowid`, namespace, `ESCAPE`d name, and
+1. Run `interfaces` for every interface's `rowid`, namespace, `SANITIZE`d name, and
    `iid`, then keep the one whose name matches (or all of them for `*`).
-2. Bind that `rowid` as `:parent` and run `methods` (each `Name` `ESCAPE`d) and
+2. Bind that `rowid` as `:parent` and run `methods` (each `Name` `SANITIZE`d) and
    decode each method's return type from its signature with the `Dialect`,
    omitting the clause when it is the spec's no-value `void`; then bind *its*
    `rowid` as `:parent` and run `params` — the correlated walk down the

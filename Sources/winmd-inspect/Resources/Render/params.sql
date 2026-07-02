@@ -1,6 +1,6 @@
 SELECT
   rowid,
-  ESCAPE(Name) AS Name,
+  SANITIZE(Name) AS Name,
   Sequence
 FROM
   params

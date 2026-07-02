@@ -5,11 +5,56 @@ import Testing
 
 @testable import winmd_inspect
 
+import ArgumentParser
 import SQL
 import WinMDSynthesis
 import WinMD
 
+import class Foundation.FileManager
+import struct Foundation.Data
+import struct Foundation.UUID
+
 struct ShellTests {
+  /// Runs `body` with the path of a fresh, empty regular file that exists for
+  /// the call and is removed after. The root's `validate` (run on every parse)
+  /// requires the database to be an existing regular file, so a parse test
+  /// binds a real path rather than a made-up one.
+  private static func withDatabase(_ body: (String) throws -> Void) rethrows {
+    let manager = FileManager.default
+    let directory =
+        manager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try? manager.createDirectory(at: directory,
+                                 withIntermediateDirectories: true)
+    defer { try? manager.removeItem(at: directory) }
+    let url = directory.appendingPathComponent("fixture.winmd")
+    manager.createFile(atPath: url.path, contents: Data())
+    try body(url.path)
+  }
+
+  @Test("`query` is the default subcommand; its verb may be omitted")
+  func queryIsDefault() throws {
+    try ShellTests.withDatabase { database in
+      // With `query` the default subcommand, `<db>` alone parses to a `Query`
+      // opening the shell (no script), the same as `<db> query`, and a bare
+      // `<db> <sql>` binds the trailing positional to `sql` without the verb.
+      let shell =
+          try #require(try Inspect.parseAsRoot([database])
+                           as? winmd_inspect.Query)
+      #expect(shell.sql == nil)
+      #expect(shell.options.database.url.lastPathComponent == "fixture.winmd")
+
+      let scripted =
+          try #require(try Inspect.parseAsRoot([database, "SELECT 1"])
+                           as? winmd_inspect.Query)
+      #expect(scripted.sql == "SELECT 1")
+
+      // A named subcommand still routes to its own command, not the default.
+      let dumped = try #require(try Inspect.parseAsRoot([database, "dump"])
+                                    as? Dump)
+      #expect(dumped.options.database.url.lastPathComponent == "fixture.winmd")
+    }
+  }
+
   @Test("each meta-command answers to its `.`-prefixed spelling")
   func spellings() {
     // The leading-token dispatch matches a `.`-token against each `Metacommand`

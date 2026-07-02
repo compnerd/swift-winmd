@@ -78,7 +78,8 @@ struct Inspect: ParsableCommand {
                            Dump.self,
                            PrintNamespaces.self,
                            Query.self,
-                         ])
+                         ],
+                         defaultSubcommand: Query.self)
   }
 
   @OptionGroup

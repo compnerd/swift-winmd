@@ -33,11 +33,14 @@ jobs:
       - name: Process Coverage Information
         run: |
           $bin = swift build --show-bin-path
-          $objects = (swift package describe --type json | ConvertFrom-JSON).targets `
-                   | Where-Object { $_.type -eq 'test' } `
-                   | ForEach-Object { '-object'; "$bin\$($_.name)-test-runner.exe" }
-          $workspace = $env:GITHUB_WORKSPACE
-          llvm-cov export -format lcov -path-equivalence "$workspace,." -ignore-filename-regex '\.build[\\/]|[\\/]Tests[\\/]' -instr-profile "$bin\codecov\default.profdata" @objects | Set-Content -Encoding ascii -Path coverage.lcov
+          $objects = Get-ChildItem "$bin" -Include *-test-runner.exe,*Tests.dll -Recurse `
+                   | ForEach-Object { '-object'; $_.FullName }
+          llvm-cov export -format lcov -ignore-filename-regex '\.build[\\/]' -instr-profile "$bin\codecov\default.profdata" @objects | Set-Content -Encoding ascii -Path coverage.lcov
+          $ws = $env:GITHUB_WORKSPACE
+          (Get-Content coverage.lcov) `
+            | ForEach-Object { $_ -replace [regex]::Escape("$ws\"), '' -replace [regex]::Escape("$ws/"), '' } `
+            | ForEach-Object { $_ -replace '\\', '/' } `
+            | Set-Content -Encoding ascii coverage.lcov
       - uses: codecov/codecov-action@v7.0.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

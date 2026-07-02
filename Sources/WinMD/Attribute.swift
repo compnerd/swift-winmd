@@ -73,6 +73,18 @@ internal struct AttributeDecoder: ~Escapable {
 
 // MARK: - GuidAttribute value
 
+/// The UUID a `GuidAttribute` `CustomAttribute` value blob names, decoding the
+/// raw `bytes` as an ECMA-335 §II.23.3 `GuidAttribute` value.
+///
+/// This is the escapable, value → value form of `Tuple.iid(_:)`: a caller that
+/// has already copied a `CustomAttribute.Value` blob out of the borrowed scan
+/// (the SQL adapter's `.blob` cell) decodes it here, without a `Tuple`. A blob
+/// that is not a GUID-shaped `GuidAttribute` value throws.
+public func iid(decoding bytes: Array<UInt8>) throws(WinMDError) -> UUID {
+  var decoder = AttributeDecoder(bytes.span.bytes)
+  return try decoder.guid()
+}
+
 extension Tuple {
   /// The UUID a `GuidAttribute` `CustomAttribute` row's `Value` blob names, by
   /// decoding the `#Blob` heap cell at `column` as an ECMA-335 §II.23.3
@@ -91,7 +103,6 @@ extension Tuple {
     for i in 0 ..< blob.count {
       bytes.append(blob.load(at: i, as: UInt8.self))
     }
-    var decoder = AttributeDecoder(bytes.span.bytes)
-    return try decoder.guid()
+    return try WinMD.iid(decoding: bytes)
   }
 }

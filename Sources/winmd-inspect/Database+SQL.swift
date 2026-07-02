@@ -22,22 +22,19 @@ internal import WinMD
 /// `width`: `rowid` enables foreign-key joins — an FK is a real column holding a
 /// `rowid`.
 ///
-/// One table exposes a further per-table virtual column that decodes
-/// WinMD-specific data, at ordinals `width + 1` onward: `guid` on
-/// `CustomAttribute` (the UUID its `Value` blob names, or `NULL` when the blob is
-/// not GUID-shaped — the `interfaces` view navigates to a type's `GuidAttribute`
-/// and selects this codec to spell its IID). The extras are keyed by the
-/// relation's schema name; they are computed in `WinMDRow` and, being decoded
-/// rather than stored, are never seekable.
-///
-/// Type spellings are *not* virtual columns: they are language-specific, so the
-/// adapter — the neutral conceptual layer — does not bake them. The render spells
-/// a return/parameter at render time through the `WinMD.Storage`
+/// WinMD-specific decodes are *not* virtual columns. A real `#Blob` cell is
+/// surfaced as a `.blob` (its raw heap bytes), and the decode is a scalar UDF
+/// over it: the `GUID` UDF takes a `CustomAttribute.Value` blob and returns the
+/// UUID it names as text, or `NULL` when the blob is not GUID-shaped — the
+/// `interfaces` view selects `GUID(c.Value)` to spell a type's IID. Type
+/// spellings likewise are not virtual columns: they are language-specific, so
+/// the adapter — the neutral conceptual layer — does not bake them. The render
+/// spells a return/parameter at render time through the `WinMD.Storage`
 /// `decode(return:in:)`/`decode(parameter:for:)` methods, which navigate a
 /// method/parameter's signature and apply a target `Dialect`.
 ///
-/// Past the extras sit a relation's join keys, at ordinals `width + 1 + extras`
-/// onward — the columns a view equi-joins across. A list-owned table leads the
+/// Past `rowid` sit a relation's join keys, at ordinals `width + 1` onward —
+/// the columns a view equi-joins across. A list-owned table leads the
 /// group with `parent` (the list-child's owning parent's `rowid`), which enables
 /// list joins — a list-child relates to its owner through its run rather than a
 /// stored key — and a non-list table simply has no `parent` column. The
@@ -130,20 +127,56 @@ internal struct Session: SQL.Catalog, ~Escapable {
   }
 }
 
+// MARK: - WinMD scalar UDFs
+
+extension Session {
+  /// The WinMD-domain scalar UDFs a query resolves against — the decode
+  /// primitives the adapter surfaces over its `.blob` columns rather than
+  /// baking as decoded virtual columns.
+  ///
+  /// The one entry is `GUID(blob)`, which decodes a `CustomAttribute.Value`
+  /// blob to the UUID it names; the bundled `interfaces` view selects it to
+  /// spell a type's IID. These are escapable, value → value functions — no
+  /// borrowed storage — so they thread through the interactive `Session.run`
+  /// and merge into the render's language routines uniformly.
+  internal static var routines: Routines {
+    ["guid": Session.guid]
+  }
+
+  /// `GUID(blob)` — the UUID a `GuidAttribute` `CustomAttribute` value blob
+  /// names, as its canonical text, or `NULL` when the blob is not GUID-shaped.
+  ///
+  /// A pure per-row codec, the value → value form of the WinMD `iid` decode:
+  /// the `interfaces` view applies it only to the rows it has already navigated
+  /// to a `GuidAttribute`, so a non-GUID blob simply yields `NULL` (preserving
+  /// the old `guid` virtual column's NULL-on-mismatch behaviour). A NULL
+  /// argument propagates to NULL; a non-blob argument is `SQLError.argument`.
+  private static let guid: Scalar = { arguments in
+    guard arguments.count == 1 else {
+      throw .argument("GUID takes one argument")
+    }
+    if case .null = arguments[0] { return .null }
+    guard case let .blob(bytes) = arguments[0] else {
+      throw .argument("GUID requires a blob argument")
+    }
+    guard let uuid = try? WinMD.iid(decoding: bytes) else { return .null }
+    return .text("\(uuid)")
+  }
+}
+
 // MARK: - Table
 
 /// A `SQL.Table` over one open WinMD table.
 ///
 /// Its real columns are the table's fields; the virtual columns follow, past the
-/// `SELECT *` extent: `rowid` at `width`, then the table's per-table decoded
-/// extras (`guid`) at `width + 1` onward, then the join
-/// keys — `parent` (on a list-owned table only) leading the coded-index join
-/// keys. A real cell is typed from its field's `ColumnType`: a `#Strings` index
-/// is `.text`, every other column (a constant, a foreign-key index, another
-/// heap) is `.integer`. A seek is available on `rowid` (a dense 1-based index,
-/// trivially monotonic), on `parent` over a list-child (whose owning run is
-/// monotonic in row order), and on the table's intrinsic sort key when the
-/// database physically sorts the table; the decoded extras are not seekable.
+/// `SELECT *` extent: `rowid` at `width`, then the join keys — `parent` (on a
+/// list-owned table only) leading the coded-index join keys. A real cell is
+/// typed from its field's `ColumnType`: a `#Strings` index is `.text`, a
+/// `#Blob` index is a `.blob`, every other column (a constant, a foreign-key
+/// index, another heap) is `.integer`. A seek is available on `rowid` (a dense
+/// 1-based index, trivially monotonic), on `parent` over a list-child (whose
+/// owning run is monotonic in row order), and on the table's intrinsic sort key
+/// when the database physically sorts the table.
 internal struct WinMDRelation: SQL.Table, ~Escapable {
   /// The borrowed storage the relation reads from.
   private let storage: WinMD.Storage
@@ -173,24 +206,22 @@ internal struct WinMDRelation: SQL.Table, ~Escapable {
     return names
   }
 
-  /// The virtual column names, in ordinal order — `rowid` at `width`, this
-  /// table's decoded extras at `width + 1` onward, then its join keys: `parent`
-  /// (on a list-owned table only) leading the coded-index join keys.
+  /// The virtual column names, in ordinal order — `rowid` at `width`, then its
+  /// join keys: `parent` (on a list-owned table only) leading the coded-index
+  /// join keys.
   internal var virtuals: Array<String> {
     let parent = WinMDRelation.Link(storage, table) == nil ? [] : ["parent"]
     return ["rowid"] // the universal identity, at `width`
-        + extras // decoded codec columns
         + parent // the list-ownership key, present only on a list-owned table
         + keys.map(\.name) // coded-index join keys
   }
 
   /// One past the highest ordinal this relation can address — its real `width`
-  /// plus the universal `rowid`, this table's decoded extras, and its join keys
-  /// (`parent` when list-owned, then the coded-index join keys).
+  /// plus the universal `rowid` and its join keys (`parent` when list-owned,
+  /// then the coded-index join keys).
   internal var extent: Int {
     width // real fields
         + 1 // `rowid`
-        + extras.count // decoded codec columns
         + (WinMDRelation.Link(storage, table) == nil ? 0 : 1) // `parent`
         + keys.count // coded-index join keys
   }
@@ -202,12 +233,12 @@ internal struct WinMDRelation: SQL.Table, ~Escapable {
   }
 
   /// The ordinal of the `parent` virtual column on a list-owned table — the
-  /// first join-key ordinal, past `rowid` and the decoded extras — or `nil` when
-  /// the table owns no list (it then has no `parent` column).
+  /// first join-key ordinal, immediately past `rowid` — or `nil` when the table
+  /// owns no list (it then has no `parent` column).
   private var parent: Int? {
     WinMDRelation.Link(storage, table) == nil
         ? nil
-        : width + 1 + extras.count
+        : width + 1
   }
 
   internal func ordinal(of name: String) -> Int? {
@@ -219,16 +250,10 @@ internal struct WinMDRelation: SQL.Table, ~Escapable {
     if name.caseInsensitiveCompare("rowid") == .orderedSame {
       return rowid
     }
-    // The decoded extras follow `rowid`: extra `i` sits at `rowid + 1 + i`.
-    let extras = self.extras
-    for index in extras.indices
-        where extras[index].caseInsensitiveCompare(name) == .orderedSame {
-      return rowid + 1 + index
-    }
-    // The join keys follow the extras. `parent` (on a list-owned table) leads
+    // The join keys follow `rowid`. `parent` (on a list-owned table) leads
     // them; the coded-index join keys follow at `parent + 1` onward (or, on a
     // non-list table, at the first join-key ordinal).
-    let base = rowid + 1 + extras.count
+    let base = rowid + 1
     if let parent, name.caseInsensitiveCompare("parent") == .orderedSame {
       return parent
     }
@@ -314,12 +339,12 @@ internal struct WinMDRelation: SQL.Table, ~Escapable {
   /// The coded-index join `Key` exposed at ordinal `column`, or `nil` when
   /// `column` is not one of this table's coded-index join keys.
   ///
-  /// The coded-index join keys occupy the ordinals past `rowid`, the decoded
-  /// extras, and — on a list-owned table — the `parent` key, in the order
-  /// `keys` exposes them; this maps `column` back through that layout, the
-  /// inverse of `ordinal(of:)`'s coded-index-key arm.
+  /// The coded-index join keys occupy the ordinals past `rowid` and — on a
+  /// list-owned table — the `parent` key, in the order `keys` exposes them;
+  /// this maps `column` back through that layout, the inverse of
+  /// `ordinal(of:)`'s coded-index-key arm.
   private func key(for column: Int) -> Key? {
-    let base = rowid + 1 + extras.count
+    let base = rowid + 1
     let lead = parent == nil ? base : base + 1
     let index = column - lead
     let all = keys
@@ -353,36 +378,6 @@ internal struct WinMDRelation: SQL.Table, ~Escapable {
   @_lifetime(borrow self)
   internal borrowing func cursor() -> WinMDCursor {
     WinMDCursor(storage, table, WinMDRelation.Link(storage, table))
-  }
-}
-
-// MARK: - Per-table extras
-
-extension WinMDRelation {
-  /// The decoded extra virtual column names of this relation's table, in
-  /// ordinal order — the single source of truth `virtuals`, `extent`, `parent`,
-  /// and `ordinal(of:)` derive from (keyed by the table's schema name, through
-  /// the shared `extras(of:)` core).
-  ///
-  /// One table decodes a WinMD-specific column past `rowid`: `CustomAttribute` a
-  /// `guid` (the GUID its `Value` blob names, for the `GuidAttribute` rows the
-  /// `interfaces` view selects). Every other table exposes only `rowid` and
-  /// `parent`, so it has no extras. `WinMDRow.extras` computes the same list by
-  /// the same keying.
-  internal var extras: Array<String> {
-    WinMDRelation.extras(of: table.description)
-  }
-
-  /// The decoded extra virtual column names of the table named `schema`, keyed
-  /// by its schema name — the shared core `WinMDRelation.extras` and
-  /// `WinMDRow.extras` both derive from, so a row (which carries only its
-  /// schema name) and a relation (which carries the open table) yield the same
-  /// extras.
-  internal static func extras(of schema: String) -> Array<String> {
-    switch schema {
-    case "CustomAttribute": ["guid"]
-    default:                Array<String>()
-    }
   }
 }
 
@@ -559,7 +554,7 @@ internal struct WinMDCursor: SQL.Cursor, ~Escapable {
   @_lifetime(copy self)
   internal borrowing func row(_ index: Int) -> WinMDRow? {
     guard let tuple = cursor[index] else { return nil }
-    return WinMDRow(tuple, storage, link, cursor.relation.description)
+    return WinMDRow(tuple, storage, link)
   }
 }
 
@@ -569,15 +564,15 @@ internal struct WinMDCursor: SQL.Cursor, ~Escapable {
 ///
 /// A cell is read by ordinal as a typed `Value`: a real ordinal (`< count`)
 /// reads the WinMD cell — a `#Strings` heap index resolves through the heap as
-/// `.text`, every other column is `.integer`; `rowid` (`count`) is the 1-based
-/// row index; a per-table extra ordinal (`count + 1` onward) decodes the table's
-/// WinMD-specific column (`guid`); and the join keys
-/// follow the extras — on a list-owned table the `parent` ordinal is the owning
-/// parent row's 1-based `rowid` (zero for a row no parent owns) and the
-/// coded-index join keys follow it, while on a non-list table the coded-index
-/// join keys follow the extras directly. A coded-index join-key ordinal decodes
-/// a coded-index cell to the target's 1-based `rowid`, or SQL `NULL` when the
-/// cell points elsewhere or is null.
+/// `.text`, a `#Blob` heap index as an owning `.blob` (the raw heap payload,
+/// for a scalar UDF such as `GUID` to decode), every other column `.integer`;
+/// `rowid` (`count`) is the 1-based row index; and the join keys follow it — on
+/// a list-owned table the `parent` ordinal is the owning parent row's 1-based
+/// `rowid` (zero for a row no parent owns) and the coded-index join keys follow
+/// it, while on a non-list table the coded-index join keys follow `rowid`
+/// directly. A coded-index join-key ordinal decodes a coded-index cell to the
+/// target's 1-based `rowid`, or SQL `NULL` when the cell points elsewhere or is
+/// null.
 internal struct WinMDRow: SQL.Row, ~Escapable {
   /// The WinMD row this view reads.
   private let tuple: WinMD.Tuple
@@ -588,67 +583,46 @@ internal struct WinMDRow: SQL.Row, ~Escapable {
   /// The relation's list link, when it is a list-child.
   private let link: WinMDRelation.Link?
 
-  /// The relation's schema name — the key for this table's decoded extras
-  /// (`WinMD.Tuple` does not expose its table's name, so it is carried in).
-  private let schema: String
-
   @_lifetime(copy tuple, copy storage)
   internal init(_ tuple: borrowing WinMD.Tuple,
                 _ storage: borrowing WinMD.Storage,
-                _ link: WinMDRelation.Link?, _ schema: String) {
+                _ link: WinMDRelation.Link?) {
     self.tuple = copy tuple
     self.storage = copy storage
     self.link = link
-    self.schema = schema
   }
 
   internal subscript(_ column: Int) -> Value {
     borrowing get {
-      // The real fields are `[0, count)`; `rowid` is `count`, the decoded extras
-      // are `count + 1` onward, then the join keys.
+      // The real fields are `[0, count)`; `rowid` is `count`, then the join
+      // keys follow it.
       if column == tuple.count {
         return .integer(tuple.index + 1)
       }
       if column > tuple.count {
-        // Past `rowid`: the decoded extras occupy `[0, extras.count)` of the
-        // virtual range, then the join keys. On a list-owned table `parent`
-        // leads the join keys (the owning parent's 1-based `rowid`, zero for a
-        // row no parent owns) and the coded-index join keys follow it; on a
-        // non-list table the coded-index join keys follow the extras directly.
-        let extras = self.extras.count
+        // Past `rowid`: the join keys. On a list-owned table `parent` leads
+        // them (the owning parent's 1-based `rowid`, zero for a row no parent
+        // owns) and the coded-index join keys follow it; on a non-list table
+        // the coded-index join keys follow `rowid` directly.
         let virtual = column - (tuple.count + 1)
-        if virtual < extras { return extra(virtual) }
-        let key = virtual - extras
-        guard let link else { return self.key(key) }
-        return key == 0
+        guard let link else { return self.key(virtual) }
+        return virtual == 0
             ? .integer(storage.owner(of: tuple.index, link))
-            : self.key(key - 1)
+            : self.key(virtual - 1)
       }
       if case .index(.heap(.string)) = tuple.type(of: column) {
         return .text((try? tuple.string(column)) ?? "")
       }
+      if case .index(.heap(.blob)) = tuple.type(of: column) {
+        guard let blob = try? tuple.blob(column) else { return .null }
+        var bytes = Array<UInt8>()
+        bytes.reserveCapacity(blob.count)
+        for i in 0 ..< blob.count {
+          bytes.append(blob.load(at: i, as: UInt8.self))
+        }
+        return .blob(bytes)
+      }
       return .integer(tuple[column])
-    }
-  }
-
-  /// The decoded extra virtual column names of this row's table, in ordinal
-  /// order — the schema-keyed sibling of `WinMDRelation.extras`, so a row
-  /// (which carries only its schema name) derives the same extras a relation
-  /// does from the open table (both through the shared
-  /// `WinMDRelation.extras(of:)` core).
-  private var extras: Array<String> {
-    WinMDRelation.extras(of: schema)
-  }
-
-  /// The decoded value of this table's `index`th extra virtual column.
-  ///
-  /// The extras are keyed by the table's schema name (the same keying `extras`
-  /// exposes); each decodes its WinMD-specific cell. An out-of-range index — no
-  /// such extra — is SQL `NULL`.
-  private func extra(_ index: Int) -> Value {
-    switch (schema, index) {
-    case ("CustomAttribute", 0): guid()
-    default:                     .null
     }
   }
 
@@ -683,21 +657,6 @@ internal struct WinMDRow: SQL.Row, ~Escapable {
     let value = key.kind.init(rawValue: tuple[key.column])
     guard value.tag == key.tag, value.row != 0 else { return .null }
     return .integer(value.row)
-  }
-
-  /// The `guid` extra of a `CustomAttribute` row — the UUID its `Value` blob
-  /// names, decoded as an ECMA-335 §II.23.3 `GuidAttribute` value, or SQL
-  /// `NULL` when the blob is not GUID-shaped.
-  ///
-  /// A pure per-row codec: the `interfaces` view selects it only on the rows it
-  /// has already navigated to a `GuidAttribute`, so a non-Guid attribute's
-  /// non-GUID blob simply yields `NULL`.
-  private func guid() -> Value {
-    guard let column = tuple.ordinal(for: "Value"),
-        let uuid = try? tuple.iid(column) else {
-      return .null
-    }
-    return .text("\(uuid)")
   }
 }
 

@@ -52,8 +52,9 @@ extension Dialect {
   }
 }
 
-/// Coverage of the WinMD → SQL adapter's decoded `guid` virtual column on
-/// `CustomAttribute` and the render-time signature decode (`decode(return:in:)`/
+/// Coverage of the WinMD → SQL adapter's `GUID` scalar UDF over a
+/// `CustomAttribute.Value` `.blob` column and the render-time signature decode
+/// (`decode(return:in:)`/
 /// `decode(parameter:for:)`), which the adapter no longer bakes as `ReturnType`/
 /// `ParamType` columns. Rather than map a `.winmd` file, the tests assemble a
 /// tiny COM
@@ -203,7 +204,7 @@ struct DatabaseSQLTests {
       Issue.record("not a SELECT")
       return []
     }
-    return try Engine.run(select, catalog)
+    return try Engine.run(select, catalog, Session.routines)
   }
 
   /// Parses `query` as a `CREATE VIEW`, returning its case-folded name and view.
@@ -226,7 +227,7 @@ struct DatabaseSQLTests {
       Issue.record("not a SELECT")
       return []
     }
-    return try Engine.run(select, Session(catalog, views))
+    return try Engine.run(select, Session(catalog, views), Session.routines)
   }
 
   /// Plans and runs `query` through the engine over a `Session` catalog
@@ -242,7 +243,7 @@ struct DatabaseSQLTests {
       Issue.record("not a SELECT")
       return []
     }
-    return try Engine.run(select, Session(catalog, views), Routines(),
+    return try Engine.run(select, Session(catalog, views), Session.routines,
                           bindings: bindings)
   }
 
@@ -250,9 +251,8 @@ struct DatabaseSQLTests {
   func bundledInterfaces() throws {
     // The `interfaces` view navigates each `TypeDef` to its `GuidAttribute` IID
     // across the coded-index join keys (`TypeDef` ← `CustomAttribute` →
-    // `MemberRef` → `TypeRef`), projecting the decoded `CustomAttribute.guid` as
-    // `iid`; the only IID-carrying type is `IMyInterface`, whose `iid` is the
-    // well-known value.
+    // `MemberRef` → `TypeRef`), projecting `GUID(c.Value)` as `iid`; the only
+    // IID-carrying type is `IMyInterface`, whose `iid` is the well-known value.
     try DatabaseSQLTests.with { catalog in
       let rows = try DatabaseSQLTests.run(
           "SELECT TypeName, iid FROM interfaces", Session.bundled(), catalog)
@@ -295,15 +295,16 @@ struct DatabaseSQLTests {
 
   @Test("a registered view is queryable through the session catalog")
   func sessionView() throws {
-    // `CREATE VIEW guids …` registers a view over `CustomAttribute`'s decoded
-    // `guid` extra; a `SELECT … FROM guids` then resolves it through the session
-    // catalog and yields the view's rows. The fixture's single
-    // `CustomAttribute` is the `GuidAttribute`, so its `guid` is the well-known
-    // value.
+    // `CREATE VIEW guids …` registers a view decoding `CustomAttribute.Value`
+    // through the `GUID` UDF; a `SELECT … FROM guids` then resolves it through
+    // the session catalog and yields the view's rows. The fixture's single
+    // `CustomAttribute` is the `GuidAttribute`, so its `GUID(Value)` is the
+    // well-known value.
     try DatabaseSQLTests.with { catalog in
       let (name, view) = try DatabaseSQLTests.create(
           "CREATE VIEW guids AS "
-          + "SELECT guid FROM CustomAttribute WHERE guid IS NOT NULL")
+          + "SELECT GUID(Value) AS guid FROM CustomAttribute "
+          + "WHERE GUID(Value) IS NOT NULL")
       let rows = try DatabaseSQLTests.run(
           "SELECT guid FROM guids", [name: view], catalog)
       #expect(rows == [[.text("0C733A30-2A1C-11CE-ADE5-00AA0044773D")]])
@@ -390,23 +391,22 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("vends a CustomAttribute's decoded guid")
+  @Test("the GUID UDF decodes a CustomAttribute's Value blob")
   func guid() throws {
-    // The `guid` extra decodes the `GuidAttribute`'s `Value` blob to the
-    // well-known UUID as text; the fixture's sole `CustomAttribute` is that
-    // attribute.
+    // The `GUID` UDF decodes the `GuidAttribute`'s `Value` blob (surfaced as a
+    // real `.blob` column) to the well-known UUID as text; the fixture's sole
+    // `CustomAttribute` is that attribute.
     try DatabaseSQLTests.with { catalog in
       let rows = try DatabaseSQLTests.run(
-          "SELECT guid FROM CustomAttribute", catalog)
+          "SELECT GUID(Value) FROM CustomAttribute", catalog)
       #expect(rows == [[.text("0C733A30-2A1C-11CE-ADE5-00AA0044773D")]])
     }
   }
 
-  @Test("excludes the decoded extras from SELECT *")
+  @Test("excludes the virtual columns from SELECT *")
   func star() throws {
     // `SELECT *` projects exactly the six real `TypeDef` fields — neither
-    // `rowid`, `parent`, nor any decoded extra appears — for each of the two
-    // fixture types.
+    // `rowid` nor `parent` appears — for each of the two fixture types.
     try DatabaseSQLTests.with { catalog in
       let rows = try DatabaseSQLTests.run("SELECT * FROM TypeDef", catalog)
       #expect(rows.count == 2)
@@ -633,12 +633,13 @@ struct DatabaseSQLTests {
   @Test("a coded-index join key joins a CustomAttribute to its owning TypeDef")
   func codedKeyJoin() throws {
     // Joining `CustomAttribute` to `TypeDef` on the decoded `Parent_TypeDef`
-    // key against the `TypeDef`'s rowid pairs the `GuidAttribute` row (carrying
-    // the decoded `guid`) with the `IMyInterface` type it decorates, end to end
+    // key against the `TypeDef`'s rowid pairs the `GuidAttribute` row (its
+    // `GUID(Value)` IID) with the `IMyInterface` type it decorates, end to end
     // across the coded index.
     try DatabaseSQLTests.with { catalog in
       let rows = try DatabaseSQLTests.run(
-          "SELECT TypeDef.TypeName, CustomAttribute.guid FROM CustomAttribute "
+          "SELECT TypeDef.TypeName, GUID(CustomAttribute.Value) "
+          + "FROM CustomAttribute "
           + "JOIN TypeDef ON CustomAttribute.Parent_TypeDef = TypeDef.rowid",
           catalog)
       #expect(rows == [

@@ -420,7 +420,10 @@ internal struct Shell: ~Escapable {
     // parameter that names the one to load.
     var body = try self.template(named: template, search: search)
     let language = Shell.language(declaredIn: &body, search: search)
-    let routines = language.routines
+    // The queries resolve against both the target-language spec's UDFs
+    // (`SANITIZE`) and the WinMD-domain UDFs (`GUID`) — the `interfaces` view
+    // spells its `iid` through `GUID(c.Value)`.
+    let routines = language.routines.merging(Session.routines)
     // The type spellings are decoded at render time from the spec's `Dialect`:
     // the adapter is language-neutral, so the render — not the binary's WinMD →
     // SQL layer — spells a return/parameter, navigating the signature with the
@@ -866,9 +869,9 @@ extension Session {
       register(name, view)
       return []
     case let .select(query):
-      return try Engine.run(query, self, bindings: bindings)
+      return try Engine.run(query, self, Session.routines, bindings: bindings)
     case .with:
-      return try Engine.run(parsed, self, bindings: bindings)
+      return try Engine.run(parsed, self, Session.routines, bindings: bindings)
     }
   }
 }

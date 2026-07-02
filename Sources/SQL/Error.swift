@@ -43,8 +43,9 @@ public enum SQLError: Error, Hashable, Sendable {
   case state(String, String)
   /// A character that begins no valid token.
   case character(Character, at: SourceLocation)
-  /// A string literal whose closing quote is missing.
-  case unterminated(at: SourceLocation)
+  /// A delimited construct whose closing delimiter is missing — the `String`
+  /// names what was left open (a string literal, a block comment, …).
+  case unterminated(String, at: SourceLocation)
   /// An integer literal that does not fit the platform `Int`.
   case overflow(String, at: SourceLocation)
   /// A token of a kind other than the one the grammar requires here.
@@ -119,8 +120,8 @@ extension SQLError: CustomStringConvertible {
       message
     case let .character(character, location):
       "unexpected character '\(character)' at \(location)"
-    case let .unterminated(location):
-      "unterminated string literal at \(location)"
+    case let .unterminated(what, location):
+      "unterminated \(what) at \(location)"
     case let .overflow(text, location):
       "integer literal '\(text)' out of range at \(location)"
     case let .unexpected(found, expected, location):

@@ -181,6 +181,69 @@ struct ShellTests {
             == ["SELECT 'x;\n y;' AS s"])
   }
 
+  @Test("a `;` inside a comment does not terminate the statement")
+  func streamComment() {
+    // Now that the lexer skips comments, the splitter must too: a `;` inside a
+    // `--` line comment or a `/* … */` block comment is not a terminator, or a
+    // valid script would be cut mid-comment before the lexer could skip it.
+    #expect(Array(Statements(of: "SELECT 1 -- ; note\n; SELECT 2;"))
+            == ["SELECT 1 -- ; note", "SELECT 2"])
+    #expect(Array(Statements(of: "SELECT /* ; */ 1;"))
+            == ["SELECT /* ; */ 1"])
+    #expect(Array(Statements(of: "SELECT /* a;\n b; */ 1; SELECT 2;"))
+            == ["SELECT /* a;\n b; */ 1", "SELECT 2"])
+    // A `--` comment stops at its newline, so the following statement still
+    // terminates rather than being swallowed by the comment; the comment text
+    // simply travels with that statement (the lexer skips it at parse).
+    #expect(Array(Statements(of: "SELECT 1; -- trailing\nSELECT 2;"))
+            == ["SELECT 1", "-- trailing\nSELECT 2"])
+  }
+
+  @Test("a trivia-only fragment is not yielded as a statement")
+  func streamTriviaOnly() {
+    // A chunk that is only whitespace and comments carries no statement, so it
+    // is dropped rather than handed to the parser as empty input — a trailing
+    // or standalone comment, or a comment between terminators.
+    #expect(Array(Statements(of: "SELECT 1; -- trailing")) == ["SELECT 1"])
+    #expect(Array(Statements(of: "-- just a comment")).isEmpty)
+    #expect(Array(Statements(of: "/* a block */")).isEmpty)
+    #expect(Array(Statements(of: "SELECT 1; -- note\n; SELECT 2;"))
+            == ["SELECT 1", "SELECT 2"])
+  }
+
+  @Test("an unterminated block comment is yielded, not dropped")
+  func streamUnterminatedComment() {
+    // A CLOSED comment is trivia, but an unclosed `/*` is not: the fragment
+    // must reach the parser so the lexer's unterminated-block-comment error
+    // surfaces on a batch/`.read`/EOF path rather than being silently
+    // swallowed.
+    #expect(Array(Statements(of: "/* missing close")) == ["/* missing close"])
+    #expect(Array(Statements(of: "SELECT 1; /* missing close"))
+            == ["SELECT 1", "/* missing close"])
+  }
+
+  @Test("a `;` or comment inside a delimited identifier is data")
+  func streamDelimitedIdentifier() {
+    // A double-quoted delimited identifier is tracked like a string literal, so
+    // `--`, `/* */`, and `;` inside `"…"` are data — not a comment or a
+    // terminator — and the real terminator after it is still found.
+    #expect(Array(Statements(of: "SELECT \"--\" AS c;"))
+            == ["SELECT \"--\" AS c"])
+    #expect(Array(Statements(of: "SELECT \"a;b\" AS c;"))
+            == ["SELECT \"a;b\" AS c"])
+    #expect(Array(Statements(of: "SELECT \"/* x */\" AS c;"))
+            == ["SELECT \"/* x */\" AS c"])
+  }
+
+  @Test("a comment before a meta-command does not turn it into SQL")
+  func streamCommentBeforeMeta() {
+    // A comment-only pending is trivia, so a following `.`-meta line is still
+    // recognised as a meta-command rather than glued onto the comment and sent
+    // through SQL parsing.
+    #expect(Array(Statements(of: "-- note\n.tables")) == [".tables"])
+    #expect(Array(Statements(of: "/* note */\n.read a.sql")) == [".read a.sql"])
+  }
+
   @Test("an open-quote `.`-meta accumulates raw lines into one statement")
   func streamOpenQuoteMeta() {
     // A `.`-meta whose single-quoted string is still open is a multiline meta:
@@ -220,6 +283,22 @@ struct ShellTests {
     let statements = Array(Statements(reading: { lines.next() }))
     #expect(statements.count == 2)
     #expect(statements[0] == ".template t 'first\n  ; second\nthird'")
+    #expect(statements[1] == "SELECT 1")
+  }
+
+  @Test("a `.template` name starting with -- still accumulates its body")
+  func streamTemplateDashName() {
+    // The `.template` name is the first token; when it starts with `--`, the
+    // meta accumulation must NOT treat the rest of the line as a comment (it is
+    // meta text, not SQL) — the open single quote still opens a multiline body.
+    let script = """
+      .template --swift 'line one
+      line two'
+      SELECT 1;
+      """
+    let statements = Array(Statements(of: script))
+    #expect(statements.count == 2)
+    #expect(statements[0] == ".template --swift 'line one\nline two'")
     #expect(statements[1] == "SELECT 1")
   }
 

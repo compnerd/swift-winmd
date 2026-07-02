@@ -29,7 +29,8 @@ struct SQLStateTests {
   @Test("a syntax error reports 42601")
   func syntax() {
     #expect(SQLError.character("@", at: here).sqlstate == "42601")
-    #expect(SQLError.unterminated(at: here).sqlstate == "42601")
+    #expect(SQLError.unterminated("string literal", at: here).sqlstate
+                == "42601")
     #expect(
         SQLError.unexpected("X", expected: "Y", at: here).sqlstate == "42601")
     #expect(SQLError.incomplete(expected: "Z").sqlstate == "42601")

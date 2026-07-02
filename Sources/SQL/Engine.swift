@@ -429,7 +429,7 @@ public enum Engine {
       if let predicate = select.predicate {
         filter = try from.schema.lower(predicate, in: relation)
       }
-      var order: (column: Int, ascending: Bool)? = nil
+      var order = Array<(column: Int, ascending: Bool)>()
       if let clause = select.order {
         order = try from.schema.order(clause, in: relation)
       }
@@ -482,7 +482,7 @@ public enum Engine {
     if let clause = select.predicate {
       predicate = try scope.lower(clause)
     }
-    var order: (column: Int, ascending: Bool)? = nil
+    var order = Array<(column: Int, ascending: Bool)>()
     if let clause = select.order {
       order = try scope.order(clause)
     }
@@ -496,7 +496,7 @@ public enum Engine {
     for term in projection { term.references(into: &references) }
     for match in matches { match.references(into: &references) }
     predicate?.references(into: &references)
-    if let order { references.insert(order.column) }
+    for key in order { references.insert(key.column) }
     let combined = references.sorted()
 
     var slot = Dictionary<Int, Int>(minimumCapacity: combined.count)
@@ -620,17 +620,17 @@ public enum Engine {
 
   /// The sorted, deduplicated ordinals a query references: the union of the
   /// ordinals its `projection` terms read, the columns its `filter` reads, and
-  /// its `order` column. The projection terms hold ordinals at this stage; a
-  /// scalar call's arguments contribute their read ordinals too.
+  /// EVERY column its `order` keys read. The projection terms hold ordinals at
+  /// this stage; a scalar call's arguments contribute their read ordinals too.
   private static func referenced(_ projection: Array<Term>, _ filter: Filter?,
-                                 _ order: (column: Int, ascending: Bool)?)
+                                 _ order: Array<(column: Int, ascending: Bool)>)
       -> Array<Int> {
     var ordinals = Set<Int>()
     for term in projection {
       term.references(into: &ordinals)
     }
     filter?.references(into: &ordinals)
-    if let order { ordinals.insert(order.column) }
+    for key in order { ordinals.insert(key.column) }
     return ordinals.sorted()
   }
 
@@ -646,7 +646,7 @@ public enum Engine {
 
   /// Wraps `source` in the `Project(Limit(Sort(Select(_))))` operators, omitting
   /// each layer when its clause is absent. The `projection`, `filter`, and
-  /// `order` are in slot space.
+  /// `order` keys are in slot space; an empty `order` omits the sort.
   ///
   /// The row `limit` sits BELOW the projection — after `WHERE` and `ORDER BY`,
   /// but before the select list is evaluated. A row outside the requested page
@@ -655,14 +655,14 @@ public enum Engine {
   /// a discarded row and the query returns the documented empty page.
   private static func shape(_ source: Plan, _ projection: Array<Term>,
                             _ filter: Filter?,
-                            _ order: (slot: Int, ascending: Bool)?,
+                            _ order: Array<(slot: Int, ascending: Bool)>,
                             _ limit: Limit?) -> Plan {
     var plan = source
     if let filter {
       plan = .select(filter, plan)
     }
-    if let order {
-      plan = .sort(slot: order.slot, ascending: order.ascending, plan)
+    if !order.isEmpty {
+      plan = .sort(keys: order, plan)
     }
     return .project(projection, plan.capped(limit: limit))
   }
@@ -722,9 +722,8 @@ public enum Engine {
       try .select(filter, optimise(source, catalog, ctes, bindings))
     case let .project(ordinals, source):
       try .project(ordinals, optimise(source, catalog, ctes, bindings))
-    case let .sort(slot, ascending, source):
-      try .sort(slot: slot, ascending: ascending,
-                optimise(source, catalog, ctes, bindings))
+    case let .sort(keys, source):
+      try .sort(keys: keys, optimise(source, catalog, ctes, bindings))
     case let .product(left, right):
       try .product(optimise(left, catalog, ctes, bindings),
                    optimise(right, catalog, ctes, bindings))
@@ -1024,8 +1023,8 @@ extension Plan {
       try source.pushdown().distribute(filter.conjuncts)
     case let .project(terms, source):
       try .project(terms, source.pushdown())
-    case let .sort(slot, ascending, source):
-      try .sort(slot: slot, ascending: ascending, source.pushdown())
+    case let .sort(keys, source):
+      try .sort(keys: keys, source.pushdown())
     case let .product(left, right):
       try .product(left.pushdown(), right.pushdown())
     case let .union(left, right, all):

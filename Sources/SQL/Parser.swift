@@ -29,7 +29,8 @@
 /// additive       := multiplicative (('+' | '-') multiplicative)*
 /// multiplicative := factor (('*' | '/') factor)*
 /// factor         := '(' expression ')' | literal | call | column
-/// order          := ORDER BY column [ASC | DESC]
+/// order          := ORDER BY key (',' key)*
+/// key            := column [ASC | DESC]
 /// limit          := [OFFSET integer ROWS]
 ///                   [FETCH (FIRST | NEXT) [integer] ROWS ONLY]
 /// column         := identifier        // a dotted identifier is qualified
@@ -548,10 +549,22 @@ internal struct Parser: ~Escapable {
 
   // MARK: - Order
 
-  /// Parses `BY identifier [ASC | DESC]` (the `ORDER` keyword is already
-  /// consumed).
+  /// Parses `BY key (',' key)*` — a comma-separated list of sort keys, each a
+  /// column and its own optional `ASC`/`DESC` — into an `Order` (the `ORDER`
+  /// keyword is already consumed). The keys read in source order, major to
+  /// minor.
   private mutating func order() throws(SQLError) -> Order {
     try expect(.by)
+    var keys = [try key()]
+    while try match(.comma) {
+      try keys.append(key())
+    }
+    return Order(keys: keys)
+  }
+
+  /// Parses one sort key — `column [ASC | DESC]`, the direction defaulting to
+  /// ascending.
+  private mutating func key() throws(SQLError) -> Order.Key {
     let column = try column()
 
     var ascending = true
@@ -560,7 +573,7 @@ internal struct Parser: ~Escapable {
     } else {
       _ = try match(.asc)
     }
-    return Order(column: column, ascending: ascending)
+    return Order.Key(column: column, ascending: ascending)
   }
 
   // MARK: - Row limiting

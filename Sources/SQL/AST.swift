@@ -9,7 +9,7 @@
 /// SELECT <* | column (, column)*>
 ///   FROM <table> [AS alias]
 ///   (JOIN <table> [AS alias] ON <column> = <column>)*
-///   [WHERE <predicate>] [ORDER BY <column> [ASC|DESC]]
+///   [WHERE <predicate>] [ORDER BY <column> [ASC|DESC] (, …)*]
 ///   [OFFSET <skip> ROWS] [FETCH {FIRST | NEXT} <count> ROWS ONLY]
 /// ```
 ///
@@ -343,18 +343,40 @@ public enum Literal: Hashable, Sendable {
   case integer(Int)
 }
 
-/// An `ORDER BY` clause: a column and its direction.
+/// An `ORDER BY` clause: an ordered list of sort keys, each a column and its
+/// own direction.
+///
+/// The keys are applied major to minor — `ORDER BY a, b DESC, c` sorts by `a`
+/// ascending, breaks ties by `b` descending, then breaks the rest by `c`
+/// ascending — so `keys[0]` is the primary key and each later key orders only
+/// the rows the earlier keys leave equal. A per-key `ASC`/`DESC` governs that
+/// key alone (default `ASC`); `keys` is never empty.
 public struct Order: Hashable, Sendable {
-  /// The column the result is ordered on.
-  public let column: Column
+  /// One sort key: the column to order on and its direction.
+  public struct Key: Hashable, Sendable {
+    /// The column this key orders on.
+    public let column: Column
 
-  /// Whether the order is ascending (`ASC`, the default) rather than
-  /// descending (`DESC`).
-  public let ascending: Bool
+    /// Whether this key is ascending (`ASC`, the default) rather than
+    /// descending (`DESC`).
+    public let ascending: Bool
 
+    public init(column: Column, ascending: Bool = true) {
+      self.column = column
+      self.ascending = ascending
+    }
+  }
+
+  /// The sort keys, in major-to-minor order — `keys[0]` is the primary key.
+  public let keys: Array<Key>
+
+  public init(keys: Array<Key>) {
+    self.keys = keys
+  }
+
+  /// A single-key `ORDER BY` — the common case, ordering on one column.
   public init(column: Column, ascending: Bool = true) {
-    self.column = column
-    self.ascending = ascending
+    self.init(keys: [Key(column: column, ascending: ascending)])
   }
 }
 

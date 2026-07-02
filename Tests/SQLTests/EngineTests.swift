@@ -250,6 +250,29 @@ private func people() -> Memory {
   return Memory(["People": Relation(fields, records, sorted: 0)])
 }
 
+/// A single-relation catalog for compound ordering: a `Grade` relation whose
+/// `Class`/`Score` columns hold deliberate ties, so a three-key `ORDER BY
+/// Class, Score, Name` needs the third key to settle rows the first two leave
+/// equal. The rows are stored out of every non-`Id` order, so a sort is never a
+/// no-op.
+private func grades() -> Memory {
+  let fields = [
+    Field(name: "Id", kind: .integer),
+    Field(name: "Class", kind: .text),
+    Field(name: "Score", kind: .integer),
+    Field(name: "Name", kind: .text),
+  ]
+  let records = [
+    [.integer(1), .text("B"), .integer(90), .text("Zed")],
+    [.integer(2), .text("A"), .integer(80), .text("Yan")],
+    [.integer(3), .text("A"), .integer(80), .text("Ada")],
+    [.integer(4), .text("B"), .integer(90), .text("Amy")],
+    [.integer(5), .text("A"), .integer(80), .text("Mel")],
+    [.integer(6), .text("A"), .integer(70), .text("Bob")],
+  ] as Array<Array<Value>>
+  return Memory(["Grade": Relation(fields, records, sorted: 0)])
+}
+
 /// A catalog modelling a decoded coded-index key: an `Attribute` relation whose
 /// `Parent` column is seekable but not ordered. It stands in for a
 /// `CustomAttribute` physically sorted on its raw `Parent` coded index with
@@ -518,6 +541,11 @@ private func run(_ text: String) throws -> Array<Array<Value>> {
   try Engine.run(parse(text), people())
 }
 
+/// Runs `text` against the compound-ordering `Grade` catalog.
+private func grades(_ text: String) throws -> Array<Array<Value>> {
+  try Engine.run(parse(text), grades())
+}
+
 /// Runs `text` against the wide catalog.
 private func wide(_ text: String) throws -> Array<Array<Value>> {
   try Engine.run(parse(text), wide())
@@ -645,6 +673,85 @@ struct EngineOrderTests {
     let rows = try run("SELECT Name FROM People ORDER BY Name DESC")
     #expect(rows == [[.text("Eve")], [.text("Dave")], [.text("Carol")],
                      [.text("Bob")], [.text("Alice")]])
+  }
+}
+
+struct EngineCompoundOrderTests {
+  @Test("a single-key ORDER BY still orders as before")
+  func single() throws {
+    // The one-key case is unchanged: ages ascending, ties kept in scan order.
+    let rows = try run("SELECT Id FROM People ORDER BY Age ASC")
+    #expect(rows == [[.integer(2)], [.integer(5)], [.integer(1)],
+                     [.integer(3)], [.integer(4)]])
+  }
+
+  @Test("two keys order by the first, then the second")
+  func twoKeys() throws {
+    // Age ascending, ties by Name ascending: {Bob,Eve} at 25 → Bob, Eve;
+    // {Alice,Carol} at 30 → Alice, Carol; then Dave.
+    let rows = try run("SELECT Name FROM People ORDER BY Age, Name")
+    #expect(rows == [[.text("Bob")], [.text("Eve")], [.text("Alice")],
+                     [.text("Carol")], [.text("Dave")]])
+  }
+
+  @Test("each key carries its own direction")
+  func mixedDirections() throws {
+    // Age descending, ties by Name ascending: Dave(40); Alice, Carol (30);
+    // Bob, Eve (25).
+    let rows =
+        try run("SELECT Name FROM People ORDER BY Age DESC, Name ASC")
+    #expect(rows == [[.text("Dave")], [.text("Alice")], [.text("Carol")],
+                     [.text("Bob")], [.text("Eve")]])
+  }
+
+  @Test("a later key breaks ties the first key leaves")
+  func tieBreak() throws {
+    // Age ascending leaves {Bob,Eve} and {Alice,Carol} tied; a DESC Name key
+    // reorders each pair against the scan order (Eve before Bob, Carol before
+    // Alice) — proof the second key, not the input order, settles the ties.
+    let rows = try run("SELECT Name FROM People ORDER BY Age ASC, Name DESC")
+    #expect(rows == [[.text("Eve")], [.text("Bob")], [.text("Carol")],
+                     [.text("Alice")], [.text("Dave")]])
+  }
+
+  @Test("three keys settle rows the first two leave equal")
+  func threeKeys() throws {
+    // Class ascending, Score ascending, Name ascending. Class A: Bob(70), then
+    // the 80s by Name — Ada, Mel, Yan. Class B: both 90, by Name — Amy, Zed.
+    let rows =
+        try grades("SELECT Id FROM Grade ORDER BY Class, Score, Name")
+    #expect(rows == [[.integer(6)], [.integer(3)], [.integer(5)],
+                     [.integer(2)], [.integer(4)], [.integer(1)]])
+  }
+
+  @Test("a compound ORDER BY is stable across all keys")
+  func stable() throws {
+    // Class and Score alone leave the three Class-A/Score-80 rows tied; with no
+    // further key the sort keeps their scan order — Yan(2), Ada(3), Mel(5).
+    let rows = try grades("SELECT Id FROM Grade ORDER BY Class, Score")
+    #expect(rows == [[.integer(6)], [.integer(2)], [.integer(3)],
+                     [.integer(5)], [.integer(1)], [.integer(4)]])
+  }
+
+  @Test("FETCH takes the top-N of a compound order")
+  func topN() throws {
+    // Age descending, ties by Name ascending, then the first two rows: Dave(40)
+    // and the lower-named of the 30s, Alice.
+    let rows = try run("""
+        SELECT Name FROM People
+          ORDER BY Age DESC, Name ASC FETCH FIRST 2 ROWS ONLY
+        """)
+    #expect(rows == [[.text("Dave")], [.text("Alice")]])
+  }
+
+  @Test("OFFSET then FETCH pages into a compound order")
+  func page() throws {
+    // The full compound order is Dave, Alice, Carol, Bob, Eve; skip 1, take 2.
+    let rows = try run("""
+        SELECT Name FROM People
+          ORDER BY Age DESC, Name ASC OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY
+        """)
+    #expect(rows == [[.text("Alice")], [.text("Carol")]])
   }
 }
 
@@ -1172,7 +1279,7 @@ private func derived(_ plan: Plan) -> Plan? {
     derived(source)
   case let .project(_, source):
     derived(source)
-  case let .sort(_, _, source):
+  case let .sort(_, source):
     derived(source)
   case let .product(left, right):
     derived(left) ?? derived(right)
@@ -1194,7 +1301,7 @@ private func seeks(_ plan: Plan) -> Bool {
     seeks(source)
   case let .project(_, source):
     seeks(source)
-  case let .sort(_, _, source):
+  case let .sort(_, source):
     seeks(source)
   case let .derived(_, sub, _, _):
     seeks(sub)
@@ -1223,7 +1330,7 @@ private func filters(_ plan: Plan) -> Bool {
     filters(source)
   case let .project(_, source):
     filters(source)
-  case let .sort(_, _, source):
+  case let .sort(_, source):
     filters(source)
   case let .derived(_, sub, _, _):
     filters(sub)
@@ -1253,7 +1360,7 @@ private func pushed(_ plan: Plan) -> Bool {
     pushed(source)
   case let .project(_, source):
     pushed(source)
-  case let .sort(_, _, source):
+  case let .sort(_, source):
     pushed(source)
   case let .derived(_, sub, _, _):
     pushed(sub)
@@ -1274,7 +1381,7 @@ private func floats(_ plan: Plan) -> Bool {
     true
   case let .project(_, source):
     floats(source)
-  case let .sort(_, _, source):
+  case let .sort(_, source):
     floats(source)
   case let .derived(_, sub, _, _):
     floats(sub)
@@ -1295,7 +1402,7 @@ private func joins(_ plan: Plan) -> Bool {
     joins(source)
   case let .project(_, source):
     joins(source)
-  case let .sort(_, _, source):
+  case let .sort(_, source):
     joins(source)
   case let .limit(_, _, source):
     joins(source)
@@ -1321,7 +1428,7 @@ private func residual(_ plan: Plan) -> Bool {
     residual(source)
   case let .project(_, source):
     residual(source)
-  case let .sort(_, _, source):
+  case let .sort(_, source):
     residual(source)
   case let .limit(_, _, source):
     residual(source)
@@ -1429,7 +1536,7 @@ private func injected(_ plan: Plan) -> Bool {
     injected(source)
   case let .project(_, source):
     injected(source)
-  case let .sort(_, _, source):
+  case let .sort(_, source):
     injected(source)
   case let .limit(_, _, source):
     injected(source)

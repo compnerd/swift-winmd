@@ -121,8 +121,12 @@ internal indirect enum Plan {
   /// call) against the record, in order, to the output row. A bare-column
   /// projection is a list of `.slot` terms, so the simple path is a reorder.
   case project(Array<Term>, Plan)
-  /// τ — orders the records by a typed key on `slot`.
-  case sort(slot: Int, ascending: Bool, Plan)
+  /// τ — orders the records by a list of typed sort keys, major to minor. Each
+  /// key names a `slot` and its direction; `keys[0]` is the primary key and
+  /// each later key orders only the rows the earlier keys leave equal. The sort
+  /// is stable, so rows equal on every key keep their input order. `keys` is
+  /// never empty.
+  case sort(keys: Array<(slot: Int, ascending: Bool)>, Plan)
   /// × — every concatenation of an outer record with an inner one.
   case product(Plan, Plan)
   /// ⋈ — for each outer record, seeks the inner relation `name` on
@@ -238,7 +242,8 @@ extension Plan {
 /// the relation by name, opens its cursor, and materialises its referenced
 /// ordinals over the seek range into dense slots; `select` keeps the admitted
 /// records; `project` rebuilds each from the projected slots; `sort` orders them
-/// by a typed key, stably and in the requested direction; `product` pairs every
+/// by its typed keys major to minor, stably and each in its own direction;
+/// `product` pairs every
 /// outer record with every inner one; `join` re-resolves the inner relation,
 /// seeks it per outer record, and concatenates the matches; `union` runs its
 /// two sides — each with its own union semantics — and concatenates their rows,
@@ -273,16 +278,22 @@ internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
   case let .project(terms, source):
     try execute(source, catalog, ctes, routines, bindings)
       .map { record throws(SQLError) in try project(terms, record, routines) }
-  case let .sort(slot, ascending, source):
+  case let .sort(keys, source):
     try execute(source, catalog, ctes, routines, bindings)
       .enumerated()
       .sorted { lhs, rhs in
-        let ordered = less(lhs.element[slot], rhs.element[slot])
-        let reverse = less(rhs.element[slot], lhs.element[slot])
-        // A stable sort: keep the source order within an equal-key group by
+        // Compare the keys major to minor: the first key on which the rows
+        // differ decides the order; a key they are equal on falls through to
+        // the next. A key's direction governs that key alone.
+        for key in keys {
+          let ordered = less(lhs.element[key.slot], rhs.element[key.slot])
+          let reverse = less(rhs.element[key.slot], lhs.element[key.slot])
+          if ordered == reverse { continue }
+          return key.ascending ? ordered : reverse
+        }
+        // Equal on every key: keep the source order (a stable sort) by
         // tie-breaking on the original index.
-        if ordered == reverse { return lhs.offset < rhs.offset }
-        return ascending ? ordered : reverse
+        return lhs.offset < rhs.offset
       }
       .map(\.element)
   case let .product(outer, inner):

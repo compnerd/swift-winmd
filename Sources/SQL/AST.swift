@@ -10,6 +10,7 @@
 ///   FROM <table> [AS alias]
 ///   (JOIN <table> [AS alias] ON <column> = <column>)*
 ///   [WHERE <predicate>] [ORDER BY <column> [ASC|DESC]]
+///   [OFFSET <skip> ROWS] [FETCH {FIRST | NEXT} <count> ROWS ONLY]
 /// ```
 ///
 /// The AST is a tree of fully escapable values — names, operators, and literal
@@ -91,7 +92,7 @@ public indirect enum Query: Hashable, Sendable {
 }
 
 /// A `SELECT` query: a projection over one relation or a chain of joins, with an
-/// optional predicate and ordering.
+/// optional predicate, ordering, and row limit.
 ///
 /// `from` is optional: a FROM-less `SELECT <expr-list>` yields exactly one row
 /// whose columns are the evaluated projection expressions, the standard SQL
@@ -118,14 +119,18 @@ public struct Select: Hashable, Sendable {
   /// The ordering applied to the result, if any.
   public let order: Order?
 
+  /// The row limit applied to the (ordered) result, if any.
+  public let limit: Limit?
+
   public init(projection: Projection, from: Relation?,
               joins: Array<Join> = [], predicate: Predicate? = nil,
-              order: Order? = nil) {
+              order: Order? = nil, limit: Limit? = nil) {
     self.projection = projection
     self.from = from
     self.joins = joins
     self.predicate = predicate
     self.order = order
+    self.limit = limit
   }
 
   /// The name of the primary relation, or the empty string for a FROM-less
@@ -350,5 +355,30 @@ public struct Order: Hashable, Sendable {
   public init(column: Column, ascending: Bool = true) {
     self.column = column
     self.ascending = ascending
+  }
+}
+
+/// A row-limiting clause — the standard `OFFSET <n> ROWS FETCH { FIRST | NEXT }
+/// <n> ROWS ONLY` — pairing an optional leading skip with an optional cap.
+///
+/// It applies to the ordered result — after `WHERE` and `ORDER BY`, but before
+/// the projection, so a row outside the page is never projected: skip the first
+/// `offset` rows, then take at most `count`. The two ISO clauses are independent
+/// — an `OFFSET` written without a `FETCH` leaves `count` `nil` (no cap, every
+/// row after the skip), and a `FETCH` without an `OFFSET` caps from the start
+/// (`offset` `0`). Both counts are non-negative; a `count` of `0` yields no rows
+/// and an `offset` past the end yields none.
+public struct Limit: Hashable, Sendable {
+  /// The greatest number of rows the result yields, or `nil` for no cap — an
+  /// `OFFSET` written without a `FETCH`.
+  public let count: Int?
+
+  /// The number of leading rows skipped before the count applies — `0` when no
+  /// `OFFSET` was written.
+  public let offset: Int
+
+  public init(count: Int?, offset: Int = 0) {
+    self.count = count
+    self.offset = offset
   }
 }

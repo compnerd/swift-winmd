@@ -51,7 +51,9 @@ extension String {
 /// scans the input's UTF-8 bytes by value and compares them against ASCII byte
 /// constants. Whitespace separates tokens and is otherwise discarded; keywords
 /// are recognised case-insensitively; string literals are single-quoted with
-/// `''` as an escaped quote.
+/// `''` as an escaped quote; a double-quoted delimited identifier (`""` an
+/// escaped quote) spells a name — a reserved word or otherwise — as an
+/// identifier verbatim.
 ///
 /// The lexer tracks a `SourceLocation` as it scans — advancing the column per
 /// byte and starting a fresh line on each newline — so every token and fault
@@ -129,6 +131,9 @@ internal struct Lexer: ~Escapable {
     case UInt8(ascii: "'"):
       return try string()
 
+    case UInt8(ascii: "\""):
+      return try delimited()
+
     case UInt8(ascii: ":"):
       return try parameter()
 
@@ -181,6 +186,48 @@ internal struct Lexer: ~Escapable {
         }
         advance()
         return Token(kind: .string(text), location: start)
+      default:
+        advance()
+      }
+    }
+
+    throw .unterminated(at: start)
+  }
+
+  /// Scans a double-quoted delimited identifier at the current position.
+  ///
+  /// A delimited identifier spells a name a bare identifier cannot: a reserved
+  /// word used as a column (`"Offset"`, which `ManifestResource` and
+  /// `FieldLayout` declare), or a spelling outside the identifier bytes. Its
+  /// text is taken verbatim and case-sensitively — never matched against the
+  /// keywords — so it is a `quoted` token, distinct from a bare `identifier` so
+  /// the parser keeps a dot in it as part of the name rather than a qualifier; a
+  /// doubled quote `""` is an escaped quote, mirroring a string literal's `''`.
+  /// Faults if unclosed.
+  private mutating func delimited() throws(SQLError) -> Token {
+    let start = location
+    advance()
+    let begin = position
+
+    // As with a string literal, defer assembling the text from segments until a
+    // doubled quote appears, and otherwise materialise the whole run at close.
+    var value: String? = nil
+    var segment = position
+    while let byte = peek() {
+      switch byte {
+      case UInt8(ascii: "\"") where peek(1) == UInt8(ascii: "\""):
+        value = (value ?? "") + String(bytes, segment ..< position) + "\""
+        advance()
+        advance()
+        segment = position
+      case UInt8(ascii: "\""):
+        let text = if let value {
+          value + String(bytes, segment ..< position)
+        } else {
+          String(bytes, begin ..< position)
+        }
+        advance()
+        return Token(kind: .quoted(text), location: start)
       default:
         advance()
       }
@@ -243,6 +290,11 @@ internal struct Lexer: ~Escapable {
     case "BY": .by
     case "ASC": .asc
     case "DESC": .desc
+    case "OFFSET": .offset
+    case "FETCH": .fetch
+    case "FIRST", "NEXT": .first
+    case "ROW", "ROWS": .rows
+    case "ONLY": .only
     case "AND": .and
     case "OR": .or
     case "NOT": .not

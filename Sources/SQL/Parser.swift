@@ -13,7 +13,8 @@
 /// cte            := identifier ['(' identifier (',' identifier)* ')']
 ///                   AS '(' query ')'
 /// query          := select (UNION [ALL] select)*
-/// select         := SELECT projection [FROM relation (join)* [where] [order]]
+/// select         := SELECT projection
+///                   [FROM relation (join)* [where] [order] [limit]]
 /// relation       := identifier [AS identifier]
 /// join           := JOIN relation ON column '=' column
 /// projection     := '*' | column (',' column)*
@@ -29,7 +30,10 @@
 /// multiplicative := factor (('*' | '/') factor)*
 /// factor         := '(' expression ')' | literal | call | column
 /// order          := ORDER BY column [ASC | DESC]
+/// limit          := [OFFSET integer ROWS]
+///                   [FETCH (FIRST | NEXT) [integer] ROWS ONLY]
 /// column         := identifier        // a dotted identifier is qualified
+/// identifier     := word | '"' … '"'  // a delimited identifier is verbatim
 /// ```
 ///
 /// Arithmetic precedence is `*` `/` > `+` `-`, both levels left-associative; the
@@ -238,7 +242,7 @@ internal struct Parser: ~Escapable {
   ///
   /// `FROM` is optional: a FROM-less `SELECT <expr-list>` projects over a single
   /// empty row (the standard way to compute a scalar, `SELECT 1 + 1`), and so
-  /// admits no relation, joins, `WHERE`, or `ORDER BY` to follow.
+  /// admits no relation, joins, `WHERE`, `ORDER BY`, or `LIMIT` to follow.
   private mutating func select() throws(SQLError) -> Select {
     try expect(.select)
     let projection = try projection()
@@ -261,9 +265,10 @@ internal struct Parser: ~Escapable {
     } else {
       nil
     }
+    let limit = try rowLimit()
 
     return Select(projection: projection, from: from, joins: joins,
-                  predicate: predicate, order: order)
+                  predicate: predicate, order: order, limit: limit)
   }
 
   // MARK: - Relation
@@ -278,12 +283,22 @@ internal struct Parser: ~Escapable {
     let name = try identifier()
     let alias: String? = if try match(.as) {
       try identifier()
-    } else if case .identifier = current?.kind {
+    } else if isName(current?.kind) {
       try identifier()
     } else {
       nil
     }
     return Relation(name: name, alias: alias)
+  }
+
+  /// Whether `kind` begins an identifier — a bare or a delimited name — the
+  /// token an optional (`AS`-less) relation alias may start with, so a following
+  /// keyword or the end of input is not mistaken for an alias.
+  private func isName(_ kind: Token.Kind?) -> Bool {
+    switch kind {
+    case .identifier, .quoted: true
+    default: false
+    }
   }
 
   /// Parses the join tail (the `JOIN` keyword is already consumed): a relation,
@@ -401,9 +416,12 @@ internal struct Parser: ~Escapable {
       return .literal(.integer(value))
     }
 
-    let name = try identifier()
+    let ident = try name()
     guard try match(.lparen) else {
-      return .column(Column(name))
+      // A delimited name is a verbatim column (a dot in it is part of the name);
+      // a bare one may be a qualified reference that `Column(_:)` splits.
+      return .column(ident.quoted ? Column(name: ident.text)
+                                  : Column(ident.text))
     }
 
     var arguments = Array<Expression>()
@@ -414,7 +432,7 @@ internal struct Parser: ~Escapable {
       }
     }
     try expect(.rparen)
-    return .call(name: name, arguments: arguments)
+    return .call(name: ident.text, arguments: arguments)
   }
 
   // MARK: - Predicate
@@ -545,24 +563,88 @@ internal struct Parser: ~Escapable {
     return Order(column: column, ascending: ascending)
   }
 
+  // MARK: - Row limiting
+
+  /// Parses the standard row-limiting tail — `[OFFSET n ROWS] [FETCH { FIRST |
+  /// NEXT } [n] ROWS ONLY]` — into a `Limit`, or `nil` when neither clause is
+  /// present.
+  ///
+  /// The two ISO clauses are independent: an `OFFSET` without a `FETCH` skips
+  /// rows with no cap (`count` `nil`), a `FETCH` without an `OFFSET` caps from
+  /// the start. `ROW` and `ROWS` are interchangeable, as are `FIRST` and `NEXT`,
+  /// and the `FETCH` count defaults to `1` when omitted (`FETCH FIRST ROW
+  /// ONLY`). Both counts are non-negative integer literals; a bare or negative
+  /// spelling is not one (the lexer scans a `-` as its own token), so it faults
+  /// as any other misplaced token would.
+  private mutating func rowLimit() throws(SQLError) -> Limit? {
+    let offset: Int
+    if try match(.offset) {
+      offset = try count()
+      try expect(.rows)
+    } else {
+      offset = 0
+    }
+
+    let cap: Int?
+    if try match(.fetch) {
+      try expect(.first)
+      cap = if case .integer = current?.kind { try count() } else { 1 }
+      try expect(.rows)
+      try expect(.only)
+    } else {
+      cap = nil
+    }
+
+    guard offset != 0 || cap != nil else { return nil }
+    return Limit(count: cap, offset: offset)
+  }
+
   // MARK: - Terminals
 
-  /// Consumes an identifier and returns its name.
-  private mutating func identifier() throws(SQLError) -> String {
+  /// Consumes a non-negative integer literal and returns its value — an
+  /// `OFFSET` skip or a `FETCH` row count.
+  private mutating func count() throws(SQLError) -> Int {
+    let token = try advance(expecting: "an integer")
+    guard case let .integer(value) = token.kind else {
+      throw .unexpected(token.kind.description,
+                        expected: "an integer", at: token.location)
+    }
+    return value
+  }
+
+  /// Consumes an identifier — bare or delimited — as its text and whether it was
+  /// delimited (double-quoted). A delimited name is verbatim, so a caller
+  /// building a column keeps a dot in it as part of the name rather than a
+  /// qualifier.
+  private mutating func name() throws(SQLError) -> (text: String, quoted: Bool) {
     let token = try advance(expecting: "an identifier")
-    guard case let .identifier(name) = token.kind else {
+    switch token.kind {
+    case let .identifier(text):
+      return (text, false)
+    case let .quoted(text):
+      return (text, true)
+    default:
       throw .unexpected(token.kind.description,
                         expected: "an identifier", at: token.location)
     }
-    return name
   }
 
-  /// Consumes an identifier and parses it as a (possibly-qualified) column.
+  /// Consumes an identifier — bare or delimited — and returns its name. Callers
+  /// that name a relation, alias, or CTE take the text alone; the delimited flag
+  /// matters only where a dot could be a qualifier (`column`).
+  private mutating func identifier() throws(SQLError) -> String {
+    try name().text
+  }
+
+  /// Consumes an identifier and parses it as a column reference.
   ///
-  /// A qualifying dot is part of the identifier the lexer scans, so the column
-  /// reference is one identifier token that `Column(_:)` splits.
+  /// A bare identifier's qualifying dot is part of the one token the lexer
+  /// scans, so `Column(_:)` splits it (`t.Name` → qualifier `t`, name `Name`). A
+  /// delimited identifier is verbatim, so a dot in it belongs to an unqualified
+  /// name (`"a.b"` is the column `a.b`, not `a`.`b`).
   private mutating func column() throws(SQLError) -> Column {
-    try Column(identifier())
+    let ident = try name()
+    return ident.quoted ? Column(name: ident.text) : Column(ident.text)
   }
 
   // MARK: - Cursor

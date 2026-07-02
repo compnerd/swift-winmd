@@ -58,6 +58,14 @@ struct LexerTests {
     #expect(try lex("with Recursive") == [.with, .recursive])
   }
 
+  @Test("lexes the row-limiting keywords")
+  func rowLimitKeywords() throws {
+    #expect(try lex("OFFSET FETCH FIRST ROWS ONLY")
+                == [.offset, .fetch, .first, .rows, .only])
+    // ROW is a synonym of ROWS, and NEXT of FIRST.
+    #expect(try lex("ROW NEXT") == [.rows, .first])
+  }
+
   @Test("lexes the comparison operators")
   func operators() throws {
     #expect(try lex("= <> < > <= >=")
@@ -95,6 +103,20 @@ struct LexerTests {
   @Test("lexes an empty string literal")
   func emptyString() throws {
     #expect(try lex("''") == [.string("")])
+  }
+
+  @Test("lexes a delimited identifier verbatim")
+  func delimitedIdentifier() throws {
+    // A double-quoted name is a `quoted` token, case-preserved and never a
+    // keyword — distinct from a bare identifier so a dot in it is kept.
+    #expect(try lex("\"Offset\"") == [.quoted("Offset")])
+    #expect(try lex("\"select\"") == [.quoted("select")])
+    #expect(try lex("\"a.b\"") == [.quoted("a.b")])
+  }
+
+  @Test("unescapes a doubled quote in a delimited identifier")
+  func escapedQuoteInIdentifier() throws {
+    #expect(try lex("\"a\"\"b\"") == [.quoted("a\"b")])
   }
 
   @Test("lexes tokens with no separating whitespace")
@@ -144,6 +166,11 @@ struct LexerTests {
   @Test("rejects an unterminated string")
   func unterminatedString() {
     #expect(throws: SQLError.self) { _ = try lex("'oops") }
+  }
+
+  @Test("rejects an unterminated delimited identifier")
+  func unterminatedIdentifier() {
+    #expect(throws: SQLError.self) { _ = try lex("\"oops") }
   }
 
   @Test("scans a bound-parameter placeholder")

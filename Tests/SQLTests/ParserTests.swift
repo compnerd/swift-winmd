@@ -6,7 +6,7 @@ import Testing
 
 /// Parses `text` and returns its `Select`, failing the test on any other shape
 /// — a non-`SELECT` statement, or a `UNION` of several selects.
-private func parseSelect(_ text: String) throws -> Select {
+private func parse(select text: String) throws -> Select {
   guard case let .select(.select(select)) = try Statement(parsing: text) else {
     Issue.record("expected a single SELECT statement")
     throw SQLError.incomplete(expected: "a SELECT statement")
@@ -17,7 +17,7 @@ private func parseSelect(_ text: String) throws -> Select {
 struct ProjectionTests {
   @Test("parses a SELECT * projection")
   func star() throws {
-    let select = try parseSelect("SELECT * FROM TypeDef")
+    let select = try parse(select: "SELECT * FROM TypeDef")
     #expect(select.projection == .all)
     #expect(select.table == "TypeDef")
     #expect(select.predicate == nil)
@@ -26,14 +26,14 @@ struct ProjectionTests {
 
   @Test("parses a single-column projection")
   func singleColumn() throws {
-    let select = try parseSelect("SELECT TypeName FROM TypeDef")
+    let select = try parse(select: "SELECT TypeName FROM TypeDef")
     #expect(select.projection == .columns(["TypeName"]))
   }
 
   @Test("parses a comma-separated column list")
   func columnList() throws {
     let select =
-        try parseSelect("SELECT TypeName, TypeNamespace, Flags FROM TypeDef")
+        try parse(select: "SELECT TypeName, TypeNamespace, Flags FROM TypeDef")
     #expect(select.projection
                 == .columns(["TypeName", "TypeNamespace", "Flags"]))
   }
@@ -42,8 +42,19 @@ struct ProjectionTests {
   func dottedColumn() throws {
     // Simple column identifiers may carry a qualifying dot; metadata names with
     // dots appear only as string literals.
-    let select = try parseSelect("SELECT TypeDef.TypeName FROM TypeDef")
+    let select = try parse(select: "SELECT TypeDef.TypeName FROM TypeDef")
     #expect(select.projection == .columns(["TypeDef.TypeName"]))
+  }
+
+  @Test("parses a delimited column identifier as one unqualified name")
+  func delimitedColumn() throws {
+    // A delimited identifier is verbatim: a dot in it is part of the name,
+    // not a qualifier as in the bare dotted form above.
+    let dotted = try parse(select: "SELECT \"a.b\" FROM T")
+    #expect(dotted.projection == .columns([Column(name: "a.b")]))
+    // A quoted reserved word is likewise a plain, unqualified column name.
+    let offset = try parse(select: "SELECT \"Offset\" FROM T")
+    #expect(offset.projection == .columns([Column(name: "Offset")]))
   }
 }
 
@@ -51,7 +62,7 @@ struct KeywordTests {
   @Test("parses lowercase keywords")
   func caseInsensitive() throws {
     let select =
-        try parseSelect("select TypeName from TypeDef where Flags = 1")
+        try parse(select: "select TypeName from TypeDef where Flags = 1")
     #expect(select.projection == .columns(["TypeName"]))
     #expect(select.table == "TypeDef")
     #expect(select.predicate == .comparison(left: .column("Flags"), op: .equal,
@@ -60,7 +71,8 @@ struct KeywordTests {
 
   @Test("parses mixed-case keywords")
   func mixedCase() throws {
-    let select = try parseSelect("SeLeCt * FrOm TypeDef OrDeR By TypeName DeSc")
+    let select =
+        try parse(select: "SeLeCt * FrOm TypeDef OrDeR By TypeName DeSc")
     #expect(select.order == Order(column: "TypeName", ascending: false))
   }
 }
@@ -78,7 +90,7 @@ struct PredicateTests {
     ]
     for (text, op) in cases {
       let select =
-          try parseSelect("SELECT * FROM T WHERE Flags \(text) 1")
+          try parse(select: "SELECT * FROM T WHERE Flags \(text) 1")
       #expect(select.predicate
                   == .comparison(left: .column("Flags"), op: op,
                                  right: .literal(.integer(1))))
@@ -87,9 +99,9 @@ struct PredicateTests {
 
   @Test("parses a string-literal operand")
   func stringLiteral() throws {
-    let select =
-        try parseSelect(
-            "SELECT * FROM TypeDef WHERE TypeNamespace = 'Windows.Win32.Foundation'")
+    let text =
+        "SELECT * FROM TypeDef WHERE TypeNamespace = 'Windows.Win32.Foundation'"
+    let select = try parse(select: text)
     let value = Expression.literal(.string("Windows.Win32.Foundation"))
     #expect(select.predicate
                 == .comparison(left: .column("TypeNamespace"), op: .equal,
@@ -98,7 +110,7 @@ struct PredicateTests {
 
   @Test("parses a string with an escaped quote")
   func escapedQuote() throws {
-    let select = try parseSelect("SELECT * FROM T WHERE name = 'O''Brien'")
+    let select = try parse(select: "SELECT * FROM T WHERE name = 'O''Brien'")
     #expect(select.predicate
                 == .comparison(left: .column("name"), op: .equal,
                                right: .literal(.string("O'Brien"))))
@@ -106,7 +118,7 @@ struct PredicateTests {
 
   @Test("parses a function call as a comparison operand")
   func functionOperand() throws {
-    let select = try parseSelect("SELECT * FROM T WHERE upper(Name) = 'X'")
+    let select = try parse(select: "SELECT * FROM T WHERE upper(Name) = 'X'")
     let call = Expression.call(name: "upper", arguments: [.column("Name")])
     #expect(select.predicate
                 == .comparison(left: call, op: .equal,
@@ -117,7 +129,7 @@ struct PredicateTests {
   func andBindsTighterThanOr() throws {
     // a = 1 OR b = 2 AND c = 3  ==>  a OR (b AND c)
     let select =
-        try parseSelect("SELECT * FROM T WHERE a = 1 OR b = 2 AND c = 3")
+        try parse(select: "SELECT * FROM T WHERE a = 1 OR b = 2 AND c = 3")
     let a = Predicate.comparison(left: .column("a"), op: .equal,
                                  right: .literal(.integer(1)))
     let b = Predicate.comparison(left: .column("b"), op: .equal,
@@ -131,7 +143,7 @@ struct PredicateTests {
   func notBindsTighterThanAnd() throws {
     // NOT a = 1 AND b = 2  ==>  (NOT a) AND b
     let select =
-        try parseSelect("SELECT * FROM T WHERE NOT a = 1 AND b = 2")
+        try parse(select: "SELECT * FROM T WHERE NOT a = 1 AND b = 2")
     let a = Predicate.comparison(left: .column("a"), op: .equal,
                                  right: .literal(.integer(1)))
     let b = Predicate.comparison(left: .column("b"), op: .equal,
@@ -143,7 +155,7 @@ struct PredicateTests {
   func parenthesesOverridePrecedence() throws {
     // (a = 1 OR b = 2) AND c = 3
     let select =
-        try parseSelect("SELECT * FROM T WHERE (a = 1 OR b = 2) AND c = 3")
+        try parse(select: "SELECT * FROM T WHERE (a = 1 OR b = 2) AND c = 3")
     let a = Predicate.comparison(left: .column("a"), op: .equal,
                                  right: .literal(.integer(1)))
     let b = Predicate.comparison(left: .column("b"), op: .equal,
@@ -155,19 +167,19 @@ struct PredicateTests {
 
   @Test("parses IS NULL")
   func isNull() throws {
-    let select = try parseSelect("SELECT * FROM T WHERE Note IS NULL")
+    let select = try parse(select: "SELECT * FROM T WHERE Note IS NULL")
     #expect(select.predicate == .null(.column("Note"), negated: false))
   }
 
   @Test("parses IS NOT NULL")
   func isNotNull() throws {
-    let select = try parseSelect("SELECT * FROM T WHERE Note IS NOT NULL")
+    let select = try parse(select: "SELECT * FROM T WHERE Note IS NOT NULL")
     #expect(select.predicate == .null(.column("Note"), negated: true))
   }
 
   @Test("parses IS NULL over a function-call operand")
   func isNullCall() throws {
-    let select = try parseSelect("SELECT * FROM T WHERE iid(Id) IS NULL")
+    let select = try parse(select: "SELECT * FROM T WHERE iid(Id) IS NULL")
     let call = Expression.call(name: "iid", arguments: [.column("Id")])
     #expect(select.predicate == .null(call, negated: false))
   }
@@ -183,7 +195,7 @@ struct PredicateTests {
   func leftAssociativeOr() throws {
     // a = 1 OR b = 2 OR c = 3  ==>  ((a OR b) OR c)
     let select =
-        try parseSelect("SELECT * FROM T WHERE a = 1 OR b = 2 OR c = 3")
+        try parse(select: "SELECT * FROM T WHERE a = 1 OR b = 2 OR c = 3")
     let a = Predicate.comparison(left: .column("a"), op: .equal,
                                  right: .literal(.integer(1)))
     let b = Predicate.comparison(left: .column("b"), op: .equal,
@@ -197,19 +209,19 @@ struct PredicateTests {
 struct OrderTests {
   @Test("defaults ORDER BY to ascending")
   func defaultAscending() throws {
-    let select = try parseSelect("SELECT * FROM T ORDER BY TypeName")
+    let select = try parse(select: "SELECT * FROM T ORDER BY TypeName")
     #expect(select.order == Order(column: "TypeName", ascending: true))
   }
 
   @Test("parses an explicit ASC order")
   func explicitAscending() throws {
-    let select = try parseSelect("SELECT * FROM T ORDER BY TypeName ASC")
+    let select = try parse(select: "SELECT * FROM T ORDER BY TypeName ASC")
     #expect(select.order == Order(column: "TypeName", ascending: true))
   }
 
   @Test("parses a DESC order")
   func descending() throws {
-    let select = try parseSelect("SELECT * FROM T ORDER BY TypeName DESC")
+    let select = try parse(select: "SELECT * FROM T ORDER BY TypeName DESC")
     #expect(select.order == Order(column: "TypeName", ascending: false))
   }
 }
@@ -218,7 +230,7 @@ struct CompositeTests {
   @Test("parses a full SELECT/WHERE/ORDER BY query")
   func fullQuery() throws {
     let select =
-        try parseSelect("""
+        try parse(select: """
             SELECT TypeName, TypeNamespace FROM TypeDef
               WHERE TypeNamespace = 'Windows.Win32.Foundation' AND Flags >= 1
               ORDER BY TypeName DESC
@@ -261,26 +273,26 @@ struct ColumnTests {
 struct RelationTests {
   @Test("parses a bare FROM relation with no alias")
   func bare() throws {
-    let select = try parseSelect("SELECT * FROM TypeDef")
+    let select = try parse(select: "SELECT * FROM TypeDef")
     #expect(select.from == Relation(name: "TypeDef"))
     #expect(select.joins.isEmpty)
   }
 
   @Test("parses an AS alias on the FROM relation")
   func alias() throws {
-    let select = try parseSelect("SELECT * FROM TypeDef AS t")
+    let select = try parse(select: "SELECT * FROM TypeDef AS t")
     #expect(select.from == Relation(name: "TypeDef", alias: "t"))
   }
 
   @Test("parses an implicit (AS-less) alias")
   func implicitAlias() throws {
-    let select = try parseSelect("SELECT * FROM TypeDef t")
+    let select = try parse(select: "SELECT * FROM TypeDef t")
     #expect(select.from == Relation(name: "TypeDef", alias: "t"))
   }
 
   @Test("does not mistake a following keyword for an alias")
   func keywordNotAlias() throws {
-    let select = try parseSelect("SELECT * FROM TypeDef WHERE Flags = 1")
+    let select = try parse(select: "SELECT * FROM TypeDef WHERE Flags = 1")
     #expect(select.from == Relation(name: "TypeDef"))
   }
 }
@@ -288,7 +300,7 @@ struct RelationTests {
 struct JoinTests {
   @Test("parses a list-shape join with aliases")
   func listJoin() throws {
-    let select = try parseSelect("""
+    let select = try parse(select: """
         SELECT m.Name FROM TypeDef AS t
           JOIN MethodDef AS m ON m.parent = t.rowid
           WHERE t.TypeName = 'IUnknown'
@@ -306,7 +318,7 @@ struct JoinTests {
 
   @Test("parses a forward-key join")
   func forwardJoin() throws {
-    let select = try parseSelect("""
+    let select = try parse(select: """
         SELECT r.TypeName FROM TypeDef AS t
           JOIN TypeRef AS r ON t.Extends = r.rowid
         """)
@@ -318,7 +330,7 @@ struct JoinTests {
 
   @Test("parses a join without aliases")
   func unaliasedJoin() throws {
-    let select = try parseSelect("""
+    let select = try parse(select: """
         SELECT Name FROM MethodDef
           JOIN Param ON Param.parent = MethodDef.rowid
         """)
@@ -332,7 +344,7 @@ struct JoinTests {
 
   @Test("parses a chain of two joins in source order")
   func chainedJoins() throws {
-    let select = try parseSelect("""
+    let select = try parse(select: """
         SELECT Param.Name FROM TypeDef AS t
           JOIN MethodDef AS m ON m.parent = t.rowid
           JOIN Param ON Param.parent = m.rowid
@@ -414,7 +426,7 @@ struct ErrorTests {
   func columnOperands() throws {
     // Either operand may be an expression, so a column-vs-column predicate is
     // valid SQL (`a = b`), not an error.
-    let select = try parseSelect("SELECT * FROM T WHERE a = b")
+    let select = try parse(select: "SELECT * FROM T WHERE a = b")
     #expect(select.predicate
                 == .comparison(left: .column("a"), op: .equal,
                                right: .column("b")))
@@ -426,13 +438,13 @@ struct ErrorTests {
 struct ExpressionTests {
   @Test("a bare-column list stays the simpler columns projection")
   func columns() throws {
-    let select = try parseSelect("SELECT a, b FROM T")
+    let select = try parse(select: "SELECT a, b FROM T")
     #expect(select.projection == .columns(["a", "b"]))
   }
 
   @Test("a function call yields an expression projection")
   func call() throws {
-    let select = try parseSelect("SELECT guid(Name) FROM T")
+    let select = try parse(select: "SELECT guid(Name) FROM T")
     #expect(select.projection
                 == .expressions([
                   Projected(expression: .call(name: "guid",
@@ -442,7 +454,7 @@ struct ExpressionTests {
 
   @Test("an aliased column yields an expression projection")
   func alias() throws {
-    let select = try parseSelect("SELECT Name AS label FROM T")
+    let select = try parse(select: "SELECT Name AS label FROM T")
     #expect(select.projection
                 == .expressions([
                   Projected(expression: .column("Name"), alias: "label")
@@ -451,7 +463,7 @@ struct ExpressionTests {
 
   @Test("a call takes literal and nested-call arguments")
   func arguments() throws {
-    let select = try parseSelect("SELECT f(1, g(x), 'lit') FROM T")
+    let select = try parse(select: "SELECT f(1, g(x), 'lit') FROM T")
     #expect(select.projection
                 == .expressions([
                   Projected(expression:
@@ -465,7 +477,7 @@ struct ExpressionTests {
 
   @Test("a zero-argument call parses")
   func nullary() throws {
-    let select = try parseSelect("SELECT now() FROM T")
+    let select = try parse(select: "SELECT now() FROM T")
     #expect(select.projection
                 == .expressions([
                   Projected(expression: .call(name: "now", arguments: []))
@@ -479,7 +491,7 @@ struct ArithmeticTests {
   /// The lone projected expression of a single-item projection, failing on any
   /// other shape.
   private func expression(_ text: String) throws -> Expression {
-    let select = try parseSelect(text)
+    let select = try parse(select: text)
     guard case let .expressions(items) = select.projection,
         items.count == 1 else {
       Issue.record("expected a single expression projection")
@@ -540,7 +552,7 @@ struct ArithmeticTests {
 
   @Test("arithmetic parses on either side of a comparison")
   func predicate() throws {
-    let select = try parseSelect("SELECT * FROM T WHERE Age + 1 = 26")
+    let select = try parse(select: "SELECT * FROM T WHERE Age + 1 = 26")
     let sum = Expression.binary(.add, .column("Age"), .literal(.integer(1)))
     #expect(select.predicate
                 == .comparison(left: sum, op: .equal,
@@ -553,7 +565,7 @@ struct ArithmeticTests {
 struct ScalarSelectTests {
   @Test("parses a FROM-less SELECT with no relation")
   func bare() throws {
-    let select = try parseSelect("SELECT 1")
+    let select = try parse(select: "SELECT 1")
     #expect(select.from == nil)
     #expect(select.joins.isEmpty)
     #expect(select.predicate == nil)
@@ -564,7 +576,7 @@ struct ScalarSelectTests {
 
   @Test("parses a FROM-less arithmetic projection")
   func arithmetic() throws {
-    let select = try parseSelect("SELECT 1 + 1")
+    let select = try parse(select: "SELECT 1 + 1")
     let sum = Expression.binary(.add, .literal(.integer(1)),
                                 .literal(.integer(1)))
     #expect(select.from == nil)
@@ -573,7 +585,7 @@ struct ScalarSelectTests {
 
   @Test("parses a FROM-less multi-column projection")
   func multiColumn() throws {
-    let select = try parseSelect("SELECT 1, 2")
+    let select = try parse(select: "SELECT 1, 2")
     #expect(select.from == nil)
     #expect(select.projection == .expressions([
       Projected(expression: .literal(.integer(1))),
@@ -583,7 +595,7 @@ struct ScalarSelectTests {
 
   @Test("a FROM-less alias names the projected column")
   func aliased() throws {
-    let select = try parseSelect("SELECT 1 + 1 AS two")
+    let select = try parse(select: "SELECT 1 + 1 AS two")
     let sum = Expression.binary(.add, .literal(.integer(1)),
                                 .literal(.integer(1)))
     #expect(select.projection

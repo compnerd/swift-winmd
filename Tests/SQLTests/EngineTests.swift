@@ -1178,6 +1178,8 @@ private func derived(_ plan: Plan) -> Plan? {
     derived(left) ?? derived(right)
   case let .union(left, right, _):
     derived(left) ?? derived(right)
+  case let .limit(_, _, source):
+    derived(source)
   case .single, .scan, .join:
     nil
   }
@@ -1204,6 +1206,8 @@ private func seeks(_ plan: Plan) -> Bool {
     seeks(outer)
   case let .union(left, right, _):
     seeks(left) || seeks(right)
+  case let .limit(_, _, source):
+    seeks(source)
   case .single:
     false
   }
@@ -1227,6 +1231,8 @@ private func filters(_ plan: Plan) -> Bool {
     filters(left) || filters(right)
   case let .union(left, right, _):
     filters(left) || filters(right)
+  case let .limit(_, _, source):
+    filters(source)
   case .single, .scan, .join:
     false
   }
@@ -1253,6 +1259,8 @@ private func pushed(_ plan: Plan) -> Bool {
     pushed(sub)
   case let .union(left, right, _):
     pushed(left) || pushed(right)
+  case let .limit(_, _, source):
+    pushed(source)
   case .single, .scan:
     false
   }
@@ -1270,6 +1278,8 @@ private func floats(_ plan: Plan) -> Bool {
     floats(source)
   case let .derived(_, sub, _, _):
     floats(sub)
+  case let .limit(_, _, source):
+    floats(source)
   default:
     false
   }
@@ -1286,6 +1296,8 @@ private func joins(_ plan: Plan) -> Bool {
   case let .project(_, source):
     joins(source)
   case let .sort(_, _, source):
+    joins(source)
+  case let .limit(_, _, source):
     joins(source)
   case let .derived(_, sub, _, _):
     joins(sub)
@@ -1310,6 +1322,8 @@ private func residual(_ plan: Plan) -> Bool {
   case let .project(_, source):
     residual(source)
   case let .sort(_, _, source):
+    residual(source)
+  case let .limit(_, _, source):
     residual(source)
   case let .derived(_, sub, _, _):
     residual(sub)
@@ -1416,6 +1430,8 @@ private func injected(_ plan: Plan) -> Bool {
   case let .project(_, source):
     injected(source)
   case let .sort(_, _, source):
+    injected(source)
+  case let .limit(_, _, source):
     injected(source)
   case let .derived(_, sub, _, _):
     injected(sub)
@@ -2884,12 +2900,14 @@ struct EngineScalarSelectTests {
 
   @Test("a directly-built FROM-less select with clauses is rejected")
   func clauses() throws {
-    // The parser never builds a FROM-less select carrying a WHERE, ORDER BY, or
-    // JOIN, but `Select.init` is public, so a direct `Select(from: nil, …)` can.
-    // The engine must reject it rather than silently drop the clause — a false
-    // predicate would otherwise still return the scalar row.
+    // The parser never builds a FROM-less select carrying a WHERE, ORDER BY,
+    // OFFSET/FETCH, or JOIN, but `Select.init` is public, so a direct
+    // `Select(from: nil, …)` can. The engine must reject it rather than
+    // silently drop the clause — a false predicate would otherwise still
+    // return the scalar row.
     let fault =
-        SQLError.unsupported("a WHERE, ORDER BY, or JOIN requires a FROM clause")
+        SQLError.unsupported(
+            "a WHERE, ORDER BY, OFFSET/FETCH, or JOIN requires a FROM clause")
     let filtered = try EngineScalarSelectTests.select(
         "SELECT 1 FROM People WHERE Id = 99")
     #expect(throws: fault) {
@@ -2902,6 +2920,12 @@ struct EngineScalarSelectTests {
     #expect(throws: fault) {
       try Engine.run(.select(Select(projection: ordered.projection, from: nil,
                                     order: ordered.order)), people())
+    }
+    let limited = try EngineScalarSelectTests.select(
+        "SELECT Id FROM People FETCH FIRST 1 ROW ONLY")
+    #expect(throws: fault) {
+      try Engine.run(.select(Select(projection: limited.projection, from: nil,
+                                    limit: limited.limit)), people())
     }
     let joined = try EngineScalarSelectTests.select(
         "SELECT Id FROM People JOIN Pets ON Pets.Owner = People.Id")
@@ -3021,7 +3045,7 @@ struct EngineWithTests {
   func arity() throws {
     #expect(throws: SQLError.columns(expected: 2, got: 1)) {
       try statement("""
-          WITH a (only) AS (SELECT Id, Name FROM Parent) SELECT only FROM a
+          WITH a (x) AS (SELECT Id, Name FROM Parent) SELECT x FROM a
           """, family())
     }
   }

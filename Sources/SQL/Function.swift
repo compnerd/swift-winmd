@@ -59,6 +59,14 @@ public struct Routines: Sendable {
     return Routines(functions)
   }
 
+  /// These routines overlaid with `other`'s — a caller composing two routine
+  /// sources (e.g. a target-language spec's UDFs and a data source's domain
+  /// UDFs). A name `other` also binds shadows this one's; names are already
+  /// case-folded on both sides.
+  public func merging(_ other: Routines) -> Routines {
+    Routines(functions.merging(other.functions) { _, last in last })
+  }
+
   /// The engine's built-in scalar functions, available to every `Routines` —
   /// even the empty one — and resolved ahead of a registered function of the
   /// same name (see `function(named:)`), so an unqualified call always reaches

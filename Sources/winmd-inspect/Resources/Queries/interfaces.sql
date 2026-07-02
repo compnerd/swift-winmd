@@ -3,7 +3,7 @@ SELECT
   t.rowid,
   t.TypeNamespace,
   t.TypeName,
-  c.guid AS iid
+  GUID(c.Value) AS iid
 FROM
   TypeDef t
   JOIN CustomAttribute c ON c.Parent_TypeDef = t.rowid
@@ -18,7 +18,7 @@ SELECT
   t.rowid,
   t.TypeNamespace,
   t.TypeName,
-  c.guid AS iid
+  GUID(c.Value) AS iid
 FROM
   TypeDef t
   JOIN CustomAttribute c ON c.Parent_TypeDef = t.rowid
@@ -33,7 +33,7 @@ SELECT
   t.rowid,
   t.TypeNamespace,
   t.TypeName,
-  c.guid AS iid
+  GUID(c.Value) AS iid
 FROM
   TypeDef t
   JOIN CustomAttribute c ON c.Parent_TypeDef = t.rowid

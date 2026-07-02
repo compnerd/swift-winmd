@@ -2269,8 +2269,11 @@ struct EngineStreamingProductTests {
 /// Routines with two demonstration scalar functions: `upper`, which folds a
 /// text cell to upper case, and `add`, which sums two integer cells. These
 /// stand in for the per-dialect decode functions a synthesis projection calls.
+/// Built from `Routines.standard` so the prelude (e.g. `BITAND`) resolves here
+/// as it does at the engine's public entry points, which seed the prelude by
+/// default.
 private func routines() -> Routines {
-  Routines()
+  Routines.standard
     .registering("upper") { arguments throws(SQLError) in
       guard case let .text(text) = arguments.first else {
         throw .argument("upper expects one text argument")
@@ -2349,10 +2352,11 @@ struct EngineFunctionTests {
     #expect(rows == [[.text("ALICE")]])
   }
 
-  @Test("the built-in BITAND yields the bitwise AND of two integers")
+  @Test("the prelude BITAND yields the bitwise AND of two integers")
   func bitand() throws {
-    // BITAND is an engine built-in: `routines()` never registers it, yet the
-    // call resolves and folds case-insensitively. 12 & 10 = 8; 6 & 3 = 2.
+    // BITAND ships in the prelude (`Routines.standard`): `routines()` never
+    // registers it, yet the call resolves through the seeded prelude and folds
+    // case-insensitively. 12 & 10 = 8; 6 & 3 = 2.
     #expect(try functionRun("SELECT BITAND(12, 10) FROM People WHERE Id = 1")
             == [[.integer(8)]])
     #expect(try functionRun("SELECT bitand(6, 3) FROM People WHERE Id = 1")
@@ -2371,16 +2375,17 @@ struct EngineFunctionTests {
     }
   }
 
-  @Test("a registered function cannot shadow the built-in BITAND")
-  func bitandNotShadowed() throws {
-    // A built-in resolves ahead of a registered function of the same name, so
-    // an unqualified `BITAND` is always the built-in, not the user's closure.
-    let user = Routines().registering("bitand") { _ throws(SQLError) in
+  @Test("a registered function shadows the prelude BITAND")
+  func bitandShadowed() throws {
+    // The registry is a single flat map with no privileged tier, so a caller's
+    // `bitand` registered OVER the prelude one shadows it (house rule: a later
+    // binding wins). The user's closure returns -1, not the bitwise AND.
+    let user = Routines.standard.registering("bitand") { _ throws(SQLError) in
       .integer(-1)
     }
     let query = try parse("SELECT BITAND(6, 3) FROM People WHERE Id = 1")
     let rows = try Engine.run(query, people(), user)
-    #expect(rows == [[.integer(2)]])
+    #expect(rows == [[.integer(-1)]])
   }
 
   @Test("routine names colliding only by case merge without trapping")

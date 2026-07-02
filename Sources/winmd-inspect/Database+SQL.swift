@@ -134,13 +134,16 @@ extension Session {
   /// primitives the adapter surfaces over its `.blob` columns rather than
   /// baking as decoded virtual columns.
   ///
-  /// The one entry is `GUID(blob)`, which decodes a `CustomAttribute.Value`
-  /// blob to the UUID it names; the bundled `interfaces` view selects it to
-  /// spell a type's IID. These are escapable, value → value functions — no
-  /// borrowed storage — so they thread through the interactive `Session.run`
-  /// and merge into the render's language routines uniformly.
+  /// The `GUID(blob)` entry decodes a `CustomAttribute.Value` blob to the UUID
+  /// it names; the bundled `interfaces` view selects it to spell a type's IID.
+  /// It is an escapable, value → value function — no borrowed storage — so it
+  /// threads through the interactive `Session.run` and merges into the render's
+  /// language routines uniformly. The engine's standard-library prelude
+  /// (`Routines.standard`, e.g. `BITAND`) is folded in here so it reaches the
+  /// session and render paths, which pass these routines EXPLICITLY rather than
+  /// relying on the engine's default seeding.
   internal static var routines: Routines {
-    ["guid": Session.guid]
+    Routines.standard.registering("guid", Session.guid)
   }
 
   /// `GUID(blob)` — the UUID a `GuidAttribute` `CustomAttribute` value blob

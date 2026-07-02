@@ -40,7 +40,11 @@ public enum Engine {
                                                   _ routines: Routines = [:],
                                                   bindings: Bindings = [:])
       throws(SQLError) -> Array<Array<Value>> {
-    try run(query, catalog, [:], routines, bindings)
+    // Seed the standard prelude UNDER the caller's routines so a public call
+    // always resolves the built-ins (BITAND) even when it supplies unrelated
+    // UDFs; an explicitly registered function of the same name still shadows it
+    // (the merge keeps the caller's binding on a clash).
+    try run(query, catalog, [:], Routines.standard.merging(routines), bindings)
   }
 
   /// Runs `query` against `catalog` with the common table expressions `ctes` in
@@ -68,7 +72,10 @@ public enum Engine {
                                                   _ routines: Routines = [:],
                                                   bindings: Bindings = [:])
       throws(SQLError) -> Array<Array<Value>> {
-    switch statement {
+    // Seed the standard prelude under the caller's routines (see the query
+    // overload) so BITAND resolves regardless of what the caller supplies.
+    let routines = Routines.standard.merging(routines)
+    return switch statement {
     case let .select(query):
       try run(query, catalog, [:], routines, bindings)
     case let .with(ctes, query):

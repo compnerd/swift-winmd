@@ -116,11 +116,29 @@ public enum Engine {
       guard relations[cte.name.lowercased()] == nil else {
         throw .redefinition(cte.name)
       }
+      // A `WITH RECURSIVE` member's recursive reference must be its FINAL UNION
+      // arm — the engine's model is anchor members then ONE recursive arm. A
+      // reference to the CTE's own name in an EARLIER arm resolves against the
+      // base scope (the CTE is not in scope outside the recursive arm), so a
+      // same-named base or view is a valid seed; but with no such base/view the
+      // reference can only be a misplaced recursive arm — recursion before the
+      // final arm, or a second recursive arm — a shape the engine does not
+      // support. Reject it rather than silently read a same-named base or fail
+      // obscurely as an unresolved relation. This covers BOTH routings below (a
+      // non-recursive final arm still reaches the run-once branch).
+      if cte.recursive, case let .union(anchor, _, _) = cte.query,
+          references(anchor, cte.name.lowercased()),
+          case nil = catalog.table(named: cte.name),
+          case nil = catalog.view(named: cte.name) {
+        throw .unsupported(
+            "recursive WITH references the CTE outside its final UNION arm")
+      }
       // A CTE that names itself iterates a fixpoint; every other one — a
       // non-recursive CTE, or one a `WITH RECURSIVE` marks recursive but which
       // does not reference itself — runs its query once. Each resolves against
-      // the base catalog plus the CTEs done so far, its body's compiled width
-      // checked against the declared columns first.
+      // the base catalog plus the CTEs done so far. A recursive CTE checks the
+      // arity of both its arms internally (see `fixpoint`); a non-recursive one
+      // checks its body's compiled width here.
       let rows: Array<Array<Value>>
       if cte.recursive && recursive(cte) {
         rows = try fixpoint(cte, catalog, relations, routines, bindings)
@@ -158,6 +176,19 @@ public enum Engine {
     return references(arm, cte.name.lowercased())
   }
 
+  /// Whether `query` names the relation `name` (case-folded) in ANY member's
+  /// `FROM`/`JOIN` — walking the left-associative `UNION` chain and each arm.
+  /// Used to spot a self-reference lurking in a recursive body's anchor;
+  /// `recursive` itself inspects only the recursive arm.
+  private static func references(_ query: Query, _ name: String) -> Bool {
+    switch query {
+    case let .select(select):
+      references(select, name)
+    case let .union(left, select, _):
+      references(left, name) || references(select, name)
+    }
+  }
+
   /// Whether `select` names the relation `name` (case-folded) in its `FROM` or
   /// any `JOIN`.
   private static func references(_ select: Select, _ name: String) -> Bool {
@@ -165,18 +196,121 @@ public enum Engine {
     return select.joins.contains { $0.relation.name.lowercased() == name }
   }
 
+  /// The greatest number of fixpoint iterations a recursive CTE may take before
+  /// the engine concludes it does not terminate and throws
+  /// `SQLError.recursion`.
+  internal static let kRecursionCap = 10_000
+
   /// Evaluates a recursive `cte` to a fixpoint over `catalog` with the earlier
-  /// `ctes` in scope.
+  /// `ctes` in scope, returning every produced row.
   ///
-  /// Not yet implemented — the fixpoint loop lands in a later phase; a recursive
-  /// CTE faults until then.
+  /// A recursive CTE's query is a `UNION` of an ANCHOR (its left arm, itself a
+  /// query) and a RECURSIVE arm (its right `SELECT`, which names the CTE). The
+  /// anchor evaluates once — with the CTE name NOT yet bound — to seed `result`
+  /// and the `working` set. Each iteration then binds the CTE name to ONLY the
+  /// `working` rows (the SQL semantics — the recursive arm sees just the
+  /// previous step's output) and runs the recursive arm; the rows it produces
+  /// extend `result` and become the next `working` set. A `UNION ALL` keeps
+  /// every produced row; a `UNION` keeps only rows not seen before (a whole-row
+  /// `seen` set), and a step that adds nothing new is the fixpoint. The
+  /// `kRecursionCap` guards a non-terminating CTE with `SQLError.recursion`.
+  ///
+  /// A non-`UNION` recursive query has no recursive arm to iterate, so it runs
+  /// once like a non-recursive CTE — its compiled width validated the same way
+  /// before it materialises, so a non-`UNION` body binding rows of a width other
+  /// than the column list (e.g. a base relation of the CTE's own name) faults
+  /// with `SQLError.columns` rather than trapping on a later read.
+  ///
+  /// The anchor and the recursive arm are each validated against
+  /// `cte.columns.count` by their compiled `Plan.width` BEFORE any rows bind
+  /// under the declared columns: the loop binds `working` as a `Materialised`
+  /// of `cte.columns`, so an arm narrower or wider than the column list — a
+  /// two-column anchor under a three-column list, or a recursive arm of a width
+  /// differing from the anchor's — would trap in `Materialised.record` when the
+  /// next iteration reads it. Checking the compiled width faults with
+  /// `SQLError.columns` regardless of how many rows an arm yields, so even a
+  /// `SELECT *` arm filtered to zero rows is caught. The anchor compiles with
+  /// the CTE name NOT in scope (it does not reference itself); the recursive
+  /// arm compiles with the name bound to `cte.columns`, the schema it reads.
   internal static func fixpoint<C: Catalog & ~Escapable>(_ cte: CTE,
                                                          _ catalog: borrowing C,
                                                          _ ctes: CTEs,
                                                          _ routines: Routines,
                                                          _ bindings: Bindings)
       throws(SQLError) -> Array<Array<Value>> {
-    throw .statement("recursive WITH is not yet supported")
+    guard case let .union(anchor, recursive, all) = cte.query else {
+      // A non-`UNION` recursive query runs once, but still binds under
+      // `cte.columns`, so validate its compiled width here too — the check the
+      // anchor and arm get. A body naming a base relation of the CTE's own name
+      // (`WITH RECURSIVE Parent(x,y,z) AS (SELECT * FROM Parent)`) would else
+      // bind narrow base rows under the wider list and trap on a later read.
+      let width = try compile(cte.query, catalog, ctes).width
+      guard width == cte.columns.count else {
+        throw .columns(expected: cte.columns.count, got: width)
+      }
+      return try run(cte.query, catalog, ctes, routines, bindings)
+    }
+
+    // A misplaced recursive reference in the anchor (a same-named base/view is
+    // absent) was already rejected in `with`, before routing here, so the anchor
+    // is a genuine base case by this point.
+
+    // Validate the anchor's compiled width against the declared columns BEFORE
+    // it seeds the working set: the loop binds `working` under `cte.columns` as
+    // a `Materialised`, so an anchor narrower than the column list — a
+    // two-column `Parent` under `t(a, b, c)` — would trap when the recursive
+    // arm reads the absent ordinal, rather than surfacing `SQLError.columns`.
+    // The anchor is the base case and does not reference the CTE, so its width
+    // resolves with the name not yet in scope.
+    let width = try compile(anchor, catalog, ctes).width
+    guard width == cte.columns.count else {
+      throw .columns(expected: cte.columns.count, got: width)
+    }
+
+    // The recursive arm compiles with the CTE name bound to `cte.columns` — the
+    // schema every iteration reads it under — so its width resolves too (a
+    // `SELECT *` arm spans that schema). Checking it here catches a mismatch
+    // even when the arm is filtered to zero rows in every iteration.
+    var probe = ctes
+    probe[cte.name.lowercased()] =
+        Materialised(columns: cte.columns, rows: [])
+    let arm = try compile(.select(recursive), catalog, probe).width
+    guard arm == cte.columns.count else {
+      throw .columns(expected: cte.columns.count, got: arm)
+    }
+
+    // The anchor seeds the result and the working set, the CTE name not yet in
+    // scope (the anchor is the base case, which does not reference itself). A
+    // bare `UNION` dedups the seed exactly as it dedups an iteration's rows —
+    // duplicate anchor rows collapse to their first occurrence — while `UNION
+    // ALL` keeps every anchor row.
+    let anchored = try run(anchor, catalog, ctes, routines, bindings)
+    var seen = Set<Array<Value>>()
+    var result = all ? anchored
+                     : anchored.filter { seen.insert($0).inserted }
+    var working = result
+
+    var iterations = 0
+    while !working.isEmpty {
+      iterations += 1
+      guard iterations <= kRecursionCap else { throw .recursion(cte.name) }
+
+      // Bind the CTE name to ONLY the previous step's output and run the
+      // recursive arm against the base catalog plus the earlier CTEs.
+      var scope = ctes
+      scope[cte.name.lowercased()] =
+          Materialised(columns: cte.columns, rows: working)
+      let produced =
+          try run(.select(recursive), catalog, scope, routines, bindings)
+
+      var next = Array<Array<Value>>()
+      for row in produced where all || seen.insert(row).inserted {
+        next.append(row)
+      }
+      result += next
+      working = next
+    }
+    return result
   }
 
   // MARK: - Compilation

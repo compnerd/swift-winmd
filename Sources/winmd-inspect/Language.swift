@@ -16,7 +16,7 @@ internal import WinMDSynthesis
 /// `-I`. Retargeting the generator to Rust or C is then a new spec beside a new
 /// template, not a code change.
 ///
-/// The spec surfaces to the render queries as the `ESCAPE` scalar UDF
+/// The spec surfaces to the render queries as the `SANITIZE` scalar UDF
 /// (keyword-escape an identifier), and to the render's Swift decode as a
 /// `Dialect` — the type spellings a `SignatureType` composes into a spelling. The
 /// no-value return is the spec's `void` spelling, tested against a decoded return
@@ -175,22 +175,26 @@ internal struct Language: Sendable {
         escape: { language.escape($0) })
   }
 
-  /// The spec's render UDFs — just `ESCAPE(identifier)` — for the routines the
-  /// render binds its queries with. `ESCAPE` wraps a keyword identifier (and
+  /// The spec's render UDFs — just `SANITIZE(identifier)` — for the routines the
+  /// render binds its queries with. `SANITIZE` wraps a keyword identifier (and
   /// passes a NULL through); the no-value return is decided in Swift now (the
   /// render tests a decoded return against `returned(_:)`), so it needs no UDF.
+  ///
+  /// The UDF is spelled `SANITIZE`, not `ESCAPE`, to steer clear of the ISO-SQL
+  /// reserved word `ESCAPE` (§8.5, the escape-character clause of a `LIKE`
+  /// predicate) should `LIKE` ever be added to the engine.
   internal var routines: Routines {
     let language = self
-    let escape: Scalar = { arguments in
+    let sanitize: Scalar = { arguments in
       guard arguments.count == 1 else {
-        throw .argument("ESCAPE takes one argument")
+        throw .argument("SANITIZE takes one argument")
       }
       if case .null = arguments[0] { return .null }
       guard case let .text(identifier) = arguments[0] else {
-        throw .argument("ESCAPE requires a text argument")
+        throw .argument("SANITIZE requires a text argument")
       }
       return .text(language.escape(identifier))
     }
-    return ["escape": escape]
+    return ["sanitize": sanitize]
   }
 }

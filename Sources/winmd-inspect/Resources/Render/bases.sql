@@ -1,4 +1,4 @@
 SELECT
-  ESCAPE(base) AS base
+  SANITIZE(base) AS base
 FROM
   bases

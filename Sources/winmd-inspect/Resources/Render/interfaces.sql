@@ -1,7 +1,7 @@
 SELECT
   rowid,
   TypeNamespace,
-  ESCAPE(TypeName) AS TypeName,
+  SANITIZE(TypeName) AS TypeName,
   iid
 FROM
   interfaces

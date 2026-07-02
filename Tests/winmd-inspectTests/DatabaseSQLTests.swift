@@ -530,7 +530,7 @@ struct DatabaseSQLTests {
     // be escaped in the `: <base>` clause, exactly as the interface, method, and
     // parameter names are — otherwise `public protocol IMyInterface: protocol`
     // would not compile. Overriding `bases` to yield a keyword base drives the
-    // render's `ESCAPE(base)`.
+    // render's `SANITIZE(base)`.
     try DatabaseSQLTests.with { catalog in
       var shell = Shell(catalog)
       let query = """

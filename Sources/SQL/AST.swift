@@ -116,6 +116,18 @@ public struct Select: Hashable, Sendable {
   /// The row filter, if any.
   public let predicate: Predicate?
 
+  /// The `GROUP BY` columns, in source order — empty for a query with no
+  /// explicit grouping. A query that aggregates without a `GROUP BY` (`SELECT
+  /// COUNT(*) FROM T`) leaves this empty and aggregates the whole result as a
+  /// single group.
+  public let grouping: Array<Column>
+
+  /// The `HAVING` filter over the grouped rows, if any — a predicate the engine
+  /// applies AFTER aggregation, so it may reference the aggregates and the
+  /// grouping columns. A `HAVING` without a `GROUP BY` filters the single
+  /// whole-result group.
+  public let having: Predicate?
+
   /// The ordering applied to the result, if any.
   public let order: Order?
 
@@ -124,11 +136,14 @@ public struct Select: Hashable, Sendable {
 
   public init(projection: Projection, from: Relation?,
               joins: Array<Join> = [], predicate: Predicate? = nil,
+              grouping: Array<Column> = [], having: Predicate? = nil,
               order: Order? = nil, limit: Limit? = nil) {
     self.projection = projection
     self.from = from
     self.joins = joins
     self.predicate = predicate
+    self.grouping = grouping
+    self.having = having
     self.order = order
     self.limit = limit
   }
@@ -276,6 +291,43 @@ public indirect enum Expression: Hashable, Sendable {
   /// `lhs <op> rhs` — a binary arithmetic expression over two sub-expressions,
   /// the engine evaluating it per row to a typed `Value`.
   case binary(Arithmetic, Expression, Expression)
+  /// An aggregate function over a group of rows — `COUNT(*)`, `COUNT(x)`,
+  /// `SUM(x)`, `MIN(x)`, `MAX(x)`, `AVG(x)`. Unlike a scalar `call` (evaluated
+  /// per row), an aggregate accumulates over every row of a group and yields one
+  /// value, so the engine recognises the fixed set of aggregate names at parse
+  /// time and lowers them through a dedicated mechanism rather than the routines.
+  case aggregate(Aggregate, of: Aggregand)
+}
+
+/// A standard SQL aggregate function.
+///
+/// The engine recognises this fixed set by name (case-insensitively) at parse
+/// time, distinct from a scalar-function `call`. `COUNT` counts rows (or
+/// non-NULL values); `SUM`/`AVG` total and average the non-NULL integers;
+/// `MIN`/`MAX` take the least/greatest non-NULL value by the engine's typed
+/// comparison.
+public enum Aggregate: Hashable, Sendable {
+  /// `COUNT` — the number of rows (`*`) or of non-NULL values.
+  case count
+  /// `SUM` — the total of the non-NULL integer values.
+  case sum
+  /// `MIN` — the least non-NULL value.
+  case min
+  /// `MAX` — the greatest non-NULL value.
+  case max
+  /// `AVG` — the average of the non-NULL integer values.
+  case avg
+}
+
+/// An aggregate's operand: `*` (rows), valid only for `COUNT`, or a scalar
+/// expression evaluated per row and aggregated over the group.
+public enum Aggregand: Hashable, Sendable {
+  /// `*` — the whole row, the operand of `COUNT(*)`. It counts every row of the
+  /// group, NULLs included, so it is admitted only for `COUNT`.
+  case star
+  /// An expression evaluated per row; the aggregate folds its non-NULL values
+  /// over the group.
+  case expression(Expression)
 }
 
 /// A binary arithmetic operator.

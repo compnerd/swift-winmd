@@ -1287,6 +1287,8 @@ private func derived(_ plan: Plan) -> Plan? {
     derived(left) ?? derived(right)
   case let .limit(_, _, source):
     derived(source)
+  case let .aggregate(_, _, source):
+    derived(source)
   case .single, .scan, .join:
     nil
   }
@@ -1315,6 +1317,8 @@ private func seeks(_ plan: Plan) -> Bool {
     seeks(left) || seeks(right)
   case let .limit(_, _, source):
     seeks(source)
+  case let .aggregate(_, _, source):
+    seeks(source)
   case .single:
     false
   }
@@ -1339,6 +1343,8 @@ private func filters(_ plan: Plan) -> Bool {
   case let .union(left, right, _):
     filters(left) || filters(right)
   case let .limit(_, _, source):
+    filters(source)
+  case let .aggregate(_, _, source):
     filters(source)
   case .single, .scan, .join:
     false
@@ -1367,6 +1373,8 @@ private func pushed(_ plan: Plan) -> Bool {
   case let .union(left, right, _):
     pushed(left) || pushed(right)
   case let .limit(_, _, source):
+    pushed(source)
+  case let .aggregate(_, _, source):
     pushed(source)
   case .single, .scan:
     false
@@ -1412,6 +1420,8 @@ private func joins(_ plan: Plan) -> Bool {
     joins(left) || joins(right)
   case let .union(left, right, _):
     joins(left) || joins(right)
+  case let .aggregate(_, _, source):
+    joins(source)
   case .single, .scan:
     false
   }
@@ -1440,6 +1450,8 @@ private func residual(_ plan: Plan) -> Bool {
     residual(outer)
   case let .union(left, right, _):
     residual(left) || residual(right)
+  case let .aggregate(_, _, source):
+    residual(source)
   case .single, .scan:
     false
   }
@@ -1546,6 +1558,8 @@ private func injected(_ plan: Plan) -> Bool {
     injected(left) || injected(right)
   case let .join(outer, _, _, _, _, _, _):
     injected(outer)
+  case let .aggregate(_, _, source):
+    injected(source)
   case .single, .scan:
     false
   }
@@ -3012,20 +3026,33 @@ struct EngineScalarSelectTests {
 
   @Test("a directly-built FROM-less select with clauses is rejected")
   func clauses() throws {
-    // The parser never builds a FROM-less select carrying a WHERE, ORDER BY,
-    // OFFSET/FETCH, or JOIN, but `Select.init` is public, so a direct
-    // `Select(from: nil, …)` can. The engine must reject it rather than
-    // silently drop the clause — a false predicate would otherwise still
-    // return the scalar row.
+    // The parser never builds a FROM-less select carrying a WHERE, GROUP BY,
+    // HAVING, ORDER BY, OFFSET/FETCH, or JOIN, but a direct `Select(from: nil,
+    // …)` can. The engine rejects it rather than silently drop the clause — a
+    // false predicate or HAVING would otherwise still return the scalar row.
     let fault =
         SQLError.unsupported(
-            "a WHERE, ORDER BY, OFFSET/FETCH, or JOIN requires a FROM clause")
+            "a WHERE, GROUP BY, HAVING, ORDER BY, OFFSET/FETCH, or JOIN " +
+            "requires a FROM clause")
     let filtered = try EngineScalarSelectTests.select(
         "SELECT 1 FROM People WHERE Id = 99")
     #expect(throws: fault) {
       try Engine.run(.select(Select(projection: filtered.projection,
                                     from: nil,
                                     predicate: filtered.predicate)), people())
+    }
+    let grouped = try EngineScalarSelectTests.select(
+        "SELECT Id FROM People GROUP BY Id")
+    #expect(throws: fault) {
+      try Engine.run(.select(Select(projection: grouped.projection, from: nil,
+                                    grouping: grouped.grouping)), people())
+    }
+    let filteredGroup = try EngineScalarSelectTests.select(
+        "SELECT Id FROM People GROUP BY Id HAVING COUNT(*) > 0")
+    #expect(throws: fault) {
+      try Engine.run(.select(Select(projection: filteredGroup.projection,
+                                    from: nil,
+                                    having: filteredGroup.having)), people())
     }
     let ordered =
         try EngineScalarSelectTests.select("SELECT Id FROM People ORDER BY Id")

@@ -211,6 +211,15 @@ private struct DoubleSortTests {
     #expect(less(.double(1.5), .integer(2)) == true)
     #expect(less(.double(2.5), .integer(2)) == false)
   }
+
+  @Test("a double past Int.max still orders against Int.max, not a false tie")
+  func beyondIntRange() {
+    // `Double(Int.max)` rounds to 2^63, past `Int` — but `Int.max` (2^63 - 1)
+    // is still strictly less, so the pair orders one way, never false both ways
+    // (which would leave MIN/MAX and sort order-dependent).
+    #expect(less(.integer(.max), .double(Double(Int.max))) == true)
+    #expect(less(.double(Double(Int.max)), .integer(.max)) == false)
+  }
 }
 
 // MARK: - Literal

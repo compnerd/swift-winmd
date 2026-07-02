@@ -148,6 +148,17 @@ internal indirect enum Plan {
   /// appends the trailing arm. Both sides yield rows of the same width — the
   /// result columns of the first arm.
   case union(Plan, Plan, all: Bool)
+  /// Γ — groups its `source`'s records by the `keys` terms and folds each
+  /// `aggregates` accumulator over every record of a group, yielding one grouped
+  /// record per group. The grouped record's slots are the `keys` values (slots
+  /// `0 ..< keys.count`, in key order) followed by the aggregate results (slot
+  /// `keys.count + j` is `aggregates[j]`), the slot space the projection, the
+  /// `HAVING`, and the `ORDER BY` are lowered against. With no `keys` the whole
+  /// source is one group — the degenerate `SELECT COUNT(*) FROM T` — yielding a
+  /// single grouped record even over an empty source (`COUNT` `0`, the others
+  /// NULL). It sits above the WHERE/join chain and below the projection, so it
+  /// aggregates the filtered rows and the projection reads its output.
+  case aggregate(keys: Array<Term>, aggregates: Array<Aggregation>, Plan)
   /// A row cap on its `source`'s output: skips the first `offset` records then
   /// takes at most `count` of the rest, in the source's order. It sits over the
   /// sort/select but BELOW the projection, so it caps the ordered rows before
@@ -175,6 +186,9 @@ extension Plan {
       // A `limit` caps rows without reshaping them, so it is as wide as its
       // source.
       source.width
+    case let .aggregate(keys, aggregates, _):
+      // A grouped record is the key values followed by the aggregate results.
+      keys.count + aggregates.count
     default:
       // `compile` always tops an arm with a `project`; nothing else reaches a
       // view's sub-plan root. Measuring nil would mask a width mismatch, so a
@@ -220,6 +234,10 @@ extension Plan {
       // A `limit` caps rows without reshaping them, so it spans the same slots
       // as its source.
       source.slots
+    case let .aggregate(keys, aggregates, _):
+      // A grouped record reshapes its source into the key values followed by the
+      // aggregate results — a fresh slot space of that width.
+      keys.count + aggregates.count
     default:
       nil
     }
@@ -304,6 +322,9 @@ internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
              base, column, keys, filter, catalog, ctes, routines, bindings)
   case let .union(left, right, all):
     try union(left, right, all, catalog, ctes, routines, bindings)
+  case let .aggregate(keys, aggregates, source):
+    try grouped(execute(source, catalog, ctes, routines, bindings), keys,
+                aggregates, routines)
   case let .limit(count, offset, source):
     limited(try execute(source, catalog, ctes, routines, bindings),
             count, offset)
@@ -514,8 +535,9 @@ private func bucket(_ value: Value) -> Value {
 /// fractional double, text, boolean, blob, null) is itself. Unlike the join's
 /// promoted `bucket`, this is EXACT and transitive, so two integers stay
 /// distinct even when they round to the same double — an earlier approximate
-/// row cannot absorb two unequal exact integers.
-private func canonical(_ value: Value) -> Value {
+/// row cannot absorb two unequal exact integers. Grouping reuses it to key its
+/// groups so `1` and `1.0` fall in one group, matching UNION's dedup.
+internal func canonical(_ value: Value) -> Value {
   if case let .double(number) = value, let integer = Int(exactly: number) {
     return .integer(integer)
   }
@@ -776,20 +798,25 @@ internal func less(_ lhs: Value, _ rhs: Value) -> Bool {
 
 /// Whether integer `lhs` is strictly less than double `rhs`, compared EXACTLY.
 /// `Double(lhs) < rhs` decides it unless the two tie under promotion — then
-/// `rhs` is integral and denotes an exact integer (`Int(exactly:)`) the
-/// integers compare against, so a value past 2^53 orders by its true magnitude.
+/// `rhs` is a whole double equal to `Double(lhs)`. If it denotes an exact `Int`
+/// the integers compare directly, so a value past 2^53 orders by its true
+/// magnitude; if it does not (`Double(Int.max)` rounds to 2^63, past `Int`),
+/// `rhs` lies outside `Int` — positive here, so `lhs < rhs` — never a false tie
+/// leaving the pair unordered.
 private func less(integer lhs: Int, double rhs: Double) -> Bool {
   let promoted = Double(lhs)
   guard promoted == rhs else { return promoted < rhs }
-  guard let exact = Int(exactly: rhs) else { return false }
+  guard let exact = Int(exactly: rhs) else { return rhs > 0 }
   return lhs < exact
 }
 
 /// Whether double `lhs` is strictly less than integer `rhs`, compared EXACTLY —
-/// the mirror of `less(integer:double:)`.
+/// the mirror of `less(integer:double:)`. An out-of-`Int` tie means `lhs` lies
+/// outside `Int`, so its sign decides: a positive `lhs` (past `Int.max`) is not
+/// less than any `Int`.
 private func less(double lhs: Double, integer rhs: Int) -> Bool {
   let promoted = Double(rhs)
   guard lhs == promoted else { return lhs < promoted }
-  guard let exact = Int(exactly: lhs) else { return false }
+  guard let exact = Int(exactly: lhs) else { return lhs < 0 }
   return exact < rhs
 }

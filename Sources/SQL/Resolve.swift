@@ -82,6 +82,10 @@ extension Schema {
       return .apply(name: name, arguments: lowered)
     case let .binary(op, lhs, rhs):
       return try .binary(op, term(lhs, in: relation), term(rhs, in: relation))
+    case .aggregate:
+      // An aggregate has no per-row meaning — it folds over a group — so it may
+      // not appear in a `WHERE`, a join `ON`, or a non-aggregate projection.
+      throw .unsupported("an aggregate is not allowed here")
     }
   }
 
@@ -242,6 +246,10 @@ internal struct Scope {
       return .apply(name: name, arguments: lowered)
     case let .binary(op, lhs, rhs):
       return try .binary(op, term(lhs), term(rhs))
+    case .aggregate:
+      // An aggregate has no per-row meaning — it folds over a group — so it may
+      // not appear in a `WHERE`, a join `ON`, or a non-aggregate projection.
+      throw .unsupported("an aggregate is not allowed here")
     }
   }
 
@@ -283,6 +291,213 @@ internal struct Scope {
     case let .not(operand):
       try .not(lower(operand))
     }
+  }
+}
+
+// MARK: - Grouped scope
+
+/// The grouped slot space of an aggregate query — the lowering surface for the
+/// projection, `HAVING`, and `ORDER BY` that read a grouped record.
+///
+/// An `aggregate` node yields grouped records whose slots are the `GROUP BY` key
+/// values (slots `0 ..< keys.count`, in key order) followed by the aggregate
+/// results (slot `keys.count + j` is aggregate `j`). A `Grouping` lowers a
+/// name-addressed AST expression into that space: an aggregate call maps to its
+/// result slot; a bare column maps to its key slot ONLY when it is a `GROUP BY`
+/// key — the standard rule that a non-aggregated column must appear in the
+/// `GROUP BY` (else `SQLError.grouping`). It also records each projected item's
+/// output name so an `ORDER BY` may name a projection alias, the standard way to
+/// order on an aggregate (`ORDER BY <count-alias>`).
+///
+/// The keys and aggregates resolve against the underlying `Scope`, so the same
+/// combined-ordinal resolution the source uses decides which projection columns
+/// are keys.
+internal struct Grouping {
+  private let scope: Scope
+
+  /// Each `GROUP BY` key's combined base ordinal mapped to its grouped slot —
+  /// key `i` sits at grouped slot `i`.
+  private let keys: Dictionary<Int, Int>
+
+  /// The distinct aggregate expressions mapped to their grouped slots — aggregate
+  /// `j` sits at grouped slot `keys.count + j`.
+  private let aggregates: Dictionary<Expression, Int>
+
+  /// Each projected item's output name (an alias, else a bare column's name),
+  /// lowercased, mapped to its grouped term — the surface an `ORDER BY` names a
+  /// projection alias against.
+  private var aliases: Dictionary<String, Term> = [:]
+
+  /// Output names two or more projected items share, lowercased. An `ORDER BY`
+  /// that names one has no single slot to order on — the same ambiguity the
+  /// non-grouped `Scope.order` reports for a shared unqualified join column
+  /// (`SQLError.ambiguous`) rather than silently picking the last projection.
+  private var ambiguous: Set<String> = []
+
+  /// Builds a grouping over `scope` for the `GROUP BY` `columns` and the
+  /// query's distinct `aggregates` (in first-appearance order — aggregate `j` at
+  /// grouped slot `columns.count + j`).
+  internal init(_ scope: Scope, _ columns: Array<Column>,
+                _ aggregates: Array<Expression>) throws(SQLError) {
+    self.scope = scope
+    var keys = Dictionary<Int, Int>(minimumCapacity: columns.count)
+    for index in columns.indices {
+      try keys[scope.ordinal(of: columns[index])] = index
+    }
+    self.keys = keys
+    var map = Dictionary<Expression, Int>(minimumCapacity: aggregates.count)
+    for index in aggregates.indices {
+      map[aggregates[index]] = columns.count + index
+    }
+    self.aggregates = map
+  }
+
+  /// The grouped slot an aggregate expression resolves to (an aggregate the
+  /// query collected), or `nil` if it is not one.
+  private func slot(of aggregate: Expression) -> Int? {
+    aggregates[aggregate]
+  }
+
+  /// Lowers a scalar `expression` to a grouped-space `Term`.
+  ///
+  /// An aggregate call maps to its result slot; a literal to a constant; a
+  /// `call`/`binary` recurses over its operands; a bare column maps to its key
+  /// slot only when it is a `GROUP BY` key, else it is `SQLError.grouping` — the
+  /// standard rule.
+  private func term(_ expression: Expression) throws(SQLError) -> Term {
+    if case .aggregate = expression, let slot = slot(of: expression) {
+      return .slot(slot)
+    }
+    switch expression {
+    case let .column(column):
+      let ordinal = try scope.ordinal(of: column)
+      guard let slot = keys[ordinal] else { throw .grouping(column.name) }
+      return .slot(slot)
+    case let .literal(literal):
+      return try .constant(value(of: literal))
+    case let .call(name, arguments):
+      var lowered = Array<Term>()
+      lowered.reserveCapacity(arguments.count)
+      for argument in arguments {
+        try lowered.append(term(argument))
+      }
+      return .apply(name: name, arguments: lowered)
+    case let .binary(op, lhs, rhs):
+      return try .binary(op, term(lhs), term(rhs))
+    case .aggregate:
+      // An aggregate reaches here only when it was not collected — an internal
+      // inconsistency, since the query gathers every projection/HAVING aggregate.
+      throw .unsupported("uncollected aggregate")
+    }
+  }
+
+  /// Records a projected item's output `name` → grouped `term`, flagging the
+  /// name ambiguous if another projected item already claimed it.
+  private mutating func record(_ name: String, _ term: Term) {
+    let key = name.lowercased()
+    if aliases.updateValue(term, forKey: key) != nil { ambiguous.insert(key) }
+  }
+
+  /// The grouped-space projected terms, recording each item's output name for an
+  /// `ORDER BY` to name.
+  ///
+  /// A `columns` projection (`SELECT Dept … GROUP BY Dept`) lowers each column
+  /// as a grouped term — a `GROUP BY` key, else `SQLError.grouping`. An
+  /// `expressions` projection lowers each item's expression and records its
+  /// output name (an alias, else a bare column's name) so an `ORDER BY` may name
+  /// it — the standard alias ordering on an aggregate. A `SELECT *` has no
+  /// well-defined meaning over groups (which columns?), so it faults.
+  internal mutating func terms(_ projection: Projection)
+      throws(SQLError) -> Array<Term> {
+    switch projection {
+    case .all:
+      throw .unsupported("SELECT * is not allowed with GROUP BY or aggregates")
+    case let .columns(columns):
+      var terms = Array<Term>()
+      terms.reserveCapacity(columns.count)
+      for column in columns {
+        let term = try term(.column(column))
+        terms.append(term)
+        record(column.name, term)
+      }
+      return terms
+    case let .expressions(items):
+      var terms = Array<Term>()
+      terms.reserveCapacity(items.count)
+      for item in items {
+        let term = try term(item.expression)
+        terms.append(term)
+        // Record the output name — an alias, else a bare column's name — so an
+        // `ORDER BY` may name it (the standard alias ordering on an aggregate).
+        if let alias = item.alias {
+          record(alias, term)
+        } else if case let .column(column) = item.expression {
+          record(column.name, term)
+        }
+      }
+      return terms
+    }
+  }
+
+  /// Lowers a `HAVING`/predicate to a grouped-space `Filter`.
+  internal func lower(_ predicate: Predicate) throws(SQLError) -> Filter {
+    switch predicate {
+    case let .comparison(left, op, right):
+      try .compare(term(left), op, term(right))
+    case let .bound(left, op, parameter):
+      try .bound(term(left), op, parameter)
+    case let .null(expression, negated):
+      try .null(term(expression), negated: negated)
+    case let .and(lhs, rhs):
+      try .and(lower(lhs), lower(rhs))
+    case let .or(lhs, rhs):
+      try .or(lower(lhs), lower(rhs))
+    case let .not(operand):
+      try .not(lower(operand))
+    }
+  }
+
+  /// The `(slot, ascending)` keys an `ORDER BY` resolves to in grouped
+  /// space, major to minor.
+  ///
+  /// Each order column names a projection output first — an alias, or a bare
+  /// column's name (`terms` recorded these), the standard way to order on an
+  /// aggregate — else a `GROUP BY` key column. A column that is neither is
+  /// `SQLError.grouping`, as a bare non-key column is meaningless over groups.
+  ///
+  /// The `sort` operator orders by grouped slots, so an alias resolves only
+  /// when its projected term is a bare `.slot` — a plain group key or a whole
+  /// aggregate (`SUM(x) AS Total`). An alias over a COMPUTED expression
+  /// (`COUNT(*) * 2 AS Doubled`) has no standalone slot to sort on — the
+  /// projection computes it after the sort — so ordering on it is unsupported
+  /// rather than misreported as an unknown column.
+  internal func order(_ order: Order) throws(SQLError)
+      -> Array<(slot: Int, ascending: Bool)> {
+    var resolved = Array<(slot: Int, ascending: Bool)>()
+    resolved.reserveCapacity(order.keys.count)
+    for key in order.keys {
+      if key.column.qualifier == nil {
+        let name = key.column.name.lowercased()
+        // A name two projections share has no single slot to order on — reject
+        // it as ambiguous rather than pick the last, matching the non-grouped
+        // `Scope.order` fault for a shared unqualified join column.
+        if ambiguous.contains(name) { throw .ambiguous(key.column.name) }
+        if let term = aliases[name] {
+          guard case let .slot(slot) = term else {
+            throw .unsupported(
+                "ORDER BY on a computed column alias is not supported")
+          }
+          resolved.append((slot, key.ascending))
+          continue
+        }
+      }
+      let ordinal = try scope.ordinal(of: key.column)
+      guard let slot = keys[ordinal] else {
+        throw .grouping(key.column.name)
+      }
+      resolved.append((slot, key.ascending))
+    }
+    return resolved
   }
 }
 

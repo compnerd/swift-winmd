@@ -341,13 +341,20 @@ internal struct Shell: ~Escapable {
   /// run; an unknown `.`-token is a `MetaError.unknown`. Anything else is a SQL
   /// statement, run through `Session.run` with the shell's `bindings` — a `CREATE
   /// VIEW` registers, a `SELECT` yields rows resolving any `:name` from the
-  /// bindings — and its rows print tab-separated. The shell does not single out
-  /// `CREATE VIEW`: it just runs the statement and prints what comes back.
+  /// bindings — and its rows print as a `sqlite3`-style `.mode box` table
+  /// (`Box.render`), the column headers taken from the statement's projection.
+  /// The shell does not single out `CREATE VIEW`: it just runs the statement and
+  /// prints what comes back — a `CREATE VIEW` yields no rows, so nothing prints.
   internal mutating func execute(_ statement: String) throws {
     guard statement.first == "." else {
-      for row in try session.run(statement.statement, bindings: bindings) {
-        print(row.map(\.display).joined(separator: "\t"))
-      }
+      let text = statement.statement
+      let rows = try session.run(text, bindings: bindings)
+      // A row-producing statement (`SELECT`/`WITH`) prints its box even when the
+      // result is empty — the header frame still conveys the zero-row result — so
+      // an empty result is NOT treated as no output. A `CREATE VIEW` genuinely
+      // produces nothing; `headers` returns nil for it and it is skipped.
+      guard let names = Shell.headers(of: text, rows) else { return }
+      print(Box.render(names, rows))
       return
     }
     let spelling = statement.prefix { !$0.isWhitespace }
@@ -569,6 +576,51 @@ internal struct Shell: ~Escapable {
     else { throw RenderError.query(name) }
     let data = try Data(contentsOf: url)
     return String(decoding: data, as: UTF8.self)
+  }
+
+  /// The box-table column headers for the row-producing statement `text`, sized
+  /// to its result `rows` — or `nil` when `text` is not row output (a `CREATE
+  /// VIEW`), so the caller prints nothing.
+  ///
+  /// A `SELECT`'s explicit projection names its columns from the statement (an
+  /// aliased or bare column projects its name, the qualifier dropped; a computed
+  /// expression with no alias falls back to a positional `column N`). A
+  /// `SELECT *` carries no names in the statement — its real columns come from
+  /// the engine's resolution (view-shadows-table, joins, unions), which the shell
+  /// does NOT duplicate here; it frames by the produced width (`column N`)
+  /// pending a resolved-output-schema source (INFORMATION_SCHEMA). Anything else
+  /// (a `WITH`, or an unparsable string) likewise frames by the produced width.
+  internal static func headers(of text: String,
+                               _ rows: Array<Array<Value>>) -> Array<String>? {
+    guard let statement = try? Statement(parsing: text) else {
+      return generic(rows)
+    }
+    if case .create = statement { return nil }
+    guard case let .select(query) = statement else { return generic(rows) }
+    switch query.first.projection {
+    case let .columns(list):
+      return list.map(\.name)
+    case let .expressions(items):
+      return items.enumerated().map { index, item in
+        item.alias ?? column(item.expression) ?? "column \(index + 1)"
+      }
+    case .all:
+      return generic(rows)
+    }
+  }
+
+  /// `column N` headers for `rows`' produced width — the fallback when a column
+  /// name cannot be recovered (a `SELECT *` over a join, an unresolved relation,
+  /// or a non-`SELECT` row source), so a non-empty result still frames correctly.
+  private static func generic(_ rows: Array<Array<Value>>) -> Array<String> {
+    (0 ..< (rows.first?.count ?? 0)).map { "column \($0 + 1)" }
+  }
+
+  /// The output name of a projected `expression` — a bare column's name (the
+  /// qualifier dropped), or `nil` for a computed expression that names no
+  /// column, which the header derivation falls back to a positional label.
+  private static func column(_ expression: Expression) -> String? {
+    if case let .column(column) = expression { column.name } else { nil }
   }
 
   /// Parses `text` as a `SELECT`, returning its `SQL.Query`.

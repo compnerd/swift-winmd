@@ -451,6 +451,100 @@ struct ShellTests {
                 .decode(with: resolver, dialect: dialect) == "HRESULT")
   }
 
+  @Test("the box renderer frames a header over a ruled multi-row grid")
+  func boxHeaderAndRows() {
+    // The `.mode box` grid: a `┌─┬─┐` top, the header row, a `├─┼─┤` rule, one
+    // line per row, and a `└─┴─┘` bottom, every cell padded one space each side.
+    let table = Box.render(["Name", "Id"],
+                           [[.text("IUnknown"), .integer(1)],
+                            [.text("IInspectable"), .integer(2)]])
+    #expect(table == """
+      ┌──────────────┬────┐
+      │ Name         │ Id │
+      ├──────────────┼────┤
+      │ IUnknown     │ 1  │
+      │ IInspectable │ 2  │
+      └──────────────┴────┘
+      """)
+  }
+
+  @Test("each column is sized to the widest of its header and its cells")
+  func boxColumnWidth() {
+    // Column width is the max of the header and every cell's display width: the
+    // first column is sized by its long cell (`elongated`), the second by its
+    // header (`X`), which outsizes its one-character cells.
+    let table = Box.render(["k", "X"],
+                           [[.text("elongated"), .text("y")]])
+    #expect(table == """
+      ┌───────────┬───┐
+      │ k         │ X │
+      ├───────────┼───┤
+      │ elongated │ y │
+      └───────────┴───┘
+      """)
+  }
+
+  @Test("an empty result renders the header and frame alone")
+  func boxEmptyResult() {
+    // With no rows the header row still prints between the top frame and the
+    // header rule and bottom frame — sized to the header widths — so the column
+    // names remain visible.
+    #expect(Box.render(["Name", "Id"], []) == """
+      ┌──────┬────┐
+      │ Name │ Id │
+      ├──────┼────┤
+      └──────┴────┘
+      """)
+  }
+
+  @Test("a NULL or empty cell renders as blank padding")
+  func boxNullAndEmptyCell() {
+    // A `.null` cell (and an empty `.text`) shows as the empty string — the way
+    // the shell's list mode displays a NULL — padded to the column width. A row
+    // shorter than the header pads its missing trailing cells empty too.
+    let table = Box.render(["a", "b", "c"],
+                           [[.null, .text(""), .text("v")],
+                            [.text("x")]])
+    #expect(table == """
+      ┌───┬───┬───┐
+      │ a │ b │ c │
+      ├───┼───┼───┤
+      │   │   │ v │
+      │ x │   │   │
+      └───┴───┴───┘
+      """)
+  }
+
+  @Test("a wide (double-width) cell is sized by its display columns")
+  func boxWideCell() {
+    // A cell's width is measured in display columns, not bytes or scalars: a
+    // fullwidth CJK character occupies two columns, so the column sizes to four
+    // (two glyphs) rather than mis-sizing on its scalar count, keeping the frame
+    // aligned.
+    let table = Box.render(["h"], [[.text("中文")]])
+    #expect(table == """
+      ┌──────┐
+      │ h    │
+      ├──────┤
+      │ 中文 │
+      └──────┘
+      """)
+  }
+
+  @Test("headers frame an empty SELECT by projection and skip CREATE VIEW")
+  func emptyResultHeaders() {
+    // An empty result still frames its columns for an explicit projection — its
+    // names come from the statement regardless of row count. A CREATE VIEW is not
+    // row output and yields nil (nothing printed). A `SELECT *` carries no names
+    // in the statement (its columns come from the engine's resolution, deferred
+    // to a resolved-schema source), so it frames by the produced width.
+    #expect(Shell.headers(of: "SELECT Id, Name FROM T", []) == ["Id", "Name"])
+    #expect(Shell.headers(of: "SELECT Id FROM T", [[.integer(1)]]) == ["Id"])
+    #expect(Shell.headers(of: "CREATE VIEW v AS SELECT 1 AS x", []) == nil)
+    #expect(Shell.headers(of: "SELECT * FROM T", [[.integer(9), .integer(8)]])
+            == ["column 1", "column 2"])
+  }
+
   @Test("the identity spec escapes nothing and applies no conventions")
   func languageIdentity() {
     // A template that declares no language (or names a spec with no resource)

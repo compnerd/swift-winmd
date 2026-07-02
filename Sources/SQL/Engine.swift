@@ -161,18 +161,69 @@ public enum Engine {
     return select.joins.contains { $0.relation.name.lowercased() == name }
   }
 
+  /// The greatest number of fixpoint iterations a recursive CTE may take before
+  /// the engine concludes it does not terminate and throws
+  /// `SQLError.recursion`.
+  internal static let kRecursionCap = 10_000
+
   /// Evaluates a recursive `cte` to a fixpoint over `catalog` with the earlier
-  /// `ctes` in scope.
+  /// `ctes` in scope, returning every produced row.
   ///
-  /// Not yet implemented — the fixpoint loop lands in a later phase; a recursive
-  /// CTE faults until then.
+  /// A recursive CTE's query is a `UNION` of an ANCHOR (its left arm, itself a
+  /// query) and a RECURSIVE arm (its right `SELECT`, which names the CTE). The
+  /// anchor evaluates once — with the CTE name NOT yet bound — to seed `result`
+  /// and the `working` set. Each iteration then binds the CTE name to ONLY the
+  /// `working` rows (the SQL semantics — the recursive arm sees just the
+  /// previous step's output) and runs the recursive arm; the rows it produces
+  /// extend `result` and become the next `working` set. A `UNION ALL` keeps
+  /// every produced row; a `UNION` keeps only rows not seen before (a whole-row
+  /// `seen` set), and a step that adds nothing new is the fixpoint. The
+  /// `kRecursionCap` guards a non-terminating CTE with `SQLError.recursion`.
+  ///
+  /// A non-`UNION` recursive query has no recursive arm to iterate, so it runs
+  /// once like a non-recursive CTE.
   internal static func fixpoint<C: Catalog & ~Escapable>(_ cte: CTE,
                                                          _ catalog: borrowing C,
                                                          _ ctes: CTEs,
                                                          _ routines: Routines,
                                                          _ bindings: Bindings)
       throws(SQLError) -> Array<Array<Value>> {
-    throw .statement("recursive WITH is not yet supported")
+    guard case let .union(anchor, recursive, all) = cte.query else {
+      return try run(cte.query, catalog, ctes, routines, bindings)
+    }
+
+    // The anchor seeds the result and the working set, the CTE name not yet in
+    // scope (the anchor is the base case, which does not reference itself). A
+    // bare `UNION` dedups the seed exactly as it dedups an iteration's rows —
+    // duplicate anchor rows collapse to their first occurrence — while `UNION
+    // ALL` keeps every anchor row.
+    let anchored = try run(anchor, catalog, ctes, routines, bindings)
+    var seen = Set<Array<Value>>()
+    var result = all ? anchored
+                     : anchored.filter { seen.insert($0).inserted }
+    var working = result
+
+    var iterations = 0
+    while !working.isEmpty {
+      iterations += 1
+      guard iterations <= kRecursionCap else { throw .recursion(cte.name) }
+
+      // Bind the CTE name to ONLY the previous step's output and run the
+      // recursive arm against the base catalog plus the earlier CTEs.
+      var scope = ctes
+      scope[cte.name.lowercased()] =
+          Materialised(columns: cte.columns, rows: working)
+      let produced =
+          try run(.select(recursive), catalog, scope, routines, bindings)
+
+      var next = Array<Array<Value>>()
+      for row in produced where all || seen.insert(row).inserted {
+        next.append(row)
+      }
+      result += next
+      working = next
+    }
+    return result
   }
 
   // MARK: - Compilation

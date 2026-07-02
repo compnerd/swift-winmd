@@ -79,6 +79,7 @@ struct SQLStateTests {
             == "SS001")
     #expect(SQLError.statement("CREATE VIEW is not a query").sqlstate
             == "SS002")
+    #expect(SQLError.recursion("loop").sqlstate == "SS003")
   }
 
   @Test(".state round-trips its code and message")

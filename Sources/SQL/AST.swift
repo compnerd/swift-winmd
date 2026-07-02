@@ -24,6 +24,45 @@ public enum Statement: Hashable, Sendable {
   /// projection). A consumer registers the `View` under `name` in a catalog so
   /// a later `SELECT … FROM name` resolves it.
   case create(name: String, view: View)
+  /// A `WITH [RECURSIVE] cte (, cte)* query`: the common table expressions
+  /// `ctes`, in source order, scoping the trailing `query`. Each `CTE` binds a
+  /// named relation the `query` — and a later `CTE` — may name; the engine
+  /// materialises them in order into an overlay catalog the `query` runs
+  /// against.
+  case with(ctes: Array<CTE>, query: Query)
+}
+
+/// A common table expression — a query bound to a name for the duration of the
+/// enclosing statement.
+///
+/// `name` is the relation name the trailing query (and a later `CTE`) resolves
+/// against; `columns` names its columns in projection order — explicit from a
+/// `(c, …)` list, else inferred from the query's first arm exactly as a view's
+/// are. A `recursive` CTE names itself in its own `query` (which must be a
+/// `UNION` of an anchor and a recursive arm); a non-recursive one does not. The
+/// CTE is fully escapable data — the engine materialises its `query` into an
+/// in-memory relation and resolves the name to it.
+public struct CTE: Hashable, Sendable {
+  /// The relation name the CTE binds.
+  public let name: String
+
+  /// The CTE's column names, in projection order.
+  public let columns: Array<String>
+
+  /// The query the CTE stands for.
+  public let query: Query
+
+  /// Whether the CTE is recursive — a `WITH RECURSIVE` member that may name
+  /// itself in its own `query`.
+  public let recursive: Bool
+
+  public init(name: String, columns: Array<String>, query: Query,
+              recursive: Bool) {
+    self.name = name
+    self.columns = columns
+    self.query = query
+    self.recursive = recursive
+  }
 }
 
 /// A query: one `SELECT`, or several combined left-associatively with `UNION`.

@@ -6,9 +6,12 @@
 /// The grammar is the minimal dialect, extended with a chain of joins:
 ///
 /// ```
-/// statement      := query | create
+/// statement      := with | query | create
 /// create         := CREATE VIEW identifier
 ///                   ['(' identifier (',' identifier)* ')'] AS query
+/// with           := WITH [RECURSIVE] cte (',' cte)* query
+/// cte            := identifier ['(' identifier (',' identifier)* ')']
+///                   AS '(' query ')'
 /// query          := select (UNION [ALL] select)*
 /// select         := SELECT projection [FROM relation (join)* [where] [order]]
 /// relation       := identifier [AS identifier]
@@ -57,18 +60,100 @@ internal struct Parser: ~Escapable {
 
   /// Parses a complete statement and asserts the input is exhausted.
   ///
-  /// A leading `CREATE` selects the `CREATE VIEW` form; anything else is a
-  /// `query` — a `SELECT` or a `UNION` of several.
+  /// A leading `CREATE` selects the `CREATE VIEW` form; a leading `WITH` the
+  /// common-table-expression form; anything else is a `query` — a `SELECT` or a
+  /// `UNION` of several.
   internal mutating func parse() throws(SQLError) -> Statement {
-    let statement = if current?.kind == .create {
-      try create()
-    } else {
-      try Statement.select(query())
+    let statement = switch current?.kind {
+    case .create: try create()
+    case .with: try with()
+    default: try Statement.select(query())
     }
     if let token = current {
       throw .trailing(at: token.location)
     }
     return statement
+  }
+
+  /// Parses `WITH [RECURSIVE] cte (, cte)* query` (the leading `WITH` is the
+  /// next token).
+  ///
+  /// The `RECURSIVE` keyword, when present, marks every CTE of the list
+  /// recursive — the SQL standard scopes it to the whole `WITH`, not a single
+  /// member — so a member that names itself is admitted. The CTEs parse in
+  /// source order, each scoping the trailing query; the query is the same
+  /// `select (UNION …)*` form a bare statement is.
+  private mutating func with() throws(SQLError) -> Statement {
+    try expect(.with)
+    let recursive = try match(.recursive)
+
+    var ctes = Array<CTE>()
+    try ctes.append(cte(recursive: recursive))
+    while try match(.comma) {
+      try ctes.append(cte(recursive: recursive))
+    }
+    return try .with(ctes: ctes, query: query())
+  }
+
+  /// Parses one `cte := identifier ['(' identifier (, identifier)* ')'] AS '('
+  /// query ')'`, binding it `recursive` per the enclosing `WITH`.
+  ///
+  /// An explicit `(c, …)` list names the CTE's columns; absent one, the names
+  /// are inferred from the query's first arm, exactly as a view's are — the same
+  /// arity, naming, and case-insensitive uniqueness rules `columns(_:_:)`
+  /// applies.
+  private mutating func cte(recursive: Bool) throws(SQLError) -> CTE {
+    let name = try identifier()
+    let explicit = try names()
+    try expect(.as)
+    try expect(.lparen)
+    let query = try query()
+    try expect(.rparen)
+    return try CTE(name: name, columns: columns(explicit, query),
+                   query: query, recursive: recursive)
+  }
+
+  /// Parses an optional parenthesised column-name list `'(' identifier (,
+  /// identifier)* ')'`, returning the names, or `nil` when no `(` follows.
+  ///
+  /// Shared by a `CREATE VIEW`'s and a CTE's explicit column list.
+  private mutating func names() throws(SQLError) -> Array<String>? {
+    guard try match(.lparen) else { return nil }
+    var columns = Array<String>()
+    try columns.append(identifier())
+    while try match(.comma) {
+      try columns.append(identifier())
+    }
+    try expect(.rparen)
+    return columns
+  }
+
+  /// Resolves a relation's column names from an `explicit` list (when given) or
+  /// the `query`'s first arm, applying the view/CTE naming rules.
+  ///
+  /// An explicit list must name exactly one column per projected value when the
+  /// first arm's arity is statically known — a `.columns`/`.expressions`
+  /// projection, but not a `SELECT *`, whose width is known only at resolution —
+  /// else `SQLError.columns`. Absent a list, the names are inferred from the
+  /// projection (`infer`). The final names — explicit or inferred — must be
+  /// case-insensitively unique, matching `Schema.ordinal(of:)`'s resolution, or
+  /// the shadowed column would be unreachable (`SQLError.duplicate`).
+  private func columns(_ explicit: Array<String>?, _ query: Query)
+      throws(SQLError) -> Array<String> {
+    if let explicit, let arity = arity(query.first.projection),
+        explicit.count != arity {
+      throw .columns(expected: arity, got: explicit.count)
+    }
+    let columns: Array<String> = if let explicit {
+      explicit
+    } else {
+      try infer(query.first.projection)
+    }
+    var seen = Set<String>()
+    for column in columns where !seen.insert(column.lowercased()).inserted {
+      throw .duplicate(column)
+    }
+    return columns
   }
 
   /// Parses `select (UNION [ALL] select)*`, left-associative.
@@ -91,50 +176,18 @@ internal struct Parser: ~Escapable {
   ///
   /// An explicit `(col, col, …)` list names the view's columns; absent one, the
   /// names are inferred from the FIRST arm's projection (the ISO rule for a
-  /// union's result columns). A projection whose names cannot be inferred — a
-  /// `SELECT *`, or an unaliased non-column expression — faults with
-  /// `SQLError.named`. An explicit list that does not name exactly one column
-  /// per projected value, when the first arm's arity is statically known (a
-  /// `.columns` or `.expressions` projection, but not a `SELECT *`), faults with
-  /// `SQLError.columns`; a `SELECT *` view's width is checked by the engine at
-  /// resolution instead. The final names — explicit or inferred — must be
-  /// case-insensitively unique, matching `Schema.ordinal(of:)`'s resolution; a
-  /// collision faults with `SQLError.duplicate`.
+  /// union's result columns) — the naming, arity, and uniqueness rules
+  /// `columns(_:_:)` applies, shared with a CTE's column list.
   private mutating func create() throws(SQLError) -> Statement {
     try expect(.create)
     try expect(.view)
     let name = try identifier()
-
-    var explicit: Array<String>? = nil
-    if try match(.lparen) {
-      var columns = Array<String>()
-      try columns.append(identifier())
-      while try match(.comma) {
-        try columns.append(identifier())
-      }
-      try expect(.rparen)
-      explicit = columns
-    }
-
+    let explicit = try names()
     try expect(.as)
     let query = try query()
-    let columns: Array<String>
-    if let explicit {
-      if let arity = arity(query.first.projection), explicit.count != arity {
-        throw .columns(expected: arity, got: explicit.count)
-      }
-      columns = explicit
-    } else {
-      columns = try infer(query.first.projection)
-    }
-    // A view's columns must be case-insensitively unique — explicit or
-    // inferred — to match the resolution `Schema.ordinal(of:)` performs; a
-    // collision would shadow the later column and make it unreachable.
-    var seen = Set<String>()
-    for column in columns where !seen.insert(column.lowercased()).inserted {
-      throw .duplicate(column)
-    }
-    return .create(name: name, view: View(query: query, columns: columns))
+    return try .create(name: name,
+                       view: View(query: query,
+                                  columns: columns(explicit, query)))
   }
 
   /// The number of values `projection` projects, or `nil` when it is not

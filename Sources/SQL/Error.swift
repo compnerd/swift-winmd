@@ -89,6 +89,10 @@ public enum SQLError: Error, Hashable, Sendable {
   /// `Schema.ordinal(of:)` performs, so the shadowed column would be
   /// unreachable; the string is the offending name.
   case duplicate(String)
+  /// A `WITH` list binds the same query name twice (case-insensitively), so the
+  /// later definition would silently shadow the earlier; the string is the
+  /// repeated name.
+  case redefinition(String)
   /// A `UNION` combines two `SELECT`s of differing column counts — the result
   /// columns of every arm must align — carrying the first arm's width and the
   /// offending arm's.
@@ -98,6 +102,14 @@ public enum SQLError: Error, Hashable, Sendable {
   /// select (which projects only expressions over a single row); the string
   /// describes it.
   case unsupported(String)
+  /// A statement cannot be run as a query — a `CREATE VIEW` defines a view
+  /// rather than producing rows, or a malformed `WITH` member; the string
+  /// describes the fault.
+  case statement(String)
+  /// A recursive common table expression did not reach a fixpoint within the
+  /// iteration cap (`kRecursionCap`) — it produces rows without end. The string
+  /// is the offending CTE's name.
+  case recursion(String)
 }
 
 extension SQLError: CustomStringConvertible {
@@ -140,11 +152,17 @@ extension SQLError: CustomStringConvertible {
           + "expected \(expected), got \(got)"
     case let .duplicate(name):
       "duplicate view column '\(name)'"
+    case let .redefinition(name):
+      "WITH query name '\(name)' specified more than once"
     case let .arity(expected, found):
       "UNION arms project differing column counts: "
           + "expected \(expected), found \(found)"
     case let .unsupported(detail):
       "unsupported query: \(detail)"
+    case let .statement(detail):
+      "statement is not runnable as a query: \(detail)"
+    case let .recursion(name):
+      "recursive CTE '\(name)' did not terminate"
     }
   }
 }
@@ -176,8 +194,11 @@ extension SQLError {
   /// - Class `SS` — the implementation-defined class this engine squats on
   ///   (SwiftSQL) for a condition with no standard ISO code — `SS001`, a query
   ///   shape the engine does not support (a FROM-less `SELECT *`, or a clause
-  ///   with no `FROM`). ISO leaves classes whose first character is `5`–`9` or
-  ///   `I`–`Z` implementation-defined, so `SS` is a safe squat.
+  ///   with no `FROM`), `SS002`, a statement that is not runnable as a query
+  ///   (a `CREATE VIEW`, or a malformed `WITH` member), and `SS003`, a recursive
+  ///   CTE that did not reach a fixpoint within the iteration cap. ISO leaves
+  ///   classes whose first character is `5`–`9` or `I`–`Z`
+  ///   implementation-defined, so `SS` is a safe squat.
   public var sqlstate: String {
     switch self {
     case let .state(code, _):
@@ -194,6 +215,8 @@ extension SQLError {
       "42702"
     case .duplicate:
       "42701"
+    case .redefinition:
+      "42712"
     case .function:
       "42883"
     // Class 22 — data exception.
@@ -210,6 +233,10 @@ extension SQLError {
     // Class SS — SwiftSQL, this engine's implementation-defined conditions.
     case .unsupported:
       "SS001"
+    case .statement:
+      "SS002"
+    case .recursion:
+      "SS003"
     }
   }
 

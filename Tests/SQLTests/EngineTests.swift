@@ -2939,4 +2939,240 @@ struct EngineScalarSelectTests {
   }
 }
 
+// MARK: - WITH (non-recursive) tests
 
+/// Parses `text` to a statement and runs it against `catalog`.
+private func statement<C: Catalog & ~Escapable>(_ text: String,
+                                                _ catalog: borrowing C)
+    throws -> Array<Array<Value>> {
+  try Engine.run(Statement(parsing: text), catalog)
+}
+
+struct EngineWithTests {
+  @Test("a non-recursive CTE materialises as an inline view")
+  func inline() throws {
+    // The CTE `adults` is materialised once and the trailing query reads it
+    // like a table — the inline-view shape of a non-recursive WITH.
+    let rows = try statement("""
+        WITH adults (Key, Label) AS (SELECT Id, Name FROM Parent WHERE Id >= 2)
+          SELECT Label FROM adults
+        """, family())
+    #expect(rows == [[.text("Bee")], [.text("Cid")]])
+  }
+
+  @Test("a CTE infers its columns and filters on them")
+  func inferred() throws {
+    let rows = try statement("""
+        WITH grown AS (SELECT Id, Name FROM Parent)
+          SELECT Name FROM grown WHERE Id = 3
+        """, family())
+    #expect(rows == [[.text("Cid")]])
+  }
+
+  @Test("a later CTE reads an earlier one (chained CTEs)")
+  func chained() throws {
+    // `b` resolves `a` — the resolver consults the CTEs materialised so far, so
+    // a later member sees an earlier one.
+    let rows = try statement("""
+        WITH a (Id, Name) AS (SELECT Id, Name FROM Parent WHERE Id >= 2),
+             b (Who) AS (SELECT Name FROM a WHERE Id = 3)
+          SELECT Who FROM b
+        """, family())
+    #expect(rows == [[.text("Cid")]])
+  }
+
+  @Test("a CTE shadows a base relation of the same name")
+  func shadow() throws {
+    // `Parent` is a base relation; the CTE of the same name shadows it, so the
+    // trailing query reads the CTE's rows, not the base table's.
+    let rows = try statement("""
+        WITH Parent (Id, Name) AS (SELECT Id, Name FROM Parent WHERE Id = 1)
+          SELECT Name FROM Parent
+        """, family())
+    #expect(rows == [[.text("Ada")]])
+  }
+
+  @Test("the trailing query joins a CTE against a base relation")
+  func joinBase() throws {
+    // The CTE `kids` joins to the base `Parent` on the foreign key — proving a
+    // materialised relation and a base one combine in one query.
+    let rows = try statement("""
+        WITH kids (Pid, Kid) AS (SELECT Pid, Name FROM Child)
+          SELECT Parent.Name, kids.Kid FROM Parent
+            JOIN kids ON kids.Pid = Parent.Id
+        """, family())
+    #expect(rows == [
+      [.text("Ada"), .text("Ann")],
+      [.text("Ada"), .text("Amy")],
+      [.text("Bee"), .text("Bob")],
+    ])
+  }
+
+  @Test("a CTE's rowid virtual column resolves")
+  func rowid() throws {
+    let rows = try statement("""
+        WITH a (Tag) AS (SELECT Name FROM Parent)
+          SELECT rowid, Tag FROM a WHERE rowid = 2
+        """, family())
+    #expect(rows == [[.integer(2), .text("Bee")]])
+  }
+
+  @Test("a CTE column list of the wrong arity is rejected at parse")
+  func arity() throws {
+    #expect(throws: SQLError.columns(expected: 2, got: 1)) {
+      try statement("""
+          WITH a (only) AS (SELECT Id, Name FROM Parent) SELECT only FROM a
+          """, family())
+    }
+  }
+
+  @Test("an unknown column of a CTE is reported")
+  func unknown() throws {
+    #expect(throws: SQLError.column("Missing")) {
+      try statement("""
+          WITH a (Id) AS (SELECT Id FROM Parent) SELECT Missing FROM a
+          """, family())
+    }
+  }
+
+  @Test("a CTE whose body is a UNION materialises both arms")
+  func union() throws {
+    let rows = try statement("""
+        WITH both (Tag) AS (SELECT Tag FROM Left UNION SELECT Tag FROM Right)
+          SELECT Tag FROM both
+        """, tags())
+    #expect(rows == [[.text("a")], [.text("shared")], [.text("b")]])
+  }
+
+  @Test("a CTE column list wider than its SELECT * body is rejected, not trapped")
+  func widthMismatch() throws {
+    // `Parent` is a two-column relation, but the column list declares three
+    // names; the `SELECT *` body's width is known only after it compiles, so
+    // the declared arity is checked against the body's compiled width, faulting
+    // with `SQLError.columns` rather than trapping when a later read indexes a
+    // cell the row does not have.
+    #expect(throws: SQLError.columns(expected: 3, got: 2)) {
+      try statement("""
+          WITH a (x, y, z) AS (SELECT * FROM Parent) SELECT x FROM a
+          """, family())
+    }
+  }
+
+  @Test("a zero-row SELECT * CTE body of the wrong arity is rejected")
+  func zeroRowWidthMismatch() throws {
+    // `Parent` is a two-column relation, but the column list declares three
+    // names. The body `WHERE Id < 0` yields no rows, so a per-row check would
+    // pass it through vacuously and register `a` with a three-column schema
+    // over a two-column body; the trailing `SELECT z` then reads an ordinal the
+    // body never projects. The body's compiled width is checked against the
+    // declared arity BEFORE materialising, regardless of the row count, so the
+    // mismatch faults with `SQLError.columns` rather than silently returning
+    // data.
+    #expect(throws: SQLError.columns(expected: 3, got: 2)) {
+      try statement("""
+          WITH a (x, y, z) AS (SELECT * FROM Parent WHERE Id < 0)
+            SELECT z FROM a
+            UNION SELECT 99 AS z FROM Parent WHERE Id = 1
+          """, family())
+    }
+  }
+
+  @Test("a WITH list rejects a case-insensitively duplicate query name")
+  func duplicateName() throws {
+    // Two CTEs share a name (`a` and `A`), so the second would silently
+    // overwrite the first in the materialised scope — a typo in a multi-CTE
+    // query changing the result. The duplicate is rejected before materialising.
+    #expect(throws: SQLError.redefinition("A")) {
+      try statement("""
+          WITH a (x) AS (SELECT Id FROM Parent),
+               A (x) AS (SELECT Id FROM Parent)
+            SELECT x FROM a
+          """, family())
+    }
+  }
+
+  @Test("a WHERE pushed onto a joined-in CTE filters its rows before the join")
+  func joinPushedFilter() throws {
+    // `kids` is joined to `Parent` on the foreign key, and a single-relation
+    // `WHERE kids.Kid = 'Amy'` is pushed onto the CTE inner; only the matching
+    // CTE row may join, so a CTE row with any other `Kid` is excluded rather than
+    // paired.
+    let rows = try statement("""
+        WITH kids (Pid, Kid) AS (SELECT Pid, Name FROM Child)
+          SELECT Parent.Name, kids.Kid FROM Parent
+            JOIN kids ON kids.Pid = Parent.Id
+            WHERE kids.Kid = 'Amy'
+        """, family())
+    #expect(rows == [[.text("Ada"), .text("Amy")]])
+  }
+
+  @Test("a statement CTE does not leak into a registered view's body")
+  func viewScoping() throws {
+    // `Adults` is a view over the base `Parent`; a statement-local
+    // `WITH Parent (Id) AS …` must NOT reach into the view's stored body, so
+    // `SELECT Id FROM Adults` still reads the base `Parent`'s ids — a view means
+    // what it was registered to mean regardless of the caller's WITH. Were the
+    // caller's CTEs threaded into the view body, `Adults`'s `FROM Parent` would
+    // bind to the CTE and the query would return `99`.
+    let adults =
+        try View(query: select("SELECT Id FROM Parent"), columns: ["Id"])
+    let catalog = Memory(family().relations, views: ["Adults": adults])
+    let rows = try statement("""
+        WITH Parent (Id) AS (SELECT 99 AS Id FROM Parent WHERE Id = 1)
+          SELECT Id FROM Adults
+        """, catalog)
+    #expect(rows == [[.integer(1)], [.integer(2)], [.integer(3)]])
+  }
+
+  @Test("a top-level FROM a CTE still resolves to the CTE, not the base relation")
+  func topLevelCTEShadowsBase() throws {
+    // The complement of `viewScoping`: at the STATEMENT level a CTE that names a
+    // base relation still shadows it, so a trailing `FROM Parent` reads the CTE
+    // — the scoping fix narrows only a view's body, never the statement query.
+    let adults =
+        try View(query: select("SELECT Id FROM Parent"), columns: ["Id"])
+    let catalog = Memory(family().relations, views: ["Adults": adults])
+    let rows = try statement("""
+        WITH Parent (Id) AS (SELECT 99 AS Id FROM Parent WHERE Id = 1)
+          SELECT Id FROM Parent
+        """, catalog)
+    #expect(rows == [[.integer(99)]])
+  }
+
+  @Test("a WITH RECURSIVE arm that never names the CTE runs once, not to a cap")
+  func nonSelfReferentialUnionAll() throws {
+    // Every member of a `WITH RECURSIVE` list is syntactically marked recursive,
+    // but neither arm of this UNION ALL reads `a`, so it is not recursive in
+    // truth: it runs once, yielding exactly its two rows, rather than re-running
+    // an arm that adds nothing new until the recursion cap fires.
+    let rows = try statement("""
+        WITH RECURSIVE a (n) AS (
+          SELECT 1 AS n FROM Extra UNION ALL SELECT 2 AS n FROM Extra
+        )
+        SELECT n FROM a
+        """, tags())
+    #expect(rows == [[.integer(1)], [.integer(2)]])
+  }
+
+  @Test("a WITH RECURSIVE whose anchor reads a same-named base is not recursive")
+  func anchorReadsSameNamedBase() throws {
+    // The CTE `Parent` shares a base relation's name; only the ANCHOR reads that
+    // base (the CTE is not in scope there), while the recursive arm reads
+    // `Extra` and never names the CTE. Self-reference is detected in the arm
+    // alone, so this is NOT routed through the fixpoint: the two arms materialise
+    // once (UNION ALL) instead of the arm re-running to the recursion cap.
+    let catalog = Memory([
+      "Parent": Relation([Field(name: "Id", kind: .integer)],
+                         [[.integer(1)], [.integer(2)]] as Array<Array<Value>>),
+      "Extra": Relation([Field(name: "Id", kind: .integer)],
+                        [[.integer(3)]] as Array<Array<Value>>),
+    ])
+    let rows = try statement("""
+        WITH RECURSIVE Parent (Id) AS (
+          SELECT Id FROM Parent UNION ALL SELECT Id FROM Extra
+        )
+        SELECT Id FROM Parent
+        """, catalog)
+    #expect(rows == [[.integer(1)], [.integer(2)], [.integer(3)]])
+  }
+}

@@ -26,6 +26,11 @@ extension Token {
     case by
     case asc
     case desc
+    case offset
+    case fetch
+    case first
+    case rows
+    case only
     case and
     case or
     case not
@@ -41,6 +46,9 @@ extension Token {
 
     // Operands.
     case identifier(String)
+    /// A delimited (double-quoted) identifier — a name taken verbatim, so unlike
+    /// a bare `identifier` a dot in it is part of the name, not a qualifier.
+    case quoted(String)
     case string(String)
     case integer(Int)
     /// A bound parameter placeholder `:name`, holding the parameter's name.
@@ -76,6 +84,11 @@ extension Token.Kind {
     case .by: "BY"
     case .asc: "ASC"
     case .desc: "DESC"
+    case .offset: "OFFSET"
+    case .fetch: "FETCH"
+    case .first: "FIRST"
+    case .rows: "ROWS"
+    case .only: "ONLY"
     case .and: "AND"
     case .or: "OR"
     case .not: "NOT"
@@ -89,6 +102,7 @@ extension Token.Kind {
     case .with: "WITH"
     case .recursive: "RECURSIVE"
     case let .identifier(name): name
+    case let .quoted(name): "\"\(name)\""
     case let .string(value): "'\(value)'"
     case let .integer(value): "\(value)"
     case let .parameter(name): ":\(name)"

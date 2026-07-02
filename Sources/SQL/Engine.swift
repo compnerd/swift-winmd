@@ -396,16 +396,26 @@ public enum Engine {
       throws(SQLError) -> Plan {
     guard let relation = select.from else {
       // A FROM-less select projects expressions over a single row; a `WHERE`,
-      // `ORDER BY`, or `JOIN` has no relation to apply to. The parser never
-      // produces that shape, but a direct `Select(from: nil, …)` can, so reject
-      // it rather than silently ignore the clause.
+      // `ORDER BY`, `OFFSET`/`FETCH`, or `JOIN` has no relation to apply to. The
+      // parser never produces that shape, but a direct `Select(from: nil, …)`
+      // can, so reject it rather than silently ignore the clause.
       guard select.joins.isEmpty, select.predicate == nil,
-          select.order == nil else {
-        throw .unsupported("a WHERE, ORDER BY, or JOIN requires a FROM clause")
+          select.order == nil, select.limit == nil else {
+        throw .unsupported(
+            "a WHERE, ORDER BY, OFFSET/FETCH, or JOIN requires a FROM clause")
       }
       return try scalar(select.projection)
     }
     let from = try resolve(relation, catalog, ctes)
+
+    if let limit = select.limit {
+      // The parser yields only non-negative counts (a `-` is its own token), but
+      // a direct `Limit(count:offset:)` may carry negatives the executor's skip
+      // and take would trap on. Reject them as a query error rather than crash.
+      guard limit.offset >= 0, (limit.count ?? 0) >= 0 else {
+        throw .unsupported("OFFSET and FETCH row counts must be non-negative")
+      }
+    }
 
     guard !select.joins.isEmpty else {
       var filter: Filter? = nil
@@ -425,7 +435,8 @@ public enum Engine {
       let scan = from.leaf(ordinals)
       return shape(scan, projection.map { $0.remapped(through: slot) },
                    filter.map { $0.remapped(through: slot) },
-                   order.map { (slot[$0.column]!, $0.ascending) })
+                   order.map { (slot[$0.column]!, $0.ascending) },
+                   select.limit)
     }
 
     // Resolve every joined relation and lay all relations — the FROM relation
@@ -507,7 +518,8 @@ public enum Engine {
 
     return shape(chain, projection.map { $0.remapped(through: slot) },
                  predicate.map { $0.remapped(through: slot) },
-                 order.map { (slot[$0.column]!, $0.ascending) })
+                 order.map { (slot[$0.column]!, $0.ascending) },
+                 select.limit)
   }
 
   /// Compiles a scalar (FROM-less) `SELECT <expr-list>` into `Project(single)`
@@ -625,12 +637,19 @@ public enum Engine {
     return slot
   }
 
-  /// Wraps `source` in the `Project(Sort(Select(_)))` operators, omitting the
-  /// `Select` and `Sort` layers when their clause is absent. The `projection`,
-  /// `filter`, and `order` are in slot space.
+  /// Wraps `source` in the `Project(Limit(Sort(Select(_))))` operators, omitting
+  /// each layer when its clause is absent. The `projection`, `filter`, and
+  /// `order` are in slot space.
+  ///
+  /// The row `limit` sits BELOW the projection — after `WHERE` and `ORDER BY`,
+  /// but before the select list is evaluated. A row outside the requested page
+  /// is dropped by the limit before its projection runs, so a projection that
+  /// could throw (`SELECT 1 / 0 … FETCH FIRST 0 ROWS ONLY`) never evaluates for
+  /// a discarded row and the query returns the documented empty page.
   private static func shape(_ source: Plan, _ projection: Array<Term>,
                             _ filter: Filter?,
-                            _ order: (slot: Int, ascending: Bool)?) -> Plan {
+                            _ order: (slot: Int, ascending: Bool)?,
+                            _ limit: Limit?) -> Plan {
     var plan = source
     if let filter {
       plan = .select(filter, plan)
@@ -638,7 +657,7 @@ public enum Engine {
     if let order {
       plan = .sort(slot: order.slot, ascending: order.ascending, plan)
     }
-    return .project(projection, plan)
+    return .project(projection, plan.capped(limit: limit))
   }
 
   // MARK: - Optimisation
@@ -710,6 +729,11 @@ public enum Engine {
       // preserving this node's own `all`.
       try .union(optimise(left, catalog, ctes, bindings),
                  optimise(right, catalog, ctes, bindings), all: all)
+    case let .limit(count, offset, source):
+      // A `limit` is a transparent wrapper — optimise its source and re-cap;
+      // the cap itself has no seek or join to rewrite.
+      try .limit(count: count, offset: offset,
+                 optimise(source, catalog, ctes, bindings))
     }
   }
 
@@ -999,6 +1023,12 @@ extension Plan {
       try .product(left.pushdown(), right.pushdown())
     case let .union(left, right, all):
       try .union(left.pushdown(), right.pushdown(), all: all)
+    case let .limit(count, offset, source):
+      // A `limit` is the outermost operator, so no `WHERE` conjunct ever reaches
+      // it to push down; it recurses transparently, its source pushed as usual.
+      // A filter must never cross it — capping before or after a filter yields
+      // different rows — and none can, since the cap sits above the projection.
+      try .limit(count: count, offset: offset, source.pushdown())
     }
   }
 

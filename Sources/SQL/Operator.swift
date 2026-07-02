@@ -144,6 +144,14 @@ internal indirect enum Plan {
   /// appends the trailing arm. Both sides yield rows of the same width — the
   /// result columns of the first arm.
   case union(Plan, Plan, all: Bool)
+  /// A row cap on its `source`'s output: skips the first `offset` records then
+  /// takes at most `count` of the rest, in the source's order. It sits over the
+  /// sort/select but BELOW the projection, so it caps the ordered rows before
+  /// the select list is evaluated — a row outside the page is never projected
+  /// (a projection that could throw does not run for it). It neither reorders
+  /// nor reshapes the rows, a transparent wrapper the pushdown and optimise
+  /// passes recurse through.
+  case limit(count: Int?, offset: Int, Plan)
 }
 
 extension Plan {
@@ -159,6 +167,10 @@ extension Plan {
       terms.count
     case let .union(left, _, _):
       left.width
+    case let .limit(_, _, source):
+      // A `limit` caps rows without reshaping them, so it is as wide as its
+      // source.
+      source.width
     default:
       // `compile` always tops an arm with a `project`; nothing else reaches a
       // view's sub-plan root. Measuring nil would mask a width mismatch, so a
@@ -200,9 +212,21 @@ extension Plan {
       // Both sides yield rows of the same width — the result columns — so the
       // union's width is its left side's.
       left.slots
+    case let .limit(_, _, source):
+      // A `limit` caps rows without reshaping them, so it spans the same slots
+      // as its source.
+      source.slots
     default:
       nil
     }
+  }
+
+  /// This plan capped by `limit` — wrapped in a `limit` operator when one is
+  /// present, else returned unchanged. `shape` caps the sorted/selected rows
+  /// with this and then projects, so the cap sits below the projection.
+  internal func capped(limit: Limit?) -> Plan {
+    guard let limit else { return self }
+    return .limit(count: limit.count, offset: limit.offset, self)
   }
 }
 
@@ -218,7 +242,8 @@ extension Plan {
 /// outer record with every inner one; `join` re-resolves the inner relation,
 /// seeks it per outer record, and concatenates the matches; `union` runs its
 /// two sides — each with its own union semantics — and concatenates their rows,
-/// deduplicating the whole row unless `all`.
+/// deduplicating the whole row unless `all`; `limit` skips the first `offset` of
+/// its source's rows then takes at most `count`.
 /// The catalog is borrowed throughout — a `~Escapable` source is never copied
 /// or stored.
 internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
@@ -268,7 +293,27 @@ internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
              base, column, keys, filter, catalog, ctes, routines, bindings)
   case let .union(left, right, all):
     try union(left, right, all, catalog, ctes, routines, bindings)
+  case let .limit(count, offset, source):
+    limited(try execute(source, catalog, ctes, routines, bindings),
+            count, offset)
   }
+}
+
+/// Caps `records` to at most `count` rows after skipping the first `offset`, in
+/// their existing (ordered) order.
+///
+/// A `nil` `count` is no cap — every row after the skip (an `OFFSET` without a
+/// `FETCH`). An `offset` at or past the end yields no rows; a `count` reaching
+/// past the remaining rows takes all of them. Both are non-negative, so the skip
+/// and the take never index before the start. The take is a `prefix` of the
+/// skipped slice rather than an `offset + count` bound, so a `count` near
+/// `Int.max` caps the slice instead of overflowing.
+private func limited(_ records: Array<Record>, _ count: Int?, _ offset: Int)
+    -> Array<Record> {
+  guard offset < records.count else { return [] }
+  let tail = records[offset...]
+  guard let count else { return Array(tail) }
+  return Array(tail.prefix(count))
 }
 
 /// Concatenates the rows of `left` followed by `right`, deduplicating the whole

@@ -173,6 +173,50 @@ struct LexerTests {
     #expect(throws: SQLError.self) { _ = try lex("\"oops") }
   }
 
+  @Test("skips a line comment between tokens")
+  func lineComment() throws {
+    #expect(try lex("SELECT -- pick a star\n*")
+                == [.select, .star])
+  }
+
+  @Test("skips a line comment at end of input")
+  func lineCommentAtEnd() throws {
+    // An unterminated `--` comment at EOF is not a fault.
+    #expect(try lex("SELECT * -- trailing") == [.select, .star])
+  }
+
+  @Test("skips a block comment spanning a newline")
+  func blockComment() throws {
+    #expect(try lex("SELECT /* a\n block */ *") == [.select, .star])
+  }
+
+  @Test("skips a block comment between tokens on one line")
+  func blockCommentInline() throws {
+    #expect(try lex("SELECT /* star */ *") == [.select, .star])
+  }
+
+  @Test("lexes a lone minus and slash as operators")
+  func loneOperators() throws {
+    // A single `-` or `/` is still an operator; only `--` and `/*` begin a
+    // comment.
+    #expect(try lex("a - 1 / 2")
+                == [.identifier("a"), .minus, .integer(1), .slash,
+                    .integer(2)])
+  }
+
+  @Test("rejects an unterminated block comment")
+  func unterminatedBlockComment() {
+    #expect(throws: SQLError.self) { _ = try lex("SELECT /* oops") }
+  }
+
+  @Test("tracks line and column across a block comment")
+  func commentLocation() throws {
+    // Newlines inside a block comment still advance the line counter.
+    let locations = try tokens("SELECT /* a\nb */ *").map(\.location)
+    #expect(locations.map(\.line) == [1, 2])
+    #expect(locations.map(\.column) == [1, 6])
+  }
+
   @Test("scans a bound-parameter placeholder")
   func parameter() throws {
     #expect(try lex("WHERE a = :pid")

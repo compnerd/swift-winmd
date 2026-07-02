@@ -727,33 +727,40 @@ internal struct Statements: Sequence {
     /// without a final terminator runs its last statement.
     internal mutating func next() -> String? {
       while true {
-        // Drain any completed statement already accumulated.
+        // Drain any completed statement already accumulated. A chunk that is
+        // only trivia — whitespace and comments, e.g. a `-- note` between two
+        // `;` — carries no statement, so skip it rather than hand the parser
+        // empty input.
         if let semicolon = Iterator.terminator(in: pending) {
           let statement = String(pending[..<semicolon]).trimmed
           pending = String(pending[pending.index(after: semicolon)...])
-          guard statement.isEmpty else { return statement }
+          guard Iterator.trivial(statement) else { return statement }
           continue
         }
         // Prompt before the read (the interactive shell only): a pending,
-        // unterminated statement asks for its continuation; an empty one asks
-        // for a fresh statement. A batch's hook is `nil`, so it never prompts.
-        prompt?(!pending.trimmed.isEmpty)
+        // unterminated statement asks for its continuation; an empty or
+        // trivia-only one asks for a fresh statement. A batch's hook is `nil`,
+        // so it never prompts.
+        prompt?(!Iterator.trivial(pending))
         guard let line = lines() else {
           // End of input: flush a final unterminated statement (the closing
-          // `;` is optional), then clear `pending` so the next call stops.
+          // `;` is optional), then clear `pending` so the next call stops. A
+          // trivia-only tail (a trailing or standalone `-- comment`) is nothing
+          // to run, so it ends the stream rather than reaching the parser.
           let statement = pending.trimmed
           pending = ""
-          return statement.isEmpty ? nil : statement
+          return Iterator.trivial(statement) ? nil : statement
         }
         // A `.`-meta line yields whole when no statement is pending — a
-        // whitespace-only spacer line before it is nothing, so drop it rather
-        // than gluing the meta line onto it. `.template` alone carries a single-
+        // whitespace-only or comment-only line before it is trivia, so drop it
+        // rather than glue the meta line onto it (a `-- note` before `.tables`
+        // must not turn the meta into SQL). `.template` alone carries a single-
         // quoted (possibly multiline) body: when ITS quote is left open, keep
         // accumulating raw lines until the quote closes, then yield the whole
         // block as one statement. Every other meta yields whole, so an
         // apostrophe in an argument — a `.read /tmp/O'Brien.sql` path — is data,
         // not an unterminated literal that would swallow the following lines.
-        if pending.trimmed.isEmpty, line.trimmed.first == "." {
+        if Iterator.trivial(pending), line.trimmed.first == "." {
           let meta = line.trimmed
           let spelling = meta.prefix { !$0.isWhitespace }
           guard spelling == Template.spelling, Iterator.open(in: meta) else {
@@ -784,61 +791,169 @@ internal struct Statements: Sequence {
     }
 
     /// The index in `text` of the first `;` that terminates a statement — one
-    /// outside a single-quoted string literal — or `nil` when there is none
-    /// (including when `text` trails off inside a literal whose closing quote
-    /// has not arrived yet). A `;` inside `'…'` is data, not a terminator, so
-    /// the split matches what the SQL lexer scans (`''` is an escaped quote).
+    /// outside a string literal, a delimited identifier, and a comment — or
+    /// `nil` when there is none (including when `text` trails off inside an
+    /// unclosed `'…'` or `"…"`). A `;` inside `'…'`, `"…"`, `--`, or `/* … */`
+    /// is data, not a terminator, so the split matches what the SQL lexer
+    /// scans.
     ///
-    /// It runs the same single-scan quote tracking `open(in:)` does — advancing
-    /// through `'…'` (a doubled `''` an escaped quote) — and returns the first
-    /// unquoted `;`, so both share one notion of what a literal is.
+    /// It runs the shared `scan`, as `open(in:)` does, so both agree on what a
+    /// literal, an identifier, and a comment are.
     private static func terminator(in text: String) -> String.Index? {
       var index = text.startIndex
-      var quoted = false
+      var enclosure = Enclosure.none
       while index < text.endIndex {
-        if Iterator.scan(text, &index, &quoted) { continue }
-        if !quoted, text[index] == ";" { return index }
+        if Iterator.scan(text, &index, &enclosure) { continue }
+        if enclosure == .none, text[index] == ";" { return index }
         index = text.index(after: index)
       }
       return nil
     }
 
-    /// Whether `text` ends inside an unclosed single-quoted literal — the shared
-    /// quote-state scan lifted out so the multiline meta accumulation and
-    /// `terminator(in:)` reuse one implementation. A doubled `''` is an escaped
-    /// quote (it stays inside the literal); a lone `'` toggles. `false` when
-    /// every `'` is balanced, so the line stands complete.
+    /// Whether `text` ends inside an unclosed single-quoted literal — a
+    /// QUOTE-ONLY scan for `.template` body accumulation. Unlike the SQL
+    /// `terminator` scan it does NOT skip comments or track delimited
+    /// identifiers: a `.template` line is meta-command text, not SQL, so a
+    /// `--`, `/*`, or `"` in its name or body is data, and only a `'…'` (a
+    /// doubled `''` escaped) opens or closes the body. `false` when every `'`
+    /// is balanced, so the line stands complete.
     private static func open(in text: String) -> Bool {
       var index = text.startIndex
       var quoted = false
       while index < text.endIndex {
-        if Iterator.scan(text, &index, &quoted) { continue }
+        let character = text[index]
+        if quoted {
+          if character == "'" {
+            let next = text.index(after: index)
+            if next < text.endIndex, text[next] == "'" {
+              index = text.index(after: next)
+              continue
+            }
+            quoted = false
+          }
+        } else if character == "'" {
+          quoted = true
+        }
         index = text.index(after: index)
       }
       return quoted
     }
 
-    /// Advances the quote state at `index` in `text`: enters a literal on an
-    /// opening `'`, and inside one consumes a doubled `''` as an escaped quote
-    /// (skipping both) or closes on a lone `'`. Returns `true` when it already
-    /// advanced `index` past the pair (the caller must not step again), `false`
-    /// when `index` still points at the character to consider — the single point
-    /// both scans agree on what a single-quoted literal is.
+    /// The literal/identifier the scan is currently inside — none, a single-
+    /// quoted string, or a double-quoted delimited identifier. A comment or a
+    /// `;` terminator is recognised only in `.none`; inside a string or an
+    /// identifier those bytes are data, exactly as the lexer treats them.
+    private enum Enclosure: Equatable { case none, string, identifier }
+
+    /// Advances the `enclosure` state at `index` in `text`. In `.none` it
+    /// enters a string on `'` or a delimited identifier on `"`, and otherwise
+    /// skips a `--` or `/* … */` comment; inside a string or identifier it
+    /// consumes a doubled `''`/`""` as an escaped quote (skipping both) or
+    /// closes on a lone one. Returns `true` when it already advanced `index` (a
+    /// skipped pair or comment — the caller must not step again), `false` when
+    /// `index` still points at the character to consider. This is the SQL scan
+    /// `terminator(in:)` runs; `.template` meta text uses the quote-only
+    /// `open(in:)` instead, since `--`/`"` there are data, not SQL.
     private static func scan(_ text: String, _ index: inout String.Index,
-                             _ quoted: inout Bool) -> Bool {
+                             _ enclosure: inout Enclosure) -> Bool {
       let character = text[index]
-      if quoted {
+      switch enclosure {
+      case .string:
         guard character == "'" else { return false }
         let next = text.index(after: index)
         if next < text.endIndex, text[next] == "'" {
           index = text.index(after: next)
           return true
         }
-        quoted = false
-      } else if character == "'" {
-        quoted = true
+        enclosure = .none
+      case .identifier:
+        guard character == "\"" else { return false }
+        let next = text.index(after: index)
+        if next < text.endIndex, text[next] == "\"" {
+          index = text.index(after: next)
+          return true
+        }
+        enclosure = .none
+      case .none:
+        if character == "'" {
+          enclosure = .string
+        } else if character == "\"" {
+          enclosure = .identifier
+        } else if character == "-", let end = Iterator.simple(text, index) {
+          // A `--` line comment: skip to (not past) its newline, which the
+          // caller advances over as ordinary text. A `;` inside it is not a
+          // terminator, matching the lexer's trivia.
+          index = end
+          return true
+        } else if character == "/", let (end, _) = Iterator.block(text, index) {
+          // A `/* … */` block comment (or an unterminated `/*` run to the end):
+          // skipped whole, so a `;` inside it is not a terminator either.
+          index = end
+          return true
+        }
       }
       return false
+    }
+
+    /// The index of the newline ending a `--` line comment begun at `index` (or
+    /// `endIndex`), or `nil` when `index` begins no comment (no second `-`).
+    private static func simple(_ text: String, _ index: String.Index)
+        -> String.Index? {
+      let second = text.index(after: index)
+      guard second < text.endIndex, text[second] == "-" else { return nil }
+      var cursor = text.index(after: second)
+      while cursor < text.endIndex, text[cursor] != "\n" {
+        cursor = text.index(after: cursor)
+      }
+      return cursor
+    }
+
+    /// Whether `text` carries no statement — only whitespace and comments, so
+    /// it lexes to no token. Such a fragment (a trailing or standalone comment,
+    /// or a blank chunk between two `;`) must not be handed to the parser,
+    /// which would reject it as empty input.
+    private static func trivial(_ text: String) -> Bool {
+      var index = text.startIndex
+      while index < text.endIndex {
+        let character = text[index]
+        if character == "-", let end = Iterator.simple(text, index) {
+          index = end
+        } else if character == "/", let comment = Iterator.block(text, index) {
+          // An unterminated block comment is NOT trivia: the fragment must
+          // reach the parser so the lexer reports the missing `*/`, rather than
+          // being silently dropped. A closed comment is skipped.
+          guard comment.closed else { return false }
+          index = comment.end
+        } else if character.isWhitespace {
+          index = text.index(after: index)
+        } else {
+          return false
+        }
+      }
+      return true
+    }
+
+    /// The end of a `/* … */` block comment begun at `index` and whether it
+    /// closed: the index just past its `*/` with `closed` true, or `endIndex`
+    /// with `closed` false when unterminated; `nil` when `index` begins no
+    /// comment (no `*` after the `/`). The `closed` flag lets `trivial` keep an
+    /// unclosed comment non-trivial so its error still reaches the parser,
+    /// while `scan` consumes either way.
+    private static func block(_ text: String, _ index: String.Index)
+        -> (end: String.Index, closed: Bool)? {
+      let second = text.index(after: index)
+      guard second < text.endIndex, text[second] == "*" else { return nil }
+      var cursor = text.index(after: second)
+      while cursor < text.endIndex {
+        if text[cursor] == "*" {
+          let close = text.index(after: cursor)
+          if close < text.endIndex, text[close] == "/" {
+            return (text.index(after: close), true)
+          }
+        }
+        cursor = text.index(after: cursor)
+      }
+      return (cursor, false)
     }
   }
 }

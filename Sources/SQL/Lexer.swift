@@ -49,11 +49,17 @@ extension String {
 ///
 /// The lexer is single-pass over the source bytes. SQL is ASCII, so the lexer
 /// scans the input's UTF-8 bytes by value and compares them against ASCII byte
-/// constants. Whitespace separates tokens and is otherwise discarded; keywords
-/// are recognised case-insensitively; string literals are single-quoted with
-/// `''` as an escaped quote; a double-quoted delimited identifier (`""` an
-/// escaped quote) spells a name — a reserved word or otherwise — as an
-/// identifier verbatim.
+/// constants. Whitespace and comments separate tokens and are otherwise
+/// discarded; keywords are recognised case-insensitively; string literals are
+/// single-quoted with `''` as an escaped quote; a double-quoted delimited
+/// identifier (`""` an escaped quote) spells a name — a reserved word or
+/// otherwise — as an identifier verbatim.
+///
+/// Two comment forms are skipped as trivia (ISO 9075 §5.2 `<comment>`): a `--`
+/// simple comment runs to the end of the line, and a `/* … */` bracketed
+/// comment spans to its closing `*/`. A `--` shares its lead byte with the `-`
+/// subtraction operator and `/*` with the `/` division operator, so each opens
+/// a comment only when its second byte confirms it.
 ///
 /// The lexer tracks a `SourceLocation` as it scans — advancing the column per
 /// byte and starting a fresh line on each newline — so every token and fault
@@ -81,7 +87,7 @@ internal struct Lexer: ~Escapable {
 
   /// Scans and returns the next token, or `nil` once the input is exhausted.
   internal mutating func next() throws(SQLError) -> Token? {
-    trivia()
+    try trivia()
 
     guard let byte = peek() else { return nil }
 
@@ -191,7 +197,7 @@ internal struct Lexer: ~Escapable {
       }
     }
 
-    throw .unterminated(at: start)
+    throw .unterminated("string literal", at: start)
   }
 
   /// Scans a double-quoted delimited identifier at the current position.
@@ -233,7 +239,7 @@ internal struct Lexer: ~Escapable {
       }
     }
 
-    throw .unterminated(at: start)
+    throw .unterminated("delimited identifier", at: start)
   }
 
   /// Scans a bound-parameter placeholder `:name` at the current position.
@@ -333,12 +339,60 @@ internal struct Lexer: ~Escapable {
     position += 1
   }
 
-  /// Advances past any run of insignificant bytes (whitespace, and in time
-  /// comments) separating tokens.
-  private mutating func trivia() {
-    while let byte = peek(), whitespace(byte) {
+  /// Advances past any run of insignificant bytes — whitespace and comments —
+  /// separating tokens.
+  ///
+  /// Whitespace and the two comment forms may interleave freely, so this loops
+  /// until the cursor rests on a byte that begins a token (or the input ends).
+  private mutating func trivia() throws(SQLError) {
+    while let byte = peek() {
+      switch byte {
+      case let b where whitespace(b):
+        advance()
+      case UInt8(ascii: "-") where peek(1) == UInt8(ascii: "-"):
+        simple()
+      case UInt8(ascii: "/") where peek(1) == UInt8(ascii: "*"):
+        try block()
+      default:
+        return
+      }
+    }
+  }
+
+  /// Skips a `--` simple comment: from the `--` to the next newline, or to the
+  /// end of input if none follows.
+  ///
+  /// The terminating newline is left for `trivia()` to consume as ordinary
+  /// whitespace, so its line/column bookkeeping stays with `advance()`. An
+  /// unterminated `--` comment at end of input is not a fault.
+  private mutating func simple() {
+    advance()
+    advance()
+    while let byte = peek(), byte != UInt8(ascii: "\n") {
       advance()
     }
+  }
+
+  /// Skips a `/* … */` bracketed comment: from the `/*` to the matching `*/`.
+  ///
+  /// Bracketed comments do not nest — ISO 9075 does not require nesting, and
+  /// the common interpretation stops at the first `*/`. Newlines within the
+  /// comment advance the line counter through `advance()`. A comment left open
+  /// at end of input is unterminated and faults.
+  private mutating func block() throws(SQLError) {
+    let start = location
+    advance()
+    advance()
+    while let byte = peek() {
+      if byte == UInt8(ascii: "*"), peek(1) == UInt8(ascii: "/") {
+        advance()
+        advance()
+        return
+      }
+      advance()
+    }
+
+    throw .unterminated("block comment", at: start)
   }
 
   /// The byte `offset` positions ahead of the cursor, or `nil` past the end.

@@ -48,6 +48,16 @@ struct LexerTests {
     #expect(try lex("is null") == [.is, .null])
   }
 
+  @Test("lexes the WITH-clause keywords")
+  func withKeywords() throws {
+    #expect(try lex("WITH RECURSIVE") == [.with, .recursive])
+  }
+
+  @Test("lexes the WITH-clause keywords case-insensitively")
+  func withKeywordsCaseInsensitive() throws {
+    #expect(try lex("with Recursive") == [.with, .recursive])
+  }
+
   @Test("lexes the comparison operators")
   func operators() throws {
     #expect(try lex("= <> < > <= >=")

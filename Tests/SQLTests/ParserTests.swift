@@ -797,3 +797,126 @@ struct UnionTests {
     #expect(view.query == .union(.select(left), right, all: false))
   }
 }
+
+// MARK: - WITH / CTE tests
+
+/// Parses `text` and returns its `(ctes, query)`, failing on any other shape.
+private func parseWith(_ text: String) throws -> (Array<CTE>, Query) {
+  guard case let .with(ctes, query) = try Statement(parsing: text) else {
+    Issue.record("expected a WITH statement")
+    throw SQLError.incomplete(expected: "a WITH statement")
+  }
+  return (ctes, query)
+}
+
+struct WithTests {
+  @Test("parses a single non-recursive CTE and its trailing query")
+  func single() throws {
+    let (ctes, query) = try parseWith("""
+        WITH a AS (SELECT x FROM t) SELECT x FROM a
+        """)
+    #expect(ctes.count == 1)
+    #expect(ctes[0].name == "a")
+    #expect(ctes[0].columns == ["x"])
+    #expect(ctes[0].recursive == false)
+    #expect(ctes[0].query
+                == .select(Select(projection: .columns(["x"]),
+                                  from: Relation(name: "t"))))
+    #expect(query == .select(Select(projection: .columns(["x"]),
+                                    from: Relation(name: "a"))))
+  }
+
+  @Test("infers a CTE's columns from its query's projection")
+  func inferred() throws {
+    let (ctes, _) = try parseWith("""
+        WITH a AS (SELECT p, q FROM t) SELECT p FROM a
+        """)
+    #expect(ctes[0].columns == ["p", "q"])
+  }
+
+  @Test("an explicit column list names a CTE's columns")
+  func explicit() throws {
+    let (ctes, _) = try parseWith("""
+        WITH a (k, v) AS (SELECT p, q FROM t) SELECT k FROM a
+        """)
+    #expect(ctes[0].columns == ["k", "v"])
+  }
+
+  @Test("parses several comma-separated CTEs in source order")
+  func chain() throws {
+    let (ctes, query) = try parseWith("""
+        WITH a AS (SELECT x FROM t), b AS (SELECT y FROM a) SELECT y FROM b
+        """)
+    #expect(ctes.map(\.name) == ["a", "b"])
+    #expect(ctes[1].query
+                == .select(Select(projection: .columns(["y"]),
+                                  from: Relation(name: "a"))))
+    #expect(query == .select(Select(projection: .columns(["y"]),
+                                    from: Relation(name: "b"))))
+  }
+
+  @Test("RECURSIVE marks every CTE of the list recursive")
+  func recursive() throws {
+    let (ctes, _) = try parseWith("""
+        WITH RECURSIVE a (n) AS (SELECT n FROM seed UNION ALL SELECT n FROM a)
+          SELECT n FROM a
+        """)
+    #expect(ctes[0].recursive == true)
+    #expect(ctes[0].columns == ["n"])
+    guard case .union = ctes[0].query else {
+      Issue.record("expected the recursive CTE's query to be a UNION")
+      return
+    }
+  }
+
+  @Test("a CTE's query may itself be a UNION")
+  func union() throws {
+    let (ctes, _) = try parseWith("""
+        WITH a AS (SELECT x FROM t UNION SELECT y FROM u) SELECT x FROM a
+        """)
+    let left = Select(projection: .columns(["x"]), from: Relation(name: "t"))
+    let right = Select(projection: .columns(["y"]), from: Relation(name: "u"))
+    #expect(ctes[0].query == .union(.select(left), right, all: false))
+  }
+
+  @Test("recognises lowercase with and recursive keywords")
+  func caseInsensitive() throws {
+    let (ctes, query) = try parseWith("""
+        with recursive a (n) as (select n from a) select n from a
+        """)
+    #expect(ctes[0].name == "a")
+    #expect(ctes[0].recursive == true)
+    #expect(query == .select(Select(projection: .columns(["n"]),
+                                    from: Relation(name: "a"))))
+  }
+
+  @Test("an explicit list of the wrong arity is rejected")
+  func arity() throws {
+    #expect(throws: SQLError.columns(expected: 2, got: 3)) {
+      _ = try parseWith("""
+          WITH a (x, y, z) AS (SELECT p, q FROM t) SELECT x FROM a
+          """)
+    }
+  }
+
+  @Test("a CTE naming two columns that collide by case is rejected")
+  func duplicate() throws {
+    #expect(throws: SQLError.duplicate("X")) {
+      _ = try parseWith("WITH a (x, X) AS (SELECT p, q FROM t) SELECT x FROM a")
+    }
+  }
+
+  @Test("a CTE projecting an un-nameable column with no list is rejected")
+  func unnamed() throws {
+    #expect(throws: SQLError.named("SELECT *")) {
+      _ = try parseWith("WITH a AS (SELECT * FROM t) SELECT x FROM a")
+    }
+  }
+
+  @Test("a CTE missing its parenthesised query is rejected")
+  func missingParen() throws {
+    #expect(throws: SQLError.self) {
+      _ = try parseWith("WITH a AS SELECT x FROM t SELECT x FROM a")
+    }
+  }
+}

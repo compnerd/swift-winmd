@@ -253,6 +253,8 @@ internal struct Lexer: ~Escapable {
     case "NULL": .null
     case "UNION": .union
     case "ALL": .all
+    case "WITH": .with
+    case "RECURSIVE": .recursive
     default: .identifier(text)
     }
     return Token(kind: kind, location: start)

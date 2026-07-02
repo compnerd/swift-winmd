@@ -862,6 +862,8 @@ extension Session {
       return []
     case let .select(query):
       return try Engine.run(query, self, bindings: bindings)
+    case .with:
+      throw SQLError.unsupported("WITH is not yet executable")
     }
   }
 }

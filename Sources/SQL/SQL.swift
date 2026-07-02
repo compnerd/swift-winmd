@@ -8,6 +8,7 @@ extension Statement {
   /// recursive descent into a SQL abstract syntax tree. The dialect is minimal:
   ///
   /// ```sql
+  /// [WITH [RECURSIVE] cte (, cte)*]
   /// SELECT <* | column (, column)*> FROM <table>
   ///   [WHERE <predicate>] [ORDER BY <column> [ASC|DESC]]
   ///   (UNION [ALL] SELECT …)*

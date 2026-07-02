@@ -19,6 +19,7 @@ struct ShellTests {
     #expect(Quit.spelling == ".quit")
     #expect(Read.spelling == ".read")
     #expect(Render.spelling == ".render")
+    #expect(Bind.spelling == ".bind")
   }
 
   @Test("`.read` parses its trailing path, trimming surrounding whitespace")
@@ -41,6 +42,29 @@ struct ShellTests {
     #expect(render.template == "com")
     #expect(Render("IFoo").interface.isEmpty)
     #expect(Render("").template.isEmpty)
+  }
+
+  @Test("`.bind` parses its name and types its value")
+  func bind() {
+    // `Bind.init` takes the name (the first whitespace token) and the trimmed
+    // remainder as the value, typed: an `Int`-parsable value is an `.integer`,
+    // else `.text` with a surrounding single-quote pair stripped and a doubled
+    // `''` unescaped to one `'`.
+    #expect(Bind(" n 42").name == "n")
+    #expect(Bind(" n 42").value == .integer(42))
+    #expect(Bind(" s hello").value == .text("hello"))
+    #expect(Bind(" s 'hello world' ").value == .text("hello world"))
+    // A quoted numeral stays text — the quotes force the `.text` reading over
+    // the `Int` parse.
+    #expect(Bind("s '42'").value == .text("42"))
+    // A doubled `''` inside the quotes is one literal `'`, so the advertised
+    // single-quoted form binds an apostrophe rather than storing two quotes —
+    // otherwise `WHERE Name = :name` never matches a row holding `O'Hare`.
+    #expect(Bind("s 'O''Hare'").value == .text("O'Hare"))
+    // A name with no value clears the binding — `value` is nil.
+    #expect(Bind(" n").name == "n")
+    #expect(Bind(" n").value == nil)
+    #expect(Bind("  ").name.isEmpty)
   }
 
   @Test("a `;`-separated script streams into trimmed, non-empty statements")

@@ -87,6 +87,81 @@ internal struct Read: Metacommand {
   }
 }
 
+/// The body of the single-quoted literal `text` opens with — from its first
+/// `'` to the matching close, with a doubled `''` unescaped to one `'`. The
+/// empty string when `text` does not open with a `'`. A run past the close (a
+/// `'` not doubled) ends the body; any text after it is ignored.
+internal func unquote(_ text: String) -> String {
+  guard text.first == "'" else { return "" }
+  var body = ""
+  var index = text.index(after: text.startIndex)
+  while index < text.endIndex {
+    let character = text[index]
+    if character == "'" {
+      let next = text.index(after: index)
+      // A doubled `''` is one literal `'`; a lone `'` closes the body.
+      guard next < text.endIndex, text[next] == "'" else { break }
+      body.append("'")
+      index = text.index(after: next)
+      continue
+    }
+    body.append(character)
+    index = text.index(after: index)
+  }
+  return body
+}
+
+/// `.bind <name> <value>` — bind (or clear) a `:name` parameter the shell
+/// threads into every SQL statement it runs.
+///
+/// A parameterized query typed at the prompt (`WHERE col = :name`) needs its
+/// `:name` bound, which the shell has no other way to supply; `.bind` fills that
+/// gap. `arguments` is `<name> <value>`: the name is the first
+/// whitespace-delimited token, the value the trimmed remainder, typed as an
+/// `.integer` when it parses as an `Int`, else `.text` (a surrounding pair of
+/// single quotes stripped and a doubled `''` unescaped to one `'`, so
+/// `.bind s 'O''Hare'` binds the text `O'Hare`). A `.bind` with a name and no
+/// value removes that binding.
+internal struct Bind: Metacommand {
+  internal static let spelling = ".bind"
+
+  /// The parameter name — the first whitespace-delimited token of `arguments`.
+  internal let name: String
+
+  /// The value to bind, typed from the trimmed remainder — an `.integer` when it
+  /// parses as an `Int`, else `.text` (a surrounding single-quote pair stripped
+  /// and `''` unescaped to one `'`). `nil` when no value follows the name, which
+  /// clears the binding.
+  internal let value: Value?
+
+  internal init(_ arguments: Substring) {
+    let text = arguments.trimmed
+    let split = text.firstIndex(where: \.isWhitespace)
+    name = String(split.map { text[..<$0] } ?? text[...])
+    let remainder = split.map { text[$0...].trimmed } ?? ""
+    value = if remainder.isEmpty {
+      nil
+    } else if let integer = Int(remainder) {
+      .integer(integer)
+    } else if remainder.first == "'" {
+      .text(unquote(remainder))
+    } else {
+      .text(remainder)
+    }
+  }
+
+  internal func execute(against shell: inout Shell) throws {
+    guard !name.isEmpty else { throw Shell.MetaError.unknown(Bind.spelling) }
+    if let value {
+      shell.bindings[name] = value
+      note("bound :\(name) = \(value.display)")
+    } else {
+      shell.bindings[name] = nil
+      note("cleared :\(name)")
+    }
+  }
+}
+
 /// `.render <interface> <template>` — render a COM interface (or `*` for every
 /// interface) through a bundled Mustache template.
 internal struct Render: Metacommand {
@@ -127,7 +202,10 @@ internal struct Render: Metacommand {
 /// first token begins with `.` is a `Metacommand` looked up in `commands` and
 /// run; anything else is a SQL statement run through `Session.run` — a `CREATE
 /// VIEW` registers, a `SELECT` returns rows — whose rows the shell prints,
-/// without singling out `CREATE VIEW`. The streaming (`Statements`), the
+/// without singling out `CREATE VIEW`. The shell threads its `bindings` (set by
+/// `.bind`) into every SQL statement, so a parameterized query typed at the
+/// prompt (`WHERE col = :name`) resolves its `:name` from them. The streaming
+/// (`Statements`), the
 /// per-statement execution (`execute(_:)`), and the driving (the `for`-in in
 /// `Query.run` and `.read`) are three separate pieces — there is no loop
 /// abstraction. It is `~Escapable` because the `Session` it holds borrows the
@@ -135,6 +213,12 @@ internal struct Render: Metacommand {
 internal struct Shell: ~Escapable {
   /// The shell's mutable catalog state.
   internal var session: Session
+
+  /// The `:name` parameters `.bind` has set, threaded into every SQL statement
+  /// the shell runs so a parameterized query typed at the prompt (`WHERE col =
+  /// :name`) resolves. Empty initially; a `CREATE VIEW` ignores them, binding
+  /// only when a later `SELECT` reads the view.
+  internal var bindings: Bindings = [:]
 
   /// Whether a statement fault ends the run (an explicit batch) or is reported
   /// to stderr and skipped (the interactive/redirected shell). `.read` inherits
@@ -164,7 +248,7 @@ internal struct Shell: ~Escapable {
   /// computed so the metatype array (not `Sendable`) is not a shared mutable
   /// global.
   private static var commands: Array<any Metacommand.Type> {
-    [Tables.self, Help.self, Quit.self, Read.self, Render.self]
+    [Tables.self, Help.self, Quit.self, Read.self, Render.self, Bind.self]
   }
 
   /// The command summary `.help` prints.
@@ -172,6 +256,7 @@ internal struct Shell: ~Escapable {
     .tables                 list the database's tables
     .read <path>            run a file of `;`-separated SQL statements
     .render <iface> <tmpl>  render an interface (or `*`) through a template
+    .bind <name> <value>    bind a `:name` parameter (no value clears it)
     .help                   show this help
     .quit                   leave the shell
     <sql>                   run a SQL statement (trailing `;` optional)
@@ -206,12 +291,13 @@ internal struct Shell: ~Escapable {
   /// A statement whose leading token begins with `.` is a meta-command: the
   /// matching `Metacommand` type is built from the rest of the statement and
   /// run; an unknown `.`-token is a `MetaError.unknown`. Anything else is a SQL
-  /// statement, run through `Session.run` — a `CREATE VIEW` registers, a `SELECT`
-  /// yields rows — and its rows print tab-separated. The shell does not single
-  /// out `CREATE VIEW`: it just runs the statement and prints what comes back.
+  /// statement, run through `Session.run` with the shell's `bindings` — a `CREATE
+  /// VIEW` registers, a `SELECT` yields rows resolving any `:name` from the
+  /// bindings — and its rows print tab-separated. The shell does not single out
+  /// `CREATE VIEW`: it just runs the statement and prints what comes back.
   internal mutating func execute(_ statement: String) throws {
     guard statement.first == "." else {
-      for row in try session.run(statement.statement) {
+      for row in try session.run(statement.statement, bindings: bindings) {
         print(row.map(\.display).joined(separator: "\t"))
       }
       return
@@ -639,14 +725,19 @@ extension Session {
   /// (the key case-folded, the way the catalog resolves it) instead. `CREATE
   /// VIEW` is an ordinary statement here, not a special case; the shell prints
   /// whatever rows come back.
-  internal mutating func run(_ statement: String)
+  ///
+  /// `bindings` resolve a `SELECT`'s `:name` parameters — the shell threads its
+  /// `.bind` bindings through here, so a parameterized query typed at the prompt
+  /// finds its values. A `CREATE VIEW` ignores them: it stores the view's text,
+  /// binding only when a later `SELECT` reads it.
+  internal mutating func run(_ statement: String, bindings: Bindings = [:])
       throws -> Array<Array<Value>> {
     switch try Statement(parsing: statement) {
     case let .create(name, view):
       register(name, view)
       return []
     case let .select(query):
-      return try Engine.run(query, self)
+      return try Engine.run(query, self, bindings: bindings)
     }
   }
 }

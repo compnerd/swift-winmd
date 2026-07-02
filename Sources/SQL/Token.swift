@@ -23,6 +23,8 @@ extension Token {
     case from
     case `where`
     case order
+    case group
+    case having
     case by
     case asc
     case desc
@@ -85,6 +87,8 @@ extension Token.Kind {
     case .from: "FROM"
     case .where: "WHERE"
     case .order: "ORDER"
+    case .group: "GROUP"
+    case .having: "HAVING"
     case .by: "BY"
     case .asc: "ASC"
     case .desc: "DESC"

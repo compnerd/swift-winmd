@@ -403,13 +403,16 @@ public enum Engine {
       throws(SQLError) -> Plan {
     guard let relation = select.from else {
       // A FROM-less select projects expressions over a single row; a `WHERE`,
-      // `ORDER BY`, `OFFSET`/`FETCH`, or `JOIN` has no relation to apply to. The
-      // parser never produces that shape, but a direct `Select(from: nil, …)`
-      // can, so reject it rather than silently ignore the clause.
+      // `GROUP BY`, `HAVING`, `ORDER BY`, `OFFSET`/`FETCH`, or `JOIN` has no
+      // relation to apply to. The parser never produces that shape, but a direct
+      // `Select(from: nil, …)` can, so reject it rather than silently ignore the
+      // clause — a scalar projection would drop a `GROUP BY`/`HAVING` otherwise.
       guard select.joins.isEmpty, select.predicate == nil,
+          select.grouping.isEmpty, select.having == nil,
           select.order == nil, select.limit == nil else {
         throw .unsupported(
-            "a WHERE, ORDER BY, OFFSET/FETCH, or JOIN requires a FROM clause")
+            "a WHERE, GROUP BY, HAVING, ORDER BY, OFFSET/FETCH, or JOIN " +
+            "requires a FROM clause")
       }
       return try scalar(select.projection)
     }
@@ -422,6 +425,15 @@ public enum Engine {
       guard limit.offset >= 0, (limit.count ?? 0) >= 0 else {
         throw .unsupported("OFFSET and FETCH row counts must be non-negative")
       }
+    }
+
+    // An aggregate query — one with a `GROUP BY`, a `HAVING`, or an aggregate in
+    // its projection — compiles through the grouped path, which places an
+    // `aggregate` node above the WHERE/join chain and lowers the projection,
+    // `HAVING`, and `ORDER BY` against the grouped slot space. A non-aggregate
+    // query compiles exactly as before.
+    if aggregates(select) {
+      return try group(select, relation, from, catalog, ctes)
     }
 
     guard !select.joins.isEmpty else {
@@ -667,6 +679,243 @@ public enum Engine {
     return .project(projection, plan.capped(limit: limit))
   }
 
+  // MARK: - Aggregation
+
+  /// Whether `select` aggregates — it has a `GROUP BY`, a `HAVING`, or an
+  /// aggregate function anywhere in its projection.
+  ///
+  /// A query with any of these compiles through the grouped path; one with none
+  /// keeps the ordinary `Project(Limit(Sort(Select(_))))` shape unchanged. A
+  /// `HAVING` alone (no `GROUP BY`, no aggregate) still aggregates — it filters
+  /// the single whole-result group.
+  private static func aggregates(_ select: Select) -> Bool {
+    if !select.grouping.isEmpty || select.having != nil { return true }
+    switch select.projection {
+    case .all, .columns:
+      return false
+    case let .expressions(items):
+      return items.contains { aggregated($0.expression) }
+    }
+  }
+
+  /// Whether `expression` contains an aggregate call anywhere within it.
+  private static func aggregated(_ expression: Expression) -> Bool {
+    switch expression {
+    case .column, .literal:
+      false
+    case .aggregate:
+      true
+    case let .call(_, arguments):
+      arguments.contains { aggregated($0) }
+    case let .binary(_, lhs, rhs):
+      aggregated(lhs) || aggregated(rhs)
+    }
+  }
+
+  /// Compiles an aggregate `select` into `Project(Limit(Sort(Having(Aggregate(
+  /// source)))))`, the `source` the WHERE/join chain and the aggregate node
+  /// grouping it.
+  ///
+  /// The source (a scan, or a left-deep join chain) materialises exactly the
+  /// ordinals the WHERE, the `GROUP BY` keys, and the aggregate arguments read.
+  /// The `aggregate` node groups it by the keys and folds each aggregate over a
+  /// group, yielding grouped records whose slots are the key values then the
+  /// aggregate results. The projection, `HAVING`, and `ORDER BY` lower against
+  /// that grouped slot space through a `Grouping`, which also enforces the
+  /// standard rule that every non-aggregated projection/`ORDER BY` column appear
+  /// in the `GROUP BY`.
+  private static func group<C: Catalog & ~Escapable>(_ select: Select,
+                                                     _ relation: Relation,
+                                                     _ from: Resolved,
+                                                     _ catalog: borrowing C,
+                                                     _ ctes: CTEs)
+      throws(SQLError) -> Plan {
+    // Resolve every joined relation and lay the FROM relation and each joined
+    // one end to end in one combined ordinal space (as the non-aggregate join
+    // path does), so the WHERE, keys, and aggregate arguments resolve uniformly.
+    var joined = Array<Resolved>()
+    joined.reserveCapacity(select.joins.count)
+    for join in select.joins {
+      try joined.append(resolve(join.relation, catalog, ctes))
+    }
+    var relations = [(relation, from.schema)]
+    for index in select.joins.indices {
+      relations.append((select.joins[index].relation, joined[index].schema))
+    }
+    let scope = Scope(relations)
+
+    // Each join's ON equality lowers to a `match` at its own chain level,
+    // resolved against only the prefix already in scope (as the non-aggregate
+    // path does).
+    var matches = Array<Filter>()
+    matches.reserveCapacity(select.joins.count)
+    for index in select.joins.indices {
+      let prefix = Scope(Array(relations[0 ... index + 1]))
+      let join = select.joins[index]
+      try matches.append(prefix.match(join.left, join.right))
+    }
+    var predicate: Filter? = nil
+    if let clause = select.predicate {
+      predicate = try scope.lower(clause)
+    }
+
+    // The `GROUP BY` keys and the aggregate arguments lower to combined
+    // base-ordinal terms; the aggregates are collected from the projection and
+    // the `HAVING` (deduplicated so the same aggregate computes once).
+    let keys = try select.grouping.map { column throws(SQLError) -> Term in
+      try .slot(scope.ordinal(of: column))
+    }
+    var expressions = Array<Expression>()
+    for expression in projected(select.projection) {
+      collect(expression, into: &expressions)
+    }
+    if let having = select.having {
+      collect(having, into: &expressions)
+    }
+    var aggregations = Array<Aggregation>()
+    for expression in expressions {
+      try aggregations.append(lower(expression, scope))
+    }
+
+    // The source materialises exactly the ordinals the WHERE, the keys, and the
+    // aggregate arguments read — never the projection/HAVING/ORDER, which read
+    // the GROUPED record. Pack them per relation in chain order, building the
+    // combined-ordinal → slot map and each relation's leaf ordinals.
+    var references = Set<Int>()
+    for match in matches { match.references(into: &references) }
+    predicate?.references(into: &references)
+    for key in keys { key.references(into: &references) }
+    for aggregation in aggregations { aggregation.references(into: &references) }
+    let combined = references.sorted()
+
+    var slot = Dictionary<Int, Int>(minimumCapacity: combined.count)
+    var locals = Array<Array<Int>>()
+    var packed = 0
+    for (offset, extent) in scope.layout {
+      let local = combined.compactMap {
+        offset <= $0 && $0 < offset + extent ? $0 - offset : nil
+      }
+      for index in local.indices {
+        slot[offset + local[index]] = packed + index
+      }
+      locals.append(local)
+      packed += local.count
+    }
+
+    let seed = from.leaf(locals[0])
+    var chain = select.joins.indices.reduce(seed) { chain, index in
+      .select(matches[index].remapped(through: slot),
+              .product(chain, joined[index].leaf(locals[index + 1])))
+    }
+    if let predicate {
+      chain = .select(predicate.remapped(through: slot), chain)
+    }
+
+    // The aggregate node groups the source by the remapped keys and folds each
+    // aggregate; its output is the grouped slot space the rest lowers against.
+    let node = Plan.aggregate(keys: keys.map { $0.remapped(through: slot) },
+                              aggregates: aggregations.map {
+                                $0.remapped(through: slot)
+                              }, chain)
+
+    // Lower the projection, HAVING, and ORDER BY against the grouped slot space,
+    // enforcing the projection rule (every non-aggregated column must be a
+    // GROUP BY key).
+    var grouping = try Grouping(scope, select.grouping, expressions)
+    let projection = try grouping.terms(select.projection)
+    let having: Filter? = if let clause = select.having {
+      try grouping.lower(clause)
+    } else {
+      nil
+    }
+    let order = if let clause = select.order {
+      try grouping.order(clause)
+    } else {
+      Array<(slot: Int, ascending: Bool)>()
+    }
+
+    var plan = node
+    if let having {
+      plan = .select(having, plan)
+    }
+    if !order.isEmpty {
+      plan = .sort(keys: order, plan)
+    }
+    return .project(projection, plan.capped(limit: select.limit))
+  }
+
+  /// The projected expressions of `projection` — an `expressions` list yields
+  /// each item's expression; a `*` or bare-column list yields none (no aggregate
+  /// can hide in them). An aggregate query's projection is always the
+  /// `expressions` case (an aggregate call makes it one).
+  private static func projected(_ projection: Projection) -> Array<Expression> {
+    switch projection {
+    case .all, .columns:
+      []
+    case let .expressions(items):
+      items.map(\.expression)
+    }
+  }
+
+  /// Collects the distinct aggregate expressions within `expression` into
+  /// `expressions`, in first-appearance order — the same aggregate written twice
+  /// computes once.
+  private static func collect(_ expression: Expression,
+                              into expressions: inout Array<Expression>) {
+    switch expression {
+    case .column, .literal:
+      break
+    case .aggregate:
+      if !expressions.contains(expression) {
+        expressions.append(expression)
+      }
+    case let .call(_, arguments):
+      for argument in arguments { collect(argument, into: &expressions) }
+    case let .binary(_, lhs, rhs):
+      collect(lhs, into: &expressions)
+      collect(rhs, into: &expressions)
+    }
+  }
+
+  /// Collects the distinct aggregates within a `predicate` into `expressions`.
+  private static func collect(_ predicate: Predicate,
+                              into expressions: inout Array<Expression>) {
+    switch predicate {
+    case let .comparison(left, _, right):
+      collect(left, into: &expressions)
+      collect(right, into: &expressions)
+    case let .bound(left, _, _):
+      collect(left, into: &expressions)
+    case let .null(expression, _):
+      collect(expression, into: &expressions)
+    case let .and(lhs, rhs), let .or(lhs, rhs):
+      collect(lhs, into: &expressions)
+      collect(rhs, into: &expressions)
+    case let .not(operand):
+      collect(operand, into: &expressions)
+    }
+  }
+
+  /// Lowers an AST `.aggregate` expression to an `Aggregation`, its argument (if
+  /// any) resolved to a combined base-ordinal term through `scope`.
+  ///
+  /// `COUNT(*)` has no argument (it counts rows); every other aggregate lowers
+  /// its single operand expression to a term. `expression` is always an
+  /// `.aggregate` — `collect` gathers only those.
+  private static func lower(_ expression: Expression, _ scope: Scope)
+      throws(SQLError) -> Aggregation {
+    guard case let .aggregate(function, operand) = expression else {
+      throw .unsupported("expected an aggregate")
+    }
+    let argument: Term? = switch operand {
+    case .star:
+      nil
+    case let .expression(expression):
+      try scope.term(expression)
+    }
+    return Aggregation(function: function, argument: argument)
+  }
+
   // MARK: - Optimisation
 
   /// Rewrites the logical `plan` into a physical one, re-resolving relations by
@@ -735,6 +984,14 @@ public enum Engine {
       // preserving this node's own `all`.
       try .union(optimise(left, catalog, ctes, bindings),
                  optimise(right, catalog, ctes, bindings), all: all)
+    case let .aggregate(keys, aggregates, source):
+      // An aggregate reshapes its source and has no seek or join of its own;
+      // optimise its source (the WHERE/join chain below it seeks and nests as
+      // usual) and rewrap. The `HAVING`/projection sit above it as `select`s the
+      // recursion reaches through here, but their grouped-space slots never seek
+      // a base relation.
+      try .aggregate(keys: keys, aggregates: aggregates,
+                     optimise(source, catalog, ctes, bindings))
     case let .limit(count, offset, source):
       // A `limit` is a transparent wrapper — optimise its source and re-cap;
       // the cap itself has no seek or join to rewrite.
@@ -1029,6 +1286,13 @@ extension Plan {
       try .product(left.pushdown(), right.pushdown())
     case let .union(left, right, all):
       try .union(left.pushdown(), right.pushdown(), all: all)
+    case let .aggregate(keys, aggregates, source):
+      // An aggregate reshapes rows into a fresh grouped slot space, so it is a
+      // pushdown barrier: a `HAVING`/projection filter above it is in grouped
+      // space and stays there (`distribute`'s default keeps it as a `select`
+      // over the aggregate), while the WHERE below it — already placed under the
+      // aggregate at compile — pushes down within the source as usual.
+      try .aggregate(keys: keys, aggregates: aggregates, source.pushdown())
     case let .limit(count, offset, source):
       // A `limit` is the outermost operator, so no `WHERE` conjunct ever reaches
       // it to push down; it recurses transparently, its source pushed as usual.

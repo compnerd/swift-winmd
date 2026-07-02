@@ -338,6 +338,8 @@ internal struct Lexer: ~Escapable {
     case "FROM": .from
     case "WHERE": .where
     case "ORDER": .order
+    case "GROUP": .group
+    case "HAVING": .having
     case "BY": .by
     case "ASC": .asc
     case "DESC": .desc

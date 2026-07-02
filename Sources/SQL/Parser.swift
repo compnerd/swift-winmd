@@ -14,11 +14,14 @@
 ///                   AS '(' query ')'
 /// query          := select (UNION [ALL] select)*
 /// select         := SELECT projection
-///                   [FROM relation (join)* [where] [order] [limit]]
+///                   [FROM relation (join)*
+///                    [where] [group] [having] [order] [limit]]
 /// relation       := identifier [AS identifier]
 /// join           := JOIN relation ON column '=' column
 /// projection     := '*' | column (',' column)*
 /// where          := WHERE predicate
+/// group          := GROUP BY column (',' column)*
+/// having         := HAVING predicate
 /// predicate      := disjunction
 /// disjunction    := conjunction (OR conjunction)*
 /// conjunction    := negation (AND negation)*
@@ -28,7 +31,9 @@
 /// expression     := additive
 /// additive       := multiplicative (('+' | '-') multiplicative)*
 /// multiplicative := factor (('*' | '/') factor)*
-/// factor         := '(' expression ')' | literal | call | column
+/// factor         := '(' expression ')' | literal | aggregate | call | column
+/// aggregate      := COUNT '(' '*' ')'
+///                 | (COUNT | SUM | MIN | MAX | AVG) '(' expression ')'
 /// order          := ORDER BY key (',' key)*
 /// key            := column [ASC | DESC]
 /// limit          := [OFFSET integer ROWS]
@@ -261,6 +266,12 @@ internal struct Parser: ~Escapable {
     } else {
       nil
     }
+    let grouping = try match(.group) ? try grouping() : []
+    let having: Predicate? = if try match(.having) {
+      try self.predicate()
+    } else {
+      nil
+    }
     let order: Order? = if try match(.order) {
       try order()
     } else {
@@ -269,7 +280,20 @@ internal struct Parser: ~Escapable {
     let limit = try rowLimit()
 
     return Select(projection: projection, from: from, joins: joins,
-                  predicate: predicate, order: order, limit: limit)
+                  predicate: predicate, grouping: grouping, having: having,
+                  order: order, limit: limit)
+  }
+
+  /// Parses `BY column (, column)*` (the `GROUP` keyword is already consumed) —
+  /// the `GROUP BY` grouping columns, in source order.
+  private mutating func grouping() throws(SQLError) -> Array<Column> {
+    try expect(.by)
+    var columns = Array<Column>()
+    try columns.append(column())
+    while try match(.comma) {
+      try columns.append(column())
+    }
+    return columns
   }
 
   // MARK: - Relation
@@ -429,6 +453,15 @@ internal struct Parser: ~Escapable {
                                   : Column(ident.text))
     }
 
+    // An aggregate is one of the fixed set of names (recognised
+    // case-insensitively, only when written bare — a delimited `"COUNT"` is a
+    // scalar name), distinct from a scalar call: it accumulates over a group
+    // rather than evaluating per row. `COUNT(*)` takes `*` in place of an
+    // expression; every aggregate else takes one expression operand.
+    if !ident.quoted, let aggregate = aggregate(ident.text) {
+      return try .aggregate(aggregate, of: aggregand(aggregate))
+    }
+
     var arguments = Array<Expression>()
     if current?.kind != .rparen {
       try arguments.append(expression())
@@ -438,6 +471,38 @@ internal struct Parser: ~Escapable {
     }
     try expect(.rparen)
     return .call(name: ident.text, arguments: arguments)
+  }
+
+  /// The `Aggregate` the bare name `text` spells (case-insensitively), or `nil`
+  /// when it is not an aggregate — a scalar-function name.
+  private func aggregate(_ text: String) -> Aggregate? {
+    switch text.uppercased() {
+    case "COUNT": .count
+    case "SUM": .sum
+    case "MIN": .min
+    case "MAX": .max
+    case "AVG": .avg
+    default: nil
+    }
+  }
+
+  /// Parses an aggregate's operand (the `(` is already consumed) and the closing
+  /// `)`: `*` for `COUNT(*)` — admitted only for `COUNT` — else a single
+  /// expression. A non-`COUNT` aggregate over `*` (`SUM(*)`), or an aggregate
+  /// with no operand, faults.
+  private mutating func aggregand(_ aggregate: Aggregate)
+      throws(SQLError) -> Aggregand {
+    let operand: Aggregand
+    if try match(.star) {
+      guard aggregate == .count else {
+        throw .unsupported("only COUNT admits a '*' operand")
+      }
+      operand = .star
+    } else {
+      operand = try .expression(expression())
+    }
+    try expect(.rparen)
+    return operand
   }
 
   // MARK: - Predicate

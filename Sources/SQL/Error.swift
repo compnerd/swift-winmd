@@ -98,6 +98,10 @@ public enum SQLError: Error, Hashable, Sendable {
   /// select (which projects only expressions over a single row); the string
   /// describes it.
   case unsupported(String)
+  /// A statement cannot be run as a query — a `CREATE VIEW` defines a view
+  /// rather than producing rows, or a malformed `WITH` member; the string
+  /// describes the fault.
+  case statement(String)
 }
 
 extension SQLError: CustomStringConvertible {
@@ -145,6 +149,8 @@ extension SQLError: CustomStringConvertible {
           + "expected \(expected), found \(found)"
     case let .unsupported(detail):
       "unsupported query: \(detail)"
+    case let .statement(detail):
+      "statement is not runnable as a query: \(detail)"
     }
   }
 }
@@ -176,8 +182,10 @@ extension SQLError {
   /// - Class `SS` — the implementation-defined class this engine squats on
   ///   (SwiftSQL) for a condition with no standard ISO code — `SS001`, a query
   ///   shape the engine does not support (a FROM-less `SELECT *`, or a clause
-  ///   with no `FROM`). ISO leaves classes whose first character is `5`–`9` or
-  ///   `I`–`Z` implementation-defined, so `SS` is a safe squat.
+  ///   with no `FROM`), and `SS002`, a statement that is not runnable as a query
+  ///   (a `CREATE VIEW`, or a malformed `WITH` member). ISO leaves classes whose
+  ///   first character is `5`–`9` or `I`–`Z` implementation-defined, so `SS` is
+  ///   a safe squat.
   public var sqlstate: String {
     switch self {
     case let .state(code, _):
@@ -210,6 +218,8 @@ extension SQLError {
     // Class SS — SwiftSQL, this engine's implementation-defined conditions.
     case .unsupported:
       "SS001"
+    case .statement:
+      "SS002"
     }
   }
 

@@ -696,6 +696,35 @@ struct DatabaseSQLTests {
     }
   }
 
+  @Test("a `.bind` value threads into a WITH statement's parameterized body")
+  func bindThreadsIntoWith() throws {
+    // A `:name` in a `WITH` body must bind from the shell's `.bind` values the
+    // same way a plain `SELECT`'s does — `Session.run` forwards `bindings` to
+    // the WITH arm. Binding `:name` to a `TypeName` the fixture carries, then
+    // running a `WITH` whose CTE filters `WHERE TypeName = :name`, returns the
+    // one matching row. An unbound `:name` is UNKNOWN, so it admits nothing —
+    // the same behaviour the plain-SELECT arm exhibits.
+    try DatabaseSQLTests.with { catalog in
+      var shell = Shell(catalog)
+      try shell.execute(".bind name 'IMyInterface'")
+      let query = """
+          WITH t (n) AS (SELECT TypeName FROM TypeDef WHERE TypeName = :name)
+            SELECT n FROM t
+          """
+      let rows = try shell.session.run(query, bindings: shell.bindings)
+      #expect(rows == [[.text("IMyInterface")]])
+      // Rebinding to the other fixture type matches only it — the binding, not a
+      // default empty map, resolves the WITH body's parameter.
+      try shell.execute(".bind name 'INotGuid'")
+      let others = try shell.session.run(query, bindings: shell.bindings)
+      #expect(others == [[.text("INotGuid")]])
+      // An unbound parameter is UNKNOWN, so the predicate admits no row.
+      try shell.execute(".bind name")
+      let unbound = try shell.session.run(query, bindings: shell.bindings)
+      #expect(unbound.isEmpty)
+    }
+  }
+
   @Test("a `.template` registers an inline body that shadows a file lookup")
   func templateRegisters() throws {
     // `.template` stores its body in the shell's `templates`, and

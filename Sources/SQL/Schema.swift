@@ -22,11 +22,11 @@ internal struct Schema {
   internal let extent: Int
 
   /// The real column names at their ordinals `0 ..< width`.
-  private let names: Array<String>
+  internal let names: Array<String>
 
   /// The virtual column names at their ordinals `width ..< extent` — virtual
   /// `i` sits at ordinal `width + i`. A view supplies none.
-  private let virtuals: Array<String>
+  internal let virtuals: Array<String>
 
   internal init(width: Int, extent: Int, names: Array<String>,
                 virtuals: Array<String>) {

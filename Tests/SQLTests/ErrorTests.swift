@@ -77,6 +77,8 @@ struct SQLStateTests {
     // standard one.
     #expect(SQLError.unsupported("SELECT * requires a FROM clause").sqlstate
             == "SS001")
+    #expect(SQLError.statement("CREATE VIEW is not a query").sqlstate
+            == "SS002")
   }
 
   @Test(".state round-trips its code and message")

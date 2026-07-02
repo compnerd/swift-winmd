@@ -223,6 +223,7 @@ extension Plan {
 /// or stored.
 internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
                                                _ catalog: borrowing C,
+                                               _ ctes: CTEs,
                                                _ routines: Routines,
                                                _ bindings: Bindings)
     throws(SQLError) -> Array<Record> {
@@ -232,23 +233,23 @@ internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
     // projection evaluates its constant/call expressions against.
     [Record([])]
   case let .scan(name, ordinals, seek):
-    try materialise(name, ordinals, seek, catalog)
+    try materialise(name, ordinals, seek, catalog, ctes)
   case let .derived(_, source, ordinals, seek):
-    try derive(source, ordinals, seek, catalog, routines, bindings)
+    try derive(source, ordinals, seek, catalog, ctes, routines, bindings)
   case let .select(filter, .product(outer, inner)):
     // Fuse a residual product with its filter: stream each pair through the
     // predicate rather than materialising the whole cross product first.
-    try sift(execute(outer, catalog, routines, bindings),
-             execute(inner, catalog, routines, bindings), filter, routines,
+    try sift(execute(outer, catalog, ctes, routines, bindings),
+             execute(inner, catalog, ctes, routines, bindings), filter, routines,
              bindings)
   case let .select(filter, source):
-    try admitted(execute(source, catalog, routines, bindings), filter,
+    try admitted(execute(source, catalog, ctes, routines, bindings), filter,
                  routines, bindings)
   case let .project(terms, source):
-    try execute(source, catalog, routines, bindings)
+    try execute(source, catalog, ctes, routines, bindings)
       .map { record throws(SQLError) in try project(terms, record, routines) }
   case let .sort(slot, ascending, source):
-    try execute(source, catalog, routines, bindings)
+    try execute(source, catalog, ctes, routines, bindings)
       .enumerated()
       .sorted { lhs, rhs in
         let ordered = less(lhs.element[slot], rhs.element[slot])
@@ -260,13 +261,13 @@ internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
       }
       .map(\.element)
   case let .product(outer, inner):
-    try product(execute(outer, catalog, routines, bindings),
-                execute(inner, catalog, routines, bindings))
+    try product(execute(outer, catalog, ctes, routines, bindings),
+                execute(inner, catalog, ctes, routines, bindings))
   case let .join(outer, name, ordinals, base, column, keys, filter):
-    try join(execute(outer, catalog, routines, bindings), name, ordinals,
-             base, column, keys, filter, catalog, routines, bindings)
+    try join(execute(outer, catalog, ctes, routines, bindings), name, ordinals,
+             base, column, keys, filter, catalog, ctes, routines, bindings)
   case let .union(left, right, all):
-    try union(left, right, all, catalog, routines, bindings)
+    try union(left, right, all, catalog, ctes, routines, bindings)
   }
 }
 
@@ -282,11 +283,12 @@ internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
 private func union<C: Catalog & ~Escapable>(_ left: Plan, _ right: Plan,
                                             _ all: Bool,
                                             _ catalog: borrowing C,
+                                            _ ctes: CTEs,
                                             _ routines: Routines,
                                             _ bindings: Bindings)
     throws(SQLError) -> Array<Record> {
-  let rows = try execute(left, catalog, routines, bindings)
-      + execute(right, catalog, routines, bindings)
+  let rows = try execute(left, catalog, ctes, routines, bindings)
+      + execute(right, catalog, ctes, routines, bindings)
   guard !all else { return rows }
 
   var records = Array<Record>()
@@ -324,16 +326,24 @@ private func admitted(_ records: Array<Record>, _ filter: Filter,
   return kept
 }
 
-/// Re-resolves `name` against `catalog`, opens its cursor, and materialises the
-/// referenced `ordinals` of the seek's row range (the whole relation when
-/// `nil`) into dense slot `Record`s.
+/// Materialises the referenced `ordinals` of the relation `name` over the
+/// seek's row range (the whole relation when `nil`) into dense slot `Record`s.
 ///
-/// - Throws: `SQLError.relation` if the name no longer resolves.
+/// A common table expression `name` (in `ctes`, consulted first — a CTE shadows
+/// a base relation) materialises its records directly from the in-engine
+/// `Materialised` rows; else the base relation re-resolves through `catalog`,
+/// its cursor opened.
+///
+/// - Throws: `SQLError.relation` if the name resolves to neither.
 private func materialise<C: Catalog & ~Escapable>(_ name: String,
                                                   _ ordinals: Array<Int>,
                                                   _ seek: Range<Int>?,
-                                                  _ catalog: borrowing C)
+                                                  _ catalog: borrowing C,
+                                                  _ ctes: CTEs)
     throws(SQLError) -> Array<Record> {
+  if let cte = ctes[name.lowercased()] {
+    return (seek ?? 0 ..< cte.rows.count).map { cte.record($0, ordinals) }
+  }
   guard let table = catalog.table(named: name) else { throw .relation(name) }
   let cursor = table.cursor()
   var records = Array<Record>()
@@ -355,10 +365,11 @@ private func derive<C: Catalog & ~Escapable>(_ plan: Plan,
                                              _ ordinals: Array<Int>,
                                              _ seek: Range<Int>?,
                                              _ catalog: borrowing C,
+                                             _ ctes: CTEs,
                                              _ routines: Routines,
                                              _ bindings: Bindings)
     throws(SQLError) -> Array<Record> {
-  let rows = try execute(plan, catalog, routines, bindings)
+  let rows = try execute(plan, catalog, ctes, routines, bindings)
   let range = seek ?? 0 ..< rows.count
   return range.map { rows[$0].project(ordinals) }
 }
@@ -403,27 +414,26 @@ private func sift(_ outer: Array<Record>, _ inner: Array<Record>,
   return records
 }
 
-/// The equi-join of `outer` against the inner relation `name`, seeking the
-/// inner per outer record when its key `column` is seekable and hashing it once
-/// otherwise.
+/// The equi-join of `outer` against the inner relation `name`, resolved through
+/// `ctes` first then `catalog`, seeking or hashing the inner as its shape allows.
 ///
-/// The inner relation is re-resolved through `catalog`. When the inner reports
-/// `column` (the inner ordinal `keys.right` reads) seekable, each outer record's
-/// key seeks the inner's `[lower, upper)` run — an index-nested loop, cheap
-/// because the seek narrows the scan. When it is NOT seekable, a per-outer scan
-/// would read the whole inner once per outer record (O(n·m)); instead the inner
-/// is scanned ONCE into a hash map keyed by its join value, and each outer
-/// record probes it in O(1). Both strategies materialise a candidate over the
-/// referenced `ordinals` into inner slots `0 ..< ordinals.count`, admit it only
-/// when the pushed inner `filter` (in the inner's standalone slot space) also
-/// holds — applied WHILE the inner row is materialised, so a filtered inner row
-/// is never paired or bucketed — key on the inner's `keys.right` slot —
-/// `keys.right - base` in the standalone inner record — and concatenate a match
+/// A materialised CTE inner has no sort key, so it is scanned in full and joined
+/// by the equality on its `keys.right` slot (`joined`). A base relation that
+/// reports `column` (the inner ordinal `keys.right` reads) seekable is sought per
+/// outer record — an index-nested loop, cheap because the seek narrows the scan;
+/// one that is NOT seekable is scanned ONCE into a hash map keyed by its join
+/// value and each outer record probes it in O(1) (`hashed`), rather than reading
+/// the whole inner once per outer record. Every strategy materialises a candidate
+/// over the referenced `ordinals` into inner slots `0 ..< ordinals.count`, admits
+/// it only when the pushed inner `filter` (in the inner's standalone slot space)
+/// also holds — applied WHILE the inner row is materialised, so a filtered inner
+/// row is never paired or bucketed — keys on the inner's `keys.right` slot
+/// (`keys.right - base` in the standalone inner record), and concatenates a match
 /// (the inner's slots landing at `base` in the combined space). A NULL key joins
-/// to nothing under both, and both preserve outer-major order, the inner matches
-/// in cursor order within each outer.
+/// to nothing, and every path preserves outer-major order, the inner matches in
+/// cursor order within each outer.
 ///
-/// - Throws: `SQLError.relation` if the inner name no longer resolves.
+/// - Throws: `SQLError.relation` if the inner name resolves to neither.
 private func join<C: Catalog & ~Escapable>(_ outer: Array<Record>,
                                            _ name: String,
                                            _ ordinals: Array<Int>, _ base: Int,
@@ -431,9 +441,26 @@ private func join<C: Catalog & ~Escapable>(_ outer: Array<Record>,
                                            _ keys: (left: Int, right: Int),
                                            _ filter: Filter?,
                                            _ catalog: borrowing C,
+                                           _ ctes: CTEs,
                                            _ routines: Routines,
                                            _ bindings: Bindings)
     throws(SQLError) -> Array<Record> {
+  // A materialised CTE inner has no sort key, so it is scanned in full and the
+  // equality on its `keys.right` slot is the join's truth — the same probe a
+  // base relation falls back to when its key is unseekable. A pushed inner
+  // filter (in the inner's standalone slot space) is applied as each record
+  // materialises, before it can pair — mirroring the base seek/hash paths — so a
+  // filtered CTE row is never joined.
+  if let cte = ctes[name.lowercased()] {
+    var inner = Array<Record>()
+    for index in 0 ..< cte.rows.count {
+      let right = cte.record(index, ordinals)
+      if let filter,
+          try evaluate(filter, right, routines, bindings) != true { continue }
+      inner.append(right)
+    }
+    return joined(outer, inner, base, keys)
+  }
   guard let inner = catalog.table(named: name) else { throw .relation(name) }
   guard seekable(inner, column) else {
     return try hashed(outer, inner, ordinals, base, keys, filter, routines,
@@ -526,6 +553,25 @@ private func hashed<T: Table & ~Escapable>(_ outer: Array<Record>,
     let value = left[keys.left]
     if case .null = value { continue }
     for right in buckets[value] ?? [] {
+      records.append(left.merged(with: right))
+    }
+  }
+  return records
+}
+
+/// The equi-join of `outer` against a fully materialised `inner` record set:
+/// for each outer record whose `keys.left` value is non-NULL, every inner row
+/// whose `keys.right` slot (`keys.right - base` in the standalone inner record)
+/// equals it, the pair concatenated. The plain nested-loop a CTE inner takes.
+private func joined(_ outer: Array<Record>, _ inner: Array<Record>,
+                    _ base: Int, _ keys: (left: Int, right: Int))
+    -> Array<Record> {
+  let slot = keys.right - base
+  var records = Array<Record>()
+  for left in outer {
+    let value = left[keys.left]
+    if case .null = value { continue }
+    for right in inner where right[slot] == value {
       records.append(left.merged(with: right))
     }
   }

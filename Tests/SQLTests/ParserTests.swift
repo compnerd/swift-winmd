@@ -224,6 +224,24 @@ struct OrderTests {
     let select = try parse(select: "SELECT * FROM T ORDER BY TypeName DESC")
     #expect(select.order == Order(column: "TypeName", ascending: false))
   }
+
+  @Test("parses a comma-separated list of sort keys")
+  func multipleKeys() throws {
+    let select =
+        try parse(select: "SELECT * FROM T ORDER BY A, B DESC, C")
+    #expect(select.order == Order(keys: [
+      Order.Key(column: "A", ascending: true),
+      Order.Key(column: "B", ascending: false),
+      Order.Key(column: "C", ascending: true),
+    ]))
+  }
+
+  @Test("a single-key ORDER BY is one key in the list")
+  func singleKey() throws {
+    let select = try parse(select: "SELECT * FROM T ORDER BY TypeName DESC")
+    #expect(select.order?.keys
+              == [Order.Key(column: "TypeName", ascending: false)])
+  }
 }
 
 struct CompositeTests {

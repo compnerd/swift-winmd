@@ -85,10 +85,17 @@ extension Schema {
     }
   }
 
+  /// The resolved sort keys an `ORDER BY` lowers to, in major-to-minor order —
+  /// each key's column an ordinal in this relation, its direction preserved.
   internal func order(_ order: Order, in relation: Relation)
-      throws(SQLError) -> (column: Int, ascending: Bool) {
-    try (column: ordinal(of: order.column, in: relation),
-         ascending: order.ascending)
+      throws(SQLError) -> Array<(column: Int, ascending: Bool)> {
+    var keys = Array<(column: Int, ascending: Bool)>()
+    keys.reserveCapacity(order.keys.count)
+    for key in order.keys {
+      try keys.append((column: ordinal(of: key.column, in: relation),
+                       ascending: key.ascending))
+    }
+    return keys
   }
 
   internal func lower(_ predicate: Predicate, in relation: Relation)
@@ -238,11 +245,18 @@ internal struct Scope {
     }
   }
 
-  /// The `(column, ascending)` pair an `ORDER BY` resolves to, the column a
-  /// combined ordinal.
+  /// The resolved sort keys an `ORDER BY` lowers to, in major-to-minor order —
+  /// each key's column a combined ordinal across the chain, its direction
+  /// preserved.
   internal func order(_ order: Order) throws(SQLError)
-      -> (column: Int, ascending: Bool) {
-    try (column: ordinal(of: order.column), ascending: order.ascending)
+      -> Array<(column: Int, ascending: Bool)> {
+    var keys = Array<(column: Int, ascending: Bool)>()
+    keys.reserveCapacity(order.keys.count)
+    for key in order.keys {
+      try keys.append((column: ordinal(of: key.column),
+                       ascending: key.ascending))
+    }
+    return keys
   }
 
   /// Lowers a join's `ON left = right` to a `match` conjunct, each side

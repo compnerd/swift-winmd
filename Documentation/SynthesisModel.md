@@ -20,7 +20,7 @@ it.
 | Layer | Role (ANSI-SPARC) | What it is | Where it lives |
 | --- | --- | --- | --- |
 | Physical / internal | Internal schema | ECMA-335 tables, heaps, coded indices | `Sources/WinMD/` |
-| Conceptual | Conceptual schema | metadata as relations: real columns + `rowid`/`parent` + decoded join keys | `Sources/winmd-inspect/Database+SQL.swift` |
+| Conceptual | Conceptual schema | metadata as relations: real columns + `Id`/`parent` + decoded join keys | `Sources/winmd-inspect/Database+SQL.swift` |
 | External | External schema | COM-interface *views* (`interfaces`/`methods`/`params`/`bases`) | `Sources/winmd-inspect/Resources/Queries/*.sql` |
 | Federation | Component-schema codecs | signature → type spelling; GuidAttribute blob → IID; coded index → join key | `Sources/WinMDSynthesis/`, the decoded columns in `Database+SQL.swift` |
 | Presentation | — | Mustache template rendering rows to source | `Sources/winmd-inspect/Shell.swift` |
@@ -34,7 +34,7 @@ just one `Catalog` it happens to run over.
         ▲
   External schema    interfaces / methods / params / bases   (SQL views)
         ▲
-  Conceptual schema  relations: real cols + rowid/parent + <Col>_<Target> keys
+  Conceptual schema  relations: real cols + Id/parent + <Col>_<Target> keys
         ▲                                   (WinMD → SQL adapter)
         │  ── federation codecs ──  signature→type · blob→IID · coded-index→key
         ▼
@@ -123,17 +123,17 @@ A relation's **real columns** are its ECMA-335 fields (a `#Strings` cell typed
 `.text`, everything else `.integer`). Past them, at ordinals outside the
 `SELECT *` extent so a `*` never projects them, sit the **virtual columns**:
 
-- **`rowid`** — the SQLite-style 1-based row index, exposed by every relation.
-  A simple foreign key is a real column holding a target's `rowid`, so an
+- **`Id`** — the 1-based row identity, exposed by every relation.
+  A simple foreign key is a real column holding a target's `Id`, so an
   equi-join over it is an ordinary FK join.
-- **`parent`** — a list-child's owning parent's `rowid` (e.g.
+- **`parent`** — a list-child's owning parent's `Id` (e.g.
   `MethodDef`'s owning `TypeDef`), computed from the parent's run-length list
   column. A list relationship is not a stored key, so the child relates to its
   owner through this computed column. As in SQLite, a real `Parent` field always
   shadows the virtual one, so `parent` reaches only the genuine list-child
   tables.
 
-Both virtual columns are **seekable** — `rowid` is dense and monotonic, `parent`
+Both virtual columns are **seekable** — `Id` is dense and monotonic, `parent`
 is monotonic over a child's runs — so the engine's index-nested-loop join seeks
 them through the same `bound` path it uses for an intrinsic sort key. The
 adapter, not the engine, knows that a WinMD foreign key or list run *is* a join.
@@ -153,9 +153,9 @@ ordinary readable cells, so that views can navigate over them:
 - **Coded-index join keys.** For every real coded-index column, the adapter
   exposes one decoded column per candidate target table the coded index admits,
   named **`<Column>_<Target>`** (e.g. `CustomAttribute.Parent_TypeDef`). Its
-  value is the target's `rowid` when the cell's tag selects *that* target and is
+  value is the target's `Id` when the cell's tag selects *that* target and is
   non-null, else SQL `NULL`. So an equi-join `JOIN Target ON
-  child.<Col>_<Target> = Target.rowid` navigates the relationship *exactly* —
+  child.<Col>_<Target> = Target.Id` navigates the relationship *exactly* —
   the `NULL` for any other tag means the join admits only the rows whose coded
   index actually points at `Target`. These keys are derived purely from the
   schema's coded-index fields and their `CodedIndex.tables`; no table or column
@@ -253,16 +253,16 @@ keyword spells escaped just as a declaration name does. A language rule is data,
 not a branch in the binary; retargeting to Rust or C is a new template and spec,
 no code change.
 
-1. Run `interfaces` for every interface's `rowid`, namespace, `SANITIZE`d name, and
+1. Run `interfaces` for every interface's `Id`, namespace, `SANITIZE`d name, and
    `iid`, then keep the one whose name matches (or all of them for `*`).
-2. Bind that `rowid` as `:parent` and run `methods` (each `Name` `SANITIZE`d) and
+2. Bind that `Id` as `:parent` and run `methods` (each `Name` `SANITIZE`d) and
    decode each method's return type from its signature with the `Dialect`,
    omitting the clause when it is the spec's no-value `void`; then bind *its*
-   `rowid` as `:parent` and run `params` — the correlated walk down the
+   `Id` as `:parent` and run `params` — the correlated walk down the
    one-to-many relationships, one bound-parameter level at a time. The return
    pseudo-parameter (`Sequence == 0`) is dropped, and each real parameter's type
    is decoded at render time from its signature position.
-3. Bind the interface's `rowid` and run `bases`; a rootless interface defaults to
+3. Bind the interface's `Id` and run `bases`; a rootless interface defaults to
    the spec's COM `root`, except the root interface itself, which inherits
    nothing (so `IUnknown` never becomes its own base).
 4. Render the context through the template, which emits the `@com(interface:)`

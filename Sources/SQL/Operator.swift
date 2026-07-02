@@ -654,7 +654,7 @@ private func seek<T: Table & ~Escapable>(_ filter: Filter?,
 /// key is 1-based and reports `nil` for the null reference `0`, so probing with
 /// `0` would misclassify a seekable coded-index column as unseekable and force a
 /// hash build even for a selective join. `1` — the least valid key — answers for
-/// every seekable column (`rowid`, list `parent`, a sorted key, a coded-index
+/// every seekable column (`Id`, list `parent`, a sorted key, a coded-index
 /// key); its value is otherwise irrelevant, since this is only a capability
 /// check (the join loop seeks with the real outer key).
 private func seekable<T: Table & ~Escapable>(_ table: borrowing T,

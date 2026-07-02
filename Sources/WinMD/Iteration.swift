@@ -58,8 +58,8 @@ public struct Tuple: ~Escapable {
   /// The 0-based index of the row within its table.
   ///
   /// ECMA-335 row indices are 1-based; this is the 0-based index the cursor
-  /// addresses the row by. A consumer presenting the SQL `rowid` pseudo-column
-  /// (the SQLite-style 1-based row index) reads `index + 1`.
+  /// addresses the row by. A consumer presenting the SQL `Id` column (the
+  /// 1-based row identity) reads `index + 1`.
   public var index: Int { row }
 
   /// The raw decoded value of column `column`.

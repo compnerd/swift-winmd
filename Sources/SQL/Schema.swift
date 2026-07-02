@@ -42,7 +42,7 @@ internal struct Schema {
   /// column resolves against `virtuals` to its ordinal `width + i`. The real
   /// lookup wins, so a relation never hides a real column behind a virtual name.
   /// The match is case-insensitive, as a metadata source's column names are
-  /// (`TypeName`, `rowid`); a schema never carries two names differing only in
+  /// (`TypeName`, `Id`); a schema never carries two names differing only in
   /// case, so the match stays unambiguous.
   internal func ordinal(of name: String) -> Int? {
     let folded = name.lowercased()

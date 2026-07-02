@@ -1,6 +1,6 @@
 CREATE VIEW params AS
 SELECT
-  rowid,
+  Id,
   Name,
   Sequence
 FROM

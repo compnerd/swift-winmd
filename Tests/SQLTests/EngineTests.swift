@@ -3032,11 +3032,11 @@ struct EngineWithTests {
     ])
   }
 
-  @Test("a CTE's rowid virtual column resolves")
-  func rowid() throws {
+  @Test("a CTE's Id virtual column resolves")
+  func id() throws {
     let rows = try statement("""
         WITH a (Tag) AS (SELECT Name FROM Parent)
-          SELECT rowid, Tag FROM a WHERE rowid = 2
+          SELECT Id, Tag FROM a WHERE Id = 2
         """, family())
     #expect(rows == [[.integer(2), .text("Bee")]])
   }

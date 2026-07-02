@@ -315,19 +315,45 @@ extension Comparison {
     case .geq: lhs >= rhs
     }
   }
+
+  /// Applies the operator to two byte strings: `=`/`<>` is byte equality and
+  /// the ordering relations are lexicographic (memcmp) order over the bytes.
+  ///
+  /// `Array` is not `Comparable` — only `Equatable` when its element is — so a
+  /// blob cannot ride the generic `apply`. Equality is `==`; order derives from
+  /// `lexicographicallyPrecedes` (strict `<`): `>` reverses the operands, and
+  /// `<=`/`>=` are the strict order OR equality.
+  internal func apply(_ lhs: Array<UInt8>, _ rhs: Array<UInt8>) -> Bool {
+    switch self {
+    case .equal: lhs == rhs
+    case .unequal: lhs != rhs
+    case .lt: lhs.lexicographicallyPrecedes(rhs)
+    case .gt: rhs.lexicographicallyPrecedes(lhs)
+    case .leq: !rhs.lexicographicallyPrecedes(lhs)
+    case .geq: !lhs.lexicographicallyPrecedes(rhs)
+    }
+  }
 }
 
 /// Matches two typed values under operator `op`, under three-valued logic.
 ///
 /// A `NULL` on either side is UNKNOWN (`nil`): `NULL` is unordered and unequal
 /// to everything, itself included, so no comparison against it is ever true or
-/// false. A like-typed non-null pair compares — two integers or two strings; a
-/// cross-typed pair (an integer against a string, or the reverse) never matches.
+/// false. A like-typed non-null pair compares — two integers, two strings, two
+/// booleans (`false < true`), or two blobs (byte equality, lexicographic
+/// order); a cross-typed pair (an integer against a string) never matches.
 private func matches(_ lhs: Value, _ op: Comparison, _ rhs: Value) -> Bool? {
   switch (lhs, rhs) {
   case (.null, _), (_, .null): nil
   case let (.integer(lhs), .integer(rhs)): op.apply(lhs, rhs)
   case let (.text(lhs), .text(rhs)): op.apply(lhs, rhs)
+  // `Bool` is not `Comparable`, so compare on its truth ordinal — `false` is
+  // `0`, `true` is `1` — which orders `false < true` and equates like values.
+  case let (.boolean(lhs), .boolean(rhs)):
+    op.apply(lhs ? 1 : 0, rhs ? 1 : 0)
+  // `Array` is not `Comparable`, so `=`/`<>` is byte equality and the ordering
+  // relations are lexicographic (memcmp) order over the bytes.
+  case let (.blob(lhs), .blob(rhs)): op.apply(lhs, rhs)
   default: false
   }
 }

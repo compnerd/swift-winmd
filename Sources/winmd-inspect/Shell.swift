@@ -974,7 +974,24 @@ extension Value {
     case .null:                 ""
     case let .integer(integer): "\(integer)"
     case let .text(text):       text
+    case let .boolean(boolean): boolean ? "TRUE" : "FALSE"
+    // A blob renders as a lowercase-hex `x'…'` literal — lowercase `x` and
+    // digits, an empty blob as `x''` — the way `sqlite3` shows a BLOB cell.
+    case let .blob(bytes):      "x'" + Value.hex(bytes) + "'"
     }
+  }
+
+  /// `bytes` as a lowercase-hex string — each byte two lowercase nibbles, high
+  /// nibble first, so a byte's width is fixed and its leading zero is kept.
+  private static func hex(_ bytes: Array<UInt8>) -> String {
+    let digits = Array("0123456789abcdef")
+    var hex = ""
+    hex.reserveCapacity(bytes.count * 2)
+    for byte in bytes {
+      hex.append(digits[Int(byte >> 4)])
+      hex.append(digits[Int(byte & 0x0f)])
+    }
+    return hex
   }
 
   /// This cell's `text`, the empty string for any non-text cell — the render

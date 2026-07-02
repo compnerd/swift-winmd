@@ -20,14 +20,18 @@
 
 /// The kind of value a column holds.
 ///
-/// A column is either integral or textual. A source uses this to describe its
-/// schema and to build the typed `Value`s a `Row` yields; the engine itself
-/// compares and orders on the `Value`, not the kind.
+/// A column is integral, textual, truth-valued, or binary. A source uses this
+/// to describe its schema and to build the typed `Value`s a `Row` yields; the
+/// engine itself compares and orders on the `Value`, not the kind.
 public enum ValueKind: Hashable, Sendable {
   /// An integral column.
   case integer
   /// A textual column.
   case text
+  /// A truth-valued column — `TRUE` or `FALSE`; its UNKNOWN is `NULL`.
+  case boolean
+  /// A binary column — an uninterpreted byte string.
+  case blob
 }
 
 /// A typed cell value the engine yields.
@@ -45,6 +49,13 @@ public enum Value: Hashable, Sendable {
   case integer(Int)
   /// A textual value.
   case text(String)
+  /// A truth value — `TRUE` or `FALSE`. Its UNKNOWN is the existing `null`; a
+  /// boolean cell is never a fourth truth value, and orders `false < true`.
+  case boolean(Bool)
+  /// A binary value — an uninterpreted byte string. Two blobs compare by byte
+  /// equality (`=`/`<>`) and lexicographic order (`<`/`>`/`<=`/`>=`), both free
+  /// from `Array<UInt8>: Comparable`.
+  case blob(Array<UInt8>)
 }
 
 // MARK: - View

@@ -1,0 +1,120 @@
+// Copyright © 2026 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
+// SPDX-License-Identifier: BSD-3-Clause
+
+import Testing
+@testable import SQL
+
+// MARK: - Harness
+
+/// A one-cell row that yields a fixed `Value` at slot `0` — the minimal `Row`
+/// that drives the comparison choke point (`matches`, reached through
+/// `evaluate`) over a `boolean` or `blob` cell without a whole relation.
+///
+/// The source carries no borrowed storage, so it omits `@_lifetime`.
+private struct Cell: Row {
+  let value: Value
+
+  init(_ value: Value) {
+    self.value = value
+  }
+
+  subscript(_ column: Int) -> Value {
+    borrowing get { value }
+  }
+}
+
+/// Evaluates `cell op constant` through the engine's three-valued comparison —
+/// `true`, `false`, or `nil` (UNKNOWN) — the path a real `WHERE` takes.
+private func compare(_ cell: Value, _ op: Comparison,
+                     _ constant: Value) -> Bool? {
+  try! evaluate(.compare(.slot(0), op, .constant(constant)),
+                Cell(cell), Routines(), [:])
+}
+
+// MARK: - Boolean
+
+@Suite("BOOLEAN value type")
+private struct BooleanTests {
+  @Test("false orders before true")
+  func ordering() {
+    #expect(compare(.boolean(false), .lt, .boolean(true)) == true)
+    #expect(compare(.boolean(true), .lt, .boolean(false)) == false)
+    #expect(compare(.boolean(false), .lt, .boolean(false)) == false)
+    #expect(compare(.boolean(true), .gt, .boolean(false)) == true)
+  }
+
+  @Test("like booleans compare equal")
+  func equality() {
+    #expect(compare(.boolean(true), .equal, .boolean(true)) == true)
+    #expect(compare(.boolean(true), .equal, .boolean(false)) == false)
+    #expect(compare(.boolean(false), .unequal, .boolean(true)) == true)
+  }
+
+  @Test("the boundary relations follow the false < true order")
+  func boundaries() {
+    #expect(compare(.boolean(false), .leq, .boolean(false)) == true)
+    #expect(compare(.boolean(false), .leq, .boolean(true)) == true)
+    #expect(compare(.boolean(true), .leq, .boolean(false)) == false)
+    #expect(compare(.boolean(true), .geq, .boolean(true)) == true)
+    #expect(compare(.boolean(false), .geq, .boolean(true)) == false)
+  }
+}
+
+// MARK: - Blob
+
+@Suite("BLOB value type")
+private struct BlobTests {
+  @Test("like blobs compare by byte equality")
+  func equality() {
+    #expect(compare(.blob([0x53, 0x51, 0x4c]), .equal,
+                    .blob([0x53, 0x51, 0x4c])) == true)
+    #expect(compare(.blob([0x53, 0x51, 0x4c]), .equal,
+                    .blob([0x53, 0x51])) == false)
+    #expect(compare(.blob([]), .equal, .blob([])) == true)
+    #expect(compare(.blob([0x00]), .unequal, .blob([])) == true)
+  }
+
+  @Test("blobs order lexicographically — memcmp over the bytes")
+  func ordering() {
+    // A byte difference decides: `0x01` < `0x02`.
+    #expect(compare(.blob([0x01]), .lt, .blob([0x02])) == true)
+    #expect(compare(.blob([0x02]), .lt, .blob([0x01])) == false)
+    // A proper prefix orders before the longer string.
+    #expect(compare(.blob([0x01]), .lt, .blob([0x01, 0x00])) == true)
+    #expect(compare(.blob([]), .lt, .blob([0x00])) == true)
+    // A high byte outweighs a longer tail.
+    #expect(compare(.blob([0x02]), .gt, .blob([0x01, 0xff])) == true)
+  }
+
+  @Test("the boundary relations follow the lexicographic order")
+  func boundaries() {
+    #expect(compare(.blob([0x01]), .leq, .blob([0x01])) == true)
+    #expect(compare(.blob([0x01]), .leq, .blob([0x02])) == true)
+    #expect(compare(.blob([0x02]), .leq, .blob([0x01])) == false)
+    #expect(compare(.blob([0x02]), .geq, .blob([0x01])) == true)
+    #expect(compare(.blob([0x01]), .geq, .blob([0x02])) == false)
+  }
+}
+
+// MARK: - Cross-type
+
+@Suite("cross-type comparison")
+private struct CrossTypeTests {
+  @Test("unlike types never match — no coercion")
+  func mismatch() {
+    // Every non-null cross-type pair falls to the switch's `default: false`.
+    #expect(compare(.boolean(true), .equal, .integer(1)) == false)
+    #expect(compare(.integer(1), .equal, .boolean(true)) == false)
+    #expect(compare(.boolean(false), .equal, .integer(0)) == false)
+    #expect(compare(.blob([0x41]), .equal, .text("A")) == false)
+    #expect(compare(.text("A"), .equal, .blob([0x41])) == false)
+    #expect(compare(.blob([0x01]), .lt, .integer(2)) == false)
+    #expect(compare(.boolean(true), .lt, .text("z")) == false)
+  }
+
+  @Test("a NULL operand is UNKNOWN, not false")
+  func null() {
+    #expect(compare(.boolean(true), .equal, .null) == nil)
+    #expect(compare(.blob([0x01]), .lt, .null) == nil)
+  }
+}

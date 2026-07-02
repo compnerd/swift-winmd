@@ -41,13 +41,15 @@ public struct Routines: Sendable {
   }
 
   /// The function named `name`, folded to lower case like every other SQL
-  /// identifier, or `nil` if neither a built-in nor a registered function bears
-  /// it. An engine built-in resolves AHEAD of a registered function of the same
-  /// name: an unqualified scalar call can never shadow a built-in. (A future
-  /// PATH / search-order mechanism — à la DB2 or PostgreSQL — would let a
-  /// qualified call reach a user's redefinition.)
+  /// identifier, or `nil` if no registered function bears it. There is a single
+  /// flat map with no privileged tier: a prelude function (`Routines.standard`)
+  /// and a caller-registered one resolve through the same lookup, so a later
+  /// registration shadows an earlier binding of the same name — the house rule
+  /// the resolver already follows (a view shadows a table, a CTE shadows a
+  /// view). (A future PATH / search-order mechanism — à la DB2 or PostgreSQL —
+  /// would let a qualified call reach a specific one across schemas.)
   public func function(named name: String) -> Scalar? {
-    Routines.builtins[name.lowercased()] ?? functions[name.lowercased()]
+    functions[name.lowercased()]
   }
 
   /// A copy of these routines with `function` bound to `name` (folded to lower
@@ -67,14 +69,14 @@ public struct Routines: Sendable {
     Routines(functions.merging(other.functions) { _, last in last })
   }
 
-  /// The engine's built-in scalar functions, available to every `Routines` —
-  /// even the empty one — and resolved ahead of a registered function of the
-  /// same name (see `function(named:)`), so an unqualified call always reaches
-  /// the built-in. `BITAND` is the portable, standards-compliant spelling
-  /// (Oracle's) of a bitwise AND, an operation ISO SQL and this grammar
-  /// otherwise lack; it is a built-in so any dialect gets it without registering
-  /// a closure.
-  private static let builtins: Dictionary<String, Scalar> = ["bitand": bitand]
+  /// The standard-library prelude — the routines the engine ships, seeded into
+  /// the flat registry at the public entry points so a query reaches them
+  /// without a caller registering a closure. They are ordinary entries in the
+  /// same map as any registered function, not a privileged tier, so a caller
+  /// MAY shadow one (see `function(named:)`). Its lone member is `BITAND`, the
+  /// portable, standards-compliant spelling (Oracle's) of a bitwise AND — an
+  /// operation ISO SQL and this grammar otherwise lack.
+  public static let standard: Routines = ["bitand": bitand]
 
   /// `BITAND(x, y)` — the bitwise AND of two integers. A NULL argument yields
   /// NULL (SQL null propagation); the wrong argument count or a non-integer

@@ -393,9 +393,9 @@ internal struct Parser: ~Escapable {
     return lhs
   }
 
-  /// Parses an arithmetic factor: a parenthesised expression, a string/integer
-  /// literal, a function call (`name(args)`), or a bare (possibly-qualified)
-  /// column.
+  /// Parses an arithmetic factor: a parenthesised expression, a string,
+  /// integer, or decimal literal, a function call (`name(args)`), or a bare
+  /// (possibly-qualified) column.
   ///
   /// Parentheses override the precedence the cascade encodes. A function call is
   /// an identifier immediately followed by `(`; an identifier not so followed is
@@ -414,6 +414,10 @@ internal struct Parser: ~Escapable {
     if case let .integer(value) = current?.kind {
       _ = try advance(expecting: "a literal")
       return .literal(.integer(value))
+    }
+    if case let .decimal(value) = current?.kind {
+      _ = try advance(expecting: "a literal")
+      return .literal(.double(value))
     }
 
     let ident = try name()
@@ -534,12 +538,13 @@ internal struct Parser: ~Escapable {
     }
   }
 
-  /// Parses a string or integer literal.
+  /// Parses a string, integer, or decimal literal.
   private mutating func literal() throws(SQLError) -> Literal {
     let token = try advance(expecting: "a literal")
     return switch token.kind {
     case let .string(value): .string(value)
     case let .integer(value): .integer(value)
+    case let .decimal(value): .double(value)
     default:
       throw .unexpected(token.kind.description,
                         expected: "a literal", at: token.location)

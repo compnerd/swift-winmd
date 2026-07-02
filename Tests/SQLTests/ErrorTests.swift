@@ -65,10 +65,10 @@ struct SQLStateTests {
     #expect(SQLError.argument("bad").sqlstate == "22023")
   }
 
-  @Test("a non-integer arithmetic operand reports 42804")
+  @Test("a non-numeric arithmetic operand reports 42804")
   func operand() {
     #expect(
-        SQLError.operand("operands must be integers").sqlstate == "42804")
+        SQLError.operand("operands must be numeric").sqlstate == "42804")
   }
 
   @Test("an engine-specific condition reports the SwiftSQL SS class")

@@ -339,8 +339,11 @@ public enum Comparison: Hashable, Sendable {
 public enum Literal: Hashable, Sendable {
   /// A single-quoted string literal, with its escapes resolved.
   case string(String)
-  /// An integer literal.
+  /// An integer literal — a bare run of digits, exact numeric.
   case integer(Int)
+  /// An approximate-numeric literal — a decimal with a `.` fraction and/or an
+  /// exponent (`3.14`, `1.0`, `1e3`, `2.5e-1`), a binary64 `Double`.
+  case double(Double)
 }
 
 /// An `ORDER BY` clause: a column and its direction.

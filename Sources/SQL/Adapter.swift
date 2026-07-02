@@ -20,12 +20,16 @@
 
 /// The kind of value a column holds.
 ///
-/// A column is integral, textual, truth-valued, or binary. A source uses this
-/// to describe its schema and to build the typed `Value`s a `Row` yields; the
-/// engine itself compares and orders on the `Value`, not the kind.
+/// A column is integral, approximate-numeric, textual, truth-valued, or binary.
+/// A source uses this to describe its schema and to build the typed `Value`s a
+/// `Row` yields; the engine itself compares and orders on the `Value`, not the
+/// kind.
 public enum ValueKind: Hashable, Sendable {
-  /// An integral column.
+  /// An integral column — exact numeric.
   case integer
+  /// An approximate-numeric column — SQL `FLOAT`/`REAL`/`DOUBLE PRECISION`,
+  /// carried as a binary64 `Double`.
+  case double
   /// A textual column.
   case text
   /// A truth-valued column — `TRUE` or `FALSE`; its UNKNOWN is `NULL`.
@@ -45,8 +49,20 @@ public enum ValueKind: Hashable, Sendable {
 public enum Value: Hashable, Sendable {
   /// SQL `NULL` — the absence of a value.
   case null
-  /// An integral value.
+  /// An integral value — exact numeric.
   case integer(Int)
+  /// An approximate-numeric value — SQL `FLOAT`/`REAL`/`DOUBLE PRECISION`,
+  /// carried as a binary64 `Double`. A double compares and does arithmetic with
+  /// another double, and — both being numeric — with an `integer` too, the
+  /// integer promoted to `Double`; a mixed integer/double arithmetic yields a
+  /// double, and `/` is real division (no truncation).
+  ///
+  /// INVARIANT: a `double` must be FINITE — never `inf` or NaN. NaN is unequal
+  /// to itself, so it would break UNION/CTE duplicate elimination and ordering;
+  /// the engine's producers enforce this (a literal or arithmetic result past
+  /// range faults, a routine's non-finite result is rejected), so a `Catalog`,
+  /// `Row`, and `Scalar` must likewise vend only finite doubles.
+  case double(Double)
   /// A textual value.
   case text(String)
   /// A truth value — `TRUE` or `FALSE`. Its UNKNOWN is the existing `null`; a

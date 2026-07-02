@@ -72,7 +72,7 @@ extension Schema {
     case let .column(column):
       return try .slot(ordinal(of: column, in: relation))
     case let .literal(literal):
-      return .constant(value(of: literal))
+      return try .constant(value(of: literal))
     case let .call(name, arguments):
       var lowered = Array<Term>()
       lowered.reserveCapacity(arguments.count)
@@ -225,7 +225,7 @@ internal struct Scope {
     case let .column(column):
       return try .slot(ordinal(of: column))
     case let .literal(literal):
-      return .constant(value(of: literal))
+      return try .constant(value(of: literal))
     case let .call(name, arguments):
       var lowered = Array<Term>()
       lowered.reserveCapacity(arguments.count)

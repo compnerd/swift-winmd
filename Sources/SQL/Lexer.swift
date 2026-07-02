@@ -144,7 +144,7 @@ internal struct Lexer: ~Escapable {
       return try parameter()
 
     case let b where digit(b):
-      return try integer()
+      return try number()
 
     case let b where initial(b):
       return identifier()
@@ -260,14 +260,59 @@ internal struct Lexer: ~Escapable {
                  location: start)
   }
 
-  /// Scans an integer literal at the current position.
-  private mutating func integer() throws(SQLError) -> Token {
+  /// Scans a numeric literal at the current position — an integer or a decimal.
+  ///
+  /// A bare run of digits is an `integer`. A `.` fraction and/or an `e`/`E`
+  /// exponent makes it a `decimal` (an approximate-numeric `Double`): `3.14`,
+  /// `1.0`, `1e3`, `2.5e-1`. The `.` and exponent are each consumed only when a
+  /// digit follows — a `.` with no fraction digit (`1.`) leaves the `.` for the
+  /// caller and scans the leading integer, and an `e` with no exponent digit is
+  /// not an exponent — so a qualified reference is never misread as a float (an
+  /// identifier's leading `.` never reaches here: it begins with a letter, not
+  /// a digit). An integer past the `Int` boundary faults; a decimal does not
+  /// (an out-of-range magnitude is IEEE `inf`).
+  private mutating func number() throws(SQLError) -> Token {
     let start = location
     while let byte = peek(), digit(byte) {
       advance()
     }
 
+    var decimal = false
+    // A `.` is a fraction only when a digit follows; otherwise it is not part
+    // of the number (a lone `1.` scans as the integer `1`).
+    if peek() == UInt8(ascii: "."), let next = peek(1), digit(next) {
+      decimal = true
+      advance()
+      while let byte = peek(), digit(byte) {
+        advance()
+      }
+    }
+
+    // An `e`/`E` exponent takes an optional sign then at least one digit; short
+    // of that it is not an exponent and the number ends before the `e`.
+    if peek() == UInt8(ascii: "e") || peek() == UInt8(ascii: "E") {
+      let sign = peek(1) == UInt8(ascii: "+") || peek(1) == UInt8(ascii: "-")
+      if let next = peek(sign ? 2 : 1), digit(next) {
+        decimal = true
+        advance()
+        if sign { advance() }
+        while let byte = peek(), digit(byte) {
+          advance()
+        }
+      }
+    }
+
     let text = String(bytes, start.offset ..< position)
+    if decimal {
+      // `Double` never returns nil for lexer-shaped digits, but it yields `inf`
+      // for a magnitude past its range (`1e9999`); reject that as an overflow —
+      // like an out-of-range integer literal — so no `inf` (and thus no `inf -
+      // inf` NaN) enters the engine.
+      guard let value = Double(text), value.isFinite else {
+        throw .overflow(text, at: start)
+      }
+      return Token(kind: .decimal(value), location: start)
+    }
     guard let value = Int(text) else {
       throw .overflow(text, at: start)
     }

@@ -32,9 +32,9 @@ internal import WinMD
 ///
 /// Type spellings are *not* virtual columns: they are language-specific, so the
 /// adapter — the neutral conceptual layer — does not bake them. The render spells
-/// a return/parameter at render time through the free `decodedReturn`/
-/// `decodedParameter` functions, which navigate a method/parameter's signature
-/// and apply a target `Dialect`.
+/// a return/parameter at render time through the `WinMD.Storage`
+/// `decode(return:in:)`/`decode(parameter:for:)` methods, which navigate a
+/// method/parameter's signature and apply a target `Dialect`.
 ///
 /// Past the extras sit a relation's join keys, at ordinals `width + 1 + extras`
 /// onward — the columns a view equi-joins across. A list-owned table leads the
@@ -715,70 +715,70 @@ extension WinMD.Storage {
     }
     return nil
   }
-}
 
-/// The decoded type spelling of the return of the `MethodDef` at 1-based
-/// `method` `rowid`, in `dialect`, or `nil` when the row or its signature does
-/// not decode.
-///
-/// This is the signature-navigation the adapter once baked as the `ReturnType`
-/// virtual column, relocated so the render can spell a return at render time
-/// with a target `Dialect`: it opens the `MethodDef` row, decodes its
-/// `prototype` signature, builds a `Resolver` over the borrowed `storage`, and
-/// decodes the return. `nil` mirrors the old NULL — an absent row, an
-/// undecodable signature, or an unresolvable one.
-internal func decodedReturn(of method: Int, in storage: borrowing WinMD.Storage,
-                            dialect: Dialect) -> String? {
-  guard let table = storage.opened("MethodDef") else { return nil }
-  let cursor = WinMD.Cursor(copy storage, table)
-  guard let tuple = cursor[method - 1],
-      let row = Row<Metadata.Tables.MethodDef>(tuple),
-      let signature = try? row.prototype,
-      let resolver = try? Resolver(of: signature, with: storage) else {
-    return nil
+  /// The decoded type spelling of the return of the `MethodDef` at 1-based
+  /// `method` `rowid`, in `dialect`, or `nil` when the row or its signature
+  /// does not decode.
+  ///
+  /// This is the signature-navigation the adapter once baked as the
+  /// `ReturnType` virtual column, relocated so the render can spell a return at
+  /// render time with a target `Dialect`: it opens the `MethodDef` row, decodes
+  /// its `prototype` signature, builds a `Resolver` over the storage, and
+  /// decodes the return. `nil` mirrors the old NULL — an absent row, an
+  /// undecodable signature, or an unresolvable one.
+  internal borrowing func decode(return method: Int,
+                                 in dialect: Dialect) -> String? {
+    guard let table = opened("MethodDef") else { return nil }
+    let cursor = WinMD.Cursor(copy self, table)
+    guard let tuple = cursor[method - 1],
+        let row = Row<Metadata.Tables.MethodDef>(tuple),
+        let signature = try? row.prototype,
+        let resolver = try? Resolver(of: signature, with: self) else {
+      return nil
+    }
+    return signature.returns.decode(with: resolver, dialect: dialect)
   }
-  return signature.returns.decode(with: resolver, dialect: dialect)
-}
 
-/// The decoded type spelling of the `Param` at 1-based `parameter` `rowid`, in
-/// `dialect`, navigated through its owning method's signature — or `nil` when it
-/// does not decode.
-///
-/// This is the signature-navigation the adapter once baked as the `ParamType`
-/// virtual column, relocated so the render can spell a parameter at render time.
-/// The `Param.Sequence` cell is the 1-based parameter position: `Sequence == 0`
-/// is the return pseudo-parameter and `Sequence > parameters.count` is out of
-/// range, both `nil`. The owning `MethodDef` is found through the `Param` list
-/// link — an owner of zero is no parent (malformed/partial metadata), so the
-/// parameter is unowned and yields `nil` rather than indexing a negative row.
-/// The parameter's own `Name` is the `System.Guid` `IID`/`CLSID` hint; for any
-/// other type the decoder ignores it, so threading it is always safe.
-internal func decodedParameter(of parameter: Int,
-                               in storage: borrowing WinMD.Storage,
-                               dialect: Dialect) -> String? {
-  guard let table = storage.opened("Param") else { return nil }
-  let params = WinMD.Cursor(copy storage, table)
-  guard let param = params[parameter - 1],
-      let sequence = param.ordinal(for: "Sequence"),
-      let link = WinMDRelation.Link(storage, table) else {
-    return nil
+  /// The decoded type spelling of the `Param` at 1-based `parameter` `rowid`, in
+  /// `dialect`, navigated through its owning method's signature — or `nil` when
+  /// it does not decode.
+  ///
+  /// This is the signature-navigation the adapter once baked as the `ParamType`
+  /// virtual column, relocated so the render can spell a parameter at render
+  /// time. The `Param.Sequence` cell is the 1-based parameter position:
+  /// `Sequence == 0` is the return pseudo-parameter and `Sequence >
+  /// parameters.count` is out of range, both `nil`. The owning `MethodDef` is
+  /// found through the `Param` list link — an owner of zero is no parent
+  /// (malformed/partial metadata), so the parameter is unowned and yields `nil`
+  /// rather than indexing a negative row. The parameter's own `Name` is the
+  /// `System.Guid` `IID`/`CLSID` hint; for any other type the decoder ignores
+  /// it, so threading it is always safe.
+  internal borrowing func decode(parameter: Int,
+                                 for dialect: Dialect) -> String? {
+    guard let table = opened("Param") else { return nil }
+    let params = WinMD.Cursor(copy self, table)
+    guard let param = params[parameter - 1],
+        let sequence = param.ordinal(for: "Sequence"),
+        let link = WinMDRelation.Link(self, table) else {
+      return nil
+    }
+    let position = param[sequence]
+    let origin = owner(of: parameter - 1, link)
+    guard origin != 0 else { return nil }
+    let methods = WinMD.Cursor(copy self, link.parent)
+    guard let method = methods[origin - 1],
+        let row = Row<Metadata.Tables.MethodDef>(method),
+        let signature = try? row.prototype else {
+      return nil
+    }
+    guard position >= 1, position <= signature.parameters.count else {
+      return nil
+    }
+    guard let resolver = try? Resolver(of: signature, with: self) else {
+      return nil
+    }
+    let name = param.ordinal(for: "Name").flatMap { try? param.string($0) }
+    return signature.parameters[position - 1]
+        .decode(parameter: name, with: resolver, dialect: dialect)
   }
-  let position = param[sequence]
-  let owner = storage.owner(of: parameter - 1, link)
-  guard owner != 0 else { return nil }
-  let methods = WinMD.Cursor(copy storage, link.parent)
-  guard let method = methods[owner - 1],
-      let row = Row<Metadata.Tables.MethodDef>(method),
-      let signature = try? row.prototype else {
-    return nil
-  }
-  guard position >= 1, position <= signature.parameters.count else {
-    return nil
-  }
-  guard let resolver = try? Resolver(of: signature, with: storage) else {
-    return nil
-  }
-  let name = param.ordinal(for: "Name").flatMap { try? param.string($0) }
-  return signature.parameters[position - 1]
-      .decode(parameter: name, with: resolver, dialect: dialect)
 }

@@ -286,7 +286,7 @@ internal struct Shell: ~Escapable {
     // The type spellings are decoded at render time from the spec's `Dialect`:
     // the adapter is language-neutral, so the render — not the binary's WinMD →
     // SQL layer — spells a return/parameter, navigating the signature with the
-    // free `decodedReturn`/`decodedParameter` functions.
+    // storage's `decode(return:in:)`/`decode(parameter:for:)` methods.
     let dialect = language.dialect
     // The rows to render come straight from the bundled selection query, bound
     // by `:name`: it returns the one named interface, or — for `*` — every one
@@ -326,8 +326,8 @@ internal struct Shell: ~Escapable {
                                     bindings: ["parent": method[0]])
         var parameters = Array<Dictionary<String, Any>>()
         for parameter in params where parameter[2] != .integer(0) {
-          let type = decodedParameter(of: parameter[0].integer,
-                                      in: session.storage, dialect: dialect)
+          let type = session.storage.decode(parameter: parameter[0].integer,
+                                            for: dialect)
           parameters.append([
             "name": parameter[1].text,
             "type": type ?? "",
@@ -346,8 +346,8 @@ internal struct Shell: ~Escapable {
         // The return, decoded at render time; a no-value return (the spec's
         // `void` spelling, or an undecodable return) leaves `returns` absent, so
         // the template's `{{#returns}}` clause renders nothing.
-        let returned = decodedReturn(of: method[0].integer, in: session.storage,
-                                     dialect: dialect)
+        let returned = session.storage.decode(return: method[0].integer,
+                                              in: dialect)
         if let returned, let clause = language.returned(returned) {
           entry["returns"] = clause
         }

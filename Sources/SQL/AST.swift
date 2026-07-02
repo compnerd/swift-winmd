@@ -165,8 +165,8 @@ public struct Relation: Hashable, Sendable {
 ///
 /// The `ON` equality is held as its two column references in source order —
 /// `left = right` — for the consumer to classify. The binding interprets the
-/// adapter-computed columns `Id` (every table's 1-based row identity) and
-/// `parent` (a list-child's owning row) within those references.
+/// adapter-computed columns `Id` (every table's 1-based row identity) and a
+/// list-child's owner foreign key within those references.
 public struct Join: Hashable, Sendable {
   /// The relation joined in.
   public let relation: Relation
@@ -189,8 +189,8 @@ public struct Join: Hashable, Sendable {
 ///
 /// A qualifier names a relation by its alias or its table name; an unqualified
 /// reference leaves the relation for the consumer to infer. The name may be a
-/// real column or one of the binding's adapter-computed columns (`Id`,
-/// `parent`); the AST does not distinguish them.
+/// real column or one of the binding's adapter-computed columns (`Id`, an owner
+/// foreign key); the AST does not distinguish them.
 ///
 /// `Column` is `ExpressibleByStringLiteral`, splitting a literal on its first
 /// dot into qualifier and name, so a consumer may write a reference as a plain

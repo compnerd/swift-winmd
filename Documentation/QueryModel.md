@@ -133,32 +133,37 @@ name through the borrowed catalog:
 
 ### Joins over foreign keys and lists
 
-The WinMD adapter exposes two **virtual columns** past each relation's real
-fields, at ordinals outside the `SELECT *` range so a `*` never projects them:
+The WinMD adapter exposes **virtual columns** past each relation's real fields,
+at ordinals outside the `SELECT *` range so a `*` never projects them:
 
-- `Id` — the 1-based row identity. A foreign key is a real column
-  holding a target row's `Id`, so an equi-join over it is an ordinary FK
+- `Id` — the 1-based row identity, on every relation. A foreign key is a real
+  column holding a target row's `Id`, so an equi-join over it is an ordinary FK
   join — the child's foreign-key column against the parent's `Id`:
   `SELECT i.Interface FROM InterfaceImpl i JOIN TypeDef t ON i.Class = t.Id`,
   where `InterfaceImpl.Class` is a simple index into `TypeDef`.
-- `parent` — a list-child's owning parent's `Id`. A list relationship (a
+- an **owner foreign key** — on a list-owned child only, a column named for its
+  owning table whose value is the owning row's `Id`. A list relationship (a
   parent's run of children, e.g. `TypeDef.MethodList → MethodDef`) is not a
-  stored key, so the child relates to its owner through the computed `parent`
-  column against the parent's `Id`:
-  `SELECT m.Name FROM TypeDef t JOIN MethodDef m ON m.parent = t.Id`.
+  stored key, so the child relates to its owner through this named FK column
+  against the owner's `Id` — reading as an ordinary FK join:
+  `SELECT m.Name FROM TypeDef t JOIN MethodDef m ON m.TypeDef = t.Id`. The five
+  are `FieldDef.TypeDef`, `MethodDef.TypeDef`, `Param.MethodDef`,
+  `EventDef.EventMap`, and `PropertyDef.PropertyMap`.
 
 A *coded* index column (e.g. `TypeDef.Extends`, a `TypeDefOrRef`) exposes its
 raw encoded value — the packed row-plus-tag token — not a bare row id, so
 relating it to a target table's `Id` must be spelled out explicitly.
 
-A real column always takes precedence over a same-named pseudo-column, as in
-SQLite: a table that has its own `Parent` field (`EventMap`, `PropertyMap`,
-`ClassLayout`, …) resolves `Parent` to that real foreign key, so the virtual
-`parent` reaches only the list-child tables that have no real `Parent` field.
+An owner FK is named for its owning table, which never collides with a real
+field: no list-child schema carries a field spelled like its owner's table. A
+table with its own `Parent` field (`EventMap`, `PropertyMap`, `ClassLayout`, …)
+is unaffected — `Parent` is that real foreign key, and such a table owns no
+list, so it has no owner-FK column.
 
-Both virtual columns are seekable — `Id` is dense and monotonic, `parent` is
-monotonic over a list-child's runs — so the engine's index-nested-loop join
-seeks them through the same `bound` path it uses for an intrinsic sort key. The
+Both `Id` and an owner FK are seekable — `Id` is dense and monotonic, an owner
+FK is monotonic over a list-child's runs — so the engine's index-nested-loop
+join seeks them through the same `bound` path it uses for an intrinsic sort key.
+The
 adapter, not the engine, knows that a WinMD foreign key or list run *is* a join;
 the engine sees only seekable columns and equi-join predicates.
 
@@ -213,7 +218,7 @@ Heap columns read through their tokens: a `#Strings` or `#GUID` column through
 the `Column` value token (`row[.TypeName]`), a `#Blob` column through the
 `BlobColumn` token (`row[token]`, or `row.blob(token)` for the validating
 read). The SQL engine reaches the same foreign-key and list joins through the
-adapter's `Id`/`parent` virtual columns described above.
+adapter's `Id` and owner-foreign-key virtual columns described above.
 
 ## Complexity
 

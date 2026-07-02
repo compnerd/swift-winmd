@@ -5,4 +5,4 @@ SELECT
 FROM
   MethodDef
 WHERE
-  parent = :parent
+  TypeDef = :parent

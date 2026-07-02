@@ -23,7 +23,7 @@ FROM
   TypeDef t
   JOIN CustomAttribute c ON c.Parent_TypeDef = t.Id
   JOIN MethodDef m ON c.Type_MethodDef = m.Id
-  JOIN TypeDef g ON m.parent = g.Id
+  JOIN TypeDef g ON m.TypeDef = g.Id
 WHERE
   g.TypeNamespace = 'Windows.Win32.Foundation.Metadata'
   AND g.TypeName = 'GuidAttribute'

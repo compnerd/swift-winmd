@@ -20,7 +20,7 @@ it.
 | Layer | Role (ANSI-SPARC) | What it is | Where it lives |
 | --- | --- | --- | --- |
 | Physical / internal | Internal schema | ECMA-335 tables, heaps, coded indices | `Sources/WinMD/` |
-| Conceptual | Conceptual schema | metadata as relations: real columns + `Id`/`parent` + decoded join keys | `Sources/winmd-inspect/Database+SQL.swift` |
+| Conceptual | Conceptual schema | metadata as relations: real columns + `Id`/owner FK + decoded join keys | `Sources/winmd-inspect/Database+SQL.swift` |
 | External | External schema | COM-interface *views* (`interfaces`/`methods`/`params`/`bases`) | `Sources/winmd-inspect/Resources/Queries/*.sql` |
 | Federation | Component-schema codecs | signature → type spelling; GuidAttribute blob → IID; coded index → join key | `Sources/WinMDSynthesis/`, the decoded columns in `Database+SQL.swift` |
 | Presentation | — | Mustache template rendering rows to source | `Sources/winmd-inspect/Shell.swift` |
@@ -34,7 +34,7 @@ just one `Catalog` it happens to run over.
         ▲
   External schema    interfaces / methods / params / bases   (SQL views)
         ▲
-  Conceptual schema  relations: real cols + Id/parent + <Col>_<Target> keys
+  Conceptual schema  relations: real cols + Id/owner FK + <Col>_<Target> keys
         ▲                                   (WinMD → SQL adapter)
         │  ── federation codecs ──  signature→type · blob→IID · coded-index→key
         ▼
@@ -126,16 +126,19 @@ A relation's **real columns** are its ECMA-335 fields (a `#Strings` cell typed
 - **`Id`** — the 1-based row identity, exposed by every relation.
   A simple foreign key is a real column holding a target's `Id`, so an
   equi-join over it is an ordinary FK join.
-- **`parent`** — a list-child's owning parent's `Id` (e.g.
-  `MethodDef`'s owning `TypeDef`), computed from the parent's run-length list
-  column. A list relationship is not a stored key, so the child relates to its
-  owner through this computed column. As in SQLite, a real `Parent` field always
-  shadows the virtual one, so `parent` reaches only the genuine list-child
-  tables.
+- **an owner foreign key** — on a list-owned child only, a column named for its
+  owning table whose value is the owning row's `Id` (e.g. `MethodDef.TypeDef`),
+  computed from the owner's run-length list column. A list relationship is not a
+  stored key, so the child relates to its owner through this named FK column.
+  The five are `FieldDef.TypeDef`, `MethodDef.TypeDef`, `Param.MethodDef`,
+  `EventDef.EventMap`, and `PropertyDef.PropertyMap`. The name never collides
+  with a real field, and a table with a real `Parent` field owns no list, so it
+  has no owner-FK column.
 
-Both virtual columns are **seekable** — `Id` is dense and monotonic, `parent`
-is monotonic over a child's runs — so the engine's index-nested-loop join seeks
-them through the same `bound` path it uses for an intrinsic sort key. The
+Both `Id` and an owner FK are **seekable** — `Id` is dense and monotonic, an
+owner FK is monotonic over a child's runs — so the engine's index-nested-loop
+join seeks them through the same `bound` path it uses for an intrinsic sort key.
+The
 adapter, not the engine, knows that a WinMD foreign key or list run *is* a join.
 
 ### Decoded columns — the federation codecs surfaced as relations
@@ -207,16 +210,18 @@ This is where the logical schema lives. The bundled views — the
   constructor uses, the three `UNION`ed: a cross-file `Type_MemberRef →
   MemberRef.Class_TypeRef → TypeRef`, and — because the metadata attributes are
   defined in the very file that applies them, so their constructor is local — two
-  same-file arms, `Type_MethodDef → MethodDef.parent → TypeDef` (the constructor
-  named directly as a `MethodDef`) and `Type_MemberRef → MemberRef.Class_TypeDef
-  → TypeDef` (named as a `MemberRef` back into the in-file `TypeDef`). All three
+  same-file arms, `Type_MethodDef → MethodDef.TypeDef → TypeDef` (the
+  constructor named directly as a `MethodDef`) and `Type_MemberRef →
+  MemberRef.Class_TypeDef → TypeDef` (named as a `MemberRef` back into the
+  in-file `TypeDef`). All three
   arms filter to the `GuidAttribute` declaring type and to a `tdInterface`
   carrier (`BITAND(Flags, 32) = 32`, so a GUID-bearing coclass is not mistaken
   for an interface), projecting `CustomAttribute.guid` as the `iid`.
 - **`methods`** and **`params`** — an interface's methods are the `MethodDef`
   rows it owns; a method's parameters are its `Param` rows. Each is a one-level
-  navigation correlated by `:parent` against the `parent` virtual column
-  (`WHERE parent = :parent`), bound per level by the render.
+  navigation correlated by `:parent` against the owner-FK column (`WHERE
+  TypeDef = :parent` for `methods`, `WHERE MethodDef = :parent` for `params`),
+  bound per level by the render.
 - **`bases`** — an interface's base *is its `InterfaceImpl`*. The view navigates
   the interface's `InterfaceImpl` rows (`i.Class = :parent`, a simple `TypeDef`
   index) to each base type's name by whichever coded-index arm the base uses, the

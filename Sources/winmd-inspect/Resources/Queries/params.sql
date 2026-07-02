@@ -6,4 +6,4 @@ SELECT
 FROM
   Param
 WHERE
-  parent = :parent
+  MethodDef = :parent

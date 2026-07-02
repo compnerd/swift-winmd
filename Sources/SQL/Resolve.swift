@@ -118,15 +118,16 @@ extension Schema {
 /// combined ordinals `[offset_i, offset_i + extent_i)`, where `offset_i` is the
 /// sum of the `extent`s of the relations before it. Using each relation's
 /// `extent` — its real `width` plus the virtual columns it exposes — rather than
-/// its `width` keeps a relation's virtual columns (an `Id`, a `parent`) on its
-/// own side rather than colliding with the next relation's space. A `Scope`
-/// resolves a possibly qualified `SQL.Column` into that combined space so the
-/// engine's `Filter`, projection, and order all address cells uniformly across
-/// the chain. A qualifier names a relation by its alias, else its table name; an
-/// unqualified name resolves against every relation and is ambiguous if more
-/// than one resolves it — as is a qualified name two relations share an alias or
-/// table name for (a self-join or a duplicated alias). Resolution reads only
-/// schemas, so the scope is escapable data over the relations' `Schema`s.
+/// its `width` keeps a relation's virtual columns (an `Id`, an owner foreign
+/// key) on its own side rather than colliding with the next relation's space. A
+/// `Scope` resolves a possibly qualified `SQL.Column` into that combined space
+/// so the engine's `Filter`, projection, and order all address cells uniformly
+/// across the chain. A qualifier names a relation by its alias, else its table
+/// name; an unqualified name resolves against every relation and is ambiguous
+/// if more than one resolves it — as is a qualified name two relations share an
+/// alias or table name for (a self-join or a duplicated alias). Resolution
+/// reads only schemas, so the scope is escapable data over the relations'
+/// `Schema`s.
 internal struct Scope {
   /// One relation of the chain: its reference (for qualifier matching), its
   /// name-resolution schema, and its base offset in the combined space.

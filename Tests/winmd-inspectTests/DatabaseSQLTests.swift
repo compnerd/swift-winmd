@@ -53,8 +53,8 @@ extension Dialect {
 }
 
 /// Coverage of the WinMD → SQL adapter's decoded `guid` virtual column on
-/// `CustomAttribute` and the render-time signature decode (`decodedReturn`/
-/// `decodedParameter`), which the adapter no longer bakes as `ReturnType`/
+/// `CustomAttribute` and the render-time signature decode (`decode(return:in:)`/
+/// `decode(parameter:for:)`), which the adapter no longer bakes as `ReturnType`/
 /// `ParamType` columns. Rather than map a `.winmd` file, the tests assemble a
 /// tiny COM
 /// interface in memory — a `TypeDef` carrying a `GuidAttribute` (through the
@@ -324,12 +324,12 @@ struct DatabaseSQLTests {
   }
 
   @Test("the render decode spells a method's return from its signature")
-  func decodedReturnHelper() {
+  func decodesReturn() {
     // The render decodes a return at render time (not through a virtual column):
     // `MethodDef` rowid 1's signature `void Method(i4, string)` decodes its
     // return to `Void`.
     DatabaseSQLTests.with { catalog in
-      #expect(decodedReturn(of: 1, in: catalog, dialect: .swift) == "Void")
+      #expect(catalog.decode(return: 1, in: .swift) == "Void")
     }
   }
 
@@ -419,7 +419,7 @@ struct DatabaseSQLTests {
     // The signature `void Method(i4, string)` decodes its return to `Void`, the
     // render-time decode replacing the old `ReturnType` virtual column.
     DatabaseSQLTests.with { catalog in
-      #expect(decodedReturn(of: 1, in: catalog, dialect: .swift) == "Void")
+      #expect(catalog.decode(return: 1, in: .swift) == "Void")
     }
   }
 
@@ -430,9 +430,9 @@ struct DatabaseSQLTests {
     // `i4` (`CInt`) and `string` (`HSTRING`) — the render-time decode replacing
     // the old `ParamType` virtual column.
     DatabaseSQLTests.with { catalog in
-      #expect(decodedParameter(of: 1, in: catalog, dialect: .swift) == nil)
-      #expect(decodedParameter(of: 2, in: catalog, dialect: .swift) == "CInt")
-      #expect(decodedParameter(of: 3, in: catalog, dialect: .swift)
+      #expect(catalog.decode(parameter: 1, for: .swift) == nil)
+      #expect(catalog.decode(parameter: 2, for: .swift) == "CInt")
+      #expect(catalog.decode(parameter: 3, for: .swift)
                   == "HSTRING")
     }
   }
@@ -797,7 +797,7 @@ struct DatabaseSQLTests {
     // has zero rows, so its owner resolves to 0 — decodes to `nil` rather than
     // indexing the negative row `owner - 1` through the parent cursor.
     UnownedParamFixture.with { catalog in
-      #expect(decodedParameter(of: 1, in: catalog, dialect: .swift) == nil)
+      #expect(catalog.decode(parameter: 1, for: .swift) == nil)
     }
   }
 
@@ -807,8 +807,8 @@ struct DatabaseSQLTests {
     // the render decode classifies each by the `Param.Name` hint — `clsid`
     // (rowid 2) yields `CLSID`, `iid` (rowid 3) yields the default `IID`.
     GuidParamFixture.with { catalog in
-      #expect(decodedParameter(of: 2, in: catalog, dialect: .swift) == "CLSID")
-      #expect(decodedParameter(of: 3, in: catalog, dialect: .swift) == "IID")
+      #expect(catalog.decode(parameter: 2, for: .swift) == "CLSID")
+      #expect(catalog.decode(parameter: 3, for: .swift) == "IID")
     }
   }
 
@@ -889,8 +889,8 @@ struct DatabaseSQLTests {
 
 /// A fixture whose `Param` row is owned by no `MethodDef` run: the `MethodDef`
 /// table is present (so the list link resolves to it) but has zero rows, so the
-/// owner of the lone `Param` resolves to 0. `decodedParameter` must then yield
-/// `nil` rather than index a negative `MethodDef` row.
+/// owner of the lone `Param` resolves to 0. `decode(parameter:for:)` must then
+/// yield `nil` rather than index a negative `MethodDef` row.
 private enum UnownedParamFixture {
   // Two narrow tables packed back to back. `MethodDef` contributes no records
   // (zero rows); `Param` contributes one.

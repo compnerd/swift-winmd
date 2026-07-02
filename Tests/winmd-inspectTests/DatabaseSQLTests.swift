@@ -667,6 +667,35 @@ struct DatabaseSQLTests {
     }
   }
 
+  @Test("a `.bind` value threads into a later parameterized SELECT")
+  func bindThreadsIntoQuery() throws {
+    // `.bind` stores a `:name` in the shell's `bindings`, which `execute`'s SQL
+    // path forwards to `Session.run(_, bindings:)`. Binding `:name` to a
+    // `TypeName` the fixture carries, then running `WHERE TypeName = :name`
+    // through the session with those bindings, returns the one matching row —
+    // the exact thread `execute` performs. An unbound `:name` is UNKNOWN, so it
+    // admits no row.
+    try DatabaseSQLTests.with { catalog in
+      var shell = Shell(catalog)
+      try shell.execute(".bind name 'IMyInterface'")
+      #expect(shell.bindings["name"] == .text("IMyInterface"))
+      let query = "SELECT TypeName FROM TypeDef WHERE TypeName = :name"
+      let rows = try shell.session.run(query, bindings: shell.bindings)
+      #expect(rows == [[.text("IMyInterface")]])
+      // The other fixture type does not match the binding, so it is excluded.
+      try shell.execute(".bind name 'INotGuid'")
+      let others = try shell.session.run(query, bindings: shell.bindings)
+      #expect(others == [[.text("INotGuid")]])
+      // Clearing the binding (a `.bind` with no value) unbinds `:name`. An
+      // unbound parameter is UNKNOWN, not a value, so the predicate admits no
+      // row — the same query now yields nothing rather than matching a type.
+      try shell.execute(".bind name")
+      #expect(shell.bindings["name"] == nil)
+      let unbound = try shell.session.run(query, bindings: shell.bindings)
+      #expect(unbound.isEmpty)
+    }
+  }
+
   @Test("execute routes a `.`-token to its meta-command")
   func executeMeta() throws {
     // The leading-token dispatch matches `.tables` to `Tables`, which lists the

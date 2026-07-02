@@ -90,7 +90,7 @@ struct DatabaseSQLTests {
   //   Param[1]:    Sequence=1, Name="first"(71) — signature.parameters[0] (i4).
   //   Param[2]:    Sequence=2 — signature.parameters[1] (string).
   //   InterfaceImpl[0]: Class=TypeDef row 1 (the simple `TypeDef` index stores
-  //                the rowid directly, so 1)=IMyInterface;
+  //                the Id directly, so 1)=IMyInterface;
   //                Interface=TypeDefOrRef(TypeRef row 2)=(2<<2)|1=9 — names the
   //                base `IInspectable`, so the `bases` view derives it.
   //   InterfaceImpl[1]: Class=1=IMyInterface; Interface=TypeDefOrRef(TypeDef
@@ -263,27 +263,27 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("the bundled `methods` view yields a method bound by its parent rowid")
+  @Test("the bundled `methods` view yields a method bound by its parent Id")
   func bundledMethods() throws {
-    // `IMyInterface` is `TypeDef` rowid 1, which owns `MethodDef` rowid 1;
-    // binding `:parent` to the interface's rowid yields the method's `rowid` and
+    // `IMyInterface` is `TypeDef` Id 1, which owns `MethodDef` Id 1;
+    // binding `:parent` to the interface's Id yields the method's `Id` and
     // `Name` (the type is no longer a column — the render decodes it).
     try DatabaseSQLTests.with { catalog in
       let rows = try DatabaseSQLTests.run(
-          "SELECT rowid, Name FROM methods", Session.bundled(), catalog,
+          "SELECT Id, Name FROM methods", Session.bundled(), catalog,
           ["parent": .integer(1)])
       #expect(rows == [[.integer(1), .text("MyMethod")]])
     }
   }
 
-  @Test("the bundled `params` view yields params bound by their method rowid")
+  @Test("the bundled `params` view yields params bound by their method Id")
   func bundledParams() throws {
-    // `MethodDef` rowid 1 owns the three `Param` rows; binding `:parent` to it
-    // yields each parameter's `rowid`, `Name`, and `Sequence` (the type is no
+    // `MethodDef` Id 1 owns the three `Param` rows; binding `:parent` to it
+    // yields each parameter's `Id`, `Name`, and `Sequence` (the type is no
     // longer a column — the render navigates from these and decodes it).
     try DatabaseSQLTests.with { catalog in
       let rows = try DatabaseSQLTests.run(
-          "SELECT rowid, Name, Sequence FROM params", Session.bundled(),
+          "SELECT Id, Name, Sequence FROM params", Session.bundled(),
           catalog, ["parent": .integer(1)])
       #expect(rows == [
         [.integer(1), .text(""), .integer(0)],
@@ -327,7 +327,7 @@ struct DatabaseSQLTests {
   @Test("the render decode spells a method's return from its signature")
   func decodesReturn() {
     // The render decodes a return at render time (not through a virtual column):
-    // `MethodDef` rowid 1's signature `void Method(i4, string)` decodes its
+    // `MethodDef` Id 1's signature `void Method(i4, string)` decodes its
     // return to `Void`.
     DatabaseSQLTests.with { catalog in
       #expect(catalog.decode(return: 1, in: .swift) == "Void")
@@ -406,7 +406,7 @@ struct DatabaseSQLTests {
   @Test("excludes the virtual columns from SELECT *")
   func star() throws {
     // `SELECT *` projects exactly the six real `TypeDef` fields — neither
-    // `rowid` nor `parent` appears — for each of the two fixture types.
+    // `Id` nor `parent` appears — for each of the two fixture types.
     try DatabaseSQLTests.with { catalog in
       let rows = try DatabaseSQLTests.run("SELECT * FROM TypeDef", catalog)
       #expect(rows.count == 2)
@@ -425,7 +425,7 @@ struct DatabaseSQLTests {
 
   @Test("the render decode spells each Param, nil for the return parameter")
   func paramType() {
-    // The `Sequence == 0` return pseudo-parameter (`Param` rowid 1) decodes to
+    // The `Sequence == 0` return pseudo-parameter (`Param` Id 1) decodes to
     // `nil`; the two real parameters (rowids 2 and 3) decode to the signature's
     // `i4` (`CInt`) and `string` (`HSTRING`) — the render-time decode replacing
     // the old `ParamType` virtual column.
@@ -439,7 +439,7 @@ struct DatabaseSQLTests {
 
   @Test("the bundled `bases` view yields the interface's derived bases")
   func bundledBases() throws {
-    // `IMyInterface` is `TypeDef` rowid 1; binding `:parent` to its rowid
+    // `IMyInterface` is `TypeDef` Id 1; binding `:parent` to its Id
     // navigates `InterfaceImpl.Class = :parent`, and the view UNIONs both arms
     // of the `Interface` coded index: the cross-file `IInspectable` reached
     // through `Interface_TypeRef` → `TypeRef`, and the same-file `INotGuid`
@@ -454,7 +454,7 @@ struct DatabaseSQLTests {
 
   @Test("the bundled `bases` view is empty for a rootless interface")
   func bundledBasesRoot() throws {
-    // `INotGuid` is `TypeDef` rowid 2 and has no `InterfaceImpl` row, so the
+    // `INotGuid` is `TypeDef` Id 2 and has no `InterfaceImpl` row, so the
     // view yields no base — the render's `IUnknown` default path.
     try DatabaseSQLTests.with { catalog in
       let rows = try DatabaseSQLTests.run(
@@ -499,7 +499,7 @@ struct DatabaseSQLTests {
       var shell = Shell(catalog)
       let query = """
         CREATE VIEW bases AS SELECT b.TypeName AS base FROM InterfaceImpl i
-        JOIN TypeRef b ON i.Interface_TypeRef = b.rowid
+        JOIN TypeRef b ON i.Interface_TypeRef = b.Id
         WHERE i.Class = :parent AND i.Class = 0
         """
       let (name, view) = try DatabaseSQLTests.create(query)
@@ -535,7 +535,7 @@ struct DatabaseSQLTests {
       var shell = Shell(catalog)
       let query = """
         CREATE VIEW bases AS
-        SELECT 'protocol' AS base FROM TypeDef WHERE rowid = :parent
+        SELECT 'protocol' AS base FROM TypeDef WHERE Id = :parent
         """
       let (name, view) = try DatabaseSQLTests.create(query)
       shell.session.register(name, view)
@@ -587,10 +587,10 @@ struct DatabaseSQLTests {
   }
 
 
-  @Test("a coded-index join key decodes to the target's rowid")
+  @Test("a coded-index join key decodes to the target's Id")
   func codedKeyResolves() throws {
     // `CustomAttribute[0].Parent` is `HasCustomAttribute(TypeDef row 1)`, so
-    // the `Parent_TypeDef` key decodes to the owning `TypeDef`'s 1-based rowid.
+    // the `Parent_TypeDef` key decodes to the owning `TypeDef`'s 1-based Id.
     try DatabaseSQLTests.with { catalog in
       let rows = try DatabaseSQLTests.run(
           "SELECT Parent_TypeDef FROM CustomAttribute", catalog)
@@ -633,14 +633,14 @@ struct DatabaseSQLTests {
   @Test("a coded-index join key joins a CustomAttribute to its owning TypeDef")
   func codedKeyJoin() throws {
     // Joining `CustomAttribute` to `TypeDef` on the decoded `Parent_TypeDef`
-    // key against the `TypeDef`'s rowid pairs the `GuidAttribute` row (its
+    // key against the `TypeDef`'s Id pairs the `GuidAttribute` row (its
     // `GUID(Value)` IID) with the `IMyInterface` type it decorates, end to end
     // across the coded index.
     try DatabaseSQLTests.with { catalog in
       let rows = try DatabaseSQLTests.run(
           "SELECT TypeDef.TypeName, GUID(CustomAttribute.Value) "
           + "FROM CustomAttribute "
-          + "JOIN TypeDef ON CustomAttribute.Parent_TypeDef = TypeDef.rowid",
+          + "JOIN TypeDef ON CustomAttribute.Parent_TypeDef = TypeDef.Id",
           catalog)
       #expect(rows == [
         [.text("IMyInterface"),
@@ -895,7 +895,7 @@ struct DatabaseSQLTests {
   func paramTypeGuidClassification() {
     // The signature `void Method(Guid, Guid)` names `System.Guid` parameters;
     // the render decode classifies each by the `Param.Name` hint — `clsid`
-    // (rowid 2) yields `CLSID`, `iid` (rowid 3) yields the default `IID`.
+    // (Id 2) yields `CLSID`, `iid` (Id 3) yields the default `IID`.
     GuidParamFixture.with { catalog in
       #expect(catalog.decode(parameter: 2, for: .swift) == "CLSID")
       #expect(catalog.decode(parameter: 3, for: .swift) == "IID")
@@ -1113,7 +1113,7 @@ private enum SameModuleGuidFixture {
   //                a `MemberRef` into the in-file `TypeDef` (the `Class_TypeDef`
   //                arm).
   //   MethodDef[0]: Name=0, Signature=0, ParamList=1 — the `GuidAttribute`
-  //                `.ctor`, owned by TypeDef[0] (so its `parent` is rowid 1).
+  //                `.ctor`, owned by TypeDef[0] (so its `parent` is Id 1).
   //   MemberRef[0]: Class=MemberRefParent(TypeDef row 1)=(1<<3)|0=8 — the ctor
   //                reference whose declaring class is the in-file `GuidAttribute`
   //                `TypeDef`, so `Class_TypeDef` (not `Class_TypeRef`) decodes.

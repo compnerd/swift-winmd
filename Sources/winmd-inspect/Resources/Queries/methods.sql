@@ -1,6 +1,6 @@
 CREATE VIEW methods AS
 SELECT
-  rowid,
+  Id,
   Name
 FROM
   MethodDef

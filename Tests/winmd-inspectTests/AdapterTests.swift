@@ -14,8 +14,8 @@ import SQL
 /// `TypeDef` (#2), `MethodDef` (#6), `NestedClass` (#41), and `EventMap` (#18)
 /// — and drive a parsed `SELECT` through `Engine.run` over the `WinMD.Storage`
 /// catalog, asserting the typed `Value` rows the engine yields. They exercise a
-/// single-relation projection / filter / order with the `rowid` virtual column
-/// and a sorted-key seek, a foreign-key join on `rowid`, a list join on the
+/// single-relation projection / filter / order with the `Id` virtual column
+/// and a sorted-key seek, a foreign-key join on `Id`, a list join on the
 /// `parent` virtual column, and a real `Parent` column shadowing that
 /// pseudo-column.
 struct AdapterTests {
@@ -120,7 +120,7 @@ struct AdapterTests {
     // The string columns project as text, the constant as an integer; the
     // WHERE keeps both rows (both are in "NS"), and ORDER BY TypeName sorts
     // Alpha < Beta. `SELECT *` is the two real string heaps plus the constant
-    // and the three index columns — never `rowid` or `parent`.
+    // and the three index columns — never `Id` or `parent`.
     try AdapterTests.with { catalog in
       let rows = try AdapterTests.run(
           "SELECT TypeName, Flags FROM TypeDef "
@@ -132,12 +132,12 @@ struct AdapterTests {
     }
   }
 
-  @Test("excludes rowid and parent from SELECT *")
+  @Test("excludes Id and parent from SELECT *")
   func star() throws {
     // `SELECT *` projects exactly the real fields: a TypeDef has six. Neither
-    // the `rowid` nor the `parent` virtual column appears.
+    // the `Id` nor the `parent` virtual column appears.
     try AdapterTests.with { catalog in
-      let rows = try AdapterTests.run("SELECT * FROM TypeDef ORDER BY rowid",
+      let rows = try AdapterTests.run("SELECT * FROM TypeDef ORDER BY Id",
                                       catalog)
       #expect(rows.count == 2)
       #expect(rows[0].count == 6)
@@ -148,11 +148,11 @@ struct AdapterTests {
     }
   }
 
-  @Test("vends the rowid virtual column 1-based")
-  func rowid() throws {
+  @Test("vends the Id virtual column 1-based")
+  func id() throws {
     try AdapterTests.with { catalog in
       let rows = try AdapterTests.run(
-          "SELECT rowid, TypeName FROM TypeDef ORDER BY rowid", catalog)
+          "SELECT Id, TypeName FROM TypeDef ORDER BY Id", catalog)
       #expect(rows == [
         [.integer(1), .text("Alpha")],
         [.integer(2), .text("Beta")],
@@ -172,15 +172,15 @@ struct AdapterTests {
     }
   }
 
-  @Test("joins through a foreign key on rowid")
+  @Test("joins through a foreign key on Id")
   func foreignKeyJoin() throws {
-    // The FK `NestedClass.NestedClass` holds a TypeDef rowid; the engine joins
+    // The FK `NestedClass.NestedClass` holds a TypeDef Id; the engine joins
     // each NestedClass row to its TypeDef and projects the resolved name.
     try AdapterTests.with { catalog in
       let rows = try AdapterTests.run(
           "SELECT NestedClass.EnclosingClass, TypeDef.TypeName "
           + "FROM NestedClass JOIN TypeDef "
-          + "ON NestedClass.NestedClass = TypeDef.rowid "
+          + "ON NestedClass.NestedClass = TypeDef.Id "
           + "ORDER BY NestedClass.EnclosingClass", catalog)
       #expect(rows == [
         [.integer(1), .text("Beta")],
@@ -193,12 +193,12 @@ struct AdapterTests {
   func listJoin() throws {
     // The `parent` virtual column relates each MethodDef to the TypeDef whose
     // MethodList run owns it: MethodDef[0,1] → TypeDef[0] (Alpha), MethodDef[2]
-    // → TypeDef[1] (Beta). The join seeks TypeDef on its `rowid` per method.
+    // → TypeDef[1] (Beta). The join seeks TypeDef on its `Id` per method.
     try AdapterTests.with { catalog in
       let rows = try AdapterTests.run(
           "SELECT MethodDef.Name, TypeDef.TypeName "
           + "FROM MethodDef JOIN TypeDef "
-          + "ON MethodDef.parent = TypeDef.rowid "
+          + "ON MethodDef.parent = TypeDef.Id "
           + "ORDER BY MethodDef.Name", catalog)
       #expect(rows == [
         [.text("m0"), .text("Alpha")],
@@ -215,20 +215,20 @@ struct AdapterTests {
     // for a table no list owns). EventMap[0].Parent=1, EventMap[1].Parent=2.
     try AdapterTests.with { catalog in
       let rows = try AdapterTests.run(
-          "SELECT Parent FROM EventMap ORDER BY rowid", catalog)
+          "SELECT Parent FROM EventMap ORDER BY Id", catalog)
       #expect(rows == [[.integer(1)], [.integer(2)]])
     }
   }
 
-  @Test("joins through a real Parent foreign key on rowid")
+  @Test("joins through a real Parent foreign key on Id")
   func realParentJoin() throws {
-    // The real `EventMap.Parent` FK holds a TypeDef rowid; the join resolves
+    // The real `EventMap.Parent` FK holds a TypeDef Id; the join resolves
     // each EventMap row to its TypeDef: Parent=1 → Alpha, Parent=2 → Beta.
     try AdapterTests.with { catalog in
       let rows = try AdapterTests.run(
           "SELECT EventMap.Parent, TypeDef.TypeName "
           + "FROM EventMap JOIN TypeDef "
-          + "ON EventMap.Parent = TypeDef.rowid "
+          + "ON EventMap.Parent = TypeDef.Id "
           + "ORDER BY EventMap.Parent", catalog)
       #expect(rows == [
         [.integer(1), .text("Alpha")],

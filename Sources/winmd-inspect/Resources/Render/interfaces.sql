@@ -1,5 +1,5 @@
 SELECT
-  rowid,
+  Id,
   TypeNamespace,
   SANITIZE(TypeName) AS TypeName,
   iid

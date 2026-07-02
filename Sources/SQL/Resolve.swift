@@ -118,7 +118,7 @@ extension Schema {
 /// combined ordinals `[offset_i, offset_i + extent_i)`, where `offset_i` is the
 /// sum of the `extent`s of the relations before it. Using each relation's
 /// `extent` — its real `width` plus the virtual columns it exposes — rather than
-/// its `width` keeps a relation's virtual columns (a `rowid`, a `parent`) on its
+/// its `width` keeps a relation's virtual columns (an `Id`, a `parent`) on its
 /// own side rather than colliding with the next relation's space. A `Scope`
 /// resolves a possibly qualified `SQL.Column` into that combined space so the
 /// engine's `Filter`, projection, and order all address cells uniformly across

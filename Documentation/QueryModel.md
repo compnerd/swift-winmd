@@ -136,27 +136,27 @@ name through the borrowed catalog:
 The WinMD adapter exposes two **virtual columns** past each relation's real
 fields, at ordinals outside the `SELECT *` range so a `*` never projects them:
 
-- `rowid` — the SQLite-style 1-based row index. A foreign key is a real column
-  holding a target row's `rowid`, so an equi-join over it is an ordinary FK
-  join — the child's foreign-key column against the parent's `rowid`:
-  `SELECT i.Interface FROM InterfaceImpl i JOIN TypeDef t ON i.Class = t.rowid`,
+- `Id` — the 1-based row identity. A foreign key is a real column
+  holding a target row's `Id`, so an equi-join over it is an ordinary FK
+  join — the child's foreign-key column against the parent's `Id`:
+  `SELECT i.Interface FROM InterfaceImpl i JOIN TypeDef t ON i.Class = t.Id`,
   where `InterfaceImpl.Class` is a simple index into `TypeDef`.
-- `parent` — a list-child's owning parent's `rowid`. A list relationship (a
+- `parent` — a list-child's owning parent's `Id`. A list relationship (a
   parent's run of children, e.g. `TypeDef.MethodList → MethodDef`) is not a
   stored key, so the child relates to its owner through the computed `parent`
-  column against the parent's `rowid`:
-  `SELECT m.Name FROM TypeDef t JOIN MethodDef m ON m.parent = t.rowid`.
+  column against the parent's `Id`:
+  `SELECT m.Name FROM TypeDef t JOIN MethodDef m ON m.parent = t.Id`.
 
 A *coded* index column (e.g. `TypeDef.Extends`, a `TypeDefOrRef`) exposes its
 raw encoded value — the packed row-plus-tag token — not a bare row id, so
-relating it to a target table's `rowid` must be spelled out explicitly.
+relating it to a target table's `Id` must be spelled out explicitly.
 
 A real column always takes precedence over a same-named pseudo-column, as in
 SQLite: a table that has its own `Parent` field (`EventMap`, `PropertyMap`,
 `ClassLayout`, …) resolves `Parent` to that real foreign key, so the virtual
 `parent` reaches only the list-child tables that have no real `Parent` field.
 
-Both virtual columns are seekable — `rowid` is dense and monotonic, `parent` is
+Both virtual columns are seekable — `Id` is dense and monotonic, `parent` is
 monotonic over a list-child's runs — so the engine's index-nested-loop join
 seeks them through the same `bound` path it uses for an intrinsic sort key. The
 adapter, not the engine, knows that a WinMD foreign key or list run *is* a join;
@@ -213,7 +213,7 @@ Heap columns read through their tokens: a `#Strings` or `#GUID` column through
 the `Column` value token (`row[.TypeName]`), a `#Blob` column through the
 `BlobColumn` token (`row[token]`, or `row.blob(token)` for the validating
 read). The SQL engine reaches the same foreign-key and list joins through the
-adapter's `rowid`/`parent` virtual columns described above.
+adapter's `Id`/`parent` virtual columns described above.
 
 ## Complexity
 

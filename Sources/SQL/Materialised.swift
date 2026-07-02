@@ -23,9 +23,9 @@ internal typealias CTEs = Dictionary<String, Materialised>
 /// the borrowed base catalog, consulting it first when it resolves a name, and
 /// builds the leaf records directly from `rows` rather than opening a cursor.
 ///
-/// It exposes the universal `rowid` virtual column at `width`, so a CTE
+/// It exposes the universal `Id` virtual column at `width`, so a CTE
 /// resolves columns exactly as a base relation does (a real column below
-/// `width`, the `rowid` at `width`).
+/// `width`, the `Id` at `width`).
 internal struct Materialised: Hashable, Sendable {
   /// The relation's column names, in ordinal order.
   internal let columns: Array<String>
@@ -42,18 +42,18 @@ internal struct Materialised: Hashable, Sendable {
   internal var width: Int { columns.count }
 
   /// One past the highest ordinal — the real width plus the lone virtual
-  /// `rowid` column at `width`.
+  /// `Id` column at `width`.
   internal var extent: Int { width + 1 }
 
   /// The resolution schema of this relation: its columns below `width`, a
-  /// virtual `rowid` at `width`.
+  /// virtual `Id` at `width`.
   internal func schema() -> Schema {
-    Schema(width: width, extent: extent, names: columns, virtuals: ["rowid"])
+    Schema(width: width, extent: extent, names: columns, virtuals: ["Id"])
   }
 
   /// The record for the row at `index`, materialising the referenced `ordinals`
   /// into dense slots — a real ordinal (`< width`) reads the stored cell, the
-  /// virtual `rowid` ordinal (`== width`) the 1-based row index.
+  /// virtual `Id` ordinal (`== width`) the 1-based row index.
   internal func record(_ index: Int, _ ordinals: Array<Int>) -> Record {
     let cells = rows[index]
     return Record(ordinals.map {

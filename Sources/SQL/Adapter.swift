@@ -126,7 +126,7 @@ extension Catalog where Self: ~Escapable {
 /// A `Table` knows its real column count (`width`, the extent of `SELECT *`),
 /// its `extent` (one past the highest ordinal it can address, real or virtual),
 /// resolves a column name to an ordinal (a real ordinal `< width`, or a virtual
-/// ordinal `>= width` for a computed column such as a `rowid`), and — for a
+/// ordinal `>= width` for a computed column such as an `Id`), and — for a
 /// column whose rows are stored in sorted order — maps a comparison value to a
 /// row boundary so the executor can seek rather than scan. `cursor()` borrows
 /// the table and hands back a cursor tied to that borrow.
@@ -142,14 +142,14 @@ public protocol Table: ~Escapable {
   ///
   /// A relation knows its own column names; the engine reads them to lift a
   /// base table's resolution onto an escapable `Schema` so a join may resolve a
-  /// view against a base table uniformly. The virtual columns (`rowid`,
+  /// view against a base table uniformly. The virtual columns (`Id`,
   /// `parent`) are not in `names`; they resolve through `ordinal(of:)`.
   var names: Array<String> { get }
 
   /// The virtual column names, in ordinal order — virtual `i` of `virtuals`
   /// sits at ordinal `width + i`.
   ///
-  /// A virtual column is computed by the `Row` rather than stored (a `rowid`, a
+  /// A virtual column is computed by the `Row` rather than stored (an `Id`, a
   /// `parent`); naming them lets the engine lift resolution onto an escapable
   /// `Schema`. The default is empty — a relation overrides it only when it
   /// computes a virtual column, and then its `extent` is `width + virtuals.count`.
@@ -158,8 +158,8 @@ public protocol Table: ~Escapable {
   /// One past the highest ordinal this table can address — its real `width`
   /// plus the virtual columns it exposes.
   ///
-  /// A relation with no virtual column has `extent == width`; one exposing a
-  /// `rowid` at `width` has `extent == width + 1`, and so on. A join lays the
+  /// A relation with no virtual column has `extent == width`; one exposing an
+  /// `Id` at `width` has `extent == width + 1`, and so on. A join lays the
   /// inner relation immediately past the outer's `extent` so an outer virtual
   /// column never collides with the inner's space. The default is `width` — a
   /// relation overrides it only when it computes a virtual column.
@@ -169,7 +169,7 @@ public protocol Table: ~Escapable {
   /// such column.
   ///
   /// A real column resolves to an ordinal `< width`; a virtual column — one the
-  /// `Row` computes rather than stores, such as a `rowid` — resolves to an
+  /// `Row` computes rather than stores, such as an `Id` — resolves to an
   /// ordinal `>= width`.
   func ordinal(of name: String) -> Int?
 

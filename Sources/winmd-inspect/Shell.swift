@@ -396,9 +396,9 @@ internal struct Shell: ~Escapable {
   /// bundled `Resources/Render/*.sql` queries (not Swift literals): the
   /// `interfaces` query selects the one named interface, or every
   /// interface for `*` (its `WHERE TypeName = :name OR '*' = :name`), then
-  /// for each its `methods` bound by the interface's `rowid`, each
-  /// method's `params` bound by the method's `rowid`, and its `bases`
-  /// bound by the interface's `rowid`. The presentation tier is the named
+  /// for each its `methods` bound by the interface's `Id`, each
+  /// method's `params` bound by the method's `Id`, and its `bases`
+  /// bound by the interface's `Id`. The presentation tier is the named
   /// template loaded from `Resources/Templates`. A single interface that
   /// no view names raises `RenderError.interface`; a missing template
   /// resource raises `RenderError.template`.
@@ -445,19 +445,19 @@ internal struct Shell: ~Escapable {
     var sources = Array<String>()
     sources.reserveCapacity(interfaces.count)
     for found in interfaces {
-      let rowid = found[0]
-      // The interface's methods, bound by its rowid; each row is its `rowid`
+      let id = found[0]
+      // The interface's methods, bound by its `Id`; each row is its `Id`
       // then its escaped `Name`. The type spellings are no longer projected —
       // the render decodes them from the signature with the spec's `Dialect`.
       let plan = try Shell.select(Shell.query(named: "methods",
                                               search: search))
       let rows = try Engine.run(plan, session, routines,
-                                bindings: ["parent": rowid])
+                                bindings: ["parent": id])
       var methods = Array<Dictionary<String, Any>>()
       methods.reserveCapacity(rows.count)
       for method in rows {
-        // Each method's parameters, bound by the method's rowid; each row is its
-        // `rowid`, escaped `Name`, and `Sequence`. The return pseudo-parameter
+        // Each method's parameters, bound by the method's `Id`; each row is its
+        // `Id`, escaped `Name`, and `Sequence`. The return pseudo-parameter
         // (`Sequence == 0`) is dropped — only the real parameters spell the
         // requirement's arguments — and the rest decode their type at render
         // time from the parameter's own signature position.
@@ -494,14 +494,14 @@ internal struct Shell: ~Escapable {
         }
         methods.append(entry)
       }
-      // The interface's base, via the `bases` view bound by its rowid. A
+      // The interface's base, via the `bases` view bound by its `Id`. A
       // rootless interface defaults to the spec's COM root, except the root
       // interface itself — which inherits nothing, so it never becomes its own
       // base; an empty `root` applies no default.
       let lineage =
           try Shell.select(Shell.query(named: "bases", search: search))
       let bases = try Engine.run(lineage, session, routines,
-                                 bindings: ["parent": rowid])
+                                 bindings: ["parent": id])
       let base: String? = if let inherited = bases.first {
         inherited[0].text
       } else if language.root.isEmpty || found[2].text == language.root {
@@ -1017,15 +1017,15 @@ extension Session {
   /// declaring type, projecting `CustomAttribute.guid` as the `iid` — a
   /// `methods` view of one interface's methods, a `params` view of one
   /// method's parameters, and a `bases` view of one interface's base type. The
-  /// latter three carry a uniform `:parent` param — the owning row's `rowid` —
+  /// latter three carry a uniform `:parent` param — the owning row's `Id` —
   /// so a render can walk interface → methods → params, binding each level's
-  /// `rowid` to the next's `:parent`, and look up the interface's base by its
-  /// `rowid`.
+  /// `Id` to the next's `:parent`, and look up the interface's base by its
+  /// `Id`.
   ///
   /// The `bases` view navigates the interface's single `InterfaceImpl` row
-  /// (whose simple `Class` index is the interface's 1-based `rowid`) to its
+  /// (whose simple `Class` index is the interface's 1-based `Id`) to its
   /// base type's simple name, projecting `TypeRef.TypeName` as `base`. The
-  /// `Class` column is a *simple* `TypeDef` index — it stores the `rowid`
+  /// `Class` column is a *simple* `TypeDef` index — it stores the `Id`
   /// directly, so the predicate is `i.Class = :parent` (there is no decoded
   /// `Class_TypeDef` join key — `WinMDRelation.keys` derives keys only for
   /// *coded* indices). `Interface` is the coded `TypeDefOrRef`, so its decoded
@@ -1122,7 +1122,7 @@ extension Value {
   }
 
   /// This cell's `integer`, zero for any non-integer cell — the render reads a
-  /// `rowid`/`Sequence` `.integer` column to navigate a signature, so a
+  /// `Id`/`Sequence` `.integer` column to navigate a signature, so a
   /// non-integer cell is a NULL the query guarantees never appears there.
   internal var integer: Int {
     if case let .integer(integer) = self { integer } else { 0 }

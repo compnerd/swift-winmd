@@ -1,5 +1,5 @@
 SELECT
-  rowid,
+  Id,
   SANITIZE(Name) AS Name
 FROM
   methods

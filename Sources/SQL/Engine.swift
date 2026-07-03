@@ -554,7 +554,8 @@ public enum Engine {
   private static func scalar(_ projection: Projection)
       throws(SQLError) -> Plan {
     guard case .all = projection else {
-      let schema = Schema(width: 0, extent: 0, names: [], virtuals: [])
+      let schema = Schema(width: 0, extent: 0, names: [], types: [],
+                          virtuals: [])
       let terms = try schema.terms(projection, in: Relation(name: ""))
       return .project(terms, .single)
     }

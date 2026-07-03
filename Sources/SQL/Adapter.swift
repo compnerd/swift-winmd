@@ -18,13 +18,13 @@
 
 // MARK: - Values
 
-/// The kind of value a column holds.
+/// The type of value a column holds.
 ///
 /// A column is integral, approximate-numeric, textual, truth-valued, or binary.
 /// A source uses this to describe its schema and to build the typed `Value`s a
 /// `Row` yields; the engine itself compares and orders on the `Value`, not the
-/// kind.
-public enum ValueKind: Hashable, Sendable {
+/// type.
+public enum ValueType: Hashable, Sendable {
   /// An integral column — exact numeric.
   case integer
   /// An approximate-numeric column — SQL `FLOAT`/`REAL`/`DOUBLE PRECISION`,
@@ -128,11 +128,31 @@ public protocol Catalog: ~Escapable {
   /// default registers no view, so a source without stored queries need not
   /// implement it.
   borrowing func view(named name: String) -> View?
+
+  /// The names of every base relation the catalog holds, in any order.
+  ///
+  /// Where `table(named:)` resolves ONE name, this enumerates them all — the
+  /// surface the engine's `INFORMATION_SCHEMA` overlay walks to build its
+  /// `tables`/`columns` metadata. An `Array<String>` is escapable owned data,
+  /// so the enumeration stays `~Escapable`-safe over a borrowed source. Every
+  /// catalog implements it; a source that cannot enumerate its relations
+  /// returns `[]` (its metadata is then empty rather than wrong).
+  borrowing func relations() -> Array<String>
+
+  /// The names of every view the catalog registers, in any order.
+  ///
+  /// The `INFORMATION_SCHEMA` overlay lists these with a `'VIEW'` table type
+  /// beside the base `relations()`. The default is empty — a source with no
+  /// stored queries need not implement it, matching `view(named:)`.
+  borrowing func views() -> Array<String>
 }
 
 extension Catalog where Self: ~Escapable {
   /// A catalog with no stored queries registers no view.
   public borrowing func view(named name: String) -> View? { nil }
+
+  /// A catalog with no stored queries lists no view.
+  public borrowing func views() -> Array<String> { [] }
 }
 
 // MARK: - Table
@@ -161,6 +181,18 @@ public protocol Table: ~Escapable {
   /// view against a base table uniformly. The virtual columns (`Id`, an owner
   /// foreign key) are not in `names`; they resolve through `ordinal(of:)`.
   var names: Array<String> { get }
+
+  /// The value type of each real column, in ordinal order — type `i` is the
+  /// type of the real column at ordinal `i`, so `types.count == width`.
+  ///
+  /// The engine reads these only to describe a relation's schema — the
+  /// `INFORMATION_SCHEMA` overlay's `data_type` column and
+  /// `Engine.outputSchema` — never to compare or order (that runs on the
+  /// `Value` a `Row` yields). The default is `.integer` for every column, so a
+  /// source that does not type its schema advertises an all-integral relation;
+  /// a source that knows its column types overrides it. The virtual columns
+  /// (`Id`, an owner foreign key) are not typed here — not being ISO columns.
+  var types: Array<ValueType> { get }
 
   /// The virtual column names, in ordinal order — virtual `i` of `virtuals`
   /// sits at ordinal `width + i`.
@@ -221,6 +253,12 @@ public protocol Table: ~Escapable {
 extension Table where Self: ~Escapable {
   /// A relation with no virtual column ends at its real `width`.
   public var extent: Int { width }
+
+  /// A relation that does not type its schema advertises every real column as
+  /// integral, so `types.count` still equals `width`.
+  public var types: Array<ValueType> {
+    Array(repeating: .integer, count: width)
+  }
 
   /// A relation exposes no virtual column by default.
   public var virtuals: Array<String> { [] }

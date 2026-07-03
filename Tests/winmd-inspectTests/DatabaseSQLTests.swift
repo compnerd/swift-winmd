@@ -324,6 +324,19 @@ struct DatabaseSQLTests {
     }
   }
 
+  @Test("a session enumerates its registered views for introspection")
+  func sessionViewsEnumerated() throws {
+    // The session implements `Catalog.views()` off its registered set, the
+    // surface the `INFORMATION_SCHEMA` overlay lists with a `'VIEW'` table type.
+    // A session over one registered view enumerates exactly that view's name.
+    try DatabaseSQLTests.with { catalog in
+      let (name, view) = try DatabaseSQLTests.create(
+          "CREATE VIEW named AS SELECT TypeName FROM TypeDef")
+      let session = Session(catalog, [name: view])
+      #expect(session.views() == ["named"])
+    }
+  }
+
   @Test("the render decode spells a method's return from its signature")
   func decodesReturn() {
     // The render decodes a return at render time (not through a virtual column):
@@ -661,9 +674,9 @@ struct DatabaseSQLTests {
     try DatabaseSQLTests.with { catalog in
       var shell = Shell(catalog)
       try shell.execute("CREATE VIEW names AS SELECT TypeName FROM TypeDef")
-      #expect(shell.session.views.keys.contains("names"))
+      #expect(shell.session.registered.keys.contains("names"))
       let rows = try DatabaseSQLTests.run(
-          "SELECT TypeName FROM names", shell.session.views, catalog)
+          "SELECT TypeName FROM names", shell.session.registered, catalog)
       #expect(rows == [[.text("IMyInterface")], [.text("INotGuid")]])
     }
   }
@@ -841,7 +854,7 @@ struct DatabaseSQLTests {
     DatabaseSQLTests.with { catalog in
       var shell = Shell(catalog)
       #expect(throws: Never.self) { try shell.execute(".read \(path)") }
-      #expect(shell.session.views.keys.contains("ok"))
+      #expect(shell.session.registered.keys.contains("ok"))
     }
   }
 

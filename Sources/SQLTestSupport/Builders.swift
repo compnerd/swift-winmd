@@ -10,7 +10,7 @@ import SQL
 /// A `Catalog { … }` gathers `Relation`/`View` members; a `Relation` gathers
 /// `Row` members; a `Row` takes bare Swift literals a `ValueConvertible` lifts
 /// into `Value`s, so `Row(1, "Alice", 30)` needs no `.integer(…)`/`.text(…)`
-/// ceremony. The schema is an ordered `KeyValuePairs<String, ValueKind>` so a
+/// ceremony. The schema is an ordered `KeyValuePairs<String, ValueType>` so a
 /// column's position is its declaration order, and `sorted:` marks a column
 /// seekable — driving the fixture store's binary-search `bound`.
 
@@ -106,7 +106,7 @@ public enum Member {
 /// A named base relation: an ordered schema, its rows, and an optional seekable
 /// column.
 ///
-/// The schema is a `KeyValuePairs<String, ValueKind>` so a column's ordinal is
+/// The schema is a `KeyValuePairs<String, ValueType>` so a column's ordinal is
 /// its declaration order; `sorted:` names the column whose rows are stored in
 /// ascending order, which the fixture store's `bound` seeks (and any other
 /// column scans). The body lists the rows as `Row(…)` literals.
@@ -114,10 +114,10 @@ public struct Relation {
   public let member: Member
 
   public init(_ name: String,
-              _ schema: KeyValuePairs<String, ValueKind>,
+              _ schema: KeyValuePairs<String, ValueType>,
               sorted column: String? = nil,
               @RowBuilder rows: () -> Array<Array<Value>> = { [] }) {
-    let fields = schema.map { FixtureField(name: $0.key, kind: $0.value) }
+    let fields = schema.map { FixtureField(name: $0.key, type: $0.value) }
     // Fold the sorted-column name like the engine folds identifiers, so
     // `sorted: "id"` matches a declared `Id`; a name matching no column is a
     // fixture error and traps rather than silently building an unsorted

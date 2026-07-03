@@ -24,15 +24,22 @@ internal struct Schema {
   /// The real column names at their ordinals `0 ..< width`.
   internal let names: Array<String>
 
+  /// The value type of each real column at its ordinal `0 ..< width` — type `i`
+  /// types the column named `names[i]`, so `types.count == width`. It describes
+  /// the schema (the `INFORMATION_SCHEMA` overlay's `data_type`,
+  /// `Engine.outputSchema`); the engine never compares or orders on it.
+  internal let types: Array<ValueType>
+
   /// The virtual column names at their ordinals `width ..< extent` — virtual
   /// `i` sits at ordinal `width + i`. A view supplies none.
   internal let virtuals: Array<String>
 
   internal init(width: Int, extent: Int, names: Array<String>,
-                virtuals: Array<String>) {
+                types: Array<ValueType>, virtuals: Array<String>) {
     self.width = width
     self.extent = extent
     self.names = names
+    self.types = types
     self.virtuals = virtuals
   }
 
@@ -61,15 +68,23 @@ extension Table where Self: ~Escapable {
   /// its `virtuals` at and past it, with `width`/`extent` gating a `SELECT *`
   /// and the join split exactly as the table reports them.
   internal borrowing func schema() -> Schema {
-    Schema(width: width, extent: extent, names: names, virtuals: virtuals)
+    Schema(width: width, extent: extent, names: names, types: types,
+           virtuals: virtuals)
   }
 }
 
 extension View {
   /// The resolution schema of this view: its columns in projection order, no
   /// virtual column.
+  ///
+  /// A view's column types are not known without compiling its query, so its
+  /// schema types every column integral — the same default a base table without
+  /// a typed schema advertises. Resolution never reads `types`; only the
+  /// metadata surfaces do, and they see a view's columns through the base
+  /// relations they select from.
   internal func schema() -> Schema {
     Schema(width: columns.count, extent: columns.count, names: columns,
+           types: Array(repeating: .integer, count: columns.count),
            virtuals: [])
   }
 }

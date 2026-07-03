@@ -61,13 +61,24 @@ extension WinMD.Storage: SQL.Catalog {
   /// `SQLError.relation`.
   @_lifetime(borrow self)
   internal borrowing func table(named name: String) -> WinMDRelation? {
-    for index in 0 ..< relations.count {
-      if relations[index].description.caseInsensitiveCompare(name)
+    for index in 0 ..< tables.count {
+      if tables[index].description.caseInsensitiveCompare(name)
           == .orderedSame {
-        return WinMDRelation(self, relations[index])
+        return WinMDRelation(self, tables[index])
       }
     }
     return nil
+  }
+
+  /// The schema names of every open table — the `INFORMATION_SCHEMA` overlay's
+  /// base-relation enumeration, mapped from the database's open relations.
+  internal borrowing func relations() -> Array<String> {
+    var names = Array<String>()
+    names.reserveCapacity(tables.count)
+    for index in 0 ..< tables.count {
+      names.append("\(tables[index].description)")
+    }
+    return names
   }
 }
 
@@ -91,7 +102,7 @@ internal struct Session: SQL.Catalog, ~Escapable {
   internal let storage: WinMD.Storage
 
   /// The views the session has registered, keyed case-folded.
-  internal var views: Dictionary<String, View>
+  internal var registered: Dictionary<String, View>
 
   /// Opens a session over `storage`, seeding the bundled COM-interface views —
   /// or, where a `-I` `search` directory shadows or adds one, its view.
@@ -99,7 +110,7 @@ internal struct Session: SQL.Catalog, ~Escapable {
   internal init(_ storage: borrowing WinMD.Storage,
                 search: Array<String> = []) {
     self.storage = copy storage
-    self.views = Session.bundled(search: search)
+    self.registered = Session.bundled(search: search)
   }
 
   /// Opens a session over `storage` with an explicit `views` set — the seam a
@@ -109,13 +120,13 @@ internal struct Session: SQL.Catalog, ~Escapable {
   internal init(_ storage: borrowing WinMD.Storage,
                 _ views: Dictionary<String, View>) {
     self.storage = copy storage
-    self.views = views
+    self.registered = views
   }
 
   /// Registers `view` under `name` (case-folded, the way `view(named:)`
   /// resolves it) — the `CREATE VIEW` path.
   internal mutating func register(_ name: String, _ view: View) {
-    views[name.lowercased()] = view
+    registered[name.lowercased()] = view
   }
 
   @_lifetime(borrow self)
@@ -124,7 +135,22 @@ internal struct Session: SQL.Catalog, ~Escapable {
   }
 
   internal borrowing func view(named name: String) -> View? {
-    views[name.lowercased()]
+    registered[name.lowercased()]
+  }
+
+  /// The base relations the session exposes — the storage's open tables, the
+  /// same set `table(named:)` resolves against.
+  internal borrowing func relations() -> Array<String> {
+    storage.relations()
+  }
+
+  /// The names of the views the session registers — the registered and bundled
+  /// set `view(named:)` resolves, so the `INFORMATION_SCHEMA` overlay lists
+  /// them with a `'VIEW'` table type beside the base `relations()`. The stored
+  /// map is keyed case-folded; a view's own declared name is not retained, so
+  /// the folded keys are the names the overlay reports.
+  internal borrowing func views() -> Array<String> {
+    Array(registered.keys)
   }
 }
 
@@ -208,6 +234,27 @@ internal struct WinMDRelation: SQL.Table, ~Escapable {
       names.append("\(table.schema.fields[index].name)")
     }
     return names
+  }
+
+  /// The value type of each real field, in ordinal order — mirroring how a
+  /// `WinMDRow` cell decides its `Value`: a `#Strings` heap index is `.text`, a
+  /// `#Blob` heap index a `.blob`, every other column (a constant, a
+  /// foreign-key index, another heap) an `.integer`. The virtual columns are
+  /// not typed here.
+  internal var types: Array<ValueType> {
+    var types = Array<ValueType>()
+    types.reserveCapacity(table.schema.fields.count)
+    for index in 0 ..< table.schema.fields.count {
+      switch table.schema.fields[index].type {
+      case .index(.heap(.string)):
+        types.append(.text)
+      case .index(.heap(.blob)):
+        types.append(.blob)
+      default:
+        types.append(.integer)
+      }
+    }
+    return types
   }
 
   /// The virtual column names, in ordinal order — `Id` at `width`, then its
@@ -487,11 +534,11 @@ extension WinMDRelation {
       for index in Self.lists.indices
           where Self.lists[index].child
                     .caseInsensitiveCompare(child.description) == .orderedSame {
-        for relation in 0 ..< storage.relations.count
-            where storage.relations[relation].description
+        for relation in 0 ..< storage.tables.count
+            where storage.tables[relation].description
                       .caseInsensitiveCompare(Self.lists[index].parent)
                           == .orderedSame {
-          self.parent = storage.relations[relation]
+          self.parent = storage.tables[relation]
           self.column = Self.lists[index].column
           return
         }
@@ -682,10 +729,10 @@ extension WinMD.Storage {
   /// against the database's relations — the signature decode's table lookup, the
   /// same keying `WinMDRelation.Link` uses to find a list parent.
   internal borrowing func opened(_ schema: String) -> WinMD.Table? {
-    for index in 0 ..< relations.count
-        where relations[index].description
+    for index in 0 ..< tables.count
+        where tables[index].description
                   .caseInsensitiveCompare(schema) == .orderedSame {
-      return relations[index]
+      return tables[index]
     }
     return nil
   }

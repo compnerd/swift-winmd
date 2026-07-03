@@ -25,15 +25,19 @@ private struct AggregateRelation: Sendable {
 
 /// A `Catalog` over a dictionary of named relations.
 private struct AggregateMemory: Catalog {
-  let relations: Dictionary<String, AggregateRelation>
+  let catalog: Dictionary<String, AggregateRelation>
 
   init(_ relations: Dictionary<String, AggregateRelation>) {
-    self.relations = relations
+    self.catalog = relations
   }
 
   func table(named name: String) -> AggregateTable? {
-    guard let relation = relations[name] else { return nil }
+    guard let relation = catalog[name] else { return nil }
     return AggregateTable(relation)
+  }
+
+  func relations() -> Array<String> {
+    Array(catalog.keys)
   }
 }
 

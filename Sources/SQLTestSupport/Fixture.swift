@@ -17,14 +17,14 @@ import SQL
 /// single copy of the adapter both `EngineTests` and `LimitTests` build
 /// fixtures over.
 
-/// A column's name and value kind.
+/// A column's name and value type.
 public struct FixtureField: Sendable {
   public let name: String
-  public let kind: ValueKind
+  public let type: ValueType
 
-  public init(name: String, kind: ValueKind) {
+  public init(name: String, type: ValueType) {
     self.name = name
-    self.kind = kind
+    self.type = type
   }
 }
 
@@ -101,26 +101,34 @@ public struct FixtureRelation: Sendable {
 /// source would instead annotate them. It is the proof the same protocols admit
 /// both a Span-backed source and an owned one.
 public struct FixtureCatalog: Catalog {
-  public let relations: Dictionary<String, FixtureRelation>
-  public let views: Dictionary<String, SQL.View>
+  public let catalog: Dictionary<String, FixtureRelation>
+  public let registered: Dictionary<String, SQL.View>
 
   public init(_ relations: Dictionary<String, FixtureRelation>,
               views: Dictionary<String, SQL.View> = [:]) {
-    self.relations = relations
-    self.views = views
+    self.catalog = relations
+    self.registered = views
   }
 
   public func table(named name: String) -> FixtureTable? {
     // Fold the lookup like the engine and the WinMD catalog do, so a query's
     // casing need not match the fixture's declared relation name.
     let folded = name.lowercased()
-    return relations.first { $0.key.lowercased() == folded }
+    return catalog.first { $0.key.lowercased() == folded }
         .map { FixtureTable($0.value) }
   }
 
   public func view(named name: String) -> SQL.View? {
     let folded = name.lowercased()
-    return views.first { $0.key.lowercased() == folded }?.value
+    return registered.first { $0.key.lowercased() == folded }?.value
+  }
+
+  public func relations() -> Array<String> {
+    Array(catalog.keys)
+  }
+
+  public func views() -> Array<String> {
+    Array(registered.keys)
   }
 }
 
@@ -138,6 +146,9 @@ public struct FixtureTable: Table {
 
   /// The real column names, in ordinal order.
   public var names: Array<String> { relation.fields.map(\.name) }
+
+  /// The real column types, in ordinal order — the fixtures type their fields.
+  public var types: Array<ValueType> { relation.fields.map(\.type) }
 
   /// The lone virtual `Id` column at ordinal `width`.
   public var virtuals: Array<String> { ["Id"] }

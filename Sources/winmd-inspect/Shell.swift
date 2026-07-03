@@ -42,7 +42,7 @@ internal struct Tables: Metacommand {
   internal init(_ arguments: Substring) {}
 
   internal func execute(against shell: inout Shell) throws {
-    let relations = shell.session.storage.relations
+    let relations = shell.session.storage.tables
     for index in 0 ..< relations.count { print("  \(relations[index])") }
   }
 }

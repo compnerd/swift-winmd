@@ -48,7 +48,8 @@ internal struct Materialised: Hashable, Sendable {
   /// The resolution schema of this relation: its columns below `width`, a
   /// virtual `Id` at `width`.
   internal func schema() -> Schema {
-    Schema(width: width, extent: extent, names: columns, virtuals: ["Id"])
+    Schema(width: width, extent: extent, names: columns,
+           types: Array(repeating: .integer, count: width), virtuals: ["Id"])
   }
 
   /// The record for the row at `index`, materialising the referenced `ordinals`

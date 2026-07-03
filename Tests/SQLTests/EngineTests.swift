@@ -72,8 +72,8 @@ private func grades() throws -> Memory {
 /// `Relation` (whose only marker is `sorted:`) does not spell.
 private func attributes() -> Memory {
   let fields = [
-    Field(name: "Parent", kind: .integer),
-    Field(name: "Name", kind: .text),
+    Field(name: "Parent", type: .integer),
+    Field(name: "Name", type: .text),
   ]
   // Stored `Parent` = `(Id << 2) | tag` (Coded.bits == 2), ascending.
   // Decoded `Parent`:
@@ -102,7 +102,7 @@ private func attributes() -> Memory {
 /// The ten columns and four rows are generated, so it is built directly as a
 /// `FixtureRelation` rather than a literal-per-row fluent `Relation`.
 private func wide() -> Memory {
-  let fields = (0 ..< 10).map { Field(name: "C\($0)", kind: .integer) }
+  let fields = (0 ..< 10).map { Field(name: "C\($0)", type: .integer) }
   let records = (0 ..< 4).map { row in
     (0 ..< 10).map { Value.integer(row * 10 + $0) }
   }
@@ -161,7 +161,7 @@ private func views() throws -> Memory {
     try View("Picked", "SELECT Id, Name FROM Parent WHERE Id = :id",
              as: ["Key", "Label"])
   }
-  return Memory(try family().relations, views: catalog.views)
+  return Memory(try family().catalog, views: catalog.registered)
 }
 
 /// A catalog with NULL cells: a `Maybe` relation whose `Note` text column is
@@ -990,7 +990,7 @@ struct EngineViewTests {
     // catches the mismatch at resolution rather than indexing past a row.
     let star = try View(query: select("SELECT * FROM Parent"),
                         columns: ["a", "b", "c"])
-    let catalog = Memory(try family().relations, views: ["Star": star])
+    let catalog = Memory(try family().catalog, views: ["Star": star])
     #expect(throws: SQLError.columns(expected: 2, got: 3)) {
       try Engine.run(parse("SELECT a FROM Star"), catalog)
     }
@@ -1002,7 +1002,7 @@ struct EngineViewTests {
     // resolves and queries — the backstop passes the well-formed view through.
     let star = try View(query: select("SELECT * FROM Parent"),
                         columns: ["a", "b"])
-    let catalog = Memory(try family().relations, views: ["Star": star])
+    let catalog = Memory(try family().catalog, views: ["Star": star])
     let rows = try Engine.run(parse("SELECT b FROM Star WHERE a = 1"), catalog)
     #expect(rows == [[.text("Ada")]])
   }
@@ -1221,8 +1221,8 @@ private func residual(_ plan: Plan) -> Bool {
 private func counted() throws -> (catalog: Memory, reads: Counter) {
   let reads = Counter()
   let parent = [
-    Field(name: "Id", kind: .integer),
-    Field(name: "Name", kind: .text),
+    Field(name: "Id", type: .integer),
+    Field(name: "Name", type: .text),
   ]
   let parents = [
     [.integer(1), .text("Ada")],
@@ -1231,8 +1231,8 @@ private func counted() throws -> (catalog: Memory, reads: Counter) {
   ] as Array<Array<Value>>
 
   let child = [
-    Field(name: "Pid", kind: .integer),
-    Field(name: "Kid", kind: .text),
+    Field(name: "Pid", type: .integer),
+    Field(name: "Kid", type: .text),
   ]
   let children = [
     [.integer(1), .text("Ann")],
@@ -1261,8 +1261,8 @@ private func counted() throws -> (catalog: Memory, reads: Counter) {
 /// projection and seeking inside the `Alpha` arm.
 private func spanned() throws -> Memory {
   let alpha = [
-    Field(name: "Key", kind: .integer),
-    Field(name: "Tag", kind: .text),
+    Field(name: "Key", type: .integer),
+    Field(name: "Tag", type: .text),
   ]
   let alphas = [
     [.integer(1), .text("a1")],
@@ -1271,8 +1271,8 @@ private func spanned() throws -> Memory {
   ] as Array<Array<Value>>
 
   let beta = [
-    Field(name: "Tag", kind: .text),
-    Field(name: "Key", kind: .integer),
+    Field(name: "Tag", type: .text),
+    Field(name: "Key", type: .integer),
   ]
   let betas = [
     [.text("b1"), .integer(1)],
@@ -1362,9 +1362,9 @@ struct EnginePushdownTests {
     // survives the three-term AND.
     let catalog = Memory([
       "T": FixtureRelation([
-        Field(name: "Name", kind: .text),
-        Field(name: "Age", kind: .integer),
-        Field(name: "Id", kind: .integer),
+        Field(name: "Name", type: .text),
+        Field(name: "Age", type: .integer),
+        Field(name: "Id", type: .integer),
       ], [
         [.text("a"), .integer(1), .integer(5)],
         [.text("b"), .integer(2), .integer(6)],
@@ -1390,9 +1390,9 @@ struct EnginePushdownTests {
     // residual bars the seek: the plan scans, and it raises.
     let catalog = Memory([
       "T": FixtureRelation([
-        Field(name: "x", kind: .integer),
-        Field(name: "name", kind: .text),
-        Field(name: "id", kind: .integer),
+        Field(name: "x", type: .integer),
+        Field(name: "name", type: .text),
+        Field(name: "id", type: .integer),
       ], [
         [.integer(0), .text("a"), .integer(5)],
       ] as Array<Array<Value>>, sorted: 2),
@@ -1516,9 +1516,9 @@ struct EnginePushdownTests {
     // the query returns no rows. Pushed to the left, it would run once per left
     // row and raise `SQLError.divide`.
     let catalog = Memory([
-      "A": FixtureRelation([Field(name: "x", kind: .integer)],
+      "A": FixtureRelation([Field(name: "x", type: .integer)],
                     [[.integer(1)]] as Array<Array<Value>>),
-      "B": FixtureRelation([Field(name: "y", kind: .integer)],
+      "B": FixtureRelation([Field(name: "y", type: .integer)],
                     [] as Array<Array<Value>>),
     ])
     let rows = try Engine.run(parse("""
@@ -1535,9 +1535,9 @@ struct EnginePushdownTests {
     // never evaluated; the query returns no rows. Pushed to `A` (x = 0) it would
     // divide by zero and raise `SQLError.divide`.
     let catalog = Memory([
-      "A": FixtureRelation([Field(name: "x", kind: .integer)],
+      "A": FixtureRelation([Field(name: "x", type: .integer)],
                     [[.integer(0)]] as Array<Array<Value>>),
-      "B": FixtureRelation([Field(name: "y", kind: .integer)],
+      "B": FixtureRelation([Field(name: "y", type: .integer)],
                     [] as Array<Array<Value>>),
     ])
     let rows = try Engine.run(parse("""
@@ -1554,9 +1554,9 @@ struct EnginePushdownTests {
     // the division runs, silently returning no rows. The earlier unsafe conjunct
     // is an ordering barrier, so the query raises as the un-pushed `AND` would.
     let catalog = Memory([
-      "A": FixtureRelation([Field(name: "x", kind: .integer)],
+      "A": FixtureRelation([Field(name: "x", type: .integer)],
                     [[.integer(0)]] as Array<Array<Value>>),
-      "B": FixtureRelation([Field(name: "y", kind: .integer)],
+      "B": FixtureRelation([Field(name: "y", type: .integer)],
                     [[.integer(0)]] as Array<Array<Value>>),
     ])
     #expect(throws: SQLError.self) {
@@ -1576,11 +1576,11 @@ struct EnginePushdownTests {
     // first and raises. The matching Parent is named 'other', so the row is
     // excluded with no throw.
     let catalog = Memory([
-      "Child": FixtureRelation([Field(name: "Pid", kind: .integer),
-                         Field(name: "x", kind: .integer)],
+      "Child": FixtureRelation([Field(name: "Pid", type: .integer),
+                         Field(name: "x", type: .integer)],
                         [[.integer(1), .integer(0)]] as Array<Array<Value>>),
-      "Parent": FixtureRelation([Field(name: "Id", kind: .integer),
-                          Field(name: "Name", kind: .text)],
+      "Parent": FixtureRelation([Field(name: "Id", type: .integer),
+                          Field(name: "Name", type: .text)],
                          [[.integer(1), .text("other")]]
                              as Array<Array<Value>>),
     ])
@@ -1619,8 +1619,8 @@ struct EnginePushdownTests {
     // pushing `id <> 0` below the view's Project would filter the row first and
     // silently skip the division, so a view whose projection can throw is never
     // pushed into.
-    let t = [Field(name: "id", kind: .integer),
-             Field(name: "z", kind: .integer)]
+    let t = [Field(name: "id", type: .integer),
+             Field(name: "z", type: .integer)]
     let rows = [[.integer(0), .integer(0)]] as Array<Array<Value>>
     let view = try View(query: select("SELECT id, 1 / z FROM T"),
                         columns: ["id", "q"])
@@ -1640,7 +1640,7 @@ struct EnginePushdownTests {
     // outer division ever runs, silently returning no rows. The unsafe outer
     // conjunct is an ordering barrier, so the query raises as the un-pushed `AND`
     // would.
-    let t = [Field(name: "x", kind: .integer)]
+    let t = [Field(name: "x", type: .integer)]
     let rows = [[.integer(0)]] as Array<Array<Value>>
     let view = try View(query: select("SELECT x FROM T"), columns: ["x"])
     let catalog = Memory(["T": FixtureRelation(t, rows, sorted: 0)],
@@ -1662,11 +1662,11 @@ struct EnginePushdownTests {
     // nullable conjunct must NOT ride past a LATER unsafe conjunct, so `A.x = 1`
     // stays a product-level residual and the query raises.
     let catalog = Memory([
-      "A": FixtureRelation([Field(name: "x", kind: .integer),
-                     Field(name: "k", kind: .integer)],
+      "A": FixtureRelation([Field(name: "x", type: .integer),
+                     Field(name: "k", type: .integer)],
                     [[.null, .integer(0)]] as Array<Array<Value>>),
-      "B": FixtureRelation([Field(name: "y", kind: .integer),
-                     Field(name: "k", kind: .integer)],
+      "B": FixtureRelation([Field(name: "y", type: .integer),
+                     Field(name: "k", type: .integer)],
                     [[.integer(0), .integer(0)]] as Array<Array<Value>>),
     ])
     let select = try parse("""
@@ -1697,8 +1697,8 @@ struct EnginePushdownTests {
     // division runs, suppressing the throw. A nullable conjunct must NOT be
     // injected past a LATER unsafe outer conjunct, so `x = 1` stays outer and
     // the query raises.
-    let t = [Field(name: "x", kind: .integer),
-             Field(name: "y", kind: .integer)]
+    let t = [Field(name: "x", type: .integer),
+             Field(name: "y", type: .integer)]
     let rows = [[.null, .integer(0)]] as Array<Array<Value>>
     let view = try View(query: select("SELECT x, y FROM T"),
                         columns: ["x", "y"])
@@ -1728,8 +1728,8 @@ struct EnginePushdownTests {
     // `1 = :missing` into the view would drop every row first, suppressing the
     // throw. A bound conjunct is nullable despite reading no slot, so it stays
     // outer and the query raises.
-    let t = [Field(name: "x", kind: .integer),
-             Field(name: "y", kind: .integer)]
+    let t = [Field(name: "x", type: .integer),
+             Field(name: "y", type: .integer)]
     let rows = [[.integer(1), .integer(0)]] as Array<Array<Value>>
     let view = try View(query: select("SELECT x, y FROM T"),
                         columns: ["x", "y"])
@@ -1760,11 +1760,11 @@ struct EnginePushdownTests {
     // separate inner gate drops that pair before the WHERE runs, so the query
     // does not raise: the matched `x = 1` row fails `(1 / 1) = 0`, leaving no
     // rows.
-    let a = [Field(name: "x", kind: .integer), Field(name: "k", kind: .integer)]
+    let a = [Field(name: "x", type: .integer), Field(name: "k", type: .integer)]
     let catalog = Memory([
       "A": FixtureRelation(a, [[.integer(1), .integer(1)],
                         [.integer(0), .null]] as Array<Array<Value>>),
-      "T": FixtureRelation([Field(name: "k", kind: .integer)],
+      "T": FixtureRelation([Field(name: "k", type: .integer)],
                     [[.integer(1)]] as Array<Array<Value>>),
     ], views: ["V": try View(query: select("SELECT k FROM T"),
                              columns: ["k"])])
@@ -1785,8 +1785,8 @@ struct EnginePushdownTests {
 private func hashable() -> (catalog: Memory, reads: Counter) {
   let reads = Counter()
   let parent = [
-    Field(name: "Id", kind: .integer),
-    Field(name: "Name", kind: .text),
+    Field(name: "Id", type: .integer),
+    Field(name: "Name", type: .text),
   ]
   let parents = [
     [.integer(1), .text("Ada")],
@@ -1795,8 +1795,8 @@ private func hashable() -> (catalog: Memory, reads: Counter) {
   ] as Array<Array<Value>>
 
   let child = [
-    Field(name: "Pid", kind: .integer),
-    Field(name: "Kid", kind: .text),
+    Field(name: "Pid", type: .integer),
+    Field(name: "Kid", type: .text),
   ]
   let children = [
     [.integer(1), .text("Ann")],
@@ -1840,11 +1840,11 @@ struct EngineHashJoinTests {
     // coded run instead. `Attribute.Parent` is such a column (stored raw
     // `(Id << 2) | tag`, decoded to a Id), and one `Type` (Id 6) probes it.
     let reads = Counter()
-    let type = [Field(name: "Id", kind: .integer)]
+    let type = [Field(name: "Id", type: .integer)]
     let types = [[.integer(6)]] as Array<Array<Value>>
     let attribute = [
-      Field(name: "Parent", kind: .integer),
-      Field(name: "Name", kind: .text),
+      Field(name: "Parent", type: .integer),
+      Field(name: "Name", type: .text),
     ]
     let attributes = [
       [.integer(0), .text("null-ref")],
@@ -1898,16 +1898,16 @@ struct EngineHashJoinTests {
     // nested-loop path this replaced read none for an all-null outer too.
     let reads = Counter()
     let parent = [
-      Field(name: "Id", kind: .integer),
-      Field(name: "Name", kind: .text),
+      Field(name: "Id", type: .integer),
+      Field(name: "Name", type: .text),
     ]
     let parents = [
       [.integer(1), .text("Ada")],
       [.integer(2), .text("Bee")],
     ] as Array<Array<Value>>
     let child = [
-      Field(name: "Pid", kind: .integer),
-      Field(name: "Kid", kind: .text),
+      Field(name: "Pid", type: .integer),
+      Field(name: "Kid", type: .text),
     ]
     let children = [
       [.integer(1), .text("Ann")],
@@ -1969,16 +1969,16 @@ struct EngineHashJoinTests {
     // nothing, and a NULL inner key is never bucketed. `Parent` here is unsorted
     // so the join hashes.
     let parent = [
-      Field(name: "Id", kind: .integer),
-      Field(name: "Name", kind: .text),
+      Field(name: "Id", type: .integer),
+      Field(name: "Name", type: .text),
     ]
     let parents = [
       [.integer(1), .text("Ada")],
       [.integer(2), .text("Bee")],
     ] as Array<Array<Value>>
     let child = [
-      Field(name: "Pid", kind: .integer),
-      Field(name: "Name", kind: .text),
+      Field(name: "Pid", type: .integer),
+      Field(name: "Name", type: .text),
     ]
     let children = [
       [.integer(1), .text("Ann")],
@@ -2011,8 +2011,8 @@ struct EngineHashJoinTests {
     // bucketed (three reads) before the filter matched none of it.
     let reads = Counter()
     let parent = [
-      Field(name: "Id", kind: .integer),
-      Field(name: "Code", kind: .integer),
+      Field(name: "Id", type: .integer),
+      Field(name: "Code", type: .integer),
     ]
     let parents = [
       [.integer(1), .integer(10)],
@@ -2020,8 +2020,8 @@ struct EngineHashJoinTests {
       [.integer(3), .integer(30)],
     ] as Array<Array<Value>>
     let child = [
-      Field(name: "Code", kind: .integer),
-      Field(name: "Kid", kind: .text),
+      Field(name: "Code", type: .integer),
+      Field(name: "Kid", type: .text),
     ]
     let children = [
       [.integer(10), .text("Ann")],
@@ -2102,8 +2102,8 @@ struct EngineStreamingProductTests {
     // A NULL-keyed pair evaluates the ON equality to UNKNOWN, which the fused
     // filter drops exactly as `admitted` would — no NULL child reaches a match.
     let child = [
-      Field(name: "Pid", kind: .integer),
-      Field(name: "Name", kind: .text),
+      Field(name: "Pid", type: .integer),
+      Field(name: "Name", type: .text),
     ]
     let children = [
       [.integer(2), .text("Bob")],
@@ -2113,8 +2113,8 @@ struct EngineStreamingProductTests {
         SELECT Id, Name FROM Base WHERE Id >= 2
         """), columns: ["Key", "Label"])
     let base = [
-      Field(name: "Id", kind: .integer),
-      Field(name: "Name", kind: .text),
+      Field(name: "Id", type: .integer),
+      Field(name: "Name", type: .text),
     ]
     let bases = [
       [.integer(2), .text("Bee")],
@@ -2484,7 +2484,7 @@ struct EngineBoundTests {
 /// `a` already in `Left`, so a trailing `UNION ALL Extra` keeps it a second
 /// time — proving an inner `UNION`'s dedup survives an outer `UNION ALL`.
 private func tags() -> Memory {
-  let fields = [Field(name: "Tag", kind: .text)]
+  let fields = [Field(name: "Tag", type: .text)]
   let left = [
     [.text("a")],
     [.text("shared")],
@@ -2578,7 +2578,7 @@ struct EngineUnionTests {
     let both = try View(query: select("""
         SELECT Tag FROM Left UNION SELECT Tag FROM Right
         """), columns: ["Tag"])
-    let catalog = Memory(tags().relations, views: ["Both": both])
+    let catalog = Memory(tags().catalog, views: ["Both": both])
     let rows = try Engine.run(parse("SELECT Tag FROM Both"), catalog)
     #expect(rows == [[.text("a")], [.text("shared")], [.text("b")]])
   }
@@ -3106,7 +3106,7 @@ struct EngineWithTests {
     // bind to the CTE and the query would return `99`.
     let adults =
         try View(query: select("SELECT Id FROM Parent"), columns: ["Id"])
-    let catalog = Memory(try family().relations, views: ["Adults": adults])
+    let catalog = Memory(try family().catalog, views: ["Adults": adults])
     let rows = try statement("""
         WITH Parent (Id) AS (SELECT 99 AS Id FROM Parent WHERE Id = 1)
           SELECT Id FROM Adults
@@ -3121,7 +3121,7 @@ struct EngineWithTests {
     // — the scoping fix narrows only a view's body, never the statement query.
     let adults =
         try View(query: select("SELECT Id FROM Parent"), columns: ["Id"])
-    let catalog = Memory(try family().relations, views: ["Adults": adults])
+    let catalog = Memory(try family().catalog, views: ["Adults": adults])
     let rows = try statement("""
         WITH Parent (Id) AS (SELECT 99 AS Id FROM Parent WHERE Id = 1)
           SELECT Id FROM Parent
@@ -3152,9 +3152,9 @@ struct EngineWithTests {
     // alone, so this is NOT routed through the fixpoint: the two arms materialise
     // once (UNION ALL) instead of the arm re-running to the recursion cap.
     let catalog = Memory([
-      "Parent": FixtureRelation([Field(name: "Id", kind: .integer)],
+      "Parent": FixtureRelation([Field(name: "Id", type: .integer)],
                          [[.integer(1)], [.integer(2)]] as Array<Array<Value>>),
-      "Extra": FixtureRelation([Field(name: "Id", kind: .integer)],
+      "Extra": FixtureRelation([Field(name: "Id", type: .integer)],
                         [[.integer(3)]] as Array<Array<Value>>),
     ])
     let rows = try statement("""
@@ -3173,12 +3173,12 @@ struct EngineWithTests {
 /// `SELECT 1` the dialect lacks expressed as `SELECT 1 FROM Seed`. It also
 /// carries an `Edge(Src, Dst)` relation for a transitive-closure test.
 private func seed() -> Memory {
-  let one = [Field(name: "One", kind: .integer)]
+  let one = [Field(name: "One", type: .integer)]
   let seedRows = [[.integer(1)]] as Array<Array<Value>>
 
   let edge = [
-    Field(name: "Src", kind: .integer),
-    Field(name: "Dst", kind: .integer),
+    Field(name: "Src", type: .integer),
+    Field(name: "Dst", type: .integer),
   ]
   // 1 -> 2 -> 3 -> 4, a simple chain whose closure is every reachable pair.
   let edges = [
@@ -3302,7 +3302,7 @@ struct EngineRecursiveTests {
     // this — the anchor's reference resolves to an existing base relation, so it
     // is a valid seed, not a misplaced recursive arm.
     let catalog = Memory([
-      "Parent": FixtureRelation([Field(name: "Id", kind: .integer)],
+      "Parent": FixtureRelation([Field(name: "Id", type: .integer)],
                          [[.integer(1)]] as Array<Array<Value>>),
     ])
     let rows = try Engine.run(Statement(parsing: """
@@ -3324,7 +3324,7 @@ struct EngineRecursiveTests {
     // self-reference. The guard must accept a view seed as well as a table.
     let view = try View(query: select("SELECT Id FROM Parent"), columns: ["id"])
     let catalog = Memory([
-      "Parent": FixtureRelation([Field(name: "Id", kind: .integer)],
+      "Parent": FixtureRelation([Field(name: "Id", type: .integer)],
                          [[.integer(1)]] as Array<Array<Value>>),
     ], views: ["v": view])
     let rows = try Engine.run(Statement(parsing: """

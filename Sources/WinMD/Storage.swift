@@ -18,7 +18,7 @@ package struct Storage: ~Escapable {
   internal let bytes: RawSpan
 
   /// The open tables of the database, borrowed from `Database.relations`.
-  package let relations: Span<Table>
+  package let tables: Span<Table>
 
   /// The "Strings" (`#Strings`) heap.
   internal let strings: RawSpan
@@ -43,7 +43,7 @@ package struct Storage: ~Escapable {
   package init(bytes: RawSpan, relations: Span<Table>, strings: RawSpan,
                 blob: RawSpan, guid: RawSpan, valid: UInt64, sorted: UInt64) {
     self.bytes = bytes
-    self.relations = relations
+    self.tables = relations
     self.strings = strings
     self.blob = blob
     self.guid = guid
@@ -56,14 +56,14 @@ package struct Storage: ~Escapable {
                                           from begin: Int = 0,
                                           to end: Int? = nil) throws(WinMDError)
       -> TableIterator<Schema> {
-    // `relations` is dense and ordered by table number, so a present table's
+    // `tables` is dense and ordered by table number, so a present table's
     // slot is the number of present tables below it: the population count of
     // the lower bits of `Valid` (the same slot the row counts are read from).
     guard valid & (1 << Schema.number) != 0 else {
       throw .TableNotFound
     }
     let slot = (valid & ((1 << Schema.number) - 1)).nonzeroBitCount
-    return TableIterator<Schema>(self, relations[slot], from: begin, to: end)
+    return TableIterator<Schema>(self, tables[slot], from: begin, to: end)
   }
 
   /// The `Tuple` at the 0-based `row` of the table described by `schema`.
@@ -80,7 +80,7 @@ package struct Storage: ~Escapable {
       throws(WinMDError) -> Tuple? {
     guard valid & (1 << schema.number) != 0 else { return nil }
     let slot = (valid & ((1 << schema.number) - 1)).nonzeroBitCount
-    let table = relations[slot]
+    let table = tables[slot]
     guard row >= 0, row < Int(table.rows) else { return nil }
     return Tuple(row, table, self)
   }
@@ -120,7 +120,7 @@ package struct Storage: ~Escapable {
       throw .TableNotFound
     }
     let slot = (valid & ((1 << schema.number) - 1)).nonzeroBitCount
-    let table = relations[slot]
+    let table = tables[slot]
 
     // The stored cell an owning row holds to name `target`. ECMA-335 rows are
     // 1-based, so `target`'s 0-based row is stored as `target.row + 1`.

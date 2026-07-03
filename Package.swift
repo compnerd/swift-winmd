@@ -26,7 +26,12 @@ let _ =
                       swiftSettings: [
                         .enableExperimentalFeature("Lifetimes"),
                       ]),
-              .testTarget(name: "SQLTests", dependencies: ["SQL"],
+              .target(name: "SQLTestSupport", dependencies: ["SQL"],
+                      swiftSettings: [
+                        .enableExperimentalFeature("Lifetimes"),
+                      ]),
+              .testTarget(name: "SQLTests",
+                          dependencies: ["SQL", "SQLTestSupport"],
                           swiftSettings: [
                             .enableExperimentalFeature("Lifetimes"),
                           ]),

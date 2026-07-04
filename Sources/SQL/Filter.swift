@@ -264,7 +264,7 @@ private func apply<R: Row & ~Escapable>(_ name: String,
                                         _ row: borrowing R,
                                         _ routines: Routines)
     throws(SQLError) -> Value {
-  guard let function = routines.function(named: name) else {
+  guard let routine = routines[name] else {
     throw .function(name)
   }
   var values = Array<Value>()
@@ -272,7 +272,7 @@ private func apply<R: Row & ~Escapable>(_ name: String,
   for argument in arguments {
     try values.append(evaluate(argument, row, routines))
   }
-  let result = try function(values)
+  let result = try routine(values)
   // A registered routine is a public producer of `Value`s that bypasses the
   // literal/arithmetic finite checks; enforce the invariant here so a routine
   // cannot return `inf`/NaN. NaN in particular is unequal to itself and would

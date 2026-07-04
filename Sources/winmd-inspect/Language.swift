@@ -185,7 +185,8 @@ internal struct Language: Sendable {
   /// predicate) should `LIKE` ever be added to the engine.
   internal var routines: Routines {
     let language = self
-    let sanitize: Scalar = { arguments in
+    let sanitize:
+        @Sendable (Array<Value>) throws(SQLError) -> Value = { arguments in
       guard arguments.count == 1 else {
         throw .argument("SANITIZE takes one argument")
       }
@@ -195,6 +196,8 @@ internal struct Language: Sendable {
       }
       return .text(language.escape(identifier))
     }
-    return ["sanitize": sanitize]
+    // `SANITIZE` returns text, so it is registered with its return type rather
+    // than through the bare-closure literal (which defaults to `.integer`).
+    return Routines().registering("sanitize", returns: .text, sanitize)
   }
 }

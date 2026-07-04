@@ -161,8 +161,9 @@ private struct DoubleArithmeticTests {
     // A registered routine is a public `Value` producer that bypasses the
     // literal/arithmetic checks; a NaN or inf result is rejected at the call
     // boundary so it never reaches dedup, ordering, or a recursive UNION.
-    let routines: Routines = ["nan": { _ in .double(.nan) },
-                              "huge": { _ in .double(.infinity) }]
+    let routines: Routines =
+        ["nan": { _ in .double(.nan) },
+         "huge": { _ in .double(.infinity) }]
     #expect(throws: SQLError.self) {
       try evaluate(.apply(name: "nan", arguments: []), Cell(.null), routines)
     }

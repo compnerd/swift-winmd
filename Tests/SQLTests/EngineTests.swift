@@ -2246,9 +2246,9 @@ struct EngineFunctionTests {
   func collision() throws {
     // "tag" and "TAG" fold to one name; the registry merges them (the later-
     // sorting original spelling wins) instead of trapping on the duplicate.
-    let lower: Scalar = { _ in .text("lower") }
-    let upper: Scalar = { _ in .text("upper") }
-    let routines: Routines = ["tag": lower, "TAG": upper]
+    let routines: Routines =
+        ["tag": { _ in .text("lower") },
+         "TAG": { _ in .text("upper") }]
     let query = try parse("SELECT tag(Name) FROM People WHERE Id = 1")
     let rows = try people().run(query, routines)
     #expect(rows == [[.text("lower")]])

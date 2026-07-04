@@ -170,7 +170,10 @@ extension Session {
   /// session and render paths, which pass these routines EXPLICITLY rather than
   /// relying on the engine's default seeding.
   internal static var routines: Routines {
-    Routines.standard.registering("guid", Session.guid)
+    // `GUID` returns the UUID as text, so it is declared `.text` — the result
+    // type the schema walk and the `INFORMATION_SCHEMA` `data_type` a view's
+    // `GUID(...)` column reports read.
+    Routines.standard.registering("guid", returns: .text, Session.guid)
   }
 
   /// `GUID(blob)` — the UUID a `GuidAttribute` `CustomAttribute` value blob
@@ -181,7 +184,8 @@ extension Session {
   /// to a `GuidAttribute`, so a non-GUID blob simply yields `NULL` (preserving
   /// the old `guid` virtual column's NULL-on-mismatch behaviour). A NULL
   /// argument propagates to NULL; a non-blob argument is `SQLError.argument`.
-  private static let guid: Scalar = { arguments in
+  private static func guid(_ arguments: Array<Value>)
+      throws(SQLError) -> Value {
     guard arguments.count == 1 else {
       throw .argument("GUID takes one argument")
     }

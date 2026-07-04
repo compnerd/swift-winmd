@@ -76,20 +76,14 @@ extension Catalog where Self: ~Escapable {
     // path drives, resolving every arm and cross-checking a UNION's arity — so
     // a schema is returned only for a query that could actually run.
     _ = try compile(query, ctes)
-    // `compile` resolves each call's ARGUMENTS but cannot check the routine
-    // EXISTS (it holds no routine set; the name binds at execute), and the
-    // first-arm type walk below faults an unknown call it PROJECTS but not one
-    // in a `WHERE`/`HAVING` or a later `UNION` arm — so gate on `calls`, the
-    // whole-query inventory, against the same routines a run resolves: a query
-    // naming an unregistered function faults here EXACTLY as a run would rather
-    // than returning headers for a schema it could not produce.
+    // Type-check every REACHABLE operand and call across all arms — the
+    // projection, `WHERE`, and `HAVING` of each. `compile` resolves a call's
+    // arguments but cannot check the routine EXISTS, and the first-arm schema
+    // walk below sees only the first projection; `typecheck` faults an unknown
+    // call or a bad operand anywhere a run would evaluate it, and — like the
+    // executor — skips an arm a `false AND`/`true OR` short-circuits, so a
+    // query that runs is not rejected for an unreachable call.
     let returns = Routines.standard.merging(routines).returns
-    for name in query.calls where returns[name.lowercased()] == nil {
-      throw .function(name)
-    }
-    // Calls resolve, so type-check every arm's operands (a later arm's
-    // `Name + 1`, a `HAVING SUM(Name)`) — a fault the first-arm schema walk
-    // below would miss but a run would raise.
     try typecheck(query, ctes, returns: returns)
     // The result columns are the first arm's projection (the ISO rule a UNION
     // follows), resolved against the validated scope; a scalar call types from
@@ -161,20 +155,74 @@ extension Catalog where Self: ~Escapable {
     }
   }
 
-  /// Type-checks a single arm — its projection expressions, `WHERE`, and
-  /// `HAVING` — against its own scope, discarding the types and throwing on the
-  /// first operand or function fault. `check(_:_:)` walks a predicate's operand
-  /// expressions.
+  /// Type-checks a single arm against its own scope, validating exactly the
+  /// expressions a run reaches — throwing the operand or function fault a run
+  /// would — and skipping those the executor's evaluation order makes
+  /// unreachable. The clauses run `WHERE` → group/fold → `HAVING` → limit →
+  /// projection, so:
+  ///
+  ///   - `WHERE` runs first and always validates (`check`, short-circuit
+  ///     aware).
+  ///   - A statically-false `WHERE` filters every row, so a `GROUP BY` forms no
+  ///     group and a non-aggregate query yields no row — nothing after it is
+  ///     checked. A whole-result aggregate (no `GROUP BY`) is the exception: it
+  ///     emits one empty group, so a scalar CALL in its `HAVING` and projection
+  ///     still runs (over NULL/zero aggregate results) and is checked
+  ///     (`reachable`) — an aggregate operand, folding zero rows, is not.
+  ///   - Otherwise the aggregate FOLDS in the projection and `HAVING` run over
+  ///     the filtered rows in the group node, before `HAVING` and any limit, so
+  ///     every aggregate operand is validated unconditionally (a short-circuit
+  ///     or zero-row limit does not spare it).
+  ///   - `HAVING` filters grouped rows before the limit: it validates
+  ///     short-circuit aware, and a statically false `HAVING` (like a false
+  ///     `WHERE`) leaves the projection's non-aggregate work unreachable.
+  ///   - The projection runs LAST: under a `FETCH FIRST 0 ROWS ONLY` its
+  ///     non-aggregate work is unreachable (its output type is still DERIVED
+  ///     for the schema, non-faulting); otherwise it validates fully.
   private borrowing func typecheck(_ select: Select, _ ctes: CTEs,
                                    visited: Set<String>,
                                    returns: Dictionary<String, ValueType>)
       throws(SQLError) {
     let scope = try scope(of: select, ctes, visited: visited, returns: returns)
+    if let predicate = select.predicate {
+      try scope.check(predicate, returns)
+      // A false WHERE filters every row, so a GROUP BY forms no group and a
+      // non-aggregate query yields no row — nothing after is reachable. A
+      // whole-result aggregate (an aggregate projection or HAVING, no GROUP BY)
+      // still emits ONE empty group: the fold sees zero rows, so an aggregate
+      // operand and arithmetic never evaluate (they propagate NULL), but a
+      // scalar CALL in the HAVING and projection runs over the group's results,
+      // so validate those calls.
+      if scope.constant(predicate) == false {
+        if Engine.aggregates(select), select.grouping.isEmpty {
+          if let having = select.having {
+            try scope.reachable(having, returns)
+          }
+          if case let .expressions(items) = select.projection {
+            for item in items { try scope.reachable(item.expression, returns) }
+          }
+        }
+        return
+      }
+    }
+    // Aggregate folds run before HAVING and any limit, so validate every
+    // aggregate operand in the projection and HAVING unconditionally.
     if case let .expressions(items) = select.projection {
+      for item in items { try scope.aggregates(in: item.expression, returns) }
+    }
+    if let having = select.having {
+      try scope.aggregates(in: having, returns)
+      try scope.check(having, returns)
+      // A false HAVING filters every group before the projection, so the
+      // projection's non-aggregate work is unreachable.
+      if scope.constant(having) == false { return }
+    }
+    // The projection runs after any limit: a zero-row limit leaves only its
+    // aggregate folds (validated above) reachable.
+    if select.limit?.count != 0,
+        case let .expressions(items) = select.projection {
       for item in items { _ = try scope.type(of: item.expression, returns) }
     }
-    if let predicate = select.predicate { try scope.check(predicate, returns) }
-    if let having = select.having { try scope.check(having, returns) }
   }
 
   /// The name-resolution schema of `relation`, resolved against this catalog
@@ -216,18 +264,13 @@ extension Catalog where Self: ~Escapable {
       // declared schema (every type the `.integer` default). `try?` cannot
       // catch this — the recursion overflows the stack rather than throwing.
       guard !visited.contains(name.lowercased()) else { return base }
-      // `compile` checks the body's relations, arities, and call arguments but
-      // not that a called routine EXISTS (no routine set; the name binds at
-      // execute), and the outer query's `calls` never reach into a view body.
-      // So validate the body's whole call inventory here: a view calling an
-      // unregistered function in a clause the first-arm walk misses — a
-      // `WHERE`/`HAVING`, a later `UNION` arm — faults as a run of it would.
-      for call in view.query.calls where returns[call.lowercased()] == nil {
-        throw .function(call)
-      }
-      // Operand types too, across every arm and `HAVING` — the first-arm
-      // resolve below would miss a later arm's `Name + 1` or a `HAVING
-      // SUM(Name)`, but a `SELECT * FROM v` run over the view would fault.
+      // Type-check the body's REACHABLE operands and calls across every arm and
+      // clause — `compile` cannot check a routine EXISTS, the first-arm resolve
+      // below sees only the first projection, and the outer query's walk does
+      // not reach into a body. `typecheck` faults an unknown call or a bad
+      // operand a `SELECT * FROM v` run would evaluate — a `WHERE`/`HAVING`, a
+      // later `UNION` arm — while skipping an arm a short-circuit proves
+      // unreachable.
       let overlay = schemas([:], for: view.query)
       let inner = visited.union([name.lowercased()])
       try typecheck(view.query, overlay, visited: inner, returns: returns)
@@ -300,7 +343,13 @@ extension Scope {
     } else {
       "column \(index + 1)"
     }
+    // DERIVE the nominal output type (`validate: false`): the schema reports
+    // the type a run would produce and never faults on an operand. Run-time
+    // operand and call validation is `typecheck`'s job, reachability-aware, so
+    // a schema resolves even for an expression a zero-row limit makes
+    // unreachable.
     return try OutputColumn(name: name,
-                            type: type(of: item.expression, returns))
+                            type: type(of: item.expression, returns,
+                                       validate: false))
   }
 }

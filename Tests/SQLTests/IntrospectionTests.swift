@@ -896,6 +896,275 @@ struct IntrospectionTests {
     #expect(rows == [])
   }
 
+  @Test("columns(of:) skips an arm a constant-false AND short-circuits")
+  func shortCircuitAnd() throws {
+    // `1 = 0` is constantly false, so the executor never evaluates `Name + 1`;
+    // the schema resolves rather than faulting on the unreachable arm.
+    let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
+    #expect(try cat.columns(of: parse("""
+        SELECT Name FROM People WHERE 1 = 0 AND Name + 1 = 2
+        """)) == [OutputColumn(name: "Name", type: .text)])
+  }
+
+  @Test("columns(of:) skips an arm a constant-true OR short-circuits")
+  func shortCircuitOr() throws {
+    let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
+    #expect(try cat.columns(of: parse("""
+        SELECT Name FROM People WHERE 1 = 1 OR Name + 1 = 2
+        """)) == [OutputColumn(name: "Name", type: .text)])
+  }
+
+  @Test("columns(of:) still faults on a reachable bad arm")
+  func reachableBadArm() throws {
+    // A constant-TRUE AND does not short-circuit its right arm, and a
+    // non-constant guard leaves the arm reachable — both still fault.
+    let cat = MetaCatalog(["People":
+        MetaRelation([("Name", .text), ("Age", .integer)], [])])
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("""
+          SELECT Name FROM People WHERE 1 = 1 AND Name + 1 = 2
+          """))
+    }
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("""
+          SELECT Name FROM People WHERE Age = 0 AND Name + 1 = 2
+          """))
+    }
+  }
+
+  @Test("information_schema.columns lists a view with a short-circuited arm")
+  func shortCircuitView() throws {
+    let body = try parse("""
+        SELECT Name FROM People WHERE 1 = 0 AND Name + 1 = 2
+        """)
+    let cat = MetaCatalog(
+        ["People": MetaRelation([("Name", .text)], [])],
+        views: ["v": View(query: body, columns: ["Name"])])
+    let rows = try cat.run(parse("""
+        SELECT column_name FROM information_schema.columns
+         WHERE table_name = 'v'
+        """))
+    #expect(rows == [[.text("Name")]])
+  }
+
+  @Test("columns(of:) skips an unknown call a false AND short-circuits")
+  func shortCircuitUnknownCall() throws {
+    // `NOPE` is only in the unreachable arm of `1 = 0 AND …`, so the executor
+    // never evaluates it and the query runs — the schema resolves, and call
+    // validation rides the same short-circuit-aware walk as operand checking.
+    let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
+    #expect(try cat.columns(of: parse("""
+        SELECT Name FROM People WHERE 1 = 0 AND NOPE(Name) = 1
+        """)) == [OutputColumn(name: "Name", type: .text)])
+    #expect(try cat.columns(of: parse("""
+        SELECT Name FROM People WHERE 1 = 1 OR NOPE(Name) = 1
+        """)) == [OutputColumn(name: "Name", type: .text)])
+  }
+
+  @Test("columns(of:) still faults on a reachable unknown call")
+  func reachableUnknownCall() throws {
+    let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("""
+          SELECT Name FROM People WHERE 1 = 1 AND NOPE(Name) = 1
+          """))
+    }
+  }
+
+  @Test("information_schema.columns lists a view with an unreachable call")
+  func shortCircuitUnknownCallView() throws {
+    let body = try parse("""
+        SELECT Name FROM People WHERE 1 = 0 AND NOPE(Name) = 1
+        """)
+    let cat = MetaCatalog(
+        ["People": MetaRelation([("Name", .text)], [])],
+        views: ["v": View(query: body, columns: ["Name"])])
+    let rows = try cat.run(parse("""
+        SELECT column_name FROM information_schema.columns
+         WHERE table_name = 'v'
+        """))
+    #expect(rows == [[.text("Name")]])
+  }
+
+  @Test("columns(of:) derives a schema for a zero-row-limit projection")
+  func zeroRowLimitProjection() throws {
+    // `FETCH FIRST 0 ROWS ONLY` yields no rows and the limit applies before the
+    // projection, so `Name + 1` is never evaluated; the schema DERIVES its
+    // nominal type without faulting on the non-numeric operand.
+    let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
+    #expect(try cat.columns(of: parse("""
+        SELECT Name + 1 AS x FROM People FETCH FIRST 0 ROWS ONLY
+        """)) == [OutputColumn(name: "x", type: .integer)])
+  }
+
+  @Test("columns(of:) still faults on a projection under a non-zero limit")
+  func nonzeroLimitProjection() throws {
+    // A non-zero limit projects rows, so the operand is reachable and faults.
+    let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("""
+          SELECT Name + 1 AS x FROM People FETCH FIRST 2 ROWS ONLY
+          """))
+    }
+  }
+
+  @Test("information_schema.columns lists a zero-row-limit view")
+  func zeroRowLimitView() throws {
+    let body = try parse("""
+        SELECT Name + 1 AS x FROM People FETCH FIRST 0 ROWS ONLY
+        """)
+    let cat = MetaCatalog(
+        ["People": MetaRelation([("Name", .text)], [])],
+        views: ["v": View(query: body, columns: ["x"])])
+    let rows = try cat.run(parse("""
+        SELECT column_name, data_type FROM information_schema.columns
+         WHERE table_name = 'v'
+        """))
+    #expect(rows == [[.text("x"), .text("integer")]])
+  }
+
+  @Test("columns(of:) validates an aggregate fold under a zero-row limit")
+  func aggregateUnderZeroLimit() throws {
+    // A `FETCH FIRST 0 ROWS ONLY` skips a non-aggregate projection, but an
+    // aggregate folds every row before the limit, so `SUM(Name)` over text
+    // still faults; a numeric fold types cleanly.
+    let cat = MetaCatalog(["People":
+        MetaRelation([("Name", .text), ("Age", .integer)], [])])
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("""
+          SELECT SUM(Name) FROM People FETCH FIRST 0 ROWS ONLY
+          """))
+    }
+    #expect(try cat.columns(of: parse("""
+        SELECT SUM(Age) AS x FROM People FETCH FIRST 0 ROWS ONLY
+        """)) == [OutputColumn(name: "x", type: .integer)])
+  }
+
+  @Test("columns(of:) folds a literal IS NULL test in a short-circuit")
+  func shortCircuitNullTest() throws {
+    // `1 IS NULL` is constantly false and `1 IS NOT NULL` constantly true, so
+    // the executor skips the guarded arm; the schema resolves rather than
+    // faulting on the unreachable operand or call.
+    let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
+    #expect(try cat.columns(of: parse("""
+        SELECT Name FROM People WHERE 1 IS NULL AND Name + 1 = 2
+        """)) == [OutputColumn(name: "Name", type: .text)])
+    #expect(try cat.columns(of: parse("""
+        SELECT Name FROM People WHERE 1 IS NOT NULL OR NOPE(Name) = 1
+        """)) == [OutputColumn(name: "Name", type: .text)])
+  }
+
+  @Test("columns(of:) skips the work after a constant-false WHERE")
+  func constantFalseWhere() throws {
+    // `WHERE 1 = 0` filters every row before projecting, so `Name + 1` is
+    // unreachable and the schema resolves.
+    let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
+    #expect(try cat.columns(of: parse("""
+        SELECT Name + 1 AS x FROM People WHERE 1 = 0
+        """)) == [OutputColumn(name: "x", type: .integer)])
+    // An aggregate folds zero rows, so its text operand is never evaluated.
+    let summed = try cat.columns(of: parse("""
+        SELECT SUM(Name) AS s FROM People WHERE 1 = 0
+        """))
+    #expect(summed.count == 1)
+    // But a whole-result aggregate still emits ONE empty group, so a scalar
+    // call projecting it runs — an unregistered routine faults, as a run does.
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("""
+          SELECT NOPE(COUNT(*)) AS x FROM People WHERE 1 = 0
+          """))
+    }
+  }
+
+  @Test("columns(of:) validates a COUNT expression operand")
+  func countOperand() throws {
+    let cat = MetaCatalog(["People":
+        MetaRelation([("Name", .text), ("Age", .integer)], [])])
+    // COUNT evaluates its operand per row to test non-NULL, so a bad operand
+    // (or an unknown call) faults; a valid operand counts as integer.
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("SELECT COUNT(Name + 1) FROM People"))
+    }
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("SELECT COUNT(NOPE(Name)) FROM People"))
+    }
+    #expect(try cat.columns(of: parse("SELECT COUNT(Age) AS c FROM People"))
+                == [OutputColumn(name: "c", type: .integer)])
+  }
+
+  @Test("columns(of:) skips the projection after a constant-false HAVING")
+  func constantFalseHaving() throws {
+    // `HAVING 1 = 0` filters every group before the projection, so `Name + 1`
+    // is unreachable and the schema resolves — but an aggregate fold, which the
+    // group node runs before HAVING, is still validated.
+    let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
+    #expect(try cat.columns(of: parse("""
+        SELECT Name + 1 AS x FROM People GROUP BY Name HAVING 1 = 0
+        """)) == [OutputColumn(name: "x", type: .integer)])
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("""
+          SELECT SUM(Name) FROM People GROUP BY Name HAVING 1 = 0
+          """))
+    }
+  }
+
+  @Test("columns(of:) validates a HAVING aggregate despite a short-circuit")
+  func havingAggregateShortCircuit() throws {
+    // `HAVING 1 = 0 AND SUM(Name) > 0` short-circuits the comparison, but the
+    // group node folds `SUM(Name)` before the HAVING filter, so it faults;
+    // a numeric fold in the skipped arm is fine.
+    let cat = MetaCatalog(["People":
+        MetaRelation([("Name", .text), ("Age", .integer)], [])])
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("""
+          SELECT Name FROM People GROUP BY Name HAVING 1 = 0 AND SUM(Name) > 0
+          """))
+    }
+    #expect(try cat.columns(of: parse("""
+        SELECT Name FROM People GROUP BY Name HAVING 1 = 0 AND SUM(Age) > 0
+        """)) == [OutputColumn(name: "Name", type: .text)])
+  }
+
+  @Test("columns(of:) rejects a statically-known division by zero")
+  func divideByZeroLiteral() throws {
+    let cat = MetaCatalog(["People": MetaRelation([("Age", .integer)], [])])
+    #expect(throws: SQLError.divide) {
+      let _ = try cat.columns(of: parse("SELECT 1 / 0 AS x FROM People"))
+    }
+    // A non-literal divisor is data-dependent, so it is not rejected.
+    #expect(try cat.columns(of: parse("SELECT 1 / Age AS x FROM People"))
+                == [OutputColumn(name: "x", type: .integer)])
+  }
+
+  @Test("columns(of:) rejects statically-overflowing literal arithmetic")
+  func overflowLiteral() throws {
+    let cat = MetaCatalog(["People": MetaRelation([("Age", .integer)], [])])
+    // Both operands literal, so the result overflows on every row (a FROM-less
+    // SELECT at once); the schema rejects it rather than advertise a column.
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of:
+          parse("SELECT 9223372036854775807 + 1 AS x FROM People"))
+    }
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of:
+          parse("SELECT 1e308 * 1e308 AS x FROM People"))
+    }
+    // A non-literal operand is data-dependent, so it is not rejected.
+    #expect(try cat.columns(of: parse("SELECT Age + 1 AS x FROM People"))
+                == [OutputColumn(name: "x", type: .integer)])
+  }
+
+  @Test("columns(of:) accepts a parameterized predicate with no binding")
+  func unboundParameter() throws {
+    // With no binding (the schema default), `Name + 1 = :p` yields UNKNOWN
+    // without evaluating the left term, so the query runs (no rows) and the
+    // schema resolves rather than faulting on the text arithmetic.
+    let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
+    #expect(try cat.columns(of: parse("""
+        SELECT Name FROM People WHERE Name + 1 = :p
+        """)) == [OutputColumn(name: "Name", type: .text)])
+  }
+
   @Test("columns(of:) faults on a bad operand inside a call's arguments")
   func nonnumericCallArgument() throws {
     // `BITAND(Name + 1, 1)` returns integer, but its argument `Name + 1`

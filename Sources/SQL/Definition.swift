@@ -341,20 +341,12 @@ extension Catalog where Self: ~Escapable {
       // run and is not advertised here.
       guard let plan = try? compile(view.query, schemas([:], for: view.query)),
           plan.width == view.columns.count else { continue }
-      // `compile` resolved the body — its relations, arities, and each call's
-      // ARGUMENTS — but cannot check a called routine EXISTS (it holds no
-      // routine set and builds no call term; the name binds at execute), so
-      // reject a body naming an unregistered function against the run's routine
-      // return-type map. The first-arm type walk below faults an unknown call
-      // it PROJECTS, but not one in a `WHERE`/`HAVING` or a later `UNION` arm,
-      // so gate on `calls`, the whole-body inventory — a view a run could not
-      // execute is not advertised as queryable metadata.
-      let unknown = view.query.calls.first { returns[$0.lowercased()] == nil }
-      guard unknown == nil else { continue }
       // Type the columns from the body's first arm; type-check every arm's
-      // operands too — a later arm's `Name + 1` or a `HAVING SUM(Name)` faults
-      // a run but the first-arm resolve would miss it — so a view a `SELECT *`
-      // could not evaluate is not advertised.
+      // REACHABLE operands and calls too — an unknown call or a bad operand in
+      // a `WHERE`/`HAVING` or a later `UNION` arm faults a run, but the
+      // first-arm resolve would miss it (`compile` cannot check a routine
+      // exists), while an arm a short-circuit proves unreachable is skipped. A
+      // view a `SELECT *` could not evaluate is not advertised.
       let overlay = schemas([:], for: view.query)
       guard (try? typecheck(view.query, overlay, visited: [name.lowercased()],
                             returns: returns)) != nil,

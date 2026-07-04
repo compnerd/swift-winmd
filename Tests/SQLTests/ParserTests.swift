@@ -774,7 +774,7 @@ struct CreateViewTests {
 // MARK: - UNION
 
 /// Parses `text` and returns its `Query`, failing on any other statement shape.
-private func parseQuery(_ text: String) throws -> Query {
+private func parse(query text: String) throws -> Query {
   guard case let .select(query) = try Statement(parsing: text) else {
     Issue.record("expected a SELECT statement")
     throw SQLError.incomplete(expected: "a SELECT statement")
@@ -785,7 +785,7 @@ private func parseQuery(_ text: String) throws -> Query {
 struct UnionTests {
   @Test("parses UNION into a deduplicating union of two selects")
   func union() throws {
-    let query = try parseQuery("SELECT a FROM t UNION SELECT b FROM u")
+    let query = try parse(query: "SELECT a FROM t UNION SELECT b FROM u")
     let left = Select(projection: .columns(["a"]), from: Relation(name: "t"))
     let right = Select(projection: .columns(["b"]), from: Relation(name: "u"))
     #expect(query == .union(.select(left), right, all: false))
@@ -793,7 +793,7 @@ struct UnionTests {
 
   @Test("parses UNION ALL into a duplicate-keeping union")
   func all() throws {
-    let query = try parseQuery("SELECT a FROM t UNION ALL SELECT b FROM u")
+    let query = try parse(query: "SELECT a FROM t UNION ALL SELECT b FROM u")
     let left = Select(projection: .columns(["a"]), from: Relation(name: "t"))
     let right = Select(projection: .columns(["b"]), from: Relation(name: "u"))
     #expect(query == .union(.select(left), right, all: true))
@@ -801,7 +801,7 @@ struct UnionTests {
 
   @Test("nests a chain of UNIONs left-associatively in source order")
   func chain() throws {
-    let query = try parseQuery(
+    let query = try parse(query:
         "SELECT a FROM t UNION SELECT b FROM u UNION ALL SELECT c FROM v")
     let a = Select(projection: .columns(["a"]), from: Relation(name: "t"))
     let b = Select(projection: .columns(["b"]), from: Relation(name: "u"))
@@ -811,7 +811,7 @@ struct UnionTests {
 
   @Test("recognises lowercase union and all keywords")
   func caseInsensitive() throws {
-    let query = try parseQuery("select a from t union all select b from u")
+    let query = try parse(query: "select a from t union all select b from u")
     let left = Select(projection: .columns(["a"]), from: Relation(name: "t"))
     let right = Select(projection: .columns(["b"]), from: Relation(name: "u"))
     #expect(query == .union(.select(left), right, all: true))

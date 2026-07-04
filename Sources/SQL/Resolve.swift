@@ -276,6 +276,29 @@ internal struct Scope {
     return lhs == .double || rhs == .double ? .double : .integer
   }
 
+  /// Type-checks every operand expression in `predicate` — a comparison's two
+  /// sides, a bound comparison's left side, an `IS NULL` operand — recursing
+  /// through `AND`/`OR`/`NOT`. It types each for the side effect of validation
+  /// (an operand or function fault a run would raise) and discards the result.
+  func check(_ predicate: Predicate,
+             _ returns: Dictionary<String, ValueType> = [:])
+      throws(SQLError) {
+    switch predicate {
+    case let .comparison(left, _, right):
+      _ = try type(of: left, returns)
+      _ = try type(of: right, returns)
+    case let .bound(left, _, _):
+      _ = try type(of: left, returns)
+    case let .null(operand, _):
+      _ = try type(of: operand, returns)
+    case let .and(lhs, rhs), let .or(lhs, rhs):
+      try check(lhs, returns)
+      try check(rhs, returns)
+    case let .not(operand):
+      try check(operand, returns)
+    }
+  }
+
   /// Whether `column`'s qualifier admits `member`: an unqualified name admits
   /// every relation, a qualified one only a relation its qualifier (an alias,
   /// else a table name) names.

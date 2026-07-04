@@ -351,11 +351,16 @@ extension Catalog where Self: ~Escapable {
       // execute is not advertised as queryable metadata.
       let unknown = view.query.calls.first { returns[$0.lowercased()] == nil }
       guard unknown == nil else { continue }
-      // Type the columns from the body's first arm.
+      // Type the columns from the body's first arm; type-check every arm's
+      // operands too — a later arm's `Name + 1` or a `HAVING SUM(Name)` faults
+      // a run but the first-arm resolve would miss it — so a view a `SELECT *`
+      // could not evaluate is not advertised.
       let overlay = schemas([:], for: view.query)
-      guard let resolved = try? columns(of: view.query.first, overlay,
-                                        visited: [name.lowercased()],
-                                        returns: returns),
+      guard (try? typecheck(view.query, overlay, visited: [name.lowercased()],
+                            returns: returns)) != nil,
+          let resolved = try? columns(of: view.query.first, overlay,
+                                      visited: [name.lowercased()],
+                                      returns: returns),
           resolved.count == view.columns.count else { continue }
       for ordinal in view.columns.indices {
         rows.append([.text(name), .text(view.columns[ordinal]),

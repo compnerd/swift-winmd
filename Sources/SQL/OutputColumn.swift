@@ -87,6 +87,10 @@ extension Catalog where Self: ~Escapable {
     for name in query.calls where returns[name.lowercased()] == nil {
       throw .function(name)
     }
+    // Calls resolve, so type-check every arm's operands (a later arm's
+    // `Name + 1`, a `HAVING SUM(Name)`) — a fault the first-arm schema walk
+    // below would miss but a run would raise.
+    try typecheck(query, ctes, returns: returns)
     // The result columns are the first arm's projection (the ISO rule a UNION
     // follows), resolved against the validated scope; a scalar call types from
     // the routine return types — the engine prelude merged under `routines`,
@@ -109,16 +113,20 @@ extension Catalog where Self: ~Escapable {
                          visited: Set<String> = [],
                          returns: Dictionary<String, ValueType> = [:])
       throws(SQLError) -> Array<OutputColumn> {
-    // A FROM-less `SELECT <expr-list>` projects over no relation — resolve its
-    // expression names and types against an empty scope.
-    guard let relation = select.from else {
-      let scope = Scope([])
-      return try scope.columns(of: select.projection, returns)
-    }
+    try scope(of: select, ctes, visited: visited, returns: returns)
+        .columns(of: select.projection, returns)
+  }
 
-    // Resolve the FROM relation and each joined relation to its schema and lay
-    // them end to end in one scope — the same layout compilation resolves a
-    // projection against.
+  /// The name-resolution scope of `select` — its FROM relation and each joined
+  /// relation resolved to schema and laid end to end in one combined ordinal
+  /// space, the same layout compilation resolves a projection against. A
+  /// FROM-less `SELECT <expr-list>` projects over no relation, so its scope is
+  /// empty. It reads only schemas, never a cursor.
+  borrowing func scope(of select: Select, _ ctes: CTEs,
+                       visited: Set<String> = [],
+                       returns: Dictionary<String, ValueType> = [:])
+      throws(SQLError) -> Scope {
+    guard let relation = select.from else { return Scope([]) }
     var relations =
         [(relation, try schema(of: relation, ctes, visited: visited,
                                returns: returns))]
@@ -127,7 +135,46 @@ extension Catalog where Self: ~Escapable {
                               returns: returns)
       relations.append((join.relation, joined))
     }
-    return try Scope(relations).columns(of: select.projection, returns)
+    return Scope(relations)
+  }
+
+  /// Type-checks every operand in `query` — the projection, `WHERE`, and
+  /// `HAVING` of EVERY arm — throwing the run-time fault a bad operand would.
+  ///
+  /// The result schema types only the FIRST arm's projection (the ISO rule), so
+  /// a later `UNION` arm's or a `HAVING`'s operand-type error would otherwise
+  /// go unadvertised — `SELECT Age FROM t UNION SELECT Name + 1 FROM t` or `…
+  /// HAVING SUM(Name) > 0` resolves its names but `Arithmetic.apply`/
+  /// `Aggregate.fold` faults `SQLError.operand` at run. `compile` cannot catch
+  /// this (no evaluating term is built), so a schema path type-checks each arm
+  /// before returning metadata. It reads no cursor.
+  borrowing func typecheck(_ query: Query, _ ctes: CTEs,
+                           visited: Set<String> = [],
+                           returns: Dictionary<String, ValueType> = [:])
+      throws(SQLError) {
+    switch query {
+    case let .select(select):
+      try typecheck(select, ctes, visited: visited, returns: returns)
+    case let .union(left, select, _):
+      try typecheck(left, ctes, visited: visited, returns: returns)
+      try typecheck(select, ctes, visited: visited, returns: returns)
+    }
+  }
+
+  /// Type-checks a single arm — its projection expressions, `WHERE`, and
+  /// `HAVING` — against its own scope, discarding the types and throwing on the
+  /// first operand or function fault. `check(_:_:)` walks a predicate's operand
+  /// expressions.
+  private borrowing func typecheck(_ select: Select, _ ctes: CTEs,
+                                   visited: Set<String>,
+                                   returns: Dictionary<String, ValueType>)
+      throws(SQLError) {
+    let scope = try scope(of: select, ctes, visited: visited, returns: returns)
+    if case let .expressions(items) = select.projection {
+      for item in items { _ = try scope.type(of: item.expression, returns) }
+    }
+    if let predicate = select.predicate { try scope.check(predicate, returns) }
+    if let having = select.having { try scope.check(having, returns) }
   }
 
   /// The name-resolution schema of `relation`, resolved against this catalog
@@ -178,13 +225,18 @@ extension Catalog where Self: ~Escapable {
       for call in view.query.calls where returns[call.lowercased()] == nil {
         throw .function(call)
       }
+      // Operand types too, across every arm and `HAVING` — the first-arm
+      // resolve below would miss a later arm's `Name + 1` or a `HAVING
+      // SUM(Name)`, but a `SELECT * FROM v` run over the view would fault.
+      let overlay = schemas([:], for: view.query)
+      let inner = visited.union([name.lowercased()])
+      try typecheck(view.query, overlay, visited: inner, returns: returns)
       // Type off the body's first arm (the ISO rule for a UNION). Arity — the
       // body's width against the declared columns — is `compile`'s job (the
       // public entry and the introspection builder run it), so on a shortfall
       // fall back to the declared schema rather than re-checking it here.
       let resolved =
-          try columns(of: view.query.first, schemas([:], for: view.query),
-                      visited: visited.union([name.lowercased()]),
+          try columns(of: view.query.first, overlay, visited: inner,
                       returns: returns)
       guard resolved.count == base.width else { return base }
       return Schema(width: base.width, extent: base.extent, names: base.names,

@@ -831,6 +831,71 @@ struct IntrospectionTests {
                 == [OutputColumn(name: "x", type: .text)])
   }
 
+  @Test("columns(of:) faults on a bad operand in a later UNION arm")
+  func nonnumericLaterArm() throws {
+    // The first arm types fine; the later arm's `Name + 1` faults, as a run of
+    // the union would — the first-arm schema walk never visits it.
+    let cat = MetaCatalog(["People":
+        MetaRelation([("Name", .text), ("Age", .integer)], [])])
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("""
+          SELECT Age FROM People UNION SELECT Name + 1 FROM People
+          """))
+    }
+  }
+
+  @Test("columns(of:) faults on a bad aggregate operand in a HAVING")
+  func nonnumericHaving() throws {
+    // `SUM(Name)` in the HAVING is not projected, so the projection walk misses
+    // it; the whole-query type-check faults it, as a run would.
+    let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("""
+          SELECT Name FROM People GROUP BY Name HAVING SUM(Name) > 0
+          """))
+    }
+  }
+
+  @Test("columns(of:) faults on a bad operand in a WHERE")
+  func nonnumericWhere() throws {
+    let cat = MetaCatalog(["People":
+        MetaRelation([("Name", .text), ("Age", .integer)], [])])
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("""
+          SELECT Age FROM People WHERE Name + 1 = 2
+          """))
+    }
+  }
+
+  @Test("columns(of:) types a valid later arm and HAVING")
+  func validLaterArmAndHaving() throws {
+    let cat = MetaCatalog(["People":
+        MetaRelation([("Name", .text), ("Age", .integer)], [])])
+    #expect(try cat.columns(of: parse("""
+        SELECT Age FROM People UNION SELECT Age + 1 FROM People
+        """)) == [OutputColumn(name: "Age", type: .integer)])
+    #expect(try cat.columns(of: parse("""
+        SELECT Name FROM People GROUP BY Name HAVING SUM(Age) > 0
+        """)) == [OutputColumn(name: "Name", type: .text)])
+  }
+
+  @Test("information_schema.columns hides a view with a bad HAVING operand")
+  func nonnumericHavingView() throws {
+    // The view's HAVING folds `SUM(Name)` over text — a run faults — so the
+    // view is not advertised, though its projection types cleanly.
+    let body = try parse("""
+        SELECT Name FROM People GROUP BY Name HAVING SUM(Name) > 0
+        """)
+    let cat = MetaCatalog(
+        ["People": MetaRelation([("Name", .text)], [])],
+        views: ["v": View(query: body, columns: ["Name"])])
+    let rows = try cat.run(parse("""
+        SELECT column_name FROM information_schema.columns
+         WHERE table_name = 'v'
+        """))
+    #expect(rows == [])
+  }
+
   @Test("a base relation shadowed by the definition_schema store is hidden")
   func storeShadowsBase() throws {
     // The store overlay resolves `definition_schema.tables`, so a catalog base

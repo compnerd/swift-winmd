@@ -280,11 +280,14 @@ struct ColumnTests {
     #expect(column.name == "Name")
   }
 
-  @Test("splits on the first dot only")
-  func firstDot() {
+  @Test("splits on the last dot only")
+  func lastDot() {
+    // A two-part relation name may qualify a column — the reserved
+    // `information_schema.tables.table_name` — so the split takes the text
+    // before the LAST dot as the qualifier and the rest as the name.
     let column = Column("t.a.b")
-    #expect(column.qualifier == "t")
-    #expect(column.name == "a.b")
+    #expect(column.qualifier == "t.a")
+    #expect(column.name == "b")
   }
 }
 

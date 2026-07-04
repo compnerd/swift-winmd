@@ -282,8 +282,8 @@ internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
     [Record([])]
   case let .scan(name, ordinals, seek):
     try materialise(name, ordinals, seek, catalog, ctes)
-  case let .derived(_, source, ordinals, seek):
-    try derive(source, ordinals, seek, catalog, routines, bindings)
+  case let .derived(name, source, ordinals, seek):
+    try derive(name, source, ordinals, seek, catalog, routines, bindings)
   case let .select(filter, .product(outer, inner)):
     // Fuse a residual product with its filter: stream each pair through the
     // predicate rather than materialising the whole cross product first.
@@ -439,19 +439,27 @@ private func materialise<C: Catalog & ~Escapable>(_ name: String,
 /// `0 ..< columns.count`; this projects each to the `ordinals` the outer query
 /// reads, in the slot order the outer scan expects (slot `i` is `ordinals[i]`).
 ///
-/// The sub-plan runs OUTSIDE the statement's CTE scope — an empty CTE map, the
-/// same scope it compiled and optimised under — so a caller's `WITH` never
-/// reaches into a stored view's body: a view's own `FROM`/`JOIN` names resolve
-/// to base relations (and other views), never to a statement-local CTE that
-/// happens to share a name.
-private func derive<C: Catalog & ~Escapable>(_ plan: Plan,
+/// The sub-plan runs OUTSIDE the statement's CTE scope — never the caller's
+/// `WITH` — so a caller's `WITH` never reaches into a stored view's body: a
+/// view's own `FROM`/`JOIN` names resolve to base relations (and other views),
+/// never to a statement-local CTE that happens to share a name. Its scope is
+/// instead the `definition_schema.` overlay the view's OWN query names (empty
+/// when it names none), so a view defined over a store relation materialises
+/// exactly as the inline query does — the same overlay the body compiled and
+/// optimised under.
+private func derive<C: Catalog & ~Escapable>(_ name: String, _ plan: Plan,
                                              _ ordinals: Array<Int>,
                                              _ seek: Range<Int>?,
                                              _ catalog: borrowing C,
                                              _ routines: Routines,
                                              _ bindings: Bindings)
     throws(SQLError) -> Array<Record> {
-  let rows = try execute(plan, catalog, [:], routines, bindings)
+  let overlay = if let view = catalog.resolve(view: name) {
+    catalog.augment([:], for: view.query)
+  } else {
+    CTEs()
+  }
+  let rows = try execute(plan, catalog, overlay, routines, bindings)
   let range = seek ?? 0 ..< rows.count
   return range.map { rows[$0].project(ordinals) }
 }

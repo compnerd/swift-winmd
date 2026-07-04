@@ -170,6 +170,83 @@ internal struct Scope {
     members.map { ($0.offset, $0.schema.extent) }
   }
 
+  /// The relations' name-resolution schemas, in chain order — the surface the
+  /// result-schema walk reads each relation's `names`/`types` off for a
+  /// `SELECT *`.
+  internal var schemas: Array<Schema> {
+    members.map(\.schema)
+  }
+
+  /// The value type of the real column at combined `ordinal` — the type the
+  /// owning relation's schema types it, for the result-schema walk.
+  ///
+  /// A combined `ordinal` falls in exactly one relation's `[offset, offset +
+  /// extent)` span; a real one (its local index `< width`) reads that schema's
+  /// `types`. A virtual ordinal (`Id`, an owner foreign key) is not an ISO
+  /// column and carries no schema type, so it reports `.integer` — the identity
+  /// and foreign-key columns are integral.
+  internal func type(at ordinal: Int) -> ValueType {
+    for member in members {
+      let local = ordinal - member.offset
+      guard local >= 0, local < member.schema.extent else { continue }
+      return local < member.schema.width ? member.schema.types[local]
+                                         : .integer
+    }
+    return .integer
+  }
+
+  /// The value type a scalar `expression` yields, statically: a bare column its
+  /// source type, a literal its own, a standard aggregate its result domain, a
+  /// scalar call its routine's declared return type (`returns`), a binary
+  /// arithmetic expression a double when either operand is a double (else an
+  /// integer); every other expression `.integer`, the engine's exact-numeric
+  /// default. It resolves the column ordinal (so an unknown or ambiguous
+  /// reference faults exactly as a projection would) but reads no cursor.
+  ///
+  /// A `COUNT` yields `.integer` (a row count); `AVG` always `.double` (the
+  /// engine averages to a non-NULL double); `SUM`/`MIN`/`MAX` the type of the
+  /// aggregated argument — a `COUNT(*)`, having no argument, is `.integer`.
+  ///
+  /// A `.call` types from `returns` — the routine return-type map the run
+  /// carries — so a text-returning scalar (`GUID(...)`) reports `.text` rather
+  /// than the `.integer` default; a call to a routine the map does not name
+  /// (whose return type the engine cannot see) stays `.integer`.
+  internal func type(of expression: Expression,
+                     _ returns: Dictionary<String, ValueType> = [:])
+      throws(SQLError) -> ValueType {
+    switch expression {
+    case let .column(column):
+      try type(at: ordinal(of: column))
+    case let .literal(literal):
+      switch literal {
+      case .string: .text
+      case .integer: .integer
+      case .double: .double
+      }
+    case let .call(name, _):
+      returns[name.lowercased()] ?? .integer
+    case let .aggregate(function, operand):
+      switch function {
+      case .count:
+        .integer
+      case .avg:
+        .double
+      case .sum, .min, .max:
+        switch operand {
+        case .star: .integer
+        case let .expression(argument): try type(of: argument, returns)
+        }
+      }
+    case let .binary(_, lhs, rhs):
+      // Arithmetic promotes to a double when either operand is a double
+      // (`Age + 1.5`); an all-integer expression stays an integer.
+      switch (try type(of: lhs, returns), try type(of: rhs, returns)) {
+      case (.double, _), (_, .double): .double
+      default: .integer
+      }
+    }
+  }
+
   /// Whether `column`'s qualifier admits `member`: an unqualified name admits
   /// every relation, a qualified one only a relation its qualifier (an alias,
   /// else a table name) names.

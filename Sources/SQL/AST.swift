@@ -207,7 +207,7 @@ public struct Join: Hashable, Sendable {
 /// real column or one of the binding's adapter-computed columns (`Id`, an owner
 /// foreign key); the AST does not distinguish them.
 ///
-/// `Column` is `ExpressibleByStringLiteral`, splitting a literal on its first
+/// `Column` is `ExpressibleByStringLiteral`, splitting a literal on its LAST
 /// dot into qualifier and name, so a consumer may write a reference as a plain
 /// string (`"t.Name"`, `"Flags"`).
 public struct Column: Hashable, Sendable, ExpressibleByStringLiteral {
@@ -222,11 +222,20 @@ public struct Column: Hashable, Sendable, ExpressibleByStringLiteral {
     self.name = name
   }
 
-  /// Parses a reference from its dotted spelling: the text before the first dot
-  /// is the qualifier and the rest is the name; an undotted spelling is an
-  /// unqualified name.
+  /// Parses a reference from its dotted spelling: the text before the LAST dot
+  /// is the qualifier and the text after it is the name; an undotted spelling
+  /// is an unqualified name.
+  ///
+  /// Splitting on the last dot keeps every single-dot reference identical
+  /// (`t.Name` → qualifier `t`, name `Name`) while letting a two-part relation
+  /// name qualify a column — the `INFORMATION_SCHEMA` overlay's dotted
+  /// relations (`information_schema.tables.table_name` → qualifier
+  /// `information_schema.tables`, name `table_name`). A bare identifier in this
+  /// dialect carries more than one dot only for that reserved two-part
+  /// namespace; a dotted metadata name reaches the parser delimited, so it
+  /// never splits here.
   public init(_ spelling: String) {
-    if let dot = spelling.firstIndex(of: ".") {
+    if let dot = spelling.lastIndex(of: ".") {
       self.qualifier = String(spelling[..<dot])
       self.name = String(spelling[spelling.index(after: dot)...])
     } else {
@@ -252,6 +261,36 @@ public enum Projection: Hashable, Sendable {
   /// carries a function call or an alias; a list of bare columns stays the
   /// simpler `columns` case.
   case expressions(Array<Projected>)
+
+  /// A view's column names inferred from this projection — the ISO rule shared
+  /// by `CREATE VIEW` without an explicit column list and the `View(_:)`
+  /// convenience initializer.
+  ///
+  /// A `columns` projection yields each reference's name (the qualifier
+  /// dropped); an `expressions` projection yields each item's alias, or — for
+  /// a bare column with no alias — the column's name; a non-column expression
+  /// with no alias, and a `SELECT *`, have no inferable name and fault with
+  /// `SQLError.named`.
+  internal func names() throws(SQLError) -> Array<String> {
+    switch self {
+    case .all:
+      throw .named("SELECT *")
+    case let .columns(columns):
+      return columns.map(\.name)
+    case let .expressions(items):
+      var names = Array<String>()
+      for item in items {
+        if let alias = item.alias {
+          names.append(alias)
+        } else if case let .column(column) = item.expression {
+          names.append(column.name)
+        } else {
+          throw .named("an unaliased expression")
+        }
+      }
+      return names
+    }
+  }
 }
 
 /// One projected expression with an optional output alias.

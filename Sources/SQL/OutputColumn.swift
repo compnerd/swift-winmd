@@ -167,9 +167,9 @@ extension Catalog where Self: ~Escapable {
   ///   - A statically-false `WHERE` filters every row, so a `GROUP BY` forms no
   ///     group and a non-aggregate query yields no row — nothing after it is
   ///     checked. A whole-result aggregate (no `GROUP BY`) is the exception: it
-  ///     emits one empty group, so a scalar CALL in its `HAVING` and projection
-  ///     still runs (over NULL/zero aggregate results) and is checked
-  ///     (`reachable`) — an aggregate operand, folding zero rows, is not.
+  ///     emits one empty group, so its `HAVING` and projection are EVALUATED
+  ///     over that group (`empty`) — a divide, overflow, or bad routine call
+  ///     faults as a run would; an aggregate operand (zero rows) does not.
   ///   - Otherwise the aggregate FOLDS in the projection and `HAVING` run over
   ///     the filtered rows in the group node, before `HAVING` and any limit, so
   ///     every aggregate operand is validated unconditionally (a short-circuit
@@ -192,16 +192,20 @@ extension Catalog where Self: ~Escapable {
       // non-aggregate query yields no row — nothing after is reachable. A
       // whole-result aggregate (an aggregate projection or HAVING, no GROUP BY)
       // still emits ONE empty group: the fold sees zero rows, so an aggregate
-      // operand and arithmetic never evaluate (they propagate NULL), but a
-      // scalar CALL in the HAVING and projection runs over the group's results,
-      // so validate those calls.
+      // operand never evaluates (it propagates NULL), but the HAVING and
+      // projection run over the group's results, so EVALUATE them (`empty`) — a
+      // divide, overflow, or bad routine call faults as the run would.
       if scope.constant(predicate) == false {
         if Engine.aggregates(select), select.grouping.isEmpty {
           if let having = select.having {
-            try scope.reachable(having, routines)
+            // Evaluate HAVING over the empty group: it validates its operands
+            // (a divide, overflow, or bad routine call faults) AND yields the
+            // group's fate — a group passes only when HAVING is TRUE, so FALSE
+            // or UNKNOWN drops it and the projection is unreachable.
+            if try scope.empty(having, routines) != true { return }
           }
           if case let .expressions(items) = select.projection {
-            for item in items { try scope.reachable(item.expression, routines) }
+            for item in items { _ = try scope.empty(item.expression, routines) }
           }
         }
         return

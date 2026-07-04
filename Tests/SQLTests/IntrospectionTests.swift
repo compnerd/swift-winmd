@@ -1082,6 +1082,82 @@ struct IntrospectionTests {
     }
   }
 
+  @Test("columns(of:) refines empty-group reachability")
+  func emptyGroupReachability() throws {
+    let cat = MetaCatalog(["People": MetaRelation([("Age", .integer)], [])])
+    // A false HAVING drops the empty group before the projection, so its call
+    // is unreachable — the query returns an empty result and types cleanly.
+    #expect(try cat.columns(of: parse("""
+        SELECT NOPE(COUNT(*)) AS x FROM People WHERE 1 = 0 HAVING 1 = 0
+        """)) == [OutputColumn(name: "x", type: .integer)])
+    // A true HAVING keeps the empty group, so the projection's call runs.
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("""
+          SELECT NOPE(COUNT(*)) AS x FROM People WHERE 1 = 0 HAVING 1 = 1
+          """))
+    }
+    // COUNT is 0 over the empty group, so COUNT(*) / 0 is a real divide.
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("""
+          SELECT COUNT(*) / 0 AS x FROM People WHERE 1 = 0
+          """))
+    }
+    // Every other aggregate is NULL, so SUM(Age) / 0 propagates NULL, no fault.
+    #expect(try cat.columns(of: parse("""
+        SELECT SUM(Age) / 0 AS x FROM People WHERE 1 = 0
+        """)) == [OutputColumn(name: "x", type: .integer)])
+    // A literal fault in the projection beside an aggregate still runs.
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("""
+          SELECT COUNT(*) AS c, 1 / 0 AS x FROM People WHERE 1 = 0
+          """))
+    }
+    // A registered routine runs over the empty group, so a wrong-arity call
+    // (BITAND takes two) faults as the run would.
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("""
+          SELECT BITAND(COUNT(*)) AS x FROM People WHERE 1 = 0
+          """))
+    }
+    // A HAVING false over the empty group (COUNT is 0) drops it, so a faulting
+    // projection is never reached — the query returns no rows, types cleanly.
+    #expect(try cat.columns(of: parse("""
+        SELECT 1 / 0 AS x FROM People WHERE 1 = 0 HAVING COUNT(*) = 1
+        """)).count == 1)
+    // A HAVING true over the empty group keeps it, so the projection runs.
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("""
+          SELECT 1 / 0 AS x FROM People WHERE 1 = 0 HAVING COUNT(*) = 0
+          """))
+    }
+  }
+
+  @Test("columns(of:) skips an unbound HAVING parameter over the empty group")
+  func emptyGroupUnboundParameter() throws {
+    let cat = MetaCatalog(["People": MetaRelation([("Age", .integer)], [])])
+    // With no binding, `... = :p` yields UNKNOWN without evaluating the left,
+    // so the divide never runs — the query returns no rows and types cleanly.
+    #expect(try cat.columns(of: parse("""
+        SELECT COUNT(*) AS c FROM People WHERE 1 = 0 HAVING COUNT(*) / 0 = :p
+        """)).count == 1)
+  }
+
+  @Test("columns(of:) rejects a non-finite routine result over the empty group")
+  func emptyGroupNonfiniteRoutine() throws {
+    let cat = MetaCatalog(["People": MetaRelation([("Age", .integer)], [])])
+    let routines: Routines =
+        ["BAD": Routine(returns: .double, parameters: []) { _ in
+          .double(.infinity)
+        }]
+    // The empty group projects BAD(), a non-finite double the run rejects
+    // (SQLError.magnitude), so the schema must reject it too.
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("""
+          SELECT BAD() AS x FROM People WHERE 1 = 0 HAVING 1 = 1
+          """), routines: routines)
+    }
+  }
+
   @Test("columns(of:) validates a COUNT expression operand")
   func countOperand() throws {
     let cat = MetaCatalog(["People":

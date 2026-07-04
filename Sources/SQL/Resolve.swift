@@ -465,52 +465,79 @@ internal struct Scope {
     }
   }
 
-  /// Validates the scalar calls reachable when a whole-result aggregate
-  /// projects over the single empty group a constant-false `WHERE` leaves. The
-  /// fold sees zero rows, so an aggregate's operand and any arithmetic never
-  /// evaluate (they propagate NULL), but a scalar CALL still runs over the
-  /// group's results — so an unregistered routine faults `SQLError.function`
-  /// exactly as a run would. It recurses a call's arguments and a binary's
-  /// operands, but treats an aggregate as OPAQUE (its operand is never reached
-  /// over the empty group), so a `SUM(text)` yields NULL rather than a fault.
-  func reachable(_ expression: Expression,
-                 _ routines: Routines = [:])
-      throws(SQLError) {
+  /// The value `expression` yields when a whole-result aggregate projects the
+  /// single empty group a constant-false `WHERE` leaves — the fold over zero
+  /// rows: `COUNT` is 0, every other aggregate NULL, a literal itself, a binary
+  /// the operator applied to its folded operands, a call the routine applied to
+  /// its folded arguments. It EVALUATES the empty group exactly as a run does,
+  /// so it raises precisely the run's fault — an unregistered routine
+  /// (`SQLError.function`), a bad arity or kind (`SQLError.argument`), a divide
+  /// by zero (`SQLError.divide`), an overflow (`SQLError.magnitude`) —
+  /// while a NULL operand propagates without faulting. An aggregate's own
+  /// operand is never reached (the fold sees no row), and a bare column cannot
+  /// appear (a non-grouped column is a grouping error `compile` already
+  /// rejected), so a `SUM(text)` is NULL here rather than a type fault.
+  func empty(_ expression: Expression, _ routines: Routines = [:])
+      throws(SQLError) -> Value {
     switch expression {
-    case .column, .literal, .aggregate:
-      break
+    case let .literal(literal):
+      return try value(of: literal)
+    case let .aggregate(function, _):
+      return function == .count ? .integer(0) : .null
+    case let .binary(op, lhs, rhs):
+      return try op.apply(empty(lhs, routines), empty(rhs, routines))
     case let .call(name, arguments):
-      guard routines[name] != nil else { throw .function(name) }
-      for argument in arguments { try reachable(argument, routines) }
-    case let .binary(_, lhs, rhs):
-      try reachable(lhs, routines)
-      try reachable(rhs, routines)
+      guard let routine = routines[name] else { throw .function(name) }
+      var values = Array<Value>()
+      values.reserveCapacity(arguments.count)
+      for argument in arguments {
+        try values.append(empty(argument, routines))
+      }
+      let result = try routine(values)
+      // A routine call bypasses `Arithmetic.apply`'s finite check, so enforce
+      // it here: a non-finite double faults as a run would (magnitude).
+      if case let .double(number) = result, !number.isFinite {
+        throw .magnitude("function '\(name)' produced a non-finite double")
+      }
+      return result
+    case .column:
+      return .null
     }
   }
 
-  /// Validates the reachable scalar calls of a `HAVING` `predicate` filtering
-  /// the single empty group — `reachable(_:)` over each operand expression,
-  /// respecting the filter's short-circuit (`false AND rhs` never evaluates
-  /// `rhs`), matching the run.
-  func reachable(_ predicate: Predicate,
-                 _ routines: Routines = [:])
-      throws(SQLError) {
+  /// Whether a `HAVING` `predicate` passes over the single empty group a
+  /// constant-false `WHERE` leaves — TRUE keeps the group (the projection then
+  /// runs), FALSE or UNKNOWN (`nil`) drops it (the projection is unreachable).
+  /// It evaluates the predicate as a run does: comparing the folded operand
+  /// values (`empty(_:_:)`) with three-valued logic, and short-circuiting
+  /// `AND`/`OR` so an unreachable arm's operand never folds — and never faults.
+  /// A `left op :parameter` with no binding is UNKNOWN, its left unevaluated.
+  func empty(_ predicate: Predicate,
+             _ routines: Routines = [:])
+      throws(SQLError) -> Bool? {
     switch predicate {
-    case let .comparison(left, _, right):
-      try reachable(left, routines)
-      try reachable(right, routines)
-    case let .bound(left, _, _):
-      try reachable(left, routines)
-    case let .null(operand, _):
-      try reachable(operand, routines)
+    case let .comparison(left, op, right):
+      return matches(try empty(left, routines), op, try empty(right, routines))
+    case .bound:
+      return nil
+    case let .null(operand, negated):
+      let value = try empty(operand, routines)
+      let null = if case .null = value { true } else { false }
+      return negated ? !null : null
     case let .and(lhs, rhs):
-      try reachable(lhs, routines)
-      if constant(lhs) != false { try reachable(rhs, routines) }
+      let left = try empty(lhs, routines)
+      if left == false { return false }
+      let right = try empty(rhs, routines)
+      if right == false { return false }
+      return left == true && right == true ? true : nil
     case let .or(lhs, rhs):
-      try reachable(lhs, routines)
-      if constant(lhs) != true { try reachable(rhs, routines) }
+      let left = try empty(lhs, routines)
+      if left == true { return true }
+      let right = try empty(rhs, routines)
+      if right == true { return true }
+      return left == false && right == false ? false : nil
     case let .not(operand):
-      try reachable(operand, routines)
+      return try empty(operand, routines).map { !$0 }
     }
   }
 

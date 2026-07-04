@@ -196,8 +196,10 @@ internal struct Language: Sendable {
       }
       return .text(language.escape(identifier))
     }
-    // `SANITIZE` returns text, so it is registered with its return type rather
-    // than through the bare-closure literal (which defaults to `.integer`).
-    return Routines().registering("sanitize", returns: .text, sanitize)
+    // `SANITIZE` returns text over one text argument, so it declares both its
+    // return type and its `[.text]` parameter contract — the signature the
+    // static type-check validates a `SANITIZE(...)` call against.
+    return Routines().registering("sanitize", returns: .text,
+                                  parameters: [.text], sanitize)
   }
 }

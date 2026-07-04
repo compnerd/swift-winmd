@@ -170,10 +170,13 @@ extension Session {
   /// session and render paths, which pass these routines EXPLICITLY rather than
   /// relying on the engine's default seeding.
   internal static var routines: Routines {
-    // `GUID` returns the UUID as text, so it is declared `.text` — the result
-    // type the schema walk and the `INFORMATION_SCHEMA` `data_type` a view's
-    // `GUID(...)` column reports read.
-    Routines.standard.registering("guid", returns: .text, Session.guid)
+    // `GUID` returns the UUID as text over one blob argument, so it declares
+    // both its `.text` return type — the result type the schema walk and the
+    // `INFORMATION_SCHEMA` `data_type` a view's `GUID(...)` column reports read
+    // — and its `[.blob]` parameter contract, which the static type-check
+    // validates a `GUID(...)` call against.
+    Routines.standard.registering("guid", returns: .text, parameters: [.blob],
+                                  Session.guid)
   }
 
   /// `GUID(blob)` — the UUID a `GuidAttribute` `CustomAttribute` value blob

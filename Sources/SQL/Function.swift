@@ -2,29 +2,38 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 /// A registered scalar routine — a per-row computation over evaluated arguments
-/// paired with its declared result type.
+/// paired with its declared signature.
 ///
 /// A routine takes its arguments already evaluated to typed `Value`s (the
 /// engine evaluates each argument expression against the row first) and returns
 /// one `Value`; it is CALLED as a function — `routine(arguments)`. It declares
-/// the result `returns` type, read to TYPE a `f(...)` call WITHOUT running it:
-/// the result-schema walk (`Scope.type(of:)`) and the `INFORMATION_SCHEMA`
-/// `data_type` a view's `GUID(...)` column reports. This is the shape the
-/// per-dialect decode routines (`guid`, `ret_type`, `span_type`, …) take — each
-/// a pure mapping from cell values to a cell value, registered by name and
-/// called from a projection or a predicate. A routine that cannot map its
-/// arguments throws `SQLError`; one that does not declare a result type is
-/// `.integer`, the engine's exact-numeric default.
+/// the type of each positional `parameter` — the count is the arity — and the
+/// result `returns` type, both read to TYPE a `f(...)` call WITHOUT running it:
+/// the result-schema walk (`Scope.type(of:)`) types the call by `returns` and
+/// validates each argument against `parameters`, and the `INFORMATION_SCHEMA`
+/// `data_type` a view's `GUID(...)` column reports from `returns`. This is the
+/// shape the per-dialect decode routines (`guid`, `ret_type`, `span_type`,
+/// …) take — each a pure mapping from cell values to a cell value, registered
+/// by name and called from a projection or a predicate. A routine that cannot
+/// map its arguments throws `SQLError`; one that does not declare a result type
+/// is `.integer`, the engine's exact-numeric default.
 public struct Routine: Sendable {
+  /// The declared type of each positional argument, in order — its count the
+  /// routine's arity. The static type-check validates a call against this: a
+  /// wrong argument count or a definitively-wrong argument type is rejected
+  /// before a schema is published (see `Scope`'s `call`).
+  public let parameters: Array<ValueType>
+
   /// The declared result type, read to type a call statically.
   public let returns: ValueType
 
   /// The per-row computation over evaluated arguments.
   private let compute: @Sendable (Array<Value>) throws(SQLError) -> Value
 
-  public init(returns: ValueType = .integer,
+  public init(returns: ValueType = .integer, parameters: Array<ValueType>,
               _ compute: @escaping @Sendable (Array<Value>)
                   throws(SQLError) -> Value) {
+    self.parameters = parameters
     self.returns = returns
     self.compute = compute
   }
@@ -76,26 +85,22 @@ public struct Routines: Sendable {
     functions[name.lowercased()]
   }
 
-  /// The declared result type of every registered routine, keyed by its
-  /// case-folded name — the map the result-schema walk (`Scope.type(of:)`) and
-  /// the `INFORMATION_SCHEMA` view-column typing read to type a `f(...)` call.
-  public var returns: Dictionary<String, ValueType> {
-    functions.mapValues(\.returns)
-  }
-
-  /// A copy of these routines with a routine computing `compute` and returning
-  /// `returns` (default `.integer`) bound to `name` (folded to lower case), the
-  /// binding shadowing any existing one.
+  /// A copy of these routines with a routine computing `compute`, accepting
+  /// `parameters` (default none), and returning `returns` (default `.integer`)
+  /// bound to `name` (folded to lower case), the binding shadowing any existing
+  /// one.
   //
   // `SQL.Value` is spelled in full here and in `bitand`: `Routines` conforms to
   // `ExpressibleByDictionaryLiteral`, whose associated `Value` is the literal's
-  // element closure type, so an unqualified `Value` inside `Routines` names
-  // that closure, not the engine cell the routine computes.
+  // element `Routine`, so an unqualified `Value` inside `Routines` names that
+  // element, not the engine cell the routine computes.
   public func registering(_ name: String, returns: ValueType = .integer,
+                          parameters: Array<ValueType> = [],
                           _ compute: @escaping @Sendable (Array<SQL.Value>)
                               throws(SQLError) -> SQL.Value) -> Routines {
     var functions = self.functions
-    functions[name.lowercased()] = Routine(returns: returns, compute)
+    functions[name.lowercased()] =
+        Routine(returns: returns, parameters: parameters, compute)
     return Routines(functions)
   }
 
@@ -114,12 +119,15 @@ public struct Routines: Sendable {
   /// shadow one (see `subscript(_:)`). Its lone member is `BITAND`, the
   /// portable, standards-compliant spelling (Oracle's) of a bitwise AND — an
   /// operation ISO SQL and this grammar otherwise lack; it returns an integer.
-  public static let standard: Routines = ["bitand": bitand]
+  public static let standard: Routines =
+      ["bitand": Routine(parameters: [.integer, .integer], bitand)]
 
   /// `BITAND(x, y)` — the bitwise AND of two integers. A NULL argument yields
   /// NULL (SQL null propagation); the wrong argument count or a non-integer
   /// argument is `SQLError.argument` (a function-argument fault — not
-  /// `SQLError.arity`, which is the UNION column-count mismatch).
+  /// `SQLError.arity`, which is the UNION column-count mismatch). Its declared
+  /// `[.integer, .integer]` contract is what the static type-check validates a
+  /// call against, mirroring these run-time faults.
   private static func bitand(_ arguments: Array<SQL.Value>)
       throws(SQLError) -> SQL.Value {
     guard arguments.count == 2 else {
@@ -136,21 +144,12 @@ public struct Routines: Sendable {
 }
 
 extension Routines: ExpressibleByDictionaryLiteral {
-  /// Builds routines from a `name: closure` dictionary literal — the value is a
-  /// BARE closure, so `["upper": { … }]` reads unchanged for a client that
-  /// declares no return type, the routine defaulting to a `.integer` result.
-  /// `registering(_:returns:_:)` declares another return type. An empty literal
-  /// `[:]` is the empty routines; a repeated key keeps the last, and `init(_:)`
-  /// case-folds the names.
-  //
-  // The value is spelled as a closure (not a `Routine`) so the historical
-  // bare-closure registration keeps type-checking; this closure IS the
-  // associated `Value`, so the full `SQL.Value` spelling names the engine cell.
-  public init(dictionaryLiteral elements:
-                  (String, @Sendable (Array<SQL.Value>)
-                      throws(SQLError) -> SQL.Value)...) {
-    self.init(Dictionary(
-        elements.map { ($0.0, Routine(returns: .integer, $0.1)) },
-        uniquingKeysWith: { _, last in last }))
+  /// Builds routines from a `name: Routine` dictionary literal, so every
+  /// registered routine declares its full signature — its `parameters` and
+  /// `returns` — inline: `["bitand": Routine(parameters: [.integer, .integer],
+  /// bitand)]`. An empty literal `[:]` is the empty routines; a repeated key
+  /// keeps the last, and `init(_:)` case-folds the names.
+  public init(dictionaryLiteral elements: (String, Routine)...) {
+    self.init(Dictionary(elements, uniquingKeysWith: { _, last in last }))
   }
 }

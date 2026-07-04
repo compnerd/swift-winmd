@@ -739,6 +739,21 @@ struct IntrospectionTests {
     }
   }
 
+  @Test("a base relation shadowed by the definition_schema store is hidden")
+  func storeShadowsBase() throws {
+    // The store overlay resolves `definition_schema.tables`, so a catalog base
+    // relation of that name is unreachable; it must not be advertised as a BASE
+    // TABLE, or metadata would disagree with resolution for the reserved name.
+    let cat = MetaCatalog([
+      "People": MetaRelation([("Name", .text)], []),
+      "definition_schema.tables": MetaRelation([("x", .integer)], []),
+    ])
+    let rows = try cat.run(parse("""
+        SELECT table_name FROM information_schema.tables ORDER BY table_name
+        """))
+    #expect(rows == [[.text("People")]])
+  }
+
   @Test("information_schema.columns hides a view with an unknown scalar call")
   func unknownCallView() throws {
     // `v` projects `NOPE(Name)`; `NOPE` is not registered, so `SELECT * FROM v`

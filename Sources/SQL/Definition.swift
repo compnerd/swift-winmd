@@ -248,7 +248,12 @@ extension Catalog where Self: ~Escapable {
     // a shadowed base is unreachable and is not listed — the name appears once,
     // as the VIEW a query actually resolves.
     let shadowed = Set(views().map { $0.lowercased() })
-    for name in relations() where !shadowed.contains(name.lowercased()) {
+    for name in relations() {
+      // A reserved store name resolves to the store overlay, never a catalog
+      // relation of that name, so such a base is unreachable and is not listed;
+      // nor is a base a view shadows.
+      guard Definition(name) == nil,
+          !shadowed.contains(name.lowercased()) else { continue }
       rows.append([.null, .null, .text(name), .text("BASE TABLE")])
     }
     for name in views() where Definition(name) == nil {
@@ -277,7 +282,12 @@ extension Catalog where Self: ~Escapable {
     // A view shadows a same-named base relation, so a shadowed base's columns
     // are unreachable and not listed — only the view's are (below).
     let shadowed = Set(views().map { $0.lowercased() })
-    for name in relations() where !shadowed.contains(name.lowercased()) {
+    for name in relations() {
+      // A reserved store name resolves to the store overlay, not a catalog
+      // relation, so its columns are unreachable and not listed; nor is a base
+      // a view shadows.
+      guard Definition(name) == nil,
+          !shadowed.contains(name.lowercased()) else { continue }
       guard let table = table(named: name) else { continue }
       let names = table.names
       let types = table.types

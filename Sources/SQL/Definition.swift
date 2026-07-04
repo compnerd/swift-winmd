@@ -139,12 +139,14 @@ extension Catalog where Self: ~Escapable {
   /// `relations()`/`views()` and each relation's schema and builds the
   /// relation's rows. It builds no cached state, so the engine resolves a
   /// reserved name lazily, building only the one a query references.
-  borrowing func store(_ relation: Definition) -> Materialised {
+  borrowing func store(_ relation: Definition,
+                       _ returns: Dictionary<String, ValueType> = [:])
+      -> Materialised {
     switch relation {
     case .tables:
       tables()
     case .columns:
-      columns()
+      columns(returns)
     }
   }
 
@@ -161,13 +163,14 @@ extension Catalog where Self: ~Escapable {
   /// query actually references are enumerated. A name in the reserved namespace
   /// but not one the store serves is left unbound, so it faults later as an
   /// ordinary unknown relation (`SQLError.relation`).
-  borrowing func augment(_ ctes: CTEs, for query: Query) -> CTEs {
+  borrowing func augment(_ ctes: CTEs, for query: Query,
+                         returns: Dictionary<String, ValueType> = [:]) -> CTEs {
     var names = Set<String>()
     query.collect(into: &names)
     var augmented = ctes
     for name in names where augmented[name.lowercased()] == nil {
       if let relation = Definition(name) {
-        augmented[name.lowercased()] = store(relation)
+        augmented[name.lowercased()] = store(relation, returns)
       }
     }
     return augmented
@@ -248,7 +251,7 @@ extension Catalog where Self: ~Escapable {
     for name in relations() where !shadowed.contains(name.lowercased()) {
       rows.append([.null, .null, .text(name), .text("BASE TABLE")])
     }
-    for name in views() {
+    for name in views() where Definition(name) == nil {
       rows.append([.null, .null, .text(name), .text("VIEW")])
     }
     return Materialised(columns: Definition.tables.names, rows: rows,
@@ -264,8 +267,12 @@ extension Catalog where Self: ~Escapable {
   /// ISO columns. `data_type` maps the engine's `ValueType` to its ISO domain;
   /// `is_nullable` is a first cut of `'YES'` for every column (the engine does
   /// not yet track per-column nullability). A view's columns are listed too,
-  /// their types resolved from the view's body.
-  private borrowing func columns() -> Materialised {
+  /// their types resolved from the view's body — a scalar call in that body
+  /// types from `returns`, the run's routine return-type map, so a view's
+  /// `GUID(...)` column advertises `character varying`, not the integer
+  /// default.
+  private borrowing func columns(_ returns: Dictionary<String, ValueType>)
+      -> Materialised {
     var rows = Array<Array<Value>>()
     // A view shadows a same-named base relation, so a shadowed base's columns
     // are unreachable and not listed — only the view's are (below).
@@ -280,7 +287,7 @@ extension Catalog where Self: ~Escapable {
                      .text("YES")])
       }
     }
-    for name in views() {
+    for name in views() where Definition(name) == nil {
       guard let view = view(named: name) else { continue }
       // List a view's columns only if its WHOLE body validates — exactly the
       // resolution a run performs, so a view a `SELECT *` could not run is not
@@ -300,20 +307,26 @@ extension Catalog where Self: ~Escapable {
       // run and is not advertised here.
       guard let plan = try? compile(view.query, schemas([:], for: view.query)),
           plan.width == view.columns.count else { continue }
-      // Type the (now known valid) view's columns from its body. The types come
-      // from the resolve-only projection walk over the view's OWN overlay,
-      // built schema-only so reserved relations resolve without a row build.
-      // Compilation already proved the body runs and its arity matches its
-      // declared columns, so this defensively falls back to the declared
-      // `.integer` only if the type walk somehow falls short.
+      // `compile` resolved the body — its relations, arities, and each call's
+      // ARGUMENTS — but cannot check a called routine EXISTS (it holds no
+      // routine set and builds no call term; the name binds at execute), so
+      // reject a body naming an unregistered function against the run's routine
+      // return-type map. The first-arm type walk below faults an unknown call
+      // it PROJECTS, but not one in a `WHERE`/`HAVING` or a later `UNION` arm,
+      // so gate on `calls`, the whole-body inventory — a view a run could not
+      // execute is not advertised as queryable metadata.
+      let unknown = view.query.calls.first { returns[$0.lowercased()] == nil }
+      guard unknown == nil else { continue }
+      // Type the columns from the body's first arm.
       let overlay = schemas([:], for: view.query)
-      let resolved = (try? columns(of: view.query.first, overlay,
-                                   visited: [name.lowercased()])) ?? []
-      let typed = resolved.count == view.columns.count
+      guard let resolved = try? columns(of: view.query.first, overlay,
+                                        visited: [name.lowercased()],
+                                        returns: returns),
+          resolved.count == view.columns.count else { continue }
       for ordinal in view.columns.indices {
-        let type = typed ? resolved[ordinal].type : .integer
         rows.append([.text(name), .text(view.columns[ordinal]),
-                     .integer(ordinal + 1), .text(type.domain), .text("YES")])
+                     .integer(ordinal + 1),
+                     .text(resolved[ordinal].type.domain), .text("YES")])
       }
     }
     return Materialised(columns: Definition.columns.names, rows: rows,

@@ -108,8 +108,10 @@ extension Catalog where Self: ~Escapable {
     // CTEs, before the base catalog. Every phase reads the extended map, so a
     // reserved store relation resolves, plans, and materialises exactly as a
     // common table expression does; a portable `information_schema.` view over
-    // the store resolves through the ordinary view machinery.
-    let ctes = augment(ctes, for: query)
+    // the store resolves through the ordinary view machinery. The routines'
+    // return types ride in so a store `data_type` row types a view's
+    // scalar-call column (`GUID(...)`) by its declared return type.
+    let ctes = augment(ctes, for: query, returns: routines.returns)
     let logical = try compile(query, ctes).pushdown()
     let plan = try optimise(logical, ctes, bindings)
     return try execute(plan, self, ctes, routines, bindings).map(\.values)

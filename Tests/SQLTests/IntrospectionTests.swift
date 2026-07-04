@@ -650,6 +650,159 @@ struct IntrospectionTests {
     #expect(columns == [OutputColumn(name: "Name", type: .text)])
   }
 
+  @Test("a text-returning scalar-call column types character varying")
+  func scalarReturnType() throws {
+    // `v` projects a scalar call `TAG(Name)` whose routine declares a `.text`
+    // return type. `information_schema.columns` types the view's column from
+    // its body: a `.call` reads the run's routine return-type map, so `iid`
+    // advertises `character varying`, not the `.integer` default a call fell to
+    // before routines declared a return type. The run carries `TAG`, so its
+    // return type reaches the store builder's view typing.
+    let body = try parse("SELECT TAG(Name) AS iid FROM People")
+    let cat = MetaCatalog(
+        ["People": MetaRelation([("Name", .text)], [])],
+        views: ["v": View(query: body, columns: ["iid"])])
+    let routines =
+        Routines().registering("tag", returns: .text) { _ in .text("x") }
+    let rows = try cat.run(parse("""
+        SELECT column_name, data_type FROM information_schema.columns
+         WHERE table_name = 'v'
+        """), routines)
+    #expect(rows == [[.text("iid"), .text("character varying")]])
+  }
+
+  @Test("columns(of:) types a scalar call by its routine's return type")
+  func scalarCallColumn() throws {
+    // The public schema API takes the SAME routines a run would, so a projected
+    // `TAG(Name)` reports its declared `.text` return type, not `.integer`.
+    let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
+    let query = try parse("SELECT TAG(Name) AS t FROM People")
+    let routines =
+        Routines().registering("tag", returns: .text) { _ in .text("x") }
+    #expect(try cat.columns(of: query, routines: routines)
+                == [OutputColumn(name: "t", type: .text)])
+    // Without the routines, `TAG` is an unknown function that a run could not
+    // execute, so the schema faults rather than inventing an `.integer` header.
+    #expect(throws: SQLError.self) { let _ = try cat.columns(of: query) }
+  }
+
+  @Test("columns(of:) faults on an unknown call in a predicate")
+  func unknownCallPredicateColumns() throws {
+    // The unknown `NOPE` is in the WHERE, invisible to the first-arm projection
+    // walk; the whole-query inventory faults it, exactly as a run would.
+    let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
+    let query = try parse("SELECT Name FROM People WHERE NOPE(Name) = 1")
+    #expect(throws: SQLError.self) { let _ = try cat.columns(of: query) }
+  }
+
+  @Test("columns(of:) faults on an unknown call in a later UNION arm")
+  func unknownCallLaterArmColumns() throws {
+    // The first arm types cleanly; the unknown `NOPE` is in the second arm the
+    // first-arm walk never visits.
+    let cat = MetaCatalog([
+      "People": MetaRelation([("Name", .text)], []),
+      "Pet": MetaRelation([("Species", .text)], []),
+    ])
+    let query = try parse("""
+        SELECT Name FROM People UNION SELECT NOPE(Species) FROM Pet
+        """)
+    #expect(throws: SQLError.self) { let _ = try cat.columns(of: query) }
+  }
+
+  @Test("a routine return type crosses a view boundary in schema resolution")
+  func scalarCallThroughView() throws {
+    // `w` projects `TAG(Name)`; `SELECT * FROM w` must report `t` as the
+    // routine's declared `.text`, so schema resolution threads the return map
+    // across the view boundary rather than dropping it to `.integer`.
+    let body = try parse("SELECT TAG(Name) AS t FROM People")
+    let cat = MetaCatalog(
+        ["People": MetaRelation([("Name", .text)], [])],
+        views: ["w": View(query: body, columns: ["t"])])
+    let routines =
+        Routines().registering("tag", returns: .text) { _ in .text("x") }
+    let typed =
+        try cat.columns(of: parse("SELECT * FROM w"), routines: routines)
+    #expect(typed == [OutputColumn(name: "t", type: .text)])
+  }
+
+  @Test("columns(of:) faults on an unknown call in a view body predicate")
+  func unknownCallViewBodyColumns() throws {
+    // `SELECT * FROM v` names no call, but v's body calls the unregistered
+    // `NOPE` in its WHERE — a clause the view-boundary first-arm walk misses.
+    // The body's call inventory must fault, as `SELECT * FROM v` would at run.
+    let body = try parse("SELECT Name FROM People WHERE NOPE(Name) = 1")
+    let cat = MetaCatalog(
+        ["People": MetaRelation([("Name", .text)], [])],
+        views: ["v": View(query: body, columns: ["Name"])])
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("SELECT * FROM v"))
+    }
+  }
+
+  @Test("information_schema.columns hides a view with an unknown scalar call")
+  func unknownCallView() throws {
+    // `v` projects `NOPE(Name)`; `NOPE` is not registered, so `SELECT * FROM v`
+    // faults at run. `compile` lowers the call without checking the routine, so
+    // the unknown function surfaces at typing — the view is not listed.
+    let body = try parse("SELECT NOPE(Name) AS x FROM People")
+    let cat = MetaCatalog(
+        ["People": MetaRelation([("Name", .text)], [])],
+        views: ["v": View(query: body, columns: ["x"])])
+    let rows = try cat.run(parse("""
+        SELECT column_name FROM information_schema.columns
+         WHERE table_name = 'v'
+        """))
+    #expect(rows == [])
+  }
+
+  @Test("information_schema.columns hides a view whose predicate calls unknown")
+  func unknownCallPredicate() throws {
+    // The unknown `NOPE` is in the WHERE, not the projection, so the first-arm
+    // type walk never sees it — only the whole-body call inventory does, and a
+    // run of `SELECT * FROM v` would fault `SQLError.function`.
+    let body = try parse("SELECT Name FROM People WHERE NOPE(Name) = 1")
+    let cat = MetaCatalog(
+        ["People": MetaRelation([("Name", .text)], [])],
+        views: ["v": View(query: body, columns: ["Name"])])
+    let rows = try cat.run(parse("""
+        SELECT column_name FROM information_schema.columns
+         WHERE table_name = 'v'
+        """))
+    #expect(rows == [])
+  }
+
+  @Test("information_schema.columns hides a view whose later arm calls unknown")
+  func unknownCallLaterArm() throws {
+    // The first arm types cleanly; the unknown `NOPE` is in the second UNION
+    // arm, which the first-arm walk never types — the inventory spans arms.
+    let body = try parse("""
+        SELECT Name FROM People UNION SELECT NOPE(Name) FROM People
+        """)
+    let cat = MetaCatalog(
+        ["People": MetaRelation([("Name", .text)], [])],
+        views: ["v": View(query: body, columns: ["Name"])])
+    let rows = try cat.run(parse("""
+        SELECT column_name FROM information_schema.columns
+         WHERE table_name = 'v'
+        """))
+    #expect(rows == [])
+  }
+
+  @Test("information_schema.columns lists a view whose predicate calls known")
+  func knownCallPredicate() throws {
+    // The gate rejects only an UNKNOWN routine — a registered one in the WHERE
+    // (`BITAND`, the standard prelude) leaves the view advertised.
+    let body = try parse("SELECT Name FROM People WHERE BITAND(1, 1) = 1")
+    let cat = MetaCatalog(
+        ["People": MetaRelation([("Name", .text)], [])],
+        views: ["v": View(query: body, columns: ["Name"])])
+    let rows = try cat.run(parse("""
+        SELECT column_name FROM information_schema.columns
+         WHERE table_name = 'v'
+        """))
+    #expect(rows == [[.text("Name")]])
+  }
+
   // MARK: - DEFINITION_SCHEMA store
 
   @Test("definition_schema.tables is itself queryable as the store")

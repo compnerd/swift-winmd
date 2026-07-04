@@ -208,9 +208,11 @@ internal struct Scope {
   /// aggregated argument — a `COUNT(*)`, having no argument, is `.integer`.
   ///
   /// A `.call` types from `returns` — the routine return-type map the run
-  /// carries — so a text-returning scalar (`GUID(...)`) reports `.text` rather
-  /// than the `.integer` default; a call to a routine the map does not name
-  /// (whose return type the engine cannot see) stays `.integer`.
+  /// carries — so a text-returning scalar (`GUID(...)`) reports `.text`. A call
+  /// to a routine the map does not name is an UNKNOWN function that a run could
+  /// not execute (it would fault `SQLError.function`), so typing it faults the
+  /// same way rather than inventing an `.integer` header for a query that
+  /// cannot run — the schema of an unrunnable query is not returned.
   internal func type(of expression: Expression,
                      _ returns: Dictionary<String, ValueType> = [:])
       throws(SQLError) -> ValueType {
@@ -224,7 +226,9 @@ internal struct Scope {
       case .double: .double
       }
     case let .call(name, _):
-      returns[name.lowercased()] ?? .integer
+      if let type = returns[name.lowercased()] { type } else {
+        throw .function(name)
+      }
     case let .aggregate(function, operand):
       switch function {
       case .count:

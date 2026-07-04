@@ -55,13 +55,19 @@ extension Catalog where Self: ~Escapable {
   /// mismatches the arity, faults here EXACTLY as a run would rather than
   /// returning headers for a query that cannot run.
   ///
+  /// `routines` are the scalar functions a run would resolve against — pass the
+  /// SAME set here so a projected call `TAG(Name)` reports its declared return
+  /// type rather than the `.integer` default. It defaults to none, matching a
+  /// run with no custom routines.
+  ///
   /// - Throws: the same resolution faults `run(query)` raises —
   ///   `SQLError.relation` for an unknown relation,
   ///   `SQLError.column`/`SQLError.ambiguous` for a column reference that does
-  ///   not resolve to exactly one relation, `SQLError.arity` for a `UNION`
-  ///   whose arms project differing column counts.
-  public borrowing func columns(of query: Query) throws(SQLError)
-      -> Array<OutputColumn> {
+  ///   not resolve to exactly one relation, `SQLError.function` for a call to
+  ///   an unregistered scalar function anywhere in the query, `SQLError.arity`
+  ///   for a `UNION` whose arms project differing column counts.
+  public borrowing func columns(of query: Query, routines: Routines = [:])
+      throws(SQLError) -> Array<OutputColumn> {
     // Extend the scope with any `definition_schema.` store relation the query
     // names, so its result schema resolves the reserved relation the same as a
     // run would.
@@ -70,9 +76,23 @@ extension Catalog where Self: ~Escapable {
     // path drives, resolving every arm and cross-checking a UNION's arity — so
     // a schema is returned only for a query that could actually run.
     _ = try compile(query, ctes)
+    // `compile` resolves each call's ARGUMENTS but cannot check the routine
+    // EXISTS (it holds no routine set; the name binds at execute), and the
+    // first-arm type walk below faults an unknown call it PROJECTS but not one
+    // in a `WHERE`/`HAVING` or a later `UNION` arm — so gate on `calls`, the
+    // whole-query inventory, against the same routines a run resolves: a query
+    // naming an unregistered function faults here EXACTLY as a run would rather
+    // than returning headers for a schema it could not produce.
+    let returns = Routines.standard.merging(routines).returns
+    for name in query.calls where returns[name.lowercased()] == nil {
+      throw .function(name)
+    }
     // The result columns are the first arm's projection (the ISO rule a UNION
-    // follows), resolved against the validated scope.
-    return try columns(of: query.first, ctes)
+    // follows), resolved against the validated scope; a scalar call types from
+    // the routine return types — the engine prelude merged under `routines`,
+    // exactly as a run seeds them, so a standard call (`BITAND`) types without
+    // the caller re-supplying it.
+    return try columns(of: query.first, ctes, returns: returns)
   }
 
   /// The result columns of a single `select`, resolved against this catalog
@@ -100,9 +120,11 @@ extension Catalog where Self: ~Escapable {
     // them end to end in one scope — the same layout compilation resolves a
     // projection against.
     var relations =
-        [(relation, try schema(of: relation, ctes, visited: visited))]
+        [(relation, try schema(of: relation, ctes, visited: visited,
+                               returns: returns))]
     for join in select.joins {
-      let joined = try schema(of: join.relation, ctes, visited: visited)
+      let joined = try schema(of: join.relation, ctes, visited: visited,
+                              returns: returns)
       relations.append((join.relation, joined))
     }
     return try Scope(relations).columns(of: select.projection, returns)
@@ -114,9 +136,12 @@ extension Catalog where Self: ~Escapable {
   /// same precedence `compile` resolves a relation by. It reads only schemas,
   /// never a cursor, so it never executes. `visited` names the views already
   /// being resolved down this chain, breaking a cyclic view (`A` over `B` over
-  /// `A`) that would otherwise re-enter here.
+  /// `A`) that would otherwise re-enter here. `returns` rides through so a view
+  /// body projecting a scalar call types it from the routine's declared return
+  /// type, not the `.integer` default.
   borrowing func schema(of relation: Relation, _ ctes: CTEs,
-                        visited: Set<String> = [])
+                        visited: Set<String> = [],
+                        returns: Dictionary<String, ValueType> = [:])
       throws(SQLError) -> Schema {
     let name = relation.name
     if let cte = ctes[name.lowercased()] {
@@ -144,15 +169,23 @@ extension Catalog where Self: ~Escapable {
       // declared schema (every type the `.integer` default). `try?` cannot
       // catch this — the recursion overflows the stack rather than throwing.
       guard !visited.contains(name.lowercased()) else { return base }
-      // Type off the body's first arm (the ISO rule for a UNION). Whole-body
-      // validation — every arm, and the body's arity against the declared
-      // columns — is `compile`'s job (the public entry and the introspection
-      // builder run it), so on any shortfall (a mismatch a caller has not yet
-      // compiled away) fall back to the declared schema rather than re-checking
-      // it here.
+      // `compile` checks the body's relations, arities, and call arguments but
+      // not that a called routine EXISTS (no routine set; the name binds at
+      // execute), and the outer query's `calls` never reach into a view body.
+      // So validate the body's whole call inventory here: a view calling an
+      // unregistered function in a clause the first-arm walk misses — a
+      // `WHERE`/`HAVING`, a later `UNION` arm — faults as a run of it would.
+      for call in view.query.calls where returns[call.lowercased()] == nil {
+        throw .function(call)
+      }
+      // Type off the body's first arm (the ISO rule for a UNION). Arity — the
+      // body's width against the declared columns — is `compile`'s job (the
+      // public entry and the introspection builder run it), so on a shortfall
+      // fall back to the declared schema rather than re-checking it here.
       let resolved =
           try columns(of: view.query.first, schemas([:], for: view.query),
-                      visited: visited.union([name.lowercased()]))
+                      visited: visited.union([name.lowercased()]),
+                      returns: returns)
       guard resolved.count == base.width else { return base }
       return Schema(width: base.width, extent: base.extent, names: base.names,
                     types: resolved.map(\.type), virtuals: base.virtuals)

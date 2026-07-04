@@ -187,12 +187,12 @@ struct LimitTests {
     let negativeOffset = Select(projection: base.projection, from: base.from,
                                 limit: Limit(count: 1, offset: -1))
     #expect(throws: fault) {
-      try Engine.run(.select(negativeOffset), catalog)
+      try catalog.run(.select(negativeOffset))
     }
     let negativeCount = Select(projection: base.projection, from: base.from,
                                limit: Limit(count: -1))
     #expect(throws: fault) {
-      try Engine.run(.select(negativeCount), catalog)
+      try catalog.run(.select(negativeCount))
     }
   }
 

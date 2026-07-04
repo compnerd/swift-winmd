@@ -435,8 +435,8 @@ internal struct Shell: ~Escapable {
     // the query's job, so render just iterates whatever it returns.
     let selection =
         try Shell.select(Shell.query(named: "interfaces", search: search))
-    let interfaces = try Engine.run(selection, session, routines,
-                                    bindings: ["name": .text(interface)])
+    let interfaces = try session.run(selection, routines,
+                                     bindings: ["name": .text(interface)])
     guard interface == "*" || !interfaces.isEmpty else {
       throw RenderError.interface(interface)
     }
@@ -451,8 +451,8 @@ internal struct Shell: ~Escapable {
       // the render decodes them from the signature with the spec's `Dialect`.
       let plan = try Shell.select(Shell.query(named: "methods",
                                               search: search))
-      let rows = try Engine.run(plan, session, routines,
-                                bindings: ["parent": id])
+      let rows = try session.run(plan, routines,
+                                 bindings: ["parent": id])
       var methods = Array<Dictionary<String, Any>>()
       methods.reserveCapacity(rows.count)
       for method in rows {
@@ -463,8 +463,8 @@ internal struct Shell: ~Escapable {
         // time from the parameter's own signature position.
         let selection = try Shell.select(Shell.query(named: "params",
                                                      search: search))
-        let params = try Engine.run(selection, session, routines,
-                                    bindings: ["parent": method[0]])
+        let params = try session.run(selection, routines,
+                                     bindings: ["parent": method[0]])
         var parameters = Array<Dictionary<String, Any>>()
         for parameter in params where parameter[2] != .integer(0) {
           let type = session.storage.decode(parameter: parameter[0].integer,
@@ -500,8 +500,8 @@ internal struct Shell: ~Escapable {
       // base; an empty `root` applies no default.
       let lineage =
           try Shell.select(Shell.query(named: "bases", search: search))
-      let bases = try Engine.run(lineage, session, routines,
-                                 bindings: ["parent": id])
+      let bases = try session.run(lineage, routines,
+                                  bindings: ["parent": id])
       let base: String? = if let inherited = bases.first {
         inherited[0].text
       } else if language.root.isEmpty || found[2].text == language.root {
@@ -984,9 +984,9 @@ extension Session {
       register(name, view)
       return []
     case let .select(query):
-      return try Engine.run(query, self, Session.routines, bindings: bindings)
+      return try self.run(query, Session.routines, bindings: bindings)
     case .with:
-      return try Engine.run(parsed, self, Session.routines, bindings: bindings)
+      return try self.run(parsed, Session.routines, bindings: bindings)
     }
   }
 }

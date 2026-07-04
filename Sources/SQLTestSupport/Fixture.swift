@@ -12,7 +12,7 @@ import SQL
 /// its public adapter protocols. Because the storage is owned rather than
 /// borrowed, every conformer omits `@_lifetime` — the same trick a
 /// `Span`-backed source would replace with lifetime annotations — which is
-/// exactly what a `borrowing Engine.run` admits. It is the proof the engine's
+/// exactly what a `borrowing Catalog.run` admits. It is the proof the engine's
 /// protocols admit an owned source as readily as a mapped-file one, and the
 /// single copy of the adapter both `EngineTests` and `LimitTests` build
 /// fixtures over.

@@ -18,7 +18,59 @@
 /// chain. Absent layers are omitted. Executing the plan yields the result
 /// records' typed values; formatting them is a client's job.
 public enum Engine {
-  /// Runs `query` against `catalog`, returning the projected, filtered, and
+  // MARK: - WITH
+
+  /// Whether `cte` actually references itself — the test the fixpoint routing
+  /// turns on, distinct from the syntactic `recursive` flag a `WITH RECURSIVE`
+  /// stamps on every member.
+  ///
+  /// The parser marks each member of a `WITH RECURSIVE` list recursive whether
+  /// or not it names itself, but only a self-referential CTE has a recursive arm
+  /// to iterate; running a non-self-referential one through the fixpoint would
+  /// re-evaluate an arm that never reads the CTE, repeating its rows without end
+  /// (a `UNION ALL`) or needlessly (a `UNION`). A CTE is recursive in truth when
+  /// its recursive arm — the right member of the top-level `UNION`, the one the
+  /// fixpoint compiles with the CTE bound — names `cte.name` in a `FROM`/`JOIN`.
+  /// The anchor is the base case, compiled with the name NOT in scope, so a
+  /// `FROM <name>` there reads a base relation of that name, not the CTE.
+  /// Scanning the anchor too would misroute `WITH RECURSIVE Parent(Id) AS
+  /// (SELECT Id FROM Parent UNION ALL SELECT Id FROM Extra)` — whose anchor
+  /// merely reads the same-named base — into the fixpoint.
+  internal static func recursive(_ cte: CTE) -> Bool {
+    guard case let .union(_, arm, _) = cte.query else { return false }
+    return references(arm, cte.name.lowercased())
+  }
+
+  /// Whether `query` names the relation `name` (case-folded) in ANY member's
+  /// `FROM`/`JOIN` — walking the left-associative `UNION` chain and each arm.
+  /// Used to spot a self-reference lurking in a recursive body's anchor;
+  /// `recursive` itself inspects only the recursive arm.
+  internal static func references(_ query: Query, _ name: String) -> Bool {
+    switch query {
+    case let .select(select):
+      references(select, name)
+    case let .union(left, select, _):
+      references(left, name) || references(select, name)
+    }
+  }
+
+  /// Whether `select` names the relation `name` (case-folded) in its `FROM` or
+  /// any `JOIN`.
+  private static func references(_ select: Select, _ name: String) -> Bool {
+    if select.from?.name.lowercased() == name { return true }
+    return select.joins.contains { $0.relation.name.lowercased() == name }
+  }
+
+  /// The greatest number of fixpoint iterations a recursive CTE may take before
+  /// the engine concludes it does not terminate and throws
+  /// `SQLError.recursion`.
+  internal static let kRecursionCap = 10_000
+}
+
+// MARK: - Execution
+
+extension Catalog where Self: ~Escapable {
+  /// Runs `query` against this catalog, returning the projected, filtered, and
   /// ordered rows as typed values.
   ///
   /// A bare `SELECT` runs as before; a `UNION` runs each arm through the same
@@ -35,51 +87,44 @@ public enum Engine {
   ///   `SQLError.column` if a referenced column is absent, `SQLError.ambiguous`
   ///   if an unqualified name is resolved by more than one relation of a chain,
   ///   `SQLError.arity` if a `UNION`'s arms project differing column counts.
-  public static func run<C: Catalog & ~Escapable>(_ query: Query,
-                                                  _ catalog: borrowing C,
-                                                  _ routines: Routines = [:],
-                                                  bindings: Bindings = [:])
+  public borrowing func run(_ query: Query, _ routines: Routines = [:],
+                            bindings: Bindings = [:])
       throws(SQLError) -> Array<Array<Value>> {
     // Seed the standard prelude UNDER the caller's routines so a public call
     // always resolves the built-ins (BITAND) even when it supplies unrelated
     // UDFs; an explicitly registered function of the same name still shadows it
     // (the merge keeps the caller's binding on a clash).
-    try run(query, catalog, [:], Routines.standard.merging(routines), bindings)
+    try run(query, [:], Routines.standard.merging(routines), bindings)
   }
 
-  /// Runs `query` against `catalog` with the common table expressions `ctes` in
-  /// scope (empty for a query with no `WITH`), the resolution phases consulting
-  /// `ctes` before the base catalog.
-  internal static func run<C: Catalog & ~Escapable>(_ query: Query,
-                                                    _ catalog: borrowing C,
-                                                    _ ctes: CTEs,
-                                                    _ routines: Routines,
-                                                    _ bindings: Bindings)
+  /// Runs `query` against this catalog with the common table expressions `ctes`
+  /// in scope (empty for a query with no `WITH`), the resolution phases
+  /// consulting `ctes` before the base catalog.
+  internal borrowing func run(_ query: Query, _ ctes: CTEs,
+                              _ routines: Routines, _ bindings: Bindings)
       throws(SQLError) -> Array<Array<Value>> {
-    let logical = try compile(query, catalog, ctes).pushdown()
-    let plan = try optimise(logical, catalog, ctes, bindings)
-    return try execute(plan, catalog, ctes, routines, bindings).map(\.values)
+    let logical = try compile(query, ctes).pushdown()
+    let plan = try optimise(logical, ctes, bindings)
+    return try execute(plan, self, ctes, routines, bindings).map(\.values)
   }
 
-  /// Runs a `Statement` against `catalog`, returning its result rows.
+  /// Runs a `Statement` against this catalog, returning its result rows.
   ///
   /// A `select` runs its query directly; a `with` materialises its common table
   /// expressions, in source order, into the `CTEs` the trailing query resolves
   /// against (see `with`). A `create` defines a view rather than producing
   /// rows, so it is not runnable and faults with `SQLError.statement`.
-  public static func run<C: Catalog & ~Escapable>(_ statement: Statement,
-                                                  _ catalog: borrowing C,
-                                                  _ routines: Routines = [:],
-                                                  bindings: Bindings = [:])
+  public borrowing func run(_ statement: Statement, _ routines: Routines = [:],
+                            bindings: Bindings = [:])
       throws(SQLError) -> Array<Array<Value>> {
     // Seed the standard prelude under the caller's routines (see the query
     // overload) so BITAND resolves regardless of what the caller supplies.
     let routines = Routines.standard.merging(routines)
     return switch statement {
     case let .select(query):
-      try run(query, catalog, [:], routines, bindings)
+      try run(query, [:], routines, bindings)
     case let .with(ctes, query):
-      try with(ctes, query, catalog, routines, bindings)
+      try with(ctes, query, routines, bindings)
     case .create:
       throw .statement("CREATE VIEW defines a view rather than producing rows")
     }
@@ -88,10 +133,10 @@ public enum Engine {
   // MARK: - WITH
 
   /// Materialises the common table expressions `ctes`, in source order, into
-  /// the `CTEs` map and runs the trailing `query` against the base `catalog`
-  /// with that map in scope.
+  /// the `CTEs` map and runs the trailing `query` against this catalog with that
+  /// map in scope.
   ///
-  /// Each CTE materialises against the base `catalog` plus every EARLIER CTE,
+  /// Each CTE materialises against the base catalog plus every EARLIER CTE,
   /// so a CTE may name one defined before it (chained CTEs); a CTE name shadows
   /// a base relation of the same name (the resolver consults the map first). A
   /// recursive CTE — one that names itself in its own query — iterates a
@@ -109,11 +154,8 @@ public enum Engine {
   /// against the declared count BEFORE the CTE materialises — regardless of how
   /// many rows the body yields. A body filtered to zero rows still faults with
   /// `SQLError.columns`, where a per-row check would pass it through vacuously.
-  internal static func with<C: Catalog & ~Escapable>(_ ctes: Array<CTE>,
-                                                     _ query: Query,
-                                                     _ catalog: borrowing C,
-                                                     _ routines: Routines,
-                                                     _ bindings: Bindings)
+  internal borrowing func with(_ ctes: Array<CTE>, _ query: Query,
+                               _ routines: Routines, _ bindings: Bindings)
       throws(SQLError) -> Array<Array<Value>> {
     var relations = CTEs()
     for cte in ctes {
@@ -134,9 +176,9 @@ public enum Engine {
       // obscurely as an unresolved relation. This covers BOTH routings below (a
       // non-recursive final arm still reaches the run-once branch).
       if cte.recursive, case let .union(anchor, _, _) = cte.query,
-          references(anchor, cte.name.lowercased()),
-          case nil = catalog.table(named: cte.name),
-          case nil = catalog.view(named: cte.name) {
+          Engine.references(anchor, cte.name.lowercased()),
+          case nil = table(named: cte.name),
+          case nil = view(named: cte.name) {
         throw .unsupported(
             "recursive WITH references the CTE outside its final UNION arm")
       }
@@ -147,68 +189,22 @@ public enum Engine {
       // arity of both its arms internally (see `fixpoint`); a non-recursive one
       // checks its body's compiled width here.
       let rows: Array<Array<Value>>
-      if cte.recursive && recursive(cte) {
-        rows = try fixpoint(cte, catalog, relations, routines, bindings)
+      if cte.recursive && Engine.recursive(cte) {
+        rows = try fixpoint(cte, relations, routines, bindings)
       } else {
-        let width = try compile(cte.query, catalog, relations).width
+        let width = try compile(cte.query, relations).width
         guard width == cte.columns.count else {
           throw .columns(expected: cte.columns.count, got: width)
         }
-        rows = try run(cte.query, catalog, relations, routines, bindings)
+        rows = try run(cte.query, relations, routines, bindings)
       }
       relations[cte.name.lowercased()] =
           Materialised(columns: cte.columns, rows: rows)
     }
-    return try run(query, catalog, relations, routines, bindings)
+    return try run(query, relations, routines, bindings)
   }
 
-  /// Whether `cte` actually references itself — the test the fixpoint routing
-  /// turns on, distinct from the syntactic `recursive` flag a `WITH RECURSIVE`
-  /// stamps on every member.
-  ///
-  /// The parser marks each member of a `WITH RECURSIVE` list recursive whether
-  /// or not it names itself, but only a self-referential CTE has a recursive arm
-  /// to iterate; running a non-self-referential one through the fixpoint would
-  /// re-evaluate an arm that never reads the CTE, repeating its rows without end
-  /// (a `UNION ALL`) or needlessly (a `UNION`). A CTE is recursive in truth when
-  /// its recursive arm — the right member of the top-level `UNION`, the one the
-  /// fixpoint compiles with the CTE bound — names `cte.name` in a `FROM`/`JOIN`.
-  /// The anchor is the base case, compiled with the name NOT in scope, so a
-  /// `FROM <name>` there reads a base relation of that name, not the CTE.
-  /// Scanning the anchor too would misroute `WITH RECURSIVE Parent(Id) AS
-  /// (SELECT Id FROM Parent UNION ALL SELECT Id FROM Extra)` — whose anchor
-  /// merely reads the same-named base — into the fixpoint.
-  private static func recursive(_ cte: CTE) -> Bool {
-    guard case let .union(_, arm, _) = cte.query else { return false }
-    return references(arm, cte.name.lowercased())
-  }
-
-  /// Whether `query` names the relation `name` (case-folded) in ANY member's
-  /// `FROM`/`JOIN` — walking the left-associative `UNION` chain and each arm.
-  /// Used to spot a self-reference lurking in a recursive body's anchor;
-  /// `recursive` itself inspects only the recursive arm.
-  private static func references(_ query: Query, _ name: String) -> Bool {
-    switch query {
-    case let .select(select):
-      references(select, name)
-    case let .union(left, select, _):
-      references(left, name) || references(select, name)
-    }
-  }
-
-  /// Whether `select` names the relation `name` (case-folded) in its `FROM` or
-  /// any `JOIN`.
-  private static func references(_ select: Select, _ name: String) -> Bool {
-    if select.from?.name.lowercased() == name { return true }
-    return select.joins.contains { $0.relation.name.lowercased() == name }
-  }
-
-  /// The greatest number of fixpoint iterations a recursive CTE may take before
-  /// the engine concludes it does not terminate and throws
-  /// `SQLError.recursion`.
-  internal static let kRecursionCap = 10_000
-
-  /// Evaluates a recursive `cte` to a fixpoint over `catalog` with the earlier
+  /// Evaluates a recursive `cte` to a fixpoint over this catalog with the
   /// `ctes` in scope, returning every produced row.
   ///
   /// A recursive CTE's query is a `UNION` of an ANCHOR (its left arm, itself a
@@ -239,11 +235,8 @@ public enum Engine {
   /// `SELECT *` arm filtered to zero rows is caught. The anchor compiles with
   /// the CTE name NOT in scope (it does not reference itself); the recursive
   /// arm compiles with the name bound to `cte.columns`, the schema it reads.
-  internal static func fixpoint<C: Catalog & ~Escapable>(_ cte: CTE,
-                                                         _ catalog: borrowing C,
-                                                         _ ctes: CTEs,
-                                                         _ routines: Routines,
-                                                         _ bindings: Bindings)
+  internal borrowing func fixpoint(_ cte: CTE, _ ctes: CTEs,
+                                   _ routines: Routines, _ bindings: Bindings)
       throws(SQLError) -> Array<Array<Value>> {
     guard case let .union(anchor, recursive, all) = cte.query else {
       // A non-`UNION` recursive query runs once, but still binds under
@@ -251,11 +244,11 @@ public enum Engine {
       // anchor and arm get. A body naming a base relation of the CTE's own name
       // (`WITH RECURSIVE Parent(x,y,z) AS (SELECT * FROM Parent)`) would else
       // bind narrow base rows under the wider list and trap on a later read.
-      let width = try compile(cte.query, catalog, ctes).width
+      let width = try compile(cte.query, ctes).width
       guard width == cte.columns.count else {
         throw .columns(expected: cte.columns.count, got: width)
       }
-      return try run(cte.query, catalog, ctes, routines, bindings)
+      return try run(cte.query, ctes, routines, bindings)
     }
 
     // A misplaced recursive reference in the anchor (a same-named base/view is
@@ -269,7 +262,7 @@ public enum Engine {
     // arm reads the absent ordinal, rather than surfacing `SQLError.columns`.
     // The anchor is the base case and does not reference the CTE, so its width
     // resolves with the name not yet in scope.
-    let width = try compile(anchor, catalog, ctes).width
+    let width = try compile(anchor, ctes).width
     guard width == cte.columns.count else {
       throw .columns(expected: cte.columns.count, got: width)
     }
@@ -281,7 +274,7 @@ public enum Engine {
     var probe = ctes
     probe[cte.name.lowercased()] =
         Materialised(columns: cte.columns, rows: [])
-    let arm = try compile(.select(recursive), catalog, probe).width
+    let arm = try compile(.select(recursive), probe).width
     guard arm == cte.columns.count else {
       throw .columns(expected: cte.columns.count, got: arm)
     }
@@ -291,7 +284,7 @@ public enum Engine {
     // bare `UNION` dedups the seed exactly as it dedups an iteration's rows —
     // duplicate anchor rows collapse to their first occurrence — while `UNION
     // ALL` keeps every anchor row.
-    let anchored = try run(anchor, catalog, ctes, routines, bindings)
+    let anchored = try run(anchor, ctes, routines, bindings)
     var seen = Seen()
     var result = all ? anchored
                      : anchored.filter { seen.insert($0) }
@@ -300,7 +293,9 @@ public enum Engine {
     var iterations = 0
     while !working.isEmpty {
       iterations += 1
-      guard iterations <= kRecursionCap else { throw .recursion(cte.name) }
+      guard iterations <= Engine.kRecursionCap else {
+        throw .recursion(cte.name)
+      }
 
       // Bind the CTE name to ONLY the previous step's output and run the
       // recursive arm against the base catalog plus the earlier CTEs.
@@ -308,7 +303,7 @@ public enum Engine {
       scope[cte.name.lowercased()] =
           Materialised(columns: cte.columns, rows: working)
       let produced =
-          try run(.select(recursive), catalog, scope, routines, bindings)
+          try run(.select(recursive), scope, routines, bindings)
 
       var next = Array<Array<Value>>()
       for row in produced where all || seen.insert(row) {
@@ -319,228 +314,11 @@ public enum Engine {
     }
     return result
   }
+}
 
-  // MARK: - Compilation
+// MARK: - Compilation
 
-  /// Compiles `query` over `catalog` into a logical operator tree.
-  ///
-  /// A single `SELECT` compiles as itself; a `UNION` compiles recursively into a
-  /// BINARY `union` plan that mirrors the left-associative `Query`:
-  /// `compile(.union(left, select, all))` is `.union(compile(left),
-  /// compile(.select(select)), all)`. Each node carries its OWN `all`, so the
-  /// executor honours every `UNION`/`UNION ALL` distinctly — `(A UNION B) UNION
-  /// ALL C` dedups `A ∪ B` before appending `C`, rather than treating the whole
-  /// chain by the trailing arm's flag. The new arm must project the same column
-  /// count as the chain's first `SELECT` — the result columns — else
-  /// `SQLError.arity`.
-  internal static func compile<C: Catalog & ~Escapable>(_ query: Query,
-                                                        _ catalog: borrowing C,
-                                                        _ ctes: CTEs = [:])
-      throws(SQLError) -> Plan {
-    guard case let .union(left, select, all) = query else {
-      return try compile(query.first, catalog, ctes)
-    }
-
-    let width = try arity(query.first, catalog, ctes)
-    let count = try arity(select, catalog, ctes)
-    guard count == width else { throw .arity(width, count) }
-    return try .union(compile(left, catalog, ctes),
-                      compile(.select(select), catalog, ctes), all: all)
-  }
-
-  /// The number of result columns `select` projects — the extent of a `*` over
-  /// its relations, else the count of its projected items — for the `UNION`
-  /// arity check. The relations resolve through the borrowed `catalog`, the
-  /// `ctes` consulted first.
-  private static func arity<C: Catalog & ~Escapable>(_ select: Select,
-                                                     _ catalog: borrowing C,
-                                                     _ ctes: CTEs)
-      throws(SQLError) -> Int {
-    switch select.projection {
-    case .all:
-      // `SELECT *` spans the relations in scope; a FROM-less arm has none.
-      guard let relation = select.from else {
-        throw .named("SELECT * with no FROM")
-      }
-      var width = try resolve(relation, catalog, ctes).schema.width
-      for join in select.joins {
-        try width += resolve(join.relation, catalog, ctes).schema.width
-      }
-      return width
-    case let .columns(columns):
-      return columns.count
-    case let .expressions(items):
-      return items.count
-    }
-  }
-
-  /// Compiles `select` over `catalog` into a logical operator tree in slot
-  /// space.
-  ///
-  /// The relation(s) resolve through the borrowed catalog (`SQLError.relation`
-  /// on a miss). A single relation shapes `Project(Sort(Select(Scan)))`; a chain
-  /// of joins shapes a left-deep tree, each join level a `Select(match,
-  /// Product(chain, Scan))` on that join's `ON` equality, with the `WHERE`
-  /// wrapped outside as `Project(Sort(Select(where, chain)))`. The `Select` and
-  /// `Sort` layers are present only when a predicate or an `ORDER BY` is. Each
-  /// scan carries the set of ordinals the query references on its side
-  /// (projection ∪ every match ∪ filter ∪ order, reals and virtuals) so the
-  /// executor materialises exactly those, in a fixed order that defines a dense
-  /// SLOT for each — slot `i` is the scan's `i`th referenced ordinal.
-  ///
-  /// The operators run in slot space: `compile` remaps every ordinal it lowered
-  /// (the projection, the `filter`, the order column, and each join's keys)
-  /// through `ordinal → slot` so the records the operators address are dense
-  /// arrays. The combined slot space lays the relations end to end in chain
-  /// order — relation `i`'s referenced ordinals take a contiguous slot run after
-  /// every earlier relation's — matching the merged record (each relation's
-  /// cells concatenated in order). The tree is logical: every scan is a full
-  /// `Scan(_, _, nil)`; the optimiser turns scans into seeks and each product
-  /// into a join.
-  internal static func compile<C: Catalog & ~Escapable>(_ select: Select,
-                                                        _ catalog: borrowing C,
-                                                        _ ctes: CTEs = [:])
-      throws(SQLError) -> Plan {
-    guard let relation = select.from else {
-      // A FROM-less select projects expressions over a single row; a `WHERE`,
-      // `GROUP BY`, `HAVING`, `ORDER BY`, `OFFSET`/`FETCH`, or `JOIN` has no
-      // relation to apply to. The parser never produces that shape, but a direct
-      // `Select(from: nil, …)` can, so reject it rather than silently ignore the
-      // clause — a scalar projection would drop a `GROUP BY`/`HAVING` otherwise.
-      guard select.joins.isEmpty, select.predicate == nil,
-          select.grouping.isEmpty, select.having == nil,
-          select.order == nil, select.limit == nil else {
-        throw .unsupported(
-            "a WHERE, GROUP BY, HAVING, ORDER BY, OFFSET/FETCH, or JOIN " +
-            "requires a FROM clause")
-      }
-      return try scalar(select.projection)
-    }
-    let from = try resolve(relation, catalog, ctes)
-
-    if let limit = select.limit {
-      // The parser yields only non-negative counts (a `-` is its own token), but
-      // a direct `Limit(count:offset:)` may carry negatives the executor's skip
-      // and take would trap on. Reject them as a query error rather than crash.
-      guard limit.offset >= 0, (limit.count ?? 0) >= 0 else {
-        throw .unsupported("OFFSET and FETCH row counts must be non-negative")
-      }
-    }
-
-    // An aggregate query — one with a `GROUP BY`, a `HAVING`, or an aggregate in
-    // its projection — compiles through the grouped path, which places an
-    // `aggregate` node above the WHERE/join chain and lowers the projection,
-    // `HAVING`, and `ORDER BY` against the grouped slot space. A non-aggregate
-    // query compiles exactly as before.
-    if aggregates(select) {
-      return try group(select, relation, from, catalog, ctes)
-    }
-
-    guard !select.joins.isEmpty else {
-      var filter: Filter? = nil
-      if let predicate = select.predicate {
-        filter = try from.schema.lower(predicate, in: relation)
-      }
-      var order = Array<(column: Int, ascending: Bool)>()
-      if let clause = select.order {
-        order = try from.schema.order(clause, in: relation)
-      }
-      let projection =
-          try from.schema.terms(select.projection, in: relation)
-
-      // The referenced ordinals, in slot order: slot `i` is `ordinals[i]`.
-      let ordinals = referenced(projection, filter, order)
-      let slot = invert(ordinals)
-      let scan = from.leaf(ordinals)
-      return shape(scan, projection.map { $0.remapped(through: slot) },
-                   filter.map { $0.remapped(through: slot) },
-                   order.map { (slot[$0.column]!, $0.ascending) },
-                   select.limit)
-    }
-
-    // Resolve every joined relation and lay all relations — the FROM relation
-    // first, then each joined one in source order — end to end in one combined
-    // ordinal space.
-    var joined = Array<Resolved>()
-    joined.reserveCapacity(select.joins.count)
-    for join in select.joins {
-      try joined.append(resolve(join.relation, catalog, ctes))
-    }
-
-    var relations = [(relation, from.schema)]
-    for index in select.joins.indices {
-      relations.append((select.joins[index].relation, joined[index].schema))
-    }
-    let scope = Scope(relations)
-
-    // Each join's ON equality lowers to a `match` at its own chain level,
-    // resolved against only the prefix already in scope plus the relation that
-    // join introduces — the FROM relation and joins `0…index` — never a
-    // relation joined later. Since `Scope` lays relations at cumulative offsets
-    // from 0, a prefix scope yields the same global combined ordinals as the
-    // full-chain scope, so the match ordinals remap through `slot` as before;
-    // resolving against the prefix rejects a reference to a not-yet-joined
-    // relation (`SQLError.column`) and judges ambiguity only within the prefix.
-    // The WHERE and ORDER lower against the whole chain, which legitimately
-    // sees every relation.
-    var matches = Array<Filter>()
-    matches.reserveCapacity(select.joins.count)
-    for index in select.joins.indices {
-      let prefix = Scope(Array(relations[0 ... index + 1]))
-      let join = select.joins[index]
-      try matches.append(prefix.match(join.left, join.right))
-    }
-    var predicate: Filter? = nil
-    if let clause = select.predicate {
-      predicate = try scope.lower(clause)
-    }
-    var order = Array<(column: Int, ascending: Bool)>()
-    if let clause = select.order {
-      order = try scope.order(clause)
-    }
-    let projection = try scope.terms(select.projection)
-
-    // The combined referenced ordinals — projection ∪ every match ∪ WHERE ∪
-    // order — packed per relation in chain order: relation i's referenced
-    // ordinals take a contiguous slot run after every earlier relation's,
-    // building the combined-ordinal → slot map and each relation's leaf ordinals.
-    var references = Set<Int>()
-    for term in projection { term.references(into: &references) }
-    for match in matches { match.references(into: &references) }
-    predicate?.references(into: &references)
-    for key in order { references.insert(key.column) }
-    let combined = references.sorted()
-
-    var slot = Dictionary<Int, Int>(minimumCapacity: combined.count)
-    var locals = Array<Array<Int>>()
-    var packed = 0
-    for (offset, extent) in scope.layout {
-      let local = combined.compactMap {
-        offset <= $0 && $0 < offset + extent ? $0 - offset : nil
-      }
-      for index in local.indices {
-        slot[offset + local[index]] = packed + index
-      }
-      locals.append(local)
-      packed += local.count
-    }
-
-    // The left-deep chain: starting from the FROM relation's leaf, each join
-    // folds in the next relation's scan as a `Select` on that join's match over
-    // their product. The optimiser turns each `Select`-over-`Product` level into
-    // an index-nested-loop join.
-    let seed = from.leaf(locals[0])
-    let chain = select.joins.indices.reduce(seed) { chain, index in
-      .select(matches[index].remapped(through: slot),
-              .product(chain, joined[index].leaf(locals[index + 1])))
-    }
-
-    return shape(chain, projection.map { $0.remapped(through: slot) },
-                 predicate.map { $0.remapped(through: slot) },
-                 order.map { (slot[$0.column]!, $0.ascending) },
-                 select.limit)
-  }
-
+extension Engine {
   /// Compiles a scalar (FROM-less) `SELECT <expr-list>` into `Project(single)`
   /// — the projection evaluated against the one empty row the `single` leaf
   /// yields.
@@ -551,7 +329,7 @@ public enum Engine {
   /// faulting (`SQLError.column` for a column, `SQLError.unsupported` for `*`).
   /// The terms hold no slots, so the `single` row's empty record carries every
   /// value the projection needs.
-  private static func scalar(_ projection: Projection)
+  internal static func scalar(_ projection: Projection)
       throws(SQLError) -> Plan {
     guard case .all = projection else {
       let schema = Schema(width: 0, extent: 0, names: [], types: [],
@@ -568,75 +346,18 @@ public enum Engine {
   /// `leaf` factory that, given the ordinals the query references on its side,
   /// builds the leaf `Plan` — a `scan` for a base table, a `derived` over the
   /// view's compiled sub-plan for a view.
-  private struct Resolved {
+  internal struct Resolved {
     let schema: Schema
     let leaf: (Array<Int>) -> Plan
-  }
-
-  /// Resolves a `Relation` against `catalog` and the in-scope `ctes` to its
-  /// schema and leaf factory.
-  ///
-  /// A common table expression shadows a base relation of the same name:
-  /// `ctes` is consulted first, a CTE resolving to its materialised schema and
-  /// a `scan` leaf (the executor materialises its records from the rows). Else
-  /// a view shadows a base table — its `select` compiled to a sub-plan in a
-  /// `derived` leaf — and finally a base table scans. A name none resolves is
-  /// `SQLError.relation`.
-  ///
-  /// A view's body compiles OUTSIDE the statement's CTE scope — with an empty
-  /// CTE map, not the caller's `ctes` — so a stored view means exactly what it
-  /// was registered to mean regardless of the `WITH` a caller wraps around it. A
-  /// name that IS a statement CTE has already resolved above (a CTE shadows a
-  /// view, as it shadows a base table), so a name reaching the view branch is
-  /// genuinely a view; letting its body see the caller's CTEs would let an
-  /// unrelated statement-local `WITH Parent AS …` reach into a view whose own
-  /// `FROM Parent` must mean the base relation. The view's `FROM`/`JOIN` names
-  /// therefore resolve against the base catalog (and other views) alone.
-  ///
-  /// A view's `columns` must name exactly one column per value its query
-  /// projects, or the view's schema would let a query index past a sub-plan row.
-  /// The parser checks this whenever the projection's arity is statically known;
-  /// this is the backstop for a `SELECT *` view, whose width is known only here,
-  /// after the sub-plan compiles — a mismatch is `SQLError.columns`.
-  private static func resolve<C: Catalog & ~Escapable>(_ relation: Relation,
-                                                       _ catalog: borrowing C,
-                                                       _ ctes: CTEs)
-      throws(SQLError) -> Resolved {
-    let name = relation.name
-    if let cte = ctes[name.lowercased()] {
-      let schema = cte.schema()
-      return Resolved(schema: schema) { ordinals in
-        .scan(name: name, ordinals: ordinals, seek: nil)
-      }
-    }
-
-    if let view = catalog.view(named: name) {
-      let plan = try compile(view.query, catalog, [:])
-      let projected = plan.width
-      guard view.columns.count == projected else {
-        throw .columns(expected: projected, got: view.columns.count)
-      }
-      let schema = view.schema()
-      return Resolved(schema: schema) { ordinals in
-        .derived(name: name, plan: plan, ordinals: ordinals, seek: nil)
-      }
-    }
-
-    guard let table = catalog.table(named: name) else {
-      throw .relation(name)
-    }
-    let schema = table.schema()
-    return Resolved(schema: schema) { ordinals in
-      .scan(name: name, ordinals: ordinals, seek: nil)
-    }
   }
 
   /// The sorted, deduplicated ordinals a query references: the union of the
   /// ordinals its `projection` terms read, the columns its `filter` reads, and
   /// EVERY column its `order` keys read. The projection terms hold ordinals at
   /// this stage; a scalar call's arguments contribute their read ordinals too.
-  private static func referenced(_ projection: Array<Term>, _ filter: Filter?,
-                                 _ order: Array<(column: Int, ascending: Bool)>)
+  internal static func referenced(
+      _ projection: Array<Term>, _ filter: Filter?,
+      _ order: Array<(column: Int, ascending: Bool)>)
       -> Array<Int> {
     var ordinals = Set<Int>()
     for term in projection {
@@ -649,7 +370,8 @@ public enum Engine {
 
   /// The inverse map `ordinal → slot` of a referenced-ordinal list: slot `i` is
   /// `ordinals[i]`, so the map sends `ordinals[i]` back to `i`.
-  private static func invert(_ ordinals: Array<Int>) -> Dictionary<Int, Int> {
+  internal static func invert(_ ordinals: Array<Int>)
+      -> Dictionary<Int, Int> {
     var slot = Dictionary<Int, Int>(minimumCapacity: ordinals.count)
     for index in ordinals.indices {
       slot[ordinals[index]] = index
@@ -666,10 +388,10 @@ public enum Engine {
   /// is dropped by the limit before its projection runs, so a projection that
   /// could throw (`SELECT 1 / 0 … FETCH FIRST 0 ROWS ONLY`) never evaluates for
   /// a discarded row and the query returns the documented empty page.
-  private static func shape(_ source: Plan, _ projection: Array<Term>,
-                            _ filter: Filter?,
-                            _ order: Array<(slot: Int, ascending: Bool)>,
-                            _ limit: Limit?) -> Plan {
+  internal static func shape(
+      _ source: Plan, _ projection: Array<Term>, _ filter: Filter?,
+      _ order: Array<(slot: Int, ascending: Bool)>,
+      _ limit: Limit?) -> Plan {
     var plan = source
     if let filter {
       plan = .select(filter, plan)
@@ -689,7 +411,7 @@ public enum Engine {
   /// keeps the ordinary `Project(Limit(Sort(Select(_))))` shape unchanged. A
   /// `HAVING` alone (no `GROUP BY`, no aggregate) still aggregates — it filters
   /// the single whole-result group.
-  private static func aggregates(_ select: Select) -> Bool {
+  internal static func aggregates(_ select: Select) -> Bool {
     if !select.grouping.isEmpty || select.having != nil { return true }
     switch select.projection {
     case .all, .columns:
@@ -713,6 +435,11 @@ public enum Engine {
     }
   }
 
+}
+
+// MARK: - Aggregation
+
+extension Catalog where Self: ~Escapable {
   /// Compiles an aggregate `select` into `Project(Limit(Sort(Having(Aggregate(
   /// source)))))`, the `source` the WHERE/join chain and the aggregate node
   /// grouping it.
@@ -725,19 +452,16 @@ public enum Engine {
   /// that grouped slot space through a `Grouping`, which also enforces the
   /// standard rule that every non-aggregated projection/`ORDER BY` column appear
   /// in the `GROUP BY`.
-  private static func group<C: Catalog & ~Escapable>(_ select: Select,
-                                                     _ relation: Relation,
-                                                     _ from: Resolved,
-                                                     _ catalog: borrowing C,
-                                                     _ ctes: CTEs)
+  internal borrowing func group(_ select: Select, _ relation: Relation,
+                                _ from: Engine.Resolved, _ ctes: CTEs)
       throws(SQLError) -> Plan {
     // Resolve every joined relation and lay the FROM relation and each joined
     // one end to end in one combined ordinal space (as the non-aggregate join
     // path does), so the WHERE, keys, and aggregate arguments resolve uniformly.
-    var joined = Array<Resolved>()
+    var joined = Array<Engine.Resolved>()
     joined.reserveCapacity(select.joins.count)
     for join in select.joins {
-      try joined.append(resolve(join.relation, catalog, ctes))
+      try joined.append(resolve(join.relation, ctes))
     }
     var relations = [(relation, from.schema)]
     for index in select.joins.indices {
@@ -767,15 +491,15 @@ public enum Engine {
       try .slot(scope.ordinal(of: column))
     }
     var expressions = Array<Expression>()
-    for expression in projected(select.projection) {
-      collect(expression, into: &expressions)
+    for expression in Engine.projected(select.projection) {
+      Engine.collect(expression, into: &expressions)
     }
     if let having = select.having {
-      collect(having, into: &expressions)
+      Engine.collect(having, into: &expressions)
     }
     var aggregations = Array<Aggregation>()
     for expression in expressions {
-      try aggregations.append(lower(expression, scope))
+      try aggregations.append(Engine.lower(expression, scope))
     }
 
     // The source materialises exactly the ordinals the WHERE, the keys, and the
@@ -844,12 +568,15 @@ public enum Engine {
     }
     return .project(projection, plan.capped(limit: select.limit))
   }
+}
 
+extension Engine {
   /// The projected expressions of `projection` — an `expressions` list yields
   /// each item's expression; a `*` or bare-column list yields none (no aggregate
   /// can hide in them). An aggregate query's projection is always the
   /// `expressions` case (an aggregate call makes it one).
-  private static func projected(_ projection: Projection) -> Array<Expression> {
+  internal static func projected(_ projection: Projection)
+      -> Array<Expression> {
     switch projection {
     case .all, .columns:
       []
@@ -861,8 +588,8 @@ public enum Engine {
   /// Collects the distinct aggregate expressions within `expression` into
   /// `expressions`, in first-appearance order — the same aggregate written twice
   /// computes once.
-  private static func collect(_ expression: Expression,
-                              into expressions: inout Array<Expression>) {
+  internal static func collect(_ expression: Expression,
+                               into expressions: inout Array<Expression>) {
     switch expression {
     case .column, .literal:
       break
@@ -879,8 +606,8 @@ public enum Engine {
   }
 
   /// Collects the distinct aggregates within a `predicate` into `expressions`.
-  private static func collect(_ predicate: Predicate,
-                              into expressions: inout Array<Expression>) {
+  internal static func collect(_ predicate: Predicate,
+                               into expressions: inout Array<Expression>) {
     switch predicate {
     case let .comparison(left, _, right):
       collect(left, into: &expressions)
@@ -903,7 +630,7 @@ public enum Engine {
   /// `COUNT(*)` has no argument (it counts rows); every other aggregate lowers
   /// its single operand expression to a term. `expression` is always an
   /// `.aggregate` — `collect` gathers only those.
-  private static func lower(_ expression: Expression, _ scope: Scope)
+  internal static func lower(_ expression: Expression, _ scope: Scope)
       throws(SQLError) -> Aggregation {
     guard case let .aggregate(function, operand) = expression else {
       throw .unsupported("expected an aggregate")
@@ -917,11 +644,14 @@ public enum Engine {
     return Aggregation(function: function, argument: argument)
   }
 
-  // MARK: - Optimisation
+}
 
+// MARK: - Optimisation
+
+extension Catalog where Self: ~Escapable {
   /// Rewrites the logical `plan` into a physical one, re-resolving relations by
-  /// name through the borrowed `catalog` for their seekability and a bound key
-  /// through `bindings` so it seeks like a literal.
+  /// name through this catalog for their seekability and a bound key through
+  /// `bindings` so it seeks like a literal.
   ///
   /// Two pattern rewrites fire, the rest of the tree recursing unchanged:
   ///
@@ -936,19 +666,15 @@ public enum Engine {
   ///     `Join` that seeks the inner per outer record, the remaining conjuncts
   ///     kept as a residual `Select`. If the inner side is not a bare `Scan`,
   ///     the product stays (a plain nested loop).
-  internal static func optimise<C: Catalog & ~Escapable>(_ plan: Plan,
-                                                         _ catalog: borrowing C,
-                                                         _ bindings: Bindings)
+  internal borrowing func optimise(_ plan: Plan, _ bindings: Bindings)
       throws(SQLError) -> Plan {
-    try optimise(plan, catalog, [:], bindings)
+    try optimise(plan, [:], bindings)
   }
 
   /// Rewrites `plan` into a physical one with the in-scope `ctes` (consulted
-  /// before the base `catalog` for seekability) and `bindings`.
-  internal static func optimise<C: Catalog & ~Escapable>(_ plan: Plan,
-                                                         _ catalog: borrowing C,
-                                                         _ ctes: CTEs,
-                                                         _ bindings: Bindings)
+  /// before the base catalog for seekability) and `bindings`.
+  internal borrowing func optimise(_ plan: Plan, _ ctes: CTEs,
+                                   _ bindings: Bindings)
       throws(SQLError) -> Plan {
     switch plan {
     case .single:
@@ -962,29 +688,29 @@ public enum Engine {
       // OUTSIDE the statement's CTE scope (an empty CTE map, matching the empty
       // scope it compiled under) — a view means what it was registered to mean,
       // never seeing a caller's `WITH`.
-      try .derived(name: name, plan: optimise(plan, catalog, [:], bindings),
+      try .derived(name: name, plan: optimise(plan, [:], bindings),
                    ordinals: ordinals, seek: seek)
     case let .select(filter, .scan(name, ordinals, nil)):
-      try seek(filter, name, ordinals, catalog, ctes, bindings)
+      try seek(filter, name, ordinals, ctes, bindings)
     case let .select(filter, .product(left, right)):
-      try nest(filter, left, right, catalog, ctes, bindings)
+      try nest(filter, left, right, ctes, bindings)
     case let .select(filter, source):
-      try .select(filter, optimise(source, catalog, ctes, bindings))
+      try .select(filter, optimise(source, ctes, bindings))
     case let .project(ordinals, source):
-      try .project(ordinals, optimise(source, catalog, ctes, bindings))
+      try .project(ordinals, optimise(source, ctes, bindings))
     case let .sort(keys, source):
-      try .sort(keys: keys, optimise(source, catalog, ctes, bindings))
+      try .sort(keys: keys, optimise(source, ctes, bindings))
     case let .product(left, right):
-      try .product(optimise(left, catalog, ctes, bindings),
-                   optimise(right, catalog, ctes, bindings))
+      try .product(optimise(left, ctes, bindings),
+                   optimise(right, ctes, bindings))
     case .join:
       plan
     case let .union(left, right, all):
       // Optimise each side with the same bindings so a bound predicate inside an
       // arm seeks; the union itself merely concatenates and deduplicates,
       // preserving this node's own `all`.
-      try .union(optimise(left, catalog, ctes, bindings),
-                 optimise(right, catalog, ctes, bindings), all: all)
+      try .union(optimise(left, ctes, bindings),
+                 optimise(right, ctes, bindings), all: all)
     case let .aggregate(keys, aggregates, source):
       // An aggregate reshapes its source and has no seek or join of its own;
       // optimise its source (the WHERE/join chain below it seeks and nests as
@@ -992,12 +718,12 @@ public enum Engine {
       // recursion reaches through here, but their grouped-space slots never seek
       // a base relation.
       try .aggregate(keys: keys, aggregates: aggregates,
-                     optimise(source, catalog, ctes, bindings))
+                     optimise(source, ctes, bindings))
     case let .limit(count, offset, source):
       // A `limit` is a transparent wrapper — optimise its source and re-cap;
       // the cap itself has no seek or join to rewrite.
       try .limit(count: count, offset: offset,
-                 optimise(source, catalog, ctes, bindings))
+                 optimise(source, ctes, bindings))
     }
   }
 
@@ -1005,7 +731,7 @@ public enum Engine {
 
   /// Rewrites `Select(filter, Scan(name, ordinals, nil))` into a seeked scan
   /// when a sort-key conjunct qualifies, else leaves the full scan under the
-  /// filter. The relation re-resolves through `catalog` to read its boundaries.
+  /// filter. The relation re-resolves through this catalog for its boundaries.
   ///
   /// A standalone qualifying comparison seeks its run and admits all of it (no
   /// residual). An `AND` with one qualifying conjunct seeks that run and keeps
@@ -1015,22 +741,19 @@ public enum Engine {
   /// skipped row. Everything else scans under the whole filter. The `filter` is
   /// in slot space, so a comparison's slot maps back to its table ordinal
   /// through the scan's `ordinals` before reading a boundary.
-  private static func seek<C: Catalog & ~Escapable>(_ filter: Filter,
-                                                    _ name: String,
-                                                    _ ordinals: Array<Int>,
-                                                    _ catalog: borrowing C,
-                                                    _ ctes: CTEs,
-                                                    _ bindings: Bindings)
+  private borrowing func seek(_ filter: Filter, _ name: String,
+                              _ ordinals: Array<Int>, _ ctes: CTEs,
+                              _ bindings: Bindings)
       throws(SQLError) -> Plan {
     // A materialised CTE relation stores no sort key, so it is never seekable —
     // leave the scan under the whole filter.
     guard ctes[name.lowercased()] == nil else {
       return .select(filter, .scan(name: name, ordinals: ordinals, seek: nil))
     }
-    guard let table = catalog.table(named: name) else { throw .relation(name) }
+    guard let table = table(named: name) else { throw .relation(name) }
     let count = table.cursor().count
 
-    if let range = boundaries(filter, ordinals, table, count, bindings) {
+    if let range = Engine.boundaries(filter, ordinals, table, count, bindings) {
       return .scan(name: name, ordinals: ordinals, seek: range)
     }
 
@@ -1043,18 +766,22 @@ public enum Engine {
     // 0)` the left fold rebuilds so a seekable `id < 0` is the top-level RHS.
     if case let .and(lhs, rhs) = filter {
       if rhs.safe,
-          let range = boundaries(lhs, ordinals, table, count, bindings) {
+          let range =
+              Engine.boundaries(lhs, ordinals, table, count, bindings) {
         return .select(rhs, .scan(name: name, ordinals: ordinals, seek: range))
       }
       if lhs.safe,
-          let range = boundaries(rhs, ordinals, table, count, bindings) {
+          let range =
+              Engine.boundaries(rhs, ordinals, table, count, bindings) {
         return .select(lhs, .scan(name: name, ordinals: ordinals, seek: range))
       }
     }
 
     return .select(filter, .scan(name: name, ordinals: ordinals, seek: nil))
   }
+}
 
+extension Engine {
   /// The seekable `(slot, op, integer)` of `filter`: a `compare` against an
   /// integer literal, or a `bound` whose parameter resolves to an integer in
   /// `bindings`. A string operand, an unbound or non-integer parameter, or a
@@ -1123,9 +850,11 @@ public enum Engine {
     case .unequal: nil   // a split run is two scans; let the scan handle it
     }
   }
+}
 
-  // MARK: - Physical join
+// MARK: - Physical join
 
+extension Catalog where Self: ~Escapable {
   /// Rewrites `Select(filter, Product(left, Scan(inner, _, nil)))` into an
   /// index-nested-loop `Join` when a `match` conjunct relates the two sides,
   /// else leaves the product (a plain nested loop) under the filter.
@@ -1151,12 +880,8 @@ public enum Engine {
   /// still gates a later unsafe residual conjunct (the pushdown barrier having
   /// kept the safe inner filter ahead of any unsafe conjunct). When the inner
   /// side is neither shape, the product is preserved.
-  private static func nest<C: Catalog & ~Escapable>(_ filter: Filter,
-                                                    _ left: Plan,
-                                                    _ right: Plan,
-                                                    _ catalog: borrowing C,
-                                                    _ ctes: CTEs,
-                                                    _ bindings: Bindings)
+  private borrowing func nest(_ filter: Filter, _ left: Plan, _ right: Plan,
+                              _ ctes: CTEs, _ bindings: Bindings)
       throws(SQLError) -> Plan {
     let inner: (name: String, ordinals: Array<Int>, filter: Filter?)?
     switch right {
@@ -1169,15 +894,15 @@ public enum Engine {
     }
 
     guard let inner, let base = left.slots else {
-      return try gated(filter,
-                       .product(optimise(left, catalog, ctes, bindings),
-                                optimise(right, catalog, ctes, bindings)))
+      return try Engine.gated(filter,
+                              .product(optimise(left, ctes, bindings),
+                                       optimise(right, ctes, bindings)))
     }
 
     let conjuncts = filter.conjuncts
     for index in conjuncts.indices {
       guard case let .match(lhs, rhs) = conjuncts[index],
-          let (leftKey, rightKey) = keys(lhs, rhs, base) else {
+          let (leftKey, rightKey) = Engine.keys(lhs, rhs, base) else {
         continue
       }
 
@@ -1192,7 +917,7 @@ public enum Engine {
       // only when the filter holds), without letting that conjunct throw first
       // (`Parent.Name = 'nope' AND (1 / Child.x) = 0`, the false name excluding
       // the row before the division runs).
-      let join = try Plan.join(optimise(left, catalog, ctes, bindings),
+      let join = try Plan.join(optimise(left, ctes, bindings),
                                name: inner.name, ordinals: inner.ordinals,
                                base: base,
                                column: inner.ordinals[rightKey - base],
@@ -1202,11 +927,13 @@ public enum Engine {
       return .select(predicate, join)
     }
 
-    return try gated(filter,
-                     .product(optimise(left, catalog, ctes, bindings),
-                              optimise(right, catalog, ctes, bindings)))
+    return try Engine.gated(filter,
+                            .product(optimise(left, ctes, bindings),
+                                     optimise(right, ctes, bindings)))
   }
+}
 
+extension Engine {
   /// A `product` under `filter` for a join `nest` cannot fold into a `Join`,
   /// keeping the ON `match` conjuncts as a SEPARATE inner gate below the rest —
   /// `Select(rest, Select(match, product))`. Because `evaluate(.and)` does not
@@ -1217,7 +944,7 @@ public enum Engine {
   /// product)` did before `distribute` folded the match into the conjuncts for
   /// `nest` to find. When there is no match, `rest` is the whole filter and this
   /// is the plain `Select(filter, product)`.
-  private static func gated(_ filter: Filter, _ product: Plan) -> Plan {
+  internal static func gated(_ filter: Filter, _ product: Plan) -> Plan {
     var matches = Array<Filter>()
     var rest = Array<Filter>()
     for conjunct in filter.conjuncts {
@@ -1239,7 +966,7 @@ public enum Engine {
   /// Exactly one slot must be below `base` (the outer key) and the other at or
   /// above it (the inner key, still in combined space); the order the equality
   /// was written in does not matter.
-  private static func keys(_ lhs: Int, _ rhs: Int, _ base: Int)
+  internal static func keys(_ lhs: Int, _ rhs: Int, _ base: Int)
       -> (outer: Int, inner: Int)? {
     switch (lhs < base, rhs < base) {
     case (true, false): (lhs, rhs)
@@ -1247,7 +974,6 @@ public enum Engine {
     default: nil
     }
   }
-
 }
 
 // MARK: - Selection pushdown
@@ -1519,5 +1245,280 @@ extension Plan {
   private func residual(_ conjuncts: Array<Filter>) -> Plan {
     guard let filter = conjuncts.conjunction else { return self }
     return .select(filter, self)
+  }
+}
+
+// MARK: - Compilation
+
+extension Catalog where Self: ~Escapable {
+  /// Compiles `query` over this catalog into a logical operator tree.
+  ///
+  /// A single `SELECT` compiles as itself; a `UNION` compiles recursively into a
+  /// BINARY `union` plan that mirrors the left-associative `Query`:
+  /// `compile(.union(left, select, all))` is `.union(compile(left),
+  /// compile(.select(select)), all)`. Each node carries its OWN `all`, so the
+  /// executor honours every `UNION`/`UNION ALL` distinctly — `(A UNION B) UNION
+  /// ALL C` dedups `A ∪ B` before appending `C`, rather than treating the whole
+  /// chain by the trailing arm's flag. The new arm must project the same column
+  /// count as the chain's first `SELECT` — the result columns — else
+  /// `SQLError.arity`.
+  internal borrowing func compile(_ query: Query, _ ctes: CTEs = [:])
+      throws(SQLError) -> Plan {
+    guard case let .union(left, select, all) = query else {
+      return try compile(query.first, ctes)
+    }
+
+    let width = try arity(query.first, ctes)
+    let count = try arity(select, ctes)
+    guard count == width else { throw .arity(width, count) }
+    return try .union(compile(left, ctes),
+                      compile(.select(select), ctes), all: all)
+  }
+
+  /// The number of result columns `select` projects — the extent of a `*` over
+  /// its relations, else the count of its projected items — for the `UNION`
+  /// arity check. The relations resolve through this catalog, the `ctes`
+  /// consulted first.
+  private borrowing func arity(_ select: Select, _ ctes: CTEs)
+      throws(SQLError) -> Int {
+    switch select.projection {
+    case .all:
+      // `SELECT *` spans the relations in scope; a FROM-less arm has none.
+      guard let relation = select.from else {
+        throw .named("SELECT * with no FROM")
+      }
+      var width = try resolve(relation, ctes).schema.width
+      for join in select.joins {
+        try width += resolve(join.relation, ctes).schema.width
+      }
+      return width
+    case let .columns(columns):
+      return columns.count
+    case let .expressions(items):
+      return items.count
+    }
+  }
+
+  /// Resolves a `Relation` against this catalog and the in-scope `ctes` to its
+  /// schema and leaf factory.
+  ///
+  /// A common table expression shadows a base relation of the same name:
+  /// `ctes` is consulted first, a CTE resolving to its materialised schema and
+  /// a `scan` leaf (the executor materialises its records from the rows). Else
+  /// a view shadows a base table — its `select` compiled to a sub-plan in a
+  /// `derived` leaf — and finally a base table scans. A name none resolves is
+  /// `SQLError.relation`.
+  ///
+  /// A view's body compiles OUTSIDE the statement's CTE scope — with an empty
+  /// CTE map, not the caller's `ctes` — so a stored view means exactly what it
+  /// was registered to mean regardless of the `WITH` a caller wraps around it. A
+  /// name that IS a statement CTE has already resolved above (a CTE shadows a
+  /// view, as it shadows a base table), so a name reaching the view branch is
+  /// genuinely a view; letting its body see the caller's CTEs would let an
+  /// unrelated statement-local `WITH Parent AS …` reach into a view whose own
+  /// `FROM Parent` must mean the base relation. The view's `FROM`/`JOIN` names
+  /// therefore resolve against the base catalog (and other views) alone.
+  ///
+  /// A view's `columns` must name exactly one column per value its query
+  /// projects, or the view's schema would let a query index past a sub-plan row.
+  /// The parser checks this whenever the projection's arity is statically known;
+  /// this is the backstop for a `SELECT *` view, whose width is known only here,
+  /// after the sub-plan compiles — a mismatch is `SQLError.columns`.
+  internal borrowing func resolve(_ relation: Relation, _ ctes: CTEs)
+      throws(SQLError) -> Engine.Resolved {
+    let name = relation.name
+    if let cte = ctes[name.lowercased()] {
+      let schema = cte.schema()
+      return Engine.Resolved(schema: schema) { ordinals in
+        .scan(name: name, ordinals: ordinals, seek: nil)
+      }
+    }
+
+    if let view = view(named: name) {
+      let plan = try compile(view.query, [:])
+      let projected = plan.width
+      guard view.columns.count == projected else {
+        throw .columns(expected: projected, got: view.columns.count)
+      }
+      let schema = view.schema()
+      return Engine.Resolved(schema: schema) { ordinals in
+        .derived(name: name, plan: plan, ordinals: ordinals, seek: nil)
+      }
+    }
+
+    guard let table = table(named: name) else {
+      throw .relation(name)
+    }
+    let schema = table.schema()
+    return Engine.Resolved(schema: schema) { ordinals in
+      .scan(name: name, ordinals: ordinals, seek: nil)
+    }
+  }
+
+  /// Compiles `select` over this catalog into a logical operator tree in slot
+  /// space.
+  ///
+  /// The relation(s) resolve through this catalog (`SQLError.relation` on a
+  /// miss). A single relation shapes `Project(Sort(Select(Scan)))`; a chain
+  /// of joins shapes a left-deep tree, each join level a `Select(match,
+  /// Product(chain, Scan))` on that join's `ON` equality, with the `WHERE`
+  /// wrapped outside as `Project(Sort(Select(where, chain)))`. The `Select` and
+  /// `Sort` layers are present only when a predicate or an `ORDER BY` is. Each
+  /// scan carries the set of ordinals the query references on its side
+  /// (projection ∪ every match ∪ filter ∪ order, reals and virtuals) so the
+  /// executor materialises exactly those, in a fixed order that defines a dense
+  /// SLOT for each — slot `i` is the scan's `i`th referenced ordinal.
+  ///
+  /// The operators run in slot space: `compile` remaps every ordinal it lowered
+  /// (the projection, the `filter`, the order column, and each join's keys)
+  /// through `ordinal → slot` so the records the operators address are dense
+  /// arrays. The combined slot space lays the relations end to end in chain
+  /// order — relation `i`'s referenced ordinals take a contiguous slot run after
+  /// every earlier relation's — matching the merged record (each relation's
+  /// cells concatenated in order). The tree is logical: every scan is a full
+  /// `Scan(_, _, nil)`; the optimiser turns scans into seeks and each product
+  /// into a join.
+  internal borrowing func compile(_ select: Select, _ ctes: CTEs = [:])
+      throws(SQLError) -> Plan {
+    guard let relation = select.from else {
+      // A FROM-less select projects expressions over a single row; a `WHERE`,
+      // `GROUP BY`, `HAVING`, `ORDER BY`, `OFFSET`/`FETCH`, or `JOIN` has no
+      // relation to apply to. The parser never produces that shape, but a direct
+      // `Select(from: nil, …)` can, so reject it rather than silently ignore the
+      // clause — a scalar projection would drop a `GROUP BY`/`HAVING` otherwise.
+      guard select.joins.isEmpty, select.predicate == nil,
+          select.grouping.isEmpty, select.having == nil,
+          select.order == nil, select.limit == nil else {
+        throw .unsupported(
+            "a WHERE, GROUP BY, HAVING, ORDER BY, OFFSET/FETCH, or JOIN " +
+            "requires a FROM clause")
+      }
+      return try Engine.scalar(select.projection)
+    }
+    let from = try resolve(relation, ctes)
+
+    if let limit = select.limit {
+      // The parser yields only non-negative counts (a `-` is its own token), but
+      // a direct `Limit(count:offset:)` may carry negatives the executor's skip
+      // and take would trap on. Reject them as a query error rather than crash.
+      guard limit.offset >= 0, (limit.count ?? 0) >= 0 else {
+        throw .unsupported("OFFSET and FETCH row counts must be non-negative")
+      }
+    }
+
+    // An aggregate query — one with a `GROUP BY`, a `HAVING`, or an aggregate in
+    // its projection — compiles through the grouped path, which places an
+    // `aggregate` node above the WHERE/join chain and lowers the projection,
+    // `HAVING`, and `ORDER BY` against the grouped slot space. A non-aggregate
+    // query compiles exactly as before.
+    if Engine.aggregates(select) {
+      return try group(select, relation, from, ctes)
+    }
+
+    guard !select.joins.isEmpty else {
+      var filter: Filter? = nil
+      if let predicate = select.predicate {
+        filter = try from.schema.lower(predicate, in: relation)
+      }
+      var order = Array<(column: Int, ascending: Bool)>()
+      if let clause = select.order {
+        order = try from.schema.order(clause, in: relation)
+      }
+      let projection =
+          try from.schema.terms(select.projection, in: relation)
+
+      // The referenced ordinals, in slot order: slot `i` is `ordinals[i]`.
+      let ordinals = Engine.referenced(projection, filter, order)
+      let slot = Engine.invert(ordinals)
+      let scan = from.leaf(ordinals)
+      return Engine.shape(scan,
+                          projection.map { $0.remapped(through: slot) },
+                          filter.map { $0.remapped(through: slot) },
+                          order.map { (slot[$0.column]!, $0.ascending) },
+                          select.limit)
+    }
+
+    // Resolve every joined relation and lay all relations — the FROM relation
+    // first, then each joined one in source order — end to end in one combined
+    // ordinal space.
+    var joined = Array<Engine.Resolved>()
+    joined.reserveCapacity(select.joins.count)
+    for join in select.joins {
+      try joined.append(resolve(join.relation, ctes))
+    }
+
+    var relations = [(relation, from.schema)]
+    for index in select.joins.indices {
+      relations.append((select.joins[index].relation, joined[index].schema))
+    }
+    let scope = Scope(relations)
+
+    // Each join's ON equality lowers to a `match` at its own chain level,
+    // resolved against only the prefix already in scope plus the relation that
+    // join introduces — the FROM relation and joins `0…index` — never a
+    // relation joined later. Since `Scope` lays relations at cumulative offsets
+    // from 0, a prefix scope yields the same global combined ordinals as the
+    // full-chain scope, so the match ordinals remap through `slot` as before;
+    // resolving against the prefix rejects a reference to a not-yet-joined
+    // relation (`SQLError.column`) and judges ambiguity only within the prefix.
+    // The WHERE and ORDER lower against the whole chain, which legitimately
+    // sees every relation.
+    var matches = Array<Filter>()
+    matches.reserveCapacity(select.joins.count)
+    for index in select.joins.indices {
+      let prefix = Scope(Array(relations[0 ... index + 1]))
+      let join = select.joins[index]
+      try matches.append(prefix.match(join.left, join.right))
+    }
+    var predicate: Filter? = nil
+    if let clause = select.predicate {
+      predicate = try scope.lower(clause)
+    }
+    var order = Array<(column: Int, ascending: Bool)>()
+    if let clause = select.order {
+      order = try scope.order(clause)
+    }
+    let projection = try scope.terms(select.projection)
+
+    // The combined referenced ordinals — projection ∪ every match ∪ WHERE ∪
+    // order — packed per relation in chain order: relation i's referenced
+    // ordinals take a contiguous slot run after every earlier relation's,
+    // building the combined-ordinal → slot map and each relation's leaf ordinals.
+    var references = Set<Int>()
+    for term in projection { term.references(into: &references) }
+    for match in matches { match.references(into: &references) }
+    predicate?.references(into: &references)
+    for key in order { references.insert(key.column) }
+    let combined = references.sorted()
+
+    var slot = Dictionary<Int, Int>(minimumCapacity: combined.count)
+    var locals = Array<Array<Int>>()
+    var packed = 0
+    for (offset, extent) in scope.layout {
+      let local = combined.compactMap {
+        offset <= $0 && $0 < offset + extent ? $0 - offset : nil
+      }
+      for index in local.indices {
+        slot[offset + local[index]] = packed + index
+      }
+      locals.append(local)
+      packed += local.count
+    }
+
+    // The left-deep chain: starting from the FROM relation's leaf, each join
+    // folds in the next relation's scan as a `Select` on that join's match over
+    // their product. The optimiser turns each `Select`-over-`Product` level into
+    // an index-nested-loop join.
+    let seed = from.leaf(locals[0])
+    let chain = select.joins.indices.reduce(seed) { chain, index in
+      .select(matches[index].remapped(through: slot),
+              .product(chain, joined[index].leaf(locals[index + 1])))
+    }
+
+    return Engine.shape(chain,
+                        projection.map { $0.remapped(through: slot) },
+                        predicate.map { $0.remapped(through: slot) },
+                        order.map { (slot[$0.column]!, $0.ascending) },
+                        select.limit)
   }
 }

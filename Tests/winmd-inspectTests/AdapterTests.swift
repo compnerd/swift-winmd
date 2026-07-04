@@ -12,7 +12,7 @@ import SQL
 ///
 /// Rather than map a `.winmd` file, the tests assemble a tiny store in memory —
 /// `TypeDef` (#2), `MethodDef` (#6), `NestedClass` (#41), and `EventMap` (#18)
-/// — and drive a parsed `SELECT` through `Engine.run` over the `WinMD.Storage`
+/// — and drive a parsed `SELECT` through `Catalog.run` over the `WinMD.Storage`
 /// catalog, asserting the typed `Value` rows the engine yields. They exercise a
 /// single-relation projection / filter / order with the `Id` virtual column
 /// and a sorted-key seek, a foreign-key join on `Id`, a list join on the owner
@@ -112,7 +112,7 @@ struct AdapterTests {
       Issue.record("not a SELECT")
       return []
     }
-    return try Engine.run(select, catalog)
+    return try catalog.run(select)
   }
 
   @Test("projects, filters, and orders a single relation")

@@ -342,14 +342,19 @@ struct DatabaseSQLTests {
     // The session's registered views appear in the `INFORMATION_SCHEMA` overlay
     // with a `'VIEW'` table type, enumerated beside the storage's base tables —
     // the feature over the real WinMD catalog, not just an in-memory fixture.
+    // The engine-provided `information_schema.` views are listed too.
     try DatabaseSQLTests.with { catalog in
       let (name, view) = try DatabaseSQLTests.create(
           "CREATE VIEW named AS SELECT TypeName FROM TypeDef")
       let rows = try DatabaseSQLTests.run("""
           SELECT table_name FROM information_schema.tables
-           WHERE table_type = 'VIEW'
+           WHERE table_type = 'VIEW' ORDER BY table_name
           """, [name: view], catalog)
-      #expect(rows == [[.text("named")]])
+      #expect(rows == [
+        [.text("information_schema.columns")],
+        [.text("information_schema.tables")],
+        [.text("named")],
+      ])
     }
   }
 

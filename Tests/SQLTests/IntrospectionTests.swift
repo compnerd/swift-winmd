@@ -147,13 +147,62 @@ struct IntrospectionTests {
         SELECT table_name, table_type FROM information_schema.tables
           ORDER BY table_type, table_name
         """)
-    // Two base tables (People, Widget) and one view (Adults), ordered by type
-    // then name — the base tables first (`BASE TABLE` < `VIEW`).
+    // Two base tables (People, Widget) and the views — the user's `Adults` and
+    // the two engine-provided `information_schema.` views, which are themselves
+    // queryable — ordered by type then name (`BASE TABLE` < `VIEW`).
     #expect(rows == [
       [.text("People"), .text("BASE TABLE")],
       [.text("Widget"), .text("BASE TABLE")],
       [.text("Adults"), .text("VIEW")],
+      [.text("information_schema.columns"), .text("VIEW")],
+      [.text("information_schema.tables"), .text("VIEW")],
     ])
+  }
+
+  @Test("information_schema.tables lists an engine-provided view by name")
+  func builtinViewListed() throws {
+    // The built-in views are queryable through `resolve(view:)`, so a consumer
+    // discovers them by name — `... WHERE table_name = 'information_schema.
+    // columns'` finds the VIEW even though it is engine-provided, not a
+    // registered user view.
+    let rows = try run("""
+        SELECT table_type FROM information_schema.tables
+         WHERE table_name = 'information_schema.columns'
+        """)
+    #expect(rows == [[.text("VIEW")]])
+  }
+
+  @Test("information_schema.columns lists an engine-provided view's columns")
+  func builtinViewColumns() throws {
+    // A built-in view's columns are typed from its body — over the store, all
+    // text — exactly as a user view's are.
+    let rows = try run("""
+        SELECT column_name, data_type FROM information_schema.columns
+         WHERE table_name = 'information_schema.tables'
+         ORDER BY ordinal_position
+        """)
+    #expect(rows == [
+      [.text("table_catalog"), .text("character varying")],
+      [.text("table_schema"), .text("character varying")],
+      [.text("table_name"), .text("character varying")],
+      [.text("table_type"), .text("character varying")],
+    ])
+  }
+
+  @Test("a base relation shadows a same-named built-in information_schema view")
+  func baseShadowsBuiltinView() throws {
+    // A base relation named for a built-in view shadows it (`resolve(view:)`
+    // yields the base), so the built-in is not listed as a VIEW — the base is
+    // listed as a BASE TABLE. (The name now resolves to the base, so the store
+    // relation is read directly to observe the metadata.)
+    let cat = MetaCatalog([
+      "information_schema.tables": MetaRelation([("x", .integer)], []),
+    ])
+    let rows = try cat.run(parse("""
+        SELECT table_type FROM definition_schema.tables
+         WHERE table_name = 'information_schema.tables'
+        """))
+    #expect(rows == [[.text("BASE TABLE")]])
   }
 
   @Test("information_schema.tables carries the standard catalog/schema columns")
@@ -794,7 +843,12 @@ struct IntrospectionTests {
     let rows = try cat.run(parse("""
         SELECT table_name FROM information_schema.tables ORDER BY table_name
         """))
-    #expect(rows == [[.text("People")]])
+    // `People` and the two built-in views — but NOT the shadowed reserved base.
+    #expect(rows == [
+      [.text("People")],
+      [.text("information_schema.columns")],
+      [.text("information_schema.tables")],
+    ])
   }
 
   @Test("information_schema.columns hides a view with an unknown scalar call")
@@ -875,6 +929,8 @@ struct IntrospectionTests {
       [.text("People"), .text("BASE TABLE")],
       [.text("Widget"), .text("BASE TABLE")],
       [.text("Adults"), .text("VIEW")],
+      [.text("information_schema.columns"), .text("VIEW")],
+      [.text("information_schema.tables"), .text("VIEW")],
     ])
   }
 

@@ -237,11 +237,35 @@ extension Catalog where Self: ~Escapable {
     return augmented
   }
 
+  /// The names of every view a query can resolve — each user `views()` entry
+  /// the store does not shadow, then each built-in `View.standard` view a user
+  /// view or base relation does not shadow (the precedence `resolve(view:)`
+  /// applies). The metadata builders enumerate these so a consumer discovers
+  /// EVERY queryable view — the engine-provided `information_schema.` views are
+  /// resolvable through `resolve(view:)`, so they belong in the catalog
+  /// metadata alongside a user's own. A name resolves to its `View` with
+  /// `resolve(view:)`.
+  private borrowing func listable() -> Array<String> {
+    var names = Array<String>()
+    for name in views() where Definition(name) == nil {
+      names.append(name)
+    }
+    for name in View.standard.keys {
+      // A user view or a base relation of the same name shadows the built-in
+      // (`resolve(view:)`), so list the built-in only when neither does.
+      if view(named: name) == nil, table(named: name) == nil {
+        names.append(name)
+      }
+    }
+    return names
+  }
+
   /// `definition_schema.tables` — one row per base relation and view, with the
   /// standard `table_catalog`, `table_schema`, `table_name`, `table_type`
   /// columns. `table_type` is `'BASE TABLE'` for a base relation, `'VIEW'` for
-  /// a view; `table_catalog`/`table_schema` are `NULL` (the store models a
-  /// single unnamed catalog and schema).
+  /// a view (a user view or a built-in `information_schema.` one);
+  /// `table_catalog`/`table_schema` are `NULL` (the store models a single
+  /// unnamed catalog and schema).
   private borrowing func tables() -> Materialised {
     var rows = Array<Array<Value>>()
     // A view shadows a same-named base relation (`resolve` picks the view), so
@@ -256,7 +280,7 @@ extension Catalog where Self: ~Escapable {
           !shadowed.contains(name.lowercased()) else { continue }
       rows.append([.null, .null, .text(name), .text("BASE TABLE")])
     }
-    for name in views() where Definition(name) == nil {
+    for name in listable() {
       rows.append([.null, .null, .text(name), .text("VIEW")])
     }
     return Materialised(columns: Definition.tables.names, rows: rows,
@@ -297,8 +321,8 @@ extension Catalog where Self: ~Escapable {
                      .text("YES")])
       }
     }
-    for name in views() where Definition(name) == nil {
-      guard let view = view(named: name) else { continue }
+    for name in listable() {
+      guard let view = resolve(view: name) else { continue }
       // List a view's columns only if its WHOLE body validates — exactly the
       // resolution a run performs, so a view a `SELECT *` could not run is not
       // advertised as queryable metadata. Validate via the REAL `compile`

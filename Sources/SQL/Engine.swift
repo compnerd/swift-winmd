@@ -204,7 +204,8 @@ extension Catalog where Self: ~Escapable {
         // The width check resolves the body's relations, so it reads the same
         // `definition_schema.` overlay the body's own run does — a CTE body may
         // select from a reserved store relation.
-        let scope = augment(relations, for: cte.query)
+        let scope = augment(relations, for: cte.query,
+                            returns: routines.returns)
         let width = try compile(cte.query, scope).width
         guard width == cte.columns.count else {
           throw .columns(expected: cte.columns.count, got: width)
@@ -253,8 +254,12 @@ extension Catalog where Self: ~Escapable {
       throws(SQLError) -> Array<Array<Value>> {
     // Extend the scope with any `definition_schema.` store relation the CTE's
     // body names, so the fixpoint's width-check compiles resolve a reserved
-    // relation as the body's own run does.
-    let ctes = augment(ctes, for: cte.query)
+    // relation as the body's own run does. The routine return types ride in:
+    // this store entry is cached in `ctes` and reused by every anchor/recursive
+    // execution (a later `augment` will not replace a bound name), so a view
+    // column using even a standard routine (`BITAND(...)`) types the same
+    // inside the CTE as the identical SELECT does outside it.
+    let ctes = augment(ctes, for: cte.query, returns: routines.returns)
     guard case let .union(anchor, recursive, all) = cte.query else {
       // A non-`UNION` recursive query runs once, but still binds under
       // `cte.columns`, so validate its compiled width here too — the check the

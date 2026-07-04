@@ -896,6 +896,47 @@ struct IntrospectionTests {
     #expect(rows == [])
   }
 
+  @Test("columns(of:) faults on a bad operand inside a call's arguments")
+  func nonnumericCallArgument() throws {
+    // `BITAND(Name + 1, 1)` returns integer, but its argument `Name + 1`
+    // faults; typing recurses into the arguments, as a run would.
+    let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("""
+          SELECT BITAND(Name + 1, 1) FROM People
+          """))
+    }
+  }
+
+  @Test("columns(of:) types a call over valid arguments")
+  func callArgumentTyping() throws {
+    let cat = MetaCatalog(["People": MetaRelation([("Age", .integer)], [])])
+    #expect(try cat.columns(of: parse("""
+        SELECT BITAND(Age, 1) AS b FROM People
+        """)) == [OutputColumn(name: "b", type: .integer)])
+  }
+
+  @Test("a recursive CTE over the store types a view's standard call")
+  func recursiveStoreRoutineReturns() throws {
+    // A view column that is a standard scalar call must appear in
+    // definition_schema.columns even when a recursive CTE names the store
+    // directly — the cached CTE store entry is seeded with the routine returns,
+    // so `BITAND(...)` types inside the CTE as it does outside it.
+    let body = try parse("SELECT BITAND(Age, 1) AS b FROM People")
+    let cat = MetaCatalog(
+        ["People": MetaRelation([("Age", .integer)], [])],
+        views: ["v": View(query: body, columns: ["b"])])
+    let rows = try cat.run(Statement(parsing: """
+        WITH RECURSIVE r AS (
+          SELECT column_name FROM definition_schema.columns
+           WHERE table_name = 'v'
+          UNION SELECT column_name FROM r WHERE 1 = 0
+        )
+        SELECT column_name FROM r
+        """))
+    #expect(rows == [[.text("b")]])
+  }
+
   @Test("a base relation shadowed by the definition_schema store is hidden")
   func storeShadowsBase() throws {
     // The store overlay resolves `definition_schema.tables`, so a catalog base

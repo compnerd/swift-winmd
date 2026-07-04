@@ -222,15 +222,29 @@ internal struct Scope {
       case .integer: .integer
       case .double: .double
       }
-    case let .call(name, _):
-      if let type = returns[name.lowercased()] { type } else {
-        throw .function(name)
-      }
+    case let .call(name, arguments):
+      try call(name, over: arguments, returns)
     case let .aggregate(function, operand):
       try aggregate(function, over: operand, returns)
     case let .binary(_, lhs, rhs):
       try arithmetic(type(of: lhs, returns), type(of: rhs, returns))
     }
+  }
+
+  /// The result type of the scalar routine `name` called over `arguments` — its
+  /// declared return type from `returns` (an unregistered name faults
+  /// `SQLError.function`). Each argument is typed too, so a type error nested
+  /// in a call — `BITAND(Name + 1, 1)` over text — faults exactly as a run
+  /// would, rather than the call reporting its return type over an un-evaluable
+  /// argument `compile` resolved but never type-checked.
+  private func call(_ name: String, over arguments: Array<Expression>,
+                    _ returns: Dictionary<String, ValueType>)
+      throws(SQLError) -> ValueType {
+    guard let result = returns[name.lowercased()] else {
+      throw .function(name)
+    }
+    for argument in arguments { _ = try type(of: argument, returns) }
+    return result
   }
 
   /// The result type of `function` folded over `operand`. `COUNT` counts rows

@@ -196,16 +196,13 @@ internal struct Scope {
   }
 
   /// The value type a scalar `expression` yields, statically: a bare column its
-  /// source type, a literal its own, a standard aggregate its result domain, a
-  /// scalar call its routine's declared return type (`returns`), a binary
-  /// arithmetic expression a double when either operand is a double (else an
-  /// integer); every other expression `.integer`, the engine's exact-numeric
-  /// default. It resolves the column ordinal (so an unknown or ambiguous
-  /// reference faults exactly as a projection would) but reads no cursor.
-  ///
-  /// A `COUNT` yields `.integer` (a row count); `AVG` always `.double` (the
-  /// engine averages to a non-NULL double); `SUM`/`MIN`/`MAX` the type of the
-  /// aggregated argument — a `COUNT(*)`, having no argument, is `.integer`.
+  /// source type, a literal its own, a standard aggregate its result domain
+  /// (see `aggregate(_:over:_:)`), a scalar call its routine's declared return
+  /// type (`returns`), a binary arithmetic expression a numeric result (see
+  /// `arithmetic(_:_:)`). It resolves the column ordinal (so an unknown or
+  /// ambiguous reference faults exactly as a projection would) but reads no
+  /// cursor, and faults `SQLError.operand` for an aggregate or arithmetic over
+  /// a non-numeric operand a run could not fold.
   ///
   /// A `.call` types from `returns` — the routine return-type map the run
   /// carries — so a text-returning scalar (`GUID(...)`) reports `.text`. A call
@@ -230,25 +227,53 @@ internal struct Scope {
         throw .function(name)
       }
     case let .aggregate(function, operand):
-      switch function {
-      case .count:
-        .integer
-      case .avg:
-        .double
-      case .sum, .min, .max:
-        switch operand {
-        case .star: .integer
-        case let .expression(argument): try type(of: argument, returns)
-        }
-      }
+      try aggregate(function, over: operand, returns)
     case let .binary(_, lhs, rhs):
-      // Arithmetic promotes to a double when either operand is a double
-      // (`Age + 1.5`); an all-integer expression stays an integer.
-      switch (try type(of: lhs, returns), try type(of: rhs, returns)) {
-      case (.double, _), (_, .double): .double
-      default: .integer
-      }
+      try arithmetic(type(of: lhs, returns), type(of: rhs, returns))
     }
+  }
+
+  /// The result type of `function` folded over `operand`. `COUNT` counts rows
+  /// (`.integer`); `MIN`/`MAX` take the operand's own type — they compare, so
+  /// any comparable value folds. `SUM`/`AVG` fold NUMERICALLY: `SUM` yields the
+  /// operand's numeric type, `AVG` a double, so both REQUIRE a numeric operand.
+  /// Over text, boolean, or blob `Aggregate.fold` faults `SQLError.operand` on
+  /// the first non-NULL value, so typing faults the same way rather than
+  /// advertising `AVG(Name)` as a double or `SUM(Name)` as text for a query
+  /// that cannot fold its rows.
+  private func aggregate(_ function: Aggregate, over operand: Aggregand,
+                         _ returns: Dictionary<String, ValueType>)
+      throws(SQLError) -> ValueType {
+    switch function {
+    case .count:
+      return .integer
+    case .min, .max:
+      switch operand {
+      case .star: return .integer
+      case let .expression(argument): return try type(of: argument, returns)
+      }
+    case .sum, .avg:
+      let type: ValueType = switch operand {
+      case .star: .integer
+      case let .expression(argument): try type(of: argument, returns)
+      }
+      guard type.numeric else { throw .operand("operands must be numeric") }
+      return function == .avg ? .double : type
+    }
+  }
+
+  /// The result type of arithmetic over operands of `lhs`/`rhs` type — a double
+  /// when either is a double (`Age + 1.5`), else an integer. Both must be
+  /// numeric: a text, boolean, or blob operand has no arithmetic
+  /// (`Arithmetic.apply` faults `SQLError.operand` on the first non-NULL row),
+  /// so typing faults the same way rather than advertising `Name + 1` as an
+  /// integer for a query that cannot evaluate it.
+  private func arithmetic(_ lhs: ValueType, _ rhs: ValueType)
+      throws(SQLError) -> ValueType {
+    guard lhs.numeric, rhs.numeric else {
+      throw .operand("operands must be numeric")
+    }
+    return lhs == .double || rhs == .double ? .double : .integer
   }
 
   /// Whether `column`'s qualifier admits `member`: an unqualified name admits

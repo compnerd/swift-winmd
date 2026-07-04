@@ -739,6 +739,49 @@ struct IntrospectionTests {
     }
   }
 
+  @Test("columns(of:) faults on arithmetic over a non-numeric operand")
+  func nonnumericArithmetic() throws {
+    // `Name + 1` has no arithmetic — `Arithmetic.apply` faults on the first
+    // non-NULL text row, so the schema faults rather than typing `.integer`.
+    let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("SELECT Name + 1 AS x FROM People"))
+    }
+  }
+
+  @Test("columns(of:) faults on SUM or AVG over a non-numeric operand")
+  func nonnumericAggregate() throws {
+    // `SUM`/`AVG` fold numerically — `Aggregate.fold` faults on non-numeric —
+    // so `SUM(Name)`/`AVG(Name)` fault rather than typing text/double.
+    let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("SELECT SUM(Name) FROM People"))
+    }
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("SELECT AVG(Name) FROM People"))
+    }
+  }
+
+  @Test("columns(of:) types numeric aggregates and arithmetic")
+  func numericAggregateTyping() throws {
+    let cat = MetaCatalog(["T": MetaRelation(
+        [("Name", .text), ("Age", .integer), ("Score", .double)], [])])
+    #expect(try cat.columns(of: parse("SELECT SUM(Age) AS x FROM T"))
+                == [OutputColumn(name: "x", type: .integer)])
+    #expect(try cat.columns(of: parse("SELECT SUM(Score) AS x FROM T"))
+                == [OutputColumn(name: "x", type: .double)])
+    #expect(try cat.columns(of: parse("SELECT AVG(Age) AS x FROM T"))
+                == [OutputColumn(name: "x", type: .double)])
+    #expect(try cat.columns(of: parse("SELECT Age + 1 AS x FROM T"))
+                == [OutputColumn(name: "x", type: .integer)])
+    #expect(try cat.columns(of: parse("SELECT Age + Score AS x FROM T"))
+                == [OutputColumn(name: "x", type: .double)])
+    // MIN/MAX compare rather than fold, so they keep the operand's own type —
+    // even a non-numeric one.
+    #expect(try cat.columns(of: parse("SELECT MIN(Name) AS x FROM T"))
+                == [OutputColumn(name: "x", type: .text)])
+  }
+
   @Test("a base relation shadowed by the definition_schema store is hidden")
   func storeShadowsBase() throws {
     // The store overlay resolves `definition_schema.tables`, so a catalog base

@@ -78,19 +78,20 @@ extension Catalog where Self: ~Escapable {
     _ = try compile(query, ctes)
     // Type-check every REACHABLE operand and call across all arms — the
     // projection, `WHERE`, and `HAVING` of each. `compile` resolves a call's
-    // arguments but cannot check the routine EXISTS, and the first-arm schema
-    // walk below sees only the first projection; `typecheck` faults an unknown
-    // call or a bad operand anywhere a run would evaluate it, and — like the
-    // executor — skips an arm a `false AND`/`true OR` short-circuits, so a
-    // query that runs is not rejected for an unreachable call.
-    let returns = Routines.standard.merging(routines).returns
-    try typecheck(query, ctes, returns: returns)
+    // arguments but cannot check the routine EXISTS or that it is called with
+    // its declared arity and argument kinds, and the first-arm walk below
+    // sees only the first projection; `typecheck` faults an unknown or
+    // ill-typed call or a bad operand anywhere a run would evaluate it, and —
+    // like the executor — skips an arm a `false AND`/`true OR` short-circuits,
+    // so a query that runs is not rejected for an unreachable call.
+    let routines = Routines.standard.merging(routines)
+    try typecheck(query, ctes, routines: routines)
     // The result columns are the first arm's projection (the ISO rule a UNION
     // follows), resolved against the validated scope; a scalar call types from
-    // the routine return types — the engine prelude merged under `routines`,
-    // exactly as a run seeds them, so a standard call (`BITAND`) types without
-    // the caller re-supplying it.
-    return try columns(of: query.first, ctes, returns: returns)
+    // its routine's declared return type — the engine prelude merged under
+    // `routines`, exactly as a run seeds them, so a standard call (`BITAND`)
+    // types without the caller re-supplying it.
+    return try columns(of: query.first, ctes, routines: routines)
   }
 
   /// The result columns of a single `select`, resolved against this catalog
@@ -101,14 +102,14 @@ extension Catalog where Self: ~Escapable {
   /// `compile` — the public `columns(of query:)` runs it, and the introspection
   /// builder runs it per view — so this worker never duplicates (and never
   /// drifts from) that resolution. It runs only after compilation has proved
-  /// the arm resolves. `returns` maps a scalar routine's name to its declared
-  /// return type, so a call types from it rather than the `.integer` default.
+  /// the arm resolves. `routines` are the scalar routines a call types from —
+  /// its declared return type — rather than the `.integer` default.
   borrowing func columns(of select: Select, _ ctes: CTEs,
                          visited: Set<String> = [],
-                         returns: Dictionary<String, ValueType> = [:])
+                         routines: Routines = [:])
       throws(SQLError) -> Array<OutputColumn> {
-    try scope(of: select, ctes, visited: visited, returns: returns)
-        .columns(of: select.projection, returns)
+    try scope(of: select, ctes, visited: visited, routines: routines)
+        .columns(of: select.projection, routines)
   }
 
   /// The name-resolution scope of `select` — its FROM relation and each joined
@@ -118,15 +119,15 @@ extension Catalog where Self: ~Escapable {
   /// empty. It reads only schemas, never a cursor.
   borrowing func scope(of select: Select, _ ctes: CTEs,
                        visited: Set<String> = [],
-                       returns: Dictionary<String, ValueType> = [:])
+                       routines: Routines = [:])
       throws(SQLError) -> Scope {
     guard let relation = select.from else { return Scope([]) }
     var relations =
         [(relation, try schema(of: relation, ctes, visited: visited,
-                               returns: returns))]
+                               routines: routines))]
     for join in select.joins {
       let joined = try schema(of: join.relation, ctes, visited: visited,
-                              returns: returns)
+                              routines: routines)
       relations.append((join.relation, joined))
     }
     return Scope(relations)
@@ -144,14 +145,14 @@ extension Catalog where Self: ~Escapable {
   /// before returning metadata. It reads no cursor.
   borrowing func typecheck(_ query: Query, _ ctes: CTEs,
                            visited: Set<String> = [],
-                           returns: Dictionary<String, ValueType> = [:])
+                           routines: Routines = [:])
       throws(SQLError) {
     switch query {
     case let .select(select):
-      try typecheck(select, ctes, visited: visited, returns: returns)
+      try typecheck(select, ctes, visited: visited, routines: routines)
     case let .union(left, select, _):
-      try typecheck(left, ctes, visited: visited, returns: returns)
-      try typecheck(select, ctes, visited: visited, returns: returns)
+      try typecheck(left, ctes, visited: visited, routines: routines)
+      try typecheck(select, ctes, visited: visited, routines: routines)
     }
   }
 
@@ -181,11 +182,12 @@ extension Catalog where Self: ~Escapable {
   ///     for the schema, non-faulting); otherwise it validates fully.
   private borrowing func typecheck(_ select: Select, _ ctes: CTEs,
                                    visited: Set<String>,
-                                   returns: Dictionary<String, ValueType>)
+                                   routines: Routines)
       throws(SQLError) {
-    let scope = try scope(of: select, ctes, visited: visited, returns: returns)
+    let scope = try scope(of: select, ctes, visited: visited,
+                          routines: routines)
     if let predicate = select.predicate {
-      try scope.check(predicate, returns)
+      try scope.check(predicate, routines)
       // A false WHERE filters every row, so a GROUP BY forms no group and a
       // non-aggregate query yields no row — nothing after is reachable. A
       // whole-result aggregate (an aggregate projection or HAVING, no GROUP BY)
@@ -196,10 +198,10 @@ extension Catalog where Self: ~Escapable {
       if scope.constant(predicate) == false {
         if Engine.aggregates(select), select.grouping.isEmpty {
           if let having = select.having {
-            try scope.reachable(having, returns)
+            try scope.reachable(having, routines)
           }
           if case let .expressions(items) = select.projection {
-            for item in items { try scope.reachable(item.expression, returns) }
+            for item in items { try scope.reachable(item.expression, routines) }
           }
         }
         return
@@ -208,11 +210,11 @@ extension Catalog where Self: ~Escapable {
     // Aggregate folds run before HAVING and any limit, so validate every
     // aggregate operand in the projection and HAVING unconditionally.
     if case let .expressions(items) = select.projection {
-      for item in items { try scope.aggregates(in: item.expression, returns) }
+      for item in items { try scope.aggregates(in: item.expression, routines) }
     }
     if let having = select.having {
-      try scope.aggregates(in: having, returns)
-      try scope.check(having, returns)
+      try scope.aggregates(in: having, routines)
+      try scope.check(having, routines)
       // A false HAVING filters every group before the projection, so the
       // projection's non-aggregate work is unreachable.
       if scope.constant(having) == false { return }
@@ -221,7 +223,7 @@ extension Catalog where Self: ~Escapable {
     // aggregate folds (validated above) reachable.
     if select.limit?.count != 0,
         case let .expressions(items) = select.projection {
-      for item in items { _ = try scope.type(of: item.expression, returns) }
+      for item in items { _ = try scope.type(of: item.expression, routines) }
     }
   }
 
@@ -231,12 +233,12 @@ extension Catalog where Self: ~Escapable {
   /// same precedence `compile` resolves a relation by. It reads only schemas,
   /// never a cursor, so it never executes. `visited` names the views already
   /// being resolved down this chain, breaking a cyclic view (`A` over `B` over
-  /// `A`) that would otherwise re-enter here. `returns` rides through so a view
+  /// `A`) that would otherwise re-enter here. `routines` ride through so a view
   /// body projecting a scalar call types it from the routine's declared return
   /// type, not the `.integer` default.
   borrowing func schema(of relation: Relation, _ ctes: CTEs,
                         visited: Set<String> = [],
-                        returns: Dictionary<String, ValueType> = [:])
+                        routines: Routines = [:])
       throws(SQLError) -> Schema {
     let name = relation.name
     if let cte = ctes[name.lowercased()] {
@@ -273,14 +275,14 @@ extension Catalog where Self: ~Escapable {
       // unreachable.
       let overlay = schemas([:], for: view.query)
       let inner = visited.union([name.lowercased()])
-      try typecheck(view.query, overlay, visited: inner, returns: returns)
+      try typecheck(view.query, overlay, visited: inner, routines: routines)
       // Type off the body's first arm (the ISO rule for a UNION). Arity — the
       // body's width against the declared columns — is `compile`'s job (the
       // public entry and the introspection builder run it), so on a shortfall
       // fall back to the declared schema rather than re-checking it here.
       let resolved =
           try columns(of: view.query.first, overlay, visited: inner,
-                      returns: returns)
+                      routines: routines)
       guard resolved.count == base.width else { return base }
       return Schema(width: base.width, extent: base.extent, names: base.names,
                     types: resolved.map(\.type), virtuals: base.virtuals)
@@ -294,9 +296,9 @@ extension Catalog where Self: ~Escapable {
 
 extension Scope {
   /// The output columns a `projection` yields over this scope, named and typed
-  /// — `returns` maps a scalar routine's name to its declared return type.
+  /// — `routines` type a scalar call from its declared return type.
   internal func columns(of projection: Projection,
-                        _ returns: Dictionary<String, ValueType> = [:])
+                        _ routines: Routines = [:])
       throws(SQLError) -> Array<OutputColumn> {
     return switch projection {
     case .all:
@@ -305,7 +307,7 @@ extension Scope {
       try references.map { column throws(SQLError) in try output(of: column) }
     case let .expressions(items):
       try items.indices.map { index throws(SQLError) in
-        try output(items[index], at: index, returns)
+        try output(items[index], at: index, routines)
       }
     }
   }
@@ -331,10 +333,9 @@ extension Scope {
   /// The output column a projected `item` at 0-based `index` yields: its alias,
   /// else a bare column's name, else a positional `column N` (1-based). A bare
   /// column carries its source type and a literal its own; a scalar call its
-  /// routine's declared return type (`returns`); every other expression
-  /// `.integer`.
+  /// routine's declared return type; every other expression `.integer`.
   internal func output(_ item: Projected, at index: Int,
-                       _ returns: Dictionary<String, ValueType> = [:])
+                       _ routines: Routines = [:])
       throws(SQLError) -> OutputColumn {
     let name = if let alias = item.alias {
       alias
@@ -349,7 +350,7 @@ extension Scope {
     // a schema resolves even for an expression a zero-row limit makes
     // unreachable.
     return try OutputColumn(name: name,
-                            type: type(of: item.expression, returns,
+                            type: type(of: item.expression, routines,
                                        validate: false))
   }
 }

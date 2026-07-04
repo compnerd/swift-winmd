@@ -712,7 +712,9 @@ struct IntrospectionTests {
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["v": View(query: body, columns: ["iid"])])
     let routines =
-        Routines().registering("tag", returns: .text) { _ in .text("x") }
+        Routines().registering("tag", returns: .text, parameters: [.text]) {
+          _ in .text("x")
+        }
     let rows = try cat.run(parse("""
         SELECT column_name, data_type FROM information_schema.columns
          WHERE table_name = 'v'
@@ -727,7 +729,9 @@ struct IntrospectionTests {
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
     let query = try parse("SELECT TAG(Name) AS t FROM People")
     let routines =
-        Routines().registering("tag", returns: .text) { _ in .text("x") }
+        Routines().registering("tag", returns: .text, parameters: [.text]) {
+          _ in .text("x")
+        }
     #expect(try cat.columns(of: query, routines: routines)
                 == [OutputColumn(name: "t", type: .text)])
     // Without the routines, `TAG` is an unknown function that a run could not
@@ -768,7 +772,9 @@ struct IntrospectionTests {
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["w": View(query: body, columns: ["t"])])
     let routines =
-        Routines().registering("tag", returns: .text) { _ in .text("x") }
+        Routines().registering("tag", returns: .text, parameters: [.text]) {
+          _ in .text("x")
+        }
     let typed =
         try cat.columns(of: parse("SELECT * FROM w"), routines: routines)
     #expect(typed == [OutputColumn(name: "t", type: .text)])
@@ -1183,6 +1189,33 @@ struct IntrospectionTests {
     #expect(try cat.columns(of: parse("""
         SELECT BITAND(Age, 1) AS b FROM People
         """)) == [OutputColumn(name: "b", type: .integer)])
+  }
+
+  @Test("columns(of:) faults on a call over a wrong-kind argument")
+  func callArgumentKind() throws {
+    // `BITAND` declares an `[.integer, .integer]` contract, so
+    // `BITAND(Name, 1)` over the text `Name` faults as a run would (`BITAND`
+    // throws `SQLError.argument` on a non-integer non-NULL value); the schema
+    // must reject it rather than advertise an integer column no row produces.
+    let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("""
+          SELECT BITAND(Name, 1) AS x FROM People
+          """))
+    }
+  }
+
+  @Test("columns(of:) faults on a call over the wrong arity")
+  func callArgumentArity() throws {
+    // `BITAND` takes two arguments, so `BITAND(Age)` faults `SQLError.argument`
+    // at run; the static type-check enforces the declared arity, so the schema
+    // rejects it rather than typing an integer column.
+    let cat = MetaCatalog(["People": MetaRelation([("Age", .integer)], [])])
+    #expect(throws: SQLError.self) {
+      let _ = try cat.columns(of: parse("""
+          SELECT BITAND(Age) AS x FROM People
+          """))
+    }
   }
 
   @Test("a recursive CTE over the store types a view's standard call")

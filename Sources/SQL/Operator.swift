@@ -455,7 +455,7 @@ private func derive<C: Catalog & ~Escapable>(_ name: String, _ plan: Plan,
                                              _ bindings: Bindings)
     throws(SQLError) -> Array<Record> {
   let overlay = if let view = catalog.resolve(view: name) {
-    catalog.augment([:], for: view.query, returns: routines.returns)
+    catalog.augment([:], for: view.query, routines: routines)
   } else {
     CTEs()
   }

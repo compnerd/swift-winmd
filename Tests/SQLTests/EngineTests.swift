@@ -2128,13 +2128,15 @@ struct EngineStreamingProductTests {
 /// default.
 private func routines() -> Routines {
   Routines.standard
-    .registering("upper") { arguments throws(SQLError) in
+    .registering("upper", returns: .text, parameters: [.text]) {
+      arguments throws(SQLError) in
       guard case let .text(text) = arguments.first else {
         throw .argument("upper expects one text argument")
       }
       return .text(text.uppercased())
     }
-    .registering("add") { arguments throws(SQLError) in
+    .registering("add", parameters: [.integer, .integer]) {
+      arguments throws(SQLError) in
       guard arguments.count == 2,
           case let .integer(lhs) = arguments[0],
           case let .integer(rhs) = arguments[1] else {
@@ -2234,9 +2236,10 @@ struct EngineFunctionTests {
     // The registry is a single flat map with no privileged tier, so a caller's
     // `bitand` registered OVER the prelude one shadows it (house rule: a later
     // binding wins). The user's closure returns -1, not the bitwise AND.
-    let user = Routines.standard.registering("bitand") { _ throws(SQLError) in
-      .integer(-1)
-    }
+    let user = Routines.standard
+        .registering("bitand", parameters: [.integer, .integer]) {
+          _ throws(SQLError) in .integer(-1)
+        }
     let query = try parse("SELECT BITAND(6, 3) FROM People WHERE Id = 1")
     let rows = try people().run(query, user)
     #expect(rows == [[.integer(-1)]])
@@ -2247,8 +2250,12 @@ struct EngineFunctionTests {
     // "tag" and "TAG" fold to one name; the registry merges them (the later-
     // sorting original spelling wins) instead of trapping on the duplicate.
     let routines: Routines =
-        ["tag": { _ in .text("lower") },
-         "TAG": { _ in .text("upper") }]
+        ["tag": Routine(returns: .text, parameters: [.text]) {
+          _ in .text("lower")
+        },
+         "TAG": Routine(returns: .text, parameters: [.text]) {
+          _ in .text("upper")
+        }]
     let query = try parse("SELECT tag(Name) FROM People WHERE Id = 1")
     let rows = try people().run(query, routines)
     #expect(rows == [[.text("lower")]])
@@ -2729,7 +2736,8 @@ struct EngineScalarSelectTests {
   func null() throws {
     // The bare literal NULL is not in the grammar, but a NULL arises from a
     // function returning it; `nothing` yields NULL for the single row.
-    let routines: Routines = ["nothing": { _ in .null }]
+    let routines: Routines =
+        ["nothing": Routine(parameters: []) { _ in .null }]
     let rows = try people().run(parse("SELECT nothing()"), routines)
     #expect(rows == [[.null]])
   }
@@ -3180,7 +3188,8 @@ private func seed() -> Memory {
 /// Routines with an `inc` scalar — `inc(n) = n + 1` — standing in for the `+`
 /// the dialect lacks, so a recursive counter can advance.
 private func counting() -> Routines {
-  Routines().registering("inc") { arguments throws(SQLError) in
+  Routines().registering("inc", parameters: [.integer]) {
+    arguments throws(SQLError) in
     guard case let .integer(n) = arguments.first else {
       throw .argument("inc expects one integer argument")
     }

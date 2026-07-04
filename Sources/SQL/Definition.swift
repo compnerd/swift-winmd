@@ -140,13 +140,13 @@ extension Catalog where Self: ~Escapable {
   /// relation's rows. It builds no cached state, so the engine resolves a
   /// reserved name lazily, building only the one a query references.
   borrowing func store(_ relation: Definition,
-                       _ returns: Dictionary<String, ValueType> = [:])
+                       _ routines: Routines = [:])
       -> Materialised {
     switch relation {
     case .tables:
       tables()
     case .columns:
-      columns(returns)
+      columns(routines)
     }
   }
 
@@ -164,13 +164,13 @@ extension Catalog where Self: ~Escapable {
   /// but not one the store serves is left unbound, so it faults later as an
   /// ordinary unknown relation (`SQLError.relation`).
   borrowing func augment(_ ctes: CTEs, for query: Query,
-                         returns: Dictionary<String, ValueType> = [:]) -> CTEs {
+                         routines: Routines = [:]) -> CTEs {
     var names = Set<String>()
     query.collect(into: &names)
     var augmented = ctes
     for name in names where augmented[name.lowercased()] == nil {
       if let relation = Definition(name) {
-        augmented[name.lowercased()] = store(relation, returns)
+        augmented[name.lowercased()] = store(relation, routines)
       }
     }
     return augmented
@@ -297,10 +297,10 @@ extension Catalog where Self: ~Escapable {
   /// `is_nullable` is a first cut of `'YES'` for every column (the engine does
   /// not yet track per-column nullability). A view's columns are listed too,
   /// their types resolved from the view's body — a scalar call in that body
-  /// types from `returns`, the run's routine return-type map, so a view's
+  /// types from `routines`, the run's registered routines, so a view's
   /// `GUID(...)` column advertises `character varying`, not the integer
   /// default.
-  private borrowing func columns(_ returns: Dictionary<String, ValueType>)
+  private borrowing func columns(_ routines: Routines)
       -> Materialised {
     var rows = Array<Array<Value>>()
     // A view shadows a same-named base relation, so a shadowed base's columns
@@ -349,10 +349,10 @@ extension Catalog where Self: ~Escapable {
       // view a `SELECT *` could not evaluate is not advertised.
       let overlay = schemas([:], for: view.query)
       guard (try? typecheck(view.query, overlay, visited: [name.lowercased()],
-                            returns: returns)) != nil,
+                            routines: routines)) != nil,
           let resolved = try? columns(of: view.query.first, overlay,
                                       visited: [name.lowercased()],
-                                      returns: returns),
+                                      routines: routines),
           resolved.count == view.columns.count else { continue }
       for ordinal in view.columns.indices {
         rows.append([.text(name), .text(view.columns[ordinal]),

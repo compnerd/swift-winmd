@@ -359,14 +359,14 @@ internal struct WinMDRelation: SQL.Table, ~Escapable {
     // decodes any coded index whose row is zero as SQL `NULL`), which no cell can
     // equal — `NULL = 0` is UNKNOWN. Returning `nil` for it defers to a full
     // scan + filter, where the decoded `NULL` correctly fails the comparison,
-    // rather than seeking the raw run that encodes row zero (which `Engine.seek`
+    // rather than seeking the raw run that encodes row zero (which `Catalog.seek`
     // would consume without a residual recheck, leaking those rows).
     //
     // The upper bound `value <= Int.max >> key.kind.bits` rejects a decoded
     // Id too large to encode without truncation: Swift's `<<` discards the
     // bits shifted past the word, so a larger `value` would alias `encoded` to a
     // real raw coded cell (e.g. with `bits == 5`, `(1 << 59) + 1` encodes to raw
-    // `35`, the same cell as `TypeDef` row 1), and `Engine.seek` would consume
+    // `35`, the same cell as `TypeDef` row 1), and `Catalog.seek` would consume
     // the standalone equality without a residual recheck and return the aliased
     // run. Below the bound `value << bits` fits in `Int` and `| tag` only sets
     // the low bits the shift cleared (`tag < 2^bits`), so `encoded <= Int.max`.

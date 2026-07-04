@@ -64,7 +64,7 @@ extension Dialect {
 /// rows (the `Sequence == 0` return pseudo-parameter and the two real
 /// parameters), and an `InterfaceImpl` row naming the base `IInspectable`
 /// `TypeRef` (so the `bases` view derives the interface's base) — and drive a
-/// parsed `SELECT` through `Engine.run` over the `WinMD.Storage` catalog,
+/// parsed `SELECT` through `Catalog.run` over the `WinMD.Storage` catalog,
 /// asserting the decoded `Value`s the engine yields (or the spellings the render
 /// decode composes).
 struct DatabaseSQLTests {
@@ -204,7 +204,7 @@ struct DatabaseSQLTests {
       Issue.record("not a SELECT")
       return []
     }
-    return try Engine.run(select, catalog, Session.routines)
+    return try catalog.run(select, Session.routines)
   }
 
   /// Parses `query` as a `CREATE VIEW`, returning its case-folded name and view.
@@ -227,7 +227,7 @@ struct DatabaseSQLTests {
       Issue.record("not a SELECT")
       return []
     }
-    return try Engine.run(select, Session(catalog, views), Session.routines)
+    return try Session(catalog, views).run(select, Session.routines)
   }
 
   /// Plans and runs `query` through the engine over a `Session` catalog
@@ -243,8 +243,8 @@ struct DatabaseSQLTests {
       Issue.record("not a SELECT")
       return []
     }
-    return try Engine.run(select, Session(catalog, views), Session.routines,
-                          bindings: bindings)
+    return try Session(catalog, views).run(select, Session.routines,
+                                           bindings: bindings)
   }
 
   @Test("the bundled `interfaces` view yields the IID-carrying TypeDef")

@@ -128,7 +128,7 @@ private func parse(_ text: String) throws -> Query {
 
 /// Runs `text` against the `Sales` catalog, yielding the projected rows.
 private func run(_ text: String) throws -> Array<Array<Value>> {
-  try Engine.run(parse(text), sales())
+  try sales().run(parse(text))
 }
 
 // MARK: - Tests
@@ -251,8 +251,7 @@ struct AggregateTests {
     // first-appearance integer, not two one-row groups.
     let catalog = AggregateMemory(
         ["T": AggregateRelation(["x"], [[.integer(1)], [.double(1.0)]])])
-    let rows = try Engine.run(
-        parse("SELECT x, COUNT(*) FROM T GROUP BY x"), catalog)
+    let rows = try catalog.run(parse("SELECT x, COUNT(*) FROM T GROUP BY x"))
     #expect(rows == [[.integer(1), .integer(2)]])
   }
 
@@ -270,9 +269,9 @@ struct AggregateTests {
             ["x"], [[.double(0.5)], [.integer(.max)], [.integer(1)]])])
     let expected = Double(Int.max) + 1.0 + 0.5
     let query = "SELECT SUM(x), AVG(x) FROM T"
-    #expect(try Engine.run(parse(query), prefix)
+    #expect(try prefix.run(parse(query))
             == [[.double(expected), .double(expected / 3)]])
-    #expect(try Engine.run(parse(query), suffix)
+    #expect(try suffix.run(parse(query))
             == [[.double(expected), .double(expected / 3)]])
   }
 
@@ -287,15 +286,15 @@ struct AggregateTests {
     let down = AggregateMemory(
         ["T": AggregateRelation(
             ["x"], [[.integer(.max)], [.integer(-1)], [.integer(1)]])])
-    #expect(try Engine.run(parse("SELECT SUM(x) FROM T"), up)
+    #expect(try up.run(parse("SELECT SUM(x) FROM T"))
             == [[.integer(.max)]])
-    #expect(try Engine.run(parse("SELECT SUM(x) FROM T"), down)
+    #expect(try down.run(parse("SELECT SUM(x) FROM T"))
             == [[.integer(.max)]])
     // A total that genuinely exceeds Int still faults, in any order.
     let over = AggregateMemory(
         ["T": AggregateRelation(["x"], [[.integer(.max)], [.integer(.max)]])])
     #expect(throws: SQLError.magnitude("integer overflow")) {
-      try Engine.run(parse("SELECT SUM(x) FROM T"), over)
+      try over.run(parse("SELECT SUM(x) FROM T"))
     }
   }
 
@@ -305,7 +304,7 @@ struct AggregateTests {
     // AVG divides the wide total and returns the finite approximate mean.
     let catalog = AggregateMemory(
         ["T": AggregateRelation(["x"], [[.integer(.max)], [.integer(.max)]])])
-    #expect(try Engine.run(parse("SELECT AVG(x) FROM T"), catalog)
+    #expect(try catalog.run(parse("SELECT AVG(x) FROM T"))
             == [[.double(Double(Int.max))]])
   }
 
@@ -321,10 +320,10 @@ struct AggregateTests {
         ["T": AggregateRelation(["x"], [[.integer(1)], [.text("a")]])])
     for catalog in [textFirst, intFirst] {
       #expect(throws: fault) {
-        try Engine.run(parse("SELECT MIN(x) FROM T"), catalog)
+        try catalog.run(parse("SELECT MIN(x) FROM T"))
       }
       #expect(throws: fault) {
-        try Engine.run(parse("SELECT MAX(x) FROM T"), catalog)
+        try catalog.run(parse("SELECT MAX(x) FROM T"))
       }
     }
   }
@@ -341,7 +340,7 @@ struct AggregateTests {
         ["T": AggregateRelation(
             ["x"], [[.double(Double(Int.max))], [.integer(.max)]])])
     for catalog in [intFirst, doubleFirst] {
-      #expect(try Engine.run(parse("SELECT MIN(x), MAX(x) FROM T"), catalog)
+      #expect(try catalog.run(parse("SELECT MIN(x), MAX(x) FROM T"))
               == [[.integer(.max), .double(Double(Int.max))]])
     }
   }
@@ -524,11 +523,11 @@ struct AggregateTests {
           [[.integer(1), .integer(10)], [.integer(1), .integer(20)],
            [.integer(2), .integer(40)]]),
     ])
-    let rows = try Engine.run(parse("""
+    let rows = try catalog.run(parse("""
         SELECT Dept.Name, SUM(Item.Price) FROM Dept
           JOIN Item ON Item.DeptId = Dept.Id
           GROUP BY Dept.Name ORDER BY Dept.Name
-        """), catalog)
+        """))
     #expect(rows == [[.text("Books"), .integer(30)],
                      [.text("Games"), .integer(40)]])
   }
@@ -548,7 +547,7 @@ struct AggregateTests {
           [[.double(1.5)], [.double(2.25)], [.double(0.25)]]),
     ])
     // 1.5 + 2.25 + 0.25 = 4.0 — the running total widens to a double.
-    let rows = try Engine.run(parse("SELECT SUM(X) FROM T"), catalog)
+    let rows = try catalog.run(parse("SELECT SUM(X) FROM T"))
     #expect(rows == [[.double(4.0)]])
   }
 
@@ -559,7 +558,7 @@ struct AggregateTests {
           [[.integer(10)], [.double(2.5)], [.integer(20)]]),
     ])
     // 10 + 2.5 + 20 = 32.5 — a lone double operand widens the whole total.
-    let rows = try Engine.run(parse("SELECT SUM(X) FROM T"), catalog)
+    let rows = try catalog.run(parse("SELECT SUM(X) FROM T"))
     #expect(rows == [[.double(32.5)]])
   }
 
@@ -570,7 +569,7 @@ struct AggregateTests {
           [[.double(1.0)], [.double(2.0)]]),
     ])
     // (1.0 + 2.0) / 2 = 1.5 — real division over a double total.
-    let rows = try Engine.run(parse("SELECT AVG(X) FROM T"), catalog)
+    let rows = try catalog.run(parse("SELECT AVG(X) FROM T"))
     #expect(rows == [[.double(1.5)]])
   }
 }

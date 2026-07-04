@@ -260,37 +260,37 @@ private func parse(_ text: String) throws -> Query {
 
 /// Runs `text` against the single-relation `People` catalog.
 private func run(_ text: String) throws -> Array<Array<Value>> {
-  try Engine.run(parse(text), people())
+  try people().run(parse(text))
 }
 
 /// Runs `text` against the compound-ordering `Grade` catalog.
 private func grades(_ text: String) throws -> Array<Array<Value>> {
-  try Engine.run(parse(text), grades())
+  try grades().run(parse(text))
 }
 
 /// Runs `text` against the coded-key `Attribute` catalog.
 private func attributes(_ text: String) throws -> Array<Array<Value>> {
-  try Engine.run(parse(text), attributes())
+  try attributes().run(parse(text))
 }
 
 /// Runs `text` against the join `family` catalog.
 private func join(_ text: String) throws -> Array<Array<Value>> {
-  try Engine.run(parse(text), family())
+  try family().run(parse(text))
 }
 
 /// Runs `text` against the view catalog.
 private func view(_ text: String) throws -> Array<Array<Value>> {
-  try Engine.run(parse(text), views())
+  try views().run(parse(text))
 }
 
 /// Runs `text` against the nullable `Maybe` catalog.
 private func nullable(_ text: String) throws -> Array<Array<Value>> {
-  try Engine.run(parse(text), nullable())
+  try nullable().run(parse(text))
 }
 
 /// Runs `text` against the three-level `lineage` catalog.
 private func lineage(_ text: String) throws -> Array<Array<Value>> {
-  try Engine.run(parse(text), lineage())
+  try lineage().run(parse(text))
 }
 
 // MARK: - Single-relation tests
@@ -546,7 +546,7 @@ struct EngineCodedKeyTests {
     // A decoded row is 1-based, so `Parent = 0` is `NULL = 0` for every row —
     // UNKNOWN, admitting none. Row 0's stored raw cell is `(0 << 2) | 0 == 0`,
     // which encodes exactly the target the equality would seek; before the fix
-    // `bound(0, …)` bracketed that raw run and `Engine.seek` consumed it with no
+    // `bound(0, …)` bracketed that raw run and `Catalog.seek` consumed it with no
     // residual recheck, leaking the null-reference row. The fix returns `nil`
     // for a non-positive decoded Id, so the query scans and filters, and the
     // decoded `NULL` correctly fails `= 0`.
@@ -560,7 +560,7 @@ struct EngineCodedKeyTests {
     // positive but past `Int.max >> Coded.bits`, so `(value << 2) | 0` shifts the
     // high `1` clear out of the word and aliases raw `24` — the same raw cell as
     // `td6` (`(6 << 2) | 0`). Before the upper-bound guard, `bound` bracketed
-    // that aliased run and `Engine.seek` consumed the standalone equality with no
+    // that aliased run and `Catalog.seek` consumed the standalone equality with no
     // residual recheck, returning td6 for a value no decoded key equals. The
     // guard returns `nil` for the unencodable value, so the query scans and
     // filters — every decoded key is a small Id or NULL, none equals the huge
@@ -579,13 +579,13 @@ struct EngineCodedKeyTests {
 
     let equal = try parse("SELECT Name FROM Attribute WHERE Parent = 4")
     let equalPlan =
-        try Engine.optimise(Engine.compile(equal, catalog), catalog, [:])
+        try catalog.optimise(catalog.compile(equal), [:])
     #expect(seeks(equalPlan))
     #expect(!filters(equalPlan))
 
     let less = try parse("SELECT Name FROM Attribute WHERE Parent < 5")
     let lessPlan =
-        try Engine.optimise(Engine.compile(less, catalog), catalog, [:])
+        try catalog.optimise(catalog.compile(less), [:])
     #expect(!seeks(lessPlan))
     #expect(filters(lessPlan))
   }
@@ -616,7 +616,7 @@ struct EngineCodedKeyTests {
       }
     }
     let query = try parse("SELECT * FROM T WHERE Id = 1")
-    let plan = try Engine.optimise(Engine.compile(query, catalog), catalog, [:])
+    let plan = try catalog.optimise(catalog.compile(query), [:])
     #expect(seeks(plan))
   }
 
@@ -628,7 +628,7 @@ struct EngineCodedKeyTests {
       Relation("T", ["Id": .integer], sorted: "Id")
     }
     let query = try parse("SELECT * FROM T WHERE Id = 1")
-    let plan = try Engine.optimise(Engine.compile(query, catalog), catalog, [:])
+    let plan = try catalog.optimise(catalog.compile(query), [:])
     #expect(seeks(plan))
   }
 }
@@ -992,7 +992,7 @@ struct EngineViewTests {
                         columns: ["a", "b", "c"])
     let catalog = Memory(try family().catalog, views: ["Star": star])
     #expect(throws: SQLError.columns(expected: 2, got: 3)) {
-      try Engine.run(parse("SELECT a FROM Star"), catalog)
+      try catalog.run(parse("SELECT a FROM Star"))
     }
   }
 
@@ -1003,7 +1003,7 @@ struct EngineViewTests {
     let star = try View(query: select("SELECT * FROM Parent"),
                         columns: ["a", "b"])
     let catalog = Memory(try family().catalog, views: ["Star": star])
-    let rows = try Engine.run(parse("SELECT b FROM Star WHERE a = 1"), catalog)
+    let rows = try catalog.run(parse("SELECT b FROM Star WHERE a = 1"))
     #expect(rows == [[.text("Ada")]])
   }
 
@@ -1016,8 +1016,7 @@ struct EngineViewTests {
     // `.scan` (a non-nil seek) and carry no `.select` over a raw scan.
     let catalog = try views()
     let select = try parse("SELECT Key, Label FROM Adults")
-    let plan = try Engine.optimise(Engine.compile(select, catalog), catalog,
-                                   [:])
+    let plan = try catalog.optimise(catalog.compile(select), [:])
     let sub = try #require(derived(plan))
     #expect(seeks(sub))
     #expect(!filters(sub))
@@ -1331,8 +1330,7 @@ struct EnginePushdownTests {
           WHERE Parent.Name = 'Ada'
         """)
     let plan =
-        try Engine.optimise(Engine.compile(select, catalog).pushdown(),
-                            catalog, [:])
+        try catalog.optimise(catalog.compile(select).pushdown(), [:])
     #expect(pushed(plan))
   }
 
@@ -1346,8 +1344,7 @@ struct EnginePushdownTests {
           WHERE Parent.Id = 2
         """)
     let plan =
-        try Engine.optimise(Engine.compile(select, catalog).pushdown(),
-                            catalog, [:])
+        try catalog.optimise(catalog.compile(select).pushdown(), [:])
     #expect(seeks(plan))
     #expect(pushed(plan))
   }
@@ -1374,8 +1371,7 @@ struct EnginePushdownTests {
         SELECT Name FROM T WHERE Name <> 'x' AND Age > 0 AND Id = 5
         """)
     let plan =
-        try Engine.optimise(Engine.compile(select, catalog).pushdown(),
-                            catalog, [:])
+        try catalog.optimise(catalog.compile(select).pushdown(), [:])
     #expect(seeks(plan))
   }
 
@@ -1403,13 +1399,12 @@ struct EnginePushdownTests {
 
     // The unsafe `(1 / x) = 0` residual bars the `id < 0` seek — the plan scans.
     let plan =
-        try Engine.optimise(Engine.compile(select, catalog).pushdown(),
-                            catalog, [:])
+        try catalog.optimise(catalog.compile(select).pushdown(), [:])
     #expect(!seeks(plan))
 
     // …and the scan raises the division rather than seeking past the empty run.
     #expect(throws: SQLError.self) {
-      _ = try Engine.run(select, catalog)
+      _ = try catalog.run(select)
     }
   }
 
@@ -1436,8 +1431,7 @@ struct EnginePushdownTests {
           JOIN Parent ON Parent.Id = Child.Pid WHERE Parent.Name <> 'zz'
         """)
     let plan =
-        try Engine.optimise(Engine.compile(select, catalog).pushdown(),
-                            catalog, [:])
+        try catalog.optimise(catalog.compile(select).pushdown(), [:])
     #expect(joins(plan))
 
     // …and it returns the correct rows: every child with a matching parent,
@@ -1463,8 +1457,7 @@ struct EnginePushdownTests {
           JOIN Child ON Child.Pid = Parent.Id WHERE Parent.Name <> Child.Name
         """)
     let plan =
-        try Engine.optimise(Engine.compile(select, catalog).pushdown(),
-                            catalog, [:])
+        try catalog.optimise(catalog.compile(select).pushdown(), [:])
     #expect(joins(plan))
     #expect(floats(plan))
 
@@ -1483,14 +1476,13 @@ struct EnginePushdownTests {
     // view's sub-plan and seek Parent to the single matching row before joining,
     // so only that parent's rows are read — not the whole relation.
     let (culled, pruned) = try counted()
-    let rows = try Engine.run(parse("SELECT Kid FROM Kin WHERE Key = 2"),
-                              culled)
+    let rows = try culled.run(parse("SELECT Kid FROM Kin WHERE Key = 2"))
     #expect(rows == [[.text("Bob")]])
 
     // The un-pushed baseline: the same view with no `WHERE` reads every parent
     // row — three.
     let (whole, full) = try counted()
-    _ = try Engine.run(parse("SELECT Kid FROM Kin"), whole)
+    _ = try whole.run(parse("SELECT Kid FROM Kin"))
     #expect(full.reads == 3)
 
     // Pushed, the seek reads the one matching parent — a single row.
@@ -1501,10 +1493,10 @@ struct EnginePushdownTests {
   func equivalence() throws {
     // Running the view then filtering must agree with the pushed plan.
     let (catalog, _) = try counted()
-    let all = try Engine.run(parse("SELECT Key, Kid FROM Kin"), catalog)
+    let all = try catalog.run(parse("SELECT Key, Kid FROM Kin"))
     let culled = all.filter { $0[0] == .integer(2) }.map { [$0[1]] }
     let filtered =
-        try Engine.run(parse("SELECT Kid FROM Kin WHERE Key = 2"), catalog)
+        try catalog.run(parse("SELECT Kid FROM Kin WHERE Key = 2"))
     #expect(filtered == culled)
   }
 
@@ -1521,9 +1513,9 @@ struct EnginePushdownTests {
       "B": FixtureRelation([Field(name: "y", type: .integer)],
                     [] as Array<Array<Value>>),
     ])
-    let rows = try Engine.run(parse("""
+    let rows = try catalog.run(parse("""
         SELECT A.x FROM A JOIN B ON A.x = B.y WHERE (1 / 0) = 0
-        """), catalog)
+        """))
     #expect(rows.isEmpty)
   }
 
@@ -1540,9 +1532,9 @@ struct EnginePushdownTests {
       "B": FixtureRelation([Field(name: "y", type: .integer)],
                     [] as Array<Array<Value>>),
     ])
-    let rows = try Engine.run(parse("""
+    let rows = try catalog.run(parse("""
         SELECT A.x FROM A JOIN B ON A.x = B.y WHERE (1 / A.x) = 0
-        """), catalog)
+        """))
     #expect(rows.isEmpty)
   }
 
@@ -1560,9 +1552,9 @@ struct EnginePushdownTests {
                     [[.integer(0)]] as Array<Array<Value>>),
     ])
     #expect(throws: SQLError.self) {
-      _ = try Engine.run(parse("""
+      _ = try catalog.run(parse("""
           SELECT A.x FROM A JOIN B ON A.x = B.y WHERE (1 / A.x) = 0 AND A.x <> 0
-          """), catalog)
+          """))
     }
   }
 
@@ -1584,10 +1576,10 @@ struct EnginePushdownTests {
                          [[.integer(1), .text("other")]]
                              as Array<Array<Value>>),
     ])
-    let rows = try Engine.run(parse("""
+    let rows = try catalog.run(parse("""
         SELECT Child.x FROM Child JOIN Parent ON Parent.Id = Child.Pid
           WHERE Parent.Name = 'nope' AND (1 / Child.x) = 0
-        """), catalog)
+        """))
     #expect(rows.isEmpty)
   }
 
@@ -1600,14 +1592,13 @@ struct EnginePushdownTests {
     let catalog = try spanned()
     let select = try parse("SELECT Tag FROM Both WHERE Key = 2")
     let plan =
-        try Engine.optimise(Engine.compile(select, catalog).pushdown(),
-                            catalog, [:])
+        try catalog.optimise(catalog.compile(select).pushdown(), [:])
     #expect(injected(plan))
     #expect(seeks(plan))
 
     // …and the rows are exactly the union filtered late: `a2` from Alpha and
     // `b2` from Beta.
-    let rows = try Engine.run(select, catalog)
+    let rows = try catalog.run(select)
     #expect(rows == [[.text("a2")], [.text("b2")]])
   }
 
@@ -1626,7 +1617,7 @@ struct EnginePushdownTests {
                         columns: ["id", "q"])
     let catalog = Memory(["T": FixtureRelation(t, rows)], views: ["V": view])
     #expect(throws: SQLError.self) {
-      _ = try Engine.run(parse("SELECT id FROM V WHERE id <> 0"), catalog)
+      _ = try catalog.run(parse("SELECT id FROM V WHERE id <> 0"))
     }
   }
 
@@ -1646,8 +1637,7 @@ struct EnginePushdownTests {
     let catalog = Memory(["T": FixtureRelation(t, rows, sorted: 0)],
                          views: ["V": view])
     #expect(throws: SQLError.self) {
-      _ = try Engine.run(parse("SELECT x FROM V WHERE (1 / x) = 0 AND x = 1"),
-                         catalog)
+      _ = try catalog.run(parse("SELECT x FROM V WHERE (1 / x) = 0 AND x = 1"))
     }
   }
 
@@ -1677,14 +1667,13 @@ struct EnginePushdownTests {
     // `A.x = 1` is nullable and precedes the unsafe division, so it is NOT
     // pushed to the `A` leaf — it floats at the product level.
     let plan =
-        try Engine.optimise(Engine.compile(select, catalog).pushdown(),
-                            catalog, [:])
+        try catalog.optimise(catalog.compile(select).pushdown(), [:])
     #expect(!pushed(plan))
     #expect(floats(plan))
 
     // …and the query raises rather than silently dropping the row.
     #expect(throws: SQLError.self) {
-      _ = try Engine.run(select, catalog)
+      _ = try catalog.run(select)
     }
   }
 
@@ -1708,13 +1697,12 @@ struct EnginePushdownTests {
     // `x = 1` is nullable and precedes the unsafe division, so it is NOT
     // injected into the view — it floats above the derived leaf.
     let plan =
-        try Engine.optimise(Engine.compile(select, catalog).pushdown(),
-                            catalog, [:])
+        try catalog.optimise(catalog.compile(select).pushdown(), [:])
     #expect(floats(plan))
 
     // …and the query raises rather than silently dropping the row.
     #expect(throws: SQLError.self) {
-      _ = try Engine.run(select, catalog)
+      _ = try catalog.run(select)
     }
   }
 
@@ -1740,13 +1728,12 @@ struct EnginePushdownTests {
     // the unsafe division, so it is NOT injected into the view — it floats above
     // the derived leaf.
     let plan =
-        try Engine.optimise(Engine.compile(select, catalog).pushdown(),
-                            catalog, [:])
+        try catalog.optimise(catalog.compile(select).pushdown(), [:])
     #expect(floats(plan))
 
     // …and the query raises rather than silently dropping the row.
     #expect(throws: SQLError.self) {
-      _ = try Engine.run(select, catalog)
+      _ = try catalog.run(select)
     }
   }
 
@@ -1773,7 +1760,7 @@ struct EnginePushdownTests {
 
     // The UNKNOWN-ON pair (A.k NULL) is dropped by the match gate before the
     // division runs, so the query returns rows rather than raising.
-    #expect(try Engine.run(select, catalog) == [])
+    #expect(try catalog.run(select) == [])
   }
 }
 
@@ -1819,10 +1806,10 @@ struct EngineHashJoinTests {
     // Four outer children probe the map, but the inner is read only three times
     // — its row count — not twelve (once per outer).
     let (catalog, reads) = hashable()
-    let rows = try Engine.run(parse("""
+    let rows = try catalog.run(parse("""
         SELECT Child.Kid, Parent.Name FROM Child
           JOIN Parent ON Parent.Id = Child.Pid
-        """), catalog)
+        """))
     #expect(rows == [
       [.text("Ann"), .text("Ada")],
       [.text("Amy"), .text("Ada")],
@@ -1859,10 +1846,10 @@ struct EngineHashJoinTests {
       "Attribute": FixtureRelation(attribute, attributes, coded: 0,
                                    counter: reads),
     ])
-    let rows = try Engine.run(parse("""
+    let rows = try catalog.run(parse("""
         SELECT Attribute.Name FROM Type
           JOIN Attribute ON Attribute.Parent = Type.Id
-        """), catalog)
+        """))
     #expect(rows == [[.text("td6")]])
     // Seeked: only the `Parent = 6` run (the single `td6` row) is read, not all
     // six. Before the fix — probing seekability with `0` — the coded column
@@ -1880,10 +1867,10 @@ struct EngineHashJoinTests {
     // outer, and a large unseekable inner must not be fully scanned to answer
     // nothing.
     let (catalog, reads) = hashable()
-    let rows = try Engine.run(parse("""
+    let rows = try catalog.run(parse("""
         SELECT Child.Kid, Parent.Name FROM Child
           JOIN Parent ON Parent.Id = Child.Pid WHERE Child.Pid < 0
-        """), catalog)
+        """))
     #expect(rows.isEmpty)
     #expect(reads.reads == 0)
   }
@@ -1918,10 +1905,10 @@ struct EngineHashJoinTests {
       "Parent": FixtureRelation(parent, parents, counter: reads),
       "Child": FixtureRelation(child, children),
     ])
-    let rows = try Engine.run(parse("""
+    let rows = try catalog.run(parse("""
         SELECT Child.Kid, Parent.Name FROM Child
           JOIN Parent ON Parent.Id = Child.Pid WHERE Child.Pid IS NULL
-        """), catalog)
+        """))
     #expect(rows.isEmpty)
     #expect(reads.reads == 0)
   }
@@ -1989,10 +1976,10 @@ struct EngineHashJoinTests {
       "Parent": FixtureRelation(parent, parents),
       "Child": FixtureRelation(child, children),
     ])
-    let rows = try Engine.run(parse("""
+    let rows = try catalog.run(parse("""
         SELECT Child.Name, Parent.Name FROM Child
           JOIN Parent ON Parent.Id = Child.Pid
-        """), catalog)
+        """))
     #expect(rows == [
       [.text("Ann"), .text("Ada")],
       [.text("Bob"), .text("Bee")],
@@ -2033,10 +2020,10 @@ struct EngineHashJoinTests {
       "Parent": FixtureRelation(parent, parents, sorted: 0, counter: reads),
       "Child": FixtureRelation(child, children),
     ])
-    let rows = try Engine.run(parse("""
+    let rows = try catalog.run(parse("""
         SELECT Child.Kid, Parent.Id FROM Child
           JOIN Parent ON Parent.Code = Child.Code WHERE Parent.Id < 0
-        """), catalog)
+        """))
     #expect(rows.isEmpty)
     #expect(reads.reads == 0)
   }
@@ -2057,8 +2044,7 @@ struct EngineStreamingProductTests {
           JOIN Adults ON Adults.Key = Child.Pid
         """)
     let plan =
-        try Engine.optimise(Engine.compile(select, catalog).pushdown(),
-                            catalog, [:])
+        try catalog.optimise(catalog.compile(select).pushdown(), [:])
     #expect(residual(plan))
   }
 
@@ -2067,10 +2053,10 @@ struct EngineStreamingProductTests {
     // `Adults` is Parent rows with Id >= 2 (Key 2 → Bee, 3 → Cid); only the
     // child whose Pid equals a Key survives — Bob (Pid 2) against Bee.
     let catalog = try views()
-    let rows = try Engine.run(parse("""
+    let rows = try catalog.run(parse("""
         SELECT Child.Name, Adults.Label FROM Child
           JOIN Adults ON Adults.Key = Child.Pid
-        """), catalog)
+        """))
     #expect(rows == [[.text("Bob"), .text("Bee")]])
   }
 
@@ -2080,8 +2066,8 @@ struct EngineStreamingProductTests {
     // outer-major order — and keep the pairs the ON equality admits. The fused
     // streaming operator must yield exactly this, in this order.
     let catalog = try views()
-    let children = try Engine.run(parse("SELECT Name, Pid FROM Child"), catalog)
-    let adults = try Engine.run(parse("SELECT Label, Key FROM Adults"), catalog)
+    let children = try catalog.run(parse("SELECT Name, Pid FROM Child"))
+    let adults = try catalog.run(parse("SELECT Label, Key FROM Adults"))
 
     var eager = Array<Array<Value>>()
     for child in children {
@@ -2090,10 +2076,10 @@ struct EngineStreamingProductTests {
       }
     }
 
-    let streamed = try Engine.run(parse("""
+    let streamed = try catalog.run(parse("""
         SELECT Child.Name, Adults.Label FROM Child
           JOIN Adults ON Adults.Key = Child.Pid
-        """), catalog)
+        """))
     #expect(streamed == eager)
   }
 
@@ -2124,10 +2110,10 @@ struct EngineStreamingProductTests {
       "Child": FixtureRelation(child, children),
       "Base": FixtureRelation(base, bases, sorted: 0),
     ], views: ["Adults": adults])
-    let rows = try Engine.run(parse("""
+    let rows = try catalog.run(parse("""
         SELECT Child.Name, Adults.Label FROM Child
           JOIN Adults ON Adults.Key = Child.Pid
-        """), catalog)
+        """))
     #expect(rows == [[.text("Bob"), .text("Bee")]])
   }
 }
@@ -2160,7 +2146,7 @@ private func routines() -> Routines {
 
 /// Runs `text` against the `People` catalog through the demonstration routines.
 private func functionRun(_ text: String) throws -> Array<Array<Value>> {
-  try Engine.run(parse(text), people(), routines())
+  try people().run(parse(text), routines())
 }
 
 struct EngineFunctionTests {
@@ -2252,7 +2238,7 @@ struct EngineFunctionTests {
       .integer(-1)
     }
     let query = try parse("SELECT BITAND(6, 3) FROM People WHERE Id = 1")
-    let rows = try Engine.run(query, people(), user)
+    let rows = try people().run(query, user)
     #expect(rows == [[.integer(-1)]])
   }
 
@@ -2264,7 +2250,7 @@ struct EngineFunctionTests {
     let upper: Scalar = { _ in .text("upper") }
     let routines: Routines = ["tag": lower, "TAG": upper]
     let query = try parse("SELECT tag(Name) FROM People WHERE Id = 1")
-    let rows = try Engine.run(query, people(), routines)
+    let rows = try people().run(query, routines)
     #expect(rows == [[.text("lower")]])
   }
 
@@ -2342,10 +2328,10 @@ struct EngineNullTests {
     // The child with a NULL foreign key is the outer row; a NULL key equi-joins
     // to nothing, so it contributes no pair — `Parent` is sorted, so the inner
     // is seeked and the NULL key is skipped before probing.
-    let rows = try Engine.run(parse("""
+    let rows = try nullableKeys().run(parse("""
         SELECT Child.Name, Parent.Name FROM Child
           JOIN Parent ON Parent.Id = Child.Pid
-        """), nullableKeys())
+        """))
     #expect(rows == [
       [.text("Ann"), .text("Ada")],
       [.text("Bob"), .text("Bee")],
@@ -2358,7 +2344,7 @@ struct EngineNullTests {
 /// Runs `text` against the `family` catalog with the given parameter bindings.
 private func boundRun(_ text: String, _ bindings: Bindings)
     throws -> Array<Array<Value>> {
-  try Engine.run(parse(text), family(), Routines(), bindings: bindings)
+  try family().run(parse(text), Routines(), bindings: bindings)
 }
 
 struct EngineBoundTests {
@@ -2400,14 +2386,13 @@ struct EngineBoundTests {
     // key bound, producing that parent's children — exactly an interface →
     // methods expansion.
     let catalog = try family()
-    let parents = try Engine.run(parse("SELECT Id, Name FROM Parent"), catalog)
+    let parents = try catalog.run(parse("SELECT Id, Name FROM Parent"))
     let query = try parse("SELECT Name FROM Child WHERE Pid = :pid")
 
     var sections = Array<(parent: String, children: Array<String>)>()
     for parent in parents {
       let key = parent[0]
-      let children = try Engine.run(query, catalog, Routines(),
-                                    bindings: ["pid": key])
+      let children = try catalog.run(query, Routines(), bindings: ["pid": key])
       guard case let .text(name) = parent[1] else { continue }
       sections.append((name, children.map { row in
         guard case let .text(child) = row[0] else { return "" }
@@ -2445,8 +2430,8 @@ struct EngineBoundTests {
     // seeks the run rather than scanning and filtering the whole relation.
     let select = try parse("SELECT Name FROM Parent WHERE Id = :id")
     let catalog = try family()
-    let plan = try Engine.optimise(Engine.compile(select, catalog), catalog,
-                                   ["id": .integer(2)])
+    let plan = try catalog.optimise(catalog.compile(select),
+                                    ["id": .integer(2)])
     #expect(seeks(plan))
     #expect(!filters(plan))
   }
@@ -2455,8 +2440,7 @@ struct EngineBoundTests {
   func scan() throws {
     let select = try parse("SELECT Name FROM Parent WHERE Id = :id")
     let catalog = try family()
-    let plan = try Engine.optimise(Engine.compile(select, catalog), catalog,
-                                   [:])
+    let plan = try catalog.optimise(catalog.compile(select), [:])
     #expect(!seeks(plan))
     #expect(filters(plan))
   }
@@ -2468,8 +2452,8 @@ struct EngineBoundTests {
     // supplied, so a reusable view is as fast as the inlined query.
     let select = try parse("SELECT Key, Label FROM Picked")
     let catalog = try views()
-    let plan = try Engine.optimise(Engine.compile(select, catalog), catalog,
-                                   ["id": .integer(2)])
+    let plan = try catalog.optimise(catalog.compile(select),
+                                    ["id": .integer(2)])
     let sub = try #require(derived(plan))
     #expect(seeks(sub))
     #expect(!filters(sub))
@@ -2508,35 +2492,35 @@ struct EngineUnionTests {
   func dedup() throws {
     // People's Age repeats (30 for Alice and Carol, 25 for Bob and Eve); a
     // UNION of the relation with itself collapses every duplicate row.
-    let rows = try Engine.run(parse("""
+    let rows = try people().run(parse("""
         SELECT Age FROM People UNION SELECT Age FROM People
-        """), people())
+        """))
     #expect(rows == [[.integer(30)], [.integer(25)], [.integer(40)]])
   }
 
   @Test("UNION ALL keeps every row of every arm in source order")
   func all() throws {
-    let rows = try Engine.run(parse("""
+    let rows = try people().run(parse("""
         SELECT Age FROM People UNION ALL SELECT Age FROM People
-        """), people())
+        """))
     let ages = [30, 25, 30, 40, 25].map { Value.integer($0) }
     #expect(rows == (ages + ages).map { [$0] })
   }
 
   @Test("a UNION across two relations of matching arity merges and dedups")
   func merge() throws {
-    let rows = try Engine.run(parse("""
+    let rows = try tags().run(parse("""
         SELECT Tag FROM Left UNION SELECT Tag FROM Right
-        """), tags())
+        """))
     // `shared` appears in both arms but survives once, first occurrence kept.
     #expect(rows == [[.text("a")], [.text("shared")], [.text("b")]])
   }
 
   @Test("a UNION ALL across two relations keeps the shared row twice")
   func mergeAll() throws {
-    let rows = try Engine.run(parse("""
+    let rows = try tags().run(parse("""
         SELECT Tag FROM Left UNION ALL SELECT Tag FROM Right
-        """), tags())
+        """))
     #expect(rows == [
       [.text("a")],
       [.text("shared")],
@@ -2552,10 +2536,10 @@ struct EngineUnionTests {
     // ALL then appends Extra's `a` WITHOUT deduplicating, so `a` recurs. A
     // chain flattened to the trailing `all` would instead keep both copies of
     // `shared`; honouring each node's own flag keeps exactly one.
-    let rows = try Engine.run(parse("""
+    let rows = try tags().run(parse("""
         SELECT Tag FROM Left UNION SELECT Tag FROM Right
           UNION ALL SELECT Tag FROM Extra
-        """), tags())
+        """))
     #expect(rows == [
       [.text("a")],
       [.text("shared")],
@@ -2567,9 +2551,9 @@ struct EngineUnionTests {
   @Test("a UNION of arms projecting differing column counts is rejected")
   func arity() throws {
     #expect(throws: SQLError.arity(1, 2)) {
-      try Engine.run(parse("""
+      try people().run(parse("""
           SELECT Id FROM People UNION SELECT Id, Name FROM People
-          """), people())
+          """))
     }
   }
 
@@ -2579,7 +2563,7 @@ struct EngineUnionTests {
         SELECT Tag FROM Left UNION SELECT Tag FROM Right
         """), columns: ["Tag"])
     let catalog = Memory(tags().catalog, views: ["Both": both])
-    let rows = try Engine.run(parse("SELECT Tag FROM Both"), catalog)
+    let rows = try catalog.run(parse("SELECT Tag FROM Both"))
     #expect(rows == [[.text("a")], [.text("shared")], [.text("b")]])
   }
 
@@ -2587,10 +2571,10 @@ struct EngineUnionTests {
   func bound() throws {
     // Both arms key on the same `:pid`; the binding reaches each alike, so the
     // union is the parent's children drawn from two queries over the relation.
-    let rows = try Engine.run(parse("""
+    let rows = try family().run(parse("""
         SELECT Name FROM Child WHERE Pid = :pid
           UNION ALL SELECT Name FROM Child WHERE Pid = :pid
-        """), family(), Routines(), bindings: ["pid": .integer(1)])
+        """), Routines(), bindings: ["pid": .integer(1)])
     #expect(rows == [
       [.text("Ann")],
       [.text("Amy")],
@@ -2746,7 +2730,7 @@ struct EngineScalarSelectTests {
     // The bare literal NULL is not in the grammar, but a NULL arises from a
     // function returning it; `nothing` yields NULL for the single row.
     let routines: Routines = ["nothing": { _ in .null }]
-    let rows = try Engine.run(parse("SELECT nothing()"), people(), routines)
+    let rows = try people().run(parse("SELECT nothing()"), routines)
     #expect(rows == [[.null]])
   }
 
@@ -2775,40 +2759,40 @@ struct EngineScalarSelectTests {
     let filtered = try EngineScalarSelectTests.select(
         "SELECT 1 FROM People WHERE Id = 99")
     #expect(throws: fault) {
-      try Engine.run(.select(Select(projection: filtered.projection,
+      try people().run(.select(Select(projection: filtered.projection,
                                     from: nil,
-                                    predicate: filtered.predicate)), people())
+                                    predicate: filtered.predicate)))
     }
     let grouped = try EngineScalarSelectTests.select(
         "SELECT Id FROM People GROUP BY Id")
     #expect(throws: fault) {
-      try Engine.run(.select(Select(projection: grouped.projection, from: nil,
-                                    grouping: grouped.grouping)), people())
+      try people().run(.select(Select(projection: grouped.projection, from: nil,
+                                    grouping: grouped.grouping)))
     }
     let filteredGroup = try EngineScalarSelectTests.select(
         "SELECT Id FROM People GROUP BY Id HAVING COUNT(*) > 0")
     #expect(throws: fault) {
-      try Engine.run(.select(Select(projection: filteredGroup.projection,
+      try people().run(.select(Select(projection: filteredGroup.projection,
                                     from: nil,
-                                    having: filteredGroup.having)), people())
+                                    having: filteredGroup.having)))
     }
     let ordered =
         try EngineScalarSelectTests.select("SELECT Id FROM People ORDER BY Id")
     #expect(throws: fault) {
-      try Engine.run(.select(Select(projection: ordered.projection, from: nil,
-                                    order: ordered.order)), people())
+      try people().run(.select(Select(projection: ordered.projection, from: nil,
+                                    order: ordered.order)))
     }
     let limited = try EngineScalarSelectTests.select(
         "SELECT Id FROM People FETCH FIRST 1 ROW ONLY")
     #expect(throws: fault) {
-      try Engine.run(.select(Select(projection: limited.projection, from: nil,
-                                    limit: limited.limit)), people())
+      try people().run(.select(Select(projection: limited.projection, from: nil,
+                                    limit: limited.limit)))
     }
     let joined = try EngineScalarSelectTests.select(
         "SELECT Id FROM People JOIN Pets ON Pets.Owner = People.Id")
     #expect(throws: fault) {
-      try Engine.run(.select(Select(projection: joined.projection, from: nil,
-                                    joins: joined.joins)), people())
+      try people().run(.select(Select(projection: joined.projection, from: nil,
+                                    joins: joined.joins)))
     }
   }
 
@@ -2825,9 +2809,9 @@ struct EngineScalarSelectTests {
   func union() throws {
     // Both arms project one integer column; the FROM-less arm contributes its
     // single computed row, deduplicating against the People ages.
-    let rows = try Engine.run(parse("""
+    let rows = try people().run(parse("""
         SELECT 100 UNION ALL SELECT Age FROM People WHERE Id = 1
-        """), people())
+        """))
     #expect(rows == [[.integer(100)], [.integer(30)]])
   }
 
@@ -2846,7 +2830,7 @@ struct EngineScalarSelectTests {
 private func statement<C: Catalog & ~Escapable>(_ text: String,
                                                 _ catalog: borrowing C)
     throws -> Array<Array<Value>> {
-  try Engine.run(Statement(parsing: text), catalog)
+  try catalog.run(Statement(parsing: text))
 }
 
 struct EngineWithTests {
@@ -3217,21 +3201,21 @@ struct EngineRecursiveTests {
         )
         SELECT n FROM c
         """)
-    let rows = try Engine.run(query, seed(), counting())
+    let rows = try seed().run(query, counting())
     #expect(rows == [[.integer(1)], [.integer(2)], [.integer(3)],
                      [.integer(4)], [.integer(5)]])
   }
 
-  @Test("a recursive counter runs through Engine.run(_:statement:)")
+  @Test("a recursive counter runs through Catalog.run(_:statement:)")
   func statement() throws {
-    let rows = try Engine.run(Statement(parsing: """
+    let rows = try seed().run(Statement(parsing: """
         WITH RECURSIVE c (n) AS (
           SELECT 1 AS n FROM Seed
           UNION ALL
           SELECT inc(n) AS n FROM c WHERE n < 3
         )
         SELECT n FROM c
-        """), seed(), counting())
+        """), counting())
     #expect(rows == [[.integer(1)], [.integer(2)], [.integer(3)]])
   }
 
@@ -3244,10 +3228,10 @@ struct EngineRecursiveTests {
     // than binding narrow rows that trap when the trailing `SELECT z` reads the
     // absent ordinal.
     #expect(throws: SQLError.columns(expected: 3, got: 2)) {
-      _ = try Engine.run(Statement(parsing: """
+      _ = try family().run(Statement(parsing: """
           WITH RECURSIVE Parent (x, y, z) AS (SELECT * FROM Parent)
             SELECT z FROM Parent
-          """), family())
+          """))
     }
   }
 
@@ -3267,7 +3251,7 @@ struct EngineRecursiveTests {
         """)
     #expect(throws: SQLError.unsupported(
         "recursive WITH references the CTE outside its final UNION arm")) {
-      _ = try Engine.run(query, seed(), counting())
+      _ = try seed().run(query, counting())
     }
   }
 
@@ -3289,7 +3273,7 @@ struct EngineRecursiveTests {
         """)
     #expect(throws: SQLError.unsupported(
         "recursive WITH references the CTE outside its final UNION arm")) {
-      _ = try Engine.run(query, seed(), counting())
+      _ = try seed().run(query, counting())
     }
   }
 
@@ -3305,13 +3289,13 @@ struct EngineRecursiveTests {
       "Parent": FixtureRelation([Field(name: "Id", type: .integer)],
                          [[.integer(1)]] as Array<Array<Value>>),
     ])
-    let rows = try Engine.run(Statement(parsing: """
+    let rows = try catalog.run(Statement(parsing: """
         WITH RECURSIVE Parent (Id) AS (
           SELECT Id FROM Parent
           UNION ALL SELECT inc(Id) AS Id FROM Parent WHERE Id < 5
         )
         SELECT Id FROM Parent
-        """), catalog, counting())
+        """), counting())
     #expect(rows == [[.integer(1)], [.integer(2)], [.integer(3)],
                      [.integer(4)], [.integer(5)]])
   }
@@ -3327,13 +3311,13 @@ struct EngineRecursiveTests {
       "Parent": FixtureRelation([Field(name: "Id", type: .integer)],
                          [[.integer(1)]] as Array<Array<Value>>),
     ], views: ["v": view])
-    let rows = try Engine.run(Statement(parsing: """
+    let rows = try catalog.run(Statement(parsing: """
         WITH RECURSIVE v (id) AS (
           SELECT id FROM v
           UNION ALL SELECT inc(id) AS id FROM v WHERE id < 5
         )
         SELECT id FROM v
-        """), catalog, counting())
+        """), counting())
     #expect(rows == [[.integer(1)], [.integer(2)], [.integer(3)],
                      [.integer(4)], [.integer(5)]])
   }
@@ -3352,7 +3336,7 @@ struct EngineRecursiveTests {
         )
         SELECT n FROM c
         """)
-    let rows = try Engine.run(query, seed(), counting())
+    let rows = try seed().run(query, counting())
     #expect(rows == [[.integer(1)], [.integer(2)], [.integer(3)],
                      [.integer(4)]])
   }
@@ -3374,7 +3358,7 @@ struct EngineRecursiveTests {
         )
         SELECT n FROM c
         """)
-    let rows = try Engine.run(query, seed(), counting())
+    let rows = try seed().run(query, counting())
     #expect(rows == [[.integer(1)]])
   }
 
@@ -3392,7 +3376,7 @@ struct EngineRecursiveTests {
         )
         SELECT Src, Dst FROM reach ORDER BY Src ASC
         """)
-    let rows = try Engine.run(query, seed())
+    let rows = try seed().run(query)
     // Direct: (1,2)(2,3)(3,4); extended: (1,3)(2,4); further: (1,4).
     let pairs = rows.map { row -> (Int, Int) in
       guard case let .integer(a) = row[0], case let .integer(b) = row[1]
@@ -3422,7 +3406,7 @@ struct EngineRecursiveTests {
         SELECT a FROM t
         """)
     #expect(throws: SQLError.columns(expected: 3, got: 2)) {
-      try Engine.run(query, seed())
+      try seed().run(query)
     }
   }
 
@@ -3444,7 +3428,7 @@ struct EngineRecursiveTests {
         SELECT a FROM t
         """)
     #expect(throws: SQLError.columns(expected: 3, got: 2)) {
-      try Engine.run(query, seed())
+      try seed().run(query)
     }
   }
 
@@ -3462,7 +3446,7 @@ struct EngineRecursiveTests {
         SELECT n FROM c
         """)
     #expect(throws: SQLError.recursion("c")) {
-      try Engine.run(query, seed(), counting())
+      try seed().run(query, counting())
     }
   }
 }

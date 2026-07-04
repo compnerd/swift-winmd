@@ -15,7 +15,7 @@ import Testing
 /// `catalog.expect(_:equals:)` checks two queries return the same rows — the
 /// pervasive "seek result equals scan result" idiom. Each is a `borrowing`
 /// method on the catalog under test, takes a `location` defaulting to the
-/// caller's, and runs through the engine's public `Engine.run`, so the
+/// caller's, and runs through the engine's public `Catalog.run`, so the
 /// framework needs no `@testable` import.
 
 /// Parses `sql` to a `Query`, trapping on any other statement.
@@ -31,7 +31,7 @@ extension Catalog where Self: ~Escapable {
   private borrowing func run(_ sql: String, routines: Routines,
                              bindings: Bindings)
       throws(SQLError) -> Array<Array<Value>> {
-    try Engine.run(query(sql), self, routines, bindings: bindings)
+    try run(query(sql), routines, bindings: bindings)
   }
 
   /// Checks `sql` run against this catalog yields exactly `rows`, each row a

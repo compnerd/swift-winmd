@@ -459,3 +459,81 @@ public struct Limit: Hashable, Sendable {
     self.offset = offset
   }
 }
+
+// MARK: - Scalar-call inventory
+
+extension Query {
+  /// The names of every scalar-function `call` anywhere in the query — across
+  /// both arms of a `UNION` and every call-bearing clause of each arm.
+  ///
+  /// The introspection builder checks these against the registered routines
+  /// before advertising a view. `compile` resolves a call's ARGUMENTS but
+  /// cannot check the routine EXISTS — it holds no routine set and builds no
+  /// call term, the name binding only at execute — so a call to an unregistered
+  /// function in a `WHERE`/`HAVING` or a later `UNION` arm, invisible to the
+  /// first-arm projection type walk, would otherwise be advertised though a run
+  /// faults `SQLError.function`.
+  internal var calls: Set<String> {
+    switch self {
+    case let .select(select):
+      select.calls
+    case let .union(query, select, _):
+      query.calls.union(select.calls)
+    }
+  }
+}
+
+extension Select {
+  /// The scalar-call names across this arm's call-bearing clauses — the
+  /// projection expressions, the `WHERE`, and the `HAVING`. `GROUP BY`, the
+  /// join equalities, and `ORDER BY` are column references, never calls.
+  internal var calls: Set<String> {
+    var names = Set<String>()
+    if case let .expressions(items) = projection {
+      for item in items { names.formUnion(item.expression.calls) }
+    }
+    if let predicate { names.formUnion(predicate.calls) }
+    if let having { names.formUnion(having.calls) }
+    return names
+  }
+}
+
+extension Predicate {
+  /// The scalar-call names within this predicate tree.
+  internal var calls: Set<String> {
+    switch self {
+    case let .comparison(left, _, right):
+      left.calls.union(right.calls)
+    case let .bound(left, _, _):
+      left.calls
+    case let .null(operand, _):
+      operand.calls
+    case let .and(lhs, rhs), let .or(lhs, rhs):
+      lhs.calls.union(rhs.calls)
+    case let .not(operand):
+      operand.calls
+    }
+  }
+}
+
+extension Expression {
+  /// The scalar-call names within this expression — the call itself and every
+  /// call nested in its arguments, a binary's operands, or an aggregate's
+  /// operand. A bare column or literal names none.
+  internal var calls: Set<String> {
+    switch self {
+    case .column, .literal:
+      []
+    case let .call(name, arguments):
+      arguments.reduce(into: Set([name])) { $0.formUnion($1.calls) }
+    case let .binary(_, lhs, rhs):
+      lhs.calls.union(rhs.calls)
+    case let .aggregate(_, operand):
+      if case let .expression(expression) = operand {
+        expression.calls
+      } else {
+        []
+      }
+    }
+  }
+}

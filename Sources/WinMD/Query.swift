@@ -1,52 +1,59 @@
 // Copyright © 2026 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-/// The closure query combinators over a generic `Cursor`.
+/// The closure query combinators over any `Scan`.
 ///
 /// A query is a borrowed traversal of the mapped buffer: filtering with `where`
 /// and mapping with `select` build lazy `~Escapable` stages that store escapable
-/// closures of the form `(borrowing Tuple) -> …`, while the cursor and the
-/// transiently materialised `Tuple` stay on the borrowed view side of the
+/// closures of the form `(borrowing Base.Element) -> …`, while the scan and the
+/// transiently materialised row view stay on the borrowed view side of the
 /// escape boundary. Nothing is materialised and nothing allocates per row;
 /// stages compose and the scan runs only when a terminal consumes it.
 ///
+/// The combinators are generic over the `Scan` they walk, so the one set runs
+/// over both the typed `TableIterator<Schema>` — handing each stage a borrowed
+/// `Row<Schema>`, whose predicates and projections address columns with
+/// leading-dot `Column` tokens (`$0[.TypeName]`) — and the type-erased
+/// `Cursor`, handing each stage a `Tuple` addressed positionally.
+///
 /// A projection must yield an escapable value. `.select({ $0 })` does not
-/// surface the row — it silently infers `T = ()`, because a `Tuple` cannot
+/// surface the row — it silently infers `T = ()`, because a row view cannot
 /// escape the closure. To surface rows themselves, hand them to the
-/// `(borrowing Tuple) -> Void` callback of `forEach` rather than returning them.
+/// `(borrowing Base.Element) -> Void` callback of `forEach` rather than
+/// returning them.
 
 // MARK: - Filter
 
-/// A lazy filtered stage over a `Cursor`.
+/// A lazy filtered stage over a `Scan`.
 ///
-/// It holds the base cursor and a predicate; the predicate is evaluated only
-/// when a terminal consumes the stage.
-public struct Filter: ~Escapable {
-  private let base: Cursor
-  private let predicate: (borrowing Tuple) -> Bool
+/// It holds the base scan and a predicate; the predicate is evaluated only when
+/// a terminal consumes the stage.
+public struct Filter<Base: Scan & ~Escapable>: ~Escapable {
+  private let base: Base
+  private let predicate: (borrowing Base.Element) -> Bool
 
   @_lifetime(copy base)
-  internal init(_ base: borrowing Cursor,
-                _ predicate: @escaping (borrowing Tuple) -> Bool) {
+  internal init(_ base: borrowing Base,
+                _ predicate: @escaping (borrowing Base.Element) -> Bool) {
     self.base = copy base
     self.predicate = predicate
   }
 
   /// Maps each surviving row through `transform`, yielding an escapable value.
   @_lifetime(copy self)
-  public func select<T>(_ transform: @escaping (borrowing Tuple) -> T)
-      -> Projection<T> {
+  public func select<T>(_ transform: @escaping (borrowing Base.Element) -> T)
+      -> Projection<Base, T> {
     Projection(base, where: predicate, select: transform)
   }
 
   // MARK: Terminals
 
   /// Applies `body` to each surviving row.
-  public func forEach(_ body: (borrowing Tuple) -> Void) {
+  public func forEach(_ body: (borrowing Base.Element) -> Void) {
     for row in 0 ..< base.count {
-      guard let tuple = base[row] else { continue }
-      if predicate(tuple) {
-        body(tuple)
+      guard let value = base.element(row) else { continue }
+      if predicate(value) {
+        body(value)
       }
     }
   }
@@ -54,12 +61,12 @@ public struct Filter: ~Escapable {
   /// The first surviving row satisfying `predicate`, passed to `body`.
   ///
   /// Returns the escapable value `body` produces, or `nil` if no row matches.
-  public func first<T>(where predicate: (borrowing Tuple) -> Bool,
-                       _ body: (borrowing Tuple) -> T) -> T? {
+  public func first<T>(where predicate: (borrowing Base.Element) -> Bool,
+                       _ body: (borrowing Base.Element) -> T) -> T? {
     for row in 0 ..< base.count {
-      guard let tuple = base[row] else { continue }
-      if self.predicate(tuple), predicate(tuple) {
-        return body(tuple)
+      guard let value = base.element(row) else { continue }
+      if self.predicate(value), predicate(value) {
+        return body(value)
       }
     }
     return nil
@@ -67,12 +74,12 @@ public struct Filter: ~Escapable {
 
   /// Folds the surviving rows into `initial` with `next`.
   public func reduce<R>(_ initial: R,
-                        _ next: (R, borrowing Tuple) -> R) -> R {
+                        _ next: (R, borrowing Base.Element) -> R) -> R {
     var result = initial
     for row in 0 ..< base.count {
-      guard let tuple = base[row] else { continue }
-      if predicate(tuple) {
-        result = next(result, tuple)
+      guard let value = base.element(row) else { continue }
+      if predicate(value) {
+        result = next(result, value)
       }
     }
     return result
@@ -82,8 +89,8 @@ public struct Filter: ~Escapable {
   public func count() -> Int {
     var count = 0
     for row in 0 ..< base.count {
-      guard let tuple = base[row] else { continue }
-      if predicate(tuple) {
+      guard let value = base.element(row) else { continue }
+      if predicate(value) {
         count += 1
       }
     }
@@ -93,20 +100,20 @@ public struct Filter: ~Escapable {
 
 // MARK: - Projection
 
-/// A lazy projected stage over a `Cursor`.
+/// A lazy projected stage over a `Scan`.
 ///
-/// It holds the base cursor, an optional predicate, and a transform mapping a
+/// It holds the base scan, an optional predicate, and a transform mapping a
 /// surviving row to an escapable value; both run only when a terminal consumes
 /// the stage.
-public struct Projection<T>: ~Escapable {
-  private let base: Cursor
-  private let predicate: ((borrowing Tuple) -> Bool)?
-  private let transform: (borrowing Tuple) -> T
+public struct Projection<Base: Scan & ~Escapable, T>: ~Escapable {
+  private let base: Base
+  private let predicate: ((borrowing Base.Element) -> Bool)?
+  private let transform: (borrowing Base.Element) -> T
 
   @_lifetime(copy base)
-  internal init(_ base: borrowing Cursor,
-                where predicate: ((borrowing Tuple) -> Bool)? = nil,
-                select transform: @escaping (borrowing Tuple) -> T) {
+  internal init(_ base: borrowing Base,
+                where predicate: ((borrowing Base.Element) -> Bool)? = nil,
+                select transform: @escaping (borrowing Base.Element) -> T) {
     self.base = copy base
     self.predicate = predicate
     self.transform = transform
@@ -117,19 +124,19 @@ public struct Projection<T>: ~Escapable {
   /// Applies `body` to each projected value.
   public func forEach(_ body: (T) -> Void) {
     for row in 0 ..< base.count {
-      guard let tuple = base[row] else { continue }
-      if predicate?(tuple) ?? true {
-        body(transform(tuple))
+      guard let value = base.element(row) else { continue }
+      if predicate?(value) ?? true {
+        body(transform(value))
       }
     }
   }
 
   /// The first projected value whose row satisfies `predicate`.
-  public func first(where predicate: (borrowing Tuple) -> Bool) -> T? {
+  public func first(where predicate: (borrowing Base.Element) -> Bool) -> T? {
     for row in 0 ..< base.count {
-      guard let tuple = base[row] else { continue }
-      if self.predicate?(tuple) ?? true, predicate(tuple) {
-        return transform(tuple)
+      guard let value = base.element(row) else { continue }
+      if self.predicate?(value) ?? true, predicate(value) {
+        return transform(value)
       }
     }
     return nil
@@ -139,9 +146,9 @@ public struct Projection<T>: ~Escapable {
   public func reduce<R>(_ initial: R, _ next: (R, T) -> R) -> R {
     var result = initial
     for row in 0 ..< base.count {
-      guard let tuple = base[row] else { continue }
-      if predicate?(tuple) ?? true {
-        result = next(result, transform(tuple))
+      guard let value = base.element(row) else { continue }
+      if predicate?(value) ?? true {
+        result = next(result, transform(value))
       }
     }
     return result
@@ -152,8 +159,8 @@ public struct Projection<T>: ~Escapable {
     guard let predicate else { return base.count }
     var count = 0
     for row in 0 ..< base.count {
-      guard let tuple = base[row] else { continue }
-      if predicate(tuple) {
+      guard let value = base.element(row) else { continue }
+      if predicate(value) {
         count += 1
       }
     }
@@ -161,20 +168,20 @@ public struct Projection<T>: ~Escapable {
   }
 }
 
-// MARK: - Cursor entry points
+// MARK: - Scan entry points
 
-extension Cursor {
+extension Scan where Self: ~Escapable {
   /// Filters the rows by `predicate`, yielding a lazy `Filter` stage.
   @_lifetime(copy self)
-  public func `where`(_ predicate: @escaping (borrowing Tuple) -> Bool)
-      -> Filter {
+  public func `where`(_ predicate: @escaping (borrowing Element) -> Bool)
+      -> Filter<Self> {
     Filter(self, predicate)
   }
 
   /// Maps each row through `transform`, yielding a lazy `Projection` stage.
   @_lifetime(copy self)
-  public func select<T>(_ transform: @escaping (borrowing Tuple) -> T)
-      -> Projection<T> {
+  public func select<T>(_ transform: @escaping (borrowing Element) -> T)
+      -> Projection<Self, T> {
     Projection(self, select: transform)
   }
 
@@ -183,9 +190,9 @@ extension Cursor {
   /// This is the common-case entry point; `where(_:).select(_:)` reads better
   /// when a query is built up incrementally.
   @_lifetime(copy self)
-  public func select<T>(_ transform: @escaping (borrowing Tuple) -> T,
-                        where predicate: @escaping (borrowing Tuple) -> Bool)
-      -> Projection<T> {
+  public func select<T>(_ transform: @escaping (borrowing Element) -> T,
+                        where predicate: @escaping (borrowing Element) -> Bool)
+      -> Projection<Self, T> {
     Projection(self, where: predicate, select: transform)
   }
 }

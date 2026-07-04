@@ -282,6 +282,30 @@ extension Row /* : CustomDebugStringConvertible */ {
   }
 }
 
+/// A borrowed, index-addressed scan over the rows of an open table.
+///
+/// A `~Escapable` view cannot conform to `Sequence`/`IteratorProtocol`, so a
+/// scan is index-based: walk `0 ..< count`, reading `element(_:)`. It is the
+/// one surface the query combinators (`Filter`/`Projection`) drive, so the same
+/// combinator set runs over both the typed `TableIterator<Schema>` (yielding a
+/// `Row<Schema>`) and the type-erased `Cursor` (yielding a `Tuple`); the
+/// element is the associated `~Escapable` row view each vends.
+///
+/// The row accessor is a `borrowing func` rather than a subscript because a
+/// subscript getter cannot be `borrowing` — the same reason the SQL adapter's
+/// `Cursor` protocol vends its row through `row(_:)`.
+public protocol Scan: ~Escapable {
+  /// The row view this scan vends.
+  associatedtype Element: ~Escapable
+
+  /// The number of rows the scan walks.
+  var count: Int { get }
+
+  /// The row at `offset`, or `nil` if `offset` is out of range.
+  @_lifetime(copy self)
+  borrowing func element(_ offset: Int) -> Element?
+}
+
 /// Iterator for a `Table`
 ///
 /// Provides a way to iterate a given table in a type-safe manner. It walks the
@@ -317,6 +341,13 @@ public struct TableIterator<Schema: TableSchema>: ~Escapable {
       guard offset < rows else { return nil }
       return Row(start + offset, table, storage)
     }
+  }
+}
+
+extension TableIterator: Scan {
+  @_lifetime(copy self)
+  public borrowing func element(_ offset: Int) -> Row<Schema>? {
+    self[offset]
   }
 }
 
@@ -367,5 +398,12 @@ public struct Cursor: ~Escapable {
   package var backing: Storage {
     @_lifetime(copy self)
     get { storage }
+  }
+}
+
+extension Cursor: Scan {
+  @_lifetime(copy self)
+  public borrowing func element(_ offset: Int) -> Tuple? {
+    self[offset]
   }
 }

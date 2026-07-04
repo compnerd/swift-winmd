@@ -191,7 +191,8 @@ public struct Database: ~Escapable {
   @_lifetime(borrow self)
   public func referencing(_ target: borrowing Tuple,
                           in schema: TableSchema.Type,
-                          by column: Int) throws(WinMDError) -> Filter {
+                          by column: Int)
+      throws(WinMDError) -> Filter<Cursor> {
     let storage = self.storage
     return try storage.referencing(target, in: schema, by: column)
   }
@@ -207,7 +208,7 @@ public struct Database: ~Escapable {
   @_lifetime(borrow self)
   public func referencing<Owner, Target>(_ target: borrowing Row<Target>,
                                          by column: Reference<Owner, Target>)
-      throws(WinMDError) -> Filter {
+      throws(WinMDError) -> Filter<Cursor> {
     let storage = self.storage
     return try storage.referencing(target, by: column)
   }
@@ -220,7 +221,7 @@ public struct Database: ~Escapable {
   @_lifetime(borrow self)
   public func referencing<Owner, Target>(_ target: borrowing Row<Target>,
                                          by column: CodedReference<Owner>)
-      throws(WinMDError) -> Filter {
+      throws(WinMDError) -> Filter<Cursor> {
     let storage = self.storage
     return try storage.referencing(target, by: column)
   }

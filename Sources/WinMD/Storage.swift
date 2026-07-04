@@ -115,7 +115,8 @@ package struct Storage: ~Escapable {
   @_lifetime(copy self)
   internal func referencing(_ target: borrowing Tuple,
                             in schema: TableSchema.Type,
-                            by column: Int) throws(WinMDError) -> Filter {
+                            by column: Int)
+      throws(WinMDError) -> Filter<Cursor> {
     guard valid & (1 << schema.number) != 0 else {
       throw .TableNotFound
     }
@@ -170,7 +171,7 @@ package struct Storage: ~Escapable {
   @_lifetime(copy self)
   internal func referencing<Owner, Target>(_ target: borrowing Row<Target>,
                                            by column: Reference<Owner, Target>)
-      throws(WinMDError) -> Filter {
+      throws(WinMDError) -> Filter<Cursor> {
     try referencing(target.columns, in: Owner.self, by: column.ordinal)
   }
 
@@ -179,7 +180,7 @@ package struct Storage: ~Escapable {
   @_lifetime(copy self)
   internal func referencing<Owner, Target>(_ target: borrowing Row<Target>,
                                            by column: CodedReference<Owner>)
-      throws(WinMDError) -> Filter {
+      throws(WinMDError) -> Filter<Cursor> {
     try referencing(target.columns, in: Owner.self, by: column.ordinal)
   }
 

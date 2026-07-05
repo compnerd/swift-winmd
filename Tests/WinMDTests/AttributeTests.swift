@@ -22,16 +22,14 @@ struct AttributeTests {
     0x00, 0x00,                                      // NumNamed (no named args)
   ]
 
-  @Test("decodes IUnknown's IID")
-  func iunknown() throws {
+  @Test func `decodes IUnknown's IID`() throws {
     let bytes = unknown
     var decoder = AttributeDecoder(bytes.span.bytes)
     let guid = try decoder.guid()
     #expect("\(guid)" == "00000000-0000-0000-C000-000000000046")
   }
 
-  @Test("decodes a fully-populated GUID, fields little-endian")
-  func populated() throws {
+  @Test func `decodes a fully-populated GUID, fields little-endian`() throws {
     // The well-known `ISequentialStream` IID exercises every field: data1/2/3
     // are little-endian, the data4 tail is in order.
     let bytes: Array<UInt8> = [
@@ -47,15 +45,13 @@ struct AttributeTests {
     #expect("\(guid)" == "0C733A30-2A1C-11CE-ADE5-00AA0044773D")
   }
 
-  @Test("renders the canonical uppercase, zero-padded spelling")
-  func description() {
+  @Test func `renders the canonical uppercase, zero-padded spelling`() {
     let guid = UUID(uuid: (0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x00, 0x03,
                            0x00, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a))
     #expect("\(guid)" == "00000001-0002-0003-0004-05060708090A")
   }
 
-  @Test("rejects a blob without the 0x0001 prolog")
-  func badProlog() {
+  @Test func `rejects a blob without the 0x0001 prolog`() {
     let bytes: Array<UInt8> = [
       0x00, 0x00,                                      // wrong prolog
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -67,8 +63,7 @@ struct AttributeTests {
     }
   }
 
-  @Test("rejects a blob too short for the GUID")
-  func truncated() {
+  @Test func `rejects a blob too short for the GUID`() {
     // The prolog and data1, then the blob ends before data2/data3/data4.
     let bytes: Array<UInt8> = [0x01, 0x00, 0x00, 0x00, 0x00, 0x00]
     var decoder = AttributeDecoder(bytes.span.bytes)
@@ -77,8 +72,7 @@ struct AttributeTests {
     }
   }
 
-  @Test("rejects an empty blob")
-  func empty() {
+  @Test func `rejects an empty blob`() {
     let bytes = Array<UInt8>()
     var decoder = AttributeDecoder(bytes.span.bytes)
     #expect(throws: WinMDError.BadImageFormat) {
@@ -86,8 +80,7 @@ struct AttributeTests {
     }
   }
 
-  @Test("rejects a blob missing the NumNamed count")
-  func missingNumNamed() {
+  @Test func `rejects a blob missing the NumNamed count`() {
     // The prolog and a full GUID, but the blob ends before the mandatory
     // 2-byte `NumNamed` count (ECMA-335 §II.23.3).
     let bytes: Array<UInt8> = [
@@ -103,8 +96,7 @@ struct AttributeTests {
     }
   }
 
-  @Test("rejects a blob with a non-zero NumNamed count")
-  func namedArguments() {
+  @Test func `rejects a blob with a non-zero NumNamed count`() {
     // A `[Guid]` has no named arguments, so `NumNamed` must be 0; a non-zero
     // count is malformed for this attribute (ECMA-335 §II.23.3).
     let bytes: Array<UInt8> = [

@@ -29,8 +29,7 @@ struct RequiredReferenceTests {
 
   private static let valid: UInt64 = 1 << 9
 
-  @Test("a null required reference throws rather than traps")
-  func nullRequiredReference() throws {
+  @Test func `a null required reference throws rather than traps`() throws {
     let storage = Storage(bytes: RequiredReferenceTests.record.span.bytes,
                           relations: RequiredReferenceTests.relations.span,
                           strings: RequiredReferenceTests.empty.span.bytes,

@@ -58,8 +58,7 @@ struct ResolveTests {
     try body(storage)
   }
 
-  @Test("resolves a coded foreign key to the referenced row")
-  func codedIndexResolution() throws {
+  @Test func `resolves a coded foreign key to the referenced row`() throws {
     try ResolveTests.with { storage in
       // TypeDef[0] extends TypeRef[0] through `Extends` (ordinal 3), a
       // `TypeDefOrRef` coded index whose tag selects the `TypeRef` table.
@@ -75,8 +74,7 @@ struct ResolveTests {
     }
   }
 
-  @Test("resolves a simple index to the referenced row")
-  func simpleIndexResolution() throws {
+  @Test func `resolves a simple index to the referenced row`() throws {
     try ResolveTests.with { storage in
       // NestedClass[0].NestedClass (ordinal 0) is a simple `TypeDef` index;
       // resolving it lands on the six-column TypeDef row it names.
@@ -91,8 +89,7 @@ struct ResolveTests {
     }
   }
 
-  @Test("resolves a null reference to nothing")
-  func nullReference() throws {
+  @Test func `resolves a null reference to nothing`() throws {
     try ResolveTests.with { storage in
       // TypeDef[1].Extends is the null reference (coded row 0), so it resolves
       // to nothing.
@@ -102,8 +99,7 @@ struct ResolveTests {
     }
   }
 
-  @Test("rejects resolving a non-foreign-key column")
-  func columnKindMismatch() throws {
+  @Test func `rejects resolving a non-foreign-key column`() throws {
     ResolveTests.with { storage in
       let source = Tuple(0, ResolveTests.relations[1], storage)
       // Flags (ordinal 0) is a constant and TypeName (ordinal 1) is a string
@@ -123,8 +119,7 @@ struct ResolveTests {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00,
   ]
 
-  @Test("rejects a coded foreign key whose tag is out of range")
-  func codedIndexBadTag() throws {
+  @Test func `rejects a coded foreign key whose tag is out of range`() throws {
     let relations: Array<Table> = [
       Table(Metadata.Tables.TypeDef.self, rows: 1, range: 0 ..< 14,
             wide: 0, stride: 14),
@@ -141,8 +136,7 @@ struct ResolveTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try source.resolve(3) }
   }
 
-  @Test("rejects a TypeDefOrRef reference whose tag is out of range")
-  func resolveBadTag() throws {
+  @Test func `rejects a TypeDefOrRef reference whose tag is out of range`() throws {
     // A signature can carry a `TypeDefOrRef` directly (not decoded out of a row's
     // coded-index cell), and `Database.resolve(_:)` selects its target table by
     // tag. `TypeDefOrRef` names three tables across two tag bits, so tag 3 is the
@@ -186,8 +180,7 @@ struct ResolveTests {
   private static let methodRow =
       Array<UInt8>(repeating: 0, count: 14)
 
-  @Test("rejects a CustomAttributeType with a reserved tag")
-  func customAttributeReservedTag() throws {
+  @Test func `rejects a CustomAttributeType with a reserved tag`() throws {
     // `Type` = `(1 << CustomAttributeType.bits) | 0`: row 1, tag 0 — reserved.
     let reserved = (1 << CustomAttributeType.bits) | 0
     let record = ResolveTests.attribute(reserved)
@@ -207,8 +200,7 @@ struct ResolveTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try source.resolve(1) }
   }
 
-  @Test("resolves a CustomAttributeType with a valid tag")
-  func customAttributeValidTag() throws {
+  @Test func `resolves a CustomAttributeType with a valid tag`() throws {
     // `Type` = `(1 << CustomAttributeType.bits) | 2`: row 1, tag 2 — `MethodDef`.
     let valid = (1 << CustomAttributeType.bits) | 2
     let record = ResolveTests.attribute(valid) + ResolveTests.methodRow
@@ -237,8 +229,7 @@ struct ResolveTests {
   // `TypeDef` index) names row 999 — non-null but far past the single TypeDef
   // row. `storage.tuple` returns nil for the out-of-range row; resolution must
   // surface that as a malformed image rather than as "no relationship".
-  @Test("rejects a simple foreign key whose row is out of range")
-  func simpleIndexOutOfRange() throws {
+  @Test func `rejects a simple foreign key whose row is out of range`() throws {
     // TypeDef[0] (the target table) before NestedClass[0] (the source): the
     // relations are ordered by table number. The NestedClass row points its
     // `NestedClass` simple index at row 999, well past the one TypeDef row.
@@ -269,8 +260,7 @@ struct ResolveTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try source.resolve(0) }
   }
 
-  @Test("rejects a coded foreign key whose row is out of range")
-  func codedIndexOutOfRange() throws {
+  @Test func `rejects a coded foreign key whose row is out of range`() throws {
     // TypeDef[0].Extends (ordinal 3, a `TypeDefOrRef` coded index) names a
     // non-null row through tag 1 (`TypeRef`), but row 999 is far past the single
     // TypeRef row. Encoding: `(999 << 2) | 1`.
@@ -301,8 +291,7 @@ struct ResolveTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try source.resolve(3) }
   }
 
-  @Test("rejects a TypeDefOrRef reference whose row is out of range")
-  func resolveOutOfRange() throws {
+  @Test func `rejects a TypeDefOrRef reference whose row is out of range`() throws {
     // A `TypeDefOrRef` carried in a signature with tag 1 (`TypeRef`) but row 999:
     // `(999 << 2) | 1`. `Database.resolve(_:)`'s tag guard passes (the tag names
     // a real table) but the row is past the one TypeRef row.
@@ -330,8 +319,7 @@ struct ResolveTests {
     }
   }
 
-  @Test("rejects a simple foreign key whose target table is absent")
-  func simpleIndexAbsentTable() throws {
+  @Test func `rejects a simple foreign key whose target table is absent`() throws {
     // A NestedClass row (#41) whose `NestedClass` (ordinal 0, a simple `TypeDef`
     // index) names a non-null row, but the `TypeDef` table (#2) is absent from
     // the `Valid` mask. A dangling foreign-key target is a malformed image, not a
@@ -357,8 +345,7 @@ struct ResolveTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try source.resolve(0) }
   }
 
-  @Test("rejects a coded foreign key whose target table is absent")
-  func codedIndexAbsentTable() throws {
+  @Test func `rejects a coded foreign key whose target table is absent`() throws {
     // TypeDef[0].Extends (ordinal 3, a `TypeDefOrRef` coded index) names a
     // non-null row through tag 1 (`TypeRef`), but the `TypeRef` table (#1) is
     // absent from the `Valid` mask. Encoding: `(1 << 2) | 1 = 5`.
@@ -384,8 +371,7 @@ struct ResolveTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try source.resolve(3) }
   }
 
-  @Test("rejects a TypeDefOrRef reference whose target table is absent")
-  func resolveAbsentTable() throws {
+  @Test func `rejects a TypeDefOrRef reference whose target table is absent`() throws {
     // A `TypeDefOrRef` carried in a signature with tag 1 (`TypeRef`) and row 1:
     // `(1 << 2) | 1`. `Database.resolve(_:)`'s tag guard passes (the tag names a
     // real table), but the `TypeRef` table is absent from the `Valid` mask.

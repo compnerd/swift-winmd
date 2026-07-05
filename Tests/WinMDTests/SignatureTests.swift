@@ -31,8 +31,7 @@ private let typeref0: UInt8 = 0x05
 // directly through `SignatureDecoder`; the accessor tests additionally wrap a
 // signature in a one-blob `#Blob` heap and reach it through a `Row`.
 struct SignatureTests {
-  @Test("decodes (i4, string) -> void")
-  func methodPrimitives() throws {
+  @Test func `decodes (i4, string) -> void`() throws {
     let bytes = [DEFAULT, 0x02, VOID, I4, STRING]
     var decoder = SignatureDecoder(bytes.span.bytes)
     let signature = try decoder.method()
@@ -50,8 +49,7 @@ struct SignatureTests {
     }
   }
 
-  @Test("decodes the HASTHIS instance flag")
-  func methodInstance() throws {
+  @Test func `decodes the HASTHIS instance flag`() throws {
     let bytes = [HASTHIS | DEFAULT, 0x00, VOID]
     var decoder = SignatureDecoder(bytes.span.bytes)
     let signature = try decoder.method()
@@ -59,8 +57,7 @@ struct SignatureTests {
     #expect(signature.parameters.isEmpty)
   }
 
-  @Test("decodes a pointer parameter")
-  func pointerParameter() throws {
+  @Test func `decodes a pointer parameter`() throws {
     let bytes = [DEFAULT, 0x01, VOID, PTR, I4]
     var decoder = SignatureDecoder(bytes.span.bytes)
     let signature = try decoder.method()
@@ -70,8 +67,7 @@ struct SignatureTests {
     }
   }
 
-  @Test("decodes a byref parameter")
-  func byrefParameter() throws {
+  @Test func `decodes a byref parameter`() throws {
     let bytes = [DEFAULT, 0x01, VOID, BYREF, U4]
     var decoder = SignatureDecoder(bytes.span.bytes)
     let signature = try decoder.method()
@@ -81,8 +77,7 @@ struct SignatureTests {
     }
   }
 
-  @Test("decodes an SZARRAY return")
-  func arrayReturn() throws {
+  @Test func `decodes an SZARRAY return`() throws {
     let bytes = [DEFAULT, 0x00, SZARRAY, I4]
     var decoder = SignatureDecoder(bytes.span.bytes)
     let signature = try decoder.method()
@@ -92,8 +87,7 @@ struct SignatureTests {
     }
   }
 
-  @Test("decodes a CLASS parameter via a coded index")
-  func namedParameter() throws {
+  @Test func `decodes a CLASS parameter via a coded index`() throws {
     let bytes = [DEFAULT, 0x01, VOID, CLASS, typeref0]
     var decoder = SignatureDecoder(bytes.span.bytes)
     let signature = try decoder.method()
@@ -106,8 +100,7 @@ struct SignatureTests {
     #expect(reference.row == 1)
   }
 
-  @Test("decodes a custom-modified parameter")
-  func modifiedParameter() throws {
+  @Test func `decodes a custom-modified parameter`() throws {
     // `const`-modified value type: CMOD_OPT TypeRef[0], then VALUETYPE TypeRef[0].
     let bytes = [DEFAULT, 0x01, VOID, CMOD_OPT, typeref0, VALUETYPE, typeref0]
     var decoder = SignatureDecoder(bytes.span.bytes)
@@ -123,8 +116,7 @@ struct SignatureTests {
     }
   }
 
-  @Test("decodes a field signature")
-  func field() throws {
+  @Test func `decodes a field signature`() throws {
     let bytes = [FIELD, I4]
     var decoder = SignatureDecoder(bytes.span.bytes)
     let signature = try decoder.field()
@@ -133,15 +125,13 @@ struct SignatureTests {
     }
   }
 
-  @Test("rejects an unknown element type")
-  func malformed() {
+  @Test func `rejects an unknown element type`() {
     let bytes = [DEFAULT, 0x00, 0xff]
     var decoder = SignatureDecoder(bytes.span.bytes)
     #expect(throws: WinMDError.BadImageFormat) { _ = try decoder.method() }
   }
 
-  @Test("rejects an unsupported calling convention")
-  func unsupportedConvention() {
+  @Test func `rejects an unsupported calling convention`() {
     // The prolog's low nibble names the calling convention (ECMA-335 §II.23.2.1);
     // 0x09 and 0x0f are not defined values, so the decoder must reject them rather
     // than silently treating them as the DEFAULT convention.
@@ -154,15 +144,13 @@ struct SignatureTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try fifteenDecoder.method() }
   }
 
-  @Test("rejects a truncated signature")
-  func truncated() {
+  @Test func `rejects a truncated signature`() {
     let bytes = [DEFAULT, 0x01, VOID]    // missing the parameter
     var decoder = SignatureDecoder(bytes.span.bytes)
     #expect(throws: WinMDError.BadImageFormat) { _ = try decoder.method() }
   }
 
-  @Test("rejects an invalid compressed-integer lead byte")
-  func compressedLeadByte() {
+  @Test func `rejects an invalid compressed-integer lead byte`() {
     // The parameter count is a compressed integer; `0xe0` is `111xxxxx`, not a
     // defined encoding, so decoding must fault rather than read past the blob.
     let bytes = [DEFAULT, 0xe0, VOID]
@@ -170,8 +158,7 @@ struct SignatureTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try decoder.method() }
   }
 
-  @Test("rejects a compressed integer running off the blob end")
-  func compressedTruncated() {
+  @Test func `rejects a compressed integer running off the blob end`() {
     // `0x80` opens a 2-byte encoding but no second byte follows; `0xc0` opens a
     // 4-byte one with only one byte left. Either must fault, not crash.
     let two = [DEFAULT, 0x80]
@@ -183,8 +170,7 @@ struct SignatureTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try fourDecoder.method() }
   }
 
-  @Test("decodes a multidimensional ARRAY's negative lower bound")
-  func matrixNegativeBound() throws {
+  @Test func `decodes a multidimensional ARRAY's negative lower bound`() throws {
     // `i4[*]` returning from a method: rank 1, no explicit sizes, one lower
     // bound of -3 (compressed signed `0x7b`, ECMA-335 §II.23.2).
     let bytes = [DEFAULT, 0x00, ARRAY, I4, 0x01, 0x00, 0x01, 0x7b]
@@ -199,8 +185,7 @@ struct SignatureTests {
     #expect(shape.bounds == [-3])
   }
 
-  @Test("decodes a multidimensional ARRAY's 4-byte negative lower bound")
-  func matrixWideNegativeBound() throws {
+  @Test func `decodes a multidimensional ARRAY's 4-byte negative lower bound`() throws {
     // A lower bound whose magnitude exceeds 2^13 needs the 4-byte compressed
     // signed form, which carries 29 payload bits (5 in the lead byte + 24
     // following), so the negative correction subtracts 2^28. The bound -16384
@@ -220,8 +205,7 @@ struct SignatureTests {
     #expect(shape.bounds == [-16384])
   }
 
-  @Test("rejects an ARRAY with more sizes than its rank")
-  func matrixTooManySizes() {
+  @Test func `rejects an ARRAY with more sizes than its rank`() {
     // ECMA-335 §II.23.2.13 constrains `NumSizes` to `<= Rank`. Here rank is 1 but
     // NumSizes is 2 (two sizes, no lower bounds) — the decoder must reject it.
     let bytes = [DEFAULT, 0x00, ARRAY, I4, 0x01, 0x02, 0x01, 0x02, 0x00]
@@ -229,8 +213,7 @@ struct SignatureTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try decoder.method() }
   }
 
-  @Test("rejects an ARRAY with more lower bounds than its rank")
-  func matrixTooManyBounds() {
+  @Test func `rejects an ARRAY with more lower bounds than its rank`() {
     // Likewise `NumLoBounds` must be `<= Rank`. Rank is 1 but NumLoBounds is 2
     // (no sizes, two bounds) — the decoder must reject it.
     let bytes = [DEFAULT, 0x00, ARRAY, I4, 0x01, 0x00, 0x02, 0x01, 0x02]
@@ -238,8 +221,7 @@ struct SignatureTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try decoder.method() }
   }
 
-  @Test("decodes a well-formed ARRAY at its rank's limits")
-  func matrixWellFormed() throws {
+  @Test func `decodes a well-formed ARRAY at its rank's limits`() throws {
     // Rank 2 with NumSizes 2 and NumLoBounds 2 — both at the rank limit — decodes
     // to a 2x3 matrix lower-bounded at (0, 1).
     let bytes =
@@ -255,8 +237,7 @@ struct SignatureTests {
     #expect(shape.bounds == [0, 1])
   }
 
-  @Test("rejects a zero-rank ARRAY")
-  func matrixZeroRank() {
+  @Test func `rejects a zero-rank ARRAY`() {
     // ECMA-335 §II.23.2.13 requires `Rank >= 1`. Here rank is 0 (with no sizes
     // and no lower bounds); both `<= Rank` guards pass vacuously, so the rank
     // guard itself must reject it.
@@ -265,8 +246,7 @@ struct SignatureTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try decoder.method() }
   }
 
-  @Test("rejects EXPLICITTHIS without HASTHIS")
-  func methodExplicitWithoutInstance() {
+  @Test func `rejects EXPLICITTHIS without HASTHIS`() {
     // ECMA-335 §II.23.2.1: EXPLICITTHIS (0x40) is only valid alongside HASTHIS
     // (0x20). A prolog of 0x40 alone — explicit but not instance — is malformed.
     let bytes = [EXPLICITTHIS | DEFAULT, 0x00, VOID]
@@ -274,8 +254,7 @@ struct SignatureTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try decoder.method() }
   }
 
-  @Test("decodes EXPLICITTHIS alongside HASTHIS")
-  func methodExplicitInstance() throws {
+  @Test func `decodes EXPLICITTHIS alongside HASTHIS`() throws {
     // A prolog of 0x60 sets both HASTHIS and EXPLICITTHIS, which is well-formed.
     let bytes = [EXPLICITTHIS | HASTHIS | DEFAULT, 0x00, VOID]
     var decoder = SignatureDecoder(bytes.span.bytes)
@@ -315,8 +294,7 @@ struct SignatureTests {
 
   private static let empty = Array<UInt8>()
 
-  @Test("decodes a MethodDef signature through the row accessor")
-  func methodAccessor() throws {
+  @Test func `decodes a MethodDef signature through the row accessor`() throws {
     let relations =
         [Table(Metadata.Tables.MethodDef.self, rows: 1, range: 0 ..< 14,
                wide: 0, stride: 14)]
@@ -334,8 +312,7 @@ struct SignatureTests {
     #expect(signature.parameters.isEmpty)
   }
 
-  @Test("decodes a FieldDef signature through the row accessor")
-  func fieldAccessor() throws {
+  @Test func `decodes a FieldDef signature through the row accessor`() throws {
     let relations =
         [Table(Metadata.Tables.FieldDef.self, rows: 1, range: 0 ..< 6,
                wide: 0, stride: 6)]
@@ -362,8 +339,7 @@ struct SignatureTests {
   // high bit is likewise a method-signature flag, invalid on a field.
   private static let fieldHasThisBlob: Array<UInt8> = [0x02, 0x26, I4]
 
-  @Test("rejects a field signature whose prolog carries the GENERIC flag")
-  func fieldGenericProlog() throws {
+  @Test func `rejects a field signature whose prolog carries the GENERIC flag`() throws {
     let relations =
         [Table(Metadata.Tables.FieldDef.self, rows: 1, range: 0 ..< 6,
                wide: 0, stride: 6)]
@@ -377,8 +353,7 @@ struct SignatureTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try rows[0]!.declaration }
   }
 
-  @Test("rejects a field signature whose prolog carries the HASTHIS flag")
-  func fieldHasThisProlog() throws {
+  @Test func `rejects a field signature whose prolog carries the HASTHIS flag`() throws {
     let relations =
         [Table(Metadata.Tables.FieldDef.self, rows: 1, range: 0 ..< 6,
                wide: 0, stride: 6)]
@@ -402,8 +377,7 @@ struct SignatureTests {
   private static let fieldTrailingBlob: Array<UInt8> =
       [0x03, FIELD, I4, 0xff]
 
-  @Test("rejects a method signature with trailing bytes")
-  func methodTrailingBytes() throws {
+  @Test func `rejects a method signature with trailing bytes`() throws {
     let relations =
         [Table(Metadata.Tables.MethodDef.self, rows: 1, range: 0 ..< 14,
                wide: 0, stride: 14)]
@@ -417,8 +391,7 @@ struct SignatureTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try rows[0]!.prototype }
   }
 
-  @Test("rejects a field signature with trailing bytes")
-  func fieldTrailingBytes() throws {
+  @Test func `rejects a field signature with trailing bytes`() throws {
     let relations =
         [Table(Metadata.Tables.FieldDef.self, rows: 1, range: 0 ..< 6,
                wide: 0, stride: 6)]
@@ -448,8 +421,7 @@ struct SignatureTests {
   private static let propertyConventionBlob: Array<UInt8> =
       [0x03, 0x08, 0x00, VOID]
 
-  @Test("rejects a method prolog with the reserved high bit set")
-  func reservedProlog() throws {
+  @Test func `rejects a method prolog with the reserved high bit set`() throws {
     let relations =
         [Table(Metadata.Tables.MethodDef.self, rows: 1, range: 0 ..< 14,
                wide: 0, stride: 14)]
@@ -463,8 +435,7 @@ struct SignatureTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try rows[0]!.prototype }
   }
 
-  @Test("rejects a method prolog naming the FIELD convention")
-  func fieldConvention() throws {
+  @Test func `rejects a method prolog naming the FIELD convention`() throws {
     let relations =
         [Table(Metadata.Tables.MethodDef.self, rows: 1, range: 0 ..< 14,
                wide: 0, stride: 14)]
@@ -478,8 +449,7 @@ struct SignatureTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try rows[0]!.prototype }
   }
 
-  @Test("rejects a method prolog naming the LOCAL_SIG convention")
-  func localConvention() throws {
+  @Test func `rejects a method prolog naming the LOCAL_SIG convention`() throws {
     let relations =
         [Table(Metadata.Tables.MethodDef.self, rows: 1, range: 0 ..< 14,
                wide: 0, stride: 14)]
@@ -493,8 +463,7 @@ struct SignatureTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try rows[0]!.prototype }
   }
 
-  @Test("rejects a method prolog naming the PROPERTY convention")
-  func propertyConvention() throws {
+  @Test func `rejects a method prolog naming the PROPERTY convention`() throws {
     let relations =
         [Table(Metadata.Tables.MethodDef.self, rows: 1, range: 0 ..< 14,
                wide: 0, stride: 14)]
@@ -520,8 +489,7 @@ struct SignatureTests {
   // exceeds the heap. Opening it must throw, not read out of bounds.
   private static let longPrefixBlob: Array<UInt8> = [0x7f, DEFAULT]
 
-  @Test("rejects a #Blob signature entry with an invalid length-prefix lead")
-  func methodAccessorBadPrefix() throws {
+  @Test func `rejects a #Blob signature entry with an invalid length-prefix lead`() throws {
     let relations =
         [Table(Metadata.Tables.MethodDef.self, rows: 1, range: 0 ..< 14,
                wide: 0, stride: 14)]
@@ -535,8 +503,7 @@ struct SignatureTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try rows[0]!.prototype }
   }
 
-  @Test("rejects a #Blob signature entry whose length runs past the heap")
-  func methodAccessorLongPrefix() throws {
+  @Test func `rejects a #Blob signature entry whose length runs past the heap`() throws {
     let relations =
         [Table(Metadata.Tables.MethodDef.self, rows: 1, range: 0 ..< 14,
                wide: 0, stride: 14)]
@@ -550,8 +517,7 @@ struct SignatureTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try rows[0]!.prototype }
   }
 
-  @Test("rejects a #Blob field entry with an invalid length-prefix lead")
-  func fieldAccessorBadPrefix() throws {
+  @Test func `rejects a #Blob field entry with an invalid length-prefix lead`() throws {
     let relations =
         [Table(Metadata.Tables.FieldDef.self, rows: 1, range: 0 ..< 6,
                wide: 0, stride: 6)]
@@ -565,8 +531,7 @@ struct SignatureTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try rows[0]!.declaration }
   }
 
-  @Test("rejects a #Blob field entry whose length runs past the heap")
-  func fieldAccessorLongPrefix() throws {
+  @Test func `rejects a #Blob field entry whose length runs past the heap`() throws {
     let relations =
         [Table(Metadata.Tables.FieldDef.self, rows: 1, range: 0 ..< 6,
                wide: 0, stride: 6)]
@@ -580,8 +545,7 @@ struct SignatureTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try rows[0]!.declaration }
   }
 
-  @Test("a well-formed #Blob signature entry still decodes through the accessor")
-  func methodAccessorWellFormed() throws {
+  @Test func `a well-formed #Blob signature entry still decodes through the accessor`() throws {
     let relations =
         [Table(Metadata.Tables.MethodDef.self, rows: 1, range: 0 ..< 14,
                wide: 0, stride: 14)]
@@ -619,8 +583,7 @@ struct SignatureTests {
   private static let voidPointerBlob: Array<UInt8> =
       [0x05, DEFAULT, 0x01, I4, PTR, VOID]
 
-  @Test("rejects a VOID method parameter")
-  func voidParameter() throws {
+  @Test func `rejects a VOID method parameter`() throws {
     let relations =
         [Table(Metadata.Tables.MethodDef.self, rows: 1, range: 0 ..< 14,
                wide: 0, stride: 14)]
@@ -634,8 +597,7 @@ struct SignatureTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try rows[0]!.prototype }
   }
 
-  @Test("rejects a VOID field type")
-  func voidField() throws {
+  @Test func `rejects a VOID field type`() throws {
     let relations =
         [Table(Metadata.Tables.FieldDef.self, rows: 1, range: 0 ..< 6,
                wide: 0, stride: 6)]
@@ -649,8 +611,7 @@ struct SignatureTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try rows[0]!.declaration }
   }
 
-  @Test("decodes a VOID return")
-  func voidReturn() throws {
+  @Test func `decodes a VOID return`() throws {
     let relations =
         [Table(Metadata.Tables.MethodDef.self, rows: 1, range: 0 ..< 14,
                wide: 0, stride: 14)]
@@ -668,8 +629,7 @@ struct SignatureTests {
     #expect(signature.parameters.isEmpty)
   }
 
-  @Test("decodes a VOID pointer parameter")
-  func voidPointer() throws {
+  @Test func `decodes a VOID pointer parameter`() throws {
     let relations =
         [Table(Metadata.Tables.MethodDef.self, rows: 1, range: 0 ..< 14,
                wide: 0, stride: 14)]
@@ -725,28 +685,23 @@ struct SignatureTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try rows[0]!.prototype }
   }
 
-  @Test("rejects a MethodDef prolog naming the unmanaged C convention")
-  func cConvention() throws {
+  @Test func `rejects a MethodDef prolog naming the unmanaged C convention`() throws {
     try expectPrototypeRejects(SignatureTests.cConventionBlob)
   }
 
-  @Test("rejects a MethodDef prolog naming the unmanaged STDCALL convention")
-  func stdcallConvention() throws {
+  @Test func `rejects a MethodDef prolog naming the unmanaged STDCALL convention`() throws {
     try expectPrototypeRejects(SignatureTests.stdcallConventionBlob)
   }
 
-  @Test("rejects a MethodDef prolog naming the unmanaged THISCALL convention")
-  func thiscallConvention() throws {
+  @Test func `rejects a MethodDef prolog naming the unmanaged THISCALL convention`() throws {
     try expectPrototypeRejects(SignatureTests.thiscallConventionBlob)
   }
 
-  @Test("rejects a MethodDef prolog naming the unmanaged FASTCALL convention")
-  func fastcallConvention() throws {
+  @Test func `rejects a MethodDef prolog naming the unmanaged FASTCALL convention`() throws {
     try expectPrototypeRejects(SignatureTests.fastcallConventionBlob)
   }
 
-  @Test("decodes a DEFAULT-convention MethodDef through prototype")
-  func defaultConvention() throws {
+  @Test func `decodes a DEFAULT-convention MethodDef through prototype`() throws {
     let relations =
         [Table(Metadata.Tables.MethodDef.self, rows: 1, range: 0 ..< 14,
                wide: 0, stride: 14)]
@@ -761,8 +716,7 @@ struct SignatureTests {
     #expect(signature.convention == .default)
   }
 
-  @Test("decodes a VARARG-convention MethodDef through prototype")
-  func varargConvention() throws {
+  @Test func `decodes a VARARG-convention MethodDef through prototype`() throws {
     let relations =
         [Table(Metadata.Tables.MethodDef.self, rows: 1, range: 0 ..< 14,
                wide: 0, stride: 14)]
@@ -779,8 +733,7 @@ struct SignatureTests {
 
   // MARK: - method() itself admits the unmanaged conventions
 
-  @Test("decodes an FNPTR carrying an unmanaged STDCALL convention")
-  func functionPointerUnmanagedConvention() throws {
+  @Test func `decodes an FNPTR carrying an unmanaged STDCALL convention`() throws {
     // FNPTR (0x1b) wraps a nested method signature, and a function pointer
     // (calli) legitimately names an unmanaged convention. The inner method's
     // prolog is 0x03 (THISCALL) over a `() -> void` body. The `prototype`

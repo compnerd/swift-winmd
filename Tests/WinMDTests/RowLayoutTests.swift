@@ -16,8 +16,7 @@ struct RowLayoutTests {
   // stride is 14.
   typealias Schema = Metadata.Tables.TypeDef
 
-  @Test("computes narrow column offsets from the schema")
-  func narrowLayout() {
+  @Test func `computes narrow column offsets from the schema`() {
     #expect(Schema.offset(0) == 0)
     #expect(Schema.offset(1) == 4)
     #expect(Schema.offset(2) == 6)
@@ -26,8 +25,7 @@ struct RowLayoutTests {
     #expect(Schema.offset(5) == 12)
   }
 
-  @Test("gives offsets and widths for an all-narrow table")
-  func narrowTable() {
+  @Test func `gives offsets and widths for an all-narrow table`() {
     // No wide indices: offsets are the narrow offsets, every index is 2 bytes,
     // and the stride is the narrow stride.
     let table = Table(Schema.self, rows: 0, range: 0 ..< 0, wide: 0, stride: 14)
@@ -44,8 +42,7 @@ struct RowLayoutTests {
     #expect(table.width(5) == 2)
   }
 
-  @Test("shifts and widens columns past wide indices")
-  func wideTable() {
+  @Test func `shifts and widens columns past wide indices`() {
     // Widen TypeName (column 1) and FieldList (column 4) to 4-byte indices.
     // Each adds two bytes, so the stride grows by four and every column from
     // the first wide index onward shifts by the running popcount.

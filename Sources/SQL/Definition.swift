@@ -56,6 +56,66 @@ internal enum Definition {
   }
 }
 
+extension View {
+  /// The engine-provided views — the portable relations the engine ships,
+  /// resolvable over ANY catalog without a source registering them, keyed by
+  /// their case-folded dotted name.
+  ///
+  /// Where `Routines.standard` seeds the built-in scalar functions, this seeds
+  /// the built-in VIEWS: the ISO `INFORMATION_SCHEMA` relations, each a stored
+  /// `SELECT` over the `DEFINITION_SCHEMA` store. `resolve(view:)` consults
+  /// these AFTER a catalog's own views and base tables, so a source that itself
+  /// defines `information_schema.tables` shadows the built-in — the same low
+  /// precedence the store's overlay held. A built-in view's body names a
+  /// `definition_schema.` relation, resolved through the same overlay a user
+  /// view over the store resolves through, so it plans, types, and executes
+  /// exactly as a registered view does.
+  internal static let standard: Dictionary<String, View> =
+      ["information_schema.tables": tables,
+       "information_schema.columns": columns]
+
+  /// A view over the query `text`, parsing `text` to its `SELECT` and inferring
+  /// the column names from its first arm's projection — the same rule
+  /// `CREATE VIEW` applies without an explicit list, so the query alone names
+  /// the columns. It TRAPS if `text` is not a single `SELECT`, or names no
+  /// inferable columns — for a caller with a known-good literal (the engine's
+  /// built-in views, a test fixture); a consumer parsing untrusted SQL uses
+  /// `Statement(parsing:)` and the memberwise initializer.
+  internal init(_ text: String) {
+    guard case let .select(query) = try! Statement(parsing: text) else {
+      fatalError("a view body must be a SELECT")
+    }
+    self.init(query: query, columns: try! query.first.projection.names())
+  }
+
+  /// The engine-provided (built-in `INFORMATION_SCHEMA`) view named `name`
+  /// (case-folded), or `nil` if the engine ships none by that name.
+  internal init?(named name: String) {
+    guard let view = View.standard[name.lowercased()] else { return nil }
+    self = view
+  }
+
+  /// `information_schema.tables` — a projection over the store relation
+  /// `definition_schema.tables`, which already holds the portable shape
+  /// (`table_catalog`/`table_schema` NULL, `table_name`, `table_type`), so the
+  /// view names and orders its columns; the ISO reshaping the grammar cannot
+  /// express lives in the store's builder.
+  private static let tables =
+      View("""
+          SELECT table_catalog, table_schema, table_name, table_type
+            FROM definition_schema.tables
+          """)
+
+  /// `information_schema.columns` — a projection over
+  /// `definition_schema.columns`, the standard column-metadata relation.
+  private static let columns =
+      View("""
+          SELECT table_name, column_name, ordinal_position, data_type,
+                 is_nullable
+            FROM definition_schema.columns
+          """)
+}
+
 /// The `DEFINITION_SCHEMA` metadata store — the ISO 9075-11 base relations,
 /// built on demand from any `Catalog` by ENUMERATING it.
 ///
@@ -138,31 +198,74 @@ extension Catalog where Self: ~Escapable {
   /// none). It seeds the view sub-plan's execute so a view defined over a store
   /// relation resolves; it never carries a caller's statement CTEs, so a view
   /// means what it was registered to mean.
+  ///
+  /// The name resolves to a user view first, then a built-in `View.standard`
+  /// view — so a built-in `information_schema.` view over the store re-resolves
+  /// its own `definition_schema.` scan exactly as a user view would.
   borrowing func overlay(_ name: String) -> CTEs {
-    guard let view = view(named: name) else { return [:] }
+    guard let view = resolve(view: name) else { return [:] }
     return augment([:], for: view.query, rows: true)
+  }
+
+  /// The view named `name`, or `nil`, by the precedence a query name follows.
+  /// A USER view the catalog registers wins; a BASE relation of that name then
+  /// shadows a built-in `information_schema.` view (so a source that vends its
+  /// own `information_schema.tables` stays reachable, and `SELECT *` reads its
+  /// rows); the engine-provided `View.standard` view answers only when nothing
+  /// else bears the name.
+  borrowing func resolve(view name: String) -> View? {
+    if let view = view(named: name) { return view }
+    if table(named: name) != nil { return nil }
+    return View(named: name)
+  }
+
+  /// The names of every view a query can resolve — each user `views()` entry
+  /// the store does not shadow, then each built-in `View.standard` view a user
+  /// view or base relation does not shadow (the precedence `resolve(view:)`
+  /// applies). The metadata builders enumerate these so a consumer discovers
+  /// EVERY queryable view — the engine-provided `information_schema.` views are
+  /// resolvable through `resolve(view:)`, so they belong in the catalog
+  /// metadata alongside a user's own. A name resolves to its `View` with
+  /// `resolve(view:)`.
+  private borrowing func listable() -> Array<String> {
+    var names = Array<String>()
+    for name in views() where Definition(name) == nil {
+      names.append(name)
+    }
+    for name in View.standard.keys {
+      // A user view or a base relation of the same name shadows the built-in
+      // (`resolve(view:)`), so list the built-in only when neither does.
+      if view(named: name) == nil, table(named: name) == nil {
+        names.append(name)
+      }
+    }
+    return names
+  }
+
+  /// The base relations whose metadata the store reports — every `relations()`
+  /// name that is neither a reserved `definition_schema.` store name (it
+  /// resolves to the store overlay, not a catalog relation) nor shadowed by a
+  /// same-named view (a view resolves ahead of a base, so the base is
+  /// unreachable). The `tables`/`columns` builders share this one walk.
+  private borrowing func bases() -> Array<String> {
+    let shadowed = Set(views().map { $0.lowercased() })
+    return relations().filter { name in
+      Definition(name) == nil && !shadowed.contains(name.lowercased())
+    }
   }
 
   /// `definition_schema.tables` — one row per base relation and view, with the
   /// standard `table_catalog`, `table_schema`, `table_name`, `table_type`
   /// columns. `table_type` is `'BASE TABLE'` for a base relation, `'VIEW'` for
-  /// a view; `table_catalog`/`table_schema` are `NULL` (the store models a
-  /// single unnamed catalog and schema).
+  /// a view (a user view or a built-in `information_schema.` one);
+  /// `table_catalog`/`table_schema` are `NULL` (the store models a single
+  /// unnamed catalog and schema).
   private borrowing func tables() -> Materialised {
     var rows = Array<Array<Value>>()
-    // A view shadows a same-named base relation (a view resolves ahead of a
-    // base), so a shadowed base is unreachable and is not listed — the name
-    // appears once, as the VIEW a query actually resolves.
-    let shadowed = Set(views().map { $0.lowercased() })
-    for name in relations() {
-      // A reserved store name resolves to the store overlay, never a catalog
-      // relation of that name, so such a base is unreachable and is not listed;
-      // nor is a base a view shadows.
-      guard Definition(name) == nil,
-          !shadowed.contains(name.lowercased()) else { continue }
+    for name in bases() {
       rows.append([.null, .null, .text(name), .text("BASE TABLE")])
     }
-    for name in views() {
+    for name in listable() {
       rows.append([.null, .null, .text(name), .text("VIEW")])
     }
     return Materialised(columns: Definition.tables.names, rows: rows,
@@ -185,15 +288,7 @@ extension Catalog where Self: ~Escapable {
   private borrowing func columns(_ routines: Routines)
       -> Materialised {
     var rows = Array<Array<Value>>()
-    // A view shadows a same-named base relation, so a shadowed base's columns
-    // are unreachable and not listed — only the view's are (below).
-    let shadowed = Set(views().map { $0.lowercased() })
-    for name in relations() {
-      // A reserved store name resolves to the store overlay, not a catalog
-      // relation, so its columns are unreachable and not listed; nor is a base
-      // a view shadows.
-      guard Definition(name) == nil,
-          !shadowed.contains(name.lowercased()) else { continue }
+    for name in bases() {
       guard let table = table(named: name) else { continue }
       let names = table.names
       let types = table.types
@@ -203,8 +298,8 @@ extension Catalog where Self: ~Escapable {
                      .text("YES")])
       }
     }
-    for name in views() {
-      guard let view = view(named: name) else { continue }
+    for name in listable() {
+      guard let view = resolve(view: name) else { continue }
       // List a view's columns only if its WHOLE body validates — exactly the
       // resolution a run performs, so a view a `SELECT *` could not run is not
       // advertised as queryable metadata. Validate via the REAL `compile`
@@ -217,8 +312,9 @@ extension Catalog where Self: ~Escapable {
       // `definition_schema.` overlay, built SCHEMA-ONLY so a view over a store
       // relation resolves without this row builder re-entering itself.
       // The body must compile AND its width must equal the view's DECLARED
-      // column count: a view whose declared arity differs from its body's
-      // (`v(x) AS SELECT * FROM People`) cannot run and is not advertised here.
+      // column count: `resolve` rejects a view whose declared arity differs
+      // from its body's (`v(x) AS SELECT * FROM People`), so such a view cannot
+      // run and is not advertised here.
       let overlay = augment([:], for: view.query, rows: false)
       guard let plan = try? compile(view.query, overlay),
           plan.width == view.columns.count else { continue }

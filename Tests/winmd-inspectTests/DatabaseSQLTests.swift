@@ -337,6 +337,42 @@ struct DatabaseSQLTests {
     }
   }
 
+  @Test("a session view is listed in information_schema.tables")
+  func sessionViewIntrospected() throws {
+    // The session's registered views appear in the `INFORMATION_SCHEMA` overlay
+    // with a `'VIEW'` table type, enumerated beside the storage's base tables —
+    // the feature over the real WinMD catalog, not just an in-memory fixture.
+    // The engine-provided `information_schema.` views are listed too.
+    try DatabaseSQLTests.with { catalog in
+      let (name, view) = try DatabaseSQLTests.create(
+          "CREATE VIEW named AS SELECT TypeName FROM TypeDef")
+      let rows = try DatabaseSQLTests.run("""
+          SELECT table_name FROM information_schema.tables
+           WHERE table_type = 'VIEW' ORDER BY table_name
+          """, [name: view], catalog)
+      #expect(rows == [
+        [.text("information_schema.columns")],
+        [.text("information_schema.tables")],
+        [.text("named")],
+      ])
+    }
+  }
+
+  @Test("information_schema.columns types the GUID view column as text")
+  func guidColumnTypedText() throws {
+    // The bundled `interfaces` view projects `GUID(c.Value) AS iid`; `GUID`
+    // declares a `.text` return type, so `information_schema.columns` reports
+    // `iid`'s `data_type` as `character varying` rather than the integer
+    // default a scalar call fell to before routines carried a return type.
+    try DatabaseSQLTests.with { catalog in
+      let rows = try DatabaseSQLTests.run("""
+          SELECT data_type FROM information_schema.columns
+           WHERE table_name = 'interfaces' AND column_name = 'iid'
+          """, Session.bundled(), catalog)
+      #expect(rows == [[.text("character varying")]])
+    }
+  }
+
   @Test("the render decode spells a method's return from its signature")
   func decodesReturn() {
     // The render decodes a return at render time (not through a virtual column):

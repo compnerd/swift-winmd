@@ -9,8 +9,9 @@
 /// one `Value`; it is CALLED as a function — `routine(arguments)`. It declares
 /// the type of each positional `parameter` — the count is the arity — and the
 /// result `returns` type, both read to TYPE a `f(...)` call WITHOUT running it:
-/// the result-schema walk (`Scope.type(of:)`) types the call by `returns` and
-/// validates each argument against `parameters`, and the `INFORMATION_SCHEMA`
+/// the result-schema walk (`Scope.derive(_:_:)`) types a call by `returns`, the
+/// type-check walk (`Scope.validate(_:_:)`) validates each argument against
+/// `parameters`, and the `INFORMATION_SCHEMA`
 /// `data_type` a view's `GUID(...)` column reports from `returns`. This is the
 /// shape the per-dialect decode routines (`guid`, `ret_type`, `span_type`,
 /// …) take — each a pure mapping from cell values to a cell value, registered

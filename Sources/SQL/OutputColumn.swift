@@ -404,7 +404,7 @@ extension Catalog where Self: ~Escapable {
     var reachable = select.distinct
     if !reachable { reachable = !drops(select.limit, single: sole) }
     if reachable, case let .expressions(items) = select.projection {
-      for item in items { _ = try scope.type(of: item.expression, routines) }
+      for item in items { _ = try scope.validate(item.expression, routines) }
     }
   }
 
@@ -541,13 +541,11 @@ extension Scope {
                        _ routines: Routines = [:])
       throws(SQLError) -> OutputColumn {
     let name = item.name ?? "column \(index + 1)"
-    // DERIVE the nominal output type (`validate: false`): the schema reports
-    // the type a run would produce and never faults on an operand. Run-time
-    // operand and call validation is `typecheck`'s job, reachability-aware, so
-    // a schema resolves even for an expression a zero-row limit makes
-    // unreachable.
+    // DERIVE the nominal output type: the schema reports the type a run would
+    // produce and never faults on an operand. Run-time operand and call
+    // validation is `typecheck`'s job, reachability-aware, so a schema resolves
+    // even for an expression a zero-row limit makes unreachable.
     return try OutputColumn(name: name,
-                            type: type(of: item.expression, routines,
-                                       validate: false))
+                            type: derive(item.expression, routines))
   }
 }

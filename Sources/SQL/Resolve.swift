@@ -226,93 +226,127 @@ internal struct Scope {
     return .integer
   }
 
-  /// The value type a scalar `expression` yields, statically: a bare column its
-  /// source type, a literal its own, a standard aggregate its result domain
-  /// (see `aggregate(_:over:_:)`), a scalar call its routine's declared return
-  /// type (`returns`), a binary arithmetic expression a numeric result (see
-  /// `arithmetic(_:_:)`). It resolves the column ordinal (so an unknown or
-  /// ambiguous reference faults as a projection would) but reads no cursor.
-  ///
-  /// `validate` separates output-kind DERIVATION from run-time operand
-  /// VALIDATION. When `true` (the type-check path) an aggregate or arithmetic
-  /// over a non-numeric operand, or a call to an unregistered routine, faults
-  /// exactly as a run would. When `false` (the schema path) it only DERIVES the
-  /// nominal type a run would produce — arithmetic an integer/double, an
-  /// unknown call the `.integer` default — never faulting on an operand, so a
+  /// The value type of a `literal` operand — the domain of the value it stands
+  /// for. Shared by both the schema and type-check surfaces.
+  private func type(of literal: Literal) -> ValueType {
+    switch literal {
+    case .string: .text
+    case .integer: .integer
+    case .double: .double
+    case .boolean: .boolean
+    case .blob: .blob
+    }
+  }
+
+  /// DERIVES the nominal value type a scalar `expression` yields WITHOUT
+  /// faulting on an operand: a bare column its source type, a literal its own,
+  /// a standard aggregate its result domain (`COUNT`/`SUM`/`AVG` numeric,
+  /// `MIN`/`MAX` the operand's type), a scalar call its routine's declared
+  /// return type (`returns`, else the `.integer` default for an unregistered
+  /// name), a binary arithmetic expression a numeric result (a double when
+  /// either operand is a double, else an integer). It resolves the column
+  /// ordinal (so an unknown or ambiguous reference faults as a projection
+  /// would) but reads no cursor and never faults on an operand's kind, so a
   /// schema resolves even for an expression a zero-row limit or a short-circuit
   /// makes unreachable (a run never evaluates it, so it cannot fault).
-  internal func type(of expression: Expression,
-                     _ routines: Routines = [:],
-                     validate: Bool = true)
+  ///
+  /// This is the SCHEMA surface. `validate(_:_:)` is the type-check surface: it
+  /// faults exactly as a run would on a bad operand or an unknown/misused call.
+  internal func derive(_ expression: Expression, _ routines: Routines = [:])
+      throws(SQLError) -> ValueType {
+    return switch expression {
+    case let .column(column):
+      try type(at: ordinal(of: column))
+    case let .literal(literal):
+      type(of: literal)
+    case let .call(name, _):
+      routines[name]?.returns ?? .integer
+    case let .aggregate(function, operand):
+      switch function {
+      // `COUNT` always counts rows to an integer; `AVG` folds to a double;
+      // `SUM`/`MIN`/`MAX` take the operand's own type (an integer for `.star`).
+      case .count: .integer
+      case .avg: .double
+      case .sum, .min, .max:
+        switch operand {
+        case .star: .integer
+        case let .expression(argument): try derive(argument, routines)
+        }
+      }
+    case let .binary(_, lhs, rhs):
+      try [derive(lhs, routines), derive(rhs, routines)].contains(.double)
+          ? .double : .integer
+    }
+  }
+
+  /// The value type a scalar `expression` yields, VALIDATING each operand and
+  /// call exactly as a run would fault: an aggregate or arithmetic over a
+  /// non-numeric operand (`SQLError.operand`), a call to an unregistered
+  /// routine (`SQLError.function`), a bad arity or argument kind
+  /// (`SQLError.argument`), a `/` by a literal zero (`SQLError.divide`), or a
+  /// deterministic overflow of two folded literal operands
+  /// (`SQLError.magnitude`) faults precisely where a run would raise it. It
+  /// resolves column ordinals and reads no cursor, so it type-checks a query
+  /// without executing it.
+  ///
+  /// This is the TYPE-CHECK surface. `derive(_:_:)` is the non-faulting schema
+  /// surface, which only DERIVES the nominal output type.
+  internal func validate(_ expression: Expression, _ routines: Routines = [:])
       throws(SQLError) -> ValueType {
     switch expression {
     case let .column(column):
       try type(at: ordinal(of: column))
     case let .literal(literal):
-      switch literal {
-      case .string: .text
-      case .integer: .integer
-      case .double: .double
-      case .boolean: .boolean
-      case .blob: .blob
-      }
+      type(of: literal)
     case let .call(name, arguments):
-      try call(name, over: arguments, routines, validate: validate)
+      try call(name, over: arguments, routines)
     case let .aggregate(function, operand):
-      try aggregate(function, over: operand, routines, validate: validate)
+      try aggregate(function, over: operand, routines)
     case let .binary(op, lhs, rhs):
-      try arithmetic(op, lhs, rhs, routines, validate: validate)
+      try arithmetic(op, lhs, rhs, routines)
     }
   }
 
-  /// The result type of the scalar routine `name` called over `arguments` — its
-  /// declared return type (an unregistered name faults `SQLError.function`).
-  ///
-  /// When validating a registered routine, its declared signature is enforced
-  /// exactly as a run would fault: the argument count must equal the routine's
-  /// `parameters` arity, and each argument's static type must equal the
-  /// declared parameter type. A nullable column of the DECLARED type passes —
-  /// statically it carries its declared type and a run-time NULL propagates —
-  /// so only a definitively-wrong type (text where an integer is required) is
-  /// rejected, mirroring a routine like `BITAND` throwing `SQLError.argument`
-  /// on a non-integer non-NULL value. Each argument is typed too, so a type
-  /// error nested in a call — `BITAND(Name + 1, 1)` over text — faults exactly
-  /// as a run would, rather than the call reporting its return type over an
-  /// un-evaluable argument `compile` resolved but never type-checked.
+  /// The result type of the scalar routine `name` called over `arguments`,
+  /// validating its declared signature exactly as a run would fault: an
+  /// unregistered name faults `SQLError.function`; the argument count must
+  /// equal the routine's `parameters` arity; and each argument's static type
+  /// must equal the declared parameter type. A nullable column of the DECLARED
+  /// type passes — statically it carries its declared type and a run-time NULL
+  /// propagates — so only a definitively-wrong type (text where an integer is
+  /// required) is rejected, mirroring a routine like `BITAND` throwing
+  /// `SQLError.argument` on a non-integer non-NULL value. Each argument is
+  /// validated too, so a type error nested in a call — `BITAND(Name + 1, 1)`
+  /// over text — faults exactly as a run would, rather than the call reporting
+  /// its return type over an un-evaluable argument `compile` resolved but never
+  /// type-checked.
   private func call(_ name: String, over arguments: Array<Expression>,
-                    _ routines: Routines,
-                    validate: Bool)
+                    _ routines: Routines)
       throws(SQLError) -> ValueType {
-    guard let routine = routines[name] else {
-      if validate { throw .function(name) }
-      return .integer
+    guard let routine = routines[name] else { throw .function(name) }
+    guard arguments.count == routine.parameters.count else {
+      throw .argument("\(name) takes \(routine.parameters.count) arguments")
     }
-    if validate {
-      guard arguments.count == routine.parameters.count else {
-        throw .argument(
-            "\(name) takes \(routine.parameters.count) arguments")
-      }
-      for (argument, expected) in zip(arguments, routine.parameters) {
-        let type = try type(of: argument, routines, validate: true)
-        guard type == expected else {
-          throw .argument("\(name) requires \(expected.domain) arguments")
-        }
+    for (argument, expected) in zip(arguments, routine.parameters) {
+      let type = try validate(argument, routines)
+      guard type == expected else {
+        throw .argument("\(name) requires \(expected.domain) arguments")
       }
     }
     return routine.returns
   }
 
-  /// The result type of `function` folded over `operand`. `COUNT` counts rows
-  /// (`.integer`); `MIN`/`MAX` take the operand's own type — they compare, so
-  /// any comparable value folds. `SUM`/`AVG` fold NUMERICALLY: `SUM` yields the
-  /// operand's numeric type, `AVG` a double, so both REQUIRE a numeric operand.
-  /// Over text, boolean, or blob `Aggregate.fold` faults `SQLError.operand` on
-  /// the first non-NULL value, so typing faults the same way rather than
+  /// The result type of `function` folded over `operand`, validating the
+  /// operand as a run would fault. `COUNT` counts rows (`.integer`);
+  /// `MIN`/`MAX` take the operand's own type — they compare, so any comparable
+  /// value folds. `SUM`/`AVG` fold NUMERICALLY: `SUM` yields the operand's
+  /// numeric type, `AVG` a double, so both REQUIRE a numeric operand — over
+  /// text, boolean, or blob `Aggregate.fold` faults `SQLError.operand` on the
+  /// first non-NULL value, so typing faults the same way rather than
   /// advertising `AVG(Name)` as a double or `SUM(Name)` as text for a query
   /// that cannot fold its rows.
   private func aggregate(_ function: Aggregate, over operand: Aggregand,
-                         _ routines: Routines,
-                         validate: Bool)
+                         _ routines: Routines)
       throws(SQLError) -> ValueType {
     switch function {
     case .count:
@@ -320,54 +354,51 @@ internal struct Scope {
       // validate the operand (`COUNT(*)` has none); the result is always an
       // integer count.
       if case let .expression(argument) = operand {
-        _ = try type(of: argument, routines, validate: validate)
+        _ = try validate(argument, routines)
       }
       return .integer
     case .min, .max:
       switch operand {
       case .star: return .integer
       case let .expression(argument):
-        return try type(of: argument, routines, validate: validate)
+        return try validate(argument, routines)
       }
     case .sum, .avg:
       let type: ValueType = switch operand {
       case .star: .integer
       case let .expression(argument):
-        try type(of: argument, routines, validate: validate)
+        try validate(argument, routines)
       }
-      if validate, !type.numeric { throw .operand("operands must be numeric") }
+      if !type.numeric { throw .operand("operands must be numeric") }
       return function == .avg ? .double : type
     }
   }
 
   /// The result type of `lhs op rhs` — a double when either operand is a double
-  /// (`Age + 1.5`), else an integer. When validating, both operands must be
-  /// numeric (a text/boolean/blob operand has no arithmetic —
-  /// `Arithmetic.apply` faults `SQLError.operand`); a `/` by a literal zero is
-  /// rejected up front (`SQLError.divide`); and two literal operands are folded
-  /// to reject a deterministic overflow (`SQLError.magnitude`). Typing thus
-  /// faults as a run would rather than advertise a header no row can produce.
+  /// (`Age + 1.5`), else an integer — validating both operands are numeric (a
+  /// text/boolean/blob operand has no arithmetic — `Arithmetic.apply` faults
+  /// `SQLError.operand`); a `/` by a literal zero is rejected up front
+  /// (`SQLError.divide`); and two literal operands are folded to reject a
+  /// deterministic overflow (`SQLError.magnitude`). Typing thus faults as a run
+  /// would rather than advertise a header no row can produce.
   private func arithmetic(_ op: Arithmetic, _ lhs: Expression,
                           _ rhs: Expression,
-                          _ routines: Routines,
-                          validate: Bool)
+                          _ routines: Routines)
       throws(SQLError) -> ValueType {
-    let left = try type(of: lhs, routines, validate: validate)
-    let right = try type(of: rhs, routines, validate: validate)
-    if validate {
-      guard left.numeric, right.numeric else {
-        throw .operand("operands must be numeric")
-      }
-      // A literal-zero divisor faults `Arithmetic.apply` on the first row it
-      // divides, so reject it statically; a non-literal divisor is per row.
-      if case .divide = op, zero(rhs) { throw .divide }
-      // Two literal operands fold to a constant, so a deterministic magnitude
-      // fault (integer overflow, a non-finite double) hits every row the
-      // projection reaches — a FROM-less SELECT at once. Fold them so the
-      // schema rejects the column rather than advertise a header no row yields.
-      if case let .literal(lhs) = lhs, case let .literal(rhs) = rhs {
-        _ = try op.apply(value(of: lhs), value(of: rhs))
-      }
+    let left = try validate(lhs, routines)
+    let right = try validate(rhs, routines)
+    guard left.numeric, right.numeric else {
+      throw .operand("operands must be numeric")
+    }
+    // A literal-zero divisor faults `Arithmetic.apply` on the first row it
+    // divides, so reject it statically; a non-literal divisor is per row.
+    if case .divide = op, zero(rhs) { throw .divide }
+    // Two literal operands fold to a constant, so a deterministic magnitude
+    // fault (integer overflow, a non-finite double) hits every row the
+    // projection reaches — a FROM-less SELECT at once. Fold them so the schema
+    // rejects the column rather than advertise a header no row yields.
+    if case let .literal(lhs) = lhs, case let .literal(rhs) = rhs {
+      _ = try op.apply(value(of: lhs), value(of: rhs))
     }
     return left == .double || right == .double ? .double : .integer
   }
@@ -399,15 +430,15 @@ internal struct Scope {
       throws(SQLError) {
     switch predicate {
     case let .comparison(left, _, right):
-      _ = try type(of: left, routines)
-      _ = try type(of: right, routines)
+      _ = try validate(left, routines)
+      _ = try validate(right, routines)
     case .bound:
       // `left op :parameter` with no binding — the schema default `[:]` —
       // yields UNKNOWN without evaluating the left term, so a run just produces
       // no rows; schema validation has no bindings, so it does not evaluate it.
       break
     case let .null(operand, _):
-      _ = try type(of: operand, routines)
+      _ = try validate(operand, routines)
     case let .and(lhs, rhs):
       try check(lhs, routines)
       if constant(lhs) != false { try check(rhs, routines) }
@@ -464,7 +495,7 @@ internal struct Scope {
     case .column, .literal:
       break
     case let .aggregate(function, operand):
-      _ = try aggregate(function, over: operand, routines, validate: true)
+      _ = try aggregate(function, over: operand, routines)
     case let .call(_, arguments):
       for argument in arguments { try aggregates(in: argument, routines) }
     case let .binary(_, lhs, rhs):

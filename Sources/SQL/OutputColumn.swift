@@ -194,19 +194,21 @@ extension Catalog where Self: ~Escapable {
       // projection run over the group's results, so EVALUATE them (`empty`) — a
       // divide, overflow, or bad routine call faults as the run would.
       if scope.constant(predicate) == false {
-        // The lone empty group is itself unreachable when a limit drops the one
-        // row it would emit — a zero `FETCH` or any positive `OFFSET` — so the
-        // projection never evaluates over it.
-        if Engine.aggregates(select), select.grouping.isEmpty,
-            !dropsSingleRow(select.limit, singleRow: true) {
+        if Engine.aggregates(select), select.grouping.isEmpty {
           if let having = select.having {
-            // Evaluate HAVING over the empty group: it validates its operands
-            // (a divide, overflow, or bad routine call faults) AND yields the
-            // group's fate — a group passes only when HAVING is TRUE, so FALSE
-            // or UNKNOWN drops it and the projection is unreachable.
+            // HAVING filters the group BEFORE any OFFSET/FETCH limit, so
+            // evaluate it UNCONDITIONALLY — a zero `FETCH` or positive `OFFSET`
+            // spares only the projection, never HAVING. It validates its
+            // operands (a divide, overflow, or bad routine call faults) AND
+            // yields the group's fate — a group passes only when HAVING is TRUE,
+            // so FALSE or UNKNOWN drops it and the projection is unreachable.
             if try scope.empty(having, routines) != true { return }
           }
-          if case let .expressions(items) = select.projection {
+          // The lone empty group is itself unreachable when a limit drops the
+          // one row it would emit — a zero `FETCH` or any positive `OFFSET` — so
+          // the projection never evaluates over it.
+          if !drops(select.limit, single: true),
+              case let .expressions(items) = select.projection {
             for item in items { _ = try scope.empty(item.expression, routines) }
           }
         }
@@ -229,21 +231,21 @@ extension Catalog where Self: ~Escapable {
     // would yield leaves only its aggregate folds (validated above) reachable.
     // A whole-result aggregate emits exactly ONE row, so a positive OFFSET
     // drops it too — not just a zero FETCH.
-    let singleRow = Engine.aggregates(select) && select.grouping.isEmpty
-    if !dropsSingleRow(select.limit, singleRow: singleRow),
+    let sole = Engine.aggregates(select) && select.grouping.isEmpty
+    if !drops(select.limit, single: sole),
         case let .expressions(items) = select.projection {
       for item in items { _ = try scope.type(of: item.expression, routines) }
     }
   }
 
-  /// Whether `limit` drops the one row a `singleRow` result would yield, making
-  /// a projection over that row unreachable. A zero `FETCH` (`count == 0`)
-  /// drops every row; a positive `OFFSET` skips the sole row of a single-row
-  /// result (a whole-result aggregate). A `nil` `count` caps nothing, and an
-  /// `offset` of `0` skips nothing.
-  private func dropsSingleRow(_ limit: Limit?, singleRow: Bool) -> Bool {
+  /// Whether `limit` drops the one row a `single`-row result would yield,
+  /// making a projection over that row unreachable. A zero `FETCH`
+  /// (`count == 0`) drops every row; a positive `OFFSET` skips the sole row of
+  /// a single-row result (a whole-result aggregate). A `nil` `count` caps
+  /// nothing, and an `offset` of `0` skips nothing.
+  private func drops(_ limit: Limit?, single: Bool) -> Bool {
     guard let limit else { return false }
-    return limit.count == 0 || (singleRow && limit.offset >= 1)
+    return limit.count == 0 || (single && limit.offset >= 1)
   }
 
   /// The name-resolution schema of `relation`, resolved against this catalog

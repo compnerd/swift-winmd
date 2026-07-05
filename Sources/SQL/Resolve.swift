@@ -432,11 +432,10 @@ internal struct Scope {
       }
       return matches(lhs, op, rhs)
     case let .and(lhs, rhs):
-      if constant(lhs) == false || constant(rhs) == false { return false }
-      return constant(lhs) == true && constant(rhs) == true ? true : nil
+      // `constant` is a pure fold with no side effect, so both arms evaluate.
+      return and(constant(lhs), constant(rhs))
     case let .or(lhs, rhs):
-      if constant(lhs) == true || constant(rhs) == true { return true }
-      return constant(lhs) == false && constant(rhs) == false ? false : nil
+      return or(constant(lhs), constant(rhs))
     case let .not(operand):
       guard let value = constant(operand) else { return nil }
       return !value
@@ -556,17 +555,16 @@ internal struct Scope {
       let null = if case .null = value { true } else { false }
       return negated ? !null : null
     case let .and(lhs, rhs):
+      // A `false` left proves the `AND` false without folding the right arm,
+      // which a run's short-circuit never evaluates and so must not fault.
       let left = try empty(lhs, routines)
       if left == false { return false }
-      let right = try empty(rhs, routines)
-      if right == false { return false }
-      return left == true && right == true ? true : nil
+      return and(left, try empty(rhs, routines))
     case let .or(lhs, rhs):
+      // A `true` left proves the `OR` true without folding the right arm.
       let left = try empty(lhs, routines)
       if left == true { return true }
-      let right = try empty(rhs, routines)
-      if right == true { return true }
-      return left == false && right == false ? false : nil
+      return or(left, try empty(rhs, routines))
     case let .not(operand):
       return try empty(operand, routines).map { !$0 }
     }

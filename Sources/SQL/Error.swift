@@ -120,6 +120,11 @@ public enum SQLError: Error, Hashable, Sendable {
   /// requires every non-aggregated column to appear in the `GROUP BY`. The
   /// string is the offending column's name.
   case grouping(String)
+  /// A `SELECT DISTINCT` orders on a column absent from its select list — the
+  /// dedup runs on the projected rows, so ordering on a dropped column is
+  /// ill-defined; the standard requires every `ORDER BY` key under `DISTINCT`
+  /// to be an output column. The string is the offending column's name.
+  case distinct(String)
 }
 
 extension SQLError: CustomStringConvertible {
@@ -176,6 +181,8 @@ extension SQLError: CustomStringConvertible {
     case let .grouping(name):
       "column '\(name)' must appear in the GROUP BY clause "
           + "or be used in an aggregate function"
+    case let .distinct(name):
+      "ORDER BY column '\(name)' must appear in the SELECT DISTINCT list"
     }
   }
 }
@@ -209,10 +216,11 @@ extension SQLError {
   ///   shape the engine does not support (a FROM-less `SELECT *`, or a clause
   ///   with no `FROM`), `SS002`, a statement that is not runnable as a query
   ///   (a `CREATE VIEW`, or a malformed `WITH` member), `SS003`, a recursive
-  ///   CTE that did not reach a fixpoint within the iteration cap, and `SS004`,
-  ///   an aggregate query naming a non-aggregated column absent from the `GROUP
-  ///   BY`. ISO leaves classes whose first character is `5`–`9` or `I`–`Z`
-  ///   implementation-defined, so `SS` is a safe squat.
+  ///   CTE that did not reach a fixpoint within the iteration cap, `SS004`, an
+  ///   aggregate query naming a non-aggregated column absent from the `GROUP
+  ///   BY`, and `SS005`, a `SELECT DISTINCT` ordering on a column absent from
+  ///   its select list. ISO leaves classes whose first character is `5`–`9` or
+  ///   `I`–`Z` implementation-defined, so `SS` is a safe squat.
   public var sqlstate: String {
     switch self {
     case let .state(code, _):
@@ -253,6 +261,8 @@ extension SQLError {
       "SS003"
     case .grouping:
       "SS004"
+    case .distinct:
+      "SS005"
     }
   }
 

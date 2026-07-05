@@ -101,6 +101,11 @@ public indirect enum Query: Hashable, Sendable {
 /// expand — nor a bare-column reference; only literals, calls, and arithmetic
 /// over them resolve against the empty row.
 public struct Select: Hashable, Sendable {
+  /// Whether `SELECT DISTINCT` was written — the result rows are deduplicated,
+  /// the first occurrence of each distinct row kept. `false` for the default
+  /// `SELECT` (equivalently the explicit `SELECT ALL`), which keeps every row.
+  public let distinct: Bool
+
   /// The columns the query yields.
   public let projection: Projection
 
@@ -134,10 +139,12 @@ public struct Select: Hashable, Sendable {
   /// The row limit applied to the (ordered) result, if any.
   public let limit: Limit?
 
-  public init(projection: Projection, from: Relation?,
-              joins: Array<Join> = [], predicate: Predicate? = nil,
-              grouping: Array<Column> = [], having: Predicate? = nil,
-              order: Order? = nil, limit: Limit? = nil) {
+  public init(distinct: Bool = false, projection: Projection,
+              from: Relation?, joins: Array<Join> = [],
+              predicate: Predicate? = nil, grouping: Array<Column> = [],
+              having: Predicate? = nil, order: Order? = nil,
+              limit: Limit? = nil) {
+    self.distinct = distinct
     self.projection = projection
     self.from = from
     self.joins = joins

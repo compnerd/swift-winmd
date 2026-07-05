@@ -1040,6 +1040,8 @@ private func derived(_ plan: Plan) -> Plan? {
     derived(left) ?? derived(right)
   case let .limit(_, _, source):
     derived(source)
+  case let .distinct(source):
+    derived(source)
   case let .aggregate(_, _, source):
     derived(source)
   case .single, .scan, .join:
@@ -1070,6 +1072,8 @@ private func seeks(_ plan: Plan) -> Bool {
     seeks(left) || seeks(right)
   case let .limit(_, _, source):
     seeks(source)
+  case let .distinct(source):
+    seeks(source)
   case let .aggregate(_, _, source):
     seeks(source)
   case .single:
@@ -1096,6 +1100,8 @@ private func filters(_ plan: Plan) -> Bool {
   case let .union(left, right, _):
     filters(left) || filters(right)
   case let .limit(_, _, source):
+    filters(source)
+  case let .distinct(source):
     filters(source)
   case let .aggregate(_, _, source):
     filters(source)
@@ -1126,6 +1132,8 @@ private func pushed(_ plan: Plan) -> Bool {
   case let .union(left, right, _):
     pushed(left) || pushed(right)
   case let .limit(_, _, source):
+    pushed(source)
+  case let .distinct(source):
     pushed(source)
   case let .aggregate(_, _, source):
     pushed(source)
@@ -1167,6 +1175,8 @@ private func joins(_ plan: Plan) -> Bool {
     joins(source)
   case let .limit(_, _, source):
     joins(source)
+  case let .distinct(source):
+    joins(source)
   case let .derived(_, sub, _, _):
     joins(sub)
   case let .product(left, right):
@@ -1194,6 +1204,8 @@ private func residual(_ plan: Plan) -> Bool {
   case let .sort(_, source):
     residual(source)
   case let .limit(_, _, source):
+    residual(source)
+  case let .distinct(source):
     residual(source)
   case let .derived(_, sub, _, _):
     residual(sub)
@@ -1304,6 +1316,8 @@ private func injected(_ plan: Plan) -> Bool {
   case let .sort(_, source):
     injected(source)
   case let .limit(_, _, source):
+    injected(source)
+  case let .distinct(source):
     injected(source)
   case let .derived(_, sub, _, _):
     injected(sub)
@@ -2588,6 +2602,147 @@ struct EngineUnionTests {
       [.text("Ann")],
       [.text("Amy")],
     ])
+  }
+}
+
+// MARK: - DISTINCT tests
+
+struct EngineDistinctTests {
+  @Test("DISTINCT removes duplicate rows, keeping the first occurrence")
+  func dedup() throws {
+    // People's Age repeats (30 for Alice and Carol, 25 for Bob and Eve);
+    // DISTINCT collapses each duplicate to its first appearance, in row order.
+    try people().expect("SELECT DISTINCT Age FROM People",
+                        yields: [[30], [25], [40]])
+  }
+
+  @Test("a plain SELECT keeps every duplicate row")
+  func all() throws {
+    try people().expect("SELECT Age FROM People",
+                        yields: [[30], [25], [30], [40], [25]])
+  }
+
+  @Test("SELECT ALL is the plain, non-deduplicating select")
+  func explicitAll() throws {
+    try people().expect("SELECT ALL Age FROM People",
+                        yields: [[30], [25], [30], [40], [25]])
+  }
+
+  @Test("DISTINCT dedups on the whole projected row, not one column")
+  func multipleColumns() throws {
+    // Grade's (Class, Score) pairs repeat — (A, 80) three times, (B, 90)
+    // twice — while a single column would over-collapse. DISTINCT keeps one of
+    // each distinct pair, first occurrence in row order.
+    try grades().expect("SELECT DISTINCT Class, Score FROM Grade",
+                        yields: [["B", 90], ["A", 80], ["A", 70]])
+  }
+
+  @Test("DISTINCT dedups rows a projection maps together")
+  func projected() throws {
+    // Bob (25) and Eve (25), Alice (30) and Carol (30) share an Age; projecting
+    // Age alone collapses each pair even though their other columns differ.
+    try people().expect("SELECT DISTINCT Age FROM People WHERE Age < 40",
+                        yields: [[30], [25]])
+  }
+
+  @Test("DISTINCT binds to its own arm within a UNION ALL")
+  func overUnionArm() throws {
+    // DISTINCT is a per-SELECT quantifier: it dedups the LEFT arm alone (its
+    // repeated Ages collapse to 30, 25, 40), then the UNION ALL appends the
+    // right arm's rows without deduplicating across the arms.
+    try people().expect("""
+        SELECT DISTINCT Age FROM People
+          UNION ALL SELECT Age FROM People WHERE Id = 1
+        """, yields: [[30], [25], [40], [30]])
+  }
+
+  @Test("DISTINCT combines with ORDER BY, ordering the deduplicated rows")
+  func ordered() throws {
+    // The distinct Ages, then ascending: dedup keeps 30, 25, 40; ORDER BY sorts
+    // them 25, 30, 40.
+    try people().expect("SELECT DISTINCT Age FROM People ORDER BY Age",
+                        yields: [[25], [30], [40]])
+  }
+
+  @Test("DISTINCT dedups before OFFSET/FETCH pages the result")
+  func paged() throws {
+    // Three distinct Ages ordered 25, 30, 40; FETCH FIRST 2 pages the
+    // deduplicated, ordered rows — proving the cap sits above the dedup.
+    try people().expect("""
+        SELECT DISTINCT Age FROM People ORDER BY Age FETCH FIRST 2 ROWS ONLY
+        """, yields: [[25], [30]])
+  }
+
+  @Test("DISTINCT over an aggregate dedups the grouped rows")
+  func aggregate() throws {
+    // Grouping People by Age yields one row per distinct Age (25, 30, 40), each
+    // with its COUNT; projecting only the COUNT leaves 2, 2, 1 — DISTINCT then
+    // collapses the two 2s to one.
+    try people().expect("""
+        SELECT DISTINCT COUNT(*) FROM People GROUP BY Age
+        """, yields: [[2], [1]])
+  }
+
+  @Test("a view defined with DISTINCT deduplicates when queried")
+  func view() throws {
+    let ages = try View(query: select("SELECT DISTINCT Age FROM People"),
+                        columns: ["Age"])
+    let catalog = Memory(try people().catalog, views: ["Ages": ages])
+    try catalog.expect("SELECT Age FROM Ages", yields: [[30], [25], [40]])
+  }
+
+  @Test("DISTINCT ordering on a non-projected column faults")
+  func hiddenOrderKey() throws {
+    // Name is not in the DISTINCT output, so after dedup each Age stands for
+    // several Names — the order is ill-defined; the standard rejects it.
+    try people().expect("SELECT DISTINCT Age FROM People ORDER BY Name",
+                        fails: .distinct("Name"))
+  }
+
+  @Test("DISTINCT ordering on a projected column pages correctly")
+  func projectedOrderKey() throws {
+    // Age is a select-list column, so ordering (and paging) on it is well
+    // defined: the deduplicated Ages sort 25, 30, 40, and OFFSET 1 drops the
+    // first.
+    try people().expect("""
+        SELECT DISTINCT Age FROM People ORDER BY Age
+          OFFSET 1 ROWS FETCH FIRST 2 ROWS ONLY
+        """, yields: [[30], [40]])
+  }
+
+  @Test("DISTINCT over a join rejects a hidden ORDER BY key")
+  func hiddenJoinOrderKey() throws {
+    // Child.Name is not projected, so ordering the deduplicated Parent.Name
+    // rows on it is ill-defined across the two joined relations.
+    try family().expect("""
+        SELECT DISTINCT Parent.Name FROM Parent
+          JOIN Child ON Child.Pid = Parent.Id ORDER BY Child.Name
+        """, fails: .distinct("Name"))
+  }
+
+  @Test("SS005 is the DISTINCT ORDER BY SQLSTATE")
+  func sqlstate() {
+    #expect(SQLError.distinct("Name").sqlstate == "SS005")
+  }
+
+  @Test("grouped DISTINCT rejects ordering on a non-output GROUP BY key")
+  func hiddenGroupedOrderKey() throws {
+    // The output is only COUNT(*); Age is the grouping key but not projected,
+    // so ordering (and paging) on it after dedup is ill-defined — the same rule
+    // the non-aggregate path enforces, in grouped-slot space.
+    try people().expect("""
+        SELECT DISTINCT COUNT(*) FROM People GROUP BY Age ORDER BY Age
+        """, fails: .distinct("Age"))
+  }
+
+  @Test("grouped DISTINCT orders on a projected aggregate alias")
+  func projectedGroupedOrderKey() throws {
+    // The counts per Age are 2, 2, 1; DISTINCT collapses the two 2s, leaving
+    // {1, 2}. Ordering on the projected alias `c` is well defined — ascending
+    // yields 1, 2.
+    try people().expect("""
+        SELECT DISTINCT COUNT(*) AS c FROM People GROUP BY Age ORDER BY c
+        """, yields: [[1], [2]])
   }
 }
 

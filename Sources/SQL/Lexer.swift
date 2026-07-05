@@ -395,6 +395,7 @@ internal struct Lexer: ~Escapable {
     case "CREATE": .create
     case "VIEW": .view
     case "SELECT": .select
+    case "DISTINCT": .distinct
     case "FROM": .from
     case "WHERE": .where
     case "ORDER": .order

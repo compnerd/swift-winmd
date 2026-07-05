@@ -45,6 +45,8 @@ extension Token {
     case all
     case with
     case recursive
+    case `true`
+    case `false`
 
     // Operands.
     case identifier(String)
@@ -57,6 +59,9 @@ extension Token {
     /// An approximate-numeric literal — a decimal with a `.` fraction and/or an
     /// exponent (`3.14`, `1.0`, `1e3`, `2.5e-1`), scanned into a `Double`.
     case decimal(Double)
+    /// A binary-string literal — an `x'…'` run of hex byte pairs, its bytes
+    /// scanned out. `x''` is the empty blob.
+    case blob(Array<UInt8>)
     /// A bound parameter placeholder `:name`, holding the parameter's name.
     case parameter(String)
 
@@ -109,11 +114,15 @@ extension Token.Kind {
     case .all: "ALL"
     case .with: "WITH"
     case .recursive: "RECURSIVE"
+    case .true: "TRUE"
+    case .false: "FALSE"
     case let .identifier(name): name
     case let .quoted(name): "\"\(name)\""
     case let .string(value): "'\(value)'"
     case let .integer(value): "\(value)"
     case let .decimal(value): "\(value)"
+    case let .blob(bytes):
+      "x'" + bytes.reduce(into: "") { $0 += Self.hex($1) } + "'"
     case let .parameter(name): ":\(name)"
     case .star: "*"
     case .plus: "+"
@@ -129,5 +138,12 @@ extension Token.Kind {
     case .leq: "<="
     case .geq: ">="
     }
+  }
+
+  /// `byte` as two lowercase-hex nibbles, high nibble first — a byte's fixed
+  /// two-digit spelling, keeping its leading zero.
+  private static func hex(_ byte: UInt8) -> String {
+    let digits = Array("0123456789abcdef")
+    return String([digits[Int(byte >> 4)], digits[Int(byte & 0x0f)]])
   }
 }

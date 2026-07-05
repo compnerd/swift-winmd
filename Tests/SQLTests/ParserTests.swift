@@ -394,6 +394,83 @@ struct JoinTests {
   }
 }
 
+// MARK: - Literals
+
+struct LiteralTests {
+  @Test("parses TRUE and FALSE as boolean literals")
+  func boolean() throws {
+    let yes = try parse(select: "SELECT * FROM T WHERE Sealed = TRUE")
+    #expect(yes.predicate
+                == .comparison(left: .column("Sealed"), op: .equal,
+                               right: .literal(.boolean(true))))
+    let no = try parse(select: "SELECT * FROM T WHERE Sealed = FALSE")
+    #expect(no.predicate
+                == .comparison(left: .column("Sealed"), op: .equal,
+                               right: .literal(.boolean(false))))
+  }
+
+  @Test("recognises the boolean keywords case-insensitively")
+  func booleanCase() throws {
+    let select = try parse(select: "SELECT * FROM T WHERE a = true")
+    #expect(select.predicate
+                == .comparison(left: .column("a"), op: .equal,
+                               right: .literal(.boolean(true))))
+  }
+
+  @Test("parses an x'…' hex blob literal into its bytes")
+  func blob() throws {
+    let select = try parse(select: "SELECT * FROM T WHERE Sig = x'53514c'")
+    #expect(select.predicate
+                == .comparison(left: .column("Sig"), op: .equal,
+                               right: .literal(.blob([0x53, 0x51, 0x4c]))))
+  }
+
+  @Test("parses an uppercase X'…' prefix and mixed-case hex digits")
+  func blobPrefixAndDigits() throws {
+    let select = try parse(select: "SELECT * FROM T WHERE a = X'aBcDeF'")
+    #expect(select.predicate
+                == .comparison(left: .column("a"), op: .equal,
+                               right: .literal(.blob([0xab, 0xcd, 0xef]))))
+  }
+
+  @Test("parses an empty blob x''")
+  func emptyBlob() throws {
+    let select = try parse(select: "SELECT * FROM T WHERE a = x''")
+    #expect(select.predicate
+                == .comparison(left: .column("a"), op: .equal,
+                               right: .literal(.blob([]))))
+  }
+
+  @Test("a bare x is an ordinary identifier, not a blob prefix")
+  func bareX() throws {
+    // The `x` prefix opens a blob only when a quote follows; alone it is a
+    // column name.
+    let select = try parse(select: "SELECT x FROM T")
+    #expect(select.projection == .columns(["x"]))
+  }
+
+  @Test("rejects a blob with an odd hex digit count")
+  func oddBlob() {
+    #expect(throws: SQLError.self) {
+      _ = try Statement(parsing: "SELECT * FROM T WHERE a = x'abc'")
+    }
+  }
+
+  @Test("rejects a blob with a non-hex digit")
+  func nonHexBlob() {
+    #expect(throws: SQLError.self) {
+      _ = try Statement(parsing: "SELECT * FROM T WHERE a = x'gg'")
+    }
+  }
+
+  @Test("rejects an unterminated blob")
+  func unterminatedBlob() {
+    #expect(throws: SQLError.self) {
+      _ = try Statement(parsing: "SELECT * FROM T WHERE a = x'abcd")
+    }
+  }
+}
+
 struct ErrorTests {
   @Test("rejects a query missing FROM")
   func missingFrom() {

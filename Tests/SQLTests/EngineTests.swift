@@ -2732,6 +2732,33 @@ struct EngineScalarSelectTests {
     #expect(rows == [[.integer(42)]])
   }
 
+  @Test("a boolean literal lowers to its truth value")
+  func boolean() throws {
+    try people().expect("SELECT TRUE, FALSE", yields: [[true, false]])
+  }
+
+  @Test("a hex blob literal lowers to its bytes")
+  func blob() throws {
+    // The `x'53514c'` literal lexes, parses, and lowers to the three-byte
+    // blob `SQL`, projected as a `Value.blob`.
+    try people().expect("SELECT x'53514c'",
+                        yields: [[[0x53, 0x51, 0x4c] as Array<UInt8>]])
+  }
+
+  @Test("a boolean operand faults as a non-numeric type error")
+  func booleanArithmetic() throws {
+    // Neither boolean nor blob is numeric, so arithmetic over either faults
+    // exactly as text does — the type-checker rejects any non-numeric operand.
+    try people().expect("SELECT TRUE + 1",
+                        fails: .operand("operands must be numeric"))
+  }
+
+  @Test("a blob operand faults as a non-numeric type error")
+  func blobArithmetic() throws {
+    try people().expect("SELECT x'00' + 1",
+                        fails: .operand("operands must be numeric"))
+  }
+
   @Test("a NULL-yielding FROM-less expression projects NULL")
   func null() throws {
     // The bare literal NULL is not in the grammar, but a NULL arises from a

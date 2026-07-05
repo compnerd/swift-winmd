@@ -19,6 +19,8 @@ extension Token {
     // Keywords.
     case create
     case view
+    case function
+    case returns
     case select
     case distinct
     case from
@@ -89,6 +91,8 @@ extension Token.Kind {
     switch self {
     case .create: "CREATE"
     case .view: "VIEW"
+    case .function: "FUNCTION"
+    case .returns: "RETURNS"
     case .select: "SELECT"
     case .distinct: "DISTINCT"
     case .from: "FROM"

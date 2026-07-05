@@ -311,6 +311,43 @@ struct DatabaseSQLTests {
     }
   }
 
+  @Test("a session `CREATE FUNCTION` helper is visible to the render routines")
+  func renderResolvesSessionFunction() throws {
+    // The bug: the render composed its routine set from the STATIC prelude
+    // (`language.routines.merging(Session.routines)`), NOT the session's own
+    // routines, so a helper a session `CREATE FUNCTION` defined — reachable
+    // from an ordinary `SELECT`/`.schema`, which resolve through
+    // `session.functions` — was invisible to the render, faulting
+    // `SQLError.function`. The render now merges `session.functions`, so the
+    // helper is visible there too, at parity with the non-render paths.
+    //
+    // A stand-in for `language.routines` (the target-language spec's UDFs the
+    // render always merges) stands for the render's base; the fix is that the
+    // session's routines — not the static prelude — are merged over it.
+    try DatabaseSQLTests.with { catalog in
+      var session = Session(catalog, Session.bundled())
+      _ = try session.run("CREATE FUNCTION twice(n INTEGER) RETURNS INTEGER "
+                          + "AS n + n")
+      let language = Routines().registering("sanitize", returns: .text,
+                                            parameters: [.text]) { $0[0] }
+      // The OLD render composition — the static prelude, WITHOUT the
+      // session's routines — cannot resolve the session helper.
+      let stale = language.merging(Session.routines)
+      #expect(stale["twice"] == nil)
+      // The FIXED render composition merges the session's routines, so the
+      // helper resolves and a render query naming it runs.
+      let routines = language.merging(session.functions)
+      #expect(routines["twice"] != nil)
+      guard case let .select(select) =
+          try Statement(parsing: "SELECT twice(Id) FROM TypeDef") else {
+        Issue.record("not a SELECT")
+        return
+      }
+      let rows = try session.run(select, routines)
+      #expect(rows == [[.integer(2)], [.integer(4)]])
+    }
+  }
+
   @Test("a view is resolved case-insensitively")
   func sessionViewCaseInsensitive() throws {
     // The session catalog folds the view name, so a query may name the view in

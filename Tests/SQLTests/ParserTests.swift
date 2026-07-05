@@ -883,6 +883,108 @@ struct CreateViewTests {
   }
 }
 
+// MARK: - CREATE FUNCTION
+
+/// Parses `text` and returns `(name, function)`, failing on any other shape.
+private func parse(function text: String) throws -> (String, Function) {
+  guard case let .function(name, function) = try Statement(parsing: text)
+  else {
+    Issue.record("expected a CREATE FUNCTION statement")
+    throw SQLError.incomplete(expected: "a CREATE FUNCTION statement")
+  }
+  return (name, function)
+}
+
+struct CreateFunctionTests {
+  @Test("parses a scalar function's name, parameters, return, and body")
+  func full() throws {
+    let (name, function) = try parse(function: """
+        CREATE FUNCTION twice(n INTEGER) RETURNS INTEGER AS n + n
+        """)
+    #expect(name == "twice")
+    #expect(function.parameters
+                == [Function.Parameter(name: "n", type: .integer)])
+    #expect(function.returns == .integer)
+    #expect(function.body == .binary(.add, .column("n"), .column("n")))
+  }
+
+  @Test("parses several typed parameters in order")
+  func parameters() throws {
+    let (_, function) = try parse(function: """
+        CREATE FUNCTION f(a INTEGER, b TEXT, c BOOLEAN) RETURNS TEXT AS b
+        """)
+    #expect(function.parameters == [
+      Function.Parameter(name: "a", type: .integer),
+      Function.Parameter(name: "b", type: .text),
+      Function.Parameter(name: "c", type: .boolean),
+    ])
+    #expect(function.returns == .text)
+  }
+
+  @Test("parses a parameterless function over a literal body")
+  func nullary() throws {
+    let (name, function) = try parse(function: """
+        CREATE FUNCTION answer() RETURNS INTEGER AS 42
+        """)
+    #expect(name == "answer")
+    #expect(function.parameters.isEmpty)
+    #expect(function.body == .literal(.integer(42)))
+  }
+
+  @Test("maps the ISO type spellings onto value types")
+  func types() throws {
+    let (_, function) = try parse(function: """
+        CREATE FUNCTION f(a INT, b REAL, c VARCHAR, d BOOL, e BLOB) \
+        RETURNS DOUBLE AS b
+        """)
+    #expect(function.parameters.map(\.type)
+                == [.integer, .double, .text, .boolean, .blob])
+    #expect(function.returns == .double)
+  }
+
+  @Test("parses lowercase CREATE FUNCTION keywords")
+  func caseInsensitive() throws {
+    let (name, function) = try parse(function: """
+        create function f(n integer) returns integer as n
+        """)
+    #expect(name == "f")
+    #expect(function.returns == .integer)
+  }
+
+  @Test("rejects a duplicate parameter name")
+  func duplicateParameter() {
+    #expect(throws: SQLError.duplicate("n")) {
+      _ = try Statement(
+          parsing: "CREATE FUNCTION f(n INTEGER, n TEXT) RETURNS INTEGER AS n")
+    }
+  }
+
+  @Test("rejects a case-insensitive duplicate parameter name")
+  func duplicateParameterFolded() {
+    // The offending (later) spelling is reported, matching the explicit
+    // view-column duplicate fault (`CREATE VIEW v (X, x)` reports `x`).
+    #expect(throws: SQLError.duplicate("n")) {
+      _ = try Statement(
+          parsing: "CREATE FUNCTION f(N INTEGER, n TEXT) RETURNS INTEGER AS n")
+    }
+  }
+
+  @Test("rejects an unknown type spelling")
+  func unknownType() {
+    #expect(throws: SQLError.self) {
+      _ = try Statement(
+          parsing: "CREATE FUNCTION f(n WIDGET) RETURNS INTEGER AS n")
+    }
+  }
+
+  @Test("rejects a function with no RETURNS clause")
+  func missingReturns() {
+    #expect(throws: SQLError.self) {
+      _ = try Statement(parsing: "CREATE FUNCTION f(n INTEGER) AS n")
+    }
+  }
+}
+
 // MARK: - UNION
 
 /// Parses `text` and returns its `Query`, failing on any other statement shape.

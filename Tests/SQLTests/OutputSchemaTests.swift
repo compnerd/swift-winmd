@@ -350,4 +350,20 @@ struct OutputSchemaTests {
         "SELECT 1 / 0, COUNT(*) FROM People WHERE 1 = 0 OFFSET 1 ROWS")
     #expect(empty.count == 2)
   }
+
+  @Test("HAVING is evaluated before a zero-FETCH limit, so its faults surface")
+  func havingFaultsUnderZeroLimit() throws {
+    // The compiled plan applies HAVING BEFORE the OFFSET/FETCH limit, so a zero
+    // FETCH spares only the PROJECTION — HAVING still evaluates over the empty
+    // group. A faulting HAVING must therefore surface even under a zero FETCH.
+    #expect(throws: SQLError.self) {
+      try schema("SELECT COUNT(*) FROM People WHERE 1 = 0 "
+          + "HAVING 1 / 0 = 0 FETCH FIRST 0 ROWS ONLY")
+    }
+    // A non-faulting FALSE HAVING drops the empty group cleanly (the limit would
+    // drop it anyway), so the schema resolves.
+    let columns = try schema("SELECT COUNT(*) FROM People WHERE 1 = 0 "
+        + "HAVING COUNT(*) = 1 FETCH FIRST 0 ROWS ONLY")
+    #expect(columns.count == 1)
+  }
 }

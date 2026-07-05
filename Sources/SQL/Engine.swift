@@ -413,20 +413,57 @@ extension Engine {
     }
     return slot
   }
+
+  /// Rejects an `ORDER BY` key naming a column outside the `DISTINCT` output.
+  ///
+  /// `SELECT DISTINCT` sorts the pre-projection rows then dedups the projected
+  /// ones, so ordering on a column the projection drops is ill-defined — after
+  /// dedup one output row stands for many source rows, whose differing sort-key
+  /// values leave no single order. The standard therefore requires every
+  /// `ORDER BY` key under `DISTINCT` to be a column of the select list, as the
+  /// grouped path requires for `GROUP BY`. Each resolved order key's ordinal
+  /// (`order`, paired index-for-index with the AST `keys` for the offending
+  /// name) must equal a projected term that is a bare `.slot` — a plain output
+  /// column; a computed projection is not orderable-on anyway. A key naming no
+  /// output column faults `SQLError.distinct`. Only a `distinct` query is
+  /// checked; a plain `SELECT` may order on any source column.
+  ///
+  /// The check runs in whatever slot space the caller resolved into: the
+  /// non-aggregate paths pass base ordinals, the grouped path passes grouped
+  /// slots. Both are consistent — `order` and `projection` share it — so the
+  /// one comparison serves every compile path.
+  internal static func distinct(
+      _ keys: Array<Order.Key>, _ order: Array<Int>,
+      _ projection: Array<Term>) throws(SQLError) {
+    var output = Set<Int>()
+    for term in projection {
+      if case let .slot(ordinal) = term { output.insert(ordinal) }
+    }
+    for index in order.indices where !output.contains(order[index]) {
+      throw .distinct(keys[index].column.name)
+    }
+  }
 }
 
 extension Plan {
-  /// This source plan wrapped in the `Project(Limit(Sort(Select(_))))`
-  /// operators, omitting each layer when its clause is absent. The
-  /// `projection`, `filter`, and `order` keys are in slot space; an empty
-  /// `order` omits the sort.
+  /// This source plan wrapped in the projection/limit/sort/select operators,
+  /// omitting each layer when its clause is absent. The `projection`, `filter`,
+  /// and `order` keys are in slot space; an empty `order` omits the sort.
   ///
-  /// The row `limit` sits BELOW the projection — after `WHERE` and `ORDER BY`,
-  /// but before the select list is evaluated. A row outside the requested page
-  /// is dropped by the limit before its projection runs, so a projection that
+  /// Without `distinct` the shape is `Project(Limit(Sort(Select(_))))`: the row
+  /// `limit` sits BELOW the projection — after `WHERE` and `ORDER BY`, but
+  /// before the select list is evaluated. A row outside the requested page is
+  /// dropped by the limit before its projection runs, so a projection that
   /// could throw (`SELECT 1 / 0 … FETCH FIRST 0 ROWS ONLY`) never evaluates for
   /// a discarded row and the query returns the documented empty page.
-  internal func shaped(projection: Array<Term>, filter: Filter?,
+  ///
+  /// With `distinct` (`SELECT DISTINCT`) the dedup runs on the projected rows —
+  /// after `ORDER BY`, before `OFFSET`/`FETCH` (the ISO order) — so the shape
+  /// is `Limit(Distinct(Project(Sort(Select(_)))))`: the projection loses its
+  /// cap (every candidate row must be projected to dedup it), the `distinct`
+  /// dedups the projected rows, and the `limit` pages the deduplicated result.
+  internal func shaped(distinct: Bool = false, projection: Array<Term>,
+                       filter: Filter?,
                        order: Array<(slot: Int, ascending: Bool)>,
                        limit: Limit?) -> Plan {
     var plan = self
@@ -436,7 +473,10 @@ extension Plan {
     if !order.isEmpty {
       plan = .sort(keys: order, plan)
     }
-    return .project(projection, plan.capped(limit: limit))
+    guard distinct else {
+      return .project(projection, plan.capped(limit: limit))
+    }
+    return Plan.distinct(.project(projection, plan)).capped(limit: limit)
   }
 }
 
@@ -600,6 +640,14 @@ extension Catalog where Self: ~Escapable {
       Array<(slot: Int, ascending: Bool)>()
     }
 
+    // Under DISTINCT every ORDER BY key must be a select-list column — the
+    // dedup runs on the projected rows, so ordering on a dropped column is
+    // ill-defined (see `Engine.distinct`). The order keys and projection are
+    // in grouped-slot space here, aligned with the AST keys index-for-index.
+    if select.distinct, let clause = select.order {
+      try Engine.distinct(clause.keys, order.map(\.slot), projection)
+    }
+
     var plan = node
     if let having {
       plan = .select(having, plan)
@@ -607,7 +655,10 @@ extension Catalog where Self: ~Escapable {
     if !order.isEmpty {
       plan = .sort(keys: order, plan)
     }
-    return .project(projection, plan.capped(limit: select.limit))
+    guard select.distinct else {
+      return .project(projection, plan.capped(limit: select.limit))
+    }
+    return Plan.distinct(.project(projection, plan)).capped(limit: select.limit)
   }
 }
 
@@ -752,6 +803,10 @@ extension Catalog where Self: ~Escapable {
       // preserving this node's own `all`.
       try .union(optimise(left, ctes, bindings),
                  optimise(right, ctes, bindings), all: all)
+    case let .distinct(source):
+      // A `distinct` dedups its source without a seek or join of its own;
+      // optimise the source below it and rewrap.
+      try .distinct(optimise(source, ctes, bindings))
     case let .aggregate(keys, aggregates, source):
       // An aggregate reshapes its source and has no seek or join of its own;
       // optimise its source (the WHERE/join chain below it seeks and nests as
@@ -1054,6 +1109,12 @@ extension Plan {
       try .product(left.pushdown(), right.pushdown())
     case let .union(left, right, all):
       try .union(left.pushdown(), right.pushdown(), all: all)
+    case let .distinct(source):
+      // A `distinct` sits above the projection, so no `WHERE` conjunct reaches
+      // it to push down; it recurses transparently. A filter must never cross a
+      // dedup — filtering before or after it yields different rows — and none
+      // can, since it sits above the projection like the cap.
+      try .distinct(source.pushdown())
     case let .aggregate(keys, aggregates, source):
       // An aggregate reshapes rows into a fresh grouped slot space, so it is a
       // pushdown barrier: a `HAVING`/projection filter above it is in grouped
@@ -1509,11 +1570,20 @@ extension Catalog where Self: ~Escapable {
       let projection =
           try from.schema.terms(select.projection, in: relation)
 
+      // Under DISTINCT every ORDER BY key must be a select-list column — the
+      // dedup runs on the projected rows, so ordering on a dropped column is
+      // ill-defined (see `Engine.distinct`). The order keys and projection are
+      // still in base-ordinal space here, aligned with the AST keys by index.
+      if select.distinct, let clause = select.order {
+        try Engine.distinct(clause.keys, order.map(\.column), projection)
+      }
+
       // The referenced ordinals, in slot order: slot `i` is `ordinals[i]`.
       let ordinals = Engine.referenced(projection, filter, order)
       let slot = Engine.invert(ordinals)
       let scan = from.leaf(ordinals)
       return scan.shaped(
+          distinct: select.distinct,
           projection: projection.map { $0.remapped(through: slot) },
           filter: filter.map { $0.remapped(through: slot) },
           order: order.map { (slot[$0.column]!, $0.ascending) },
@@ -1562,6 +1632,13 @@ extension Catalog where Self: ~Escapable {
     }
     let projection = try scope.terms(select.projection)
 
+    // Under DISTINCT every ORDER BY key must be a select-list column (see
+    // `Engine.distinct`); order keys and projection are in combined base-ordinal
+    // space here, aligned with the AST keys index-for-index.
+    if select.distinct, let clause = select.order {
+      try Engine.distinct(clause.keys, order.map(\.column), projection)
+    }
+
     // The combined referenced ordinals — projection ∪ every match ∪ WHERE ∪
     // order — packed per relation in chain order: relation i's referenced
     // ordinals take a contiguous slot run after every earlier relation's,
@@ -1598,6 +1675,7 @@ extension Catalog where Self: ~Escapable {
     }
 
     return chain.shaped(
+        distinct: select.distinct,
         projection: projection.map { $0.remapped(through: slot) },
         filter: predicate.map { $0.remapped(through: slot) },
         order: order.map { (slot[$0.column]!, $0.ascending) },

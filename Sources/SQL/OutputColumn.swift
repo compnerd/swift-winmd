@@ -209,10 +209,16 @@ extension Catalog where Self: ~Escapable {
             if try scope.empty(having, routines) != true { return }
           }
           // The lone empty group is itself unreachable when a limit drops the
-          // one row it would emit — a zero `FETCH` or any positive `OFFSET` — so
-          // the projection never evaluates over it.
-          if !drops(select.limit, single: true),
-              case let .expressions(items) = select.projection {
+          // one row it would emit — a zero `FETCH` or any positive `OFFSET`. A
+          // DISTINCT select is the exception: its plan is
+          // `Limit(Distinct(Project(…)))`, so the projection evaluates over the
+          // empty group's row (dedup needs it) BEFORE the cap pages the
+          // deduplicated result — a zero FETCH or skipping OFFSET does not
+          // spare it, mirroring the main projection path below. (`||` with a
+          // `borrowing self` autoclosure needs the two-statement form.)
+          var reachable = select.distinct
+          if !reachable { reachable = !drops(select.limit, single: true) }
+          if reachable, case let .expressions(items) = select.projection {
             for item in items { _ = try scope.empty(item.expression, routines) }
           }
         }
@@ -234,10 +240,16 @@ extension Catalog where Self: ~Escapable {
     // The projection runs after any limit: a limit that drops every row it
     // would yield leaves only its aggregate folds (validated above) reachable.
     // A whole-result aggregate emits exactly ONE row, so a positive OFFSET
-    // drops it too — not just a zero FETCH.
+    // drops it too — not just a zero FETCH. A DISTINCT select is the exception:
+    // its plan is `Limit(Distinct(Project(…)))`, so the projection evaluates
+    // over EVERY candidate row (dedup needs them) BEFORE the cap pages the
+    // deduplicated result — a zero FETCH or skipping OFFSET does not spare it.
+    // A false WHERE still yields no rows to dedup (handled above), so only the
+    // limit-based elision is bypassed for DISTINCT.
     let sole = select.aggregates && select.grouping.isEmpty
-    if !drops(select.limit, single: sole),
-        case let .expressions(items) = select.projection {
+    var reachable = select.distinct
+    if !reachable { reachable = !drops(select.limit, single: sole) }
+    if reachable, case let .expressions(items) = select.projection {
       for item in items { _ = try scope.type(of: item.expression, routines) }
     }
   }

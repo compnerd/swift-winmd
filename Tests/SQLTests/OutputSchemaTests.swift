@@ -351,6 +351,69 @@ struct OutputSchemaTests {
     #expect(empty.count == 2)
   }
 
+  @Test("a zero FETCH does not spare a SELECT DISTINCT projection")
+  func distinctZeroFetch() throws {
+    // A DISTINCT plan is `Limit(Distinct(Project(…)))`: the projection
+    // evaluates over every candidate row to dedup it BEFORE the cap pages the
+    // result, so a zero FETCH does NOT make it unreachable. The schema must
+    // fault its divide-by-zero exactly as a run would — unlike the non-distinct
+    // form, whose `Project(Limit(…))` shape the zero FETCH still spares.
+    #expect(throws: SQLError.self) {
+      try schema("SELECT DISTINCT 1 / 0 FROM People FETCH FIRST 0 ROWS ONLY")
+    }
+    let normal = try schema(
+        "SELECT 1 / 0 FROM People FETCH FIRST 0 ROWS ONLY")
+    #expect(normal.count == 1)
+  }
+
+  @Test("a positive OFFSET does not spare a SELECT DISTINCT projection")
+  func distinctPositiveOffset() throws {
+    // The OFFSET pages the deduplicated result, so the projection still
+    // evaluates over every candidate row and its divide-by-zero faults.
+    #expect(throws: SQLError.self) {
+      try schema("SELECT DISTINCT 1 / 0 FROM People OFFSET 1 ROWS")
+    }
+  }
+
+  @Test("a zero FETCH does not spare a grouped DISTINCT projection")
+  func groupedDistinctZeroFetch() throws {
+    // A grouped DISTINCT dedups the projected group rows before the cap, so the
+    // projection is reachable and its divide-by-zero faults under a zero FETCH.
+    #expect(throws: SQLError.self) {
+      try schema("SELECT DISTINCT 1 / 0 FROM People GROUP BY Name "
+          + "FETCH FIRST 0 ROWS ONLY")
+    }
+  }
+
+  @Test("a constant-false WHERE still spares a SELECT DISTINCT projection")
+  func distinctFalseWhere() throws {
+    // A statically-false WHERE yields no rows, so a DISTINCT query has nothing
+    // to dedup and the projection is genuinely unreached — the WHERE-based
+    // elision stays, unlike the limit-based one.
+    let columns = try schema("SELECT DISTINCT 1 / 0 FROM People WHERE 1 = 0")
+    #expect(columns.count == 1)
+  }
+
+  @Test("a zero FETCH does not spare a DISTINCT empty-group projection")
+  func distinctEmptyGroupZeroFetch() throws {
+    // A constant-false WHERE over a whole-result aggregate emits ONE empty
+    // group. For a non-distinct query a zero FETCH drops that lone row, so its
+    // projection is unreachable and the divide-by-zero is spared. A DISTINCT
+    // query is the exception: its `Limit(Distinct(Project(…)))` plan evaluates
+    // the projection over the empty group's row (to dedup) BEFORE the cap, so
+    // the divide-by-zero faults exactly as a run does — the empty-group gate
+    // must bypass the limit elision under DISTINCT just as the main path does.
+    #expect(throws: SQLError.self) {
+      try schema("SELECT DISTINCT COUNT(*) / 0 FROM People WHERE 1 = 0 "
+          + "FETCH FIRST 0 ROWS ONLY")
+    }
+    // The non-distinct equivalent's zero FETCH drops the lone empty-group row,
+    // so its projection is unreachable and the schema resolves cleanly.
+    let columns = try schema(
+        "SELECT COUNT(*) / 0 FROM People WHERE 1 = 0 FETCH FIRST 0 ROWS ONLY")
+    #expect(columns.count == 1)
+  }
+
   @Test("HAVING is evaluated before a zero-FETCH limit, so its faults surface")
   func havingFaultsUnderZeroLimit() throws {
     // The compiled plan applies HAVING BEFORE the OFFSET/FETCH limit, so a zero

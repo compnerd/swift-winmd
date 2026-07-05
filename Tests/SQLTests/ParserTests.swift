@@ -77,6 +77,41 @@ struct KeywordTests {
   }
 }
 
+struct SetQuantifierTests {
+  @Test("a plain SELECT is not distinct")
+  func plain() throws {
+    let select = try parse(select: "SELECT TypeName FROM TypeDef")
+    #expect(!select.distinct)
+  }
+
+  @Test("SELECT DISTINCT sets the distinct flag")
+  func distinct() throws {
+    let select = try parse(select: "SELECT DISTINCT TypeName FROM TypeDef")
+    #expect(select.distinct)
+    #expect(select.projection == .columns(["TypeName"]))
+  }
+
+  @Test("SELECT ALL is the default, not distinct")
+  func explicitAll() throws {
+    let select = try parse(select: "SELECT ALL TypeName FROM TypeDef")
+    #expect(!select.distinct)
+    #expect(select.projection == .columns(["TypeName"]))
+  }
+
+  @Test("DISTINCT is case-insensitive")
+  func caseInsensitive() throws {
+    let select = try parse(select: "select distinct TypeName from TypeDef")
+    #expect(select.distinct)
+  }
+
+  @Test("DISTINCT applies to a FROM-less scalar select")
+  func scalar() throws {
+    let select = try parse(select: "SELECT DISTINCT 1")
+    #expect(select.distinct)
+    #expect(select.from == nil)
+  }
+}
+
 struct PredicateTests {
   @Test("parses each comparison operator")
   func operators() throws {

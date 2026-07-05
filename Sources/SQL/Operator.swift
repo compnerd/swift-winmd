@@ -148,6 +148,12 @@ internal indirect enum Plan {
   /// appends the trailing arm. Both sides yield rows of the same width — the
   /// result columns of the first arm.
   case union(Plan, Plan, all: Bool)
+  /// δ — deduplicates its `source`'s rows, keeping the first occurrence of each
+  /// distinct whole row and preserving their order (`SELECT DISTINCT`). It sits
+  /// above the projection, so it dedups the projected output rows on the SAME
+  /// whole-row key `UNION` uses (`Value` is `Hashable`). The plain `SELECT`
+  /// (equivalently `SELECT ALL`) omits it.
+  case distinct(Plan)
   /// Γ — groups its `source`'s records by the `keys` terms and folds each
   /// `aggregates` accumulator over every record of a group, yielding one grouped
   /// record per group. The grouped record's slots are the `keys` values (slots
@@ -182,6 +188,10 @@ extension Plan {
       terms.count
     case let .union(left, _, _):
       left.width
+    case let .distinct(source):
+      // A `distinct` dedups rows without reshaping them, so it is as wide as
+      // its source.
+      source.width
     case let .limit(_, _, source):
       // A `limit` caps rows without reshaping them, so it is as wide as its
       // source.
@@ -230,6 +240,10 @@ extension Plan {
       // Both sides yield rows of the same width — the result columns — so the
       // union's width is its left side's.
       left.slots
+    case let .distinct(source):
+      // A `distinct` dedups rows without reshaping them, so it spans the same
+      // slots as its source.
+      source.slots
     case let .limit(_, _, source):
       // A `limit` caps rows without reshaping them, so it spans the same slots
       // as its source.
@@ -265,7 +279,8 @@ extension Plan {
 /// outer record with every inner one; `join` re-resolves the inner relation,
 /// seeks it per outer record, and concatenates the matches; `union` runs its
 /// two sides — each with its own union semantics — and concatenates their rows,
-/// deduplicating the whole row unless `all`; `limit` skips the first `offset` of
+/// deduplicating the whole row unless `all`; `distinct` deduplicates its
+/// source's whole rows (`SELECT DISTINCT`); `limit` skips the first `offset` of
 /// its source's rows then takes at most `count`.
 /// The catalog is borrowed throughout — a `~Escapable` source is never copied
 /// or stored.
@@ -322,6 +337,8 @@ internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
              base, column, keys, filter, catalog, ctes, routines, bindings)
   case let .union(left, right, all):
     try union(left, right, all, catalog, ctes, routines, bindings)
+  case let .distinct(source):
+    deduplicated(try execute(source, catalog, ctes, routines, bindings))
   case let .aggregate(keys, aggregates, source):
     try grouped(execute(source, catalog, ctes, routines, bindings), keys,
                 aggregates, routines)
@@ -366,14 +383,22 @@ private func union<C: Catalog & ~Escapable>(_ left: Plan, _ right: Plan,
     throws(SQLError) -> Array<Record> {
   let rows = try execute(left, catalog, ctes, routines, bindings)
       + execute(right, catalog, ctes, routines, bindings)
-  guard !all else { return rows }
+  return all ? rows : deduplicated(rows)
+}
 
-  var records = Array<Record>()
+/// The rows of `records` with whole-row duplicates removed — the first
+/// occurrence of each distinct row kept and their order preserved.
+///
+/// A `Record` is `Hashable`, so the dedup keys on the materialised row's values
+/// through the `Seen` set — the SAME whole-row equality `UNION` uses. It backs
+/// both a bare `UNION` and `SELECT DISTINCT`.
+private func deduplicated(_ records: Array<Record>) -> Array<Record> {
+  var rows = Array<Record>()
   var seen = Seen()
-  for record in rows where seen.insert(record.values) {
-    records.append(record)
+  for record in records where seen.insert(record.values) {
+    rows.append(record)
   }
-  return records
+  return rows
 }
 
 /// Evaluates each projected `term` against `record` through `routines` to the

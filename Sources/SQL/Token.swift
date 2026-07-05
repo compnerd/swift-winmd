@@ -20,6 +20,7 @@ extension Token {
     case create
     case view
     case select
+    case distinct
     case from
     case `where`
     case order
@@ -89,6 +90,7 @@ extension Token.Kind {
     case .create: "CREATE"
     case .view: "VIEW"
     case .select: "SELECT"
+    case .distinct: "DISTINCT"
     case .from: "FROM"
     case .where: "WHERE"
     case .order: "ORDER"

@@ -13,7 +13,7 @@
 /// cte            := identifier ['(' identifier (',' identifier)* ')']
 ///                   AS '(' query ')'
 /// query          := select (UNION [ALL] select)*
-/// select         := SELECT projection
+/// select         := SELECT [DISTINCT | ALL] projection
 ///                   [FROM relation (join)*
 ///                    [where] [group] [having] [order] [limit]]
 /// relation       := identifier [AS identifier]
@@ -225,9 +225,13 @@ internal struct Parser: ~Escapable {
   /// admits no relation, joins, `WHERE`, `ORDER BY`, or `LIMIT` to follow.
   private mutating func select() throws(SQLError) -> Select {
     try expect(.select)
+    // An optional set quantifier: `DISTINCT` deduplicates the result rows;
+    // `ALL` (the default when neither is written) keeps every row.
+    let distinct = try match(.distinct)
+    if !distinct { _ = try match(.all) }
     let projection = try projection()
     guard try match(.from) else {
-      return Select(projection: projection, from: nil)
+      return Select(distinct: distinct, projection: projection, from: nil)
     }
     let from = try relation()
 
@@ -253,9 +257,9 @@ internal struct Parser: ~Escapable {
     }
     let limit = try rowLimit()
 
-    return Select(projection: projection, from: from, joins: joins,
-                  predicate: predicate, grouping: grouping, having: having,
-                  order: order, limit: limit)
+    return Select(distinct: distinct, projection: projection, from: from,
+                  joins: joins, predicate: predicate, grouping: grouping,
+                  having: having, order: order, limit: limit)
   }
 
   /// Parses `BY column (, column)*` (the `GROUP` keyword is already consumed) —

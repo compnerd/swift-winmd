@@ -524,15 +524,15 @@ extension Catalog where Self: ~Escapable {
       try .slot(scope.ordinal(of: column))
     }
     var expressions = Array<Expression>()
-    for expression in Engine.projected(select.projection) {
-      Engine.collect(expression, into: &expressions)
+    for expression in select.projection.projected {
+      expression.collect(into: &expressions)
     }
     if let having = select.having {
-      Engine.collect(having, into: &expressions)
+      having.collect(into: &expressions)
     }
     var aggregations = Array<Aggregation>()
     for expression in expressions {
-      try aggregations.append(Engine.lower(expression, scope))
+      try aggregations.append(expression.aggregation(scope))
     }
 
     // The source materialises exactly the ordinals the WHERE, the keys, and the
@@ -603,69 +603,49 @@ extension Catalog where Self: ~Escapable {
   }
 }
 
-extension Engine {
-  /// The projected expressions of `projection` — an `expressions` list yields
-  /// each item's expression; a `*` or bare-column list yields none (no aggregate
-  /// can hide in them). An aggregate query's projection is always the
-  /// `expressions` case (an aggregate call makes it one).
-  internal static func projected(_ projection: Projection)
-      -> Array<Expression> {
-    switch projection {
+extension Projection {
+  /// The projected expressions — an `expressions` list yields each item's
+  /// expression; a `*` or bare-column list yields none (no aggregate can hide
+  /// in them). An aggregate query's projection is always the `expressions` case
+  /// (an aggregate call makes it one).
+  internal var projected: Array<Expression> {
+    switch self {
     case .all, .columns:
       []
     case let .expressions(items):
       items.map(\.expression)
     }
   }
+}
 
-  /// Collects the distinct aggregate expressions within `expression` into
+extension Expression {
+  /// Collects the distinct aggregate expressions within this expression into
   /// `expressions`, in first-appearance order — the same aggregate written twice
   /// computes once.
-  internal static func collect(_ expression: Expression,
-                               into expressions: inout Array<Expression>) {
-    switch expression {
+  internal func collect(into expressions: inout Array<Expression>) {
+    switch self {
     case .column, .literal:
       break
     case .aggregate:
-      if !expressions.contains(expression) {
-        expressions.append(expression)
+      if !expressions.contains(self) {
+        expressions.append(self)
       }
     case let .call(_, arguments):
-      for argument in arguments { collect(argument, into: &expressions) }
+      for argument in arguments { argument.collect(into: &expressions) }
     case let .binary(_, lhs, rhs):
-      collect(lhs, into: &expressions)
-      collect(rhs, into: &expressions)
+      lhs.collect(into: &expressions)
+      rhs.collect(into: &expressions)
     }
   }
 
-  /// Collects the distinct aggregates within a `predicate` into `expressions`.
-  internal static func collect(_ predicate: Predicate,
-                               into expressions: inout Array<Expression>) {
-    switch predicate {
-    case let .comparison(left, _, right):
-      collect(left, into: &expressions)
-      collect(right, into: &expressions)
-    case let .bound(left, _, _):
-      collect(left, into: &expressions)
-    case let .null(expression, _):
-      collect(expression, into: &expressions)
-    case let .and(lhs, rhs), let .or(lhs, rhs):
-      collect(lhs, into: &expressions)
-      collect(rhs, into: &expressions)
-    case let .not(operand):
-      collect(operand, into: &expressions)
-    }
-  }
-
-  /// Lowers an AST `.aggregate` expression to an `Aggregation`, its argument (if
-  /// any) resolved to a combined base-ordinal term through `scope`.
+  /// Lowers this AST `.aggregate` expression to an `Aggregation`, its argument
+  /// (if any) resolved to a combined base-ordinal term through `scope`.
   ///
   /// `COUNT(*)` has no argument (it counts rows); every other aggregate lowers
-  /// its single operand expression to a term. `expression` is always an
-  /// `.aggregate` — `collect` gathers only those.
-  internal static func lower(_ expression: Expression, _ scope: Scope)
-      throws(SQLError) -> Aggregation {
-    guard case let .aggregate(function, operand) = expression else {
+  /// its single operand expression to a term. `self` is always an `.aggregate`
+  /// — `collect` gathers only those.
+  internal func aggregation(_ scope: Scope) throws(SQLError) -> Aggregation {
+    guard case let .aggregate(function, operand) = self else {
       throw .unsupported("expected an aggregate")
     }
     let argument: Term? = switch operand {
@@ -676,7 +656,26 @@ extension Engine {
     }
     return Aggregation(function: function, argument: argument)
   }
+}
 
+extension Predicate {
+  /// Collects the distinct aggregates within this predicate into `expressions`.
+  internal func collect(into expressions: inout Array<Expression>) {
+    switch self {
+    case let .comparison(left, _, right):
+      left.collect(into: &expressions)
+      right.collect(into: &expressions)
+    case let .bound(left, _, _):
+      left.collect(into: &expressions)
+    case let .null(expression, _):
+      expression.collect(into: &expressions)
+    case let .and(lhs, rhs), let .or(lhs, rhs):
+      lhs.collect(into: &expressions)
+      rhs.collect(into: &expressions)
+    case let .not(operand):
+      operand.collect(into: &expressions)
+    }
+  }
 }
 
 // MARK: - Optimisation

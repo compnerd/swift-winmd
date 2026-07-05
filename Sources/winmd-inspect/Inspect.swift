@@ -53,26 +53,32 @@ struct PrintNamespaces: ParsableCommand {
     let data = try Data(contentsOf: options.database.url,
                         options: .alwaysMapped)
     let database = try Database(data.span.bytes)
-    // Zero namespaces must yield zero lines, not one blank line, so scripts
-    // reading a namespace per line never see a spurious empty entry.
-    let out = try PrintNamespaces.namespaces(database.storage)
-    if !out.isEmpty { print(out) }
+    // One line per namespace row: no rows prints nothing, while a lone
+    // empty-string namespace (the global namespace) prints one blank line —
+    // outcomes a joined string cannot tell apart, so scripts read exactly one
+    // line per namespace and none for a namespace-free database.
+    for namespace in try PrintNamespaces.namespaces(database.storage) {
+      print(namespace)
+    }
   }
 
-  /// The database's distinct namespaces as a plain one-per-line list, ascending
-  /// — a `SELECT DISTINCT … ORDER BY` deduplicates and sorts them, the engine's
-  /// own dedup replacing the hand-rolled `Set` + `sorted()`.
+  /// The database's distinct namespaces, ascending, one element per row — a
+  /// `SELECT DISTINCT … ORDER BY` deduplicates and sorts them, the engine's own
+  /// dedup replacing the hand-rolled `Set` + `sorted()`.
   ///
-  /// The result is a plain namespace-per-line list scripts parse, NOT the boxed
-  /// table `Shell.execute` frames a row result as (borders and a `TypeNamespace`
-  /// header): each row's single cell prints on its own line, unframed, so this
-  /// runs the DISTINCT query directly rather than through the shell.
+  /// An element per row, rather than a joined string, keeps the zero-rows case
+  /// (a namespace-free database) distinct from a single empty-string namespace:
+  /// the former yields no lines, the latter one blank line, whereas a
+  /// newline-join collapses both to the empty string. Each element is a plain
+  /// namespace scripts parse a line at a time, NOT the boxed table
+  /// `Shell.execute` frames a row result as (borders and a `TypeNamespace`
+  /// header), so this runs the DISTINCT query directly rather than the shell.
   internal static func namespaces(_ storage: borrowing WinMD.Storage)
-      throws -> String {
+      throws -> Array<String> {
     var session = Session(storage)
     let rows = try session.run(
         "SELECT DISTINCT TypeNamespace FROM TypeDef ORDER BY TypeNamespace")
-    return rows.map { $0[0].display }.joined(separator: "\n")
+    return rows.map { $0[0].display }
   }
 }
 

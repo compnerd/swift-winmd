@@ -2,124 +2,42 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 import Testing
-@testable import SQL
+import SQL
+
+import SQLTestSupport
 
 // MARK: - In-memory adapter
 
-/// A typed in-memory relation — a column name/kind list and rows — for the
-/// INFORMATION_SCHEMA overlay tests.
-private struct MetaRelation: Sendable {
-  let names: Array<String>
-  let types: Array<ValueType>
-  let records: Array<Array<Value>>
+// The INFORMATION_SCHEMA overlay tests run over the shared SQLTestSupport
+// store, whose `FixtureCatalog`/`FixtureTable` already model named typed
+// relations, registered views, and a virtual `Id` past each relation's real
+// columns — exactly the shape these tests built by hand. `MetaCatalog` aliases
+// the shared catalog so the inline fixtures read as before, and `MetaRelation`
+// lifts the tests' `[(name, kind)]` schema tuples (with optional rows) into a
+// `FixtureRelation`. The store folds `relations()`/`views()` case-insensitively
+// and returns them unordered; every test that observes the enumeration sorts it
+// with an explicit `ORDER BY`, so the order is unobservable here.
+private typealias MetaCatalog = FixtureCatalog
 
-  init(_ columns: Array<(String, ValueType)>,
-       _ records: Array<Array<Value>> = []) {
-    self.names = columns.map(\.0)
-    self.types = columns.map(\.1)
-    self.records = records
-  }
-}
-
-/// A `Catalog` over named typed relations plus registered views, exposing a
-/// virtual `Id` past each relation's real columns (to prove the overlay reports
-/// only the real ones).
-private struct MetaCatalog: Catalog {
-  let catalog: Dictionary<String, MetaRelation>
-  let registered: Dictionary<String, View>
-
-  init(_ catalog: Dictionary<String, MetaRelation>,
-       views: Dictionary<String, View> = [:]) {
-    self.catalog = catalog
-    self.registered = views
-  }
-
-  func table(named name: String) -> MetaTable? {
-    guard let relation = catalog[name] else { return nil }
-    return MetaTable(relation)
-  }
-
-  func view(named name: String) -> View? {
-    registered[name]
-  }
-
-  func relations() -> Array<String> {
-    catalog.keys.sorted()
-  }
-
-  func views() -> Array<String> {
-    registered.keys.sorted()
-  }
-}
-
-/// A `Table` over one typed relation, with a lone virtual `Id` at `width`.
-private struct MetaTable: Table {
-  let relation: MetaRelation
-
-  init(_ relation: MetaRelation) {
-    self.relation = relation
-  }
-
-  var width: Int { relation.names.count }
-  var names: Array<String> { relation.names }
-  var types: Array<ValueType> { relation.types }
-  var virtuals: Array<String> { ["Id"] }
-  var extent: Int { width + 1 }
-
-  func ordinal(of name: String) -> Int? {
-    if name == "Id" { return width }
-    return relation.names.firstIndex(of: name)
-  }
-
-  func bound(_ column: Int, _ value: Int, strict: Bool) -> Int? { nil }
-
-  func cursor() -> MetaCursor {
-    MetaCursor(relation)
-  }
-}
-
-private struct MetaCursor: Cursor {
-  let relation: MetaRelation
-
-  init(_ relation: MetaRelation) {
-    self.relation = relation
-  }
-
-  var count: Int { relation.records.count }
-
-  func row(_ index: Int) -> MetaRow? {
-    guard index < relation.records.count else { return nil }
-    return MetaRow(relation, index)
-  }
-}
-
-private struct MetaRow: Row {
-  let relation: MetaRelation
-  let index: Int
-
-  init(_ relation: MetaRelation, _ index: Int) {
-    self.relation = relation
-    self.index = index
-  }
-
-  subscript(_ column: Int) -> Value {
-    borrowing get {
-      column == relation.names.count ? .integer(index + 1)
-                                     : relation.records[index][column]
-    }
-  }
+/// A `FixtureRelation` from a `[(name, kind)]` schema and optional rows — the
+/// shape the introspection fixtures declare their relations in.
+private func MetaRelation(_ columns: Array<(String, ValueType)>,
+                          _ records: Array<Array<Value>> = [])
+    -> FixtureRelation {
+  FixtureRelation(columns.map { FixtureField(name: $0.0, type: $0.1) }, records)
 }
 
 // MARK: - Fixtures
 
 /// A catalog of two base relations — `People` (a text column, an integer
 /// column) and `Widget` (one text column) — and one registered view `Adults`.
-private func catalog() -> MetaCatalog {
+private func catalog() throws -> MetaCatalog {
   MetaCatalog([
     "People": MetaRelation([("Name", .text), ("Age", .integer)],
                            [[.text("Ann"), .integer(30)]]),
     "Widget": MetaRelation([("Label", .text)], [[.text("cog")]]),
-  ], views: ["Adults": View("SELECT Name FROM People")])
+  ], views: ["Adults": View(query: try parse("SELECT Name FROM People"),
+                            columns: ["Name"])])
 }
 
 // MARK: - Helpers
@@ -637,7 +555,7 @@ struct IntrospectionTests {
     // exactly what the inline query does.
     let body = try parse("""
         SELECT table_name FROM information_schema.tables
-          WHERE table_type = 'BASE TABLE'
+          WHERE table_type = 'BASE TABLE' ORDER BY table_name
         """)
     let source = MetaCatalog([
       "People": MetaRelation([("Name", .text), ("Age", .integer)]),
@@ -1470,7 +1388,7 @@ struct IntrospectionTests {
     // execution (`resolve`/`derive`), not only the top-level query.
     let body = try parse("""
         SELECT table_name FROM definition_schema.tables
-          WHERE table_type = 'BASE TABLE'
+          WHERE table_type = 'BASE TABLE' ORDER BY table_name
         """)
     let source = MetaCatalog([
       "People": MetaRelation([("Name", .text), ("Age", .integer)]),

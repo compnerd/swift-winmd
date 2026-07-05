@@ -545,6 +545,24 @@ struct ShellTests {
             == ["column 1", "column 2"])
   }
 
+  @Test("headers derive a WITH from its trailing query's projection")
+  func withResultHeaders() {
+    // A `WITH` frames its box from the TRAILING query's projection, exactly as
+    // a plain `SELECT` does — names come from the statement, not the rows, so
+    // `WITH t(n) AS (…) SELECT n FROM t` headers `n`, not the positional
+    // `column 1` the generic fallback would produce.
+    let query = "WITH t(n) AS (SELECT 1) SELECT n FROM t"
+    #expect(Shell.headers(of: query, [[.integer(1)]]) == ["n"])
+    // A zero-row result still frames the real column name — the header comes
+    // from the projection, so the box is sized to `n` regardless of row count.
+    #expect(Shell.headers(of: query, []) == ["n"])
+    // A trailing `SELECT *` over a CTE carries no names in the statement (they
+    // need CTE-scoped schema resolution, out of scope here), so it frames by
+    // the produced width, the same fallback a plain `SELECT *` takes.
+    #expect(Shell.headers(of: "WITH t(n) AS (SELECT 1) SELECT * FROM t",
+                          [[.integer(1)]]) == ["column 1"])
+  }
+
   @Test("the identity spec escapes nothing and applies no conventions")
   func languageIdentity() {
     // A template that declares no language (or names a spec with no resource)

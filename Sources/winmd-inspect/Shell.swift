@@ -584,19 +584,31 @@ internal struct Shell: ~Escapable {
   ///
   /// A `SELECT`'s explicit projection names its columns from the statement (an
   /// aliased or bare column projects its name, the qualifier dropped; a computed
-  /// expression with no alias falls back to a positional `column N`). A
-  /// `SELECT *` carries no names in the statement — its real columns come from
-  /// the engine's resolution (view-shadows-table, joins, unions), which the shell
-  /// does NOT duplicate here; it frames by the produced width (`column N`)
-  /// pending a resolved-output-schema source (INFORMATION_SCHEMA). Anything else
-  /// (a `WITH`, or an unparsable string) likewise frames by the produced width.
+  /// expression with no alias falls back to a positional `column N`). A `WITH`
+  /// shares this derivation, taking its headers from the TRAILING query's
+  /// projection — `WITH t(n) AS (…) SELECT n FROM t` headers `n`, and a
+  /// zero-row result still frames the real column names with the right width. A
+  /// `SELECT *` (a plain one, or a `WITH`'s trailing `SELECT *` over a CTE)
+  /// carries no names in the statement — its real columns come from the
+  /// engine's resolution (view-shadows-table, joins, unions, CTE-scoped
+  /// schema), which the shell does NOT duplicate here; it frames by the
+  /// produced width (`column N`) pending a resolved-output-schema source
+  /// (INFORMATION_SCHEMA). An unparsable string likewise frames by the produced
+  /// width.
   internal static func headers(of text: String,
                                _ rows: Array<Array<Value>>) -> Array<String>? {
     guard let statement = try? Statement(parsing: text) else {
       return generic(rows)
     }
-    if case .create = statement { return nil }
-    guard case let .select(query) = statement else { return generic(rows) }
+    let query: SQL.Query
+    switch statement {
+    case .create:
+      return nil
+    case let .select(select):
+      query = select
+    case let .with(_, trailing):
+      query = trailing
+    }
     switch query.first.projection {
     case let .columns(list):
       return list.map(\.name)

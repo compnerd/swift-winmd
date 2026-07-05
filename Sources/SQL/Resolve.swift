@@ -253,6 +253,8 @@ internal struct Scope {
       case .string: .text
       case .integer: .integer
       case .double: .double
+      case .boolean: .boolean
+      case .blob: .blob
       }
     case let .call(name, arguments):
       try call(name, over: arguments, routines, validate: validate)

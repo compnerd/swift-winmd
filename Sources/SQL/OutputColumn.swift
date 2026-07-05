@@ -68,10 +68,14 @@ extension Catalog where Self: ~Escapable {
   ///   for a `UNION` whose arms project differing column counts.
   public borrowing func columns(of query: Query, routines: Routines = [:])
       throws(SQLError) -> Array<OutputColumn> {
+    // Extend the scope with any `definition_schema.` store relation the query
+    // names, so its result schema resolves the reserved relation the same as a
+    // run would — SCHEMA-ONLY, so typing never triggers the row build.
+    let ctes = augment([:], for: query, rows: false)
     // Validate the whole query without executing — the same compile the run
     // path drives, resolving every arm and cross-checking a UNION's arity — so
     // a schema is returned only for a query that could actually run.
-    _ = try compile(query)
+    _ = try compile(query, ctes)
     // Type-check every REACHABLE operand and call across all arms — the
     // projection, `WHERE`, and `HAVING` of each. `compile` resolves a call's
     // arguments but cannot check the routine EXISTS or that it is called with
@@ -81,13 +85,13 @@ extension Catalog where Self: ~Escapable {
     // like the executor — skips an arm a `false AND`/`true OR` short-circuits,
     // so a query that runs is not rejected for an unreachable call.
     let routines = Routines.standard.merging(routines)
-    try typecheck(query, [:], routines: routines)
+    try typecheck(query, ctes, routines: routines)
     // The result columns are the first arm's projection (the ISO rule a UNION
     // follows), resolved against the validated scope; a scalar call types from
     // its routine's declared return type — the engine prelude merged under
     // `routines`, exactly as a run seeds them, so a standard call (`BITAND`)
     // types without the caller re-supplying it.
-    return try columns(of: query.first, [:], routines: routines)
+    return try columns(of: query.first, ctes, routines: routines)
   }
 
   /// The result columns of a single `select`, resolved against this catalog
@@ -247,7 +251,8 @@ extension Catalog where Self: ~Escapable {
   }
 
   /// The name-resolution schema of `relation`, resolved against this catalog
-  /// and the in-scope `ctes` — a CTE first, then a view, then a base table, the
+  /// and the in-scope `ctes` — a CTE first, then a reserved
+  /// `definition_schema.` store relation, then a view, then a base table, the
   /// same precedence `compile` resolves a relation by. It reads only schemas,
   /// never a cursor, so it never executes. `visited` names the views already
   /// being resolved down this chain, breaking a cyclic view (`A` over `B` over
@@ -262,11 +267,20 @@ extension Catalog where Self: ~Escapable {
     if let cte = ctes[name.lowercased()] {
       return cte.schema()
     }
+    // A reserved store relation types through its SCHEMA-ONLY build (header +
+    // types, no rows), so resolving a view over `definition_schema.tables`/
+    // `.columns` reads only the schema and never triggers the row builder.
+    if let relation = Definition(name) {
+      return store(relation, rows: false).schema()
+    }
     if let view = view(named: name) {
       // A view's declared schema types every column `.integer`, since a view
       // stores no types; resolve the view body's own types so a `SELECT *` over
-      // the view reports each column's true type. The names stay the view's
-      // DECLARED ones; only the types come from the resolved body.
+      // the view reports each column's true type. Resolving runs the
+      // RESOLVE-only worker over the view's OWN `definition_schema.` overlay,
+      // built SCHEMA-ONLY so a view over a reserved relation resolves its types
+      // without a row build. The names stay the view's DECLARED ones; only the
+      // types come from the resolved body.
       let base = view.schema()
       // A cyclic view cannot resolve its body's types: resolving it would
       // re-enter this view forever, so break the cycle and fall back to the
@@ -280,14 +294,15 @@ extension Catalog where Self: ~Escapable {
       // operand a `SELECT * FROM v` run would evaluate — a `WHERE`/`HAVING`, a
       // later `UNION` arm — while skipping an arm a short-circuit proves
       // unreachable.
+      let overlay = augment([:], for: view.query, rows: false)
       let inner = visited.union([name.lowercased()])
-      try typecheck(view.query, [:], visited: inner, routines: routines)
+      try typecheck(view.query, overlay, visited: inner, routines: routines)
       // Type off the body's first arm (the ISO rule for a UNION). Arity — the
       // body's width against the declared columns — is `compile`'s job (the
       // public entry runs it), so on a shortfall fall back to the declared
       // schema rather than re-checking it here.
       let resolved =
-          try columns(of: view.query.first, [:], visited: inner,
+          try columns(of: view.query.first, overlay, visited: inner,
                       routines: routines)
       guard resolved.count == base.width else { return base }
       return Schema(width: base.width, extent: base.extent, names: base.names,

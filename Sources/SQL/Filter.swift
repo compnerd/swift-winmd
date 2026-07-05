@@ -423,6 +423,22 @@ internal func matches(_ lhs: Value, _ op: Comparison, _ rhs: Value) -> Bool? {
   }
 }
 
+/// Kleene `AND` over two three-valued operands: `false` dominates (a `false`
+/// side makes the whole `false` even against UNKNOWN), both `true` is `true`,
+/// and any other pair is UNKNOWN (`nil`).
+internal func and(_ lhs: Bool?, _ rhs: Bool?) -> Bool? {
+  if lhs == false || rhs == false { return false }
+  return lhs == true && rhs == true ? true : nil
+}
+
+/// Kleene `OR` over two three-valued operands: `true` dominates (a `true` side
+/// makes the whole `true` even against UNKNOWN), both `false` is `false`, and
+/// any other pair is UNKNOWN (`nil`).
+internal func or(_ lhs: Bool?, _ rhs: Bool?) -> Bool? {
+  if lhs == true || rhs == true { return true }
+  return lhs == false && rhs == false ? false : nil
+}
+
 /// Evaluates `filter` against `row` under three-valued logic, resolving scalar
 /// calls through `routines` and any bound parameter from `bindings`.
 ///

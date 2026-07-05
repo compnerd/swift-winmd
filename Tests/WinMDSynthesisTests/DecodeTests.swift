@@ -50,8 +50,7 @@ struct DecodeTests {
   // The Swift dialect every case spells against.
   private var dialect: Dialect { .swift }
 
-  @Test("a primitive decodes to its C typealias spelling")
-  func primitives() {
+  @Test func `a primitive decodes to its C typealias spelling`() {
     let cases: Array<(PrimitiveType, String)> = [
       (.void, "Void"),
       (.boolean, "CBool"),
@@ -75,8 +74,7 @@ struct DecodeTests {
     }
   }
 
-  @Test("a pointer wraps its decoded pointee")
-  func pointers() {
+  @Test func `a pointer wraps its decoded pointee`() {
     #expect(SignatureType.pointer(.primitive(.void))
                 .decode(with: resolver, dialect: dialect)
                 == "UnsafeMutableRawPointer")
@@ -93,16 +91,14 @@ struct DecodeTests {
                 == "UnsafeMutablePointer<Unicode.UTF16.CodeUnit>")
   }
 
-  @Test("a generic variable decodes to a T/M-prefixed placeholder")
-  func variables() {
+  @Test func `a generic variable decodes to a T/M-prefixed placeholder`() {
     #expect(SignatureType.variable(scope: .type, 0)
                 .decode(with: resolver, dialect: dialect) == "T0")
     #expect(SignatureType.variable(scope: .method, 2)
                 .decode(with: resolver, dialect: dialect) == "M2")
   }
 
-  @Test("only an IsConst custom modifier marks a pointee const")
-  func modifiers() {
+  @Test func `only an IsConst custom modifier marks a pointee const`() {
     // Two modifier-type references: one resolves to `IsConst`, the other to an
     // unrelated type. Only the former may flip the pointer to immutable.
     let marker = TypeDefOrRef(rawValue: 1)
@@ -129,8 +125,7 @@ struct DecodeTests {
                 == "UnsafeMutablePointer<CInt>")
   }
 
-  @Test("a generic instantiation strips the CLR arity from its base name")
-  func genericInstance() {
+  @Test func `a generic instantiation strips the CLR arity from its base name`() {
     let reference = TypeDefOrRef(rawValue: 1)
     let resolver = Resolver([
       reference.rawValue: Identity(namespace: "Windows.Foundation",
@@ -144,8 +139,7 @@ struct DecodeTests {
                 == "IReference<CInt>")
   }
 
-  @Test("a generic over an unresolved base degrades to the opaque pointer")
-  func unresolvedGenericBase() {
+  @Test func `a generic over an unresolved base degrades to the opaque pointer`() {
     // The base reference resolves to nothing (e.g. a TypeSpec with no
     // identity): the empty resolver leaves it unresolved.
     let base = TypeDefOrRef(rawValue: 1)
@@ -155,8 +149,7 @@ struct DecodeTests {
                 == "UnsafeMutableRawPointer")
   }
 
-  @Test("a named type whose simple name is a keyword is escaped")
-  func keywordNamedType() {
+  @Test func `a named type whose simple name is a keyword is escaped`() {
     // A metadata type whose simple name collides with a target keyword
     // (`protocol`, `repeat`, …) spells escaped, like a declaration name, so a
     // parameter or return of that type still compiles.
@@ -168,8 +161,7 @@ struct DecodeTests {
                 .decode(with: resolver, dialect: dialect) == "`protocol`")
   }
 
-  @Test("a generic base is escaped after its CLR arity is stripped")
-  func keywordGenericBase() {
+  @Test func `a generic base is escaped after its CLR arity is stripped`() {
     // The generic definition's name carries the arity suffix (`protocol``1`),
     // so it matches no keyword until the suffix is stripped; the base must be
     // escaped after the strip, not before, or it spells `protocol<CInt>`.
@@ -183,8 +175,7 @@ struct DecodeTests {
                 == "`protocol`<CInt>")
   }
 
-  @Test("a generic argument keeps the parameter-name class-ID hint")
-  func genericArgumentHint() {
+  @Test func `a generic argument keeps the parameter-name class-ID hint`() {
     let base = TypeDefOrRef(rawValue: 1)
     let guid = TypeDefOrRef(rawValue: 2)
     let resolver = Resolver([
@@ -204,8 +195,7 @@ struct DecodeTests {
                 == "IReference<IID>")
   }
 
-  @Test("a non-void pointer-to-pointer keeps the optional inner slot")
-  func doublePointer() {
+  @Test func `a non-void pointer-to-pointer keeps the optional inner slot`() {
     let marker = TypeDefOrRef(rawValue: 1)
     let foo = TypeDefOrRef(rawValue: 2)
     let resolver = Resolver([
@@ -232,8 +222,7 @@ struct DecodeTests {
                 == "UnsafeMutablePointer<UnsafeMutablePointer<IFoo>?>")
   }
 
-  @Test("a const void-pointer pointee honors const")
-  func constVoidPointer() {
+  @Test func `a const void-pointer pointee honors const`() {
     let marker = TypeDefOrRef(rawValue: 1)
     let resolver = Resolver([
       marker.rawValue: Identity(namespace: "System.Runtime.CompilerServices",
@@ -248,8 +237,7 @@ struct DecodeTests {
                 == "UnsafePointer<UnsafeMutableRawPointer?>")
   }
 
-  @Test("a pointer to a const void pointer keeps the optional raw slot")
-  func constVoidPointerPointee() {
+  @Test func `a pointer to a const void pointer keeps the optional raw slot`() {
     let marker = TypeDefOrRef(rawValue: 1)
     let resolver = Resolver([
       marker.rawValue: Identity(namespace: "System.Runtime.CompilerServices",

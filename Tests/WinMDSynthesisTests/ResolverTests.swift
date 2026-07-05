@@ -37,8 +37,7 @@ struct IdentityTests {
     0x00, 0x00, 0xFF, 0x00, 0x01, 0x00,
   ]
 
-  @Test("reads a TypeRef's namespace and name as an Identity")
-  func typeRefIdentity() throws {
+  @Test func `reads a TypeRef's namespace and name as an Identity`() throws {
     let storage = Storage(bytes: IdentityTests.record.span.bytes,
                           relations: IdentityTests.relations.span,
                           strings: IdentityTests.strings.span.bytes,
@@ -50,8 +49,7 @@ struct IdentityTests {
     #expect(identity == Identity(namespace: "System", name: "Guid"))
   }
 
-  @Test("a malformed name offset propagates a WinMDError")
-  func malformedIdentity() {
+  @Test func `a malformed name offset propagates a WinMDError`() {
     let storage = Storage(bytes: IdentityTests.malformed.span.bytes,
                           relations: IdentityTests.relations.span,
                           strings: IdentityTests.strings.span.bytes,

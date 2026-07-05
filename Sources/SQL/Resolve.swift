@@ -45,6 +45,25 @@ private func lower(_ predicate: Predicate,
   }
 }
 
+/// The resolved sort keys `order` lowers to, in major-to-minor order — each
+/// key's column resolved to an ordinal through `ordinal` and its direction
+/// preserved.
+///
+/// A single relation and a join scope share this shape, differing only in how a
+/// key's column resolves to an ordinal (against one schema, or a combined join
+/// space); each caller supplies that resolution as `ordinal`. A grouped scope
+/// orders on projection aliases and grouped slots, so it does not share it.
+private func order(_ order: Order,
+                   ordinal: (Column) throws(SQLError) -> Int)
+    throws(SQLError) -> Array<(column: Int, ascending: Bool)> {
+  var keys = Array<(column: Int, ascending: Bool)>()
+  keys.reserveCapacity(order.keys.count)
+  for key in order.keys {
+    try keys.append((column: ordinal(key.column), ascending: key.ascending))
+  }
+  return keys
+}
+
 extension Schema {
   /// The ordinal of the column `column` names, validating its qualifier against
   /// `relation`.
@@ -120,13 +139,9 @@ extension Schema {
   /// each key's column an ordinal in this relation, its direction preserved.
   internal func order(_ order: Order, in relation: Relation)
       throws(SQLError) -> Array<(column: Int, ascending: Bool)> {
-    var keys = Array<(column: Int, ascending: Bool)>()
-    keys.reserveCapacity(order.keys.count)
-    for key in order.keys {
-      try keys.append((column: ordinal(of: key.column, in: relation),
-                       ascending: key.ascending))
+    try SQL.order(order) { column throws(SQLError) in
+      try ordinal(of: column, in: relation)
     }
-    return keys
   }
 
   internal func lower(_ predicate: Predicate, in relation: Relation)
@@ -645,13 +660,9 @@ internal struct Scope {
   /// preserved.
   internal func order(_ order: Order) throws(SQLError)
       -> Array<(column: Int, ascending: Bool)> {
-    var keys = Array<(column: Int, ascending: Bool)>()
-    keys.reserveCapacity(order.keys.count)
-    for key in order.keys {
-      try keys.append((column: ordinal(of: key.column),
-                       ascending: key.ascending))
+    try SQL.order(order) { column throws(SQLError) in
+      try ordinal(of: column)
     }
-    return keys
   }
 
   /// Lowers a join's `ON left = right` to a `match` conjunct, each side

@@ -407,21 +407,23 @@ extension Engine {
     }
     return slot
   }
+}
 
-  /// Wraps `source` in the `Project(Limit(Sort(Select(_))))` operators, omitting
-  /// each layer when its clause is absent. The `projection`, `filter`, and
-  /// `order` keys are in slot space; an empty `order` omits the sort.
+extension Plan {
+  /// This source plan wrapped in the `Project(Limit(Sort(Select(_))))`
+  /// operators, omitting each layer when its clause is absent. The
+  /// `projection`, `filter`, and `order` keys are in slot space; an empty
+  /// `order` omits the sort.
   ///
   /// The row `limit` sits BELOW the projection — after `WHERE` and `ORDER BY`,
   /// but before the select list is evaluated. A row outside the requested page
   /// is dropped by the limit before its projection runs, so a projection that
   /// could throw (`SELECT 1 / 0 … FETCH FIRST 0 ROWS ONLY`) never evaluates for
   /// a discarded row and the query returns the documented empty page.
-  internal static func shape(
-      _ source: Plan, _ projection: Array<Term>, _ filter: Filter?,
-      _ order: Array<(slot: Int, ascending: Bool)>,
-      _ limit: Limit?) -> Plan {
-    var plan = source
+  internal func shaped(projection: Array<Term>, filter: Filter?,
+                       order: Array<(slot: Int, ascending: Bool)>,
+                       limit: Limit?) -> Plan {
+    var plan = self
     if let filter {
       plan = .select(filter, plan)
     }
@@ -430,7 +432,6 @@ extension Engine {
     }
     return .project(projection, plan.capped(limit: limit))
   }
-
 }
 
 // MARK: - Aggregation
@@ -1506,11 +1507,11 @@ extension Catalog where Self: ~Escapable {
       let ordinals = Engine.referenced(projection, filter, order)
       let slot = Engine.invert(ordinals)
       let scan = from.leaf(ordinals)
-      return Engine.shape(scan,
-                          projection.map { $0.remapped(through: slot) },
-                          filter.map { $0.remapped(through: slot) },
-                          order.map { (slot[$0.column]!, $0.ascending) },
-                          select.limit)
+      return scan.shaped(
+          projection: projection.map { $0.remapped(through: slot) },
+          filter: filter.map { $0.remapped(through: slot) },
+          order: order.map { (slot[$0.column]!, $0.ascending) },
+          limit: select.limit)
     }
 
     // Resolve every joined relation and lay all relations — the FROM relation
@@ -1590,10 +1591,10 @@ extension Catalog where Self: ~Escapable {
               .product(chain, joined[index].leaf(locals[index + 1])))
     }
 
-    return Engine.shape(chain,
-                        projection.map { $0.remapped(through: slot) },
-                        predicate.map { $0.remapped(through: slot) },
-                        order.map { (slot[$0.column]!, $0.ascending) },
-                        select.limit)
+    return chain.shaped(
+        projection: projection.map { $0.remapped(through: slot) },
+        filter: predicate.map { $0.remapped(through: slot) },
+        order: order.map { (slot[$0.column]!, $0.ascending) },
+        limit: select.limit)
   }
 }

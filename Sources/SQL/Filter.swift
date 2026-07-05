@@ -229,6 +229,8 @@ internal func value(of literal: Literal) throws(SQLError) -> Value {
   return switch literal {
   case let .integer(integer): .integer(integer)
   case let .string(string): .text(string)
+  case let .boolean(boolean): .boolean(boolean)
+  case let .blob(bytes): .blob(bytes)
   case let .double(double) where double.isFinite: .double(double)
   // A directly-built `Literal.double` bypasses the lexer's finite check; reject
   // NaN/inf at lowering so no non-finite double reaches a plan (it would break

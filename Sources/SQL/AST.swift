@@ -444,6 +444,12 @@ public enum Literal: Hashable, Sendable {
   /// An approximate-numeric literal — a decimal with a `.` fraction and/or an
   /// exponent (`3.14`, `1.0`, `1e3`, `2.5e-1`), a binary64 `Double`.
   case double(Double)
+  /// A truth-valued literal — the keyword `TRUE` or `FALSE`. SQL's third truth
+  /// value UNKNOWN is spelled `NULL`, not a literal here.
+  case boolean(Bool)
+  /// A binary-string literal — a hex `x'…'` run of byte pairs, its bytes taken
+  /// verbatim.
+  case blob(Array<UInt8>)
 }
 
 /// An `ORDER BY` clause: an ordered list of sort keys, each a column and its

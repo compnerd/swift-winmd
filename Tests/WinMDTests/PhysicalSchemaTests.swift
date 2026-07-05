@@ -17,8 +17,7 @@ struct PhysicalSchemaTests {
   // the layout the way the database does — through `relations`, which sizes the
   // `Type` column (column 1, a `CustomAttributeType` coded index) via
   // `PhysicalSchema.width(of:)`.
-  @Test("sizes a coded column with reserved tags by its present targets only")
-  func reservedTagsDoNotWiden() throws {
+  @Test func `sizes a coded column with reserved tags by its present targets only`() throws {
     // Header: Reserved(4), Major(1), Minor(1), HeapSizes(1), Reserved(1),
     // Valid(8), Sorted(8), then a 32-bit row count per present table. The three
     // present tables each carry a single row, comfortably below the compressed

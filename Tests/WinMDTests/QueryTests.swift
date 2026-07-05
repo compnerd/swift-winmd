@@ -54,8 +54,7 @@ struct QueryTests {
     body(storage, table)
   }
 
-  @Test("resolves column ordinals by name")
-  func ordinalResolution() {
+  @Test func `resolves column ordinals by name`() {
     QueryTests.with { tuple in
       #expect(tuple.ordinal(for: "Flags") == 0)
       #expect(tuple.ordinal(for: "TypeName") == 1)
@@ -65,16 +64,14 @@ struct QueryTests {
     }
   }
 
-  @Test("reads string cells through the strings heap")
-  func stringResolution() throws {
+  @Test func `reads string cells through the strings heap`() throws {
     QueryTests.with { tuple in
       #expect((try? tuple.string(1)) == "string0")
       #expect((try? tuple.string(2)) == "string1")
     }
   }
 
-  @Test("throws on a malformed strings-heap entry rather than trapping")
-  func malformedStringEntry() {
+  @Test func `throws on a malformed strings-heap entry rather than trapping`() {
     // A record whose TypeName cell points one past the heap end, and whose
     // TypeNamespace cell points at an unterminated run that reaches the heap
     // end without a NUL. Both must throw `.BadImageFormat` through
@@ -110,8 +107,7 @@ struct QueryTests {
     #expect(throws: WinMDError.BadImageFormat) { _ = try tuple.string(2) }
   }
 
-  @Test("rejects a heap read on the wrong column kind")
-  func heapKindMismatch() {
+  @Test func `rejects a heap read on the wrong column kind`() {
     QueryTests.with { tuple in
       // Field 0 (Flags) is a constant, not a string heap index.
       #expect(throws: WinMDError.InvalidColumn) { _ = try tuple.string(0) }
@@ -123,8 +119,7 @@ struct QueryTests {
     }
   }
 
-  @Test("rejects an out-of-bounds column ordinal without trapping")
-  func ordinalBounds() {
+  @Test func `rejects an out-of-bounds column ordinal without trapping`() {
     QueryTests.with { tuple in
       // The throwing accessors index the schema's fields to recover a column's
       // type, so an ordinal outside `0 ..< count` would trap on that lookup
@@ -146,8 +141,7 @@ struct QueryTests {
     }
   }
 
-  @Test("a scan yields nil for an out-of-range offset on both ends")
-  func scanBounds() {
+  @Test func `a scan yields nil for an out-of-range offset on both ends`() {
     // The `Scan.element(_:)` contract is to return `nil` for any offset
     // outside `0 ..< count`. The subscript the conformances delegate to must
     // reject a negative offset as well as one at or past `count`; a negative

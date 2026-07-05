@@ -12,8 +12,7 @@ struct GUIDHeapTests {
     0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
   ]
 
-  @Test("reads a GUID by 1-based index and rejects index 0")
-  func subscriptAccess() throws {
+  @Test func `reads a GUID by 1-based index and rejects index 0`() throws {
     let bytes = GUIDHeapTests.heap
     let guids = GUIDHeap(bytes.span.bytes)
     #expect(throws: WinMDError.InvalidIndex) {

@@ -56,8 +56,7 @@ struct FieldTests {
     try body(storage)
   }
 
-  @Test("reads typed values through Column tokens")
-  func tokenReads() throws {
+  @Test func `reads typed values through Column tokens`() throws {
     try FieldTests.with { storage in
       let table = FieldTests.relations[0]
       let row = Row<Metadata.Tables.TypeDef>(0, table, storage)
@@ -80,8 +79,7 @@ struct FieldTests {
     }
   }
 
-  @Test("filters and projects typed rows with where and select")
-  func whereSelect() throws {
+  @Test func `filters and projects typed rows with where and select`() throws {
     try FieldTests.with { storage in
       let iterator =
           try storage.rows(of: Metadata.Tables.TypeDef.self)
@@ -95,8 +93,7 @@ struct FieldTests {
     }
   }
 
-  @Test("filters typed rows with a value predicate")
-  func wherePredicate() throws {
+  @Test func `filters typed rows with a value predicate`() throws {
     try FieldTests.with { storage in
       let iterator =
           try storage.rows(of: Metadata.Tables.TypeDef.self)
@@ -110,8 +107,7 @@ struct FieldTests {
     }
   }
 
-  @Test("projects the first row matching a typed predicate")
-  func firstProjection() throws {
+  @Test func `projects the first row matching a typed predicate`() throws {
     try FieldTests.with { storage in
       let iterator =
           try storage.rows(of: Metadata.Tables.TypeDef.self)

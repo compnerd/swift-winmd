@@ -63,8 +63,7 @@ struct NavigationTests {
     try body(storage)
   }
 
-  @Test("resolves a simple-index token to a typed row")
-  func simpleResolution() throws {
+  @Test func `resolves a simple-index token to a typed row`() throws {
     try NavigationTests.with { storage in
       // NestedClass[0].NestedClass is a simple `TypeDef` index; the token
       // resolve lands on the typed `Row<TypeDef>` it names.
@@ -78,8 +77,7 @@ struct NavigationTests {
     }
   }
 
-  @Test("resolves a null simple-index token to nothing")
-  func nullSimpleResolution() throws {
+  @Test func `resolves a null simple-index token to nothing`() throws {
     try NavigationTests.with { storage in
       // The reframed `EnclosingClass` accessor is non-optional; the underlying
       // token resolve is optional and non-nil for a live reference.
@@ -92,8 +90,7 @@ struct NavigationTests {
     }
   }
 
-  @Test("resolves a coded-index token to a type-erased tuple")
-  func codedResolution() throws {
+  @Test func `resolves a coded-index token to a type-erased tuple`() throws {
     try NavigationTests.with { storage in
       // TypeDef[0].Extends is a `TypeDefOrRef` coded index whose tag selects
       // the `TypeRef` table; the token resolve yields the type-erased tuple.
@@ -107,8 +104,7 @@ struct NavigationTests {
     }
   }
 
-  @Test("resolves a null coded-index token to nothing")
-  func nullCodedResolution() throws {
+  @Test func `resolves a null coded-index token to nothing`() throws {
     try NavigationTests.with { storage in
       // TypeDef[1].Extends is the null reference (coded row 0).
       let source = Row<Metadata.Tables.TypeDef>(1,
@@ -120,8 +116,7 @@ struct NavigationTests {
     }
   }
 
-  @Test("narrows a coded resolution to the target with Row(_:)")
-  func typedRoundTrip() throws {
+  @Test func `narrows a coded resolution to the target with Row(_:)`() throws {
     try NavigationTests.with { storage in
       let source = Row<Metadata.Tables.TypeDef>(0,
                                                 NavigationTests.relations[1],
@@ -139,8 +134,7 @@ struct NavigationTests {
     }
   }
 
-  @Test("rejects a Row(_:) narrowing to the wrong table")
-  func typedMismatch() throws {
+  @Test func `rejects a Row(_:) narrowing to the wrong table`() throws {
     try NavigationTests.with { storage in
       let source = Row<Metadata.Tables.TypeDef>(0,
                                                 NavigationTests.relations[1],
@@ -159,8 +153,7 @@ struct NavigationTests {
     }
   }
 
-  @Test("opens a typed list iterator over the run")
-  func listNavigation() throws {
+  @Test func `opens a typed list iterator over the run`() throws {
     try NavigationTests.with { storage in
       // TypeDef[0].FieldList delimits a run ending one before the next row's
       // start, so it yields exactly FieldDef[0] ("string0").
@@ -173,8 +166,7 @@ struct NavigationTests {
     }
   }
 
-  @Test("a typed list run agrees with the reframed accessor")
-  func listAccessorAgrees() throws {
+  @Test func `a typed list run agrees with the reframed accessor`() throws {
     try NavigationTests.with { storage in
       let source = Row<Metadata.Tables.TypeDef>(0,
                                                 NavigationTests.relations[1],
@@ -232,8 +224,7 @@ struct ReverseNavigationTests {
     try body(storage)
   }
 
-  @Test("reverse-navigates a simple-index token to its owners")
-  func simpleReverse() throws {
+  @Test func `reverse-navigates a simple-index token to its owners`() throws {
     // The token names the owning `NestedClass` table and the `NestedClass`
     // ordinal, so the call site needs no schema or ordinal; the rows naming
     // TypeDef[1] are the contiguous run [1, 3).
@@ -248,8 +239,7 @@ struct ReverseNavigationTests {
     }
   }
 
-  @Test("the typed reverse token agrees with the ordinal form")
-  func tokenAgreesWithOrdinal() throws {
+  @Test func `the typed reverse token agrees with the ordinal form`() throws {
     try ReverseNavigationTests.with(0) { storage in
       let target = Row<Metadata.Tables.TypeDef>(1,
                                                 ReverseNavigationTests.relations[0],
@@ -297,8 +287,7 @@ struct ReverseCodedNavigationTests {
 
   private static let valid: UInt64 = (1 << 2) | (1 << 12)
 
-  @Test("reverse-navigates a coded-index token to its owners")
-  func codedReverse() throws {
+  @Test func `reverse-navigates a coded-index token to its owners`() throws {
     // CustomAttribute is left unsorted, so the typed reverse lookup scans; the
     // rows naming TypeDef[0] through `Parent` are 0 and 2.
     let storage =

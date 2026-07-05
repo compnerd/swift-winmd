@@ -30,8 +30,7 @@ struct StringsHeapTests {
     0x53, 0x74, 0x72, 0x69, 0x6e, 0x67, 0x20, 0x31, 0x35, 0x00,
   ]
 
-  @Test("reads null-terminated strings by heap offset")
-  func subscriptAccess() {
+  @Test func `reads null-terminated strings by heap offset`() {
     let bytes = StringsHeapTests.heap
     let heap = StringsHeap(bytes.span.bytes)
 

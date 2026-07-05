@@ -68,8 +68,7 @@ struct ReferencingTests {
     return rows
   }
 
-  @Test("finds the referencing run by binary search when sorted")
-  func sortedBinarySearch() throws {
+  @Test func `finds the referencing run by binary search when sorted`() throws {
     // NestedClass is sorted on its key (ordinal 0), so the run referencing
     // TypeDef[1] is found by binary search: rows 1 and 2.
     try ReferencingTests.with(1 << 41) { storage in
@@ -79,8 +78,7 @@ struct ReferencingTests {
     }
   }
 
-  @Test("falls back to a scan when unsorted and agrees")
-  func unsortedScanAgrees() throws {
+  @Test func `falls back to a scan when unsorted and agrees`() throws {
     // With the `Sorted` bit clear the same query falls back to a linear scan
     // and must return the identical matches.
     try ReferencingTests.with(0) { storage in
@@ -90,8 +88,7 @@ struct ReferencingTests {
     }
   }
 
-  @Test("sorted and scan paths agree for every target")
-  func sortedAndScanAgree() throws {
+  @Test func `sorted and scan paths agree for every target`() throws {
     // Every target row resolves to the same set of owners under both paths.
     for row in 0 ..< 4 {
       var sorted = Array<Int>()
@@ -108,8 +105,7 @@ struct ReferencingTests {
     }
   }
 
-  @Test("yields no owners for an unreferenced target")
-  func zeroMatches() throws {
+  @Test func `yields no owners for an unreferenced target`() throws {
     // TypeDef[2] (stored value 3) is named by no NestedClass row.
     try ReferencingTests.with(1 << 41) { storage in
       let target = Tuple(2, ReferencingTests.relations[0], storage)
@@ -123,8 +119,7 @@ struct ReferencingTests {
     }
   }
 
-  @Test("rejects a reverse lookup by an out-of-range column ordinal")
-  func columnOrdinalOutOfRange() throws {
+  @Test func `rejects a reverse lookup by an out-of-range column ordinal`() throws {
     // A negative ordinal or one at/beyond the owner's column count names no
     // field; `referencing` must throw rather than trap on `schema.fields`.
     ReferencingTests.with(0) { storage in
@@ -143,8 +138,7 @@ struct ReferencingTests {
     }
   }
 
-  @Test("rejects a reverse lookup against the wrong table")
-  func simpleIndexTableMismatch() throws {
+  @Test func `rejects a reverse lookup against the wrong table`() throws {
     // `referencing` by a simple `TypeDef` index against a `NestedClass` target
     // is a usage error: the index does not name that table.
     ReferencingTests.with(0) { storage in
@@ -189,8 +183,7 @@ struct ReferencingCodedTests {
 
   private static let valid: UInt64 = (1 << 2) | (1 << 12)
 
-  @Test("scans an unsorted owner by a coded index")
-  func codedReverseScan() throws {
+  @Test func `scans an unsorted owner by a coded index`() throws {
     // CustomAttribute is left unsorted (`Sorted` clear), so the reverse lookup
     // scans; the rows naming TypeDef[0] through `Parent` are 0 and 2.
     let storage = Storage(bytes: ReferencingCodedTests.record.span.bytes,
@@ -219,8 +212,7 @@ struct ReferencingCodedTests {
   // This locks the Option-A behaviour. Were the reserved slots still the old
   // `Module` placeholders, `tag(of: Module)` would find one (tag 0) and the
   // lookup would silently scan instead of throwing.
-  @Test("rejects a reverse lookup whose target is a reserved coded-index table")
-  func reservedCodedIndexTarget() throws {
+  @Test func `rejects a reverse lookup whose target is a reserved coded-index table`() throws {
     // A single Module row (#0): Generation (constant, 2 bytes) + Name (string) +
     // Mvid + EncId + EncBaseId (guid each), all narrow ⇒ stride 10; cells zero.
     // A single CustomAttribute row (#12, stride 6) follows so the owning table is

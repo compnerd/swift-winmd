@@ -1461,4 +1461,48 @@ struct IntrospectionTests {
         """))
     #expect(rows == [[.integer(1)]])
   }
+
+  @Test("a view over definition_schema.tables yields the inline rows")
+  func viewOverStoreTables() throws {
+    // A view whose body names the STORE relation directly — not an
+    // `information_schema.` view over it — resolves and runs the same as the
+    // inline query: the store overlay reaches the view body's compile and
+    // execution (`resolve`/`derive`), not only the top-level query.
+    let body = try parse("""
+        SELECT table_name FROM definition_schema.tables
+          WHERE table_type = 'BASE TABLE'
+        """)
+    let source = MetaCatalog([
+      "People": MetaRelation([("Name", .text), ("Age", .integer)]),
+      "Widget": MetaRelation([("Label", .text)]),
+    ], views: ["meta": View(query: body, columns: ["table_name"])])
+    let inline = try source.run(body)
+    let viewed = try source.run(parse("""
+        SELECT table_name FROM meta ORDER BY table_name
+        """))
+    #expect(viewed == inline)
+    #expect(viewed == [[.text("People")], [.text("Widget")]])
+  }
+
+  @Test("a view over definition_schema.columns yields the inline rows")
+  func viewOverStoreColumns() throws {
+    let body = try parse("""
+        SELECT column_name, data_type FROM definition_schema.columns
+          WHERE table_name = 'People'
+          ORDER BY column_name
+        """)
+    let source = MetaCatalog([
+      "People": MetaRelation([("Name", .text), ("Age", .integer)]),
+    ], views: ["cols": View(query: body,
+                            columns: ["column_name", "data_type"])])
+    let inline = try source.run(body)
+    let viewed = try source.run(parse("""
+        SELECT column_name, data_type FROM cols ORDER BY column_name
+        """))
+    #expect(viewed == inline)
+    #expect(viewed == [
+      [.text("Age"), .text("integer")],
+      [.text("Name"), .text("character varying")],
+    ])
+  }
 }

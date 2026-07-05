@@ -912,6 +912,35 @@ struct DatabaseSQLTests {
     }
   }
 
+  @Test("print-namespaces yields a plain one-per-line list, not a boxed table")
+  func printNamespacesPlainList() throws {
+    // `print-namespaces` DEDUPS through `SELECT DISTINCT … ORDER BY`, but its
+    // output is a plain namespace-per-line list scripts parse — NOT the boxed
+    // table `Shell.execute` frames a row result as. The fixture's two TypeDefs
+    // both live in `NS`, so the DISTINCT collapses them to the one line `NS`,
+    // with no `┌─┐`/`│` box borders and no `TypeNamespace` header line.
+    try DatabaseSQLTests.with { storage in
+      let list = try PrintNamespaces.namespaces(storage)
+      #expect(list == "NS")
+      #expect(!list.contains("TypeNamespace"))
+      #expect(!list.contains("┌"))
+      #expect(!list.contains("│"))
+    }
+  }
+
+  @Test("print-namespaces on an empty database yields no output line")
+  func printNamespacesEmpty() throws {
+    // A database with an empty `TypeDef` table has no namespaces, so the
+    // DISTINCT query returns zero rows and the joined list is the empty
+    // string. `print-namespaces` must then emit NOTHING — its `run` guards the
+    // `print` on a non-empty result — so a script reading a namespace per line
+    // never sees a spurious blank entry.
+    try NoTypeDefFixture.with { storage in
+      let list = try PrintNamespaces.namespaces(storage)
+      #expect(list.isEmpty)
+    }
+  }
+
   @Test("a coded-index join key admits one key per candidate target table")
   func codedKeyEnumeration() {
     // `CustomAttribute.Parent` is `HasCustomAttribute`, which admits 22 target
@@ -1030,6 +1059,27 @@ struct DatabaseSQLTests {
 /// table is present (so the list link resolves to it) but has zero rows, so the
 /// owner of the lone `Param` resolves to 0. `decode(parameter:for:)` must then
 /// yield `nil` rather than index a negative `MethodDef` row.
+/// A fixture whose `TypeDef` table is present but empty: it contributes zero
+/// rows, so `SELECT DISTINCT TypeNamespace FROM TypeDef` finds no namespaces.
+private enum NoTypeDefFixture {
+  private static let empty = Array<UInt8>()
+
+  private static let relations: Array<WinMD.Table> = [
+    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 0, range: 0 ..< 0,
+                wide: 0, stride: 14),
+  ]
+
+  private static let valid: UInt64 = (1 << 2)
+
+  /// Runs `body` over a `Storage` catalog bound to the empty metadata.
+  static func with(_ body: (borrowing Storage) throws -> Void) rethrows {
+    let storage = Storage(bytes: empty.span.bytes, relations: relations.span,
+                          strings: empty.span.bytes, blob: empty.span.bytes,
+                          guid: empty.span.bytes, valid: valid, sorted: 0)
+    try body(storage)
+  }
+}
+
 private enum UnownedParamFixture {
   // Two narrow tables packed back to back. `MethodDef` contributes no records
   // (zero rows); `Param` contributes one.

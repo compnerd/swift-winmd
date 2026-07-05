@@ -126,14 +126,14 @@ extension Catalog where Self: ~Escapable {
   /// SCHEMA-ONLY — each CTE contributes its declared column list (typed
   /// `.integer`, the default a materialised relation reports) without running
   /// its body — so the derive never opens a cursor, exactly as `columns(of
-  /// query:)` never does. A `create` names no result, so it faults
-  /// `SQLError.statement` the way running one does.
+  /// query:)` never does. A `create` and a `function` name no result, so each
+  /// faults `SQLError.statement` the way running one does.
   ///
   /// `routines` and `validate` carry the meaning `columns(of query:)` gives
   /// them; pass `validate: false` after a run has proved the statement runnable.
   ///
   /// - Throws: the resolution faults `columns(of query:)` raises, plus
-  ///   `SQLError.statement` for a `create`.
+  ///   `SQLError.statement` for a `create` or a `function`.
   public borrowing func columns(of statement: Statement,
                                 routines: Routines = [:],
                                 validate: Bool = true)
@@ -146,6 +146,8 @@ extension Catalog where Self: ~Escapable {
                          validate: validate)
     case .create:
       throw .statement("CREATE VIEW names no result columns")
+    case .function:
+      throw .statement("CREATE FUNCTION names no result columns")
     }
   }
 

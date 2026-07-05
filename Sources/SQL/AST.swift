@@ -31,6 +31,55 @@ public enum Statement: Hashable, Sendable {
   /// materialises them in order into an overlay catalog the `query` runs
   /// against.
   case with(ctes: Array<CTE>, query: Query)
+  /// A `CREATE FUNCTION name(param TYPE, …) RETURNS TYPE AS expression`: the
+  /// scalar function's `name` and the `Function` it binds — the declared
+  /// parameters, result type, and the SQL body expression. A consumer registers
+  /// the `Function` under `name` into its `Routines` (as it registers a `View`
+  /// into a catalog) so a later call `name(…)` in a projection or predicate
+  /// resolves to it.
+  case function(name: String, function: Function)
+}
+
+/// A user-defined scalar function — a named SQL expression over named
+/// parameters, registered as a routine.
+///
+/// A defined function is the SQL counterpart of a native `Routine` closure: its
+/// `body` is a scalar `Expression` over the `parameters` (each a name and a
+/// declared type), yielding the declared `returns` type. It is fully escapable
+/// data — no borrowed storage — so a consumer threads it into the `Routines`
+/// map beside the borrowing catalog, exactly as a `View` sits in a catalog. A
+/// call binds its evaluated arguments to the parameter names and evaluates the
+/// body (see `Routine`'s defined initializer).
+public struct Function: Hashable, Sendable {
+  /// One declared parameter — its name and value type.
+  public struct Parameter: Hashable, Sendable {
+    /// The parameter's name — the identifier the body references it by.
+    public let name: String
+
+    /// The parameter's declared value type.
+    public let type: ValueType
+
+    public init(name: String, type: ValueType) {
+      self.name = name
+      self.type = type
+    }
+  }
+
+  /// The declared parameters, in order — their count the function's arity.
+  public let parameters: Array<Parameter>
+
+  /// The declared result type.
+  public let returns: ValueType
+
+  /// The scalar expression the function computes over its parameters.
+  public let body: Expression
+
+  public init(parameters: Array<Parameter>, returns: ValueType,
+              body: Expression) {
+    self.parameters = parameters
+    self.returns = returns
+    self.body = body
+  }
 }
 
 /// A common table expression — a query bound to a name for the duration of the

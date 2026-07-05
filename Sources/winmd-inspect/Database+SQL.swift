@@ -104,6 +104,13 @@ internal struct Session: SQL.Catalog, ~Escapable {
   /// The views the session has registered, keyed case-folded.
   internal var registered: Dictionary<String, View>
 
+  /// The routines the session resolves a call against — the WinMD-domain UDFs
+  /// and the standard prelude (`Session.routines`), plus every scalar function a
+  /// `CREATE FUNCTION` has defined this session. A `SELECT` and the schema
+  /// derive resolve calls through it, so a session-defined function is reachable
+  /// from a later query exactly as a registered view is.
+  internal var functions: Routines
+
   /// Opens a session over `storage`, seeding the bundled COM-interface views —
   /// or, where a `-I` `search` directory shadows or adds one, its view.
   @_lifetime(borrow storage)
@@ -111,6 +118,7 @@ internal struct Session: SQL.Catalog, ~Escapable {
                 search: Array<String> = []) {
     self.storage = copy storage
     self.registered = Session.bundled(search: search)
+    self.functions = Session.routines
   }
 
   /// Opens a session over `storage` with an explicit `views` set — the seam a
@@ -121,12 +129,22 @@ internal struct Session: SQL.Catalog, ~Escapable {
                 _ views: Dictionary<String, View>) {
     self.storage = copy storage
     self.registered = views
+    self.functions = Session.routines
   }
 
   /// Registers `view` under `name` (case-folded, the way `view(named:)`
   /// resolves it) — the `CREATE VIEW` path.
   internal mutating func register(_ name: String, _ view: View) {
     registered[name.lowercased()] = view
+  }
+
+  /// Registers the defined scalar `function` under `name` (case-folded) into the
+  /// session's routines — the `CREATE FUNCTION` path, mirroring `register` for a
+  /// view. The body is lowered against its parameters here, so a body naming an
+  /// undeclared parameter faults at definition.
+  internal mutating func register(_ name: String, _ function: Function)
+      throws(SQLError) {
+    functions = try functions.registering(name, function)
   }
 
   @_lifetime(borrow self)

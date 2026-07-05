@@ -47,7 +47,7 @@ internal indirect enum Filter {
 /// projected expression to a `Term` the executor evaluates per record against
 /// the routines; a bare-column projection lowers to a `.slot`, so the simple
 /// path stays a plain slot read.
-internal indirect enum Term {
+internal indirect enum Term: Sendable {
   /// The cell at `slot` of the record.
   case slot(Int)
   /// A constant value.

@@ -127,8 +127,9 @@ extension Catalog where Self: ~Escapable {
   ///
   /// A `select` runs its query directly; a `with` materialises its common table
   /// expressions, in source order, into the `CTEs` the trailing query resolves
-  /// against (see `with`). A `create` defines a view rather than producing
-  /// rows, so it is not runnable and faults with `SQLError.statement`.
+  /// against (see `with`). A `create` defines a view and a `function` a scalar
+  /// function rather than producing rows, so neither is runnable — both fault
+  /// with `SQLError.statement`.
   public borrowing func run(_ statement: Statement, _ routines: Routines = [:],
                             bindings: Bindings = [:])
       throws(SQLError) -> Array<Array<Value>> {
@@ -142,6 +143,8 @@ extension Catalog where Self: ~Escapable {
       try with(ctes, query, routines, bindings)
     case .create:
       throw .statement("CREATE VIEW defines a view rather than producing rows")
+    case .function:
+      throw .statement("CREATE FUNCTION defines a function rather than rows")
     }
   }
 

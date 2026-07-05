@@ -835,6 +835,190 @@ struct DatabaseSQLTests {
     }
   }
 
+  @Test("`.schema` types a query's result columns without running it")
+  func schemaColumns() throws {
+    // `.schema` prints the query's result columns — the name and type
+    // `session.columns(of:)` resolves WITHOUT opening a cursor, the capability
+    // the command formats. `TypeDef.TypeName` is a `#Strings` column, so it
+    // types `.text`, and the bundled `interfaces` view's `GUID(c.Value) AS iid`
+    // types `.text` too — the `GUID` UDF's declared `.text` return, not the
+    // integer default a scalar call falls to.
+    try DatabaseSQLTests.with { catalog in
+      let session = Session(catalog, Session.bundled())
+      guard case let .select(query) =
+          try Statement(parsing: "SELECT TypeName, iid FROM interfaces") else {
+        Issue.record("not a SELECT")
+        return
+      }
+      let columns = try session.columns(of: query, routines: Session.routines)
+      #expect(columns == [
+        OutputColumn(name: "TypeName", type: .text),
+        OutputColumn(name: "iid", type: .text),
+      ])
+    }
+  }
+
+  @Test("`.schema` faults on a query that would not run, without running it")
+  func schemaFaults() {
+    // `.schema` resolves the query the way a run would, so an unknown relation
+    // faults `SQLError.relation` exactly as a run would — the dry-run check —
+    // rather than silently printing nothing. An empty query is the unknown-meta
+    // fault its guard raises.
+    DatabaseSQLTests.with { catalog in
+      var shell = Shell(catalog)
+      #expect(throws: SQLError.relation("NoSuchTable")) {
+        try shell.execute(".schema SELECT x FROM NoSuchTable")
+      }
+      #expect(throws: Shell.MetaError.unknown(".schema")) {
+        try shell.execute(".schema")
+      }
+    }
+  }
+
+  @Test("`.schema` describes a WITH statement, the shape the shell runs")
+  func schemaWith() {
+    // `.schema` routes through the CTE-aware, statement-level derive, so a
+    // `WITH` types its trailing query against the CTE scope — the SAME
+    // statement the shell runs. The trailing `SELECT n FROM t` resolves `n` off
+    // the CTE, so `.schema` succeeds rather than rejecting anything but a bare
+    // `SELECT`.
+    DatabaseSQLTests.with { catalog in
+      var shell = Shell(catalog)
+      #expect(throws: Never.self) {
+        try shell.execute(
+            ".schema WITH t(n) AS (SELECT TypeName FROM TypeDef)"
+                + " SELECT n FROM t")
+      }
+    }
+  }
+
+  @Test("`.schema` faults a WITH whose body arity contradicts its list")
+  func schemaWithBadArity() {
+    // The CTE declares ONE column but its body — a `SELECT *` over the
+    // six-column `TypeDef` — projects six. The parser cannot catch this (a
+    // `SELECT *`'s width is known only at resolution), so a run rejects it with
+    // `SQLError.columns`. `.schema` validates the whole statement, so it faults
+    // the SAME way rather than advertising the one trusted declared column.
+    DatabaseSQLTests.with { catalog in
+      var shell = Shell(catalog)
+      #expect(throws: SQLError.columns(expected: 1, got: 6)) {
+        try shell.execute(
+            ".schema WITH t(a) AS (SELECT * FROM TypeDef) SELECT * FROM t")
+      }
+    }
+  }
+
+  @Test("an empty SELECT frames its REAL column names, not `column N`")
+  func emptyResultRealHeaders() throws {
+    // A `SELECT *` yielding no rows still frames its box, and the headers are
+    // the RESOLVED result-schema names (`columns(of:)`), not the positional
+    // `column N` a syntactic `SELECT *` would fall back to. A false predicate
+    // filters every fixture row, so the result is empty yet the six real
+    // `TypeDef` field names frame it. A named projection resolves too.
+    DatabaseSQLTests.with { catalog in
+      let shell = Shell(catalog)
+      #expect(shell.headers(of: "SELECT * FROM TypeDef WHERE 1 = 0", [])
+              == ["Flags", "TypeName", "TypeNamespace", "Extends",
+                  "FieldList", "MethodList"])
+      #expect(shell.headers(of: "SELECT TypeName FROM TypeDef WHERE 1 = 0", [])
+              == ["TypeName"])
+    }
+  }
+
+  @Test("a non-empty SELECT frames its rows under the resolved headers")
+  func nonEmptyResultHeaders() throws {
+    // A `SELECT` yielding rows frames them under its resolved headers — the box
+    // renderer always heads its grid, so a run with rows keeps the same column
+    // names as the empty case. A `CREATE VIEW` is not row output, so `headers`
+    // yields nil (nothing printed).
+    DatabaseSQLTests.with { catalog in
+      let shell = Shell(catalog)
+      #expect(shell.headers(of: "SELECT TypeName FROM TypeDef",
+                            [[.text("IMyInterface")], [.text("INotGuid")]])
+              == ["TypeName"])
+      #expect(shell.headers(of: "CREATE VIEW v AS SELECT TypeName FROM TypeDef",
+                            []) == nil)
+    }
+  }
+
+  @Test("a data-dependent empty result headers without re-validating")
+  func emptyResultHeadersDerived() throws {
+    // A `WHERE` no fixture row satisfies filters the result to empty, so the
+    // projection's `TypeName + 1` (text arithmetic) NEVER evaluates — the run
+    // SUCCEEDS with zero rows. The header path then DERIVES the `x` header off
+    // the query (`validate: false`), never re-type-checking the reachable-but-
+    // unevaluated arithmetic that a validating resolve would fault
+    // `SQLError.operand`. The header survives; no error.
+    DatabaseSQLTests.with { catalog in
+      let shell = Shell(catalog)
+      #expect(shell.headers(of:
+          "SELECT TypeName + 1 AS x FROM TypeDef WHERE TypeName = 'missing'",
+          []) == ["x"])
+    }
+  }
+
+  @Test("a WITH's SELECT * over a CTE heads the CTE's columns, not the base")
+  func withCTEShadowingHeaders() throws {
+    // A CTE `TypeDef` SHADOWS the six-column base `TypeDef`: the run resolves
+    // the trailing `SELECT * FROM TypeDef` against the CTE (one column `x`), so
+    // the header must too — derived with the CTE scope in place, not the base
+    // catalog. The bug this guards headed the six base field names, a
+    // column-count mismatch against the one-column result.
+    DatabaseSQLTests.with { catalog in
+      let shell = Shell(catalog)
+      #expect(shell.headers(of:
+          "WITH TypeDef(x) AS (SELECT 1) SELECT * FROM TypeDef", [[.integer(1)]])
+          == ["x"])
+    }
+  }
+
+  @Test("a WITH heads its trailing query's CTE-resolved column names")
+  func withCTEExplicitHeaders() throws {
+    // The trailing query names columns off the CTE it references: an explicit
+    // list `(a, b)` heads `a, b` through the CTE, and a bare-column projection
+    // reads the CTE's declared column. Both resolve against the CTE scope.
+    DatabaseSQLTests.with { catalog in
+      let shell = Shell(catalog)
+      #expect(shell.headers(of:
+          "WITH t(a, b) AS (SELECT 1, 2) SELECT * FROM t",
+          [[.integer(1), .integer(2)]]) == ["a", "b"])
+      #expect(shell.headers(of:
+          "WITH t(a, b) AS (SELECT 1, 2) SELECT b FROM t",
+          [[.integer(2)]]) == ["b"])
+    }
+  }
+
+  @Test("a WITH not shadowing a base heads its trailing SELECT * real names")
+  func withCTENotShadowingHeaders() throws {
+    // A CTE whose name does NOT collide with a base relation leaves the base
+    // reachable: the trailing `SELECT * FROM TypeDef` resolves the six real
+    // base columns, and the unrelated CTE scope does not perturb them.
+    DatabaseSQLTests.with { catalog in
+      let shell = Shell(catalog)
+      #expect(shell.headers(of:
+          "WITH t(x) AS (SELECT 1) SELECT * FROM TypeDef", [])
+          == ["Flags", "TypeName", "TypeNamespace", "Extends",
+              "FieldList", "MethodList"])
+    }
+  }
+
+  @Test("`.schema` still faults a data-dependently ill-typed query")
+  func schemaFaultsIllTyped() {
+    // The validating default a static shape check keeps: `.schema` reports an
+    // ill-typed query even when a data-dependent filter would spare it at run.
+    // The SAME `TypeName + 1` the derive-only header renders faults here — the
+    // filter is not statically false, so the projection is reachable and its
+    // text arithmetic type-checks to `SQLError.operand`; `.schema` is a dry-run
+    // TYPE check, not a run.
+    DatabaseSQLTests.with { catalog in
+      var shell = Shell(catalog)
+      #expect(throws: SQLError.self) {
+        try shell.execute(
+            ".schema SELECT TypeName + 1 AS x FROM TypeDef WHERE TypeName = ''")
+      }
+    }
+  }
+
   @Test("a `.quit` inside a `.read` file leaves the shell, not just the file")
   func readPropagatesQuit() throws {
     // `.read` drives the same statement stream, but a `.quit` in the file must

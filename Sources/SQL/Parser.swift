@@ -145,9 +145,10 @@ internal struct Parser: ~Escapable {
   /// first arm's arity is statically known — a `.columns`/`.expressions`
   /// projection, but not a `SELECT *`, whose width is known only at resolution —
   /// else `SQLError.columns`. Absent a list, the names are inferred from the
-  /// projection (`infer`). The final names — explicit or inferred — must be
-  /// case-insensitively unique, matching `Schema.ordinal(of:)`'s resolution, or
-  /// the shadowed column would be unreachable (`SQLError.duplicate`).
+  /// projection (`Projection.names()`). The final names — explicit or inferred
+  /// — must be case-insensitively unique, matching `Schema.ordinal(of:)`'s
+  /// resolution, or the shadowed column would be unreachable
+  /// (`SQLError.duplicate`).
   private func columns(_ explicit: Array<String>?, _ query: Query)
       throws(SQLError) -> Array<String> {
     if let explicit, let arity = arity(query.first.projection),
@@ -157,7 +158,7 @@ internal struct Parser: ~Escapable {
     let columns: Array<String> = if let explicit {
       explicit
     } else {
-      try infer(query.first.projection)
+      try query.first.projection.names()
     }
     var seen = Set<String>()
     for column in columns where !seen.insert(column.lowercased()).inserted {
@@ -212,35 +213,6 @@ internal struct Parser: ~Escapable {
       columns.count
     case let .expressions(items):
       items.count
-    }
-  }
-
-  /// Infers a view's column names from its `projection`.
-  ///
-  /// A `columns` projection yields each reference's name (the qualifier
-  /// dropped); an `expressions` projection yields each item's alias, or — for a
-  /// bare column with no alias — the column's name; a non-column expression with
-  /// no alias, and a `SELECT *`, have no inferable name and fault with
-  /// `SQLError.named`.
-  private func infer(_ projection: Projection) throws(SQLError)
-      -> Array<String> {
-    switch projection {
-    case .all:
-      throw .named("SELECT *")
-    case let .columns(columns):
-      return columns.map(\.name)
-    case let .expressions(items):
-      var names = Array<String>()
-      for item in items {
-        if let alias = item.alias {
-          names.append(alias)
-        } else if case let .column(column) = item.expression {
-          names.append(column.name)
-        } else {
-          throw .named("an unaliased expression")
-        }
-      }
-      return names
     }
   }
 

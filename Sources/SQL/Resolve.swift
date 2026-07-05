@@ -170,6 +170,377 @@ internal struct Scope {
     members.map { ($0.offset, $0.schema.extent) }
   }
 
+  /// The relations' name-resolution schemas, in chain order — the surface the
+  /// result-schema walk reads each relation's `names`/`types` off for a
+  /// `SELECT *`.
+  internal var schemas: Array<Schema> {
+    members.map(\.schema)
+  }
+
+  /// The value type of the real column at combined `ordinal` — the type the
+  /// owning relation's schema types it, for the result-schema walk.
+  ///
+  /// A combined `ordinal` falls in exactly one relation's `[offset, offset +
+  /// extent)` span; a real one (its local index `< width`) reads that schema's
+  /// `types`. A virtual ordinal (`Id`, an owner foreign key) is not an ISO
+  /// column and carries no schema type, so it reports `.integer` — the identity
+  /// and foreign-key columns are integral.
+  internal func type(at ordinal: Int) -> ValueType {
+    for member in members {
+      let local = ordinal - member.offset
+      guard local >= 0, local < member.schema.extent else { continue }
+      return local < member.schema.width ? member.schema.types[local]
+                                         : .integer
+    }
+    return .integer
+  }
+
+  /// The value type a scalar `expression` yields, statically: a bare column its
+  /// source type, a literal its own, a standard aggregate its result domain
+  /// (see `aggregate(_:over:_:)`), a scalar call its routine's declared return
+  /// type (`returns`), a binary arithmetic expression a numeric result (see
+  /// `arithmetic(_:_:)`). It resolves the column ordinal (so an unknown or
+  /// ambiguous reference faults as a projection would) but reads no cursor.
+  ///
+  /// `validate` separates output-kind DERIVATION from run-time operand
+  /// VALIDATION. When `true` (the type-check path) an aggregate or arithmetic
+  /// over a non-numeric operand, or a call to an unregistered routine, faults
+  /// exactly as a run would. When `false` (the schema path) it only DERIVES the
+  /// nominal type a run would produce — arithmetic an integer/double, an
+  /// unknown call the `.integer` default — never faulting on an operand, so a
+  /// schema resolves even for an expression a zero-row limit or a short-circuit
+  /// makes unreachable (a run never evaluates it, so it cannot fault).
+  internal func type(of expression: Expression,
+                     _ routines: Routines = [:],
+                     validate: Bool = true)
+      throws(SQLError) -> ValueType {
+    switch expression {
+    case let .column(column):
+      try type(at: ordinal(of: column))
+    case let .literal(literal):
+      switch literal {
+      case .string: .text
+      case .integer: .integer
+      case .double: .double
+      }
+    case let .call(name, arguments):
+      try call(name, over: arguments, routines, validate: validate)
+    case let .aggregate(function, operand):
+      try aggregate(function, over: operand, routines, validate: validate)
+    case let .binary(op, lhs, rhs):
+      try arithmetic(op, lhs, rhs, routines, validate: validate)
+    }
+  }
+
+  /// The result type of the scalar routine `name` called over `arguments` — its
+  /// declared return type (an unregistered name faults `SQLError.function`).
+  ///
+  /// When validating a registered routine, its declared signature is enforced
+  /// exactly as a run would fault: the argument count must equal the routine's
+  /// `parameters` arity, and each argument's static type must equal the
+  /// declared parameter type. A nullable column of the DECLARED type passes —
+  /// statically it carries its declared type and a run-time NULL propagates —
+  /// so only a definitively-wrong type (text where an integer is required) is
+  /// rejected, mirroring a routine like `BITAND` throwing `SQLError.argument`
+  /// on a non-integer non-NULL value. Each argument is typed too, so a type
+  /// error nested in a call — `BITAND(Name + 1, 1)` over text — faults exactly
+  /// as a run would, rather than the call reporting its return type over an
+  /// un-evaluable argument `compile` resolved but never type-checked.
+  private func call(_ name: String, over arguments: Array<Expression>,
+                    _ routines: Routines,
+                    validate: Bool)
+      throws(SQLError) -> ValueType {
+    guard let routine = routines[name] else {
+      if validate { throw .function(name) }
+      return .integer
+    }
+    if validate {
+      guard arguments.count == routine.parameters.count else {
+        throw .argument(
+            "\(name) takes \(routine.parameters.count) arguments")
+      }
+      for (argument, expected) in zip(arguments, routine.parameters) {
+        let type = try type(of: argument, routines, validate: true)
+        guard type == expected else {
+          throw .argument("\(name) requires \(expected.domain) arguments")
+        }
+      }
+    }
+    return routine.returns
+  }
+
+  /// The result type of `function` folded over `operand`. `COUNT` counts rows
+  /// (`.integer`); `MIN`/`MAX` take the operand's own type — they compare, so
+  /// any comparable value folds. `SUM`/`AVG` fold NUMERICALLY: `SUM` yields the
+  /// operand's numeric type, `AVG` a double, so both REQUIRE a numeric operand.
+  /// Over text, boolean, or blob `Aggregate.fold` faults `SQLError.operand` on
+  /// the first non-NULL value, so typing faults the same way rather than
+  /// advertising `AVG(Name)` as a double or `SUM(Name)` as text for a query
+  /// that cannot fold its rows.
+  private func aggregate(_ function: Aggregate, over operand: Aggregand,
+                         _ routines: Routines,
+                         validate: Bool)
+      throws(SQLError) -> ValueType {
+    switch function {
+    case .count:
+      // `COUNT(expr)` evaluates `expr` per row to test it is non-NULL, so
+      // validate the operand (`COUNT(*)` has none); the result is always an
+      // integer count.
+      if case let .expression(argument) = operand {
+        _ = try type(of: argument, routines, validate: validate)
+      }
+      return .integer
+    case .min, .max:
+      switch operand {
+      case .star: return .integer
+      case let .expression(argument):
+        return try type(of: argument, routines, validate: validate)
+      }
+    case .sum, .avg:
+      let type: ValueType = switch operand {
+      case .star: .integer
+      case let .expression(argument):
+        try type(of: argument, routines, validate: validate)
+      }
+      if validate, !type.numeric { throw .operand("operands must be numeric") }
+      return function == .avg ? .double : type
+    }
+  }
+
+  /// The result type of `lhs op rhs` — a double when either operand is a double
+  /// (`Age + 1.5`), else an integer. When validating, both operands must be
+  /// numeric (a text/boolean/blob operand has no arithmetic —
+  /// `Arithmetic.apply` faults `SQLError.operand`); a `/` by a literal zero is
+  /// rejected up front (`SQLError.divide`); and two literal operands are folded
+  /// to reject a deterministic overflow (`SQLError.magnitude`). Typing thus
+  /// faults as a run would rather than advertise a header no row can produce.
+  private func arithmetic(_ op: Arithmetic, _ lhs: Expression,
+                          _ rhs: Expression,
+                          _ routines: Routines,
+                          validate: Bool)
+      throws(SQLError) -> ValueType {
+    let left = try type(of: lhs, routines, validate: validate)
+    let right = try type(of: rhs, routines, validate: validate)
+    if validate {
+      guard left.numeric, right.numeric else {
+        throw .operand("operands must be numeric")
+      }
+      // A literal-zero divisor faults `Arithmetic.apply` on the first row it
+      // divides, so reject it statically; a non-literal divisor is per row.
+      if case .divide = op, zero(rhs) { throw .divide }
+      // Two literal operands fold to a constant, so a deterministic magnitude
+      // fault (integer overflow, a non-finite double) hits every row the
+      // projection reaches — a FROM-less SELECT at once. Fold them so the
+      // schema rejects the column rather than advertise a header no row yields.
+      if case let .literal(lhs) = lhs, case let .literal(rhs) = rhs {
+        _ = try op.apply(value(of: lhs), value(of: rhs))
+      }
+    }
+    return left == .double || right == .double ? .double : .integer
+  }
+
+  /// Whether `expression` is a literal zero — the statically-known divisor a
+  /// `/` would fault on.
+  private func zero(_ expression: Expression) -> Bool {
+    switch expression {
+    case .literal(.integer(0)): true
+    case let .literal(.double(value)): value == 0
+    default: false
+    }
+  }
+
+  /// Type-checks every operand expression in `predicate` — a comparison's two
+  /// sides, an `IS NULL` operand — recursing through `AND`/`OR`/`NOT`. It types
+  /// each for the side effect of validation (an operand or function fault a run
+  /// would raise) and discards the result. A `left op :parameter` bound
+  /// comparison is NOT checked: with no binding (the schema default) the run
+  /// yields UNKNOWN without evaluating the left term.
+  ///
+  /// It respects the executor's short-circuit: `false AND rhs` and `true OR
+  /// rhs` never evaluate `rhs` (`evaluate` returns on the left arm), so a right
+  /// arm a STATICALLY-false `AND` (or true `OR`) guards is unreachable and is
+  /// not type-checked — `WHERE 1 = 0 AND Name + 1 = 2` runs, so its schema
+  /// resolves rather than faulting on the unreachable `Name + 1`.
+  func check(_ predicate: Predicate,
+             _ routines: Routines = [:])
+      throws(SQLError) {
+    switch predicate {
+    case let .comparison(left, _, right):
+      _ = try type(of: left, routines)
+      _ = try type(of: right, routines)
+    case .bound:
+      // `left op :parameter` with no binding — the schema default `[:]` —
+      // yields UNKNOWN without evaluating the left term, so a run just produces
+      // no rows; schema validation has no bindings, so it does not evaluate it.
+      break
+    case let .null(operand, _):
+      _ = try type(of: operand, routines)
+    case let .and(lhs, rhs):
+      try check(lhs, routines)
+      if constant(lhs) != false { try check(rhs, routines) }
+    case let .or(lhs, rhs):
+      try check(lhs, routines)
+      if constant(lhs) != true { try check(rhs, routines) }
+    case let .not(operand):
+      try check(operand, routines)
+    }
+  }
+
+  /// The definite constant truth value of `predicate` when it is statically
+  /// decidable — a comparison of literal operands, composed through
+  /// `AND`/`OR`/`NOT` — else `nil` (a predicate reading a column or a
+  /// `:parameter` is decided per row). `check(_:_:)` reads it to skip an arm
+  /// the executor's short-circuit proves unreachable, matching `matches` and
+  /// `value(of:)`, the primitives the run itself evaluates a comparison with.
+  func constant(_ predicate: Predicate) -> Bool? {
+    switch predicate {
+    case let .comparison(left, op, right):
+      guard case let .literal(left) = left, case let .literal(right) = right,
+          let lhs = try? value(of: left), let rhs = try? value(of: right) else {
+        return nil
+      }
+      return matches(lhs, op, rhs)
+    case let .and(lhs, rhs):
+      if constant(lhs) == false || constant(rhs) == false { return false }
+      return constant(lhs) == true && constant(rhs) == true ? true : nil
+    case let .or(lhs, rhs):
+      if constant(lhs) == true || constant(rhs) == true { return true }
+      return constant(lhs) == false && constant(rhs) == false ? false : nil
+    case let .not(operand):
+      guard let value = constant(operand) else { return nil }
+      return !value
+    case let .null(operand, negated):
+      // A literal is never NULL, so `IS NULL` is definitely false and `IS NOT
+      // NULL` (`negated`) definitely true; a non-literal operand is per row.
+      guard case .literal = operand else { return nil }
+      return negated
+    case .bound:
+      return nil
+    }
+  }
+
+  /// Validates the aggregate sub-expressions of `expression` — an aggregate's
+  /// fold runs over every row (in the aggregate node) BEFORE a `LIMIT`, so it
+  /// is reachable even under a zero-row limit — WITHOUT validating the
+  /// surrounding per-result expression a run never reaches. It recurses through
+  /// a binary's operands and a call's arguments to reach an aggregate, then
+  /// validates it (its operand included); a bare column or literal has none.
+  func aggregates(in expression: Expression,
+                  _ routines: Routines = [:])
+      throws(SQLError) {
+    switch expression {
+    case .column, .literal:
+      break
+    case let .aggregate(function, operand):
+      _ = try aggregate(function, over: operand, routines, validate: true)
+    case let .call(_, arguments):
+      for argument in arguments { try aggregates(in: argument, routines) }
+    case let .binary(_, lhs, rhs):
+      try aggregates(in: lhs, routines)
+      try aggregates(in: rhs, routines)
+    }
+  }
+
+  /// Validates the aggregate sub-expressions of `predicate` — a `HAVING`'s
+  /// aggregates are collected and FOLDED by the group node before the `HAVING`
+  /// filter runs, so they are reachable even in an arm the filter's
+  /// short-circuit skips. It walks EVERY arm (unlike `check`), reaching an
+  /// aggregate through a comparison's operands and `AND`/`OR`/`NOT`.
+  func aggregates(in predicate: Predicate,
+                  _ routines: Routines = [:])
+      throws(SQLError) {
+    switch predicate {
+    case let .comparison(left, _, right):
+      try aggregates(in: left, routines)
+      try aggregates(in: right, routines)
+    case let .bound(left, _, _):
+      try aggregates(in: left, routines)
+    case let .null(operand, _):
+      try aggregates(in: operand, routines)
+    case let .and(lhs, rhs), let .or(lhs, rhs):
+      try aggregates(in: lhs, routines)
+      try aggregates(in: rhs, routines)
+    case let .not(operand):
+      try aggregates(in: operand, routines)
+    }
+  }
+
+  /// The value `expression` yields when a whole-result aggregate projects the
+  /// single empty group a constant-false `WHERE` leaves — the fold over zero
+  /// rows: `COUNT` is 0, every other aggregate NULL, a literal itself, a binary
+  /// the operator applied to its folded operands, a call the routine applied to
+  /// its folded arguments. It EVALUATES the empty group exactly as a run does,
+  /// so it raises precisely the run's fault — an unregistered routine
+  /// (`SQLError.function`), a bad arity or kind (`SQLError.argument`), a divide
+  /// by zero (`SQLError.divide`), an overflow (`SQLError.magnitude`) —
+  /// while a NULL operand propagates without faulting. An aggregate's own
+  /// operand is never reached (the fold sees no row), and a bare column cannot
+  /// appear (a non-grouped column is a grouping error `compile` already
+  /// rejected), so a `SUM(text)` is NULL here rather than a type fault.
+  func empty(_ expression: Expression, _ routines: Routines = [:])
+      throws(SQLError) -> Value {
+    switch expression {
+    case let .literal(literal):
+      return try value(of: literal)
+    case let .aggregate(function, _):
+      return function == .count ? .integer(0) : .null
+    case let .binary(op, lhs, rhs):
+      return try op.apply(empty(lhs, routines), empty(rhs, routines))
+    case let .call(name, arguments):
+      guard let routine = routines[name] else { throw .function(name) }
+      var values = Array<Value>()
+      values.reserveCapacity(arguments.count)
+      for argument in arguments {
+        try values.append(empty(argument, routines))
+      }
+      let result = try routine(values)
+      // A routine call bypasses `Arithmetic.apply`'s finite check, so enforce
+      // it here: a non-finite double faults as a run would (magnitude).
+      if case let .double(number) = result, !number.isFinite {
+        throw .magnitude("function '\(name)' produced a non-finite double")
+      }
+      return result
+    case .column:
+      return .null
+    }
+  }
+
+  /// Whether a `HAVING` `predicate` passes over the single empty group a
+  /// constant-false `WHERE` leaves — TRUE keeps the group (the projection then
+  /// runs), FALSE or UNKNOWN (`nil`) drops it (the projection is unreachable).
+  /// It evaluates the predicate as a run does: comparing the folded operand
+  /// values (`empty(_:_:)`) with three-valued logic, and short-circuiting
+  /// `AND`/`OR` so an unreachable arm's operand never folds — and never faults.
+  /// A `left op :parameter` with no binding is UNKNOWN, its left unevaluated.
+  func empty(_ predicate: Predicate,
+             _ routines: Routines = [:])
+      throws(SQLError) -> Bool? {
+    switch predicate {
+    case let .comparison(left, op, right):
+      return matches(try empty(left, routines), op, try empty(right, routines))
+    case .bound:
+      return nil
+    case let .null(operand, negated):
+      let value = try empty(operand, routines)
+      let null = if case .null = value { true } else { false }
+      return negated ? !null : null
+    case let .and(lhs, rhs):
+      let left = try empty(lhs, routines)
+      if left == false { return false }
+      let right = try empty(rhs, routines)
+      if right == false { return false }
+      return left == true && right == true ? true : nil
+    case let .or(lhs, rhs):
+      let left = try empty(lhs, routines)
+      if left == true { return true }
+      let right = try empty(rhs, routines)
+      if right == true { return true }
+      return left == false && right == false ? false : nil
+    case let .not(operand):
+      return try empty(operand, routines).map { !$0 }
+    }
+  }
+
   /// Whether `column`'s qualifier admits `member`: an unqualified name admits
   /// every relation, a qualified one only a relation its qualifier (an alias,
   /// else a table name) names.
@@ -427,13 +798,10 @@ internal struct Grouping {
       for item in items {
         let term = try term(item.expression)
         terms.append(term)
-        // Record the output name — an alias, else a bare column's name — so an
-        // `ORDER BY` may name it (the standard alias ordering on an aggregate).
-        if let alias = item.alias {
-          record(alias, term)
-        } else if case let .column(column) = item.expression {
-          record(column.name, term)
-        }
+        // Record the output name (`Projected.name` — an alias, else a bare
+        // column's name) so an `ORDER BY` may name it (the standard alias
+        // ordering on an aggregate); a computed item names nothing.
+        if let name = item.name { record(name, term) }
       }
       return terms
     }

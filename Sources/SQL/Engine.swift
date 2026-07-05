@@ -430,39 +430,43 @@ extension Engine {
     return .project(projection, plan.capped(limit: limit))
   }
 
-  // MARK: - Aggregation
+}
 
-  /// Whether `select` aggregates — it has a `GROUP BY`, a `HAVING`, or an
+// MARK: - Aggregation
+
+extension Select {
+  /// Whether the select aggregates — it has a `GROUP BY`, a `HAVING`, or an
   /// aggregate function anywhere in its projection.
   ///
   /// A query with any of these compiles through the grouped path; one with none
   /// keeps the ordinary `Project(Limit(Sort(Select(_))))` shape unchanged. A
   /// `HAVING` alone (no `GROUP BY`, no aggregate) still aggregates — it filters
   /// the single whole-result group.
-  internal static func aggregates(_ select: Select) -> Bool {
-    if !select.grouping.isEmpty || select.having != nil { return true }
-    switch select.projection {
+  internal var aggregates: Bool {
+    if !grouping.isEmpty || having != nil { return true }
+    switch projection {
     case .all, .columns:
       return false
     case let .expressions(items):
-      return items.contains { aggregated($0.expression) }
+      return items.contains { $0.expression.aggregated }
     }
   }
+}
 
-  /// Whether `expression` contains an aggregate call anywhere within it.
-  private static func aggregated(_ expression: Expression) -> Bool {
-    switch expression {
+extension Expression {
+  /// Whether the expression contains an aggregate call anywhere within it.
+  internal var aggregated: Bool {
+    switch self {
     case .column, .literal:
       false
     case .aggregate:
       true
     case let .call(_, arguments):
-      arguments.contains { aggregated($0) }
+      arguments.contains { $0.aggregated }
     case let .binary(_, lhs, rhs):
-      aggregated(lhs) || aggregated(rhs)
+      lhs.aggregated || rhs.aggregated
     }
   }
-
 }
 
 // MARK: - Aggregation
@@ -1482,7 +1486,7 @@ extension Catalog where Self: ~Escapable {
     // `aggregate` node above the WHERE/join chain and lowers the projection,
     // `HAVING`, and `ORDER BY` against the grouped slot space. A non-aggregate
     // query compiles exactly as before.
-    if Engine.aggregates(select) {
+    if select.aggregates {
       return try group(select, relation, from, ctes, visited)
     }
 

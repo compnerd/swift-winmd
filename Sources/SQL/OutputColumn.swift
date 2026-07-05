@@ -198,7 +198,7 @@ extension Catalog where Self: ~Escapable {
       // projection run over the group's results, so EVALUATE them (`empty`) — a
       // divide, overflow, or bad routine call faults as the run would.
       if scope.constant(predicate) == false {
-        if Engine.aggregates(select), select.grouping.isEmpty {
+        if select.aggregates, select.grouping.isEmpty {
           if let having = select.having {
             // HAVING filters the group BEFORE any OFFSET/FETCH limit, so
             // evaluate it UNCONDITIONALLY — a zero `FETCH` or positive `OFFSET`
@@ -235,7 +235,7 @@ extension Catalog where Self: ~Escapable {
     // would yield leaves only its aggregate folds (validated above) reachable.
     // A whole-result aggregate emits exactly ONE row, so a positive OFFSET
     // drops it too — not just a zero FETCH.
-    let sole = Engine.aggregates(select) && select.grouping.isEmpty
+    let sole = select.aggregates && select.grouping.isEmpty
     if !drops(select.limit, single: sole),
         case let .expressions(items) = select.projection {
       for item in items { _ = try scope.type(of: item.expression, routines) }

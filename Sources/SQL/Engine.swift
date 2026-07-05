@@ -103,6 +103,15 @@ extension Catalog where Self: ~Escapable {
   internal borrowing func run(_ query: Query, _ ctes: CTEs,
                               _ routines: Routines, _ bindings: Bindings)
       throws(SQLError) -> Array<Array<Value>> {
+    // Extend the relations with any `definition_schema.` store relation the
+    // query names, resolved lazily — the overlay after the
+    // CTEs, before the base catalog. Every phase reads the extended map, so a
+    // reserved store relation resolves, plans, and materialises exactly as a
+    // common table expression does; a portable `information_schema.` view over
+    // the store resolves through the ordinary view machinery. The routines ride
+    // in so a store `data_type` row types a view's scalar-call column
+    // (`GUID(...)`) by its declared return type.
+    let ctes = augment(ctes, for: query, rows: true, routines: routines)
     let logical = try compile(query, ctes).pushdown()
     let plan = try optimise(logical, ctes, bindings)
     return try execute(plan, self, ctes, routines, bindings).map(\.values)
@@ -192,7 +201,12 @@ extension Catalog where Self: ~Escapable {
       if cte.recursive && Engine.recursive(cte) {
         rows = try fixpoint(cte, relations, routines, bindings)
       } else {
-        let width = try compile(cte.query, relations).width
+        // The width check resolves the body's relations, so it reads the same
+        // `definition_schema.` overlay the body's own run does — a CTE body may
+        // select from a reserved store relation.
+        let scope = augment(relations, for: cte.query, rows: true,
+                            routines: routines)
+        let width = try compile(cte.query, scope).width
         guard width == cte.columns.count else {
           throw .columns(expected: cte.columns.count, got: width)
         }
@@ -238,6 +252,14 @@ extension Catalog where Self: ~Escapable {
   internal borrowing func fixpoint(_ cte: CTE, _ ctes: CTEs,
                                    _ routines: Routines, _ bindings: Bindings)
       throws(SQLError) -> Array<Array<Value>> {
+    // Extend the scope with any `definition_schema.` store relation the CTE's
+    // body names, so the fixpoint's width-check compiles resolve a reserved
+    // relation as the body's own run does. The routines ride in: this store
+    // entry is cached in `ctes` and reused by every anchor/recursive execution
+    // (a later `augment` will not replace a bound name), so a view column using
+    // even a standard routine (`BITAND(...)`) types the same inside the CTE as
+    // the identical SELECT does outside it.
+    let ctes = augment(ctes, for: cte.query, rows: true, routines: routines)
     guard case let .union(anchor, recursive, all) = cte.query else {
       // A non-`UNION` recursive query runs once, but still binds under
       // `cte.columns`, so validate its compiled width here too — the check the
@@ -453,7 +475,8 @@ extension Catalog where Self: ~Escapable {
   /// standard rule that every non-aggregated projection/`ORDER BY` column appear
   /// in the `GROUP BY`.
   internal borrowing func group(_ select: Select, _ relation: Relation,
-                                _ from: Engine.Resolved, _ ctes: CTEs)
+                                _ from: Engine.Resolved, _ ctes: CTEs,
+                                _ visited: Set<String>)
       throws(SQLError) -> Plan {
     // Resolve every joined relation and lay the FROM relation and each joined
     // one end to end in one combined ordinal space (as the non-aggregate join
@@ -461,7 +484,7 @@ extension Catalog where Self: ~Escapable {
     var joined = Array<Engine.Resolved>()
     joined.reserveCapacity(select.joins.count)
     for join in select.joins {
-      try joined.append(resolve(join.relation, ctes))
+      try joined.append(resolve(join.relation, ctes, visited))
     }
     var relations = [(relation, from.schema)]
     for index in select.joins.indices {
@@ -685,10 +708,11 @@ extension Catalog where Self: ~Escapable {
       // Optimise the view's sub-plan with the bindings so a bound predicate
       // inside the view seeks; the derived leaf itself carries no sort key, so
       // the outer query still scans its result as is. The sub-plan resolves
-      // OUTSIDE the statement's CTE scope (an empty CTE map, matching the empty
-      // scope it compiled under) — a view means what it was registered to mean,
-      // never seeing a caller's `WITH`.
-      try .derived(name: name, plan: optimise(plan, [:], bindings),
+      // OUTSIDE the statement's CTE scope — never a caller's `WITH` — so a view
+      // means what it was registered to mean; its scope is the
+      // `definition_schema.` overlay its OWN query names (the same one it
+      // compiled under), so a view body's store scan re-resolves.
+      try .derived(name: name, plan: optimise(plan, overlay(name), bindings),
                    ordinals: ordinals, seek: seek)
     case let .select(filter, .scan(name, ordinals, nil)):
       try seek(filter, name, ordinals, ctes, bindings)
@@ -1262,24 +1286,26 @@ extension Catalog where Self: ~Escapable {
   /// chain by the trailing arm's flag. The new arm must project the same column
   /// count as the chain's first `SELECT` — the result columns — else
   /// `SQLError.arity`.
-  internal borrowing func compile(_ query: Query, _ ctes: CTEs = [:])
+  internal borrowing func compile(_ query: Query, _ ctes: CTEs = [:],
+                                  _ visited: Set<String> = [])
       throws(SQLError) -> Plan {
     guard case let .union(left, select, all) = query else {
-      return try compile(query.first, ctes)
+      return try compile(query.first, ctes, visited)
     }
 
-    let width = try arity(query.first, ctes)
-    let count = try arity(select, ctes)
+    let width = try arity(query.first, ctes, visited)
+    let count = try arity(select, ctes, visited)
     guard count == width else { throw .arity(width, count) }
-    return try .union(compile(left, ctes),
-                      compile(.select(select), ctes), all: all)
+    return try .union(compile(left, ctes, visited),
+                      compile(.select(select), ctes, visited), all: all)
   }
 
   /// The number of result columns `select` projects — the extent of a `*` over
   /// its relations, else the count of its projected items — for the `UNION`
   /// arity check. The relations resolve through this catalog, the `ctes`
   /// consulted first.
-  private borrowing func arity(_ select: Select, _ ctes: CTEs)
+  private borrowing func arity(_ select: Select, _ ctes: CTEs,
+                               _ visited: Set<String>)
       throws(SQLError) -> Int {
     switch select.projection {
     case .all:
@@ -1287,9 +1313,9 @@ extension Catalog where Self: ~Escapable {
       guard let relation = select.from else {
         throw .named("SELECT * with no FROM")
       }
-      var width = try resolve(relation, ctes).schema.width
+      var width = try resolve(relation, ctes, visited).schema.width
       for join in select.joins {
-        try width += resolve(join.relation, ctes).schema.width
+        try width += resolve(join.relation, ctes, visited).schema.width
       }
       return width
     case let .columns(columns):
@@ -1324,7 +1350,17 @@ extension Catalog where Self: ~Escapable {
   /// The parser checks this whenever the projection's arity is statically known;
   /// this is the backstop for a `SELECT *` view, whose width is known only here,
   /// after the sub-plan compiles — a mismatch is `SQLError.columns`.
-  internal borrowing func resolve(_ relation: Relation, _ ctes: CTEs)
+  ///
+  /// `visited` names the views already being resolved down this chain. A view
+  /// whose body reaches back to itself — `A` over `B` over `A`, or a view over
+  /// itself — would recurse resolve→compile→resolve without end (a stack
+  /// overflow, not an `SQLError`); re-encountering a name is a cyclic
+  /// definition, reported as `.recursion` rather than hung. The
+  /// `definition_schema.` store's `columns` builder, which compiles every view
+  /// to advertise it, relies on this: a cyclic view's `try? compile` catches
+  /// the fault and skips it.
+  internal borrowing func resolve(_ relation: Relation, _ ctes: CTEs,
+                                  _ visited: Set<String> = [])
       throws(SQLError) -> Engine.Resolved {
     let name = relation.name
     if let cte = ctes[name.lowercased()] {
@@ -1335,7 +1371,30 @@ extension Catalog where Self: ~Escapable {
     }
 
     if let view = view(named: name) {
-      let plan = try compile(view.query, [:])
+      // A view whose body reaches back to itself — `A` over `B` over `A`, or a
+      // view over itself — would recurse resolve→compile→resolve without end (a
+      // stack overflow, not an `SQLError`). `visited` names the views already
+      // being resolved down this chain; re-encountering one is a cyclic
+      // definition, reported as `.recursion` rather than hung.
+      guard !visited.contains(name.lowercased()) else {
+        throw .recursion(name)
+      }
+      // The view body compiles OUTSIDE the caller's statement CTEs, but it may
+      // still name a reserved `definition_schema.` store relation, so seed its
+      // scope with the overlay built from the view's OWN query — never the
+      // caller's `ctes` — so a view defined over a store relation resolves.
+      //
+      // Compilation resolves only SCHEMAS (names → ordinals/types), never rows,
+      // so the overlay is built SCHEMA-ONLY: a reserved relation types from its
+      // header+types, and the row build is never triggered here. A view over
+      // `definition_schema.columns` would otherwise re-enter that row builder
+      // (which lists views, whose bodies name the relation again) — an
+      // unbounded recursion. The rows a view over a reserved relation actually
+      // returns are supplied at EXECUTE time, where `derive` rebuilds the
+      // overlay with rows and runs the sub-plan.
+      let overlay = augment([:], for: view.query, rows: false)
+      let plan =
+          try compile(view.query, overlay, visited.union([name.lowercased()]))
       let projected = plan.width
       guard view.columns.count == projected else {
         throw .columns(expected: projected, got: view.columns.count)
@@ -1378,7 +1437,8 @@ extension Catalog where Self: ~Escapable {
   /// cells concatenated in order). The tree is logical: every scan is a full
   /// `Scan(_, _, nil)`; the optimiser turns scans into seeks and each product
   /// into a join.
-  internal borrowing func compile(_ select: Select, _ ctes: CTEs = [:])
+  internal borrowing func compile(_ select: Select, _ ctes: CTEs = [:],
+                                  _ visited: Set<String> = [])
       throws(SQLError) -> Plan {
     guard let relation = select.from else {
       // A FROM-less select projects expressions over a single row; a `WHERE`,
@@ -1395,7 +1455,7 @@ extension Catalog where Self: ~Escapable {
       }
       return try Engine.scalar(select.projection)
     }
-    let from = try resolve(relation, ctes)
+    let from = try resolve(relation, ctes, visited)
 
     if let limit = select.limit {
       // The parser yields only non-negative counts (a `-` is its own token), but
@@ -1412,7 +1472,7 @@ extension Catalog where Self: ~Escapable {
     // `HAVING`, and `ORDER BY` against the grouped slot space. A non-aggregate
     // query compiles exactly as before.
     if Engine.aggregates(select) {
-      return try group(select, relation, from, ctes)
+      return try group(select, relation, from, ctes, visited)
     }
 
     guard !select.joins.isEmpty else {
@@ -1444,7 +1504,7 @@ extension Catalog where Self: ~Escapable {
     var joined = Array<Engine.Resolved>()
     joined.reserveCapacity(select.joins.count)
     for join in select.joins {
-      try joined.append(resolve(join.relation, ctes))
+      try joined.append(resolve(join.relation, ctes, visited))
     }
 
     var relations = [(relation, from.schema)]

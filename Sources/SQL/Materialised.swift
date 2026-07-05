@@ -33,9 +33,20 @@ internal struct Materialised: Hashable, Sendable {
   /// The relation's rows, each a positional array of typed values.
   internal let rows: Array<Array<Value>>
 
-  internal init(columns: Array<String>, rows: Array<Array<Value>>) {
+  /// The value type of each real column, in ordinal order — the types a
+  /// materialised relation reports to the result-schema walk.
+  ///
+  /// A CTE's rows carry no static types, so a call site that has none passes
+  /// `nil` and every column types `.integer` (the historical default); a
+  /// DEFINITION_SCHEMA store relation, whose columns have known ISO domains,
+  /// passes them so `information_schema` columns report their real types.
+  internal let types: Array<ValueType>
+
+  internal init(columns: Array<String>, rows: Array<Array<Value>>,
+                types: Array<ValueType>? = nil) {
     self.columns = columns
     self.rows = rows
+    self.types = types ?? Array(repeating: .integer, count: columns.count)
   }
 
   /// The real column count — the extent of a `SELECT *`.
@@ -49,7 +60,7 @@ internal struct Materialised: Hashable, Sendable {
   /// virtual `Id` at `width`.
   internal func schema() -> Schema {
     Schema(width: width, extent: extent, names: columns,
-           types: Array(repeating: .integer, count: width), virtuals: ["Id"])
+           types: types, virtuals: ["Id"])
   }
 
   /// The record for the row at `index`, materialising the referenced `ordinals`

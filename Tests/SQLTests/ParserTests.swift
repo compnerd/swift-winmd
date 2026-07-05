@@ -358,13 +358,13 @@ struct JoinTests {
   func listJoin() throws {
     let select = try parse(select: """
         SELECT m.Name FROM TypeDef AS t
-          JOIN MethodDef AS m ON m.parent = t.rowid
+          JOIN MethodDef AS m ON m.parent = t.Id
           WHERE t.TypeName = 'IUnknown'
         """)
     #expect(select.from == Relation(name: "TypeDef", alias: "t"))
     #expect(select.joins == [
       Join(relation: Relation(name: "MethodDef", alias: "m"),
-           left: Column("m.parent"), right: Column("t.rowid")),
+           left: Column("m.parent"), right: Column("t.Id")),
     ])
     #expect(select.projection == .columns([Column("m.Name")]))
     let value = Expression.literal(.string("IUnknown"))
@@ -376,11 +376,11 @@ struct JoinTests {
   func forwardJoin() throws {
     let select = try parse(select: """
         SELECT r.TypeName FROM TypeDef AS t
-          JOIN TypeRef AS r ON t.Extends = r.rowid
+          JOIN TypeRef AS r ON t.Extends = r.Id
         """)
     #expect(select.joins == [
       Join(relation: Relation(name: "TypeRef", alias: "r"),
-           left: Column("t.Extends"), right: Column("r.rowid")),
+           left: Column("t.Extends"), right: Column("r.Id")),
     ])
   }
 
@@ -388,13 +388,13 @@ struct JoinTests {
   func unaliasedJoin() throws {
     let select = try parse(select: """
         SELECT Name FROM MethodDef
-          JOIN Param ON Param.parent = MethodDef.rowid
+          JOIN Param ON Param.parent = MethodDef.Id
         """)
     #expect(select.from == Relation(name: "MethodDef"))
     #expect(select.joins == [
       Join(relation: Relation(name: "Param"),
            left: Column("Param.parent"),
-           right: Column("MethodDef.rowid")),
+           right: Column("MethodDef.Id")),
     ])
   }
 
@@ -402,15 +402,15 @@ struct JoinTests {
   func chainedJoins() throws {
     let select = try parse(select: """
         SELECT Param.Name FROM TypeDef AS t
-          JOIN MethodDef AS m ON m.parent = t.rowid
-          JOIN Param ON Param.parent = m.rowid
+          JOIN MethodDef AS m ON m.parent = t.Id
+          JOIN Param ON Param.parent = m.Id
         """)
     #expect(select.from == Relation(name: "TypeDef", alias: "t"))
     #expect(select.joins == [
       Join(relation: Relation(name: "MethodDef", alias: "m"),
-           left: Column("m.parent"), right: Column("t.rowid")),
+           left: Column("m.parent"), right: Column("t.Id")),
       Join(relation: Relation(name: "Param"),
-           left: Column("Param.parent"), right: Column("m.rowid")),
+           left: Column("Param.parent"), right: Column("m.Id")),
     ])
   }
 
@@ -424,7 +424,7 @@ struct JoinTests {
   @Test("rejects a join whose ON is not an equality")
   func nonEqualityOn() {
     #expect(throws: SQLError.self) {
-      _ = try Statement(parsing: "SELECT * FROM A JOIN B ON a.x < b.rowid")
+      _ = try Statement(parsing: "SELECT * FROM A JOIN B ON a.x < b.Id")
     }
   }
 }

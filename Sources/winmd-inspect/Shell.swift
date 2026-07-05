@@ -82,7 +82,7 @@ internal struct Schema: Metacommand {
     // statement the shell runs — the dry run validating the whole statement.
     let parsed = try Statement(parsing: query)
     let columns =
-        try shell.session.columns(of: parsed, routines: Session.routines,
+        try shell.session.columns(of: parsed, routines: shell.session.functions,
                                   validate: true)
     for column in columns {
       print("\(column.name)\t\(column.type.domain)")
@@ -473,9 +473,15 @@ internal struct Shell: ~Escapable {
     var body = try self.template(named: template, search: search)
     let language = Shell.language(declaredIn: &body, search: search)
     // The queries resolve against both the target-language spec's UDFs
-    // (`SANITIZE`) and the WinMD-domain UDFs (`GUID`) — the `interfaces` view
-    // spells its `iid` through `GUID(c.Value)`.
-    let routines = language.routines.merging(Session.routines)
+    // (`SANITIZE`) and the session's routines (`session.functions`) — the
+    // WinMD-domain UDFs (`GUID`, which the `interfaces` view spells its `iid`
+    // through) and the standard prelude it is seeded with, PLUS every scalar
+    // function a session `CREATE FUNCTION` has defined. Merging the session's
+    // routines (not the static `Session.routines` prelude) gives the render the
+    // same routine set a `SELECT`/`.schema` resolves through, so a session
+    // helper is visible to the render SQL and to the session views it reads;
+    // later-wins lets such a helper overlay a language spec's UDF.
+    let routines = language.routines.merging(session.functions)
     // The type spellings are decoded at render time from the spec's `Dialect`:
     // the adapter is language-neutral, so the render — not the binary's WinMD →
     // SQL layer — spells a return/parameter, navigating the signature with the
@@ -653,11 +659,12 @@ internal struct Shell: ~Escapable {
       return Shell.generic(rows)
     }
     if case .create = statement { return nil }
+    if case .function = statement { return nil }
     // Prefer the resolved result schema (real names for a plain/base/empty
     // query, and a WITH's CTE-scoped trailing query); fall back to the trailing
     // query's syntactic projection only when the derive cannot resolve it.
     if let columns = try? session.columns(of: statement,
-                                          routines: Session.routines,
+                                          routines: session.functions,
                                           validate: false) {
       return columns.map(\.name)
     }
@@ -666,13 +673,15 @@ internal struct Shell: ~Escapable {
 
   /// The row-producing query of `statement` — a `select`'s query, or a `with`'s
   /// trailing query — the syntactic-projection fallback names its columns off.
-  /// A `create` never reaches here (`headers(of:)` returns `nil` for it first),
-  /// so it maps to its own (nameless) query defensively.
+  /// A `create` or a `function` never reaches here (`headers(of:)` returns `nil`
+  /// for a definition first), so it maps to a defensive nameless query.
   private static func trailing(_ statement: Statement) -> SQL.Query {
     switch statement {
     case let .select(query): query
     case let .with(_, query): query
     case let .create(_, view): view.query
+    case .function:
+      .select(Select(projection: .all, from: nil))
     }
   }
 
@@ -1104,10 +1113,11 @@ internal struct Statements: Sequence {
 
 extension Session {
   /// Runs one SQL `statement` against the session, returning the rows a
-  /// `SELECT` yields — or none for a `CREATE VIEW`, which registers its `View`
-  /// (the key case-folded, the way the catalog resolves it) instead. `CREATE
-  /// VIEW` is an ordinary statement here, not a special case; the shell prints
-  /// whatever rows come back.
+  /// `SELECT` yields — or none for a `CREATE VIEW`, which registers its `View`,
+  /// or a `CREATE FUNCTION`, which registers its scalar `Function` into the
+  /// session's routines (each key case-folded, the way the catalog and routines
+  /// resolve it) instead. A `CREATE` is an ordinary statement here, not a
+  /// special case; the shell prints whatever rows come back.
   ///
   /// `bindings` resolve a `:name` parameter of a `SELECT` or a `WITH` — the
   /// shell threads its `.bind` bindings through here, so a parameterized query
@@ -1122,10 +1132,13 @@ extension Session {
     case let .create(name, view):
       register(name, view)
       return []
+    case let .function(name, function):
+      try register(name, function)
+      return []
     case let .select(query):
-      return try self.run(query, Session.routines, bindings: bindings)
+      return try self.run(query, functions, bindings: bindings)
     case .with:
-      return try self.run(parsed, Session.routines, bindings: bindings)
+      return try self.run(parsed, functions, bindings: bindings)
     }
   }
 }

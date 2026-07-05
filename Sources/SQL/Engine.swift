@@ -18,9 +18,16 @@
 /// chain. Absent layers are omitted. Executing the plan yields the result
 /// records' typed values; formatting them is a client's job.
 public enum Engine {
-  // MARK: - WITH
+  /// The greatest number of fixpoint iterations a recursive CTE may take before
+  /// the engine concludes it does not terminate and throws
+  /// `SQLError.recursion`.
+  internal static let kRecursionCap = 10_000
+}
 
-  /// Whether `cte` actually references itself — the test the fixpoint routing
+// MARK: - WITH
+
+extension CTE {
+  /// Whether the CTE actually references itself — the test the fixpoint routing
   /// turns on, distinct from the syntactic `recursive` flag a `WITH RECURSIVE`
   /// stamps on every member.
   ///
@@ -30,41 +37,40 @@ public enum Engine {
   /// re-evaluate an arm that never reads the CTE, repeating its rows without end
   /// (a `UNION ALL`) or needlessly (a `UNION`). A CTE is recursive in truth when
   /// its recursive arm — the right member of the top-level `UNION`, the one the
-  /// fixpoint compiles with the CTE bound — names `cte.name` in a `FROM`/`JOIN`.
+  /// fixpoint compiles with the CTE bound — names `name` in a `FROM`/`JOIN`.
   /// The anchor is the base case, compiled with the name NOT in scope, so a
   /// `FROM <name>` there reads a base relation of that name, not the CTE.
   /// Scanning the anchor too would misroute `WITH RECURSIVE Parent(Id) AS
   /// (SELECT Id FROM Parent UNION ALL SELECT Id FROM Extra)` — whose anchor
   /// merely reads the same-named base — into the fixpoint.
-  internal static func recursive(_ cte: CTE) -> Bool {
-    guard case let .union(_, arm, _) = cte.query else { return false }
-    return references(arm, cte.name.lowercased())
+  internal var recurses: Bool {
+    guard case let .union(_, arm, _) = query else { return false }
+    return arm.references(name.lowercased())
   }
+}
 
-  /// Whether `query` names the relation `name` (case-folded) in ANY member's
+extension Query {
+  /// Whether the query names the relation `name` (case-folded) in ANY member's
   /// `FROM`/`JOIN` — walking the left-associative `UNION` chain and each arm.
   /// Used to spot a self-reference lurking in a recursive body's anchor;
-  /// `recursive` itself inspects only the recursive arm.
-  internal static func references(_ query: Query, _ name: String) -> Bool {
-    switch query {
+  /// `CTE.recurses` itself inspects only the recursive arm.
+  internal func references(_ name: String) -> Bool {
+    switch self {
     case let .select(select):
-      references(select, name)
+      select.references(name)
     case let .union(left, select, _):
-      references(left, name) || references(select, name)
+      left.references(name) || select.references(name)
     }
   }
+}
 
-  /// Whether `select` names the relation `name` (case-folded) in its `FROM` or
-  /// any `JOIN`.
-  private static func references(_ select: Select, _ name: String) -> Bool {
-    if select.from?.name.lowercased() == name { return true }
-    return select.joins.contains { $0.relation.name.lowercased() == name }
+extension Select {
+  /// Whether the select names the relation `name` (case-folded) in its `FROM`
+  /// or any `JOIN`.
+  internal func references(_ name: String) -> Bool {
+    if from?.name.lowercased() == name { return true }
+    return joins.contains { $0.relation.name.lowercased() == name }
   }
-
-  /// The greatest number of fixpoint iterations a recursive CTE may take before
-  /// the engine concludes it does not terminate and throws
-  /// `SQLError.recursion`.
-  internal static let kRecursionCap = 10_000
 }
 
 // MARK: - Execution
@@ -185,7 +191,7 @@ extension Catalog where Self: ~Escapable {
       // obscurely as an unresolved relation. This covers BOTH routings below (a
       // non-recursive final arm still reaches the run-once branch).
       if cte.recursive, case let .union(anchor, _, _) = cte.query,
-          Engine.references(anchor, cte.name.lowercased()),
+          anchor.references(cte.name.lowercased()),
           case nil = table(named: cte.name),
           case nil = view(named: cte.name) {
         throw .unsupported(
@@ -198,7 +204,7 @@ extension Catalog where Self: ~Escapable {
       // arity of both its arms internally (see `fixpoint`); a non-recursive one
       // checks its body's compiled width here.
       let rows: Array<Array<Value>>
-      if cte.recursive && Engine.recursive(cte) {
+      if cte.recursive && cte.recurses {
         rows = try fixpoint(cte, relations, routines, bindings)
       } else {
         // The width check resolves the body's relations, so it reads the same

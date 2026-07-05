@@ -159,6 +159,32 @@ extension Filter {
     return remapped(through: map)
   }
 
+  /// `product` gated by this filter for a join `nest` that cannot fold into a
+  /// `Join`, keeping the ON `match` conjuncts as a SEPARATE inner gate below
+  /// the rest — `Select(rest, Select(match, product))`. Because evaluating
+  /// `.and` does not short-circuit, folding the match into one `AND` with WHERE
+  /// would, for a pair whose NULL join key makes the match UNKNOWN, still
+  /// evaluate a throwing WHERE (`(1 / A.x) = 0`) — a pair the join forms no row
+  /// for. Gating on the match first drops that pair before the WHERE runs, as
+  /// the `Select(match, product)` did before `distribute` folded the match into
+  /// the conjuncts for `nest` to find. When there is no match, `rest` is the
+  /// whole filter and this is the plain `Select(self, product)`.
+  internal func gated(over product: Plan) -> Plan {
+    var matches = Array<Filter>()
+    var rest = Array<Filter>()
+    for conjunct in conjuncts {
+      if case .match = conjunct {
+        matches.append(conjunct)
+      } else {
+        rest.append(conjunct)
+      }
+    }
+    var plan = product
+    if let gate = matches.conjunction { plan = .select(gate, plan) }
+    if let predicate = rest.conjunction { plan = .select(predicate, plan) }
+    return plan
+  }
+
   /// Whether evaluating this filter cannot throw — every term it reads is a bare
   /// slot or a constant. Selection pushdown keeps a filter that is NOT safe at
   /// the product level (evaluated per pair), so a division or scalar-call

@@ -1073,9 +1073,8 @@ extension Catalog where Self: ~Escapable {
     }
 
     guard let inner, let base = left.slots else {
-      return try Engine.gated(filter,
-                              .product(optimise(left, ctes, bindings),
-                                       optimise(right, ctes, bindings)))
+      return try filter.gated(over: .product(optimise(left, ctes, bindings),
+                                             optimise(right, ctes, bindings)))
     }
 
     let conjuncts = filter.conjuncts
@@ -1106,39 +1105,12 @@ extension Catalog where Self: ~Escapable {
       return .select(predicate, join)
     }
 
-    return try Engine.gated(filter,
-                            .product(optimise(left, ctes, bindings),
-                                     optimise(right, ctes, bindings)))
+    return try filter.gated(over: .product(optimise(left, ctes, bindings),
+                                           optimise(right, ctes, bindings)))
   }
 }
 
 extension Engine {
-  /// A `product` under `filter` for a join `nest` cannot fold into a `Join`,
-  /// keeping the ON `match` conjuncts as a SEPARATE inner gate below the rest —
-  /// `Select(rest, Select(match, product))`. Because `evaluate(.and)` does not
-  /// short-circuit, folding the match into one `AND` with the WHERE would, for a
-  /// pair whose NULL join key makes the match UNKNOWN, still evaluate a throwing
-  /// WHERE (`(1 / A.x) = 0`) — a pair the join forms no row for. Gating on the
-  /// match first drops that pair before the WHERE runs, as the `Select(match,
-  /// product)` did before `distribute` folded the match into the conjuncts for
-  /// `nest` to find. When there is no match, `rest` is the whole filter and this
-  /// is the plain `Select(filter, product)`.
-  internal static func gated(_ filter: Filter, _ product: Plan) -> Plan {
-    var matches = Array<Filter>()
-    var rest = Array<Filter>()
-    for conjunct in filter.conjuncts {
-      if case .match = conjunct {
-        matches.append(conjunct)
-      } else {
-        rest.append(conjunct)
-      }
-    }
-    var plan = product
-    if let gate = matches.conjunction { plan = .select(gate, plan) }
-    if let predicate = rest.conjunction { plan = .select(predicate, plan) }
-    return plan
-  }
-
   /// The `(outerKey, innerKey)` an equality between slots `lhs` and `rhs`
   /// relates across the boundary `base`, or `nil` if both fall on one side.
   ///

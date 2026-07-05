@@ -207,7 +207,7 @@ public struct Join: Hashable, Sendable {
 /// real column or one of the binding's adapter-computed columns (`Id`, an owner
 /// foreign key); the AST does not distinguish them.
 ///
-/// `Column` is `ExpressibleByStringLiteral`, splitting a literal on its first
+/// `Column` is `ExpressibleByStringLiteral`, splitting a literal on its LAST
 /// dot into qualifier and name, so a consumer may write a reference as a plain
 /// string (`"t.Name"`, `"Flags"`).
 public struct Column: Hashable, Sendable, ExpressibleByStringLiteral {
@@ -222,11 +222,20 @@ public struct Column: Hashable, Sendable, ExpressibleByStringLiteral {
     self.name = name
   }
 
-  /// Parses a reference from its dotted spelling: the text before the first dot
-  /// is the qualifier and the rest is the name; an undotted spelling is an
-  /// unqualified name.
+  /// Parses a reference from its dotted spelling: the text before the LAST dot
+  /// is the qualifier and the text after it is the name; an undotted spelling
+  /// is an unqualified name.
+  ///
+  /// Splitting on the last dot keeps every single-dot reference identical
+  /// (`t.Name` → qualifier `t`, name `Name`) while letting a two-part relation
+  /// name qualify a column — the `INFORMATION_SCHEMA` overlay's dotted
+  /// relations (`information_schema.tables.table_name` → qualifier
+  /// `information_schema.tables`, name `table_name`). A bare identifier in this
+  /// dialect carries more than one dot only for that reserved two-part
+  /// namespace; a dotted metadata name reaches the parser delimited, so it
+  /// never splits here.
   public init(_ spelling: String) {
-    if let dot = spelling.firstIndex(of: ".") {
+    if let dot = spelling.lastIndex(of: ".") {
       self.qualifier = String(spelling[..<dot])
       self.name = String(spelling[spelling.index(after: dot)...])
     } else {
@@ -252,6 +261,33 @@ public enum Projection: Hashable, Sendable {
   /// carries a function call or an alias; a list of bare columns stays the
   /// simpler `columns` case.
   case expressions(Array<Projected>)
+
+  /// A view's column names inferred from this projection — the ISO rule shared
+  /// by `CREATE VIEW` without an explicit column list and the `View(_:)`
+  /// convenience initializer.
+  ///
+  /// A `columns` projection yields each reference's name (the qualifier
+  /// dropped); an `expressions` projection yields each item's inferable `name`
+  /// (its alias, else a bare column's name); a non-column expression with no
+  /// alias, and a `SELECT *`, have no inferable name and fault with
+  /// `SQLError.named`.
+  internal func names() throws(SQLError) -> Array<String> {
+    switch self {
+    case .all:
+      throw .named("SELECT *")
+    case let .columns(columns):
+      return columns.map(\.name)
+    case let .expressions(items):
+      var names = Array<String>()
+      for item in items {
+        guard let name = item.name else {
+          throw .named("an unaliased expression")
+        }
+        names.append(name)
+      }
+      return names
+    }
+  }
 }
 
 /// One projected expression with an optional output alias.
@@ -270,6 +306,18 @@ public struct Projected: Hashable, Sendable {
   public init(expression: Expression, alias: String? = nil) {
     self.expression = expression
     self.alias = alias
+  }
+
+  /// The output name this item contributes, or `nil` when it has none — its
+  /// alias, else a bare column's name; a non-column expression with no alias
+  /// has no inferable name. It is the ONE derivation every output-name site
+  /// shares: view/CTE column inference (`Projection.names()`, faulting on
+  /// `nil`), the result-schema walk (substituting a positional `column N`),
+  /// and an aggregate `ORDER BY`'s alias recording (recording only a `name`).
+  internal var name: String? {
+    if let alias { return alias }
+    if case let .column(column) = expression { return column.name }
+    return nil
   }
 }
 
@@ -457,83 +505,5 @@ public struct Limit: Hashable, Sendable {
   public init(count: Int?, offset: Int = 0) {
     self.count = count
     self.offset = offset
-  }
-}
-
-// MARK: - Scalar-call inventory
-
-extension Query {
-  /// The names of every scalar-function `call` anywhere in the query — across
-  /// both arms of a `UNION` and every call-bearing clause of each arm.
-  ///
-  /// The introspection builder checks these against the registered routines
-  /// before advertising a view. `compile` resolves a call's ARGUMENTS but
-  /// cannot check the routine EXISTS — it holds no routine set and builds no
-  /// call term, the name binding only at execute — so a call to an unregistered
-  /// function in a `WHERE`/`HAVING` or a later `UNION` arm, invisible to the
-  /// first-arm projection type walk, would otherwise be advertised though a run
-  /// faults `SQLError.function`.
-  internal var calls: Set<String> {
-    switch self {
-    case let .select(select):
-      select.calls
-    case let .union(query, select, _):
-      query.calls.union(select.calls)
-    }
-  }
-}
-
-extension Select {
-  /// The scalar-call names across this arm's call-bearing clauses — the
-  /// projection expressions, the `WHERE`, and the `HAVING`. `GROUP BY`, the
-  /// join equalities, and `ORDER BY` are column references, never calls.
-  internal var calls: Set<String> {
-    var names = Set<String>()
-    if case let .expressions(items) = projection {
-      for item in items { names.formUnion(item.expression.calls) }
-    }
-    if let predicate { names.formUnion(predicate.calls) }
-    if let having { names.formUnion(having.calls) }
-    return names
-  }
-}
-
-extension Predicate {
-  /// The scalar-call names within this predicate tree.
-  internal var calls: Set<String> {
-    switch self {
-    case let .comparison(left, _, right):
-      left.calls.union(right.calls)
-    case let .bound(left, _, _):
-      left.calls
-    case let .null(operand, _):
-      operand.calls
-    case let .and(lhs, rhs), let .or(lhs, rhs):
-      lhs.calls.union(rhs.calls)
-    case let .not(operand):
-      operand.calls
-    }
-  }
-}
-
-extension Expression {
-  /// The scalar-call names within this expression — the call itself and every
-  /// call nested in its arguments, a binary's operands, or an aggregate's
-  /// operand. A bare column or literal names none.
-  internal var calls: Set<String> {
-    switch self {
-    case .column, .literal:
-      []
-    case let .call(name, arguments):
-      arguments.reduce(into: Set([name])) { $0.formUnion($1.calls) }
-    case let .binary(_, lhs, rhs):
-      lhs.calls.union(rhs.calls)
-    case let .aggregate(_, operand):
-      if case let .expression(expression) = operand {
-        expression.calls
-      } else {
-        []
-      }
-    }
   }
 }

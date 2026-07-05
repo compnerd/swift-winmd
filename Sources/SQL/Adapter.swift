@@ -36,6 +36,32 @@ public enum ValueType: Hashable, Sendable {
   case boolean
   /// A binary column — an uninterpreted byte string.
   case blob
+
+  /// Whether the type is numeric — an `integer` or a `double`. Arithmetic and
+  /// the folding aggregates (`SUM`/`AVG`) require a numeric operand; text,
+  /// boolean, and blob have no arithmetic (`Arithmetic.apply`/`Aggregate.fold`
+  /// fault `SQLError.operand` on them).
+  internal var numeric: Bool {
+    switch self {
+    case .integer, .double: true
+    case .text, .boolean, .blob: false
+    }
+  }
+
+  /// The ISO `data_type` spelling of this value type.
+  ///
+  /// The engine's types map onto the ISO domains: exact numeric to `integer`,
+  /// approximate numeric to `double precision`, character to `character
+  /// varying`, truth-valued to `boolean`, and binary to `binary varying`.
+  internal var domain: String {
+    switch self {
+    case .integer: "integer"
+    case .double: "double precision"
+    case .text: "character varying"
+    case .boolean: "boolean"
+    case .blob: "binary varying"
+    }
+  }
 }
 
 /// A typed cell value the engine yields.

@@ -338,7 +338,7 @@ public struct TableIterator<Schema: TableSchema>: ~Escapable {
   public subscript(_ offset: Int) -> Row<Schema>? {
     @_lifetime(copy self)
     get {
-      guard offset < rows else { return nil }
+      guard 0 <= offset, offset < rows else { return nil }
       return Row(start + offset, table, storage)
     }
   }
@@ -383,7 +383,10 @@ public struct Cursor: ~Escapable {
 
   public subscript(_ offset: Int) -> Tuple? {
     @_lifetime(copy self)
-    get { offset < rows ? Tuple(start + offset, table, storage) : nil }
+    get {
+      guard 0 <= offset, offset < rows else { return nil }
+      return Tuple(start + offset, table, storage)
+    }
   }
 
   /// The open table this cursor walks.

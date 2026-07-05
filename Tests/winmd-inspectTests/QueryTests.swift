@@ -32,8 +32,7 @@ struct QueryTests {
     try body(url.path)
   }
 
-  @Test("the database leads the command line; SQL is an optional positional")
-  func databaseLeadsSQL() throws {
+  @Test func `the database leads the command line; SQL is an optional positional`() throws {
     try QueryTests.withDatabase { database in
       // The database leads the command line as the root's positional — the
       // subcommand comes after it — and is propagated into the subcommand's
@@ -63,8 +62,7 @@ struct QueryTests {
     }
   }
 
-  @Test("the leading database is validated to be an existing file")
-  func validatesDatabase() throws {
+  @Test func `the leading database is validated to be an existing file`() throws {
     // The root validates the leading `<database>` before dispatching, so a
     // non-existent path fails the parse whichever subcommand follows.
     #expect(throws: (any Error).self) {

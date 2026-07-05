@@ -31,8 +31,7 @@ struct ShellTests {
     try body(url.path)
   }
 
-  @Test("`query` is the default subcommand; its verb may be omitted")
-  func queryIsDefault() throws {
+  @Test func `query is the default subcommand; its verb may be omitted`() throws {
     try ShellTests.withDatabase { database in
       // With `query` the default subcommand, `<db>` alone parses to a `Query`
       // opening the shell (no script), the same as `<db> query`, and a bare
@@ -55,8 +54,7 @@ struct ShellTests {
     }
   }
 
-  @Test("each meta-command answers to its `.`-prefixed spelling")
-  func spellings() {
+  @Test func `each meta-command answers to its .-prefixed spelling`() {
     // The leading-token dispatch matches a `.`-token against each `Metacommand`
     // type's `spelling`; these are the tokens `execute` routes on.
     #expect(Tables.spelling == ".tables")
@@ -69,8 +67,7 @@ struct ShellTests {
     #expect(Template.spelling == ".template")
   }
 
-  @Test("`.read` parses its trailing path, trimming surrounding whitespace")
-  func read() {
+  @Test func `.read parses its trailing path, trimming surrounding whitespace`() {
     // `Read.init` takes the rest of the statement after the spelling token and
     // trims it to the path; the stream has already split off `.read`.
     #expect(Read(" foo.sql").path == "foo.sql")
@@ -79,8 +76,7 @@ struct ShellTests {
     #expect(Read("").path.isEmpty)
   }
 
-  @Test("`.schema` parses its trailing query, dropping a trailing `;`")
-  func schema() {
+  @Test func `.schema parses its trailing query, dropping a trailing ;`() {
     // `Schema.init` takes the rest of the statement after the spelling token as
     // the query text, trimmed and with a single trailing `;` removed (the same
     // optional terminator a run tolerates).
@@ -90,8 +86,7 @@ struct ShellTests {
     #expect(Schema("").query.isEmpty)
   }
 
-  @Test("`.render` parses its interface and template arguments")
-  func render() {
+  @Test func `.render parses its interface and template arguments`() {
     // `Render.init` splits the rest of the statement into interface then
     // template; both are required, so anything but two fields leaves them empty
     // and `execute` rejects it.
@@ -102,8 +97,7 @@ struct ShellTests {
     #expect(Render("").template.isEmpty)
   }
 
-  @Test("`.bind` parses its name and types its value")
-  func bind() {
+  @Test func `.bind parses its name and types its value`() {
     // `Bind.init` takes the name (the first whitespace token) and the trimmed
     // remainder as the value, typed: an `Int`-parsable value is an `.integer`,
     // else `.text` with a surrounding single-quote pair stripped and a doubled
@@ -125,8 +119,7 @@ struct ShellTests {
     #expect(Bind("  ").name.isEmpty)
   }
 
-  @Test("`.template` parses its name and unquotes the single-quoted body")
-  func template() {
+  @Test func `.template parses its name and unquotes the single-quoted body`() {
     // `Template.init` takes the name (the first whitespace token) then the
     // single-quoted literal that follows, from its first `'` to the matching
     // close, `''` unescaped to one `'`.
@@ -145,8 +138,7 @@ struct ShellTests {
     #expect(Template("t").body.isEmpty)
   }
 
-  @Test("a `;`-separated script streams into trimmed, non-empty statements")
-  func stream() {
+  @Test func `a ;-separated script streams into trimmed, non-empty statements`() {
     // The `Statements` stream is the load-bearing part of a batch run: trailing
     // `;`, whitespace, and blank statements (a `;;`) are dropped, each statement
     // trimmed, and a `.`-meta line yields whole.
@@ -162,8 +154,7 @@ struct ShellTests {
     #expect(Array(Statements(of: "   \n  ")).isEmpty)
   }
 
-  @Test("the statement stream accumulates a SQL statement across lines")
-  func streamMultiline() {
+  @Test func `the statement stream accumulates a SQL statement across lines`() {
     // A SQL statement may span lines, accumulating until a `;` closes it; an
     // unterminated trailing statement still yields at end of input — the
     // closing `;` is optional, so a one-shot query keeps its last statement.
@@ -176,8 +167,7 @@ struct ShellTests {
             == ["SELECT 1,\n       2", "SELECT 3"])
   }
 
-  @Test("a `;` inside a string literal does not terminate the statement")
-  func streamStringLiteral() {
+  @Test func `a ; inside a string literal does not terminate the statement`() {
     // The splitter must not cut a statement at a `;` that lives inside a
     // single-quoted literal — that `;` is data the SQL lexer scans, not a
     // terminator. A doubled `''` is an escaped quote, so it stays in the
@@ -193,8 +183,7 @@ struct ShellTests {
             == ["SELECT 'x;\n y;' AS s"])
   }
 
-  @Test("a `;` inside a comment does not terminate the statement")
-  func streamComment() {
+  @Test func `a ; inside a comment does not terminate the statement`() {
     // Now that the lexer skips comments, the splitter must too: a `;` inside a
     // `--` line comment or a `/* … */` block comment is not a terminator, or a
     // valid script would be cut mid-comment before the lexer could skip it.
@@ -211,8 +200,7 @@ struct ShellTests {
             == ["SELECT 1", "-- trailing\nSELECT 2"])
   }
 
-  @Test("a trivia-only fragment is not yielded as a statement")
-  func streamTriviaOnly() {
+  @Test func `a trivia-only fragment is not yielded as a statement`() {
     // A chunk that is only whitespace and comments carries no statement, so it
     // is dropped rather than handed to the parser as empty input — a trailing
     // or standalone comment, or a comment between terminators.
@@ -223,8 +211,7 @@ struct ShellTests {
             == ["SELECT 1", "SELECT 2"])
   }
 
-  @Test("an unterminated block comment is yielded, not dropped")
-  func streamUnterminatedComment() {
+  @Test func `an unterminated block comment is yielded, not dropped`() {
     // A CLOSED comment is trivia, but an unclosed `/*` is not: the fragment
     // must reach the parser so the lexer's unterminated-block-comment error
     // surfaces on a batch/`.read`/EOF path rather than being silently
@@ -234,8 +221,7 @@ struct ShellTests {
             == ["SELECT 1", "/* missing close"])
   }
 
-  @Test("a `;` or comment inside a delimited identifier is data")
-  func streamDelimitedIdentifier() {
+  @Test func `a ; or comment inside a delimited identifier is data`() {
     // A double-quoted delimited identifier is tracked like a string literal, so
     // `--`, `/* */`, and `;` inside `"…"` are data — not a comment or a
     // terminator — and the real terminator after it is still found.
@@ -247,8 +233,7 @@ struct ShellTests {
             == ["SELECT \"/* x */\" AS c"])
   }
 
-  @Test("a comment before a meta-command does not turn it into SQL")
-  func streamCommentBeforeMeta() {
+  @Test func `a comment before a meta-command does not turn it into SQL`() {
     // A comment-only pending is trivia, so a following `.`-meta line is still
     // recognised as a meta-command rather than glued onto the comment and sent
     // through SQL parsing.
@@ -256,8 +241,7 @@ struct ShellTests {
     #expect(Array(Statements(of: "/* note */\n.read a.sql")) == [".read a.sql"])
   }
 
-  @Test("an open-quote `.`-meta accumulates raw lines into one statement")
-  func streamOpenQuoteMeta() {
+  @Test func `an open-quote .-meta accumulates raw lines into one statement`() {
     // A `.`-meta whose single-quoted string is still open is a multiline meta:
     // the stream accumulates raw lines verbatim (joined with `\n`) until the
     // quote closes, then yields the whole block as ONE statement — the inline
@@ -284,8 +268,7 @@ struct ShellTests {
     #expect(statements[1] == "SELECT 1")
   }
 
-  @Test("an open-quote meta with a trailing-line close still yields one block")
-  func streamOpenQuoteReading() {
+  @Test func `an open-quote meta with a trailing-line close still yields one block`() {
     // Fed line-by-line (the interactive/`reading:` path), the same accumulation
     // holds: the closing `'` arriving on its own trailing line still yields the
     // whole `.template` block as one statement, and the following `SELECT 1`
@@ -298,8 +281,7 @@ struct ShellTests {
     #expect(statements[1] == "SELECT 1")
   }
 
-  @Test("a `.template` name starting with -- still accumulates its body")
-  func streamTemplateDashName() {
+  @Test func `a .template name starting with -- still accumulates its body`() {
     // The `.template` name is the first token; when it starts with `--`, the
     // meta accumulation must NOT treat the rest of the line as a comment (it is
     // meta text, not SQL) — the open single quote still opens a multiline body.
@@ -314,16 +296,14 @@ struct ShellTests {
     #expect(statements[1] == "SELECT 1")
   }
 
-  @Test("an unclosed open-quote meta flushes at end of input")
-  func streamOpenQuoteUnterminated() {
+  @Test func `an unclosed open-quote meta flushes at end of input`() {
     // End of input before the quote closes flushes what was captured — the
     // closing `'` is as optional as a trailing `;`.
     #expect(Array(Statements(of: ".template t 'unterminated\nbody"))
             == [".template t 'unterminated\nbody"])
   }
 
-  @Test("only `.template` accumulates on an open quote; other metas yield whole")
-  func streamOpenQuoteTemplateOnly() {
+  @Test func `only .template accumulates on an open quote; other metas yield whole`() {
     // The open-quote accumulation is `.template`'s alone. An apostrophe in
     // another meta-command's argument — the path in `.read /tmp/O'Brien.sql` —
     // is data, not an unterminated literal: the `.read` yields whole and the
@@ -333,8 +313,7 @@ struct ShellTests {
             == [".read /tmp/O'Brien.sql", "SELECT 1"])
   }
 
-  @Test("a whitespace-only spacer line before a `.`-command is dropped")
-  func streamSpacerBeforeMeta() {
+  @Test func `a whitespace-only spacer line before a .-command is dropped`() {
     // A blank line carrying spaces before a meta-command must not glue onto it:
     // a whitespace-only `pending` counts as nothing, so the `.`-line still
     // yields whole and a following statement stays a separate statement —
@@ -343,8 +322,7 @@ struct ShellTests {
             == ["SELECT 1", ".tables", "SELECT 2"])
   }
 
-  @Test("the reading stream prompts primary then continuation while pending")
-  func promptAccumulates() {
+  @Test func `the reading stream prompts primary then continuation while pending`() {
     // The interactive shell's prompt hook is called before each line read, told
     // whether a statement is pending (mid-accumulation, unterminated). A fresh
     // statement asks for the primary prompt (`false`); an unterminated one asks
@@ -362,8 +340,7 @@ struct ShellTests {
     #expect(pending == [false, true, false])
   }
 
-  @Test("a fresh statement each line prompts primary, never continuation")
-  func promptFresh() {
+  @Test func `a fresh statement each line prompts primary, never continuation`() {
     // Each self-terminating statement (its own `;`) leaves nothing pending, so
     // every prompt before a read is the primary — a `.`-meta line likewise. The
     // final read past the last line sees nothing pending too.
@@ -376,8 +353,7 @@ struct ShellTests {
     #expect(pending.allSatisfy { $0 == false })
   }
 
-  @Test("the batch stream carries no prompt hook and never prompts")
-  func batchIsQuiet() {
+  @Test func `the batch stream carries no prompt hook and never prompts`() {
     // `Statements(of:)` is the argument/`.read` path; it takes no prompt hook,
     // so a batch run never prompts. Draining a multi-statement script drives
     // the same accumulation the interactive stream does, with no prompt to
@@ -386,16 +362,14 @@ struct ShellTests {
             == ["SELECT 1\nFROM Module", "SELECT 2"])
   }
 
-  @Test("the bundled views are the four COM-interface views")
-  func bundled() {
+  @Test func `the bundled views are the four COM-interface views`() {
     // The parse-and-register path a `CREATE VIEW` reuses; the four bundled
     // views register under their case-folded names.
     let views = Session.bundled()
     #expect(Set(views.keys) == ["interfaces", "methods", "params", "bases"])
   }
 
-  @Test("a streamed CREATE VIEW statement parses and registers a view")
-  func register() throws {
+  @Test func `a streamed CREATE VIEW statement parses and registers a view`() throws {
     // A batch run runs each streamed statement through `execute`, whose `CREATE
     // VIEW` branch parses and registers it. A `Database` (a full PE image) is
     // awkward to assemble in memory — the WinMD fixtures all work over
@@ -414,8 +388,7 @@ struct ShellTests {
     #expect(views.keys.contains("v"))
   }
 
-  @Test("a language spec parses its escape, void, root, keyword, and type keys")
-  func languageParses() {
+  @Test func `a language spec parses its escape, void, root, keyword, and type keys`() {
     let swift = Language(parsing: """
       # a comment
       escape-prefix `
@@ -463,8 +436,7 @@ struct ShellTests {
                 .decode(with: resolver, dialect: dialect) == "HRESULT")
   }
 
-  @Test("the box renderer frames a header over a ruled multi-row grid")
-  func boxHeaderAndRows() {
+  @Test func `the box renderer frames a header over a ruled multi-row grid`() {
     // The `.mode box` grid: a `┌─┬─┐` top, the header row, a `├─┼─┤` rule, one
     // line per row, and a `└─┴─┘` bottom, every cell padded one space each side.
     let table = Box.render(["Name", "Id"],
@@ -480,8 +452,7 @@ struct ShellTests {
       """)
   }
 
-  @Test("each column is sized to the widest of its header and its cells")
-  func boxColumnWidth() {
+  @Test func `each column is sized to the widest of its header and its cells`() {
     // Column width is the max of the header and every cell's display width: the
     // first column is sized by its long cell (`elongated`), the second by its
     // header (`X`), which outsizes its one-character cells.
@@ -496,8 +467,7 @@ struct ShellTests {
       """)
   }
 
-  @Test("an empty result renders the header and frame alone")
-  func boxEmptyResult() {
+  @Test func `an empty result renders the header and frame alone`() {
     // With no rows the header row still prints between the top frame and the
     // header rule and bottom frame — sized to the header widths — so the column
     // names remain visible.
@@ -509,8 +479,7 @@ struct ShellTests {
       """)
   }
 
-  @Test("a NULL or empty cell renders as blank padding")
-  func boxNullAndEmptyCell() {
+  @Test func `a NULL or empty cell renders as blank padding`() {
     // A `.null` cell (and an empty `.text`) shows as the empty string — the way
     // the shell's list mode displays a NULL — padded to the column width. A row
     // shorter than the header pads its missing trailing cells empty too.
@@ -527,8 +496,7 @@ struct ShellTests {
       """)
   }
 
-  @Test("a wide (double-width) cell is sized by its display columns")
-  func boxWideCell() {
+  @Test func `a wide (double-width) cell is sized by its display columns`() {
     // A cell's width is measured in display columns, not bytes or scalars: a
     // fullwidth CJK character occupies two columns, so the column sizes to four
     // (two glyphs) rather than mis-sizing on its scalar count, keeping the frame
@@ -543,8 +511,7 @@ struct ShellTests {
       """)
   }
 
-  @Test("the identity spec escapes nothing and applies no conventions")
-  func languageIdentity() {
+  @Test func `the identity spec escapes nothing and applies no conventions`() {
     // A template that declares no language (or names a spec with no resource)
     // gets the identity `Language`: every identifier and return is verbatim, no
     // root default applies, and its `Dialect` falls a primitive back to its

@@ -346,10 +346,10 @@ extension Catalog where Self: ~Escapable {
 
 // MARK: - Compilation
 
-extension Engine {
-  /// Compiles a scalar (FROM-less) `SELECT <expr-list>` into `Project(single)`
-  /// — the projection evaluated against the one empty row the `single` leaf
-  /// yields.
+extension Projection {
+  /// Compiles this scalar (FROM-less) `SELECT <expr-list>` projection into
+  /// `Project(single)` — the projection evaluated against the one empty row the
+  /// `single` leaf yields.
   ///
   /// The projection resolves against an empty schema (no columns), so only
   /// literals, scalar calls, and arithmetic over them lower; a `SELECT *` has no
@@ -357,19 +357,20 @@ extension Engine {
   /// faulting (`SQLError.column` for a column, `SQLError.unsupported` for `*`).
   /// The terms hold no slots, so the `single` row's empty record carries every
   /// value the projection needs.
-  internal static func scalar(_ projection: Projection)
-      throws(SQLError) -> Plan {
-    guard case .all = projection else {
+  internal func scalar() throws(SQLError) -> Plan {
+    guard case .all = self else {
       let schema = Schema(width: 0, extent: 0, names: [], types: [],
                           virtuals: [])
-      let terms = try schema.terms(projection, in: Relation(name: ""))
+      let terms = try schema.terms(self, in: Relation(name: ""))
       return .project(terms, .single)
     }
     // `SELECT *` names every column of the relations in scope; a FROM-less query
     // has none, so there is nothing to expand.
     throw .unsupported("SELECT * requires a FROM clause")
   }
+}
 
+extension Engine {
   /// A relation resolved for compilation: its name-resolution `schema` and a
   /// `leaf` factory that, given the ordinals the query references on its side,
   /// builds the leaf `Plan` — a `scan` for a base table, a `derived` over the
@@ -1467,7 +1468,7 @@ extension Catalog where Self: ~Escapable {
             "a WHERE, GROUP BY, HAVING, ORDER BY, OFFSET/FETCH, or JOIN " +
             "requires a FROM clause")
       }
-      return try Engine.scalar(select.projection)
+      return try select.projection.scalar()
     }
     let from = try resolve(relation, ctes, visited)
 

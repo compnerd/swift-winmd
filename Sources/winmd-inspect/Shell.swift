@@ -47,6 +47,49 @@ internal struct Tables: Metacommand {
   }
 }
 
+/// `.schema <query>` — print a query's result columns (name and type) WITHOUT
+/// running it.
+///
+/// A query's result has a name and a type per column, which
+/// `Catalog.columns(of:validate:)` derives by RESOLVING the query the way a run
+/// would — but never opening a cursor, so the shape is inspectable over an
+/// empty or costly source without paying for it. `arguments` is the query text
+/// (a trailing `;` optional); it may be a `SELECT` (or a `UNION`) or a `WITH`,
+/// the runnable shapes `columns(of:)` types — the SAME statements the shell
+/// runs, so a CTE query describes as it executes. A `CREATE VIEW` names no
+/// result columns and faults. `execute` prints one tab-separated
+/// `<name>\t<type>` line per column, the type the ISO `data_type` spelling
+/// `information_schema.columns` reports — a query that does not resolve (an
+/// unknown relation, an unresolved column, a `WITH` whose body arity
+/// contradicts its declared list) faults exactly as a run would, so `.schema`
+/// doubles as a dry-run check.
+internal struct Schema: Metacommand {
+  internal static let spelling = ".schema"
+
+  /// The query text whose result columns to describe — the rest of the
+  /// statement after `.schema`, a trailing `;` optional.
+  internal let query: String
+
+  internal init(_ arguments: Substring) {
+    query = arguments.trimmed.statement.trimmed
+  }
+
+  internal func execute(against shell: inout Shell) throws {
+    guard !query.isEmpty else { throw Shell.MetaError.unknown(Schema.spelling) }
+    // Route through the statement-level, CTE-aware derive with `validate:
+    // true`: it types a `SELECT`/`UNION` AND a `WITH` (the CTE scope kept in
+    // place) and faults a `CREATE VIEW`, so `.schema` describes every runnable
+    // statement the shell runs — the dry run validating the whole statement.
+    let parsed = try Statement(parsing: query)
+    let columns =
+        try shell.session.columns(of: parsed, routines: Session.routines,
+                                  validate: true)
+    for column in columns {
+      print("\(column.name)\t\(column.type.domain)")
+    }
+  }
+}
+
 /// `.help` — print the command summary.
 internal struct Help: Metacommand {
   internal static let spelling = ".help"
@@ -292,13 +335,14 @@ internal struct Shell: ~Escapable {
   /// computed so the metatype array (not `Sendable`) is not a shared mutable
   /// global.
   private static var commands: Array<any Metacommand.Type> {
-    [Tables.self, Help.self, Quit.self, Read.self, Render.self, Bind.self,
-     Template.self]
+    [Tables.self, Schema.self, Help.self, Quit.self, Read.self, Render.self,
+     Bind.self, Template.self]
   }
 
   /// The command summary `.help` prints.
   internal static let help = """
     .tables                 list the database's tables
+    .schema <query>         print a query's result columns without running it
     .read <path>            run a file of `;`-separated SQL statements
     .render <iface> <tmpl>  render an interface (or `*`) through a template
     .bind <name> <value>    bind a `:name` parameter (no value clears it)
@@ -342,9 +386,10 @@ internal struct Shell: ~Escapable {
   /// statement, run through `Session.run` with the shell's `bindings` — a `CREATE
   /// VIEW` registers, a `SELECT` yields rows resolving any `:name` from the
   /// bindings — and its rows print as a `sqlite3`-style `.mode box` table
-  /// (`Box.render`), the column headers taken from the statement's projection.
-  /// The shell does not single out `CREATE VIEW`: it just runs the statement and
-  /// prints what comes back — a `CREATE VIEW` yields no rows, so nothing prints.
+  /// (`Box.render`), the column headers derived from the statement's result
+  /// schema. The shell does not single out `CREATE VIEW`: it just runs the
+  /// statement and prints what comes back — a `CREATE VIEW` yields no rows, so
+  /// nothing prints.
   internal mutating func execute(_ statement: String) throws {
     guard statement.first == "." else {
       let text = statement.statement
@@ -353,7 +398,7 @@ internal struct Shell: ~Escapable {
       // result is empty — the header frame still conveys the zero-row result — so
       // an empty result is NOT treated as no output. A `CREATE VIEW` genuinely
       // produces nothing; `headers` returns nil for it and it is skipped.
-      guard let names = Shell.headers(of: text, rows) else { return }
+      guard let names = headers(of: text, rows) else { return }
       print(Box.render(names, rows))
       return
     }
@@ -582,42 +627,72 @@ internal struct Shell: ~Escapable {
   /// to its result `rows` — or `nil` when `text` is not row output (a `CREATE
   /// VIEW`), so the caller prints nothing.
   ///
-  /// A `SELECT`'s explicit projection names its columns from the statement (an
-  /// aliased or bare column projects its name, the qualifier dropped; a computed
-  /// expression with no alias falls back to a positional `column N`). A `WITH`
-  /// shares this derivation, taking its headers from the TRAILING query's
-  /// projection — `WITH t(n) AS (…) SELECT n FROM t` headers `n`, and a
-  /// zero-row result still frames the real column names with the right width. A
-  /// `SELECT *` (a plain one, or a `WITH`'s trailing `SELECT *` over a CTE)
-  /// carries no names in the statement — its real columns come from the
-  /// engine's resolution (view-shadows-table, joins, unions, CTE-scoped
-  /// schema), which the shell does NOT duplicate here; it frames by the
-  /// produced width (`column N`) pending a resolved-output-schema source
-  /// (INFORMATION_SCHEMA). An unparsable string likewise frames by the produced
-  /// width.
-  internal static func headers(of text: String,
-                               _ rows: Array<Array<Value>>) -> Array<String>? {
+  /// The headers come from the query's RESOLVED result schema
+  /// (`columns(of:validate:)`), the same derivation `information_schema` and
+  /// `.schema` share — so a plain `SELECT` (or a `SELECT *`) over base tables
+  /// headers its REAL column names (view-shadows-table, joins, unions), and a
+  /// zero-row result still frames those names with the right width. The derive
+  /// is `validate: false`: the run above already proved the query runnable, so
+  /// a data-dependent-empty result whose reachable projection a validating
+  /// resolve would fault (`SELECT Name + 1 … WHERE …`) still frames.
+  ///
+  /// A `WITH`'s trailing query resolves against the statement's CTEs — the
+  /// derivation keeps them in scope (`columns(of statement:)` builds a
+  /// schema-only CTE overlay), so a `SELECT *` or any reference to a CTE
+  /// headers what the run produced, not a same-named base relation: `WITH
+  /// TypeDef(x) AS (…) SELECT * FROM TypeDef` headers `x`, the one CTE column,
+  /// even though a six-column base `TypeDef` exists. Only a statement the derive
+  /// still cannot resolve falls back to the trailing query's SYNTACTIC
+  /// projection — an explicit list names its columns, a `SELECT *` carries none
+  /// and frames by the produced width (`column N`). An unparsable string
+  /// likewise frames by the produced width.
+  internal borrowing func headers(of text: String,
+                                  _ rows: Array<Array<Value>>)
+      -> Array<String>? {
     guard let statement = try? Statement(parsing: text) else {
-      return generic(rows)
+      return Shell.generic(rows)
     }
-    let query: SQL.Query
+    if case .create = statement { return nil }
+    // Prefer the resolved result schema (real names for a plain/base/empty
+    // query, and a WITH's CTE-scoped trailing query); fall back to the trailing
+    // query's syntactic projection only when the derive cannot resolve it.
+    if let columns = try? session.columns(of: statement,
+                                          routines: Session.routines,
+                                          validate: false) {
+      return columns.map(\.name)
+    }
+    return Shell.names(of: Shell.trailing(statement).first.projection, rows)
+  }
+
+  /// The row-producing query of `statement` — a `select`'s query, or a `with`'s
+  /// trailing query — the syntactic-projection fallback names its columns off.
+  /// A `create` never reaches here (`headers(of:)` returns `nil` for it first),
+  /// so it maps to its own (nameless) query defensively.
+  private static func trailing(_ statement: Statement) -> SQL.Query {
     switch statement {
-    case .create:
-      return nil
-    case let .select(select):
-      query = select
-    case let .with(_, trailing):
-      query = trailing
+    case let .select(query): query
+    case let .with(_, query): query
+    case let .create(_, view): view.query
     }
-    switch query.first.projection {
+  }
+
+  /// The SYNTACTIC column headers of a `projection` — the fallback for a query
+  /// the resolved schema derive cannot type (a `WITH`'s trailing query over a
+  /// CTE). An explicit projection names its columns from the statement (an
+  /// aliased or bare column projects its name, the qualifier dropped; a
+  /// computed expression with no alias falls back to a positional `column N`);
+  /// a `SELECT *` carries no names, so it frames by the produced width.
+  private static func names(of projection: SQL.Projection,
+                            _ rows: Array<Array<Value>>) -> Array<String> {
+    switch projection {
     case let .columns(list):
-      return list.map(\.name)
+      list.map(\.name)
     case let .expressions(items):
-      return items.enumerated().map { index, item in
+      items.enumerated().map { index, item in
         item.alias ?? column(item.expression) ?? "column \(index + 1)"
       }
     case .all:
-      return generic(rows)
+      generic(rows)
     }
   }
 

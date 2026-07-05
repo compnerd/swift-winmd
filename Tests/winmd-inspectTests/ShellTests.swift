@@ -60,6 +60,7 @@ struct ShellTests {
     // The leading-token dispatch matches a `.`-token against each `Metacommand`
     // type's `spelling`; these are the tokens `execute` routes on.
     #expect(Tables.spelling == ".tables")
+    #expect(Schema.spelling == ".schema")
     #expect(Help.spelling == ".help")
     #expect(Quit.spelling == ".quit")
     #expect(Read.spelling == ".read")
@@ -76,6 +77,17 @@ struct ShellTests {
     #expect(Read("  spaced.sql ").path == "spaced.sql")
     // No argument leaves an empty path — `execute` rejects it as unknown.
     #expect(Read("").path.isEmpty)
+  }
+
+  @Test("`.schema` parses its trailing query, dropping a trailing `;`")
+  func schema() {
+    // `Schema.init` takes the rest of the statement after the spelling token as
+    // the query text, trimmed and with a single trailing `;` removed (the same
+    // optional terminator a run tolerates).
+    #expect(Schema(" SELECT 1").query == "SELECT 1")
+    #expect(Schema("  SELECT 1 ; ").query == "SELECT 1")
+    // No query leaves an empty string — `execute` rejects it as unknown.
+    #expect(Schema("").query.isEmpty)
   }
 
   @Test("`.render` parses its interface and template arguments")
@@ -529,38 +541,6 @@ struct ShellTests {
       │ 中文 │
       └──────┘
       """)
-  }
-
-  @Test("headers frame an empty SELECT by projection and skip CREATE VIEW")
-  func emptyResultHeaders() {
-    // An empty result still frames its columns for an explicit projection — its
-    // names come from the statement regardless of row count. A CREATE VIEW is not
-    // row output and yields nil (nothing printed). A `SELECT *` carries no names
-    // in the statement (its columns come from the engine's resolution, deferred
-    // to a resolved-schema source), so it frames by the produced width.
-    #expect(Shell.headers(of: "SELECT Id, Name FROM T", []) == ["Id", "Name"])
-    #expect(Shell.headers(of: "SELECT Id FROM T", [[.integer(1)]]) == ["Id"])
-    #expect(Shell.headers(of: "CREATE VIEW v AS SELECT 1 AS x", []) == nil)
-    #expect(Shell.headers(of: "SELECT * FROM T", [[.integer(9), .integer(8)]])
-            == ["column 1", "column 2"])
-  }
-
-  @Test("headers derive a WITH from its trailing query's projection")
-  func withResultHeaders() {
-    // A `WITH` frames its box from the TRAILING query's projection, exactly as
-    // a plain `SELECT` does — names come from the statement, not the rows, so
-    // `WITH t(n) AS (…) SELECT n FROM t` headers `n`, not the positional
-    // `column 1` the generic fallback would produce.
-    let query = "WITH t(n) AS (SELECT 1) SELECT n FROM t"
-    #expect(Shell.headers(of: query, [[.integer(1)]]) == ["n"])
-    // A zero-row result still frames the real column name — the header comes
-    // from the projection, so the box is sized to `n` regardless of row count.
-    #expect(Shell.headers(of: query, []) == ["n"])
-    // A trailing `SELECT *` over a CTE carries no names in the statement (they
-    // need CTE-scoped schema resolution, out of scope here), so it frames by
-    // the produced width, the same fallback a plain `SELECT *` takes.
-    #expect(Shell.headers(of: "WITH t(n) AS (SELECT 1) SELECT * FROM t",
-                          [[.integer(1)]]) == ["column 1"])
   }
 
   @Test("the identity spec escapes nothing and applies no conventions")

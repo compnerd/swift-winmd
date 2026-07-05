@@ -32,6 +32,8 @@
 /// additive       := multiplicative (('+' | '-') multiplicative)*
 /// multiplicative := factor (('*' | '/') factor)*
 /// factor         := '(' expression ')' | literal | aggregate | call | column
+/// literal        := string | integer | decimal | TRUE | FALSE | blob
+/// blob           := ('x' | 'X') "'" (hex hex)* "'"  // whole bytes
 /// aggregate      := COUNT '(' '*' ')'
 ///                 | (COUNT | SUM | MIN | MAX | AVG) '(' expression ')'
 /// order          := ORDER BY key (',' key)*
@@ -416,6 +418,14 @@ internal struct Parser: ~Escapable {
       _ = try advance(expecting: "a literal")
       return .literal(.double(value))
     }
+    if case let .blob(bytes) = current?.kind {
+      _ = try advance(expecting: "a literal")
+      return .literal(.blob(bytes))
+    }
+    if current?.kind == .true || current?.kind == .false {
+      let token = try advance(expecting: "a literal")
+      return .literal(.boolean(token.kind == .true))
+    }
 
     let ident = try name()
     guard try match(.lparen) else {
@@ -576,13 +586,16 @@ internal struct Parser: ~Escapable {
     }
   }
 
-  /// Parses a string, integer, or decimal literal.
+  /// Parses a string, integer, decimal, boolean, or binary literal.
   private mutating func literal() throws(SQLError) -> Literal {
     let token = try advance(expecting: "a literal")
     return switch token.kind {
     case let .string(value): .string(value)
     case let .integer(value): .integer(value)
     case let .decimal(value): .double(value)
+    case let .blob(bytes): .blob(bytes)
+    case .true: .boolean(true)
+    case .false: .boolean(false)
     default:
       throw .unexpected(token.kind.description,
                         expected: "a literal", at: token.location)

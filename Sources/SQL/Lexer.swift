@@ -143,6 +143,13 @@ internal struct Lexer: ~Escapable {
     case UInt8(ascii: ":"):
       return try parameter()
 
+    // An `x'…'`/`X'…'` binary-string literal. The `x` prefix is also an
+    // identifier lead byte, so scan a blob only when a quote follows;
+    // otherwise fall through to `identifier()` as an ordinary name.
+    case UInt8(ascii: "x"), UInt8(ascii: "X"):
+      return if peek(1) == UInt8(ascii: "'") { try blob() }
+          else { identifier() }
+
     case let b where digit(b):
       return try number()
 
@@ -260,6 +267,59 @@ internal struct Lexer: ~Escapable {
                  location: start)
   }
 
+  /// Scans a binary-string literal `x'…'`/`X'…'` at the current position.
+  ///
+  /// The `x` prefix and its opening quote are consumed; the body is a run of
+  /// hex digit pairs — each pair one byte, high nibble first — closed by a
+  /// quote. The count of digits must be even (a whole number of bytes); an
+  /// empty body `x''` is the empty blob. A non-hex digit faults where it sits,
+  /// an odd digit count faults at the close, and an unclosed body is
+  /// unterminated.
+  private mutating func blob() throws(SQLError) -> Token {
+    let start = location
+    advance()
+    advance()
+
+    var bytes = Array<UInt8>()
+    var high: UInt8? = nil
+    while let byte = peek() {
+      if byte == UInt8(ascii: "'") {
+        guard high == nil else {
+          throw .character("'", at: location)
+        }
+        advance()
+        return Token(kind: .blob(bytes), location: start)
+      }
+      guard let nibble = nibble(byte) else {
+        throw .character(Character(UnicodeScalar(byte)), at: location)
+      }
+      if let leading = high {
+        bytes.append(leading << 4 | nibble)
+        high = nil
+      } else {
+        high = nibble
+      }
+      advance()
+    }
+
+    throw .unterminated("binary literal", at: start)
+  }
+
+  /// The value of the ASCII hex digit `byte` (`0`–`9`, `a`–`f`, `A`–`F`), or
+  /// `nil` when it is not a hex digit.
+  private func nibble(_ byte: UInt8) -> UInt8? {
+    switch byte {
+    case UInt8(ascii: "0") ... UInt8(ascii: "9"):
+      byte - UInt8(ascii: "0")
+    case UInt8(ascii: "a") ... UInt8(ascii: "f"):
+      byte - UInt8(ascii: "a") + 10
+    case UInt8(ascii: "A") ... UInt8(ascii: "F"):
+      byte - UInt8(ascii: "A") + 10
+    default:
+      nil
+    }
+  }
+
   /// Scans a numeric literal at the current position — an integer or a decimal.
   ///
   /// A bare run of digits is an `integer`. A `.` fraction and/or an `e`/`E`
@@ -360,6 +420,8 @@ internal struct Lexer: ~Escapable {
     case "ALL": .all
     case "WITH": .with
     case "RECURSIVE": .recursive
+    case "TRUE": .true
+    case "FALSE": .false
     default: .identifier(text)
     }
     return Token(kind: kind, location: start)

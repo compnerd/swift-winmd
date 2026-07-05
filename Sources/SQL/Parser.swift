@@ -7,8 +7,14 @@
 ///
 /// ```
 /// statement      := with | query | create
-/// create         := CREATE VIEW identifier
+/// create         := CREATE (view | function)
+/// view           := VIEW identifier
 ///                   ['(' identifier (',' identifier)* ')'] AS query
+/// function       := FUNCTION identifier '(' [param (',' param)*] ')'
+///                   RETURNS type AS expression
+/// param          := identifier type
+/// type           := INTEGER | INT | REAL | FLOAT | DOUBLE | VARCHAR | TEXT
+///                 | CHAR | BOOLEAN | BOOL | BLOB | BINARY
 /// with           := WITH [RECURSIVE] cte (',' cte)* query
 /// cte            := identifier ['(' identifier (',' identifier)* ')']
 ///                   AS '(' query ')'
@@ -72,9 +78,9 @@ internal struct Parser: ~Escapable {
 
   /// Parses a complete statement and asserts the input is exhausted.
   ///
-  /// A leading `CREATE` selects the `CREATE VIEW` form; a leading `WITH` the
-  /// common-table-expression form; anything else is a `query` — a `SELECT` or a
-  /// `UNION` of several.
+  /// A leading `CREATE` selects the `CREATE VIEW`/`CREATE FUNCTION` form; a
+  /// leading `WITH` the common-table-expression form; anything else is a `query`
+  /// — a `SELECT` or a `UNION` of several.
   internal mutating func parse() throws(SQLError) -> Statement {
     let statement = switch current?.kind {
     case .create: try create()
@@ -184,16 +190,26 @@ internal struct Parser: ~Escapable {
     return query
   }
 
-  /// Parses `CREATE VIEW identifier ['(' identifier (, identifier)* ')'] AS
-  /// query` (the leading `CREATE` is the next token).
+  /// Parses a `CREATE` statement — `CREATE VIEW …` or `CREATE FUNCTION …` (the
+  /// leading `CREATE` is the next token). The keyword after `CREATE` selects the
+  /// form.
+  private mutating func create() throws(SQLError) -> Statement {
+    try expect(.create)
+    if try match(.function) {
+      return try function()
+    }
+    try expect(.view)
+    return try view()
+  }
+
+  /// Parses the `VIEW` tail — `identifier ['(' identifier (, identifier)* ')']
+  /// AS query` (the `CREATE VIEW` is already consumed).
   ///
   /// An explicit `(col, col, …)` list names the view's columns; absent one, the
   /// names are inferred from the FIRST arm's projection (the ISO rule for a
   /// union's result columns) — the naming, arity, and uniqueness rules
   /// `columns(_:_:)` applies, shared with a CTE's column list.
-  private mutating func create() throws(SQLError) -> Statement {
-    try expect(.create)
-    try expect(.view)
+  private mutating func view() throws(SQLError) -> Statement {
     let name = try identifier()
     let explicit = try names()
     try expect(.as)
@@ -201,6 +217,74 @@ internal struct Parser: ~Escapable {
     return try .create(name: name,
                        view: View(query: query,
                                   columns: columns(explicit, query)))
+  }
+
+  /// Parses the `FUNCTION` tail — `identifier '(' [param (, param)*] ')' RETURNS
+  /// type AS expression` (the `CREATE FUNCTION` is already consumed), each
+  /// `param` an `identifier type`.
+  ///
+  /// The parameter list is parenthesised and may be empty (`f() RETURNS …`). The
+  /// body is a single scalar `expression` over the declared parameters, so a
+  /// call binds its arguments to the parameter names and evaluates it. The
+  /// parameter names must be case-insensitively unique — the body resolves a
+  /// reference against them, and a duplicate would make the shadowed one
+  /// unreachable — else `SQLError.duplicate`.
+  private mutating func function() throws(SQLError) -> Statement {
+    let name = try identifier()
+    try expect(.lparen)
+    var parameters = Array<Function.Parameter>()
+    if current?.kind != .rparen {
+      try parameters.append(parameter())
+      while try match(.comma) {
+        try parameters.append(parameter())
+      }
+    }
+    try expect(.rparen)
+
+    var seen = Set<String>()
+    for parameter in parameters
+        where !seen.insert(parameter.name.lowercased()).inserted {
+      throw .duplicate(parameter.name)
+    }
+
+    try expect(.returns)
+    let returns = try type()
+    try expect(.as)
+    let body = try expression()
+    return .function(name: name,
+                     function: Function(parameters: parameters,
+                                        returns: returns, body: body))
+  }
+
+  /// Parses one function parameter — `identifier type`.
+  private mutating func parameter() throws(SQLError) -> Function.Parameter {
+    let name = try identifier()
+    let type = try type()
+    return Function.Parameter(name: name, type: type)
+  }
+
+  /// Parses a value type — an ISO data-type spelling — into a `ValueType`.
+  ///
+  /// The single-word domains map directly: `INTEGER`/`INT` to `.integer`,
+  /// `REAL`/`FLOAT`/`DOUBLE` to `.double`, `VARCHAR`/`TEXT`/`CHAR` to `.text`,
+  /// `BOOLEAN`/`BOOL` to `.boolean`, `BLOB`/`BINARY` to `.blob` — matched
+  /// case-insensitively, so a type is written bare like a keyword. A spelling
+  /// none of these name is `SQLError.unexpected`.
+  private mutating func type() throws(SQLError) -> ValueType {
+    let token = try advance(expecting: "a type")
+    guard case let .identifier(text) = token.kind else {
+      throw .unexpected(token.kind.description,
+                        expected: "a type", at: token.location)
+    }
+    switch text.uppercased() {
+    case "INTEGER", "INT": return .integer
+    case "REAL", "FLOAT", "DOUBLE": return .double
+    case "VARCHAR", "TEXT", "CHAR": return .text
+    case "BOOLEAN", "BOOL": return .boolean
+    case "BLOB", "BINARY": return .blob
+    default:
+      throw .unexpected(text, expected: "a type", at: token.location)
+    }
   }
 
   /// The number of values `projection` projects, or `nil` when it is not

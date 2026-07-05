@@ -394,6 +394,8 @@ internal struct Lexer: ~Escapable {
     let kind: Token.Kind = switch text.uppercased() {
     case "CREATE": .create
     case "VIEW": .view
+    case "FUNCTION": .function
+    case "RETURNS": .returns
     case "SELECT": .select
     case "DISTINCT": .distinct
     case "FROM": .from

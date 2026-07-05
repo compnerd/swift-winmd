@@ -2292,6 +2292,259 @@ struct EngineFunctionTests {
   }
 }
 
+// MARK: - Defined function (CREATE FUNCTION) tests
+
+/// The routines with the DEFINED functions each `CREATE FUNCTION` in `defs`
+/// registers, seeded from the standard prelude — the consumer's registration
+/// path, folding a parsed `CREATE FUNCTION` into a `Routines`.
+private func defining(_ defs: String...) throws -> Routines {
+  var routines = Routines.standard
+  for def in defs {
+    guard case let .function(name, function) = try Statement(parsing: def)
+    else {
+      throw SQLError.incomplete(expected: "a CREATE FUNCTION statement")
+    }
+    routines = try routines.registering(name, function)
+  }
+  return routines
+}
+
+struct EngineDefinedFunctionTests {
+  @Test("a defined function evaluates its body over the arguments")
+  func projection() throws {
+    let routines =
+        try defining("CREATE FUNCTION twice(n INTEGER) RETURNS INTEGER "
+                         + "AS n + n")
+    let rows =
+        try people().run(parse("SELECT twice(Age) FROM People WHERE Id = 1"),
+                         routines)
+    // Alice's Age is 30; twice(30) = 60.
+    #expect(rows == [[.integer(60)]])
+  }
+
+  @Test("a defined function binds each parameter to its argument by position")
+  func parameters() throws {
+    let routines =
+        try defining("CREATE FUNCTION span(lo INTEGER, hi INTEGER) "
+                         + "RETURNS INTEGER AS hi - lo")
+    let rows =
+        try people().run(parse("SELECT span(Id, Age) FROM People WHERE Id = 4"),
+                         routines)
+    // Dave: Id 4, Age 40; span(4, 40) = 36.
+    #expect(rows == [[.integer(36)]])
+  }
+
+  @Test("a defined function projects beside a bare column")
+  func mixed() throws {
+    let routines =
+        try defining("CREATE FUNCTION inc(n INTEGER) RETURNS INTEGER AS n + 1")
+    let rows =
+        try people().run(parse("SELECT Id, inc(Age) FROM People WHERE Id = 2"),
+                         routines)
+    // Bob: Id 2, Age 25; inc(25) = 26.
+    #expect(rows == [[.integer(2), .integer(26)]])
+  }
+
+  @Test("a defined function filters in a predicate")
+  func predicate() throws {
+    let routines =
+        try defining("CREATE FUNCTION inc(n INTEGER) RETURNS INTEGER AS n + 1")
+    let rows =
+        try people().run(parse("SELECT Name FROM People WHERE inc(Age) = 31"),
+                         routines)
+    // Alice and Carol are 30; inc(30) = 31.
+    #expect(rows == [[.text("Alice")], [.text("Carol")]])
+  }
+
+  @Test("a parameterless defined function yields its constant body")
+  func nullary() throws {
+    let routines =
+        try defining("CREATE FUNCTION answer() RETURNS INTEGER AS 40 + 2")
+    let rows =
+        try people().run(parse("SELECT answer() FROM People WHERE Id = 1"),
+                         routines)
+    #expect(rows == [[.integer(42)]])
+  }
+
+  @Test("a defined function propagates a NULL argument through its body")
+  func nullArgument() throws {
+    // A NULL bound to a parameter propagates through the body's arithmetic (SQL
+    // null propagation), so the result is NULL rather than a fault.
+    let routines =
+        try defining("CREATE FUNCTION inc(n INTEGER) RETURNS INTEGER AS n + 1")
+    let catalog = try Catalog {
+      Relation("N", ["Id": .integer, "V": .integer]) {
+        Row(1, nil)
+      }
+    }
+    let rows = try catalog.run(parse("SELECT inc(V) FROM N WHERE Id = 1"),
+                               routines)
+    #expect(rows == [[.null]])
+  }
+
+  @Test("a call with the wrong argument count faults with the declared arity")
+  func arity() throws {
+    // The declared `parameters` contract is what the static type-check (the
+    // `call` contract check, the schema path drives) validates a call against,
+    // exactly as it does a native routine's signature — a wrong argument count
+    // is a function-argument fault reporting the declared arity.
+    let routines =
+        try defining("CREATE FUNCTION twice(n INTEGER) RETURNS INTEGER "
+                         + "AS n + n")
+    #expect(throws: SQLError.argument("twice takes 1 arguments")) {
+      try people().columns(of: parse("SELECT twice(Id, Age) FROM People"),
+                           routines: routines)
+    }
+  }
+
+  @Test("a call with a wrong argument kind faults against the parameter type")
+  func kind() throws {
+    // A definitively-wrong argument type (text where an integer parameter is
+    // declared) is rejected by the same `call` contract check.
+    let routines =
+        try defining("CREATE FUNCTION twice(n INTEGER) RETURNS INTEGER "
+                         + "AS n + n")
+    #expect(throws: SQLError.argument("twice requires integer arguments")) {
+      try people().columns(of: parse("SELECT twice(Name) FROM People"),
+                           routines: routines)
+    }
+  }
+
+  @Test("typing reports the declared RETURNS of a defined function")
+  func typing() throws {
+    // The result-schema walk types a `f(...)` call by the routine's declared
+    // return type without running it, so a defined function's declared RETURNS
+    // is what the output column reports.
+    let routines =
+        try defining("CREATE FUNCTION label(n INTEGER) RETURNS TEXT AS 'x'")
+    let columns =
+        try people().columns(of: parse("SELECT label(Id) AS L FROM People"),
+                             routines: routines)
+    #expect(columns.count == 1)
+    #expect(columns[0] == OutputColumn(name: "L", type: .text))
+  }
+
+  @Test("a defined function body naming an unknown parameter faults at define")
+  func undeclaredParameter() throws {
+    // The body is lowered against its parameters at registration, so a reference
+    // to a name the function does not declare faults there — the moment a
+    // `CREATE FUNCTION` binds — not at each later call.
+    #expect(throws: SQLError.column("m")) {
+      _ = try defining("CREATE FUNCTION f(n INTEGER) RETURNS INTEGER AS m + 1")
+    }
+  }
+
+  @Test("a later defined function shadows an earlier one of the same name")
+  func shadowing() throws {
+    // A later registration wins (the house rule the flat registry follows), so
+    // the second `inc` — adding 100 — is the one a call resolves.
+    let routines = try defining(
+        "CREATE FUNCTION inc(n INTEGER) RETURNS INTEGER AS n + 1",
+        "CREATE FUNCTION inc(n INTEGER) RETURNS INTEGER AS n + 100")
+    let rows =
+        try people().run(parse("SELECT inc(Age) FROM People WHERE Id = 1"),
+                         routines)
+    // Alice's Age is 30; the shadowing inc adds 100 → 130.
+    #expect(rows == [[.integer(130)]])
+  }
+
+  @Test("a body naming its own unregistered name faults as unresolved")
+  func selfReference() throws {
+    // `f() RETURNS INTEGER AS f() + 1` with NO prior `f` early-binds against a
+    // map without `f`, so the body's own call is unresolved: registration
+    // faults `SQLError.function` — the unregistered-callee case — not a
+    // self-reference one. Early binding admits no recursion; there is nothing
+    // to bind to.
+    #expect(throws: SQLError.function("f")) {
+      _ = try defining("CREATE FUNCTION f() RETURNS INTEGER AS f() + 1")
+    }
+  }
+
+  @Test("a self-referential redefinition captures the prior function")
+  func selfReferenceRedefinition() throws {
+    // `f() AS f() + 1` REPLACING a prior `f` is well-defined under early
+    // binding: the new body captures the OLD `f` and computes `f_old() + 1`,
+    // terminating. With `f_old()` = 0, `SELECT f()` returns 0 + 1 = 1.
+    let routines = try defining(
+        "CREATE FUNCTION f() RETURNS INTEGER AS 0",
+        "CREATE FUNCTION f() RETURNS INTEGER AS f() + 1")
+    let rows =
+        try people().run(parse("SELECT f() FROM People WHERE Id = 1"),
+                         routines)
+    #expect(rows == [[.integer(1)]])
+  }
+
+  @Test("a body calling a different existing function still registers")
+  func crossReference() throws {
+    // A body calling a distinct, already-registered routine early-binds it and
+    // registers cleanly — the common composition case.
+    let routines = try defining(
+        "CREATE FUNCTION g(n INTEGER) RETURNS INTEGER AS n + 1",
+        "CREATE FUNCTION f(n INTEGER) RETURNS INTEGER AS g(n) + 1")
+    let rows =
+        try people().run(parse("SELECT f(Age) FROM People WHERE Id = 1"),
+                         routines)
+    // Alice's Age is 30; g(30) = 31, f(30) = g(30) + 1 = 32.
+    #expect(rows == [[.integer(32)]])
+  }
+
+  @Test("a body calling a prelude routine registers against empty routines")
+  func preludeCall() throws {
+    // Registered against EMPTY routines — NOT `defining`, which seeds the
+    // prelude — a body calling BITAND still resolves it: registration merges
+    // `Routines.standard` under the caller's routines (the run/columns
+    // precedence), so `lowbit(n) AS BITAND(n, 1)` binds the built-in rather
+    // than faulting `SQLError.function("BITAND")`.
+    guard case let .function(name, function) =
+        try Statement(parsing: "CREATE FUNCTION lowbit(n INTEGER) "
+                          + "RETURNS INTEGER AS BITAND(n, 1)")
+    else { throw SQLError.incomplete(expected: "a CREATE FUNCTION statement") }
+    let routines = try Routines().registering(name, function)
+    let rows =
+        try people().run(parse("SELECT lowbit(Age) FROM People WHERE Id = 1"),
+                         routines)
+    // Alice's Age is 30; BITAND(30, 1) = 0 (30 is even).
+    #expect(rows == [[.integer(0)]])
+    let odd =
+        try people().run(parse("SELECT lowbit(Id) FROM People WHERE Id = 3"),
+                         routines)
+    // Id 3 is odd; BITAND(3, 1) = 1.
+    #expect(odd == [[.integer(1)]])
+  }
+
+  @Test("a body calling a still-unknown routine faults at registration")
+  func unknownCall() throws {
+    // Merging the prelude into the capture must not mask a genuinely-unknown
+    // callee: a body naming `nope`, bound by neither the prelude nor a prior
+    // registration, is still unresolved and faults `SQLError.function` at
+    // registration — the guard against over-merging.
+    #expect(throws: SQLError.function("nope")) {
+      _ = try defining("CREATE FUNCTION f() RETURNS INTEGER AS nope()")
+    }
+  }
+
+  @Test("a body binds its callee at definition, not at call time")
+  func capturedCallee() throws {
+    // The round-5 root case at the parse level. `g` returns INTEGER 1; `f() AS
+    // g()` captures that INTEGER `g`. Redefining `g` to a TEXT body shadows it
+    // for QUERIES, but `f` closed over the old `g`, so `SELECT f()` still
+    // returns the INTEGER 1 — consistent with f's advertised INTEGER schema —
+    // while `SELECT g()` sees the new TEXT `g` (query-level latest-wins holds).
+    let routines = try defining(
+        "CREATE FUNCTION g() RETURNS INTEGER AS 1",
+        "CREATE FUNCTION f() RETURNS INTEGER AS g()",
+        "CREATE FUNCTION g() RETURNS TEXT AS 'x'")
+    let captured =
+        try people().run(parse("SELECT f() FROM People WHERE Id = 1"),
+                         routines)
+    #expect(captured == [[.integer(1)]])
+    let latest =
+        try people().run(parse("SELECT g() FROM People WHERE Id = 1"),
+                         routines)
+    #expect(latest == [[.text("x")]])
+  }
+}
+
 // MARK: - NULL tests
 
 struct EngineNullTests {

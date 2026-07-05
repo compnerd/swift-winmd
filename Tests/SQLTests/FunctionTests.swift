@@ -7,25 +7,21 @@ import Testing
 import SQLTestSupport
 
 @Suite struct RoutineTests {
-  @Test("a routine's return type defaults to integer")
-  func defaultReturn() {
+  @Test func `a routine's return type defaults to integer`() {
     #expect(Routine(parameters: []) { _ in .integer(0) }.returns == .integer)
   }
 
-  @Test("a routine carries its declared return type")
-  func declaredReturn() {
+  @Test func `a routine carries its declared return type`() {
     #expect(Routine(returns: .text, parameters: []) { _ in .text("x") }
                 .returns == .text)
   }
 
-  @Test("a routine carries its declared parameter contract")
-  func declaredParameters() {
+  @Test func `a routine carries its declared parameter contract`() {
     let routine = Routine(parameters: [.integer, .text]) { _ in .integer(0) }
     #expect(routine.parameters == [.integer, .text])
   }
 
-  @Test("a routine is called to compute a value")
-  func callable() throws {
+  @Test func `a routine is called to compute a value`() throws {
     let double = Routine(parameters: [.integer]) { arguments in
       guard case let .integer(x) = arguments[0] else { return .null }
       return .integer(x * 2)
@@ -33,8 +29,7 @@ import SQLTestSupport
     #expect(try double([.integer(21)]) == .integer(42))
   }
 
-  @Test("a Routine literal registers its declared signature")
-  func routineLiteral() {
+  @Test func `a Routine literal registers its declared signature`() {
     // A client's documented shape: the literal value is a `Routine`, so each
     // registration declares its full signature — its parameters and return
     // type.
@@ -46,8 +41,7 @@ import SQLTestSupport
     #expect(routines["upper"]?.parameters == [.text])
   }
 
-  @Test("registering declares a signature, the return defaulting to integer")
-  func registering() {
+  @Test func `registering declares a signature, the return defaulting to integer`() {
     let routines = Routines()
         .registering("t", returns: .text, parameters: [.text]) {
           _ in .text("x")
@@ -57,16 +51,14 @@ import SQLTestSupport
     #expect(routines["i"]?.returns == .integer)
   }
 
-  @Test("the name subscript resolves case-insensitively")
-  func lookup() {
+  @Test func `the name subscript resolves case-insensitively`() {
     let routines: Routines =
         ["Tag": Routine(returns: .text, parameters: []) { _ in .text("x") }]
     #expect(routines["TAG"] != nil)
     #expect(routines["nope"] == nil)
   }
 
-  @Test("the standard prelude declares BITAND over two integers")
-  func standardBitand() {
+  @Test func `the standard prelude declares BITAND over two integers`() {
     #expect(Routines.standard["bitand"]?.returns == .integer)
     #expect(Routines.standard["bitand"]?.parameters == [.integer, .integer])
   }
@@ -101,8 +93,7 @@ private func id() -> Function {
 }
 
 @Suite struct RoutineContractTests {
-  @Test("a defined call with too few arguments faults at the run path")
-  func arityShort() throws {
+  @Test func `a defined call with too few arguments faults at the run path`() throws {
     // A defined routine reaches the run path without a prior type-check, so its
     // arity is enforced in the call itself: `twice()` reads slot 0 of an empty
     // record, which would trap; the guard turns it into `SQLError.argument`.
@@ -112,8 +103,7 @@ private func id() -> Function {
                          routines: routines)
   }
 
-  @Test("a defined call with too many arguments faults at the run path")
-  func arityLong() throws {
+  @Test func `a defined call with too many arguments faults at the run path`() throws {
     // Extra arguments are not silently ignored: the arity guard rejects a call
     // wider than the declared parameters, the same `SQLError.argument` a native
     // routine's own count check raises.
@@ -123,8 +113,7 @@ private func id() -> Function {
                          routines: routines)
   }
 
-  @Test("registering a body of the wrong type faults against the RETURNS")
-  func returnMismatch() {
+  @Test func `registering a body of the wrong type faults against the RETURNS`() {
     // `f(n INTEGER) RETURNS TEXT AS n + 1` derives an integer body against a
     // declared TEXT result — a contract violation caught at registration, the
     // moment the function binds, with the same `SQLError.argument` case the
@@ -139,8 +128,7 @@ private func id() -> Function {
     }
   }
 
-  @Test("registering a body matching the RETURNS succeeds and runs")
-  func returnMatch() throws {
+  @Test func `registering a body matching the RETURNS succeeds and runs`() throws {
     // A body whose derived type equals the declared result registers cleanly
     // and computes over its argument.
     let routines = try Routines().registering("twice", twice())
@@ -148,8 +136,7 @@ private func id() -> Function {
                          yields: [[14]], routines: routines)
   }
 
-  @Test("a NULL result is allowed against any declared return type")
-  func returnNull() throws {
+  @Test func `a NULL result is allowed against any declared return type`() throws {
     // NULL is not a type — it propagates through any declared result — so a
     // body that yields NULL on a row (a NULL argument through its arithmetic)
     // does not violate the INTEGER contract the derivation checked.
@@ -158,8 +145,7 @@ private func id() -> Function {
                          yields: [[nil]], routines: routines)
   }
 
-  @Test("a duplicate parameter on the public path faults with the later name")
-  func duplicateParameter() {
+  @Test func `a duplicate parameter on the public path faults with the later name`() {
     // The parser rejects a duplicate parameter, but a directly-constructed
     // `Function` bypasses it; the registration path applies the same
     // case-insensitive check so the second (unreachable) slot never registers.
@@ -172,8 +158,7 @@ private func id() -> Function {
     }
   }
 
-  @Test("registering a body calling an unregistered routine faults")
-  func unresolvedCall() {
+  @Test func `registering a body calling an unregistered routine faults`() {
     // A defined body early-binds its calls against the routines captured at
     // definition. `f() RETURNS INTEGER AS g()` with `g` unknown captures a map
     // without `g`, so the returns validation cannot resolve the call: rather
@@ -186,8 +171,7 @@ private func id() -> Function {
     }
   }
 
-  @Test("a body calling an already-registered routine adopts its return type")
-  func resolvedCall() throws {
+  @Test func `a body calling an already-registered routine adopts its return type`() throws {
     // With `g` registered first, `f() RETURNS TEXT AS g()` validates against
     // g's declared TEXT result and registers; the call resolves at run time.
     let g = Function(parameters: [], returns: .text,
@@ -199,8 +183,7 @@ private func id() -> Function {
                          yields: [["x"]], routines: routines)
   }
 
-  @Test("a defined call with a wrong-typed argument faults at the run path")
-  func argumentType() throws {
+  @Test func `a defined call with a wrong-typed argument faults at the run path`() throws {
     // Reached through the RUN path (no prior `columns(validate:)`), the defined
     // dispatch validates each argument's type, not only the arity: `id(Name)`
     // over a TEXT column would otherwise return a `.text` value against the
@@ -212,8 +195,7 @@ private func id() -> Function {
                          routines: routines)
   }
 
-  @Test("a defined call with a NULL argument is allowed and yields NULL")
-  func argumentNull() throws {
+  @Test func `a defined call with a NULL argument is allowed and yields NULL`() throws {
     // NULL is not a type — it propagates through the body — so a NULL argument
     // bound to any declared parameter is admitted (exactly as `BITAND` returns
     // NULL on a NULL argument), and the identity body yields NULL.
@@ -222,8 +204,7 @@ private func id() -> Function {
                          yields: [[nil]], routines: routines)
   }
 
-  @Test("a defined call with a correct-typed argument returns the value")
-  func argumentMatch() throws {
+  @Test func `a defined call with a correct-typed argument returns the value`() throws {
     // A correct-typed argument passes the run-path type check and the identity
     // body returns it — the guard rejects only a definitively-wrong type.
     let routines = try Routines().registering("id", id())
@@ -231,8 +212,7 @@ private func id() -> Function {
                          yields: [[7]], routines: routines)
   }
 
-  @Test("a body naming its own unregistered name faults as unresolved")
-  func selfReference() {
+  @Test func `a body naming its own unregistered name faults as unresolved`() {
     // `f() RETURNS INTEGER AS f() + 1` with NO prior `f` captures a map without
     // `f`, so the body's own call is unresolved: the returns validation faults
     // `SQLError.function`, the unregistered-callee case — not a self-reference
@@ -245,8 +225,7 @@ private func id() -> Function {
     }
   }
 
-  @Test("a body naming its own name over an existing one captures the old one")
-  func selfShadowing() throws {
+  @Test func `a body naming its own name over an existing one captures the old one`() throws {
     // `f() AS f() + 1` REPLACING a prior `f` is well-defined under early
     // binding: the new body captures the OLD `f` (the map before this
     // registration), so it computes `f_old() + 1` and terminates — no
@@ -262,8 +241,7 @@ private func id() -> Function {
                          yields: [[1]], routines: redefined)
   }
 
-  @Test("a body calling a prelude routine registers and runs")
-  func preludeCall() throws {
+  @Test func `a body calling a prelude routine registers and runs`() throws {
     // `lowbit(n INTEGER) AS BITAND(n, 1)` calls the prelude BITAND. The capture
     // seeds `Routines.standard` under `self` — the SAME precedence the public
     // run/columns compose a query's routines with — so the body resolves BITAND
@@ -280,8 +258,7 @@ private func id() -> Function {
                          yields: [[1]], routines: routines)
   }
 
-  @Test("a body calling a still-unknown routine faults at registration")
-  func unknownCall() {
+  @Test func `a body calling a still-unknown routine faults at registration`() {
     // The capture is the prelude overlaid with `self`, NOT every routine: a
     // body naming a routine neither the prelude nor a prior registration binds
     // is still unresolved, faulting `SQLError.function` at registration — the
@@ -293,8 +270,7 @@ private func id() -> Function {
     }
   }
 
-  @Test("a caller function shadows a like-named prelude routine in a body")
-  func preludeShadowed() throws {
+  @Test func `a caller function shadows a like-named prelude routine in a body`() throws {
     // Precedence is standard-under-self: a caller registration of BITAND
     // shadows the prelude one in a later body's capture, so `lowbit(n) AS
     // BITAND(n, 1)` resolves the caller's BITAND (here returning a constant 9),
@@ -313,8 +289,7 @@ private func id() -> Function {
                          yields: [[9]], routines: routines)
   }
 
-  @Test("a defined body binds its callee at definition, not at call time")
-  func capturedCallee() throws {
+  @Test func `a defined body binds its callee at definition, not at call time`() throws {
     // The round-5 root case. `g` returns INTEGER 1; `f() AS g()` captures that
     // INTEGER `g`. Redefining `g` to a TEXT body shadows it for QUERIES, but
     // `f` closed over the old `g`, so `SELECT f()` still returns the INTEGER 1

@@ -15,8 +15,7 @@ private func parse(select text: String) throws -> Select {
 }
 
 struct ProjectionTests {
-  @Test("parses a SELECT * projection")
-  func star() throws {
+  @Test func `parses a SELECT * projection`() throws {
     let select = try parse(select: "SELECT * FROM TypeDef")
     #expect(select.projection == .all)
     #expect(select.table == "TypeDef")
@@ -24,30 +23,26 @@ struct ProjectionTests {
     #expect(select.order == nil)
   }
 
-  @Test("parses a single-column projection")
-  func singleColumn() throws {
+  @Test func `parses a single-column projection`() throws {
     let select = try parse(select: "SELECT TypeName FROM TypeDef")
     #expect(select.projection == .columns(["TypeName"]))
   }
 
-  @Test("parses a comma-separated column list")
-  func columnList() throws {
+  @Test func `parses a comma-separated column list`() throws {
     let select =
         try parse(select: "SELECT TypeName, TypeNamespace, Flags FROM TypeDef")
     #expect(select.projection
                 == .columns(["TypeName", "TypeNamespace", "Flags"]))
   }
 
-  @Test("parses a dotted column identifier")
-  func dottedColumn() throws {
+  @Test func `parses a dotted column identifier`() throws {
     // Simple column identifiers may carry a qualifying dot; metadata names with
     // dots appear only as string literals.
     let select = try parse(select: "SELECT TypeDef.TypeName FROM TypeDef")
     #expect(select.projection == .columns(["TypeDef.TypeName"]))
   }
 
-  @Test("parses a delimited column identifier as one unqualified name")
-  func delimitedColumn() throws {
+  @Test func `parses a delimited column identifier as one unqualified name`() throws {
     // A delimited identifier is verbatim: a dot in it is part of the name,
     // not a qualifier as in the bare dotted form above.
     let dotted = try parse(select: "SELECT \"a.b\" FROM T")
@@ -59,8 +54,7 @@ struct ProjectionTests {
 }
 
 struct KeywordTests {
-  @Test("parses lowercase keywords")
-  func caseInsensitive() throws {
+  @Test func `parses lowercase keywords`() throws {
     let select =
         try parse(select: "select TypeName from TypeDef where Flags = 1")
     #expect(select.projection == .columns(["TypeName"]))
@@ -69,8 +63,7 @@ struct KeywordTests {
                                             right: .literal(.integer(1))))
   }
 
-  @Test("parses mixed-case keywords")
-  func mixedCase() throws {
+  @Test func `parses mixed-case keywords`() throws {
     let select =
         try parse(select: "SeLeCt * FrOm TypeDef OrDeR By TypeName DeSc")
     #expect(select.order == Order(column: "TypeName", ascending: false))
@@ -78,34 +71,29 @@ struct KeywordTests {
 }
 
 struct SetQuantifierTests {
-  @Test("a plain SELECT is not distinct")
-  func plain() throws {
+  @Test func `a plain SELECT is not distinct`() throws {
     let select = try parse(select: "SELECT TypeName FROM TypeDef")
     #expect(!select.distinct)
   }
 
-  @Test("SELECT DISTINCT sets the distinct flag")
-  func distinct() throws {
+  @Test func `SELECT DISTINCT sets the distinct flag`() throws {
     let select = try parse(select: "SELECT DISTINCT TypeName FROM TypeDef")
     #expect(select.distinct)
     #expect(select.projection == .columns(["TypeName"]))
   }
 
-  @Test("SELECT ALL is the default, not distinct")
-  func explicitAll() throws {
+  @Test func `SELECT ALL is the default, not distinct`() throws {
     let select = try parse(select: "SELECT ALL TypeName FROM TypeDef")
     #expect(!select.distinct)
     #expect(select.projection == .columns(["TypeName"]))
   }
 
-  @Test("DISTINCT is case-insensitive")
-  func caseInsensitive() throws {
+  @Test func `DISTINCT is case-insensitive`() throws {
     let select = try parse(select: "select distinct TypeName from TypeDef")
     #expect(select.distinct)
   }
 
-  @Test("DISTINCT applies to a FROM-less scalar select")
-  func scalar() throws {
+  @Test func `DISTINCT applies to a FROM-less scalar select`() throws {
     let select = try parse(select: "SELECT DISTINCT 1")
     #expect(select.distinct)
     #expect(select.from == nil)
@@ -113,8 +101,7 @@ struct SetQuantifierTests {
 }
 
 struct PredicateTests {
-  @Test("parses each comparison operator")
-  func operators() throws {
+  @Test func `parses each comparison operator`() throws {
     let cases: Array<(String, Comparison)> = [
       ("=", .equal),
       ("<>", .unequal),
@@ -132,8 +119,7 @@ struct PredicateTests {
     }
   }
 
-  @Test("parses a string-literal operand")
-  func stringLiteral() throws {
+  @Test func `parses a string-literal operand`() throws {
     let text =
         "SELECT * FROM TypeDef WHERE TypeNamespace = 'Windows.Win32.Foundation'"
     let select = try parse(select: text)
@@ -143,16 +129,14 @@ struct PredicateTests {
                                right: value))
   }
 
-  @Test("parses a string with an escaped quote")
-  func escapedQuote() throws {
+  @Test func `parses a string with an escaped quote`() throws {
     let select = try parse(select: "SELECT * FROM T WHERE name = 'O''Brien'")
     #expect(select.predicate
                 == .comparison(left: .column("name"), op: .equal,
                                right: .literal(.string("O'Brien"))))
   }
 
-  @Test("parses a function call as a comparison operand")
-  func functionOperand() throws {
+  @Test func `parses a function call as a comparison operand`() throws {
     let select = try parse(select: "SELECT * FROM T WHERE upper(Name) = 'X'")
     let call = Expression.call(name: "upper", arguments: [.column("Name")])
     #expect(select.predicate
@@ -160,8 +144,7 @@ struct PredicateTests {
                                right: .literal(.string("X"))))
   }
 
-  @Test("binds AND tighter than OR")
-  func andBindsTighterThanOr() throws {
+  @Test func `binds AND tighter than OR`() throws {
     // a = 1 OR b = 2 AND c = 3  ==>  a OR (b AND c)
     let select =
         try parse(select: "SELECT * FROM T WHERE a = 1 OR b = 2 AND c = 3")
@@ -174,8 +157,7 @@ struct PredicateTests {
     #expect(select.predicate == .or(a, .and(b, c)))
   }
 
-  @Test("binds NOT tighter than AND")
-  func notBindsTighterThanAnd() throws {
+  @Test func `binds NOT tighter than AND`() throws {
     // NOT a = 1 AND b = 2  ==>  (NOT a) AND b
     let select =
         try parse(select: "SELECT * FROM T WHERE NOT a = 1 AND b = 2")
@@ -186,8 +168,7 @@ struct PredicateTests {
     #expect(select.predicate == .and(.not(a), b))
   }
 
-  @Test("parentheses override operator precedence")
-  func parenthesesOverridePrecedence() throws {
+  @Test func `parentheses override operator precedence`() throws {
     // (a = 1 OR b = 2) AND c = 3
     let select =
         try parse(select: "SELECT * FROM T WHERE (a = 1 OR b = 2) AND c = 3")
@@ -200,34 +181,29 @@ struct PredicateTests {
     #expect(select.predicate == .and(.or(a, b), c))
   }
 
-  @Test("parses IS NULL")
-  func isNull() throws {
+  @Test func `parses IS NULL`() throws {
     let select = try parse(select: "SELECT * FROM T WHERE Note IS NULL")
     #expect(select.predicate == .null(.column("Note"), negated: false))
   }
 
-  @Test("parses IS NOT NULL")
-  func isNotNull() throws {
+  @Test func `parses IS NOT NULL`() throws {
     let select = try parse(select: "SELECT * FROM T WHERE Note IS NOT NULL")
     #expect(select.predicate == .null(.column("Note"), negated: true))
   }
 
-  @Test("parses IS NULL over a function-call operand")
-  func isNullCall() throws {
+  @Test func `parses IS NULL over a function-call operand`() throws {
     let select = try parse(select: "SELECT * FROM T WHERE iid(Id) IS NULL")
     let call = Expression.call(name: "iid", arguments: [.column("Id")])
     #expect(select.predicate == .null(call, negated: false))
   }
 
-  @Test("rejects IS without NULL")
-  func isWithoutNull() {
+  @Test func `rejects IS without NULL`() {
     #expect(throws: SQLError.self) {
       _ = try Statement(parsing: "SELECT * FROM T WHERE Note IS 1")
     }
   }
 
-  @Test("parses OR left-associatively")
-  func leftAssociativeOr() throws {
+  @Test func `parses OR left-associatively`() throws {
     // a = 1 OR b = 2 OR c = 3  ==>  ((a OR b) OR c)
     let select =
         try parse(select: "SELECT * FROM T WHERE a = 1 OR b = 2 OR c = 3")
@@ -242,26 +218,22 @@ struct PredicateTests {
 }
 
 struct OrderTests {
-  @Test("defaults ORDER BY to ascending")
-  func defaultAscending() throws {
+  @Test func `defaults ORDER BY to ascending`() throws {
     let select = try parse(select: "SELECT * FROM T ORDER BY TypeName")
     #expect(select.order == Order(column: "TypeName", ascending: true))
   }
 
-  @Test("parses an explicit ASC order")
-  func explicitAscending() throws {
+  @Test func `parses an explicit ASC order`() throws {
     let select = try parse(select: "SELECT * FROM T ORDER BY TypeName ASC")
     #expect(select.order == Order(column: "TypeName", ascending: true))
   }
 
-  @Test("parses a DESC order")
-  func descending() throws {
+  @Test func `parses a DESC order`() throws {
     let select = try parse(select: "SELECT * FROM T ORDER BY TypeName DESC")
     #expect(select.order == Order(column: "TypeName", ascending: false))
   }
 
-  @Test("parses a comma-separated list of sort keys")
-  func multipleKeys() throws {
+  @Test func `parses a comma-separated list of sort keys`() throws {
     let select =
         try parse(select: "SELECT * FROM T ORDER BY A, B DESC, C")
     #expect(select.order == Order(keys: [
@@ -271,8 +243,7 @@ struct OrderTests {
     ]))
   }
 
-  @Test("a single-key ORDER BY is one key in the list")
-  func singleKey() throws {
+  @Test func `a single-key ORDER BY is one key in the list`() throws {
     let select = try parse(select: "SELECT * FROM T ORDER BY TypeName DESC")
     #expect(select.order?.keys
               == [Order.Key(column: "TypeName", ascending: false)])
@@ -280,8 +251,7 @@ struct OrderTests {
 }
 
 struct CompositeTests {
-  @Test("parses a full SELECT/WHERE/ORDER BY query")
-  func fullQuery() throws {
+  @Test func `parses a full SELECT/WHERE/ORDER BY query`() throws {
     let select =
         try parse(select: """
             SELECT TypeName, TypeNamespace FROM TypeDef
@@ -301,22 +271,19 @@ struct CompositeTests {
 }
 
 struct ColumnTests {
-  @Test("splits a dotted column into qualifier and name")
-  func qualified() {
+  @Test func `splits a dotted column into qualifier and name`() {
     let column = Column("t.Name")
     #expect(column.qualifier == "t")
     #expect(column.name == "Name")
   }
 
-  @Test("leaves an undotted column unqualified")
-  func unqualified() {
+  @Test func `leaves an undotted column unqualified`() {
     let column = Column("Name")
     #expect(column.qualifier == nil)
     #expect(column.name == "Name")
   }
 
-  @Test("splits on the last dot only")
-  func lastDot() {
+  @Test func `splits on the last dot only`() {
     // A two-part relation name may qualify a column — the reserved
     // `information_schema.tables.table_name` — so the split takes the text
     // before the LAST dot as the qualifier and the rest as the name.
@@ -327,35 +294,30 @@ struct ColumnTests {
 }
 
 struct RelationTests {
-  @Test("parses a bare FROM relation with no alias")
-  func bare() throws {
+  @Test func `parses a bare FROM relation with no alias`() throws {
     let select = try parse(select: "SELECT * FROM TypeDef")
     #expect(select.from == Relation(name: "TypeDef"))
     #expect(select.joins.isEmpty)
   }
 
-  @Test("parses an AS alias on the FROM relation")
-  func alias() throws {
+  @Test func `parses an AS alias on the FROM relation`() throws {
     let select = try parse(select: "SELECT * FROM TypeDef AS t")
     #expect(select.from == Relation(name: "TypeDef", alias: "t"))
   }
 
-  @Test("parses an implicit (AS-less) alias")
-  func implicitAlias() throws {
+  @Test func `parses an implicit (AS-less) alias`() throws {
     let select = try parse(select: "SELECT * FROM TypeDef t")
     #expect(select.from == Relation(name: "TypeDef", alias: "t"))
   }
 
-  @Test("does not mistake a following keyword for an alias")
-  func keywordNotAlias() throws {
+  @Test func `does not mistake a following keyword for an alias`() throws {
     let select = try parse(select: "SELECT * FROM TypeDef WHERE Flags = 1")
     #expect(select.from == Relation(name: "TypeDef"))
   }
 }
 
 struct JoinTests {
-  @Test("parses a list-shape join with aliases")
-  func listJoin() throws {
+  @Test func `parses a list-shape join with aliases`() throws {
     let select = try parse(select: """
         SELECT m.Name FROM TypeDef AS t
           JOIN MethodDef AS m ON m.parent = t.Id
@@ -372,8 +334,7 @@ struct JoinTests {
                                             op: .equal, right: value))
   }
 
-  @Test("parses a forward-key join")
-  func forwardJoin() throws {
+  @Test func `parses a forward-key join`() throws {
     let select = try parse(select: """
         SELECT r.TypeName FROM TypeDef AS t
           JOIN TypeRef AS r ON t.Extends = r.Id
@@ -384,8 +345,7 @@ struct JoinTests {
     ])
   }
 
-  @Test("parses a join without aliases")
-  func unaliasedJoin() throws {
+  @Test func `parses a join without aliases`() throws {
     let select = try parse(select: """
         SELECT Name FROM MethodDef
           JOIN Param ON Param.parent = MethodDef.Id
@@ -398,8 +358,7 @@ struct JoinTests {
     ])
   }
 
-  @Test("parses a chain of two joins in source order")
-  func chainedJoins() throws {
+  @Test func `parses a chain of two joins in source order`() throws {
     let select = try parse(select: """
         SELECT Param.Name FROM TypeDef AS t
           JOIN MethodDef AS m ON m.parent = t.Id
@@ -414,15 +373,13 @@ struct JoinTests {
     ])
   }
 
-  @Test("rejects a join missing ON")
-  func missingOn() {
+  @Test func `rejects a join missing ON`() {
     #expect(throws: SQLError.self) {
       _ = try Statement(parsing: "SELECT * FROM A JOIN B b")
     }
   }
 
-  @Test("rejects a join whose ON is not an equality")
-  func nonEqualityOn() {
+  @Test func `rejects a join whose ON is not an equality`() {
     #expect(throws: SQLError.self) {
       _ = try Statement(parsing: "SELECT * FROM A JOIN B ON a.x < b.Id")
     }
@@ -432,8 +389,7 @@ struct JoinTests {
 // MARK: - Literals
 
 struct LiteralTests {
-  @Test("parses TRUE and FALSE as boolean literals")
-  func boolean() throws {
+  @Test func `parses TRUE and FALSE as boolean literals`() throws {
     let yes = try parse(select: "SELECT * FROM T WHERE Sealed = TRUE")
     #expect(yes.predicate
                 == .comparison(left: .column("Sealed"), op: .equal,
@@ -444,62 +400,54 @@ struct LiteralTests {
                                right: .literal(.boolean(false))))
   }
 
-  @Test("recognises the boolean keywords case-insensitively")
-  func booleanCase() throws {
+  @Test func `recognises the boolean keywords case-insensitively`() throws {
     let select = try parse(select: "SELECT * FROM T WHERE a = true")
     #expect(select.predicate
                 == .comparison(left: .column("a"), op: .equal,
                                right: .literal(.boolean(true))))
   }
 
-  @Test("parses an x'…' hex blob literal into its bytes")
-  func blob() throws {
+  @Test func `parses an x'…' hex blob literal into its bytes`() throws {
     let select = try parse(select: "SELECT * FROM T WHERE Sig = x'53514c'")
     #expect(select.predicate
                 == .comparison(left: .column("Sig"), op: .equal,
                                right: .literal(.blob([0x53, 0x51, 0x4c]))))
   }
 
-  @Test("parses an uppercase X'…' prefix and mixed-case hex digits")
-  func blobPrefixAndDigits() throws {
+  @Test func `parses an uppercase X'…' prefix and mixed-case hex digits`() throws {
     let select = try parse(select: "SELECT * FROM T WHERE a = X'aBcDeF'")
     #expect(select.predicate
                 == .comparison(left: .column("a"), op: .equal,
                                right: .literal(.blob([0xab, 0xcd, 0xef]))))
   }
 
-  @Test("parses an empty blob x''")
-  func emptyBlob() throws {
+  @Test func `parses an empty blob x''`() throws {
     let select = try parse(select: "SELECT * FROM T WHERE a = x''")
     #expect(select.predicate
                 == .comparison(left: .column("a"), op: .equal,
                                right: .literal(.blob([]))))
   }
 
-  @Test("a bare x is an ordinary identifier, not a blob prefix")
-  func bareX() throws {
+  @Test func `a bare x is an ordinary identifier, not a blob prefix`() throws {
     // The `x` prefix opens a blob only when a quote follows; alone it is a
     // column name.
     let select = try parse(select: "SELECT x FROM T")
     #expect(select.projection == .columns(["x"]))
   }
 
-  @Test("rejects a blob with an odd hex digit count")
-  func oddBlob() {
+  @Test func `rejects a blob with an odd hex digit count`() {
     #expect(throws: SQLError.self) {
       _ = try Statement(parsing: "SELECT * FROM T WHERE a = x'abc'")
     }
   }
 
-  @Test("rejects a blob with a non-hex digit")
-  func nonHexBlob() {
+  @Test func `rejects a blob with a non-hex digit`() {
     #expect(throws: SQLError.self) {
       _ = try Statement(parsing: "SELECT * FROM T WHERE a = x'gg'")
     }
   }
 
-  @Test("rejects an unterminated blob")
-  func unterminatedBlob() {
+  @Test func `rejects an unterminated blob`() {
     #expect(throws: SQLError.self) {
       _ = try Statement(parsing: "SELECT * FROM T WHERE a = x'abcd")
     }
@@ -507,29 +455,25 @@ struct LiteralTests {
 }
 
 struct ErrorTests {
-  @Test("rejects a query missing FROM")
-  func missingFrom() {
+  @Test func `rejects a query missing FROM`() {
     #expect(throws: SQLError.self) {
       _ = try Statement(parsing: "SELECT TypeName TypeDef")
     }
   }
 
-  @Test("rejects an invalid operator")
-  func badOperator() {
+  @Test func `rejects an invalid operator`() {
     #expect(throws: SQLError.self) {
       _ = try Statement(parsing: "SELECT * FROM T WHERE a ! 1")
     }
   }
 
-  @Test("rejects an unterminated string")
-  func unterminatedString() {
+  @Test func `rejects an unterminated string`() {
     #expect(throws: SQLError.self) {
       _ = try Statement(parsing: "SELECT * FROM T WHERE a = 'unterminated")
     }
   }
 
-  @Test("rejects trailing tokens")
-  func trailingTokens() {
+  @Test func `rejects trailing tokens`() {
     // A bare identifier after the relation is now an implicit alias, so
     // trailing garbage must come after a clause that admits no alias — here a
     // second identifier past the relation's (implicit) alias.
@@ -538,15 +482,13 @@ struct ErrorTests {
     }
   }
 
-  @Test("rejects an empty projection")
-  func emptyProjection() {
+  @Test func `rejects an empty projection`() {
     #expect(throws: SQLError.self) {
       _ = try Statement(parsing: "SELECT FROM T")
     }
   }
 
-  @Test("rejects a FROM keyword with no following relation")
-  func unexpectedEnd() {
+  @Test func `rejects a FROM keyword with no following relation`() {
     // FROM is now optional, so `SELECT *` parses as a FROM-less projection (the
     // engine rejects a `*` with no relation). A bare FROM with no relation,
     // though, ends the input where a relation is required.
@@ -555,8 +497,7 @@ struct ErrorTests {
     }
   }
 
-  @Test("parses a column on either side of a comparison")
-  func columnOperands() throws {
+  @Test func `parses a column on either side of a comparison`() throws {
     // Either operand may be an expression, so a column-vs-column predicate is
     // valid SQL (`a = b`), not an error.
     let select = try parse(select: "SELECT * FROM T WHERE a = b")
@@ -569,14 +510,12 @@ struct ErrorTests {
 // MARK: - Expression projections
 
 struct ExpressionTests {
-  @Test("a bare-column list stays the simpler columns projection")
-  func columns() throws {
+  @Test func `a bare-column list stays the simpler columns projection`() throws {
     let select = try parse(select: "SELECT a, b FROM T")
     #expect(select.projection == .columns(["a", "b"]))
   }
 
-  @Test("a function call yields an expression projection")
-  func call() throws {
+  @Test func `a function call yields an expression projection`() throws {
     let select = try parse(select: "SELECT guid(Name) FROM T")
     #expect(select.projection
                 == .expressions([
@@ -585,8 +524,7 @@ struct ExpressionTests {
                 ]))
   }
 
-  @Test("an aliased column yields an expression projection")
-  func alias() throws {
+  @Test func `an aliased column yields an expression projection`() throws {
     let select = try parse(select: "SELECT Name AS label FROM T")
     #expect(select.projection
                 == .expressions([
@@ -594,8 +532,7 @@ struct ExpressionTests {
                 ]))
   }
 
-  @Test("a call takes literal and nested-call arguments")
-  func arguments() throws {
+  @Test func `a call takes literal and nested-call arguments`() throws {
     let select = try parse(select: "SELECT f(1, g(x), 'lit') FROM T")
     #expect(select.projection
                 == .expressions([
@@ -608,8 +545,7 @@ struct ExpressionTests {
                 ]))
   }
 
-  @Test("a zero-argument call parses")
-  func nullary() throws {
+  @Test func `a zero-argument call parses`() throws {
     let select = try parse(select: "SELECT now() FROM T")
     #expect(select.projection
                 == .expressions([
@@ -633,8 +569,7 @@ struct ArithmeticTests {
     return items[0].expression
   }
 
-  @Test("parses each arithmetic operator")
-  func operators() throws {
+  @Test func `parses each arithmetic operator`() throws {
     let cases: Array<(String, Arithmetic)> = [
       ("+", .add),
       ("-", .subtract),
@@ -648,8 +583,7 @@ struct ArithmeticTests {
     }
   }
 
-  @Test("multiplication binds tighter than addition")
-  func precedence() throws {
+  @Test func `multiplication binds tighter than addition`() throws {
     // 2 + 3 * 4  ==>  2 + (3 * 4)
     let parsed = try expression("SELECT 2 + 3 * 4 FROM T")
     let product = Expression.binary(.multiply, .literal(.integer(3)),
@@ -657,8 +591,7 @@ struct ArithmeticTests {
     #expect(parsed == .binary(.add, .literal(.integer(2)), product))
   }
 
-  @Test("parentheses override precedence")
-  func grouping() throws {
+  @Test func `parentheses override precedence`() throws {
     // (2 + 3) * 4  ==>  (2 + 3) * 4
     let parsed = try expression("SELECT (2 + 3) * 4 FROM T")
     let sum = Expression.binary(.add, .literal(.integer(2)),
@@ -666,8 +599,7 @@ struct ArithmeticTests {
     #expect(parsed == .binary(.multiply, sum, .literal(.integer(4))))
   }
 
-  @Test("addition is left-associative")
-  func leftAssociative() throws {
+  @Test func `addition is left-associative`() throws {
     // 1 - 2 - 3  ==>  (1 - 2) - 3
     let parsed = try expression("SELECT 1 - 2 - 3 FROM T")
     let left = Expression.binary(.subtract, .literal(.integer(1)),
@@ -675,16 +607,14 @@ struct ArithmeticTests {
     #expect(parsed == .binary(.subtract, left, .literal(.integer(3))))
   }
 
-  @Test("arithmetic combines columns and calls")
-  func operands() throws {
+  @Test func `arithmetic combines columns and calls`() throws {
     let parsed = try expression("SELECT add(Id, 1) * 10 FROM T")
     let call = Expression.call(name: "add",
                                arguments: [.column("Id"), .literal(.integer(1))])
     #expect(parsed == .binary(.multiply, call, .literal(.integer(10))))
   }
 
-  @Test("arithmetic parses on either side of a comparison")
-  func predicate() throws {
+  @Test func `arithmetic parses on either side of a comparison`() throws {
     let select = try parse(select: "SELECT * FROM T WHERE Age + 1 = 26")
     let sum = Expression.binary(.add, .column("Age"), .literal(.integer(1)))
     #expect(select.predicate
@@ -696,8 +626,7 @@ struct ArithmeticTests {
 // MARK: - Scalar (FROM-less) SELECT
 
 struct ScalarSelectTests {
-  @Test("parses a FROM-less SELECT with no relation")
-  func bare() throws {
+  @Test func `parses a FROM-less SELECT with no relation`() throws {
     let select = try parse(select: "SELECT 1")
     #expect(select.from == nil)
     #expect(select.joins.isEmpty)
@@ -707,8 +636,7 @@ struct ScalarSelectTests {
                 == .expressions([Projected(expression: .literal(.integer(1)))]))
   }
 
-  @Test("parses a FROM-less arithmetic projection")
-  func arithmetic() throws {
+  @Test func `parses a FROM-less arithmetic projection`() throws {
     let select = try parse(select: "SELECT 1 + 1")
     let sum = Expression.binary(.add, .literal(.integer(1)),
                                 .literal(.integer(1)))
@@ -716,8 +644,7 @@ struct ScalarSelectTests {
     #expect(select.projection == .expressions([Projected(expression: sum)]))
   }
 
-  @Test("parses a FROM-less multi-column projection")
-  func multiColumn() throws {
+  @Test func `parses a FROM-less multi-column projection`() throws {
     let select = try parse(select: "SELECT 1, 2")
     #expect(select.from == nil)
     #expect(select.projection == .expressions([
@@ -726,8 +653,7 @@ struct ScalarSelectTests {
     ]))
   }
 
-  @Test("a FROM-less alias names the projected column")
-  func aliased() throws {
+  @Test func `a FROM-less alias names the projected column`() throws {
     let select = try parse(select: "SELECT 1 + 1 AS two")
     let sum = Expression.binary(.add, .literal(.integer(1)),
                                 .literal(.integer(1)))
@@ -735,8 +661,7 @@ struct ScalarSelectTests {
                 == .expressions([Projected(expression: sum, alias: "two")]))
   }
 
-  @Test("a FROM-less query admits no trailing WHERE")
-  func noWhere() {
+  @Test func `a FROM-less query admits no trailing WHERE`() {
     // With FROM absent there is no relation to filter, so a WHERE that follows
     // is trailing input rather than a clause.
     #expect(throws: SQLError.self) {
@@ -757,8 +682,7 @@ private func parseCreate(_ text: String) throws -> (String, View) {
 }
 
 struct CreateViewTests {
-  @Test("infers a view's columns from a bare-column projection")
-  func inferred() throws {
+  @Test func `infers a view's columns from a bare-column projection`() throws {
     let (name, view) = try parseCreate("CREATE VIEW v AS SELECT a, b FROM t")
     #expect(name == "v")
     #expect(view.columns == ["a", "b"])
@@ -766,22 +690,19 @@ struct CreateViewTests {
                                          from: Relation(name: "t"))))
   }
 
-  @Test("drops a qualifier when inferring a column name")
-  func qualified() throws {
+  @Test func `drops a qualifier when inferring a column name`() throws {
     let (_, view) = try parseCreate("CREATE VIEW v AS SELECT t.a FROM t")
     #expect(view.columns == ["a"])
   }
 
-  @Test("takes an explicit column list over the projection")
-  func explicit() throws {
+  @Test func `takes an explicit column list over the projection`() throws {
     let (name, view) =
         try parseCreate("CREATE VIEW v (x, y) AS SELECT a, b FROM t")
     #expect(name == "v")
     #expect(view.columns == ["x", "y"])
   }
 
-  @Test("rejects an explicit list wider than the projection")
-  func tooWide() {
+  @Test func `rejects an explicit list wider than the projection`() {
     // (a, b) names two columns over a one-value projection — the view would
     // claim a column its rows lack.
     #expect(throws: SQLError.columns(expected: 1, got: 2)) {
@@ -789,8 +710,7 @@ struct CreateViewTests {
     }
   }
 
-  @Test("rejects an explicit list narrower than the projection")
-  func tooNarrow() {
+  @Test func `rejects an explicit list narrower than the projection`() {
     // (a) names one column over a two-value projection — the projected `name`
     // would have no view column.
     #expect(throws: SQLError.columns(expected: 2, got: 1)) {
@@ -798,15 +718,13 @@ struct CreateViewTests {
     }
   }
 
-  @Test("accepts an explicit list matching the projection arity")
-  func matched() throws {
+  @Test func `accepts an explicit list matching the projection arity`() throws {
     let (_, view) =
         try parseCreate("CREATE VIEW v (a, b) AS SELECT id, name FROM t")
     #expect(view.columns == ["a", "b"])
   }
 
-  @Test("defers a SELECT * view's column-count check to the engine")
-  func starExplicit() throws {
+  @Test func `defers a SELECT * view's column-count check to the engine`() throws {
     // A `SELECT *` has no statically known arity, so the parser admits any
     // explicit list; the engine validates it against the relation at
     // resolution.
@@ -815,15 +733,13 @@ struct CreateViewTests {
     #expect(view.columns == ["a", "b"])
   }
 
-  @Test("infers a column name from an expression's alias")
-  func aliased() throws {
+  @Test func `infers a column name from an expression's alias`() throws {
     let (_, view) =
         try parseCreate("CREATE VIEW v AS SELECT guid(Id) AS iid FROM t")
     #expect(view.columns == ["iid"])
   }
 
-  @Test("infers a bare column's name in an expression projection")
-  func mixed() throws {
+  @Test func `infers a bare column's name in an expression projection`() throws {
     // A projection carrying any alias is the richer expressions form; a bare
     // column in it still infers to its own name.
     let (_, view) =
@@ -831,44 +747,38 @@ struct CreateViewTests {
     #expect(view.columns == ["Name", "iid"])
   }
 
-  @Test("parses lowercase CREATE VIEW keywords")
-  func caseInsensitive() throws {
+  @Test func `parses lowercase CREATE VIEW keywords`() throws {
     let (name, view) =
         try parseCreate("create view v as select a from t")
     #expect(name == "v")
     #expect(view.columns == ["a"])
   }
 
-  @Test("rejects a SELECT * view with no explicit columns")
-  func star() {
+  @Test func `rejects a SELECT * view with no explicit columns`() {
     #expect(throws: SQLError.self) {
       _ = try Statement(parsing: "CREATE VIEW v AS SELECT * FROM t")
     }
   }
 
-  @Test("rejects an unaliased expression with no explicit columns")
-  func unnamed() {
+  @Test func `rejects an unaliased expression with no explicit columns`() {
     #expect(throws: SQLError.self) {
       _ = try Statement(parsing: "CREATE VIEW v AS SELECT guid(Id) FROM t")
     }
   }
 
-  @Test("rejects an explicit duplicate column name")
-  func duplicateExplicit() {
+  @Test func `rejects an explicit duplicate column name`() {
     #expect(throws: SQLError.duplicate("x")) {
       _ = try Statement(parsing: "CREATE VIEW v (x, x) AS SELECT a, b FROM t")
     }
   }
 
-  @Test("rejects a case-insensitive explicit duplicate column name")
-  func duplicateExplicitFolded() {
+  @Test func `rejects a case-insensitive explicit duplicate column name`() {
     #expect(throws: SQLError.duplicate("x")) {
       _ = try Statement(parsing: "CREATE VIEW v (X, x) AS SELECT a, b FROM t")
     }
   }
 
-  @Test("rejects an inferred duplicate column name")
-  func duplicateInferred() {
+  @Test func `rejects an inferred duplicate column name`() {
     #expect(throws: SQLError.duplicate("Name")) {
       _ = try Statement(
           parsing: "CREATE VIEW v AS SELECT t.Name, u.Name FROM t "
@@ -876,8 +786,7 @@ struct CreateViewTests {
     }
   }
 
-  @Test("accepts a distinct inferred column list")
-  func distinctInferred() throws {
+  @Test func `accepts a distinct inferred column list`() throws {
     let (_, view) = try parseCreate("CREATE VIEW v AS SELECT a, b FROM t")
     #expect(view.columns == ["a", "b"])
   }
@@ -896,8 +805,7 @@ private func parse(function text: String) throws -> (String, Function) {
 }
 
 struct CreateFunctionTests {
-  @Test("parses a scalar function's name, parameters, return, and body")
-  func full() throws {
+  @Test func `parses a scalar function's name, parameters, return, and body`() throws {
     let (name, function) = try parse(function: """
         CREATE FUNCTION twice(n INTEGER) RETURNS INTEGER AS n + n
         """)
@@ -908,8 +816,7 @@ struct CreateFunctionTests {
     #expect(function.body == .binary(.add, .column("n"), .column("n")))
   }
 
-  @Test("parses several typed parameters in order")
-  func parameters() throws {
+  @Test func `parses several typed parameters in order`() throws {
     let (_, function) = try parse(function: """
         CREATE FUNCTION f(a INTEGER, b TEXT, c BOOLEAN) RETURNS TEXT AS b
         """)
@@ -921,8 +828,7 @@ struct CreateFunctionTests {
     #expect(function.returns == .text)
   }
 
-  @Test("parses a parameterless function over a literal body")
-  func nullary() throws {
+  @Test func `parses a parameterless function over a literal body`() throws {
     let (name, function) = try parse(function: """
         CREATE FUNCTION answer() RETURNS INTEGER AS 42
         """)
@@ -931,8 +837,7 @@ struct CreateFunctionTests {
     #expect(function.body == .literal(.integer(42)))
   }
 
-  @Test("maps the ISO type spellings onto value types")
-  func types() throws {
+  @Test func `maps the ISO type spellings onto value types`() throws {
     let (_, function) = try parse(function: """
         CREATE FUNCTION f(a INT, b REAL, c VARCHAR, d BOOL, e BLOB) \
         RETURNS DOUBLE AS b
@@ -942,8 +847,7 @@ struct CreateFunctionTests {
     #expect(function.returns == .double)
   }
 
-  @Test("parses lowercase CREATE FUNCTION keywords")
-  func caseInsensitive() throws {
+  @Test func `parses lowercase CREATE FUNCTION keywords`() throws {
     let (name, function) = try parse(function: """
         create function f(n integer) returns integer as n
         """)
@@ -951,16 +855,14 @@ struct CreateFunctionTests {
     #expect(function.returns == .integer)
   }
 
-  @Test("rejects a duplicate parameter name")
-  func duplicateParameter() {
+  @Test func `rejects a duplicate parameter name`() {
     #expect(throws: SQLError.duplicate("n")) {
       _ = try Statement(
           parsing: "CREATE FUNCTION f(n INTEGER, n TEXT) RETURNS INTEGER AS n")
     }
   }
 
-  @Test("rejects a case-insensitive duplicate parameter name")
-  func duplicateParameterFolded() {
+  @Test func `rejects a case-insensitive duplicate parameter name`() {
     // The offending (later) spelling is reported, matching the explicit
     // view-column duplicate fault (`CREATE VIEW v (X, x)` reports `x`).
     #expect(throws: SQLError.duplicate("n")) {
@@ -969,16 +871,14 @@ struct CreateFunctionTests {
     }
   }
 
-  @Test("rejects an unknown type spelling")
-  func unknownType() {
+  @Test func `rejects an unknown type spelling`() {
     #expect(throws: SQLError.self) {
       _ = try Statement(
           parsing: "CREATE FUNCTION f(n WIDGET) RETURNS INTEGER AS n")
     }
   }
 
-  @Test("rejects a function with no RETURNS clause")
-  func missingReturns() {
+  @Test func `rejects a function with no RETURNS clause`() {
     #expect(throws: SQLError.self) {
       _ = try Statement(parsing: "CREATE FUNCTION f(n INTEGER) AS n")
     }
@@ -997,24 +897,21 @@ private func parse(query text: String) throws -> Query {
 }
 
 struct UnionTests {
-  @Test("parses UNION into a deduplicating union of two selects")
-  func union() throws {
+  @Test func `parses UNION into a deduplicating union of two selects`() throws {
     let query = try parse(query: "SELECT a FROM t UNION SELECT b FROM u")
     let left = Select(projection: .columns(["a"]), from: Relation(name: "t"))
     let right = Select(projection: .columns(["b"]), from: Relation(name: "u"))
     #expect(query == .union(.select(left), right, all: false))
   }
 
-  @Test("parses UNION ALL into a duplicate-keeping union")
-  func all() throws {
+  @Test func `parses UNION ALL into a duplicate-keeping union`() throws {
     let query = try parse(query: "SELECT a FROM t UNION ALL SELECT b FROM u")
     let left = Select(projection: .columns(["a"]), from: Relation(name: "t"))
     let right = Select(projection: .columns(["b"]), from: Relation(name: "u"))
     #expect(query == .union(.select(left), right, all: true))
   }
 
-  @Test("nests a chain of UNIONs left-associatively in source order")
-  func chain() throws {
+  @Test func `nests a chain of UNIONs left-associatively in source order`() throws {
     let query = try parse(query:
         "SELECT a FROM t UNION SELECT b FROM u UNION ALL SELECT c FROM v")
     let a = Select(projection: .columns(["a"]), from: Relation(name: "t"))
@@ -1023,16 +920,14 @@ struct UnionTests {
     #expect(query == .union(.union(.select(a), b, all: false), c, all: true))
   }
 
-  @Test("recognises lowercase union and all keywords")
-  func caseInsensitive() throws {
+  @Test func `recognises lowercase union and all keywords`() throws {
     let query = try parse(query: "select a from t union all select b from u")
     let left = Select(projection: .columns(["a"]), from: Relation(name: "t"))
     let right = Select(projection: .columns(["b"]), from: Relation(name: "u"))
     #expect(query == .union(.select(left), right, all: true))
   }
 
-  @Test("a CREATE VIEW over a UNION stores the query and the first arm's names")
-  func view() throws {
+  @Test func `a CREATE VIEW over a UNION stores the query and the first arm's names`() throws {
     let (name, view) = try parseCreate(
         "CREATE VIEW v AS SELECT a, b FROM t UNION SELECT c, d FROM u")
     let left = Select(projection: .columns(["a", "b"]),
@@ -1057,8 +952,7 @@ private func parseWith(_ text: String) throws -> (Array<CTE>, Query) {
 }
 
 struct WithTests {
-  @Test("parses a single non-recursive CTE and its trailing query")
-  func single() throws {
+  @Test func `parses a single non-recursive CTE and its trailing query`() throws {
     let (ctes, query) = try parseWith("""
         WITH a AS (SELECT x FROM t) SELECT x FROM a
         """)
@@ -1073,24 +967,21 @@ struct WithTests {
                                     from: Relation(name: "a"))))
   }
 
-  @Test("infers a CTE's columns from its query's projection")
-  func inferred() throws {
+  @Test func `infers a CTE's columns from its query's projection`() throws {
     let (ctes, _) = try parseWith("""
         WITH a AS (SELECT p, q FROM t) SELECT p FROM a
         """)
     #expect(ctes[0].columns == ["p", "q"])
   }
 
-  @Test("an explicit column list names a CTE's columns")
-  func explicit() throws {
+  @Test func `an explicit column list names a CTE's columns`() throws {
     let (ctes, _) = try parseWith("""
         WITH a (k, v) AS (SELECT p, q FROM t) SELECT k FROM a
         """)
     #expect(ctes[0].columns == ["k", "v"])
   }
 
-  @Test("parses several comma-separated CTEs in source order")
-  func chain() throws {
+  @Test func `parses several comma-separated CTEs in source order`() throws {
     let (ctes, query) = try parseWith("""
         WITH a AS (SELECT x FROM t), b AS (SELECT y FROM a) SELECT y FROM b
         """)
@@ -1102,8 +993,7 @@ struct WithTests {
                                     from: Relation(name: "b"))))
   }
 
-  @Test("RECURSIVE marks every CTE of the list recursive")
-  func recursive() throws {
+  @Test func `RECURSIVE marks every CTE of the list recursive`() throws {
     let (ctes, _) = try parseWith("""
         WITH RECURSIVE a (n) AS (SELECT n FROM seed UNION ALL SELECT n FROM a)
           SELECT n FROM a
@@ -1116,8 +1006,7 @@ struct WithTests {
     }
   }
 
-  @Test("a CTE's query may itself be a UNION")
-  func union() throws {
+  @Test func `a CTE's query may itself be a UNION`() throws {
     let (ctes, _) = try parseWith("""
         WITH a AS (SELECT x FROM t UNION SELECT y FROM u) SELECT x FROM a
         """)
@@ -1126,8 +1015,7 @@ struct WithTests {
     #expect(ctes[0].query == .union(.select(left), right, all: false))
   }
 
-  @Test("recognises lowercase with and recursive keywords")
-  func caseInsensitive() throws {
+  @Test func `recognises lowercase with and recursive keywords`() throws {
     let (ctes, query) = try parseWith("""
         with recursive a (n) as (select n from a) select n from a
         """)
@@ -1137,8 +1025,7 @@ struct WithTests {
                                     from: Relation(name: "a"))))
   }
 
-  @Test("an explicit list of the wrong arity is rejected")
-  func arity() throws {
+  @Test func `an explicit list of the wrong arity is rejected`() throws {
     #expect(throws: SQLError.columns(expected: 2, got: 3)) {
       _ = try parseWith("""
           WITH a (x, y, z) AS (SELECT p, q FROM t) SELECT x FROM a
@@ -1146,22 +1033,19 @@ struct WithTests {
     }
   }
 
-  @Test("a CTE naming two columns that collide by case is rejected")
-  func duplicate() throws {
+  @Test func `a CTE naming two columns that collide by case is rejected`() throws {
     #expect(throws: SQLError.duplicate("X")) {
       _ = try parseWith("WITH a (x, X) AS (SELECT p, q FROM t) SELECT x FROM a")
     }
   }
 
-  @Test("a CTE projecting an un-nameable column with no list is rejected")
-  func unnamed() throws {
+  @Test func `a CTE projecting an un-nameable column with no list is rejected`() throws {
     #expect(throws: SQLError.named("SELECT *")) {
       _ = try parseWith("WITH a AS (SELECT * FROM t) SELECT x FROM a")
     }
   }
 
-  @Test("a CTE missing its parenthesised query is rejected")
-  func missingParen() throws {
+  @Test func `a CTE missing its parenthesised query is rejected`() throws {
     #expect(throws: SQLError.self) {
       _ = try parseWith("WITH a AS SELECT x FROM t SELECT x FROM a")
     }

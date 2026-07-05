@@ -136,30 +136,26 @@ private func same(_ lhs: Array<(String, ValueType)>,
 // MARK: - Tests
 
 struct OutputSchemaTests {
-  @Test("SELECT * names and types every real column, never a virtual")
-  func star() throws {
+  @Test func `SELECT * names and types every real column, never a virtual`() throws {
     let columns = try schema("SELECT * FROM People")
     #expect(columns.count == 2)
     #expect(columns[0] == ("Name", .text))
     #expect(columns[1] == ("Age", .integer))
   }
 
-  @Test("a bare-column list carries each column's name and source kind")
-  func bareColumns() throws {
+  @Test func `a bare-column list carries each column's name and source kind`() throws {
     let columns = try schema("SELECT Age, Name FROM People")
     #expect(columns[0] == ("Age", .integer))
     #expect(columns[1] == ("Name", .text))
   }
 
-  @Test("an aliased expression takes its alias, typed by its expression")
-  func alias() throws {
+  @Test func `an aliased expression takes its alias, typed by its expression`() throws {
     let columns = try schema("SELECT Name AS Who, Age AS Years FROM People")
     #expect(columns[0] == ("Who", .text))
     #expect(columns[1] == ("Years", .integer))
   }
 
-  @Test("an unnamed computed expression gets a positional name")
-  func positional() throws {
+  @Test func `an unnamed computed expression gets a positional name`() throws {
     // `Age + 1` has no alias and is not a bare column, so it is `column N`
     // (1-based); an all-integer arithmetic expression is `.integer`.
     let columns = try schema("SELECT Name, Age + 1 FROM People")
@@ -167,8 +163,7 @@ struct OutputSchemaTests {
     #expect(columns[1] == ("column 2", .integer))
   }
 
-  @Test("binary arithmetic with a double operand is a double column")
-  func arithmetic() throws {
+  @Test func `binary arithmetic with a double operand is a double column`() throws {
     // `Age + 1` stays integer (both operands integral); `Age + 1.5` promotes to
     // a double, as the engine's arithmetic does, so the schema types it so.
     let integral = try schema("SELECT Age + 1 FROM People")
@@ -177,16 +172,14 @@ struct OutputSchemaTests {
     #expect(promoted[0].1 == .double)
   }
 
-  @Test("a literal projection carries the literal's kind")
-  func literals() throws {
+  @Test func `a literal projection carries the literal's kind`() throws {
     let columns = try schema("SELECT 'x', 1, 2.5 FROM People")
     #expect(columns[0] == ("column 1", .text))
     #expect(columns[1] == ("column 2", .integer))
     #expect(columns[2] == ("column 3", .double))
   }
 
-  @Test("a join's SELECT * concatenates both relations' columns in order")
-  func joinStar() throws {
+  @Test func `a join's SELECT * concatenates both relations' columns in order`() throws {
     let columns =
         try schema("SELECT * FROM People JOIN Pet ON People.Id = Pet.Id")
     #expect(columns.count == 4)
@@ -194,8 +187,7 @@ struct OutputSchemaTests {
                            ("Species", .text), ("Legs", .integer)]))
   }
 
-  @Test("a qualified column resolves its kind from the naming relation")
-  func qualified() throws {
+  @Test func `a qualified column resolves its kind from the naming relation`() throws {
     let columns = try schema("""
         SELECT People.Name, Pet.Legs
           FROM People JOIN Pet ON People.Id = Pet.Id
@@ -204,8 +196,7 @@ struct OutputSchemaTests {
     #expect(columns[1] == ("Legs", .integer))
   }
 
-  @Test("a UNION names its result off the first arm")
-  func union() throws {
+  @Test func `a UNION names its result off the first arm`() throws {
     // The first arm's projection names the result (the ISO rule), so the
     // schema is the leading SELECT's regardless of the trailing arm.
     let columns =
@@ -214,8 +205,7 @@ struct OutputSchemaTests {
     #expect(columns[0] == ("Name", .text))
   }
 
-  @Test("a view resolves against its registered columns")
-  func view() throws {
+  @Test func `a view resolves against its registered columns`() throws {
     let definition = try View(query: {
       guard case let .select(query) =
           try Statement(parsing: "SELECT Name FROM People") else {
@@ -235,8 +225,7 @@ struct OutputSchemaTests {
     #expect(columns[0] == OutputColumn(name: "Label", type: .text))
   }
 
-  @Test("a data-dependent-empty view derives headers without re-validating")
-  func emptyViewDerives() throws {
+  @Test func `a data-dependent-empty view derives headers without re-validating`() throws {
     // A view whose body is a text-arithmetic projection under a filter that
     // matches no row RUNS to zero rows: the data-dependent WHERE spares the
     // `Name + 1` from ever evaluating. Filling in the empty result's headers
@@ -267,31 +256,27 @@ struct OutputSchemaTests {
     }
   }
 
-  @Test("an unknown relation faults exactly as compilation would")
-  func unknownRelation() throws {
+  @Test func `an unknown relation faults exactly as compilation would`() throws {
     #expect(throws: SQLError.self) {
       let _ = try catalog().columns(of: parse("SELECT * FROM Absent"))
     }
   }
 
-  @Test("an unknown column faults exactly as compilation would")
-  func unknownColumn() throws {
+  @Test func `an unknown column faults exactly as compilation would`() throws {
     #expect(throws: SQLError.self) {
       let _ =
           try catalog().columns(of: parse("SELECT Absent FROM People"))
     }
   }
 
-  @Test("columns(of:) never opens a cursor")
-  func resolveOnly() throws {
+  @Test func `columns(of:) never opens a cursor`() throws {
     // The fixture's cursor traps on any row read, so a passing resolve proves
     // `columns(of:)` reads only schemas.
     let columns = try schema("SELECT Name, Age FROM People WHERE Age > 0")
     #expect(columns.count == 2)
   }
 
-  @Test("a WHERE naming a missing column faults, though the first arm resolves")
-  func invalidPredicate() throws {
+  @Test func `a WHERE naming a missing column faults, though the first arm resolves`() throws {
     // The projection names a real column, so a first-arm-only walk would return
     // a schema; the whole-query validation resolves the WHERE too and faults as
     // a run would.
@@ -302,8 +287,7 @@ struct OutputSchemaTests {
     #expect(throws: SQLError.self) { try resolve() }
   }
 
-  @Test("a UNION whose arms mismatch arity faults, though the first resolves")
-  func invalidUnionArity() throws {
+  @Test func `a UNION whose arms mismatch arity faults, though the first resolves`() throws {
     // The first arm projects one column and the second two — a run would fault
     // with `SQLError.arity`, so the schema resolution must too rather than name
     // the result off the first arm.
@@ -316,8 +300,7 @@ struct OutputSchemaTests {
     #expect(throws: SQLError.self) { try resolve() }
   }
 
-  @Test("a valid multi-column UNION names its result off the first arm")
-  func validUnion() throws {
+  @Test func `a valid multi-column UNION names its result off the first arm`() throws {
     // Both arms project two columns, so the query validates; the result names
     // come from the leading SELECT (the ISO rule).
     let columns = try schema("""
@@ -327,8 +310,7 @@ struct OutputSchemaTests {
     #expect(same(columns, [("Name", .text), ("Age", .integer)]))
   }
 
-  @Test("AVG is typed double and COUNT integer")
-  func aggregateNumeric() throws {
+  @Test func `AVG is typed double and COUNT integer`() throws {
     // The engine always yields a non-NULL AVG as a double and a COUNT as an
     // integer, so the result schema types them so rather than as the scalar
     // default.
@@ -337,8 +319,7 @@ struct OutputSchemaTests {
     #expect(columns[1].1 == .integer)
   }
 
-  @Test("SUM and MIN take the aggregated argument's kind")
-  func aggregateArgument() throws {
+  @Test func `SUM and MIN take the aggregated argument's kind`() throws {
     // SUM/MIN/MAX carry the kind of what they aggregate — an integer column's
     // SUM is an integer, a text column's MIN text.
     let columns =
@@ -348,8 +329,7 @@ struct OutputSchemaTests {
     #expect(columns[2].1 == .text)
   }
 
-  @Test("a zero FETCH over a whole-result aggregate spares its projection")
-  func aggregateZeroFetch() throws {
+  @Test func `a zero FETCH over a whole-result aggregate spares its projection`() throws {
     // A whole-result aggregate (aggregates, no GROUP BY) emits one row, which a
     // FETCH FIRST 0 ROWS ONLY drops — so its projection is unreachable and its
     // literal divide-by-zero never faults. Without the limit the same
@@ -368,8 +348,7 @@ struct OutputSchemaTests {
     #expect(empty.count == 2)
   }
 
-  @Test("a positive OFFSET over a whole-result aggregate spares its projection")
-  func aggregatePositiveOffset() throws {
+  @Test func `a positive OFFSET over a whole-result aggregate spares its projection`() throws {
     // A whole-result aggregate emits exactly ONE row, so an OFFSET of 1 skips
     // it — the projection is unreachable and its divide-by-zero never faults,
     // just as a zero FETCH spares it.
@@ -383,8 +362,7 @@ struct OutputSchemaTests {
     #expect(empty.count == 2)
   }
 
-  @Test("a zero FETCH does not spare a SELECT DISTINCT projection")
-  func distinctZeroFetch() throws {
+  @Test func `a zero FETCH does not spare a SELECT DISTINCT projection`() throws {
     // A DISTINCT plan is `Limit(Distinct(Project(…)))`: the projection
     // evaluates over every candidate row to dedup it BEFORE the cap pages the
     // result, so a zero FETCH does NOT make it unreachable. The schema must
@@ -398,8 +376,7 @@ struct OutputSchemaTests {
     #expect(normal.count == 1)
   }
 
-  @Test("a positive OFFSET does not spare a SELECT DISTINCT projection")
-  func distinctPositiveOffset() throws {
+  @Test func `a positive OFFSET does not spare a SELECT DISTINCT projection`() throws {
     // The OFFSET pages the deduplicated result, so the projection still
     // evaluates over every candidate row and its divide-by-zero faults.
     #expect(throws: SQLError.self) {
@@ -407,8 +384,7 @@ struct OutputSchemaTests {
     }
   }
 
-  @Test("a zero FETCH does not spare a grouped DISTINCT projection")
-  func groupedDistinctZeroFetch() throws {
+  @Test func `a zero FETCH does not spare a grouped DISTINCT projection`() throws {
     // A grouped DISTINCT dedups the projected group rows before the cap, so the
     // projection is reachable and its divide-by-zero faults under a zero FETCH.
     #expect(throws: SQLError.self) {
@@ -417,8 +393,7 @@ struct OutputSchemaTests {
     }
   }
 
-  @Test("a constant-false WHERE still spares a SELECT DISTINCT projection")
-  func distinctFalseWhere() throws {
+  @Test func `a constant-false WHERE still spares a SELECT DISTINCT projection`() throws {
     // A statically-false WHERE yields no rows, so a DISTINCT query has nothing
     // to dedup and the projection is genuinely unreached — the WHERE-based
     // elision stays, unlike the limit-based one.
@@ -426,8 +401,7 @@ struct OutputSchemaTests {
     #expect(columns.count == 1)
   }
 
-  @Test("a zero FETCH does not spare a DISTINCT empty-group projection")
-  func distinctEmptyGroupZeroFetch() throws {
+  @Test func `a zero FETCH does not spare a DISTINCT empty-group projection`() throws {
     // A constant-false WHERE over a whole-result aggregate emits ONE empty
     // group. For a non-distinct query a zero FETCH drops that lone row, so its
     // projection is unreachable and the divide-by-zero is spared. A DISTINCT
@@ -446,8 +420,7 @@ struct OutputSchemaTests {
     #expect(columns.count == 1)
   }
 
-  @Test("HAVING is evaluated before a zero-FETCH limit, so its faults surface")
-  func havingFaultsUnderZeroLimit() throws {
+  @Test func `HAVING is evaluated before a zero-FETCH limit, so its faults surface`() throws {
     // The compiled plan applies HAVING BEFORE the OFFSET/FETCH limit, so a zero
     // FETCH spares only the PROJECTION — HAVING still evaluates over the empty
     // group. A faulting HAVING must therefore surface even under a zero FETCH.
@@ -462,8 +435,7 @@ struct OutputSchemaTests {
     #expect(columns.count == 1)
   }
 
-  @Test("columns(of statement:) derives a WITH against its CTE scope")
-  func statementWith() throws {
+  @Test func `columns(of statement:) derives a WITH against its CTE scope`() throws {
     // The trailing query resolves against the statement's CTEs, schema-only:
     // a CTE `People` SHADOWS the two-column base relation, so a `SELECT *` over
     // it names the CTE's one declared column `x`, not the base's `Name, Age`.
@@ -473,8 +445,7 @@ struct OutputSchemaTests {
     #expect(columns[0].name == "x")
   }
 
-  @Test("columns(of statement:) resolves a WITH's explicit column projection")
-  func statementWithExplicit() throws {
+  @Test func `columns(of statement:) resolves a WITH's explicit column projection`() throws {
     // A bare-column projection reads the CTE's declared columns; a two-column
     // CTE heads its two names, no base relation involved.
     let columns = try catalog().columns(of: Statement(parsing:
@@ -483,8 +454,7 @@ struct OutputSchemaTests {
                  [("a", .integer), ("b", .integer)]))
   }
 
-  @Test("columns(of statement:) leaves a base reachable when no CTE shadows it")
-  func statementWithNoShadow() throws {
+  @Test func `columns(of statement:) leaves a base reachable when no CTE shadows it`() throws {
     // A CTE whose name does not collide leaves the base `People` reachable — the
     // trailing `SELECT *` resolves its two real columns.
     let columns = try catalog().columns(of: Statement(parsing:
@@ -493,8 +463,7 @@ struct OutputSchemaTests {
                  [("Name", .text), ("Age", .integer)]))
   }
 
-  @Test("columns(of statement:) faults on a CREATE VIEW, naming no result")
-  func statementCreate() throws {
+  @Test func `columns(of statement:) faults on a CREATE VIEW, naming no result`() throws {
     let create = try Statement(parsing:
         "CREATE VIEW v AS SELECT Name FROM People")
     #expect(throws: SQLError.self) {
@@ -502,8 +471,7 @@ struct OutputSchemaTests {
     }
   }
 
-  @Test("a WITH whose body arity contradicts its list faults when validating")
-  func statementWithBadArity() throws {
+  @Test func `a WITH whose body arity contradicts its list faults when validating`() throws {
     // The CTE declares ONE column but its body projects TWO — a `SELECT *` over
     // the two-column `People`. The parser cannot catch this (a `SELECT *`'s
     // width is known only at resolution), so a run rejects it with
@@ -518,8 +486,7 @@ struct OutputSchemaTests {
     }
   }
 
-  @Test("a WITH's body is trusted, not compiled, when not validating")
-  func statementWithArityTrusted() throws {
+  @Test func `a WITH's body is trusted, not compiled, when not validating`() throws {
     // `validate: false` is the post-run derive: the run already proved the
     // bodies consistent, so the declared list is TRUSTED without compiling the
     // body. The same arity-mismatched `WITH` that faults when validating
@@ -531,8 +498,7 @@ struct OutputSchemaTests {
     #expect(same(columns.map { ($0.name, $0.type) }, [("a", .integer)]))
   }
 
-  @Test("a well-formed WITH validates and derives its trailing schema")
-  func statementWithValidates() throws {
+  @Test func `a well-formed WITH validates and derives its trailing schema`() throws {
     // A CTE whose declared arity matches its body validates cleanly and derives
     // the trailing query's schema — the body compiled, its width confirmed
     // against the declared list, and its reachable operands type-checked.
@@ -543,8 +509,7 @@ struct OutputSchemaTests {
                  [("a", .integer), ("b", .integer)]))
   }
 
-  @Test("a non-recursive CTE body cannot see its own schema-only self")
-  func statementWithNonRecursiveSelf() throws {
+  @Test func `a non-recursive CTE body cannot see its own schema-only self`() throws {
     // A non-recursive CTE is NOT in scope within its own body — only the PRIOR
     // CTEs and the base catalog are — so a body that names the CTE with no
     // same-named base resolves against nothing and faults `.relation`, exactly
@@ -558,8 +523,7 @@ struct OutputSchemaTests {
     }
   }
 
-  @Test("a same-named-base non-recursive CTE body resolves the base")
-  func statementWithSelfResolvesBase() throws {
+  @Test func `a same-named-base non-recursive CTE body resolves the base`() throws {
     // A non-recursive CTE `People` shadowing the two-column base is NOT in its
     // OWN body's scope, so the body's `SELECT * FROM People` resolves the BASE
     // relation (two columns), matching its declared arity; the trailing query
@@ -573,8 +537,7 @@ struct OutputSchemaTests {
                  [("a", .integer), ("b", .integer)]))
   }
 
-  @Test("a WITH with a duplicate CTE name faults with redefinition")
-  func statementWithDuplicateName() throws {
+  @Test func `a WITH with a duplicate CTE name faults with redefinition`() throws {
     // Two CTEs of the same (case-insensitive) name would silently shadow the
     // earlier binding, so the derive faults `.redefinition` — the same fault
     // `Engine.with` raises before materialising — rather than advertise a schema
@@ -586,8 +549,7 @@ struct OutputSchemaTests {
     }
   }
 
-  @Test("a recursive CTE body sees its own schema-only self and resolves")
-  func statementWithRecursiveSelf() throws {
+  @Test func `a recursive CTE body sees its own schema-only self and resolves`() throws {
     // A genuinely recursive CTE — its FINAL UNION arm names itself — DOES bind
     // its own schema-only self while its body validates, so the recursive
     // reference resolves. The anchor seeds one column, the recursive arm reads
@@ -602,8 +564,7 @@ struct OutputSchemaTests {
     #expect(columns[0].name == "n")
   }
 
-  @Test("a recursive CTE self-referencing its anchor faults as a run does")
-  func statementWithRecursiveAnchorSelf() throws {
+  @Test func `a recursive CTE self-referencing its anchor faults as a run does`() throws {
     // The engine binds a recursive CTE's self ONLY to its FINAL UNION arm: a
     // self-reference in the ANCHOR arm resolves against the base scope, so with
     // no same-named base/view it can only be a misplaced recursive arm — a
@@ -628,8 +589,7 @@ struct OutputSchemaTests {
     }
   }
 
-  @Test("a recursive CTE anchor is operand-checked against the base scope")
-  func statementWithRecursiveAnchorOperand() throws {
+  @Test func `a recursive CTE anchor is operand-checked against the base scope`() throws {
     // A recursive CTE binds its schema-only self (declared columns, typed
     // `.integer`) ONLY inside its final UNION arm; the anchor resolves against
     // the BASE scope — the same scope a run evaluates it in. So the anchor's
@@ -652,8 +612,7 @@ struct OutputSchemaTests {
     }
   }
 
-  @Test("a well-formed recursive CTE with a numeric anchor validates")
-  func statementWithRecursiveAnchorValidates() throws {
+  @Test func `a well-formed recursive CTE with a numeric anchor validates`() throws {
     // The operand check must not reject a runnable recursive CTE: a numeric
     // anchor and a recursive arm free of bad operands validate and derive the
     // trailing schema. This is the counterpart to the text-anchor fault — the

@@ -296,81 +296,69 @@ private func lineage(_ text: String) throws -> Array<Array<Value>> {
 // MARK: - Single-relation tests
 
 struct EngineProjectionTests {
-  @Test("SELECT * yields every real column and excludes the virtual Id")
-  func star() throws {
+  @Test func `SELECT * yields every real column and excludes the virtual Id`() throws {
     let rows = try run("SELECT * FROM People WHERE Id = 1")
     // Three real columns; `Id` is virtual and never in `*`.
     #expect(rows == [[.integer(1), .text("Alice"), .integer(30)]])
   }
 
-  @Test("SELECT names yields the named columns in order")
-  func named() throws {
+  @Test func `SELECT names yields the named columns in order`() throws {
     try people().expect("SELECT Name, Id FROM People WHERE Id = 2",
                         yields: [["Bob", 2]])
   }
 
-  @Test("a named projection may include the virtual Id column")
-  func virtual() throws {
+  @Test func `a named projection may include the virtual Id column`() throws {
     let rows = try run("SELECT Id, Name FROM People WHERE Name = 'Carol'")
     // Carol is the third row; her 1-based `Id` is 3.
     #expect(rows == [[.integer(3), .text("Carol")]])
   }
 
-  @Test("an unknown column is reported")
-  func unknown() throws {
+  @Test func `an unknown column is reported`() throws {
     #expect(throws: SQLError.column("Missing")) {
       try run("SELECT Missing FROM People")
     }
   }
 
-  @Test("an unknown relation is reported")
-  func relation() throws {
+  @Test func `an unknown relation is reported`() throws {
     try people().expect("SELECT * FROM Absent", fails: .relation("Absent"))
   }
 }
 
 struct EngineFilterTests {
-  @Test("equality on a text column")
-  func text() throws {
+  @Test func `equality on a text column`() throws {
     try people().expect("SELECT Id FROM People WHERE Name = 'Carol'",
                         yields: [[3]])
   }
 
-  @Test("a range on the sorted column")
-  func range() throws {
+  @Test func `a range on the sorted column`() throws {
     try people().expect("SELECT Id FROM People WHERE Id >= 4",
                         yields: [[4], [5]])
   }
 
-  @Test("an AND of a seekable conjunct and a residual")
-  func conjunction() throws {
+  @Test func `an AND of a seekable conjunct and a residual`() throws {
     let rows = try run("SELECT Name FROM People WHERE Id > 1 AND Age = 30")
     #expect(rows == [[.text("Carol")]])
   }
 
-  @Test("an OR scans and admits either side")
-  func disjunction() throws {
+  @Test func `an OR scans and admits either side`() throws {
     let rows =
         try run("SELECT Id FROM People WHERE Id = 1 OR Name = 'Eve'")
     #expect(rows == [[.integer(1)], [.integer(5)]])
   }
 
-  @Test("a NOT scans and negates")
-  func negation() throws {
+  @Test func `a NOT scans and negates`() throws {
     try people().expect("SELECT Id FROM People WHERE NOT Age = 30",
                         yields: [[2], [4], [5]])
   }
 
-  @Test("a filter on the virtual Id column")
-  func virtual() throws {
+  @Test func `a filter on the virtual Id column`() throws {
     try people().expect("SELECT Name FROM People WHERE Id = 4",
                         yields: [["Dave"]])
   }
 }
 
 struct EngineOrderTests {
-  @Test("ORDER BY ascending on an integer column")
-  func ascending() throws {
+  @Test func `ORDER BY ascending on an integer column`() throws {
     let rows = try run("SELECT Id FROM People ORDER BY Age ASC")
     // Ages: Bob 25, Eve 25, Alice 30, Carol 30, Dave 40 — a stable sort keeps
     // the scan order within an equal-key group.
@@ -378,8 +366,7 @@ struct EngineOrderTests {
                      [.integer(3)], [.integer(4)]])
   }
 
-  @Test("ORDER BY descending on a text column")
-  func descending() throws {
+  @Test func `ORDER BY descending on a text column`() throws {
     let rows = try run("SELECT Name FROM People ORDER BY Name DESC")
     #expect(rows == [[.text("Eve")], [.text("Dave")], [.text("Carol")],
                      [.text("Bob")], [.text("Alice")]])
@@ -387,16 +374,14 @@ struct EngineOrderTests {
 }
 
 struct EngineCompoundOrderTests {
-  @Test("a single-key ORDER BY still orders as before")
-  func single() throws {
+  @Test func `a single-key ORDER BY still orders as before`() throws {
     // The one-key case is unchanged: ages ascending, ties kept in scan order.
     let rows = try run("SELECT Id FROM People ORDER BY Age ASC")
     #expect(rows == [[.integer(2)], [.integer(5)], [.integer(1)],
                      [.integer(3)], [.integer(4)]])
   }
 
-  @Test("two keys order by the first, then the second")
-  func twoKeys() throws {
+  @Test func `two keys order by the first, then the second`() throws {
     // Age ascending, ties by Name ascending: {Bob,Eve} at 25 → Bob, Eve;
     // {Alice,Carol} at 30 → Alice, Carol; then Dave.
     let rows = try run("SELECT Name FROM People ORDER BY Age, Name")
@@ -404,8 +389,7 @@ struct EngineCompoundOrderTests {
                      [.text("Carol")], [.text("Dave")]])
   }
 
-  @Test("each key carries its own direction")
-  func mixedDirections() throws {
+  @Test func `each key carries its own direction`() throws {
     // Age descending, ties by Name ascending: Dave(40); Alice, Carol (30);
     // Bob, Eve (25).
     let rows =
@@ -414,8 +398,7 @@ struct EngineCompoundOrderTests {
                      [.text("Bob")], [.text("Eve")]])
   }
 
-  @Test("a later key breaks ties the first key leaves")
-  func tieBreak() throws {
+  @Test func `a later key breaks ties the first key leaves`() throws {
     // Age ascending leaves {Bob,Eve} and {Alice,Carol} tied; a DESC Name key
     // reorders each pair against the scan order (Eve before Bob, Carol before
     // Alice) — proof the second key, not the input order, settles the ties.
@@ -424,8 +407,7 @@ struct EngineCompoundOrderTests {
                      [.text("Alice")], [.text("Dave")]])
   }
 
-  @Test("three keys settle rows the first two leave equal")
-  func threeKeys() throws {
+  @Test func `three keys settle rows the first two leave equal`() throws {
     // Class ascending, Score ascending, Name ascending. Class A: Bob(70), then
     // the 80s by Name — Ada, Mel, Yan. Class B: both 90, by Name — Amy, Zed.
     let rows =
@@ -434,8 +416,7 @@ struct EngineCompoundOrderTests {
                      [.integer(2)], [.integer(4)], [.integer(1)]])
   }
 
-  @Test("a compound ORDER BY is stable across all keys")
-  func stable() throws {
+  @Test func `a compound ORDER BY is stable across all keys`() throws {
     // Class and Score alone leave the three Class-A/Score-80 rows tied; with no
     // further key the sort keeps their scan order — Yan(2), Ada(3), Mel(5).
     let rows = try grades("SELECT Id FROM Grade ORDER BY Class, Score")
@@ -443,8 +424,7 @@ struct EngineCompoundOrderTests {
                      [.integer(5)], [.integer(1)], [.integer(4)]])
   }
 
-  @Test("FETCH takes the top-N of a compound order")
-  func topN() throws {
+  @Test func `FETCH takes the top-N of a compound order`() throws {
     // Age descending, ties by Name ascending, then the first two rows: Dave(40)
     // and the lower-named of the 30s, Alice.
     try people().expect("""
@@ -454,8 +434,7 @@ struct EngineCompoundOrderTests {
         yields: [["Dave"], ["Alice"]])
   }
 
-  @Test("OFFSET then FETCH pages into a compound order")
-  func page() throws {
+  @Test func `OFFSET then FETCH pages into a compound order`() throws {
     // The full compound order is Dave, Alice, Carol, Bob, Eve; skip 1, take 2.
     try people().expect("""
         SELECT Name FROM People
@@ -466,8 +445,7 @@ struct EngineCompoundOrderTests {
 }
 
 struct EngineProjectionPushdownTests {
-  @Test("a query referencing few columns of a wide relation works")
-  func few() throws {
+  @Test func `a query referencing few columns of a wide relation works`() throws {
     // The relation has ten columns; the query reads only C0 (filter, project),
     // C5 (project), and C8 (order). The leaf materialises just those, but the
     // result is exactly as if every column were copied.
@@ -479,8 +457,7 @@ struct EngineProjectionPushdownTests {
 }
 
 struct EngineSeekTests {
-  @Test("the seek path and the scan path return identical results")
-  func equivalence() throws {
+  @Test func `the seek path and the scan path return identical results`() throws {
     // `Id >= 2` seeks the sorted column; the same selection by `Name` (which
     // `bound` reports unseekable) scans. Both must yield the same rows.
     let seek = try run("SELECT Id FROM People WHERE Id >= 2 AND Id <= 4")
@@ -510,8 +487,7 @@ struct EngineSeekTests {
 /// `(Id << Coded.bits) | tag`, decoded to the `TypeDef` `Id` or `NULL`).
 /// The engine-level plan-shape assertion complements the two result assertions.
 struct EngineCodedKeyTests {
-  @Test("a range on an unordered coded key scans and admits only its own rows")
-  func range() throws {
+  @Test func `a range on an unordered coded key scans and admits only its own rows`() throws {
     // `Parent < 5` must return only the TypeDef-tagged rows whose decoded
     // `Id` is `< 5` (td1, td2, td4) — never the other-tag rows (other-a, -b,
     // -c), which decode to NULL. Before the fix the raw boundary
@@ -520,8 +496,7 @@ struct EngineCodedKeyTests {
     #expect(rows == [[.text("td1")], [.text("td2")], [.text("td4")]])
   }
 
-  @Test("a range equals the correct scan-and-filter result")
-  func equivalence() throws {
+  @Test func `a range equals the correct scan-and-filter result`() throws {
     // The seek path (`Parent < 5`) must equal a filter that cannot seek at all
     // (`Name < 'z'` over the same rows, restricted to the tagged ones) — i.e.
     // the range yields exactly the rows a full scan-and-filter would.
@@ -532,8 +507,7 @@ struct EngineCodedKeyTests {
     #expect(seek == scan)
   }
 
-  @Test("an equality on an unordered coded key still seeks its exact run")
-  func equality() throws {
+  @Test func `an equality on an unordered coded key still seeks its exact run`() throws {
     // Equality is always seekable — the exact coded run brackets exactly the
     // rows that decode to the value, and a join rechecks — so `Parent = 4`
     // returns just td4.
@@ -541,8 +515,7 @@ struct EngineCodedKeyTests {
     #expect(rows == [[.text("td4")]])
   }
 
-  @Test("an equality on zero rejects a null coded reference rather than seeking")
-  func null() throws {
+  @Test func `an equality on zero rejects a null coded reference rather than seeking`() throws {
     // A decoded row is 1-based, so `Parent = 0` is `NULL = 0` for every row —
     // UNKNOWN, admitting none. Row 0's stored raw cell is `(0 << 2) | 0 == 0`,
     // which encodes exactly the target the equality would seek; before the fix
@@ -554,8 +527,7 @@ struct EngineCodedKeyTests {
     #expect(rows.isEmpty)
   }
 
-  @Test("an equality too large to encode rejects rather than seeking an alias")
-  func overflow() throws {
+  @Test func `an equality too large to encode rejects rather than seeking an alias`() throws {
     // A decoded Id must be encodable without truncation. `(1 << 62) + 6` is
     // positive but past `Int.max >> Coded.bits`, so `(value << 2) | 0` shifts the
     // high `1` clear out of the word and aliases raw `24` — the same raw cell as
@@ -571,8 +543,7 @@ struct EngineCodedKeyTests {
     #expect(rows.isEmpty)
   }
 
-  @Test("an equality plans a seek, a range plans a scan-and-filter")
-  func plan() throws {
+  @Test func `an equality plans a seek, a range plans a scan-and-filter`() throws {
     // The plan shape proves the gate directly: equality reaches a seeked scan
     // with no residual filter; a range reaches a raw scan under a filter.
     let catalog = attributes()
@@ -590,8 +561,7 @@ struct EngineCodedKeyTests {
     #expect(filters(lessPlan))
   }
 
-  @Test("a sorted key with a leading NULL does not seek it into an equality")
-  func nullableSortedKey() throws {
+  @Test func `a sorted key with a leading NULL does not seek it into an equality`() throws {
     // NULLs sort first, so a direct seek would bracket the NULL row into the
     // `K = 1` range; an equality seek drops the residual, so the sorted-key
     // seek must fall back to a scan and filter the NULL out, not return it.
@@ -604,8 +574,7 @@ struct EngineCodedKeyTests {
     try catalog.expect("SELECT V FROM T WHERE K = 1", yields: [["one"]])
   }
 
-  @Test("a case-varied sorted-column name is still seekable")
-  func foldedSortedKey() throws {
+  @Test func `a case-varied sorted-column name is still seekable`() throws {
     // The fixture folds `sorted: "id"` to the declared `Id`, so an equality on
     // it plans a seek — a case mismatch must not silently build an unsorted
     // relation that drops to a scan the plan-shape tests mean to cover.
@@ -620,8 +589,7 @@ struct EngineCodedKeyTests {
     #expect(seeks(plan))
   }
 
-  @Test("an empty sorted fixture still plans a seek")
-  func emptySortedKey() throws {
+  @Test func `an empty sorted fixture still plans a seek`() throws {
     // A sorted relation with no rows has no leading cell to disqualify the
     // seek; it plans a seek over the empty range, not a scan.
     let catalog = try Catalog {
@@ -634,20 +602,17 @@ struct EngineCodedKeyTests {
 }
 
 struct EngineQualifierTests {
-  @Test("a qualifier matching the alias resolves the column")
-  func alias() throws {
+  @Test func `a qualifier matching the alias resolves the column`() throws {
     try people().expect("SELECT p.Name FROM People AS p WHERE Id = 1",
                         yields: [["Alice"]])
   }
 
-  @Test("a qualifier matching the table name resolves the column")
-  func name() throws {
+  @Test func `a qualifier matching the table name resolves the column`() throws {
     try people().expect("SELECT People.Name FROM People WHERE Id = 1",
                         yields: [["Alice"]])
   }
 
-  @Test("a qualifier naming neither the alias nor the table is reported")
-  func foreign() throws {
+  @Test func `a qualifier naming neither the alias nor the table is reported`() throws {
     // `x` names neither the alias `p` nor the table `People`; a single-relation
     // query rejects it rather than dropping the qualifier and binding `Name`.
     #expect(throws: SQLError.column("Name")) {
@@ -655,8 +620,7 @@ struct EngineQualifierTests {
     }
   }
 
-  @Test("a relation and a view name resolve case-insensitively")
-  func folded() throws {
+  @Test func `a relation and a view name resolve case-insensitively`() throws {
     // The fixture folds a name like the engine and the WinMD catalog do, so a
     // query need not match the declared relation/view casing.
     let catalog = try Catalog {
@@ -669,8 +633,7 @@ struct EngineQualifierTests {
     try catalog.expect("SELECT Name FROM adults", yields: [["Alice"]])
   }
 
-  @Test("a qualifier naming a different table is reported")
-  func mismatch() throws {
+  @Test func `a qualifier naming a different table is reported`() throws {
     // The reviewer's case: `Child.Name` against `FROM Parent` must not resolve
     // to `Parent`'s `Name`; the qualifier names a relation not in scope.
     #expect(throws: SQLError.column("Name")) {
@@ -682,8 +645,7 @@ struct EngineQualifierTests {
 // MARK: - Join tests
 
 struct EngineJoinTests {
-  @Test("a join on a foreign key pairs each child with its parent")
-  func star() throws {
+  @Test func `a join on a foreign key pairs each child with its parent`() throws {
     let rows = try join("""
         SELECT * FROM Parent JOIN Child ON Child.Pid = Parent.Id
         """)
@@ -695,8 +657,7 @@ struct EngineJoinTests {
     ])
   }
 
-  @Test("a qualified projection selects across both relations")
-  func qualified() throws {
+  @Test func `a qualified projection selects across both relations`() throws {
     try family().expect("""
         SELECT Parent.Name, Child.Name FROM Parent
           JOIN Child ON Child.Pid = Parent.Id
@@ -704,8 +665,7 @@ struct EngineJoinTests {
         yields: [["Ada", "Ann"], ["Ada", "Amy"], ["Bee", "Bob"]])
   }
 
-  @Test("a join keys off the inner relation's virtual Id")
-  func virtual() throws {
+  @Test func `a join keys off the inner relation's virtual Id`() throws {
     // `Ordered` has no stored key; its identity is its 1-based `Id`. The
     // child's `Pid` joins to that virtual column.
     let rows = try join("""
@@ -720,8 +680,7 @@ struct EngineJoinTests {
     ])
   }
 
-  @Test("a join keyed off the OUTER relation's virtual Id does not collide")
-  func outerVirtual() throws {
+  @Test func `a join keyed off the OUTER relation's virtual Id does not collide`() throws {
     // The combined ordinal space lays the inner relation past the outer's
     // `extent` — its real width plus the virtual columns it exposes — so an
     // outer virtual column never shares an ordinal with an inner real one. Here
@@ -742,8 +701,7 @@ struct EngineJoinTests {
     ])
   }
 
-  @Test("a WHERE spans both relations")
-  func predicate() throws {
+  @Test func `a WHERE spans both relations`() throws {
     try family().expect("""
         SELECT Child.Name FROM Parent JOIN Child ON Child.Pid = Parent.Id
           WHERE Parent.Name = 'Ada' AND Child.Name = 'Amy'
@@ -751,8 +709,7 @@ struct EngineJoinTests {
         yields: [["Amy"]])
   }
 
-  @Test("ORDER BY orders across the join")
-  func order() throws {
+  @Test func `ORDER BY orders across the join`() throws {
     try family().expect("""
         SELECT Child.Name FROM Parent JOIN Child ON Child.Pid = Parent.Id
           ORDER BY Child.Name ASC
@@ -760,15 +717,13 @@ struct EngineJoinTests {
         yields: [["Amy"], ["Ann"], ["Bob"]])
   }
 
-  @Test("an unqualified name in both relations is ambiguous")
-  func ambiguous() throws {
+  @Test func `an unqualified name in both relations is ambiguous`() throws {
     #expect(throws: SQLError.ambiguous("Name")) {
       try join("SELECT Name FROM Parent JOIN Child ON Child.Pid = Parent.Id")
     }
   }
 
-  @Test("a self-join's shared table name makes a qualified name ambiguous")
-  func selfJoin() throws {
+  @Test func `a self-join's shared table name makes a qualified name ambiguous`() throws {
     #expect(throws: SQLError.ambiguous("Id")) {
       try join("""
           SELECT Parent.Name FROM Parent JOIN Parent ON Parent.Id = Parent.Id
@@ -776,8 +731,7 @@ struct EngineJoinTests {
     }
   }
 
-  @Test("a duplicated alias makes a shared qualified column ambiguous")
-  func duplicate() throws {
+  @Test func `a duplicated alias makes a shared qualified column ambiguous`() throws {
     // `x.Pid` resolves by column (the Child side only); `x.Name` is on both,
     // so the shared alias is ambiguous rather than binding silently to outer.
     #expect(throws: SQLError.ambiguous("Name")) {
@@ -787,8 +741,7 @@ struct EngineJoinTests {
     }
   }
 
-  @Test("a parent with no matching child contributes no rows")
-  func empty() throws {
+  @Test func `a parent with no matching child contributes no rows`() throws {
     let rows = try join("""
         SELECT Parent.Name, Child.Name FROM Parent
           JOIN Child ON Child.Pid = Parent.Id
@@ -797,8 +750,7 @@ struct EngineJoinTests {
     #expect(rows.isEmpty)
   }
 
-  @Test("the seek probe and the scan probe return identical results")
-  func equivalence() throws {
+  @Test func `the seek probe and the scan probe return identical results`() throws {
     // The join seeks `Child.Pid = Parent.Id` when the inner relation is
     // seekable on the key, and scans it otherwise. Both inner orderings — the
     // sorted `Parent` and its unsorted twin used as the inner — must agree.
@@ -822,8 +774,7 @@ struct EngineJoinTests {
 // MARK: - Multi-way join tests
 
 struct EngineMultiJoinTests {
-  @Test("a three-relation chain joins across two foreign keys")
-  func chain() throws {
+  @Test func `a three-relation chain joins across two foreign keys`() throws {
     let rows = try lineage("""
         SELECT House.House, Room.Room, Item.Item FROM House
           JOIN Room ON Room.Hid = House.Id
@@ -838,8 +789,7 @@ struct EngineMultiJoinTests {
     ])
   }
 
-  @Test("a chain seeks each inner relation keyed on its sorted column")
-  func seeked() throws {
+  @Test func `a chain seeks each inner relation keyed on its sorted column`() throws {
     // Walking the chain the other way: `Item` is the outer scan, and both inner
     // relations are seeked on their sorted `Id` — the multi-way nest rewrite
     // turning every `Select`-over-`Product` level into an index-nested loop.
@@ -855,8 +805,7 @@ struct EngineMultiJoinTests {
     ])
   }
 
-  @Test("a WHERE filters across a three-relation chain")
-  func filtered() throws {
+  @Test func `a WHERE filters across a three-relation chain`() throws {
     try lineage().expect("""
         SELECT Item.Item FROM House
           JOIN Room ON Room.Hid = House.Id
@@ -866,8 +815,7 @@ struct EngineMultiJoinTests {
         yields: [["Pot"]])
   }
 
-  @Test("an unqualified name in more than one relation of a chain is ambiguous")
-  func ambiguous() throws {
+  @Test func `an unqualified name in more than one relation of a chain is ambiguous`() throws {
     // `Id` sits in both `House` and `Room`; across the chain it resolves in more
     // than one relation, so an unqualified reference is ambiguous.
     #expect(throws: SQLError.ambiguous("Id")) {
@@ -879,8 +827,7 @@ struct EngineMultiJoinTests {
     }
   }
 
-  @Test("an early ON referencing a not-yet-joined relation is rejected")
-  func premature() throws {
+  @Test func `an early ON referencing a not-yet-joined relation is rejected`() throws {
     // The first join's `ON` qualifies a column with `Item`, a relation joined
     // only LATER. Resolving the match against just the prefix — `House` and
     // `Room` — the qualifier names no relation in scope, so the query is
@@ -895,8 +842,7 @@ struct EngineMultiJoinTests {
     }
   }
 
-  @Test("a valid early ON whose columns are all in its prefix runs")
-  func prefixed() throws {
+  @Test func `a valid early ON whose columns are all in its prefix runs`() throws {
     // Each `ON` references only the prefix it resolves against, so the whole
     // chain compiles and runs — mirroring `chain`, which the prefix-scope fix
     // leaves unchanged.
@@ -912,8 +858,7 @@ struct EngineMultiJoinTests {
     ])
   }
 
-  @Test("an unqualified early-ON column a later relation shares is not ambiguous")
-  func disambiguated() throws {
+  @Test func `an unqualified early-ON column a later relation shares is not ambiguous`() throws {
     // The first join's `ON` reads unqualified `Code`, unique within its prefix
     // `{Author, Book}` even though `Sale` — joined only later — also carries a
     // `Code`. Resolving the match against the prefix binds it; resolving against
@@ -930,8 +875,7 @@ struct EngineMultiJoinTests {
 // MARK: - View tests
 
 struct EngineViewTests {
-  @Test("a view resolves and queries like a table")
-  func table() throws {
+  @Test func `a view resolves and queries like a table`() throws {
     // `SELECT * FROM Adults` runs the view's `SELECT Id, Name FROM Parent
     // WHERE Id >= 2`, exposing the columns as `Key`/`Label`.
     let rows = try view("SELECT * FROM Adults")
@@ -941,25 +885,21 @@ struct EngineViewTests {
     ])
   }
 
-  @Test("a projection over a view selects the view's columns by name")
-  func projection() throws {
+  @Test func `a projection over a view selects the view's columns by name`() throws {
     try views().expect("SELECT Label FROM Adults", yields: [["Bee"], ["Cid"]])
   }
 
-  @Test("a WHERE over a view filters its rows")
-  func filter() throws {
+  @Test func `a WHERE over a view filters its rows`() throws {
     try views().expect("SELECT Label FROM Adults WHERE Key = 3",
                        yields: [["Cid"]])
   }
 
-  @Test("an ORDER BY over a view orders its rows")
-  func order() throws {
+  @Test func `an ORDER BY over a view orders its rows`() throws {
     try views().expect("SELECT Label FROM Adults ORDER BY Label DESC",
                        yields: [["Cid"], ["Bee"]])
   }
 
-  @Test("a view whose definition is a join resolves and queries")
-  func join() throws {
+  @Test func `a view whose definition is a join resolves and queries`() throws {
     // `Pairs` denormalises the `Parent`/`Child` foreign-key join; querying it
     // runs the inner join and exposes its two columns as `Parent`/`Kid`.
     let rows = try view("SELECT * FROM Pairs")
@@ -970,21 +910,18 @@ struct EngineViewTests {
     ])
   }
 
-  @Test("a projection and filter over a join view selects across its columns")
-  func joinProjection() throws {
+  @Test func `a projection and filter over a join view selects across its columns`() throws {
     try views().expect("SELECT Kid FROM Pairs WHERE Parent = 'Ada'",
                        yields: [["Ann"], ["Amy"]])
   }
 
-  @Test("an unknown column of a view is reported")
-  func unknown() throws {
+  @Test func `an unknown column of a view is reported`() throws {
     #expect(throws: SQLError.column("Missing")) {
       try view("SELECT Missing FROM Adults")
     }
   }
 
-  @Test("a SELECT * view over-declaring its columns is rejected at resolution")
-  func wideStar() throws {
+  @Test func `a SELECT * view over-declaring its columns is rejected at resolution`() throws {
     // `Parent` is two columns wide, but the view declares three. A `SELECT *`
     // has no statically known arity, so the parser admits the list; the engine
     // catches the mismatch at resolution rather than indexing past a row.
@@ -996,8 +933,7 @@ struct EngineViewTests {
     }
   }
 
-  @Test("a SELECT * view whose explicit list matches the width resolves")
-  func matchedStar() throws {
+  @Test func `a SELECT * view whose explicit list matches the width resolves`() throws {
     // The same `SELECT *` view declared with the right number of columns
     // resolves and queries — the backstop passes the well-formed view through.
     let star = try View(query: select("SELECT * FROM Parent"),
@@ -1007,8 +943,7 @@ struct EngineViewTests {
     #expect(rows == [[.text("Ada")]])
   }
 
-  @Test("a view's definition is optimised — its seekable predicate seeks")
-  func optimised() throws {
+  @Test func `a view's definition is optimised — its seekable predicate seeks`() throws {
     // `Adults` is `SELECT Id, Name FROM Parent WHERE Id >= 2`, and `Parent` is
     // sorted on `Id`, so the view's sub-plan must seek that run rather than
     // scanning under a `Select`. Compile and optimise an outer query over the
@@ -1333,8 +1268,7 @@ private func injected(_ plan: Plan) -> Bool {
 }
 
 struct EnginePushdownTests {
-  @Test("a single-relation WHERE conjunct rides below the join")
-  func placement() throws {
+  @Test func `a single-relation WHERE conjunct rides below the join`() throws {
     // `WHERE Parent.Name = 'Ada'` references only the outer relation, so it
     // pushes to the Parent leaf inside the join rather than filtering the whole
     // product afterwards — `pushed` sees a filter within the join's outer.
@@ -1348,8 +1282,7 @@ struct EnginePushdownTests {
     #expect(pushed(plan))
   }
 
-  @Test("pushdown down a seekable outer key seeks that leaf inside the join")
-  func seeked() throws {
+  @Test func `pushdown down a seekable outer key seeks that leaf inside the join`() throws {
     // `WHERE Parent.Id = 2` is seekable; pushed to the Parent leaf it becomes a
     // seek inside the join's outer, not a scan-then-filter atop the product.
     let catalog = try family()
@@ -1363,8 +1296,7 @@ struct EnginePushdownTests {
     #expect(pushed(plan))
   }
 
-  @Test("a trailing seekable conjunct survives a rebuilt three-term AND")
-  func seekable() throws {
+  @Test func `a trailing seekable conjunct survives a rebuilt three-term AND`() throws {
     // Pushdown flattens a single-table filter through `conjuncts` and rebuilds
     // it via `conjunction`. A right-leaning rebuild would bury the trailing
     // `Id = 5` under a nested AND, hidden from `seek` (which inspects only a
@@ -1389,8 +1321,7 @@ struct EnginePushdownTests {
     #expect(seeks(plan))
   }
 
-  @Test("a seekable conjunct grouped after an unsafe one does not bypass its throw")
-  func grouped() throws {
+  @Test func `a seekable conjunct grouped after an unsafe one does not bypass its throw`() throws {
     // The left fold rebuilds `(1 / x) = 0 AND (name <> 'z' AND id < 0)` — parsed
     // as `A AND (B AND C)` — into `((A AND B) AND C)`, promoting the seekable
     // `id < 0` to the top-level RHS `seek` inspects. On an id-sorted table whose
@@ -1422,8 +1353,7 @@ struct EnginePushdownTests {
     }
   }
 
-  @Test("pushdown preserves the join's result")
-  func correctness() throws {
+  @Test func `pushdown preserves the join's result`() throws {
     // The pushed plan must return exactly the un-pushed join's rows.
     try family().expect("""
         SELECT Child.Name FROM Parent JOIN Child ON Child.Pid = Parent.Id
@@ -1432,8 +1362,7 @@ struct EnginePushdownTests {
         yields: [["Ann"], ["Amy"]])
   }
 
-  @Test("a non-key predicate on the joined-in relation still uses the join")
-  func inner() throws {
+  @Test func `a non-key predicate on the joined-in relation still uses the join`() throws {
     // `WHERE Parent.Name <> 'zz'` references only the joined-in `Parent`, so
     // pushdown wraps that inner leaf as `Select(_, Scan(Parent))` before the
     // join folds it in. `nest` must look through that pushed filter and still
@@ -1457,8 +1386,7 @@ struct EnginePushdownTests {
         yields: [["Ann", "Ada"], ["Amy", "Ada"], ["Bob", "Bee"]])
   }
 
-  @Test("a spanning WHERE leaves the join path with a residual above it")
-  func spanning() throws {
+  @Test func `a spanning WHERE leaves the join path with a residual above it`() throws {
     // `WHERE Parent.Name <> Child.Name` references BOTH joined relations, so it
     // descends no further than the product and stays as a residual. The ON
     // match must remain adjacent to the product — folded in with the spanning
@@ -1484,8 +1412,7 @@ struct EnginePushdownTests {
         yields: [["Ann", "Ada"], ["Amy", "Ada"], ["Bob", "Bee"]])
   }
 
-  @Test("a WHERE over a join view prunes its rows before the join runs")
-  func view() throws {
+  @Test func `a WHERE over a join view prunes its rows before the join runs`() throws {
     // `Kin` is the Parent/Child join; `WHERE Key = 2` over it must push INTO the
     // view's sub-plan and seek Parent to the single matching row before joining,
     // so only that parent's rows are read — not the whole relation.
@@ -1503,8 +1430,7 @@ struct EnginePushdownTests {
     #expect(pruned.reads == 1)
   }
 
-  @Test("the pushed view result matches the unfiltered view filtered late")
-  func equivalence() throws {
+  @Test func `the pushed view result matches the unfiltered view filtered late`() throws {
     // Running the view then filtering must agree with the pushed plan.
     let (catalog, _) = try counted()
     let all = try catalog.run(parse("SELECT Key, Kid FROM Kin"))
@@ -1514,8 +1440,7 @@ struct EnginePushdownTests {
     #expect(filtered == culled)
   }
 
-  @Test("a slotless predicate stays above the join and skips an empty product")
-  func slotless() throws {
+  @Test func `a slotless predicate stays above the join and skips an empty product`() throws {
     // `WHERE (1 / 0) = 0` reads no slots, so it must stay at the product level
     // and run per pair — not ride down to the left input. `B` is empty, so the
     // join's product is empty and the throwing expression is never evaluated;
@@ -1533,8 +1458,7 @@ struct EnginePushdownTests {
     #expect(rows.isEmpty)
   }
 
-  @Test("a throwing single-side predicate stays above the join, skips an empty product")
-  func hazardous() throws {
+  @Test func `a throwing single-side predicate stays above the join, skips an empty product`() throws {
     // `WHERE (1 / A.x) = 0` reads only `A`'s slot but CAN throw (division), so —
     // like a slotless throwing predicate — it must stay at the product level, not
     // ride down to `A`. `B` is empty, so the product is empty and the division is
@@ -1552,8 +1476,7 @@ struct EnginePushdownTests {
     #expect(rows.isEmpty)
   }
 
-  @Test("an unsafe conjunct bars a later safe one from suppressing its throw")
-  func barrier() throws {
+  @Test func `an unsafe conjunct bars a later safe one from suppressing its throw`() throws {
     // `WHERE (1 / A.x) = 0 AND A.x <> 0`: left-to-right, the division runs first
     // and raises on the matching pair (`A.x = 0` joined to `B.y = 0`). The safe
     // `A.x <> 0` must NOT ride down to `A` — doing so would drop the row before
@@ -1572,8 +1495,7 @@ struct EnginePushdownTests {
     }
   }
 
-  @Test("a lifted inner filter keeps its place before a later unsafe residual")
-  func lifted() throws {
+  @Test func `a lifted inner filter keeps its place before a later unsafe residual`() throws {
     // `WHERE Parent.Name = 'nope' AND (1 / Child.x) = 0`: left-to-right, the
     // false `Parent.Name` check short-circuits before the division on the
     // matching pair (Child.x = 0). `Parent.Name = 'nope'` is a single-side inner
@@ -1597,8 +1519,7 @@ struct EnginePushdownTests {
     #expect(rows.isEmpty)
   }
 
-  @Test("a WHERE over a UNION view pushes into every arm's projection")
-  func union() throws {
+  @Test func `a WHERE over a UNION view pushes into every arm's projection`() throws {
     // `Both` unions `Alpha` and `Beta`, whose shared `Key` output column sits at
     // DIFFERING body slots. `WHERE Key = 2` must rebase PER ARM — the union root
     // fails a single pre-rebased filter — pushing below each arm's projection
@@ -1616,8 +1537,7 @@ struct EnginePushdownTests {
     #expect(rows == [[.text("a2")], [.text("b2")]])
   }
 
-  @Test("a view's throwing projection term is not suppressed by a pushed filter")
-  func throwingView() throws {
+  @Test func `a view's throwing projection term is not suppressed by a pushed filter`() throws {
     // The view projects `1 / z`, which raises on the `z = 0` row. `derive`
     // evaluates every projected column for every view row, so `SELECT id FROM V
     // WHERE id <> 0` raises even though `id <> 0` would exclude that row —
@@ -1635,8 +1555,7 @@ struct EnginePushdownTests {
     }
   }
 
-  @Test("an unsafe outer conjunct bars a later push into a view")
-  func gated() throws {
+  @Test func `an unsafe outer conjunct bars a later push into a view`() throws {
     // `V` is `SELECT x FROM T` with `T.x` sorted and a single `x = 0` row.
     // `SELECT x FROM V WHERE (1 / x) = 0 AND x = 1`: left-to-right, the division
     // runs on the `x = 0` row and raises. The safe seekable `x = 1` must NOT push
@@ -1655,8 +1574,7 @@ struct EnginePushdownTests {
     }
   }
 
-  @Test("a nullable conjunct is not pushed below a later unsafe conjunct")
-  func nullable() throws {
+  @Test func `a nullable conjunct is not pushed below a later unsafe conjunct`() throws {
     // `WHERE A.x = 1 AND (1 / B.y) = 0`: the evaluator's `AND` does not short-
     // circuit, so on the matching pair (A.x NULL, B.y = 0) the UNKNOWN left
     // still runs the right, and the division raises. The safe `A.x = 1`
@@ -1691,8 +1609,7 @@ struct EnginePushdownTests {
     }
   }
 
-  @Test("a nullable conjunct is not pushed into a view below a later unsafe one")
-  func nullableView() throws {
+  @Test func `a nullable conjunct is not pushed into a view below a later unsafe one`() throws {
     // `V` exposes safe columns `x` and `y`. `SELECT x FROM V WHERE x = 1 AND
     // (1 / y) = 0`: the `AND` does not short-circuit, so on the (x NULL, y = 0)
     // row the UNKNOWN left still runs the division, which raises. Pushing the
@@ -1720,8 +1637,7 @@ struct EnginePushdownTests {
     }
   }
 
-  @Test("a slotless bound conjunct is not pushed into a view below a later unsafe one")
-  func boundView() throws {
+  @Test func `a slotless bound conjunct is not pushed into a view below a later unsafe one`() throws {
     // A `.bound` predicate compares against a run-time `:parameter` and reads no
     // slot, yet it is UNKNOWN when the parameter is unbound (or bound to NULL).
     // `SELECT x FROM V WHERE 1 = :missing AND (1 / y) = 0` with `:missing`
@@ -1751,8 +1667,7 @@ struct EnginePushdownTests {
     }
   }
 
-  @Test("a throwing WHERE is not evaluated for a pair an UNKNOWN ON rejects")
-  func gatedMatch() throws {
+  @Test func `a throwing WHERE is not evaluated for a pair an UNKNOWN ON rejects`() throws {
     // `A JOIN V ON A.k = V.k WHERE (1 / A.x) = 0` where `V` is a derived view,
     // so `nest` cannot fold the product into a `Join`. On the `A` row with a
     // NULL `k` and `x = 0`, the ON match is UNKNOWN — the join forms no pair for
@@ -1814,8 +1729,7 @@ private func hashable() -> (catalog: Memory, reads: Counter) {
 }
 
 struct EngineHashJoinTests {
-  @Test("a hash join over an unsorted inner scans it exactly once")
-  func single() throws {
+  @Test func `a hash join over an unsorted inner scans it exactly once`() throws {
     // `Parent` is unsorted, so its `Id` is not seekable and the join hashes it.
     // Four outer children probe the map, but the inner is read only three times
     // — its row count — not twelve (once per outer).
@@ -1832,8 +1746,7 @@ struct EngineHashJoinTests {
     #expect(reads.reads == 3)
   }
 
-  @Test("a coded-index inner key seeks rather than hashing the whole inner")
-  func coded() throws {
+  @Test func `a coded-index inner key seeks rather than hashing the whole inner`() throws {
     // The join strategy is chosen by probing the inner key for seekability. A
     // decoded coded-index column is 1-based and rejects the null reference `0`,
     // so probing with `0` would call it unseekable and hash every inner row;
@@ -1871,8 +1784,7 @@ struct EngineHashJoinTests {
     #expect(reads.reads == 1)
   }
 
-  @Test("an empty outer skips the hash build of an unseekable inner")
-  func empty() throws {
+  @Test func `an empty outer skips the hash build of an unseekable inner`() throws {
     // A contradictory outer WHERE prunes every `Child`, so the outer is empty
     // and no probe can match. The inner `Parent` is unsorted (unseekable), so
     // the join would hash it — but with no probes the build is pointless. The
@@ -1889,8 +1801,7 @@ struct EngineHashJoinTests {
     #expect(reads.reads == 0)
   }
 
-  @Test("an all-NULL-key outer skips the hash build of an unseekable inner")
-  func allNull() throws {
+  @Test func `an all-NULL-key outer skips the hash build of an unseekable inner`() throws {
     // The outer is NON-empty but every `Child.Pid` is NULL (a `WHERE Pid IS
     // NULL` keeps only the null-keyed rows), and a NULL key joins to nothing —
     // so no probe can match. The inner `Parent` is unsorted (unseekable), so the
@@ -1927,8 +1838,7 @@ struct EngineHashJoinTests {
     #expect(reads.reads == 0)
   }
 
-  @Test("the hash probe and the seek probe return identical results")
-  func equivalence() throws {
+  @Test func `the hash probe and the seek probe return identical results`() throws {
     // The sorted `Parent` seeks; its unsorted twin hashes. Both inner orderings
     // must agree — the hash preserves the seek path's outer-major, inner-cursor
     // order.
@@ -1948,8 +1858,7 @@ struct EngineHashJoinTests {
     ])
   }
 
-  @Test("a hash join emits matches outer-major in inner cursor order")
-  func order() throws {
+  @Test func `a hash join emits matches outer-major in inner cursor order`() throws {
     // The unsorted twin forces the hash path. Without an ORDER BY the result
     // must be outer-major (each child in scan order), and a bucket's inner rows
     // in the inner's cursor order — exactly the nested loop's order.
@@ -1964,8 +1873,7 @@ struct EngineHashJoinTests {
     ])
   }
 
-  @Test("a NULL key joins to nothing under the hash path")
-  func null() throws {
+  @Test func `a NULL key joins to nothing under the hash path`() throws {
     // The child with a NULL foreign key is the outer row; a NULL key hashes to
     // nothing, and a NULL inner key is never bucketed. `Parent` here is unsorted
     // so the join hashes.
@@ -2000,8 +1908,7 @@ struct EngineHashJoinTests {
     ])
   }
 
-  @Test("a seekable inner filter seeks the hash inner rather than scanning it")
-  func filtered() throws {
+  @Test func `a seekable inner filter seeks the hash inner rather than scanning it`() throws {
     // `Parent.Code` (the join key) is unseekable, so the join hashes the inner;
     // `Parent.Id` is sorted (seekable and ordered). `Child JOIN Parent ON
     // Parent.Code = Child.Code WHERE Parent.Id < 0` pushes `Parent.Id < 0` onto
@@ -2046,8 +1953,7 @@ struct EngineHashJoinTests {
 // MARK: - Streaming-product tests
 
 struct EngineStreamingProductTests {
-  @Test("a join whose inner is a view leaves a residual product-under-select")
-  func shape() throws {
+  @Test func `a join whose inner is a view leaves a residual product-under-select`() throws {
     // The nest rewrite folds a bare scan into an index-nested join, but the
     // inner here is the `Adults` VIEW (a `derived` leaf), so nest cannot fire
     // and the level stays a `select` over a `product` — the shape the streaming
@@ -2062,8 +1968,7 @@ struct EngineStreamingProductTests {
     #expect(residual(plan))
   }
 
-  @Test("the streamed product filters row by row to the right rows")
-  func correctness() throws {
+  @Test func `the streamed product filters row by row to the right rows`() throws {
     // `Adults` is Parent rows with Id >= 2 (Key 2 → Bee, 3 → Cid); only the
     // child whose Pid equals a Key survives — Bob (Pid 2) against Bee.
     let catalog = try views()
@@ -2074,8 +1979,7 @@ struct EngineStreamingProductTests {
     #expect(rows == [[.text("Bob"), .text("Bee")]])
   }
 
-  @Test("the streamed product equals the eager product filtered")
-  func equivalence() throws {
+  @Test func `the streamed product equals the eager product filtered`() throws {
     // Cross the two inputs by hand — every child paired with every adult in
     // outer-major order — and keep the pairs the ON equality admits. The fused
     // streaming operator must yield exactly this, in this order.
@@ -2097,8 +2001,7 @@ struct EngineStreamingProductTests {
     #expect(streamed == eager)
   }
 
-  @Test("a residual product with UNKNOWN pairs drops them")
-  func unknown() throws {
+  @Test func `a residual product with UNKNOWN pairs drops them`() throws {
     // A NULL-keyed pair evaluates the ON equality to UNKNOWN, which the fused
     // filter drops exactly as `admitted` would — no NULL child reaches a match.
     let child = [
@@ -2166,64 +2069,55 @@ private func functionRun(_ text: String) throws -> Array<Array<Value>> {
 }
 
 struct EngineFunctionTests {
-  @Test("a registered function projects over a column")
-  func projection() throws {
+  @Test func `a registered function projects over a column`() throws {
     let rows = try functionRun("SELECT upper(Name) FROM People WHERE Id = 1")
     #expect(rows == [[.text("ALICE")]])
   }
 
-  @Test("a function projects beside a bare column")
-  func mixed() throws {
+  @Test func `a function projects beside a bare column`() throws {
     let rows =
         try functionRun("SELECT Id, upper(Name) FROM People WHERE Id = 3")
     #expect(rows == [[.integer(3), .text("CAROL")]])
   }
 
-  @Test("a function takes more than one column argument")
-  func multiple() throws {
+  @Test func `a function takes more than one column argument`() throws {
     let rows = try functionRun("SELECT add(Id, Age) FROM People WHERE Id = 2")
     // Bob: Id 2 + Age 25 = 27.
     #expect(rows == [[.integer(27)]])
   }
 
-  @Test("a function takes a literal argument")
-  func literal() throws {
+  @Test func `a function takes a literal argument`() throws {
     let rows = try functionRun("SELECT add(Id, 100) FROM People WHERE Id = 4")
     #expect(rows == [[.integer(104)]])
   }
 
-  @Test("a function call nests another function call")
-  func nested() throws {
+  @Test func `a function call nests another function call`() throws {
     let rows =
         try functionRun("SELECT add(add(Id, 1), Age) FROM People WHERE Id = 5")
     // Eve: (5 + 1) + 25 = 31.
     #expect(rows == [[.integer(31)]])
   }
 
-  @Test("an unregistered function is reported")
-  func unknown() throws {
+  @Test func `an unregistered function is reported`() throws {
     #expect(throws: SQLError.function("missing")) {
       try functionRun("SELECT missing(Name) FROM People")
     }
   }
 
-  @Test("a function rejecting its arguments reports the fault")
-  func invalid() throws {
+  @Test func `a function rejecting its arguments reports the fault`() throws {
     #expect(throws: SQLError.argument("upper expects one text argument")) {
       try functionRun("SELECT upper(Id) FROM People WHERE Id = 1")
     }
   }
 
-  @Test("a function call resolves its name case-insensitively")
-  func folded() throws {
+  @Test func `a function call resolves its name case-insensitively`() throws {
     // `upper` is registered; the natural SQL spelling UPPER resolves to it, as
     // table and column identifiers do.
     let rows = try functionRun("SELECT UPPER(Name) FROM People WHERE Id = 1")
     #expect(rows == [[.text("ALICE")]])
   }
 
-  @Test("the prelude BITAND yields the bitwise AND of two integers")
-  func bitand() throws {
+  @Test func `the prelude BITAND yields the bitwise AND of two integers`() throws {
     // BITAND ships in the prelude (`Routines.standard`): `routines()` never
     // registers it, yet the call resolves through the seeded prelude and folds
     // case-insensitively. 12 & 10 = 8; 6 & 3 = 2.
@@ -2233,8 +2127,7 @@ struct EngineFunctionTests {
             == [[.integer(2)]])
   }
 
-  @Test("BITAND reports a function-argument fault, not a UNION arity error")
-  func bitandFaults() throws {
+  @Test func `BITAND reports a function-argument fault, not a UNION arity error`() throws {
     // The wrong argument count is a function-argument fault (`.argument`), not
     // `.arity` — whose message is the UNION column-count mismatch.
     #expect(throws: SQLError.argument("BITAND takes two arguments")) {
@@ -2245,8 +2138,7 @@ struct EngineFunctionTests {
     }
   }
 
-  @Test("a registered function shadows the prelude BITAND")
-  func bitandShadowed() throws {
+  @Test func `a registered function shadows the prelude BITAND`() throws {
     // The registry is a single flat map with no privileged tier, so a caller's
     // `bitand` registered OVER the prelude one shadows it (house rule: a later
     // binding wins). The user's closure returns -1, not the bitwise AND.
@@ -2259,8 +2151,7 @@ struct EngineFunctionTests {
     #expect(rows == [[.integer(-1)]])
   }
 
-  @Test("routine names colliding only by case merge without trapping")
-  func collision() throws {
+  @Test func `routine names colliding only by case merge without trapping`() throws {
     // "tag" and "TAG" fold to one name; the registry merges them (the later-
     // sorting original spelling wins) instead of trapping on the duplicate.
     let routines: Routines =
@@ -2275,8 +2166,7 @@ struct EngineFunctionTests {
     #expect(rows == [[.text("lower")]])
   }
 
-  @Test("a predicate filters on a scalar function call")
-  func predicate() throws {
+  @Test func `a predicate filters on a scalar function call`() throws {
     // The documented contract: a predicate may call a registered function;
     // `upper(Name) = 'ALICE'` decodes the column before comparing.
     let rows =
@@ -2284,8 +2174,7 @@ struct EngineFunctionTests {
     #expect(rows == [[.integer(1)]])
   }
 
-  @Test("a predicate compares a function result to an integer")
-  func arithmetic() throws {
+  @Test func `a predicate compares a function result to an integer`() throws {
     let rows =
         try functionRun("SELECT Name FROM People WHERE add(Id, 10) = 12")
     #expect(rows == [[.text("Bob")]])
@@ -2310,8 +2199,7 @@ private func defining(_ defs: String...) throws -> Routines {
 }
 
 struct EngineDefinedFunctionTests {
-  @Test("a defined function evaluates its body over the arguments")
-  func projection() throws {
+  @Test func `a defined function evaluates its body over the arguments`() throws {
     let routines =
         try defining("CREATE FUNCTION twice(n INTEGER) RETURNS INTEGER "
                          + "AS n + n")
@@ -2322,8 +2210,7 @@ struct EngineDefinedFunctionTests {
     #expect(rows == [[.integer(60)]])
   }
 
-  @Test("a defined function binds each parameter to its argument by position")
-  func parameters() throws {
+  @Test func `a defined function binds each parameter to its argument by position`() throws {
     let routines =
         try defining("CREATE FUNCTION span(lo INTEGER, hi INTEGER) "
                          + "RETURNS INTEGER AS hi - lo")
@@ -2334,8 +2221,7 @@ struct EngineDefinedFunctionTests {
     #expect(rows == [[.integer(36)]])
   }
 
-  @Test("a defined function projects beside a bare column")
-  func mixed() throws {
+  @Test func `a defined function projects beside a bare column`() throws {
     let routines =
         try defining("CREATE FUNCTION inc(n INTEGER) RETURNS INTEGER AS n + 1")
     let rows =
@@ -2345,8 +2231,7 @@ struct EngineDefinedFunctionTests {
     #expect(rows == [[.integer(2), .integer(26)]])
   }
 
-  @Test("a defined function filters in a predicate")
-  func predicate() throws {
+  @Test func `a defined function filters in a predicate`() throws {
     let routines =
         try defining("CREATE FUNCTION inc(n INTEGER) RETURNS INTEGER AS n + 1")
     let rows =
@@ -2356,8 +2241,7 @@ struct EngineDefinedFunctionTests {
     #expect(rows == [[.text("Alice")], [.text("Carol")]])
   }
 
-  @Test("a parameterless defined function yields its constant body")
-  func nullary() throws {
+  @Test func `a parameterless defined function yields its constant body`() throws {
     let routines =
         try defining("CREATE FUNCTION answer() RETURNS INTEGER AS 40 + 2")
     let rows =
@@ -2366,8 +2250,7 @@ struct EngineDefinedFunctionTests {
     #expect(rows == [[.integer(42)]])
   }
 
-  @Test("a defined function propagates a NULL argument through its body")
-  func nullArgument() throws {
+  @Test func `a defined function propagates a NULL argument through its body`() throws {
     // A NULL bound to a parameter propagates through the body's arithmetic (SQL
     // null propagation), so the result is NULL rather than a fault.
     let routines =
@@ -2382,8 +2265,7 @@ struct EngineDefinedFunctionTests {
     #expect(rows == [[.null]])
   }
 
-  @Test("a call with the wrong argument count faults with the declared arity")
-  func arity() throws {
+  @Test func `a call with the wrong argument count faults with the declared arity`() throws {
     // The declared `parameters` contract is what the static type-check (the
     // `call` contract check, the schema path drives) validates a call against,
     // exactly as it does a native routine's signature — a wrong argument count
@@ -2397,8 +2279,7 @@ struct EngineDefinedFunctionTests {
     }
   }
 
-  @Test("a call with a wrong argument kind faults against the parameter type")
-  func kind() throws {
+  @Test func `a call with a wrong argument kind faults against the parameter type`() throws {
     // A definitively-wrong argument type (text where an integer parameter is
     // declared) is rejected by the same `call` contract check.
     let routines =
@@ -2410,8 +2291,7 @@ struct EngineDefinedFunctionTests {
     }
   }
 
-  @Test("typing reports the declared RETURNS of a defined function")
-  func typing() throws {
+  @Test func `typing reports the declared RETURNS of a defined function`() throws {
     // The result-schema walk types a `f(...)` call by the routine's declared
     // return type without running it, so a defined function's declared RETURNS
     // is what the output column reports.
@@ -2424,8 +2304,7 @@ struct EngineDefinedFunctionTests {
     #expect(columns[0] == OutputColumn(name: "L", type: .text))
   }
 
-  @Test("a defined function body naming an unknown parameter faults at define")
-  func undeclaredParameter() throws {
+  @Test func `a defined function body naming an unknown parameter faults at define`() throws {
     // The body is lowered against its parameters at registration, so a reference
     // to a name the function does not declare faults there — the moment a
     // `CREATE FUNCTION` binds — not at each later call.
@@ -2434,8 +2313,7 @@ struct EngineDefinedFunctionTests {
     }
   }
 
-  @Test("a later defined function shadows an earlier one of the same name")
-  func shadowing() throws {
+  @Test func `a later defined function shadows an earlier one of the same name`() throws {
     // A later registration wins (the house rule the flat registry follows), so
     // the second `inc` — adding 100 — is the one a call resolves.
     let routines = try defining(
@@ -2448,8 +2326,7 @@ struct EngineDefinedFunctionTests {
     #expect(rows == [[.integer(130)]])
   }
 
-  @Test("a body naming its own unregistered name faults as unresolved")
-  func selfReference() throws {
+  @Test func `a body naming its own unregistered name faults as unresolved`() throws {
     // `f() RETURNS INTEGER AS f() + 1` with NO prior `f` early-binds against a
     // map without `f`, so the body's own call is unresolved: registration
     // faults `SQLError.function` — the unregistered-callee case — not a
@@ -2460,8 +2337,7 @@ struct EngineDefinedFunctionTests {
     }
   }
 
-  @Test("a self-referential redefinition captures the prior function")
-  func selfReferenceRedefinition() throws {
+  @Test func `a self-referential redefinition captures the prior function`() throws {
     // `f() AS f() + 1` REPLACING a prior `f` is well-defined under early
     // binding: the new body captures the OLD `f` and computes `f_old() + 1`,
     // terminating. With `f_old()` = 0, `SELECT f()` returns 0 + 1 = 1.
@@ -2474,8 +2350,7 @@ struct EngineDefinedFunctionTests {
     #expect(rows == [[.integer(1)]])
   }
 
-  @Test("a body calling a different existing function still registers")
-  func crossReference() throws {
+  @Test func `a body calling a different existing function still registers`() throws {
     // A body calling a distinct, already-registered routine early-binds it and
     // registers cleanly — the common composition case.
     let routines = try defining(
@@ -2488,8 +2363,7 @@ struct EngineDefinedFunctionTests {
     #expect(rows == [[.integer(32)]])
   }
 
-  @Test("a body calling a prelude routine registers against empty routines")
-  func preludeCall() throws {
+  @Test func `a body calling a prelude routine registers against empty routines`() throws {
     // Registered against EMPTY routines — NOT `defining`, which seeds the
     // prelude — a body calling BITAND still resolves it: registration merges
     // `Routines.standard` under the caller's routines (the run/columns
@@ -2512,8 +2386,7 @@ struct EngineDefinedFunctionTests {
     #expect(odd == [[.integer(1)]])
   }
 
-  @Test("a body calling a still-unknown routine faults at registration")
-  func unknownCall() throws {
+  @Test func `a body calling a still-unknown routine faults at registration`() throws {
     // Merging the prelude into the capture must not mask a genuinely-unknown
     // callee: a body naming `nope`, bound by neither the prelude nor a prior
     // registration, is still unresolved and faults `SQLError.function` at
@@ -2523,8 +2396,7 @@ struct EngineDefinedFunctionTests {
     }
   }
 
-  @Test("a body binds its callee at definition, not at call time")
-  func capturedCallee() throws {
+  @Test func `a body binds its callee at definition, not at call time`() throws {
     // The round-5 root case at the parse level. `g` returns INTEGER 1; `f() AS
     // g()` captures that INTEGER `g`. Redefining `g` to a TEXT body shadows it
     // for QUERIES, but `f` closed over the old `g`, so `SELECT f()` still
@@ -2548,42 +2420,36 @@ struct EngineDefinedFunctionTests {
 // MARK: - NULL tests
 
 struct EngineNullTests {
-  @Test("IS NULL admits only the NULL rows")
-  func isNull() throws {
+  @Test func `IS NULL admits only the NULL rows`() throws {
     try nullable().expect("SELECT Id FROM Maybe WHERE Note IS NULL",
                           yields: [[2], [4]])
   }
 
-  @Test("IS NOT NULL admits only the non-NULL rows")
-  func isNotNull() throws {
+  @Test func `IS NOT NULL admits only the non-NULL rows`() throws {
     let rows = try nullable("SELECT Id FROM Maybe WHERE Note IS NOT NULL")
     #expect(rows == [[.integer(1)], [.integer(3)]])
   }
 
-  @Test("a comparison against a NULL cell is UNKNOWN and rejects")
-  func comparison() throws {
+  @Test func `a comparison against a NULL cell is UNKNOWN and rejects`() throws {
     // For the NULL rows (2, 4) `Note = 'alpha'` is UNKNOWN, not false, so they
     // are not admitted; only the row whose Note equals 'alpha' survives.
     try nullable().expect("SELECT Id FROM Maybe WHERE Note = 'alpha'",
                           yields: [[1]])
   }
 
-  @Test("NOT of a NULL comparison stays UNKNOWN and rejects")
-  func negated() throws {
+  @Test func `NOT of a NULL comparison stays UNKNOWN and rejects`() throws {
     // The NULL rows are UNKNOWN; NOT UNKNOWN is UNKNOWN, so they still reject —
     // only the non-null, non-'alpha' row survives.
     let rows = try nullable("SELECT Id FROM Maybe WHERE NOT Note = 'alpha'")
     #expect(rows == [[.integer(3)]])
   }
 
-  @Test("a NULL cell projects as a NULL value")
-  func projection() throws {
+  @Test func `a NULL cell projects as a NULL value`() throws {
     try nullable().expect("SELECT Note FROM Maybe WHERE Id = 2",
                           yields: [[nil]])
   }
 
-  @Test("ORDER BY ascending sorts NULL keys first, then by value")
-  func orderAscending() throws {
+  @Test func `ORDER BY ascending sorts NULL keys first, then by value`() throws {
     // NULL holds a stable position — first in ascending order — so the non-null
     // notes still sort among themselves ('alpha' before 'gamma') rather than
     // tying with the nulls and leaving the order undefined.
@@ -2591,14 +2457,12 @@ struct EngineNullTests {
                           yields: [[2], [4], [1], [3]])
   }
 
-  @Test("ORDER BY descending sorts NULL keys last")
-  func orderDescending() throws {
+  @Test func `ORDER BY descending sorts NULL keys last`() throws {
     try nullable().expect("SELECT Id FROM Maybe ORDER BY Note DESC",
                           yields: [[3], [1], [2], [4]])
   }
 
-  @Test("a NULL outer join key matches no inner row")
-  func join() throws {
+  @Test func `a NULL outer join key matches no inner row`() throws {
     // The child with a NULL foreign key is the outer row; a NULL key equi-joins
     // to nothing, so it contributes no pair — `Parent` is sorted, so the inner
     // is seeked and the NULL key is skipped before probing.
@@ -2622,8 +2486,7 @@ private func boundRun(_ text: String, _ bindings: Bindings)
 }
 
 struct EngineBoundTests {
-  @Test("a bound parameter filters rows by an outer value")
-  func filter() throws {
+  @Test func `a bound parameter filters rows by an outer value`() throws {
     // The child relation keyed on a bound parent id — the section primitive: a
     // template renders an interface's methods by binding the interface key and
     // running the child query.
@@ -2632,29 +2495,25 @@ struct EngineBoundTests {
     #expect(rows == [[.text("Ann")], [.text("Amy")]])
   }
 
-  @Test("a bound text parameter compares against a text column")
-  func text() throws {
+  @Test func `a bound text parameter compares against a text column`() throws {
     let rows = try boundRun("SELECT Id FROM Parent WHERE Name = :who",
                             ["who": .text("Bee")])
     #expect(rows == [[.integer(2)]])
   }
 
-  @Test("an unbound parameter admits no row")
-  func unbound() throws {
+  @Test func `an unbound parameter admits no row`() throws {
     let rows = try boundRun("SELECT Name FROM Child WHERE Pid = :pid", [:])
     #expect(rows.isEmpty)
   }
 
-  @Test("a bound parameter conjoined with another predicate")
-  func conjunction() throws {
+  @Test func `a bound parameter conjoined with another predicate`() throws {
     let rows = try boundRun("""
         SELECT Name FROM Child WHERE Pid = :pid AND Name = 'Amy'
         """, ["pid": .integer(1)])
     #expect(rows == [[.text("Amy")]])
   }
 
-  @Test("a correlated section runs a child query per outer row")
-  func correlated() throws {
+  @Test func `a correlated section runs a child query per outer row`() throws {
     // The relational shape of a template's nested section: the outer query
     // yields the parents; for each, the child query is re-run with the parent's
     // key bound, producing that parent's children — exactly an interface →
@@ -2683,23 +2542,20 @@ struct EngineBoundTests {
     #expect(sections[2].children.isEmpty)
   }
 
-  @Test("an unbound parameter under NOT still admits no rows")
-  func negated() throws {
+  @Test func `an unbound parameter under NOT still admits no rows`() throws {
     // A missing binding is UNKNOWN, not false; NOT preserves UNKNOWN rather
     // than inverting it into a match, so the predicate admits nothing.
     let rows = try boundRun("SELECT Name FROM Child WHERE NOT Pid = :pid", [:])
     #expect(rows.isEmpty)
   }
 
-  @Test("a bound parameter under NOT inverts the match")
-  func inverted() throws {
+  @Test func `a bound parameter under NOT inverts the match`() throws {
     let rows = try boundRun("SELECT Name FROM Child WHERE NOT Pid = :pid",
                             ["pid": .integer(1)])
     #expect(rows == [[.text("Bob")], [.text("Orphan")]])
   }
 
-  @Test("a bound key plans a seek when its value is known")
-  func seek() throws {
+  @Test func `a bound key plans a seek when its value is known`() throws {
     // Parent is sorted on Id; with `:id` bound the planner resolves it and
     // seeks the run rather than scanning and filtering the whole relation.
     let select = try parse("SELECT Name FROM Parent WHERE Id = :id")
@@ -2710,8 +2566,7 @@ struct EngineBoundTests {
     #expect(!filters(plan))
   }
 
-  @Test("an unbound key cannot seek and scans under the filter")
-  func scan() throws {
+  @Test func `an unbound key cannot seek and scans under the filter`() throws {
     let select = try parse("SELECT Name FROM Parent WHERE Id = :id")
     let catalog = try family()
     let plan = try catalog.optimise(catalog.compile(select), [:])
@@ -2719,8 +2574,7 @@ struct EngineBoundTests {
     #expect(filters(plan))
   }
 
-  @Test("a bound key inside a view seeks when its parameter is supplied")
-  func nested() throws {
+  @Test func `a bound key inside a view seeks when its parameter is supplied`() throws {
     // A parameterized view (`… WHERE Id = :id` over sorted Parent): the bound
     // key seeks inside the view's sub-plan rather than scanning it once :id is
     // supplied, so a reusable view is as fast as the inlined query.
@@ -2762,8 +2616,7 @@ private func tags() -> Memory {
 }
 
 struct EngineUnionTests {
-  @Test("UNION removes whole-row duplicates, keeping the first occurrence")
-  func dedup() throws {
+  @Test func `UNION removes whole-row duplicates, keeping the first occurrence`() throws {
     // People's Age repeats (30 for Alice and Carol, 25 for Bob and Eve); a
     // UNION of the relation with itself collapses every duplicate row.
     let rows = try people().run(parse("""
@@ -2772,8 +2625,7 @@ struct EngineUnionTests {
     #expect(rows == [[.integer(30)], [.integer(25)], [.integer(40)]])
   }
 
-  @Test("UNION ALL keeps every row of every arm in source order")
-  func all() throws {
+  @Test func `UNION ALL keeps every row of every arm in source order`() throws {
     let rows = try people().run(parse("""
         SELECT Age FROM People UNION ALL SELECT Age FROM People
         """))
@@ -2781,8 +2633,7 @@ struct EngineUnionTests {
     #expect(rows == (ages + ages).map { [$0] })
   }
 
-  @Test("a UNION across two relations of matching arity merges and dedups")
-  func merge() throws {
+  @Test func `a UNION across two relations of matching arity merges and dedups`() throws {
     let rows = try tags().run(parse("""
         SELECT Tag FROM Left UNION SELECT Tag FROM Right
         """))
@@ -2790,8 +2641,7 @@ struct EngineUnionTests {
     #expect(rows == [[.text("a")], [.text("shared")], [.text("b")]])
   }
 
-  @Test("a UNION ALL across two relations keeps the shared row twice")
-  func mergeAll() throws {
+  @Test func `a UNION ALL across two relations keeps the shared row twice`() throws {
     let rows = try tags().run(parse("""
         SELECT Tag FROM Left UNION ALL SELECT Tag FROM Right
         """))
@@ -2803,8 +2653,7 @@ struct EngineUnionTests {
     ])
   }
 
-  @Test("an inner UNION dedups before a trailing UNION ALL appends its arm")
-  func nestedAll() throws {
+  @Test func `an inner UNION dedups before a trailing UNION ALL appends its arm`() throws {
     // (Left UNION Right) UNION ALL Extra. The inner UNION dedups `shared`
     // across Left and Right to one row — `a, shared, b` — and the outer UNION
     // ALL then appends Extra's `a` WITHOUT deduplicating, so `a` recurs. A
@@ -2822,8 +2671,7 @@ struct EngineUnionTests {
     ])
   }
 
-  @Test("a UNION of arms projecting differing column counts is rejected")
-  func arity() throws {
+  @Test func `a UNION of arms projecting differing column counts is rejected`() throws {
     #expect(throws: SQLError.arity(1, 2)) {
       try people().run(parse("""
           SELECT Id FROM People UNION SELECT Id, Name FROM People
@@ -2831,8 +2679,7 @@ struct EngineUnionTests {
     }
   }
 
-  @Test("a view defined as a UNION resolves and queries")
-  func view() throws {
+  @Test func `a view defined as a UNION resolves and queries`() throws {
     let both = try View(query: select("""
         SELECT Tag FROM Left UNION SELECT Tag FROM Right
         """), columns: ["Tag"])
@@ -2841,8 +2688,7 @@ struct EngineUnionTests {
     #expect(rows == [[.text("a")], [.text("shared")], [.text("b")]])
   }
 
-  @Test("a bound parameter threads into every arm of a UNION")
-  func bound() throws {
+  @Test func `a bound parameter threads into every arm of a UNION`() throws {
     // Both arms key on the same `:pid`; the binding reaches each alike, so the
     // union is the parent's children drawn from two queries over the relation.
     let rows = try family().run(parse("""
@@ -2861,28 +2707,24 @@ struct EngineUnionTests {
 // MARK: - DISTINCT tests
 
 struct EngineDistinctTests {
-  @Test("DISTINCT removes duplicate rows, keeping the first occurrence")
-  func dedup() throws {
+  @Test func `DISTINCT removes duplicate rows, keeping the first occurrence`() throws {
     // People's Age repeats (30 for Alice and Carol, 25 for Bob and Eve);
     // DISTINCT collapses each duplicate to its first appearance, in row order.
     try people().expect("SELECT DISTINCT Age FROM People",
                         yields: [[30], [25], [40]])
   }
 
-  @Test("a plain SELECT keeps every duplicate row")
-  func all() throws {
+  @Test func `a plain SELECT keeps every duplicate row`() throws {
     try people().expect("SELECT Age FROM People",
                         yields: [[30], [25], [30], [40], [25]])
   }
 
-  @Test("SELECT ALL is the plain, non-deduplicating select")
-  func explicitAll() throws {
+  @Test func `SELECT ALL is the plain, non-deduplicating select`() throws {
     try people().expect("SELECT ALL Age FROM People",
                         yields: [[30], [25], [30], [40], [25]])
   }
 
-  @Test("DISTINCT dedups on the whole projected row, not one column")
-  func multipleColumns() throws {
+  @Test func `DISTINCT dedups on the whole projected row, not one column`() throws {
     // Grade's (Class, Score) pairs repeat — (A, 80) three times, (B, 90)
     // twice — while a single column would over-collapse. DISTINCT keeps one of
     // each distinct pair, first occurrence in row order.
@@ -2890,16 +2732,14 @@ struct EngineDistinctTests {
                         yields: [["B", 90], ["A", 80], ["A", 70]])
   }
 
-  @Test("DISTINCT dedups rows a projection maps together")
-  func projected() throws {
+  @Test func `DISTINCT dedups rows a projection maps together`() throws {
     // Bob (25) and Eve (25), Alice (30) and Carol (30) share an Age; projecting
     // Age alone collapses each pair even though their other columns differ.
     try people().expect("SELECT DISTINCT Age FROM People WHERE Age < 40",
                         yields: [[30], [25]])
   }
 
-  @Test("DISTINCT binds to its own arm within a UNION ALL")
-  func overUnionArm() throws {
+  @Test func `DISTINCT binds to its own arm within a UNION ALL`() throws {
     // DISTINCT is a per-SELECT quantifier: it dedups the LEFT arm alone (its
     // repeated Ages collapse to 30, 25, 40), then the UNION ALL appends the
     // right arm's rows without deduplicating across the arms.
@@ -2909,16 +2749,14 @@ struct EngineDistinctTests {
         """, yields: [[30], [25], [40], [30]])
   }
 
-  @Test("DISTINCT combines with ORDER BY, ordering the deduplicated rows")
-  func ordered() throws {
+  @Test func `DISTINCT combines with ORDER BY, ordering the deduplicated rows`() throws {
     // The distinct Ages, then ascending: dedup keeps 30, 25, 40; ORDER BY sorts
     // them 25, 30, 40.
     try people().expect("SELECT DISTINCT Age FROM People ORDER BY Age",
                         yields: [[25], [30], [40]])
   }
 
-  @Test("DISTINCT dedups before OFFSET/FETCH pages the result")
-  func paged() throws {
+  @Test func `DISTINCT dedups before OFFSET/FETCH pages the result`() throws {
     // Three distinct Ages ordered 25, 30, 40; FETCH FIRST 2 pages the
     // deduplicated, ordered rows — proving the cap sits above the dedup.
     try people().expect("""
@@ -2926,8 +2764,7 @@ struct EngineDistinctTests {
         """, yields: [[25], [30]])
   }
 
-  @Test("DISTINCT over an aggregate dedups the grouped rows")
-  func aggregate() throws {
+  @Test func `DISTINCT over an aggregate dedups the grouped rows`() throws {
     // Grouping People by Age yields one row per distinct Age (25, 30, 40), each
     // with its COUNT; projecting only the COUNT leaves 2, 2, 1 — DISTINCT then
     // collapses the two 2s to one.
@@ -2936,24 +2773,21 @@ struct EngineDistinctTests {
         """, yields: [[2], [1]])
   }
 
-  @Test("a view defined with DISTINCT deduplicates when queried")
-  func view() throws {
+  @Test func `a view defined with DISTINCT deduplicates when queried`() throws {
     let ages = try View(query: select("SELECT DISTINCT Age FROM People"),
                         columns: ["Age"])
     let catalog = Memory(try people().catalog, views: ["Ages": ages])
     try catalog.expect("SELECT Age FROM Ages", yields: [[30], [25], [40]])
   }
 
-  @Test("DISTINCT ordering on a non-projected column faults")
-  func hiddenOrderKey() throws {
+  @Test func `DISTINCT ordering on a non-projected column faults`() throws {
     // Name is not in the DISTINCT output, so after dedup each Age stands for
     // several Names — the order is ill-defined; the standard rejects it.
     try people().expect("SELECT DISTINCT Age FROM People ORDER BY Name",
                         fails: .distinct("Name"))
   }
 
-  @Test("DISTINCT ordering on a projected column pages correctly")
-  func projectedOrderKey() throws {
+  @Test func `DISTINCT ordering on a projected column pages correctly`() throws {
     // Age is a select-list column, so ordering (and paging) on it is well
     // defined: the deduplicated Ages sort 25, 30, 40, and OFFSET 1 drops the
     // first.
@@ -2963,8 +2797,7 @@ struct EngineDistinctTests {
         """, yields: [[30], [40]])
   }
 
-  @Test("DISTINCT over a join rejects a hidden ORDER BY key")
-  func hiddenJoinOrderKey() throws {
+  @Test func `DISTINCT over a join rejects a hidden ORDER BY key`() throws {
     // Child.Name is not projected, so ordering the deduplicated Parent.Name
     // rows on it is ill-defined across the two joined relations.
     try family().expect("""
@@ -2973,13 +2806,11 @@ struct EngineDistinctTests {
         """, fails: .distinct("Name"))
   }
 
-  @Test("SS005 is the DISTINCT ORDER BY SQLSTATE")
-  func sqlstate() {
+  @Test func `SS005 is the DISTINCT ORDER BY SQLSTATE`() {
     #expect(SQLError.distinct("Name").sqlstate == "SS005")
   }
 
-  @Test("grouped DISTINCT rejects ordering on a non-output GROUP BY key")
-  func hiddenGroupedOrderKey() throws {
+  @Test func `grouped DISTINCT rejects ordering on a non-output GROUP BY key`() throws {
     // The output is only COUNT(*); Age is the grouping key but not projected,
     // so ordering (and paging) on it after dedup is ill-defined — the same rule
     // the non-aggregate path enforces, in grouped-slot space.
@@ -2988,8 +2819,7 @@ struct EngineDistinctTests {
         """, fails: .distinct("Age"))
   }
 
-  @Test("grouped DISTINCT orders on a projected aggregate alias")
-  func projectedGroupedOrderKey() throws {
+  @Test func `grouped DISTINCT orders on a projected aggregate alias`() throws {
     // The counts per Age are 2, 2, 1; DISTINCT collapses the two 2s, leaving
     // {1, 2}. Ordering on the projected alias `c` is well defined — ascending
     // yields 1, 2.
@@ -3002,27 +2832,23 @@ struct EngineDistinctTests {
 // MARK: - Arithmetic tests
 
 struct EngineArithmeticTests {
-  @Test("literal arithmetic evaluates over a row")
-  func literal() throws {
+  @Test func `literal arithmetic evaluates over a row`() throws {
     // One row of `People` drives the projection; the value is the same for each,
     // and `Id = 1` selects exactly one.
     try people().expect("SELECT 2 + 3 FROM People WHERE Id = 1", yields: [[5]])
   }
 
-  @Test("multiplication binds tighter than addition")
-  func precedence() throws {
+  @Test func `multiplication binds tighter than addition`() throws {
     try people().expect("SELECT 2 + 3 * 4 FROM People WHERE Id = 1",
                         yields: [[14]])
   }
 
-  @Test("parentheses override precedence")
-  func grouping() throws {
+  @Test func `parentheses override precedence`() throws {
     try people().expect("SELECT (2 + 3) * 4 FROM People WHERE Id = 1",
                         yields: [[20]])
   }
 
-  @Test("subtraction and division are left-associative")
-  func associativity() throws {
+  @Test func `subtraction and division are left-associative`() throws {
     // (20 - 5) - 3 = 12, not 20 - (5 - 3) = 18; (100 / 5) / 2 = 10.
     let difference = try run("SELECT 20 - 5 - 3 FROM People WHERE Id = 1")
     #expect(difference == [[.integer(12)]])
@@ -3030,42 +2856,36 @@ struct EngineArithmeticTests {
     #expect(quotient == [[.integer(10)]])
   }
 
-  @Test("integer division truncates")
-  func integerDivision() throws {
+  @Test func `integer division truncates`() throws {
     try people().expect("SELECT 7 / 2 FROM People WHERE Id = 1", yields: [[3]])
   }
 
-  @Test("arithmetic over a column computes per row")
-  func column() throws {
+  @Test func `arithmetic over a column computes per row`() throws {
     let rows = try run("SELECT Age + 1 FROM People WHERE Id = 2")
     // Bob's Age is 25; 25 + 1 = 26.
     #expect(rows == [[.integer(26)]])
   }
 
-  @Test("arithmetic mixes columns and a function call")
-  func mixed() throws {
+  @Test func `arithmetic mixes columns and a function call`() throws {
     let rows = try functionRun("SELECT add(Id, 1) * 10 FROM People WHERE Id = 3")
     // Carol: (3 + 1) * 10 = 40.
     #expect(rows == [[.integer(40)]])
   }
 
-  @Test("a NULL operand propagates to a NULL result")
-  func nullPropagation() throws {
+  @Test func `a NULL operand propagates to a NULL result`() throws {
     // `Note` is NULL for row 2; `Id + Note` mixes a present integer with a NULL,
     // so the whole expression is NULL rather than a fault.
     try nullable().expect("SELECT Id + Note FROM Maybe WHERE Id = 2",
                           yields: [[nil]])
   }
 
-  @Test("division by zero faults")
-  func divideByZero() throws {
+  @Test func `division by zero faults`() throws {
     #expect(throws: SQLError.divide) {
       try run("SELECT Id / 0 FROM People WHERE Id = 1")
     }
   }
 
-  @Test("arithmetic overflow faults instead of trapping")
-  func overflow() throws {
+  @Test func `arithmetic overflow faults instead of trapping`() throws {
     // `Int.max + 1` and a multiply past the boundary report overflow as a
     // `SQLError` rather than trapping (and aborting) the process.
     #expect(throws: SQLError.magnitude("integer overflow")) {
@@ -3076,8 +2896,7 @@ struct EngineArithmeticTests {
     }
   }
 
-  @Test("a parenthesised expression opens a predicate")
-  func parenthesisedExpression() throws {
+  @Test func `a parenthesised expression opens a predicate`() throws {
     // `(Age + 1)` is the grouped left operand of the comparison, not a predicate
     // group; it matches Dave (40 + 1 = 41). A leading `(` no longer forces a
     // predicate-group parse.
@@ -3088,15 +2907,13 @@ struct EngineArithmeticTests {
     #expect(none.isEmpty)
   }
 
-  @Test("a text operand faults as a type error")
-  func textOperand() throws {
+  @Test func `a text operand faults as a type error`() throws {
     #expect(throws: SQLError.operand("operands must be numeric")) {
       try run("SELECT Name + 1 FROM People WHERE Id = 1")
     }
   }
 
-  @Test("arithmetic in a predicate filters rows")
-  func predicate() throws {
+  @Test func `arithmetic in a predicate filters rows`() throws {
     // `Age + 1 = 26` holds for everyone aged 25 (Bob and Eve); the arithmetic
     // is evaluated per row on the WHERE side too.
     try people().expect("SELECT Name FROM People WHERE Age + 1 = 26",
@@ -3107,68 +2924,57 @@ struct EngineArithmeticTests {
 // MARK: - Scalar (FROM-less) SELECT tests
 
 struct EngineScalarSelectTests {
-  @Test("a FROM-less literal yields exactly one row")
-  func literal() throws {
+  @Test func `a FROM-less literal yields exactly one row`() throws {
     // No relation, so the projection runs against a single empty row; the
     // catalog is never consulted for a table.
     try people().expect("SELECT 42", yields: [[42]])
   }
 
-  @Test("a FROM-less arithmetic computes a scalar")
-  func arithmetic() throws {
+  @Test func `a FROM-less arithmetic computes a scalar`() throws {
     try people().expect("SELECT 1 + 1", yields: [[2]])
   }
 
-  @Test("FROM-less arithmetic honours precedence")
-  func precedence() throws {
+  @Test func `FROM-less arithmetic honours precedence`() throws {
     try people().expect("SELECT 2 + 3 * 4", yields: [[14]])
   }
 
-  @Test("a FROM-less multi-column projection yields one row of each value")
-  func multiColumn() throws {
+  @Test func `a FROM-less multi-column projection yields one row of each value`() throws {
     try people().expect("SELECT 1, 2, 3", yields: [[1, 2, 3]])
   }
 
-  @Test("a FROM-less projection mixes text and integer expressions")
-  func mixed() throws {
+  @Test func `a FROM-less projection mixes text and integer expressions`() throws {
     try people().expect("SELECT 'x', 10 / 2", yields: [["x", 5]])
   }
 
-  @Test("a FROM-less scalar call evaluates against the single row")
-  func call() throws {
+  @Test func `a FROM-less scalar call evaluates against the single row`() throws {
     let rows = try functionRun("SELECT add(40, 2)")
     #expect(rows == [[.integer(42)]])
   }
 
-  @Test("a boolean literal lowers to its truth value")
-  func boolean() throws {
+  @Test func `a boolean literal lowers to its truth value`() throws {
     try people().expect("SELECT TRUE, FALSE", yields: [[true, false]])
   }
 
-  @Test("a hex blob literal lowers to its bytes")
-  func blob() throws {
+  @Test func `a hex blob literal lowers to its bytes`() throws {
     // The `x'53514c'` literal lexes, parses, and lowers to the three-byte
     // blob `SQL`, projected as a `Value.blob`.
     try people().expect("SELECT x'53514c'",
                         yields: [[[0x53, 0x51, 0x4c] as Array<UInt8>]])
   }
 
-  @Test("a boolean operand faults as a non-numeric type error")
-  func booleanArithmetic() throws {
+  @Test func `a boolean operand faults as a non-numeric type error`() throws {
     // Neither boolean nor blob is numeric, so arithmetic over either faults
     // exactly as text does — the type-checker rejects any non-numeric operand.
     try people().expect("SELECT TRUE + 1",
                         fails: .operand("operands must be numeric"))
   }
 
-  @Test("a blob operand faults as a non-numeric type error")
-  func blobArithmetic() throws {
+  @Test func `a blob operand faults as a non-numeric type error`() throws {
     try people().expect("SELECT x'00' + 1",
                         fails: .operand("operands must be numeric"))
   }
 
-  @Test("a NULL-yielding FROM-less expression projects NULL")
-  func null() throws {
+  @Test func `a NULL-yielding FROM-less expression projects NULL`() throws {
     // The bare literal NULL is not in the grammar, but a NULL arises from a
     // function returning it; `nothing` yields NULL for the single row.
     let routines: Routines =
@@ -3177,20 +2983,17 @@ struct EngineScalarSelectTests {
     #expect(rows == [[.null]])
   }
 
-  @Test("a FROM-less SELECT * is rejected — no relation to expand")
-  func star() throws {
+  @Test func `a FROM-less SELECT * is rejected — no relation to expand`() throws {
     #expect(throws: SQLError.unsupported("SELECT * requires a FROM clause")) {
       try run("SELECT *")
     }
   }
 
-  @Test("a FROM-less bare column is rejected — no column to bind")
-  func column() throws {
+  @Test func `a FROM-less bare column is rejected — no column to bind`() throws {
     try people().expect("SELECT Name", fails: .column("Name"))
   }
 
-  @Test("a directly-built FROM-less select with clauses is rejected")
-  func clauses() throws {
+  @Test func `a directly-built FROM-less select with clauses is rejected`() throws {
     // The parser never builds a FROM-less select carrying a WHERE, GROUP BY,
     // HAVING, ORDER BY, OFFSET/FETCH, or JOIN, but a direct `Select(from: nil,
     // …)` can. The engine rejects it rather than silently drop the clause — a
@@ -3248,8 +3051,7 @@ struct EngineScalarSelectTests {
     return select
   }
 
-  @Test("a FROM-less arm of a UNION combines with a FROM arm")
-  func union() throws {
+  @Test func `a FROM-less arm of a UNION combines with a FROM arm`() throws {
     // Both arms project one integer column; the FROM-less arm contributes its
     // single computed row, deduplicating against the People ages.
     let rows = try people().run(parse("""
@@ -3258,8 +3060,7 @@ struct EngineScalarSelectTests {
     #expect(rows == [[.integer(100)], [.integer(30)]])
   }
 
-  @Test("an existing SELECT … FROM … query is unaffected")
-  func regression() throws {
+  @Test func `an existing SELECT … FROM … query is unaffected`() throws {
     // The FROM-optional grammar leaves a normal query parsing and running
     // exactly as before.
     try people().expect("SELECT Name FROM People WHERE Id = 1",
@@ -3277,8 +3078,7 @@ private func statement<C: Catalog & ~Escapable>(_ text: String,
 }
 
 struct EngineWithTests {
-  @Test("a non-recursive CTE materialises as an inline view")
-  func inline() throws {
+  @Test func `a non-recursive CTE materialises as an inline view`() throws {
     // The CTE `adults` is materialised once and the trailing query reads it
     // like a table — the inline-view shape of a non-recursive WITH.
     let rows = try statement("""
@@ -3288,8 +3088,7 @@ struct EngineWithTests {
     #expect(rows == [[.text("Bee")], [.text("Cid")]])
   }
 
-  @Test("a JOIN matches an integer key to an equal double key")
-  func numericJoin() throws {
+  @Test func `a JOIN matches an integer key to an equal double key`() throws {
     // The optimized join paths (hash bucket, seek/final check, CTE nested loop)
     // must use the same mixed-numeric equality a predicate does: `1` and `1.0`
     // are equal, so the row joins rather than being dropped by a raw-`Value`
@@ -3301,8 +3100,7 @@ struct EngineWithTests {
     #expect(rows == [[.integer(1), .double(1.0)]])
   }
 
-  @Test("a JOIN matches a large integer to its rounded double past 2^53")
-  func numericJoinBeyondExactRange() throws {
+  @Test func `a JOIN matches a large integer to its rounded double past 2^53`() throws {
     // Above 2^53 an integer is not exactly representable as `Double`; the
     // predicate treats `9007199254740993` and `9007199254740993.0` as equal by
     // promoting the integer to `Double` (both round to 2^53), so the optimized
@@ -3315,8 +3113,7 @@ struct EngineWithTests {
     #expect(rows == [[.integer(9007199254740993)]])
   }
 
-  @Test("a JOIN keeps distinct large integer keys unequal (exact integers)")
-  func integerJoinStaysExact() throws {
+  @Test func `a JOIN keeps distinct large integer keys unequal (exact integers)`() throws {
     // Two integers that round to the SAME Double past 2^53 are still unequal as
     // integers, so an integer/integer join must NOT pair them — the hash bucket
     // may collide, but the residual `matches` check keeps integer equality
@@ -3329,8 +3126,7 @@ struct EngineWithTests {
     #expect(rows.isEmpty)
   }
 
-  @Test("UNION deduplicates numerically-equal rows across kinds")
-  func unionNumericDedup() throws {
+  @Test func `UNION deduplicates numerically-equal rows across kinds`() throws {
     // `1` and `1.0` are the same numeric value, so UNION keeps one — the first
     // arm's — not both; the dedup uses the numeric equality, not raw `Value`.
     #expect(try statement("SELECT 1 UNION SELECT 1.0", family())
@@ -3340,8 +3136,7 @@ struct EngineWithTests {
             == [[.integer(1)], [.double(1.0)]])
   }
 
-  @Test("UNION dedup keeps distinct integers a rounded double sits between")
-  func unionExactIntegers() throws {
+  @Test func `UNION dedup keeps distinct integers a rounded double sits between`() throws {
     // Dedup is EXACT: `2^53.0` equals the integer `2^53` (folds to it), but NOT
     // the integer `2^53 + 1`. So an earlier approximate row must not absorb
     // both distinct integers — the `2^53 + 1` row survives regardless of order.
@@ -3354,16 +3149,14 @@ struct EngineWithTests {
                      [.integer(9007199254740993)]])
   }
 
-  @Test("ORDER BY orders mixed integer/double keys by magnitude")
-  func orderByMixedNumeric() throws {
+  @Test func `ORDER BY orders mixed integer/double keys by magnitude`() throws {
     let rows = try statement("""
         WITH a (x) AS (SELECT 3 UNION ALL SELECT 1.5) SELECT x FROM a ORDER BY x
         """, family())
     #expect(rows == [[.double(1.5)], [.integer(3)]])
   }
 
-  @Test("ORDER BY over mixed keys past 2^53 stays a total order")
-  func orderByMixedNumericBeyondExactRange() throws {
+  @Test func `ORDER BY over mixed keys past 2^53 stays a total order`() throws {
     // A double ties two distinct integers under promotion; the comparator must
     // stay a strict weak ordering (transitive), keeping the larger integer last
     // rather than misordering it ahead of the smaller via the stable tie-break.
@@ -3377,8 +3170,7 @@ struct EngineWithTests {
     #expect(rows.last == [.integer(9007199254740993)])
   }
 
-  @Test("a CTE infers its columns and filters on them")
-  func inferred() throws {
+  @Test func `a CTE infers its columns and filters on them`() throws {
     let rows = try statement("""
         WITH grown AS (SELECT Id, Name FROM Parent)
           SELECT Name FROM grown WHERE Id = 3
@@ -3386,8 +3178,7 @@ struct EngineWithTests {
     #expect(rows == [[.text("Cid")]])
   }
 
-  @Test("a later CTE reads an earlier one (chained CTEs)")
-  func chained() throws {
+  @Test func `a later CTE reads an earlier one (chained CTEs)`() throws {
     // `b` resolves `a` — the resolver consults the CTEs materialised so far, so
     // a later member sees an earlier one.
     let rows = try statement("""
@@ -3398,8 +3189,7 @@ struct EngineWithTests {
     #expect(rows == [[.text("Cid")]])
   }
 
-  @Test("a CTE shadows a base relation of the same name")
-  func shadow() throws {
+  @Test func `a CTE shadows a base relation of the same name`() throws {
     // `Parent` is a base relation; the CTE of the same name shadows it, so the
     // trailing query reads the CTE's rows, not the base table's.
     let rows = try statement("""
@@ -3409,8 +3199,7 @@ struct EngineWithTests {
     #expect(rows == [[.text("Ada")]])
   }
 
-  @Test("the trailing query joins a CTE against a base relation")
-  func joinBase() throws {
+  @Test func `the trailing query joins a CTE against a base relation`() throws {
     // The CTE `kids` joins to the base `Parent` on the foreign key — proving a
     // materialised relation and a base one combine in one query.
     let rows = try statement("""
@@ -3425,8 +3214,7 @@ struct EngineWithTests {
     ])
   }
 
-  @Test("a CTE's Id virtual column resolves")
-  func id() throws {
+  @Test func `a CTE's Id virtual column resolves`() throws {
     let rows = try statement("""
         WITH a (Tag) AS (SELECT Name FROM Parent)
           SELECT Id, Tag FROM a WHERE Id = 2
@@ -3434,8 +3222,7 @@ struct EngineWithTests {
     #expect(rows == [[.integer(2), .text("Bee")]])
   }
 
-  @Test("a CTE column list of the wrong arity is rejected at parse")
-  func arity() throws {
+  @Test func `a CTE column list of the wrong arity is rejected at parse`() throws {
     #expect(throws: SQLError.columns(expected: 2, got: 1)) {
       try statement("""
           WITH a (x) AS (SELECT Id, Name FROM Parent) SELECT x FROM a
@@ -3443,8 +3230,7 @@ struct EngineWithTests {
     }
   }
 
-  @Test("an unknown column of a CTE is reported")
-  func unknown() throws {
+  @Test func `an unknown column of a CTE is reported`() throws {
     #expect(throws: SQLError.column("Missing")) {
       try statement("""
           WITH a (Id) AS (SELECT Id FROM Parent) SELECT Missing FROM a
@@ -3452,8 +3238,7 @@ struct EngineWithTests {
     }
   }
 
-  @Test("a CTE whose body is a UNION materialises both arms")
-  func union() throws {
+  @Test func `a CTE whose body is a UNION materialises both arms`() throws {
     let rows = try statement("""
         WITH both (Tag) AS (SELECT Tag FROM Left UNION SELECT Tag FROM Right)
           SELECT Tag FROM both
@@ -3461,8 +3246,7 @@ struct EngineWithTests {
     #expect(rows == [[.text("a")], [.text("shared")], [.text("b")]])
   }
 
-  @Test("a CTE column list wider than its SELECT * body is rejected, not trapped")
-  func widthMismatch() throws {
+  @Test func `a CTE column list wider than its SELECT * body is rejected, not trapped`() throws {
     // `Parent` is a two-column relation, but the column list declares three
     // names; the `SELECT *` body's width is known only after it compiles, so
     // the declared arity is checked against the body's compiled width, faulting
@@ -3475,8 +3259,7 @@ struct EngineWithTests {
     }
   }
 
-  @Test("a zero-row SELECT * CTE body of the wrong arity is rejected")
-  func zeroRowWidthMismatch() throws {
+  @Test func `a zero-row SELECT * CTE body of the wrong arity is rejected`() throws {
     // `Parent` is a two-column relation, but the column list declares three
     // names. The body `WHERE Id < 0` yields no rows, so a per-row check would
     // pass it through vacuously and register `a` with a three-column schema
@@ -3494,8 +3277,7 @@ struct EngineWithTests {
     }
   }
 
-  @Test("a WITH list rejects a case-insensitively duplicate query name")
-  func duplicateName() throws {
+  @Test func `a WITH list rejects a case-insensitively duplicate query name`() throws {
     // Two CTEs share a name (`a` and `A`), so the second would silently
     // overwrite the first in the materialised scope — a typo in a multi-CTE
     // query changing the result. The duplicate is rejected before materialising.
@@ -3508,8 +3290,7 @@ struct EngineWithTests {
     }
   }
 
-  @Test("a WHERE pushed onto a joined-in CTE filters its rows before the join")
-  func joinPushedFilter() throws {
+  @Test func `a WHERE pushed onto a joined-in CTE filters its rows before the join`() throws {
     // `kids` is joined to `Parent` on the foreign key, and a single-relation
     // `WHERE kids.Kid = 'Amy'` is pushed onto the CTE inner; only the matching
     // CTE row may join, so a CTE row with any other `Kid` is excluded rather than
@@ -3523,8 +3304,7 @@ struct EngineWithTests {
     #expect(rows == [[.text("Ada"), .text("Amy")]])
   }
 
-  @Test("a statement CTE does not leak into a registered view's body")
-  func viewScoping() throws {
+  @Test func `a statement CTE does not leak into a registered view's body`() throws {
     // `Adults` is a view over the base `Parent`; a statement-local
     // `WITH Parent (Id) AS …` must NOT reach into the view's stored body, so
     // `SELECT Id FROM Adults` still reads the base `Parent`'s ids — a view means
@@ -3541,8 +3321,7 @@ struct EngineWithTests {
     #expect(rows == [[.integer(1)], [.integer(2)], [.integer(3)]])
   }
 
-  @Test("a top-level FROM a CTE still resolves to the CTE, not the base relation")
-  func topLevelCTEShadowsBase() throws {
+  @Test func `a top-level FROM a CTE still resolves to the CTE, not the base relation`() throws {
     // The complement of `viewScoping`: at the STATEMENT level a CTE that names a
     // base relation still shadows it, so a trailing `FROM Parent` reads the CTE
     // — the scoping fix narrows only a view's body, never the statement query.
@@ -3556,8 +3335,7 @@ struct EngineWithTests {
     #expect(rows == [[.integer(99)]])
   }
 
-  @Test("a WITH RECURSIVE arm that never names the CTE runs once, not to a cap")
-  func nonSelfReferentialUnionAll() throws {
+  @Test func `a WITH RECURSIVE arm that never names the CTE runs once, not to a cap`() throws {
     // Every member of a `WITH RECURSIVE` list is syntactically marked recursive,
     // but neither arm of this UNION ALL reads `a`, so it is not recursive in
     // truth: it runs once, yielding exactly its two rows, rather than re-running
@@ -3571,8 +3349,7 @@ struct EngineWithTests {
     #expect(rows == [[.integer(1)], [.integer(2)]])
   }
 
-  @Test("a WITH RECURSIVE whose anchor reads a same-named base is not recursive")
-  func anchorReadsSameNamedBase() throws {
+  @Test func `a WITH RECURSIVE whose anchor reads a same-named base is not recursive`() throws {
     // The CTE `Parent` shares a base relation's name; only the ANCHOR reads that
     // base (the CTE is not in scope there), while the recursive arm reads
     // `Extra` and never names the CTE. Self-reference is detected in the arm
@@ -3633,8 +3410,7 @@ private func counting() -> Routines {
 }
 
 struct EngineRecursiveTests {
-  @Test("a recursive counter enumerates 1..5")
-  func counter() throws {
+  @Test func `a recursive counter enumerates 1..5`() throws {
     // The canonical recursive CTE: seed with 1, then inc(n) while n < 5. The
     // anchor reads the one-row Seed; the recursive arm names the CTE `c`.
     let query = try Statement(parsing: """
@@ -3650,8 +3426,7 @@ struct EngineRecursiveTests {
                      [.integer(4)], [.integer(5)]])
   }
 
-  @Test("a recursive counter runs through Catalog.run(_:statement:)")
-  func statement() throws {
+  @Test func `a recursive counter runs through Catalog.run(_:statement:)`() throws {
     let rows = try seed().run(Statement(parsing: """
         WITH RECURSIVE c (n) AS (
           SELECT 1 AS n FROM Seed
@@ -3663,8 +3438,7 @@ struct EngineRecursiveTests {
     #expect(rows == [[.integer(1)], [.integer(2)], [.integer(3)]])
   }
 
-  @Test("a non-UNION recursive CTE validates its compiled width")
-  func nonUnionWidthMismatch() throws {
+  @Test func `a non-UNION recursive CTE validates its compiled width`() throws {
     // A `WITH RECURSIVE` member whose body is not a UNION runs once, but must
     // still match its declared arity. Here the body resolves `Parent` against
     // the base relation of the same name (two columns) under a three-column
@@ -3679,8 +3453,7 @@ struct EngineRecursiveTests {
     }
   }
 
-  @Test("a recursive CTE with more than one recursive arm is rejected")
-  func multipleRecursiveArms() throws {
+  @Test func `a recursive CTE with more than one recursive arm is rejected`() throws {
     // The body has TWO self-referential arms; the engine models one anchor plus
     // one recursive arm, so the earlier recursive arm would land in the anchor
     // (compiled with the CTE not in scope). Reject it with a clear `unsupported`
@@ -3699,8 +3472,7 @@ struct EngineRecursiveTests {
     }
   }
 
-  @Test("a recursive reference before the final UNION arm is rejected")
-  func recursiveArmBeforeFinal() throws {
+  @Test func `a recursive reference before the final UNION arm is rejected`() throws {
     // The self-reference (`FROM Parent`) is a MIDDLE arm and the final arm is
     // non-recursive, so the recursive-arm check (which inspects the final arm)
     // sees no recursion and the CTE would take the run-once path — compiling the
@@ -3721,8 +3493,7 @@ struct EngineRecursiveTests {
     }
   }
 
-  @Test("a recursive CTE whose anchor reads a same-named base still evaluates")
-  func anchorShadowsBase() throws {
+  @Test func `a recursive CTE whose anchor reads a same-named base still evaluates`() throws {
     // `Parent` intentionally shadows a base relation of the same name: the anchor
     // `SELECT Id FROM Parent` reads the BASE (the CTE is not in scope for the
     // base case), seeding the recursion, while the right arm's `FROM Parent` is
@@ -3744,8 +3515,7 @@ struct EngineRecursiveTests {
                      [.integer(4)], [.integer(5)]])
   }
 
-  @Test("a recursive CTE whose anchor reads a same-named view still evaluates")
-  func anchorShadowsView() throws {
+  @Test func `a recursive CTE whose anchor reads a same-named view still evaluates`() throws {
     // Like `anchorShadowsBase`, but the same-named seed is a registered VIEW,
     // not a base table: the anchor `SELECT id FROM v` resolves to the view (the
     // CTE is not in scope for the base case), and the right arm is the true
@@ -3766,8 +3536,7 @@ struct EngineRecursiveTests {
                      [.integer(4)], [.integer(5)]])
   }
 
-  @Test("UNION dedups rows a UNION ALL recursion would repeat")
-  func dedup() throws {
+  @Test func `UNION dedups rows a UNION ALL recursion would repeat`() throws {
     // The recursive arm re-derives n from 1 without a guard's monotonic bound,
     // but a bare UNION dedups whole rows, so the fixpoint is the distinct set
     // 1..4 reached and nothing new thereafter — it terminates where UNION ALL
@@ -3785,8 +3554,7 @@ struct EngineRecursiveTests {
                      [.integer(4)]])
   }
 
-  @Test("a bare UNION dedups duplicate anchor seed rows")
-  func anchorDedup() throws {
+  @Test func `a bare UNION dedups duplicate anchor seed rows`() throws {
     // The anchor is itself a UNION ALL that yields `1` twice, so the seed
     // carries a duplicate; the recursive arm (`n < 1`) adds nothing new. A bare
     // outer UNION dedups the seed exactly as it dedups an iteration step, so the
@@ -3806,8 +3574,7 @@ struct EngineRecursiveTests {
     #expect(rows == [[.integer(1)]])
   }
 
-  @Test("a transitive-closure self-join reaches every descendant")
-  func closure() throws {
+  @Test func `a transitive-closure self-join reaches every descendant`() throws {
     // The closure of the edge chain 1->2->3->4: seed with the direct edges,
     // then extend each known reach (Src, Dst) by an edge out of Dst. The
     // recursive arm joins the CTE to the base Edge relation.
@@ -3832,8 +3599,7 @@ struct EngineRecursiveTests {
     ])
   }
 
-  @Test("a recursive arm of the wrong width faults, not traps, before rebinding")
-  func widthMismatch() throws {
+  @Test func `a recursive arm of the wrong width faults, not traps, before rebinding`() throws {
     // `Edge` is a two-column relation, but the column list declares three
     // names; the anchor's `SELECT *` compiles to a two-wide plan the fixpoint
     // would bind under the three-column schema, so the recursive arm's read of
@@ -3854,8 +3620,7 @@ struct EngineRecursiveTests {
     }
   }
 
-  @Test("a zero-row SELECT * anchor of the wrong width faults, not passes")
-  func zeroRowWidthMismatch() throws {
+  @Test func `a zero-row SELECT * anchor of the wrong width faults, not passes`() throws {
     // `Edge` is a two-column relation, but the column list declares three
     // names. The anchor `WHERE Src < 0` yields no rows, so a per-row check
     // would seed nothing to validate and bind the CTE under a three-column
@@ -3876,8 +3641,7 @@ struct EngineRecursiveTests {
     }
   }
 
-  @Test("a runaway recursion is capped with SQLError.recursion")
-  func runaway() throws {
+  @Test func `a runaway recursion is capped with SQLError.recursion`() throws {
     // inc(n) with no terminating WHERE produces an unbounded sequence of new
     // rows; UNION ALL keeps every one, so the fixpoint is never reached and the
     // cap fires.

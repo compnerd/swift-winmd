@@ -49,26 +49,22 @@ private func parse(_ text: String) throws -> Query {
 // MARK: - Tests
 
 struct LimitTests {
-  @Test("FETCH FIRST n ROWS ONLY caps the row count")
-  func caps() throws {
+  @Test func `FETCH FIRST n ROWS ONLY caps the row count`() throws {
     try people().expect("SELECT Id FROM People FETCH FIRST 3 ROWS ONLY",
                         yields: [[1], [2], [3]])
   }
 
-  @Test("FETCH FIRST 0 ROWS ONLY yields no rows")
-  func zero() throws {
+  @Test func `FETCH FIRST 0 ROWS ONLY yields no rows`() throws {
     try people().empty("SELECT Id FROM People FETCH FIRST 0 ROWS ONLY")
   }
 
-  @Test("FETCH with an omitted count takes one row")
-  func defaultsToOne() throws {
+  @Test func `FETCH with an omitted count takes one row`() throws {
     // The ISO `FETCH FIRST ROW ONLY` — no count — takes a single row.
     try people().expect("SELECT Id FROM People FETCH FIRST ROW ONLY",
                         yields: [[1]])
   }
 
-  @Test("ROW and ROWS, FIRST and NEXT, are interchangeable")
-  func synonyms() throws {
+  @Test func `ROW and ROWS, FIRST and NEXT, are interchangeable`() throws {
     // `ROW`/`ROWS` and `FIRST`/`NEXT` are ISO synonyms — the singular and the
     // `NEXT` spelling parse to the same clause as the plural `FIRST` form.
     let catalog = try people()
@@ -78,15 +74,13 @@ struct LimitTests {
                        yields: [[1]])
   }
 
-  @Test("OFFSET n ROWS then FETCH skips then caps")
-  func offset() throws {
+  @Test func `OFFSET n ROWS then FETCH skips then caps`() throws {
     try people().expect(
         "SELECT Id FROM People OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY",
         yields: [[2], [3]])
   }
 
-  @Test("OFFSET 0 ROWS is the same as no OFFSET")
-  func zeroOffset() throws {
+  @Test func `OFFSET 0 ROWS is the same as no OFFSET`() throws {
     let catalog = try people()
     try catalog.expect(
         "SELECT Id FROM People OFFSET 0 ROWS FETCH NEXT 2 ROWS ONLY",
@@ -96,15 +90,13 @@ struct LimitTests {
         yields: [[1], [2]])
   }
 
-  @Test("OFFSET without a FETCH skips with no cap")
-  func offsetOnly() throws {
+  @Test func `OFFSET without a FETCH skips with no cap`() throws {
     // An `OFFSET` written without a `FETCH` returns every row after the skip.
     try people().expect("SELECT Id FROM People OFFSET 3 ROWS",
                         yields: [[4], [5]])
   }
 
-  @Test("FETCH after ORDER BY takes the top-N in sorted order")
-  func afterOrder() throws {
+  @Test func `FETCH after ORDER BY takes the top-N in sorted order`() throws {
     // Ordered by Age ascending, ties by source order (a stable sort): Bob(25),
     // Eve(25), Alice(30), Carol(30), Dave(40). The FETCH caps the ORDERED
     // result, so it takes the two lowest ages rather than the first two rows.
@@ -113,8 +105,7 @@ struct LimitTests {
         yields: [["Bob"], ["Eve"]])
   }
 
-  @Test("OFFSET then FETCH after ORDER BY skips into the sorted result")
-  func offsetAfterOrder() throws {
+  @Test func `OFFSET then FETCH after ORDER BY skips into the sorted result`() throws {
     // Descending by Id: Eve, Dave, Carol, Bob, Alice — skip 1, take 2.
     try people().expect("""
                  SELECT Name FROM People
@@ -122,30 +113,26 @@ struct LimitTests {
                  """, yields: [["Dave"], ["Carol"]])
   }
 
-  @Test("OFFSET past the end yields no rows")
-  func offsetPastEnd() throws {
+  @Test func `OFFSET past the end yields no rows`() throws {
     let catalog = try people()
     try catalog.empty("SELECT Id FROM People OFFSET 5 ROWS")
     try catalog.empty("SELECT Id FROM People OFFSET 10 ROWS")
   }
 
-  @Test("a FETCH larger than the result yields every row")
-  func largerThanResult() throws {
+  @Test func `a FETCH larger than the result yields every row`() throws {
     let catalog = try people()
     try catalog.expect("SELECT Id FROM People FETCH FIRST 100 ROWS ONLY",
                        equals: "SELECT Id FROM People")
   }
 
-  @Test("FETCH caps rows admitted by a seekable WHERE")
-  func afterWhere() throws {
+  @Test func `FETCH caps rows admitted by a seekable WHERE`() throws {
     // `Id >= 2` seeks to rows 2…5; the FETCH then caps that run to two rows.
     try people().expect(
         "SELECT Id FROM People WHERE Id >= 2 FETCH FIRST 2 ROWS ONLY",
         yields: [[2], [3]])
   }
 
-  @Test("a reserved-word column is reachable via a delimited identifier")
-  func offsetColumn() throws {
+  @Test func `a reserved-word column is reachable via a delimited identifier`() throws {
     // `OFFSET` is a reserved word, so a relation's `Offset` column is reached
     // by the standard delimited identifier `"Offset"`. It selects, orders, and
     // coexists with a genuine OFFSET/FETCH row-limiting clause.
@@ -158,8 +145,7 @@ struct LimitTests {
                 """, yields: [[200]])
   }
 
-  @Test("the row limit applies before a discarded row's projection")
-  func beforeProjection() throws {
+  @Test func `the row limit applies before a discarded row's projection`() throws {
     // The cap sits below the projection, so a select list that would throw —
     // `1 / 0` — never runs for a row outside the page: FETCH 0 and an OFFSET
     // past the end return empty rather than dividing.
@@ -172,8 +158,7 @@ struct LimitTests {
                    fails: .divide)
   }
 
-  @Test("a directly-built negative OFFSET or FETCH is rejected")
-  func rejectsNegative() throws {
+  @Test func `a directly-built negative OFFSET or FETCH is rejected`() throws {
     // The parser cannot spell a negative count, but a direct `Limit` can — the
     // executor's skip and take would trap on it, so the engine rejects it as a
     // query error instead.
@@ -196,8 +181,7 @@ struct LimitTests {
     }
   }
 
-  @Test("a near-maximal FETCH after an OFFSET does not overflow")
-  func saturates() throws {
+  @Test func `a near-maximal FETCH after an OFFSET does not overflow`() throws {
     // A `count` near `Int.max` plus a positive `offset` would overflow an
     // `offset + count` bound; capping by a prefix of the skipped slice returns
     // the remaining rows rather than trapping.

@@ -35,23 +35,20 @@ private func compare(_ cell: Value, _ op: Comparison,
 
 @Suite("BOOLEAN value type")
 private struct BooleanTests {
-  @Test("false orders before true")
-  func ordering() {
+  @Test func `false orders before true`() {
     #expect(compare(.boolean(false), .lt, .boolean(true)) == true)
     #expect(compare(.boolean(true), .lt, .boolean(false)) == false)
     #expect(compare(.boolean(false), .lt, .boolean(false)) == false)
     #expect(compare(.boolean(true), .gt, .boolean(false)) == true)
   }
 
-  @Test("like booleans compare equal")
-  func equality() {
+  @Test func `like booleans compare equal`() {
     #expect(compare(.boolean(true), .equal, .boolean(true)) == true)
     #expect(compare(.boolean(true), .equal, .boolean(false)) == false)
     #expect(compare(.boolean(false), .unequal, .boolean(true)) == true)
   }
 
-  @Test("the boundary relations follow the false < true order")
-  func boundaries() {
+  @Test func `the boundary relations follow the false < true order`() {
     #expect(compare(.boolean(false), .leq, .boolean(false)) == true)
     #expect(compare(.boolean(false), .leq, .boolean(true)) == true)
     #expect(compare(.boolean(true), .leq, .boolean(false)) == false)
@@ -64,8 +61,7 @@ private struct BooleanTests {
 
 @Suite("BLOB value type")
 private struct BlobTests {
-  @Test("like blobs compare by byte equality")
-  func equality() {
+  @Test func `like blobs compare by byte equality`() {
     #expect(compare(.blob([0x53, 0x51, 0x4c]), .equal,
                     .blob([0x53, 0x51, 0x4c])) == true)
     #expect(compare(.blob([0x53, 0x51, 0x4c]), .equal,
@@ -74,8 +70,7 @@ private struct BlobTests {
     #expect(compare(.blob([0x00]), .unequal, .blob([])) == true)
   }
 
-  @Test("blobs order lexicographically — memcmp over the bytes")
-  func ordering() {
+  @Test func `blobs order lexicographically — memcmp over the bytes`() {
     // A byte difference decides: `0x01` < `0x02`.
     #expect(compare(.blob([0x01]), .lt, .blob([0x02])) == true)
     #expect(compare(.blob([0x02]), .lt, .blob([0x01])) == false)
@@ -86,8 +81,7 @@ private struct BlobTests {
     #expect(compare(.blob([0x02]), .gt, .blob([0x01, 0xff])) == true)
   }
 
-  @Test("the boundary relations follow the lexicographic order")
-  func boundaries() {
+  @Test func `the boundary relations follow the lexicographic order`() {
     #expect(compare(.blob([0x01]), .leq, .blob([0x01])) == true)
     #expect(compare(.blob([0x01]), .leq, .blob([0x02])) == true)
     #expect(compare(.blob([0x02]), .leq, .blob([0x01])) == false)
@@ -100,8 +94,7 @@ private struct BlobTests {
 
 @Suite("cross-type comparison")
 private struct CrossTypeTests {
-  @Test("unlike types never match — no coercion")
-  func mismatch() {
+  @Test func `unlike types never match — no coercion`() {
     // Every non-null cross-type pair falls to the switch's `default: false`.
     #expect(compare(.boolean(true), .equal, .integer(1)) == false)
     #expect(compare(.integer(1), .equal, .boolean(true)) == false)
@@ -112,8 +105,7 @@ private struct CrossTypeTests {
     #expect(compare(.boolean(true), .lt, .text("z")) == false)
   }
 
-  @Test("a NULL operand is UNKNOWN, not false")
-  func null() {
+  @Test func `a NULL operand is UNKNOWN, not false`() {
     #expect(compare(.boolean(true), .equal, .null) == nil)
     #expect(compare(.blob([0x01]), .lt, .null) == nil)
   }

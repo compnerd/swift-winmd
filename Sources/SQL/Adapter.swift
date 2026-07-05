@@ -53,7 +53,7 @@ public enum ValueType: Hashable, Sendable {
   /// The engine's types map onto the ISO domains: exact numeric to `integer`,
   /// approximate numeric to `double precision`, character to `character
   /// varying`, truth-valued to `boolean`, and binary to `binary varying`.
-  internal var domain: String {
+  public var domain: String {
     switch self {
     case .integer: "integer"
     case .double: "double precision"

@@ -60,13 +60,25 @@ extension Catalog where Self: ~Escapable {
   /// type rather than the `.integer` default. It defaults to none, matching a
   /// run with no custom routines.
   ///
+  /// `validate` (default `true`) whole-query type-checks before deriving, so a
+  /// static shape check faults an ill-typed query a run would only reach with
+  /// rows — `SELECT Name + 1 …` reports `SQLError.operand`. Pass `false` when a
+  /// run has ALREADY proved the query runnable (an empty result whose headers
+  /// this fills in): the data-dependent filter never reached the projection, so
+  /// re-validating the reachable `Name + 1` would fault a query that SUCCEEDED.
+  /// `compile` still runs either way — it resolves the relations and CTEs the
+  /// derive needs and is non-faulting for a runnable query — only the operand
+  /// type-check is skipped.
+  ///
   /// - Throws: the same resolution faults `run(query)` raises —
   ///   `SQLError.relation` for an unknown relation,
   ///   `SQLError.column`/`SQLError.ambiguous` for a column reference that does
   ///   not resolve to exactly one relation, `SQLError.function` for a call to
   ///   an unregistered scalar function anywhere in the query, `SQLError.arity`
-  ///   for a `UNION` whose arms project differing column counts.
-  public borrowing func columns(of query: Query, routines: Routines = [:])
+  ///   for a `UNION` whose arms project differing column counts; and, when
+  ///   `validate`, `SQLError.operand` for an ill-typed reachable expression.
+  public borrowing func columns(of query: Query, routines: Routines = [:],
+                                validate: Bool = true)
       throws(SQLError) -> Array<OutputColumn> {
     // Extend the scope with any `definition_schema.` store relation the query
     // names, so its result schema resolves the reserved relation the same as a
@@ -83,15 +95,149 @@ extension Catalog where Self: ~Escapable {
     // sees only the first projection; `typecheck` faults an unknown or
     // ill-typed call or a bad operand anywhere a run would evaluate it, and —
     // like the executor — skips an arm a `false AND`/`true OR` short-circuits,
-    // so a query that runs is not rejected for an unreachable call.
+    // so a query that runs is not rejected for an unreachable call. A caller
+    // that already RAN the query (`validate: false`) skips it: a reachable
+    // operand a data-dependent filter never reached would otherwise fault a
+    // query that produced its (empty) result.
     let routines = Routines.standard.merging(routines)
-    try typecheck(query, ctes, routines: routines)
+    if validate { try typecheck(query, ctes, routines: routines) }
     // The result columns are the first arm's projection (the ISO rule a UNION
     // follows), resolved against the validated scope; a scalar call types from
     // its routine's declared return type — the engine prelude merged under
     // `routines`, exactly as a run seeds them, so a standard call (`BITAND`)
-    // types without the caller re-supplying it.
-    return try columns(of: query.first, ctes, routines: routines)
+    // types without the caller re-supplying it. `validate` rides through so a
+    // `SELECT *` over a view derives the body's types WITHOUT re-type-checking
+    // it — the view body's own reachable-operand check is gated the same as the
+    // outer query's, so a `validate: false` derive faults nowhere.
+    return try columns(of: query.first, ctes, routines: routines,
+                       validate: validate)
+  }
+
+  /// The result columns `statement` would yield, named and typed, resolved
+  /// WITHOUT executing it — the statement-level entry that keeps a `WITH`'s CTE
+  /// scope in place.
+  ///
+  /// A `select` derives exactly as `columns(of query:)` does. A `with` derives
+  /// its TRAILING query against the statement's common table expressions, so a
+  /// reference the CTEs bind — a `SELECT *` over a CTE, or a name a CTE shadows
+  /// off a same-named base relation — resolves against the CTE the run did, not
+  /// the base catalog: `WITH t(x) AS (SELECT 1) SELECT * FROM t` reports one
+  /// column `x`, even where a base `t` of a different width exists. The scope is
+  /// SCHEMA-ONLY — each CTE contributes its declared column list (typed
+  /// `.integer`, the default a materialised relation reports) without running
+  /// its body — so the derive never opens a cursor, exactly as `columns(of
+  /// query:)` never does. A `create` names no result, so it faults
+  /// `SQLError.statement` the way running one does.
+  ///
+  /// `routines` and `validate` carry the meaning `columns(of query:)` gives
+  /// them; pass `validate: false` after a run has proved the statement runnable.
+  ///
+  /// - Throws: the resolution faults `columns(of query:)` raises, plus
+  ///   `SQLError.statement` for a `create`.
+  public borrowing func columns(of statement: Statement,
+                                routines: Routines = [:],
+                                validate: Bool = true)
+      throws(SQLError) -> Array<OutputColumn> {
+    switch statement {
+    case let .select(query):
+      return try columns(of: query, routines: routines, validate: validate)
+    case let .with(ctes, query):
+      return try columns(of: query, with: ctes, routines: routines,
+                         validate: validate)
+    case .create:
+      throw .statement("CREATE VIEW names no result columns")
+    }
+  }
+
+  /// The result columns the trailing `query` of a `WITH` would yield, resolved
+  /// against a SCHEMA-ONLY overlay of the `ctes` in scope.
+  ///
+  /// Each CTE binds a `Materialised` of its DECLARED columns with no rows —
+  /// the schema the run's materialised CTE resolves to (columns from the
+  /// declared list, every type `.integer`) — laid into the overlay in source
+  /// order so a later CTE, and the trailing query, resolve a name the same
+  /// precedence a run applies (a CTE shadows a base relation of the same name).
+  /// The `definition_schema.` store augment then extends this overlay for the
+  /// trailing query exactly as `columns(of query:)` does, so a `WITH` whose
+  /// trailing query also names a reserved store relation still resolves it —
+  /// the store yields to a CTE of the same name, the run's order.
+  ///
+  /// A name repeated in the list (case-insensitively) faults
+  /// `SQLError.redefinition`, the same fault `Engine.with` raises before
+  /// materialising, rather than silently shadowing the earlier binding.
+  ///
+  /// When `validate`, each CTE BODY is validated before its schema is trusted by
+  /// the SAME code a run drives — `Engine.validate`, the compile-time structural
+  /// check `Engine.with` runs before materialising: the recursive shape (a
+  /// recursive reference must be the final `UNION` arm; a self-reference in the
+  /// anchor with no same-named base faults `SQLError.unsupported`, the recursive
+  /// shape a run rejects BEFORE materialising) and the declared arity (the
+  /// compiled body width against the column list, `SQLError.columns` on a
+  /// mismatch — the anchor and recursive arm checked separately, self bound only
+  /// in the recursive arm). The schema path also asks that helper to run its
+  /// reachable-operand type-check (`typecheck: true` — the run defers this to
+  /// execution, so it stays OFF the run path): folding it in rather than layering
+  /// it here keeps ONE per-arm scoping for both, so a recursive CTE's ANCHOR is
+  /// operand-checked against the base scope the run evaluates it in, NOT the
+  /// CTE-self overlay. So a dry-run schema is advertised only for a `WITH` that
+  /// could actually run, never for one whose body's shape or width contradicts
+  /// its declared list — nor for one whose reachable operand a run would fault.
+  /// When `validate` is `false` — a
+  /// derive after a successful run — the bodies are TRUSTED, not compiled: the
+  /// run already proved them consistent, and re-checking a data-dependent-empty
+  /// body would fault a statement that succeeded.
+  private borrowing func columns(of query: Query, with ctes: Array<CTE>,
+                                 routines: Routines,
+                                 validate: Bool)
+      throws(SQLError) -> Array<OutputColumn> {
+    let routines = Routines.standard.merging(routines)
+    var overlay = CTEs()
+    for cte in ctes {
+      // A name repeated in the list (case-insensitively) would silently shadow
+      // the earlier binding in the overlay, so reject it rather than overwrite —
+      // the same fault `Engine.with` raises before materialising, so a schema is
+      // advertised only for a `WITH` that could actually run.
+      guard overlay[cte.name.lowercased()] == nil else {
+        throw .redefinition(cte.name)
+      }
+      // The CTE's schema-only self — its declared columns, no rows, every type
+      // `.integer` (the default a materialised relation reports) — bound into
+      // the recursive arm's operand check and, after validation, into the
+      // overlay a later CTE and the trailing query resolve against.
+      let declared =
+          Materialised(columns: cte.columns, rows: [],
+                       types: Array(repeating: .integer,
+                                    count: cte.columns.count))
+      // Validate the body's SHAPE and ARITY against the scope of the PRIOR CTEs
+      // by the SAME code a run uses — `Engine.validate` — so a schema is not
+      // advertised for a `WITH` a run would reject, and this path never again
+      // drifts from the engine's recursive-shape and arity rules. It binds the
+      // CTE's self only inside the recursive arm (never the whole body), so a
+      // recursive reference in the final arm resolves while a self-reference in
+      // the anchor faults the recursive shape exactly as the run does. The
+      // schema path adds ONE thing the run defers to execution: a
+      // reachable-operand type-check over the body — passed IN as `typecheck` so
+      // it runs in the SAME per-arm scope the shared helper computes, checking a
+      // recursive CTE's anchor against the base scope the run evaluates it in
+      // (NOT the CTE-self overlay). A `validate: false` derive skips both — the
+      // run already proved the bodies consistent — so `typecheck: false` there.
+      if validate {
+        // `self.` escapes the shadow the `validate` Bool parameter casts over
+        // the shared `validate(_:against:routines:)` engine helper.
+        try self.validate(cte, against: overlay, routines: routines,
+                          typecheck: true)
+      }
+      // Bind the CTE's schema-only self into the overlay AFTER its body is
+      // validated — the scope a later CTE and the trailing query resolve against
+      // — exactly as `Engine.with` binds the materialised relation after running
+      // its body.
+      overlay[cte.name.lowercased()] = declared
+    }
+    let scope = augment(overlay, for: query, rows: false)
+    _ = try compile(query, scope)
+    if validate { try typecheck(query, scope, routines: routines) }
+    return try columns(of: query.first, scope, routines: routines,
+                       validate: validate)
   }
 
   /// The result columns of a single `select`, resolved against this catalog
@@ -103,12 +249,17 @@ extension Catalog where Self: ~Escapable {
   /// duplicates (and never drifts from) that resolution. It runs only after
   /// compilation has proved the arm resolves. `routines` are the scalar
   /// routines a call types from — its declared return type — rather than the
-  /// `.integer` default.
+  /// `.integer` default. `validate` (default `true`) rides through to any view
+  /// this arm's relations resolve, gating the view body's reachable-operand
+  /// check the same as the outer query's — a `validate: false` derive never
+  /// re-type-checks a view body a run already proved runnable.
   borrowing func columns(of select: Select, _ ctes: CTEs,
                          visited: Set<String> = [],
-                         routines: Routines = [:])
+                         routines: Routines = [:],
+                         validate: Bool = true)
       throws(SQLError) -> Array<OutputColumn> {
-    try scope(of: select, ctes, visited: visited, routines: routines)
+    try scope(of: select, ctes, visited: visited, routines: routines,
+              validate: validate)
         .columns(of: select.projection, routines)
   }
 
@@ -116,18 +267,21 @@ extension Catalog where Self: ~Escapable {
   /// relation resolved to schema and laid end to end in one combined ordinal
   /// space, the same layout compilation resolves a projection against. A
   /// FROM-less `SELECT <expr-list>` projects over no relation, so its scope is
-  /// empty. It reads only schemas, never a cursor.
+  /// empty. It reads only schemas, never a cursor. `validate` (default `true`)
+  /// rides through to each relation's `schema(of:)`, gating a view body's
+  /// reachable-operand check the same as the outer query's.
   borrowing func scope(of select: Select, _ ctes: CTEs,
                        visited: Set<String> = [],
-                       routines: Routines = [:])
+                       routines: Routines = [:],
+                       validate: Bool = true)
       throws(SQLError) -> Scope {
     guard let relation = select.from else { return Scope([]) }
     var relations =
         [(relation, try schema(of: relation, ctes, visited: visited,
-                               routines: routines))]
+                               routines: routines, validate: validate))]
     for join in select.joins {
       let joined = try schema(of: join.relation, ctes, visited: visited,
-                              routines: routines)
+                              routines: routines, validate: validate)
       relations.append((join.relation, joined))
     }
     return Scope(relations)
@@ -272,10 +426,16 @@ extension Catalog where Self: ~Escapable {
   /// being resolved down this chain, breaking a cyclic view (`A` over `B` over
   /// `A`) that would otherwise re-enter here. `routines` ride through so a view
   /// body projecting a scalar call types it from the routine's declared return
-  /// type, not the `.integer` default.
+  /// type, not the `.integer` default. `validate` (default `true`) gates the
+  /// view body's reachable-operand type-check: a `validate: false` derive (an
+  /// empty result whose headers this fills) resolves the body's relations and
+  /// types WITHOUT re-checking its reachable operands, so a view whose body is
+  /// data-dependent-empty — a text-arithmetic projection under a filter that
+  /// matched no row — does not fault a `SELECT *` over it that already ran.
   borrowing func schema(of relation: Relation, _ ctes: CTEs,
                         visited: Set<String> = [],
-                        routines: Routines = [:])
+                        routines: Routines = [:],
+                        validate: Bool = true)
       throws(SQLError) -> Schema {
     let name = relation.name
     if let cte = ctes[name.lowercased()] {
@@ -310,14 +470,21 @@ extension Catalog where Self: ~Escapable {
       // unreachable.
       let overlay = augment([:], for: view.query, rows: false)
       let inner = visited.union([name.lowercased()])
-      try typecheck(view.query, overlay, visited: inner, routines: routines)
+      // Gate the body's reachable-operand check on `validate`: a `validate:
+      // false` derive skips it, so a data-dependent-empty body (a text
+      // arithmetic under an unmatched filter) does not fault a `SELECT *` over
+      // the view that already ran to its (empty) result. `validate` also rides
+      // into the recursive derive so a view over a view stays derive-only.
+      if validate {
+        try typecheck(view.query, overlay, visited: inner, routines: routines)
+      }
       // Type off the body's first arm (the ISO rule for a UNION). Arity — the
       // body's width against the declared columns — is `compile`'s job (the
       // public entry runs it), so on a shortfall fall back to the declared
       // schema rather than re-checking it here.
       let resolved =
           try columns(of: view.query.first, overlay, visited: inner,
-                      routines: routines)
+                      routines: routines, validate: validate)
       guard resolved.count == base.width else { return base }
       return Schema(width: base.width, extent: base.extent, names: base.names,
                     types: resolved.map(\.type), virtuals: base.virtuals)

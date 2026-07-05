@@ -235,6 +235,38 @@ struct OutputSchemaTests {
     #expect(columns[0] == OutputColumn(name: "Label", type: .text))
   }
 
+  @Test("a data-dependent-empty view derives headers without re-validating")
+  func emptyViewDerives() throws {
+    // A view whose body is a text-arithmetic projection under a filter that
+    // matches no row RUNS to zero rows: the data-dependent WHERE spares the
+    // `Name + 1` from ever evaluating. Filling in the empty result's headers
+    // (`validate: false`) must resolve the view — relations, CTEs, and the
+    // body's own types — WITHOUT re-type-checking the body's reachable
+    // `Name + 1`, which a run never reached; otherwise a query that SUCCEEDED
+    // reports a failure. `validate: true` (the default / `.schema`) still
+    // faults, exactly as running the body over rows would.
+    let definition = try View(query: {
+      guard case let .select(query) = try Statement(parsing:
+          "SELECT Name + 1 AS x FROM People WHERE Name = 'missing'") else {
+        throw SQLError.incomplete(expected: "a SELECT")
+      }
+      return query
+    }(), columns: ["x"])
+    let source = SchemaCatalog([
+      "People": SchemaRelation([("Name", .text), ("Age", .integer)]),
+    ], views: ["Empty": definition])
+    let query = try parse("SELECT * FROM Empty")
+    // `validate: false` derives the header without re-validating the body.
+    let derived = try source.columns(of: query, validate: false)
+    #expect(derived.count == 1)
+    #expect(derived[0].name == "x")
+    // `validate: true` re-type-checks the body's reachable `Name + 1` and
+    // faults with the text-arithmetic operand error, as running the body would.
+    #expect(throws: SQLError.self) {
+      let _ = try source.columns(of: query, validate: true)
+    }
+  }
+
   @Test("an unknown relation faults exactly as compilation would")
   func unknownRelation() throws {
     #expect(throws: SQLError.self) {
@@ -428,5 +460,211 @@ struct OutputSchemaTests {
     let columns = try schema("SELECT COUNT(*) FROM People WHERE 1 = 0 "
         + "HAVING COUNT(*) = 1 FETCH FIRST 0 ROWS ONLY")
     #expect(columns.count == 1)
+  }
+
+  @Test("columns(of statement:) derives a WITH against its CTE scope")
+  func statementWith() throws {
+    // The trailing query resolves against the statement's CTEs, schema-only:
+    // a CTE `People` SHADOWS the two-column base relation, so a `SELECT *` over
+    // it names the CTE's one declared column `x`, not the base's `Name, Age`.
+    let columns = try catalog().columns(of: Statement(parsing:
+        "WITH People(x) AS (SELECT 1) SELECT * FROM People"))
+    #expect(columns.count == 1)
+    #expect(columns[0].name == "x")
+  }
+
+  @Test("columns(of statement:) resolves a WITH's explicit column projection")
+  func statementWithExplicit() throws {
+    // A bare-column projection reads the CTE's declared columns; a two-column
+    // CTE heads its two names, no base relation involved.
+    let columns = try catalog().columns(of: Statement(parsing:
+        "WITH t(a, b) AS (SELECT 1, 2) SELECT a, b FROM t"))
+    #expect(same(columns.map { ($0.name, $0.type) },
+                 [("a", .integer), ("b", .integer)]))
+  }
+
+  @Test("columns(of statement:) leaves a base reachable when no CTE shadows it")
+  func statementWithNoShadow() throws {
+    // A CTE whose name does not collide leaves the base `People` reachable — the
+    // trailing `SELECT *` resolves its two real columns.
+    let columns = try catalog().columns(of: Statement(parsing:
+        "WITH t(x) AS (SELECT 1) SELECT * FROM People"))
+    #expect(same(columns.map { ($0.name, $0.type) },
+                 [("Name", .text), ("Age", .integer)]))
+  }
+
+  @Test("columns(of statement:) faults on a CREATE VIEW, naming no result")
+  func statementCreate() throws {
+    let create = try Statement(parsing:
+        "CREATE VIEW v AS SELECT Name FROM People")
+    #expect(throws: SQLError.self) {
+      let _ = try catalog().columns(of: create)
+    }
+  }
+
+  @Test("a WITH whose body arity contradicts its list faults when validating")
+  func statementWithBadArity() throws {
+    // The CTE declares ONE column but its body projects TWO — a `SELECT *` over
+    // the two-column `People`. The parser cannot catch this (a `SELECT *`'s
+    // width is known only at resolution), so a run rejects it with
+    // `SQLError.columns` when its compiled body width contradicts the declared
+    // list. A `validate: true` derive must not advertise a schema for it, so it
+    // faults the SAME way — declared as `expected`, body width as `got`, as
+    // `Engine.with` does — not report the one trusted declared column.
+    let statement = try Statement(parsing:
+        "WITH t(a) AS (SELECT * FROM People) SELECT * FROM t")
+    #expect(throws: SQLError.columns(expected: 1, got: 2)) {
+      let _ = try catalog().columns(of: statement, validate: true)
+    }
+  }
+
+  @Test("a WITH's body is trusted, not compiled, when not validating")
+  func statementWithArityTrusted() throws {
+    // `validate: false` is the post-run derive: the run already proved the
+    // bodies consistent, so the declared list is TRUSTED without compiling the
+    // body. The same arity-mismatched `WITH` that faults when validating
+    // reports its one declared column here — the empty/data-dependent header
+    // path a successful run fills in.
+    let statement = try Statement(parsing:
+        "WITH t(a) AS (SELECT * FROM People) SELECT * FROM t")
+    let columns = try catalog().columns(of: statement, validate: false)
+    #expect(same(columns.map { ($0.name, $0.type) }, [("a", .integer)]))
+  }
+
+  @Test("a well-formed WITH validates and derives its trailing schema")
+  func statementWithValidates() throws {
+    // A CTE whose declared arity matches its body validates cleanly and derives
+    // the trailing query's schema — the body compiled, its width confirmed
+    // against the declared list, and its reachable operands type-checked.
+    let statement = try Statement(parsing:
+        "WITH t(a, b) AS (SELECT * FROM People) SELECT a, b FROM t")
+    let columns = try catalog().columns(of: statement, validate: true)
+    #expect(same(columns.map { ($0.name, $0.type) },
+                 [("a", .integer), ("b", .integer)]))
+  }
+
+  @Test("a non-recursive CTE body cannot see its own schema-only self")
+  func statementWithNonRecursiveSelf() throws {
+    // A non-recursive CTE is NOT in scope within its own body — only the PRIOR
+    // CTEs and the base catalog are — so a body that names the CTE with no
+    // same-named base resolves against nothing and faults `.relation`, exactly
+    // as `Engine.with` does. Binding the CTE's schema-only self into its own
+    // body's scope would WRONGLY resolve it, advertising a schema for a `WITH`
+    // that cannot run.
+    let statement = try Statement(parsing:
+        "WITH t(x) AS (SELECT * FROM t) SELECT * FROM t")
+    #expect(throws: SQLError.relation("t")) {
+      let _ = try catalog().columns(of: statement, validate: true)
+    }
+  }
+
+  @Test("a same-named-base non-recursive CTE body resolves the base")
+  func statementWithSelfResolvesBase() throws {
+    // A non-recursive CTE `People` shadowing the two-column base is NOT in its
+    // OWN body's scope, so the body's `SELECT * FROM People` resolves the BASE
+    // relation (two columns), matching its declared arity; the trailing query
+    // then reads the CTE's one declared column `x`. Were the CTE's own self
+    // bound in its body, the body would read the CTE (one column) and its arity
+    // would contradict the declared two-column list.
+    let statement = try Statement(parsing:
+        "WITH People(a, b) AS (SELECT * FROM People) SELECT a, b FROM People")
+    let columns = try catalog().columns(of: statement, validate: true)
+    #expect(same(columns.map { ($0.name, $0.type) },
+                 [("a", .integer), ("b", .integer)]))
+  }
+
+  @Test("a WITH with a duplicate CTE name faults with redefinition")
+  func statementWithDuplicateName() throws {
+    // Two CTEs of the same (case-insensitive) name would silently shadow the
+    // earlier binding, so the derive faults `.redefinition` — the same fault
+    // `Engine.with` raises before materialising — rather than advertise a schema
+    // off the shadowing definition.
+    let statement = try Statement(parsing:
+        "WITH t(a) AS (SELECT 1), T(b) AS (SELECT 2) SELECT * FROM t")
+    #expect(throws: SQLError.redefinition("T")) {
+      let _ = try catalog().columns(of: statement, validate: true)
+    }
+  }
+
+  @Test("a recursive CTE body sees its own schema-only self and resolves")
+  func statementWithRecursiveSelf() throws {
+    // A genuinely recursive CTE — its FINAL UNION arm names itself — DOES bind
+    // its own schema-only self while its body validates, so the recursive
+    // reference resolves. The anchor seeds one column, the recursive arm reads
+    // the CTE, and the trailing query names the CTE's declared column `n`.
+    let statement = try Statement(parsing: """
+        WITH RECURSIVE t(n) AS (
+          SELECT 1 UNION SELECT n + 1 FROM t
+        ) SELECT n FROM t
+        """)
+    let columns = try catalog().columns(of: statement, validate: true)
+    #expect(columns.count == 1)
+    #expect(columns[0].name == "n")
+  }
+
+  @Test("a recursive CTE self-referencing its anchor faults as a run does")
+  func statementWithRecursiveAnchorSelf() throws {
+    // The engine binds a recursive CTE's self ONLY to its FINAL UNION arm: a
+    // self-reference in the ANCHOR arm resolves against the base scope, so with
+    // no same-named base/view it can only be a misplaced recursive arm — a
+    // shape the engine rejects `.unsupported`, BEFORE materialising. The derive
+    // now validates the CTE by the SAME `Engine.validate` a run drives, so it
+    // faults IDENTICALLY rather than advertising a schema for a `WITH` a run
+    // would reject.
+    let statement = try Statement(parsing: """
+        WITH RECURSIVE t(n) AS (
+          SELECT n FROM t UNION SELECT n FROM t
+        ) SELECT n FROM t
+        """)
+    let error = SQLError.unsupported(
+        "recursive WITH references the CTE outside its final UNION arm")
+    #expect(throws: error) {
+      let _ = try catalog().columns(of: statement, validate: true)
+    }
+    // The derive faults EXACTLY where a run does — the divergence the schema
+    // path repeatedly drifted into is closed by reusing the engine's own check.
+    #expect(throws: error) {
+      let _ = try catalog().run(statement)
+    }
+  }
+
+  @Test("a recursive CTE anchor is operand-checked against the base scope")
+  func statementWithRecursiveAnchorOperand() throws {
+    // A recursive CTE binds its schema-only self (declared columns, typed
+    // `.integer`) ONLY inside its final UNION arm; the anchor resolves against
+    // the BASE scope — the same scope a run evaluates it in. So the anchor's
+    // reachable operands must be type-checked with self NOT in scope: here the
+    // base `People.Name` is TEXT (the shared fixture), so the anchor `SELECT
+    // Name + 1 FROM People` faults `.operand` exactly as a run's per-row
+    // evaluation would. Were the anchor typed against the CTE-self overlay
+    // (declared `Name` integer) it would type clean and wrongly advertise a
+    // valid schema — the bug this closes. Folding the operand check into the
+    // shared `Engine.validate` keeps the derive on the run's per-arm scope: the
+    // anchor is checked with self NOT in scope, the run's own scope for it, so
+    // the two cannot drift on this axis.
+    let statement = try Statement(parsing: """
+        WITH RECURSIVE People(Name) AS (
+          SELECT Name + 1 FROM People UNION SELECT Name FROM People
+        ) SELECT Name FROM People
+        """)
+    #expect(throws: SQLError.operand("operands must be numeric")) {
+      let _ = try catalog().columns(of: statement, validate: true)
+    }
+  }
+
+  @Test("a well-formed recursive CTE with a numeric anchor validates")
+  func statementWithRecursiveAnchorValidates() throws {
+    // The operand check must not reject a runnable recursive CTE: a numeric
+    // anchor and a recursive arm free of bad operands validate and derive the
+    // trailing schema. This is the counterpart to the text-anchor fault — the
+    // per-arm operand check accepts exactly what a run does.
+    let statement = try Statement(parsing: """
+        WITH RECURSIVE Counter(n) AS (
+          SELECT 1 UNION SELECT n + 1 FROM Counter
+        ) SELECT n FROM Counter
+        """)
+    let columns = try catalog().columns(of: statement, validate: true)
+    #expect(columns.count == 1)
+    #expect(columns[0].name == "n")
   }
 }

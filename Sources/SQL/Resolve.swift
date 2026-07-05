@@ -18,6 +18,33 @@
 /// resolves is `SQLError.column`; an unqualified name both relations of a join
 /// resolve is `SQLError.ambiguous`.
 
+/// Lowers the name-addressed AST `predicate` to the engine's `Filter`, lowering
+/// each leaf's operand expressions through `term` and passing a `bound`
+/// comparison's `:parameter` through unchanged.
+///
+/// Every predicate lowering — a single relation, a join scope, a grouped scope —
+/// shares this shape, differing only in how a leaf term resolves its columns
+/// (against one schema, a combined join space, or a grouped slot space); each
+/// caller supplies that resolution as `term`.
+private func lower(_ predicate: Predicate,
+                   term: (Expression) throws(SQLError) -> Term)
+    throws(SQLError) -> Filter {
+  switch predicate {
+  case let .comparison(left, op, right):
+    try .compare(term(left), op, term(right))
+  case let .bound(left, op, parameter):
+    try .bound(term(left), op, parameter)
+  case let .null(expression, negated):
+    try .null(term(expression), negated: negated)
+  case let .and(lhs, rhs):
+    try .and(lower(lhs, term: term), lower(rhs, term: term))
+  case let .or(lhs, rhs):
+    try .or(lower(lhs, term: term), lower(rhs, term: term))
+  case let .not(operand):
+    try .not(lower(operand, term: term))
+  }
+}
+
 extension Schema {
   /// The ordinal of the column `column` names, validating its qualifier against
   /// `relation`.
@@ -104,19 +131,8 @@ extension Schema {
 
   internal func lower(_ predicate: Predicate, in relation: Relation)
       throws(SQLError) -> Filter {
-    switch predicate {
-    case let .comparison(left, op, right):
-      try .compare(term(left, in: relation), op, term(right, in: relation))
-    case let .bound(left, op, parameter):
-      try .bound(term(left, in: relation), op, parameter)
-    case let .null(expression, negated):
-      try .null(term(expression, in: relation), negated: negated)
-    case let .and(lhs, rhs):
-      try .and(lower(lhs, in: relation), lower(rhs, in: relation))
-    case let .or(lhs, rhs):
-      try .or(lower(lhs, in: relation), lower(rhs, in: relation))
-    case let .not(operand):
-      try .not(lower(operand, in: relation))
+    try SQL.lower(predicate) { expression throws(SQLError) in
+      try term(expression, in: relation)
     }
   }
 }
@@ -648,19 +664,8 @@ internal struct Scope {
   /// Lowers the name-addressed AST `predicate` to the engine's `Filter`, each
   /// column reference resolved to a combined ordinal across the chain.
   internal func lower(_ predicate: Predicate) throws(SQLError) -> Filter {
-    switch predicate {
-    case let .comparison(left, op, right):
-      try .compare(term(left), op, term(right))
-    case let .bound(left, op, parameter):
-      try .bound(term(left), op, parameter)
-    case let .null(expression, negated):
-      try .null(term(expression), negated: negated)
-    case let .and(lhs, rhs):
-      try .and(lower(lhs), lower(rhs))
-    case let .or(lhs, rhs):
-      try .or(lower(lhs), lower(rhs))
-    case let .not(operand):
-      try .not(lower(operand))
+    try SQL.lower(predicate) { expression throws(SQLError) in
+      try term(expression)
     }
   }
 }
@@ -809,19 +814,8 @@ internal struct Grouping {
 
   /// Lowers a `HAVING`/predicate to a grouped-space `Filter`.
   internal func lower(_ predicate: Predicate) throws(SQLError) -> Filter {
-    switch predicate {
-    case let .comparison(left, op, right):
-      try .compare(term(left), op, term(right))
-    case let .bound(left, op, parameter):
-      try .bound(term(left), op, parameter)
-    case let .null(expression, negated):
-      try .null(term(expression), negated: negated)
-    case let .and(lhs, rhs):
-      try .and(lower(lhs), lower(rhs))
-    case let .or(lhs, rhs):
-      try .or(lower(lhs), lower(rhs))
-    case let .not(operand):
-      try .not(lower(operand))
+    try SQL.lower(predicate) { expression throws(SQLError) in
+      try term(expression)
     }
   }
 

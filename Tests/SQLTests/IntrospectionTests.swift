@@ -59,8 +59,7 @@ private func run(_ text: String) throws -> Array<Array<Value>> {
 // MARK: - Tests
 
 struct IntrospectionTests {
-  @Test("information_schema.tables lists base tables and views")
-  func tables() throws {
+  @Test func `information_schema.tables lists base tables and views`() throws {
     let rows = try run("""
         SELECT table_name, table_type FROM information_schema.tables
           ORDER BY table_type, table_name
@@ -77,8 +76,7 @@ struct IntrospectionTests {
     ])
   }
 
-  @Test("information_schema.tables lists an engine-provided view by name")
-  func builtinViewListed() throws {
+  @Test func `information_schema.tables lists an engine-provided view by name`() throws {
     // The built-in views are queryable through `resolve(view:)`, so a consumer
     // discovers them by name — `... WHERE table_name = 'information_schema.
     // columns'` finds the VIEW even though it is engine-provided, not a
@@ -90,8 +88,7 @@ struct IntrospectionTests {
     #expect(rows == [[.text("VIEW")]])
   }
 
-  @Test("information_schema.columns lists an engine-provided view's columns")
-  func builtinViewColumns() throws {
+  @Test func `information_schema.columns lists an engine-provided view's columns`() throws {
     // A built-in view's columns are typed from its body — over the store, all
     // text — exactly as a user view's are.
     let rows = try run("""
@@ -107,8 +104,7 @@ struct IntrospectionTests {
     ])
   }
 
-  @Test("a base relation shadows a same-named built-in information_schema view")
-  func baseShadowsBuiltinView() throws {
+  @Test func `a base relation shadows a same-named built-in information_schema view`() throws {
     // A base relation named for a built-in view shadows it (`resolve(view:)`
     // yields the base), so the built-in is not listed as a VIEW — the base is
     // listed as a BASE TABLE. (The name now resolves to the base, so the store
@@ -123,8 +119,7 @@ struct IntrospectionTests {
     #expect(rows == [[.text("BASE TABLE")]])
   }
 
-  @Test("information_schema.tables carries the standard catalog/schema columns")
-  func tableColumns() throws {
+  @Test func `information_schema.tables carries the standard catalog/schema columns`() throws {
     let rows = try run("""
         SELECT * FROM information_schema.tables WHERE table_name = 'People'
         """)
@@ -132,8 +127,7 @@ struct IntrospectionTests {
     #expect(rows == [[.null, .null, .text("People"), .text("BASE TABLE")]])
   }
 
-  @Test("information_schema.columns names, positions, and types every column")
-  func columns() throws {
+  @Test func `information_schema.columns names, positions, and types every column`() throws {
     let rows = try run("""
         SELECT column_name, ordinal_position, data_type
           FROM information_schema.columns
@@ -146,8 +140,7 @@ struct IntrospectionTests {
     ])
   }
 
-  @Test("information_schema.columns lists a view's columns and kinds")
-  func viewColumns() throws {
+  @Test func `information_schema.columns lists a view's columns and kinds`() throws {
     // `Adults` is `SELECT Name FROM People` over the `.text` `Name` column, so
     // the overlay lists its one column with the resolved text domain — a
     // metadata consumer can discover the columns of a view `.tables` reports.
@@ -159,8 +152,7 @@ struct IntrospectionTests {
     #expect(rows == [[.text("Name"), .text("character varying")]])
   }
 
-  @Test("information_schema.columns types a view defined over the overlay")
-  func viewOverIntrospection() throws {
+  @Test func `information_schema.columns types a view defined over the overlay`() throws {
     // `Meta` reads `information_schema.tables`, whose `table_name` is text, so
     // the builder must seed the view body's OWN introspection overlay for
     // `Meta`'s column to advertise the text domain, not the integer default.
@@ -175,8 +167,7 @@ struct IntrospectionTests {
     #expect(rows == [[.text("character varying")]])
   }
 
-  @Test("information_schema.columns excludes the virtual Id column")
-  func excludesVirtual() throws {
+  @Test func `information_schema.columns excludes the virtual Id column`() throws {
     // `People` exposes a virtual `Id` past its two real columns; the overlay
     // reports only the real ones, so the count is two, not three.
     let rows = try run("""
@@ -186,8 +177,7 @@ struct IntrospectionTests {
     #expect(rows == [[.integer(2)]])
   }
 
-  @Test("information_schema.columns reports YES nullability")
-  func nullability() throws {
+  @Test func `information_schema.columns reports YES nullability`() throws {
     let rows = try run("""
         SELECT is_nullable FROM information_schema.columns
          WHERE table_name = 'Widget'
@@ -195,8 +185,7 @@ struct IntrospectionTests {
     #expect(rows == [[.text("YES")]])
   }
 
-  @Test("a view shadowing a base relation hides the base in the overlay")
-  func shadowed() throws {
+  @Test func `a view shadowing a base relation hides the base in the overlay`() throws {
     // `People` is both a base relation and a view; `resolve` picks the
     // view, so the overlay lists the name once as a VIEW and reports the view's
     // columns — never a base row `SELECT *` can no longer reach.
@@ -217,8 +206,7 @@ struct IntrospectionTests {
     #expect(cols == [[.text("Name")]])
   }
 
-  @Test("a view over information_schema.columns keeps its columns' kinds")
-  func viewOverColumnsKinds() throws {
+  @Test func `a view over information_schema.columns keeps its columns' kinds`() throws {
     // A view reading `information_schema.columns` ITSELF must resolve against a
     // schema-only seed of that relation, so its `column_name` column advertises
     // the text domain rather than falling back to the integer default.
@@ -233,8 +221,7 @@ struct IntrospectionTests {
     #expect(rows == [[.text("character varying")]])
   }
 
-  @Test("information_schema.columns terminates through transitive views")
-  func transitiveViews() throws {
+  @Test func `information_schema.columns terminates through transitive views`() throws {
     // `A` reads `information_schema.columns` and `B` reads `A`; building the
     // columns overlay must not re-enter itself through `B`'s resolution of `A`
     // — it terminates (rather than overflowing), and the schema-only seed rides
@@ -252,8 +239,7 @@ struct IntrospectionTests {
     #expect(rows == [[.text("b"), .text("character varying")]])
   }
 
-  @Test("information_schema.columns hides a view whose WHERE is invalid")
-  func invalidView() throws {
+  @Test func `information_schema.columns hides a view whose WHERE is invalid`() throws {
     // `v`'s projection resolves, but its WHERE names a missing column, so
     // `SELECT * FROM v` throws. The overlay validates the WHOLE body — as the
     // public schema API does — and does not advertise `v` as queryable
@@ -269,8 +255,7 @@ struct IntrospectionTests {
     #expect(rows == [])
   }
 
-  @Test("information_schema.columns hides a view whose UNION arm is invalid")
-  func invalidUnionArm() throws {
+  @Test func `information_schema.columns hides a view whose UNION arm is invalid`() throws {
     // The leading arm resolves, but the second names a missing column, so the
     // whole view cannot run — the overlay must validate EVERY arm, not just the
     // first, and not list `u`.
@@ -287,8 +272,7 @@ struct IntrospectionTests {
     #expect(rows == [])
   }
 
-  @Test("information_schema.columns hides a view whose join ON is invalid")
-  func invalidJoin() throws {
+  @Test func `information_schema.columns hides a view whose join ON is invalid`() throws {
     // The join's ON names a column `People` does not have, so `SELECT * FROM v`
     // fails to compile — the overlay validates each join's ON, not just the
     // projection, and does not list `v`.
@@ -307,8 +291,7 @@ struct IntrospectionTests {
     #expect(rows == [])
   }
 
-  @Test("information_schema.columns hides a view whose GROUP BY is invalid")
-  func invalidGrouping() throws {
+  @Test func `information_schema.columns hides a view whose GROUP BY is invalid`() throws {
     // GROUP BY names a missing column, so `SELECT * FROM v` fails to compile —
     // the overlay validates the grouping, not just the projection.
     let body = try parse("SELECT Name FROM People GROUP BY Missing")
@@ -322,8 +305,7 @@ struct IntrospectionTests {
     #expect(rows == [])
   }
 
-  @Test("information_schema.columns hides a view whose scalar-call arg is bad")
-  func invalidCallArgument() throws {
+  @Test func `information_schema.columns hides a view whose scalar-call arg is bad`() throws {
     // `v`'s projection is a scalar call `BITAND(Missing, 1)` whose ARGUMENT
     // names a column `People` does not have, so `SELECT * FROM v` fails to
     // compile (`Scope.term` resolves `Missing` and throws `SQLError.column`). A
@@ -343,8 +325,7 @@ struct IntrospectionTests {
     #expect(rows == [])
   }
 
-  @Test("information_schema.columns hides a view whose HAVING is invalid")
-  func invalidHaving() throws {
+  @Test func `information_schema.columns hides a view whose HAVING is invalid`() throws {
     // HAVING names a column that is neither a GROUP BY key nor aggregated, so
     // `SELECT * FROM v` fails to compile — the overlay validates the HAVING
     // too.
@@ -361,8 +342,7 @@ struct IntrospectionTests {
     #expect(rows == [])
   }
 
-  @Test("information_schema.columns hides a view over an invalid view")
-  func invalidNestedView() throws {
+  @Test func `information_schema.columns hides a view over an invalid view`() throws {
     // `w`'s WHERE is invalid and `v` reads `w`; `SELECT * FROM v` fails because
     // `w` cannot run, so the overlay validates the nested body and lists
     // neither.
@@ -379,8 +359,7 @@ struct IntrospectionTests {
     #expect(listed == [])
   }
 
-  @Test("information_schema.columns rejects a mismatched nested view")
-  func mismatchedNestedView() throws {
+  @Test func `information_schema.columns rejects a mismatched nested view`() throws {
     // `w` declares one column but its body projects two, so `resolve(w)`
     // faults and `SELECT * FROM v` cannot run; the nested resolution must
     // propagate that mismatch, not mask it with `w`'s declared schema, so `v`
@@ -398,8 +377,7 @@ struct IntrospectionTests {
     #expect(rows == [])
   }
 
-  @Test("information_schema.columns rejects a wrong declared arity over *")
-  func mismatchedStarArity() throws {
+  @Test func `information_schema.columns rejects a wrong declared arity over *`() throws {
     // `v(x)` declares one column but `SELECT *` over two-column `People`
     // projects two, so `resolve` faults `SELECT * FROM v`. The builder
     // compares the compiled body width to the declared count, so `v` is not
@@ -415,8 +393,7 @@ struct IntrospectionTests {
     #expect(rows == [])
   }
 
-  @Test("information_schema.columns hides a cyclic view and stays usable")
-  func cyclicViews() throws {
+  @Test func `information_schema.columns hides a cyclic view and stays usable`() throws {
     // `A` reads `B` and `B` reads `A` — a cycle. `SELECT * FROM A` cannot run:
     // resolution now faults it `.recursion` (see cyclicViewRuns) rather than
     // hanging, so the overlay validates each view via the real `compile`
@@ -441,8 +418,7 @@ struct IntrospectionTests {
     #expect(cyclic == [])
   }
 
-  @Test("a cyclic view faults rather than hanging when run")
-  func cyclicViewRuns() throws {
+  @Test func `a cyclic view faults rather than hanging when run`() throws {
     // `A` over `B` over `A` is a cyclic definition; running it once recursed
     // resolve→compile→resolve until the stack overflowed (an unrecoverable
     // crash, not an `SQLError`). The cycle guard threaded through
@@ -458,8 +434,7 @@ struct IntrospectionTests {
     }
   }
 
-  @Test("a query joins a base relation against information_schema.columns")
-  func joinIntrospection() throws {
+  @Test func `a query joins a base relation against information_schema.columns`() throws {
     // The overlay is an ordinary relation, so it joins and filters like any
     // other — here counting a named table's columns via a WHERE.
     let rows = try run("""
@@ -469,8 +444,7 @@ struct IntrospectionTests {
     #expect(rows == [[.text("character varying")]])
   }
 
-  @Test("an unknown information_schema relation faults as unknown")
-  func unknownReserved() throws {
+  @Test func `an unknown information_schema relation faults as unknown`() throws {
     // A name in the reserved namespace the overlay does not serve is a plain
     // unknown relation.
     #expect(throws: SQLError.self) {
@@ -478,8 +452,7 @@ struct IntrospectionTests {
     }
   }
 
-  @Test("a user CTE shadows the information_schema overlay")
-  func cteShadows() throws {
+  @Test func `a user CTE shadows the information_schema overlay`() throws {
     // The overlay sits after the CTEs: a `WITH` binding the reserved name wins,
     // so the query reads the CTE's rows, not the enumerated metadata.
     let rows = try catalog().run(Statement(parsing: """
@@ -489,8 +462,7 @@ struct IntrospectionTests {
     #expect(rows == [[.integer(1)]])
   }
 
-  @Test("a base relation shadows the built-in information_schema view")
-  func baseShadowsBuiltin() throws {
+  @Test func `a base relation shadows the built-in information_schema view`() throws {
     // A catalog vending its OWN `information_schema.tables` base relation must
     // reach it: a base relation shadows the engine's built-in view (precedence
     // user view > base table > built-in view), so `SELECT *` reads the base
@@ -503,8 +475,7 @@ struct IntrospectionTests {
     #expect(rows == [[.integer(7)]])
   }
 
-  @Test("a CTE may select from the information_schema overlay")
-  func cteReads() throws {
+  @Test func `a CTE may select from the information_schema overlay`() throws {
     let rows = try catalog().run(Statement(parsing: """
         WITH t (n) AS (SELECT table_name FROM information_schema.tables
                         WHERE table_type = 'BASE TABLE')
@@ -513,16 +484,14 @@ struct IntrospectionTests {
     #expect(rows == [[.integer(2)]])
   }
 
-  @Test("columns(of:) resolves an information_schema relation's headers")
-  func schemaHeaders() throws {
+  @Test func `columns(of:) resolves an information_schema relation's headers`() throws {
     let query = try parse("SELECT * FROM information_schema.tables")
     let columns = try catalog().columns(of: query)
     #expect(columns.map(\.name) == ["table_catalog", "table_schema",
                                     "table_name", "table_type"])
   }
 
-  @Test("a fully qualified introspection column resolves like the bare form")
-  func qualifiedColumn() throws {
+  @Test func `a fully qualified introspection column resolves like the bare form`() throws {
     // The relation name itself carries a dot, so a qualified reference has two
     // (`information_schema.tables.table_name`); the last-dot split makes the
     // qualifier the two-part relation name, resolving to the same rows the bare
@@ -540,16 +509,14 @@ struct IntrospectionTests {
     #expect(!qualified.isEmpty)
   }
 
-  @Test("a single-dot qualified column still resolves a base relation")
-  func singleDotQualifier() throws {
+  @Test func `a single-dot qualified column still resolves a base relation`() throws {
     // A table-qualified reference over a base relation keeps its single-dot
     // meaning (qualifier `People`, column `Name`) under last-dot splitting.
     let rows = try run("SELECT People.Name FROM People")
     #expect(rows == [[.text("Ann")]])
   }
 
-  @Test("a view over information_schema.tables yields the inline rows")
-  func viewOverTables() throws {
+  @Test func `a view over information_schema.tables yields the inline rows`() throws {
     // A view whose body selects from a reserved introspection relation must
     // resolve its overlay from ITS OWN query, so selecting from the view yields
     // exactly what the inline query does.
@@ -568,8 +535,7 @@ struct IntrospectionTests {
     #expect(viewed == [[.text("People")], [.text("Widget")]])
   }
 
-  @Test("a view over information_schema.columns yields the inline rows")
-  func viewOverColumns() throws {
+  @Test func `a view over information_schema.columns yields the inline rows`() throws {
     let body = try parse("""
         SELECT column_name, data_type FROM information_schema.columns
           WHERE table_name = 'People'
@@ -590,8 +556,7 @@ struct IntrospectionTests {
     ])
   }
 
-  @Test("information_schema.columns preserves each column's value kind")
-  func materialisedKinds() throws {
+  @Test func `information_schema.columns preserves each column's value kind`() throws {
     // The overlay reports its own columns' kinds — `ordinal_position` is an
     // integer, `table_name`/`data_type` text — not a synthesized all-integer
     // schema.
@@ -606,8 +571,7 @@ struct IntrospectionTests {
     #expect(typed["data_type"] == .text)
   }
 
-  @Test("columns(of:) types a view's columns from its resolved body")
-  func viewKinds() throws {
+  @Test func `columns(of:) types a view's columns from its resolved body`() throws {
     // `Adults` is `SELECT Name FROM People`, over the `.text` `Name` column. A
     // view stores no kinds — its declared schema types every column `.integer`
     // — so resolving the body's kinds is what reports the `.text` here rather
@@ -617,8 +581,7 @@ struct IntrospectionTests {
     #expect(columns == [OutputColumn(name: "Name", type: .text)])
   }
 
-  @Test("a text-returning scalar-call column types character varying")
-  func scalarReturnType() throws {
+  @Test func `a text-returning scalar-call column types character varying`() throws {
     // `v` projects a scalar call `TAG(Name)` whose routine declares a `.text`
     // return type. `information_schema.columns` types the view's column from
     // its body: a `.call` reads the run's routine return-type map, so `iid`
@@ -640,8 +603,7 @@ struct IntrospectionTests {
     #expect(rows == [[.text("iid"), .text("character varying")]])
   }
 
-  @Test("columns(of:) types a scalar call by its routine's return type")
-  func scalarCallColumn() throws {
+  @Test func `columns(of:) types a scalar call by its routine's return type`() throws {
     // The public schema API takes the SAME routines a run would, so a projected
     // `TAG(Name)` reports its declared `.text` return type, not `.integer`.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
@@ -657,8 +619,7 @@ struct IntrospectionTests {
     #expect(throws: SQLError.self) { let _ = try cat.columns(of: query) }
   }
 
-  @Test("columns(of:) faults on an unknown call in a predicate")
-  func unknownCallPredicateColumns() throws {
+  @Test func `columns(of:) faults on an unknown call in a predicate`() throws {
     // The unknown `NOPE` is in the WHERE, invisible to the first-arm projection
     // walk; the whole-query inventory faults it, exactly as a run would.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
@@ -666,8 +627,7 @@ struct IntrospectionTests {
     #expect(throws: SQLError.self) { let _ = try cat.columns(of: query) }
   }
 
-  @Test("columns(of:) faults on an unknown call in a later UNION arm")
-  func unknownCallLaterArmColumns() throws {
+  @Test func `columns(of:) faults on an unknown call in a later UNION arm`() throws {
     // The first arm types cleanly; the unknown `NOPE` is in the second arm the
     // first-arm walk never visits.
     let cat = MetaCatalog([
@@ -680,8 +640,7 @@ struct IntrospectionTests {
     #expect(throws: SQLError.self) { let _ = try cat.columns(of: query) }
   }
 
-  @Test("a routine return type crosses a view boundary in schema resolution")
-  func scalarCallThroughView() throws {
+  @Test func `a routine return type crosses a view boundary in schema resolution`() throws {
     // `w` projects `TAG(Name)`; `SELECT * FROM w` must report `t` as the
     // routine's declared `.text`, so schema resolution threads the return map
     // across the view boundary rather than dropping it to `.integer`.
@@ -698,8 +657,7 @@ struct IntrospectionTests {
     #expect(typed == [OutputColumn(name: "t", type: .text)])
   }
 
-  @Test("columns(of:) faults on an unknown call in a view body predicate")
-  func unknownCallViewBodyColumns() throws {
+  @Test func `columns(of:) faults on an unknown call in a view body predicate`() throws {
     // `SELECT * FROM v` names no call, but v's body calls the unregistered
     // `NOPE` in its WHERE — a clause the view-boundary first-arm walk misses.
     // The body's call inventory must fault, as `SELECT * FROM v` would at run.
@@ -712,8 +670,7 @@ struct IntrospectionTests {
     }
   }
 
-  @Test("columns(of:) faults on arithmetic over a non-numeric operand")
-  func nonnumericArithmetic() throws {
+  @Test func `columns(of:) faults on arithmetic over a non-numeric operand`() throws {
     // `Name + 1` has no arithmetic — `Arithmetic.apply` faults on the first
     // non-NULL text row, so the schema faults rather than typing `.integer`.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
@@ -722,8 +679,7 @@ struct IntrospectionTests {
     }
   }
 
-  @Test("columns(of:) faults on SUM or AVG over a non-numeric operand")
-  func nonnumericAggregate() throws {
+  @Test func `columns(of:) faults on SUM or AVG over a non-numeric operand`() throws {
     // `SUM`/`AVG` fold numerically — `Aggregate.fold` faults on non-numeric —
     // so `SUM(Name)`/`AVG(Name)` fault rather than typing text/double.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
@@ -735,8 +691,7 @@ struct IntrospectionTests {
     }
   }
 
-  @Test("columns(of:) types numeric aggregates and arithmetic")
-  func numericAggregateTyping() throws {
+  @Test func `columns(of:) types numeric aggregates and arithmetic`() throws {
     let cat = MetaCatalog(["T": MetaRelation(
         [("Name", .text), ("Age", .integer), ("Score", .double)], [])])
     #expect(try cat.columns(of: parse("SELECT SUM(Age) AS x FROM T"))
@@ -755,8 +710,7 @@ struct IntrospectionTests {
                 == [OutputColumn(name: "x", type: .text)])
   }
 
-  @Test("columns(of:) faults on a bad operand in a later UNION arm")
-  func nonnumericLaterArm() throws {
+  @Test func `columns(of:) faults on a bad operand in a later UNION arm`() throws {
     // The first arm types fine; the later arm's `Name + 1` faults, as a run of
     // the union would — the first-arm schema walk never visits it.
     let cat = MetaCatalog(["People":
@@ -768,8 +722,7 @@ struct IntrospectionTests {
     }
   }
 
-  @Test("columns(of:) faults on a bad aggregate operand in a HAVING")
-  func nonnumericHaving() throws {
+  @Test func `columns(of:) faults on a bad aggregate operand in a HAVING`() throws {
     // `SUM(Name)` in the HAVING is not projected, so the projection walk misses
     // it; the whole-query type-check faults it, as a run would.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
@@ -780,8 +733,7 @@ struct IntrospectionTests {
     }
   }
 
-  @Test("columns(of:) faults on a bad operand in a WHERE")
-  func nonnumericWhere() throws {
+  @Test func `columns(of:) faults on a bad operand in a WHERE`() throws {
     let cat = MetaCatalog(["People":
         MetaRelation([("Name", .text), ("Age", .integer)], [])])
     #expect(throws: SQLError.self) {
@@ -791,8 +743,7 @@ struct IntrospectionTests {
     }
   }
 
-  @Test("columns(of:) types a valid later arm and HAVING")
-  func validLaterArmAndHaving() throws {
+  @Test func `columns(of:) types a valid later arm and HAVING`() throws {
     let cat = MetaCatalog(["People":
         MetaRelation([("Name", .text), ("Age", .integer)], [])])
     #expect(try cat.columns(of: parse("""
@@ -803,8 +754,7 @@ struct IntrospectionTests {
         """)) == [OutputColumn(name: "Name", type: .text)])
   }
 
-  @Test("information_schema.columns hides a view with a bad HAVING operand")
-  func nonnumericHavingView() throws {
+  @Test func `information_schema.columns hides a view with a bad HAVING operand`() throws {
     // The view's HAVING folds `SUM(Name)` over text — a run faults — so the
     // view is not advertised, though its projection types cleanly.
     let body = try parse("""
@@ -820,8 +770,7 @@ struct IntrospectionTests {
     #expect(rows == [])
   }
 
-  @Test("columns(of:) skips an arm a constant-false AND short-circuits")
-  func shortCircuitAnd() throws {
+  @Test func `columns(of:) skips an arm a constant-false AND short-circuits`() throws {
     // `1 = 0` is constantly false, so the executor never evaluates `Name + 1`;
     // the schema resolves rather than faulting on the unreachable arm.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
@@ -830,16 +779,14 @@ struct IntrospectionTests {
         """)) == [OutputColumn(name: "Name", type: .text)])
   }
 
-  @Test("columns(of:) skips an arm a constant-true OR short-circuits")
-  func shortCircuitOr() throws {
+  @Test func `columns(of:) skips an arm a constant-true OR short-circuits`() throws {
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
     #expect(try cat.columns(of: parse("""
         SELECT Name FROM People WHERE 1 = 1 OR Name + 1 = 2
         """)) == [OutputColumn(name: "Name", type: .text)])
   }
 
-  @Test("columns(of:) still faults on a reachable bad arm")
-  func reachableBadArm() throws {
+  @Test func `columns(of:) still faults on a reachable bad arm`() throws {
     // A constant-TRUE AND does not short-circuit its right arm, and a
     // non-constant guard leaves the arm reachable — both still fault.
     let cat = MetaCatalog(["People":
@@ -856,8 +803,7 @@ struct IntrospectionTests {
     }
   }
 
-  @Test("information_schema.columns lists a view with a short-circuited arm")
-  func shortCircuitView() throws {
+  @Test func `information_schema.columns lists a view with a short-circuited arm`() throws {
     let body = try parse("""
         SELECT Name FROM People WHERE 1 = 0 AND Name + 1 = 2
         """)
@@ -871,8 +817,7 @@ struct IntrospectionTests {
     #expect(rows == [[.text("Name")]])
   }
 
-  @Test("columns(of:) skips an unknown call a false AND short-circuits")
-  func shortCircuitUnknownCall() throws {
+  @Test func `columns(of:) skips an unknown call a false AND short-circuits`() throws {
     // `NOPE` is only in the unreachable arm of `1 = 0 AND …`, so the executor
     // never evaluates it and the query runs — the schema resolves, and call
     // validation rides the same short-circuit-aware walk as operand checking.
@@ -885,8 +830,7 @@ struct IntrospectionTests {
         """)) == [OutputColumn(name: "Name", type: .text)])
   }
 
-  @Test("columns(of:) still faults on a reachable unknown call")
-  func reachableUnknownCall() throws {
+  @Test func `columns(of:) still faults on a reachable unknown call`() throws {
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
     #expect(throws: SQLError.self) {
       let _ = try cat.columns(of: parse("""
@@ -895,8 +839,7 @@ struct IntrospectionTests {
     }
   }
 
-  @Test("information_schema.columns lists a view with an unreachable call")
-  func shortCircuitUnknownCallView() throws {
+  @Test func `information_schema.columns lists a view with an unreachable call`() throws {
     let body = try parse("""
         SELECT Name FROM People WHERE 1 = 0 AND NOPE(Name) = 1
         """)
@@ -910,8 +853,7 @@ struct IntrospectionTests {
     #expect(rows == [[.text("Name")]])
   }
 
-  @Test("columns(of:) derives a schema for a zero-row-limit projection")
-  func zeroRowLimitProjection() throws {
+  @Test func `columns(of:) derives a schema for a zero-row-limit projection`() throws {
     // `FETCH FIRST 0 ROWS ONLY` yields no rows and the limit applies before the
     // projection, so `Name + 1` is never evaluated; the schema DERIVES its
     // nominal type without faulting on the non-numeric operand.
@@ -921,8 +863,7 @@ struct IntrospectionTests {
         """)) == [OutputColumn(name: "x", type: .integer)])
   }
 
-  @Test("columns(of:) still faults on a projection under a non-zero limit")
-  func nonzeroLimitProjection() throws {
+  @Test func `columns(of:) still faults on a projection under a non-zero limit`() throws {
     // A non-zero limit projects rows, so the operand is reachable and faults.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
     #expect(throws: SQLError.self) {
@@ -932,8 +873,7 @@ struct IntrospectionTests {
     }
   }
 
-  @Test("information_schema.columns lists a zero-row-limit view")
-  func zeroRowLimitView() throws {
+  @Test func `information_schema.columns lists a zero-row-limit view`() throws {
     let body = try parse("""
         SELECT Name + 1 AS x FROM People FETCH FIRST 0 ROWS ONLY
         """)
@@ -947,8 +887,7 @@ struct IntrospectionTests {
     #expect(rows == [[.text("x"), .text("integer")]])
   }
 
-  @Test("columns(of:) validates an aggregate fold under a zero-row limit")
-  func aggregateUnderZeroLimit() throws {
+  @Test func `columns(of:) validates an aggregate fold under a zero-row limit`() throws {
     // A `FETCH FIRST 0 ROWS ONLY` skips a non-aggregate projection, but an
     // aggregate folds every row before the limit, so `SUM(Name)` over text
     // still faults; a numeric fold types cleanly.
@@ -964,8 +903,7 @@ struct IntrospectionTests {
         """)) == [OutputColumn(name: "x", type: .integer)])
   }
 
-  @Test("columns(of:) folds a literal IS NULL test in a short-circuit")
-  func shortCircuitNullTest() throws {
+  @Test func `columns(of:) folds a literal IS NULL test in a short-circuit`() throws {
     // `1 IS NULL` is constantly false and `1 IS NOT NULL` constantly true, so
     // the executor skips the guarded arm; the schema resolves rather than
     // faulting on the unreachable operand or call.
@@ -978,8 +916,7 @@ struct IntrospectionTests {
         """)) == [OutputColumn(name: "Name", type: .text)])
   }
 
-  @Test("columns(of:) skips the work after a constant-false WHERE")
-  func constantFalseWhere() throws {
+  @Test func `columns(of:) skips the work after a constant-false WHERE`() throws {
     // `WHERE 1 = 0` filters every row before projecting, so `Name + 1` is
     // unreachable and the schema resolves.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
@@ -1000,8 +937,7 @@ struct IntrospectionTests {
     }
   }
 
-  @Test("columns(of:) refines empty-group reachability")
-  func emptyGroupReachability() throws {
+  @Test func `columns(of:) refines empty-group reachability`() throws {
     let cat = MetaCatalog(["People": MetaRelation([("Age", .integer)], [])])
     // A false HAVING drops the empty group before the projection, so its call
     // is unreachable — the query returns an empty result and types cleanly.
@@ -1050,8 +986,7 @@ struct IntrospectionTests {
     }
   }
 
-  @Test("columns(of:) skips an unbound HAVING parameter over the empty group")
-  func emptyGroupUnboundParameter() throws {
+  @Test func `columns(of:) skips an unbound HAVING parameter over the empty group`() throws {
     let cat = MetaCatalog(["People": MetaRelation([("Age", .integer)], [])])
     // With no binding, `... = :p` yields UNKNOWN without evaluating the left,
     // so the divide never runs — the query returns no rows and types cleanly.
@@ -1060,8 +995,7 @@ struct IntrospectionTests {
         """)).count == 1)
   }
 
-  @Test("columns(of:) rejects a non-finite routine result over the empty group")
-  func emptyGroupNonfiniteRoutine() throws {
+  @Test func `columns(of:) rejects a non-finite routine result over the empty group`() throws {
     let cat = MetaCatalog(["People": MetaRelation([("Age", .integer)], [])])
     let routines: Routines =
         ["BAD": Routine(returns: .double, parameters: []) { _ in
@@ -1076,8 +1010,7 @@ struct IntrospectionTests {
     }
   }
 
-  @Test("columns(of:) validates a COUNT expression operand")
-  func countOperand() throws {
+  @Test func `columns(of:) validates a COUNT expression operand`() throws {
     let cat = MetaCatalog(["People":
         MetaRelation([("Name", .text), ("Age", .integer)], [])])
     // COUNT evaluates its operand per row to test non-NULL, so a bad operand
@@ -1092,8 +1025,7 @@ struct IntrospectionTests {
                 == [OutputColumn(name: "c", type: .integer)])
   }
 
-  @Test("columns(of:) skips the projection after a constant-false HAVING")
-  func constantFalseHaving() throws {
+  @Test func `columns(of:) skips the projection after a constant-false HAVING`() throws {
     // `HAVING 1 = 0` filters every group before the projection, so `Name + 1`
     // is unreachable and the schema resolves — but an aggregate fold, which the
     // group node runs before HAVING, is still validated.
@@ -1108,8 +1040,7 @@ struct IntrospectionTests {
     }
   }
 
-  @Test("columns(of:) validates a HAVING aggregate despite a short-circuit")
-  func havingAggregateShortCircuit() throws {
+  @Test func `columns(of:) validates a HAVING aggregate despite a short-circuit`() throws {
     // `HAVING 1 = 0 AND SUM(Name) > 0` short-circuits the comparison, but the
     // group node folds `SUM(Name)` before the HAVING filter, so it faults;
     // a numeric fold in the skipped arm is fine.
@@ -1125,8 +1056,7 @@ struct IntrospectionTests {
         """)) == [OutputColumn(name: "Name", type: .text)])
   }
 
-  @Test("columns(of:) rejects a statically-known division by zero")
-  func divideByZeroLiteral() throws {
+  @Test func `columns(of:) rejects a statically-known division by zero`() throws {
     let cat = MetaCatalog(["People": MetaRelation([("Age", .integer)], [])])
     #expect(throws: SQLError.divide) {
       let _ = try cat.columns(of: parse("SELECT 1 / 0 AS x FROM People"))
@@ -1136,8 +1066,7 @@ struct IntrospectionTests {
                 == [OutputColumn(name: "x", type: .integer)])
   }
 
-  @Test("columns(of:) rejects statically-overflowing literal arithmetic")
-  func overflowLiteral() throws {
+  @Test func `columns(of:) rejects statically-overflowing literal arithmetic`() throws {
     let cat = MetaCatalog(["People": MetaRelation([("Age", .integer)], [])])
     // Both operands literal, so the result overflows on every row (a FROM-less
     // SELECT at once); the schema rejects it rather than advertise a column.
@@ -1154,8 +1083,7 @@ struct IntrospectionTests {
                 == [OutputColumn(name: "x", type: .integer)])
   }
 
-  @Test("columns(of:) accepts a parameterized predicate with no binding")
-  func unboundParameter() throws {
+  @Test func `columns(of:) accepts a parameterized predicate with no binding`() throws {
     // With no binding (the schema default), `Name + 1 = :p` yields UNKNOWN
     // without evaluating the left term, so the query runs (no rows) and the
     // schema resolves rather than faulting on the text arithmetic.
@@ -1165,8 +1093,7 @@ struct IntrospectionTests {
         """)) == [OutputColumn(name: "Name", type: .text)])
   }
 
-  @Test("columns(of:) faults on a bad operand inside a call's arguments")
-  func nonnumericCallArgument() throws {
+  @Test func `columns(of:) faults on a bad operand inside a call's arguments`() throws {
     // `BITAND(Name + 1, 1)` returns integer, but its argument `Name + 1`
     // faults; typing recurses into the arguments, as a run would.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
@@ -1177,16 +1104,14 @@ struct IntrospectionTests {
     }
   }
 
-  @Test("columns(of:) types a call over valid arguments")
-  func callArgumentTyping() throws {
+  @Test func `columns(of:) types a call over valid arguments`() throws {
     let cat = MetaCatalog(["People": MetaRelation([("Age", .integer)], [])])
     #expect(try cat.columns(of: parse("""
         SELECT BITAND(Age, 1) AS b FROM People
         """)) == [OutputColumn(name: "b", type: .integer)])
   }
 
-  @Test("columns(of:) faults on a call over a wrong-kind argument")
-  func callArgumentKind() throws {
+  @Test func `columns(of:) faults on a call over a wrong-kind argument`() throws {
     // `BITAND` declares an `[.integer, .integer]` contract, so
     // `BITAND(Name, 1)` over the text `Name` faults as a run would (`BITAND`
     // throws `SQLError.argument` on a non-integer non-NULL value); the schema
@@ -1199,8 +1124,7 @@ struct IntrospectionTests {
     }
   }
 
-  @Test("columns(of:) faults on a call over the wrong arity")
-  func callArgumentArity() throws {
+  @Test func `columns(of:) faults on a call over the wrong arity`() throws {
     // `BITAND` takes two arguments, so `BITAND(Age)` faults `SQLError.argument`
     // at run; the static type-check enforces the declared arity, so the schema
     // rejects it rather than typing an integer column.
@@ -1212,8 +1136,7 @@ struct IntrospectionTests {
     }
   }
 
-  @Test("a recursive CTE over the store types a view's standard call")
-  func recursiveStoreRoutineReturns() throws {
+  @Test func `a recursive CTE over the store types a view's standard call`() throws {
     // A view column that is a standard scalar call must appear in
     // definition_schema.columns even when a recursive CTE names the store
     // directly — the cached CTE store entry is seeded with the routine returns,
@@ -1233,8 +1156,7 @@ struct IntrospectionTests {
     #expect(rows == [[.text("b")]])
   }
 
-  @Test("a base relation shadowed by the definition_schema store is hidden")
-  func storeShadowsBase() throws {
+  @Test func `a base relation shadowed by the definition_schema store is hidden`() throws {
     // The store overlay resolves `definition_schema.tables`, so a catalog base
     // relation of that name is unreachable; it must not be advertised as a BASE
     // TABLE, or metadata would disagree with resolution for the reserved name.
@@ -1253,8 +1175,7 @@ struct IntrospectionTests {
     ])
   }
 
-  @Test("information_schema.columns hides a view with an unknown scalar call")
-  func unknownCallView() throws {
+  @Test func `information_schema.columns hides a view with an unknown scalar call`() throws {
     // `v` projects `NOPE(Name)`; `NOPE` is not registered, so `SELECT * FROM v`
     // faults at run. `compile` lowers the call without checking the routine, so
     // the unknown function surfaces at typing — the view is not listed.
@@ -1269,8 +1190,7 @@ struct IntrospectionTests {
     #expect(rows == [])
   }
 
-  @Test("information_schema.columns hides a view whose predicate calls unknown")
-  func unknownCallPredicate() throws {
+  @Test func `information_schema.columns hides a view whose predicate calls unknown`() throws {
     // The unknown `NOPE` is in the WHERE, not the projection, so the first-arm
     // type walk never sees it — only the whole-body call inventory does, and a
     // run of `SELECT * FROM v` would fault `SQLError.function`.
@@ -1285,8 +1205,7 @@ struct IntrospectionTests {
     #expect(rows == [])
   }
 
-  @Test("information_schema.columns hides a view whose later arm calls unknown")
-  func unknownCallLaterArm() throws {
+  @Test func `information_schema.columns hides a view whose later arm calls unknown`() throws {
     // The first arm types cleanly; the unknown `NOPE` is in the second UNION
     // arm, which the first-arm walk never types — the inventory spans arms.
     let body = try parse("""
@@ -1302,8 +1221,7 @@ struct IntrospectionTests {
     #expect(rows == [])
   }
 
-  @Test("information_schema.columns lists a view whose predicate calls known")
-  func knownCallPredicate() throws {
+  @Test func `information_schema.columns lists a view whose predicate calls known`() throws {
     // The gate rejects only an UNKNOWN routine — a registered one in the WHERE
     // (`BITAND`, the standard prelude) leaves the view advertised.
     let body = try parse("SELECT Name FROM People WHERE BITAND(1, 1) = 1")
@@ -1319,8 +1237,7 @@ struct IntrospectionTests {
 
   // MARK: - DEFINITION_SCHEMA store
 
-  @Test("definition_schema.tables is itself queryable as the store")
-  func definitionTables() throws {
+  @Test func `definition_schema.tables is itself queryable as the store`() throws {
     // The store the portable `information_schema.tables` view reads is
     // queryable in its own right — it holds the shape the view merely renames.
     let rows = try run("""
@@ -1336,8 +1253,7 @@ struct IntrospectionTests {
     ])
   }
 
-  @Test("definition_schema.columns is itself queryable as the store")
-  func definitionColumns() throws {
+  @Test func `definition_schema.columns is itself queryable as the store`() throws {
     let rows = try run("""
         SELECT column_name, ordinal_position, data_type
           FROM definition_schema.columns
@@ -1350,8 +1266,7 @@ struct IntrospectionTests {
     ])
   }
 
-  @Test("information_schema.tables yields exactly its definition_schema store")
-  func informationOverDefinition() throws {
+  @Test func `information_schema.tables yields exactly its definition_schema store`() throws {
     // The portable view is a projection over the store, so the two return the
     // same rows — the layering is visible, not conflated.
     let over =
@@ -1362,8 +1277,7 @@ struct IntrospectionTests {
     #expect(!over.isEmpty)
   }
 
-  @Test("an unknown definition_schema relation faults as unknown")
-  func unknownStore() throws {
+  @Test func `an unknown definition_schema relation faults as unknown`() throws {
     // A name in the reserved store namespace the store does not serve is a
     // plain unknown relation, as an unserved information_schema name is.
     #expect(throws: SQLError.self) {
@@ -1371,8 +1285,7 @@ struct IntrospectionTests {
     }
   }
 
-  @Test("a user CTE shadows the definition_schema store")
-  func storeCTEShadows() throws {
+  @Test func `a user CTE shadows the definition_schema store`() throws {
     let rows = try catalog().run(Statement(parsing: """
         WITH "definition_schema.tables" (x) AS (SELECT 1)
           SELECT x FROM "definition_schema.tables"
@@ -1380,8 +1293,7 @@ struct IntrospectionTests {
     #expect(rows == [[.integer(1)]])
   }
 
-  @Test("a view over definition_schema.tables yields the inline rows")
-  func viewOverStoreTables() throws {
+  @Test func `a view over definition_schema.tables yields the inline rows`() throws {
     // A view whose body names the STORE relation directly — not an
     // `information_schema.` view over it — resolves and runs the same as the
     // inline query: the store overlay reaches the view body's compile and
@@ -1402,8 +1314,7 @@ struct IntrospectionTests {
     #expect(viewed == [[.text("People")], [.text("Widget")]])
   }
 
-  @Test("a view over definition_schema.columns yields the inline rows")
-  func viewOverStoreColumns() throws {
+  @Test func `a view over definition_schema.columns yields the inline rows`() throws {
     let body = try parse("""
         SELECT column_name, data_type FROM definition_schema.columns
           WHERE table_name = 'People'

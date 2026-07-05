@@ -19,8 +19,7 @@ private func parse(_ text: String) throws -> Query {
 // MARK: - Tests
 
 @Suite struct DefinitionSchemaTests {
-  @Test("definition_schema.columns lists a base relation's columns")
-  func columns() throws {
+  @Test func `definition_schema.columns lists a base relation's columns`() throws {
     let catalog = try Catalog {
       Relation("People", ["Name": .text, "Age": .integer])
     }
@@ -30,8 +29,7 @@ private func parse(_ text: String) throws -> Query {
         """, yields: [["Name"], ["Age"]])
   }
 
-  @Test("definition_schema.columns skips a cyclic view and stays usable")
-  func cyclicViewColumns() throws {
+  @Test func `definition_schema.columns skips a cyclic view and stays usable`() throws {
     // `A` reads `B` and `B` reads `A` — a cycle. The store's `columns` builder
     // compiles each view to advertise it, which for a cyclic view would recurse
     // resolve→compile→resolve until the stack overflows (SIGBUS, not an
@@ -56,8 +54,7 @@ private func parse(_ text: String) throws -> Query {
         """)
   }
 
-  @Test("definition_schema.tables lists a cyclic view without crashing")
-  func cyclicViewTables() throws {
+  @Test func `definition_schema.tables lists a cyclic view without crashing`() throws {
     // `definition_schema.tables` enumerates relations and views by NAME without
     // compiling their bodies, so it lists the cyclic view too — the point is it
     // does not hang or crash reaching it. Assert the catalog's own names all

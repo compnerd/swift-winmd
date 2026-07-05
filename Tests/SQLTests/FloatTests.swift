@@ -44,15 +44,13 @@ private func arithmetic(_ lhs: Value, _ op: Arithmetic,
 
 @Suite("DOUBLE comparison")
 private struct DoubleComparisonTests {
-  @Test("like doubles compare by magnitude")
-  func equality() {
+  @Test func `like doubles compare by magnitude`() {
     #expect(compare(.double(1.5), .equal, .double(1.5)) == true)
     #expect(compare(.double(1.5), .equal, .double(2.5)) == false)
     #expect(compare(.double(1.5), .unequal, .double(2.5)) == true)
   }
 
-  @Test("doubles order by magnitude")
-  func ordering() {
+  @Test func `doubles order by magnitude`() {
     #expect(compare(.double(1.5), .lt, .double(2.5)) == true)
     #expect(compare(.double(2.5), .lt, .double(1.5)) == false)
     #expect(compare(.double(2.5), .gt, .double(1.5)) == true)
@@ -65,8 +63,7 @@ private struct DoubleComparisonTests {
 
 @Suite("mixed integer/double comparison")
 private struct MixedComparisonTests {
-  @Test("an integer equals a like-valued double — numeric, not cross-type")
-  func numericEquality() {
+  @Test func `an integer equals a like-valued double — numeric, not cross-type`() {
     // Both operands are numeric, so `1 = 1.0` is TRUE, not a cross-kind miss.
     #expect(compare(.integer(1), .equal, .double(1.0)) == true)
     #expect(compare(.double(1.0), .equal, .integer(1)) == true)
@@ -74,8 +71,7 @@ private struct MixedComparisonTests {
     #expect(compare(.integer(1), .unequal, .double(1.5)) == true)
   }
 
-  @Test("an integer orders against a double by magnitude")
-  func numericOrdering() {
+  @Test func `an integer orders against a double by magnitude`() {
     #expect(compare(.integer(1), .lt, .double(1.5)) == true)
     #expect(compare(.double(1.5), .gt, .integer(1)) == true)
     #expect(compare(.integer(2), .lt, .double(1.5)) == false)
@@ -87,8 +83,7 @@ private struct MixedComparisonTests {
 
 @Suite("DOUBLE arithmetic")
 private struct DoubleArithmeticTests {
-  @Test("double arithmetic yields a double")
-  func likeTyped() throws {
+  @Test func `double arithmetic yields a double`() throws {
     #expect(try arithmetic(.double(1.5), .add, .double(2.0)) == .double(3.5))
     #expect(try arithmetic(.double(2.5), .subtract, .double(1.0))
                 == .double(1.5))
@@ -96,14 +91,12 @@ private struct DoubleArithmeticTests {
                 == .double(3.0))
   }
 
-  @Test("double division is real, not truncated")
-  func realDivision() throws {
+  @Test func `double division is real, not truncated`() throws {
     #expect(try arithmetic(.double(5.0), .divide, .double(2.0))
                 == .double(2.5))
   }
 
-  @Test("a mixed integer/double is numeric and yields a double")
-  func mixed() throws {
+  @Test func `a mixed integer/double is numeric and yields a double`() throws {
     // `5 / 2.0` is real division `2.5`, and `2 * 1.5` is `3.0` — the integer
     // promotes to `Double`, so the result is approximate-numeric.
     #expect(try arithmetic(.integer(5), .divide, .double(2.0))
@@ -114,15 +107,13 @@ private struct DoubleArithmeticTests {
                 == .double(2.5))
   }
 
-  @Test("an integer pair still divides as integers")
-  func integerDivisionUnchanged() throws {
+  @Test func `an integer pair still divides as integers`() throws {
     // The mixed-numeric widening does not touch the exact-numeric path: `5 / 2`
     // is still `2`, not `2.5`.
     #expect(try arithmetic(.integer(5), .divide, .integer(2)) == .integer(2))
   }
 
-  @Test("a double divide by zero raises, matching the integer policy")
-  func divideByZero() {
+  @Test func `a double divide by zero raises, matching the integer policy`() {
     #expect(throws: SQLError.divide) {
       try arithmetic(.double(1.0), .divide, .double(0.0))
     }
@@ -131,8 +122,7 @@ private struct DoubleArithmeticTests {
     }
   }
 
-  @Test("a non-finite double result is rejected, never returned")
-  func nonFinite() {
+  @Test func `a non-finite double result is rejected, never returned`() {
     // An overflow to `inf` (a magnitude past `Double`'s range) faults rather
     // than returning `inf`.
     #expect(throws: SQLError.self) {
@@ -145,8 +135,7 @@ private struct DoubleArithmeticTests {
     }
   }
 
-  @Test("a non-finite double literal is rejected at lowering")
-  func nonFiniteLiteral() throws {
+  @Test func `a non-finite double literal is rejected at lowering`() throws {
     // A directly-built `Literal.double(.nan/.infinity)` (the lexer never makes
     // one) is rejected when lowered to a `Value`, so no non-finite double
     // enters a plan; a finite literal lowers unchanged.
@@ -156,8 +145,7 @@ private struct DoubleArithmeticTests {
     #expect(finite == .double(1.5))
   }
 
-  @Test("a routine returning a non-finite double is rejected")
-  func nonFiniteRoutine() {
+  @Test func `a routine returning a non-finite double is rejected`() {
     // A registered routine is a public `Value` producer that bypasses the
     // literal/arithmetic checks; a NaN or inf result is rejected at the call
     // boundary so it never reaches dedup, ordering, or a recursive UNION.
@@ -181,14 +169,12 @@ private struct DoubleArithmeticTests {
 
 @Suite("DOUBLE NULL propagation")
 private struct DoubleNullTests {
-  @Test("a NULL operand is UNKNOWN in a comparison")
-  func comparison() {
+  @Test func `a NULL operand is UNKNOWN in a comparison`() {
     #expect(compare(.double(1.5), .equal, .null) == nil)
     #expect(compare(.double(1.5), .lt, .null) == nil)
   }
 
-  @Test("a NULL operand propagates through arithmetic")
-  func propagation() throws {
+  @Test func `a NULL operand propagates through arithmetic`() throws {
     #expect(try arithmetic(.double(1.5), .add, .null) == .null)
     #expect(try arithmetic(.null, .multiply, .double(1.5)) == .null)
   }
@@ -198,8 +184,7 @@ private struct DoubleNullTests {
 
 @Suite("DOUBLE sort ordering")
 private struct DoubleSortTests {
-  @Test("doubles sort ascending by magnitude, NULL first")
-  func ordering() {
+  @Test func `doubles sort ascending by magnitude, NULL first`() {
     // `less` is the sort primitive: NULL precedes every value, and two doubles
     // order by magnitude.
     #expect(less(.double(1.5), .double(2.5)) == true)
@@ -208,8 +193,7 @@ private struct DoubleSortTests {
     #expect(less(.double(1.5), .null) == false)
   }
 
-  @Test("a mixed integer/double slot sorts by magnitude")
-  func mixed() {
+  @Test func `a mixed integer/double slot sorts by magnitude`() {
     // A slot that happens to mix exact and approximate numerics still orders by
     // magnitude rather than tying at the kind boundary.
     #expect(less(.integer(1), .double(1.5)) == true)
@@ -217,8 +201,7 @@ private struct DoubleSortTests {
     #expect(less(.double(2.5), .integer(2)) == false)
   }
 
-  @Test("a double past Int.max still orders against Int.max, not a false tie")
-  func beyondIntRange() {
+  @Test func `a double past Int.max still orders against Int.max, not a false tie`() {
     // `Double(Int.max)` rounds to 2^63, past `Int` — but `Int.max` (2^63 - 1)
     // is still strictly less, so the pair orders one way, never false both ways
     // (which would leave MIN/MAX and sort order-dependent).
@@ -231,14 +214,12 @@ private struct DoubleSortTests {
 
 @Suite("DOUBLE literal parsing")
 private struct DoubleLiteralTests {
-  @Test("a decimal literal lowers to a double value")
-  func fraction() throws {
+  @Test func `a decimal literal lowers to a double value`() throws {
     let lowered = try value(of: .double(3.14))
     #expect(lowered == .double(3.14))
   }
 
-  @Test("an integer literal stays an integer value")
-  func integer() throws {
+  @Test func `an integer literal stays an integer value`() throws {
     let lowered = try value(of: .integer(3))
     #expect(lowered == .integer(3))
   }

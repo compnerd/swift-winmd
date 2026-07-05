@@ -29,29 +29,25 @@ private func sales() throws -> FixtureCatalog {
 // MARK: - Tests
 
 struct AggregateTests {
-  @Test("COUNT(*) over the whole result counts every row")
-  func countStar() throws {
+  @Test func `COUNT(*) over the whole result counts every row`() throws {
     try sales().expect("SELECT COUNT(*) FROM Sales", yields: [[7]])
   }
 
-  @Test("COUNT(*) over an empty result is zero, not no row")
-  func countStarEmpty() throws {
+  @Test func `COUNT(*) over an empty result is zero, not no row`() throws {
     // The degenerate whole-result aggregation yields one group even over no
     // matching rows — COUNT is 0 rather than an empty result.
     try sales().expect("SELECT COUNT(*) FROM Sales WHERE Dept = 'None'",
                        yields: [[0]])
   }
 
-  @Test("COUNT(expr) ignores NULLs where COUNT(*) does not")
-  func countExpr() throws {
+  @Test func `COUNT(expr) ignores NULLs where COUNT(*) does not`() throws {
     // Five of the seven rows have a non-NULL Amount (two are NULL); COUNT(*)
     // counts all seven, COUNT(Amount) only the non-NULL five.
     try sales().expect("SELECT COUNT(Amount), COUNT(*) FROM Sales",
                        yields: [[5, 7]])
   }
 
-  @Test("SUM, MIN, MAX, and AVG skip NULLs over the whole result")
-  func wholeResult() throws {
+  @Test func `SUM, MIN, MAX, and AVG skip NULLs over the whole result`() throws {
     // Amounts 10,20,30,40,50 (the NULLs skipped): SUM 150, MIN 10, MAX 50,
     // AVG 150/5 = 30.0 — real division to an approximate-numeric double.
     try sales().expect("""
@@ -59,8 +55,7 @@ struct AggregateTests {
         """, yields: [[150, 10, 50, 30.0]])
   }
 
-  @Test("AVG is real division yielding an approximate-numeric double")
-  func avgReal() throws {
+  @Test func `AVG is real division yielding an approximate-numeric double`() throws {
     // Books amounts 10,20,30 sum 60 over 3 → 20.0; Games 40,50 sum 90 over 2
     // → 45.0 — real division, not truncating; Toys all-NULL → NULL.
     try sales().expect("""
@@ -68,16 +63,14 @@ struct AggregateTests {
         """, yields: [["Books", 20.0], ["Games", 45.0], ["Toys", nil]])
   }
 
-  @Test("AVG yields a fractional double where integer division truncates")
-  func avgFractional() throws {
+  @Test func `AVG yields a fractional double where integer division truncates`() throws {
     // East Books are 10 and 20: (10 + 20) / 2 = 15.0.
     try sales().expect("""
         SELECT AVG(Amount) FROM Sales WHERE Dept = 'Books' AND Region = 'East'
         """, yields: [[15.0]])
   }
 
-  @Test("an all-NULL group yields NULL for SUM/MIN/MAX/AVG and 0 for COUNT")
-  func allNull() throws {
+  @Test func `an all-NULL group yields NULL for SUM/MIN/MAX/AVG and 0 for COUNT`() throws {
     // Toys has one row whose Amount is NULL: COUNT(*) counts the row (1),
     // COUNT(Amount) skips it (0), and the value aggregates are NULL.
     try sales().expect("""
@@ -87,16 +80,14 @@ struct AggregateTests {
         """, yields: [[1, 0, nil, nil, nil, nil]])
   }
 
-  @Test("GROUP BY one column aggregates each group")
-  func groupByOne() throws {
+  @Test func `GROUP BY one column aggregates each group`() throws {
     try sales().expect("""
         SELECT Dept, COUNT(*), SUM(Amount) FROM Sales
           GROUP BY Dept ORDER BY Dept
         """, yields: [["Books", 3, 60], ["Games", 3, 90], ["Toys", 1, nil]])
   }
 
-  @Test("GROUP BY multiple columns keys on the tuple")
-  func groupByMany() throws {
+  @Test func `GROUP BY multiple columns keys on the tuple`() throws {
     // (Books,East) 10+20, (Books,West) 30, (Games,East) 40, (Games,West)
     // NULL+50, (Toys,East) NULL. Ordered by Dept, ties by first appearance.
     try sales().expect("""
@@ -107,8 +98,7 @@ struct AggregateTests {
                       ["Toys", "East", 1, nil]])
   }
 
-  @Test("a compound ORDER BY sorts grouped output by each key in turn")
-  func orderByCompound() throws {
+  @Test func `a compound ORDER BY sorts grouped output by each key in turn`() throws {
     // Order groups by Dept ascending, breaking ties by Region descending — the
     // second key reverses only the rows the first leaves equal.
     try sales().expect("""
@@ -119,8 +109,7 @@ struct AggregateTests {
                       ["Toys", "East", 1, nil]])
   }
 
-  @Test("mixed integer/double group keys canonicalize into one group")
-  func mixedNumericKeys() throws {
+  @Test func `mixed integer/double group keys canonicalize into one group`() throws {
     // A column carrying both 1 and 1.0 — as a CTE/UNION ALL or any source can —
     // groups them together under the engine's EXACT numeric equality (the same
     // `1` = `1.0` UNION dedup uses), yielding one group of two keyed by the
@@ -135,8 +124,7 @@ struct AggregateTests {
                        yields: [[1, 2]])
   }
 
-  @Test("mixed SUM/AVG widening does not depend on row order")
-  func mixedWideningOrderIndependent() throws {
+  @Test func `mixed SUM/AVG widening does not depend on row order`() throws {
     // Int.max, 1, 0.5 overflows Int if summed as integers first, but the 0.5
     // widens the total to a double — so the result must be the same
     // whether the overflowing integer prefix or the double is seen first, not a
@@ -161,8 +149,7 @@ struct AggregateTests {
     try suffix.expect(query, yields: [[expected, expected / 3]])
   }
 
-  @Test("all-integer SUM tolerates transient overflow if the total fits")
-  func transientIntegerOverflow() throws {
+  @Test func `all-integer SUM tolerates transient overflow if the total fits`() throws {
     // A prefix that overflows Int (Int.max + 1) must not latch a fault when a
     // later value (-1) brings the exact total back into range — the result is
     // the mathematical total, Int.max, whichever order the rows arrive in.
@@ -193,8 +180,7 @@ struct AggregateTests {
                 fails: .magnitude("integer overflow"))
   }
 
-  @Test("AVG divides a wide integer total that SUM could not represent")
-  func avgWideIntegerTotal() throws {
+  @Test func `AVG divides a wide integer total that SUM could not represent`() throws {
     // Two Int.max rows sum to 2 * Int.max, outside Int — SUM would fault, but
     // AVG divides the wide total and returns the finite approximate mean.
     let catalog = try Catalog {
@@ -206,8 +192,7 @@ struct AggregateTests {
     try catalog.expect("SELECT AVG(x) FROM T", yields: [[Double(Int.max)]])
   }
 
-  @Test("MIN/MAX over incomparable kinds is a type error, either order")
-  func minMaxIncomparableKinds() throws {
+  @Test func `MIN/MAX over incomparable kinds is a type error, either order`() throws {
     // A column mixing TEXT and INTEGER (from a CTE/UNION ALL) has no ordering
     // across kinds — MIN/MAX rejects it rather than keeping the first-seen
     // value (which would flip MIN and MAX with row order).
@@ -230,8 +215,7 @@ struct AggregateTests {
     intFirst.expect("SELECT MAX(x) FROM T", fails: fault)
   }
 
-  @Test("MIN/MAX over Int.max and Double(Int.max) is deterministic")
-  func minMaxNumericBoundary() throws {
+  @Test func `MIN/MAX over Int.max and Double(Int.max) is deterministic`() throws {
     // Int.max (2^63 - 1) and Double(Int.max) (2^63) are both numeric and order
     // exactly, so MIN is the integer and MAX the larger double — same result
     // whichever row arrives first, not an order-dependent first-seen keep.
@@ -253,8 +237,7 @@ struct AggregateTests {
                            yields: [[Int.max, Double(Int.max)]])
   }
 
-  @Test("ORDER BY on a duplicated projection output name is ambiguous")
-  func orderByAmbiguousName() throws {
+  @Test func `ORDER BY on a duplicated projection output name is ambiguous`() throws {
     // Two projected columns share the output name `k`, so `ORDER BY k` has no
     // single slot to order on — rejected as ambiguous (as the non-grouped path
     // reports for a shared unqualified join column) rather than silently
@@ -265,8 +248,7 @@ struct AggregateTests {
         """, fails: .ambiguous("k"))
   }
 
-  @Test("MIN and MAX use the engine's typed comparison per group")
-  func minMax() throws {
+  @Test func `MIN and MAX use the engine's typed comparison per group`() throws {
     try sales().expect("""
         SELECT Dept, MIN(Amount), MAX(Amount) FROM Sales
           GROUP BY Dept ORDER BY Dept
@@ -274,8 +256,7 @@ struct AggregateTests {
                       ["Toys", nil, nil]])
   }
 
-  @Test("HAVING filters groups after aggregation")
-  func having() throws {
+  @Test func `HAVING filters groups after aggregation`() throws {
     // Keep only departments whose row count exceeds one — Toys (1 row) drops.
     try sales().expect("""
         SELECT Dept, COUNT(*) FROM Sales
@@ -283,8 +264,7 @@ struct AggregateTests {
         """, yields: [["Books", 3], ["Games", 3]])
   }
 
-  @Test("HAVING may reference an aggregate not in the projection")
-  func havingHidden() throws {
+  @Test func `HAVING may reference an aggregate not in the projection`() throws {
     // The HAVING aggregates SUM(Amount) though the projection does not — the
     // engine still computes it for the group filter.
     // Books SUM 60 drops, Games SUM 90 keeps, Toys SUM NULL drops (UNKNOWN).
@@ -294,8 +274,7 @@ struct AggregateTests {
         """, yields: [["Games"]])
   }
 
-  @Test("HAVING without a GROUP BY filters the single whole-result group")
-  func havingWholeResult() throws {
+  @Test func `HAVING without a GROUP BY filters the single whole-result group`() throws {
     // The whole result is one group; HAVING keeps or drops it. COUNT(*) is 7.
     let catalog = try sales()
     try catalog.expect("SELECT COUNT(*) FROM Sales HAVING COUNT(*) > 5",
@@ -303,8 +282,7 @@ struct AggregateTests {
     try catalog.empty("SELECT COUNT(*) FROM Sales HAVING COUNT(*) > 100")
   }
 
-  @Test("ORDER BY may name an aggregate's projection alias")
-  func orderByAggregate() throws {
+  @Test func `ORDER BY may name an aggregate's projection alias`() throws {
     // Order the departments by their total descending — the ORDER BY names the
     // aggregate's output alias `Total`.
     // Games 90, Books 60, Toys NULL (NULL sorts last descending).
@@ -314,8 +292,7 @@ struct AggregateTests {
         """, yields: [["Games", 90], ["Books", 60], ["Toys", nil]])
   }
 
-  @Test("ORDER BY on a computed-expression alias is rejected clearly")
-  func orderByComputedAlias() throws {
+  @Test func `ORDER BY on a computed-expression alias is rejected clearly`() throws {
     // `Doubled` aliases a COMPUTED value (the projection evaluates it after
     // the sort), so it has no standalone grouped slot to order on — the engine
     // rejects it as unsupported rather than misreporting an unknown column.
@@ -327,8 +304,7 @@ struct AggregateTests {
     }
   }
 
-  @Test("an aggregate query pages with OFFSET/FETCH after ORDER BY")
-  func aggregateFetch() throws {
+  @Test func `an aggregate query pages with OFFSET/FETCH after ORDER BY`() throws {
     // Three groups ordered by Dept; skip one, take one.
     try sales().expect("""
         SELECT Dept, COUNT(*) FROM Sales
@@ -336,8 +312,7 @@ struct AggregateTests {
         """, yields: [["Games", 3]])
   }
 
-  @Test("an aggregate mixes with a scalar arithmetic over the group key")
-  func mixedProjection() throws {
+  @Test func `an aggregate mixes with a scalar arithmetic over the group key`() throws {
     // A grouped query may project the key through arithmetic and a scalar
     // expression alongside the aggregate; COUNT(*) doubled proves it composes.
     try sales().expect("""
@@ -346,8 +321,7 @@ struct AggregateTests {
         """, yields: [["Books", 6], ["Games", 6], ["Toys", 2]])
   }
 
-  @Test("a non-grouped projection column is rejected")
-  func projectionRule() throws {
+  @Test func `a non-grouped projection column is rejected`() throws {
     // `Region` is neither aggregated nor a GROUP BY key, so the query is
     // ill-formed — the standard single-group rule.
     try sales().expect(
@@ -355,36 +329,31 @@ struct AggregateTests {
         fails: .grouping("Region"))
   }
 
-  @Test("a bare column with no GROUP BY and an aggregate is rejected")
-  func bareColumnRule() throws {
+  @Test func `a bare column with no GROUP BY and an aggregate is rejected`() throws {
     // Mixing a bare column with an aggregate and no GROUP BY groups the whole
     // result — the column is then not a key, so it faults.
     try sales().expect("SELECT Dept, COUNT(*) FROM Sales",
                        fails: .grouping("Dept"))
   }
 
-  @Test("the projection-rule fault carries the SS004 SQLSTATE")
-  func projectionRuleState() throws {
+  @Test func `the projection-rule fault carries the SS004 SQLSTATE`() throws {
     #expect(SQLError.grouping("Region").sqlstate == "SS004")
   }
 
-  @Test("SUM over a text column is a type error")
-  func sumText() throws {
+  @Test func `SUM over a text column is a type error`() throws {
     // SUM/AVG require numeric operands; folding a text value faults through the
     // engine's arithmetic rather than coercing.
     try sales().expect("SELECT SUM(Dept) FROM Sales",
                        fails: .operand("operands must be numeric"))
   }
 
-  @Test("AVG over a text column is a type error")
-  func avgText() throws {
+  @Test func `AVG over a text column is a type error`() throws {
     // AVG folds the same numeric total as SUM, so a text operand faults alike.
     try sales().expect("SELECT AVG(Dept) FROM Sales",
                        fails: .operand("operands must be numeric"))
   }
 
-  @Test("only COUNT admits a '*' operand")
-  func starOnlyCount() throws {
+  @Test func `only COUNT admits a '*' operand`() throws {
     // `SUM(*)`/`AVG(*)`/`MIN(*)`/`MAX(*)` are not valid — only `COUNT(*)`
     // counts rows without reading a value.
     let catalog = try sales()
@@ -397,8 +366,7 @@ struct AggregateTests {
     try catalog.expect("SELECT COUNT(*) FROM Sales", yields: [[7]])
   }
 
-  @Test("an aggregate in a WHERE clause is rejected")
-  func aggregateInWhere() throws {
+  @Test func `an aggregate in a WHERE clause is rejected`() throws {
     // An aggregate has no per-row meaning, so it may not appear in a WHERE.
     #expect(throws: SQLError.self) {
       try sales().run(Statement(parsing:
@@ -406,8 +374,7 @@ struct AggregateTests {
     }
   }
 
-  @Test("an aggregate groups a join by a qualified key column")
-  func aggregateOverJoin() throws {
+  @Test func `an aggregate groups a join by a qualified key column`() throws {
     // Aggregation sits above the join chain, so a grouped query over a join
     // folds each aggregate over the joined rows and keys on a qualified column.
     let catalog = try Catalog {
@@ -428,15 +395,13 @@ struct AggregateTests {
         """, yields: [["Books", 30], ["Games", 40]])
   }
 
-  @Test("SUM over an all-integer column stays an exact integer")
-  func sumIntegerExact() throws {
+  @Test func `SUM over an all-integer column stays an exact integer`() throws {
     // Every folded value is an integer, so the total stays an integer — the
     // engine's arithmetic keeps `integer + integer` integral.
     try sales().expect("SELECT SUM(Amount) FROM Sales", yields: [[150]])
   }
 
-  @Test("SUM over a double column yields a double")
-  func sumDouble() throws {
+  @Test func `SUM over a double column yields a double`() throws {
     let catalog = try Catalog {
       Relation("T", ["X": .double]) {
         Row(1.5)
@@ -448,8 +413,7 @@ struct AggregateTests {
     try catalog.expect("SELECT SUM(X) FROM T", yields: [[4.0]])
   }
 
-  @Test("SUM over mixed integer and double columns widens to a double")
-  func sumMixed() throws {
+  @Test func `SUM over mixed integer and double columns widens to a double`() throws {
     let catalog = try Catalog {
       Relation("T", ["X": .integer]) {
         Row(10)
@@ -461,8 +425,7 @@ struct AggregateTests {
     try catalog.expect("SELECT SUM(X) FROM T", yields: [[32.5]])
   }
 
-  @Test("AVG over a double column is a double")
-  func avgDouble() throws {
+  @Test func `AVG over a double column is a double`() throws {
     let catalog = try Catalog {
       Relation("T", ["X": .double]) {
         Row(1.0)

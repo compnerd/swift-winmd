@@ -108,9 +108,12 @@ public enum SQLError: Error, Hashable, Sendable {
   /// rather than producing rows, or a malformed `WITH` member; the string
   /// describes the fault.
   case statement(String)
-  /// A recursive common table expression did not reach a fixpoint within the
-  /// iteration cap (`kRecursionCap`) — it produces rows without end. The string
-  /// is the offending CTE's name.
+  /// A definition refers to itself without end: a recursive common table
+  /// expression that did not reach a fixpoint within the iteration cap
+  /// (`kRecursionCap`) — it produces rows without end — or a cyclic registered
+  /// view whose body resolves back to itself (`A` over `B` over `A`), which
+  /// would otherwise recurse resolve→compile→resolve until the stack overflows.
+  /// The string is the offending CTE's or view's name.
   case recursion(String)
   /// An aggregate query names a column in its projection, `HAVING`, or `ORDER
   /// BY` that is neither aggregated nor a `GROUP BY` key — the standard rule
@@ -169,7 +172,7 @@ extension SQLError: CustomStringConvertible {
     case let .statement(detail):
       "statement is not runnable as a query: \(detail)"
     case let .recursion(name):
-      "recursive CTE '\(name)' did not terminate"
+      "recursive definition '\(name)' did not terminate"
     case let .grouping(name):
       "column '\(name)' must appear in the GROUP BY clause "
           + "or be used in an aggregate function"

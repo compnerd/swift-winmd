@@ -275,7 +275,7 @@ extension Catalog where Self: ~Escapable {
     if let relation = Definition(name) {
       return store(relation, rows: false).schema()
     }
-    if let view = view(named: name) {
+    if let view = resolve(view: name) {
       // A view's declared schema types every column `.integer`, since a view
       // stores no types; resolve the view body's own types so a `SELECT *` over
       // the view reports each column's true type. Resolving runs the

@@ -1335,15 +1335,17 @@ extension Catalog where Self: ~Escapable {
   /// `derived` leaf — and finally a base table scans. A name none resolves is
   /// `SQLError.relation`.
   ///
-  /// A view's body compiles OUTSIDE the statement's CTE scope — with an empty
-  /// CTE map, not the caller's `ctes` — so a stored view means exactly what it
-  /// was registered to mean regardless of the `WITH` a caller wraps around it. A
-  /// name that IS a statement CTE has already resolved above (a CTE shadows a
-  /// view, as it shadows a base table), so a name reaching the view branch is
-  /// genuinely a view; letting its body see the caller's CTEs would let an
-  /// unrelated statement-local `WITH Parent AS …` reach into a view whose own
-  /// `FROM Parent` must mean the base relation. The view's `FROM`/`JOIN` names
-  /// therefore resolve against the base catalog (and other views) alone.
+  /// A view's body compiles OUTSIDE the statement's CTE scope — never the
+  /// caller's `ctes` — so a stored view means exactly what it was registered to
+  /// mean regardless of the `WITH` a caller wraps around it. A name that IS a
+  /// statement CTE has already resolved above (a CTE shadows a view, as it
+  /// shadows a base table), so a name reaching the view branch is genuinely a
+  /// view; letting its body see the caller's CTEs would let an unrelated
+  /// statement-local `WITH Parent AS …` reach into a view whose own `FROM
+  /// Parent` must mean the base relation. The body's scope is instead the
+  /// `definition_schema.` overlay built from the view's OWN query, so a view
+  /// defined over a reserved store relation resolves; its `FROM`/`JOIN` names
+  /// otherwise resolve against the base catalog (and other views) alone.
   ///
   /// A view's `columns` must name exactly one column per value its query
   /// projects, or the view's schema would let a query index past a sub-plan row.
@@ -1370,7 +1372,7 @@ extension Catalog where Self: ~Escapable {
       }
     }
 
-    if let view = view(named: name) {
+    if let view = resolve(view: name) {
       // A view whose body reaches back to itself — `A` over `B` over `A`, or a
       // view over itself — would recurse resolve→compile→resolve without end (a
       // stack overflow, not an `SQLError`). `visited` names the views already
@@ -1383,15 +1385,18 @@ extension Catalog where Self: ~Escapable {
       // still name a reserved `definition_schema.` store relation, so seed its
       // scope with the overlay built from the view's OWN query — never the
       // caller's `ctes` — so a view defined over a store relation resolves.
+      // This covers the built-in `information_schema.` views themselves, whose
+      // bodies name `definition_schema.` relations.
       //
       // Compilation resolves only SCHEMAS (names → ordinals/types), never rows,
       // so the overlay is built SCHEMA-ONLY: a reserved relation types from its
       // header+types, and the row build is never triggered here. A view over
       // `definition_schema.columns` would otherwise re-enter that row builder
       // (which lists views, whose bodies name the relation again) — an
-      // unbounded recursion. The rows a view over a reserved relation actually
-      // returns are supplied at EXECUTE time, where `derive` rebuilds the
-      // overlay with rows and runs the sub-plan.
+      // unbounded recursion, and the reason the introspection builder can
+      // validate a view via `compile`. The rows a view over a reserved
+      // relation actually returns are supplied at EXECUTE time, where `derive`
+      // rebuilds the overlay with rows and runs the sub-plan.
       let overlay = augment([:], for: view.query, rows: false)
       let plan =
           try compile(view.query, overlay, visited.union([name.lowercased()]))

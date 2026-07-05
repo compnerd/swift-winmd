@@ -44,6 +44,16 @@ struct QueryTests {
     body(Tuple(0, table, storage))
   }
 
+  private static func scan(_ body: (borrowing Storage, Table) -> Void) {
+    let record = QueryTests.record.span.bytes
+    let table = Table(Metadata.Tables.TypeDef.self, rows: 1,
+                      range: 0 ..< record.byteCount, wide: 0, stride: 14)
+    let storage = Storage(bytes: record, relations: relations.span,
+                          strings: strings.span.bytes, blob: empty.span.bytes,
+                          guid: empty.span.bytes, valid: 0, sorted: 0)
+    body(storage, table)
+  }
+
   @Test("resolves column ordinals by name")
   func ordinalResolution() {
     QueryTests.with { tuple in
@@ -133,6 +143,39 @@ struct QueryTests {
       #expect(throws: WinMDError.InvalidColumn) { _ = try tuple.resolve(past) }
       // A valid in-range column still reads.
       #expect((try? tuple.string(1)) == "string0")
+    }
+  }
+
+  @Test("a scan yields nil for an out-of-range offset on both ends")
+  func scanBounds() {
+    // The `Scan.element(_:)` contract is to return `nil` for any offset
+    // outside `0 ..< count`. The subscript the conformances delegate to must
+    // reject a negative offset as well as one at or past `count`; a negative
+    // offset would otherwise address a row before the table's start.
+    QueryTests.scan { storage, table in
+      let cursor = Cursor(storage, table)
+      #expect(cursor.count == 1)
+      // `element` yields a `~Escapable` `Tuple?`, which cannot escape the
+      // borrow to be compared with `nil`; bind it in place and report only
+      // its presence as an escapable `Bool`.
+      let before: Bool = if let _ = cursor.element(-1) { true } else { false }
+      let past: Bool =
+          if let _ = cursor.element(cursor.count) { true } else { false }
+      let first: Bool = if let _ = cursor.element(0) { true } else { false }
+      #expect(before == false)
+      #expect(past == false)
+      #expect(first == true)
+    }
+    QueryTests.scan { storage, table in
+      let rows = TableIterator<Metadata.Tables.TypeDef>(storage, table)
+      #expect(rows.count == 1)
+      let before: Bool = if let _ = rows.element(-1) { true } else { false }
+      let past: Bool =
+          if let _ = rows.element(rows.count) { true } else { false }
+      let first: Bool = if let _ = rows.element(0) { true } else { false }
+      #expect(before == false)
+      #expect(past == false)
+      #expect(first == true)
     }
   }
 }

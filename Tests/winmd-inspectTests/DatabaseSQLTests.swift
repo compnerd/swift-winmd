@@ -247,8 +247,7 @@ struct DatabaseSQLTests {
                                            bindings: bindings)
   }
 
-  @Test("the bundled `interfaces` view yields the IID-carrying TypeDef")
-  func bundledInterfaces() throws {
+  @Test func `the bundled interfaces view yields the IID-carrying TypeDef`() throws {
     // The `interfaces` view navigates each `TypeDef` to its `GuidAttribute` IID
     // across the coded-index join keys (`TypeDef` ← `CustomAttribute` →
     // `MemberRef` → `TypeRef`), projecting `GUID(c.Value)` as `iid`; the only
@@ -263,8 +262,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("the bundled `methods` view yields a method bound by its parent Id")
-  func bundledMethods() throws {
+  @Test func `the bundled methods view yields a method bound by its parent Id`() throws {
     // `IMyInterface` is `TypeDef` Id 1, which owns `MethodDef` Id 1;
     // binding `:parent` to the interface's Id yields the method's `Id` and
     // `Name` (the type is no longer a column — the render decodes it).
@@ -276,8 +274,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("the bundled `params` view yields params bound by their method Id")
-  func bundledParams() throws {
+  @Test func `the bundled params view yields params bound by their method Id`() throws {
     // `MethodDef` Id 1 owns the three `Param` rows; binding `:parent` to it
     // yields each parameter's `Id`, `Name`, and `Sequence` (the type is no
     // longer a column — the render navigates from these and decodes it).
@@ -293,8 +290,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a registered view is queryable through the session catalog")
-  func sessionView() throws {
+  @Test func `a registered view is queryable through the session catalog`() throws {
     // `CREATE VIEW guids …` registers a view decoding `CustomAttribute.Value`
     // through the `GUID` UDF; a `SELECT … FROM guids` then resolves it through
     // the session catalog and yields the view's rows. The fixture's single
@@ -311,8 +307,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a session `CREATE FUNCTION` helper is visible to the render routines")
-  func renderResolvesSessionFunction() throws {
+  @Test func `a session CREATE FUNCTION helper is visible to the render routines`() throws {
     // The bug: the render composed its routine set from the STATIC prelude
     // (`language.routines.merging(Session.routines)`), NOT the session's own
     // routines, so a helper a session `CREATE FUNCTION` defined — reachable
@@ -348,8 +343,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a view is resolved case-insensitively")
-  func sessionViewCaseInsensitive() throws {
+  @Test func `a view is resolved case-insensitively`() throws {
     // The session catalog folds the view name, so a query may name the view in
     // any case (relation names resolve case-insensitively elsewhere).
     try DatabaseSQLTests.with { catalog in
@@ -361,8 +355,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a session enumerates its registered views for introspection")
-  func sessionViewsEnumerated() throws {
+  @Test func `a session enumerates its registered views for introspection`() throws {
     // The session implements `Catalog.views()` off its registered set, the
     // surface the `INFORMATION_SCHEMA` overlay lists with a `'VIEW'` table type.
     // A session over one registered view enumerates exactly that view's name.
@@ -374,8 +367,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a session view is listed in information_schema.tables")
-  func sessionViewIntrospected() throws {
+  @Test func `a session view is listed in information_schema.tables`() throws {
     // The session's registered views appear in the `INFORMATION_SCHEMA` overlay
     // with a `'VIEW'` table type, enumerated beside the storage's base tables —
     // the feature over the real WinMD catalog, not just an in-memory fixture.
@@ -395,8 +387,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("information_schema.columns types the GUID view column as text")
-  func guidColumnTypedText() throws {
+  @Test func `information_schema.columns types the GUID view column as text`() throws {
     // The bundled `interfaces` view projects `GUID(c.Value) AS iid`; `GUID`
     // declares a `.text` return type, so `information_schema.columns` reports
     // `iid`'s `data_type` as `character varying` rather than the integer
@@ -410,8 +401,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("the render decode spells a method's return from its signature")
-  func decodesReturn() {
+  @Test func `the render decode spells a method's return from its signature`() {
     // The render decodes a return at render time (not through a virtual column):
     // `MethodDef` Id 1's signature `void Method(i4, string)` decodes its
     // return to `Void`.
@@ -420,8 +410,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("the `interfaces` view excludes a type with no GuidAttribute")
-  func interfacesViewExcludes() throws {
+  @Test func `the interfaces view excludes a type with no GuidAttribute`() throws {
     // `INotGuid` (TypeDef row 2) carries no `GuidAttribute`, so the view's
     // navigation finds no matching `CustomAttribute` chain for it: it does not
     // appear, leaving only `IMyInterface`.
@@ -432,8 +421,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("the `interfaces` view resolves a same-module MethodDef-ctor IID")
-  func interfacesViewSameModuleMethodDefCtor() throws {
+  @Test func `the interfaces view resolves a same-module MethodDef-ctor IID`() throws {
     // When `GuidAttribute` is defined in the same file, a type's
     // `CustomAttribute.Type` names the attribute's `.ctor` directly as a
     // `MethodDef` (not a cross-module `MemberRef`), so the `MemberRef` chains
@@ -448,8 +436,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("the `interfaces` view resolves a same-module MemberRef-ctor IID")
-  func interfacesViewSameModuleMemberRefCtor() throws {
+  @Test func `the interfaces view resolves a same-module MemberRef-ctor IID`() throws {
     // A same-file constructor can also be encoded as a `MemberRef` whose
     // `Class` points back at the in-file `GuidAttribute` `TypeDef`, so the
     // decoded key is `Class_TypeDef`, not `Class_TypeRef`, and the cross-module
@@ -464,8 +451,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("the `interfaces` view excludes a GuidAttribute-carrying non-interface")
-  func interfacesViewExcludesNonInterface() throws {
+  @Test func `the interfaces view excludes a GuidAttribute-carrying non-interface`() throws {
     // `CThing` is a coclass — a `TypeDef` carrying a `GuidAttribute` yet whose
     // `Flags` clear the `tdInterface` (0x20) bit. Not every GUID-bearing type
     // is a COM interface, so the view's `BITAND(t.Flags, 32) = 32` filter drops
@@ -477,8 +463,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("the GUID UDF decodes a CustomAttribute's Value blob")
-  func guid() throws {
+  @Test func `the GUID UDF decodes a CustomAttribute's Value blob`() throws {
     // The `GUID` UDF decodes the `GuidAttribute`'s `Value` blob (surfaced as a
     // real `.blob` column) to the well-known UUID as text; the fixture's sole
     // `CustomAttribute` is that attribute.
@@ -489,8 +474,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("excludes the virtual columns from SELECT *")
-  func star() throws {
+  @Test func `excludes the virtual columns from SELECT *`() throws {
     // `SELECT *` projects exactly the six real `TypeDef` fields — neither
     // `Id` nor an owner-FK column appears — for each of the two fixture types.
     try DatabaseSQLTests.with { catalog in
@@ -500,8 +484,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("the render decode spells a MethodDef's return")
-  func returnType() {
+  @Test func `the render decode spells a MethodDef's return`() {
     // The signature `void Method(i4, string)` decodes its return to `Void`, the
     // render-time decode replacing the old `ReturnType` virtual column.
     DatabaseSQLTests.with { catalog in
@@ -509,8 +492,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("the render decode spells each Param, nil for the return parameter")
-  func paramType() {
+  @Test func `the render decode spells each Param, nil for the return parameter`() {
     // The `Sequence == 0` return pseudo-parameter (`Param` Id 1) decodes to
     // `nil`; the two real parameters (Ids 2 and 3) decode to the signature's
     // `i4` (`CInt`) and `string` (`HSTRING`) — the render-time decode replacing
@@ -523,8 +505,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("the bundled `bases` view yields the interface's derived bases")
-  func bundledBases() throws {
+  @Test func `the bundled bases view yields the interface's derived bases`() throws {
     // `IMyInterface` is `TypeDef` Id 1; binding `:parent` to its Id
     // navigates `InterfaceImpl.Class = :parent`, and the view UNIONs both arms
     // of the `Interface` coded index: the cross-file `IInspectable` reached
@@ -538,8 +519,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("the bundled `bases` view is empty for a rootless interface")
-  func bundledBasesRoot() throws {
+  @Test func `the bundled bases view is empty for a rootless interface`() throws {
     // `INotGuid` is `TypeDef` Id 2 and has no `InterfaceImpl` row, so the
     // view yields no base — the render's `IUnknown` default path.
     try DatabaseSQLTests.with { catalog in
@@ -550,8 +530,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("renders the fixture interface's `@com` protocol from the views")
-  func render() throws {
+  @Test func `renders the fixture interface's @com protocol from the views`() throws {
     // The render joins the bundled views — `interfaces` → `methods` → `params`
     // → `bases` — and the Mustache template into the `@com` protocol source.
     // The fixture is `IMyInterface` with the well-known IID and the single
@@ -574,8 +553,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("renders the `IUnknown` default for a rootless interface")
-  func renderRoot() throws {
+  @Test func `renders the IUnknown default for a rootless interface`() throws {
     // A `bases`-empty interface (no `InterfaceImpl` row) falls back to the
     // `IUnknown` COM-root convention. The fixture's only IID-carrying type has
     // an `InterfaceImpl`, so this overrides `bases` with a never-matching view
@@ -595,8 +573,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("the root interface renders with no base, not self-inheritance")
-  func renderRootInterface() throws {
+  @Test func `the root interface renders with no base, not self-inheritance`() throws {
     // When the rendered interface is the COM root itself (`IUnknown`), it
     // implements nothing, so `bases` is empty. The root default must not then
     // make it its own base — `public protocol IUnknown: IUnknown` is invalid
@@ -610,8 +587,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a keyword base interface name is escaped in the inheritance clause")
-  func renderKeywordBase() throws {
+  @Test func `a keyword base interface name is escaped in the inheritance clause`() throws {
     // A base whose `TypeName` is a Swift keyword (`protocol`, `repeat`, …) must
     // be escaped in the `: <base>` clause, exactly as the interface, method, and
     // parameter names are — otherwise `public protocol IMyInterface: protocol`
@@ -630,8 +606,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("an unknown interface name raises a clear render error")
-  func renderUnknown() {
+  @Test func `an unknown interface name raises a clear render error`() {
     DatabaseSQLTests.with { catalog in
       let shell = Shell(catalog)
       #expect(throws: Shell.RenderError.interface("IMissing")) {
@@ -640,8 +615,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("execute routes `.render <iface> <tmpl>` to the render command")
-  func renderCommand() throws {
+  @Test func `execute routes .render <iface> <tmpl> to the render command`() throws {
     // The leading-token dispatch matches `.render` to `Render`, which renders
     // the named interface through the named template (here the fixture's
     // `IMyInterface` through `com`, so `execute` succeeds). Anything but two
@@ -660,8 +634,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("`*` renders every interface in the views")
-  func renderAll() throws {
+  @Test func `* renders every interface in the views`() throws {
     // `*` drops the name filter and loops every interface; this fixture's
     // `interfaces` view holds only `IMyInterface` (the IID-carrying type), so
     // the sweep emits its protocol — exercising the no-filter `*` path.
@@ -673,8 +646,7 @@ struct DatabaseSQLTests {
   }
 
 
-  @Test("a coded-index join key decodes to the target's Id")
-  func codedKeyResolves() throws {
+  @Test func `a coded-index join key decodes to the target's Id`() throws {
     // `CustomAttribute[0].Parent` is `HasCustomAttribute(TypeDef row 1)`, so
     // the `Parent_TypeDef` key decodes to the owning `TypeDef`'s 1-based Id.
     try DatabaseSQLTests.with { catalog in
@@ -684,8 +656,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a coded-index join key is NULL when it points elsewhere")
-  func codedKeyNull() throws {
+  @Test func `a coded-index join key is NULL when it points elsewhere`() throws {
     // The same `Parent` cell tags `TypeDef` (tag 3), so every other candidate
     // target's join key — here `Parent_MethodDef` (tag 0) — is SQL NULL: a NULL
     // will not equi-join, so only the `TypeDef` key matches.
@@ -704,8 +675,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a coded-index join key is excluded from SELECT *")
-  func codedKeyStar() throws {
+  @Test func `a coded-index join key is excluded from SELECT *`() throws {
     // `SELECT *` projects exactly the three real `CustomAttribute` fields —
     // neither the virtuals nor the coded-index join keys appear.
     try DatabaseSQLTests.with { catalog in
@@ -716,8 +686,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a coded-index join key joins a CustomAttribute to its owning TypeDef")
-  func codedKeyJoin() throws {
+  @Test func `a coded-index join key joins a CustomAttribute to its owning TypeDef`() throws {
     // Joining `CustomAttribute` to `TypeDef` on the decoded `Parent_TypeDef`
     // key against the `TypeDef`'s Id pairs the `GuidAttribute` row (its
     // `GUID(Value)` IID) with the `IMyInterface` type it decorates, end to end
@@ -735,8 +704,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a script's CREATE VIEW is visible to a later statement's SELECT")
-  func scriptSession() throws {
+  @Test func `a script's CREATE VIEW is visible to a later statement's SELECT`() throws {
     // The batch driver seeds the bundled views and threads one shared `Session`
     // across every statement, so a `CREATE VIEW` registered by one statement is
     // visible to a later `SELECT`. `execute` prints rather than returning rows,
@@ -754,8 +722,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a `.bind` value threads into a later parameterized SELECT")
-  func bindThreadsIntoQuery() throws {
+  @Test func `a .bind value threads into a later parameterized SELECT`() throws {
     // `.bind` stores a `:name` in the shell's `bindings`, which `execute`'s SQL
     // path forwards to `Session.run(_, bindings:)`. Binding `:name` to a
     // `TypeName` the fixture carries, then running `WHERE TypeName = :name`
@@ -783,8 +750,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a `.bind` value threads into a WITH statement's parameterized body")
-  func bindThreadsIntoWith() throws {
+  @Test func `a .bind value threads into a WITH statement's parameterized body`() throws {
     // A `:name` in a `WITH` body must bind from the shell's `.bind` values the
     // same way a plain `SELECT`'s does — `Session.run` forwards `bindings` to
     // the WITH arm. Binding `:name` to a `TypeName` the fixture carries, then
@@ -812,8 +778,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a `.template` registers an inline body that shadows a file lookup")
-  func templateRegisters() throws {
+  @Test func `a .template registers an inline body that shadows a file lookup`() throws {
     // `.template` stores its body in the shell's `templates`, and
     // `template(named:)` returns it (unescaped) when present — an inline
     // template shadows the `-I`/bundle resolution. Registering `com` (the one
@@ -829,8 +794,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a `.render` through an inline template renders the interface")
-  func templateRenders() throws {
+  @Test func `a .render through an inline template renders the interface`() throws {
     // The end-to-end pipeline: define an inline template, then `.render` an
     // interface through it. The fixture's `IMyInterface` renders through a
     // minimal inline template (no language directive — the identity language
@@ -843,8 +807,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("execute routes a `.`-token to its meta-command")
-  func executeMeta() throws {
+  @Test func `execute routes a .-token to its meta-command`() throws {
     // The leading-token dispatch matches `.tables` to `Tables`, which lists the
     // storage's relations; the fixture's catalog vends them, so `execute`
     // succeeds. A SQL statement takes the parse path instead — exercised by
@@ -856,8 +819,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("execute rejects an unknown or empty-argument `.`-command")
-  func executeUnknown() {
+  @Test func `execute rejects an unknown or empty-argument .-command`() {
     // An unrecognised `.`-token is `MetaError.unknown`, and a `.read` with no
     // path executes to the same unknown fault — the empty-argument guard the
     // `Read` command carries.
@@ -872,8 +834,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("`.schema` types a query's result columns without running it")
-  func schemaColumns() throws {
+  @Test func `.schema types a query's result columns without running it`() throws {
     // `.schema` prints the query's result columns — the name and type
     // `session.columns(of:)` resolves WITHOUT opening a cursor, the capability
     // the command formats. `TypeDef.TypeName` is a `#Strings` column, so it
@@ -895,8 +856,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("`.schema` faults on a query that would not run, without running it")
-  func schemaFaults() {
+  @Test func `.schema faults on a query that would not run, without running it`() {
     // `.schema` resolves the query the way a run would, so an unknown relation
     // faults `SQLError.relation` exactly as a run would — the dry-run check —
     // rather than silently printing nothing. An empty query is the unknown-meta
@@ -912,8 +872,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("`.schema` describes a WITH statement, the shape the shell runs")
-  func schemaWith() {
+  @Test func `.schema describes a WITH statement, the shape the shell runs`() {
     // `.schema` routes through the CTE-aware, statement-level derive, so a
     // `WITH` types its trailing query against the CTE scope — the SAME
     // statement the shell runs. The trailing `SELECT n FROM t` resolves `n` off
@@ -929,8 +888,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("`.schema` faults a WITH whose body arity contradicts its list")
-  func schemaWithBadArity() {
+  @Test func `.schema faults a WITH whose body arity contradicts its list`() {
     // The CTE declares ONE column but its body — a `SELECT *` over the
     // six-column `TypeDef` — projects six. The parser cannot catch this (a
     // `SELECT *`'s width is known only at resolution), so a run rejects it with
@@ -945,8 +903,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("an empty SELECT frames its REAL column names, not `column N`")
-  func emptyResultRealHeaders() throws {
+  @Test func `an empty SELECT frames its REAL column names, not column N`() throws {
     // A `SELECT *` yielding no rows still frames its box, and the headers are
     // the RESOLVED result-schema names (`columns(of:)`), not the positional
     // `column N` a syntactic `SELECT *` would fall back to. A false predicate
@@ -962,8 +919,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a non-empty SELECT frames its rows under the resolved headers")
-  func nonEmptyResultHeaders() throws {
+  @Test func `a non-empty SELECT frames its rows under the resolved headers`() throws {
     // A `SELECT` yielding rows frames them under its resolved headers — the box
     // renderer always heads its grid, so a run with rows keeps the same column
     // names as the empty case. A `CREATE VIEW` is not row output, so `headers`
@@ -978,8 +934,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a data-dependent empty result headers without re-validating")
-  func emptyResultHeadersDerived() throws {
+  @Test func `a data-dependent empty result headers without re-validating`() throws {
     // A `WHERE` no fixture row satisfies filters the result to empty, so the
     // projection's `TypeName + 1` (text arithmetic) NEVER evaluates — the run
     // SUCCEEDS with zero rows. The header path then DERIVES the `x` header off
@@ -994,8 +949,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a WITH's SELECT * over a CTE heads the CTE's columns, not the base")
-  func withCTEShadowingHeaders() throws {
+  @Test func `a WITH's SELECT * over a CTE heads the CTE's columns, not the base`() throws {
     // A CTE `TypeDef` SHADOWS the six-column base `TypeDef`: the run resolves
     // the trailing `SELECT * FROM TypeDef` against the CTE (one column `x`), so
     // the header must too — derived with the CTE scope in place, not the base
@@ -1009,8 +963,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a WITH heads its trailing query's CTE-resolved column names")
-  func withCTEExplicitHeaders() throws {
+  @Test func `a WITH heads its trailing query's CTE-resolved column names`() throws {
     // The trailing query names columns off the CTE it references: an explicit
     // list `(a, b)` heads `a, b` through the CTE, and a bare-column projection
     // reads the CTE's declared column. Both resolve against the CTE scope.
@@ -1025,8 +978,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a WITH not shadowing a base heads its trailing SELECT * real names")
-  func withCTENotShadowingHeaders() throws {
+  @Test func `a WITH not shadowing a base heads its trailing SELECT * real names`() throws {
     // A CTE whose name does NOT collide with a base relation leaves the base
     // reachable: the trailing `SELECT * FROM TypeDef` resolves the six real
     // base columns, and the unrelated CTE scope does not perturb them.
@@ -1039,8 +991,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("`.schema` still faults a data-dependently ill-typed query")
-  func schemaFaultsIllTyped() {
+  @Test func `.schema still faults a data-dependently ill-typed query`() {
     // The validating default a static shape check keeps: `.schema` reports an
     // ill-typed query even when a data-dependent filter would spare it at run.
     // The SAME `TypeName + 1` the derive-only header renders faults here — the
@@ -1056,8 +1007,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a `.quit` inside a `.read` file leaves the shell, not just the file")
-  func readPropagatesQuit() throws {
+  @Test func `a .quit inside a .read file leaves the shell, not just the file`() throws {
     // `.read` drives the same statement stream, but a `.quit` in the file must
     // throw `Stop` past the file reader so the whole session ends — the help's
     // promise — not merely the included file. The statement after the `.quit`
@@ -1075,8 +1025,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a `.read` fault fails an explicit batch fast")
-  func readFailsFastInBatch() throws {
+  @Test func `a .read fault fails an explicit batch fast`() throws {
     // A `strict` shell (an explicit batch) lets an included file's fault
     // propagate, so the run aborts rather than pressing on against a partially
     // applied session. The bad `SELECT` is the file's only statement here; that
@@ -1094,8 +1043,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a `.read` fault is reported and skipped in shell mode")
-  func readContinuesInShell() throws {
+  @Test func `a .read fault is reported and skipped in shell mode`() throws {
     // A forgiving shell (the interactive/redirected path) reports a statement's
     // fault and reads on, so an included file behaves like its text on stdin: a
     // bad statement does not skip the file's later valid ones. `.read` must not
@@ -1115,8 +1063,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a script SELECTing a bundled view sees it through the seeded session")
-  func scriptBundledView() throws {
+  @Test func `a script SELECTing a bundled view sees it through the seeded session`() throws {
     // The `script` runner seeds `Session.bundled()`, so a statement may name a
     // bundled view (here `interfaces`) with no explicit `CREATE VIEW` — the gap
     // the old one-shot path (an empty view set) could not span. The session
@@ -1133,8 +1080,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("print-namespaces yields a plain one-per-line list, not a boxed table")
-  func printNamespacesPlainList() throws {
+  @Test func `print-namespaces yields a plain one-per-line list, not a boxed table`() throws {
     // `print-namespaces` DEDUPS through `SELECT DISTINCT … ORDER BY`, but its
     // output is one plain namespace element per row scripts parse a line at a
     // time — NOT the boxed table `Shell.execute` frames a row result as. The
@@ -1150,8 +1096,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("print-namespaces on an empty database yields no lines")
-  func printNamespacesEmpty() throws {
+  @Test func `print-namespaces on an empty database yields no lines`() throws {
     // A database with an empty `TypeDef` table has no namespaces, so the
     // DISTINCT query returns zero rows. `print-namespaces` must then emit
     // NOTHING — an empty element list prints no lines — so a script reading a
@@ -1162,8 +1107,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("print-namespaces yields one blank line for the global namespace")
-  func printNamespacesGlobal() throws {
+  @Test func `print-namespaces yields one blank line for the global namespace`() throws {
     // A database whose lone `TypeDef` lives in the global namespace — a
     // `TypeNamespace` of the empty string — has exactly one namespace: the
     // empty one. `print-namespaces` must yield a single empty-string element,
@@ -1175,8 +1119,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a coded-index join key admits one key per candidate target table")
-  func codedKeyEnumeration() {
+  @Test func `a coded-index join key admits one key per candidate target table`() {
     // `CustomAttribute.Parent` is `HasCustomAttribute`, which admits 22 target
     // tables, plus `Type` is `CustomAttributeType`, which admits two (its three
     // reserved tags yield no key): the relation exposes 24 join keys in total,
@@ -1193,8 +1136,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("an unowned Param's render decode is nil and does not trap")
-  func paramTypeUnowned() {
+  @Test func `an unowned Param's render decode is nil and does not trap`() {
     // A `Param` no `MethodDef` run owns — the `MethodDef` table is present but
     // has zero rows, so its owner resolves to 0 — decodes to `nil` rather than
     // indexing the negative row `owner - 1` through the parent cursor.
@@ -1203,8 +1145,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a System.Guid Param decodes to CLSID or IID by its Name")
-  func paramTypeGuidClassification() {
+  @Test func `a System.Guid Param decodes to CLSID or IID by its Name`() {
     // The signature `void Method(Guid, Guid)` names `System.Guid` parameters;
     // the render decode classifies each by the `Param.Name` hint — `clsid`
     // (Id 2) yields `CLSID`, `iid` (Id 3) yields the default `IID`.
@@ -1214,8 +1155,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a `-I` directory's template shadows the bundled one")
-  func searchTemplateOverride() throws {
+  @Test func `a -I directory's template shadows the bundled one`() throws {
     // A `-I` directory's `Templates/com.mustache` is loaded in place of the
     // bundled template, so the render emits the override's text.
     let root = NSTemporaryDirectory() + "winmd-inspect-\(UUID().uuidString)"
@@ -1232,8 +1172,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("a `-I` directory's view joins the bundled ones in the seed")
-  func searchViewAddition() throws {
+  @Test func `a -I directory's view joins the bundled ones in the seed`() throws {
     // A `-I` directory's `Queries/extra.sql` adds its view to the seed, while
     // the bundled views (here `interfaces`) remain — the union.
     let root = NSTemporaryDirectory() + "winmd-inspect-\(UUID().uuidString)"
@@ -1248,8 +1187,7 @@ struct DatabaseSQLTests {
     #expect(views.keys.contains("interfaces"))
   }
 
-  @Test("a search directory without a match falls back to the bundle")
-  func searchFallsBackToBundle() throws {
+  @Test func `a search directory without a match falls back to the bundle`() throws {
     // A `-I` directory that holds no matching resource leaves the render on the
     // bundled template and views, so the normal `@com` protocol still renders.
     let root = NSTemporaryDirectory() + "winmd-inspect-\(UUID().uuidString)"
@@ -1263,8 +1201,7 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test("with two `-I` directories the last one wins")
-  func searchLastWins() throws {
+  @Test func `with two -I directories the last one wins`() throws {
     // Both directories carry a `Templates/com.mustache`; the render must use the
     // LAST `-I`'s copy, so a later directory overrides an earlier one.
     let first = NSTemporaryDirectory() + "winmd-inspect-\(UUID().uuidString)"

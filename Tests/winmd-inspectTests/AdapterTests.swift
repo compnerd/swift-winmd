@@ -115,8 +115,7 @@ struct AdapterTests {
     return try catalog.run(select)
   }
 
-  @Test("projects, filters, and orders a single relation")
-  func singleRelation() throws {
+  @Test func `projects, filters, and orders a single relation`() throws {
     // The string columns project as text, the constant as an integer; the
     // WHERE keeps both rows (both are in "NS"), and ORDER BY TypeName sorts
     // Alpha < Beta. `SELECT *` is the two real string heaps plus the constant
@@ -132,8 +131,7 @@ struct AdapterTests {
     }
   }
 
-  @Test("excludes Id and the owner FK from SELECT *")
-  func star() throws {
+  @Test func `excludes Id and the owner FK from SELECT *`() throws {
     // `SELECT *` projects exactly the real fields: a TypeDef has six. Neither
     // the `Id` nor an owner-foreign-key virtual column appears.
     try AdapterTests.with { catalog in
@@ -148,8 +146,7 @@ struct AdapterTests {
     }
   }
 
-  @Test("vends the Id virtual column 1-based")
-  func id() throws {
+  @Test func `vends the Id virtual column 1-based`() throws {
     try AdapterTests.with { catalog in
       let rows = try AdapterTests.run(
           "SELECT Id, TypeName FROM TypeDef ORDER BY Id", catalog)
@@ -160,8 +157,7 @@ struct AdapterTests {
     }
   }
 
-  @Test("seeks a sorted key rather than scanning")
-  func seek() throws {
+  @Test func `seeks a sorted key rather than scanning`() throws {
     // NestedClass is sorted on its key column, so an equality on it takes the
     // engine's seek path; the one row whose NestedClass index is 2 survives.
     try AdapterTests.with { catalog in
@@ -172,8 +168,7 @@ struct AdapterTests {
     }
   }
 
-  @Test("joins through a foreign key on Id")
-  func foreignKeyJoin() throws {
+  @Test func `joins through a foreign key on Id`() throws {
     // The FK `NestedClass.NestedClass` holds a TypeDef Id; the engine joins
     // each NestedClass row to its TypeDef and projects the resolved name.
     try AdapterTests.with { catalog in
@@ -189,8 +184,7 @@ struct AdapterTests {
     }
   }
 
-  @Test("joins a list child to its owner on the owner FK")
-  func listJoin() throws {
+  @Test func `joins a list child to its owner on the owner FK`() throws {
     // The `TypeDef` owner-FK column relates each MethodDef to the TypeDef whose
     // MethodList run owns it: MethodDef[0,1] → TypeDef[0] (Alpha), MethodDef[2]
     // → TypeDef[1] (Beta). The join seeks TypeDef on its `Id` per method.
@@ -208,8 +202,7 @@ struct AdapterTests {
     }
   }
 
-  @Test("resolves a real Parent foreign-key column")
-  func realParentColumn() throws {
+  @Test func `resolves a real Parent foreign-key column`() throws {
     // EventMap carries a real `Parent` field — a TypeDef index — and owns no
     // list, so it has no owner-FK column: the name resolves to that ordinary
     // foreign key. EventMap[0].Parent=1, EventMap[1].Parent=2.
@@ -220,8 +213,7 @@ struct AdapterTests {
     }
   }
 
-  @Test("joins through a real Parent foreign key on Id")
-  func realParentJoin() throws {
+  @Test func `joins through a real Parent foreign key on Id`() throws {
     // The real `EventMap.Parent` FK holds a TypeDef Id; the join resolves
     // each EventMap row to its TypeDef: Parent=1 → Alpha, Parent=2 → Beta.
     try AdapterTests.with { catalog in

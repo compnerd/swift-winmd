@@ -512,7 +512,7 @@ struct DatabaseSQLTests {
   @Test("the render decode spells each Param, nil for the return parameter")
   func paramType() {
     // The `Sequence == 0` return pseudo-parameter (`Param` Id 1) decodes to
-    // `nil`; the two real parameters (rowids 2 and 3) decode to the signature's
+    // `nil`; the two real parameters (Ids 2 and 3) decode to the signature's
     // `i4` (`CInt`) and `string` (`HSTRING`) — the render-time decode replacing
     // the old `ParamType` virtual column.
     DatabaseSQLTests.with { catalog in

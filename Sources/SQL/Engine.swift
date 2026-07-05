@@ -180,42 +180,20 @@ extension Catalog where Self: ~Escapable {
       guard relations[cte.name.lowercased()] == nil else {
         throw .redefinition(cte.name)
       }
-      // A `WITH RECURSIVE` member's recursive reference must be its FINAL UNION
-      // arm — the engine's model is anchor members then ONE recursive arm. A
-      // reference to the CTE's own name in an EARLIER arm resolves against the
-      // base scope (the CTE is not in scope outside the recursive arm), so a
-      // same-named base or view is a valid seed; but with no such base/view the
-      // reference can only be a misplaced recursive arm — recursion before the
-      // final arm, or a second recursive arm — a shape the engine does not
-      // support. Reject it rather than silently read a same-named base or fail
-      // obscurely as an unresolved relation. This covers BOTH routings below (a
-      // non-recursive final arm still reaches the run-once branch).
-      if cte.recursive, case let .union(anchor, _, _) = cte.query,
-          anchor.references(cte.name.lowercased()),
-          case nil = table(named: cte.name),
-          case nil = view(named: cte.name) {
-        throw .unsupported(
-            "recursive WITH references the CTE outside its final UNION arm")
-      }
+      // Validate the CTE's SHAPE and ARITY against the CTEs done so far — the
+      // compile-time structural check, shared with the dry-run schema path so a
+      // derive rejects exactly the CTEs a run rejects. It faults the recursive
+      // shape and the width mismatch here, BEFORE any rows materialise.
+      try validate(cte, against: relations, routines: routines)
       // A CTE that names itself iterates a fixpoint; every other one — a
       // non-recursive CTE, or one a `WITH RECURSIVE` marks recursive but which
       // does not reference itself — runs its query once. Each resolves against
-      // the base catalog plus the CTEs done so far. A recursive CTE checks the
-      // arity of both its arms internally (see `fixpoint`); a non-recursive one
-      // checks its body's compiled width here.
+      // the base catalog plus the CTEs done so far. The arity of both routings
+      // is already checked by `validate` above.
       let rows: Array<Array<Value>>
       if cte.recursive && cte.recurses {
         rows = try fixpoint(cte, relations, routines, bindings)
       } else {
-        // The width check resolves the body's relations, so it reads the same
-        // `definition_schema.` overlay the body's own run does — a CTE body may
-        // select from a reserved store relation.
-        let scope = augment(relations, for: cte.query, rows: true,
-                            routines: routines)
-        let width = try compile(cte.query, scope).width
-        guard width == cte.columns.count else {
-          throw .columns(expected: cte.columns.count, got: width)
-        }
         rows = try run(cte.query, relations, routines, bindings)
       }
       relations[cte.name.lowercased()] =
@@ -224,6 +202,108 @@ extension Catalog where Self: ~Escapable {
                                     count: cte.columns.count))
     }
     return try run(query, relations, routines, bindings)
+  }
+
+  /// Validates the SHAPE and declared ARITY of a single common table expression
+  /// `cte` against the base catalog plus the CTEs done so far (`ctes`), WITHOUT
+  /// materialising a row — the compile-time structural check `with` runs before
+  /// each CTE materialises, factored out so the dry-run result-schema path
+  /// (`columns(of:with:)`) validates a `WITH` by the SAME code a run does, ending
+  /// the divergence between the two.
+  ///
+  /// It reproduces, without executing, the two structural faults `with` and
+  /// `fixpoint` raise:
+  ///
+  ///   - The RECURSIVE SHAPE. A `WITH RECURSIVE` member's recursive reference
+  ///     must be its FINAL `UNION` arm — the engine's model is anchor members
+  ///     then ONE recursive arm. A reference to the CTE's own name in an EARLIER
+  ///     arm resolves against the base scope (the CTE is not in scope outside
+  ///     the recursive arm), so a same-named base or view is a valid seed; but
+  ///     with no such base/view the reference can only be a misplaced recursive
+  ///     arm — recursion before the final arm, or a second recursive arm — a
+  ///     shape the engine does not support, faulted `SQLError.unsupported`.
+  ///
+  ///   - The DECLARED ARITY. Each CTE body must project exactly the arity its
+  ///     column list declares, or a later reader indexes out of bounds. The
+  ///     body's width is known once it COMPILES — never opening a cursor — so
+  ///     the compiled `Plan.width` is checked against the declared count,
+  ///     faulting `SQLError.columns` on a mismatch. A recursive (self-naming)
+  ///     CTE checks its ANCHOR (self NOT in scope) and its RECURSIVE arm (self
+  ///     bound to the declared columns) separately, exactly as `fixpoint` does;
+  ///     every other CTE checks its whole body with self NOT in scope. This is
+  ///     why the schema path must NOT bind the CTE's self for the whole body: a
+  ///     `WITH RECURSIVE t(n) AS (SELECT n FROM t UNION SELECT n FROM t)` faults
+  ///     the recursive shape here — self is not in scope in the anchor — rather
+  ///     than resolving a self-reference the run would reject.
+  ///
+  /// The reachable-operand type-check the schema path also wants is NOT part of
+  /// the shape/arity check the run relies on — the run DEFERS it to execution.
+  /// It rides in through `typecheck`: the run path passes `false` (it defers),
+  /// the schema path passes `true` (it must fault an ill-typed body statically).
+  /// Folding it here rather than layering it in the schema path keeps ONE per-arm
+  /// scoping for BOTH the structural check and the operand check — a recursive
+  /// CTE's ANCHOR is operand-checked against base + prior CTEs (self NOT in
+  /// scope, the scope the run evaluates the anchor in), NOT the CTE-self overlay,
+  /// so `SELECT Name + 1 FROM People` in the anchor faults `SQLError.operand`
+  /// against the BASE `People` a run reads it against, never wrongly types clean
+  /// against the CTE's declared columns.
+  internal borrowing func validate(_ cte: CTE, against ctes: CTEs,
+                                   routines: Routines = [:],
+                                   typecheck: Bool = false)
+      throws(SQLError) {
+    // Reject a misplaced recursive reference in an EARLIER arm when no
+    // same-named base/view can seed it — the shape `with` rejects before
+    // routing to the fixpoint.
+    if cte.recursive, case let .union(anchor, _, _) = cte.query,
+        anchor.references(cte.name.lowercased()),
+        case nil = table(named: cte.name),
+        case nil = view(named: cte.name) {
+      throw .unsupported(
+          "recursive WITH references the CTE outside its final UNION arm")
+    }
+    // Check the declared arity by compiling the body — never a cursor. A
+    // recursive (self-naming) CTE checks its anchor and recursive arm the way
+    // `fixpoint` does: the anchor with self NOT in scope, the recursive arm
+    // with self bound to the declared columns. Every other CTE checks its whole
+    // body with self NOT in scope. When `typecheck`, the reachable-operand check
+    // runs in the SAME per-arm scope each arity check uses, so the operand check
+    // shares the run's arm scoping and never types an anchor against the
+    // CTE-self overlay.
+    if cte.recursive && cte.recurses, case let .union(anchor, recursive, _) =
+        cte.query {
+      let scope = augment(ctes, for: anchor, rows: false, routines: routines)
+      let width = try compile(anchor, scope).width
+      guard width == cte.columns.count else {
+        throw .columns(expected: cte.columns.count, got: width)
+      }
+      // The anchor is operand-checked with self NOT in scope — the scope the run
+      // evaluates it in — so a text-arithmetic anchor faults against the base
+      // relation, not the CTE's declared (integer) columns.
+      if typecheck { try self.typecheck(anchor, scope, routines: routines) }
+      var probe = augment(ctes, for: .select(recursive), rows: false,
+                          routines: routines)
+      probe[cte.name.lowercased()] =
+          Materialised(columns: cte.columns, rows: [],
+                       types: Array(repeating: .integer,
+                                    count: cte.columns.count))
+      let arm = try compile(.select(recursive), probe).width
+      guard arm == cte.columns.count else {
+        throw .columns(expected: cte.columns.count, got: arm)
+      }
+      // The recursive arm is operand-checked with self bound to the declared
+      // columns — the schema every iteration reads the CTE under.
+      if typecheck {
+        try self.typecheck(.select(recursive), probe, routines: routines)
+      }
+    } else {
+      let scope = augment(ctes, for: cte.query, rows: false, routines: routines)
+      let width = try compile(cte.query, scope).width
+      guard width == cte.columns.count else {
+        throw .columns(expected: cte.columns.count, got: width)
+      }
+      // A non-self-naming body is operand-checked whole with self NOT in scope.
+      if typecheck { try self.typecheck(cte.query, scope, routines: routines) }
+    }
   }
 
   /// Evaluates a recursive `cte` to a fixpoint over this catalog with the

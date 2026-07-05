@@ -219,7 +219,9 @@ extension Catalog where Self: ~Escapable {
         rows = try run(cte.query, relations, routines, bindings)
       }
       relations[cte.name.lowercased()] =
-          Materialised(columns: cte.columns, rows: rows)
+          Materialised(columns: cte.columns, rows: rows,
+                       types: Array(repeating: .integer,
+                                    count: cte.columns.count))
     }
     return try run(query, relations, routines, bindings)
   }
@@ -301,7 +303,9 @@ extension Catalog where Self: ~Escapable {
     // even when the arm is filtered to zero rows in every iteration.
     var probe = ctes
     probe[cte.name.lowercased()] =
-        Materialised(columns: cte.columns, rows: [])
+        Materialised(columns: cte.columns, rows: [],
+                     types: Array(repeating: .integer,
+                                  count: cte.columns.count))
     let arm = try compile(.select(recursive), probe).width
     guard arm == cte.columns.count else {
       throw .columns(expected: cte.columns.count, got: arm)
@@ -329,7 +333,9 @@ extension Catalog where Self: ~Escapable {
       // recursive arm against the base catalog plus the earlier CTEs.
       var scope = ctes
       scope[cte.name.lowercased()] =
-          Materialised(columns: cte.columns, rows: working)
+          Materialised(columns: cte.columns, rows: working,
+                       types: Array(repeating: .integer,
+                                    count: cte.columns.count))
       let produced =
           try run(.select(recursive), scope, routines, bindings)
 

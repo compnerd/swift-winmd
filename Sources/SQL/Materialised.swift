@@ -36,17 +36,17 @@ internal struct Materialised: Hashable, Sendable {
   /// The value type of each real column, in ordinal order — the types a
   /// materialised relation reports to the result-schema walk.
   ///
-  /// A CTE's rows carry no static types, so a call site that has none passes
-  /// `nil` and every column types `.integer` (the historical default); a
+  /// A CTE's rows carry no static types, so its call site types every column
+  /// `.integer` (the same default a view without a typed schema advertises); a
   /// DEFINITION_SCHEMA store relation, whose columns have known ISO domains,
   /// passes them so `information_schema` columns report their real types.
   internal let types: Array<ValueType>
 
   internal init(columns: Array<String>, rows: Array<Array<Value>>,
-                types: Array<ValueType>? = nil) {
+                types: Array<ValueType>) {
     self.columns = columns
     self.rows = rows
-    self.types = types ?? Array(repeating: .integer, count: columns.count)
+    self.types = types
   }
 
   /// The real column count — the extent of a `SELECT *`.

@@ -308,4 +308,60 @@ private func id() -> Function {
     try numbers().expect("SELECT g() FROM N WHERE Id = 1",
                          yields: [["x"]], routines: routines)
   }
+
+  @Test func `a body referencing a query parameter faults at registration`() {
+    // A body's inputs are its declared parameters, not query bindings. `f() AS
+    // CASE WHEN 1 = :p THEN 1 ELSE 0 END` reaches a `:parameter` through a CASE
+    // guard, but a routine body is evaluated with only its argument record — the
+    // caller's bindings never reach it — so `:p` would always be UNBOUND and
+    // silently pick the ELSE branch. The registration rejects the `.bound`.
+    let body =
+        Expression.case([When(when: .bound(left: .literal(.integer(1)),
+                                           op: .equal, parameter: "p"),
+                              then: .literal(.integer(1)))],
+                        else: .literal(.integer(0)))
+    let function = Function(parameters: [], returns: .integer, body: body)
+    #expect(throws:
+        SQLError.argument("the body cannot reference a query parameter")) {
+      _ = try Routines().registering("f", function)
+    }
+  }
+
+  @Test func `a body with a bound-free CASE registers cleanly`() throws {
+    // The rejection is of a `.bound` specifically, not of a CASE in a body: a
+    // guard over the parameter (`CASE WHEN n = 7 THEN 1 ELSE 0 END`) registers
+    // and computes — here yielding 1 for the matching argument (N.V is 7).
+    let body =
+        Expression.case([When(when: .comparison(left: .column("n"),
+                                                op: .equal,
+                                                right: .literal(.integer(7))),
+                              then: .literal(.integer(1)))],
+                        else: .literal(.integer(0)))
+    let function =
+        Function(parameters: [Function.Parameter(name: "n", type: .integer)],
+                 returns: .integer, body: body)
+    let routines = try Routines().registering("seven", function)
+    try numbers().expect("SELECT seven(V) FROM N WHERE Id = 1",
+                         yields: [[1]], routines: routines)
+  }
+
+  @Test func `a RETURNS DOUBLE body of a mixed CASE returns a double`() throws {
+    // `f(n INTEGER) RETURNS DOUBLE AS CASE WHEN n = 7 THEN 1 ELSE 2.5 END`: the
+    // body's results unify to `.double`, so it TYPES as double and the RETURNS
+    // check passes. Called with N.V = 7 it takes the integer THEN `1`, which
+    // the CASE coercion widens to `.double(1.0)` — the value now matches the
+    // declared double return, not a bare `.integer(1)`.
+    let body =
+        Expression.case([When(when: .comparison(left: .column("n"),
+                                                op: .equal,
+                                                right: .literal(.integer(7))),
+                              then: .literal(.integer(1)))],
+                        else: .literal(.double(2.5)))
+    let function =
+        Function(parameters: [Function.Parameter(name: "n", type: .integer)],
+                 returns: .double, body: body)
+    let routines = try Routines().registering("choose", function)
+    try numbers().expect("SELECT choose(V) FROM N WHERE Id = 1",
+                         yields: [[1.0]], routines: routines)
+  }
 }

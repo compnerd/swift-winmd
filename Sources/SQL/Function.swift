@@ -95,6 +95,15 @@ public struct Routine: Sendable {
   internal init(returns: ValueType, parameters: Array<ValueType>,
                 names: Array<String>, body: Expression,
                 _ routines: Routines) throws(SQLError) {
+    // A body's inputs are its declared parameters, not query bindings: it is
+    // validated over the parameter schema and later evaluated against ONLY the
+    // argument record, so a `:parameter` reference (reachable through a `CASE`
+    // guard) would always be UNBOUND at call time — the caller's `bindings`
+    // never reach a routine body — and silently pick the wrong branch. Reject
+    // a `.bound` anywhere in the body at registration rather than lowering it.
+    guard !body.bound else {
+      throw .argument("the body cannot reference a query parameter")
+    }
     let schema = Schema(width: names.count, extent: names.count,
                         names: names, types: parameters, virtuals: [])
     let scope = Scope([(Relation(name: ""), schema)])
@@ -106,7 +115,8 @@ public struct Routine: Sendable {
     self.parameters = parameters
     self.returns = returns
     self.body =
-        try .defined(schema.term(body, in: Relation(name: "")), routines)
+        try .defined(schema.term(body, in: Relation(name: ""), routines),
+                     routines)
   }
 
   /// Computes the cell value for the evaluated `arguments`, resolving a defined

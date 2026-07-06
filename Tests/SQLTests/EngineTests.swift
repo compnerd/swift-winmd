@@ -2313,6 +2313,18 @@ struct EngineDefinedFunctionTests {
     }
   }
 
+  @Test func `a defined function body referencing a query parameter faults at define`() throws {
+    // A body's inputs are its declared parameters, not query bindings: a routine
+    // body is evaluated with only its argument record, so a `:parameter` (here
+    // reached through a CASE guard) would always be UNBOUND and silently pick
+    // the ELSE branch. Registration rejects the `.bound`.
+    #expect(throws:
+        SQLError.argument("the body cannot reference a query parameter")) {
+      _ = try defining("CREATE FUNCTION f() RETURNS INTEGER AS "
+                           + "CASE WHEN 1 = :p THEN 1 ELSE 0 END")
+    }
+  }
+
   @Test func `a later defined function shadows an earlier one of the same name`() throws {
     // A later registration wins (the house rule the flat registry follows), so
     // the second `inc` — adding 100 — is the one a call resolves.

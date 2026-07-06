@@ -773,6 +773,7 @@ extension WinMD.Storage {
   /// decodes the return. `nil` mirrors the old NULL — an absent row, an
   /// undecodable signature, or an unresolvable one.
   internal borrowing func decode(return method: Int,
+                                 generics: Array<String>? = nil,
                                  in dialect: Dialect) -> String? {
     guard let table = opened("MethodDef") else { return nil }
     let cursor = WinMD.Cursor(copy self, table)
@@ -782,7 +783,8 @@ extension WinMD.Storage {
         let resolver = try? Resolver(of: signature, with: self) else {
       return nil
     }
-    return signature.returns.decode(with: resolver, dialect: dialect)
+    return signature.returns.decode(generics: generics, with: resolver,
+                                    dialect: dialect)
   }
 
   /// The decoded type spelling of the `Param` at 1-based `parameter` `Id`, in
@@ -800,6 +802,7 @@ extension WinMD.Storage {
   /// `System.Guid` `IID`/`CLSID` hint; for any other type the decoder ignores
   /// it, so threading it is always safe.
   internal borrowing func decode(parameter: Int,
+                                 generics: Array<String>? = nil,
                                  for dialect: Dialect) -> String? {
     guard let table = opened("Param") else { return nil }
     let params = WinMD.Cursor(copy self, table)
@@ -825,6 +828,7 @@ extension WinMD.Storage {
     }
     let name = param.ordinal(for: "Name").flatMap { try? param.string($0) }
     return signature.parameters[position - 1]
-        .decode(parameter: name, with: resolver, dialect: dialect)
+        .decode(parameter: name, generics: generics, with: resolver,
+                dialect: dialect)
   }
 }

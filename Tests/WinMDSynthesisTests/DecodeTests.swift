@@ -98,6 +98,80 @@ struct DecodeTests {
                 .decode(with: resolver, dialect: dialect) == "M2")
   }
 
+  @Test func `a type variable spells its declared name when names are supplied`() {
+    // With the owner's ordered names threaded, a `VAR` spells the declared
+    // parameter's name (`VAR 0` of `<Element>` → `Element`) rather than the
+    // positional placeholder.
+    #expect(SignatureType.variable(scope: .type, 0)
+                .decode(generics: ["Element"], with: resolver, dialect: dialect)
+                == "Element")
+    #expect(SignatureType.variable(scope: .type, 1)
+                .decode(generics: ["Key", "Value"], with: resolver,
+                        dialect: dialect)
+                == "Value")
+    // An out-of-range operand falls back to the placeholder.
+    #expect(SignatureType.variable(scope: .type, 2)
+                .decode(generics: ["Element"], with: resolver, dialect: dialect)
+                == "T2")
+    // A method variable (`MVAR`) keeps its placeholder — only the type-level
+    // names are threaded, so a method-level operand never indexes them.
+    #expect(SignatureType.variable(scope: .method, 0)
+                .decode(generics: ["Element"], with: resolver, dialect: dialect)
+                == "M0")
+  }
+
+  @Test func `a negative type variable operand falls back to the placeholder`() {
+    // The metadata decoder emits no negative operand, but the enum case and
+    // `decode(generics:)` are public — a malformed programmatic `VAR -1` must
+    // degrade to the positional placeholder rather than trap on `generics[-1]`,
+    // exactly as an out-of-range operand does.
+    #expect(SignatureType.variable(scope: .type, -1)
+                .decode(generics: ["Element"], with: resolver, dialect: dialect)
+                == "T-1")
+  }
+
+  @Test func `a nested type variable spells its declared name`() {
+    // The names thread through the structural cases too: a `VAR` inside a
+    // pointer or a `GENERICINST` argument spells the declared name.
+    #expect(SignatureType.pointer(.variable(scope: .type, 0))
+                .decode(generics: ["Element"], with: resolver, dialect: dialect)
+                == "UnsafeMutablePointer<Element>")
+    let base = TypeDefOrRef(rawValue: 1)
+    let resolver = Resolver([
+      base.rawValue: Identity(namespace: "Windows.Foundation",
+                              name: "IReference`1"),
+    ])
+    #expect(SignatureType.instance(.named(kind: .class, base),
+                                   [.variable(scope: .type, 0)])
+                .decode(generics: ["Element"], with: resolver, dialect: dialect)
+                == "IReference<Element>")
+  }
+
+  @Test func `a generic declaration clause wraps the ordered names`() {
+    // The declaration hook composes the dialect's generic delimiters around the
+    // comma-separated names; an empty list is a non-generic declaration (`nil`).
+    #expect(dialect.generics(["Element"]) == "<Element>")
+    #expect(dialect.generics(["Key", "Value"]) == "<Key, Value>")
+    #expect(dialect.generics([]) == nil)
+  }
+
+  @Test func `a keyword-named type variable escapes its use and declaration`() {
+    // A parameter whose metadata name is a Swift keyword (`in`, `class`) must
+    // spell its `VAR` use through the dialect's keyword escape — a raw keyword
+    // is an invalid type reference (`UnsafeMutablePointer<in>`). The escaped
+    // spelling appears bare and inside the structural cases alike.
+    #expect(SignatureType.variable(scope: .type, 0)
+                .decode(generics: ["in"], with: resolver, dialect: dialect)
+                == "`in`")
+    #expect(SignatureType.pointer(.variable(scope: .type, 0))
+                .decode(generics: ["in"], with: resolver, dialect: dialect)
+                == "UnsafeMutablePointer<`in`>")
+    // The declaration clause escapes the same name, so declaration and use
+    // agree — a `` `in` `` use resolves against a `` <`in`> `` declaration.
+    #expect(dialect.generics(["in"]) == "<`in`>")
+    #expect(dialect.generics(["class", "Value"]) == "<`class`, Value>")
+  }
+
   @Test func `only an IsConst custom modifier marks a pointee const`() {
     // Two modifier-type references: one resolves to `IsConst`, the other to an
     // unrelated type. Only the former may flip the pointer to immutable.

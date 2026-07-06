@@ -38,7 +38,10 @@
 /// expression     := additive
 /// additive       := multiplicative (('+' | '-') multiplicative)*
 /// multiplicative := factor (('*' | '/') factor)*
-/// factor         := '(' expression ')' | literal | aggregate | call | column
+/// factor         := '(' expression ')' | case
+///                 | literal | aggregate | call | column
+/// case           := CASE [expression] (WHEN (predicate | expression) THEN
+///                     expression)+ [ELSE expression] END
 /// literal        := string | integer | decimal | TRUE | FALSE | blob
 /// blob           := ('x' | 'X') "'" (hex hex)* "'"  // whole bytes
 /// aggregate      := COUNT '(' '*' ')'
@@ -495,6 +498,9 @@ internal struct Parser: ~Escapable {
       try expect(.rparen)
       return expression
     }
+    if current?.kind == .case {
+      return try conditional()
+    }
     if case let .string(value) = current?.kind {
       _ = try advance(expecting: "a literal")
       return .literal(.string(value))
@@ -574,6 +580,41 @@ internal struct Parser: ~Escapable {
     }
     try expect(.rparen)
     return operand
+  }
+
+  /// Parses a `CASE` expression (the `CASE` is the next token) into the searched
+  /// `Expression.case`, admitting both ISO forms.
+  ///
+  /// A `WHEN` directly after `CASE` is the SEARCHED form — each `WHEN` a full
+  /// predicate. An expression after `CASE` is the SIMPLE form's operand — each
+  /// `WHEN value` is normalised to the equality `operand = value`, so both forms
+  /// share one searched AST. At least one `WHEN` is required; an optional `ELSE`
+  /// gives the no-branch result (absent, the result is `NULL`); the whole is
+  /// closed by `END`.
+  private mutating func conditional() throws(SQLError) -> Expression {
+    try expect(.case)
+    let operand: Expression? = current?.kind == .when ? nil
+                                                       : try expression()
+
+    var whens = Array<When>()
+    repeat {
+      try expect(.when)
+      let when: Predicate = if let operand {
+        try .comparison(left: operand, op: .equal, right: expression())
+      } else {
+        try predicate()
+      }
+      try expect(.then)
+      try whens.append(When(when: when, then: expression()))
+    } while current?.kind == .when
+
+    let otherwise: Expression? = if try match(.else) {
+      try expression()
+    } else {
+      nil
+    }
+    try expect(.end)
+    return .case(whens, else: otherwise)
   }
 
   // MARK: - Predicate

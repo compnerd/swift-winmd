@@ -444,11 +444,11 @@ extension Projection {
   /// faulting (`SQLError.column` for a column, `SQLError.unsupported` for `*`).
   /// The terms hold no slots, so the `single` row's empty record carries every
   /// value the projection needs.
-  internal func scalar() throws(SQLError) -> Plan {
+  internal func scalar(_ routines: Routines = [:]) throws(SQLError) -> Plan {
     guard case .all = self else {
       let schema = Schema(width: 0, extent: 0, names: [], types: [],
                           virtuals: [])
-      let terms = try schema.terms(self, in: Relation(name: ""))
+      let terms = try schema.terms(self, in: Relation(name: ""), routines)
       return .project(terms, .single)
     }
     // `SELECT *` names every column of the relations in scope; a FROM-less query
@@ -589,6 +589,72 @@ extension Expression {
       arguments.contains { $0.aggregated }
     case let .binary(_, lhs, rhs):
       lhs.aggregated || rhs.aggregated
+    case let .case(whens, otherwise):
+      whens.contains { $0.when.aggregated || $0.then.aggregated }
+          || (otherwise?.aggregated ?? false)
+    }
+  }
+
+  /// Whether the expression references a query binding — a `.bound` predicate —
+  /// anywhere within it, reached only through a `CASE` guard (a scalar
+  /// expression has no other predicate). A defined-function body is validated
+  /// over its parameter schema and evaluated with only its argument record — no
+  /// query bindings reach it — so a body naming a `:parameter` is rejected at
+  /// registration rather than silently evaluating that reference as UNBOUND.
+  internal var bound: Bool {
+    switch self {
+    case .column, .literal, .aggregate:
+      false
+    case let .call(_, arguments):
+      arguments.contains { $0.bound }
+    case let .binary(_, lhs, rhs):
+      lhs.bound || rhs.bound
+    case let .case(whens, otherwise):
+      whens.contains { $0.when.bound || $0.then.bound }
+          || (otherwise?.bound ?? false)
+    }
+  }
+}
+
+extension Predicate {
+  /// Whether the predicate contains an aggregate call anywhere within it — used
+  /// to spot an aggregate hiding in a `CASE` guard (`CASE WHEN COUNT(*) > 1
+  /// …`), which makes the enclosing query an aggregate one.
+  internal var aggregated: Bool {
+    switch self {
+    case let .comparison(left, _, right):
+      left.aggregated || right.aggregated
+    case let .bound(left, _, _):
+      left.aggregated
+    case let .null(operand, _):
+      operand.aggregated
+    case let .membership(operand, values, _):
+      operand.aggregated || values.contains { $0.aggregated }
+    case let .and(lhs, rhs), let .or(lhs, rhs):
+      lhs.aggregated || rhs.aggregated
+    case let .not(operand):
+      operand.aggregated
+    }
+  }
+
+  /// Whether the predicate references a query binding — a `.bound` operand — in
+  /// any position within it. A defined-function body's `CASE` guards are walked
+  /// through this to reject a `:parameter` at registration (see
+  /// `Expression.bound`).
+  internal var bound: Bool {
+    switch self {
+    case .bound:
+      true
+    case let .comparison(left, _, right):
+      left.bound || right.bound
+    case let .null(operand, _):
+      operand.bound
+    case let .membership(operand, values, _):
+      operand.bound || values.contains { $0.bound }
+    case let .and(lhs, rhs), let .or(lhs, rhs):
+      lhs.bound || rhs.bound
+    case let .not(operand):
+      operand.bound
     }
   }
 }
@@ -638,7 +704,7 @@ extension Catalog where Self: ~Escapable {
     }
     var predicate: Filter? = nil
     if let clause = select.predicate {
-      predicate = try scope.lower(clause)
+      predicate = try scope.lower(clause, context.routines)
     }
 
     // The `GROUP BY` keys and the aggregate arguments lower to combined
@@ -656,7 +722,7 @@ extension Catalog where Self: ~Escapable {
     }
     var aggregations = Array<Aggregation>()
     for expression in expressions {
-      try aggregations.append(expression.aggregation(scope))
+      try aggregations.append(expression.aggregation(scope, context.routines))
     }
 
     // The source materialises exactly the ordinals the WHERE, the keys, and the
@@ -704,9 +770,9 @@ extension Catalog where Self: ~Escapable {
     // enforcing the projection rule (every non-aggregated column must be a
     // GROUP BY key).
     var grouping = try Grouping(scope, select.grouping, expressions)
-    let projection = try grouping.terms(select.projection)
+    let projection = try grouping.terms(select.projection, context.routines)
     let having: Filter? = if let clause = select.having {
-      try grouping.lower(clause)
+      try grouping.lower(clause, context.routines)
     } else {
       nil
     }
@@ -770,6 +836,12 @@ extension Expression {
     case let .binary(_, lhs, rhs):
       lhs.collect(into: &expressions)
       rhs.collect(into: &expressions)
+    case let .case(whens, otherwise):
+      for branch in whens {
+        branch.when.collect(into: &expressions)
+        branch.then.collect(into: &expressions)
+      }
+      otherwise?.collect(into: &expressions)
     }
   }
 
@@ -779,7 +851,8 @@ extension Expression {
   /// `COUNT(*)` has no argument (it counts rows); every other aggregate lowers
   /// its single operand expression to a term. `self` is always an `.aggregate`
   /// — `collect` gathers only those.
-  internal func aggregation(_ scope: Scope) throws(SQLError) -> Aggregation {
+  internal func aggregation(_ scope: Scope, _ routines: Routines = [:])
+      throws(SQLError) -> Aggregation {
     guard case let .aggregate(function, operand) = self else {
       throw .unsupported("expected an aggregate")
     }
@@ -787,7 +860,7 @@ extension Expression {
     case .star:
       nil
     case let .expression(expression):
-      try scope.term(expression)
+      try scope.term(expression, routines)
     }
     return Aggregation(function: function, argument: argument)
   }
@@ -1580,7 +1653,7 @@ extension Catalog where Self: ~Escapable {
             "a WHERE, GROUP BY, HAVING, ORDER BY, OFFSET/FETCH, or JOIN " +
             "requires a FROM clause")
       }
-      return try select.projection.scalar()
+      return try select.projection.scalar(context.routines)
     }
     let from = try resolve(relation, context, visited)
 
@@ -1605,14 +1678,16 @@ extension Catalog where Self: ~Escapable {
     guard !select.joins.isEmpty else {
       var filter: Filter? = nil
       if let predicate = select.predicate {
-        filter = try from.schema.lower(predicate, in: relation)
+        filter = try from.schema.lower(predicate, in: relation,
+                                       context.routines)
       }
       var order = Array<(column: Int, ascending: Bool)>()
       if let clause = select.order {
         order = try from.schema.order(clause, in: relation)
       }
       let projection =
-          try from.schema.terms(select.projection, in: relation)
+          try from.schema.terms(select.projection, in: relation,
+                                context.routines)
 
       // Under DISTINCT every ORDER BY key must be a select-list column — the
       // dedup runs on the projected rows, so ordering on a dropped column is
@@ -1668,13 +1743,13 @@ extension Catalog where Self: ~Escapable {
     }
     var predicate: Filter? = nil
     if let clause = select.predicate {
-      predicate = try scope.lower(clause)
+      predicate = try scope.lower(clause, context.routines)
     }
     var order = Array<(column: Int, ascending: Bool)>()
     if let clause = select.order {
       order = try scope.order(clause)
     }
-    let projection = try scope.terms(select.projection)
+    let projection = try scope.terms(select.projection, context.routines)
 
     // Under DISTINCT every ORDER BY key must be a select-list column (see
     // `distinct`); order keys and projection are in combined base-ordinal

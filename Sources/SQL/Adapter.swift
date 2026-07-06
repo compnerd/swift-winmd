@@ -58,6 +58,18 @@ public enum ValueType: Hashable, Sendable {
     self == other || (numeric && other.numeric)
   }
 
+  /// The single type a value of this type and one of `other` UNIFY to, or `nil`
+  /// when they are irreconcilable — the rule a `CASE` reconciles its result
+  /// types by. Like types unify to themselves; a mixed integer/double pair
+  /// widens to `double` (both numeric, the integer promoted, as arithmetic and
+  /// comparison do); any other cross-kind pair — text against a number, boolean
+  /// against blob — has no common type and does not unify.
+  internal func unified(with other: ValueType) -> ValueType? {
+    if self == other { return self }
+    if numeric && other.numeric { return .double }
+    return nil
+  }
+
   /// The ISO `data_type` spelling of this value type.
   ///
   /// The engine's types map onto the ISO domains: exact numeric to `integer`,
@@ -108,6 +120,24 @@ public enum Value: Hashable, Sendable {
   /// equality (`=`/`<>`) and lexicographic order (`<`/`>`/`<=`/`>=`), both free
   /// from `Array<UInt8>: Comparable`.
   case blob(Array<UInt8>)
+}
+
+extension Value {
+  /// This value coerced to `type` — the widening a `CASE` (or a defined
+  /// function body) applies so a selected branch's raw value matches the
+  /// unified result type the schema advertises.
+  ///
+  /// `ValueType.unified` performs one widening only — a mixed integer/double
+  /// pair to `.double` — so this promotes an `.integer` to `.double` when
+  /// `type` is `.double` and leaves every other value unchanged: NULL stays
+  /// NULL, a value already of the unified type passes through, and a
+  /// non-widening unified type (every arm the same) needs no coercion.
+  internal func coerced(to type: ValueType) -> Value {
+    if case .double = type, case let .integer(number) = self {
+      return .double(Double(number))
+    }
+    return self
+  }
 }
 
 // MARK: - View

@@ -51,6 +51,11 @@ extension Token {
     case recursive
     case `true`
     case `false`
+    case `case`
+    case when
+    case then
+    case `else`
+    case end
 
     // Operands.
     case identifier(String)
@@ -124,6 +129,11 @@ extension Token.Kind {
     case .recursive: "RECURSIVE"
     case .true: "TRUE"
     case .false: "FALSE"
+    case .case: "CASE"
+    case .when: "WHEN"
+    case .then: "THEN"
+    case .else: "ELSE"
+    case .end: "END"
     case let .identifier(name): name
     case let .quoted(name): "\"\(name)\""
     case let .string(value): "'\(value)'"

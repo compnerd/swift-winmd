@@ -426,6 +426,11 @@ internal struct Lexer: ~Escapable {
     case "RECURSIVE": .recursive
     case "TRUE": .true
     case "FALSE": .false
+    case "CASE": .case
+    case "WHEN": .when
+    case "THEN": .then
+    case "ELSE": .else
+    case "END": .end
     default: .identifier(text)
     }
     return Token(kind: kind, location: start)

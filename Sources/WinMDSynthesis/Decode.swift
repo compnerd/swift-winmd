@@ -73,6 +73,16 @@ public struct Dialect: Sendable {
     self.known = known
     self.escape = escape
   }
+
+  /// The generic-parameter declaration clause for the ordered `names`
+  /// (`<Element>`, `<Key, Value>`) — the dialect's generic delimiters wrapped
+  /// around the comma-separated names — or `nil` for a non-generic declaration
+  /// (an empty list), so a caller omits the clause entirely. Variance is
+  /// dropped (the target has no declaration-site variance); names spell plain.
+  public func generics(_ names: Array<String>) -> String? {
+    guard !names.isEmpty else { return nil }
+    return generic.open + names.joined(separator: ", ") + generic.close
+  }
 }
 
 /// The per-dialect decode functions, emitting a target type spelling as text.
@@ -89,33 +99,43 @@ public struct Dialect: Sendable {
 extension SignatureType {
   /// The type spelling of `self` in `dialect`, resolving named types through
   /// `resolver` and disambiguating a `System.Guid` by the `parameter`-name hint.
-  public func decode(parameter: String? = nil, with resolver: Resolver,
+  ///
+  /// A `VAR` generic variable spells its declared parameter's name when the
+  /// owner's ordered `generics` names are supplied (`VAR 0` of `<Element>`
+  /// spells `Element`); absent them (the DB-free path) it degrades to the
+  /// dialect's positional placeholder (`T0`). The names index by the variable's
+  /// operand; an out-of-range operand falls back to the placeholder. An `MVAR`
+  /// (method-level) variable always spells its placeholder — only the
+  /// type-level names are threaded here.
+  public func decode(parameter: String? = nil,
+                     generics: Array<String>? = nil, with resolver: Resolver,
                      dialect: Dialect) -> String {
     switch self {
     case let .primitive(primitive):
       primitive.spelling(dialect)
     case let .pointer(pointee):
-      pointee.spelling(parameter: parameter, const: false, with: resolver,
-                       dialect: dialect)
+      pointee.spelling(parameter: parameter, generics: generics, const: false,
+                       with: resolver, dialect: dialect)
     case let .reference(referent):
-      referent.spelling(parameter: parameter, const: false, with: resolver,
-                        dialect: dialect)
+      referent.spelling(parameter: parameter, generics: generics, const: false,
+                        with: resolver, dialect: dialect)
     case let .array(element):
-      element.spelling(parameter: parameter, const: false, with: resolver,
-                       dialect: dialect)
+      element.spelling(parameter: parameter, generics: generics, const: false,
+                       with: resolver, dialect: dialect)
     case let .matrix(element, _):
-      element.spelling(parameter: parameter, const: false, with: resolver,
-                       dialect: dialect)
+      element.spelling(parameter: parameter, generics: generics, const: false,
+                       with: resolver, dialect: dialect)
     case let .named(kind, reference):
       reference.spelling(kind: kind, parameter: parameter, with: resolver,
                          dialect: dialect)
     case let .variable(scope, index):
-      "\(scope.prefix(dialect))\(index)"
+      scope.spelling(index, generics: generics, dialect: dialect)
     case let .instance(base, arguments):
-      base.specialized(by: arguments, parameter: parameter, with: resolver,
-                       dialect: dialect)
+      base.specialized(by: arguments, parameter: parameter, generics: generics,
+                       with: resolver, dialect: dialect)
     case let .modified(inner, _):
-      inner.decode(parameter: parameter, with: resolver, dialect: dialect)
+      inner.decode(parameter: parameter, generics: generics, with: resolver,
+                   dialect: dialect)
     case .function:
       dialect.opaque
     }
@@ -174,8 +194,8 @@ extension SignatureType {
   /// is `const`), and an `int**`/`IFoo**` a pointer to an optional typed pointer.
   /// Otherwise a non-`void` pointee decodes as `Unsafe{Mutable}Pointer<Pointee>`,
   /// mutable unless a `const` modifier marks the pointee.
-  fileprivate func spelling(parameter: String?, const: Bool,
-                            with resolver: Resolver,
+  fileprivate func spelling(parameter: String?, generics: Array<String>?,
+                            const: Bool, with resolver: Resolver,
                             dialect: Dialect) -> String {
     switch self {
     case .primitive(.void):
@@ -191,15 +211,16 @@ extension SignatureType {
     case .pointer:
       // A non-`void` pointer-to-pointer: the inner pointer slot is itself
       // nullable, so mark the decoded element optional (as the `void**` cases).
-      wrap(decode(parameter: parameter, with: resolver, dialect: dialect)
-               + dialect.optional,
+      wrap(decode(parameter: parameter, generics: generics, with: resolver,
+                  dialect: dialect) + dialect.optional,
            const: const, dialect: dialect)
     case let .modified(inner, modifiers):
-      inner.spelling(parameter: parameter,
+      inner.spelling(parameter: parameter, generics: generics,
                      const: modifiers.constant(with: resolver),
                      with: resolver, dialect: dialect)
     default:
-      wrap(decode(parameter: parameter, with: resolver, dialect: dialect),
+      wrap(decode(parameter: parameter, generics: generics, with: resolver,
+                  dialect: dialect),
            const: const, dialect: dialect)
     }
   }
@@ -284,7 +305,8 @@ extension SignatureType {
   /// hint flows to the arguments as well, so a `System.Guid` argument of a
   /// parameter named `clsid` spells `CLSID` rather than the default `IID`.
   fileprivate func specialized(by arguments: Array<SignatureType>,
-                               parameter: String?, with resolver: Resolver,
+                               parameter: String?, generics: Array<String>?,
+                               with resolver: Resolver,
                                dialect: Dialect) -> String {
     let base = decode(parameter: parameter, with: resolver, dialect: dialect)
     // An unresolved base (e.g. a TypeSpec with no identity) decodes to the
@@ -296,8 +318,8 @@ extension SignatureType {
     // be escaped after the strip, not before, to spell `` `protocol`<…> ``.
     let name = dialect.escape(String(base.prefix { $0 != "`" }))
     let arguments = arguments
-        .map { $0.decode(parameter: parameter, with: resolver,
-                         dialect: dialect) }
+        .map { $0.decode(parameter: parameter, generics: generics,
+                         with: resolver, dialect: dialect) }
         .joined(separator: ", ")
     return "\(name)\(dialect.generic.open)\(arguments)\(dialect.generic.close)"
   }
@@ -311,5 +333,22 @@ extension VariableScope {
     case .type:   dialect.variable.type
     case .method: dialect.variable.method
     }
+  }
+
+  /// The spelling of the generic variable at `index` in this scope: the
+  /// declared parameter's name when this is a type-level `VAR`, the owner's
+  /// ordered `generics` names are supplied, and the operand is in range (`VAR
+  /// 0` of `<Element>` → `Element`); otherwise the positional placeholder
+  /// (`\(prefix)\(index)`). A method-level `MVAR` always spells its
+  /// placeholder — only type-level names are threaded — as does an out-of-range
+  /// operand. The lower bound guards a negative operand: the metadata decoder
+  /// emits none, but the enum case is public, so a malformed programmatic
+  /// `VAR -1` degrades to the placeholder rather than trap on `generics[-1]`.
+  fileprivate func spelling(_ index: Int, generics: Array<String>?,
+                            dialect: Dialect) -> String {
+    if case .type = self, let generics, index >= 0, index < generics.count {
+      return generics[index]
+    }
+    return "\(prefix(dialect))\(index)"
   }
 }

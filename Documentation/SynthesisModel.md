@@ -69,7 +69,9 @@ algebra — that never imports `WinMD`. It runs entirely against four
   `bound(_:_:strict:)` partition point for a sorted seek; it vends a `Cursor`.
 - **`Cursor`** addresses rows by index.
 - **`Row`** reads a typed cell by ordinal, as a `Value` — `.null`, `.integer`,
-  or `.text`.
+  `.double`, `.text`, `.boolean`, or `.blob`. The `.blob` case is load-bearing
+  for the synthesis path: a `GuidAttribute`'s value arrives as a `#Blob`, and
+  the render's `GUID` UDF (below) turns that blob into an IID string.
 
 `Engine.run(_:_:_:bindings:)` (`Sources/SQL/Engine.swift`) plans and executes a
 `Query` in three phases — **compile → optimise → execute**:
@@ -106,9 +108,13 @@ layer relies on:
   binding a parent row's key into a child query is how the render walks a
   one-to-many relationship one level at a time.
 - **Registered scalar functions** (`Routines`, `Sources/SQL/Function.swift`) —
-  the engine's extension point. The render binds the target-language `SANITIZE`
-  UDF (below) here, so keyword-escaping is a value a query projects rather than
-  logic in the binary.
+  the engine's extension point. Two kinds matter here: the WinMD-domain
+  `GUID(blob)` UDF, which decodes a `GuidAttribute` value blob to the UUID it
+  names (the `interfaces` view spells its `iid` through it), and the
+  target-language `SANITIZE` UDF (below). Both are values a query projects rather
+  than logic in the binary. A registered aggregate (`COUNT`/`SUM`/`MIN`/`MAX`/
+  `AVG`, `Sources/SQL/Aggregate.swift`) exists for interactive use but the
+  synthesis views do not lean on it.
 
 The engine yields typed `Value` rows, never rendered text.
 
@@ -143,16 +149,9 @@ adapter, not the engine, knows that a WinMD foreign key or list run *is* a join.
 
 ### Decoded columns — the federation codecs surfaced as relations
 
-Two further kinds of virtual column expose WinMD's *serialization formats* as
-ordinary readable cells, so that views can navigate over them:
+The adapter exposes one further kind of virtual column so that views can
+navigate over WinMD's *serialization formats*:
 
-- **Per-table decoded extra.** `CustomAttribute.guid` decodes a WinMD-specific
-  column (the UUID a `GuidAttribute` blob names, or `NULL` when the blob is not
-  GUID-shaped), computed in `WinMDRow`, decoded rather than stored, and never
-  seekable. A signature's return/parameter *type* is deliberately **not** a
-  column: the adapter stays type-neutral and the render decodes the spelling from
-  the signature at render time (see Presentation), so no target language leaks
-  into the conceptual schema.
 - **Coded-index join keys.** For every real coded-index column, the adapter
   exposes one decoded column per candidate target table the coded index admits,
   named **`<Column>_<Target>`** (e.g. `CustomAttribute.Parent_TypeDef`). Its
@@ -163,6 +162,15 @@ ordinary readable cells, so that views can navigate over them:
   index actually points at `Target`. These keys are derived purely from the
   schema's coded-index fields and their `CodedIndex.tables`; no table or column
   is special-cased.
+
+A byte-format *decode* that is not itself a relationship is **not** a virtual
+column but a scalar UDF applied in a view. A `GuidAttribute` blob decodes to an
+IID through the `GUID(blob)` function (`Database+SQL.swift`), which the
+`interfaces` view calls on the raw `CustomAttribute.Value` cell — keeping the
+adapter's columns free of any per-attribute decode. Likewise a signature's
+return/parameter *type* is deliberately not a column: the adapter stays
+type-neutral and the render decodes the spelling from the signature at render
+time (see Presentation), so no target language leaks into the conceptual schema.
 
 A `Session` (`Database+SQL.swift`) is the same `Catalog` overlaid with the
 session's registered views, so a `SELECT` may name a view, and a view shadows a
@@ -176,24 +184,32 @@ path, and it is deliberately limited to **byte/format codecs**, not
 relationships:
 
 - **`WinMDSynthesis.Decode`** (`Sources/WinMDSynthesis/Decode.swift`) composes a
-  decoded `SignatureType` into a type spelling: primitives, the pointer/
-  reference/array family, a `System.Guid` to `IID`/`CLSID` by a parameter-name
-  hint, and named types through a well-known table or their resolved simple name.
-  The target spellings themselves are **not** baked in — the composition is
-  parameterized by a `Dialect` the render builds from the language spec
+  decoded `SignatureType` into a type spelling — a pure function of the signature
+  and a `Dialect`. It covers the primitive leaves; the pointer/reference/array
+  family (with `void*` collapsing to a raw pointer and a pointer-to-pointer
+  keeping an optional inner slot); a `System.Guid` classified to `IID`/`CLSID` by
+  a parameter-name hint; a `GENERICINST` as `Base<Args…>` (the CLR arity suffix
+  stripped); a `VAR`/`MVAR` generic variable as a `T`/`M` placeholder; named
+  types resolved through the `Resolver` and then a well-known table or their
+  escaped simple name; and a function pointer degraded to the dialect's opaque
+  pointer. The target spellings themselves are **not** baked in — the composition
+  is parameterized by a `Dialect` the render builds from the language spec
   (`swift.lang`), so the codec is the language-neutral *structure* and the spec
-  supplies the Swift (or Rust, or C) strings. The render, not the adapter,
+  supplies the Swift (or Rust, or C) strings, including the keyword-`escape` that
+  a named type's simple name spells compilably. The render, not the adapter,
   invokes it.
 - **`Resolver`/`Identity`/`TypeResolver`**
   (`Sources/WinMDSynthesis/`) resolve the `TypeDefOrRef` references a signature
   names against a borrowed `Storage` into a `Resolver` — a `rawValue → Identity`
-  table the `Sendable`, database-free decode tier reads. Because a `Database` is
-  `~Escapable` and cannot be captured by a `Sendable` value, resolution is done
-  eagerly while the database is in scope.
-- The **coded-index join keys** and the **GuidAttribute blob decode** in
-  `Database+SQL.swift` are codecs of the same kind: a coded index is a packed
-  tag-plus-row encoding, and a GUID is a blob layout — byte formats, decoded
-  once into a join key or a UUID string.
+  table (namespace + simple name) the `Sendable`, database-free decode tier
+  reads. Because a `Database` is `~Escapable` and cannot be captured by a
+  `Sendable` value, resolution is done eagerly while the database is in scope:
+  every reference a signature carries — directly or nested under a pointer,
+  reference, array, modifier, or instantiation — is collected up front.
+- The **coded-index join keys** in `Database+SQL.swift` and the **`GUID(blob)`
+  UDF** are codecs of the same kind: a coded index is a packed tag-plus-row
+  encoding, and a GUID is a blob layout — byte formats, decoded once into a join
+  key or a UUID string.
 
 These are codecs because they decode a *serialization format*. They are not
 relationships, and so they are not expressed in SQL.
@@ -216,7 +232,8 @@ This is where the logical schema lives. The bundled views — the
   in-file `TypeDef`). All three
   arms filter to the `GuidAttribute` declaring type and to a `tdInterface`
   carrier (`BITAND(Flags, 32) = 32`, so a GUID-bearing coclass is not mistaken
-  for an interface), projecting `CustomAttribute.guid` as the `iid`.
+  for an interface), projecting `GUID(CustomAttribute.Value)` as the `iid` — the
+  UDF decoding the attribute's blob to its UUID.
 - **`methods`** and **`params`** — an interface's methods are the `MethodDef`
   rows it owns; a method's parameters are its `Param` rows. Each is a one-level
   navigation correlated by `:parent` against the owner-FK column (`WHERE

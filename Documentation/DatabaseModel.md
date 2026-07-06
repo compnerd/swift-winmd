@@ -108,15 +108,21 @@ materialise a database; each is a view that interprets the raw bytes in place:
 - **`PhysicalSchema`** — an immutable value holding the resolved physical schema
   (all index/column byte widths). Resolved once when the database is opened and
   exposed as `Database.catalog`.
-- **`Table`** — an immutable value describing an *open* table: a schema, a
-  `TupleDescriptor`, the row count, and the table's absolute byte `range`. The
-  present tables are opened once at database open.
-- **`TupleDescriptor`** (`TupleDescriptor.swift`) — a row's physical layout: each
-  column's precomputed byte offset (pre-summed) and width, plus the row
-  `stride`. Computed once per open table.
-- **`Row<Schema>`** — a cursor over a borrowed view: a row index that decodes a
-  cell on demand by arithmetic against the descriptor — `range + row * stride +
-  offset[i]`, a zero-copy unaligned `RawSpan` load. No allocation, no copy.
+- **`Table`** — an immutable value describing an *open* table: a schema, the row
+  count, the table's absolute byte `range`, the record `stride`, and a `wide`
+  width-bitset (bit `i` set iff column `i` is an index the catalog resolved to
+  its wide, 4-byte form). The present tables are opened once at database open.
+  `Table.offset(_:)` recovers a column's byte offset on demand from the schema's
+  compile-time narrow offsets shifted by the `wide` bitset, so no per-table
+  offset array is materialised.
+- **Row layout** (`RowLayout.swift`) — the compile-time narrow column widths and
+  their prefix-sum offsets, a property of a `TableSchema` (`TableSchema.offset(_:)`).
+  A database's wide indices shift these at read time via the `Table`'s bitset;
+  there is no separate per-table descriptor value.
+- **`Row<Schema>`** / **`Tuple`** — a cursor over a borrowed view: a row index
+  that decodes a cell on demand by arithmetic against the schema and the `Table`
+  — `range + row * stride + offset(i)`, a zero-copy unaligned `RawSpan` load. No
+  allocation, no copy.
 - **`TableIterator<Schema>`** — a (table) scan over a table's rows, yielding a
   typed `Row` cursor for each.
 - **`Database`** (`Database.swift`) — the entry point, and itself a `~Escapable`
@@ -141,8 +147,9 @@ materialise a database; each is a view that interprets the raw bytes in place:
 - **Zero allocation on the hot path.** Schema layout is resolved once per table
   at open. Reading a row constructs only a small cursor value and decodes
   exactly the columns that are touched.
-- **Resolve once.** The catalog (index widths) and each table's row descriptor
-  are invariant for the file's lifetime and are computed a single time when the
-  database is opened, not on each access.
-- **O(1) column access.** Column offsets are pre-summed so locating a column is a
-  constant array lookup rather than a walk over preceding columns.
+- **Resolve once.** The catalog (index widths) and each table's `wide` bitset
+  and `stride` are invariant for the file's lifetime and are computed a single
+  time when the database is opened, not on each access.
+- **O(1) column access.** A column's narrow offset is a compile-time prefix sum
+  over its schema, adjusted by the `wide` bitset, so locating a column is
+  constant-time arithmetic rather than a walk over preceding columns.

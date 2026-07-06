@@ -56,7 +56,7 @@ below name the steps of that arithmetic, not components of a running database.
 | Logical schema (the catalog's table/column definitions) | The table definitions in ECMA-335 §II.22 — table number and column descriptors | `TableSchema` (`Table.swift`); the ~40 marker types in `Sources/WinMD/Tables/` |
 | Physical schema / the catalog (system metadata describing the schema) | Resolved index/column byte widths, derived from the `Valid` bitvector, row counts, and `HeapSizes` | `PhysicalSchema` (`PhysicalSchema.swift`), exposed as `Database.catalog` |
 | The catalog resolved once at open | Resolved once when the database is opened | `Database.catalog`, computed in `Database.init` |
-| Row descriptor (precomputes each column's byte offset) | The byte offset and width of each column, pre-summed, plus the row stride | `TupleDescriptor` (`TupleDescriptor.swift`) |
+| Row layout (each column's byte offset and the row stride) | The byte offset and width of each column, plus the row stride | The schema's compile-time narrow offsets (`RowLayout.swift`), shifted by the open `Table`'s `wide` bitset and `stride` |
 | A table / open relation | One table's rows within the file | `Table` (the immutable value in `Table.swift`) |
 | A row / cursor (an offset into the buffer + the shared descriptor) | A row addressed by index into the table's packed rows | `Row<Schema>` (`Iteration.swift`) |
 | A (table) scan | Iterating a table's rows | `TableIterator<Schema>` |
@@ -75,12 +75,14 @@ materialises nothing: a `Database` is a `~Escapable` borrowed view over the
 buffer, not a constructed copy of it. The caller owns and keeps the buffer
 alive; see the zero-copy principle in [DatabaseModel.md](DatabaseModel.md).
 
-**Resolve a row descriptor per table.** With the catalog in hand, each
-present table is *opened* into a `Table` value. At that moment its
-`TupleDescriptor` is computed once: the column widths are resolved against the
-catalog and pre-summed into offsets, so that locating column *i* is a constant
-array lookup rather than a walk over the preceding columns. The value holds the
-schema, the descriptor, the row count, and the table's absolute byte range.
+**Resolve a row layout per table.** With the catalog in hand, each present table
+is *opened* into a `Table` value. At that moment its physical layout is resolved
+once: the catalog decides which index columns are wide, captured as the `Table`'s
+`wide` bitset and record `stride`. A column's offset is the schema's compile-time
+narrow prefix sum (`RowLayout.swift`) shifted by that bitset, so locating column
+*i* is constant-time arithmetic rather than a walk over the preceding columns.
+The `Table` value holds the schema, the `wide` bitset, the `stride`, the row
+count, and the table's absolute byte range.
 
 **Hand out cursors, not copies.** A `Row<Schema>` is a cursor: a row index over
 a borrowed view of the buffer. Constructing one allocates nothing and copies

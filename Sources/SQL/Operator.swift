@@ -298,7 +298,7 @@ internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
   case let .scan(name, ordinals, seek):
     try materialise(name, ordinals, seek, catalog, ctes)
   case let .derived(name, source, ordinals, seek):
-    try derive(name, source, ordinals, seek, catalog, routines, bindings)
+    try catalog.derive(name, source, ordinals, seek, routines, bindings)
   case let .select(filter, .product(outer, inner)):
     // Fuse a residual product with its filter: stream each pair through the
     // predicate rather than materialising the whole cross product first.
@@ -456,37 +456,36 @@ private func materialise<C: Catalog & ~Escapable>(_ name: String,
   return records
 }
 
-/// Executes a view's sub-`plan` against `catalog` and re-lays each resulting
-/// record to the referenced `ordinals` (slots into the view's columns) over the
-/// seek's row range (the whole result when `nil`).
-///
-/// The sub-plan yields full-width view records — its columns at slots
-/// `0 ..< columns.count`; this projects each to the `ordinals` the outer query
-/// reads, in the slot order the outer scan expects (slot `i` is `ordinals[i]`).
-///
-/// The sub-plan runs OUTSIDE the statement's CTE scope — never the caller's
-/// `WITH` — so a caller's `WITH` never reaches into a stored view's body: a
-/// view's own `FROM`/`JOIN` names resolve to base relations (and other views),
-/// never to a statement-local CTE that happens to share a name. Its scope is
-/// instead the `definition_schema.` overlay the view's OWN query names (empty
-/// when it names none), so a view defined over a store relation materialises
-/// exactly as the inline query does — the same overlay the body compiled and
-/// optimised under.
-private func derive<C: Catalog & ~Escapable>(_ name: String, _ plan: Plan,
-                                             _ ordinals: Array<Int>,
-                                             _ seek: Range<Int>?,
-                                             _ catalog: borrowing C,
-                                             _ routines: Routines,
-                                             _ bindings: Bindings)
-    throws(SQLError) -> Array<Record> {
-  let overlay = if let view = catalog.resolve(view: name) {
-    catalog.augment([:], for: view.query, rows: true, routines: routines)
-  } else {
-    CTEs()
+extension Catalog where Self: ~Escapable {
+  /// Executes a view's sub-`plan` against this catalog and re-lays each resulting
+  /// record to the referenced `ordinals` (slots into the view's columns) over the
+  /// seek's row range (the whole result when `nil`).
+  ///
+  /// The sub-plan yields full-width view records — its columns at slots
+  /// `0 ..< columns.count`; this projects each to the `ordinals` the outer query
+  /// reads, in the slot order the outer scan expects (slot `i` is `ordinals[i]`).
+  ///
+  /// The sub-plan runs OUTSIDE the statement's CTE scope — never the caller's
+  /// `WITH` — so a caller's `WITH` never reaches into a stored view's body: a
+  /// view's own `FROM`/`JOIN` names resolve to base relations (and other views),
+  /// never to a statement-local CTE that happens to share a name. Its scope is
+  /// instead the `definition_schema.` overlay the view's OWN query names (empty
+  /// when it names none), so a view defined over a store relation materialises
+  /// exactly as the inline query does — the same overlay the body compiled and
+  /// optimised under.
+  internal borrowing func derive(_ name: String, _ plan: Plan,
+                                 _ ordinals: Array<Int>, _ seek: Range<Int>?,
+                                 _ routines: Routines, _ bindings: Bindings)
+      throws(SQLError) -> Array<Record> {
+    let overlay = if let view = resolve(view: name) {
+      augment([:], for: view.query, rows: true, routines: routines)
+    } else {
+      CTEs()
+    }
+    let rows = try execute(plan, self, overlay, routines, bindings)
+    let range = seek ?? 0 ..< rows.count
+    return range.map { rows[$0].project(ordinals) }
   }
-  let rows = try execute(plan, catalog, overlay, routines, bindings)
-  let range = seek ?? 0 ..< rows.count
-  return range.map { rows[$0].project(ordinals) }
 }
 
 /// The Cartesian product of two materialised relations: every concatenation of

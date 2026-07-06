@@ -80,14 +80,18 @@ extension Catalog where Self: ~Escapable {
   public borrowing func columns(of query: Query, routines: Routines = [:],
                                 validate: Bool = true)
       throws(SQLError) -> Array<OutputColumn> {
+    // The engine prelude merged under the caller's routines, exactly as a run
+    // seeds them, so a standard call (`BITAND`) types without the caller
+    // re-supplying it. A typing path has no bindings.
+    let context = Context(routines: Routines.standard.merging(routines))
     // Extend the scope with any `definition_schema.` store relation the query
     // names, so its result schema resolves the reserved relation the same as a
     // run would — SCHEMA-ONLY, so typing never triggers the row build.
-    let ctes = augment([:], for: query, rows: false)
+    let scope = augment(context, for: query, rows: false)
     // Validate the whole query without executing — the same compile the run
     // path drives, resolving every arm and cross-checking a UNION's arity — so
     // a schema is returned only for a query that could actually run.
-    _ = try compile(query, ctes)
+    _ = try compile(query, scope)
     // Type-check every REACHABLE operand and call across all arms — the
     // projection, `WHERE`, and `HAVING` of each. `compile` resolves a call's
     // arguments but cannot check the routine EXISTS or that it is called with
@@ -99,18 +103,14 @@ extension Catalog where Self: ~Escapable {
     // that already RAN the query (`validate: false`) skips it: a reachable
     // operand a data-dependent filter never reached would otherwise fault a
     // query that produced its (empty) result.
-    let routines = Routines.standard.merging(routines)
-    if validate { try typecheck(query, ctes, routines: routines) }
+    if validate { try typecheck(query, scope) }
     // The result columns are the first arm's projection (the ISO rule a UNION
     // follows), resolved against the validated scope; a scalar call types from
-    // its routine's declared return type — the engine prelude merged under
-    // `routines`, exactly as a run seeds them, so a standard call (`BITAND`)
-    // types without the caller re-supplying it. `validate` rides through so a
+    // its routine's declared return type. `validate` rides through so a
     // `SELECT *` over a view derives the body's types WITHOUT re-type-checking
     // it — the view body's own reachable-operand check is gated the same as the
     // outer query's, so a `validate: false` derive faults nowhere.
-    return try columns(of: query.first, ctes, routines: routines,
-                       validate: validate)
+    return try columns(of: query.first, scope, validate: validate)
   }
 
   /// The result columns `statement` would yield, named and typed, resolved
@@ -192,7 +192,7 @@ extension Catalog where Self: ~Escapable {
                                  routines: Routines,
                                  validate: Bool)
       throws(SQLError) -> Array<OutputColumn> {
-    let routines = Routines.standard.merging(routines)
+    let context = Context(routines: Routines.standard.merging(routines))
     var overlay = ScopedRelations()
     for cte in ctes {
       // A name repeated in the list (case-insensitively) would silently shadow
@@ -225,8 +225,8 @@ extension Catalog where Self: ~Escapable {
       // run already proved the bodies consistent — so `typecheck: false` there.
       if validate {
         // `self.` escapes the shadow the `validate` Bool parameter casts over
-        // the shared `validate(_:against:routines:)` engine helper.
-        try self.validate(cte, against: overlay, routines: routines,
+        // the shared `validate(_:against:)` engine helper.
+        try self.validate(cte, against: context.scoping(overlay),
                           typecheck: true)
       }
       // Bind the CTE's schema-only self into the overlay AFTER its body is
@@ -235,11 +235,10 @@ extension Catalog where Self: ~Escapable {
       // its body.
       overlay[cte.name.lowercased()] = declared
     }
-    let scope = augment(overlay, for: query, rows: false)
+    let scope = augment(context.scoping(overlay), for: query, rows: false)
     _ = try compile(query, scope)
-    if validate { try typecheck(query, scope, routines: routines) }
-    return try columns(of: query.first, scope, routines: routines,
-                       validate: validate)
+    if validate { try typecheck(query, scope) }
+    return try columns(of: query.first, scope, validate: validate)
   }
 
   /// The result columns of a single `select`, resolved against this catalog
@@ -255,14 +254,12 @@ extension Catalog where Self: ~Escapable {
   /// this arm's relations resolve, gating the view body's reachable-operand
   /// check the same as the outer query's — a `validate: false` derive never
   /// re-type-checks a view body a run already proved runnable.
-  borrowing func columns(of select: Select, _ ctes: ScopedRelations,
+  borrowing func columns(of select: Select, _ context: Context,
                          visited: Set<String> = [],
-                         routines: Routines = [:],
                          validate: Bool = true)
       throws(SQLError) -> Array<OutputColumn> {
-    try scope(of: select, ctes, visited: visited, routines: routines,
-              validate: validate)
-        .columns(of: select.projection, routines)
+    try scope(of: select, context, visited: visited, validate: validate)
+        .columns(of: select.projection, context.routines)
   }
 
   /// The name-resolution scope of `select` — its FROM relation and each joined
@@ -272,18 +269,17 @@ extension Catalog where Self: ~Escapable {
   /// empty. It reads only schemas, never a cursor. `validate` (default `true`)
   /// rides through to each relation's `schema(of:)`, gating a view body's
   /// reachable-operand check the same as the outer query's.
-  borrowing func scope(of select: Select, _ ctes: ScopedRelations,
+  borrowing func scope(of select: Select, _ context: Context,
                        visited: Set<String> = [],
-                       routines: Routines = [:],
                        validate: Bool = true)
       throws(SQLError) -> Scope {
     guard let relation = select.from else { return Scope([]) }
     var relations =
-        [(relation, try schema(of: relation, ctes, visited: visited,
-                               routines: routines, validate: validate))]
+        [(relation, try schema(of: relation, context, visited: visited,
+                               validate: validate))]
     for join in select.joins {
-      let joined = try schema(of: join.relation, ctes, visited: visited,
-                              routines: routines, validate: validate)
+      let joined = try schema(of: join.relation, context, visited: visited,
+                              validate: validate)
       relations.append((join.relation, joined))
     }
     return Scope(relations)
@@ -299,16 +295,15 @@ extension Catalog where Self: ~Escapable {
   /// `Aggregate.fold` faults `SQLError.operand` at run. `compile` cannot catch
   /// this (no evaluating term is built), so a schema path type-checks each arm
   /// before returning metadata. It reads no cursor.
-  borrowing func typecheck(_ query: Query, _ ctes: ScopedRelations,
-                           visited: Set<String> = [],
-                           routines: Routines = [:])
+  borrowing func typecheck(_ query: Query, _ context: Context,
+                           visited: Set<String> = [])
       throws(SQLError) {
     switch query {
     case let .select(select):
-      try typecheck(select, ctes, visited: visited, routines: routines)
+      try typecheck(select, context, visited: visited)
     case let .union(left, select, _):
-      try typecheck(left, ctes, visited: visited, routines: routines)
-      try typecheck(select, ctes, visited: visited, routines: routines)
+      try typecheck(left, context, visited: visited)
+      try typecheck(select, context, visited: visited)
     }
   }
 
@@ -338,12 +333,11 @@ extension Catalog where Self: ~Escapable {
   ///     ONLY`, or a positive `OFFSET` over a whole-result aggregate's sole row
   ///     (its output type is still DERIVED for the schema, non-faulting);
   ///     otherwise it validates fully.
-  private borrowing func typecheck(_ select: Select, _ ctes: ScopedRelations,
-                                   visited: Set<String>,
-                                   routines: Routines)
+  private borrowing func typecheck(_ select: Select, _ context: Context,
+                                   visited: Set<String>)
       throws(SQLError) {
-    let scope = try scope(of: select, ctes, visited: visited,
-                          routines: routines)
+    let routines = context.routines
+    let scope = try scope(of: select, context, visited: visited)
     if let predicate = select.predicate {
       try scope.check(predicate, routines)
       // A false WHERE filters every row, so a GROUP BY forms no group and a
@@ -434,13 +428,12 @@ extension Catalog where Self: ~Escapable {
   /// types WITHOUT re-checking its reachable operands, so a view whose body is
   /// data-dependent-empty — a text-arithmetic projection under a filter that
   /// matched no row — does not fault a `SELECT *` over it that already ran.
-  borrowing func schema(of relation: Relation, _ ctes: ScopedRelations,
+  borrowing func schema(of relation: Relation, _ context: Context,
                         visited: Set<String> = [],
-                        routines: Routines = [:],
                         validate: Bool = true)
       throws(SQLError) -> Schema {
     let name = relation.name
-    if let cte = ctes[name.lowercased()] {
+    if let cte = context.relations[name.lowercased()] {
       return cte.schema()
     }
     // A reserved store relation types through its SCHEMA-ONLY build (header +
@@ -470,7 +463,7 @@ extension Catalog where Self: ~Escapable {
       // operand a `SELECT * FROM v` run would evaluate — a `WHERE`/`HAVING`, a
       // later `UNION` arm — while skipping an arm a short-circuit proves
       // unreachable.
-      let overlay = augment([:], for: view.query, rows: false)
+      let overlay = augment(context.scoping([:]), for: view.query, rows: false)
       let inner = visited.union([name.lowercased()])
       // Gate the body's reachable-operand check on `validate`: a `validate:
       // false` derive skips it, so a data-dependent-empty body (a text
@@ -478,7 +471,7 @@ extension Catalog where Self: ~Escapable {
       // the view that already ran to its (empty) result. `validate` also rides
       // into the recursive derive so a view over a view stays derive-only.
       if validate {
-        try typecheck(view.query, overlay, visited: inner, routines: routines)
+        try typecheck(view.query, overlay, visited: inner)
       }
       // Type off the body's first arm (the ISO rule for a UNION). Arity — the
       // body's width against the declared columns — is `compile`'s job (the
@@ -486,7 +479,7 @@ extension Catalog where Self: ~Escapable {
       // schema rather than re-checking it here.
       let resolved =
           try columns(of: view.query.first, overlay, visited: inner,
-                      routines: routines, validate: validate)
+                      validate: validate)
       guard resolved.count == base.width else { return base }
       return Schema(width: base.width, extent: base.extent, names: base.names,
                     types: resolved.map(\.type), virtuals: base.virtuals)

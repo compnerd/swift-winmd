@@ -286,33 +286,33 @@ extension Plan {
 /// or stored.
 internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
                                                _ catalog: borrowing C,
-                                               _ ctes: ScopedRelations,
-                                               _ routines: Routines,
-                                               _ bindings: Bindings)
+                                               _ context: Context)
     throws(SQLError) -> Array<Record> {
+  let routines = context.routines
+  let bindings = context.bindings
   switch plan {
   case .single:
     // The FROM-less single row: one record with no cells, the source a scalar
     // projection evaluates its constant/call expressions against.
-    [Record([])]
+    return [Record([])]
   case let .scan(name, ordinals, seek):
-    try materialise(name, ordinals, seek, catalog, ctes)
+    return try materialise(name, ordinals, seek, catalog, context.relations)
   case let .derived(name, source, ordinals, seek):
-    try catalog.derive(name, source, ordinals, seek, routines, bindings)
+    return try catalog.derive(name, source, ordinals, seek, context)
   case let .select(filter, .product(outer, inner)):
     // Fuse a residual product with its filter: stream each pair through the
     // predicate rather than materialising the whole cross product first.
-    try sift(execute(outer, catalog, ctes, routines, bindings),
-             execute(inner, catalog, ctes, routines, bindings), filter, routines,
-             bindings)
+    return try sift(execute(outer, catalog, context),
+                    execute(inner, catalog, context), filter, routines,
+                    bindings)
   case let .select(filter, source):
-    try admitted(execute(source, catalog, ctes, routines, bindings), filter,
-                 routines, bindings)
+    return try admitted(execute(source, catalog, context), filter,
+                        routines, bindings)
   case let .project(terms, source):
-    try execute(source, catalog, ctes, routines, bindings)
+    return try execute(source, catalog, context)
       .map { record throws(SQLError) in try project(terms, record, routines) }
   case let .sort(keys, source):
-    try execute(source, catalog, ctes, routines, bindings)
+    return try execute(source, catalog, context)
       .enumerated()
       .sorted { lhs, rhs in
         // Compare the keys major to minor: the first key on which the rows
@@ -330,21 +330,20 @@ internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
       }
       .map(\.element)
   case let .product(outer, inner):
-    try product(execute(outer, catalog, ctes, routines, bindings),
-                execute(inner, catalog, ctes, routines, bindings))
+    return try product(execute(outer, catalog, context),
+                       execute(inner, catalog, context))
   case let .join(outer, name, ordinals, base, column, keys, filter):
-    try join(execute(outer, catalog, ctes, routines, bindings), name, ordinals,
-             base, column, keys, filter, catalog, ctes, routines, bindings)
+    return try join(execute(outer, catalog, context), name, ordinals,
+                    base, column, keys, filter, catalog, context)
   case let .union(left, right, all):
-    try union(left, right, all, catalog, ctes, routines, bindings)
+    return try union(left, right, all, catalog, context)
   case let .distinct(source):
-    deduplicated(try execute(source, catalog, ctes, routines, bindings))
+    return deduplicated(try execute(source, catalog, context))
   case let .aggregate(keys, aggregates, source):
-    try grouped(execute(source, catalog, ctes, routines, bindings), keys,
-                aggregates, routines)
+    return try grouped(execute(source, catalog, context), keys,
+                       aggregates, routines)
   case let .limit(count, offset, source):
-    limited(try execute(source, catalog, ctes, routines, bindings),
-            count, offset)
+    return limited(try execute(source, catalog, context), count, offset)
   }
 }
 
@@ -377,12 +376,10 @@ private func limited(_ records: Array<Record>, _ count: Int?, _ offset: Int)
 private func union<C: Catalog & ~Escapable>(_ left: Plan, _ right: Plan,
                                             _ all: Bool,
                                             _ catalog: borrowing C,
-                                            _ ctes: ScopedRelations,
-                                            _ routines: Routines,
-                                            _ bindings: Bindings)
+                                            _ context: Context)
     throws(SQLError) -> Array<Record> {
-  let rows = try execute(left, catalog, ctes, routines, bindings)
-      + execute(right, catalog, ctes, routines, bindings)
+  let rows = try execute(left, catalog, context)
+      + execute(right, catalog, context)
   return all ? rows : deduplicated(rows)
 }
 
@@ -475,14 +472,14 @@ extension Catalog where Self: ~Escapable {
   /// optimised under.
   internal borrowing func derive(_ name: String, _ plan: Plan,
                                  _ ordinals: Array<Int>, _ seek: Range<Int>?,
-                                 _ routines: Routines, _ bindings: Bindings)
+                                 _ context: Context)
       throws(SQLError) -> Array<Record> {
     let overlay = if let view = resolve(view: name) {
-      augment([:], for: view.query, rows: true, routines: routines)
+      augment(context.scoping([:]), for: view.query, rows: true)
     } else {
-      ScopedRelations()
+      context.scoping([:])
     }
-    let rows = try execute(plan, self, overlay, routines, bindings)
+    let rows = try execute(plan, self, overlay)
     let range = seek ?? 0 ..< rows.count
     return range.map { rows[$0].project(ordinals) }
   }
@@ -602,17 +599,17 @@ private func join<C: Catalog & ~Escapable>(_ outer: Array<Record>,
                                            _ keys: (left: Int, right: Int),
                                            _ filter: Filter?,
                                            _ catalog: borrowing C,
-                                           _ ctes: ScopedRelations,
-                                           _ routines: Routines,
-                                           _ bindings: Bindings)
+                                           _ context: Context)
     throws(SQLError) -> Array<Record> {
+  let routines = context.routines
+  let bindings = context.bindings
   // A materialised CTE inner has no sort key, so it is scanned in full and the
   // equality on its `keys.right` slot is the join's truth — the same probe a
   // base relation falls back to when its key is unseekable. A pushed inner
   // filter (in the inner's standalone slot space) is applied as each record
   // materialises, before it can pair — mirroring the base seek/hash paths — so a
   // filtered CTE row is never joined.
-  if let cte = ctes[name.lowercased()] {
+  if let cte = context.relations[name.lowercased()] {
     var inner = Array<Record>()
     for index in 0 ..< cte.rows.count {
       let right = cte.record(index, ordinals)

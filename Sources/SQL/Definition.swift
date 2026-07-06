@@ -179,8 +179,9 @@ extension Catalog where Self: ~Escapable {
   /// typing path passes `false` for the SCHEMA-ONLY sibling, so resolving a
   /// view body's types never triggers the row build (a view over
   /// `definition_schema.columns` types without the builder re-entering itself).
-  borrowing func augment(_ ctes: CTEs, for query: Query, rows: Bool,
-                         routines: Routines = [:]) -> CTEs {
+  borrowing func augment(_ ctes: ScopedRelations, for query: Query,
+                         rows: Bool, routines: Routines = [:])
+      -> ScopedRelations {
     var names = Set<String>()
     query.collect(into: &names)
     var augmented = ctes
@@ -202,7 +203,7 @@ extension Catalog where Self: ~Escapable {
   /// The name resolves to a user view first, then a built-in `View.standard`
   /// view — so a built-in `information_schema.` view over the store re-resolves
   /// its own `definition_schema.` scan exactly as a user view would.
-  borrowing func overlay(_ name: String) -> CTEs {
+  borrowing func overlay(_ name: String) -> ScopedRelations {
     guard let view = resolve(view: name) else { return [:] }
     return augment([:], for: view.query, rows: true)
   }

@@ -105,7 +105,7 @@ extension Catalog where Self: ~Escapable {
   /// Runs `query` against this catalog with the common table expressions `ctes`
   /// in scope (empty for a query with no `WITH`), the resolution phases
   /// consulting `ctes` before the base catalog.
-  internal borrowing func run(_ query: Query, _ ctes: CTEs,
+  internal borrowing func run(_ query: Query, _ ctes: ScopedRelations,
                               _ routines: Routines, _ bindings: Bindings)
       throws(SQLError) -> Array<Array<Value>> {
     // Extend the relations with any `definition_schema.` store relation the
@@ -125,10 +125,10 @@ extension Catalog where Self: ~Escapable {
   /// Runs a `Statement` against this catalog, returning its result rows.
   ///
   /// A `select` runs its query directly; a `with` materialises its common table
-  /// expressions, in source order, into the `CTEs` the trailing query resolves
-  /// against (see `with`). A `create` defines a view and a `function` a scalar
-  /// function rather than producing rows, so neither is runnable — both fault
-  /// with `SQLError.statement`.
+  /// expressions, in source order, into the `ScopedRelations` the trailing
+  /// query resolves against (see `with`). A `create` defines a view and a
+  /// `function` a scalar function rather than producing rows, so neither is
+  /// runnable — both fault with `SQLError.statement`.
   public borrowing func run(_ statement: Statement, _ routines: Routines = [:],
                             bindings: Bindings = [:])
       throws(SQLError) -> Array<Array<Value>> {
@@ -150,8 +150,8 @@ extension Catalog where Self: ~Escapable {
   // MARK: - WITH
 
   /// Materialises the common table expressions `ctes`, in source order, into
-  /// the `CTEs` map and runs the trailing `query` against this catalog with that
-  /// map in scope.
+  /// the `ScopedRelations` map and runs the trailing `query` against this
+  /// catalog with that map in scope.
   ///
   /// Each CTE materialises against the base catalog plus every EARLIER CTE,
   /// so a CTE may name one defined before it (chained CTEs); a CTE name shadows
@@ -174,7 +174,7 @@ extension Catalog where Self: ~Escapable {
   internal borrowing func with(_ ctes: Array<CTE>, _ query: Query,
                                _ routines: Routines, _ bindings: Bindings)
       throws(SQLError) -> Array<Array<Value>> {
-    var relations = CTEs()
+    var relations = ScopedRelations()
     for cte in ctes {
       // A query name repeated in the list (case-insensitively) would silently
       // shadow the earlier binding in `relations`, so reject it rather than
@@ -249,7 +249,7 @@ extension Catalog where Self: ~Escapable {
   /// so `SELECT Name + 1 FROM People` in the anchor faults `SQLError.operand`
   /// against the BASE `People` a run reads it against, never wrongly types clean
   /// against the CTE's declared columns.
-  internal borrowing func validate(_ cte: CTE, against ctes: CTEs,
+  internal borrowing func validate(_ cte: CTE, against ctes: ScopedRelations,
                                    routines: Routines = [:],
                                    typecheck: Bool = false)
       throws(SQLError) {
@@ -339,7 +339,7 @@ extension Catalog where Self: ~Escapable {
   /// `SELECT *` arm filtered to zero rows is caught. The anchor compiles with
   /// the CTE name NOT in scope (it does not reference itself); the recursive
   /// arm compiles with the name bound to `cte.columns`, the schema it reads.
-  internal borrowing func fixpoint(_ cte: CTE, _ ctes: CTEs,
+  internal borrowing func fixpoint(_ cte: CTE, _ ctes: ScopedRelations,
                                    _ routines: Routines, _ bindings: Bindings)
       throws(SQLError) -> Array<Array<Value>> {
     // Extend the scope with any `definition_schema.` store relation the CTE's
@@ -610,7 +610,7 @@ extension Catalog where Self: ~Escapable {
   /// standard rule that every non-aggregated projection/`ORDER BY` column appear
   /// in the `GROUP BY`.
   internal borrowing func group(_ select: Select, _ relation: Relation,
-                                _ from: Resolved, _ ctes: CTEs,
+                                _ from: Resolved, _ ctes: ScopedRelations,
                                 _ visited: Set<String>)
       throws(SQLError) -> Plan {
     // Resolve every joined relation and lay the FROM relation and each joined
@@ -841,7 +841,7 @@ extension Catalog where Self: ~Escapable {
 
   /// Rewrites `plan` into a physical one with the in-scope `ctes` (consulted
   /// before the base catalog for seekability) and `bindings`.
-  internal borrowing func optimise(_ plan: Plan, _ ctes: CTEs,
+  internal borrowing func optimise(_ plan: Plan, _ ctes: ScopedRelations,
                                    _ bindings: Bindings)
       throws(SQLError) -> Plan {
     switch plan {
@@ -915,7 +915,7 @@ extension Catalog where Self: ~Escapable {
   /// in slot space, so a comparison's slot maps back to its table ordinal
   /// through the scan's `ordinals` before reading a boundary.
   private borrowing func seek(_ filter: Filter, _ name: String,
-                              _ ordinals: Array<Int>, _ ctes: CTEs,
+                              _ ordinals: Array<Int>, _ ctes: ScopedRelations,
                               _ bindings: Bindings)
       throws(SQLError) -> Plan {
     // A materialised CTE relation stores no sort key, so it is never seekable —
@@ -1048,7 +1048,7 @@ extension Catalog where Self: ~Escapable {
   /// kept the safe inner filter ahead of any unsafe conjunct). When the inner
   /// side is neither shape, the product is preserved.
   private borrowing func nest(_ filter: Filter, _ left: Plan, _ right: Plan,
-                              _ ctes: CTEs, _ bindings: Bindings)
+                              _ ctes: ScopedRelations, _ bindings: Bindings)
       throws(SQLError) -> Plan {
     let inner: (name: String, ordinals: Array<Int>, filter: Filter?)?
     switch right {
@@ -1405,7 +1405,7 @@ extension Catalog where Self: ~Escapable {
   /// chain by the trailing arm's flag. The new arm must project the same column
   /// count as the chain's first `SELECT` — the result columns — else
   /// `SQLError.arity`.
-  internal borrowing func compile(_ query: Query, _ ctes: CTEs = [:],
+  internal borrowing func compile(_ query: Query, _ ctes: ScopedRelations = [:],
                                   _ visited: Set<String> = [])
       throws(SQLError) -> Plan {
     guard case let .union(left, select, all) = query else {
@@ -1423,7 +1423,7 @@ extension Catalog where Self: ~Escapable {
   /// its relations, else the count of its projected items — for the `UNION`
   /// arity check. The relations resolve through this catalog, the `ctes`
   /// consulted first.
-  private borrowing func arity(_ select: Select, _ ctes: CTEs,
+  private borrowing func arity(_ select: Select, _ ctes: ScopedRelations,
                                _ visited: Set<String>)
       throws(SQLError) -> Int {
     switch select.projection {
@@ -1480,7 +1480,7 @@ extension Catalog where Self: ~Escapable {
   /// `definition_schema.` store's `columns` builder, which compiles every view
   /// to advertise it, relies on this: a cyclic view's `try? compile` catches
   /// the fault and skips it.
-  internal borrowing func resolve(_ relation: Relation, _ ctes: CTEs,
+  internal borrowing func resolve(_ relation: Relation, _ ctes: ScopedRelations,
                                   _ visited: Set<String> = [])
       throws(SQLError) -> Resolved {
     let name = relation.name
@@ -1561,7 +1561,8 @@ extension Catalog where Self: ~Escapable {
   /// cells concatenated in order). The tree is logical: every scan is a full
   /// `Scan(_, _, nil)`; the optimiser turns scans into seeks and each product
   /// into a join.
-  internal borrowing func compile(_ select: Select, _ ctes: CTEs = [:],
+  internal borrowing func compile(_ select: Select,
+                                  _ ctes: ScopedRelations = [:],
                                   _ visited: Set<String> = [])
       throws(SQLError) -> Plan {
     guard let relation = select.from else {

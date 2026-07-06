@@ -5,13 +5,14 @@
 /// relations the engine resolves a `WITH`'s names against.
 ///
 /// It is threaded alongside the borrowed base catalog through every resolution
-/// phase: when the engine resolves a relation name, it consults `CTEs` first (a
-/// CTE name shadows a base table or view of the same name), and a CTE leaf
-/// materialises its records from the `Materialised` rows rather than opening a
-/// base cursor. An empty `CTEs` is the default — a query with no `WITH` resolves
-/// exactly as before. Threading escapable data sidesteps wrapping the borrowed
-/// `~Escapable` base catalog in a unifying overlay type.
-internal typealias CTEs = Dictionary<String, Materialised>
+/// phase: when the engine resolves a relation name, it consults
+/// `ScopedRelations` first (a CTE name shadows a base table or view of the same
+/// name), and a CTE leaf materialises its records from the `Materialised` rows
+/// rather than opening a base cursor. An empty `ScopedRelations` is the default
+/// — a query with no `WITH` resolves exactly as before. Threading escapable
+/// data sidesteps wrapping the borrowed `~Escapable` base catalog in a unifying
+/// overlay type.
+internal typealias ScopedRelations = Dictionary<String, Materialised>
 
 /// An escapable, in-engine relation over `(columns, rows)`.
 ///

@@ -286,7 +286,7 @@ extension Plan {
 /// or stored.
 internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
                                                _ catalog: borrowing C,
-                                               _ ctes: CTEs,
+                                               _ ctes: ScopedRelations,
                                                _ routines: Routines,
                                                _ bindings: Bindings)
     throws(SQLError) -> Array<Record> {
@@ -377,7 +377,7 @@ private func limited(_ records: Array<Record>, _ count: Int?, _ offset: Int)
 private func union<C: Catalog & ~Escapable>(_ left: Plan, _ right: Plan,
                                             _ all: Bool,
                                             _ catalog: borrowing C,
-                                            _ ctes: CTEs,
+                                            _ ctes: ScopedRelations,
                                             _ routines: Routines,
                                             _ bindings: Bindings)
     throws(SQLError) -> Array<Record> {
@@ -441,7 +441,7 @@ private func materialise<C: Catalog & ~Escapable>(_ name: String,
                                                   _ ordinals: Array<Int>,
                                                   _ seek: Range<Int>?,
                                                   _ catalog: borrowing C,
-                                                  _ ctes: CTEs)
+                                                  _ ctes: ScopedRelations)
     throws(SQLError) -> Array<Record> {
   if let cte = ctes[name.lowercased()] {
     return (seek ?? 0 ..< cte.rows.count).map { cte.record($0, ordinals) }
@@ -480,7 +480,7 @@ extension Catalog where Self: ~Escapable {
     let overlay = if let view = resolve(view: name) {
       augment([:], for: view.query, rows: true, routines: routines)
     } else {
-      CTEs()
+      ScopedRelations()
     }
     let rows = try execute(plan, self, overlay, routines, bindings)
     let range = seek ?? 0 ..< rows.count
@@ -602,7 +602,7 @@ private func join<C: Catalog & ~Escapable>(_ outer: Array<Record>,
                                            _ keys: (left: Int, right: Int),
                                            _ filter: Filter?,
                                            _ catalog: borrowing C,
-                                           _ ctes: CTEs,
+                                           _ ctes: ScopedRelations,
                                            _ routines: Routines,
                                            _ bindings: Bindings)
     throws(SQLError) -> Array<Record> {

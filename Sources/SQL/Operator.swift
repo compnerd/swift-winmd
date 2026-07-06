@@ -284,68 +284,66 @@ extension Plan {
 /// its source's rows then takes at most `count`.
 /// The catalog is borrowed throughout — a `~Escapable` source is never copied
 /// or stored.
-internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
-                                               _ catalog: borrowing C,
-                                               _ context: Context)
-    throws(SQLError) -> Array<Record> {
-  let routines = context.routines
-  let bindings = context.bindings
-  switch plan {
-  case .single:
-    // The FROM-less single row: one record with no cells, the source a scalar
-    // projection evaluates its constant/call expressions against.
-    return [Record([])]
-  case let .scan(name, ordinals, seek):
-    return try materialise(name, ordinals, seek, catalog, context.relations)
-  case let .derived(name, source, ordinals, seek):
-    return try catalog.derive(name, source, ordinals, seek, context)
-  case let .select(filter, .product(outer, inner)):
-    // Fuse a residual product with its filter: stream each pair through the
-    // predicate rather than materialising the whole cross product first.
-    return try sift(execute(outer, catalog, context),
-                    execute(inner, catalog, context), filter, routines,
-                    bindings)
-  case let .select(filter, source):
-    return try admitted(execute(source, catalog, context), filter,
-                        routines, bindings)
-  case let .project(terms, source):
-    return try execute(source, catalog, context)
-      .map { record throws(SQLError) in
-        try project(terms, record, routines, bindings)
-      }
-  case let .sort(keys, source):
-    return try execute(source, catalog, context)
-      .enumerated()
-      .sorted { lhs, rhs in
-        // Compare the keys major to minor: the first key on which the rows
-        // differ decides the order; a key they are equal on falls through to
-        // the next. A key's direction governs that key alone.
-        for key in keys {
-          let ordered = less(lhs.element[key.slot], rhs.element[key.slot])
-          let reverse = less(rhs.element[key.slot], lhs.element[key.slot])
-          if ordered == reverse { continue }
-          return key.ascending ? ordered : reverse
+extension Catalog where Self: ~Escapable {
+  internal borrowing func execute(_ plan: Plan, _ context: Context)
+      throws(SQLError) -> Array<Record> {
+    let routines = context.routines
+    let bindings = context.bindings
+    switch plan {
+    case .single:
+      // The FROM-less single row: one record with no cells, the source a scalar
+      // projection evaluates its constant/call expressions against.
+      return [Record([])]
+    case let .scan(name, ordinals, seek):
+      return try materialise(name, ordinals, seek, context.relations)
+    case let .derived(name, source, ordinals, seek):
+      return try derive(name, source, ordinals, seek, context)
+    case let .select(filter, .product(outer, inner)):
+      // Fuse a residual product with its filter: stream each pair through the
+      // predicate rather than materialising the whole cross product first.
+      return try sift(execute(outer, context), execute(inner, context),
+                      filter, routines, bindings)
+    case let .select(filter, source):
+      return try admitted(execute(source, context), filter, routines,
+                          bindings)
+    case let .project(terms, source):
+      return try execute(source, context)
+        .map { record throws(SQLError) in
+          try project(terms, record, routines, bindings)
         }
-        // Equal on every key: keep the source order (a stable sort) by
-        // tie-breaking on the original index.
-        return lhs.offset < rhs.offset
-      }
-      .map(\.element)
-  case let .product(outer, inner):
-    return try product(execute(outer, catalog, context),
-                       execute(inner, catalog, context))
-  case let .join(outer, name, ordinals, base, column, keys, filter):
-    return try join(execute(outer, catalog, context), name, ordinals,
-                    base, column, keys, filter, catalog, context)
-  case let .union(left, right, all):
-    return try union(left, right, all, catalog, context)
-  case let .distinct(source):
-    return deduplicated(try execute(source, catalog, context))
-  case let .aggregate(keys, aggregates, source):
-    return try grouped(execute(source, catalog, context), keys,
-                       aggregates, routines, bindings)
-  case let .limit(count, offset, source):
-    return limited(try execute(source, catalog, context), count, offset)
+    case let .sort(keys, source):
+      return try execute(source, context)
+        .enumerated()
+        .sorted { lhs, rhs in
+          // Compare the keys major to minor: the first key on which the rows
+          // differ decides the order; a key they are equal on falls through to
+          // the next. A key's direction governs that key alone.
+          for key in keys {
+            let ordered = less(lhs.element[key.slot], rhs.element[key.slot])
+            let reverse = less(rhs.element[key.slot], lhs.element[key.slot])
+            if ordered == reverse { continue }
+            return key.ascending ? ordered : reverse
+          }
+          // Equal on every key: keep the source order (a stable sort) by
+          // tie-breaking on the original index.
+          return lhs.offset < rhs.offset
+        }
+        .map(\.element)
+    case let .product(outer, inner):
+      return try product(execute(outer, context), execute(inner, context))
+    case let .join(outer, name, ordinals, base, column, keys, filter):
+      return try join(execute(outer, context), name, ordinals, base, column,
+                      keys, filter, context)
+    case let .union(left, right, all):
+      return try union(left, right, all, context)
+    case let .distinct(source):
+      return deduplicated(try execute(source, context))
+    case let .aggregate(keys, aggregates, source):
+      return try grouped(execute(source, context), keys, aggregates,
+                         routines, bindings)
+    case let .limit(count, offset, source):
+      return limited(try execute(source, context), count, offset)
+    }
   }
 }
 
@@ -375,14 +373,13 @@ private func limited(_ records: Array<Record>, _ count: Int?, _ offset: Int)
 /// and it executes with its OWN semantics first — a `UNION` nested under a
 /// `UNION ALL` dedups its pair before the outer node appends `right`. A `Record`
 /// is `Hashable`, so `UNION`'s dedup keys on the materialised row.
-private func union<C: Catalog & ~Escapable>(_ left: Plan, _ right: Plan,
-                                            _ all: Bool,
-                                            _ catalog: borrowing C,
-                                            _ context: Context)
-    throws(SQLError) -> Array<Record> {
-  let rows = try execute(left, catalog, context)
-      + execute(right, catalog, context)
-  return all ? rows : deduplicated(rows)
+extension Catalog where Self: ~Escapable {
+  fileprivate borrowing func union(_ left: Plan, _ right: Plan, _ all: Bool,
+                                   _ context: Context)
+      throws(SQLError) -> Array<Record> {
+    let rows = try execute(left, context) + execute(right, context)
+    return all ? rows : deduplicated(rows)
+  }
 }
 
 /// The rows of `records` with whole-row duplicates removed — the first
@@ -433,27 +430,28 @@ private func admitted(_ records: Array<Record>, _ filter: Filter,
 ///
 /// A common table expression `name` (in `ctes`, consulted first — a CTE shadows
 /// a base relation) materialises its records directly from the in-engine
-/// `Materialised` rows; else the base relation re-resolves through `catalog`,
-/// its cursor opened.
+/// `Materialised` rows; else the base relation re-resolves through this
+/// catalog, its cursor opened.
 ///
 /// - Throws: `SQLError.relation` if the name resolves to neither.
-private func materialise<C: Catalog & ~Escapable>(_ name: String,
-                                                  _ ordinals: Array<Int>,
-                                                  _ seek: Range<Int>?,
-                                                  _ catalog: borrowing C,
-                                                  _ ctes: ScopedRelations)
-    throws(SQLError) -> Array<Record> {
-  if let cte = ctes[name.lowercased()] {
-    return (seek ?? 0 ..< cte.rows.count).map { cte.record($0, ordinals) }
+extension Catalog where Self: ~Escapable {
+  fileprivate borrowing func materialise(_ name: String,
+                                         _ ordinals: Array<Int>,
+                                         _ seek: Range<Int>?,
+                                         _ ctes: ScopedRelations)
+      throws(SQLError) -> Array<Record> {
+    if let cte = ctes[name.lowercased()] {
+      return (seek ?? 0 ..< cte.rows.count).map { cte.record($0, ordinals) }
+    }
+    guard let table = table(named: name) else { throw .relation(name) }
+    let cursor = table.cursor()
+    var records = Array<Record>()
+    for index in seek ?? 0 ..< cursor.count {
+      guard let row = cursor.row(index) else { continue }
+      records.append(Record(row, ordinals))
+    }
+    return records
   }
-  guard let table = catalog.table(named: name) else { throw .relation(name) }
-  let cursor = table.cursor()
-  var records = Array<Record>()
-  for index in seek ?? 0 ..< cursor.count {
-    guard let row = cursor.row(index) else { continue }
-    records.append(Record(row, ordinals))
-  }
-  return records
 }
 
 extension Catalog where Self: ~Escapable {
@@ -482,7 +480,7 @@ extension Catalog where Self: ~Escapable {
     } else {
       context.scoping([:])
     }
-    let rows = try execute(plan, self, overlay)
+    let rows = try execute(plan, overlay)
     let range = seek ?? 0 ..< rows.count
     return range.map { rows[$0].project(ordinals) }
   }
@@ -595,68 +593,67 @@ internal struct Seen {
 }
 
 /// - Throws: `SQLError.relation` if the inner name resolves to neither.
-private func join<C: Catalog & ~Escapable>(_ outer: Array<Record>,
-                                           _ name: String,
-                                           _ ordinals: Array<Int>, _ base: Int,
-                                           _ column: Int,
-                                           _ keys: (left: Int, right: Int),
-                                           _ filter: Filter?,
-                                           _ catalog: borrowing C,
-                                           _ context: Context)
-    throws(SQLError) -> Array<Record> {
-  let routines = context.routines
-  let bindings = context.bindings
-  // A materialised CTE inner has no sort key, so it is scanned in full and the
-  // equality on its `keys.right` slot is the join's truth — the same probe a
-  // base relation falls back to when its key is unseekable. A pushed inner
-  // filter (in the inner's standalone slot space) is applied as each record
-  // materialises, before it can pair — mirroring the base seek/hash paths — so a
-  // filtered CTE row is never joined.
-  if let cte = context.relations[name.lowercased()] {
-    var inner = Array<Record>()
-    for index in 0 ..< cte.rows.count {
-      let right = cte.record(index, ordinals)
-      if let filter,
-          try right.evaluate(filter, routines, bindings) != true { continue }
-      inner.append(right)
+extension Catalog where Self: ~Escapable {
+  fileprivate borrowing func join(_ outer: Array<Record>, _ name: String,
+                                  _ ordinals: Array<Int>, _ base: Int,
+                                  _ column: Int,
+                                  _ keys: (left: Int, right: Int),
+                                  _ filter: Filter?, _ context: Context)
+      throws(SQLError) -> Array<Record> {
+    let routines = context.routines
+    let bindings = context.bindings
+    // A materialised CTE inner has no sort key, so it is scanned in full and
+    // the equality on its `keys.right` slot is the join's truth — the same
+    // probe a base relation falls back to when its key is unseekable. A pushed
+    // inner filter (in the inner's standalone slot space) is applied as each
+    // record materialises, before it can pair — mirroring the base seek/hash
+    // paths — so a filtered CTE row is never joined.
+    if let cte = context.relations[name.lowercased()] {
+      var inner = Array<Record>()
+      for index in 0 ..< cte.rows.count {
+        let right = cte.record(index, ordinals)
+        if let filter,
+            try right.evaluate(filter, routines, bindings) != true { continue }
+        inner.append(right)
+      }
+      return joined(outer, inner, base, keys)
     }
-    return joined(outer, inner, base, keys)
-  }
-  guard let inner = catalog.table(named: name) else { throw .relation(name) }
-  guard seekable(inner, column) else {
-    return try hashed(outer, inner, ordinals, base, keys, filter, routines,
-                      bindings)
-  }
+    guard let inner = table(named: name) else { throw .relation(name) }
+    guard inner.seekable(column) else {
+      return try inner.hashed(outer, ordinals, base, keys, filter, routines,
+                              bindings)
+    }
 
-  let cursor = inner.cursor()
-  let slot = keys.right - base
-  var records = Array<Record>()
-  for left in outer {
-    let value = left[keys.left]
-    // A NULL key equi-joins to nothing — NULL is unequal to every value,
-    // itself included — so it contributes no pair and need not probe.
-    if case .null = value { continue }
-    // Seek by the RAW value — the sorted key is a single-kind (integer) column,
-    // and a promoted double would defeat the seek; the numeric equality below
-    // still admits a mixed-kind match (a whole double past the range is caught
-    // by the residual check even if the seek scanned wide).
-    let range = probe(inner, column, value, cursor.count)
-    for index in range {
-      guard let row = cursor.row(index) else { continue }
-      let right = Record(row, ordinals)
-      // A pushed inner filter is applied as each candidate materialises, before
-      // it can pair — an inner row it rejects joins to nothing.
-      if let filter,
-          try right.evaluate(filter, routines, bindings) != true { continue }
-      // Equal by the SAME rule the predicate uses — integer/integer exact,
-      // mixed integer/double promoted — so a seek that scanned wide still pairs
-      // exactly.
-      if matches(value, .equal, right[slot]) == true {
-        records.append(left.merged(with: right))
+    let cursor = inner.cursor()
+    let slot = keys.right - base
+    var records = Array<Record>()
+    for left in outer {
+      let value = left[keys.left]
+      // A NULL key equi-joins to nothing — NULL is unequal to every value,
+      // itself included — so it contributes no pair and need not probe.
+      if case .null = value { continue }
+      // Seek by the RAW value — the sorted key is a single-kind (integer)
+      // column, and a promoted double would defeat the seek; the numeric
+      // equality below still admits a mixed-kind match (a whole double past the
+      // range is caught by the residual check even if the seek scanned wide).
+      let range = inner.probe(column, value, cursor.count)
+      for index in range {
+        guard let row = cursor.row(index) else { continue }
+        let right = Record(row, ordinals)
+        // A pushed inner filter is applied as each candidate materialises,
+        // before it can pair — an inner row it rejects joins to nothing.
+        if let filter,
+            try right.evaluate(filter, routines, bindings) != true { continue }
+        // Equal by the SAME rule the predicate uses — integer/integer exact,
+        // mixed integer/double promoted — so a seek that scanned wide still
+        // pairs exactly.
+        if matches(value, .equal, right[slot]) == true {
+          records.append(left.merged(with: right))
+        }
       }
     }
+    return records
   }
-  return records
 }
 
 /// The hash equi-join of `outer` against `inner`: the inner scanned once into a
@@ -685,49 +682,50 @@ private func join<C: Catalog & ~Escapable>(_ outer: Array<Record>,
 /// zero inner rows for such an outer, and a selective or contradictory outer
 /// WHERE (`… WHERE key IS NULL`, or one pruning every row) must not force a full
 /// scan of a large unseekable inner.
-private func hashed<T: Table & ~Escapable>(_ outer: Array<Record>,
-                                           _ inner: borrowing T,
-                                           _ ordinals: Array<Int>, _ base: Int,
-                                           _ keys: (left: Int, right: Int),
-                                           _ filter: Filter?,
-                                           _ routines: Routines,
-                                           _ bindings: Bindings)
-    throws(SQLError) -> Array<Record> {
-  guard outer.contains(where: {
-    if case .null = $0[keys.left] { false } else { true }
-  }) else { return [] }
+extension Table where Self: ~Escapable {
+  fileprivate borrowing func hashed(_ outer: Array<Record>,
+                                    _ ordinals: Array<Int>, _ base: Int,
+                                    _ keys: (left: Int, right: Int),
+                                    _ filter: Filter?, _ routines: Routines,
+                                    _ bindings: Bindings)
+      throws(SQLError) -> Array<Record> {
+    guard outer.contains(where: {
+      if case .null = $0[keys.left] { false } else { true }
+    }) else { return [] }
 
-  let cursor = inner.cursor()
-  let slot = keys.right - base
-  // Seek the inner by the pushed filter's seekable conjunct, so a
-  // seekable/contradictory inner filter reads few or no rows; scan the whole
-  // inner when the filter has none (or when there is no filter).
-  let range = seek(filter, ordinals, inner, cursor.count, bindings)
-  var buckets = Dictionary<Value, Array<Record>>()
-  for index in range {
-    guard let row = cursor.row(index) else { continue }
-    let right = Record(row, ordinals)
-    // Apply the whole pushed filter before bucketing — a filtered inner row is
-    // never a join candidate.
-    if let filter,
-        try right.evaluate(filter, routines, bindings) != true { continue }
-    if case .null = right[slot] { continue }
-    buckets[bucket(right[slot]), default: Array<Record>()].append(right)
-  }
-
-  var records = Array<Record>()
-  for left in outer {
-    let value = left[keys.left]
-    if case .null = value { continue }
-    // Probe the bucket, then confirm each candidate with the exact `matches`
-    // equality — the bucket over-groups (two distinct large integers can share
-    // a `Double` bucket), so the residual check keeps integer/integer exact.
-    for right in buckets[bucket(value)] ?? []
-        where matches(value, .equal, right[slot]) == true {
-      records.append(left.merged(with: right))
+    let cursor = cursor()
+    let slot = keys.right - base
+    // Seek the inner by the pushed filter's seekable conjunct, so a
+    // seekable/contradictory inner filter reads few or no rows; scan the whole
+    // inner when the filter has none (or when there is no filter).
+    let range = seek(filter, ordinals, cursor.count, bindings)
+    var buckets = Dictionary<Value, Array<Record>>()
+    for index in range {
+      guard let row = cursor.row(index) else { continue }
+      let right = Record(row, ordinals)
+      // Apply the whole pushed filter before bucketing — a filtered inner row
+      // is never a join candidate.
+      if let filter,
+          try right.evaluate(filter, routines, bindings) != true { continue }
+      if case .null = right[slot] { continue }
+      buckets[bucket(right[slot]), default: Array<Record>()].append(right)
     }
+
+    var records = Array<Record>()
+    for left in outer {
+      let value = left[keys.left]
+      if case .null = value { continue }
+      // Probe the bucket, then confirm each candidate with the exact `matches`
+      // equality — the bucket over-groups (two distinct large integers can
+      // share a `Double` bucket), so the residual check keeps integer/integer
+      // exact.
+      for right in buckets[bucket(value)] ?? []
+          where matches(value, .equal, right[slot]) == true {
+        records.append(left.merged(with: right))
+      }
+    }
+    return records
   }
-  return records
 }
 
 /// The equi-join of `outer` against a fully materialised `inner` record set:
@@ -755,17 +753,18 @@ private func joined(_ outer: Array<Record>, _ inner: Array<Record>,
 /// seeked by `filter`'s first seekable conjunct — `boundaries` over each,
 /// mapping a slot to its table column through `ordinals` — else the whole
 /// `0 ..< count` when no conjunct qualifies (or there is no filter).
-private func seek<T: Table & ~Escapable>(_ filter: Filter?,
-                                         _ ordinals: Array<Int>,
-                                         _ inner: borrowing T, _ count: Int,
-                                         _ bindings: Bindings) -> Range<Int> {
-  guard let filter else { return 0 ..< count }
-  for conjunct in filter.conjuncts {
-    if let range = inner.boundaries(conjunct, ordinals, count, bindings) {
-      return range
+extension Table where Self: ~Escapable {
+  fileprivate borrowing func seek(_ filter: Filter?, _ ordinals: Array<Int>,
+                                  _ count: Int, _ bindings: Bindings)
+      -> Range<Int> {
+    guard let filter else { return 0 ..< count }
+    for conjunct in filter.conjuncts {
+      if let range = boundaries(conjunct, ordinals, count, bindings) {
+        return range
+      }
     }
+    return 0 ..< count
   }
-  return 0 ..< count
 }
 
 /// Whether the inner `column` of `table` can be seeked — the executor probes it
@@ -779,23 +778,25 @@ private func seek<T: Table & ~Escapable>(_ filter: Filter?,
 /// every seekable column (`Id`, an owner foreign key, a sorted key, a
 /// coded-index key); its value is otherwise irrelevant, since this is only a
 /// capability check (the join loop seeks with the real outer key).
-private func seekable<T: Table & ~Escapable>(_ table: borrowing T,
-                                             _ column: Int) -> Bool {
-  table.bound(column, 1, strict: false) != nil
+extension Table where Self: ~Escapable {
+  fileprivate borrowing func seekable(_ column: Int) -> Bool {
+    bound(column, 1, strict: false) != nil
+  }
 }
 
 /// The inner range to probe for `value` on `column` of `table` of `count` rows:
 /// the seeked `[lower, upper)` run when `value` is an integer on a seekable
 /// column, else the whole `0 ..< count` to scan.
-private func probe<T: Table & ~Escapable>(_ table: borrowing T, _ column: Int,
-                                          _ value: Value, _ count: Int)
-    -> Range<Int> {
-  guard case let .integer(key) = value,
-      let lower = table.bound(column, key, strict: false),
-      let upper = table.bound(column, key, strict: true) else {
-    return 0 ..< count
+extension Table where Self: ~Escapable {
+  fileprivate borrowing func probe(_ column: Int, _ value: Value, _ count: Int)
+      -> Range<Int> {
+    guard case let .integer(key) = value,
+        let lower = bound(column, key, strict: false),
+        let upper = bound(column, key, strict: true) else {
+      return 0 ..< count
+    }
+    return lower ..< upper
   }
-  return lower ..< upper
 }
 
 /// Orders two typed sort keys ascending, by their value.

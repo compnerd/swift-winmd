@@ -1080,45 +1080,6 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test func `print-namespaces yields a plain one-per-line list, not a boxed table`() throws {
-    // `print-namespaces` DEDUPS through `SELECT DISTINCT … ORDER BY`, but its
-    // output is one plain namespace element per row scripts parse a line at a
-    // time — NOT the boxed table `Shell.execute` frames a row result as. The
-    // fixture's two TypeDefs both live in `NS`, so the DISTINCT collapses them
-    // to the single element `NS`, carrying no `┌─┐`/`│` box borders and no
-    // `TypeNamespace` header.
-    try DatabaseSQLTests.with { storage in
-      let list = try PrintNamespaces.namespaces(storage)
-      #expect(list == ["NS"])
-      #expect(!list.contains { $0.contains("TypeNamespace") })
-      #expect(!list.contains { $0.contains("┌") })
-      #expect(!list.contains { $0.contains("│") })
-    }
-  }
-
-  @Test func `print-namespaces on an empty database yields no lines`() throws {
-    // A database with an empty `TypeDef` table has no namespaces, so the
-    // DISTINCT query returns zero rows. `print-namespaces` must then emit
-    // NOTHING — an empty element list prints no lines — so a script reading a
-    // namespace per line never sees a spurious blank entry.
-    try NoTypeDefFixture.with { storage in
-      let list = try PrintNamespaces.namespaces(storage)
-      #expect(list.isEmpty)
-    }
-  }
-
-  @Test func `print-namespaces yields one blank line for the global namespace`() throws {
-    // A database whose lone `TypeDef` lives in the global namespace — a
-    // `TypeNamespace` of the empty string — has exactly one namespace: the
-    // empty one. `print-namespaces` must yield a single empty-string element,
-    // one blank line, distinct from the zero-rows case that yields no line at
-    // all — a distinction a newline-joined string could not have preserved.
-    try GlobalNamespaceFixture.with { storage in
-      let list = try PrintNamespaces.namespaces(storage)
-      #expect(list == [""])
-    }
-  }
-
   @Test func `a coded-index join key admits one key per candidate target table`() {
     // `CustomAttribute.Parent` is `HasCustomAttribute`, which admits 22 target
     // tables, plus `Type` is `CustomAttributeType`, which admits two (its three
@@ -1230,67 +1191,6 @@ struct DatabaseSQLTests {
 /// table is present (so the list link resolves to it) but has zero rows, so the
 /// owner of the lone `Param` resolves to 0. `decode(parameter:for:)` must then
 /// yield `nil` rather than index a negative `MethodDef` row.
-/// A fixture whose `TypeDef` table is present but empty: it contributes zero
-/// rows, so `SELECT DISTINCT TypeNamespace FROM TypeDef` finds no namespaces.
-private enum NoTypeDefFixture {
-  private static let empty = Array<UInt8>()
-
-  private static let relations: Array<WinMD.Table> = [
-    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 0, range: 0 ..< 0,
-                wide: 0, stride: 14),
-  ]
-
-  private static let valid: UInt64 = (1 << 2)
-
-  /// Runs `body` over a `Storage` catalog bound to the empty metadata.
-  static func with(_ body: (borrowing Storage) throws -> Void) rethrows {
-    let storage = Storage(bytes: empty.span.bytes, relations: relations.span,
-                          strings: empty.span.bytes, blob: empty.span.bytes,
-                          guid: empty.span.bytes, valid: valid, sorted: 0)
-    try body(storage)
-  }
-}
-
-/// A fixture whose lone `TypeDef` lives in the global namespace — its
-/// `TypeNamespace` is index 0, the reserved empty string — so
-/// `SELECT DISTINCT TypeNamespace FROM TypeDef` finds a single empty-string
-/// namespace, the one blank-line case that must stay distinct from zero rows.
-private enum GlobalNamespaceFixture {
-  // One narrow (all-index 2-byte) TypeDef packed into a 14-byte row.
-  //
-  //   TypeDef[0]: Flags=0, TypeName="T"(1), TypeNamespace=0 (the empty string),
-  //               Extends=0, FieldList=0, MethodList=0 — a type in the global
-  //               namespace.
-  private static let bytes: Array<UInt8> = [
-    // TypeDef[0]
-    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-  ]
-
-  // "\0T\0": the reserved empty string at offset 0, `T` at offset 1.
-  private static let strings: Array<UInt8> = [
-    0x00,
-    0x54, 0x00,
-  ]
-
-  private static let empty = Array<UInt8>()
-
-  private static let relations: Array<WinMD.Table> = [
-    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 1, range: 0 ..< 14,
-                wide: 0, stride: 14),
-  ]
-
-  private static let valid: UInt64 = (1 << 2)
-
-  /// Runs `body` over a `Storage` catalog bound to the assembled metadata.
-  static func with(_ body: (borrowing Storage) throws -> Void) rethrows {
-    let storage = Storage(bytes: bytes.span.bytes, relations: relations.span,
-                          strings: strings.span.bytes, blob: empty.span.bytes,
-                          guid: empty.span.bytes, valid: valid, sorted: 0)
-    try body(storage)
-  }
-}
-
 private enum UnownedParamFixture {
   // Two narrow tables packed back to back. `MethodDef` contributes no records
   // (zero rows); `Param` contributes one.

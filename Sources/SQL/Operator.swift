@@ -672,7 +672,7 @@ private func join<C: Catalog & ~Escapable>(_ outer: Array<Record>,
 ///
 /// A pushed inner `filter` (in the inner's standalone slot space) is applied
 /// DURING this scan, before a row is bucketed: the inner is SEEKED by the
-/// filter's seekable conjunct — `Engine.boundaries` over each conjunct, the same
+/// filter's seekable conjunct — `boundaries` over each conjunct, the same
 /// boundary logic the scan seek uses, mapping a slot back to its table column
 /// through `ordinals` — so a seekable/contradictory inner filter reads few or no
 /// inner rows rather than scanning the whole table; when no conjunct is seekable
@@ -753,7 +753,7 @@ private func joined(_ outer: Array<Record>, _ inner: Array<Record>,
 }
 
 /// The inner row range the hash join scans and buckets: the `[lower, upper)`
-/// seeked by `filter`'s first seekable conjunct — `Engine.boundaries` over each,
+/// seeked by `filter`'s first seekable conjunct — `boundaries` over each,
 /// mapping a slot to its table column through `ordinals` — else the whole
 /// `0 ..< count` when no conjunct qualifies (or there is no filter).
 private func seek<T: Table & ~Escapable>(_ filter: Filter?,
@@ -762,8 +762,7 @@ private func seek<T: Table & ~Escapable>(_ filter: Filter?,
                                          _ bindings: Bindings) -> Range<Int> {
   guard let filter else { return 0 ..< count }
   for conjunct in filter.conjuncts {
-    if let range =
-        Engine.boundaries(conjunct, ordinals, inner, count, bindings) {
+    if let range = inner.boundaries(conjunct, ordinals, count, bindings) {
       return range
     }
   }

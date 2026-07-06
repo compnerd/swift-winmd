@@ -1,23 +1,23 @@
 // Copyright © 2026 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-/// The query engine — the compiler, optimiser, and executor for a `SELECT`.
-///
-/// `Engine` runs a `SELECT` entirely against the adapter protocols, with no
-/// knowledge of any data source. It resolves the relation(s) through a borrowed
-/// `Catalog`, *compiles* a logical operator tree, *optimises* it into a physical
-/// one, and *executes* that. Each phase borrows the catalog: `compile`
-/// re-resolves each relation by name to a transient `~Escapable` table to read
-/// its schema (width, ordinals, the set of ordinals the query references) and
-/// emits a name-holding `Plan`; `optimise` re-resolves to read sort-key
-/// seekability and rewrites scans into seeks and the product into an
-/// index-nested-loop join; `execute` re-resolves to open cursors and
-/// materialise. A single relation compiles to `Project(Sort(Select(Scan)))`; a
-/// chain of joins compiles to a left-deep tree of `Product`s, each level's `ON`
-/// equality a `Select` over its product, with the `WHERE` wrapping the whole
-/// chain. Absent layers are omitted. Executing the plan yields the result
-/// records' typed values; formatting them is a client's job.
-public enum Engine {}
+// The query engine — the compiler, optimiser, and executor for a `SELECT`.
+//
+// The engine runs a `SELECT` entirely against the adapter protocols, with no
+// knowledge of any data source. It resolves the relation(s) through a borrowed
+// `Catalog`, *compiles* a logical operator tree, *optimises* it into a physical
+// one, and *executes* that. Each phase borrows the catalog: `compile`
+// re-resolves each relation by name to a transient `~Escapable` table to read
+// its schema (width, ordinals, the set of ordinals the query references) and
+// emits a name-holding `Plan`; `optimise` re-resolves to read sort-key
+// seekability and rewrites scans into seeks and the product into an
+// index-nested-loop join; `execute` re-resolves to open cursors and
+// materialise. A single relation compiles to `Project(Sort(Select(Scan)))`; a
+// chain of joins compiles to a left-deep tree of `Product`s, each level's `ON`
+// equality a `Select` over its product, with the `WHERE` wrapping the whole
+// chain. Absent layers are omitted. Executing the plan yields the result
+// records' typed values; formatting them is a client's job. The compile,
+// optimise, and execute entry points are `Catalog` members.
 
 /// The greatest number of fixpoint iterations a recursive CTE may take before
 /// the engine concludes it does not terminate and throws `SQLError.recursion`.
@@ -926,7 +926,7 @@ extension Catalog where Self: ~Escapable {
     guard let table = table(named: name) else { throw .relation(name) }
     let count = table.cursor().count
 
-    if let range = Engine.boundaries(filter, ordinals, table, count, bindings) {
+    if let range = table.boundaries(filter, ordinals, count, bindings) {
       return .scan(name: name, ordinals: ordinals, seek: range)
     }
 
@@ -939,13 +939,11 @@ extension Catalog where Self: ~Escapable {
     // 0)` the left fold rebuilds so a seekable `id < 0` is the top-level RHS.
     if case let .and(lhs, rhs) = filter {
       if rhs.safe,
-          let range =
-              Engine.boundaries(lhs, ordinals, table, count, bindings) {
+          let range = table.boundaries(lhs, ordinals, count, bindings) {
         return .select(rhs, .scan(name: name, ordinals: ordinals, seek: range))
       }
       if lhs.safe,
-          let range =
-              Engine.boundaries(rhs, ordinals, table, count, bindings) {
+          let range = table.boundaries(rhs, ordinals, count, bindings) {
         return .select(lhs, .scan(name: name, ordinals: ordinals, seek: range))
       }
     }
@@ -974,15 +972,15 @@ private func comparison(_ filter: Filter, _ bindings: Bindings)
   }
 }
 
-extension Engine {
+extension Table where Self: ~Escapable {
   /// The boundaries `[lower, upper)` to seek for a sort-key comparison, or `nil`
   /// if `filter` does not qualify for the seek path.
   ///
   /// It qualifies when `filter` is a sort-key equality or range whose operand
   /// is an integer — a literal, or a bound parameter resolved from `bindings`
-  /// so a correlated child seeks on its parent key — and `table.bound` reports
-  /// the column seekable (a non-`nil` boundary). A range additionally requires
-  /// the column `ordered`: a `bound` boundary partitions a range correctly only
+  /// so a correlated child seeks on its parent key — and `bound` reports the
+  /// column seekable (a non-`nil` boundary). A range additionally requires the
+  /// column `ordered`: a `bound` boundary partitions a range correctly only
   /// when the seeked column is monotonic, so a range on a seekable, unordered
   /// column (a decoded coded-index key) does not qualify and scans, while its
   /// equality still seeks. The comparison's slot maps back to its table ordinal
@@ -992,17 +990,13 @@ extension Engine {
   ///
   /// The hash-join executor reuses this over a pushed inner filter's conjuncts
   /// to seek the inner by a seekable conjunct before bucketing, so a
-  /// seekable/contradictory inner filter reads few or no inner rows — hence it is
-  /// `internal` rather than private to `seek`.
-  internal static func boundaries<T: Table & ~Escapable>(_ filter: Filter,
-                                                         _ ordinals: Array<Int>,
-                                                         _ table: borrowing T,
-                                                         _ count: Int,
-                                                         _ bindings: Bindings)
+  /// seekable/contradictory inner filter reads few or no inner rows.
+  internal borrowing func boundaries(_ filter: Filter, _ ordinals: Array<Int>,
+                                     _ count: Int, _ bindings: Bindings)
       -> Range<Int>? {
     guard let (slot, op, value) = comparison(filter, bindings),
-        let lower = table.bound(ordinals[slot], value, strict: false),
-        let upper = table.bound(ordinals[slot], value, strict: true) else {
+        let lower = bound(ordinals[slot], value, strict: false),
+        let upper = bound(ordinals[slot], value, strict: true) else {
       return nil
     }
 
@@ -1013,7 +1007,7 @@ extension Engine {
     // raw run brackets one tag's value, and the join re-tests the decoded key
     // per row), so equality always seeks; a range on an unordered column
     // returns `nil` and the engine scans and filters.
-    let ordered = table.ordered(ordinals[slot])
+    let ordered = ordered(ordinals[slot])
     return switch op {
     case .equal: lower ..< upper
     case .lt: ordered ? 0 ..< lower : nil

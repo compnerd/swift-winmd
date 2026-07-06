@@ -17,12 +17,11 @@
 /// equality a `Select` over its product, with the `WHERE` wrapping the whole
 /// chain. Absent layers are omitted. Executing the plan yields the result
 /// records' typed values; formatting them is a client's job.
-public enum Engine {
-  /// The greatest number of fixpoint iterations a recursive CTE may take before
-  /// the engine concludes it does not terminate and throws
-  /// `SQLError.recursion`.
-  internal static let kRecursionCap = 10_000
-}
+public enum Engine {}
+
+/// The greatest number of fixpoint iterations a recursive CTE may take before
+/// the engine concludes it does not terminate and throws `SQLError.recursion`.
+private let kRecursionCap = 10_000
 
 // MARK: - WITH
 
@@ -408,7 +407,7 @@ extension Catalog where Self: ~Escapable {
     var iterations = 0
     while !working.isEmpty {
       iterations += 1
-      guard iterations <= Engine.kRecursionCap else {
+      guard iterations <= kRecursionCap else {
         throw .recursion(cte.name)
       }
 
@@ -459,72 +458,67 @@ extension Projection {
   }
 }
 
-extension Engine {
-  /// A relation resolved for compilation: its name-resolution `schema` and a
-  /// `leaf` factory that, given the ordinals the query references on its side,
-  /// builds the leaf `Plan` — a `scan` for a base table, a `derived` over the
-  /// view's compiled sub-plan for a view.
-  internal struct Resolved {
-    let schema: Schema
-    let leaf: (Array<Int>) -> Plan
-  }
+/// A relation resolved for compilation: its name-resolution `schema` and a
+/// `leaf` factory that, given the ordinals the query references on its side,
+/// builds the leaf `Plan` — a `scan` for a base table, a `derived` over the
+/// view's compiled sub-plan for a view.
+internal struct Resolved {
+  let schema: Schema
+  let leaf: (Array<Int>) -> Plan
+}
 
-  /// The sorted, deduplicated ordinals a query references: the union of the
-  /// ordinals its `projection` terms read, the columns its `filter` reads, and
-  /// EVERY column its `order` keys read. The projection terms hold ordinals at
-  /// this stage; a scalar call's arguments contribute their read ordinals too.
-  internal static func referenced(
-      _ projection: Array<Term>, _ filter: Filter?,
-      _ order: Array<(column: Int, ascending: Bool)>)
-      -> Array<Int> {
-    var ordinals = Set<Int>()
-    for term in projection {
-      term.references(into: &ordinals)
-    }
-    filter?.references(into: &ordinals)
-    for key in order { ordinals.insert(key.column) }
-    return ordinals.sorted()
+/// The sorted, deduplicated ordinals a query references: the union of the
+/// ordinals its `projection` terms read, the columns its `filter` reads, and
+/// EVERY column its `order` keys read. The projection terms hold ordinals at
+/// this stage; a scalar call's arguments contribute their read ordinals too.
+private func referenced(_ projection: Array<Term>, _ filter: Filter?,
+                        _ order: Array<(column: Int, ascending: Bool)>)
+    -> Array<Int> {
+  var ordinals = Set<Int>()
+  for term in projection {
+    term.references(into: &ordinals)
   }
+  filter?.references(into: &ordinals)
+  for key in order { ordinals.insert(key.column) }
+  return ordinals.sorted()
+}
 
-  /// The inverse map `ordinal → slot` of a referenced-ordinal list: slot `i` is
-  /// `ordinals[i]`, so the map sends `ordinals[i]` back to `i`.
-  internal static func invert(_ ordinals: Array<Int>)
-      -> Dictionary<Int, Int> {
-    var slot = Dictionary<Int, Int>(minimumCapacity: ordinals.count)
-    for index in ordinals.indices {
-      slot[ordinals[index]] = index
-    }
-    return slot
+/// The inverse map `ordinal → slot` of a referenced-ordinal list: slot `i` is
+/// `ordinals[i]`, so the map sends `ordinals[i]` back to `i`.
+private func invert(_ ordinals: Array<Int>) -> Dictionary<Int, Int> {
+  var slot = Dictionary<Int, Int>(minimumCapacity: ordinals.count)
+  for index in ordinals.indices {
+    slot[ordinals[index]] = index
   }
+  return slot
+}
 
-  /// Rejects an `ORDER BY` key naming a column outside the `DISTINCT` output.
-  ///
-  /// `SELECT DISTINCT` sorts the pre-projection rows then dedups the projected
-  /// ones, so ordering on a column the projection drops is ill-defined — after
-  /// dedup one output row stands for many source rows, whose differing sort-key
-  /// values leave no single order. The standard therefore requires every
-  /// `ORDER BY` key under `DISTINCT` to be a column of the select list, as the
-  /// grouped path requires for `GROUP BY`. Each resolved order key's ordinal
-  /// (`order`, paired index-for-index with the AST `keys` for the offending
-  /// name) must equal a projected term that is a bare `.slot` — a plain output
-  /// column; a computed projection is not orderable-on anyway. A key naming no
-  /// output column faults `SQLError.distinct`. Only a `distinct` query is
-  /// checked; a plain `SELECT` may order on any source column.
-  ///
-  /// The check runs in whatever slot space the caller resolved into: the
-  /// non-aggregate paths pass base ordinals, the grouped path passes grouped
-  /// slots. Both are consistent — `order` and `projection` share it — so the
-  /// one comparison serves every compile path.
-  internal static func distinct(
-      _ keys: Array<Order.Key>, _ order: Array<Int>,
-      _ projection: Array<Term>) throws(SQLError) {
-    var output = Set<Int>()
-    for term in projection {
-      if case let .slot(ordinal) = term { output.insert(ordinal) }
-    }
-    for index in order.indices where !output.contains(order[index]) {
-      throw .distinct(keys[index].column.name)
-    }
+/// Rejects an `ORDER BY` key naming a column outside the `DISTINCT` output.
+///
+/// `SELECT DISTINCT` sorts the pre-projection rows then dedups the projected
+/// ones, so ordering on a column the projection drops is ill-defined — after
+/// dedup one output row stands for many source rows, whose differing sort-key
+/// values leave no single order. The standard therefore requires every
+/// `ORDER BY` key under `DISTINCT` to be a column of the select list, as the
+/// grouped path requires for `GROUP BY`. Each resolved order key's ordinal
+/// (`order`, paired index-for-index with the AST `keys` for the offending
+/// name) must equal a projected term that is a bare `.slot` — a plain output
+/// column; a computed projection is not orderable-on anyway. A key naming no
+/// output column faults `SQLError.distinct`. Only a `distinct` query is
+/// checked; a plain `SELECT` may order on any source column.
+///
+/// The check runs in whatever slot space the caller resolved into: the
+/// non-aggregate paths pass base ordinals, the grouped path passes grouped
+/// slots. Both are consistent — `order` and `projection` share it — so the
+/// one comparison serves every compile path.
+private func distinct(_ keys: Array<Order.Key>, _ order: Array<Int>,
+                      _ projection: Array<Term>) throws(SQLError) {
+  var output = Set<Int>()
+  for term in projection {
+    if case let .slot(ordinal) = term { output.insert(ordinal) }
+  }
+  for index in order.indices where !output.contains(order[index]) {
+    throw .distinct(keys[index].column.name)
   }
 }
 
@@ -616,13 +610,13 @@ extension Catalog where Self: ~Escapable {
   /// standard rule that every non-aggregated projection/`ORDER BY` column appear
   /// in the `GROUP BY`.
   internal borrowing func group(_ select: Select, _ relation: Relation,
-                                _ from: Engine.Resolved, _ ctes: CTEs,
+                                _ from: Resolved, _ ctes: CTEs,
                                 _ visited: Set<String>)
       throws(SQLError) -> Plan {
     // Resolve every joined relation and lay the FROM relation and each joined
     // one end to end in one combined ordinal space (as the non-aggregate join
     // path does), so the WHERE, keys, and aggregate arguments resolve uniformly.
-    var joined = Array<Engine.Resolved>()
+    var joined = Array<Resolved>()
     joined.reserveCapacity(select.joins.count)
     for join in select.joins {
       try joined.append(resolve(join.relation, ctes, visited))
@@ -725,10 +719,10 @@ extension Catalog where Self: ~Escapable {
 
     // Under DISTINCT every ORDER BY key must be a select-list column — the
     // dedup runs on the projected rows, so ordering on a dropped column is
-    // ill-defined (see `Engine.distinct`). The order keys and projection are
+    // ill-defined (see `distinct`). The order keys and projection are
     // in grouped-slot space here, aligned with the AST keys index-for-index.
     if select.distinct, let clause = select.order {
-      try Engine.distinct(clause.keys, order.map(\.slot), projection)
+      try distinct(clause.keys, order.map(\.slot), projection)
     }
 
     var plan = node
@@ -960,27 +954,27 @@ extension Catalog where Self: ~Escapable {
   }
 }
 
-extension Engine {
-  /// The seekable `(slot, op, integer)` of `filter`: a `compare` against an
-  /// integer literal, or a `bound` whose parameter resolves to an integer in
-  /// `bindings`. A string operand, an unbound or non-integer parameter, or a
-  /// non-comparison does not qualify, and the relation scans.
-  private static func comparison(_ filter: Filter, _ bindings: Bindings)
-      -> (Int, Comparison, Int)? {
-    switch filter {
-    case let .compare(.slot(slot), op, .constant(.integer(value))):
+/// The seekable `(slot, op, integer)` of `filter`: a `compare` against an
+/// integer literal, or a `bound` whose parameter resolves to an integer in
+/// `bindings`. A string operand, an unbound or non-integer parameter, or a
+/// non-comparison does not qualify, and the relation scans.
+private func comparison(_ filter: Filter, _ bindings: Bindings)
+    -> (Int, Comparison, Int)? {
+  switch filter {
+  case let .compare(.slot(slot), op, .constant(.integer(value))):
+    (slot, op, value)
+  case let .bound(.slot(slot), op, parameter):
+    if case let .integer(value)? = bindings[parameter] {
       (slot, op, value)
-    case let .bound(.slot(slot), op, parameter):
-      if case let .integer(value)? = bindings[parameter] {
-        (slot, op, value)
-      } else {
-        nil
-      }
-    default:
+    } else {
       nil
     }
+  default:
+    nil
   }
+}
 
+extension Engine {
   /// The boundaries `[lower, upper)` to seek for a sort-key comparison, or `nil`
   /// if `filter` does not qualify for the seek path.
   ///
@@ -1080,7 +1074,7 @@ extension Catalog where Self: ~Escapable {
     let conjuncts = filter.conjuncts
     for index in conjuncts.indices {
       guard case let .match(lhs, rhs) = conjuncts[index],
-          let (leftKey, rightKey) = Engine.keys(lhs, rhs, base) else {
+          let (leftKey, rightKey) = keys(lhs, rhs, base) else {
         continue
       }
 
@@ -1110,20 +1104,18 @@ extension Catalog where Self: ~Escapable {
   }
 }
 
-extension Engine {
-  /// The `(outerKey, innerKey)` an equality between slots `lhs` and `rhs`
-  /// relates across the boundary `base`, or `nil` if both fall on one side.
-  ///
-  /// Exactly one slot must be below `base` (the outer key) and the other at or
-  /// above it (the inner key, still in combined space); the order the equality
-  /// was written in does not matter.
-  internal static func keys(_ lhs: Int, _ rhs: Int, _ base: Int)
-      -> (outer: Int, inner: Int)? {
-    switch (lhs < base, rhs < base) {
-    case (true, false): (lhs, rhs)
-    case (false, true): (rhs, lhs)
-    default: nil
-    }
+/// The `(outerKey, innerKey)` an equality between slots `lhs` and `rhs`
+/// relates across the boundary `base`, or `nil` if both fall on one side.
+///
+/// Exactly one slot must be below `base` (the outer key) and the other at or
+/// above it (the inner key, still in combined space); the order the equality
+/// was written in does not matter.
+private func keys(_ lhs: Int, _ rhs: Int, _ base: Int)
+    -> (outer: Int, inner: Int)? {
+  switch (lhs < base, rhs < base) {
+  case (true, false): (lhs, rhs)
+  case (false, true): (rhs, lhs)
+  default: nil
   }
 }
 
@@ -1496,11 +1488,11 @@ extension Catalog where Self: ~Escapable {
   /// the fault and skips it.
   internal borrowing func resolve(_ relation: Relation, _ ctes: CTEs,
                                   _ visited: Set<String> = [])
-      throws(SQLError) -> Engine.Resolved {
+      throws(SQLError) -> Resolved {
     let name = relation.name
     if let cte = ctes[name.lowercased()] {
       let schema = cte.schema()
-      return Engine.Resolved(schema: schema) { ordinals in
+      return Resolved(schema: schema) { ordinals in
         .scan(name: name, ordinals: ordinals, seek: nil)
       }
     }
@@ -1538,7 +1530,7 @@ extension Catalog where Self: ~Escapable {
         throw .columns(expected: projected, got: view.columns.count)
       }
       let schema = view.schema()
-      return Engine.Resolved(schema: schema) { ordinals in
+      return Resolved(schema: schema) { ordinals in
         .derived(name: name, plan: plan, ordinals: ordinals, seek: nil)
       }
     }
@@ -1547,7 +1539,7 @@ extension Catalog where Self: ~Escapable {
       throw .relation(name)
     }
     let schema = table.schema()
-    return Engine.Resolved(schema: schema) { ordinals in
+    return Resolved(schema: schema) { ordinals in
       .scan(name: name, ordinals: ordinals, seek: nil)
     }
   }
@@ -1627,15 +1619,15 @@ extension Catalog where Self: ~Escapable {
 
       // Under DISTINCT every ORDER BY key must be a select-list column — the
       // dedup runs on the projected rows, so ordering on a dropped column is
-      // ill-defined (see `Engine.distinct`). The order keys and projection are
+      // ill-defined (see `distinct`). The order keys and projection are
       // still in base-ordinal space here, aligned with the AST keys by index.
       if select.distinct, let clause = select.order {
-        try Engine.distinct(clause.keys, order.map(\.column), projection)
+        try distinct(clause.keys, order.map(\.column), projection)
       }
 
       // The referenced ordinals, in slot order: slot `i` is `ordinals[i]`.
-      let ordinals = Engine.referenced(projection, filter, order)
-      let slot = Engine.invert(ordinals)
+      let ordinals = referenced(projection, filter, order)
+      let slot = invert(ordinals)
       let scan = from.leaf(ordinals)
       return scan.shaped(
           distinct: select.distinct,
@@ -1648,7 +1640,7 @@ extension Catalog where Self: ~Escapable {
     // Resolve every joined relation and lay all relations — the FROM relation
     // first, then each joined one in source order — end to end in one combined
     // ordinal space.
-    var joined = Array<Engine.Resolved>()
+    var joined = Array<Resolved>()
     joined.reserveCapacity(select.joins.count)
     for join in select.joins {
       try joined.append(resolve(join.relation, ctes, visited))
@@ -1688,10 +1680,10 @@ extension Catalog where Self: ~Escapable {
     let projection = try scope.terms(select.projection)
 
     // Under DISTINCT every ORDER BY key must be a select-list column (see
-    // `Engine.distinct`); order keys and projection are in combined base-ordinal
+    // `distinct`); order keys and projection are in combined base-ordinal
     // space here, aligned with the AST keys index-for-index.
     if select.distinct, let clause = select.order {
-      try Engine.distinct(clause.keys, order.map(\.column), projection)
+      try distinct(clause.keys, order.map(\.column), projection)
     }
 
     // The combined referenced ordinals — projection ∪ every match ∪ WHERE ∪

@@ -193,7 +193,7 @@ extension Catalog where Self: ~Escapable {
                                  validate: Bool)
       throws(SQLError) -> Array<OutputColumn> {
     let routines = Routines.standard.merging(routines)
-    var overlay = CTEs()
+    var overlay = ScopedRelations()
     for cte in ctes {
       // A name repeated in the list (case-insensitively) would silently shadow
       // the earlier binding in the overlay, so reject it rather than overwrite —
@@ -255,7 +255,7 @@ extension Catalog where Self: ~Escapable {
   /// this arm's relations resolve, gating the view body's reachable-operand
   /// check the same as the outer query's — a `validate: false` derive never
   /// re-type-checks a view body a run already proved runnable.
-  borrowing func columns(of select: Select, _ ctes: CTEs,
+  borrowing func columns(of select: Select, _ ctes: ScopedRelations,
                          visited: Set<String> = [],
                          routines: Routines = [:],
                          validate: Bool = true)
@@ -272,7 +272,7 @@ extension Catalog where Self: ~Escapable {
   /// empty. It reads only schemas, never a cursor. `validate` (default `true`)
   /// rides through to each relation's `schema(of:)`, gating a view body's
   /// reachable-operand check the same as the outer query's.
-  borrowing func scope(of select: Select, _ ctes: CTEs,
+  borrowing func scope(of select: Select, _ ctes: ScopedRelations,
                        visited: Set<String> = [],
                        routines: Routines = [:],
                        validate: Bool = true)
@@ -299,7 +299,7 @@ extension Catalog where Self: ~Escapable {
   /// `Aggregate.fold` faults `SQLError.operand` at run. `compile` cannot catch
   /// this (no evaluating term is built), so a schema path type-checks each arm
   /// before returning metadata. It reads no cursor.
-  borrowing func typecheck(_ query: Query, _ ctes: CTEs,
+  borrowing func typecheck(_ query: Query, _ ctes: ScopedRelations,
                            visited: Set<String> = [],
                            routines: Routines = [:])
       throws(SQLError) {
@@ -338,7 +338,7 @@ extension Catalog where Self: ~Escapable {
   ///     ONLY`, or a positive `OFFSET` over a whole-result aggregate's sole row
   ///     (its output type is still DERIVED for the schema, non-faulting);
   ///     otherwise it validates fully.
-  private borrowing func typecheck(_ select: Select, _ ctes: CTEs,
+  private borrowing func typecheck(_ select: Select, _ ctes: ScopedRelations,
                                    visited: Set<String>,
                                    routines: Routines)
       throws(SQLError) {
@@ -434,7 +434,7 @@ extension Catalog where Self: ~Escapable {
   /// types WITHOUT re-checking its reachable operands, so a view whose body is
   /// data-dependent-empty — a text-arithmetic projection under a filter that
   /// matched no row — does not fault a `SELECT *` over it that already ran.
-  borrowing func schema(of relation: Relation, _ ctes: CTEs,
+  borrowing func schema(of relation: Relation, _ ctes: ScopedRelations,
                         visited: Set<String> = [],
                         routines: Routines = [:],
                         validate: Bool = true)

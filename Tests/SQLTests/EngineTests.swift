@@ -771,6 +771,427 @@ struct EngineJoinTests {
   }
 }
 
+// MARK: - Non-equi join tests
+
+struct EngineNonEquiJoinTests {
+  @Test func `an inequality ON pairs every row the predicate admits`() throws {
+    // `ON Parent.Id < Child.Pid` is a pure inequality — no equi conjunct —
+    // so it is a nested loop: for each parent, every child whose Pid exceeds
+    // its Id, in outer-major order.
+    let rows = try join("""
+        SELECT Parent.Name, Child.Name FROM Parent
+          JOIN Child ON Parent.Id < Child.Pid
+        """)
+    #expect(rows == [
+      [.text("Ada"), .text("Bob")],
+      [.text("Ada"), .text("Orphan")],
+      [.text("Bee"), .text("Orphan")],
+      [.text("Cid"), .text("Orphan")],
+    ])
+  }
+
+  @Test func `a pure inequality ON plans a residual product, not a hash join`() throws {
+    // No `column = column` conjunct, so `nest` cannot form a `.join`; the level
+    // stays a `.select` over a `.product` — the nested-loop shape.
+    let catalog = try family()
+    let select = try parse("""
+        SELECT Parent.Name, Child.Name FROM Parent
+          JOIN Child ON Parent.Id < Child.Pid
+        """)
+    let plan =
+        try catalog.optimise(catalog.compile(select).pushdown(), [:])
+    #expect(!joins(plan))
+    #expect(residual(plan))
+  }
+
+  @Test func `a mixed ON hashes the equi conjunct and filters the residual`() throws {
+    // `ON Child.Pid = Parent.Id AND Child.Name < 'B'`: the equality hash-joins
+    // each child to its parent; the residual inequality beside the key then
+    // keeps only pairs whose child name sorts before 'B' — dropping Bob, the
+    // sole B-name.
+    let rows = try join("""
+        SELECT Parent.Name, Child.Name FROM Parent
+          JOIN Child ON Child.Pid = Parent.Id AND Child.Name < 'B'
+        """)
+    // Equi pairs (Ada,Ann),(Ada,Amy),(Bee,Bob); the residual drops (Bee,Bob).
+    #expect(rows == [
+      [.text("Ada"), .text("Ann")],
+      [.text("Ada"), .text("Amy")],
+    ])
+  }
+
+  @Test func `a mixed ON still plans a hash join for its equi conjunct`() throws {
+    // The `column = column` conjunct becomes a `.join`; the inequality
+    // survives as a residual `.select` over it — the equi fast-path still
+    // triggers.
+    let catalog = try family()
+    let select = try parse("""
+        SELECT Parent.Name, Child.Name FROM Parent
+          JOIN Child ON Child.Pid = Parent.Id AND Parent.Name < Child.Name
+        """)
+    let plan =
+        try catalog.optimise(catalog.compile(select).pushdown(), [:])
+    #expect(joins(plan))
+  }
+
+  @Test func `an expression equality ON is a residual, not a hash key`() throws {
+    // `ON Child.Pid = Parent.Id + 1` equates a column with an EXPRESSION, so
+    // it is not a bare `column = column` key: it lowers to a residual over the
+    // product (nested loop), not a hash join.
+    let rows = try join("""
+        SELECT Parent.Name, Child.Name FROM Parent
+          JOIN Child ON Child.Pid = Parent.Id + 1
+        """)
+    // Parent 1 (Ada) → Pid 2: Bob. Parent 2 (Bee) → Pid 3: none.
+    // Parent 3 (Cid) → Pid 4: none.
+    #expect(rows == [[.text("Ada"), .text("Bob")]])
+  }
+
+  @Test func `an expression equality ON plans a residual product`() throws {
+    let catalog = try family()
+    let select = try parse("""
+        SELECT Parent.Name, Child.Name FROM Parent
+          JOIN Child ON Child.Pid = Parent.Id + 1
+        """)
+    let plan =
+        try catalog.optimise(catalog.compile(select).pushdown(), [:])
+    #expect(!joins(plan))
+    #expect(residual(plan))
+  }
+
+  @Test func `a non-equi ON equals the eager product filtered`() throws {
+    // The nested-loop join over an inequality must yield exactly the eager
+    // cross product filtered by the same predicate, in outer-major order.
+    let catalog = try family()
+    let parents = try catalog.run(parse("SELECT Name, Id FROM Parent"))
+    let children = try catalog.run(parse("SELECT Name, Pid FROM Child"))
+    var expected = Array<Array<Value>>()
+    for parent in parents {
+      for child in children where less(parent[1], child[1]) {
+        expected.append([parent[0], child[0]])
+      }
+    }
+    let rows = try catalog.run(parse("""
+        SELECT Parent.Name, Child.Name FROM Parent
+          JOIN Child ON Parent.Id < Child.Pid
+        """))
+    #expect(rows == expected)
+  }
+
+  @Test func `an unsafe ON conjunct before an equi key is preserved`() throws {
+    // `ON (1 / A.x) = 0 AND A.k = B.k` over a product pair where `A.x = 0` and
+    // `A.k <> B.k`. The hash join evaluates its key equality BEFORE any
+    // residual, so hoisting `A.k = B.k` to a key would drop the non-matching
+    // pair and skip the division the earlier unsafe conjunct owes. The unsafe
+    // leading conjunct bars extraction, so the WHOLE ON stays a residual over
+    // the product and the division raises `SQLError.divide` rather than the
+    // query returning no rows.
+    let catalog = Memory([
+      "A": FixtureRelation([Field(name: "x", type: .integer),
+                     Field(name: "k", type: .integer)],
+                    [[.integer(0), .integer(1)]] as Array<Array<Value>>),
+      "B": FixtureRelation([Field(name: "k", type: .integer)],
+                    [[.integer(2)]] as Array<Array<Value>>),
+    ])
+    #expect(throws: SQLError.divide) {
+      _ = try catalog.run(parse("""
+          SELECT A.k FROM A JOIN B ON (1 / A.x) = 0 AND A.k = B.k
+          """))
+    }
+  }
+
+  @Test func `an unsafe-prefixed ON extracts no equi key, planning a residual`() throws {
+    // The same `ON (1 / A.x) = 0 AND A.k = B.k`: the unsafe leading conjunct
+    // bars the equi from becoming a `match`, so `nest` forms no `.join` — the
+    // level is a residual `.select` over a `.product`, the whole ON per pair.
+    let catalog = Memory([
+      "A": FixtureRelation([Field(name: "x", type: .integer),
+                     Field(name: "k", type: .integer)],
+                    [[.integer(0), .integer(1)]] as Array<Array<Value>>),
+      "B": FixtureRelation([Field(name: "k", type: .integer)],
+                    [[.integer(2)]] as Array<Array<Value>>),
+    ])
+    let select = try parse("""
+        SELECT A.k FROM A JOIN B ON (1 / A.x) = 0 AND A.k = B.k
+        """)
+    let plan =
+        try catalog.optimise(catalog.compile(select).pushdown(), [:])
+    #expect(!joins(plan))
+    #expect(residual(plan))
+  }
+
+  @Test func `an equi key before an unsafe residual extracts no key, planning a residual`() throws {
+    // `ON A.k = B.k AND (1 / A.x) = 0` (equi FIRST) has an unsafe conjunct, so
+    // NO key is extracted and the WHOLE ON lowers to a residual over the
+    // product. A hash key would skip a NULL-key pair before the unsafe RHS ran,
+    // suppressing the divide the left-to-right Kleene AND owes — so the equi
+    // must NOT hoist while an unsafe conjunct FOLLOWS it.
+    let catalog = Memory([
+      "A": FixtureRelation([Field(name: "x", type: .integer),
+                     Field(name: "k", type: .integer)],
+                    [[.integer(0), .integer(1)]] as Array<Array<Value>>),
+      "B": FixtureRelation([Field(name: "k", type: .integer)],
+                    [[.integer(2)]] as Array<Array<Value>>),
+    ])
+    let plan = try catalog.optimise(catalog.compile(parse("""
+        SELECT A.k FROM A JOIN B ON A.k = B.k AND (1 / A.x) = 0
+        """)).pushdown(), [:])
+    #expect(!joins(plan))
+    #expect(residual(plan))
+  }
+
+  @Test func `a nullable ON key before an unsafe residual raises`() throws {
+    // `ON A.k = B.k AND (1 / A.x) = 0` with `A.k` NULL and `A.x = 0`. The
+    // equality is UNKNOWN (a NULL operand), so the Kleene AND must still
+    // evaluate the unsafe RHS `(1 / A.x) = 0` and raise `SQLError.divide`.
+    // Extracting `A.k = B.k` to a hash key would skip the NULL key and DROP the
+    // pair before the RHS ran, returning no rows — so no key is hoisted and the
+    // WHOLE ON stays a residual over the product that raises.
+    let catalog = Memory([
+      "A": FixtureRelation([Field(name: "x", type: .integer),
+                     Field(name: "k", type: .integer)],
+                    [[.integer(0), .null]] as Array<Array<Value>>),
+      "B": FixtureRelation([Field(name: "k", type: .integer)],
+                    [[.integer(2)]] as Array<Array<Value>>),
+    ])
+    let plan = try catalog.optimise(catalog.compile(parse("""
+        SELECT A.k FROM A JOIN B ON A.k = B.k AND (1 / A.x) = 0
+        """)).pushdown(), [:])
+    #expect(!joins(plan))
+    #expect(residual(plan))
+    #expect(throws: SQLError.divide) {
+      _ = try catalog.run(parse("""
+          SELECT A.k FROM A JOIN B ON A.k = B.k AND (1 / A.x) = 0
+          """))
+    }
+  }
+
+  @Test func `a definite-false ON key before an unsafe residual short-circuits without raising`() throws {
+    // `ON A.k = B.k AND (1 / A.x) = 0` with `A.k = 5`, `B.k = 3` (non-NULL,
+    // definitely UNEQUAL) and `A.x = 0`. The equality is definite FALSE, so the
+    // Kleene AND short-circuits (`false` dominates) and never evaluates the
+    // unsafe RHS — no rows, no raise. Both the product+select and the residual
+    // agree, distinguishing a definite-FALSE key from the UNKNOWN NULL one.
+    let catalog = Memory([
+      "A": FixtureRelation([Field(name: "x", type: .integer),
+                     Field(name: "k", type: .integer)],
+                    [[.integer(0), .integer(5)]] as Array<Array<Value>>),
+      "B": FixtureRelation([Field(name: "k", type: .integer)],
+                    [[.integer(3)]] as Array<Array<Value>>),
+    ])
+    let rows = try catalog.run(parse("""
+        SELECT A.k FROM A JOIN B ON A.k = B.k AND (1 / A.x) = 0
+        """))
+    #expect(rows.isEmpty)
+  }
+
+  @Test func `a safe non-equi before an equi still extracts the equi key`() throws {
+    // SAFE-prefix — `ON A.p < B.q AND A.k = B.k`. The leading `<` is safe
+    // (comparing two cells never raises), so it does not bar extraction: the
+    // equi `A.k = B.k` still becomes a hash key beside the residual inequality.
+    let catalog = Memory([
+      "A": FixtureRelation([Field(name: "k", type: .integer),
+                     Field(name: "p", type: .integer)],
+                    [[.integer(1), .integer(5)],
+                     [.integer(2), .integer(10)]] as Array<Array<Value>>),
+      "B": FixtureRelation([Field(name: "k", type: .integer),
+                     Field(name: "q", type: .integer)],
+                    [[.integer(1), .integer(8)],
+                     [.integer(2), .integer(3)]] as Array<Array<Value>>),
+    ])
+    let text = """
+        SELECT A.k, B.q FROM A JOIN B ON A.p < B.q AND A.k = B.k
+        """
+    // Key pairs (1,1) with 5 < 8 kept; (2,2) with 10 < 3 dropped.
+    let rows = try catalog.run(parse(text))
+    #expect(rows == [[.integer(1), .integer(8)]])
+    let plan =
+        try catalog.optimise(catalog.compile(parse(text)).pushdown(), [:])
+    #expect(joins(plan))
+  }
+
+  @Test func `a pure equi ON still plans a hash join`() throws {
+    // The equi fast-path is unchanged: an all-`column = column` ON extracts
+    // its key and folds into a `.join`.
+    let catalog = try family()
+    let select = try parse("""
+        SELECT Parent.Name, Child.Name FROM Parent
+          JOIN Child ON Child.Pid = Parent.Id
+        """)
+    let plan =
+        try catalog.optimise(catalog.compile(select).pushdown(), [:])
+    #expect(joins(plan))
+  }
+
+  @Test func `a nullable ON gate drops a pair before an unsafe WHERE`() throws {
+    // `A JOIN B ON A.k < B.k WHERE (1 / A.x) = 0`, `A.k` NULL and `A.x` = 0.
+    // The residual `ON` gate `A.k < B.k` is UNKNOWN (a NULL operand), so the
+    // pair is DROPPED at the gate and the `WHERE` never runs on it — no rows,
+    // no raise. The gate is a distribution BARRIER: the `WHERE` stays a
+    // SEPARATE `select` above the residual `ON` gate rather than fused into one
+    // throwing `A.k < B.k AND (1 / A.x) = 0` over the product.
+    let catalog = Memory([
+      "A": FixtureRelation([Field(name: "x", type: .integer),
+                            Field(name: "k", type: .integer)],
+                           [[.integer(0), .null]] as Array<Array<Value>>),
+      "B": FixtureRelation([Field(name: "k", type: .integer)],
+                           [[.integer(2)]] as Array<Array<Value>>),
+    ])
+    let text = "SELECT A.k FROM A JOIN B ON A.k < B.k WHERE (1 / A.x) = 0"
+    let plan =
+        try catalog.optimise(catalog.compile(parse(text)).pushdown(), [:])
+    #expect(separated(plan))
+    #expect(residual(plan))
+    #expect(try catalog.run(parse(text)).isEmpty)
+  }
+
+  @Test func `a surviving ON pair still runs the unsafe WHERE`() throws {
+    // CONTROL — the same `A JOIN B ON A.k < B.k WHERE (1 / A.x) = 0`, but now
+    // `A.k` = 1 and `B.k` = 2, so the `ON` gate is TRUE and the pair PASSES it.
+    // The `WHERE` then runs on the surviving pair and `(1 / A.x) = 0` with
+    // `A.x` = 0 raises `SQLError.divide` — the `WHERE` still applies after the
+    // gate.
+    let catalog = Memory([
+      "A": FixtureRelation([Field(name: "x", type: .integer),
+                            Field(name: "k", type: .integer)],
+                           [[.integer(0), .integer(1)]] as Array<Array<Value>>),
+      "B": FixtureRelation([Field(name: "k", type: .integer)],
+                           [[.integer(2)]] as Array<Array<Value>>),
+    ])
+    #expect(throws: SQLError.divide) {
+      _ = try catalog.run(parse("""
+          SELECT A.k FROM A JOIN B ON A.k < B.k WHERE (1 / A.x) = 0
+          """))
+    }
+  }
+
+  @Test func `a safe WHERE over a non-equi ON join returns correct rows`()
+      throws {
+    // A SAFE `WHERE` over a non-equi `ON` join yields the same rows the eager
+    // product filtered by both `ON` and `WHERE` would — whether or not the safe
+    // `WHERE` fuses with the gate. `ON Parent.Id < Child.Pid WHERE Child.Name
+    // <> 'Orphan'` pairs each parent with a later-keyed child, then drops the
+    // Orphan child.
+    let rows = try join("""
+        SELECT Parent.Name, Child.Name FROM Parent
+          JOIN Child ON Parent.Id < Child.Pid WHERE Child.Name <> 'Orphan'
+        """)
+    #expect(rows == [[.text("Ada"), .text("Bob")]])
+  }
+
+  @Test func `a leftover ON match gates a pair before an unsafe WHERE`() throws {
+    // `A JOIN B ON A.k1 = B.k1 AND A.k2 = B.k2 WHERE (1 / A.x) = 0`, with
+    // `A.k1` matching, `A.k2` NULL, and `A.x` = 0. `nest` folds ONE equi key
+    // (`A.k1 = B.k1`) into the hash `.join`, leaving `A.k2 = B.k2` as the
+    // gate's own residual under the join. The surviving `k1` pair reaches that
+    // leftover match, which is UNKNOWN (a NULL `A.k2`), so the pair is DROPPED
+    // at the gate BEFORE the `WHERE` runs — no rows, no raise. The `ON` gate is
+    // a BARRIER even though it is PURE-equi: the `WHERE` stays a SEPARATE
+    // `select` above the leftover-match gate rather than fused into a throwing
+    // `A.k2 = B.k2 AND (1 / A.x) = 0` that would divide by zero on the pair.
+    let catalog = Memory([
+      "A": FixtureRelation([Field(name: "x", type: .integer),
+                            Field(name: "k1", type: .integer),
+                            Field(name: "k2", type: .integer)],
+                           [[.integer(0), .integer(1), .null]]
+                             as Array<Array<Value>>),
+      "B": FixtureRelation([Field(name: "k1", type: .integer),
+                            Field(name: "k2", type: .integer)],
+                           [[.integer(1), .integer(5)]]
+                             as Array<Array<Value>>),
+    ])
+    let text = """
+        SELECT A.k1 FROM A
+          JOIN B ON A.k1 = B.k1 AND A.k2 = B.k2 WHERE (1 / A.x) = 0
+        """
+    let plan =
+        try catalog.optimise(catalog.compile(parse(text)).pushdown(), [:])
+    // The equi key still hash-joins; the leftover match gates above it, and the
+    // `WHERE` is a SEPARATE `select` above that gate, not fused with the match.
+    #expect(joins(plan))
+    #expect(stacked(plan))
+    #expect(try catalog.run(parse(text)).isEmpty)
+  }
+
+  @Test func `both ON matches passing lets the unsafe WHERE raise`() throws {
+    // CONTROL — the same two-key `ON` and unsafe `WHERE`, but now BOTH keys
+    // match (`A.k2` = 5 = `B.k2`), so the pair passes the whole `ON` gate. The
+    // `WHERE` then runs on the surviving pair and `(1 / A.x) = 0` with `A.x`
+    // = 0 raises `SQLError.divide` — the `WHERE` still applies after the gate.
+    let catalog = Memory([
+      "A": FixtureRelation([Field(name: "x", type: .integer),
+                            Field(name: "k1", type: .integer),
+                            Field(name: "k2", type: .integer)],
+                           [[.integer(0), .integer(1), .integer(5)]]
+                             as Array<Array<Value>>),
+      "B": FixtureRelation([Field(name: "k1", type: .integer),
+                            Field(name: "k2", type: .integer)],
+                           [[.integer(1), .integer(5)]]
+                             as Array<Array<Value>>),
+    ])
+    #expect(throws: SQLError.divide) {
+      _ = try catalog.run(parse("""
+          SELECT A.k1 FROM A
+            JOIN B ON A.k1 = B.k1 AND A.k2 = B.k2 WHERE (1 / A.x) = 0
+          """))
+    }
+  }
+
+  @Test func `a two-equality pure-equi ON with a safe WHERE joins correctly`()
+      throws {
+    // The equi fast-path is intact under the always-barrier rule: a two-key
+    // pure-equi `ON` still hash-joins (one key folded, the other gating over
+    // the join) and a SAFE `WHERE` above returns the expected rows. `A.k1` and
+    // `A.k2` pick out exactly the `B` row whose BOTH keys match; the `WHERE`
+    // then keeps only the tagged pair.
+    let catalog = Memory([
+      "A": FixtureRelation([Field(name: "k1", type: .integer),
+                            Field(name: "k2", type: .integer),
+                            Field(name: "tag", type: .text)],
+                           [[.integer(1), .integer(5), .text("keep")],
+                            [.integer(1), .integer(9), .text("drop")]]
+                             as Array<Array<Value>>),
+      "B": FixtureRelation([Field(name: "k1", type: .integer),
+                            Field(name: "k2", type: .integer),
+                            Field(name: "note", type: .text)],
+                           [[.integer(1), .integer(5), .text("bee")],
+                            [.integer(1), .integer(9), .text("cee")]]
+                             as Array<Array<Value>>),
+    ])
+    let text = """
+        SELECT A.tag, B.note FROM A
+          JOIN B ON A.k1 = B.k1 AND A.k2 = B.k2 WHERE A.tag = 'keep'
+        """
+    let plan =
+        try catalog.optimise(catalog.compile(parse(text)).pushdown(), [:])
+    #expect(joins(plan))
+    #expect(try catalog.run(parse(text)) == [[.text("keep"), .text("bee")]])
+  }
+
+  @Test func `a single-equality ON still plans a hash join and behaves`() throws {
+    // A single-equality pure-equi `ON A.k = B.k` folds its ONE key into the
+    // hash `.join` and carries no leftover conjunct, so the `WHERE` sits
+    // above the join. A matching pair runs the `WHERE`; a NULL key drops the
+    // pair at the join, so the `WHERE` never runs on it. `A` holds a matching
+    // row (`k` = 1, `x` = 1) and a NULL-key row (`k` NULL, `x` = 0): the match
+    // returns the pair `WHERE A.x = 1` admits, and the NULL-key row is dropped
+    // before the unsafe `(1 / A.x)` would ever divide.
+    let catalog = Memory([
+      "A": FixtureRelation([Field(name: "x", type: .integer),
+                            Field(name: "k", type: .integer)],
+                           [[.integer(1), .integer(1)],
+                            [.integer(0), .null]] as Array<Array<Value>>),
+      "B": FixtureRelation([Field(name: "k", type: .integer)],
+                           [[.integer(1)]] as Array<Array<Value>>),
+    ])
+    let text = "SELECT A.k FROM A JOIN B ON A.k = B.k WHERE (1 / A.x) = 1"
+    let plan =
+        try catalog.optimise(catalog.compile(parse(text)).pushdown(), [:])
+    #expect(joins(plan))
+    #expect(try catalog.run(parse(text)) == [[.integer(1)]])
+  }
+}
+
 // MARK: - Multi-way join tests
 
 struct EngineMultiJoinTests {
@@ -1152,6 +1573,73 @@ private func residual(_ plan: Plan) -> Bool {
     residual(left) || residual(right)
   case let .aggregate(_, _, source):
     residual(source)
+  case .single, .scan:
+    false
+  }
+}
+
+/// Whether `plan` reaches a `.select` standing directly over ANOTHER `.select`
+/// over a `.product` — the WHERE-above-a-separate-ON-gate shape the barrier
+/// preserves (the outer `select` the `WHERE`, the inner the residual `ON`
+/// gate), as opposed to one fused `.select(ON AND WHERE, product)`.
+private func separated(_ plan: Plan) -> Bool {
+  switch plan {
+  case .select(_, .select(_, .product)):
+    true
+  case let .select(_, source):
+    separated(source)
+  case let .project(_, source):
+    separated(source)
+  case let .sort(_, source):
+    separated(source)
+  case let .limit(_, _, source):
+    separated(source)
+  case let .distinct(source):
+    separated(source)
+  case let .derived(_, sub, _, _):
+    separated(sub)
+  case let .product(left, right):
+    separated(left) || separated(right)
+  case let .join(outer, _, _, _, _, _, _):
+    separated(outer)
+  case let .union(left, right, _):
+    separated(left) || separated(right)
+  case let .aggregate(_, _, source):
+    separated(source)
+  case .single, .scan:
+    false
+  }
+}
+
+/// Whether `plan` reaches a `.select` standing over ANOTHER `.select` over a
+/// `.join` — the WHERE-above-a-leftover-ON-gate shape the always-barrier rule
+/// preserves for a pure-equi `ON` whose extra equi key `nest` leaves gating
+/// over the hash join (the outer `select` the `WHERE`, the inner the leftover
+/// match), as opposed to one fused `.select(match AND WHERE, join)`.
+private func stacked(_ plan: Plan) -> Bool {
+  switch plan {
+  case .select(_, .select(_, .join)):
+    true
+  case let .select(_, source):
+    stacked(source)
+  case let .project(_, source):
+    stacked(source)
+  case let .sort(_, source):
+    stacked(source)
+  case let .limit(_, _, source):
+    stacked(source)
+  case let .distinct(source):
+    stacked(source)
+  case let .derived(_, sub, _, _):
+    stacked(sub)
+  case let .product(left, right):
+    stacked(left) || stacked(right)
+  case let .join(outer, _, _, _, _, _, _):
+    stacked(outer)
+  case let .union(left, right, _):
+    stacked(left) || stacked(right)
+  case let .aggregate(_, _, source):
+    stacked(source)
   case .single, .scan:
     false
   }

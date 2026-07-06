@@ -231,27 +231,37 @@ public struct Relation: Hashable, Sendable {
   }
 }
 
-/// A `JOIN` clause: a second relation and the equality that relates it to the
-/// rows already in scope.
+/// A `JOIN` clause: a second relation and the `ON` predicate that relates it to
+/// the rows already in scope.
 ///
-/// The `ON` equality is held as its two column references in source order —
-/// `left = right` — for the consumer to classify. The binding interprets the
-/// adapter-computed columns `Id` (every table's 1-based row identity) and a
-/// list-child's owner foreign key within those references.
+/// The `ON` predicate is an arbitrary boolean expression over the relation
+/// joined in and the ones already in scope — the same predicate grammar a
+/// `WHERE` admits — so a join may relate its sides by an equality (`a.x =
+/// b.y`), an inequality (`a.x < b.y`), an expression equality (`a.x = b.y +
+/// 1`), or any `AND`/`OR`/`NOT` of comparisons. A pure `column = column`
+/// equality conjunct still lowers to a hash-join key; the rest becomes a
+/// residual filter over the join (nested-loop semantics). The consumer
+/// interprets the adapter-computed columns `Id` (every table's 1-based row
+/// identity) and a list-child's owner foreign key within the predicate's column
+/// references.
 public struct Join: Hashable, Sendable {
   /// The relation joined in.
   public let relation: Relation
 
-  /// The left side of the `ON` equality.
-  public let left: Column
+  /// The `ON` predicate relating the joined-in relation to those in scope.
+  public let on: Predicate
 
-  /// The right side of the `ON` equality.
-  public let right: Column
-
-  public init(relation: Relation, left: Column, right: Column) {
+  public init(relation: Relation, on: Predicate) {
     self.relation = relation
-    self.left = left
-    self.right = right
+    self.on = on
+  }
+
+  /// A `column = column` equi-join over `relation` — the common shape, as the
+  /// two column references its `ON` equates.
+  public init(relation: Relation, left: Column, right: Column) {
+    self.init(relation: relation,
+              on: .comparison(left: .column(left), op: .equal,
+                              right: .column(right)))
   }
 }
 

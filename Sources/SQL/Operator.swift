@@ -310,7 +310,9 @@ internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
                         routines, bindings)
   case let .project(terms, source):
     return try execute(source, catalog, context)
-      .map { record throws(SQLError) in try project(terms, record, routines) }
+      .map { record throws(SQLError) in
+        try project(terms, record, routines, bindings)
+      }
   case let .sort(keys, source):
     return try execute(source, catalog, context)
       .enumerated()
@@ -341,7 +343,7 @@ internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
     return deduplicated(try execute(source, catalog, context))
   case let .aggregate(keys, aggregates, source):
     return try grouped(execute(source, catalog, context), keys,
-                       aggregates, routines)
+                       aggregates, routines, bindings)
   case let .limit(count, offset, source):
     return limited(try execute(source, catalog, context), count, offset)
   }
@@ -401,11 +403,12 @@ private func deduplicated(_ records: Array<Record>) -> Array<Record> {
 /// Evaluates each projected `term` against `record` through `routines` to the
 /// output row, in order — slot `i` of the result is `terms[i]`.
 private func project(_ terms: Array<Term>, _ record: Record,
-                     _ routines: Routines) throws(SQLError) -> Record {
+                     _ routines: Routines, _ bindings: Bindings)
+    throws(SQLError) -> Record {
   var cells = Array<Value>()
   cells.reserveCapacity(terms.count)
   for term in terms {
-    try cells.append(evaluate(term, record, routines))
+    try cells.append(evaluate(term, record, routines, bindings))
   }
   return Record(cells)
 }

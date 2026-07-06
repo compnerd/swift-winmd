@@ -401,6 +401,34 @@ public indirect enum Expression: Hashable, Sendable {
   /// value, so the engine recognises the fixed set of aggregate names at parse
   /// time and lowers them through a dedicated mechanism rather than the routines.
   case aggregate(Aggregate, of: Aggregand)
+  /// A `CASE` conditional expression — the result of its FIRST `when` whose
+  /// predicate is TRUE (three-valued: UNKNOWN and FALSE both skip), else the
+  /// `else` result, or `NULL` when there is no `ELSE`. The `when`s are held in
+  /// source order.
+  ///
+  /// Both ISO forms reduce to this searched shape: a SEARCHED `CASE WHEN cond
+  /// THEN r … END` carries its predicates directly, and a SIMPLE `CASE op WHEN v
+  /// THEN r … END` is normalised at parse time to `WHEN op = v THEN r …`, so the
+  /// engine models one conditional. The result expressions' types must unify to
+  /// one result type (see resolution).
+  case `case`(Array<When>, else: Expression?)
+}
+
+/// One `WHEN predicate THEN result` branch of a `CASE` expression — the guard
+/// and the value it yields when the guard is the first TRUE one.
+public struct When: Hashable, Sendable {
+  /// The guard predicate — TRUE selects this branch (UNKNOWN and FALSE skip it).
+  /// A simple `CASE`'s `WHEN value` is normalised to the equality `operand =
+  /// value` here.
+  public let when: Predicate
+
+  /// The result expression this branch yields when its guard is the first TRUE.
+  public let then: Expression
+
+  public init(when: Predicate, then: Expression) {
+    self.when = when
+    self.then = then
+  }
 }
 
 /// A standard SQL aggregate function.

@@ -15,7 +15,7 @@ public typealias Bindings = Dictionary<String, Value>
 /// off a bare slot before running it. The filter is fully
 /// escapable; the `~Escapable` row it reads materialises only transiently at
 /// evaluation.
-internal indirect enum Filter {
+internal indirect enum Filter: Sendable {
   /// `left <op> right`, both operands lowered to ordinal-addressed terms (a
   /// slot, a constant, or a scalar-function call).
   case compare(Term, Comparison, Term)
@@ -57,6 +57,15 @@ internal indirect enum Term: Sendable {
   /// `lhs <op> rhs` — a binary arithmetic over two operand terms, the lowered
   /// form of the AST's `Expression.binary`.
   case binary(Arithmetic, Term, Term)
+  /// A `CASE` conditional — the lowered form of the AST's `Expression.case`. Each
+  /// branch is a guard `Filter` and the result `Term` it yields; the executor
+  /// evaluates the guards in order and takes the first whose three-valued value
+  /// is TRUE (UNKNOWN and FALSE skip), else the `else` term, or `NULL` when there
+  /// is none. `type` is the unification of the branch result types (the same
+  /// `ValueType.unified` reduction `derive`/`validate` compute) — the type the
+  /// schema advertises for the column — so the executor COERCES the selected
+  /// value to it, widening an `.integer` arm of a `.double` CASE.
+  case `case`(Array<(Filter, Term)>, else: Term?, type: ValueType)
 }
 
 extension Term {
@@ -78,6 +87,12 @@ extension Term {
     case let .binary(_, lhs, rhs):
       lhs.references(into: &slots)
       rhs.references(into: &slots)
+    case let .case(branches, otherwise, _):
+      for (gate, result) in branches {
+        gate.references(into: &slots)
+        result.references(into: &slots)
+      }
+      otherwise?.references(into: &slots)
     }
   }
 }
@@ -97,6 +112,10 @@ extension Term {
              arguments: arguments.map { $0.remapped(through: slot) })
     case let .binary(op, lhs, rhs):
       .binary(op, lhs.remapped(through: slot), rhs.remapped(through: slot))
+    case let .case(branches, otherwise, type):
+      .case(branches.map {
+              ($0.0.remapped(through: slot), $0.1.remapped(through: slot))
+            }, else: otherwise?.remapped(through: slot), type: type)
     }
   }
 
@@ -107,7 +126,7 @@ extension Term {
   internal var safe: Bool {
     switch self {
     case .slot, .constant: true
-    case .apply, .binary: false
+    case .apply, .binary, .case: false
     }
   }
 }
@@ -272,7 +291,8 @@ internal func value(of literal: Literal) throws(SQLError) -> Value {
 /// arguments, and applies it. The `borrowing` row is non-escaping — a term runs
 /// over a materialised projection record or a predicate's borrowed cursor row.
 internal func evaluate<R: Row & ~Escapable>(_ term: Term, _ row: borrowing R,
-                                            _ routines: Routines)
+                                            _ routines: Routines,
+                                            _ bindings: Bindings = [:])
     throws(SQLError) -> Value {
   switch term {
   case let .slot(slot):
@@ -280,17 +300,52 @@ internal func evaluate<R: Row & ~Escapable>(_ term: Term, _ row: borrowing R,
   case let .constant(value):
     value
   case let .apply(name, arguments):
-    try apply(name, arguments, row, routines)
+    try apply(name, arguments, row, routines, bindings)
   case let .binary(op, lhs, rhs):
-    try op.apply(evaluate(lhs, row, routines), evaluate(rhs, row, routines))
+    try op.apply(evaluate(lhs, row, routines, bindings),
+                 evaluate(rhs, row, routines, bindings))
+  case let .case(branches, otherwise, type):
+    // Take the FIRST branch whose guard is three-valued TRUE (UNKNOWN and FALSE
+    // skip); with none matching, the `else` term, or `NULL` when there is none.
+    // The guard is a `Filter`, so it evaluates over the same row, routines, and
+    // bindings a `WHERE` filter does — a `:parameter` guard resolves against the
+    // bindings, an UNKNOWN one does not select its branch. The selected value is
+    // COERCED to the CASE's unified result `type` so it matches the column type
+    // the schema advertised.
+    try `case`(branches, otherwise, type, row, routines, bindings)
   }
+}
+
+/// Evaluates a lowered `CASE` — its `branches` and optional `otherwise`
+/// term — against `row`, taking the first guard that is TRUE and coercing the
+/// selected value to the CASE's unified result `type`.
+///
+/// The schema advertises the column as `type` — the unification of the branch
+/// result types — yet a branch yields its own raw `Value`, so a `.integer` arm
+/// of a CASE that unifies to `.double` must widen to match. `Value.coerced`
+/// performs that one widening; NULL and an already-matching value pass
+/// unchanged, so an all-same CASE (no widening) is untouched.
+private func `case`<R: Row & ~Escapable>(_ branches: Array<(Filter, Term)>,
+                                         _ otherwise: Term?, _ type: ValueType,
+                                         _ row: borrowing R,
+                                         _ routines: Routines,
+                                         _ bindings: Bindings)
+    throws(SQLError) -> Value {
+  for (gate, result) in branches {
+    if try evaluate(gate, row, routines, bindings) == true {
+      return try evaluate(result, row, routines, bindings).coerced(to: type)
+    }
+  }
+  guard let otherwise else { return .null }
+  return try evaluate(otherwise, row, routines, bindings).coerced(to: type)
 }
 
 /// Resolves `name` in `routines` and applies it to its evaluated `arguments`.
 private func apply<R: Row & ~Escapable>(_ name: String,
                                         _ arguments: Array<Term>,
                                         _ row: borrowing R,
-                                        _ routines: Routines)
+                                        _ routines: Routines,
+                                        _ bindings: Bindings)
     throws(SQLError) -> Value {
   guard let routine = routines[name] else {
     throw .function(name)
@@ -298,7 +353,7 @@ private func apply<R: Row & ~Escapable>(_ name: String,
   var values = Array<Value>()
   values.reserveCapacity(arguments.count)
   for argument in arguments {
-    try values.append(evaluate(argument, row, routines))
+    try values.append(evaluate(argument, row, routines, bindings))
   }
   let result = try routine(values)
   // A registered routine is a public producer of `Value`s that bypasses the
@@ -490,17 +545,18 @@ internal func evaluate<R: Row & ~Escapable>(_ filter: Filter,
     throws(SQLError) -> Bool? {
   switch filter {
   case let .compare(lhs, op, rhs):
-    try matches(evaluate(lhs, row, routines), op, evaluate(rhs, row, routines))
+    try matches(evaluate(lhs, row, routines, bindings), op,
+                evaluate(rhs, row, routines, bindings))
   case let .bound(term, op, parameter):
     if let operand = bindings[parameter] {
-      try matches(evaluate(term, row, routines), op, operand)
+      try matches(evaluate(term, row, routines, bindings), op, operand)
     } else {
       nil
     }
   case let .match(left, right):
     matches(row[left], .equal, row[right])
   case let .null(term, negated):
-    try (evaluate(term, row, routines) == .null) != negated
+    try (evaluate(term, row, routines, bindings) == .null) != negated
   case let .and(lhs, rhs):
     // `&&`/`||` take an `@autoclosure` right operand, which would capture the
     // borrowed `~Escapable` row; spell each connective explicitly so a branch

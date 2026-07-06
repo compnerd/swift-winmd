@@ -425,6 +425,20 @@ struct AggregateTests {
     try catalog.expect("SELECT SUM(X) FROM T", yields: [[32.5]])
   }
 
+  @Test func `an aggregate argument's CASE guard reads the query bindings`() throws {
+    // `SUM(CASE WHEN Region = :target THEN Amount ELSE 0 END)` folds a CASE
+    // whose guard names a `:parameter`; the execution bindings must reach the
+    // aggregate ARGUMENT the same as a projection or WHERE, or `:target` is
+    // unbound, the guard is UNKNOWN for every row, the ELSE 0 always wins, and
+    // the SUM collapses to 0. Bound to `East`, only the East amounts fold —
+    // 10 + 20 + 40 (Toys/East is NULL, skipped) = 70 — neither 0 (the unbound
+    // result) nor 150 (the all-rows SUM(Amount)).
+    try sales().expect("""
+        SELECT SUM(CASE WHEN Region = :target THEN Amount ELSE 0 END)
+          FROM Sales
+        """, yields: [[70]], bindings: ["target": .text("East")])
+  }
+
   @Test func `AVG over a double column is a double`() throws {
     let catalog = try Catalog {
       Relation("T", ["X": .double]) {

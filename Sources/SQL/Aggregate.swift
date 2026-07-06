@@ -230,9 +230,14 @@ private func comparable(_ a: Value, _ b: Value) -> Bool {
 /// is ONE group — the degenerate whole-result aggregation (`SELECT COUNT(*) FROM
 /// T`) — which yields a single grouped record even over an empty input (`COUNT`
 /// `0`, the others NULL), the standard SQL rule.
+///
+/// The `bindings` thread through to every key and argument evaluation, so a
+/// `:parameter` inside a group key or an aggregate argument — the guard of a
+/// `SUM(CASE WHEN Id = :target THEN K ELSE 0 END)`, say — resolves against
+/// the same execution bindings the projection and `WHERE` evaluate with.
 internal func grouped(_ records: Array<Record>, _ keys: Array<Term>,
-                      _ aggregates: Array<Aggregation>, _ routines: Routines)
-    throws(SQLError) -> Array<Record> {
+                      _ aggregates: Array<Aggregation>, _ routines: Routines,
+                      _ bindings: Bindings) throws(SQLError) -> Array<Record> {
   var order = Array<Record>()
   var accumulators = Dictionary<Record, Array<Accumulator>>()
 
@@ -240,7 +245,7 @@ internal func grouped(_ records: Array<Record>, _ keys: Array<Term>,
     var cells = Array<Value>()
     cells.reserveCapacity(keys.count)
     for key in keys {
-      try cells.append(evaluate(key, record, routines))
+      try cells.append(evaluate(key, record, routines, bindings))
     }
     let group = Record(cells)
     // Key the group on the EXACT canonical form of its cells so `1` and `1.0`
@@ -256,7 +261,7 @@ internal func grouped(_ records: Array<Record>, _ keys: Array<Term>,
       // `COUNT(*)` has no argument — count the row with a non-NULL sentinel;
       // every other aggregate folds its evaluated argument value.
       let value: Value = if let argument = aggregates[index].argument {
-        try evaluate(argument, record, routines)
+        try evaluate(argument, record, routines, bindings)
       } else {
         .integer(0)
       }

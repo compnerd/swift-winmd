@@ -87,7 +87,8 @@ extension Schema {
   /// bare-column list yields one `.slot(ordinal)` per column; an expression list
   /// lowers each expression to a term. The terms hold ordinals, which the
   /// engine remaps to slots after gathering the referenced ones.
-  internal func terms(_ projection: Projection, in relation: Relation)
+  internal func terms(_ projection: Projection, in relation: Relation,
+                      _ routines: Routines = [:])
       throws(SQLError) -> Array<Term> {
     switch projection {
     case .all:
@@ -103,7 +104,7 @@ extension Schema {
       var terms = Array<Term>()
       terms.reserveCapacity(projected.count)
       for item in projected {
-        try terms.append(term(item.expression, in: relation))
+        try terms.append(term(item.expression, in: relation, routines))
       }
       return terms
     }
@@ -112,7 +113,8 @@ extension Schema {
   /// Lowers a scalar `expression` to an ordinal-addressed `Term`: a column to a
   /// `.slot(ordinal)`, a literal to a `.constant`, a call to an `.apply` over
   /// its lowered arguments.
-  internal func term(_ expression: Expression, in relation: Relation)
+  internal func term(_ expression: Expression, in relation: Relation,
+                     _ routines: Routines = [:])
       throws(SQLError) -> Term {
     switch expression {
     case let .column(column):
@@ -123,11 +125,33 @@ extension Schema {
       var lowered = Array<Term>()
       lowered.reserveCapacity(arguments.count)
       for argument in arguments {
-        try lowered.append(term(argument, in: relation))
+        try lowered.append(term(argument, in: relation, routines))
       }
       return .apply(name: name, arguments: lowered)
     case let .binary(op, lhs, rhs):
-      return try .binary(op, term(lhs, in: relation), term(rhs, in: relation))
+      return try .binary(op, term(lhs, in: relation, routines),
+                         term(rhs, in: relation, routines))
+    case let .case(whens, otherwise):
+      // Lower each branch's guard predicate to a `Filter` and its result to a
+      // `Term`, and the `ELSE` to a `Term`, over this relation's resolution.
+      var branches = Array<(Filter, Term)>()
+      branches.reserveCapacity(whens.count)
+      for branch in whens {
+        let gate = try lower(branch.when, in: relation, routines)
+        try branches.append((gate, term(branch.then, in: relation, routines)))
+      }
+      let fallback: Term? = if let otherwise {
+        try term(otherwise, in: relation, routines)
+      } else {
+        nil
+      }
+      // Attach the unified result type — the same `ValueType.unified` reduction
+      // `derive`/`validate` compute — so the executor COERCES the selected
+      // branch's value to the type the schema advertises. Derive it against a
+      // one-relation scope, this Schema's own resolution surface.
+      let scope = Scope([(relation, self)])
+      let type = try scope.derive(whens, otherwise, routines)
+      return .case(branches, else: fallback, type: type)
     case .aggregate:
       // An aggregate has no per-row meaning — it folds over a group — so it may
       // not appear in a `WHERE`, a join `ON`, or a non-aggregate projection.
@@ -144,10 +168,11 @@ extension Schema {
     }
   }
 
-  internal func lower(_ predicate: Predicate, in relation: Relation)
+  internal func lower(_ predicate: Predicate, in relation: Relation,
+                      _ routines: Routines = [:])
       throws(SQLError) -> Filter {
     try SQL.lower(predicate) { expression throws(SQLError) in
-      try term(expression, in: relation)
+      try term(expression, in: relation, routines)
     }
   }
 }
@@ -276,7 +301,65 @@ internal struct Scope {
     case let .binary(_, lhs, rhs):
       try [derive(lhs, routines), derive(rhs, routines)].contains(.double)
           ? .double : .integer
+    case let .case(whens, otherwise):
+      // The result type is the unification of every REACHABLE branch result (and
+      // the `ELSE`) — the executor's short-circuit means an unreachable branch
+      // (a constant-false guard, or any branch after a constant-true one) never
+      // yields a value, so it cannot shape the column's type. The reachable
+      // result types must UNIFY; a definitively-irreconcilable clash (text
+      // beside an integer) faults `SQLError.operand` here too, so this lowering
+      // surface and the faulting `validate` AGREE. A `CASE` always has at least
+      // one `WHEN`; when none is reachable (every guard constant-false, no
+      // reachable `ELSE`) the run yields NULL, for which `.integer` is the
+      // schema default.
+      try derive(whens, otherwise, routines)
     }
+  }
+
+  /// The nominal type of a `CASE` under `derive` — the unification of its
+  /// REACHABLE result types, and `.integer` when no branch is reachable (the
+  /// run yields NULL). The reachable result types must UNIFY (`unified`):
+  /// a definitively-irreconcilable pair (a text result beside an integer one)
+  /// faults `SQLError.operand`, so this lowering surface AGREES with the
+  /// faulting `validate` (`conditional`) — a mixed integer/double `CASE` still
+  /// widens to `double`.
+  internal func derive(_ whens: Array<When>, _ otherwise: Expression?,
+                       _ routines: Routines)
+      throws(SQLError) -> ValueType {
+    let results = reachable(whens, otherwise)
+    guard !results.isEmpty else { return .integer }
+    var type = try derive(results[0], routines)
+    for result in results.dropFirst() {
+      let next = try derive(result, routines)
+      guard let unified = type.unified(with: next) else {
+        throw .operand("CASE results have irreconcilable types")
+      }
+      type = unified
+    }
+    return type
+  }
+
+  /// The result expressions of a `CASE` the executor's short-circuit can REACH,
+  /// in branch order: a `WHEN` whose guard is statically constant-FALSE has an
+  /// unreachable result and is dropped; a `WHEN` whose guard is statically
+  /// constant-TRUE is itself reachable and keeps every EARLIER reachable branch
+  /// (a row an earlier row-dependent guard matches takes that branch, never
+  /// reaching this one), but makes every STRICTLY-LATER `WHEN` and the `ELSE`
+  /// unreachable; an `ELSE` is reachable only when no guard is constant-TRUE. A
+  /// guard that is not statically decidable (`constant` is `nil`) leaves its
+  /// result reachable.
+  private func reachable(_ whens: Array<When>, _ otherwise: Expression?)
+      -> Array<Expression> {
+    var results = Array<Expression>()
+    for branch in whens {
+      switch constant(branch.when) {
+      case false: continue
+      case true: results.append(branch.then); return results
+      case nil: results.append(branch.then)
+      }
+    }
+    if let otherwise { results.append(otherwise) }
+    return results
   }
 
   /// The value type a scalar `expression` yields, VALIDATING each operand and
@@ -304,7 +387,61 @@ internal struct Scope {
       try aggregate(function, over: operand, routines)
     case let .binary(op, lhs, rhs):
       try arithmetic(op, lhs, rhs, routines)
+    case let .case(whens, otherwise):
+      try conditional(whens, otherwise, routines)
     }
+  }
+
+  /// The result type of a `CASE`, validating each REACHABLE branch as a run
+  /// would fault and honouring the executor's short-circuit: each evaluated
+  /// `WHEN` guard is a boolean predicate whose operands are validated (`check`);
+  /// only a REACHABLE result expression is validated; and the reachable result
+  /// types must UNIFY to one type (`ValueType.unified`) — a
+  /// definitively-irreconcilable pair (a text result beside an integer one)
+  /// faults `SQLError.operand`, as a query cannot yield a column of two kinds. A
+  /// mixed integer/double `CASE` widens to `double`.
+  ///
+  /// The executor takes the first TRUE guard's result and never evaluates a
+  /// later branch, so a `WHEN` whose guard is statically constant-FALSE has an
+  /// unreachable result — its operands are NOT validated (`CASE WHEN 1 = 0 THEN
+  /// Name + 1 ELSE 0 END` type-checks). A constant-TRUE guard is itself
+  /// reachable and KEEPS every earlier reachable branch — a row an earlier
+  /// row-dependent guard matches takes that branch, never reaching the
+  /// constant-TRUE one — so those earlier results are still validated (`CASE WHEN
+  /// Id = 1 THEN Name + 1 WHEN 1 = 1 THEN 0 END` faults on the reachable `Id = 1`
+  /// branch's `Name + 1`); it makes only every STRICTLY-LATER guard, result, and
+  /// the `ELSE` unreachable. A REACHABLE bad operand (`WHEN Id = 1 THEN Name +
+  /// 1`) still faults. When no branch is reachable the run yields NULL, typed
+  /// `.integer` (the schema default), with no result to validate.
+  private func conditional(_ whens: Array<When>, _ otherwise: Expression?,
+                           _ routines: Routines)
+      throws(SQLError) -> ValueType {
+    var results = Array<Expression>()
+    var decided = false
+    for branch in whens {
+      // The guard up to (and including) the decisive one is evaluated, so
+      // validate its operands; a constant-FALSE guard's result is unreachable
+      // (skip it), a constant-TRUE one is reachable but makes every LATER branch
+      // unreachable — so keep the earlier results and this one, then stop.
+      try check(branch.when, routines)
+      switch constant(branch.when) {
+      case false: continue
+      case true: results.append(branch.then); decided = true
+      case nil: results.append(branch.then)
+      }
+      if decided { break }
+    }
+    if !decided, let otherwise { results.append(otherwise) }
+    guard !results.isEmpty else { return .integer }
+    var type = try validate(results[0], routines)
+    for result in results.dropFirst() {
+      let next = try validate(result, routines)
+      guard let unified = type.unified(with: next) else {
+        throw .operand("CASE results have irreconcilable types")
+      }
+      type = unified
+    }
+    return type
   }
 
   /// The result type of the scalar routine `name` called over `arguments`,
@@ -501,6 +638,12 @@ internal struct Scope {
     case let .binary(_, lhs, rhs):
       try aggregates(in: lhs, routines)
       try aggregates(in: rhs, routines)
+    case let .case(whens, otherwise):
+      for branch in whens {
+        try aggregates(in: branch.when, routines)
+        try aggregates(in: branch.then, routines)
+      }
+      if let otherwise { try aggregates(in: otherwise, routines) }
     }
   }
 
@@ -563,6 +706,21 @@ internal struct Scope {
         throw .magnitude("function '\(name)' produced a non-finite double")
       }
       return result
+    case let .case(whens, otherwise):
+      // Evaluate the `CASE` over the empty group exactly as a run does: the
+      // first branch whose guard folds TRUE (`empty(predicate)`) yields its
+      // result, else the `ELSE`, else `NULL`. A skipped branch's result never
+      // folds, so it cannot fault. The selected value is COERCED to the CASE's
+      // unified result type (`derive`), just as the executor's
+      // `Row.conditional` widens it — an `.integer` arm of a CASE that unifies
+      // to `.double` folds to `.double`, so the empty group matches the
+      // advertised column type. NULL (a no-match, no-ELSE fold) passes through.
+      let type = try derive(whens, otherwise, routines)
+      for branch in whens where try empty(branch.when, routines) == true {
+        return try empty(branch.then, routines).coerced(to: type)
+      }
+      guard let otherwise else { return .null }
+      return try empty(otherwise, routines).coerced(to: type)
     case .column:
       return .null
     }
@@ -633,7 +791,8 @@ internal struct Scope {
   /// for `*` (in chain order, never a virtual column) as `.slot` terms, a
   /// bare-column list as `.slot` terms at their combined ordinals, an expression
   /// list as lowered terms — in source order.
-  internal func terms(_ projection: Projection) throws(SQLError)
+  internal func terms(_ projection: Projection,
+                      _ routines: Routines = [:]) throws(SQLError)
       -> Array<Term> {
     switch projection {
     case .all:
@@ -657,14 +816,15 @@ internal struct Scope {
       var terms = Array<Term>()
       terms.reserveCapacity(projected.count)
       for item in projected {
-        try terms.append(term(item.expression))
+        try terms.append(term(item.expression, routines))
       }
       return terms
     }
   }
 
   /// Lowers a scalar `expression` to a combined-ordinal `Term`.
-  internal func term(_ expression: Expression) throws(SQLError) -> Term {
+  internal func term(_ expression: Expression,
+                     _ routines: Routines = [:]) throws(SQLError) -> Term {
     switch expression {
     case let .column(column):
       return try .slot(ordinal(of: column))
@@ -674,11 +834,30 @@ internal struct Scope {
       var lowered = Array<Term>()
       lowered.reserveCapacity(arguments.count)
       for argument in arguments {
-        try lowered.append(term(argument))
+        try lowered.append(term(argument, routines))
       }
       return .apply(name: name, arguments: lowered)
     case let .binary(op, lhs, rhs):
-      return try .binary(op, term(lhs), term(rhs))
+      return try .binary(op, term(lhs, routines), term(rhs, routines))
+    case let .case(whens, otherwise):
+      // Lower each branch's guard to a combined-ordinal `Filter` and its result
+      // to a `Term`, and the `ELSE` to a `Term`, across the join chain.
+      var branches = Array<(Filter, Term)>()
+      branches.reserveCapacity(whens.count)
+      for branch in whens {
+        try branches.append((lower(branch.when, routines),
+                             term(branch.then, routines)))
+      }
+      let fallback: Term? = if let otherwise {
+        try term(otherwise, routines)
+      } else {
+        nil
+      }
+      // Attach the unified result type — the same `ValueType.unified` reduction
+      // `derive`/`validate` compute — so the executor COERCES the selected
+      // branch's value to the type the schema advertises.
+      let type = try derive(whens, otherwise, routines)
+      return .case(branches, else: fallback, type: type)
     case .aggregate:
       // An aggregate has no per-row meaning — it folds over a group — so it may
       // not appear in a `WHERE`, a join `ON`, or a non-aggregate projection.
@@ -705,9 +884,10 @@ internal struct Scope {
 
   /// Lowers the name-addressed AST `predicate` to the engine's `Filter`, each
   /// column reference resolved to a combined ordinal across the chain.
-  internal func lower(_ predicate: Predicate) throws(SQLError) -> Filter {
+  internal func lower(_ predicate: Predicate,
+                      _ routines: Routines = [:]) throws(SQLError) -> Filter {
     try SQL.lower(predicate) { expression throws(SQLError) in
-      try term(expression)
+      try term(expression, routines)
     }
   }
 }
@@ -782,7 +962,8 @@ internal struct Grouping {
   /// `call`/`binary` recurses over its operands; a bare column maps to its key
   /// slot only when it is a `GROUP BY` key, else it is `SQLError.grouping` — the
   /// standard rule.
-  private func term(_ expression: Expression) throws(SQLError) -> Term {
+  private func term(_ expression: Expression,
+                    _ routines: Routines = [:]) throws(SQLError) -> Term {
     if case .aggregate = expression, let slot = slot(of: expression) {
       return .slot(slot)
     }
@@ -797,11 +978,31 @@ internal struct Grouping {
       var lowered = Array<Term>()
       lowered.reserveCapacity(arguments.count)
       for argument in arguments {
-        try lowered.append(term(argument))
+        try lowered.append(term(argument, routines))
       }
       return .apply(name: name, arguments: lowered)
     case let .binary(op, lhs, rhs):
-      return try .binary(op, term(lhs), term(rhs))
+      return try .binary(op, term(lhs, routines), term(rhs, routines))
+    case let .case(whens, otherwise):
+      // Lower each branch's guard and result, and the `ELSE`, against the
+      // grouped slot space — a bare column in any of them must be a `GROUP BY`
+      // key, an aggregate its result slot, as elsewhere in a grouped expression.
+      var branches = Array<(Filter, Term)>()
+      branches.reserveCapacity(whens.count)
+      for branch in whens {
+        try branches.append((lower(branch.when, routines),
+                             term(branch.then, routines)))
+      }
+      let fallback: Term? = if let otherwise {
+        try term(otherwise, routines)
+      } else {
+        nil
+      }
+      // Attach the unified result type — the same `ValueType.unified` reduction
+      // `derive`/`validate` compute — over the grouped scope, so the executor
+      // COERCES the selected branch's value to the advertised column type.
+      let type = try scope.derive(whens, otherwise, routines)
+      return .case(branches, else: fallback, type: type)
     case .aggregate:
       // An aggregate reaches here only when it was not collected — an internal
       // inconsistency, since the query gathers every projection/HAVING aggregate.
@@ -825,7 +1026,8 @@ internal struct Grouping {
   /// output name (an alias, else a bare column's name) so an `ORDER BY` may name
   /// it — the standard alias ordering on an aggregate. A `SELECT *` has no
   /// well-defined meaning over groups (which columns?), so it faults.
-  internal mutating func terms(_ projection: Projection)
+  internal mutating func terms(_ projection: Projection,
+                               _ routines: Routines = [:])
       throws(SQLError) -> Array<Term> {
     switch projection {
     case .all:
@@ -834,7 +1036,7 @@ internal struct Grouping {
       var terms = Array<Term>()
       terms.reserveCapacity(columns.count)
       for column in columns {
-        let term = try term(.column(column))
+        let term = try term(.column(column), routines)
         terms.append(term)
         record(column.name, term)
       }
@@ -843,7 +1045,7 @@ internal struct Grouping {
       var terms = Array<Term>()
       terms.reserveCapacity(items.count)
       for item in items {
-        let term = try term(item.expression)
+        let term = try term(item.expression, routines)
         terms.append(term)
         // Record the output name (`Projected.name` — an alias, else a bare
         // column's name) so an `ORDER BY` may name it (the standard alias
@@ -855,9 +1057,10 @@ internal struct Grouping {
   }
 
   /// Lowers a `HAVING`/predicate to a grouped-space `Filter`.
-  internal func lower(_ predicate: Predicate) throws(SQLError) -> Filter {
+  internal func lower(_ predicate: Predicate,
+                      _ routines: Routines = [:]) throws(SQLError) -> Filter {
     try SQL.lower(predicate) { expression throws(SQLError) in
-      try term(expression)
+      try term(expression, routines)
     }
   }
 

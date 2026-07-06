@@ -504,58 +504,28 @@ internal struct Shell: ~Escapable {
     sources.reserveCapacity(interfaces.count)
     for found in interfaces {
       let id = found[0]
-      // The interface's methods, bound by its `Id`; each row is its `Id`
-      // then its escaped `Name`. The type spellings are no longer projected —
-      // the render decodes them from the signature with the spec's `Dialect`.
-      let plan = try Shell.select(Shell.query(named: "methods",
-                                              search: search))
-      let rows = try session.run(plan, routines,
-                                 bindings: ["parent": id])
-      var methods = Array<Dictionary<String, Any>>()
-      methods.reserveCapacity(rows.count)
-      for method in rows {
-        // Each method's parameters, bound by the method's `Id`; each row is its
-        // `Id`, escaped `Name`, and `Sequence`. The return pseudo-parameter
-        // (`Sequence == 0`) is dropped — only the real parameters spell the
-        // requirement's arguments — and the rest decode their type at render
-        // time from the parameter's own signature position.
-        let selection = try Shell.select(Shell.query(named: "params",
-                                                     search: search))
-        let params = try session.run(selection, routines,
-                                     bindings: ["parent": method[0]])
-        var parameters = Array<Dictionary<String, Any>>()
-        for parameter in params where parameter[2] != .integer(0) {
-          let type = session.storage.decode(parameter: parameter[0].integer,
-                                            for: dialect)
-          parameters.append([
-            "name": parameter[1].text,
-            "type": type ?? "",
-            "last": false,
-          ])
-        }
-        // The trailing parameter's `last` flag drives the template's
-        // `{{^last}}, {{/last}}` comma separation, omitting the final comma.
-        if !parameters.isEmpty {
-          parameters[parameters.count - 1]["last"] = true
-        }
-        var entry: Dictionary<String, Any> = [
-          "name": method[1].text,
-          "params": parameters,
-        ]
-        // The return, decoded at render time; a no-value return (the spec's
-        // `void` spelling, or an undecodable return) leaves `returns` absent, so
-        // the template's `{{#returns}}` clause renders nothing.
-        let returned = session.storage.decode(return: method[0].integer,
-                                              in: dialect)
-        if let returned, let clause = language.returned(returned) {
-          entry["returns"] = clause
-        }
-        methods.append(entry)
-      }
-      // The interface's base, via the `bases` view bound by its `Id`. A
-      // rootless interface defaults to the spec's COM root, except the root
-      // interface itself — which inherits nothing, so it never becomes its own
-      // base; an empty `root` applies no default.
+      // The interface's ordered declared generic-parameter names, through the
+      // `generics` view bound by its `Id` — empty for a non-generic interface.
+      // A generic interface declares at least one; its own name then carries a
+      // CLR arity suffix, stripped below. The names thread into the
+      // method/parameter/return decode so a `VAR` spells its declared name
+      // (`Element`) rather than a positional placeholder (`T0`).
+      let names = try declarations(of: id, routines, search: search)
+      // The names supplied to decode when the interface is generic; `nil`
+      // otherwise, so a non-generic interface decodes exactly as before.
+      let generics: Array<String>? = names.isEmpty ? nil : names
+      // The interface's own methods, decoded with its generic names so a `VAR`
+      // spells its declared name. A generic interface that HAS a base renders
+      // only its own surface here; forwarding a base's inherited methods onto
+      // the wrapper is a follow-up.
+      let methods = try self.methods(of: id, routines, search: search,
+                                     generics: generics, in: dialect,
+                                     language: language)
+      // The interface's named base, via the `bases` view bound by its `Id` (a
+      // `TypeRef`/`TypeDef` simple name). A rootless interface defaults to the
+      // spec's COM root, except the root interface itself — which inherits
+      // nothing, so it never becomes its own base; an empty `root` applies no
+      // default.
       let lineage =
           try Shell.select(Shell.query(named: "bases", search: search))
       let bases = try session.run(lineage, routines,
@@ -567,17 +537,161 @@ internal struct Shell: ~Escapable {
       } else {
         language.root
       }
+      // A generic interface's own `TypeName` carries the CLR arity suffix
+      // (`IVector``1`); strip it — the decode tier strips it only for a
+      // `GENERICINST` use, so the declaration name must be stripped here — so
+      // the emitted name is `IVector`, its `<T>` clause supplied separately.
+      // The keyword escape (`SANITIZE`) is applied HERE, on the STRIPPED name,
+      // not in the `interfaces` query: escaping the suffixed name would spare a
+      // generic whose stripped name is a keyword (`protocol``1` is not the
+      // reserved word `protocol`), leaving `public struct protocol` to be
+      // emitted. Escaping after the strip is why the query projects the raw
+      // `TypeName` — the interface's own name is the one identifier the strip
+      // must precede the escape for, so its escape lives in Swift, not the SQL.
+      let stripped = String(found[2].text.prefix { $0 != "`" })
+      let name = language.escape(stripped)
+      // The ABI-protocol name is the wrapper's own name suffixed with `ABI`,
+      // used for BOTH the ABI protocol's declaration and the wrapper's `base:
+      // any …ABI<…>` existential. The `ABI` suffix must precede the escape (the
+      // same order the base-name spelling uses): a keyword name's `<name>ABI`
+      // is never itself a keyword (no Swift keyword ends in `ABI`), so escaping
+      // the SUFFIXED name is a no-op yielding a plain `protocolABI` — whereas
+      // escaping FIRST then appending `ABI` would splice a backtick pair into
+      // the middle (`` `protocol`ABI ``), which Swift cannot parse.
+      let abi = language.escape(stripped + "ABI")
       var context: Dictionary<String, Any> = [
-        "name": found[2].text,
+        "name": name,
+        "abi": abi,
         "iid": found[3].text,
         "namespace": found[1].text,
         "methods": methods,
       ]
       // An absent `base` skips the template's `{{#base}}` inheritance clause.
       if let base { context["base"] = base }
+      // A generic interface carries its `generic` flag and its ordered clause
+      // `generics` (each with a `last` flag for comma separation); a
+      // non-generic one carries neither, so the template's `{{#generic}}` guard
+      // leaves its output byte-identical to today's.
+      if let generics {
+        context["generic"] = true
+        context["generics"] = generics.enumerated().map { index, name in
+          ["name": name, "last": index == generics.count - 1]
+        }
+      }
       sources.append(mustache.render(context))
     }
     return sources.joined(separator: "\n")
+  }
+
+  /// The template method entries for the interface at `id`, in declaration
+  /// order — each a `name`, a `params` list, and (for a value-returning method)
+  /// a `returns` clause — decoded with the owner's `generics` names threaded so
+  /// a `VAR` spells its declared name.
+  ///
+  /// Each method's parameters, bound by the method's `Id`, drop the return
+  /// pseudo-parameter (`Sequence == 0`); the rest decode their type from their
+  /// own signature position. The return decodes to `returns` unless it is the
+  /// spec's `void` spelling or undecodable, when `{{#returns}}` renders
+  /// nothing.
+  private borrowing func methods(of id: Value, _ routines: Routines,
+                                 search: Array<String>,
+                                 generics: Array<String>?, in dialect: Dialect,
+                                 language: Language) throws
+      -> Array<Dictionary<String, Any>> {
+    let plan = try Shell.select(Shell.query(named: "methods", search: search))
+    let rows = try session.run(plan, routines, bindings: ["parent": id])
+    var methods = Array<Dictionary<String, Any>>()
+    methods.reserveCapacity(rows.count)
+    for method in rows {
+      let selection = try Shell.select(Shell.query(named: "params",
+                                                   search: search))
+      let params = try session.run(selection, routines,
+                                   bindings: ["parent": method[0]])
+      let kept = params.filter { $0[2] != .integer(0) }
+      let types = kept.map {
+        session.storage.decode(parameter: $0[0].integer, generics: generics,
+                               for: dialect) ?? ""
+      }
+      let parameters = Shell.parameters(kept.map(\.[1].text), types: types)
+      var entry: Dictionary<String, Any> = [
+        "name": method[1].text,
+        "params": parameters,
+      ]
+      let returned = session.storage.decode(return: method[0].integer,
+                                            generics: generics, in: dialect)
+      if let returned, let clause = language.returned(returned) {
+        entry["returns"] = clause
+      }
+      methods.append(entry)
+    }
+    return methods
+  }
+
+  /// The template parameter dictionaries for a method's kept parameters — one
+  /// per `(name, type)` pair, in order — with each blank name assigned a
+  /// stable, collision-free `local` and the trailing entry's `last` flag set.
+  ///
+  /// A blank parameter name (`func Foo(_ : T)`) is allowed in a protocol
+  /// requirement's decl, but the wrapper's forwarding method must PASS it by
+  /// name in the call (`base.Foo(arg0)`), so a blank name synthesizes a `local`
+  /// used in BOTH the forwarding method's parameter list (`_ arg0: T`) and the
+  /// call — while `name` stays blank in the requirement. The synthetic name is
+  /// chosen AFTER the method's real names are known: it is the first `arg<N>`
+  /// (from `N == 0`) not already used by a real parameter or an earlier
+  /// synthetic one, so `Foo(_ : T, _ arg0: T)` gives the blank a `local` of
+  /// `arg1` rather than colliding with the real `arg0`. A named parameter's
+  /// `local` is its own name.
+  internal static func parameters(_ names: Array<String>,
+                                  types: Array<String>)
+      -> Array<Dictionary<String, Any>> {
+    // The names in play — the real ones plus each synthetic as it is minted —
+    // so a synthetic never duplicates a real name or a sibling synthetic.
+    var used = Set(names.filter { !$0.isEmpty })
+    var next = 0
+    var parameters = Array<Dictionary<String, Any>>()
+    parameters.reserveCapacity(names.count)
+    for (name, type) in zip(names, types) {
+      let local: String
+      if name.isEmpty {
+        while used.contains("arg\(next)") { next += 1 }
+        local = "arg\(next)"
+        used.insert(local)
+        next += 1
+      } else {
+        local = name
+      }
+      parameters.append([
+        "name": name,
+        "local": local,
+        "type": type,
+        "last": false,
+      ])
+    }
+    // The trailing parameter's `last` flag drives the template's
+    // `{{^last}}, {{/last}}` comma separation, omitting the final comma.
+    if !parameters.isEmpty {
+      parameters[parameters.count - 1]["last"] = true
+    }
+    return parameters
+  }
+
+  /// The ordered declared generic-parameter names of the interface at `id`,
+  /// through the `generics` view bound by its `Id` — an empty list for a
+  /// non-generic interface.
+  ///
+  /// A metadata file with no generic types omits the `GenericParam` table
+  /// entirely (the `#~` valid mask sets a table's bit only when it has rows),
+  /// so the `generics` view over it would resolve no relation; the base table's
+  /// presence is checked first (`opened` is `nil` for an absent table), so a
+  /// file with no generics is simply no generics rather than a faulting query.
+  private borrowing func declarations(of id: Value, _ routines: Routines,
+                                      search: Array<String>) throws
+      -> Array<String> {
+    guard session.storage.opened("GenericParam") != nil else { return [] }
+    let clause =
+        try Shell.select(Shell.query(named: "generics", search: search))
+    let declared = try session.run(clause, routines, bindings: ["parent": id])
+    return declared.map(\.first!.text)
   }
 
   /// The text of the Mustache template named `name` — an inline template
@@ -1156,8 +1270,8 @@ extension Session {
   /// `Queries/*.sql`, then for each name load the first search directory that
   /// has it (else the bundle), parse it as a `CREATE VIEW`, and register it —
   /// so a `-I` directory both shadows an existing view and adds a new one. The
-  /// four COM-interface views are the one bundled set, so adding a query later
-  /// is dropping in another `.sql` beside them (or under a `-I` directory) — no
+  /// COM-interface views are the one bundled set, so adding a query later is
+  /// dropping in another `.sql` beside them (or under a `-I` directory) — no
   /// code change. The views are order-independent (none references another), so
   /// the enumeration order does not matter.
   ///
@@ -1168,11 +1282,11 @@ extension Session {
   /// `MemberRef.Class_TypeRef` → `TypeRef`, filtered to the `GuidAttribute`
   /// declaring type, projecting `CustomAttribute.guid` as the `iid` — a
   /// `methods` view of one interface's methods, a `params` view of one
-  /// method's parameters, and a `bases` view of one interface's base type. The
-  /// latter three carry a uniform `:parent` param — the owning row's `Id` —
-  /// so a render can walk interface → methods → params, binding each level's
-  /// `Id` to the next's `:parent`, and look up the interface's base by its
-  /// `Id`.
+  /// method's parameters, a `bases` view of one interface's named base type,
+  /// and a `generics` view of one interface's declared generic parameters.
+  /// These carry a uniform `:parent` param — the owning row's `Id` — so a
+  /// render can walk interface → methods → params, binding each level's `Id` to
+  /// the next's `:parent`, and look up the interface's base by its `Id`.
   ///
   /// The `bases` view navigates the interface's single `InterfaceImpl` row
   /// (whose simple `Class` index is the interface's 1-based `Id`) to its

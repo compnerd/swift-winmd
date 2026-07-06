@@ -81,6 +81,8 @@ let _ =
                             "winmd-inspect",
                             "SQL",
                             "WinMD",
+                            .product(name: "Mustache",
+                                     package: "swift-mustache"),
                           ],
                           swiftSettings: [
                             .enableExperimentalFeature("Lifetimes"),

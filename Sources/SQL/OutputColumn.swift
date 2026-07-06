@@ -347,7 +347,7 @@ extension Catalog where Self: ~Escapable {
       // operand never evaluates (it propagates NULL), but the HAVING and
       // projection run over the group's results, so EVALUATE them (`empty`) — a
       // divide, overflow, or bad routine call faults as the run would.
-      if scope.constant(predicate) == false {
+      if scope.constant(predicate, routines) == false {
         if select.aggregates, select.grouping.isEmpty {
           if let having = select.having {
             // HAVING filters the group BEFORE any OFFSET/FETCH limit, so
@@ -385,7 +385,7 @@ extension Catalog where Self: ~Escapable {
       try scope.check(having, routines)
       // A false HAVING filters every group before the projection, so the
       // projection's non-aggregate work is unreachable.
-      if scope.constant(having) == false { return }
+      if scope.constant(having, routines) == false { return }
     }
     // The projection runs after any limit: a limit that drops every row it
     // would yield leaves only its aggregate folds (validated above) reachable.

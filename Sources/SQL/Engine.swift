@@ -628,6 +628,8 @@ extension Predicate {
       left.aggregated
     case let .null(operand, _):
       operand.aggregated
+    case let .membership(operand, values, _):
+      operand.aggregated || values.contains { $0.aggregated }
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.aggregated || rhs.aggregated
     case let .not(operand):
@@ -647,6 +649,8 @@ extension Predicate {
       left.bound || right.bound
     case let .null(operand, _):
       operand.bound
+    case let .membership(operand, values, _):
+      operand.bound || values.contains { $0.bound }
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.bound || rhs.bound
     case let .not(operand):
@@ -873,6 +877,9 @@ extension Predicate {
       left.collect(into: &expressions)
     case let .null(expression, _):
       expression.collect(into: &expressions)
+    case let .membership(operand, values, _):
+      operand.collect(into: &expressions)
+      for value in values { value.collect(into: &expressions) }
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.collect(into: &expressions)
       rhs.collect(into: &expressions)

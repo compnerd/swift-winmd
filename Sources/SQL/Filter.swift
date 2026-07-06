@@ -29,6 +29,15 @@ internal indirect enum Filter: Sendable {
   /// `term IS NULL`, or `IS NOT NULL` when `negated` — the lowered form of the
   /// AST's `null`, a definite two-valued test (never UNKNOWN).
   case null(Term, negated: Bool)
+  /// `operand [NOT] IN (element, …)` — the lowered form of the AST's
+  /// `membership`. The operand term is held ONCE, the value list lowered to
+  /// element terms, and `negated` marks `NOT IN`. Evaluating it reads the
+  /// operand exactly once per row (an OR-chain of `compare`s would re-evaluate
+  /// a non-idempotent operand, once per element) and folds `operand = element`
+  /// over the elements IN ORDER under Kleene `OR`, short-circuiting at the
+  /// first TRUE; `NOT IN` negates that three-valued truth (UNKNOWN maps to
+  /// itself).
+  case membership(Term, Array<Term>, negated: Bool)
   /// `lhs AND rhs`.
   case and(Filter, Filter)
   /// `lhs OR rhs`.
@@ -144,6 +153,10 @@ extension Filter {
       .match(slot[left]!, slot[right]!)
     case let .null(term, negated):
       .null(term.remapped(through: slot), negated: negated)
+    case let .membership(operand, elements, negated):
+      .membership(operand.remapped(through: slot),
+                  elements.map { $0.remapped(through: slot) },
+                  negated: negated)
     case let .and(lhs, rhs):
       .and(lhs.remapped(through: slot), rhs.remapped(through: slot))
     case let .or(lhs, rhs):
@@ -215,6 +228,8 @@ extension Filter {
     case let .bound(term, _, _): term.safe
     case .match: true
     case let .null(term, _): term.safe
+    case let .membership(operand, elements, _):
+      operand.safe && elements.allSatisfy(\.safe)
     case let .and(lhs, rhs): lhs.safe && rhs.safe
     case let .or(lhs, rhs): lhs.safe && rhs.safe
     case let .not(operand): operand.safe
@@ -243,7 +258,7 @@ extension Filter {
   private var parameterised: Bool {
     switch self {
     case .bound: true
-    case .compare, .match, .null: false
+    case .compare, .match, .null, .membership: false
     case let .and(lhs, rhs): lhs.parameterised || rhs.parameterised
     case let .or(lhs, rhs): lhs.parameterised || rhs.parameterised
     case let .not(operand): operand.parameterised
@@ -556,6 +571,8 @@ extension Row where Self: ~Escapable {
       matches(self[left], .equal, self[right])
     case let .null(term, negated):
       try (evaluate(term, routines, bindings) == .null) != negated
+    case let .membership(operand, elements, negated):
+      try member(operand, elements, negated, routines, bindings)
     case let .and(lhs, rhs):
       // `&&`/`||` take an `@autoclosure` right operand, which would capture the
       // borrowed `~Escapable` row; spell each connective explicitly so a branch
@@ -577,5 +594,29 @@ extension Row where Self: ~Escapable {
     case let .not(operand):
       try evaluate(operand, routines, bindings).map { !$0 }
     }
+  }
+
+  /// Evaluates a lowered `operand [NOT] IN (element, …)` against this row.
+  ///
+  /// The `operand` is evaluated ONCE per row — an OR-chain of `compare`s would
+  /// re-evaluate a non-idempotent operand once per element — then `operand =
+  /// element` folds over the elements IN ORDER under Kleene `OR`, seeded FALSE
+  /// and short-circuiting at the first TRUE (the same left-to-right visit the
+  /// OR-chain made, so a NULL operand or a NULL element keeps the ISO
+  /// three-valued result: an unmatched test yields UNKNOWN, not FALSE). `NOT
+  /// IN` negates that three-valued truth, mapping UNKNOWN to itself via
+  /// `map(!)`.
+  private borrowing func member(_ operand: Term, _ elements: Array<Term>,
+                                _ negated: Bool, _ routines: Routines,
+                                _ bindings: Bindings)
+      throws(SQLError) -> Bool? {
+    let value = try evaluate(operand, routines, bindings)
+    var truth: Bool? = false
+    for element in elements {
+      let element = try evaluate(element, routines, bindings)
+      truth = or(truth, matches(value, .equal, element))
+      if truth == true { break }
+    }
+    return negated ? truth.map { !$0 } : truth
   }
 }

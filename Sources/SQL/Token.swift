@@ -44,6 +44,7 @@ extension Token {
     case `as`
     case `is`
     case null
+    case `in`
     case union
     case all
     case with
@@ -121,6 +122,7 @@ extension Token.Kind {
     case .as: "AS"
     case .is: "IS"
     case .null: "NULL"
+    case .in: "IN"
     case .union: "UNION"
     case .all: "ALL"
     case .with: "WITH"

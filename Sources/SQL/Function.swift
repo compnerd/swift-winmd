@@ -29,6 +29,17 @@
 /// defined. A routine that cannot map its arguments throws `SQLError`; one that
 /// does not declare a result type is `.integer`, the engine's exact-numeric
 /// default.
+///
+/// A routine also declares whether it is DETERMINISTIC — ISO SQL's
+/// `DETERMINISTIC` / `NOT DETERMINISTIC` characteristic: a deterministic
+/// routine returns the same value for the same arguments every time and has no
+/// side effect, so the engine may execute it at COMPILE time to fold a
+/// row-independent call (see `Resolve`'s `constant(_:_:)`). A NOT
+/// DETERMINISTIC routine — the default for a host-registered closure, which may
+/// be stateful or observe the clock — is NEVER executed at compile time: it
+/// could return one value while types are being computed and another when the
+/// row is actually reached. The RUN path invokes any routine regardless;
+/// determinism gates only compile-time folding.
 public struct Routine: Sendable {
   /// A routine's implementation — a native Swift closure or a defined SQL
   /// expression body.
@@ -52,14 +63,22 @@ public struct Routine: Sendable {
   /// The declared result type, read to type a call statically.
   public let returns: ValueType
 
+  /// Whether this routine is DETERMINISTIC (ISO SQL) — same arguments yield the
+  /// same value with no side effect. Only a deterministic routine is folded at
+  /// compile time (`Resolve`'s `constant(_:_:)`); a NOT DETERMINISTIC one is
+  /// left for the run to invoke.
+  public let deterministic: Bool
+
   /// The routine's implementation.
   private let body: Body
 
   public init(returns: ValueType = .integer, parameters: Array<ValueType>,
+              deterministic: Bool = false,
               _ compute: @escaping @Sendable (Array<Value>)
                   throws(SQLError) -> Value) {
     self.parameters = parameters
     self.returns = returns
+    self.deterministic = deterministic
     self.body = .native(compute)
   }
 
@@ -92,6 +111,11 @@ public struct Routine: Sendable {
   /// what the returns validation resolves the body's own calls against AND what
   /// the `.defined` case captures, so a nested call evaluates against exactly
   /// the map it was typed against — the two are consistent by construction.
+  ///
+  /// A defined routine is NOT DETERMINISTIC: the DDL (`CREATE FUNCTION`) has no
+  /// `DETERMINISTIC` clause yet, so ISO's default characteristic applies and
+  /// the body is never folded at compile time — the safe choice, since it may
+  /// call a non-deterministic routine.
   internal init(returns: ValueType, parameters: Array<ValueType>,
                 names: Array<String>, body: Expression,
                 _ routines: Routines) throws(SQLError) {
@@ -114,6 +138,7 @@ public struct Routine: Sendable {
     }
     self.parameters = parameters
     self.returns = returns
+    self.deterministic = false
     self.body =
         try .defined(schema.term(body, in: Relation(name: ""), routines),
                      routines)
@@ -224,7 +249,11 @@ public struct Routines: Sendable {
   /// A copy of these routines with a routine computing `compute`, accepting
   /// `parameters` (default none), and returning `returns` (default `.integer`)
   /// bound to `name` (folded to lower case), the binding shadowing any existing
-  /// one.
+  /// one. `deterministic` declares the routine's ISO SQL characteristic and
+  /// defaults to `false` (NOT DETERMINISTIC) — the safe default for a host
+  /// closure, which may be stateful or read the clock: it is not executed at
+  /// compile time. Pass `true` for a pure routine to let a row-independent call
+  /// fold.
   //
   // `SQL.Value` is spelled in full here and in `bitand`: `Routines` conforms to
   // `ExpressibleByDictionaryLiteral`, whose associated `Value` is the literal's
@@ -232,11 +261,13 @@ public struct Routines: Sendable {
   // element, not the engine cell the routine computes.
   public func registering(_ name: String, returns: ValueType = .integer,
                           parameters: Array<ValueType> = [],
+                          deterministic: Bool = false,
                           _ compute: @escaping @Sendable (Array<SQL.Value>)
                               throws(SQLError) -> SQL.Value) -> Routines {
     var functions = self.functions
     functions[name.lowercased()] =
-        Routine(returns: returns, parameters: parameters, compute)
+        Routine(returns: returns, parameters: parameters,
+                deterministic: deterministic, compute)
     return Routines(functions)
   }
 
@@ -311,8 +342,11 @@ public struct Routines: Sendable {
   /// shadow one (see `subscript(_:)`). Its lone member is `BITAND`, the
   /// portable, standards-compliant spelling (Oracle's) of a bitwise AND — an
   /// operation ISO SQL and this grammar otherwise lack; it returns an integer.
+  /// It is DETERMINISTIC — a pure bitwise fold — so a row-independent call may
+  /// fold at compile time.
   public static let standard: Routines =
-      ["bitand": Routine(parameters: [.integer, .integer], bitand)]
+      ["bitand": Routine(parameters: [.integer, .integer],
+                         deterministic: true, bitand)]
 
   /// `BITAND(x, y)` — the bitwise AND of two integers. A NULL argument yields
   /// NULL (SQL null propagation); the wrong argument count or a non-integer

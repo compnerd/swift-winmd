@@ -92,9 +92,10 @@ extension Tuple {
   ///
   /// A `Row`/`Tuple` is a borrowed view that cannot escape the scan, so the
   /// blob's bytes are copied out and run through `AttributeDecoder` after. This
-  /// is the codec the SQL adapter's `guid` virtual column on `CustomAttribute`
-  /// reads (mapping a failure to SQL `NULL`); `Row<TypeDef>.iid` performs the
-  /// equivalent decode inline as it navigates to the attribute. A malformed
+  /// is the codec the SQL adapter's `guid` scalar function over a
+  /// `CustomAttribute` `#Blob` reads (mapping a failure to SQL `NULL`);
+  /// `Row<TypeDef>.iid` performs the equivalent decode inline as it
+  /// navigates to the attribute. A malformed
   /// `Value` blob throws.
   public func iid(_ column: Int) throws(WinMDError) -> UUID {
     let blob = try blob(column)

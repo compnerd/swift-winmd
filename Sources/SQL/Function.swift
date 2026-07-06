@@ -157,7 +157,7 @@ public struct Routine: Sendable {
           where !argument.matches(expected) {
         throw .argument("requires \(expected.domain) arguments")
       }
-      return try evaluate(term, Record(arguments), routines)
+      return try Record(arguments).evaluate(term, routines)
     }
   }
 }

@@ -1,7 +1,7 @@
 SELECT
   Id,
   TypeNamespace,
-  SANITIZE(TypeName) AS TypeName,
+  TypeName,
   iid
 FROM
   interfaces

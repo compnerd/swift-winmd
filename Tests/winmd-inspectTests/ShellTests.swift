@@ -86,6 +86,30 @@ struct ShellTests {
     #expect(Schema("").query.isEmpty)
   }
 
+  @Test func `a blank parameter local avoids colliding with a real name`() {
+    // A generic method with an unnamed parameter followed by a real parameter
+    // named like the synthetic local (`Foo(_ : T, _ arg0: T)`) must not emit
+    // two `arg0` locals — the wrapper's forwarding method would not compile.
+    // The synthetic name is chosen AFTER the real names are known, skipping any
+    // `arg<N>` a real (or earlier synthetic) parameter already uses: the blank
+    // takes `arg1`, the real `arg0` keeps its own name.
+    let collision = Shell.parameters(["", "arg0"], types: ["T", "T"])
+    #expect(collision.map { $0["local"] as? String } == ["arg1", "arg0"])
+    // The blank's `name` stays empty (the protocol requirement spells `_ : T`),
+    // only its `local` is synthesised.
+    #expect(collision.map { $0["name"] as? String } == ["", "arg0"])
+    // Two blanks number sequentially and skip a real `arg1` between them.
+    let mixed = Shell.parameters(["", "arg1", ""], types: ["A", "B", "C"])
+    #expect(mixed.map { $0["local"] as? String } == ["arg0", "arg1", "arg2"])
+    // The last entry carries the `last` flag; the rest do not.
+    #expect(mixed.map { $0["last"] as? Bool } == [false, false, true])
+    // A named-only list keeps each name as its own local, no synthesis.
+    let named = Shell.parameters(["a", "b"], types: ["X", "Y"])
+    #expect(named.map { $0["local"] as? String } == ["a", "b"])
+    // An empty list produces no entries (and sets no `last`).
+    #expect(Shell.parameters([], types: []).isEmpty)
+  }
+
   @Test func `.render parses its interface and template arguments`() {
     // `Render.init` splits the rest of the statement into interface then
     // template; both are required, so anything but two fields leaves them empty

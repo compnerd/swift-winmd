@@ -31,12 +31,13 @@ protocols, exposing each table's rows along with two virtual columns — a
 that foreign-key and parent/child list relationships become ordinary equi-joins
 the engine can plan and seek.
 
-The `winmd-inspect` command-line tool exposes the reader through its `dump`,
-`print-namespaces`, and `query` subcommands:
+The `winmd-inspect` command-line tool exposes the reader through its `dump` and
+`query` subcommands, with `query` the default:
 
 ```
 winmd-inspect <file.winmd> dump
-winmd-inspect <file.winmd> print-namespaces
+winmd-inspect <file.winmd> \
+    "SELECT DISTINCT TypeNamespace FROM TypeDef ORDER BY TypeNamespace"
 winmd-inspect <file.winmd> query \
     "SELECT TypeName, TypeNamespace FROM TypeDef \
        WHERE TypeNamespace = 'Windows.Win32.Foundation'"

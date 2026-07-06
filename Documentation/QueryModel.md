@@ -81,17 +81,23 @@ protocols (below), which the WinMD database conforms to.
 
 ## Textual SQL (the engine)
 
-The generic `SQL` module lexes and parses the text into a SQL AST — a relation,
-a projection (named columns or `*`), an optional predicate tree of
-`column · comparison · operand` nodes composed with `AND`/`OR`/`NOT`, an
-optional `JOIN … ON`, and an optional `ORDER BY`:
+The generic `SQL` module lexes and parses the text into a SQL AST. The dialect
+is a portable subset of ISO SQL — the authoritative grammar is the doc-comment
+atop `Sources/SQL/Parser.swift`. It covers `SELECT` with a projection (`*`, bare
+columns, or expressions with an `AS` alias, optionally `DISTINCT`), an optional
+predicate tree (`= <> < > <= >=`, `IS [NOT] NULL`, composed with
+`AND`/`OR`/`NOT`), `JOIN … ON`, `GROUP BY`/`HAVING`, `ORDER BY` (multi-key), and
+the ISO `OFFSET`/`FETCH` row-limiting clauses; aggregates
+(`COUNT`/`SUM`/`MIN`/`MAX`/`AVG`); `WITH [RECURSIVE]` CTEs and `UNION [ALL]`; and
+the `CREATE VIEW`/`CREATE FUNCTION` definitional statements. Its values are
+integer, double, text, boolean, and blob:
 
 ```sql
 SELECT TypeName, TypeNamespace FROM TypeDef
  WHERE TypeNamespace = 'Windows.Win32.Foundation'
 ```
 
-`winmd-inspect query` hands the parsed `SELECT` to the database-agnostic
+`winmd-inspect query` hands the parsed statement to the database-agnostic
 `Engine`, which runs entirely against four adapter protocols a data source
 conforms to: a `Catalog` resolves a relation name to a `Table`; a `Table`
 reports its schema (real `width`, a name → ordinal map, and a `bound` for a
@@ -99,7 +105,7 @@ sorted-seek) and vends a `Cursor`; a `Cursor` addresses rows by index; a `Row`
 reads a typed cell by ordinal. Every protocol is `~Escapable`, so a
 borrowed-storage source — a WinMD database over a mapped file — conforms to the
 same surface as an owned one. The engine yields typed `Value`s, never rendered
-text; `winmd-inspect` formats each into a tab-separated line.
+text; `winmd-inspect` formats each result set into a Unicode box-drawing table.
 
 The engine runs the `SELECT` in three phases, each re-resolving relations by
 name through the borrowed catalog:

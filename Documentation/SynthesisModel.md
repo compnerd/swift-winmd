@@ -284,12 +284,16 @@ Given a SQL string it runs one query; given none it opens a `sqlite3`-style shel
 over the memory-mapped database — a literal `for`-in over a `Statements` stream,
 running each statement through `Shell.execute`. The shell offers:
 
-- bare SQL, run through the same `Engine` and printed tab-separated;
-- `CREATE VIEW …`, registering a session view that subsequent queries may name;
+- bare SQL, run through the same `Engine` and printed as a box-drawing table;
+- `CREATE VIEW …`/`CREATE FUNCTION …`, registering a session view or scalar
+  function that subsequent queries may name;
 - `.read <path>`, running a file of `;`-separated statements (registering views
   and printing selects), so user-authored views compose with the bundled ones;
 - `.render <interface> <template>` (with `*` for the whole database), the
   rendering pipeline above;
+- `.schema <query>`, printing a query's result columns and types without running
+  it; `.bind <name> <value>`, binding a `:name` parameter; `.template <name>
+  '<body>'`, defining an inline Mustache template;
 - `.tables`, `.help`, `.quit`.
 
 Meta-commands take a `.` prefix precisely so the SQL `:name` parameter syntax

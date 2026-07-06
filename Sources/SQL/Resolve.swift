@@ -1118,6 +1118,65 @@ internal struct Scope {
     try .match(ordinal(of: left), ordinal(of: right))
   }
 
+  /// Lowers a join's `ON predicate` to the engine's `Filter` across the chain,
+  /// emitting a `match` for each pure `column = column` equality — the
+  /// hash-join key `nest` folds into a physical `Join` — ONLY WHEN the WHOLE
+  /// `ON` is safe, and otherwise lowering the entire conjunction as one
+  /// residual.
+  ///
+  /// A `column = column` conjunct is the hash-join key `nest` folds into a
+  /// physical `Join`, so it lowers to a `match(left, right)` — the same node
+  /// the equi-only `ON` produced — rather than a `compare(.slot, .equal,
+  /// .slot)`, which `nest` would not recognise as a key. Every other leaf (an
+  /// inequality, an expression equality such as `a.x = b.y + 1`, an `IS NULL`,
+  /// a membership, an `OR`/`NOT`) lowers through `lower`, becoming a residual
+  /// the join runs as a filter over the product — nested-loop semantics,
+  /// correct if O(n·m).
+  ///
+  /// A `match` key is extracted ONLY WHEN EVERY lowered conjunct is `safe`; if
+  /// ANY conjunct is unsafe, the whole `ON` lowers to a single residual and NO
+  /// key is hoisted. The hash join evaluates its key equality BEFORE any
+  /// residual conjunct AND skips a NULL key (an equi `match` drops a pair whose
+  /// key cell is NULL), so an extracted key changes the `ON`'s left-to-right
+  /// Kleene error behaviour on two hazards, both suppressing a throw the
+  /// residual `select` over the product would raise (the order the WHERE
+  /// pushdown barriers preserve):
+  ///   - an UNSAFE conjunct BEFORE the key (`ON (1 / A.x) = 0 AND A.k = B.k`):
+  ///     hoisting the key would let its non-match drop a pair before the
+  ///     unsafe conjunct runs (`A.x = 0` ⇒ `SQLError.divide`);
+  ///   - a NULLABLE key BEFORE an UNSAFE conjunct (`ON A.k = B.k AND (1 / A.x)
+  ///     = 0`, `A.k` NULL, `A.x = 0`): the equality is UNKNOWN, so the Kleene
+  ///     `AND` must still evaluate the unsafe RHS and raise — but the hash join
+  ///     skips the NULL key and drops the pair before the RHS runs.
+  /// The engine has no NOT NULL schema (a column surfaces as a `Value` that may
+  /// be `.null`), so it cannot prove a key operand non-nullable; EVERY equi key
+  /// is treated as nullable, collapsing both hazards to the single whole-`ON`
+  /// rule. An equi `column = column` is always `safe` (comparing two cells
+  /// never raises), so an all-equi or otherwise all-safe `ON` still hash-joins
+  /// byte-for-byte.
+  internal func on(_ predicate: Predicate,
+                   _ routines: Routines = [:]) throws(SQLError) -> Filter {
+    let conjuncts = predicate.conjuncts
+    let lowered = try conjuncts.map { conjunct throws(SQLError) in
+      try lower(conjunct, routines)
+    }
+    // An unsafe conjunct anywhere forbids extracting ANY key: a hoisted key
+    // both skips a NULL pair before a LATER unsafe conjunct runs and drops a
+    // non-match before an EARLIER one does — either suppressing the throw the
+    // whole-ON residual owes. Lower the entire conjunction as one residual.
+    guard lowered.allSatisfy(\.safe) else { return lowered.conjunction! }
+    var filters = Array<Filter>()
+    for (conjunct, residual) in zip(conjuncts, lowered) {
+      if case let .comparison(.column(left),
+                              .equal, .column(right)) = conjunct {
+        try filters.append(match(left, right))
+      } else {
+        filters.append(residual)
+      }
+    }
+    return filters.conjunction!
+  }
+
   /// Lowers the name-addressed AST `predicate` to the engine's `Filter`, each
   /// column reference resolved to a combined ordinal across the chain.
   internal func lower(_ predicate: Predicate,

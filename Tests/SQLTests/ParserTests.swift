@@ -379,10 +379,28 @@ struct JoinTests {
     }
   }
 
-  @Test func `rejects a join whose ON is not an equality`() {
-    #expect(throws: SQLError.self) {
-      _ = try Statement(parsing: "SELECT * FROM A JOIN B ON a.x < b.Id")
-    }
+  @Test func `parses a non-equi ON as an arbitrary predicate`() throws {
+    let select = try parse(select: """
+        SELECT * FROM A JOIN B ON a.x < b.Id
+        """)
+    #expect(select.joins == [
+      Join(relation: Relation(name: "B"),
+           on: .comparison(left: .column("a.x"), op: .lt,
+                           right: .column("b.Id"))),
+    ])
+  }
+
+  @Test func `parses a mixed equi-and-residual ON`() throws {
+    let select = try parse(select: """
+        SELECT * FROM A JOIN B ON a.k = b.k AND a.x < b.y
+        """)
+    #expect(select.joins == [
+      Join(relation: Relation(name: "B"),
+           on: .and(.comparison(left: .column("a.k"), op: .equal,
+                                right: .column("b.k")),
+                    .comparison(left: .column("a.x"), op: .lt,
+                                right: .column("b.y")))),
+    ])
   }
 }
 

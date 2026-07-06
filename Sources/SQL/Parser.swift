@@ -23,7 +23,7 @@
 ///                   [FROM relation (join)*
 ///                    [where] [group] [having] [order] [limit]]
 /// relation       := identifier [AS identifier]
-/// join           := JOIN relation ON column '=' column
+/// join           := JOIN relation ON predicate
 /// projection     := '*' | column (',' column)*
 /// where          := WHERE predicate
 /// group          := GROUP BY column (',' column)*
@@ -393,14 +393,15 @@ internal struct Parser: ~Escapable {
   }
 
   /// Parses the join tail (the `JOIN` keyword is already consumed): a relation,
-  /// `ON`, and a single `column = column` equality.
+  /// `ON`, and an arbitrary boolean predicate — the same grammar a `WHERE`
+  /// admits, so a join relates its sides by an equality, an inequality, an
+  /// expression equality, or any `AND`/`OR`/`NOT` of comparisons. A pure
+  /// `column = column` conjunct hash-joins; the rest is a residual filter.
   private mutating func join() throws(SQLError) -> Join {
     let relation = try relation()
     try expect(.on)
-    let left = try column()
-    try expect(.equal)
-    let right = try column()
-    return Join(relation: relation, left: left, right: right)
+    let on = try predicate()
+    return Join(relation: relation, on: on)
   }
 
   // MARK: - Projection

@@ -617,6 +617,16 @@ extension Expression {
 }
 
 extension Predicate {
+  /// The flat list of top-level `AND`-conjuncts of this predicate in SOURCE
+  /// ORDER (a non-`and` is a singleton). The parser leans `AND` left (`a AND b
+  /// AND c` is `.and(.and(a, b), c)`), so a left-first flatten yields the
+  /// conjuncts as written — the order `Scope.on` walks to bound its safe
+  /// key-extraction prefix.
+  internal var conjuncts: Array<Predicate> {
+    guard case let .and(lhs, rhs) = self else { return [self] }
+    return lhs.conjuncts + rhs.conjuncts
+  }
+
   /// Whether the predicate contains an aggregate call anywhere within it — used
   /// to spot an aggregate hiding in a `CASE` guard (`CASE WHEN COUNT(*) > 1
   /// …`), which makes the enclosing query an aggregate one.
@@ -692,15 +702,16 @@ extension Catalog where Self: ~Escapable {
     }
     let scope = Scope(relations)
 
-    // Each join's ON equality lowers to a `match` at its own chain level,
+    // Each join's ON predicate lowers to a `Filter` at its own chain level,
     // resolved against only the prefix already in scope (as the non-aggregate
-    // path does).
+    // path does). A `column = column` conjunct becomes a `match` hash-join key;
+    // the rest is a residual the join runs as a filter.
     var matches = Array<Filter>()
     matches.reserveCapacity(select.joins.count)
     for index in select.joins.indices {
       let prefix = Scope(Array(relations[0 ... index + 1]))
       let join = select.joins[index]
-      try matches.append(prefix.match(join.left, join.right))
+      try matches.append(prefix.on(join.on, context.routines))
     }
     var predicate: Filter? = nil
     if let clause = select.predicate {
@@ -1253,12 +1264,25 @@ extension Plan {
   /// belongs to the left child and rides down; one entirely at or above it
   /// belongs to the right child, rebased into that child's own slot space; one
   /// straddling the boundary — or reading no slots, or able to throw when
-  /// evaluated (a division or scalar call) — stays here. A
-  /// `select` (a join's `ON` match, whose
-  /// two sides straddle every boundary) is transparent — the conjuncts descend
-  /// through it into the product beneath. At a `derived` leaf the conjuncts push
-  /// into the view; at a base `scan` they land directly above it. Any conjunct
-  /// that cannot descend is re-conjoined as a `select` at this level.
+  /// evaluated (a division or scalar call) — stays here. A `select` is a join's
+  /// `ON` gate, whose two sides straddle every boundary, and is a BARRIER for
+  /// an UNSAFE `WHERE` conjunct: `nest` folds only ONE `match` into the hash
+  /// `Join`'s key, leaving every other `ON` conjunct (a match beyond that key,
+  /// or a non-equi residual) as the gate's residual under the join, and the
+  /// gate drops a pair its leftover conjuncts evaluate UNKNOWN or `false`
+  /// BEFORE the `WHERE` runs. So fusing a throwing `WHERE` conjunct into the
+  /// gate — the `AND` not short-circuiting, still evaluating it for a pair the
+  /// gate already dropped — would raise an error the separate gate suppresses,
+  /// whether the leftover is a non-equi residual (`A JOIN B ON A.k < B.k WHERE
+  /// (1 / A.x) = 0`, `A.k` NULL) or a second equi key (`… ON A.k1 = B.k1 AND
+  /// A.k2 = B.k2 WHERE (1 / A.x) = 0`, `A.k2` NULL). Every UNSAFE `WHERE`
+  /// conjunct stays a separate `select` above the gate, preserving the
+  /// `ON`-drops-before-`WHERE` ordering; a SAFE `WHERE` conjunct (which never
+  /// raises) still descends below the gate — as the product loop's ordering
+  /// allows — so a safe single-relation conjunct reaches its base scan. The
+  /// match keys fold down so `nest` can join under the gate. At a `derived`
+  /// leaf the conjuncts push into the view; at a base `scan` they land right
+  /// above it. A conjunct that cannot descend is re-conjoined here.
   private func distribute(_ conjuncts: Array<Filter>)
       throws(SQLError) -> Plan {
     switch self {
@@ -1307,15 +1331,69 @@ extension Plan {
           Plan.product(try left.distribute(down),
                        try right.distribute(over.map { $0.shifted(by: base) }))
       return product.residual(here)
-    case let .select(match, source):
-      // A join's `ON` match straddles both sides, so it never captures a
-      // single-relation conjunct. Fold it in with the descending conjuncts so
-      // the product carries one `Select([match, spanning…], Product)`: `nest`
-      // finds the match to form the `Join` and keeps any spanning residual above
-      // it. Wrapping it outside instead — `Select(match, source.distribute(…))`
-      // — would leave `Select(match, Select(spanning, Product))`, whose match is
-      // no longer adjacent to the product, so `nest` could not fold it.
-      return try source.distribute(match.conjuncts + conjuncts)
+    case let .select(gate, source):
+      // A join's `ON` gate straddles both sides, so it never captures a
+      // single-relation conjunct. Its equi `column = column` conjuncts are the
+      // `match` keys `nest` folds into a hash `Join`; any other conjunct is a
+      // residual (non-equi) `ON` predicate the join runs over its product.
+      var matches = Array<Filter>()
+      var residual = Array<Filter>()
+      for conjunct in gate.conjuncts {
+        if case .match = conjunct {
+          matches.append(conjunct)
+        } else {
+          residual.append(conjunct)
+        }
+      }
+      // The `ON` gate is ALWAYS a DISTRIBUTION BARRIER for an UNSAFE outer
+      // `WHERE` conjunct, whether the gate is mixed (a non-equi residual) or
+      // PURE-equi (only matches). `nest` folds only ONE `match` into the hash
+      // `Join`'s key and leaves every other `ON` conjunct — a match beyond that
+      // key, plus any non-equi residual — as the gate's own residual `select`
+      // under the join, which drops a pair it evaluates UNKNOWN or `false`
+      // BEFORE the `WHERE` runs. Because the evaluator's `AND` does not
+      // short-circuit, FUSING a throwing `WHERE` conjunct into that gate
+      // residual would evaluate it for a pair the gate has already dropped.
+      // This bites a pure-equi `ON` too: `A JOIN B ON A.k1 = B.k1 AND A.k2 =
+      // B.k2 WHERE (1 / A.x) = 0`, `A.k1` matching, `A.k2` NULL, `A.x` = 0 —
+      // `nest` keys on `A.k1 = B.k1`, so the surviving pair reaches the
+      // leftover `A.k2 = B.k2` (UNKNOWN), which should drop it; a fused `A.k2 =
+      // B.k2 AND (1 / A.x) = 0` would instead divide by zero. So every UNSAFE
+      // `WHERE` conjunct stays a SEPARATE `select` ABOVE the gate — never fused
+      // with a leftover `ON` conjunct — keeping the `ON`-drops-before-`WHERE`
+      // order.
+      //
+      // A SAFE `WHERE` conjunct, by contrast, never raises, so pushing it below
+      // the gate can only drop rows, not suppress a throw; it still descends
+      // (`matches + residual + safe`) so a safe single-relation conjunct
+      // reaches its base scan as before. `distribute`'s product loop keeps it
+      // AFTER the `ON` residual, and its own barrier bars it from riding past
+      // an unsafe `ON` conjunct — a safe `WHERE` pushed to a base scan below
+      // the product does not co-locate with, nor reorder around, the gate's
+      // leftover conjuncts. A safe conjunct stays above when the loop would
+      // keep it at the product level anyway — mirroring that loop's ordering
+      // rules so descending it never suppresses a throw the `WHERE`'s
+      // non-short-circuiting `AND` owes: after ANY earlier unsafe conjunct
+      // (a `barrier`), or when it is NULLABLE and a LATER conjunct is unsafe
+      // (a `hazard`). The match keys still fold down beside the residual so
+      // `nest` can form the join under the gate; a single-equality pure-equi
+      // `ON` folds its one key and carries no leftover conjunct, so a safe
+      // `WHERE` descends and an unsafe one sits directly above the join.
+      var safe = Array<Filter>()
+      var above = Array<Filter>()
+      var barrier = false
+      for (index, conjunct) in conjuncts.enumerated() {
+        let hazard =
+            conjunct.nullable && conjuncts[(index + 1)...].contains { !$0.safe }
+        if conjunct.safe && !barrier && !hazard {
+          safe.append(conjunct)
+        } else {
+          above.append(conjunct)
+        }
+        if !conjunct.safe { barrier = true }
+      }
+      let gated = try source.distribute(matches + residual + safe)
+      return gated.residual(above)
     case .derived:
       return try into(conjuncts)
     default:
@@ -1724,14 +1802,16 @@ extension Catalog where Self: ~Escapable {
     }
     let scope = Scope(relations)
 
-    // Each join's ON equality lowers to a `match` at its own chain level,
+    // Each join's ON predicate lowers to a `Filter` at its own chain level,
     // resolved against only the prefix already in scope plus the relation that
     // join introduces — the FROM relation and joins `0…index` — never a
     // relation joined later. Since `Scope` lays relations at cumulative offsets
     // from 0, a prefix scope yields the same global combined ordinals as the
-    // full-chain scope, so the match ordinals remap through `slot` as before;
+    // full-chain scope, so the ON ordinals remap through `slot` as before;
     // resolving against the prefix rejects a reference to a not-yet-joined
     // relation (`SQLError.column`) and judges ambiguity only within the prefix.
+    // A `column = column` conjunct lowers to a `match` hash-join key; any
+    // inequality or expression equality lowers to a residual the join filters.
     // The WHERE and ORDER lower against the whole chain, which legitimately
     // sees every relation.
     var matches = Array<Filter>()
@@ -1739,7 +1819,7 @@ extension Catalog where Self: ~Escapable {
     for index in select.joins.indices {
       let prefix = Scope(Array(relations[0 ... index + 1]))
       let join = select.joins[index]
-      try matches.append(prefix.match(join.left, join.right))
+      try matches.append(prefix.on(join.on, context.routines))
     }
     var predicate: Filter? = nil
     if let clause = select.predicate {

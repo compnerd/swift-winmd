@@ -362,11 +362,12 @@ struct ShellTests {
             == ["SELECT 1\nFROM Module", "SELECT 2"])
   }
 
-  @Test func `the bundled views are the four COM-interface views`() {
-    // The parse-and-register path a `CREATE VIEW` reuses; the four bundled
+  @Test func `the bundled views are the five COM-interface views`() {
+    // The parse-and-register path a `CREATE VIEW` reuses; the five bundled
     // views register under their case-folded names.
     let views = Session.bundled()
-    #expect(Set(views.keys) == ["interfaces", "methods", "params", "bases"])
+    #expect(Set(views.keys)
+            == ["interfaces", "methods", "params", "bases", "generics"])
   }
 
   @Test func `a streamed CREATE VIEW statement parses and registers a view`() throws {

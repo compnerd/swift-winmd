@@ -120,7 +120,7 @@ extension Catalog where Self: ~Escapable {
     let context = augment(context, for: query, rows: true)
     let logical = try compile(query, context).pushdown()
     let plan = try optimise(logical, context)
-    return try execute(plan, self, context).map(\.values)
+    return try execute(plan, context).map(\.values)
   }
 
   /// Runs a `Statement` against this catalog, returning its result rows.

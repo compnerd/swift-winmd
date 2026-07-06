@@ -99,16 +99,17 @@ extension Catalog where Self: ~Escapable {
     // always resolves the built-ins (BITAND) even when it supplies unrelated
     // UDFs; an explicitly registered function of the same name still shadows it
     // (the merge keeps the caller's binding on a clash).
-    try run(query, [:], Routines.standard.merging(routines), bindings)
+    try run(query, Context(routines: Routines.standard.merging(routines),
+                           bindings: bindings))
   }
 
-  /// Runs `query` against this catalog with the common table expressions `ctes`
-  /// in scope (empty for a query with no `WITH`), the resolution phases
-  /// consulting `ctes` before the base catalog.
-  internal borrowing func run(_ query: Query, _ ctes: ScopedRelations,
-                              _ routines: Routines, _ bindings: Bindings)
+  /// Runs `query` against this catalog under `context` — the in-scope common
+  /// table expressions (empty for a query with no `WITH`), the routines, and
+  /// the bindings — the resolution phases consulting the overlay before the
+  /// base catalog.
+  internal borrowing func run(_ query: Query, _ context: Context)
       throws(SQLError) -> Array<Array<Value>> {
-    // Extend the relations with any `definition_schema.` store relation the
+    // Extend the overlay with any `definition_schema.` store relation the
     // query names, resolved lazily — the overlay after the
     // CTEs, before the base catalog. Every phase reads the extended map, so a
     // reserved store relation resolves, plans, and materialises exactly as a
@@ -116,10 +117,10 @@ extension Catalog where Self: ~Escapable {
     // the store resolves through the ordinary view machinery. The routines ride
     // in so a store `data_type` row types a view's scalar-call column
     // (`GUID(...)`) by its declared return type.
-    let ctes = augment(ctes, for: query, rows: true, routines: routines)
-    let logical = try compile(query, ctes).pushdown()
-    let plan = try optimise(logical, ctes, bindings)
-    return try execute(plan, self, ctes, routines, bindings).map(\.values)
+    let context = augment(context, for: query, rows: true)
+    let logical = try compile(query, context).pushdown()
+    let plan = try optimise(logical, context)
+    return try execute(plan, self, context).map(\.values)
   }
 
   /// Runs a `Statement` against this catalog, returning its result rows.
@@ -134,12 +135,13 @@ extension Catalog where Self: ~Escapable {
       throws(SQLError) -> Array<Array<Value>> {
     // Seed the standard prelude under the caller's routines (see the query
     // overload) so BITAND resolves regardless of what the caller supplies.
-    let routines = Routines.standard.merging(routines)
+    let context = Context(routines: Routines.standard.merging(routines),
+                          bindings: bindings)
     return switch statement {
     case let .select(query):
-      try run(query, [:], routines, bindings)
+      try run(query, context)
     case let .with(ctes, query):
-      try with(ctes, query, routines, bindings)
+      try with(ctes, query, context)
     case .create:
       throw .statement("CREATE VIEW defines a view rather than producing rows")
     case .function:
@@ -172,7 +174,7 @@ extension Catalog where Self: ~Escapable {
   /// many rows the body yields. A body filtered to zero rows still faults with
   /// `SQLError.columns`, where a per-row check would pass it through vacuously.
   internal borrowing func with(_ ctes: Array<CTE>, _ query: Query,
-                               _ routines: Routines, _ bindings: Bindings)
+                               _ context: Context)
       throws(SQLError) -> Array<Array<Value>> {
     var relations = ScopedRelations()
     for cte in ctes {
@@ -182,11 +184,14 @@ extension Catalog where Self: ~Escapable {
       guard relations[cte.name.lowercased()] == nil else {
         throw .redefinition(cte.name)
       }
+      // The scope for this CTE's body: the base catalog plus every earlier CTE,
+      // over the run's routines and bindings.
+      let scope = context.scoping(relations)
       // Validate the CTE's SHAPE and ARITY against the CTEs done so far — the
       // compile-time structural check, shared with the dry-run schema path so a
       // derive rejects exactly the CTEs a run rejects. It faults the recursive
       // shape and the width mismatch here, BEFORE any rows materialise.
-      try validate(cte, against: relations, routines: routines)
+      try validate(cte, against: scope)
       // A CTE that names itself iterates a fixpoint; every other one — a
       // non-recursive CTE, or one a `WITH RECURSIVE` marks recursive but which
       // does not reference itself — runs its query once. Each resolves against
@@ -194,16 +199,16 @@ extension Catalog where Self: ~Escapable {
       // is already checked by `validate` above.
       let rows: Array<Array<Value>>
       if cte.recursive && cte.recurses {
-        rows = try fixpoint(cte, relations, routines, bindings)
+        rows = try fixpoint(cte, scope)
       } else {
-        rows = try run(cte.query, relations, routines, bindings)
+        rows = try run(cte.query, scope)
       }
       relations[cte.name.lowercased()] =
           Materialised(columns: cte.columns, rows: rows,
                        types: Array(repeating: .integer,
                                     count: cte.columns.count))
     }
-    return try run(query, relations, routines, bindings)
+    return try run(query, context.scoping(relations))
   }
 
   /// Validates the SHAPE and declared ARITY of a single common table expression
@@ -249,8 +254,7 @@ extension Catalog where Self: ~Escapable {
   /// so `SELECT Name + 1 FROM People` in the anchor faults `SQLError.operand`
   /// against the BASE `People` a run reads it against, never wrongly types clean
   /// against the CTE's declared columns.
-  internal borrowing func validate(_ cte: CTE, against ctes: ScopedRelations,
-                                   routines: Routines = [:],
+  internal borrowing func validate(_ cte: CTE, against context: Context,
                                    typecheck: Bool = false)
       throws(SQLError) {
     // Reject a misplaced recursive reference in an EARLIER arm when no
@@ -273,7 +277,7 @@ extension Catalog where Self: ~Escapable {
     // CTE-self overlay.
     if cte.recursive && cte.recurses, case let .union(anchor, recursive, _) =
         cte.query {
-      let scope = augment(ctes, for: anchor, rows: false, routines: routines)
+      let scope = augment(context, for: anchor, rows: false)
       let width = try compile(anchor, scope).width
       guard width == cte.columns.count else {
         throw .columns(expected: cte.columns.count, got: width)
@@ -281,13 +285,12 @@ extension Catalog where Self: ~Escapable {
       // The anchor is operand-checked with self NOT in scope — the scope the run
       // evaluates it in — so a text-arithmetic anchor faults against the base
       // relation, not the CTE's declared (integer) columns.
-      if typecheck { try self.typecheck(anchor, scope, routines: routines) }
-      var probe = augment(ctes, for: .select(recursive), rows: false,
-                          routines: routines)
-      probe[cte.name.lowercased()] =
-          Materialised(columns: cte.columns, rows: [],
-                       types: Array(repeating: .integer,
-                                    count: cte.columns.count))
+      if typecheck { try self.typecheck(anchor, scope) }
+      let empty = Materialised(columns: cte.columns, rows: [],
+                               types: Array(repeating: .integer,
+                                            count: cte.columns.count))
+      let probe = augment(context, for: .select(recursive), rows: false)
+          .binding(cte.name, to: empty)
       let arm = try compile(.select(recursive), probe).width
       guard arm == cte.columns.count else {
         throw .columns(expected: cte.columns.count, got: arm)
@@ -295,16 +298,16 @@ extension Catalog where Self: ~Escapable {
       // The recursive arm is operand-checked with self bound to the declared
       // columns — the schema every iteration reads the CTE under.
       if typecheck {
-        try self.typecheck(.select(recursive), probe, routines: routines)
+        try self.typecheck(.select(recursive), probe)
       }
     } else {
-      let scope = augment(ctes, for: cte.query, rows: false, routines: routines)
+      let scope = augment(context, for: cte.query, rows: false)
       let width = try compile(cte.query, scope).width
       guard width == cte.columns.count else {
         throw .columns(expected: cte.columns.count, got: width)
       }
       // A non-self-naming body is operand-checked whole with self NOT in scope.
-      if typecheck { try self.typecheck(cte.query, scope, routines: routines) }
+      if typecheck { try self.typecheck(cte.query, scope) }
     }
   }
 
@@ -339,28 +342,27 @@ extension Catalog where Self: ~Escapable {
   /// `SELECT *` arm filtered to zero rows is caught. The anchor compiles with
   /// the CTE name NOT in scope (it does not reference itself); the recursive
   /// arm compiles with the name bound to `cte.columns`, the schema it reads.
-  internal borrowing func fixpoint(_ cte: CTE, _ ctes: ScopedRelations,
-                                   _ routines: Routines, _ bindings: Bindings)
+  internal borrowing func fixpoint(_ cte: CTE, _ context: Context)
       throws(SQLError) -> Array<Array<Value>> {
     // Extend the scope with any `definition_schema.` store relation the CTE's
     // body names, so the fixpoint's width-check compiles resolve a reserved
     // relation as the body's own run does. The routines ride in: this store
-    // entry is cached in `ctes` and reused by every anchor/recursive execution
-    // (a later `augment` will not replace a bound name), so a view column using
-    // even a standard routine (`BITAND(...)`) types the same inside the CTE as
-    // the identical SELECT does outside it.
-    let ctes = augment(ctes, for: cte.query, rows: true, routines: routines)
+    // entry is cached in the overlay and reused by every anchor/recursive
+    // execution (a later `augment` will not replace a bound name), so a view
+    // column using even a standard routine (`BITAND(...)`) types the same
+    // inside the CTE as the identical SELECT does outside it.
+    let context = augment(context, for: cte.query, rows: true)
     guard case let .union(anchor, recursive, all) = cte.query else {
       // A non-`UNION` recursive query runs once, but still binds under
       // `cte.columns`, so validate its compiled width here too — the check the
       // anchor and arm get. A body naming a base relation of the CTE's own name
       // (`WITH RECURSIVE Parent(x,y,z) AS (SELECT * FROM Parent)`) would else
       // bind narrow base rows under the wider list and trap on a later read.
-      let width = try compile(cte.query, ctes).width
+      let width = try compile(cte.query, context).width
       guard width == cte.columns.count else {
         throw .columns(expected: cte.columns.count, got: width)
       }
-      return try run(cte.query, ctes, routines, bindings)
+      return try run(cte.query, context)
     }
 
     // A misplaced recursive reference in the anchor (a same-named base/view is
@@ -374,7 +376,7 @@ extension Catalog where Self: ~Escapable {
     // arm reads the absent ordinal, rather than surfacing `SQLError.columns`.
     // The anchor is the base case and does not reference the CTE, so its width
     // resolves with the name not yet in scope.
-    let width = try compile(anchor, ctes).width
+    let width = try compile(anchor, context).width
     guard width == cte.columns.count else {
       throw .columns(expected: cte.columns.count, got: width)
     }
@@ -383,11 +385,10 @@ extension Catalog where Self: ~Escapable {
     // schema every iteration reads it under — so its width resolves too (a
     // `SELECT *` arm spans that schema). Checking it here catches a mismatch
     // even when the arm is filtered to zero rows in every iteration.
-    var probe = ctes
-    probe[cte.name.lowercased()] =
-        Materialised(columns: cte.columns, rows: [],
-                     types: Array(repeating: .integer,
-                                  count: cte.columns.count))
+    let empty = Materialised(columns: cte.columns, rows: [],
+                             types: Array(repeating: .integer,
+                                          count: cte.columns.count))
+    let probe = context.binding(cte.name, to: empty)
     let arm = try compile(.select(recursive), probe).width
     guard arm == cte.columns.count else {
       throw .columns(expected: cte.columns.count, got: arm)
@@ -398,7 +399,7 @@ extension Catalog where Self: ~Escapable {
     // bare `UNION` dedups the seed exactly as it dedups an iteration's rows —
     // duplicate anchor rows collapse to their first occurrence — while `UNION
     // ALL` keeps every anchor row.
-    let anchored = try run(anchor, ctes, routines, bindings)
+    let anchored = try run(anchor, context)
     var seen = Seen()
     var result = all ? anchored
                      : anchored.filter { seen.insert($0) }
@@ -413,13 +414,11 @@ extension Catalog where Self: ~Escapable {
 
       // Bind the CTE name to ONLY the previous step's output and run the
       // recursive arm against the base catalog plus the earlier CTEs.
-      var scope = ctes
-      scope[cte.name.lowercased()] =
-          Materialised(columns: cte.columns, rows: working,
-                       types: Array(repeating: .integer,
-                                    count: cte.columns.count))
-      let produced =
-          try run(.select(recursive), scope, routines, bindings)
+      let step = Materialised(columns: cte.columns, rows: working,
+                              types: Array(repeating: .integer,
+                                           count: cte.columns.count))
+      let produced = try run(.select(recursive), context.binding(cte.name,
+                                                                 to: step))
 
       var next = Array<Array<Value>>()
       for row in produced where all || seen.insert(row) {
@@ -610,7 +609,7 @@ extension Catalog where Self: ~Escapable {
   /// standard rule that every non-aggregated projection/`ORDER BY` column appear
   /// in the `GROUP BY`.
   internal borrowing func group(_ select: Select, _ relation: Relation,
-                                _ from: Resolved, _ ctes: ScopedRelations,
+                                _ from: Resolved, _ context: Context,
                                 _ visited: Set<String>)
       throws(SQLError) -> Plan {
     // Resolve every joined relation and lay the FROM relation and each joined
@@ -619,7 +618,7 @@ extension Catalog where Self: ~Escapable {
     var joined = Array<Resolved>()
     joined.reserveCapacity(select.joins.count)
     for join in select.joins {
-      try joined.append(resolve(join.relation, ctes, visited))
+      try joined.append(resolve(join.relation, context, visited))
     }
     var relations = [(relation, from.schema)]
     for index in select.joins.indices {
@@ -836,13 +835,13 @@ extension Catalog where Self: ~Escapable {
   ///     the product stays (a plain nested loop).
   internal borrowing func optimise(_ plan: Plan, _ bindings: Bindings)
       throws(SQLError) -> Plan {
-    try optimise(plan, [:], bindings)
+    try optimise(plan, Context(bindings: bindings))
   }
 
-  /// Rewrites `plan` into a physical one with the in-scope `ctes` (consulted
-  /// before the base catalog for seekability) and `bindings`.
-  internal borrowing func optimise(_ plan: Plan, _ ctes: ScopedRelations,
-                                   _ bindings: Bindings)
+  /// Rewrites `plan` into a physical one under `context` — the in-scope overlay
+  /// (consulted before the base catalog for seekability) and the bindings a
+  /// bound key seeks like a literal.
+  internal borrowing func optimise(_ plan: Plan, _ context: Context)
       throws(SQLError) -> Plan {
     switch plan {
     case .single:
@@ -857,33 +856,32 @@ extension Catalog where Self: ~Escapable {
       // means what it was registered to mean; its scope is the
       // `definition_schema.` overlay its OWN query names (the same one it
       // compiled under), so a view body's store scan re-resolves.
-      try .derived(name: name, plan: optimise(plan, overlay(name), bindings),
+      try .derived(name: name,
+                   plan: optimise(plan, overlay(name, context)),
                    ordinals: ordinals, seek: seek)
     case let .select(filter, .scan(name, ordinals, nil)):
-      try seek(filter, name, ordinals, ctes, bindings)
+      try seek(filter, name, ordinals, context)
     case let .select(filter, .product(left, right)):
-      try nest(filter, left, right, ctes, bindings)
+      try nest(filter, left, right, context)
     case let .select(filter, source):
-      try .select(filter, optimise(source, ctes, bindings))
+      try .select(filter, optimise(source, context))
     case let .project(ordinals, source):
-      try .project(ordinals, optimise(source, ctes, bindings))
+      try .project(ordinals, optimise(source, context))
     case let .sort(keys, source):
-      try .sort(keys: keys, optimise(source, ctes, bindings))
+      try .sort(keys: keys, optimise(source, context))
     case let .product(left, right):
-      try .product(optimise(left, ctes, bindings),
-                   optimise(right, ctes, bindings))
+      try .product(optimise(left, context), optimise(right, context))
     case .join:
       plan
     case let .union(left, right, all):
       // Optimise each side with the same bindings so a bound predicate inside an
       // arm seeks; the union itself merely concatenates and deduplicates,
       // preserving this node's own `all`.
-      try .union(optimise(left, ctes, bindings),
-                 optimise(right, ctes, bindings), all: all)
+      try .union(optimise(left, context), optimise(right, context), all: all)
     case let .distinct(source):
       // A `distinct` dedups its source without a seek or join of its own;
       // optimise the source below it and rewrap.
-      try .distinct(optimise(source, ctes, bindings))
+      try .distinct(optimise(source, context))
     case let .aggregate(keys, aggregates, source):
       // An aggregate reshapes its source and has no seek or join of its own;
       // optimise its source (the WHERE/join chain below it seeks and nests as
@@ -891,12 +889,11 @@ extension Catalog where Self: ~Escapable {
       // recursion reaches through here, but their grouped-space slots never seek
       // a base relation.
       try .aggregate(keys: keys, aggregates: aggregates,
-                     optimise(source, ctes, bindings))
+                     optimise(source, context))
     case let .limit(count, offset, source):
       // A `limit` is a transparent wrapper — optimise its source and re-cap;
       // the cap itself has no seek or join to rewrite.
-      try .limit(count: count, offset: offset,
-                 optimise(source, ctes, bindings))
+      try .limit(count: count, offset: offset, optimise(source, context))
     }
   }
 
@@ -915,17 +912,17 @@ extension Catalog where Self: ~Escapable {
   /// in slot space, so a comparison's slot maps back to its table ordinal
   /// through the scan's `ordinals` before reading a boundary.
   private borrowing func seek(_ filter: Filter, _ name: String,
-                              _ ordinals: Array<Int>, _ ctes: ScopedRelations,
-                              _ bindings: Bindings)
+                              _ ordinals: Array<Int>, _ context: Context)
       throws(SQLError) -> Plan {
     // A materialised CTE relation stores no sort key, so it is never seekable —
     // leave the scan under the whole filter.
-    guard ctes[name.lowercased()] == nil else {
+    guard context.relations[name.lowercased()] == nil else {
       return .select(filter, .scan(name: name, ordinals: ordinals, seek: nil))
     }
     guard let table = table(named: name) else { throw .relation(name) }
     let count = table.cursor().count
 
+    let bindings = context.bindings
     if let range = table.boundaries(filter, ordinals, count, bindings) {
       return .scan(name: name, ordinals: ordinals, seek: range)
     }
@@ -1048,7 +1045,7 @@ extension Catalog where Self: ~Escapable {
   /// kept the safe inner filter ahead of any unsafe conjunct). When the inner
   /// side is neither shape, the product is preserved.
   private borrowing func nest(_ filter: Filter, _ left: Plan, _ right: Plan,
-                              _ ctes: ScopedRelations, _ bindings: Bindings)
+                              _ context: Context)
       throws(SQLError) -> Plan {
     let inner: (name: String, ordinals: Array<Int>, filter: Filter?)?
     switch right {
@@ -1061,8 +1058,8 @@ extension Catalog where Self: ~Escapable {
     }
 
     guard let inner, let base = left.slots else {
-      return try filter.gated(over: .product(optimise(left, ctes, bindings),
-                                             optimise(right, ctes, bindings)))
+      return try filter.gated(over: .product(optimise(left, context),
+                                             optimise(right, context)))
     }
 
     let conjuncts = filter.conjuncts
@@ -1083,7 +1080,7 @@ extension Catalog where Self: ~Escapable {
       // only when the filter holds), without letting that conjunct throw first
       // (`Parent.Name = 'nope' AND (1 / Child.x) = 0`, the false name excluding
       // the row before the division runs).
-      let join = try Plan.join(optimise(left, ctes, bindings),
+      let join = try Plan.join(optimise(left, context),
                                name: inner.name, ordinals: inner.ordinals,
                                base: base,
                                column: inner.ordinals[rightKey - base],
@@ -1093,8 +1090,8 @@ extension Catalog where Self: ~Escapable {
       return .select(predicate, join)
     }
 
-    return try filter.gated(over: .product(optimise(left, ctes, bindings),
-                                           optimise(right, ctes, bindings)))
+    return try filter.gated(over: .product(optimise(left, context),
+                                           optimise(right, context)))
   }
 }
 
@@ -1405,25 +1402,26 @@ extension Catalog where Self: ~Escapable {
   /// chain by the trailing arm's flag. The new arm must project the same column
   /// count as the chain's first `SELECT` — the result columns — else
   /// `SQLError.arity`.
-  internal borrowing func compile(_ query: Query, _ ctes: ScopedRelations = [:],
+  internal borrowing func compile(_ query: Query,
+                                  _ context: Context = Context(),
                                   _ visited: Set<String> = [])
       throws(SQLError) -> Plan {
     guard case let .union(left, select, all) = query else {
-      return try compile(query.first, ctes, visited)
+      return try compile(query.first, context, visited)
     }
 
-    let width = try arity(query.first, ctes, visited)
-    let count = try arity(select, ctes, visited)
+    let width = try arity(query.first, context, visited)
+    let count = try arity(select, context, visited)
     guard count == width else { throw .arity(width, count) }
-    return try .union(compile(left, ctes, visited),
-                      compile(.select(select), ctes, visited), all: all)
+    return try .union(compile(left, context, visited),
+                      compile(.select(select), context, visited), all: all)
   }
 
   /// The number of result columns `select` projects — the extent of a `*` over
   /// its relations, else the count of its projected items — for the `UNION`
-  /// arity check. The relations resolve through this catalog, the `ctes`
+  /// arity check. The relations resolve through this catalog, the overlay
   /// consulted first.
-  private borrowing func arity(_ select: Select, _ ctes: ScopedRelations,
+  private borrowing func arity(_ select: Select, _ context: Context,
                                _ visited: Set<String>)
       throws(SQLError) -> Int {
     switch select.projection {
@@ -1432,9 +1430,9 @@ extension Catalog where Self: ~Escapable {
       guard let relation = select.from else {
         throw .named("SELECT * with no FROM")
       }
-      var width = try resolve(relation, ctes, visited).schema.width
+      var width = try resolve(relation, context, visited).schema.width
       for join in select.joins {
-        try width += resolve(join.relation, ctes, visited).schema.width
+        try width += resolve(join.relation, context, visited).schema.width
       }
       return width
     case let .columns(columns):
@@ -1480,11 +1478,11 @@ extension Catalog where Self: ~Escapable {
   /// `definition_schema.` store's `columns` builder, which compiles every view
   /// to advertise it, relies on this: a cyclic view's `try? compile` catches
   /// the fault and skips it.
-  internal borrowing func resolve(_ relation: Relation, _ ctes: ScopedRelations,
+  internal borrowing func resolve(_ relation: Relation, _ context: Context,
                                   _ visited: Set<String> = [])
       throws(SQLError) -> Resolved {
     let name = relation.name
-    if let cte = ctes[name.lowercased()] {
+    if let cte = context.relations[name.lowercased()] {
       let schema = cte.schema()
       return Resolved(schema: schema) { ordinals in
         .scan(name: name, ordinals: ordinals, seek: nil)
@@ -1516,7 +1514,8 @@ extension Catalog where Self: ~Escapable {
       // validate a view via `compile`. The rows a view over a reserved
       // relation actually returns are supplied at EXECUTE time, where `derive`
       // rebuilds the overlay with rows and runs the sub-plan.
-      let overlay = augment([:], for: view.query, rows: false)
+      let overlay =
+          augment(context.scoping([:]), for: view.query, rows: false)
       let plan =
           try compile(view.query, overlay, visited.union([name.lowercased()]))
       let projected = plan.width
@@ -1562,7 +1561,7 @@ extension Catalog where Self: ~Escapable {
   /// `Scan(_, _, nil)`; the optimiser turns scans into seeks and each product
   /// into a join.
   internal borrowing func compile(_ select: Select,
-                                  _ ctes: ScopedRelations = [:],
+                                  _ context: Context = Context(),
                                   _ visited: Set<String> = [])
       throws(SQLError) -> Plan {
     guard let relation = select.from else {
@@ -1580,7 +1579,7 @@ extension Catalog where Self: ~Escapable {
       }
       return try select.projection.scalar()
     }
-    let from = try resolve(relation, ctes, visited)
+    let from = try resolve(relation, context, visited)
 
     if let limit = select.limit {
       // The parser yields only non-negative counts (a `-` is its own token), but
@@ -1597,7 +1596,7 @@ extension Catalog where Self: ~Escapable {
     // `HAVING`, and `ORDER BY` against the grouped slot space. A non-aggregate
     // query compiles exactly as before.
     if select.aggregates {
-      return try group(select, relation, from, ctes, visited)
+      return try group(select, relation, from, context, visited)
     }
 
     guard !select.joins.isEmpty else {
@@ -1638,7 +1637,7 @@ extension Catalog where Self: ~Escapable {
     var joined = Array<Resolved>()
     joined.reserveCapacity(select.joins.count)
     for join in select.joins {
-      try joined.append(resolve(join.relation, ctes, visited))
+      try joined.append(resolve(join.relation, context, visited))
     }
 
     var relations = [(relation, from.schema)]

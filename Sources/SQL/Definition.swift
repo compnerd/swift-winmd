@@ -157,55 +157,60 @@ extension Catalog where Self: ~Escapable {
     case .tables:
       tables()
     case .columns:
-      columns(routines)
+      columns(Context(routines: routines))
     }
   }
 
-  /// `ctes` extended with every `definition_schema.` store relation `query`
-  /// names, each built over this catalog as a `Materialised` — the resolution
-  /// surface the engine consults for a reserved store relation.
+  /// `context` with its `relations` overlay extended by every
+  /// `definition_schema.` store relation `query` names, each built over this
+  /// catalog as a `Materialised` — the resolution surface the engine consults
+  /// for a reserved store relation, threaded onward as the working scope.
   ///
   /// The store sits AFTER the common table expressions and BEFORE the base
-  /// catalog: a `definition_schema.` name is added only when `ctes` does not
-  /// already bind it (a user relation may shadow the store), and the extended
-  /// map is consulted first by every resolution phase (compile, optimise,
-  /// execute) — so it shadows a base table or view but yields to a CTE.
-  /// Building runs lazily per named relation: only the reserved relations the
-  /// query actually references are enumerated. A name in the reserved namespace
-  /// but not one the store serves is left unbound, so it faults later as an
-  /// ordinary unknown relation (`SQLError.relation`).
+  /// catalog: a `definition_schema.` name is added only when the overlay does
+  /// not already bind it (a user relation may shadow the store), and the
+  /// extended map is consulted first by every resolution phase (compile,
+  /// optimise, execute) — so it shadows a base table or view but yields to a
+  /// CTE. Building runs lazily per named relation: only the reserved relations
+  /// the query actually references are enumerated. A name in the reserved
+  /// namespace but not one the store serves is left unbound, so it faults later
+  /// as an ordinary unknown relation (`SQLError.relation`).
   ///
   /// `rows` selects the build: a run passes `true` for the enumerated rows; a
   /// typing path passes `false` for the SCHEMA-ONLY sibling, so resolving a
   /// view body's types never triggers the row build (a view over
   /// `definition_schema.columns` types without the builder re-entering itself).
-  borrowing func augment(_ ctes: ScopedRelations, for query: Query,
-                         rows: Bool, routines: Routines = [:])
-      -> ScopedRelations {
+  /// A store relation's row build types a view's scalar-call column through the
+  /// context's `routines`.
+  borrowing func augment(_ context: Context, for query: Query, rows: Bool)
+      -> Context {
     var names = Set<String>()
     query.collect(into: &names)
-    var augmented = ctes
+    var augmented = context.relations
     for name in names where augmented[name.lowercased()] == nil {
       if let relation = Definition(name) {
-        augmented[name.lowercased()] = store(relation, rows: rows, routines)
+        augmented[name.lowercased()] =
+            store(relation, rows: rows, context.routines)
       }
     }
-    return augmented
+    return context.scoping(augmented)
   }
 
-  /// The `definition_schema.` overlay a view's body resolves against — the
-  /// reserved store relations the view `name` names in its OWN query, each
-  /// built over this catalog — or empty when `name` is not a view (or names
-  /// none). It seeds the view sub-plan's execute so a view defined over a store
-  /// relation resolves; it never carries a caller's statement CTEs, so a view
-  /// means what it was registered to mean.
+  /// `context` rescoped to the `definition_schema.` overlay a view's body
+  /// resolves against — the reserved store relations the view `name` names in
+  /// its OWN query, each built over this catalog, the caller's CTEs DROPPED (an
+  /// empty overlay when `name` is not a view or names none). It seeds the view
+  /// sub-plan's execute so a view defined over a store relation resolves; it
+  /// never carries a caller's statement CTEs, so a view means what it was
+  /// registered to mean. The routines and bindings ride through unchanged.
   ///
   /// The name resolves to a user view first, then a built-in `View.standard`
   /// view — so a built-in `information_schema.` view over the store re-resolves
   /// its own `definition_schema.` scan exactly as a user view would.
-  borrowing func overlay(_ name: String) -> ScopedRelations {
-    guard let view = resolve(view: name) else { return [:] }
-    return augment([:], for: view.query, rows: true)
+  borrowing func overlay(_ name: String, _ context: Context) -> Context {
+    let fresh = context.scoping([:])
+    guard let view = resolve(view: name) else { return fresh }
+    return augment(fresh, for: view.query, rows: true)
   }
 
   /// The view named `name`, or `nil`, by the precedence a query name follows.
@@ -286,7 +291,7 @@ extension Catalog where Self: ~Escapable {
   /// types from `routines`, the run's registered routines, so a view's
   /// `GUID(...)` column advertises `character varying`, not the integer
   /// default.
-  private borrowing func columns(_ routines: Routines)
+  private borrowing func columns(_ context: Context)
       -> Materialised {
     var rows = Array<Array<Value>>()
     for name in bases() {
@@ -316,7 +321,7 @@ extension Catalog where Self: ~Escapable {
       // column count: `resolve` rejects a view whose declared arity differs
       // from its body's (`v(x) AS SELECT * FROM People`), so such a view cannot
       // run and is not advertised here.
-      let overlay = augment([:], for: view.query, rows: false)
+      let overlay = augment(context.scoping([:]), for: view.query, rows: false)
       guard let plan = try? compile(view.query, overlay),
           plan.width == view.columns.count else { continue }
       // Type the columns from the body's first arm; type-check every arm's
@@ -325,11 +330,10 @@ extension Catalog where Self: ~Escapable {
       // first-arm resolve would miss it (`compile` cannot check a routine
       // exists), while an arm a short-circuit proves unreachable is skipped. A
       // view a `SELECT *` could not evaluate is not advertised.
-      guard (try? typecheck(view.query, overlay, visited: [name.lowercased()],
-                            routines: routines)) != nil,
+      guard (try? typecheck(view.query, overlay,
+                            visited: [name.lowercased()])) != nil,
           let resolved = try? columns(of: view.query.first, overlay,
-                                      visited: [name.lowercased()],
-                                      routines: routines),
+                                      visited: [name.lowercased()]),
           resolved.count == view.columns.count else { continue }
       for ordinal in view.columns.indices {
         rows.append([.text(name), .text(view.columns[ordinal]),

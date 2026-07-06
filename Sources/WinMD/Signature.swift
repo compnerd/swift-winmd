@@ -185,6 +185,25 @@ public struct FieldSignature: Sendable {
   }
 }
 
+/// A decoded property signature (ECMA-335 §II.23.2.5).
+public struct PropertySignature: Sendable {
+  /// Whether the property has an implicit `this` parameter (`HASTHIS`).
+  public let `instance`: Bool
+
+  /// The property's type.
+  public let type: SignatureType
+
+  /// The index parameter types, in order; empty for a non-indexer property.
+  public let parameters: Array<SignatureType>
+
+  public init(instance: Bool, type: SignatureType,
+              parameters: Array<SignatureType>) {
+    self.instance = `instance`
+    self.type = type
+    self.parameters = parameters
+  }
+}
+
 // MARK: - Decoding
 
 /// A cursor decoding a `#Blob` signature byte stream (ECMA-335 §II.23.2).
@@ -429,6 +448,30 @@ internal struct SignatureDecoder: ~Escapable {
     guard prolog == 0x06 else { throw .BadImageFormat }
     return FieldSignature(type: try type())
   }
+
+  /// Decodes a property signature (ECMA-335 §II.23.2.5): a `PROPERTY` prolog
+  /// byte (`0x08`, optionally OR'd with `HASTHIS` `0x20`), a parameter count,
+  /// the property's `Type`, then that many index-parameter `Type`s.
+  ///
+  /// The count precedes the property type and names the index parameters an
+  /// indexer property carries; a plain property has a count of zero and no
+  /// index parameters.
+  internal mutating func property() throws(WinMDError) -> PropertySignature {
+    let prolog = try byte()
+    guard prolog & ~0x20 == 0x08 else { throw .BadImageFormat }
+    let `instance` = prolog & 0x20 != 0    // HASTHIS
+
+    let count = try compressed()
+    let type = try type()
+
+    var parameters = Array<SignatureType>()
+    for _ in 0 ..< count {
+      try parameters.append(self.type())
+    }
+
+    return PropertySignature(instance: `instance`, type: type,
+                             parameters: parameters)
+  }
 }
 
 // MARK: - Accessors
@@ -461,6 +504,22 @@ extension Row where Schema == Metadata.Tables.FieldDef {
       let entry = try blob(.Signature)
       var decoder = SignatureDecoder(entry.bytes)
       let signature = try decoder.field()
+      try decoder.end()
+      return signature
+    }
+  }
+}
+
+extension Row where Schema == Metadata.Tables.PropertyDef {
+  /// The decoded property signature (ECMA-335 §II.23.2.5).
+  ///
+  /// Distinct from the `Type` accessor, which vends the raw `#Blob`; this
+  /// decodes that blob into a structured `PropertySignature`.
+  public var declaration: PropertySignature {
+    get throws(WinMDError) {
+      let entry = try blob(.Type)
+      var decoder = SignatureDecoder(entry.bytes)
+      let signature = try decoder.property()
       try decoder.end()
       return signature
     }

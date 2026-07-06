@@ -10,6 +10,7 @@ private let DEFAULT: UInt8 = 0x00
 private let HASTHIS: UInt8 = 0x20
 private let EXPLICITTHIS: UInt8 = 0x40
 private let FIELD: UInt8 = 0x06
+private let PROPERTY: UInt8 = 0x08
 private let VOID: UInt8 = 0x01
 private let I4: UInt8 = 0x08
 private let U4: UInt8 = 0x09
@@ -123,6 +124,51 @@ struct SignatureTests {
     guard case .primitive(.int4) = signature.type else {
       Issue.record("field not i4"); return
     }
+  }
+
+  @Test func `decodes a property signature`() throws {
+    // PROPERTY, no index parameters, an I4 property type.
+    let bytes = [PROPERTY, 0x00, I4]
+    var decoder = SignatureDecoder(bytes.span.bytes)
+    let signature = try decoder.property()
+    #expect(!signature.instance)
+    guard case .primitive(.int4) = signature.type else {
+      Issue.record("property not i4"); return
+    }
+    #expect(signature.parameters.isEmpty)
+  }
+
+  @Test func `decodes the property HASTHIS instance flag`() throws {
+    let bytes = [PROPERTY | HASTHIS, 0x00, STRING]
+    var decoder = SignatureDecoder(bytes.span.bytes)
+    let signature = try decoder.property()
+    #expect(signature.instance)
+    guard case .primitive(.string) = signature.type else {
+      Issue.record("property not string"); return
+    }
+  }
+
+  @Test func `decodes an indexer property's index parameters`() throws {
+    // PROPERTY, two index parameters (I4, STRING), a U4 property type.
+    let bytes = [PROPERTY, 0x02, U4, I4, STRING]
+    var decoder = SignatureDecoder(bytes.span.bytes)
+    let signature = try decoder.property()
+    guard case .primitive(.uint4) = signature.type else {
+      Issue.record("property not u4"); return
+    }
+    #expect(signature.parameters.count == 2)
+    guard case .primitive(.int4) = signature.parameters[0],
+        case .primitive(.string) = signature.parameters[1] else {
+      Issue.record("index parameters not (i4, string)"); return
+    }
+  }
+
+  @Test func `rejects a property signature with a non-PROPERTY prolog`() {
+    // A FIELD (0x06) prolog names a field, not a property; `property()` must
+    // reject it (ECMA-335 §II.23.2.5).
+    let bytes = [FIELD, 0x00, I4]
+    var decoder = SignatureDecoder(bytes.span.bytes)
+    #expect(throws: WinMDError.BadImageFormat) { _ = try decoder.property() }
   }
 
   @Test func `rejects an unknown element type`() {
@@ -327,6 +373,80 @@ struct SignatureTests {
     guard case .primitive(.int4) = signature.type else {
       Issue.record("field not i4"); return
     }
+  }
+
+  // A `PropertyDef` row whose `Type` cell (ordinal 2) is the heap offset 0.
+  // The narrow stride is Flags (2) + Name (2) + Type (2) = 6.
+  private static let propertyRecord: Array<UInt8> = [
+    0x00, 0x00,                // Flags
+    0x00, 0x00,                // Name
+    0x00, 0x00,                // Type (heap offset 0)
+  ]
+
+  // A blob heap holding `PROPERTY, 0, I4` — a plain `I4` property — length-
+  // prefixed.
+  private static let propertyBlob: Array<UInt8> = [0x03, PROPERTY, 0x00, I4]
+
+  // A blob heap holding `PROPERTY, 1, STRING, I4` — a `String this[i4]`
+  // indexer — length-prefixed.
+  private static let indexerBlob: Array<UInt8> =
+      [0x04, PROPERTY, 0x01, STRING, I4]
+
+  // A blob heap holding a `FIELD, I4` field signature under a `PropertyDef`
+  // row: the FIELD prolog is not a property, so `declaration` must reject it.
+  private static let propertyFieldBlob: Array<UInt8> = [0x02, FIELD, I4]
+
+  @Test func `decodes a PropertyDef signature through the row accessor`() throws {
+    let relations =
+        [Table(Metadata.Tables.PropertyDef.self, rows: 1, range: 0 ..< 6,
+               wide: 0, stride: 6)]
+    let storage = Storage(bytes: SignatureTests.propertyRecord.span.bytes,
+                          relations: relations.span,
+                          strings: SignatureTests.empty.span.bytes,
+                          blob: SignatureTests.propertyBlob.span.bytes,
+                          guid: SignatureTests.empty.span.bytes,
+                          valid: 1 << 23, sorted: 0)
+    let rows = try storage.rows(of: Metadata.Tables.PropertyDef.self)
+    let signature = try rows[0]!.declaration
+    guard case .primitive(.int4) = signature.type else {
+      Issue.record("property not i4"); return
+    }
+    #expect(signature.parameters.isEmpty)
+  }
+
+  @Test func `decodes a PropertyDef indexer through the row accessor`() throws {
+    let relations =
+        [Table(Metadata.Tables.PropertyDef.self, rows: 1, range: 0 ..< 6,
+               wide: 0, stride: 6)]
+    let storage = Storage(bytes: SignatureTests.propertyRecord.span.bytes,
+                          relations: relations.span,
+                          strings: SignatureTests.empty.span.bytes,
+                          blob: SignatureTests.indexerBlob.span.bytes,
+                          guid: SignatureTests.empty.span.bytes,
+                          valid: 1 << 23, sorted: 0)
+    let rows = try storage.rows(of: Metadata.Tables.PropertyDef.self)
+    let signature = try rows[0]!.declaration
+    guard case .primitive(.string) = signature.type else {
+      Issue.record("property not string"); return
+    }
+    #expect(signature.parameters.count == 1)
+    guard case .primitive(.int4) = signature.parameters[0] else {
+      Issue.record("index parameter not i4"); return
+    }
+  }
+
+  @Test func `rejects a PropertyDef signature with a non-PROPERTY prolog`() throws {
+    let relations =
+        [Table(Metadata.Tables.PropertyDef.self, rows: 1, range: 0 ..< 6,
+               wide: 0, stride: 6)]
+    let storage = Storage(bytes: SignatureTests.propertyRecord.span.bytes,
+                          relations: relations.span,
+                          strings: SignatureTests.empty.span.bytes,
+                          blob: SignatureTests.propertyFieldBlob.span.bytes,
+                          guid: SignatureTests.empty.span.bytes,
+                          valid: 1 << 23, sorted: 0)
+    let rows = try storage.rows(of: Metadata.Tables.PropertyDef.self)
+    #expect(throws: WinMDError.BadImageFormat) { _ = try rows[0]!.declaration }
   }
 
   // A field signature whose prolog is `FIELD | GENERIC` (`0x16`): the `GENERIC`

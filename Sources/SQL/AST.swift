@@ -467,6 +467,14 @@ public indirect enum Predicate: Hashable, Sendable {
   /// nullable column — an absent decoded attribute — is filtered (`WHERE iid IS
   /// NOT NULL`).
   case null(Expression, negated: Bool)
+  /// `operand IN (v, …)`, or `NOT IN` when `negated` — whether the operand
+  /// equals any value of the non-empty `values` list. It is ISO shorthand for a
+  /// disjunction of equalities under three-valued logic: `x IN (a, b)` is `x = a
+  /// OR x = b`, so a NULL operand or a NULL element makes an otherwise-unmatched
+  /// test UNKNOWN rather than FALSE, and `NOT IN` is the negation of that (never
+  /// TRUE when a NULL element is present). The engine lowers it to that
+  /// disjunction rather than carrying a dedicated `Filter` case.
+  case membership(Expression, Array<Expression>, negated: Bool)
   /// `lhs AND rhs`.
   case and(Predicate, Predicate)
   /// `lhs OR rhs`.

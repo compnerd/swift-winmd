@@ -804,6 +804,9 @@ extension Predicate {
       left.collect(into: &expressions)
     case let .null(expression, _):
       expression.collect(into: &expressions)
+    case let .membership(operand, values, _):
+      operand.collect(into: &expressions)
+      for value in values { value.collect(into: &expressions) }
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.collect(into: &expressions)
       rhs.collect(into: &expressions)

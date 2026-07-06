@@ -36,6 +36,14 @@ private func lower(_ predicate: Predicate,
     try .bound(term(left), op, parameter)
   case let .null(expression, negated):
     try .null(term(expression), negated: negated)
+  case let .membership(expression, values, negated):
+    // `x IN (a, b, …)` is the disjunction `x = a OR x = b OR …` and `NOT IN`
+    // its negation, so lowering to that OR-chain (over the shared comparison
+    // machinery) yields the ISO three-valued result: an unmatched test with a
+    // NULL operand or a NULL element is UNKNOWN — Kleene `OR` of a FALSE and an
+    // UNKNOWN is UNKNOWN — not FALSE, and `NOT` maps that UNKNOWN to itself, so
+    // `NOT IN` a list holding NULL is never TRUE.
+    try membership(term(expression), values, negated: negated, term: term)
   case let .and(lhs, rhs):
     try .and(lower(lhs, term: term), lower(rhs, term: term))
   case let .or(lhs, rhs):
@@ -43,6 +51,33 @@ private func lower(_ predicate: Predicate,
   case let .not(operand):
     try .not(lower(operand, term: term))
   }
+}
+
+/// Lowers `x [NOT] IN (v, …)` — the operand already lowered to `left` — to the
+/// disjunction `left = v0 OR left = v1 OR …`, negated for `NOT IN`, each value
+/// lowered through `term`.
+///
+/// The value list must be non-empty: the parser rejects `IN ()`, but
+/// `Predicate.membership` is public, so a caller can hand this lowering an
+/// empty list directly, bypassing the grammar. An empty list has no OR-chain
+/// seed — the disjunction is undefined — so reject it as an unsupported shape
+/// rather than folding it. The left-leaning fold matches the parser's own `OR`
+/// association; the three-valued `OR` of the comparisons gives the ISO
+/// membership semantics, and the outer `NOT` the `NOT IN` negation.
+private func membership(_ left: Term, _ values: Array<Expression>,
+                        negated: Bool,
+                        term: (Expression) throws(SQLError) -> Term)
+    throws(SQLError) -> Filter {
+  guard !values.isEmpty else {
+    throw .unsupported("IN requires a non-empty value list")
+  }
+  var filter: Filter? = nil
+  for value in values {
+    let equality = try Filter.compare(left, .equal, term(value))
+    filter = if let filter { .or(filter, equality) } else { equality }
+  }
+  let disjunction = filter!
+  return negated ? .not(disjunction) : disjunction
 }
 
 /// The resolved sort keys `order` lowers to, in major-to-minor order — each
@@ -439,6 +474,35 @@ internal struct Scope {
       break
     case let .null(operand, _):
       _ = try validate(operand, routines)
+    case let .membership(operand, values, _):
+      // `x IN (v, …)` lowers to `x = v OR …`, so type it as those comparisons:
+      // validate the operand and each value, and require each value COMPARABLE
+      // to the operand — a definitively cross-kind element (text in an integer
+      // list) can never match, so reject it up front as a run's comparison
+      // would silently never match. The comparability rule is `matches`'s: like
+      // types, or two numerics.
+      //
+      // The OR-chain short-circuits: a DEFINITE constant match (`x = v` folds
+      // TRUE, both literals) makes the whole `IN` TRUE and leaves every later
+      // element unreachable, so validation stops there — `1 IN (1, Name + 1)`
+      // type-checks, the run matching `1 = 1` before ever reaching `Name + 1`,
+      // while `2 IN (1, Name + 1)` (no definite match) still validates `Name + 1`
+      // and faults. `matched(operand, value)` is the fold's own primitive.
+      //
+      // An empty list has no OR-chain and cannot be lowered (`lower` would have
+      // no seed), so reject it here too — the parser rejects `IN ()`, but a
+      // caller can build `.membership(_, [], …)` directly, so this validation
+      // faults on that shape rather than typing it as an always-false chain.
+      guard !values.isEmpty else {
+        throw .unsupported("IN requires a non-empty value list")
+      }
+      let type = try validate(operand, routines)
+      _ = try membership(of: values, each: { value throws(SQLError) in
+        let element = try validate(value, routines)
+        guard type.comparable(with: element) else {
+          throw .operand("IN list element is not comparable to the operand")
+        }
+      }, equality: { value throws(SQLError) in matched(operand, value) })
     case let .and(lhs, rhs):
       try check(lhs, routines)
       if constant(lhs) != false { try check(rhs, routines) }
@@ -448,6 +512,51 @@ internal struct Scope {
     case let .not(operand):
       try check(operand, routines)
     }
+  }
+
+  /// The definite truth of the equality `operand = value` when BOTH are literals
+  /// — the OR-chain equality an `IN` element folds to — else `nil` (a non-literal
+  /// side is decided per row). It folds through `value(of:)` and `matches`, the
+  /// same primitives the run compares with, so a `true` here is a definite match
+  /// that short-circuits the chain.
+  private func matched(_ operand: Expression, _ value: Expression) -> Bool? {
+    guard case let .literal(operand) = operand,
+        case let .literal(value) = value,
+        let lhs = try? SQL.value(of: operand),
+        let rhs = try? SQL.value(of: value) else {
+      return nil
+    }
+    return matches(lhs, .equal, rhs)
+  }
+
+  /// Folds an `IN` value list as its OR-chain of `operand = element` equalities,
+  /// honouring the executor's SHORT-CIRCUIT: the elements are visited in order,
+  /// each mapped to its three-valued equality truth by `equality`, and the truths
+  /// are OR-folded — but a definite `true` stops the walk, since the OR-chain
+  /// matches there and every LATER element is unreachable (`Row.matches` returns
+  /// on the first true arm). This is the ONE short-circuit the `IN`
+  /// type-check (`check`), constant fold (`constant`), and empty-group evaluator
+  /// (`empty`) all share: each supplies the per-element `equality` its surface
+  /// computes with, and every surface stops at the same element the run does.
+  ///
+  /// `visit` runs on each element BEFORE its truth is taken, so a surface with a
+  /// per-element side effect (validation) applies it to exactly the reachable
+  /// prefix. The fold seeds FALSE (an empty match is FALSE), so the returned
+  /// truth is the disjunction over the visited prefix.
+  private func membership<E: Error>(
+      of elements: Array<Expression>,
+      each visit: (Expression) throws(E) -> Void = { (_: Expression) in },
+      equality: (Expression) throws(E) -> Bool?)
+      throws(E) -> Bool? {
+    var truth: Bool? = false
+    for element in elements {
+      try visit(element)
+      truth = or(truth, try equality(element))
+      // A definite match makes every LATER element unreachable — the OR-chain
+      // short-circuits here, exactly as the run does.
+      if truth == true { break }
+    }
+    return truth
   }
 
   /// The definite constant truth value of `predicate` when it is statically
@@ -477,6 +586,17 @@ internal struct Scope {
       // NULL` (`negated`) definitely true; a non-literal operand is per row.
       guard case .literal = operand else { return nil }
       return negated
+    case let .membership(operand, values, negated):
+      // Fold `x IN (…)` exactly as its OR-chain of equalities folds — the same
+      // primitives (`value(of:)`, `matches`, `membership`'s short-circuit) —
+      // honouring the OR-chain's short-circuit: once a LITERAL element definitely
+      // equals the literal operand the fold is `true`, so a later non-literal
+      // element (which alone would make the fold per-row `nil`) is unreachable
+      // and does not spoil it — `1 IN (1, Name + 1)` folds `true`. Absent a
+      // decisive match, any non-literal element makes it per row (`nil`). `NOT
+      // IN` negates the folded truth (UNKNOWN maps to itself).
+      let truth = membership(of: values) { value in matched(operand, value) }
+      return negated ? truth.map { !$0 } : truth
     case .bound:
       return nil
     }
@@ -520,6 +640,9 @@ internal struct Scope {
       try aggregates(in: left, routines)
     case let .null(operand, _):
       try aggregates(in: operand, routines)
+    case let .membership(operand, values, _):
+      try aggregates(in: operand, routines)
+      for value in values { try aggregates(in: value, routines) }
     case let .and(lhs, rhs), let .or(lhs, rhs):
       try aggregates(in: lhs, routines)
       try aggregates(in: rhs, routines)
@@ -587,6 +710,18 @@ internal struct Scope {
       let value = try empty(operand, routines)
       let null = if case .null = value { true } else { false }
       return negated ? !null : null
+    case let .membership(operand, values, negated):
+      // Fold `x IN (…)` over the empty group as its OR-chain of equalities does
+      // — the folded operand matched against each folded element under
+      // three-valued `OR`, honouring the OR-chain's short-circuit (`membership`):
+      // the run stops at the first TRUE comparison and never evaluates a later
+      // element, so `1 IN (1, 1 / 0)` folds `true` here without folding `1 / 0`
+      // to a `.divide` fault. Negated for `NOT IN`.
+      let lhs = try empty(operand, routines)
+      let truth = try membership(of: values) { value throws(SQLError) in
+        matches(lhs, .equal, try empty(value, routines))
+      }
+      return negated ? truth.map { !$0 } : truth
     case let .and(lhs, rhs):
       // A `false` left proves the `AND` false without folding the right arm,
       // which a run's short-circuit never evaluates and so must not fault.

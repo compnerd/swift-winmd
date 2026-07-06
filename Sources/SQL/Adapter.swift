@@ -48,6 +48,16 @@ public enum ValueType: Hashable, Sendable {
     }
   }
 
+  /// Whether a value of this type may be compared for equality against one of
+  /// `other` — the same rule `matches` applies: like types compare, and an
+  /// integer and a double are comparable (both numeric, the integer promoted).
+  /// A cross-kind pair — a number against text, boolean, or blob — never
+  /// matches, so it is not comparable. The `IN` value list and a simple `CASE`
+  /// require each element comparable to the tested value by this rule.
+  internal func comparable(with other: ValueType) -> Bool {
+    self == other || (numeric && other.numeric)
+  }
+
   /// The ISO `data_type` spelling of this value type.
   ///
   /// The engine's types map onto the ISO domains: exact numeric to `integer`,

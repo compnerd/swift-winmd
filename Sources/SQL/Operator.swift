@@ -343,7 +343,7 @@ internal func execute<C: Catalog & ~Escapable>(_ plan: Plan,
     return deduplicated(try execute(source, catalog, context))
   case let .aggregate(keys, aggregates, source):
     return try grouped(execute(source, catalog, context), keys,
-                       aggregates, routines)
+                       aggregates, routines, bindings)
   case let .limit(count, offset, source):
     return limited(try execute(source, catalog, context), count, offset)
   }
@@ -408,7 +408,7 @@ private func project(_ terms: Array<Term>, _ record: Record,
   var cells = Array<Value>()
   cells.reserveCapacity(terms.count)
   for term in terms {
-    try cells.append(evaluate(term, record, routines, bindings))
+    try cells.append(record.evaluate(term, routines, bindings))
   }
   return Record(cells)
 }
@@ -421,7 +421,7 @@ private func admitted(_ records: Array<Record>, _ filter: Filter,
     throws(SQLError) -> Array<Record> {
   var kept = Array<Record>()
   for record in records {
-    if try evaluate(filter, record, routines, bindings) == true {
+    if try record.evaluate(filter, routines, bindings) == true {
       kept.append(record)
     }
   }
@@ -520,7 +520,7 @@ private func sift(_ outer: Array<Record>, _ inner: Array<Record>,
   for left in outer {
     for right in inner {
       let record = left.merged(with: right)
-      if try evaluate(filter, record, routines, bindings) == true {
+      if try record.evaluate(filter, routines, bindings) == true {
         records.append(record)
       }
     }
@@ -617,7 +617,7 @@ private func join<C: Catalog & ~Escapable>(_ outer: Array<Record>,
     for index in 0 ..< cte.rows.count {
       let right = cte.record(index, ordinals)
       if let filter,
-          try evaluate(filter, right, routines, bindings) != true { continue }
+          try right.evaluate(filter, routines, bindings) != true { continue }
       inner.append(right)
     }
     return joined(outer, inner, base, keys)
@@ -647,7 +647,7 @@ private func join<C: Catalog & ~Escapable>(_ outer: Array<Record>,
       // A pushed inner filter is applied as each candidate materialises, before
       // it can pair — an inner row it rejects joins to nothing.
       if let filter,
-          try evaluate(filter, right, routines, bindings) != true { continue }
+          try right.evaluate(filter, routines, bindings) != true { continue }
       // Equal by the SAME rule the predicate uses — integer/integer exact,
       // mixed integer/double promoted — so a seek that scanned wide still pairs
       // exactly.
@@ -710,7 +710,7 @@ private func hashed<T: Table & ~Escapable>(_ outer: Array<Record>,
     // Apply the whole pushed filter before bucketing — a filtered inner row is
     // never a join candidate.
     if let filter,
-        try evaluate(filter, right, routines, bindings) != true { continue }
+        try right.evaluate(filter, routines, bindings) != true { continue }
     if case .null = right[slot] { continue }
     buckets[bucket(right[slot]), default: Array<Record>()].append(right)
   }

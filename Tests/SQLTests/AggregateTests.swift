@@ -435,4 +435,25 @@ struct AggregateTests {
     // (1.0 + 2.0) / 2 = 1.5 — real division over a double total.
     try catalog.expect("SELECT AVG(X) FROM T", yields: [[1.5]])
   }
+
+  @Test func `an aggregate argument resolves a bound parameter`() throws {
+    // A `:parameter` reached from inside an aggregate's argument binds to its
+    // query value the same way the projection and the WHERE do — the CASE guard
+    // sees `:k` as 10, so exactly the one Amount = 10 row folds a 1 into the
+    // COUNT rather than reading `:k` as UNBOUND and counting 0.
+    try sales().expect("""
+        SELECT COUNT(CASE WHEN Amount = :k THEN 1 END) FROM Sales
+        """, yields: [[1]], bindings: ["k": .integer(10)])
+  }
+
+  @Test func `a SUM argument resolves a bound parameter`() throws {
+    // The bound parameter reaches a SUM's argument, not just a COUNT's —
+    // proving the fix is the general per-record argument evaluation, one
+    // aggregate fold path for every function. With :k = 20 the CASE keeps each
+    // Amount that equals 20 and folds 0 otherwise, so SUM is the single 20 —
+    // read as UNBOUND the guard never matches and SUM is 0.
+    try sales().expect("""
+        SELECT SUM(CASE WHEN Amount = :k THEN Amount ELSE 0 END) FROM Sales
+        """, yields: [[20]], bindings: ["k": .integer(20)])
+  }
 }

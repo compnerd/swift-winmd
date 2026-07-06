@@ -28,16 +28,16 @@ private struct Cell: Row {
 /// `true`, `false`, or `nil` (UNKNOWN) — the path a real `WHERE` takes.
 private func compare(_ cell: Value, _ op: Comparison,
                      _ constant: Value) -> Bool? {
-  try! evaluate(.compare(.slot(0), op, .constant(constant)),
-                Cell(cell), Routines(), [:])
+  try! Cell(cell).evaluate(.compare(.slot(0), op, .constant(constant)),
+                           Routines(), [:])
 }
 
 /// Evaluates `lhs op rhs` through the engine's arithmetic — a typed `Value`, or
 /// a thrown `SQLError` (a divide by zero, a non-numeric operand).
 private func arithmetic(_ lhs: Value, _ op: Arithmetic,
                         _ rhs: Value) throws(SQLError) -> Value {
-  try evaluate(.binary(op, .constant(lhs), .constant(rhs)),
-               Cell(.null), Routines())
+  try Cell(.null).evaluate(.binary(op, .constant(lhs), .constant(rhs)),
+                           Routines())
 }
 
 // MARK: - Comparison
@@ -157,10 +157,10 @@ private struct DoubleArithmeticTests {
           _ in .double(.infinity)
         }]
     #expect(throws: SQLError.self) {
-      try evaluate(.apply(name: "nan", arguments: []), Cell(.null), routines)
+      try Cell(.null).evaluate(.apply(name: "nan", arguments: []), routines)
     }
     #expect(throws: SQLError.self) {
-      try evaluate(.apply(name: "huge", arguments: []), Cell(.null), routines)
+      try Cell(.null).evaluate(.apply(name: "huge", arguments: []), routines)
     }
   }
 }

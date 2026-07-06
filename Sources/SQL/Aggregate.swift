@@ -230,9 +230,17 @@ private func comparable(_ a: Value, _ b: Value) -> Bool {
 /// is ONE group — the degenerate whole-result aggregation (`SELECT COUNT(*) FROM
 /// T`) — which yields a single grouped record even over an empty input (`COUNT`
 /// `0`, the others NULL), the standard SQL rule.
+///
+/// The `bindings` thread through both the key and the argument evaluation — the
+/// same bindings the projection and the `WHERE` filter resolve against — so a
+/// `:parameter` reached from inside an aggregate's argument (a
+/// `COUNT(CASE WHEN K = :k …)`) binds to its query value rather than reading as
+/// UNBOUND. The key evaluation threads them for the same reason and to keep the
+/// two evaluate sites consistent, though a `GROUP BY` key is a bare column
+/// today, so it cannot yet reach one.
 internal func grouped(_ records: Array<Record>, _ keys: Array<Term>,
-                      _ aggregates: Array<Aggregation>, _ routines: Routines)
-    throws(SQLError) -> Array<Record> {
+                      _ aggregates: Array<Aggregation>, _ routines: Routines,
+                      _ bindings: Bindings) throws(SQLError) -> Array<Record> {
   var order = Array<Record>()
   var accumulators = Dictionary<Record, Array<Accumulator>>()
 
@@ -240,7 +248,7 @@ internal func grouped(_ records: Array<Record>, _ keys: Array<Term>,
     var cells = Array<Value>()
     cells.reserveCapacity(keys.count)
     for key in keys {
-      try cells.append(evaluate(key, record, routines))
+      try cells.append(record.evaluate(key, routines, bindings))
     }
     let group = Record(cells)
     // Key the group on the EXACT canonical form of its cells so `1` and `1.0`
@@ -256,7 +264,7 @@ internal func grouped(_ records: Array<Record>, _ keys: Array<Term>,
       // `COUNT(*)` has no argument — count the row with a non-NULL sentinel;
       // every other aggregate folds its evaluated argument value.
       let value: Value = if let argument = aggregates[index].argument {
-        try evaluate(argument, record, routines)
+        try record.evaluate(argument, routines, bindings)
       } else {
         .integer(0)
       }

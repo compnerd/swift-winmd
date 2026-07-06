@@ -27,8 +27,8 @@ private struct Cell: Row {
 /// `true`, `false`, or `nil` (UNKNOWN) — the path a real `WHERE` takes.
 private func compare(_ cell: Value, _ op: Comparison,
                      _ constant: Value) -> Bool? {
-  try! evaluate(.compare(.slot(0), op, .constant(constant)),
-                Cell(cell), Routines(), [:])
+  try! Cell(cell).evaluate(.compare(.slot(0), op, .constant(constant)),
+                           Routines(), [:])
 }
 
 // MARK: - Boolean

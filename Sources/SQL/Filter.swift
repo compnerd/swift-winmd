@@ -284,87 +284,86 @@ internal func value(of literal: Literal) throws(SQLError) -> Value {
   }
 }
 
-/// Evaluates `term` against `row` through `routines`, yielding a typed value.
-///
-/// A `slot` reads the row's cell; a `constant` is itself; an `apply` looks the
-/// function up in the routines (`SQLError.function` on a miss), evaluates its
-/// arguments, and applies it. The `borrowing` row is non-escaping — a term runs
-/// over a materialised projection record or a predicate's borrowed cursor row.
-internal func evaluate<R: Row & ~Escapable>(_ term: Term, _ row: borrowing R,
-                                            _ routines: Routines,
-                                            _ bindings: Bindings = [:])
-    throws(SQLError) -> Value {
-  switch term {
-  case let .slot(slot):
-    row[slot]
-  case let .constant(value):
-    value
-  case let .apply(name, arguments):
-    try apply(name, arguments, row, routines, bindings)
-  case let .binary(op, lhs, rhs):
-    try op.apply(evaluate(lhs, row, routines, bindings),
-                 evaluate(rhs, row, routines, bindings))
-  case let .case(branches, otherwise, type):
-    // Take the FIRST branch whose guard is three-valued TRUE (UNKNOWN and FALSE
-    // skip); with none matching, the `else` term, or `NULL` when there is none.
-    // The guard is a `Filter`, so it evaluates over the same row, routines, and
-    // bindings a `WHERE` filter does — a `:parameter` guard resolves against the
-    // bindings, an UNKNOWN one does not select its branch. The selected value is
-    // COERCED to the CASE's unified result `type` so it matches the column type
-    // the schema advertised.
-    try `case`(branches, otherwise, type, row, routines, bindings)
-  }
-}
-
-/// Evaluates a lowered `CASE` — its `branches` and optional `otherwise`
-/// term — against `row`, taking the first guard that is TRUE and coercing the
-/// selected value to the CASE's unified result `type`.
-///
-/// The schema advertises the column as `type` — the unification of the branch
-/// result types — yet a branch yields its own raw `Value`, so a `.integer` arm
-/// of a CASE that unifies to `.double` must widen to match. `Value.coerced`
-/// performs that one widening; NULL and an already-matching value pass
-/// unchanged, so an all-same CASE (no widening) is untouched.
-private func `case`<R: Row & ~Escapable>(_ branches: Array<(Filter, Term)>,
-                                         _ otherwise: Term?, _ type: ValueType,
-                                         _ row: borrowing R,
-                                         _ routines: Routines,
-                                         _ bindings: Bindings)
-    throws(SQLError) -> Value {
-  for (gate, result) in branches {
-    if try evaluate(gate, row, routines, bindings) == true {
-      return try evaluate(result, row, routines, bindings).coerced(to: type)
+extension Row where Self: ~Escapable {
+  /// Evaluates `term` against this row through `routines`, yielding a typed
+  /// value.
+  ///
+  /// A `slot` reads the row's cell; a `constant` is itself; an `apply` looks
+  /// the function up in the routines (`SQLError.function` on a miss), evaluates
+  /// its arguments, and applies it. The `borrowing` row is non-escaping — a
+  /// term runs over a materialised projection record or a predicate's borrowed
+  /// cursor row.
+  internal borrowing func evaluate(_ term: Term, _ routines: Routines,
+                                   _ bindings: Bindings = [:])
+      throws(SQLError) -> Value {
+    switch term {
+    case let .slot(slot):
+      self[slot]
+    case let .constant(value):
+      value
+    case let .apply(name, arguments):
+      try apply(name, arguments, routines, bindings)
+    case let .binary(op, lhs, rhs):
+      try op.apply(evaluate(lhs, routines, bindings),
+                   evaluate(rhs, routines, bindings))
+    case let .case(branches, otherwise, type):
+      // Take the FIRST branch whose guard is three-valued TRUE (UNKNOWN and
+      // FALSE skip); with none matching, the `else` term, or `NULL` when there
+      // is none. The guard is a `Filter`, so it evaluates over the same row,
+      // routines, and bindings a `WHERE` filter does — a `:parameter` guard
+      // resolves against the bindings, an UNKNOWN one does not select its
+      // branch. The selected value is COERCED to the CASE's unified result
+      // `type` so it matches the column type the schema advertised.
+      try conditional(branches, otherwise, type, routines, bindings)
     }
   }
-  guard let otherwise else { return .null }
-  return try evaluate(otherwise, row, routines, bindings).coerced(to: type)
-}
 
-/// Resolves `name` in `routines` and applies it to its evaluated `arguments`.
-private func apply<R: Row & ~Escapable>(_ name: String,
-                                        _ arguments: Array<Term>,
-                                        _ row: borrowing R,
-                                        _ routines: Routines,
-                                        _ bindings: Bindings)
-    throws(SQLError) -> Value {
-  guard let routine = routines[name] else {
-    throw .function(name)
+  /// Evaluates a lowered `CASE` — its `branches` and optional `otherwise`
+  /// term — against this row, taking the first guard that is TRUE and coercing
+  /// the selected value to the CASE's unified result `type`.
+  ///
+  /// The schema advertises the column as `type` — the unification of the branch
+  /// result types — yet a branch yields its own raw `Value`, so a `.integer`
+  /// arm of a CASE that unifies to `.double` must widen to match.
+  /// `Value.coerced` performs that one widening; NULL and an already-matching
+  /// value pass unchanged, so an all-same CASE (no widening) is untouched.
+  private borrowing func conditional(_ branches: Array<(Filter, Term)>,
+                                     _ otherwise: Term?, _ type: ValueType,
+                                     _ routines: Routines,
+                                     _ bindings: Bindings)
+      throws(SQLError) -> Value {
+    for (gate, result) in branches {
+      if try evaluate(gate, routines, bindings) == true {
+        return try evaluate(result, routines, bindings).coerced(to: type)
+      }
+    }
+    guard let otherwise else { return .null }
+    return try evaluate(otherwise, routines, bindings).coerced(to: type)
   }
-  var values = Array<Value>()
-  values.reserveCapacity(arguments.count)
-  for argument in arguments {
-    try values.append(evaluate(argument, row, routines, bindings))
+
+  /// Resolves `name` in `routines` and applies it to its evaluated `arguments`.
+  private borrowing func apply(_ name: String, _ arguments: Array<Term>,
+                               _ routines: Routines, _ bindings: Bindings)
+      throws(SQLError) -> Value {
+    guard let routine = routines[name] else {
+      throw .function(name)
+    }
+    var values = Array<Value>()
+    values.reserveCapacity(arguments.count)
+    for argument in arguments {
+      try values.append(evaluate(argument, routines, bindings))
+    }
+    let result = try routine(values)
+    // A registered routine is a public producer of `Value`s that bypasses the
+    // literal/arithmetic finite checks; enforce the invariant here so a routine
+    // cannot return `inf`/NaN. NaN in particular is unequal to itself and would
+    // break UNION/CTE dedup and ORDER BY (and stall a recursive UNION at the
+    // cap).
+    if case let .double(number) = result, !number.isFinite {
+      throw .magnitude("function '\(name)' produced a non-finite double")
+    }
+    return result
   }
-  let result = try routine(values)
-  // A registered routine is a public producer of `Value`s that bypasses the
-  // literal/arithmetic finite checks; enforce the invariant here so a routine
-  // cannot return `inf`/NaN. NaN in particular is unequal to itself and would
-  // break UNION/CTE dedup and ORDER BY (and stall a recursive UNION at the
-  // cap).
-  if case let .double(number) = result, !number.isFinite {
-    throw .magnitude("function '\(name)' produced a non-finite double")
-  }
-  return result
 }
 
 // MARK: - Evaluation
@@ -522,60 +521,61 @@ internal func or(_ lhs: Bool?, _ rhs: Bool?) -> Bool? {
   return lhs == false && rhs == false ? false : nil
 }
 
-/// Evaluates `filter` against `row` under three-valued logic, resolving scalar
-/// calls through `routines` and any bound parameter from `bindings`.
-///
-/// The result is `true`, `false`, or `nil` — SQL's UNKNOWN. A `compare`
-/// evaluates both operand terms and matches them — a `NULL` operand making the
-/// comparison UNKNOWN; a `bound` matches the left term against the parameter's
-/// bound value, but an unbound or absent parameter is UNKNOWN (`nil`), not
-/// `false` — a missing binding cannot be inverted into a match by `NOT`. A
-/// `match` tests both cells equal under the same three-valued rule, so a `NULL`
-/// join key matches nothing; a `null` is a definite test of whether its term
-/// is `NULL` (`true`/`false`, never UNKNOWN), negated for `IS NOT NULL`. `AND`
-/// and `OR` follow Kleene logic (`false` dominates `AND`, `true` dominates `OR`,
-/// UNKNOWN otherwise) and `NOT` maps UNKNOWN to itself. The executor admits a
-/// row only when the whole predicate is `true` (its `== true` gate), so UNKNOWN
-/// and `false` both reject. The `borrowing` row is non-escaping; it threads
-/// into the recursion freely and is never stored.
-internal func evaluate<R: Row & ~Escapable>(_ filter: Filter,
-                                            _ row: borrowing R,
-                                            _ routines: Routines,
-                                            _ bindings: Bindings)
-    throws(SQLError) -> Bool? {
-  switch filter {
-  case let .compare(lhs, op, rhs):
-    try matches(evaluate(lhs, row, routines, bindings), op,
-                evaluate(rhs, row, routines, bindings))
-  case let .bound(term, op, parameter):
-    if let operand = bindings[parameter] {
-      try matches(evaluate(term, row, routines, bindings), op, operand)
-    } else {
-      nil
+extension Row where Self: ~Escapable {
+  /// Evaluates `filter` against this row under three-valued logic, resolving
+  /// scalar calls through `routines` and any bound parameter from `bindings`.
+  ///
+  /// The result is `true`, `false`, or `nil` — SQL's UNKNOWN. A `compare`
+  /// evaluates both operand terms and matches them — a `NULL` operand making
+  /// the comparison UNKNOWN; a `bound` matches the left term against the
+  /// parameter's bound value, but an unbound or absent parameter is UNKNOWN
+  /// (`nil`), not `false` — a missing binding cannot be inverted into a match
+  /// by `NOT`. A `match` tests both cells equal under the same three-valued
+  /// rule, so a `NULL` join key matches nothing; a `null` is a definite test of
+  /// whether its term is `NULL` (`true`/`false`, never UNKNOWN), negated for
+  /// `IS NOT NULL`. `AND` and `OR` follow Kleene logic (`false` dominates
+  /// `AND`, `true` dominates `OR`, UNKNOWN otherwise) and `NOT` maps UNKNOWN to
+  /// itself. The executor admits a row only when the whole predicate is `true`
+  /// (its `== true` gate), so UNKNOWN and `false` both reject. The `borrowing`
+  /// row is non-escaping; it threads into the recursion freely and is never
+  /// stored.
+  internal borrowing func evaluate(_ filter: Filter, _ routines: Routines,
+                                   _ bindings: Bindings)
+      throws(SQLError) -> Bool? {
+    switch filter {
+    case let .compare(lhs, op, rhs):
+      try matches(evaluate(lhs, routines, bindings), op,
+                  evaluate(rhs, routines, bindings))
+    case let .bound(term, op, parameter):
+      if let operand = bindings[parameter] {
+        try matches(evaluate(term, routines, bindings), op, operand)
+      } else {
+        nil
+      }
+    case let .match(left, right):
+      matches(self[left], .equal, self[right])
+    case let .null(term, negated):
+      try (evaluate(term, routines, bindings) == .null) != negated
+    case let .and(lhs, rhs):
+      // `&&`/`||` take an `@autoclosure` right operand, which would capture the
+      // borrowed `~Escapable` row; spell each connective explicitly so a branch
+      // re-borrows the row rather than capturing it. Kleene `AND`: `false`
+      // dominates, an UNKNOWN left yields `false` only against a `false` right.
+      switch try evaluate(lhs, routines, bindings) {
+      case false?: false
+      case true?: try evaluate(rhs, routines, bindings)
+      case nil: try evaluate(rhs, routines, bindings) == false ? false : nil
+      }
+    case let .or(lhs, rhs):
+      // Kleene `OR`: `true` dominates, an UNKNOWN left yields `true` only
+      // against a `true` right.
+      switch try evaluate(lhs, routines, bindings) {
+      case true?: true
+      case false?: try evaluate(rhs, routines, bindings)
+      case nil: try evaluate(rhs, routines, bindings) == true ? true : nil
+      }
+    case let .not(operand):
+      try evaluate(operand, routines, bindings).map { !$0 }
     }
-  case let .match(left, right):
-    matches(row[left], .equal, row[right])
-  case let .null(term, negated):
-    try (evaluate(term, row, routines, bindings) == .null) != negated
-  case let .and(lhs, rhs):
-    // `&&`/`||` take an `@autoclosure` right operand, which would capture the
-    // borrowed `~Escapable` row; spell each connective explicitly so a branch
-    // re-borrows the row rather than capturing it. Kleene `AND`: `false`
-    // dominates, an UNKNOWN left yields `false` only against a `false` right.
-    switch try evaluate(lhs, row, routines, bindings) {
-    case false?: false
-    case true?: try evaluate(rhs, row, routines, bindings)
-    case nil: try evaluate(rhs, row, routines, bindings) == false ? false : nil
-    }
-  case let .or(lhs, rhs):
-    // Kleene `OR`: `true` dominates, an UNKNOWN left yields `true` only against
-    // a `true` right.
-    switch try evaluate(lhs, row, routines, bindings) {
-    case true?: true
-    case false?: try evaluate(rhs, row, routines, bindings)
-    case nil: try evaluate(rhs, row, routines, bindings) == true ? true : nil
-    }
-  case let .not(operand):
-    try evaluate(operand, row, routines, bindings).map { !$0 }
   }
 }

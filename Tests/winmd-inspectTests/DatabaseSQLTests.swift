@@ -5,6 +5,7 @@ import Testing
 
 @testable import winmd_inspect
 
+import Mustache
 import SQL
 @testable import WinMD
 import WinMDSynthesis
@@ -194,6 +195,40 @@ struct DatabaseSQLTests {
                           strings: strings.span.bytes, blob: blob.span.bytes,
                           guid: empty.span.bytes, valid: valid, sorted: 0)
     try body(storage)
+  }
+
+  /// Runs `body` over a `Storage` catalog whose relations carry an (empty)
+  /// `GenericParam` table, so the render's `declarations` guard — which checks
+  /// the table's PRESENCE in storage before running the `generics` view —
+  /// passes and the render takes its generic arm. The rows the arm renders come
+  /// from a `generics` view override the caller registers, so the table need
+  /// hold no rows (an empty range past the last real table); the shared
+  /// fixture omits it (no generics), which the render treats as no generics.
+  private static func withGenerics(
+      _ body: (borrowing Storage) throws -> Void) rethrows {
+    var relations = DatabaseSQLTests.relations
+    relations.append(WinMD.Table(Metadata.Tables.GenericParam.self, rows: 0,
+                                 range: bytes.count ..< bytes.count,
+                                 wide: 0, stride: 8))
+    let valid = DatabaseSQLTests.valid | (1 << 42)
+    let storage = Storage(bytes: bytes.span.bytes, relations: relations.span,
+                          strings: strings.span.bytes, blob: blob.span.bytes,
+                          guid: empty.span.bytes, valid: valid, sorted: 0)
+    try body(storage)
+  }
+
+  /// The bundled template `name`'s body with its leading `{{! language: … }}`
+  /// directive line stripped — the body the render hands to `MustacheTemplate`
+  /// after `language(declaredIn:)` consumes the directive. A test renders it
+  /// directly with a hand-built context to pin the template's output shape.
+  private static func template(named name: String) throws -> String {
+    var body = ""
+    try DatabaseSQLTests.with { catalog in
+      let shell = Shell(catalog)
+      body = try shell.template(named: name, search: [])
+    }
+    guard let newline = body.firstIndex(where: \.isNewline) else { return body }
+    return String(body[body.index(after: newline)...])
   }
 
   /// Plans and runs `query` through the engine over the catalog.
@@ -807,6 +842,422 @@ struct DatabaseSQLTests {
     }
   }
 
+  @Test func `the bundled com template renders a non-generic interface unchanged`() throws {
+    // The fixture's `IMyInterface` (non-generic) renders through the REAL
+    // bundled `com` template: the `{{^generic}}` arm emits today's `@com`
+    // protocol shape unchanged — a static `@com(interface:)` IID, `public
+    // protocol` with its `: IInspectable` base, and one `func` per method — with
+    // no generic-wrapper output. This pins the non-generic output byte-for-byte
+    // so the generic split cannot perturb it.
+    try DatabaseSQLTests.with { catalog in
+      let shell = Shell(catalog)
+      let rendered = try shell.render("IMyInterface", template: "com")
+      #expect(rendered == """
+        @com(interface: "0C733A30-2A1C-11CE-ADE5-00AA0044773D")
+        public protocol IMyInterface: IInspectable {
+            func MyMethod(_ first: CInt, _ : HSTRING)
+        }
+
+        """)
+    }
+  }
+
+  @Test func `the bundled com template renders a generic interface as a wrapper`() throws {
+    // A generic interface renders through the `{{#generic}}` arm of the REAL
+    // bundled `com` template: an internal ABI protocol carrying the ordered
+    // type parameters as its primary associated types (`<Element>` naming an
+    // `associatedtype Element` in the body) — so a requirement mentioning
+    // `Element` resolves — with no static IID (the WinRT PIID is computed at
+    // runtime), plus a public generic `struct` wrapper holding the ABI as a
+    // parameterised existential (`any IVectorABI<Element>`). The context is
+    // built the same way the render loop assembles it for an `IVector`-like
+    // ``1` type (arity suffix stripped, one generic parameter `Element`, one
+    // method whose return decodes to that declared name).
+    let body = try DatabaseSQLTests.template(named: "com")
+    let template = try MustacheTemplate(string: body)
+    let context: [String: Any] = [
+      "name": "IVector",
+      "abi": "IVectorABI",
+      "iid": "00000000-0000-0000-0000-000000000000",
+      "namespace": "Windows.Foundation.Collections",
+      "generic": true,
+      "generics": [["name": "Element", "last": true]],
+      "methods": [
+        [
+          "name": "GetAt",
+          "params": [
+            ["name": "index", "local": "index", "type": "CUnsignedInt",
+             "last": true],
+          ],
+          "returns": "Element",
+        ],
+      ],
+    ]
+    #expect(template.render(context) == """
+      // A WinRT parameterised interface: its IID is a per-instantiation PIID computed
+      // at runtime from the type arguments, so no static `@com(interface:)` is emitted
+      // on the ABI protocol or the generic wrapper — the runtime projection supplies it.
+      internal protocol IVectorABI<Element> {
+          associatedtype Element
+          func GetAt(_ index: CUnsignedInt) -> Element
+      }
+
+      public struct IVector<Element> {
+          internal let base: any IVectorABI<Element>
+          public func GetAt(_ index: CUnsignedInt) -> Element {
+              base.GetAt(index)
+          }
+      }
+
+      """)
+  }
+
+  @Test func `a generic interface whose stripped name is a keyword renders escaped`() throws {
+    // A generic type named `protocol``1` strips to the reserved word
+    // `protocol`, which the render escapes to the backticked `` `protocol` ``
+    // for the wrapper `struct` name. The ABI-protocol name is a DIFFERENT
+    // spelling: it suffixes `ABI` onto the stripped name BEFORE escaping, so it
+    // is the plain `protocolABI` (no Swift keyword ends in `ABI`, so the escape
+    // is a no-op). Suffixing `ABI` onto the ALREADY-escaped `` `protocol` ``
+    // would splice a backtick pair into the middle (`` `protocol`ABI ``), which
+    // Swift cannot parse. The wrapper `struct` keeps the escaped bare name
+    // (`` `protocol`<Element> ``); the ABI protocol's declaration and the
+    // wrapper's `base: any …<Element>` existential both spell `protocolABI`.
+    // Overriding `interfaces` to yield a suffixed keyword name over the
+    // fixture's generic-aware storage drives the render's generic arm;
+    // `methods` and `bases` are emptied so the output is the declaration shell
+    // alone.
+    try DatabaseSQLTests.withGenerics { catalog in
+      var shell = Shell(catalog)
+      let interfaces = """
+        CREATE VIEW interfaces AS
+        SELECT Id, TypeNamespace, 'protocol`1' AS TypeName,
+               '00000000-0000-0000-0000-000000000000' AS iid
+        FROM TypeDef WHERE Id = 1
+        """
+      let generics = """
+        CREATE VIEW generics AS
+        SELECT 'Element' AS Name, 0 AS Number FROM TypeDef WHERE Id = :parent
+        """
+      let methods = """
+        CREATE VIEW methods AS
+        SELECT Id, '' AS Name FROM TypeDef WHERE 0 = 1
+        """
+      let bases = """
+        CREATE VIEW bases AS SELECT '' AS base FROM TypeDef WHERE 0 = 1
+        """
+      for query in [interfaces, generics, methods, bases] {
+        let (name, view) = try DatabaseSQLTests.create(query)
+        shell.session.register(name, view)
+      }
+      let rendered = try shell.render("protocol`1", template: "com")
+      #expect(rendered == """
+        // A WinRT parameterised interface: its IID is a per-instantiation PIID computed
+        // at runtime from the type arguments, so no static `@com(interface:)` is emitted
+        // on the ABI protocol or the generic wrapper — the runtime projection supplies it.
+        internal protocol protocolABI<Element>: IUnknown {
+            associatedtype Element
+        }
+
+        public struct `protocol`<Element> {
+            internal let base: any protocolABI<Element>
+        }
+
+        """)
+    }
+  }
+
+  // A self-contained fixture whose one generic interface `IVector` inherits a
+  // generic base named through a `TypeSpec` — an `IIterable<Element>` — so the
+  // render must decode the `TypeSpec` `GENERICINST` with the owner's generic
+  // names for the inheritance clause (`bases` yields no name; `specs` yields
+  // the `TypeSpec` `Id`). Five narrow tables, in table-number order:
+  //   TypeRef[0]:  ResolutionScope=0, TypeName="IIterable"(1) — the generic
+  //                base the `TypeSpec` instantiates; `class`-tagged, coded as
+  //                TypeDefOrRef(TypeRef row 1)=(1<<2)|1=5 in the signature.
+  //   TypeDef[0]:  Flags=0x21 (interface), TypeName="IVector"(11),
+  //                TypeNamespace="NS"(27), Extends=0, MethodList=1 — the owning
+  //                generic interface; `GenericParam` declares its `Element`.
+  //   InterfaceImpl[0]: Class=1=IVector; Interface=TypeDefOrRef(TypeSpec row
+  //                1)=(1<<2)|2=6 — a generic base named through a `TypeSpec`, so
+  //                both `bases` name arms are NULL and `specs` surfaces its Id.
+  //   TypeSpec[0]: Signature=blob[1] — `GENERICINST CLASS <IIterable> 1 VAR 0`,
+  //                the specialized base `IIterable<Element>`.
+  //   GenericParam[0]: Number=0, Owner=TypeOrMethodDef(TypeDef row 1)=(1<<1)=2,
+  //                Name="Element"(19) — `IVector`'s one declared parameter.
+  private static let genericBytes: Array<UInt8> = [
+    // TypeRef[0]
+    0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    // TypeDef[0]
+    0x21, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x1b, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
+    // InterfaceImpl[0]
+    0x01, 0x00, 0x06, 0x00,
+    // TypeSpec[0]
+    0x01, 0x00,
+    // GenericParam[0]
+    0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x13, 0x00,
+  ]
+
+  // "\0IIterable\0IVector\0Element\0NS\0": IIterable@1, IVector@11, Element@19,
+  // NS@27.
+  private static let genericStrings: Array<UInt8> = [
+    0x00,
+    0x49, 0x49, 0x74, 0x65, 0x72, 0x61, 0x62, 0x6c, 0x65, 0x00,
+    0x49, 0x56, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x00,
+    0x45, 0x6c, 0x65, 0x6d, 0x65, 0x6e, 0x74, 0x00,
+    0x4e, 0x53, 0x00,
+  ]
+
+  // A `#Blob` heap: offset 0 is the reserved empty blob; offset 1 is the 6-byte
+  // `TypeSpec` signature `IIterable<Element>` — `GENERICINST` (0x15), `CLASS`
+  // (0x12), the `IIterable` TypeDefOrRef coded index (0x05), argument count 1,
+  // `VAR` (0x13) operand 0 — preceded by its length 0x06.
+  private static let genericBlob: Array<UInt8> = [
+    0x00,
+    0x06, 0x15, 0x12, 0x05, 0x01, 0x13, 0x00,
+  ]
+
+  private static let genericRelations: Array<WinMD.Table> = [
+    WinMD.Table(Metadata.Tables.TypeRef.self, rows: 1, range: 0 ..< 6,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 1, range: 6 ..< 20,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.InterfaceImpl.self, rows: 1, range: 20 ..< 24,
+                wide: 0, stride: 4),
+    WinMD.Table(Metadata.Tables.TypeSpec.self, rows: 1, range: 24 ..< 26,
+                wide: 0, stride: 2),
+    WinMD.Table(Metadata.Tables.GenericParam.self, rows: 1, range: 26 ..< 34,
+                wide: 0, stride: 8),
+  ]
+
+  /// Runs `body` over a `Storage` catalog bound to the generic-base fixture.
+  private static func withGenericBase(
+      _ body: (borrowing Storage) throws -> Void) rethrows {
+    let valid: UInt64 =
+        (1 << 1) | (1 << 2) | (1 << 9) | (1 << 27) | (1 << 42)
+    let storage = Storage(bytes: genericBytes.span.bytes,
+                          relations: genericRelations.span,
+                          strings: genericStrings.span.bytes,
+                          blob: genericBlob.span.bytes,
+                          guid: empty.span.bytes, valid: valid, sorted: 0)
+    try body(storage)
+  }
+
+  @Test func `a generic base named through a TypeSpec is decoded specialized`() throws {
+    // A generic interface inheriting another generic interface has an
+    // `InterfaceImpl.Interface` that is a `TypeSpec` (a `GENERICINST`), not a
+    // `TypeRef`/`TypeDef` name — so `bases` (which projects only a `TypeName`)
+    // cannot spell it. The render instead reads the `TypeSpec`'s `Id` through
+    // the REAL bundled `specs` view and decodes its signature with the OWNER's
+    // declared generic names threaded. The generic arm's inheritance clause is
+    // the ABI PROTOCOL's, and a protocol cannot inherit the base's public
+    // wrapper `struct`, so the clause spells the base's ABI PROTOCOL,
+    // `IIterableABI` — the `ABI` suffix on the base's simple name — rather than
+    // the wrapper `IIterable<Element>`, a bare arity-suffixed name, or the root.
+    // The base is spelled WITHOUT arguments: a protocol's primary associated
+    // types are not in scope in its own inheritance clause (`protocol P<T>:
+    // Q<T>` does not compile), so the deriving ABI protocol's own `<Element>`
+    // REFINES the inherited associated type instead — which typechecks for the
+    // WinRT pass-through where the base's argument is the owner's `Element`.
+    // Only `interfaces` is overridden (to name `IVector` without the
+    // `GuidAttribute` chain the fixture omits) and `methods` emptied (the
+    // wrapper's requirements are exercised elsewhere); `generics`, `bases`, and
+    // `specs` are the real bundled views over the storage.
+    try DatabaseSQLTests.withGenericBase { catalog in
+      var shell = Shell(catalog)
+      let interfaces = """
+        CREATE VIEW interfaces AS
+        SELECT Id, TypeNamespace, TypeName,
+               '00000000-0000-0000-0000-000000000000' AS iid
+        FROM TypeDef WHERE Id = 1
+        """
+      let methods = """
+        CREATE VIEW methods AS
+        SELECT Id, '' AS Name FROM TypeDef WHERE 0 = 1
+        """
+      for query in [interfaces, methods] {
+        let (name, view) = try DatabaseSQLTests.create(query)
+        shell.session.register(name, view)
+      }
+      let rendered = try shell.render("IVector", template: "com")
+      #expect(rendered == """
+        // A WinRT parameterised interface: its IID is a per-instantiation PIID computed
+        // at runtime from the type arguments, so no static `@com(interface:)` is emitted
+        // on the ABI protocol or the generic wrapper — the runtime projection supplies it.
+        internal protocol IVectorABI<Element>: IIterableABI {
+            associatedtype Element
+        }
+
+        public struct IVector<Element> {
+            internal let base: any IVectorABI<Element>
+        }
+
+        """)
+    }
+  }
+
+  @Test func `a generic interface inheriting a non-generic base keeps it plain`() throws {
+    // A generic interface may inherit a NON-generic base — `IInspectable`, a
+    // plain protocol, not a generic one — which arrives through `bases` (a
+    // `TypeRef`/`TypeDef` simple name), not `specs`/a `TypeSpec`. Its ABI
+    // protocol's inheritance clause names that base UNCHANGED (`: IInspectable`,
+    // no `ABI` suffix and no arguments): the base is already a protocol and
+    // carries no wrapper/ABI split, so only a GENERIC base (a `TypeSpec`
+    // `GENERICINST`) gets the `ABI`-suffixed spelling. The `withGenerics`
+    // storage carries no `TypeSpec` table, so `specialization` is `nil` and the
+    // `bases` override supplies the plain name; `methods` are emptied so the
+    // output is the declaration shell.
+    try DatabaseSQLTests.withGenerics { catalog in
+      var shell = Shell(catalog)
+      let interfaces = """
+        CREATE VIEW interfaces AS
+        SELECT Id, TypeNamespace, 'IVector`1' AS TypeName,
+               '00000000-0000-0000-0000-000000000000' AS iid
+        FROM TypeDef WHERE Id = 1
+        """
+      let generics = """
+        CREATE VIEW generics AS
+        SELECT 'Element' AS Name, 0 AS Number FROM TypeDef WHERE Id = :parent
+        """
+      let methods = """
+        CREATE VIEW methods AS
+        SELECT Id, '' AS Name FROM TypeDef WHERE 0 = 1
+        """
+      let bases = """
+        CREATE VIEW bases AS
+        SELECT 'IInspectable' AS base FROM TypeDef WHERE Id = :parent
+        """
+      for query in [interfaces, generics, methods, bases] {
+        let (name, view) = try DatabaseSQLTests.create(query)
+        shell.session.register(name, view)
+      }
+      let rendered = try shell.render("IVector`1", template: "com")
+      #expect(rendered == """
+        // A WinRT parameterised interface: its IID is a per-instantiation PIID computed
+        // at runtime from the type arguments, so no static `@com(interface:)` is emitted
+        // on the ABI protocol or the generic wrapper — the runtime projection supplies it.
+        internal protocol IVectorABI<Element>: IInspectable {
+            associatedtype Element
+        }
+
+        public struct IVector<Element> {
+            internal let base: any IVectorABI<Element>
+        }
+
+        """)
+    }
+  }
+
+  @Test func `a generic wrapper forwards a blank parameter under a synthesized name`() throws {
+    // The non-generic renderer allows a blank parameter name (`func Foo(_ :
+    // T)`), and the generic ABI protocol requirement keeps it blank too, but the
+    // wrapper's forwarding method must PASS every argument BY NAME in the call
+    // (`base.Foo(arg0)`) — a blank name there expands to an empty argument,
+    // dropping the argument or mangling the commas. A blank parameter therefore
+    // synthesizes a stable `arg<N>` local, used in BOTH the forwarding method's
+    // parameter list (`_ arg0: T`) and the call. This context (built as the
+    // render loop assembles one) drives the REAL bundled `com` template: the
+    // first parameter is blank (→ `arg0`), the second named (`value`, kept). The
+    // protocol requirement stays blank; only the wrapper's forwarding surface
+    // takes the synthesized names.
+    let body = try DatabaseSQLTests.template(named: "com")
+    let template = try MustacheTemplate(string: body)
+    let context: [String: Any] = [
+      "name": "IPair",
+      "abi": "IPairABI",
+      "iid": "00000000-0000-0000-0000-000000000000",
+      "namespace": "NS",
+      "generic": true,
+      "generics": [["name": "Element", "last": true]],
+      "methods": [
+        [
+          "name": "Set",
+          "params": [
+            ["name": "", "local": "arg0", "type": "Element", "last": false],
+            ["name": "value", "local": "value", "type": "CInt", "last": true],
+          ],
+        ],
+      ],
+    ]
+    #expect(template.render(context) == """
+      // A WinRT parameterised interface: its IID is a per-instantiation PIID computed
+      // at runtime from the type arguments, so no static `@com(interface:)` is emitted
+      // on the ABI protocol or the generic wrapper — the runtime projection supplies it.
+      internal protocol IPairABI<Element> {
+          associatedtype Element
+          func Set(_ : Element, _ value: CInt)
+      }
+
+      public struct IPair<Element> {
+          internal let base: any IPairABI<Element>
+          public func Set(_ arg0: Element, _ value: CInt) {
+              base.Set(arg0, value)
+          }
+      }
+
+      """)
+  }
+
+  @Test func `the render synthesizes arg names for blank parameters positionally`() throws {
+    // The render loop itself (not just the template) assigns the `arg<N>` local:
+    // a `Param` whose `Name` is blank gets a positional `arg0`/`arg1`, a named
+    // one keeps its name, so a mix renders `_ arg0: …, _ named: …, _ arg2: …`.
+    // A single blank parameter forwards as `base.M(arg0)` — no empty argument —
+    // and a named parameter is untouched. The fixture's storage decodes the
+    // parameter types; `interfaces`/`methods`/`params` are overridden so the one
+    // method takes a blank then a named parameter over the fixture's `MethodDef`
+    // signature. The forwarding call passes both locals.
+    try DatabaseSQLTests.withGenerics { catalog in
+      var shell = Shell(catalog)
+      let interfaces = """
+        CREATE VIEW interfaces AS
+        SELECT Id, TypeNamespace, 'IThing`1' AS TypeName,
+               '00000000-0000-0000-0000-000000000000' AS iid
+        FROM TypeDef WHERE Id = 1
+        """
+      let generics = """
+        CREATE VIEW generics AS
+        SELECT 'Element' AS Name, 0 AS Number FROM TypeDef WHERE Id = :parent
+        """
+      // The fixture's `MethodDef` Id 1 is `void MyMethod(i4, string)`, its two
+      // real parameters `Param` Id 2 (Sequence 1, `i4` → `CInt`) and Id 3
+      // (Sequence 2, `string` → `HSTRING`). `methods` names the one method;
+      // `params` yields those two rows in order but BLANKS the first's `Name`
+      // (its type still decodes from the real `Param` Id) and names the second
+      // `first`, so the render must synthesize `arg0` for the blank one and keep
+      // `first`. The `Sequence` column is non-zero so neither is filtered as the
+      // return pseudo-parameter.
+      let methods = """
+        CREATE VIEW methods AS
+        SELECT Id, 'MyMethod' AS Name FROM MethodDef WHERE Id = 1
+        """
+      let params = """
+        CREATE VIEW params AS
+        SELECT 2 AS Id, '' AS Name, 1 AS Sequence
+        FROM MethodDef WHERE Id = 1
+        UNION ALL
+        SELECT 3 AS Id, 'first' AS Name, 2 AS Sequence
+        FROM MethodDef WHERE Id = 1
+        """
+      let bases = """
+        CREATE VIEW bases AS SELECT '' AS base FROM TypeDef WHERE 0 = 1
+        """
+      for query in [interfaces, generics, methods, params, bases] {
+        let (name, view) = try DatabaseSQLTests.create(query)
+        shell.session.register(name, view)
+      }
+      let rendered = try shell.render("IThing`1", template: "com")
+      // The wrapper's forwarding method names the blank parameter `arg0` and
+      // keeps `first`; the call passes both. The ABI requirement leaves the
+      // blank parameter blank (`_ : CInt`).
+      #expect(rendered.contains(
+          "public func MyMethod(_ arg0: CInt, _ first: HSTRING) {"))
+      #expect(rendered.contains("base.MyMethod(arg0, first)"))
+      #expect(rendered.contains("func MyMethod(_ : CInt, _ first: HSTRING)"))
+    }
+  }
+
   @Test func `execute routes a .-token to its meta-command`() throws {
     // The leading-token dispatch matches `.tables` to `Tables`, which lists the
     // storage's relations; the fixture's catalog vends them, so `execute`
@@ -1183,6 +1634,143 @@ struct DatabaseSQLTests {
       let rendered = try shell.render("IMyInterface", template: "com")
       #expect(rendered.contains("LAST"))
       #expect(!rendered.contains("FIRST"))
+    }
+  }
+
+  // A `IMap<K,V> : IIterable<IKeyValuePair<K,V>>` fixture: the base's argument
+  // is NOT a plain owner parameter, so the forwarded base methods must decode
+  // the base's `VAR i` against the SUBSTITUTED argument, not the owner's own
+  // parameter of that position. `IIterable` owns one method, `First() -> VAR 0`
+  // (its element); forwarded into `IMap` the return must spell
+  // `IKeyValuePair<K, V>` (the substituted argument), not `K` (owner `VAR 0`).
+  //
+  // Strings: `\0IMap\0IIterable\0IKeyValuePair\0First\0K\0V\0Element\0NS\0` —
+  // IMap@1, IIterable@6, IKeyValuePair@16, First@30, K@36, V@38, Element@40,
+  // NS@48.
+  private static let mapStrings: Array<UInt8> = [
+    0x00,
+    0x49, 0x4d, 0x61, 0x70, 0x00,
+    0x49, 0x49, 0x74, 0x65, 0x72, 0x61, 0x62, 0x6c, 0x65, 0x00,
+    0x49, 0x4b, 0x65, 0x79, 0x56, 0x61, 0x6c, 0x75, 0x65, 0x50, 0x61, 0x69,
+    0x72, 0x00,
+    0x46, 0x69, 0x72, 0x73, 0x74, 0x00,
+    0x4b, 0x00,
+    0x56, 0x00,
+    0x45, 0x6c, 0x65, 0x6d, 0x65, 0x6e, 0x74, 0x00,
+    0x4e, 0x53, 0x00,
+  ]
+
+  // Blob: offset 0 empty; offset 1 the 4-byte `First` signature — HASTHIS
+  // (0x20), param count 0, return `VAR` (0x13) operand 0 — length 0x04; offset
+  // 6 the 12-byte `TypeSpec` signature `IIterable<IKeyValuePair<K,V>>` —
+  // GENERICINST (0x15) CLASS (0x12) IIterable (TypeDef 2 → coded 0x08) argcount
+  // 1, then the sole argument GENERICINST (0x15) CLASS (0x12) IKeyValuePair
+  // (TypeDef 3 → coded 0x0c) argcount 2, `VAR 0` (0x13 0x00), `VAR 1` (0x13
+  // 0x01) — length 0x0c.
+  private static let mapBlob: Array<UInt8> = [
+    0x00,
+    0x04, 0x20, 0x00, 0x13, 0x00,
+    0x0c, 0x15, 0x12, 0x08, 0x01, 0x15, 0x12, 0x0c, 0x02, 0x13, 0x00,
+    0x13, 0x01,
+  ]
+
+  // Tables: three `TypeDef` (IMap, IIterable, IKeyValuePair); one `MethodDef`
+  // (`First`, owned by IIterable through the `MethodList` ranges 1,1,2); one
+  // `Param` (the return pseudo-parameter, Sequence 0); one `InterfaceImpl`
+  // (Class IMap → Interface the `TypeSpec`); one `TypeSpec`; three
+  // `GenericParam` (IMap's K/V, IIterable's Element).
+  private static let mapBytes: Array<UInt8> = [
+    // TypeDef[0] IMap: Flags 0x21, Name 1, NS 48, Extends 0, Field 1, Method 1
+    0x21, 0x00, 0x00, 0x00, 0x01, 0x00, 0x30, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
+    // TypeDef[1] IIterable: Name 6, NS 48, Field 1, Method 1
+    0x21, 0x00, 0x00, 0x00, 0x06, 0x00, 0x30, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
+    // TypeDef[2] IKeyValuePair: Name 16, NS 48, Field 1, Method 2
+    0x21, 0x00, 0x00, 0x00, 0x10, 0x00, 0x30, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x02, 0x00,
+    // MethodDef[0] First: RVA 0, ImplFlags 0, Flags 0, Name 30, Sig 1, Param 1
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x1e, 0x00, 0x01, 0x00, 0x01, 0x00,
+    // Param[0] return: Flags 0, Sequence 0, Name 0
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // InterfaceImpl[0]: Class 1 (IMap), Interface TypeSpec 1 (coded 0x06)
+    0x01, 0x00, 0x06, 0x00,
+    // TypeSpec[0]: Signature blob 6
+    0x06, 0x00,
+    // GenericParam[0] IMap.K: Number 0, Flags 0, Owner (TypeDef 1 → 2), Name 36
+    0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x24, 0x00,
+    // GenericParam[1] IMap.V: Number 1, Owner 2, Name 38
+    0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x26, 0x00,
+    // GenericParam[2] IIterable.Element: Number 0, Owner (TypeDef 2 → 4),
+    // Name 40
+    0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x28, 0x00,
+  ]
+
+  private static let mapRelations: Array<WinMD.Table> = [
+    // An empty `TypeRef` table so the bundled `bases` view's `TypeRef` join arm
+    // resolves a relation (the fixture's only base is a same-file `TypeSpec`).
+    WinMD.Table(Metadata.Tables.TypeRef.self, rows: 0, range: 0 ..< 0,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 3, range: 0 ..< 42,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.MethodDef.self, rows: 1, range: 42 ..< 56,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.Param.self, rows: 1, range: 56 ..< 62,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.InterfaceImpl.self, rows: 1, range: 62 ..< 66,
+                wide: 0, stride: 4),
+    WinMD.Table(Metadata.Tables.TypeSpec.self, rows: 1, range: 66 ..< 68,
+                wide: 0, stride: 2),
+    WinMD.Table(Metadata.Tables.GenericParam.self, rows: 3, range: 68 ..< 92,
+                wide: 0, stride: 8),
+  ]
+
+  /// Runs `body` over a `Storage` catalog bound to the `IMap` fixture.
+  private static func withMap(
+      _ body: (borrowing Storage) throws -> Void) rethrows {
+    let valid: UInt64 =
+        (1 << 1) | (1 << 2) | (1 << 6) | (1 << 8) | (1 << 9) | (1 << 27)
+            | (1 << 42)
+    let storage = Storage(bytes: mapBytes.span.bytes,
+                          relations: mapRelations.span,
+                          strings: mapStrings.span.bytes,
+                          blob: mapBlob.span.bytes,
+                          guid: empty.span.bytes, valid: valid, sorted: 0)
+    try body(storage)
+  }
+
+  @Test func `a non-pass-through base forwards its method with the substituted argument`() throws {
+    // `IMap<K,V> : IIterable<IKeyValuePair<K,V>>`: the base `TypeSpec`'s sole
+    // argument is `IKeyValuePair<K,V>`, not a plain owner parameter, so the
+    // forwarded `IIterable.First() -> VAR 0` must decode `VAR 0` as the
+    // SUBSTITUTED argument `IKeyValuePair<K, V>`, not the owner's `VAR 0`
+    // (`K`). Only `interfaces` is overridden (to name `IMap` without the
+    // `GuidAttribute` chain the fixture omits); `generics`, `methods`,
+    // `params`, `specs`, and `bases` are the real bundled views over the
+    // storage, so the substitution and the forwarding walk are exercised end to
+    // end.
+    try DatabaseSQLTests.withMap { catalog in
+      var shell = Shell(catalog)
+      let interfaces = """
+        CREATE VIEW interfaces AS
+        SELECT Id, TypeNamespace, TypeName,
+               '00000000-0000-0000-0000-000000000000' AS iid
+        FROM TypeDef WHERE Id = 1
+        """
+      let (name, view) = try DatabaseSQLTests.create(interfaces)
+      shell.session.register(name, view)
+      let rendered = try shell.render("IMap", template: "com")
+      // The forwarded return spells the substituted argument, not the owner's
+      // `K` and not a placeholder.
+      #expect(rendered.contains(
+          "public func First() -> IKeyValuePair<K, V> {"))
+      #expect(rendered.contains("func First() -> IKeyValuePair<K, V>"))
+      #expect(!rendered.contains("First() -> K"))
+      // The base spells its ABI protocol with the differing argument pinned as
+      // a same-type constraint.
+      #expect(rendered.contains(
+          "IMapABI<K, V>: IIterableABI where Element == IKeyValuePair<K, V>"))
     }
   }
 }

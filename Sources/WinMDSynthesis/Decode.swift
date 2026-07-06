@@ -140,6 +140,85 @@ extension SignatureType {
       dialect.opaque
     }
   }
+
+  /// The ABI-PROTOCOL inheritance spelling of `self`, a generic base of a
+  /// generic ABI protocol's inheritance clause: the base's ABI PROTOCOL name
+  /// `BaseABI` (WITHOUT arguments in the name) plus a `where`-clause pinning
+  /// the base's associated types to the decoded arguments, rather than the
+  /// wrapper `Base<Args…>`.
+  ///
+  /// A generic interface inheriting a generic base has a `TypeSpec`
+  /// (`GENERICINST`) base whose wrapper spelling is `IIterable<Element>` — the
+  /// public wrapper `struct`. An ABI protocol cannot inherit a struct, so its
+  /// inheritance clause names the base's ABI PROTOCOL: `IIterableABI`. The base
+  /// is spelled WITHOUT its arguments in the name — `IIterableABI`, not
+  /// `IIterableABI<Element>` — because a protocol's primary associated types
+  /// are not in scope in its own inheritance clause (`protocol P<T>: Q<T>` does
+  /// not compile in Swift).
+  ///
+  /// The base's arguments are instead carried as SAME-TYPE CONSTRAINTS on the
+  /// deriving ABI protocol, pinning each of the base's associated types to its
+  /// decoded argument: `associates` names the base's ordered generic parameters
+  /// (its associated-type names, e.g. `Element`), which map positionally to
+  /// `arguments`, so `IMap<K,V> : IIterable<IKeyValuePair<K,V>>` yields
+  /// `IMapABI: IIterableABI where Element == IKeyValuePair<K, V>`. Without the
+  /// constraint the inherited associated type is unconstrained — inherited
+  /// methods would have an unknown element type and conformers would not be
+  /// checked against the real WinRT instantiation.
+  ///
+  /// A pass-through argument that is the plain owner parameter of the same name
+  /// (`IVector<Element> : IIterable<Element>`, whose constraint would be the
+  /// redundant `where Element == Element`) is OMITTED — the deriving protocol's
+  /// own primary associated type already refines the inherited one by name — so
+  /// only a constraint whose argument DIFFERS from the base's plain parameter
+  /// is emitted. When every argument is a pass-through the `where` clause is
+  /// absent entirely (a bare `IIterableABI`).
+  ///
+  /// A `GENERICINST` base spells `<simple name>ABI` (the `ABI` suffix on the
+  /// base's stripped, escaped simple name); any other shape — a bare named base
+  /// has no wrapper/ABI split — decodes plain, though the render only reaches
+  /// here for a `TypeSpec` base, which is always a `GENERICINST`.
+  public func abi(generics: Array<String>? = nil,
+                  associates: Array<String> = [], with resolver: Resolver,
+                  dialect: Dialect) -> String {
+    guard case let .instance(base, arguments) = self else {
+      return decode(generics: generics, with: resolver, dialect: dialect)
+    }
+    let spelling = base.decode(with: resolver, dialect: dialect)
+    // An unresolved base (a TypeSpec with no identity) decodes to the opaque
+    // pointer; there is no ABI protocol to inherit, so degrade to it.
+    guard spelling != dialect.opaque else { return spelling }
+    // Strip the CLR arity suffix, append `ABI`, THEN escape. The `ABI` suffix
+    // must precede the escape: a keyword base's `<name>ABI` is never itself a
+    // keyword (no Swift keyword ends in `ABI`), so escaping the SUFFIXED name
+    // is a no-op that yields a plain `protocolABI` — whereas escaping FIRST
+    // would splice a backtick pair into the middle (`` `protocol`ABI ``), two
+    // identifiers Swift cannot parse.
+    let name = dialect.escape(String(spelling.prefix { $0 != "`" }) + "ABI")
+    // Pin each base associated type to its decoded argument, dropping the
+    // redundant pass-through `where X == X`. A missing associate name (the base
+    // param names could not be recovered) or an arg shorter/longer than the
+    // associates list simply contributes no constraint for that position.
+    var constraints = Array<String>()
+    for (associate, argument) in zip(associates, arguments) {
+      let pinned = argument.decode(generics: generics, with: resolver,
+                                   dialect: dialect)
+      // Escape the associate name so the constraint's LHS matches the base ABI
+      // protocol's DECLARED associated-type name, which the render's `SANITIZE`
+      // (the same escape) spells. A keyword-named base parameter (`protocol`)
+      // declares `` `protocol` `` yet `associates` supplies the raw `protocol`,
+      // so the constraint must escape it too or name a nonexistent associate.
+      // The pass-through comparison uses the ESCAPED name as well: a
+      // pass-through argument decodes to the owner's escaped parameter name
+      // (the owner names arrive already escaped through `generics`), so a
+      // keyword pass-through (`` `protocol` == `protocol` ``) is still dropped.
+      let escaped = dialect.escape(associate)
+      guard pinned != escaped else { continue }
+      constraints.append("\(escaped) == \(pinned)")
+    }
+    guard !constraints.isEmpty else { return name }
+    return "\(name) where \(constraints.joined(separator: ", "))"
+  }
 }
 
 // MARK: - Primitives

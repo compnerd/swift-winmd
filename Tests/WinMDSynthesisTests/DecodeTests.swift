@@ -196,6 +196,129 @@ struct DecodeTests {
                 == "IReference<CInt>")
   }
 
+  @Test func `an ABI base suffixes the stripped base name and drops the arguments`() {
+    // A generic ABI protocol's inheritance clause names the base's ABI PROTOCOL,
+    // not its wrapper `struct` — a protocol cannot inherit a struct — so `abi`
+    // spells `BaseABI`: the `ABI` suffix on the stripped, escaped base simple
+    // name, WITHOUT arguments (a protocol's primary associated types are not in
+    // scope in its own inheritance clause, so `BaseABI<Args…>` would not
+    // compile; the deriving protocol's own primary associated type refines the
+    // inherited one instead). The wrapper spelling (`decode`) is `Base<Args…>`
+    // for the same instance.
+    let base = TypeDefOrRef(rawValue: 1)
+    let resolver = Resolver([
+      base.rawValue: Identity(namespace: "Windows.Foundation.Collections",
+                              name: "IIterable`1"),
+    ])
+    let instance = SignatureType.instance(.named(kind: .class, base),
+                                          [.variable(scope: .type, 0)])
+    #expect(instance.abi(generics: ["Element"], with: resolver,
+                         dialect: dialect) == "IIterableABI")
+    // The wrapper spelling of the same instance carries the arguments and no
+    // `ABI` suffix.
+    #expect(instance.decode(generics: ["Element"], with: resolver,
+                            dialect: dialect) == "IIterable<Element>")
+  }
+
+  @Test func `an ABI base pins a differing argument with a constraint`() {
+    // A generic base whose argument is NOT the owner's same-named parameter —
+    // `IMap<K,V> : IIterable<IKeyValuePair<K,V>>`, the base's `Element` bound
+    // to `IKeyValuePair<K, V>` — carries the argument as a same-type constraint
+    // on the deriving ABI protocol (`IIterableABI where Element ==
+    // IKeyValuePair<K, V>`), pinning the inherited associated type; without it
+    // `Element` is unconstrained. `associates` names the base's ordered generic
+    // parameters (its associated-type names), mapped to the arguments.
+    let iiterable = TypeDefOrRef(rawValue: 1)
+    let pair = TypeDefOrRef(rawValue: 2)
+    let resolver = Resolver([
+      iiterable.rawValue: Identity(namespace: "Windows.Foundation.Collections",
+                                   name: "IIterable`1"),
+      pair.rawValue: Identity(namespace: "Windows.Foundation.Collections",
+                              name: "IKeyValuePair`2"),
+    ])
+    // The base argument is `IKeyValuePair<K, V>` (`VAR 0`, `VAR 1`).
+    let argument = SignatureType.instance(.named(kind: .class, pair),
+        [.variable(scope: .type, 0), .variable(scope: .type, 1)])
+    let instance = SignatureType.instance(.named(kind: .class, iiterable),
+                                          [argument])
+    #expect(instance.abi(generics: ["K", "Value"], associates: ["Element"],
+                         with: resolver, dialect: dialect)
+                == "IIterableABI where Element == IKeyValuePair<K, Value>")
+  }
+
+  @Test func `an ABI base omits a redundant pass-through self-constraint`() {
+    // The standard pass-through `IVector<Element> : IIterable<Element>`, whose
+    // base argument IS the owner's same-named parameter, would give the
+    // redundant `where Element == Element`; it is omitted, so the base spells
+    // the bare `IIterableABI` — the deriving protocol's own primary associated
+    // type already refines the inherited one by name.
+    let base = TypeDefOrRef(rawValue: 1)
+    let resolver = Resolver([
+      base.rawValue: Identity(namespace: "Windows.Foundation.Collections",
+                              name: "IIterable`1"),
+    ])
+    let instance = SignatureType.instance(.named(kind: .class, base),
+                                          [.variable(scope: .type, 0)])
+    #expect(instance.abi(generics: ["Element"], associates: ["Element"],
+                         with: resolver, dialect: dialect) == "IIterableABI")
+    // With no `associates` supplied (a cross-file base whose parameter names
+    // are not in this file), the bare protocol is spelled — the safe degrade.
+    #expect(instance.abi(generics: ["Element"], with: resolver,
+                         dialect: dialect) == "IIterableABI")
+  }
+
+  @Test func `an ABI base suffixes ABI before escaping the keyword base name`() {
+    // A keyword-named generic base (`protocol``1`) strips its arity to
+    // `protocol`, then takes the `ABI` suffix BEFORE the keyword escape: the
+    // suffixed `protocolABI` is not a keyword, so the escape is a no-op and it
+    // spells the plain `protocolABI`. Escaping FIRST would splice a backtick
+    // pair into the middle (`` `protocol`ABI ``), two identifiers Swift cannot
+    // parse in an inheritance clause.
+    let base = TypeDefOrRef(rawValue: 1)
+    let resolver = Resolver([
+      base.rawValue: Identity(namespace: "NS", name: "protocol`1"),
+    ])
+    let instance = SignatureType.instance(.named(kind: .class, base),
+                                          [.primitive(.int4)])
+    #expect(instance.abi(with: resolver, dialect: dialect) == "protocolABI")
+  }
+
+  @Test func `an ABI base escapes a keyword associate name in its constraint`() {
+    // A base generic parameter whose name is a keyword (`in`) declares its
+    // associated type escaped (`` `in` ``, through the render's `SANITIZE`), so
+    // the same-type constraint's LHS must escape it too — the constraint pins
+    // the DECLARED associated type by name, and a raw `where in == …` names a
+    // nonexistent associate (and is not even parseable). The associate is
+    // escaped with the dialect (the same escape `SANITIZE` uses), so the
+    // constraint reads `` where `in` == CInt ``.
+    let base = TypeDefOrRef(rawValue: 1)
+    let resolver = Resolver([
+      base.rawValue: Identity(namespace: "NS", name: "IBase`1"),
+    ])
+    let instance = SignatureType.instance(.named(kind: .class, base),
+                                          [.primitive(.int4)])
+    #expect(instance.abi(generics: ["Element"], associates: ["in"],
+                         with: resolver, dialect: dialect)
+                == "IBaseABI where `in` == CInt")
+  }
+
+  @Test func `an ABI base drops a keyword pass-through with the escaped name`() {
+    // A pass-through whose base parameter is a keyword (`in`): the owner's
+    // parameter arrives already escaped through `generics` (`` `in` ``, from
+    // `SANITIZE`), so the argument decodes to `` `in` ``. The pass-through
+    // comparison uses the ESCAPED associate too, so `` `in` == `in` `` is
+    // recognised as redundant and dropped — the bare protocol is spelled, not a
+    // spurious self-constraint.
+    let base = TypeDefOrRef(rawValue: 1)
+    let resolver = Resolver([
+      base.rawValue: Identity(namespace: "NS", name: "IBase`1"),
+    ])
+    let instance = SignatureType.instance(.named(kind: .class, base),
+                                          [.variable(scope: .type, 0)])
+    #expect(instance.abi(generics: ["`in`"], associates: ["in"],
+                         with: resolver, dialect: dialect) == "IBaseABI")
+  }
+
   @Test func `a generic over an unresolved base degrades to the opaque pointer`() {
     // The base reference resolves to nothing (e.g. a TypeSpec with no
     // identity): the empty resolver leaves it unresolved.

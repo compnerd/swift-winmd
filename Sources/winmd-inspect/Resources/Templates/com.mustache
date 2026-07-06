@@ -1,7 +1,31 @@
 {{! language: swift }}
+{{#generic}}
+// A WinRT parameterised interface: its IID is a per-instantiation PIID computed
+// at runtime from the type arguments, so no static `@com(interface:)` is emitted
+// on the ABI protocol or the generic wrapper — the runtime projection supplies it.
+internal protocol {{{abi}}}<{{#generics}}{{{name}}}{{^last}}, {{/last}}{{/generics}}>{{#base}}: {{{.}}}{{/base}} {
+{{#generics}}
+    associatedtype {{{name}}}
+{{/generics}}
+{{#methods}}
+    func {{{name}}}({{#params}}_ {{{name}}}: {{{type}}}{{^last}}, {{/last}}{{/params}}){{#returns}} -> {{{.}}}{{/returns}}
+{{/methods}}
+}
+
+public struct {{{name}}}<{{#generics}}{{{name}}}{{^last}}, {{/last}}{{/generics}}> {
+    internal let base: any {{{abi}}}<{{#generics}}{{{name}}}{{^last}}, {{/last}}{{/generics}}>
+{{#methods}}
+    public func {{{name}}}({{#params}}_ {{{local}}}: {{{type}}}{{^last}}, {{/last}}{{/params}}){{#returns}} -> {{{.}}}{{/returns}} {
+        base.{{{name}}}({{#params}}{{{local}}}{{^last}}, {{/last}}{{/params}})
+    }
+{{/methods}}
+}
+{{/generic}}
+{{^generic}}
 @com(interface: "{{{iid}}}")
 public protocol {{{name}}}{{#base}}: {{{.}}}{{/base}} {
 {{#methods}}
     func {{{name}}}({{#params}}_ {{{name}}}: {{{type}}}{{^last}}, {{/last}}{{/params}}){{#returns}} -> {{{.}}}{{/returns}}
 {{/methods}}
 }
+{{/generic}}

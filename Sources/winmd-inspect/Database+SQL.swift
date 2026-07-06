@@ -787,6 +787,177 @@ extension WinMD.Storage {
                                     dialect: dialect)
   }
 
+  /// The ABI-PROTOCOL inheritance spelling of the `TypeSpec` at 1-based `spec`
+  /// `Id`, in `dialect`, spelled with the owner's ordered `generics` names — or
+  /// `nil` when the row or its signature does not decode.
+  ///
+  /// A generic interface inheriting another generic interface has an
+  /// `InterfaceImpl.Interface` that is a `TypeSpec` — a `GENERICINST` naming
+  /// the specialized base — not a `TypeRef`/`TypeDef`. The `specs` view
+  /// surfaces its `Id`; this opens the `TypeSpec` row, decodes its signature to
+  /// `SignatureType`, builds a `Resolver` over the storage, and spells it with
+  /// the OWNER's generic names threaded, so a `VAR 0` in the base's arguments
+  /// spells the owner's `Element` rather than a placeholder.
+  ///
+  /// The generic arm's inheritance clause is the ABI protocol's, and a protocol
+  /// cannot inherit a wrapper `struct`, so the base names its ABI PROTOCOL:
+  /// `IIterableABI` (the `ABI` suffix on the base's simple name, WITHOUT
+  /// arguments in the name — a protocol's primary associated types are not in
+  /// scope in its own inheritance clause), not the wrapper `IIterable<T>`.
+  /// The base's arguments are carried instead as same-type constraints on the
+  /// deriving ABI protocol (`… where Element == IKeyValuePair<K, V>`), pinning
+  /// the base's associated types to the decoded arguments; the base's ordered
+  /// generic-parameter NAMES (its associated-type names) come from the base's
+  /// own `GenericParam` rows through `associates(ofBase:)`. It spells the base
+  /// through `abi(…)`.
+  internal borrowing func decode(abi spec: Int,
+                                 generics: Array<String>? = nil,
+                                 in dialect: Dialect) -> String? {
+    guard let table = opened("TypeSpec") else { return nil }
+    let cursor = WinMD.Cursor(copy self, table)
+    guard let tuple = cursor[spec - 1],
+        let row = Row<Metadata.Tables.TypeSpec>(tuple),
+        let type = try? row.type,
+        let resolver = try? Resolver(of: type, with: self) else {
+      return nil
+    }
+    // The base's associated-type names — its own declared generic parameters —
+    // map positionally to the `GENERICINST`'s arguments for the same-type
+    // constraints. An empty list (a cross-file base whose `GenericParam` rows
+    // are not in this file, or an unresolvable base) simply emits no
+    // constraints: the bare `IIterableABI` is spelled, as before.
+    let associates = associates(ofBase: type)
+    return type.abi(generics: generics, associates: associates, with: resolver,
+                    dialect: dialect)
+  }
+
+  /// The ordered declared generic-parameter names — the associated-type names —
+  /// of the generic base a `GENERICINST` `type` (`.instance(base, args)`)
+  /// instantiates, read from the base's own `GenericParam` rows; an empty list
+  /// when `type` is not a `GENERICINST`, its base does not resolve to a
+  /// same-file `TypeDef`, or the `GenericParam` table is absent.
+  ///
+  /// The same-type constraints `abi(…)` emits pin the base's associated types
+  /// by NAME (`where Element == …`), and those names are exactly the names the
+  /// base interface's own ABI protocol declares — the base `TypeDef`'s
+  /// `GenericParam` names, in `Number` order. A cross-file base (a `TypeRef`,
+  /// whose `GenericParam` rows live in another module) resolves to no local
+  /// `TypeDef`, so this yields no names and `abi(…)` emits the bare protocol
+  /// (the safe degrade); a same-file base (a `TypeDef`, the shape a
+  /// self-contained fixture and a single-module projection take) yields them.
+  private borrowing func associates(ofBase type: SignatureType)
+      -> Array<String> {
+    // The base must resolve to a same-file `TypeDef` (tag 0 of the
+    // `TypeDefOrRef` coded index) — a cross-file `TypeRef` (tag 1) has no local
+    // `GenericParam` rows — and a `TypeDef` `row` is 1-based, so it is the
+    // base's `Id` directly.
+    guard case let .instance(base, _) = type,
+        case let .named(_, reference) = base,
+        reference.tag == 0, reference.row != 0,
+        let parameters = opened("GenericParam") else {
+      return []
+    }
+    // A `GenericParam.Owner` (ordinal 2) is a `TypeOrMethodDef` coded index; a
+    // `TypeDef` owner has tag 0, so a base `TypeDef` at 1-based `Id` is encoded
+    // `Id << 1`. Collect the matching rows' `Name` (ordinal 3) in `Number`
+    // (ordinal 0) order.
+    let owner = reference.row << 1
+    let cursor = WinMD.Cursor(copy self, parameters)
+    var declared = Array<(number: Int, name: String)>()
+    for index in 0 ..< cursor.count {
+      guard let generic = cursor[index], generic[2] == owner,
+          let name = try? generic.string(3) else { continue }
+      declared.append((generic[0], name))
+    }
+    return declared.sorted { $0.number < $1.number }.map(\.name)
+  }
+
+  /// The 1-based `TypeDef` `Id` of the SAME-FILE base a `TypeSpec`
+  /// (`GENERICINST`) at 1-based `spec` `Id` instantiates — an `IVector`'s
+  /// `IIterable` base — or `nil` when the row does not decode, the base is not
+  /// a same-file `TypeDef` (a cross-file `TypeRef`), or the `TypeSpec` table is
+  /// absent.
+  ///
+  /// The generic-wrapper forwarding walks the base's own methods, which are
+  /// bound by the base's `TypeDef` `Id`; a `GENERICINST` base is a `.named`
+  /// `TypeDefOrRef`, whose tag-0 (`TypeDef`) `row` is that 1-based `Id`
+  /// directly.
+  internal borrowing func base(ofSpec spec: Int) -> Int? {
+    guard let table = opened("TypeSpec") else { return nil }
+    let cursor = WinMD.Cursor(copy self, table)
+    guard let tuple = cursor[spec - 1],
+        let row = Row<Metadata.Tables.TypeSpec>(tuple),
+        let type = try? row.type,
+        case let .instance(base, _) = type,
+        case let .named(_, reference) = base,
+        reference.tag == 0, reference.row != 0 else {
+      return nil
+    }
+    return reference.row
+  }
+
+  /// The base's argument spellings a `TypeSpec` (`GENERICINST`) at 1-based
+  /// `spec` `Id` instantiates, each decoded in the OWNER's `generics` context —
+  /// the SUBSTITUTION that binds the base's `VAR i` to the owner's argument at
+  /// position `i` — or `nil` when the row does not decode.
+  ///
+  /// The generic-wrapper forwarding must decode the base's inherited methods
+  /// with the base's `VAR i` bound to the ARGUMENT the owner instantiates it
+  /// with, not to the owner's own parameter of the same position. For
+  /// `IMap<K,V> : IIterable<IKeyValuePair<K,V>>` the base `TypeSpec`'s sole
+  /// argument is `IKeyValuePair<K,V>` (a `GENERICINST` of two `VAR`s), decoded
+  /// in the owner's `<K, V>` context to `IKeyValuePair<K, V>`; that spelling
+  /// becomes the substitution's element 0, so the base's `First() -> VAR 0`
+  /// forwards as `First() -> IKeyValuePair<K, V>`, not `-> K`. The composition
+  /// is transitive: passing an already-substituted list as `generics` decodes
+  /// the next base level's arguments against it, so a grandbase's `VAR j` reads
+  /// the base's substitution.
+  internal borrowing func substitution(ofSpec spec: Int,
+                                       generics: Array<String>?,
+                                       in dialect: Dialect) -> Array<String>? {
+    guard let table = opened("TypeSpec") else { return nil }
+    let cursor = WinMD.Cursor(copy self, table)
+    guard let tuple = cursor[spec - 1],
+        let row = Row<Metadata.Tables.TypeSpec>(tuple),
+        let type = try? row.type,
+        case let .instance(_, arguments) = type,
+        let resolver = try? Resolver(of: type, with: self) else {
+      return nil
+    }
+    return arguments.map {
+      $0.decode(generics: generics, with: resolver, dialect: dialect)
+    }
+  }
+
+  /// The PUBLIC closed-specialization spelling of the `TypeSpec` at 1-based
+  /// `spec` `Id`, in `dialect` — the wrapper/public spelling `IBase<String>`,
+  /// its closed arguments preserved — or `nil` when the row or its signature
+  /// does not decode.
+  ///
+  /// A NON-generic interface inheriting a CLOSED generic base
+  /// (`IFoo : IBase<String>`) has an `InterfaceImpl.Interface` that is a
+  /// `TypeSpec` — a `GENERICINST` naming the closed base — yet renders the
+  /// public `protocol IFoo: <base>` arm, so its base must be a PUBLIC type its
+  /// public protocol may refine. That is the base's own public closed spelling
+  /// `IBase<String>`, decoded through `decode(…)` — NOT the internal `IBaseABI`
+  /// (a public protocol cannot refine an internal one, and the closed arguments
+  /// would be dropped), which is only the GENERIC-wrapper arm's inheritance
+  /// clause (`decode(abi:)`). No owner `generics` are threaded: a non-generic
+  /// owner declares none, and the base's arguments are already closed (a
+  /// concrete `String`, not an owner `VAR`).
+  internal borrowing func decode(specialization spec: Int,
+                                 in dialect: Dialect) -> String? {
+    guard let table = opened("TypeSpec") else { return nil }
+    let cursor = WinMD.Cursor(copy self, table)
+    guard let tuple = cursor[spec - 1],
+        let row = Row<Metadata.Tables.TypeSpec>(tuple),
+        let type = try? row.type,
+        let resolver = try? Resolver(of: type, with: self) else {
+      return nil
+    }
+    return type.decode(with: resolver, dialect: dialect)
+  }
+
   /// The decoded type spelling of the `Param` at 1-based `parameter` `Id`, in
   /// `dialect`, navigated through its owning method's signature — or `nil` when
   /// it does not decode.

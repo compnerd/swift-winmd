@@ -494,6 +494,24 @@ extension Row where Schema == Metadata.Tables.MethodDef {
   }
 }
 
+extension Row where Schema == Metadata.Tables.TypeSpec {
+  /// The decoded type the `TypeSpec` names (ECMA-335 §II.23.2.14).
+  ///
+  /// Distinct from the `Signature` accessor, which vends the raw `#Blob`; this
+  /// decodes that blob into a structured `SignatureType` — a `TypeSpec`
+  /// signature is a single `Type` (typically a `GENERICINST`), so it decodes
+  /// one type and requires the blob be consumed exactly.
+  public var type: SignatureType {
+    get throws(WinMDError) {
+      let entry = try blob(.Signature)
+      var decoder = SignatureDecoder(entry.bytes)
+      let type = try decoder.type()
+      try decoder.end()
+      return type
+    }
+  }
+}
+
 extension Row where Schema == Metadata.Tables.FieldDef {
   /// The decoded field signature (ECMA-335 §II.23.2.4).
   ///

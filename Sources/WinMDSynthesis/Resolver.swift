@@ -70,6 +70,17 @@ public struct Resolver: TypeResolver {
     self.init(table)
   }
 
+  /// Builds the `rawValue → Identity` table from one decoded type, resolved
+  /// against a borrowed `Storage` — the `TypeSpec` base of a generic
+  /// interface's inheritance clause is one `Type` (a `GENERICINST`), not a
+  /// whole method signature, so its `TypeDefOrRef` references collect the same.
+  package init(of type: SignatureType,
+               with storage: borrowing Storage) throws(WinMDError) {
+    var table = Dictionary<Int, Identity>()
+    try collect(type, into: &table, with: storage)
+    self.init(table)
+  }
+
   public func resolve(_ reference: TypeDefOrRef, kind: NamedKind) -> Identity? {
     table[reference.rawValue]
   }

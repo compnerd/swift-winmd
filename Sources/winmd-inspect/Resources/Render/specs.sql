@@ -1,0 +1,4 @@
+SELECT
+  spec
+FROM
+  specs

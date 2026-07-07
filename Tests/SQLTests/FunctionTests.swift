@@ -41,8 +41,8 @@ import SQLTestSupport
     #expect(routines["upper"]?.parameters == [.text])
   }
 
-  @Test func `registering declares a signature, the return defaulting to integer`() {
-    let routines = Routines()
+  @Test func `registering declares a signature, the return defaulting to integer`() throws {
+    let routines = try Routines()
         .registering("t", returns: .text, parameters: [.text]) {
           _ in .text("x")
         }
@@ -61,6 +61,230 @@ import SQLTestSupport
   @Test func `the standard prelude declares BITAND over two integers`() {
     #expect(Routines.standard["bitand"]?.returns == .integer)
     #expect(Routines.standard["bitand"]?.parameters == [.integer, .integer])
+  }
+}
+
+/// A small catalog the standard-library tests project the built-ins over. Its
+/// columns give each built-in an argument of the RIGHT type (`Text`, `Num`,
+/// `Real`) and, in a second row, a NULL of each, so a call over a column and a
+/// call over a NULL both run. `Pad` is a text column with leading and trailing
+/// spaces for `TRIM`. A third row carries `Int.min` in `Num` so the integer
+/// routines are exercised at the edge where a naive `start - 1` or `a % -1`
+/// would overflow and trap.
+private func library() throws -> FixtureCatalog {
+  try Catalog {
+    Relation("L", ["Id": .integer, "Text": .text, "Pad": .text,
+                   "Num": .integer, "Real": .double]) {
+      Row(1, "aBc", "  hi  ", -7, -2.5)
+      Row(2, nil, nil, nil, nil)
+      Row(3, "hello", "", Int.min, 0.0)
+    }
+  }
+}
+
+@Suite struct StandardLibraryTests {
+  // MARK: - Declared signatures
+
+  @Test func `each standard routine declares its signature`() {
+    let standard = Routines.standard
+    #expect(standard["upper"]?.returns == .text)
+    #expect(standard["upper"]?.parameters == [.text])
+    #expect(standard["lower"]?.returns == .text)
+    #expect(standard["char_length"]?.returns == .integer)
+    #expect(standard["char_length"]?.parameters == [.text])
+    #expect(standard["character_length"]?.returns == .integer)
+    #expect(standard["substring"]?.parameters == [.text, .integer])
+    #expect(standard["substring"]?.returns == .text)
+    #expect(standard["trim"]?.returns == .text)
+    #expect(standard["abs"]?.parameters == [.double])
+    #expect(standard["abs"]?.returns == .double)
+    #expect(standard["round"]?.returns == .double)
+    #expect(standard["ceiling"]?.returns == .double)
+    #expect(standard["ceil"]?.returns == .double)
+    #expect(standard["floor"]?.returns == .double)
+    #expect(standard["mod"]?.parameters == [.integer, .integer])
+    #expect(standard["mod"]?.returns == .integer)
+  }
+
+  @Test func `every standard routine is deterministic`() {
+    for name in ["bitand", "upper", "lower", "char_length",
+                 "character_length", "substring", "trim", "abs", "round",
+                 "ceiling", "ceil", "floor", "mod"] {
+      #expect(Routines.standard[name]?.deterministic == true)
+    }
+  }
+
+  @Test func `columns(of:) reports a built-in call by its declared type`() throws {
+    // The schema walk types a call by its routine's `returns`, so a projected
+    // built-in reports the declared header — text for UPPER, integer for
+    // CHAR_LENGTH, double for ROUND — when the standard prelude is in scope.
+    let query = try Statement(parsing:
+        "SELECT UPPER(Text), CHAR_LENGTH(Text), ROUND(Real) FROM L")
+    let typed = try library().columns(of: query, routines: .standard)
+    #expect(typed.map(\.type) == [.text, .integer, .double])
+  }
+
+  // MARK: - String routines
+
+  @Test func `UPPER and LOWER fold a text column`() throws {
+    try library().expect("SELECT UPPER(Text), LOWER(Text) FROM L WHERE Id = 1",
+                         yields: [["ABC", "abc"]], routines: .standard)
+  }
+
+  @Test func `UPPER folds a text literal`() throws {
+    try library().expect("SELECT UPPER('aBc') FROM L WHERE Id = 1",
+                         yields: [["ABC"]], routines: .standard)
+  }
+
+  @Test func `CHAR_LENGTH and its synonym count characters`() throws {
+    try library().expect(
+        "SELECT CHAR_LENGTH(Text), CHARACTER_LENGTH(Text) FROM L WHERE Id = 1",
+        yields: [[3, 3]], routines: .standard)
+  }
+
+  @Test func `SUBSTRING takes an ISO 1-based start`() throws {
+    // Position 2 of 'aBc' is 'Bc'; a start at or before 1 is the whole string.
+    try library().expect("SELECT SUBSTRING(Text, 2) FROM L WHERE Id = 1",
+                         yields: [["Bc"]], routines: .standard)
+    try library().expect("SELECT SUBSTRING(Text, 1) FROM L WHERE Id = 1",
+                         yields: [["aBc"]], routines: .standard)
+  }
+
+  @Test func `SUBSTRING clamps a start at or before 1 to the whole string`()
+      throws {
+    // A start of 0, a negative start, and the extreme `Int.min` all clamp to
+    // the first character; the `Int.min` case would trap on a naive
+    // `start - 1`, so it exercises the guarded conversion over an integer
+    // column.
+    try library().expect("SELECT SUBSTRING(Text, 0) FROM L WHERE Id = 3",
+                         yields: [["hello"]], routines: .standard)
+    try library().expect("SELECT SUBSTRING(Text, Num) FROM L WHERE Id = 1",
+                         yields: [["aBc"]], routines: .standard)
+    try library().expect("SELECT SUBSTRING(Text, Num) FROM L WHERE Id = 3",
+                         yields: [["hello"]], routines: .standard)
+    try library().expect("SELECT SUBSTRING(Text, 2) FROM L WHERE Id = 3",
+                         yields: [["ello"]], routines: .standard)
+  }
+
+  @Test func `TRIM strips leading and trailing spaces`() throws {
+    try library().expect("SELECT TRIM(Pad) FROM L WHERE Id = 1",
+                         yields: [["hi"]], routines: .standard)
+  }
+
+  // MARK: - Numeric routines
+
+  @Test func `ABS takes the magnitude of a real number`() throws {
+    try library().expect("SELECT ABS(Real) FROM L WHERE Id = 1",
+                         yields: [[2.5]], routines: .standard)
+  }
+
+  @Test func `ROUND CEILING CEIL and FLOOR shape a real number`() throws {
+    try library().expect(
+        "SELECT ROUND(2.5), CEILING(2.1), CEIL(2.1), FLOOR(2.9) FROM L "
+            + "WHERE Id = 1",
+        yields: [[3.0, 3.0, 3.0, 2.0]], routines: .standard)
+  }
+
+  @Test func `MOD takes the integer remainder`() throws {
+    try library().expect("SELECT MOD(7, 3), MOD(Num, 3) FROM L WHERE Id = 1",
+                         yields: [[1, -1]], routines: .standard)
+  }
+
+  @Test func `MOD by zero faults like integer division`() throws {
+    try library().expect("SELECT MOD(7, 0) FROM L WHERE Id = 1",
+                         fails: .divide, routines: .standard)
+  }
+
+  @Test func `MOD of Int.min by -1 and by 1 is zero without trapping`()
+      throws {
+    // `Int.min % -1` overflows the implied division and traps, so a divisor
+    // of -1 short-circuits to the mathematical remainder, 0; `Int.min % 1` is
+    // 0 too. The divisor is spelt `0 - 1` since the grammar has no negative
+    // literal.
+    try library().expect("SELECT MOD(Num, 0 - 1) FROM L WHERE Id = 3",
+                         yields: [[0]], routines: .standard)
+    try library().expect("SELECT MOD(Num, 1) FROM L WHERE Id = 3",
+                         yields: [[0]], routines: .standard)
+  }
+
+  // MARK: - NULL propagation
+
+  @Test func `a built-in returns NULL on a NULL argument`() throws {
+    // Every built-in propagates NULL, the way BITAND does — the Id = 2 row
+    // holds a NULL in each column.
+    try library().expect(
+        "SELECT UPPER(Text), CHAR_LENGTH(Text), SUBSTRING(Text, 1), "
+            + "TRIM(Pad), ABS(Real), ROUND(Real), FLOOR(Real), MOD(Num, 3) "
+            + "FROM L WHERE Id = 2",
+        yields: [[nil, nil, nil, nil, nil, nil, nil, nil]],
+        routines: .standard)
+  }
+
+  // MARK: - Bad arity and kind
+
+  @Test func `a built-in faults on the wrong argument count`() throws {
+    // The run path invokes the routine without a prior static type-check, so
+    // each built-in's own arity check reports the count fault.
+    try library().expect("SELECT UPPER(Text, Text) FROM L WHERE Id = 1",
+                         fails: .argument("UPPER takes one argument"),
+                         routines: .standard)
+    try library().expect("SELECT MOD(1) FROM L WHERE Id = 1",
+                         fails: .argument("MOD takes two arguments"),
+                         routines: .standard)
+  }
+
+  @Test func `a built-in faults on a wrong-typed argument`() throws {
+    // Likewise the run invokes the routine, whose own kind check faults a
+    // numeric column passed to UPPER's text argument and a text column passed
+    // to MOD's integer arguments.
+    try library().expect("SELECT UPPER(Num) FROM L WHERE Id = 1",
+                         fails: .argument("UPPER requires a text argument"),
+                         routines: .standard)
+    try library().expect("SELECT MOD(Text, 1) FROM L WHERE Id = 1",
+                         fails: .argument("MOD requires integer arguments"),
+                         routines: .standard)
+  }
+
+  // MARK: - Protection (non-shadowable)
+
+  @Test func `registering over a standard routine is rejected`() {
+    // A standard built-in is protected: `registering` refuses to bind its name
+    // (SQLSTATE 42723) rather than shadow it.
+    #expect(throws: SQLError.state("42723",
+        "'upper' is a standard routine and cannot be redefined")) {
+      try Routines().registering("upper", returns: .text,
+                                 parameters: [.text]) { _ in .text("x") }
+    }
+  }
+
+  @Test func `registering a defined function over a standard name is rejected`() {
+    // The `CREATE FUNCTION` path is protected too: a defined routine cannot
+    // take a built-in's name.
+    let function = Function(parameters: [], returns: .integer,
+                            body: .literal(.integer(0)))
+    #expect(throws: SQLError.state("42723",
+        "'floor' is a standard routine and cannot be redefined")) {
+      try Routines().registering("floor", function)
+    }
+  }
+
+  @Test func `protection resolves the name case-insensitively`() {
+    // The guard case-folds the name like every identifier, so a differently-
+    // cased spelling of a built-in is rejected too.
+    #expect(throws: SQLError.state("42723",
+        "'BitAnd' is a standard routine and cannot be redefined")) {
+      try Routines().registering("BitAnd", parameters: [.integer, .integer]) {
+        _ in .integer(0)
+      }
+    }
+  }
+
+  @Test func `registering a non-standard name still succeeds`() throws {
+    // Protection covers only the standard set — a fresh name binds as before.
+    let routines = try Routines().registering("mine", parameters: [.integer]) {
+      _ in .integer(1)
+    }
+    #expect(routines["mine"] != nil)
   }
 }
 

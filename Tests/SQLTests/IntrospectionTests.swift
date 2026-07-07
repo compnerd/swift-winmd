@@ -593,9 +593,8 @@ struct IntrospectionTests {
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["v": View(query: body, columns: ["iid"])])
     let routines =
-        Routines().registering("tag", returns: .text, parameters: [.text]) {
-          _ in .text("x")
-        }
+        try Routines().registering("tag", returns: .text,
+                                   parameters: [.text]) { _ in .text("x") }
     let rows = try cat.run(parse("""
         SELECT column_name, data_type FROM information_schema.columns
          WHERE table_name = 'v'
@@ -609,9 +608,8 @@ struct IntrospectionTests {
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
     let query = try parse("SELECT TAG(Name) AS t FROM People")
     let routines =
-        Routines().registering("tag", returns: .text, parameters: [.text]) {
-          _ in .text("x")
-        }
+        try Routines().registering("tag", returns: .text,
+                                   parameters: [.text]) { _ in .text("x") }
     #expect(try cat.columns(of: query, routines: routines)
                 == [OutputColumn(name: "t", type: .text)])
     // Without the routines, `TAG` is an unknown function that a run could not
@@ -649,9 +647,8 @@ struct IntrospectionTests {
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["w": View(query: body, columns: ["t"])])
     let routines =
-        Routines().registering("tag", returns: .text, parameters: [.text]) {
-          _ in .text("x")
-        }
+        try Routines().registering("tag", returns: .text,
+                                   parameters: [.text]) { _ in .text("x") }
     let typed =
         try cat.columns(of: parse("SELECT * FROM w"), routines: routines)
     #expect(typed == [OutputColumn(name: "t", type: .text)])

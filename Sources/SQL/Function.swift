@@ -236,24 +236,51 @@ public struct Routines: Sendable {
 
   /// The routine `name` names, folded to lower case like every other SQL
   /// identifier, or `nil` if no registered routine bears it. There is a single
-  /// flat map with no privileged tier: a prelude routine (`Routines.standard`)
-  /// and a caller-registered one resolve through the same lookup, so a later
-  /// registration shadows an earlier binding of the same name — the house rule
-  /// the resolver already follows (a view shadows a table, a CTE shadows a
-  /// view). (A future PATH / search-order mechanism — à la DB2 or PostgreSQL —
-  /// would let a qualified call reach a specific one across schemas.)
+  /// flat map with no privileged tier at LOOKUP: a prelude routine
+  /// (`Routines.standard`) and a caller-registered one resolve through the same
+  /// lookup, so a name resolves to whatever the map binds. (A future PATH /
+  /// search-order mechanism — à la DB2 or PostgreSQL — would let a qualified
+  /// call reach a specific one across schemas.) A caller does not REACH this
+  /// map past a standard name, though: `registering(_:…)` refuses to bind one
+  /// (see `protected`), so the shadowing a lower-level `init` still permits
+  /// never arises through the public extension surface.
   public subscript(_ name: String) -> Routine? {
     functions[name.lowercased()]
+  }
+
+  /// The names of the standard-library routines, case-folded — the built-ins
+  /// `Routines.standard` seeds. These are PROTECTED: `registering(_:…)` rejects
+  /// a binding of any of them, so a caller extending the prelude cannot shadow
+  /// an ISO built-in and silently change what a query naming it computes.
+  /// Constructing a `Routines` DIRECTLY through `init(_:)` or the dictionary
+  /// literal is a lower-level escape hatch that still admits a standard name —
+  /// it is how `standard` itself is built — but the public composition API
+  /// (`registering`) does not.
+  private static let protected = Set(standard.functions.keys)
+
+  /// Faults if `name` (case-folded) is a protected standard routine — the check
+  /// both `registering` overloads apply before binding, so neither the closure
+  /// nor the `CREATE FUNCTION` path shadows a built-in. It carries SQLSTATE
+  /// `42723` (duplicate function, the PostgreSQL subclass on the `42` class)
+  /// via the `.state` passthrough — no semantic case models a reserved-name
+  /// fault, and `.function`'s message ("no such function") would misdescribe
+  /// the condition.
+  private static func reserved(_ name: String) throws(SQLError) {
+    guard !protected.contains(name.lowercased()) else {
+      throw .state("42723", "'\(name)' is a standard routine and "
+                       + "cannot be redefined")
+    }
   }
 
   /// A copy of these routines with a routine computing `compute`, accepting
   /// `parameters` (default none), and returning `returns` (default `.integer`)
   /// bound to `name` (folded to lower case), the binding shadowing any existing
-  /// one. `deterministic` declares the routine's ISO SQL characteristic and
-  /// defaults to `false` (NOT DETERMINISTIC) — the safe default for a host
-  /// closure, which may be stateful or read the clock: it is not executed at
-  /// compile time. Pass `true` for a pure routine to let a row-independent call
-  /// fold.
+  /// one — UNLESS `name` is a protected standard routine (`reserved(_:)`),
+  /// which faults rather than shadow an ISO built-in. `deterministic` declares
+  /// the routine's ISO SQL characteristic and defaults to `false` (NOT
+  /// DETERMINISTIC) — the safe default for a host closure, which may be
+  /// stateful or read the clock: it is not executed at compile time. Pass
+  /// `true` for a pure routine to let a row-independent call fold.
   //
   // `SQL.Value` is spelled in full here and in `bitand`: `Routines` conforms to
   // `ExpressibleByDictionaryLiteral`, whose associated `Value` is the literal's
@@ -263,7 +290,9 @@ public struct Routines: Sendable {
                           parameters: Array<ValueType> = [],
                           deterministic: Bool = false,
                           _ compute: @escaping @Sendable (Array<SQL.Value>)
-                              throws(SQLError) -> SQL.Value) -> Routines {
+                              throws(SQLError) -> SQL.Value)
+      throws(SQLError) -> Routines {
+    try Routines.reserved(name)
     var functions = self.functions
     functions[name.lowercased()] =
         Routine(returns: returns, parameters: parameters,
@@ -272,9 +301,11 @@ public struct Routines: Sendable {
   }
 
   /// A copy of these routines with the DEFINED `function` bound to `name`
-  /// (folded to lower case), the binding shadowing any existing one — the
-  /// registration a consumer performs for a parsed `CREATE FUNCTION`, mirroring
-  /// a catalog registering a `CREATE VIEW`'s `View`.
+  /// (folded to lower case), the binding shadowing any existing one — UNLESS
+  /// `name` is a protected standard routine (`reserved(_:)`), which faults
+  /// rather than shadow an ISO built-in — the registration a consumer performs
+  /// for a parsed `CREATE FUNCTION`, mirroring a catalog registering a `CREATE
+  /// VIEW`'s `View`.
   ///
   /// The function's body is lowered to a term over its parameters HERE, so a
   /// body naming a parameter the function does not declare faults
@@ -313,6 +344,7 @@ public struct Routines: Sendable {
   /// INTERNAL calls, not which `f` a query reaches.
   public func registering(_ name: String, _ function: Function)
       throws(SQLError) -> Routines {
+    try Routines.reserved(name)
     var seen = Set<String>()
     for parameter in function.parameters
         where !seen.insert(parameter.name.lowercased()).inserted {
@@ -336,17 +368,85 @@ public struct Routines: Sendable {
   }
 
   /// The standard-library prelude — the routines the engine ships, seeded into
-  /// the flat registry at the public entry points so a query reaches them
-  /// without a caller registering a closure. They are ordinary entries in the
-  /// same map as any registered routine, not a privileged tier, so a caller MAY
-  /// shadow one (see `subscript(_:)`). Its lone member is `BITAND`, the
-  /// portable, standards-compliant spelling (Oracle's) of a bitwise AND — an
-  /// operation ISO SQL and this grammar otherwise lack; it returns an integer.
-  /// It is DETERMINISTIC — a pure bitwise fold — so a row-independent call may
-  /// fold at compile time.
-  public static let standard: Routines =
-      ["bitand": Routine(parameters: [.integer, .integer],
-                         deterministic: true, bitand)]
+  /// the flat registry at the public entry points (`Routines.standard` merged
+  /// under a caller's routines) so a query reaches them without a caller
+  /// registering a closure. They are PROTECTED: a caller cannot shadow one
+  /// through `registering(_:…)` (see `protected`/`reserved(_:)`), so a query
+  /// naming a built-in always reaches the shipped one. Every member is a pure,
+  /// side-effect-free mapping and so DETERMINISTIC — a row-independent call
+  /// folds at compile time — and returns NULL on any NULL argument (SQL null
+  /// propagation), faulting `SQLError.argument` on the wrong argument count or
+  /// a value it cannot map, mirroring its declared `[parameters]`/`returns`
+  /// contract the static type-check validates a call against.
+  ///
+  /// The set covers the ISO scalar built-ins the grammar can already CALL
+  /// (`f(…)`), in two families:
+  ///
+  /// - STRING: `UPPER`/`LOWER` (case fold), `CHAR_LENGTH` (with its ISO synonym
+  ///   `CHARACTER_LENGTH`, the same routine under both names), `SUBSTRING` (the
+  ///   two-argument `SUBSTRING(text, start)` form, ISO 1-based indexing), and
+  ///   `TRIM` (the one-argument `TRIM(text)` form, stripping leading and
+  ///   trailing spaces).
+  /// - NUMERIC: `ABS`, `ROUND` (the one-argument form, to the nearest integer
+  ///   value), `CEILING` (with its synonym `CEIL`), `FLOOR`, and `MOD` (the
+  ///   two-integer remainder — `BITAND`'s numeric sibling, an operation the
+  ///   grammar's `%` otherwise lacks a call spelling for). `BITAND` — the
+  ///   portable, standards-compliant spelling (Oracle's) of a bitwise AND, an
+  ///   operation ISO SQL and this grammar otherwise lack — is kept.
+  ///
+  /// FOLLOW-UPS (each needs grammar or overloading this batch does not add, so
+  /// each ships in its simplest callable form now):
+  /// - `SUBSTRING(text FROM start FOR length)` — the full ISO clause with a
+  ///   `FROM`/`FOR` keyword syntax and an optional length — and the plain
+  ///   three-argument `SUBSTRING(text, start, length)` both need either grammar
+  ///   or variadic arity (the contract is a fixed-arity `[parameters]`); only
+  ///   the two-argument prefix form ships.
+  /// - `TRIM([{LEADING | TRAILING | BOTH}] [char] FROM text)` — the full ISO
+  ///   clause with a trim specification and a trim character — needs grammar;
+  ///   only the leading-and-trailing-space `TRIM(text)` form ships.
+  /// - `ROUND(n, places)` — rounding to a decimal place — needs variadic arity;
+  ///   only the nearest-integer `ROUND(n)` form ships.
+  /// - The numeric routines are declared over `double` (`returns` a `double`,
+  ///   save `MOD`'s integer remainder), so an INTEGER argument does not satisfy
+  ///   the static contract (the type-check is exact-equality — an integer is
+  ///   not a double); an integer-domain overload (`ABS(integer) → integer`, …)
+  ///   needs routine overloading, which the single-signature contract lacks.
+  public static let standard: Routines = [
+    "bitand": Routine(returns: .integer, parameters: [.integer, .integer],
+                      deterministic: true, bitand),
+    "upper": Routine(returns: .text, parameters: [.text],
+                     deterministic: true, upper),
+    "lower": Routine(returns: .text, parameters: [.text],
+                     deterministic: true, lower),
+    "char_length": Routine(returns: .integer, parameters: [.text],
+                           deterministic: true, length),
+    "character_length": Routine(returns: .integer, parameters: [.text],
+                                deterministic: true, length),
+    "substring": Routine(returns: .text, parameters: [.text, .integer],
+                         deterministic: true, substring),
+    "trim": Routine(returns: .text, parameters: [.text],
+                    deterministic: true, trim),
+    "abs": Routine(returns: .double, parameters: [.double],
+                   deterministic: true, abs),
+    "round": Routine(returns: .double, parameters: [.double],
+                     deterministic: true, round),
+    "ceiling": Routine(returns: .double, parameters: [.double],
+                       deterministic: true, ceiling),
+    "ceil": Routine(returns: .double, parameters: [.double],
+                    deterministic: true, ceiling),
+    "floor": Routine(returns: .double, parameters: [.double],
+                     deterministic: true, floor),
+    "mod": Routine(returns: .integer, parameters: [.integer, .integer],
+                   deterministic: true, mod),
+  ]
+
+  /// The single `.null` short-circuit ISO null propagation gives every built-in
+  /// — a NULL argument yields NULL — factored out so each routine reads as its
+  /// mapping alone. Returns `true` when any argument is NULL, so the caller
+  /// returns `.null` before matching a concrete kind.
+  private static func propagates(_ arguments: Array<SQL.Value>) -> Bool {
+    arguments.contains(.null)
+  }
 
   /// `BITAND(x, y)` — the bitwise AND of two integers. A NULL argument yields
   /// NULL (SQL null propagation); the wrong argument count or a non-integer
@@ -359,13 +459,180 @@ public struct Routines: Sendable {
     guard arguments.count == 2 else {
       throw .argument("BITAND takes two arguments")
     }
-    if case .null = arguments[0] { return .null }
-    if case .null = arguments[1] { return .null }
+    if propagates(arguments) { return .null }
     guard case let .integer(x) = arguments[0],
         case let .integer(y) = arguments[1] else {
       throw .argument("BITAND requires integer arguments")
     }
     return .integer(x & y)
+  }
+
+  /// `UPPER(text)` — the string upper-cased. A NULL argument yields NULL; the
+  /// wrong count or a non-text argument is `SQLError.argument`.
+  private static func upper(_ arguments: Array<SQL.Value>)
+      throws(SQLError) -> SQL.Value {
+    guard arguments.count == 1 else {
+      throw .argument("UPPER takes one argument")
+    }
+    if propagates(arguments) { return .null }
+    guard case let .text(string) = arguments[0] else {
+      throw .argument("UPPER requires a text argument")
+    }
+    return .text(string.uppercased())
+  }
+
+  /// `LOWER(text)` — the string lower-cased. A NULL argument yields NULL; the
+  /// wrong count or a non-text argument is `SQLError.argument`.
+  private static func lower(_ arguments: Array<SQL.Value>)
+      throws(SQLError) -> SQL.Value {
+    guard arguments.count == 1 else {
+      throw .argument("LOWER takes one argument")
+    }
+    if propagates(arguments) { return .null }
+    guard case let .text(string) = arguments[0] else {
+      throw .argument("LOWER requires a text argument")
+    }
+    return .text(string.lowercased())
+  }
+
+  /// `CHAR_LENGTH(text)` / `CHARACTER_LENGTH(text)` — the number of characters
+  /// in the string (its Unicode character count, not its UTF-8 byte length). A
+  /// NULL argument yields NULL; the wrong count or a non-text argument is
+  /// `SQLError.argument`.
+  private static func length(_ arguments: Array<SQL.Value>)
+      throws(SQLError) -> SQL.Value {
+    guard arguments.count == 1 else {
+      throw .argument("CHAR_LENGTH takes one argument")
+    }
+    if propagates(arguments) { return .null }
+    guard case let .text(string) = arguments[0] else {
+      throw .argument("CHAR_LENGTH requires a text argument")
+    }
+    return .integer(string.count)
+  }
+
+  /// `SUBSTRING(text, start)` — the substring of `text` from the 1-based
+  /// `start` character to the end, the ISO indexing where the first character
+  /// is position 1. A `start` at or before 1 begins at the first character; a
+  /// `start` past the end yields the empty string. A NULL argument yields NULL;
+  /// the wrong count, a non-text first argument, or a non-integer second is
+  /// `SQLError.argument`.
+  private static func substring(_ arguments: Array<SQL.Value>)
+      throws(SQLError) -> SQL.Value {
+    guard arguments.count == 2 else {
+      throw .argument("SUBSTRING takes two arguments")
+    }
+    if propagates(arguments) { return .null }
+    guard case let .text(string) = arguments[0],
+        case let .integer(start) = arguments[1] else {
+      throw .argument("SUBSTRING requires a text and an integer argument")
+    }
+    // ISO positions are 1-based; a start at or before 1 clamps to the first
+    // character, and one past the end clamps to the end (the empty tail). The
+    // `start - 1` conversion overflows for `Int.min`, so a start at or before
+    // 1 takes the whole string directly rather than subtracting.
+    let drop = start > 1 ? start - 1 : 0
+    return .text(String(string.dropFirst(drop)))
+  }
+
+  /// `TRIM(text)` — the string with leading and trailing SPACE characters
+  /// removed (the one-argument ISO form, whose implicit trim character is a
+  /// space and whose implicit specification is BOTH). A NULL argument yields
+  /// NULL; the wrong count or a non-text argument is `SQLError.argument`.
+  private static func trim(_ arguments: Array<SQL.Value>)
+      throws(SQLError) -> SQL.Value {
+    guard arguments.count == 1 else {
+      throw .argument("TRIM takes one argument")
+    }
+    if propagates(arguments) { return .null }
+    guard case let .text(string) = arguments[0] else {
+      throw .argument("TRIM requires a text argument")
+    }
+    return .text(String(string.drop(while: { $0 == " " })
+                            .reversed().drop(while: { $0 == " " })
+                            .reversed()))
+  }
+
+  /// `ABS(n)` — the absolute value of a real number. A NULL argument yields
+  /// NULL; the wrong count or a non-double argument is `SQLError.argument`.
+  private static func abs(_ arguments: Array<SQL.Value>)
+      throws(SQLError) -> SQL.Value {
+    guard arguments.count == 1 else {
+      throw .argument("ABS takes one argument")
+    }
+    if propagates(arguments) { return .null }
+    guard case let .double(value) = arguments[0] else {
+      throw .argument("ABS requires a double argument")
+    }
+    return .double(Swift.abs(value))
+  }
+
+  /// `ROUND(n)` — the real number rounded to the nearest integer value (ties
+  /// away from zero, the ISO default), carried as a double. A NULL argument
+  /// yields NULL; the wrong count or a non-double argument is
+  /// `SQLError.argument`.
+  private static func round(_ arguments: Array<SQL.Value>)
+      throws(SQLError) -> SQL.Value {
+    guard arguments.count == 1 else {
+      throw .argument("ROUND takes one argument")
+    }
+    if propagates(arguments) { return .null }
+    guard case let .double(value) = arguments[0] else {
+      throw .argument("ROUND requires a double argument")
+    }
+    return .double(value.rounded())
+  }
+
+  /// `CEILING(n)` / `CEIL(n)` — the least integer value not less than `n`,
+  /// carried as a double. A NULL argument yields NULL; the wrong count or a
+  /// non-double argument is `SQLError.argument`.
+  private static func ceiling(_ arguments: Array<SQL.Value>)
+      throws(SQLError) -> SQL.Value {
+    guard arguments.count == 1 else {
+      throw .argument("CEILING takes one argument")
+    }
+    if propagates(arguments) { return .null }
+    guard case let .double(value) = arguments[0] else {
+      throw .argument("CEILING requires a double argument")
+    }
+    return .double(value.rounded(.up))
+  }
+
+  /// `FLOOR(n)` — the greatest integer value not greater than `n`, carried as a
+  /// double. A NULL argument yields NULL; the wrong count or a non-double
+  /// argument is `SQLError.argument`.
+  private static func floor(_ arguments: Array<SQL.Value>)
+      throws(SQLError) -> SQL.Value {
+    guard arguments.count == 1 else {
+      throw .argument("FLOOR takes one argument")
+    }
+    if propagates(arguments) { return .null }
+    guard case let .double(value) = arguments[0] else {
+      throw .argument("FLOOR requires a double argument")
+    }
+    return .double(value.rounded(.down))
+  }
+
+  /// `MOD(a, b)` — the remainder of `a` divided by `b`, both integers (the ISO
+  /// `MOD` function, distinct from the grammar's `%` operator). A zero divisor
+  /// is `SQLError.divide`, as integer arithmetic's `%` by zero is. A NULL
+  /// argument yields NULL; the wrong count or a non-integer argument is
+  /// `SQLError.argument`.
+  private static func mod(_ arguments: Array<SQL.Value>)
+      throws(SQLError) -> SQL.Value {
+    guard arguments.count == 2 else {
+      throw .argument("MOD takes two arguments")
+    }
+    if propagates(arguments) { return .null }
+    guard case let .integer(a) = arguments[0],
+        case let .integer(b) = arguments[1] else {
+      throw .argument("MOD requires integer arguments")
+    }
+    guard b != 0 else { throw .divide }
+    // `a % -1` is mathematically 0, but `Int.min % -1` overflows the implied
+    // division and traps, so a divisor of -1 short-circuits to that 0.
+    guard b != -1 else { return .integer(0) }
+    return .integer(a % b)
   }
 }
 

@@ -192,9 +192,10 @@ extension Session {
     // both its `.text` return type — the result type the schema walk and the
     // `INFORMATION_SCHEMA` `data_type` a view's `GUID(...)` column reports read
     // — and its `[.blob]` parameter contract, which the static type-check
-    // validates a `GUID(...)` call against.
-    Routines.standard.registering("guid", returns: .text, parameters: [.blob],
-                                  Session.guid)
+    // validates a `GUID(...)` call against. `try!`: the name is a compile-time
+    // constant and not a protected standard routine, so it never faults.
+    try! Routines.standard.registering("guid", returns: .text,
+                                       parameters: [.blob], Session.guid)
   }
 
   /// `GUID(blob)` — the UUID a `GuidAttribute` `CustomAttribute` value blob

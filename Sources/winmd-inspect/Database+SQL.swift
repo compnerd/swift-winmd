@@ -1,7 +1,7 @@
 // Copyright © 2026 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-internal import SQL
+internal import SQLEngine
 internal import WinMDSynthesis
 internal import WinMD
 
@@ -52,7 +52,7 @@ internal import WinMD
 
 // MARK: - Catalog
 
-extension WinMD.Storage: SQL.Catalog {
+extension WinMD.Storage: SQLEngine.Catalog {
   /// The relation named `name`, resolved case-insensitively against the open
   /// tables' schema names.
   ///
@@ -84,7 +84,7 @@ extension WinMD.Storage: SQL.Catalog {
 
 // MARK: - Session
 
-/// The interactive shell's mutable state: a `SQL.Catalog` overlaying the
+/// The interactive shell's mutable state: a `SQLEngine.Catalog` overlaying the
 /// session's registered views on a borrowed `WinMD.Storage`.
 ///
 /// The shell lets a session define views (`CREATE VIEW`) and query them. A
@@ -97,7 +97,7 @@ extension WinMD.Storage: SQL.Catalog {
 /// no console I/O; `Shell` drives it. It mirrors the `~Escapable`/`@_lifetime(
 /// borrow …)` + `copy storage` pattern of `WinMDRelation`, vending the storage's
 /// own `WinMDRelation` so the engine plans over the same source.
-internal struct Session: SQL.Catalog, ~Escapable {
+internal struct Session: SQLEngine.Catalog, ~Escapable {
   /// The borrowed base storage the session's tables read from.
   internal let storage: WinMD.Storage
 
@@ -222,7 +222,7 @@ extension Session {
 
 // MARK: - Table
 
-/// A `SQL.Table` over one open WinMD table.
+/// A `SQLEngine.Table` over one open WinMD table.
 ///
 /// Its real columns are the table's fields; the virtual columns follow, past the
 /// `SELECT *` extent: `Id` at `width`, then the join keys — the owner foreign
@@ -233,7 +233,7 @@ extension Session {
 /// 1-based index, trivially monotonic), on the owner foreign key over a
 /// list-child (whose owning run is monotonic in row order), and on the table's
 /// intrinsic sort key when the database physically sorts the table.
-internal struct WinMDRelation: SQL.Table, ~Escapable {
+internal struct WinMDRelation: SQLEngine.Table, ~Escapable {
   /// The borrowed storage the relation reads from.
   private let storage: WinMD.Storage
 
@@ -613,11 +613,11 @@ extension WinMD.Storage {
 
 // MARK: - Cursor
 
-/// A `SQL.Cursor` over the rows of one open WinMD table.
+/// A `SQLEngine.Cursor` over the rows of one open WinMD table.
 ///
 /// It wraps WinMD's own `~Escapable` `Cursor` and carries the relation's list
 /// link, so the rows it vends can compute the owner foreign-key column.
-internal struct WinMDCursor: SQL.Cursor, ~Escapable {
+internal struct WinMDCursor: SQLEngine.Cursor, ~Escapable {
   /// The borrowed storage the cursor reads from.
   private let storage: WinMD.Storage
 
@@ -648,7 +648,7 @@ internal struct WinMDCursor: SQL.Cursor, ~Escapable {
 
 // MARK: - Row
 
-/// A `SQL.Row` over one WinMD row.
+/// A `SQLEngine.Row` over one WinMD row.
 ///
 /// A cell is read by ordinal as a typed `Value`: a real ordinal (`< count`)
 /// reads the WinMD cell — a `#Strings` heap index resolves through the heap as
@@ -661,7 +661,7 @@ internal struct WinMDCursor: SQL.Cursor, ~Escapable {
 /// directly. A coded-index join-key ordinal decodes a coded-index cell to the
 /// target's 1-based `Id`, or SQL `NULL` when the cell points elsewhere or is
 /// null.
-internal struct WinMDRow: SQL.Row, ~Escapable {
+internal struct WinMDRow: SQLEngine.Row, ~Escapable {
   /// The WinMD row this view reads.
   private let tuple: WinMD.Tuple
 

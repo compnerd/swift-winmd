@@ -25,11 +25,12 @@
 /// A materialised tuple: the uniform row flowing through the operators.
 ///
 /// A `Record` copies an adapter `Row`'s referenced cells out into an escapable,
-/// dense slot array, so it conforms to `SQL.Row` (cell-by-slot access) while
-/// being free of the borrowed cursor's lifetime. A scan's referenced-ordinal
-/// list (in a fixed order) defines a slot for each — slot `i` is that scan's
-/// `i`th referenced ordinal — so the engine remaps every ordinal to a slot at
-/// compile time and the record is addressed purely by array index: no
+/// dense slot array, so it conforms to `SQLEngine.Row` (cell-by-slot access)
+/// while being free of the borrowed cursor's lifetime. A scan's
+/// referenced-ordinal list (in a fixed order) defines a slot for each — slot
+/// `i` is that scan's `i`th referenced ordinal — so the engine remaps every
+/// ordinal to a slot at compile time and the record is addressed purely by
+/// array index: no
 /// dictionary, no hashing, no per-row key sort. A projection-pushdown leaf, a
 /// virtual column, and a join's two relations laid end to end all live as
 /// consecutive slots under the one accessor the existing `evaluate(_:_:)` and

@@ -9,7 +9,7 @@ let _ =
             ],
             products: [
               .executable(name: "winmd-inspect", targets: ["winmd-inspect"]),
-              .library(name: "SQL", targets: ["SQL"]),
+              .library(name: "SQLEngine", targets: ["SQLEngine"]),
               .library(name: "WinMDSynthesis", targets: ["WinMDSynthesis"]),
             ],
             dependencies: [
@@ -21,17 +21,17 @@ let _ =
             targets: [
               .target(name: "CPE", dependencies: []),
 
-              // SQL
-              .target(name: "SQL", dependencies: [],
+              // SQLEngine
+              .target(name: "SQLEngine", dependencies: [],
                       swiftSettings: [
                         .enableExperimentalFeature("Lifetimes"),
                       ]),
-              .target(name: "SQLTestSupport", dependencies: ["SQL"],
+              .target(name: "SQLTestSupport", dependencies: ["SQLEngine"],
                       swiftSettings: [
                         .enableExperimentalFeature("Lifetimes"),
                       ]),
               .testTarget(name: "SQLTests",
-                          dependencies: ["SQL", "SQLTestSupport"],
+                          dependencies: ["SQLEngine", "SQLTestSupport"],
                           swiftSettings: [
                             .enableExperimentalFeature("Lifetimes"),
                           ]),
@@ -60,7 +60,7 @@ let _ =
               // winmd-inspect
               .executableTarget(name: "winmd-inspect",
                                 dependencies: [
-                                  "SQL",
+                                  "SQLEngine",
                                   "WinMD",
                                   "WinMDSynthesis",
                                   .product(name: "ArgumentParser",
@@ -79,7 +79,7 @@ let _ =
               .testTarget(name: "winmd-inspectTests",
                           dependencies: [
                             "winmd-inspect",
-                            "SQL",
+                            "SQLEngine",
                             "WinMD",
                             .product(name: "Mustache",
                                      package: "swift-mustache"),

@@ -1,7 +1,7 @@
 // Copyright © 2026 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-import SQL
+import SQLEngine
 
 /// An owned, escapable in-memory adapter — the shared fixture store the SQL
 /// engine's tests run their queries against.
@@ -102,10 +102,10 @@ public struct FixtureRelation: Sendable {
 /// both a Span-backed source and an owned one.
 public struct FixtureCatalog: Catalog {
   public let catalog: Dictionary<String, FixtureRelation>
-  public let registered: Dictionary<String, SQL.View>
+  public let registered: Dictionary<String, SQLEngine.View>
 
   public init(_ relations: Dictionary<String, FixtureRelation>,
-              views: Dictionary<String, SQL.View> = [:]) {
+              views: Dictionary<String, SQLEngine.View> = [:]) {
     self.catalog = relations
     self.registered = views
   }
@@ -118,7 +118,7 @@ public struct FixtureCatalog: Catalog {
         .map { FixtureTable($0.value) }
   }
 
-  public func view(named name: String) -> SQL.View? {
+  public func view(named name: String) -> SQLEngine.View? {
     let folded = name.lowercased()
     return registered.first { $0.key.lowercased() == folded }?.value
   }
@@ -223,7 +223,7 @@ public struct FixtureTable: Table {
 }
 
 /// An index-addressed cursor over a relation's rows.
-public struct FixtureCursor: SQL.Cursor {
+public struct FixtureCursor: SQLEngine.Cursor {
   public let relation: FixtureRelation
 
   public init(_ relation: FixtureRelation) {
@@ -244,7 +244,7 @@ public struct FixtureCursor: SQL.Cursor {
 /// A real ordinal (`< width`) reads the stored cell; the virtual `Id`
 /// ordinal (`== width`) computes the 1-based row index. The view is an
 /// escapable value — no borrowed storage — so it omits `@_lifetime`.
-public struct FixtureRow: SQL.Row {
+public struct FixtureRow: SQLEngine.Row {
   public let relation: FixtureRelation
   public let index: Int
 

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 internal import Mustache
-internal import SQL
+internal import SQLEngine
 internal import WinMD
 internal import WinMDSynthesis
 
@@ -789,7 +789,7 @@ internal struct Shell: ~Escapable {
   /// trailing query — the syntactic-projection fallback names its columns off.
   /// A `create` or a `function` never reaches here (`headers(of:)` returns `nil`
   /// for a definition first), so it maps to a defensive nameless query.
-  private static func trailing(_ statement: Statement) -> SQL.Query {
+  private static func trailing(_ statement: Statement) -> SQLEngine.Query {
     switch statement {
     case let .select(query): query
     case let .with(_, query): query
@@ -805,7 +805,7 @@ internal struct Shell: ~Escapable {
   /// aliased or bare column projects its name, the qualifier dropped; a
   /// computed expression with no alias falls back to a positional `column N`);
   /// a `SELECT *` carries no names, so it frames by the produced width.
-  private static func names(of projection: SQL.Projection,
+  private static func names(of projection: SQLEngine.Projection,
                             _ rows: Array<Array<Value>>) -> Array<String> {
     switch projection {
     case let .columns(list):
@@ -833,13 +833,13 @@ internal struct Shell: ~Escapable {
     if case let .column(column) = expression { column.name } else { nil }
   }
 
-  /// Parses `text` as a `SELECT`, returning its `SQL.Query`.
+  /// Parses `text` as a `SELECT`, returning its `SQLEngine.Query`.
   ///
   /// The render's queries are static, well-formed `SELECT`s, so a parse failure
   /// or a non-`SELECT` is a programming error; it surfaces as the thrown error.
-  /// The return type is spelled `SQL.Query` — the module's own `Query` is the
-  /// `ParsableCommand` subcommand, not the SQL AST.
-  private static func select(_ text: String) throws -> SQL.Query {
+  /// The return type is spelled `SQLEngine.Query` — the module's own `Query` is
+  /// the `ParsableCommand` subcommand, not the SQL AST.
+  private static func select(_ text: String) throws -> SQLEngine.Query {
     guard case let .select(query) = try Statement(parsing: text) else {
       throw SQLError.incomplete(expected: "a SELECT")
     }

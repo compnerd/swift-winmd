@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 import Testing
-@testable import SQL
+@testable import SQLEngine
 
 /// Parses `text` and returns its `Select`, failing the test on any other shape
 /// — a non-`SELECT` statement, or a `UNION` of several selects.

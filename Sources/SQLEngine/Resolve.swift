@@ -287,7 +287,7 @@ extension Schema {
   /// each key's column an ordinal in this relation, its direction preserved.
   internal func order(_ order: Order, in relation: Relation)
       throws(SQLError) -> Array<(column: Int, ascending: Bool)> {
-    try SQL.order(order) { column throws(SQLError) in
+    try SQLEngine.order(order) { column throws(SQLError) in
       try ordinal(of: column, in: relation)
     }
   }
@@ -295,7 +295,7 @@ extension Schema {
   internal func lower(_ predicate: Predicate, in relation: Relation,
                       _ routines: Routines = [:])
       throws(SQLError) -> Filter {
-    try SQL.lower(predicate) { expression throws(SQLError) in
+    try SQLEngine.lower(predicate) { expression throws(SQLError) in
       try term(expression, in: relation, routines)
     }
   }
@@ -311,14 +311,14 @@ extension Schema {
 /// `extent` — its real `width` plus the virtual columns it exposes — rather than
 /// its `width` keeps a relation's virtual columns (an `Id`, an owner foreign
 /// key) on its own side rather than colliding with the next relation's space. A
-/// `Scope` resolves a possibly qualified `SQL.Column` into that combined space
-/// so the engine's `Filter`, projection, and order all address cells uniformly
-/// across the chain. A qualifier names a relation by its alias, else its table
-/// name; an unqualified name resolves against every relation and is ambiguous
-/// if more than one resolves it — as is a qualified name two relations share an
-/// alias or table name for (a self-join or a duplicated alias). Resolution
-/// reads only schemas, so the scope is escapable data over the relations'
-/// `Schema`s.
+/// `Scope` resolves a possibly qualified `SQLEngine.Column` into that combined
+/// space so the engine's `Filter`, projection, and order all address cells
+/// uniformly across the chain. A qualifier names a relation by its alias, else
+/// its table name; an unqualified name resolves against every relation and is
+/// ambiguous if more than one resolves it — as is a qualified name two
+/// relations share an alias or table name for (a self-join or a duplicated
+/// alias). Resolution reads only schemas, so the scope is escapable data over
+/// the relations' `Schema`s.
 internal struct Scope {
   /// One relation of the chain: its reference (for qualifier matching), its
   /// name-resolution schema, and its base offset in the combined space.
@@ -1132,7 +1132,7 @@ internal struct Scope {
       -> Value? {
     switch expression {
     case let .literal(literal):
-      return try? SQL.value(of: literal)
+      return try? SQLEngine.value(of: literal)
     case let .binary(op, lhs, rhs):
       guard let lhs = constant(lhs, routines),
           let rhs = constant(rhs, routines) else {
@@ -1883,7 +1883,7 @@ internal struct Scope {
   /// preserved.
   internal func order(_ order: Order) throws(SQLError)
       -> Array<(column: Int, ascending: Bool)> {
-    try SQL.order(order) { column throws(SQLError) in
+    try SQLEngine.order(order) { column throws(SQLError) in
       try ordinal(of: column)
     }
   }
@@ -1958,7 +1958,7 @@ internal struct Scope {
   /// column reference resolved to a combined ordinal across the chain.
   internal func lower(_ predicate: Predicate,
                       _ routines: Routines = [:]) throws(SQLError) -> Filter {
-    try SQL.lower(predicate) { expression throws(SQLError) in
+    try SQLEngine.lower(predicate) { expression throws(SQLError) in
       try term(expression, routines)
     }
   }
@@ -2150,7 +2150,7 @@ internal struct Grouping {
   /// Lowers a `HAVING`/predicate to a grouped-space `Filter`.
   internal func lower(_ predicate: Predicate,
                       _ routines: Routines = [:]) throws(SQLError) -> Filter {
-    try SQL.lower(predicate) { expression throws(SQLError) in
+    try SQLEngine.lower(predicate) { expression throws(SQLError) in
       try term(expression, routines)
     }
   }

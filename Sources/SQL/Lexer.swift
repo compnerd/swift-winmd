@@ -449,6 +449,7 @@ internal struct Lexer: ~Escapable {
     case "RECURSIVE": .recursive
     case "TRUE": .true
     case "FALSE": .false
+    case "UNKNOWN": .unknown
     case "CASE": .case
     case "WHEN": .when
     case "THEN": .then

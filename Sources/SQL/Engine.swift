@@ -689,6 +689,8 @@ extension Predicate {
       test.aggregated || lower.aggregated || upper.aggregated
     case let .distinct(lhs, rhs, _):
       lhs.aggregated || rhs.aggregated
+    case let .truth(inner, _, _):
+      inner.aggregated
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.aggregated || rhs.aggregated
     case let .not(operand):
@@ -716,6 +718,8 @@ extension Predicate {
       test.bound || lower.bound || upper.bound
     case let .distinct(lhs, rhs, _):
       lhs.bound || rhs.bound
+    case let .truth(inner, _, _):
+      inner.bound
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.bound || rhs.bound
     case let .not(operand):
@@ -970,6 +974,8 @@ extension Predicate {
     case let .distinct(lhs, rhs, _):
       lhs.collect(into: &expressions)
       rhs.collect(into: &expressions)
+    case let .truth(inner, _, _):
+      inner.collect(into: &expressions)
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.collect(into: &expressions)
       rhs.collect(into: &expressions)

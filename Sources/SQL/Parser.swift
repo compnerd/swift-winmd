@@ -34,13 +34,14 @@
 /// disjunction    := conjunction (OR conjunction)*
 /// conjunction    := negation (AND negation)*
 /// negation       := NOT negation | primary
-/// primary        := '(' predicate ')' | comparison
-/// comparison     := expression (op (expression | param) | IS [NOT] NULL
-///                 | IS [NOT] DISTINCT FROM expression
+/// primary        := '(' predicate ')' [IS [NOT] truthvalue] | comparison
+/// comparison     := expression (op (expression | param)
+///                 | IS [NOT] (NULL | truthvalue | DISTINCT FROM expression)
 ///                 | [NOT] IN '(' expression (',' expression)* ')'
 ///                 | [NOT] LIKE expression [ESCAPE expression]
 ///                 | [NOT] BETWEEN (expression | param) AND
 ///                                 (expression | param))
+/// truthvalue     := TRUE | FALSE | UNKNOWN
 /// expression     := additive
 /// additive       := multiplicative (('+' | '-' | '||') multiplicative)*
 /// multiplicative := factor (('*' | '/') factor)*
@@ -888,6 +889,21 @@ internal struct Parser: ~Escapable {
     try expect(.lparen)
     let predicate = try predicate()
     try expect(.rparen)
+    // A parenthesised predicate is itself a `<boolean primary>`, so an `IS
+    // [NOT] TRUE/FALSE/UNKNOWN` tail may test its three-valued result directly
+    // (`(a > b) IS TRUE`) — the inner `Predicate` the test maps against the
+    // truth value. Only a truth-value tail applies here; an `IS NULL` over a
+    // predicate is not a value test.
+    if try match(.is) {
+      let negated = try match(.not)
+      guard let value = try truth() else {
+        let token = try advance(expecting: "TRUE, FALSE, or UNKNOWN")
+        throw .unexpected(token.kind.description,
+                          expected: "TRUE, FALSE, or UNKNOWN",
+                          at: token.location)
+      }
+      return .truth(predicate, value: value, negated: negated)
+    }
     return predicate
   }
 
@@ -901,7 +917,10 @@ internal struct Parser: ~Escapable {
   /// `IS NULL` (or `IS NOT NULL`) tail tests the left expression for `NULL`
   /// rather than comparing it — the way a nullable column is filtered. An `IS
   /// [NOT] DISTINCT FROM` tail is the ISO null-safe comparison of the two
-  /// expressions, treating NULL as a comparable value. An `IN`
+  /// expressions, treating NULL as a comparable value; an `IS [NOT]
+  /// TRUE/FALSE/UNKNOWN` tail is the ISO `<boolean test>`, the boolean operand
+  /// bridging as the comparison `x = TRUE` the test maps to a definite truth.
+  /// An `IN`
   /// (or `NOT IN`) tail tests the left expression for membership in a
   /// parenthesised value list. A `LIKE` (or `NOT LIKE`) tail tests the left
   /// expression's text against a pattern, with an optional `ESCAPE` character.
@@ -915,6 +934,15 @@ internal struct Parser: ~Escapable {
       let negated = try match(.not)
       if try match(.distinct) {
         return try distinct(left, negated: negated)
+      }
+      if let value = try truth() {
+        // `x IS [NOT] TRUE/FALSE/UNKNOWN` — the boolean operand `x` bridges as
+        // the comparison `x = TRUE`, whose three-valued truth IS `x`'s boolean
+        // value (a NULL `x` reading UNKNOWN), the inner `Predicate` the test
+        // maps against `value` to a definite two-valued result.
+        let boolean = Predicate.comparison(left: left, op: .equal,
+                                           right: .literal(.boolean(true)))
+        return .truth(boolean, value: value, negated: negated)
       }
       try expect(.null)
       return .null(left, negated: negated)
@@ -1002,6 +1030,18 @@ internal struct Parser: ~Escapable {
     try expect(.and)
     let upper = try operand()
     return .between(left, lower, upper, negated: negated)
+  }
+
+  /// Consumes a `<truth value>` keyword — `TRUE`, `FALSE`, or `UNKNOWN` — at
+  /// the head of an `IS [NOT]` tail, returning its `Truth`, or `nil` when the
+  /// next token is none of them (an `IS NULL` tail, which the caller then
+  /// handles). The `TRUE`/`FALSE` keywords are the boolean literals; `UNKNOWN`
+  /// is a keyword valid ONLY in this test position.
+  private mutating func truth() throws(SQLError) -> Truth? {
+    if try match(.true) { return .true }
+    if try match(.false) { return .false }
+    if try match(.unknown) { return .unknown }
+    return nil
   }
 
   /// Parses the pattern tail of `left [NOT] LIKE pattern [ESCAPE escape]` — the

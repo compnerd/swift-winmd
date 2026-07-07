@@ -66,6 +66,7 @@ extension Token {
     case recursive
     case `true`
     case `false`
+    case unknown
     case `case`
     case when
     case then
@@ -158,6 +159,7 @@ extension Token.Kind {
     case .recursive: "RECURSIVE"
     case .true: "TRUE"
     case .false: "FALSE"
+    case .unknown: "UNKNOWN"
     case .case: "CASE"
     case .when: "WHEN"
     case .then: "THEN"

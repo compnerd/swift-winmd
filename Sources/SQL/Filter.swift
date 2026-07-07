@@ -68,6 +68,13 @@ internal indirect enum Filter: Sendable {
   /// `matches`'s cross-kind FALSE equality), and `IS DISTINCT FROM` is TRUE
   /// when they differ, `IS NOT DISTINCT FROM` when they are the same.
   case distinct(Term, Term, negated: Bool)
+  /// `p IS [NOT] <truth value>` — the lowered form of the AST's `truth`. The
+  /// inner boolean `Filter` is held once and evaluated to its three-valued
+  /// result, which is then MAPPED against `value` (`TRUE`/`FALSE`/`UNKNOWN`) to
+  /// a DEFINITE two-valued result — never itself UNKNOWN — and negated for `IS
+  /// NOT`. An UNKNOWN inner is FALSE against `TRUE`/`FALSE` but TRUE against
+  /// `UNKNOWN`, so the test collapses SQL's third value to a two-valued answer.
+  case truth(Filter, Truth, negated: Bool)
   /// `lhs AND rhs`.
   case and(Filter, Filter)
   /// `lhs OR rhs`.
@@ -312,6 +319,8 @@ extension Filter {
     case let .distinct(lhs, rhs, negated):
       .distinct(lhs.remapped(through: slot), rhs.remapped(through: slot),
                 negated: negated)
+    case let .truth(inner, value, negated):
+      .truth(inner.remapped(through: slot), value, negated: negated)
     case let .and(lhs, rhs):
       .and(lhs.remapped(through: slot), rhs.remapped(through: slot))
     case let .or(lhs, rhs):
@@ -401,6 +410,7 @@ extension Filter {
     case let .between(test, lower, upper, _):
       test.safe && lower.safe && upper.safe
     case let .distinct(lhs, rhs, _): lhs.safe && rhs.safe
+    case let .truth(inner, _, _): inner.safe
     case let .and(lhs, rhs): lhs.safe && rhs.safe
     case let .or(lhs, rhs): lhs.safe && rhs.safe
     case let .not(operand): operand.safe
@@ -437,6 +447,7 @@ extension Filter {
       pattern.parameterised || (escape?.parameterised ?? false)
     case let .between(_, lower, upper, _):
       lower.parameterised || upper.parameterised
+    case let .truth(inner, _, _): inner.parameterised
     case let .and(lhs, rhs): lhs.parameterised || rhs.parameterised
     case let .or(lhs, rhs): lhs.parameterised || rhs.parameterised
     case let .not(operand): operand.parameterised
@@ -792,6 +803,23 @@ internal func or(_ lhs: Bool?, _ rhs: Bool?) -> Bool? {
   return lhs == false && rhs == false ? false : nil
 }
 
+/// The ISO `<boolean test>` mapping — a three-valued `operand` tested against a
+/// `Truth` value, negated for `IS NOT`, yielding a DEFINITE two-valued result
+/// that is NEVER itself UNKNOWN. `p IS TRUE` is `operand == true`, `IS FALSE`
+/// is `operand == false`, and `IS UNKNOWN` is `operand == nil` — so an UNKNOWN
+/// operand is FALSE against `TRUE`/`FALSE` and TRUE against `UNKNOWN`. This is
+/// the shared primitive the run (`Filter.truth`) and the folds
+/// (`constant`/`empty`) all map through.
+internal func tested(_ operand: Bool?, _ value: Truth, _ negated: Bool)
+    -> Bool {
+  let matched = switch value {
+  case .true: operand == true
+  case .false: operand == false
+  case .unknown: operand == nil
+  }
+  return negated ? !matched : matched
+}
+
 extension Row where Self: ~Escapable {
   /// Evaluates `filter` against this row under three-valued logic, resolving
   /// scalar calls through `routines` and any bound parameter from `bindings`.
@@ -835,6 +863,8 @@ extension Row where Self: ~Escapable {
       try ranged(test, lower, upper, negated, routines, bindings)
     case let .distinct(lhs, rhs, negated):
       try differs(lhs, rhs, negated, routines, bindings)
+    case let .truth(inner, value, negated):
+      try tested(evaluate(inner, routines, bindings), value, negated)
     case let .and(lhs, rhs):
       // `&&`/`||` take an `@autoclosure` right operand, which would capture the
       // borrowed `~Escapable` row; spell each connective explicitly so a branch

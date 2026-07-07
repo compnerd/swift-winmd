@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 import SQLEngine
+// Re-export SQLStandard so a test importing `SQLTestSupport` sees the
+// prelude-defaulting `run`/`columns` overloads and `Routines.standard`; the
+// fixtures default to the standard prelude, matching a run under `import SQL`.
+@_exported import SQLStandard
 import Testing
 
 /// Expectation helpers that run a SQL query against a fixture catalog and check
@@ -38,7 +42,7 @@ extension Catalog where Self: ~Escapable {
   /// list of Swift literals lifted into `Value`s.
   public borrowing func expect(_ sql: String,
       yields rows: Array<Array<(any ValueConvertible)?>>,
-      routines: Routines = [:], bindings: Bindings = [:],
+      routines: Routines = .standard, bindings: Bindings = [:],
       location: Testing.SourceLocation = #_sourceLocation) throws {
     let expected = rows.map { $0.map { $0?.value ?? .null } }
     let actual = try run(sql, routines: routines, bindings: bindings)
@@ -47,7 +51,7 @@ extension Catalog where Self: ~Escapable {
 
   /// Checks `sql` run against this catalog yields no rows.
   public borrowing func empty(_ sql: String,
-      routines: Routines = [:], bindings: Bindings = [:],
+      routines: Routines = .standard, bindings: Bindings = [:],
       location: Testing.SourceLocation = #_sourceLocation) throws {
     let actual = try run(sql, routines: routines, bindings: bindings)
     #expect(actual.isEmpty, sourceLocation: location)
@@ -60,7 +64,7 @@ extension Catalog where Self: ~Escapable {
   /// so it catches the outcome and asserts on it, still reporting at the call
   /// site.
   public borrowing func expect(_ sql: String, fails error: SQLError,
-      routines: Routines = [:], bindings: Bindings = [:],
+      routines: Routines = .standard, bindings: Bindings = [:],
       location: Testing.SourceLocation = #_sourceLocation) {
     let raised: SQLError?
     do {
@@ -75,7 +79,7 @@ extension Catalog where Self: ~Escapable {
   /// Checks two queries run against this catalog yield the same rows — the
   /// seek / scan (or hash / seek) equivalence idiom.
   public borrowing func expect(_ lhs: String, equals rhs: String,
-      routines: Routines = [:], bindings: Bindings = [:],
+      routines: Routines = .standard, bindings: Bindings = [:],
       location: Testing.SourceLocation = #_sourceLocation) throws {
     let left = try run(lhs, routines: routines, bindings: bindings)
     let right = try run(rhs, routines: routines, bindings: bindings)

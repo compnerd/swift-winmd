@@ -248,34 +248,37 @@ private func library() throws -> FixtureCatalog {
   // MARK: - Protection (non-shadowable)
 
   @Test func `registering over a standard routine is rejected`() {
-    // A standard built-in is protected: `registering` refuses to bind its name
-    // (SQLSTATE 42723) rather than shadow it.
+    // A standard built-in is protected: registering its name over the prelude
+    // faults (SQLSTATE 42723) rather than shadow it. Protection travels with
+    // the routines (`Routines.standard` marks its own names), so the guard
+    // fires on the prelude, not on a fresh `Routines`.
     #expect(throws: SQLError.state("42723",
         "'upper' is a standard routine and cannot be redefined")) {
-      try Routines().registering("upper", returns: .text,
-                                 parameters: [.text]) { _ in .text("x") }
+      try Routines.standard.registering("upper", returns: .text,
+                                        parameters: [.text]) { _ in .text("x") }
     }
   }
 
   @Test func `registering a defined function over a standard name is rejected`() {
     // The `CREATE FUNCTION` path is protected too: a defined routine cannot
-    // take a built-in's name.
+    // take a built-in's name of the prelude.
     let function = Function(parameters: [], returns: .integer,
                             body: .literal(.integer(0)))
     #expect(throws: SQLError.state("42723",
         "'floor' is a standard routine and cannot be redefined")) {
-      try Routines().registering("floor", function)
+      try Routines.standard.registering("floor", function)
     }
   }
 
   @Test func `protection resolves the name case-insensitively`() {
     // The guard case-folds the name like every identifier, so a differently-
-    // cased spelling of a built-in is rejected too.
+    // cased spelling of a prelude built-in is rejected too.
     #expect(throws: SQLError.state("42723",
         "'BitAnd' is a standard routine and cannot be redefined")) {
-      try Routines().registering("BitAnd", parameters: [.integer, .integer]) {
-        _ in .integer(0)
-      }
+      try Routines.standard
+          .registering("BitAnd", parameters: [.integer, .integer]) {
+            _ in .integer(0)
+          }
     }
   }
 

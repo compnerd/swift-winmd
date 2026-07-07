@@ -92,15 +92,14 @@ extension Catalog where Self: ~Escapable {
   ///   `SQLError.column` if a referenced column is absent, `SQLError.ambiguous`
   ///   if an unqualified name is resolved by more than one relation of a chain,
   ///   `SQLError.arity` if a `UNION`'s arms project differing column counts.
-  public borrowing func run(_ query: Query, _ routines: Routines = [:],
+  public borrowing func run(_ query: Query, _ routines: Routines,
                             bindings: Bindings = [:])
       throws(SQLError) -> Array<Array<Value>> {
-    // Seed the standard prelude UNDER the caller's routines so a public call
-    // always resolves the built-ins (BITAND) even when it supplies unrelated
-    // UDFs; an explicitly registered function of the same name still shadows it
-    // (the merge keeps the caller's binding on a clash).
-    try run(query, Context(routines: Routines.standard.merging(routines),
-                           bindings: bindings))
+    // The engine is PURE: it resolves calls against exactly the `routines`
+    // given, seeding no prelude of its own. `import SQLStandard` adds a
+    // prelude-defaulting overload (`run(_:bindings:)` — see `SQLStandard`),
+    // so a call under that module reaches the built-ins without naming them.
+    try run(query, Context(routines: routines, bindings: bindings))
   }
 
   /// Runs `query` against this catalog under `context` — the in-scope common
@@ -130,13 +129,12 @@ extension Catalog where Self: ~Escapable {
   /// query resolves against (see `with`). A `create` defines a view and a
   /// `function` a scalar function rather than producing rows, so neither is
   /// runnable — both fault with `SQLError.statement`.
-  public borrowing func run(_ statement: Statement, _ routines: Routines = [:],
+  public borrowing func run(_ statement: Statement, _ routines: Routines,
                             bindings: Bindings = [:])
       throws(SQLError) -> Array<Array<Value>> {
-    // Seed the standard prelude under the caller's routines (see the query
-    // overload) so BITAND resolves regardless of what the caller supplies.
-    let context = Context(routines: Routines.standard.merging(routines),
-                          bindings: bindings)
+    // Pure engine: it uses exactly `routines` (see the query overload);
+    // `import SQLStandard` re-defaults the prelude via an overload.
+    let context = Context(routines: routines, bindings: bindings)
     return switch statement {
     case let .select(query):
       try run(query, context)

@@ -60,6 +60,16 @@ public struct Routine: Sendable {
   /// before a schema is published (see `Scope`'s `call`).
   public let parameters: Array<ValueType>
 
+  /// The number of REQUIRED leading arguments; arguments beyond it (up to
+  /// `parameters.count`) are OPTIONAL, so a call's arity may be anywhere in
+  /// `minimum ... parameters.count`. Defaults to `parameters.count` — all
+  /// required, a fixed arity — so every fixed-arity routine is unchanged.
+  /// `OVERLAY` sets it to 3 with an optional fourth `length` the routine
+  /// DEFAULTS from its once-evaluated replacement, so the parser need not
+  /// re-reference the replacement (which would double-evaluate a
+  /// non-deterministic one).
+  public let minimum: Int
+
   /// The declared result type, read to type a call statically.
   public let returns: ValueType
 
@@ -73,10 +83,11 @@ public struct Routine: Sendable {
   private let body: Body
 
   public init(returns: ValueType = .integer, parameters: Array<ValueType>,
-              deterministic: Bool = false,
+              minimum: Int? = nil, deterministic: Bool = false,
               _ compute: @escaping @Sendable (Array<Value>)
                   throws(SQLError) -> Value) {
     self.parameters = parameters
+    self.minimum = minimum ?? parameters.count
     self.returns = returns
     self.deterministic = deterministic
     self.body = .native(compute)
@@ -137,6 +148,7 @@ public struct Routine: Sendable {
                           + "\(returns.domain)")
     }
     self.parameters = parameters
+    self.minimum = parameters.count
     self.returns = returns
     self.deterministic = false
     self.body =
@@ -384,9 +396,16 @@ public struct Routines: Sendable {
   ///
   /// - STRING: `UPPER`/`LOWER` (case fold), `CHAR_LENGTH` (with its ISO synonym
   ///   `CHARACTER_LENGTH`, the same routine under both names), `SUBSTRING` (the
-  ///   two-argument `SUBSTRING(text, start)` form, ISO 1-based indexing), and
+  ///   two-argument `SUBSTRING(text, start)` form, ISO 1-based indexing),
   ///   `TRIM` (the one-argument `TRIM(text)` form, stripping leading and
-  ///   trailing spaces).
+  ///   trailing spaces), `POSITION` (the ISO `POSITION(substring IN string)`
+  ///   form the parser desugars to `position(substring, string)`, 1-based, 0
+  ///   when absent), and `OVERLAY` (the ISO `OVERLAY(string PLACING replacement
+  ///   FROM start [FOR length])` form the parser desugars to `overlay(string,
+  ///   replacement, start[, length])` — an optional-tail routine (`minimum` 3)
+  ///   that defaults an omitted `length` to the once-evaluated replacement's
+  ///   character count itself, so the parser need not re-reference the
+  ///   replacement).
   /// - NUMERIC: `ABS`, `ROUND` (the one-argument form, to the nearest integer
   ///   value), `CEILING` (with its synonym `CEIL`), `FLOOR`, and `MOD` (the
   ///   two-integer remainder — `BITAND`'s numeric sibling, an operation the
@@ -398,14 +417,15 @@ public struct Routines: Sendable {
   /// each ships in its simplest callable form now):
   /// - `SUBSTRING(text FROM start FOR length)` — the full ISO clause with a
   ///   `FROM`/`FOR` keyword syntax and an optional length — and the plain
-  ///   three-argument `SUBSTRING(text, start, length)` both need either grammar
-  ///   or variadic arity (the contract is a fixed-arity `[parameters]`); only
-  ///   the two-argument prefix form ships.
+  ///   three-argument `SUBSTRING(text, start, length)` could now adopt the
+  ///   optional-tail arity `OVERLAY` introduced (`minimum` 2, an optional third
+  ///   `length`); only the two-argument prefix form ships in this batch.
   /// - `TRIM([{LEADING | TRAILING | BOTH}] [char] FROM text)` — the full ISO
   ///   clause with a trim specification and a trim character — needs grammar;
   ///   only the leading-and-trailing-space `TRIM(text)` form ships.
-  /// - `ROUND(n, places)` — rounding to a decimal place — needs variadic arity;
-  ///   only the nearest-integer `ROUND(n)` form ships.
+  /// - `ROUND(n, places)` — rounding to a decimal place — could now use the
+  ///   optional-tail arity (`minimum` 1); only the nearest-integer `ROUND(n)`
+  ///   form ships in this batch.
   /// - The numeric routines are declared over `double` (`returns` a `double`,
   ///   save `MOD`'s integer remainder), so an INTEGER argument does not satisfy
   ///   the static contract (the type-check is exact-equality — an integer is
@@ -438,6 +458,11 @@ public struct Routines: Sendable {
                      deterministic: true, floor),
     "mod": Routine(returns: .integer, parameters: [.integer, .integer],
                    deterministic: true, mod),
+    "position": Routine(returns: .integer, parameters: [.text, .text],
+                        deterministic: true, position),
+    "overlay": Routine(returns: .text,
+                       parameters: [.text, .text, .integer, .integer],
+                       minimum: 3, deterministic: true, overlay),
   ]
 
   /// The single `.null` short-circuit ISO null propagation gives every built-in
@@ -633,6 +658,102 @@ public struct Routines: Sendable {
     // division and traps, so a divisor of -1 short-circuits to that 0.
     guard b != -1 else { return .integer(0) }
     return .integer(a % b)
+  }
+
+  /// `POSITION(substring, string)` — the parser's desugaring of the ISO
+  /// `POSITION(substring IN string)` — the 1-based character position of the
+  /// first occurrence of `substring` in `string`, 0 when it does not occur. An
+  /// EMPTY substring occurs at position 1 (ISO): the empty string is a prefix
+  /// of every string, including another empty string. Matching is
+  /// character-wise and case-SENSITIVE (no case fold). A NULL argument yields
+  /// NULL; the wrong count or a non-text argument is `SQLError.argument`.
+  private static func position(_ arguments: Array<SQL.Value>)
+      throws(SQLError) -> SQL.Value {
+    guard arguments.count == 2 else {
+      throw .argument("POSITION takes two arguments")
+    }
+    if propagates(arguments) { return .null }
+    guard case let .text(substring) = arguments[0],
+        case let .text(string) = arguments[1] else {
+      throw .argument("POSITION requires text arguments")
+    }
+    // The empty substring is a prefix of every string, so it occurs at 1.
+    guard !substring.isEmpty else { return .integer(1) }
+    // Character-wise search over the Unicode scalars `CHAR_LENGTH` counts, so
+    // the reported position is a 1-based character index, not a byte offset.
+    let haystack = Array(string), needle = Array(substring)
+    guard haystack.count >= needle.count else { return .integer(0) }
+    for start in 0...(haystack.count - needle.count)
+        where Array(haystack[start ..< start + needle.count]) == needle {
+      return .integer(start + 1)
+    }
+    return .integer(0)
+  }
+
+  /// `OVERLAY(string, replacement, start, length)` — the parser's desugaring of
+  /// the ISO `OVERLAY(string PLACING replacement FROM start [FOR length])` —
+  /// the `string` with `length` characters from the 1-based `start` replaced by
+  /// `replacement`. The optional `FOR length` defaults, in the parser, to the
+  /// replacement's character count, so the four-argument form is the only one
+  /// this routine sees. A NULL argument yields NULL; the wrong count, a
+  /// non-text `string`/`replacement`, or a non-integer `start`/`length` is
+  /// `SQLError.argument`.
+  ///
+  /// The 1-based `start` and the `length` are CLAMPED to the string rather than
+  /// trusted, so no arithmetic traps and no slice runs out of bounds: a `start`
+  /// at or before 1 begins at the first character (the `start - 1` conversion
+  /// would overflow for `Int.min`, so it is not subtracted below 1), a `start`
+  /// past the end appends, a negative `length` removes nothing, and a `length`
+  /// past the end removes only to the end. This is `SUBSTRING`'s clamp
+  /// discipline applied to both the prefix kept and the suffix resumed.
+  private static func overlay(_ arguments: Array<SQL.Value>)
+      throws(SQLError) -> SQL.Value {
+    guard (3 ... 4).contains(arguments.count) else {
+      throw .argument("OVERLAY takes three or four arguments")
+    }
+    if propagates(arguments) { return .null }
+    guard case let .text(string) = arguments[0],
+        case let .text(replacement) = arguments[1],
+        case let .integer(start) = arguments[2] else {
+      throw .argument("OVERLAY requires text, text, and integer arguments")
+    }
+    // The number of characters to remove: the explicit `FOR length` fourth
+    // argument, or — when omitted — the character count of the replacement.
+    // Defaulting HERE, from the single evaluated replacement value, is what
+    // lets the parser pass only three arguments for the omitted-`FOR` form:
+    // the replacement is evaluated ONCE, so a NOT-DETERMINISTIC one
+    // (`stepper_text()`) both inserts and measures the SAME value, rather than
+    // the parser re-referencing it as `char_length(replacement)` and
+    // evaluating it a second time.
+    let length: Int
+    if arguments.count == 4 {
+      guard case let .integer(explicit) = arguments[3] else {
+        throw .argument("OVERLAY requires an integer length")
+      }
+      length = explicit
+    } else {
+      length = replacement.count
+    }
+    let characters = Array(string)
+    // The prefix kept is `start - 1` characters, clamped into `[0, count]`; the
+    // `start - 1` is not computed for a start at or before 1, which would
+    // overflow at `Int.min`, and is capped at the string's length so a start
+    // past the end keeps the whole string and appends.
+    let head = start > 1 ? Swift.min(start - 1, characters.count) : 0
+    // The suffix resumes `length` characters after `head`, clamped the same
+    // way: a negative or zero length removes nothing (resumes at `head`), and a
+    // length past the end resumes at the end. The overshoot is tested against
+    // the REMAINING capacity (`count - head`) rather than forming `head +
+    // length`, whose sum would overflow for an `Int.max` length.
+    let tail = if length <= 0 {
+      head
+    } else if length < characters.count - head {
+      head + length
+    } else {
+      characters.count
+    }
+    return .text(String(characters[..<head]) + replacement
+                     + String(characters[tail...]))
   }
 }
 

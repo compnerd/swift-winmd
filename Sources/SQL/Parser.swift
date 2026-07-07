@@ -44,12 +44,15 @@
 /// additive       := multiplicative (('+' | '-' | '||') multiplicative)*
 /// multiplicative := factor (('*' | '/') factor)*
 /// factor         := '(' expression ')' | case | cast | coalesce | nullif
-///                 | literal | aggregate | call | column
+///                 | position | overlay | literal | aggregate | call | column
 /// case           := CASE [expression] (WHEN (predicate | expression) THEN
 ///                     expression)+ [ELSE expression] END
 /// cast           := CAST '(' expression AS type ')'
 /// coalesce       := COALESCE '(' expression (',' expression)+ ')'
 /// nullif         := NULLIF '(' expression ',' expression ')'
+/// position       := POSITION '(' expression IN expression ')'
+/// overlay        := OVERLAY '(' expression PLACING expression FROM expression
+///                     [FOR expression] ')'
 /// literal        := string | integer | decimal | TRUE | FALSE | blob
 /// blob           := ('x' | 'X') "'" (hex hex)* "'"  // whole bytes
 /// aggregate      := COUNT '(' '*' ')'
@@ -626,6 +629,20 @@ internal struct Parser: ~Escapable {
       return try nullif()
     }
 
+    // `POSITION` and `OVERLAY` are ISO string functions with a
+    // KEYWORD-separated argument syntax (`IN`; `PLACING`/`FROM`/`FOR`) rather
+    // than the comma list an ordinary call takes, recognised case-insensitively
+    // only when written bare (a delimited `"POSITION"`/`"OVERLAY"` is a
+    // scalar-call name). Each desugars — the `(` already consumed — into the
+    // plain `Expression.call` the registered `position`/`overlay` routine
+    // evaluates, so the eval side is the routine alone.
+    if !ident.quoted, ident.text.uppercased() == "POSITION" {
+      return try position()
+    }
+    if !ident.quoted, ident.text.uppercased() == "OVERLAY" {
+      return try overlay()
+    }
+
     // An aggregate is one of the fixed set of names (recognised
     // case-insensitively, only when written bare — a delimited `"COUNT"` is a
     // scalar name), distinct from a scalar call: it accumulates over a group
@@ -766,6 +783,53 @@ internal struct Parser: ~Escapable {
     let right = try expression()
     try expect(.rparen)
     return .nullif(left, right)
+  }
+
+  /// Parses the tail of `POSITION(substring IN string)` — the `(` is already
+  /// consumed — into the ordinary `call("position", [substring, string])` the
+  /// registered `position` routine evaluates.
+  ///
+  /// The ISO syntax separates the two operands with `IN` (already a keyword,
+  /// shared with the membership predicate) rather than a comma; `IN` does not
+  /// begin at the expression tier, so `expression()` stops at it. The result is
+  /// the 1-based position of `substring` in `string`, 0 when absent — the
+  /// routine's contract; the desugaring only lowers the special syntax to a
+  /// two-argument call. The whole is closed by `)`.
+  private mutating func position() throws(SQLError) -> Expression {
+    let substring = try expression()
+    try expect(.in)
+    let string = try expression()
+    try expect(.rparen)
+    return .call(name: "position", arguments: [substring, string])
+  }
+
+  /// Parses the tail of `OVERLAY(string PLACING replacement FROM start [FOR
+  /// length])` — the `(` is already consumed — into the ordinary
+  /// `call("overlay", [string, replacement, start[, length]])` the registered
+  /// `overlay` routine evaluates.
+  ///
+  /// The ISO syntax separates the operands with the keywords `PLACING`, `FROM`,
+  /// and an optional `FOR`, none of which begins at the expression tier, so
+  /// each `expression()` stops at the next keyword. The `FOR length` is
+  /// OPTIONAL; when omitted, the call is left at THREE arguments and the
+  /// routine defaults the length to the replacement's character count from the
+  /// single evaluated replacement value — NOT desugared to
+  /// `char_length(replacement)`, which would reference the replacement twice
+  /// and evaluate a non-deterministic one (`stepper_text()`) once to insert and
+  /// again to measure. `overlay`'s optional-tail arity (`minimum` 3) admits
+  /// both forms. The whole is closed by `)`.
+  private mutating func overlay() throws(SQLError) -> Expression {
+    let string = try expression()
+    try expect(.placing)
+    let replacement = try expression()
+    try expect(.from)
+    let start = try expression()
+    var arguments = [string, replacement, start]
+    if try match(.for) {
+      try arguments.append(expression())
+    }
+    try expect(.rparen)
+    return .call(name: "overlay", arguments: arguments)
   }
 
   // MARK: - Predicate

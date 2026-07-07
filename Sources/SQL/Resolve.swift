@@ -784,9 +784,12 @@ internal struct Scope {
 
   /// The result type of the scalar routine `name` called over `arguments`,
   /// validating its declared signature exactly as a run would fault: an
-  /// unregistered name faults `SQLError.function`; the argument count must
-  /// equal the routine's `parameters` arity; and each argument's static type
-  /// must equal the declared parameter type. A nullable column of the DECLARED
+  /// unregistered name faults `SQLError.function`; the argument count must lie
+  /// in the routine's `minimum ... parameters.count` arity (a fixed-arity
+  /// routine has `minimum == parameters.count`, so this is exact for it, and an
+  /// optional-tail routine like `OVERLAY` admits either count); and each
+  /// SUPPLIED argument's static type must equal the declared parameter type. A
+  /// nullable column of the DECLARED
   /// type passes — statically it carries its declared type and a run-time NULL
   /// propagates — so only a definitively-wrong type (text where an integer is
   /// required) is rejected, mirroring a routine like `BITAND` throwing
@@ -799,8 +802,12 @@ internal struct Scope {
                     _ routines: Routines)
       throws(SQLError) -> ValueType {
     guard let routine = routines[name] else { throw .function(name) }
-    guard arguments.count == routine.parameters.count else {
-      throw .argument("\(name) takes \(routine.parameters.count) arguments")
+    guard (routine.minimum ... routine.parameters.count)
+        .contains(arguments.count) else {
+      let arity = routine.minimum == routine.parameters.count
+          ? "\(routine.parameters.count)"
+          : "\(routine.minimum) to \(routine.parameters.count)"
+      throw .argument("\(name) takes \(arity) arguments")
     }
     for (argument, expected) in zip(arguments, routine.parameters) {
       let type = try validate(argument, routines)

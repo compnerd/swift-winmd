@@ -54,12 +54,18 @@ internal import WinMD
 // MARK: - Catalog
 
 extension WinMD.Storage: SQLEngine.Catalog {
-  /// The relation named `name`, resolved case-insensitively against the open
-  /// tables' schema names.
+  /// The relation named `name`, resolved case-insensitively against the CIL
+  /// table schema — the present tables first, then, failing that, any
+  /// schema-defined table the database omits, surfaced as an EMPTY relation.
   ///
-  /// A `WinMD.Table`'s description is its schema name (e.g. "TypeDef"); a name
-  /// the database has no table for yields `nil`, which the engine reports as
-  /// `SQLError.relation`.
+  /// A `WinMD.Table`'s description is its schema name (e.g. "TypeDef"). A
+  /// metadata file sets a table's `Valid` bit only when it has rows, so a file
+  /// with no rows for a table omits it — yet a query may still reference it (an
+  /// optional-metadata relation a view joins in one arm, e.g. the `bases`
+  /// view's `TypeSpec` arm over a file with no generic bases). Resolving an
+  /// absent but schema-defined table to a zero-row `Table.empty(_:)` relation
+  /// lets such a query always resolve, its arm simply yielding no rows, rather
+  /// than faulting `SQLError.relation`. A name no CIL schema bears is `nil`.
   @_lifetime(borrow self)
   internal borrowing func table(named name: String) -> WinMDRelation? {
     for index in 0 ..< tables.count {
@@ -68,7 +74,8 @@ extension WinMD.Storage: SQLEngine.Catalog {
         return WinMDRelation(self, tables[index])
       }
     }
-    return nil
+    guard let schema = WinMD.Storage.schema(named: name) else { return nil }
+    return WinMDRelation(self, WinMD.Table.empty(schema))
   }
 
   /// The schema names of every open table — the `INFORMATION_SCHEMA` overlay's
@@ -198,11 +205,19 @@ extension Session {
     //
     // `SIGNATURE` joins it under the same `[.blob] -> .text` contract, decoding
     // a `MethodDef.Signature` `#Blob` to its return type's neutral spelling.
+    // `GENERICBASE` decodes a `TypeSpec.Signature` blob to the coded-index
+    // token of the generic base it instantiates — an `.integer` over one
+    // `.blob`, NULL when the spec is not a generic instantiation — so the
+    // `bases` view can join a `TypeSpec`-recorded base (a generic interface's
+    // generic base) to its `TypeRef`/`TypeDef` by splitting the token's tag and
+    // row.
     try! Routines.standard
         .registering("guid", returns: .text, parameters: [.blob],
                      Session.guid)
         .registering("signature", returns: .text, parameters: [.blob],
                      Session.signature)
+        .registering("genericbase", returns: .integer, parameters: [.blob],
+                     Session.genericbase)
   }
 
   /// `GUID(blob)` — the UUID a `GuidAttribute` `CustomAttribute` value blob
@@ -270,10 +285,37 @@ extension Session {
             optional: "?",
             generic: (open: "<", close: ">"),
             variable: (type: "T", method: "M"),
+            projection: ".ABI",
             opaque: "object",
             guid: (iid: "iid", clsid: "clsid"),
             known: [:],
             escape: { $0 })
+  }
+
+  /// `GENERICBASE(blob)` — the `TypeDefOrRef` coded-index token naming the
+  /// generic base a `TypeSpec.Signature` GENERICINST instantiates, as an
+  /// integer, or `NULL` when the blob is not a generic instantiation over a
+  /// named base.
+  ///
+  /// A pure per-row codec over the raw `TypeSpec.Signature` `#Blob`: the
+  /// `bases` view feeds it the signature of a `TypeSpec`-recorded interface
+  /// base (a WinRT generic interface inheriting another, `IVector`1 :
+  /// IIterable`1`) and splits the returned token — `tag = BITAND(token, 3)`,
+  /// `row = token / 4` — to join the base `TypeRef` (tag 1) or `TypeDef` (tag
+  /// 0) by its `Id`. A NULL argument propagates to NULL; a non-blob argument is
+  /// `SQLError.argument`; a non-generic (or malformed) spec yields NULL, so its
+  /// join produces no base.
+  private static func genericbase(_ arguments: Array<Value>)
+      throws(SQLError) -> Value {
+    guard arguments.count == 1 else {
+      throw .argument("GENERICBASE takes one argument")
+    }
+    if case .null = arguments[0] { return .null }
+    guard case let .blob(bytes) = arguments[0] else {
+      throw .argument("GENERICBASE requires a blob argument")
+    }
+    guard let base = WinMD.base(decoding: bytes) else { return .null }
+    return .integer(base.rawValue)
   }
 }
 
@@ -820,19 +862,17 @@ extension WinMD.Storage {
     return nil
   }
 
-  /// The decoded type spelling of the return of the `MethodDef` at 1-based
-  /// `method` `Id`, in `dialect`, or `nil` when the row or its signature
-  /// does not decode.
+  /// The `SignatureType` of the return of the `MethodDef` at 1-based `method`
+  /// `Id`, paired with a `Resolver` over the storage — or `nil` when the row or
+  /// its signature does not decode.
   ///
-  /// This is the signature-navigation the adapter once baked as the
-  /// `ReturnType` virtual column, relocated so the render can spell a return at
-  /// render time with a target `Dialect`: it opens the `MethodDef` row, decodes
-  /// its `prototype` signature, builds a `Resolver` over the storage, and
-  /// decodes the return. `nil` mirrors the old NULL — an absent row, an
-  /// undecodable signature, or an unresolvable one.
-  internal borrowing func decode(return method: Int,
-                                 generics: Array<String>? = nil,
-                                 in dialect: Dialect) -> String? {
+  /// This is the shared signature-navigation the render's return spellings
+  /// (`decode(return:)` for the typed surface, `abi(return:)` for the erased
+  /// ABI) build on: it opens the `MethodDef` row, decodes its `prototype`
+  /// signature, and builds the `Resolver`. `nil` mirrors the old NULL — an
+  /// absent row, an undecodable signature, or an unresolvable one.
+  private borrowing func returned(_ method: Int)
+      -> (type: SignatureType, resolver: Resolver)? {
     guard let table = opened("MethodDef") else { return nil }
     let cursor = WinMD.Cursor(copy self, table)
     guard let tuple = cursor[method - 1],
@@ -841,27 +881,24 @@ extension WinMD.Storage {
         let resolver = try? Resolver(of: signature, with: self) else {
       return nil
     }
-    return signature.returns.decode(generics: generics, with: resolver,
-                                    dialect: dialect)
+    return (signature.returns, resolver)
   }
 
-  /// The decoded type spelling of the `Param` at 1-based `parameter` `Id`, in
-  /// `dialect`, navigated through its owning method's signature — or `nil` when
-  /// it does not decode.
+  /// The `SignatureType` of the `Param` at 1-based `parameter` `Id`, navigated
+  /// through its owning method's signature, paired with a `Resolver` and the
+  /// parameter's own `Name` (the `System.Guid` `IID`/`CLSID` hint) — or `nil`
+  /// when it does not decode.
   ///
-  /// This is the signature-navigation the adapter once baked as the `ParamType`
-  /// virtual column, relocated so the render can spell a parameter at render
-  /// time. The `Param.Sequence` cell is the 1-based parameter position:
-  /// `Sequence == 0` is the return pseudo-parameter and `Sequence >
+  /// This is the shared signature-navigation the render's parameter spellings
+  /// (`decode(parameter:)` for the typed surface, `abi(parameter:)` for the
+  /// erased ABI) build on. The `Param.Sequence` cell is the 1-based parameter
+  /// position: `Sequence == 0` is the return pseudo-parameter and `Sequence >
   /// parameters.count` is out of range, both `nil`. The owning `MethodDef` is
   /// found through the `Param` list link — an owner of zero is no parent
   /// (malformed/partial metadata), so the parameter is unowned and yields `nil`
-  /// rather than indexing a negative row. The parameter's own `Name` is the
-  /// `System.Guid` `IID`/`CLSID` hint; for any other type the decoder ignores
-  /// it, so threading it is always safe.
-  internal borrowing func decode(parameter: Int,
-                                 generics: Array<String>? = nil,
-                                 for dialect: Dialect) -> String? {
+  /// rather than indexing a negative row.
+  private borrowing func parametered(_ parameter: Int)
+      -> (type: SignatureType, resolver: Resolver, name: String?)? {
     guard let table = opened("Param") else { return nil }
     let params = WinMD.Cursor(copy self, table)
     guard let param = params[parameter - 1],
@@ -885,8 +922,110 @@ extension WinMD.Storage {
       return nil
     }
     let name = param.ordinal(for: "Name").flatMap { try? param.string($0) }
-    return signature.parameters[position - 1]
-        .decode(parameter: name, generics: generics, with: resolver,
-                dialect: dialect)
+    return (signature.parameters[position - 1], resolver, name)
+  }
+
+  /// The typed type spelling of the return of the `MethodDef` at 1-based
+  /// `method` `Id`, in `dialect` — the wrapper's typed surface — or `nil` when
+  /// the row or its signature does not decode.
+  ///
+  /// This is the signature-navigation the adapter once baked as the
+  /// `ReturnType` virtual column, relocated so the render can spell a return at
+  /// render time with a target `Dialect`.
+  internal borrowing func decode(return method: Int,
+                                 generics: Array<String>? = nil,
+                                 in dialect: Dialect) -> String? {
+    returned(method).map {
+      $0.type.decode(generics: generics, with: $0.resolver, dialect: dialect)
+    }
+  }
+
+  /// The ABI type spelling of the return of the `MethodDef` at 1-based `method`
+  /// `Id`, in `dialect` — the ABI protocol's return: a value keeps its own ABI,
+  /// a concrete reference is the opaque interface pointer, and an unbound
+  /// generic slot projects through its element's associated ABI type
+  /// (`Element.ABI`) — or `nil` when the row or its signature does not decode.
+  internal borrowing func abi(return method: Int,
+                              generics: Array<String>? = nil,
+                              in dialect: Dialect) -> String? {
+    returned(method).map {
+      $0.type.abi(generics: generics, with: $0.resolver, dialect: dialect)
+    }
+  }
+
+  /// Whether the return of the `MethodDef` at 1-based `method` `Id` crosses the
+  /// ABI as a concrete erased interface pointer (a reference that is NOT a
+  /// projected generic slot) — so the wrapper casts the erased result back to
+  /// its typed spelling — or `nil` when the row does not decode. A value return
+  /// needs no cast, and a projected generic return forwards through the
+  /// `ABIProjectable` conformance (see `projects(return:)`), not a cast.
+  internal borrowing func reference(return method: Int) -> Bool? {
+    returned(method).map {
+      $0.type.classification == .reference && !$0.type.projects
+    }
+  }
+
+  /// Whether the return of the `MethodDef` at 1-based `method` `Id` is an
+  /// unbound generic slot that crosses the ABI through its element's associated
+  /// ABI type (`Element.ABI`) — so the wrapper reconstructs the typed value
+  /// through the element's `ABIProjectable` conformance (`Element.fromABI(…)`),
+  /// size-correct for a value AND a reference instantiation — or `nil` when the
+  /// row does not decode.
+  internal borrowing func projects(return method: Int) -> Bool? {
+    returned(method).map { $0.type.projects }
+  }
+
+  /// The typed type spelling of the `Param` at 1-based `parameter` `Id`, in
+  /// `dialect`, navigated through its owning method's signature — the wrapper's
+  /// typed surface — or `nil` when it does not decode. The parameter's own
+  /// `Name` is the `System.Guid` `IID`/`CLSID` hint; for any other type the
+  /// decoder ignores it, so threading it is always safe.
+  ///
+  /// This is the signature-navigation the adapter once baked as the `ParamType`
+  /// virtual column, relocated so the render can spell a parameter at render
+  /// time.
+  internal borrowing func decode(parameter: Int,
+                                 generics: Array<String>? = nil,
+                                 for dialect: Dialect) -> String? {
+    parametered(parameter).map {
+      $0.type.decode(parameter: $0.name, generics: generics,
+                     with: $0.resolver, dialect: dialect)
+    }
+  }
+
+  /// The ABI type spelling of the `Param` at 1-based `parameter` `Id`, in
+  /// `dialect` — the ABI protocol's parameter: a value keeps its own ABI, a
+  /// concrete reference is the opaque interface pointer, and an unbound generic
+  /// slot projects through its element's associated ABI type (`Element.ABI`) —
+  /// or `nil` when it does not decode.
+  internal borrowing func abi(parameter: Int,
+                              generics: Array<String>? = nil,
+                              for dialect: Dialect) -> String? {
+    parametered(parameter).map {
+      $0.type.abi(parameter: $0.name, generics: generics,
+                  with: $0.resolver, dialect: dialect)
+    }
+  }
+
+  /// Whether the `Param` at 1-based `parameter` `Id` crosses the ABI as a
+  /// concrete erased interface pointer (a reference that is NOT a projected
+  /// generic slot) — so the wrapper casts the typed argument to the erased
+  /// pointer before forwarding — or `nil` when it does not decode. A value
+  /// parameter needs no cast, and a projected generic parameter forwards
+  /// through the `ABIProjectable` conformance (see `projects(parameter:)`), not
+  /// a cast.
+  internal borrowing func reference(parameter: Int) -> Bool? {
+    parametered(parameter).map {
+      $0.type.classification == .reference && !$0.type.projects
+    }
+  }
+
+  /// Whether the `Param` at 1-based `parameter` `Id` is an unbound generic slot
+  /// that crosses the ABI through its element's associated ABI type
+  /// (`Element.ABI`) — so the wrapper projects the typed argument through the
+  /// element's `ABIProjectable` conformance (`local.toABI()`), size-correct for
+  /// a value AND a reference instantiation — or `nil` when it does not decode.
+  internal borrowing func projects(parameter: Int) -> Bool? {
+    parametered(parameter).map { $0.type.projects }
   }
 }

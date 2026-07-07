@@ -27,6 +27,7 @@ extension Dialect {
         optional: "?",
         generic: (open: "<", close: ">"),
         variable: (type: "T", method: "M"),
+        projection: ".ABI",
         opaque: "UnsafeMutableRawPointer",
         guid: (iid: "IID", clsid: "CLSID"),
         known: [
@@ -340,6 +341,9 @@ struct DecodeTests {
     ])
     let type = SignatureType.named(kind: .class, foo)
     #expect(type.classification == .reference)
+    // A CONCRETE reference is not a projected generic slot: its erased pointer
+    // is a pointer either way, so the wrapper's cast is size-safe.
+    #expect(!type.projects)
     #expect(type.abi(with: resolver, dialect: dialect)
                 == "UnsafeMutableRawPointer")
     // Its own decoded spelling — what the erasure replaces — is the named type.
@@ -384,6 +388,90 @@ struct DecodeTests {
     #expect(type.classification == .reference)
     #expect(type.abi(with: resolver, dialect: dialect)
                 == "UnsafeMutableRawPointer")
+  }
+
+  @Test func `an unbound generic type variable projects through its element ABI`() {
+    // In the generic DEFINITION render there is no bound argument, so a
+    // type-level `VAR` slot projects through its declared name's ASSOCIATED ABI
+    // type (`Element.ABI`, the windows-rs `Type::Abi` mechanism) — size-correct
+    // for a value AND a reference instantiation, unlike a fixed-size raw-pointer
+    // erasure — and `projects` reports it so the wrapper forwards through
+    // `ABIProjectable` rather than a fixed-size cast. It still classifies as a
+    // reference (a fixed classification cannot know the argument), but the ABI
+    // spelling is the projection, not the opaque pointer.
+    let element = SignatureType.variable(scope: .type, 0)
+    #expect(element.classification == .reference)
+    #expect(element.projects)
+    #expect(element.abi(generics: ["Element"], with: resolver, dialect: dialect)
+                == "Element.ABI")
+    // Its own decoded spelling — the typed surface the wrapper keeps — is the
+    // declared name.
+    #expect(element.decode(generics: ["Element"], with: resolver,
+                           dialect: dialect) == "Element")
+    // A method-level `MVAR` (never substituted here) has no declared name to
+    // project, so it still erases to the opaque pointer and does NOT project.
+    let method = SignatureType.variable(scope: .method, 0)
+    #expect(method.classification == .reference)
+    #expect(!method.projects)
+    #expect(method.abi(with: resolver, dialect: dialect)
+                == "UnsafeMutableRawPointer")
+    // A byref/pointer of a type variable projects its element under the
+    // pointer — the composed spelling wraps `Element.ABI`, and it still
+    // projects (the wrapper converts the wrapped slot).
+    let byref = SignatureType.reference(.variable(scope: .type, 0))
+    #expect(byref.classification == .reference)
+    #expect(byref.projects)
+    #expect(byref.abi(generics: ["Element"], with: resolver, dialect: dialect)
+                == "UnsafeMutablePointer<Element.ABI>")
+  }
+
+  @Test func `a generic type variable erases by its bound argument's kind`() {
+    // WinRT erases a generic parameter's ABI by its CONCRETE argument's kind,
+    // so a type variable's ABI is argument-dependent: `IVector<Int32>.GetAt`
+    // carries an `Int32` value (4 bytes), `IVector<IFoo>.GetAt` an interface
+    // pointer (8 bytes). When the enclosing instantiation's binding `arguments`
+    // are supplied, `VAR 0` classifies and erases as `arguments[0]`.
+    let element = SignatureType.variable(scope: .type, 0)
+    // A VALUE argument (`Int32`) keeps its own value ABI — the slot is `CInt`,
+    // NOT the opaque pointer, so the wrapper needs no size-mismatched bitcast.
+    #expect(element.classification(substituting: [.primitive(.int4)]) == .value)
+    #expect(element.abi(substituting: [.primitive(.int4)], with: resolver,
+                        dialect: dialect) == "CInt")
+    // A REFERENCE argument (an interface) erases to the opaque pointer, exactly
+    // as the unbound definition does — the wrapper casts across the boundary.
+    let foo = TypeDefOrRef(rawValue: 1)
+    let references = Resolver([
+      foo.rawValue: Identity(namespace: "Windows.Foundation", name: "IFoo"),
+    ])
+    let reference = SignatureType.named(kind: .class, foo)
+    #expect(element.classification(substituting: [reference]) == .reference)
+    #expect(element.abi(substituting: [reference], with: references,
+                        dialect: dialect) == "UnsafeMutableRawPointer")
+    // The whole instantiation follows suit: a GENERICINST over a `CLASS` base
+    // threads ITS arguments to the base's variable slots — an out-of-range
+    // operand or a method-level `MVAR` is never substituted and stays a
+    // reference. A byref of a value-bound variable wraps the VALUE ABI.
+    let byref = SignatureType.reference(.variable(scope: .type, 0))
+    #expect(byref.abi(substituting: [.primitive(.int4)], with: resolver,
+                      dialect: dialect) == "UnsafeMutablePointer<CInt>")
+  }
+
+  @Test func `only an unbound type variable is a projected generic slot`() {
+    // `projects` partitions the erased-ABI slots the generic-definition render
+    // forwards: only an unbound type-level `VAR` (recursively, under
+    // indirection) crosses through its element's associated ABI type
+    // (`Element.ABI`) and so forwards through `ABIProjectable`. A value, a
+    // concrete reference, a generic instantiation, and a method-level `MVAR` do
+    // not project — a value needs no conversion, and a concrete reference's
+    // pointer cast is size-safe.
+    #expect(SignatureType.variable(scope: .type, 0).projects)
+    #expect(SignatureType.pointer(.variable(scope: .type, 0)).projects)
+    #expect(!SignatureType.variable(scope: .method, 0).projects)
+    #expect(!SignatureType.primitive(.int4).projects)
+    let foo = TypeDefOrRef(rawValue: 1)
+    #expect(!SignatureType.named(kind: .class, foo).projects)
+    #expect(!SignatureType.instance(.named(kind: .class, foo),
+                                    [.primitive(.int4)]).projects)
   }
 
   @Test func `a typed reference is a value keeping its own ABI spelling`() {

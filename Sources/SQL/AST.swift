@@ -545,11 +545,13 @@ public enum Aggregand: Hashable, Sendable {
   case expression(Expression)
 }
 
-/// A binary arithmetic operator.
+/// A binary operator over two scalar operands.
 ///
-/// The four standard operators over integers; `*` `/` bind tighter than `+`
-/// `-`, and all four are left-associative — the precedence the parser's
-/// climbing grammar encodes and parentheses override.
+/// The four standard arithmetic operators over numbers, and the ISO `||`
+/// string concatenation. `*` `/` bind tighter than `+` `-` `||`, and every
+/// operator is left-associative — the precedence the parser's climbing grammar
+/// encodes and parentheses override. The four arithmetic operators require
+/// numeric operands; `||` requires text operands. All propagate NULL.
 public enum Arithmetic: Hashable, Sendable {
   /// `+`
   case add
@@ -559,6 +561,10 @@ public enum Arithmetic: Hashable, Sendable {
   case multiply
   /// `/` — integer division.
   case divide
+  /// `||` — text concatenation. It joins two text operands into one text value
+  /// and propagates NULL (a NULL operand yields NULL); a non-text operand is a
+  /// `SQLError.operand` type error, as arithmetic faults on a non-numeric one.
+  case concatenate
 }
 
 /// A row filter — a tree of comparisons composed with `AND`, `OR`, and `NOT`.

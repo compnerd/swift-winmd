@@ -39,7 +39,7 @@
 ///                 | [NOT] IN '(' expression (',' expression)* ')'
 ///                 | [NOT] LIKE expression [ESCAPE expression])
 /// expression     := additive
-/// additive       := multiplicative (('+' | '-') multiplicative)*
+/// additive       := multiplicative (('+' | '-' | '||') multiplicative)*
 /// multiplicative := factor (('*' | '/') factor)*
 /// factor         := '(' expression ')' | case | cast | coalesce | nullif
 ///                 | literal | aggregate | call | column
@@ -60,9 +60,10 @@
 /// identifier     := word | '"' … '"'  // a delimited identifier is verbatim
 /// ```
 ///
-/// Arithmetic precedence is `*` `/` > `+` `-`, both levels left-associative; the
-/// cascade of `additive`/`multiplicative` encodes it, and parentheses override
-/// it through `factor`.
+/// Arithmetic precedence is `*` `/` > `+` `-` `||`, both levels
+/// left-associative; the cascade of `additive`/`multiplicative` encodes it (the
+/// `||` string concatenation sharing the additive tier), and parentheses
+/// override it through `factor`.
 ///
 /// A `column` is a single identifier token; a qualifying dot (`t.Name`) is part
 /// of the identifier the lexer scans, so `Column(_:)` splits it into qualifier
@@ -509,7 +510,12 @@ internal struct Parser: ~Escapable {
     try additive()
   }
 
-  /// Parses `multiplicative (('+' | '-') multiplicative)*`, left-associative.
+  /// Parses `multiplicative (('+' | '-' | '||') multiplicative)*`,
+  /// left-associative.
+  ///
+  /// The ISO `||` string concatenation shares this additive precedence tier and
+  /// left-associativity, so `a || b || c` reads left to right and `a + b || c`
+  /// groups `(a + b) || c` — both binding looser than `*`/`/`.
   private mutating func additive() throws(SQLError) -> Expression {
     var lhs = try multiplicative()
     while true {
@@ -517,6 +523,8 @@ internal struct Parser: ~Escapable {
         .add
       } else if try match(.minus) {
         .subtract
+      } else if try match(.concat) {
+        .concatenate
       } else {
         nil
       }

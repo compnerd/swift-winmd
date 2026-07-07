@@ -581,18 +581,26 @@ extension Row where Self: ~Escapable {
 extension Arithmetic {
   /// Applies the operator to two typed operands, yielding a typed `Value`.
   ///
-  /// The operands must be numeric — integer or double. An `integer ∘ integer`
-  /// stays an integer, with `/` integer division; any double operand makes the
-  /// result a double (a lone integer promoted to `Double`), with `/` real
-  /// division. A NULL on either side propagates — the result is NULL, not a
-  /// fault. A division by zero is `SQLError.divide`, as standard SQL raises
-  /// rather than yielding a value (`inf`/`NaN`), on either an integer or a
-  /// double divisor; a non-numeric (text/boolean/blob) operand is a
+  /// A `||` concatenates two text operands into one text value; the four
+  /// arithmetic operators require numeric operands — integer or double. An
+  /// `integer ∘ integer` stays an integer, with `/` integer division; any
+  /// double operand makes the result a double (a lone integer promoted to
+  /// `Double`), with `/` real division. A NULL on either side propagates — the
+  /// result is NULL, not a fault. A division by zero is `SQLError.divide`, as
+  /// standard SQL raises rather than yielding a value (`inf`/`NaN`), on either
+  /// an integer or a double divisor; an operand of the wrong kind (a
+  /// non-numeric arithmetic operand, or a non-text `||` operand) is a
   /// `SQLError.operand` type error rather than a silent coercion; an integer
   /// result past the `Int` boundary is `SQLError.magnitude`.
   internal func apply(_ lhs: Value, _ rhs: Value) throws(SQLError) -> Value {
     if case .null = lhs { return .null }
     if case .null = rhs { return .null }
+    if case .concatenate = self {
+      guard case let .text(lhs) = lhs, case let .text(rhs) = rhs else {
+        throw .operand("|| operands must be text")
+      }
+      return .text(lhs + rhs)
+    }
     return switch (lhs, rhs) {
     case let (.integer(lhs), .integer(rhs)):
       try apply(lhs, rhs)
@@ -622,6 +630,10 @@ extension Arithmetic {
     case .multiply: lhs.multipliedReportingOverflow(by: rhs)
     case .divide where rhs == 0: throw .divide
     case .divide: lhs.dividedReportingOverflow(by: rhs)
+    // `||` never reaches the numeric path — the public `apply` handles it over
+    // text before dispatching a numeric pair here — so a concatenate over two
+    // integers is an unreachable operand fault.
+    case .concatenate: throw .operand("|| operands must be text")
     }
     guard !outcome.overflow else { throw .magnitude("integer overflow") }
     return .integer(outcome.partialValue)
@@ -644,6 +656,9 @@ extension Arithmetic {
     case .multiply: lhs * rhs
     case .divide where rhs == 0: throw .divide
     case .divide: lhs / rhs
+    // `||` never reaches the numeric path — the public `apply` handles it over
+    // text — so a concatenate over two doubles is an unreachable operand fault.
+    case .concatenate: throw .operand("|| operands must be text")
     }
     guard result.isFinite else {
       throw .magnitude("double result is not finite")

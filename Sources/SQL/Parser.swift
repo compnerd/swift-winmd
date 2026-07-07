@@ -36,6 +36,7 @@
 /// negation       := NOT negation | primary
 /// primary        := '(' predicate ')' | comparison
 /// comparison     := expression (op (expression | param) | IS [NOT] NULL
+///                 | IS [NOT] DISTINCT FROM expression
 ///                 | [NOT] IN '(' expression (',' expression)* ')'
 ///                 | [NOT] LIKE expression [ESCAPE expression]
 ///                 | [NOT] BETWEEN (expression | param) AND
@@ -834,7 +835,9 @@ internal struct Parser: ~Escapable {
   /// `:parameter` right operand binds the comparison to a value resolved at run
   /// time from the engine's bindings — the correlated-subquery primitive. An
   /// `IS NULL` (or `IS NOT NULL`) tail tests the left expression for `NULL`
-  /// rather than comparing it — the way a nullable column is filtered. An `IN`
+  /// rather than comparing it — the way a nullable column is filtered. An `IS
+  /// [NOT] DISTINCT FROM` tail is the ISO null-safe comparison of the two
+  /// expressions, treating NULL as a comparable value. An `IN`
   /// (or `NOT IN`) tail tests the left expression for membership in a
   /// parenthesised value list. A `LIKE` (or `NOT LIKE`) tail tests the left
   /// expression's text against a pattern, with an optional `ESCAPE` character.
@@ -846,6 +849,9 @@ internal struct Parser: ~Escapable {
     let left = try expression()
     if try match(.is) {
       let negated = try match(.not)
+      if try match(.distinct) {
+        return try distinct(left, negated: negated)
+      }
       try expect(.null)
       return .null(left, negated: negated)
     }
@@ -893,6 +899,22 @@ internal struct Parser: ~Escapable {
     }
     try expect(.rparen)
     return .membership(left, values, negated: negated)
+  }
+
+  /// Parses the right operand of `left IS [NOT] DISTINCT FROM right` — the `IS
+  /// [NOT] DISTINCT` is already consumed — into the first-class
+  /// `Predicate.distinct`, `negated` carrying the `IS NOT` (null-safe equality)
+  /// spelling.
+  ///
+  /// It is the ISO null-safe comparison of the two expressions: TWO-VALUED
+  /// (never UNKNOWN), treating NULL as a comparable value, unlike `=`. The
+  /// right operand is an ordinary scalar `expression` — not an `Operand`, as no
+  /// `:parameter` form is defined for this predicate.
+  private mutating func distinct(_ left: Expression, negated: Bool)
+      throws(SQLError) -> Predicate {
+    try expect(.from)
+    let right = try expression()
+    return .distinct(left, right, negated: negated)
   }
 
   /// Parses the bounds tail of `left [NOT] BETWEEN a AND b` — the `BETWEEN` is

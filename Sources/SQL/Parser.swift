@@ -36,14 +36,17 @@
 /// negation       := NOT negation | primary
 /// primary        := '(' predicate ')' | comparison
 /// comparison     := expression (op (expression | param) | IS [NOT] NULL
-///                 | [NOT] IN '(' expression (',' expression)* ')')
+///                 | [NOT] IN '(' expression (',' expression)* ')'
+///                 | [NOT] BETWEEN expression AND expression)
 /// expression     := additive
-/// additive       := multiplicative (('+' | '-') multiplicative)*
+/// additive       := multiplicative (('+' | '-' | '||') multiplicative)*
 /// multiplicative := factor (('*' | '/') factor)*
-/// factor         := '(' expression ')' | case
+/// factor         := '(' expression ')' | case | coalesce | nullif
 ///                 | literal | aggregate | call | column
 /// case           := CASE [expression] (WHEN (predicate | expression) THEN
 ///                     expression)+ [ELSE expression] END
+/// coalesce       := COALESCE '(' expression (',' expression)+ ')'
+/// nullif         := NULLIF '(' expression ',' expression ')'
 /// literal        := string | integer | decimal | TRUE | FALSE | blob
 /// blob           := ('x' | 'X') "'" (hex hex)* "'"  // whole bytes
 /// aggregate      := COUNT '(' '*' ')'
@@ -56,9 +59,14 @@
 /// identifier     := word | '"' … '"'  // a delimited identifier is verbatim
 /// ```
 ///
-/// Arithmetic precedence is `*` `/` > `+` `-`, both levels left-associative; the
-/// cascade of `additive`/`multiplicative` encodes it, and parentheses override
-/// it through `factor`.
+/// Arithmetic precedence is `*` `/` > `+` `-` `||`, both levels
+/// left-associative; the cascade of `additive`/`multiplicative` encodes it (the
+/// `||` string concatenation sharing the additive tier), and parentheses
+/// override it through `factor`. `COALESCE`/`NULLIF` and `[NOT] BETWEEN` are
+/// the ISO-defined `CASE` expansions and range test, each parsed to a
+/// first-class AST node (`coalesce`/`nullif`/`between`) rather than the
+/// CASE/comparison expansion so its operands are evaluated ONCE, not
+/// re-referenced.
 ///
 /// A `column` is a single identifier token; a qualifying dot (`t.Name`) is part
 /// of the identifier the lexer scans, so `Column(_:)` splits it into qualifier
@@ -505,7 +513,12 @@ internal struct Parser: ~Escapable {
     try additive()
   }
 
-  /// Parses `multiplicative (('+' | '-') multiplicative)*`, left-associative.
+  /// Parses `multiplicative (('+' | '-' | '||') multiplicative)*`,
+  /// left-associative.
+  ///
+  /// The ISO `||` string concatenation shares this additive precedence tier and
+  /// left-associativity, so `a || b || c` reads left to right and `a + b || c`
+  /// groups `(a + b) || c` — both binding looser than `*`/`/`.
   private mutating func additive() throws(SQLError) -> Expression {
     var lhs = try multiplicative()
     while true {
@@ -513,6 +526,8 @@ internal struct Parser: ~Escapable {
         .add
       } else if try match(.minus) {
         .subtract
+      } else if try match(.concat) {
+        .concatenate
       } else {
         nil
       }
@@ -595,6 +610,19 @@ internal struct Parser: ~Escapable {
       return try .aggregate(aggregate, of: aggregand(aggregate))
     }
 
+    // `COALESCE`/`NULLIF` are ISO-defined expansions of a searched `CASE`, each
+    // recognised case-insensitively only when written bare (a delimited
+    // `"COALESCE"` is a scalar-call name). Desugar into the `CASE` AST here —
+    // the `(` is consumed — so the conditional's type unification, coercion,
+    // and reachability apply unchanged.
+    if !ident.quoted {
+      switch ident.text.uppercased() {
+      case "COALESCE": return try coalesce()
+      case "NULLIF": return try nullif()
+      default: break
+      }
+    }
+
     var arguments = Array<Expression>()
     if current?.kind != .rparen {
       try arguments.append(expression())
@@ -673,6 +701,45 @@ internal struct Parser: ~Escapable {
     return .case(whens, else: otherwise)
   }
 
+  /// Parses the argument tail of `COALESCE(v1, v2, …)` — the `(` is already
+  /// consumed — into the first-class `Expression.coalesce`.
+  ///
+  /// ISO 9075 defines `COALESCE(v1, v2, …)` as `CASE WHEN v1 IS NOT NULL THEN
+  /// v1 WHEN v2 IS NOT NULL THEN v2 … ELSE NULL END`, but that expansion
+  /// re-references each `vi` in both its guard and its `THEN`, evaluating a
+  /// stateful argument twice — so this builds the first-class node the engine
+  /// evaluates each argument ONCE for, inheriting the same type unification and
+  /// coercion the CASE would. At least two arguments are required — `COALESCE`
+  /// of one value is the value itself and carries no meaning — else
+  /// `SQLError.argument`.
+  private mutating func coalesce() throws(SQLError) -> Expression {
+    var arguments = try [expression()]
+    while try match(.comma) {
+      try arguments.append(expression())
+    }
+    try expect(.rparen)
+    guard arguments.count >= 2 else {
+      throw .argument("COALESCE requires at least two arguments")
+    }
+    return .coalesce(arguments)
+  }
+
+  /// Parses the argument tail of `NULLIF(v1, v2)` — the `(` is already consumed
+  /// — into the first-class `Expression.nullif`.
+  ///
+  /// ISO 9075 defines `NULLIF(v1, v2)` as `CASE WHEN v1 = v2 THEN NULL ELSE v1
+  /// END`, but that expansion embeds `v1` in both the equality and the `ELSE`,
+  /// evaluating a stateful `v1` twice — so this builds the first-class node the
+  /// engine evaluates `v1` ONCE for. It takes exactly two arguments (else
+  /// `SQLError.argument`).
+  private mutating func nullif() throws(SQLError) -> Expression {
+    let left = try expression()
+    try expect(.comma)
+    let right = try expression()
+    try expect(.rparen)
+    return .nullif(left, right)
+  }
+
   // MARK: - Predicate
 
   /// Parses a predicate at the lowest precedence (`OR`).
@@ -732,7 +799,8 @@ internal struct Parser: ~Escapable {
   }
 
   /// Parses `expression (op (expression | :parameter) | IS [NOT] NULL | [NOT]
-  /// IN '(' expression (',' expression)* ')')`.
+  /// IN '(' expression (',' expression)* ')' | [NOT] BETWEEN expression AND
+  /// expression)`.
   ///
   /// Either operand may be a column, a literal, or a scalar-function call, so a
   /// predicate can filter on a decoded value (`WHERE guid(Id) = '…'`). A
@@ -741,8 +809,10 @@ internal struct Parser: ~Escapable {
   /// `IS NULL` (or `IS NOT NULL`) tail tests the left expression for `NULL`
   /// rather than comparing it — the way a nullable column is filtered. An `IN`
   /// (or `NOT IN`) tail tests the left expression for membership in a
-  /// parenthesised value list. A leading `NOT` here can only introduce `NOT IN`:
-  /// a prefix `NOT` predicate is consumed by `negation` before this point.
+  /// parenthesised value list. A `BETWEEN a AND b` (or `NOT BETWEEN`) tail is
+  /// the ISO range test, desugared into a conjunction (or disjunction) of
+  /// bounds. A leading `NOT` here introduces `NOT IN` or `NOT BETWEEN`: a
+  /// prefix `NOT` predicate is consumed by `negation` before this point.
   private mutating func comparison() throws(SQLError) -> Predicate {
     let left = try expression()
     if try match(.is) {
@@ -753,7 +823,13 @@ internal struct Parser: ~Escapable {
     if try match(.in) {
       return try membership(left, negated: false)
     }
+    if try match(.between) {
+      return try between(left, negated: false)
+    }
     if try match(.not) {
+      if try match(.between) {
+        return try between(left, negated: true)
+      }
       try expect(.in)
       return try membership(left, negated: true)
     }
@@ -782,6 +858,24 @@ internal struct Parser: ~Escapable {
     }
     try expect(.rparen)
     return .membership(left, values, negated: negated)
+  }
+
+  /// Parses the bounds tail of `left [NOT] BETWEEN a AND b` — the `BETWEEN` is
+  /// already consumed — into the first-class `Predicate.between`.
+  ///
+  /// ISO 9075 defines `x BETWEEN a AND b` as `x >= a AND x <= b` (an inclusive
+  /// range) and `x NOT BETWEEN a AND b` as its negation `x < a OR x > b`, but
+  /// that expansion duplicates `x` across both bound comparisons, evaluating a
+  /// stateful `x` twice — so this parses the two bound expressions around the
+  /// `AND` keyword and builds the first-class node the engine evaluates `x`
+  /// ONCE for, keeping the same three-valued NULL semantics (a NULL `x`, `a`,
+  /// or `b` makes a bound UNKNOWN, and the row is excluded).
+  private mutating func between(_ left: Expression, negated: Bool)
+      throws(SQLError) -> Predicate {
+    let lower = try expression()
+    try expect(.and)
+    let upper = try expression()
+    return .between(left, lower, upper, negated: negated)
   }
 
   /// Parses a comparison operator.

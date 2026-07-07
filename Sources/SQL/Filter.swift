@@ -38,6 +38,14 @@ internal indirect enum Filter: Sendable {
   /// first TRUE; `NOT IN` negates that three-valued truth (UNKNOWN maps to
   /// itself).
   case membership(Term, Array<Term>, negated: Bool)
+  /// `x [NOT] BETWEEN a AND b` — the lowered form of the AST's `between`. The
+  /// test term `x` is held ONCE, the two bound terms `a` and `b` beside it, and
+  /// `negated` marks `NOT BETWEEN`. Evaluating it reads `x` once per row (an
+  /// `AND`/`OR` of two comparisons would re-evaluate a non-idempotent `x`, once
+  /// per bound) and folds `x >= a` AND `x <= b` (or `x < a` OR `x > b` when
+  /// negated) over the SAME `x` under Kleene logic, so a NULL `x`, `a`, or `b`
+  /// makes a bound UNKNOWN and the row is excluded.
+  case between(Term, Term, Term, negated: Bool)
   /// `lhs AND rhs`.
   case and(Filter, Filter)
   /// `lhs OR rhs`.
@@ -75,6 +83,21 @@ internal indirect enum Term: Sendable {
   /// schema advertises for the column — so the executor COERCES the selected
   /// value to it, widening an `.integer` arm of a `.double` CASE.
   case `case`(Array<(Filter, Term)>, else: Term?, type: ValueType)
+  /// `COALESCE(v1, v2, …)` — the lowered form of the AST's
+  /// `Expression.coalesce`. Each element term is evaluated IN ORDER exactly
+  /// ONCE, and the first whose value is non-NULL is the result, else NULL. A
+  /// desugar to a `CASE WHEN vi IS NOT NULL THEN vi …` re-evaluated each `vi`,
+  /// so a stateful element yielded a different value to its guard and its
+  /// result; holding the element ONCE (as `membership` holds its operand) fixes
+  /// that. `type` is the unification of the element types, to which the
+  /// selected value is COERCED — the type the schema advertises.
+  case coalesce(Array<Term>, type: ValueType)
+  /// `NULLIF(a, b)` — the lowered form of the AST's `Expression.nullif`. Both
+  /// operand terms are evaluated exactly ONCE (`va`, `vb`); the result is NULL
+  /// when `va = vb` is TRUE, else the SAME `va` that was compared. A desugar to
+  /// `CASE WHEN a = b THEN NULL ELSE a END` evaluated `a` twice — comparing one
+  /// value and returning another — which holding `a` ONCE fixes.
+  case nullif(Term, Term)
 }
 
 extension Term {
@@ -102,6 +125,13 @@ extension Term {
         result.references(into: &slots)
       }
       otherwise?.references(into: &slots)
+    case let .coalesce(elements, _):
+      for element in elements {
+        element.references(into: &slots)
+      }
+    case let .nullif(lhs, rhs):
+      lhs.references(into: &slots)
+      rhs.references(into: &slots)
     }
   }
 }
@@ -125,6 +155,10 @@ extension Term {
       .case(branches.map {
               ($0.0.remapped(through: slot), $0.1.remapped(through: slot))
             }, else: otherwise?.remapped(through: slot), type: type)
+    case let .coalesce(elements, type):
+      .coalesce(elements.map { $0.remapped(through: slot) }, type: type)
+    case let .nullif(lhs, rhs):
+      .nullif(lhs.remapped(through: slot), rhs.remapped(through: slot))
     }
   }
 
@@ -135,7 +169,7 @@ extension Term {
   internal var safe: Bool {
     switch self {
     case .slot, .constant: true
-    case .apply, .binary, .case: false
+    case .apply, .binary, .case, .coalesce, .nullif: false
     }
   }
 }
@@ -157,6 +191,9 @@ extension Filter {
       .membership(operand.remapped(through: slot),
                   elements.map { $0.remapped(through: slot) },
                   negated: negated)
+    case let .between(test, lower, upper, negated):
+      .between(test.remapped(through: slot), lower.remapped(through: slot),
+               upper.remapped(through: slot), negated: negated)
     case let .and(lhs, rhs):
       .and(lhs.remapped(through: slot), rhs.remapped(through: slot))
     case let .or(lhs, rhs):
@@ -230,6 +267,8 @@ extension Filter {
     case let .null(term, _): term.safe
     case let .membership(operand, elements, _):
       operand.safe && elements.allSatisfy(\.safe)
+    case let .between(test, lower, upper, _):
+      test.safe && lower.safe && upper.safe
     case let .and(lhs, rhs): lhs.safe && rhs.safe
     case let .or(lhs, rhs): lhs.safe && rhs.safe
     case let .not(operand): operand.safe
@@ -258,7 +297,7 @@ extension Filter {
   private var parameterised: Bool {
     switch self {
     case .bound: true
-    case .compare, .match, .null, .membership: false
+    case .compare, .match, .null, .membership, .between: false
     case let .and(lhs, rhs): lhs.parameterised || rhs.parameterised
     case let .or(lhs, rhs): lhs.parameterised || rhs.parameterised
     case let .not(operand): operand.parameterised
@@ -330,7 +369,50 @@ extension Row where Self: ~Escapable {
       // branch. The selected value is COERCED to the CASE's unified result
       // `type` so it matches the column type the schema advertised.
       try conditional(branches, otherwise, type, routines, bindings)
+    case let .coalesce(elements, type):
+      try coalesce(elements, type, routines, bindings)
+    case let .nullif(lhs, rhs):
+      try nullif(lhs, rhs, routines, bindings)
     }
+  }
+
+  /// Evaluates a lowered `COALESCE(v1, v2, …)` against this row — the
+  /// `elements` visited IN ORDER exactly ONCE, returning the first whose value
+  /// is non-NULL (coerced to the unified `type` the schema advertises), else
+  /// NULL.
+  ///
+  /// Each element is evaluated ONCE: a desugar to `CASE WHEN vi IS NOT NULL
+  /// THEN vi …` evaluated each `vi` twice — its guard and its result — so a
+  /// stateful element tested one value for NULL and returned another.
+  /// `Value.coerced` widens the selected value to `type` (a `.integer` element
+  /// of a `.double` COALESCE), exactly as a `CASE` coerces its taken branch;
+  /// NULL passes unchanged.
+  private borrowing func coalesce(_ elements: Array<Term>, _ type: ValueType,
+                                  _ routines: Routines, _ bindings: Bindings)
+      throws(SQLError) -> Value {
+    for element in elements {
+      let value = try evaluate(element, routines, bindings)
+      if case .null = value { continue }
+      return value.coerced(to: type)
+    }
+    return .null
+  }
+
+  /// Evaluates a lowered `NULLIF(a, b)` against this row — `a` and `b` each
+  /// evaluated ONCE — returning NULL when `a = b` is TRUE, else the SAME `va`
+  /// that was compared.
+  ///
+  /// A desugar to `CASE WHEN a = b THEN NULL ELSE a END` evaluated `a` twice —
+  /// once in the equality and once as the `ELSE` — so a stateful `a` compared
+  /// one value and returned another; holding `va` fixes that. `matches` is
+  /// three-valued: only a definite TRUE equality nulls out, so an UNKNOWN (a
+  /// NULL operand) yields `va`.
+  private borrowing func nullif(_ lhs: Term, _ rhs: Term,
+                                _ routines: Routines, _ bindings: Bindings)
+      throws(SQLError) -> Value {
+    let va = try evaluate(lhs, routines, bindings)
+    let vb = try evaluate(rhs, routines, bindings)
+    return matches(va, .equal, vb) == true ? .null : va
   }
 
   /// Evaluates a lowered `CASE` — its `branches` and optional `otherwise`
@@ -386,18 +468,26 @@ extension Row where Self: ~Escapable {
 extension Arithmetic {
   /// Applies the operator to two typed operands, yielding a typed `Value`.
   ///
-  /// The operands must be numeric — integer or double. An `integer ∘ integer`
-  /// stays an integer, with `/` integer division; any double operand makes the
-  /// result a double (a lone integer promoted to `Double`), with `/` real
-  /// division. A NULL on either side propagates — the result is NULL, not a
-  /// fault. A division by zero is `SQLError.divide`, as standard SQL raises
-  /// rather than yielding a value (`inf`/`NaN`), on either an integer or a
-  /// double divisor; a non-numeric (text/boolean/blob) operand is a
+  /// A `||` concatenates two text operands into one text value; the four
+  /// arithmetic operators require numeric operands — integer or double. An
+  /// `integer ∘ integer` stays an integer, with `/` integer division; any
+  /// double operand makes the result a double (a lone integer promoted to
+  /// `Double`), with `/` real division. A NULL on either side propagates — the
+  /// result is NULL, not a fault. A division by zero is `SQLError.divide`, as
+  /// standard SQL raises rather than yielding a value (`inf`/`NaN`), on either
+  /// an integer or a double divisor; an operand of the wrong kind (a
+  /// non-numeric arithmetic operand, or a non-text `||` operand) is a
   /// `SQLError.operand` type error rather than a silent coercion; an integer
   /// result past the `Int` boundary is `SQLError.magnitude`.
   internal func apply(_ lhs: Value, _ rhs: Value) throws(SQLError) -> Value {
     if case .null = lhs { return .null }
     if case .null = rhs { return .null }
+    if case .concatenate = self {
+      guard case let .text(lhs) = lhs, case let .text(rhs) = rhs else {
+        throw .operand("|| operands must be text")
+      }
+      return .text(lhs + rhs)
+    }
     return switch (lhs, rhs) {
     case let (.integer(lhs), .integer(rhs)):
       try apply(lhs, rhs)
@@ -427,6 +517,10 @@ extension Arithmetic {
     case .multiply: lhs.multipliedReportingOverflow(by: rhs)
     case .divide where rhs == 0: throw .divide
     case .divide: lhs.dividedReportingOverflow(by: rhs)
+    // `||` never reaches the numeric path — the public `apply` handles it over
+    // text before dispatching a numeric pair here — so a concatenate over two
+    // integers is an unreachable operand fault.
+    case .concatenate: throw .operand("|| operands must be text")
     }
     guard !outcome.overflow else { throw .magnitude("integer overflow") }
     return .integer(outcome.partialValue)
@@ -449,6 +543,9 @@ extension Arithmetic {
     case .multiply: lhs * rhs
     case .divide where rhs == 0: throw .divide
     case .divide: lhs / rhs
+    // `||` never reaches the numeric path — the public `apply` handles it over
+    // text — so a concatenate over two doubles is an unreachable operand fault.
+    case .concatenate: throw .operand("|| operands must be text")
     }
     guard result.isFinite else {
       throw .magnitude("double result is not finite")
@@ -573,6 +670,8 @@ extension Row where Self: ~Escapable {
       try (evaluate(term, routines, bindings) == .null) != negated
     case let .membership(operand, elements, negated):
       try member(operand, elements, negated, routines, bindings)
+    case let .between(test, lower, upper, negated):
+      try ranged(test, lower, upper, negated, routines, bindings)
     case let .and(lhs, rhs):
       // `&&`/`||` take an `@autoclosure` right operand, which would capture the
       // borrowed `~Escapable` row; spell each connective explicitly so a branch
@@ -618,5 +717,40 @@ extension Row where Self: ~Escapable {
       if truth == true { break }
     }
     return negated ? truth.map { !$0 } : truth
+  }
+
+  /// Evaluates a lowered `test [NOT] BETWEEN lower AND upper` against this row.
+  ///
+  /// The `test` term is evaluated ONCE per row — an `AND`/`OR` of two
+  /// comparisons would re-evaluate a non-idempotent test once per bound — then
+  /// the two bounds against that SAME value fold under Kleene logic: `test >=
+  /// lower` AND `test <= upper` for BETWEEN, or `test < lower` OR `test >
+  /// upper` for `NOT BETWEEN`. A NULL `test`, `lower`, or `upper` makes a bound
+  /// UNKNOWN (`matches` yields `nil`), so the row is excluded — the ISO
+  /// three-valued range semantics.
+  ///
+  /// The `upper` bound is evaluated ONLY when the lower truth requires it, as
+  /// the documented `AND`/`OR` expansion short-circuits: a definitely-FALSE
+  /// `test >= lower` makes BETWEEN FALSE (Kleene `AND`), and a definitely-TRUE
+  /// `test < lower` makes `NOT BETWEEN` TRUE (Kleene `OR`), each skipping the
+  /// `upper` term — and any error it would raise — exactly as the desugar
+  /// would. Deferring keeps the row rejecting on `0 BETWEEN 1 AND (1 / 0)`
+  /// rather than faulting on an upper the lower already settled.
+  private borrowing func ranged(_ test: Term, _ lower: Term, _ upper: Term,
+                                _ negated: Bool, _ routines: Routines,
+                                _ bindings: Bindings)
+      throws(SQLError) -> Bool? {
+    let value = try evaluate(test, routines, bindings)
+    let low = try evaluate(lower, routines, bindings)
+    if negated {
+      let below = matches(value, .lt, low)
+      guard below != true else { return true }
+      let high = try evaluate(upper, routines, bindings)
+      return or(below, matches(value, .gt, high))
+    }
+    let above = matches(value, .geq, low)
+    guard above != false else { return false }
+    let high = try evaluate(upper, routines, bindings)
+    return and(above, matches(value, .leq, high))
   }
 }

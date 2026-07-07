@@ -1636,6 +1636,40 @@ private func seeks(_ plan: Plan) -> Bool {
   }
 }
 
+/// The seek `Range<Int>` the first `.scan` reachable from `plan` carries, or
+/// `nil` if that scan is unseeked (or no scan is reached) — the exact run a
+/// seek test asserts, beyond the boolean `seeks`.
+private func seek(_ plan: Plan) -> Range<Int>? {
+  switch plan {
+  case let .scan(_, _, seek):
+    seek
+  case let .select(_, source):
+    seek(source)
+  case let .project(_, source):
+    seek(source)
+  case let .sort(_, source):
+    seek(source)
+  case let .derived(_, sub, _, _):
+    seek(sub)
+  case let .product(left, right):
+    seek(left) ?? seek(right)
+  case let .join(outer, _, _, _, _, _, _):
+    seek(outer)
+  case let .outer(left, right, _, _):
+    seek(left) ?? seek(right)
+  case let .setop(_, left, right, _):
+    seek(left) ?? seek(right)
+  case let .limit(_, _, source):
+    seek(source)
+  case let .distinct(source):
+    seek(source)
+  case let .aggregate(_, _, source):
+    seek(source)
+  case .single:
+    nil
+  }
+}
+
 /// Whether `plan` wraps a raw (unseeked) `.scan` in a `.select` — the
 /// un-optimised shape the fix eliminates from a view's sub-plan.
 private func filters(_ plan: Plan) -> Bool {

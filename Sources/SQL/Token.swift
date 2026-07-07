@@ -50,6 +50,7 @@ extension Token {
     case `is`
     case null
     case `in`
+    case between
     case union
     case intersect
     case except
@@ -86,6 +87,8 @@ extension Token {
     case plus
     case minus
     case slash
+    /// The `||` string-concatenation operator.
+    case concat
     case comma
     case lparen
     case rparen
@@ -135,6 +138,7 @@ extension Token.Kind {
     case .is: "IS"
     case .null: "NULL"
     case .in: "IN"
+    case .between: "BETWEEN"
     case .union: "UNION"
     case .intersect: "INTERSECT"
     case .except: "EXCEPT"
@@ -160,6 +164,7 @@ extension Token.Kind {
     case .plus: "+"
     case .minus: "-"
     case .slash: "/"
+    case .concat: "||"
     case .comma: ","
     case .lparen: "("
     case .rparen: ")"

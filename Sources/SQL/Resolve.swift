@@ -46,6 +46,13 @@ private func lower(_ predicate: Predicate,
     // UNKNOWN is UNKNOWN — not FALSE, and `NOT` maps that UNKNOWN to itself, so
     // `NOT IN` a list holding NULL is never TRUE.
     try membership(term(expression), values, negated: negated, term: term)
+  case let .between(test, lower, upper, negated):
+    // `x [NOT] BETWEEN a AND b` lowers to a first-class `Filter.between` that
+    // evaluates the test `x` ONCE per row (an `AND`/`OR` of two comparisons
+    // would re-evaluate a non-idempotent `x`, once per bound) and folds the two
+    // bounds against that same value under Kleene logic — a NULL `x`, `a`, or
+    // `b` making a bound UNKNOWN and excluding the row, the ISO range test.
+    try .between(term(test), term(lower), term(upper), negated: negated)
   case let .and(lhs, rhs):
     try .and(lower(lhs, term: term), lower(rhs, term: term))
   case let .or(lhs, rhs):
@@ -195,6 +202,24 @@ extension Schema {
       let scope = Scope([(relation, self)])
       let type = try scope.derive(whens, otherwise, routines)
       return .case(branches, else: fallback, type: type)
+    case let .coalesce(arguments):
+      // Lower each argument to a `Term` over this relation and hold them in a
+      // first-class `Term.coalesce` so each is evaluated ONCE. `type` is the
+      // unified argument type the selected value coerces to, derived against a
+      // one-relation scope.
+      var elements = Array<Term>()
+      elements.reserveCapacity(arguments.count)
+      for argument in arguments {
+        try elements.append(term(argument, in: relation, routines))
+      }
+      let scope = Scope([(relation, self)])
+      let type = try scope.derive(expression, routines)
+      return .coalesce(elements, type: type)
+    case let .nullif(lhs, rhs):
+      // Lower both operands to `Term`s over this relation and hold them in a
+      // first-class `Term.nullif` so each is evaluated ONCE.
+      return try .nullif(term(lhs, in: relation, routines),
+                         term(rhs, in: relation, routines))
     case .aggregate:
       // An aggregate has no per-row meaning — it folds over a group — so it may
       // not appear in a `WHERE`, a join `ON`, or a non-aggregate projection.
@@ -341,6 +366,11 @@ internal struct Scope {
         case let .expression(argument): try derive(argument, routines)
         }
       }
+    case let .binary(.concatenate, lhs, rhs):
+      // `||` yields text; the operands' own types do not shape it, but derive
+      // both for resolution — an unresolved column faults `SQLError.column`
+      // (`Missing || 'x'`) — exactly as the arithmetic `.binary` branch does.
+      try concatenation(lhs, rhs, routines)
     case let .binary(_, lhs, rhs):
       try [derive(lhs, routines), derive(rhs, routines)].contains(.double)
           ? .double : .integer
@@ -356,7 +386,91 @@ internal struct Scope {
       // reachable `ELSE`) the run yields NULL, for which `.integer` is the
       // schema default.
       try derive(whens, otherwise, routines)
+    case let .coalesce(arguments):
+      // The result type is the unification of the arguments (the same
+      // `ValueType.unified` reduction a `CASE`'s results take), the type the
+      // selected value coerces to.
+      try unified(arguments, routines)
+    case let .nullif(lhs, _):
+      // NULLIF yields either `v1` or NULL, so the column takes `v1`'s type.
+      try derive(lhs, routines)
     }
+  }
+
+  /// The `.text` type of `lhs || rhs`, deriving both operands for resolution
+  /// first: the result is always text and the operands' own types do not shape
+  /// it, but an unresolved column still faults `SQLError.column`, mirroring the
+  /// arithmetic `.binary` derive branch.
+  private func concatenation(_ lhs: Expression, _ rhs: Expression,
+                             _ routines: Routines)
+      throws(SQLError) -> ValueType {
+    _ = try derive(lhs, routines)
+    _ = try derive(rhs, routines)
+    return .text
+  }
+
+  /// The unification of the types of `arguments` — the `ValueType.unified`
+  /// reduction a `CASE`'s reachable results and a `COALESCE`'s arguments both
+  /// take. A definitively-irreconcilable pair (a text beside an integer) faults
+  /// `SQLError.operand`; a mixed integer/double pair widens to `double`. The
+  /// list is never empty (the parser requires ≥ 2 COALESCE arguments).
+  ///
+  /// Only a SELECTABLE argument shapes the type. A run skips an argument
+  /// whose value is NULL and moves on, so an argument folding to a constant
+  /// `.null` (`constant(_ expression:)`) can NEVER be the result — its type is
+  /// derived (an unknown column still faults) but is NOT merged, exactly as a
+  /// `CASE` omits an unreachable branch's result type. And an argument that is
+  /// the definite selection (`selects(_:)` — a constant NON-NULL value, or a
+  /// `COUNT` aggregate that is always non-NULL) sets the type and makes every
+  /// LATER argument unreachable — mirroring a `CASE`'s reachable-branch
+  /// unification and the faulting `validate`'s stop.
+  private func unified(_ arguments: Array<Expression>,
+                       _ routines: Routines) throws(SQLError) -> ValueType {
+    var type: ValueType?
+    for argument in arguments {
+      let next = try derive(argument, routines)
+      if case .some(.null) = constant(argument, routines) {
+        // A constant NULL is derived (for its errors) but skipped: it can never
+        // be returned, so its type must not shape the column.
+        continue
+      }
+      guard !selects(argument, routines) else {
+        // A definite selection: merge its type and stop, as every later
+        // argument is unreachable.
+        return try merged(type, next)
+      }
+      type = try merged(type, next)
+    }
+    return type ?? .integer
+  }
+
+  /// Whether `argument` is a COALESCE's definite selection — an argument the
+  /// executor's short-circuit is GUARANTEED to return, making every later
+  /// argument unreachable (neither validated nor unified). That holds when it
+  /// folds to a constant NON-NULL value (`constant(_ expression:)`), or when it
+  /// is a `COUNT` aggregate: `COUNT` alone among the aggregates always yields a
+  /// row count of 0 or more, never NULL, so it always selects — while `SUM` /
+  /// `MIN` / `MAX` / `AVG` are NULL over an empty group and so do NOT stop.
+  private func selects(_ argument: Expression, _ routines: Routines) -> Bool {
+    return switch argument {
+    case .aggregate(.count, _): true
+    default: constant(argument, routines).map { $0 != .null } ?? false
+    }
+  }
+
+  /// The unification of a COALESCE's running result type with the `next`
+  /// selectable argument's type — `next` when there is no running type yet,
+  /// else their `ValueType.unified`, faulting `SQLError.operand` on an
+  /// irreconcilable pair (a text beside an integer). Shared by the `derive`
+  /// (`unified`) and `validate` (`coalesce`) surfaces so both merge only a
+  /// selectable argument's type identically.
+  private func merged(_ running: ValueType?, _ next: ValueType)
+      throws(SQLError) -> ValueType {
+    guard let running else { return next }
+    guard let unified = running.unified(with: next) else {
+      throw .operand("COALESCE arguments have irreconcilable types")
+    }
+    return unified
   }
 
   /// The nominal type of a `CASE` under `derive` — the unification of its
@@ -433,7 +547,65 @@ internal struct Scope {
       try arithmetic(op, lhs, rhs, routines)
     case let .case(whens, otherwise):
       try conditional(whens, otherwise, routines)
+    case let .coalesce(arguments):
+      try coalesce(arguments, routines)
+    case let .nullif(lhs, rhs):
+      try nullif(lhs, rhs, routines)
     }
+  }
+
+  /// The result type of `COALESCE(v1, v2, …)`, validating each REACHABLE
+  /// argument as a run would fault and unifying only the SELECTABLE ones'
+  /// types (`merged`). A definitively-irreconcilable pair (a text argument
+  /// beside an integer) faults `SQLError.operand`, as the column cannot be two
+  /// kinds; a mixed integer/double pair widens to `double`.
+  ///
+  /// The executor returns the first NON-NULL argument and never evaluates a
+  /// later one, so an argument that is the definite selection (`selects(_:)` —
+  /// a constant NON-NULL value, or a `COUNT` aggregate that is always non-NULL)
+  /// makes every LATER argument unreachable — those are NOT validated
+  /// (`COALESCE(1, missing_udf())` and `COALESCE(COUNT(*), missing_udf())` both
+  /// type-check), exactly as a constant-TRUE `CASE` guard makes later branches
+  /// unreachable.
+  ///
+  /// An argument that folds to a constant `.null` is validated (for its own
+  /// errors) but its type is NOT merged: a run skips a NULL and moves on, so
+  /// that argument can never be returned — merging its declared type would
+  /// reject `COALESCE(null_text(), 1)`, a text arm that can only yield the
+  /// integer, exactly as a `CASE` omits a skipped branch's result type. An
+  /// undecidable argument (`nil`) may be selected, so its type is merged and
+  /// the walk continues.
+  private func coalesce(_ arguments: Array<Expression>, _ routines: Routines)
+      throws(SQLError) -> ValueType {
+    var type: ValueType?
+    for argument in arguments {
+      let next = try validate(argument, routines)
+      if case .some(.null) = constant(argument, routines) {
+        // A constant NULL is validated (for its errors) but skipped: it can
+        // never be returned, so its type must not shape the column.
+        continue
+      }
+      guard !selects(argument, routines) else {
+        // A definite selection: merge its type and stop, as every later
+        // argument is unreachable and unvalidated.
+        return try merged(type, next)
+      }
+      type = try merged(type, next)
+    }
+    return type ?? .integer
+  }
+
+  /// The result type of `NULLIF(v1, v2)`, validating both operands as a run
+  /// would fault. The result is either `v1` or NULL, so the column takes `v1`'s
+  /// type; `v2` need not unify with it (a run compares them under `matches`,
+  /// which yields FALSE across kinds without faulting), so it is validated for
+  /// its own errors (an unknown column, a bad call) but does not shape the
+  /// type.
+  private func nullif(_ lhs: Expression, _ rhs: Expression,
+                      _ routines: Routines) throws(SQLError) -> ValueType {
+    let type = try validate(lhs, routines)
+    _ = try validate(rhs, routines)
+    return type
   }
 
   /// The result type of a `CASE`, validating each REACHABLE branch as a run
@@ -555,10 +727,12 @@ internal struct Scope {
     }
   }
 
-  /// The result type of `lhs op rhs` — a double when either operand is a double
-  /// (`Age + 1.5`), else an integer — validating both operands are numeric (a
-  /// text/boolean/blob operand has no arithmetic — `Arithmetic.apply` faults
-  /// `SQLError.operand`); a `/` by a literal zero is rejected up front
+  /// The result type of `lhs op rhs` — a double when either arithmetic operand
+  /// is a double (`Age + 1.5`), an integer for two integer operands, and text
+  /// for `||` — validating each operand's kind as a run would fault: an
+  /// arithmetic operator over a text/boolean/blob operand has no arithmetic and
+  /// `||` over a non-text operand has no concatenation (`Arithmetic.apply`
+  /// faults `SQLError.operand`); a `/` by a literal zero is rejected up front
   /// (`SQLError.divide`); and two literal operands are folded to reject a
   /// deterministic overflow (`SQLError.magnitude`). Typing thus faults as a run
   /// would rather than advertise a header no row can produce.
@@ -568,6 +742,14 @@ internal struct Scope {
       throws(SQLError) -> ValueType {
     let left = try validate(lhs, routines)
     let right = try validate(rhs, routines)
+    if case .concatenate = op {
+      // `||` joins two text operands into a text result; a non-text operand
+      // faults exactly as `Arithmetic.apply` does at run time.
+      guard left == .text, right == .text else {
+        throw .operand("|| operands must be text")
+      }
+      return .text
+    }
     guard left.numeric, right.numeric else {
       throw .operand("operands must be numeric")
     }
@@ -650,6 +832,31 @@ internal struct Scope {
       }, equality: { value throws(SQLError) in
         matched(operand, value, routines)
       })
+    case let .between(test, lower, upper, negated):
+      // `x [NOT] BETWEEN a AND b` compares `x` against both bounds, so validate
+      // the three operands for real errors (an unknown column, a bad call). A
+      // cross-kind bound is NOT rejected: the run's `matches` yields FALSE
+      // across kinds without faulting (as an `IN` element does), so the schema
+      // check accepts what the run accepts.
+      //
+      // It respects the executor's short-circuit — the same one `ranged`
+      // evaluates with: a DEFINITELY-FALSE lower comparison (`x >= a`) settles
+      // BETWEEN FALSE, and a DEFINITELY-TRUE one (`x < a`) settles a `NOT
+      // BETWEEN` TRUE, each leaving `upper` unreachable, so `upper` is NOT
+      // validated — `0 BETWEEN 1 AND (1 / 0)` type-checks, the lower `0 >= 1`
+      // FALSE settling the row before the `1 / 0` upper is reached, exactly as
+      // an `AND`'s constant-false left leaves its right unchecked.
+      _ = try validate(test, routines)
+      _ = try validate(lower, routines)
+      let settled = {
+        guard let value = constant(test, routines),
+            let low = constant(lower, routines) else {
+          return false
+        }
+        return negated ? matches(value, .lt, low) == true
+                       : matches(value, .geq, low) == false
+      }()
+      if !settled { _ = try validate(upper, routines) }
     case let .and(lhs, rhs):
       try check(lhs, routines)
       if constant(lhs, routines) != false { try check(rhs, routines) }
@@ -739,6 +946,35 @@ internal struct Scope {
       }
       guard let otherwise else { return .null }
       return constant(otherwise, routines)
+    case let .coalesce(arguments):
+      // Fold as the run evaluates it — the first argument that folds to a
+      // non-NULL value (COERCED to the unified type, as the executor's
+      // `Term.coalesce` coerces the selected value), else NULL when every
+      // argument folds NULL. An argument the fold cannot decide (`nil`) BEFORE
+      // a decisive non-NULL one means the taken value is per row, so the whole
+      // `COALESCE` is `nil`. Coercing an `.integer` selected from a COALESCE
+      // that unifies to `.double` folds to `.double`, matching the advertised
+      // column type — so a `.double`-typed routine over `COALESCE(1, 2.5)`
+      // folds against the SAME value the run supplies. The unified type is the
+      // one `derive`/`unified` already reduces over the selectable arguments;
+      // an irreconcilable pair (which `derive` would fault on) leaves the value
+      // uncoerced (`try?` → `nil`), a no-op the executor never reaches.
+      let type = try? unified(arguments, routines)
+      for argument in arguments {
+        guard let value = constant(argument, routines) else { return nil }
+        if case .null = value { continue }
+        return type.map { value.coerced(to: $0) } ?? value
+      }
+      return .null
+    case let .nullif(lhs, rhs):
+      // Fold as the run evaluates it — NULL when `v1 = v2` folds definitely
+      // TRUE, else `v1`; a side the fold cannot decide leaves it per row
+      // (`nil`).
+      guard let va = constant(lhs, routines),
+          let vb = constant(rhs, routines) else {
+        return nil
+      }
+      return matches(va, .equal, vb) == true ? .null : va
     case .column, .aggregate:
       return nil
     }
@@ -825,6 +1061,28 @@ internal struct Scope {
         matched(operand, value, routines)
       }
       return negated ? truth.map { !$0 } : truth
+    case let .between(test, lower, upper, negated):
+      // Fold `x [NOT] BETWEEN a AND b` as `ranged` evaluates it — the folded
+      // `x` against the folded lower first, short-circuiting before the upper:
+      // a definitely-FALSE lower (`x >= a`) settles BETWEEN FALSE and a
+      // definitely-TRUE lower (`x < a`) settles `NOT BETWEEN` TRUE, each
+      // WITHOUT folding the upper — and any fault it carries — so
+      // `0 BETWEEN 1 AND (1 / 0)` folds definitely FALSE rather than `nil`. A
+      // side the fold cannot decide leaves it per row (`nil`).
+      guard let value = constant(test, routines),
+          let low = constant(lower, routines) else {
+        return nil
+      }
+      if negated {
+        let below = matches(value, .lt, low)
+        if below == true { return true }
+        guard let high = constant(upper, routines) else { return nil }
+        return or(below, matches(value, .gt, high))
+      }
+      let above = matches(value, .geq, low)
+      if above == false { return false }
+      guard let high = constant(upper, routines) else { return nil }
+      return and(above, matches(value, .leq, high))
     case .bound:
       return nil
     }
@@ -855,6 +1113,11 @@ internal struct Scope {
         try aggregates(in: branch.then, routines)
       }
       if let otherwise { try aggregates(in: otherwise, routines) }
+    case let .coalesce(arguments):
+      for argument in arguments { try aggregates(in: argument, routines) }
+    case let .nullif(lhs, rhs):
+      try aggregates(in: lhs, routines)
+      try aggregates(in: rhs, routines)
     }
   }
 
@@ -877,6 +1140,10 @@ internal struct Scope {
     case let .membership(operand, values, _):
       try aggregates(in: operand, routines)
       for value in values { try aggregates(in: value, routines) }
+    case let .between(test, lower, upper, _):
+      try aggregates(in: test, routines)
+      try aggregates(in: lower, routines)
+      try aggregates(in: upper, routines)
     case let .and(lhs, rhs), let .or(lhs, rhs):
       try aggregates(in: lhs, routines)
       try aggregates(in: rhs, routines)
@@ -935,6 +1202,24 @@ internal struct Scope {
       }
       guard let otherwise else { return .null }
       return try empty(otherwise, routines).coerced(to: type)
+    case let .coalesce(arguments):
+      // Evaluate the empty group as a run does — the first argument that folds
+      // to a non-NULL value (coerced to the unified type, as the executor
+      // coerces the selected value), else NULL. A NULL argument propagates
+      // without faulting; a later one is not reached once a non-NULL is taken.
+      let type = try unified(arguments, routines)
+      for argument in arguments {
+        let value = try empty(argument, routines)
+        if case .null = value { continue }
+        return value.coerced(to: type)
+      }
+      return .null
+    case let .nullif(lhs, rhs):
+      // Evaluate the empty group as a run does — NULL when `v1 = v2` is TRUE,
+      // else the folded `v1`.
+      let va = try empty(lhs, routines)
+      let vb = try empty(rhs, routines)
+      return matches(va, .equal, vb) == true ? .null : va
     case .column:
       return .null
     }
@@ -981,6 +1266,24 @@ internal struct Scope {
         matches(lhs, .equal, try empty(value, routines))
       }
       return negated ? truth.map { !$0 } : truth
+    case let .between(test, lower, upper, negated):
+      // Fold `x [NOT] BETWEEN a AND b` over the empty group as `ranged` does —
+      // the folded `x` against the folded lower first, short-circuiting before
+      // the upper: a definitely-FALSE lower (`x >= a`) settles BETWEEN FALSE
+      // and a definitely-TRUE lower (`x < a`) settles `NOT BETWEEN` TRUE, each
+      // leaving the upper unfolded — and any fault it would raise unraised —
+      // so `HAVING 0 BETWEEN 1 AND (1 / 0)` drops the group without a `.divide`
+      // fault, exactly as the run does.
+      let value = try empty(test, routines)
+      let low = try empty(lower, routines)
+      if negated {
+        let below = matches(value, .lt, low)
+        if below == true { return true }
+        return or(below, matches(value, .gt, try empty(upper, routines)))
+      }
+      let above = matches(value, .geq, low)
+      if above == false { return false }
+      return and(above, matches(value, .leq, try empty(upper, routines)))
     case let .and(lhs, rhs):
       // A `false` left proves the `AND` false without folding the right arm,
       // which a run's short-circuit never evaluates and so must not fault.
@@ -1094,6 +1397,21 @@ internal struct Scope {
       // branch's value to the type the schema advertises.
       let type = try derive(whens, otherwise, routines)
       return .case(branches, else: fallback, type: type)
+    case let .coalesce(arguments):
+      // Lower each argument to a combined-ordinal `Term` and hold them in a
+      // first-class `Term.coalesce` so each is evaluated ONCE; `type` is the
+      // unified argument type the selected value coerces to.
+      var elements = Array<Term>()
+      elements.reserveCapacity(arguments.count)
+      for argument in arguments {
+        try elements.append(term(argument, routines))
+      }
+      let type = try derive(expression, routines)
+      return .coalesce(elements, type: type)
+    case let .nullif(lhs, rhs):
+      // Lower both operands to combined-ordinal `Term`s and hold them in a
+      // first-class `Term.nullif` so each is evaluated ONCE.
+      return try .nullif(term(lhs, routines), term(rhs, routines))
     case .aggregate:
       // An aggregate has no per-row meaning — it folds over a group — so it may
       // not appear in a `WHERE`, a join `ON`, or a non-aggregate projection.
@@ -1298,6 +1616,21 @@ internal struct Grouping {
       // COERCES the selected branch's value to the advertised column type.
       let type = try scope.derive(whens, otherwise, routines)
       return .case(branches, else: fallback, type: type)
+    case let .coalesce(arguments):
+      // Lower each argument to a grouped-space `Term` and hold them in a
+      // first-class `Term.coalesce` so each is evaluated ONCE; `type` is the
+      // unified argument type (over the grouped scope) the value coerces to.
+      var elements = Array<Term>()
+      elements.reserveCapacity(arguments.count)
+      for argument in arguments {
+        try elements.append(term(argument, routines))
+      }
+      let type = try scope.derive(expression, routines)
+      return .coalesce(elements, type: type)
+    case let .nullif(lhs, rhs):
+      // Lower both operands to grouped-space `Term`s and hold them in a
+      // first-class `Term.nullif` so each is evaluated ONCE.
+      return try .nullif(term(lhs, routines), term(rhs, routines))
     case .aggregate:
       // An aggregate reaches here only when it was not collected — an internal
       // inconsistency, since the query gathers every projection/HAVING aggregate.
@@ -1429,6 +1762,10 @@ extension Filter {
       for element in elements {
         element.references(into: &ordinals)
       }
+    case let .between(test, lower, upper, _):
+      test.references(into: &ordinals)
+      lower.references(into: &ordinals)
+      upper.references(into: &ordinals)
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.references(into: &ordinals)
       rhs.references(into: &ordinals)

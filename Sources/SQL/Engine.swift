@@ -591,6 +591,10 @@ extension Expression {
     case let .case(whens, otherwise):
       whens.contains { $0.when.aggregated || $0.then.aggregated }
           || (otherwise?.aggregated ?? false)
+    case let .coalesce(arguments):
+      arguments.contains { $0.aggregated }
+    case let .nullif(lhs, rhs):
+      lhs.aggregated || rhs.aggregated
     }
   }
 
@@ -611,6 +615,10 @@ extension Expression {
     case let .case(whens, otherwise):
       whens.contains { $0.when.bound || $0.then.bound }
           || (otherwise?.bound ?? false)
+    case let .coalesce(arguments):
+      arguments.contains { $0.bound }
+    case let .nullif(lhs, rhs):
+      lhs.bound || rhs.bound
     }
   }
 }
@@ -639,6 +647,8 @@ extension Predicate {
       operand.aggregated
     case let .membership(operand, values, _):
       operand.aggregated || values.contains { $0.aggregated }
+    case let .between(test, lower, upper, _):
+      test.aggregated || lower.aggregated || upper.aggregated
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.aggregated || rhs.aggregated
     case let .not(operand):
@@ -660,6 +670,8 @@ extension Predicate {
       operand.bound
     case let .membership(operand, values, _):
       operand.bound || values.contains { $0.bound }
+    case let .between(test, lower, upper, _):
+      test.bound || lower.bound || upper.bound
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.bound || rhs.bound
     case let .not(operand):
@@ -858,6 +870,11 @@ extension Expression {
         branch.then.collect(into: &expressions)
       }
       otherwise?.collect(into: &expressions)
+    case let .coalesce(arguments):
+      for argument in arguments { argument.collect(into: &expressions) }
+    case let .nullif(lhs, rhs):
+      lhs.collect(into: &expressions)
+      rhs.collect(into: &expressions)
     }
   }
 
@@ -896,6 +913,10 @@ extension Predicate {
     case let .membership(operand, values, _):
       operand.collect(into: &expressions)
       for value in values { value.collect(into: &expressions) }
+    case let .between(test, lower, upper, _):
+      test.collect(into: &expressions)
+      lower.collect(into: &expressions)
+      upper.collect(into: &expressions)
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.collect(into: &expressions)
       rhs.collect(into: &expressions)
@@ -1070,6 +1091,23 @@ private func comparison(_ filter: Filter, _ bindings: Bindings)
   }
 }
 
+/// The seekable `(slot, lower, upper)` of a non-negated `x BETWEEN lower AND
+/// upper` whose test `x` is a `slot` and whose bounds are integer literals — a
+/// two-sided range the seek reads directly off the sorted key, the same range
+/// `x >= lower AND x <= upper` would seek. A `NOT BETWEEN` (the complement is
+/// two disjoint runs, not one contiguous seek), a non-slot test, or a
+/// non-integer bound does not qualify, and the relation scans under the
+/// residual `between`.
+private func range(_ filter: Filter) -> (Int, Int, Int)? {
+  switch filter {
+  case let .between(.slot(slot), .constant(.integer(lower)),
+                    .constant(.integer(upper)), negated: false):
+    (slot, lower, upper)
+  default:
+    nil
+  }
+}
+
 extension Table where Self: ~Escapable {
   /// The boundaries `[lower, upper)` to seek for a sort-key comparison, or `nil`
   /// if `filter` does not qualify for the seek path.
@@ -1086,12 +1124,41 @@ extension Table where Self: ~Escapable {
   /// `string` operand or an unseekable column never qualifies, and the executor
   /// scans.
   ///
+  /// A first-class `x BETWEEN lower AND upper` (non-negated) whose test `x` is
+  /// the sort-key slot and whose bounds are integer literals seeks a two-sided
+  /// run — the intersection of the `x >= lower` and `x <= upper` partitions,
+  /// exactly the run the desugar would seek — as an ordered-only range. A `NOT
+  /// BETWEEN` (a two-run complement, not one contiguous seek), a non-slot test,
+  /// or a non-integer bound does not qualify; the residual `between` still runs
+  /// over the sought rows either way.
+  ///
   /// The hash-join executor reuses this over a pushed inner filter's conjuncts
   /// to seek the inner by a seekable conjunct before bucketing, so a
   /// seekable/contradictory inner filter reads few or no inner rows.
   internal borrowing func boundaries(_ filter: Filter, _ ordinals: Array<Int>,
                                      _ count: Int, _ bindings: Bindings)
       -> Range<Int>? {
+    // A first-class `x BETWEEN lower AND upper` seeks a two-sided run directly:
+    // the lower boundary is the `x >= lower` partition (inclusive, `strict`
+    // false) and the upper is the `x <= upper` partition (inclusive, `strict`
+    // true), so their intersection `lower ..< upper` is exactly the range the
+    // desugar `x >= lower AND x <= upper` would seek. As a range it seeks ONLY
+    // an ordered key — an unordered seekable column brackets an equality, not
+    // a range — and the residual `between` still runs over the sought rows.
+    if let (slot, low, high) = range(filter) {
+      guard ordered(ordinals[slot]),
+          let lower = bound(ordinals[slot], low, strict: false),
+          let upper = bound(ordinals[slot], high, strict: true) else {
+        return nil
+      }
+      // An inverted `BETWEEN lower AND upper` (lower > upper) is a valid EMPTY
+      // range: the `x >= lower` partition starts after the `x <= upper` one
+      // ends, so `lower > upper` here and `lower ..< upper` would trap Swift's
+      // `Range(lowerBound <= upperBound)` precondition. Seek an empty run.
+      guard lower <= upper else { return lower ..< lower }
+      return lower ..< upper
+    }
+
     guard let (slot, op, value) = comparison(filter, bindings),
         let lower = bound(ordinals[slot], value, strict: false),
         let upper = bound(ordinals[slot], value, strict: true) else {

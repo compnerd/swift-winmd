@@ -468,6 +468,24 @@ public indirect enum Expression: Hashable, Sendable {
   /// engine models one conditional. The result expressions' types must unify to
   /// one result type (see resolution).
   case `case`(Array<When>, else: Expression?)
+  /// `COALESCE(v1, v2, …)` — the first argument whose value is non-NULL, else
+  /// NULL. The ISO definition is the searched `CASE WHEN v1 IS NOT NULL THEN v1
+  /// … END`, but it is a FIRST-CLASS node rather than that expansion so each
+  /// argument is evaluated EXACTLY ONCE: the desugar re-referenced each `vi` in
+  /// both its `IS NOT NULL` guard and its `THEN`, evaluating a stateful
+  /// argument twice — testing one call's value for NULL and returning a
+  /// different one. The result type is the `ValueType.unified` reduction over
+  /// the arguments (the same unification a `CASE`'s results take), to which the
+  /// selected value is coerced. At least two arguments (the parser enforces
+  /// it).
+  case coalesce(Array<Expression>)
+  /// `NULLIF(v1, v2)` — NULL when `v1` equals `v2`, else `v1`. The ISO
+  /// definition is `CASE WHEN v1 = v2 THEN NULL ELSE v1 END`, but it is a
+  /// FIRST-CLASS node rather than that expansion so `v1` is evaluated EXACTLY
+  /// ONCE: the desugar embedded `v1` in both the equality and the `ELSE`,
+  /// evaluating a stateful `v1` twice — comparing one call's value to `v2` and
+  /// returning a different one. The result type is `v1`'s.
+  case nullif(Expression, Expression)
 }
 
 /// One `WHEN predicate THEN result` branch of a `CASE` expression — the guard
@@ -518,11 +536,13 @@ public enum Aggregand: Hashable, Sendable {
   case expression(Expression)
 }
 
-/// A binary arithmetic operator.
+/// A binary operator over two scalar operands.
 ///
-/// The four standard operators over integers; `*` `/` bind tighter than `+`
-/// `-`, and all four are left-associative — the precedence the parser's
-/// climbing grammar encodes and parentheses override.
+/// The four standard arithmetic operators over numbers, and the ISO `||`
+/// string concatenation. `*` `/` bind tighter than `+` `-` `||`, and every
+/// operator is left-associative — the precedence the parser's climbing grammar
+/// encodes and parentheses override. The four arithmetic operators require
+/// numeric operands; `||` requires text operands. All propagate NULL.
 public enum Arithmetic: Hashable, Sendable {
   /// `+`
   case add
@@ -532,6 +552,10 @@ public enum Arithmetic: Hashable, Sendable {
   case multiply
   /// `/` — integer division.
   case divide
+  /// `||` — text concatenation. It joins two text operands into one text value
+  /// and propagates NULL (a NULL operand yields NULL); a non-text operand is a
+  /// `SQLError.operand` type error, as arithmetic faults on a non-numeric one.
+  case concatenate
 }
 
 /// A row filter — a tree of comparisons composed with `AND`, `OR`, and `NOT`.
@@ -559,6 +583,15 @@ public indirect enum Predicate: Hashable, Sendable {
   /// TRUE when a NULL element is present). The engine lowers it to that
   /// disjunction rather than carrying a dedicated `Filter` case.
   case membership(Expression, Array<Expression>, negated: Bool)
+  /// `x [NOT] BETWEEN a AND b` — whether `x` is within the inclusive range
+  /// `[a, b]`, or outside it when `negated`. The ISO definition is `x >= a AND
+  /// x <= b` (and `x < a OR x > b` negated), but it is a FIRST-CLASS node
+  /// rather than that expansion so the test expression `x` is evaluated EXACTLY
+  /// ONCE: the desugar duplicated `x` across both bound comparisons, testing a
+  /// stateful `x`'s lower bound with one call and its upper with another. It
+  /// keeps the ISO three-valued semantics — a NULL `x`, `a`, or `b` makes a
+  /// bound UNKNOWN, excluding the row.
+  case between(Expression, Expression, Expression, negated: Bool)
   /// `lhs AND rhs`.
   case and(Predicate, Predicate)
   /// `lhs OR rhs`.

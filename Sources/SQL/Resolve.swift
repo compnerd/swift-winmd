@@ -61,6 +61,13 @@ private func lower(_ predicate: Predicate,
     // a `.term` or a `:parameter` name resolved from the bindings at eval.
     try .between(term(test), lower(low, term: term), lower(high, term: term),
                  negated: negated)
+  case let .distinct(lhs, rhs, negated):
+    // `a IS [NOT] DISTINCT FROM b` lowers to a first-class `Filter.distinct`
+    // over the two lowered terms — the null-safe comparison the runtime
+    // evaluates TWO-VALUED, treating NULL as a comparable value. No
+    // `:parameter` form is defined, so both sides lower straight through
+    // `term`.
+    try .distinct(term(lhs), term(rhs), negated: negated)
   case let .and(lhs, rhs):
     try .and(lower(lhs, term: term), lower(rhs, term: term))
   case let .or(lhs, rhs):
@@ -1015,6 +1022,16 @@ internal struct Scope {
         return matches(value, .geq, low) == false
       }()
       if !settled { try validate(upper, routines) }
+    case let .distinct(lhs, rhs, _):
+      // `a IS [NOT] DISTINCT FROM b` compares both operands, so validate the
+      // two for real errors (an unknown column, a bad call). BOTH are always
+      // validated — the predicate is TWO-VALUED with no short-circuit: neither
+      // side settles the truth without the other. A cross-kind pair is NOT
+      // rejected: the run's `distinct` treats it as DISTINCT without faulting
+      // (as an `IN` element does), so the schema check accepts what the run
+      // accepts.
+      _ = try validate(lhs, routines)
+      _ = try validate(rhs, routines)
     case let .and(lhs, rhs):
       try check(lhs, routines)
       if constant(lhs, routines) != false { try check(rhs, routines) }
@@ -1290,6 +1307,17 @@ internal struct Scope {
       guard let high = constant(upper, routines) else { return nil }
       let within = and(above, matches(value, .leq, high))
       return negated ? within.map { !$0 } : within
+    case let .distinct(lhs, rhs, negated):
+      // Fold `a IS [NOT] DISTINCT FROM b` as `differs` evaluates it: the
+      // null-safe `distinct` of the two folded values, negated for `IS NOT`.
+      // It is TWO-VALUED, so when BOTH sides fold to ROW-INDEPENDENT constants
+      // the truth is DEFINITE; a row-dependent side leaves it per row (`nil`).
+      guard let lhs = constant(lhs, routines),
+          let rhs = constant(rhs, routines) else {
+        return nil
+      }
+      let differ = distinct(lhs, rhs)
+      return negated ? !differ : differ
     case .bound:
       return nil
     }
@@ -1416,6 +1444,9 @@ internal struct Scope {
       try aggregates(in: test, routines)
       try aggregates(in: lower, routines)
       try aggregates(in: upper, routines)
+    case let .distinct(lhs, rhs, _):
+      try aggregates(in: lhs, routines)
+      try aggregates(in: rhs, routines)
     case let .and(lhs, rhs), let .or(lhs, rhs):
       try aggregates(in: lhs, routines)
       try aggregates(in: rhs, routines)
@@ -1601,6 +1632,13 @@ internal struct Scope {
       if above == false { return negated }
       let within = and(above, matches(value, .leq, try empty(upper, routines)))
       return negated ? within.map { !$0 } : within
+    case let .distinct(lhs, rhs, negated):
+      // Fold `a IS [NOT] DISTINCT FROM b` over the empty group as `differs`
+      // does: the null-safe `distinct` of the two folded values, negated for
+      // `IS NOT`. It is TWO-VALUED — both operands fold to definite values, so
+      // the truth is definite (never UNKNOWN, unlike a `=` over a NULL).
+      let differ = distinct(try empty(lhs, routines), try empty(rhs, routines))
+      return negated ? !differ : differ
     case let .and(lhs, rhs):
       // A `false` left proves the `AND` false without folding the right arm,
       // which a run's short-circuit never evaluates and so must not fault.
@@ -2095,6 +2133,9 @@ extension Filter {
       test.references(into: &ordinals)
       lower.references(into: &ordinals)
       upper.references(into: &ordinals)
+    case let .distinct(lhs, rhs, _):
+      lhs.references(into: &ordinals)
+      rhs.references(into: &ordinals)
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.references(into: &ordinals)
       rhs.references(into: &ordinals)

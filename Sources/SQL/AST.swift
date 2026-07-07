@@ -619,6 +619,15 @@ public indirect enum Predicate: Hashable, Sendable {
   /// `LIKE` arms accept, so a caller can bind a range rather than interpolate
   /// it.
   case between(Expression, Operand, Operand, negated: Bool)
+  /// `a IS [NOT] DISTINCT FROM b` — the ISO null-safe comparison of `a` and
+  /// `b`, `negated` marking the `IS NOT DISTINCT FROM` (null-safe equality)
+  /// spelling. It is TWO-VALUED — never UNKNOWN — treating NULL as a comparable
+  /// value: `a IS DISTINCT FROM b` is FALSE iff both are NULL, or both are
+  /// non-NULL and equal, and TRUE otherwise (exactly one NULL, or both non-NULL
+  /// and unequal). `IS NOT DISTINCT FROM` is its negation. A cross-kind pair is
+  /// DISTINCT — the two differ — matching the engine's cross-kind FALSE
+  /// equality. Unlike `=`, a NULL operand never makes the row UNKNOWN.
+  case distinct(Expression, Expression, negated: Bool)
   /// `lhs AND rhs`.
   case and(Predicate, Predicate)
   /// `lhs OR rhs`.

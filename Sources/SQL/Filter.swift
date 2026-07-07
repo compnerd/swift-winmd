@@ -59,6 +59,15 @@ internal indirect enum Filter: Sendable {
   /// NULL `x`, `a`, or `b` — an unbound or NULL-bound `:parameter` included —
   /// makes a bound UNKNOWN and the row is excluded.
   case between(Term, Operand, Operand, negated: Bool)
+  /// `a IS [NOT] DISTINCT FROM b` — the lowered form of the AST's `distinct`.
+  /// Both operands are plain `Term`s (no `:parameter` form is defined for this
+  /// predicate) and `negated` marks the `IS NOT DISTINCT FROM` (null-safe
+  /// equality) spelling. Evaluating it is TWO-VALUED — never UNKNOWN — treating
+  /// NULL as a comparable value: the two are the SAME iff both are NULL, or
+  /// both non-NULL and equal (a cross-kind pair is DISTINCT, matching
+  /// `matches`'s cross-kind FALSE equality), and `IS DISTINCT FROM` is TRUE
+  /// when they differ, `IS NOT DISTINCT FROM` when they are the same.
+  case distinct(Term, Term, negated: Bool)
   /// `lhs AND rhs`.
   case and(Filter, Filter)
   /// `lhs OR rhs`.
@@ -300,6 +309,9 @@ extension Filter {
     case let .between(test, lower, upper, negated):
       .between(test.remapped(through: slot), lower.remapped(through: slot),
                upper.remapped(through: slot), negated: negated)
+    case let .distinct(lhs, rhs, negated):
+      .distinct(lhs.remapped(through: slot), rhs.remapped(through: slot),
+                negated: negated)
     case let .and(lhs, rhs):
       .and(lhs.remapped(through: slot), rhs.remapped(through: slot))
     case let .or(lhs, rhs):
@@ -388,6 +400,7 @@ extension Filter {
           && (escape.map(\.escape) ?? true)
     case let .between(test, lower, upper, _):
       test.safe && lower.safe && upper.safe
+    case let .distinct(lhs, rhs, _): lhs.safe && rhs.safe
     case let .and(lhs, rhs): lhs.safe && rhs.safe
     case let .or(lhs, rhs): lhs.safe && rhs.safe
     case let .not(operand): operand.safe
@@ -419,7 +432,7 @@ extension Filter {
   private var parameterised: Bool {
     switch self {
     case .bound: true
-    case .compare, .match, .null, .membership: false
+    case .compare, .match, .null, .membership, .distinct: false
     case let .like(_, pattern, escape, _):
       pattern.parameterised || (escape?.parameterised ?? false)
     case let .between(_, lower, upper, _):
@@ -748,6 +761,21 @@ internal func matches(_ lhs: Value, _ op: Comparison, _ rhs: Value) -> Bool? {
   }
 }
 
+/// Whether two typed values DIFFER under ISO `IS DISTINCT FROM` — the null-safe
+/// comparison, treating NULL as a comparable value. Unlike `matches`, it is
+/// TWO-VALUED (never UNKNOWN): two NULLs are the SAME (not DISTINCT), exactly
+/// one NULL is DISTINCT, and two non-NULLs are DISTINCT unless they are equal —
+/// a cross-kind pair being DISTINCT, as `matches` yields FALSE (`== true` is
+/// false) for cross-kind equality. `IS DISTINCT FROM` returns this; `IS NOT
+/// DISTINCT FROM` (null-safe equality) negates it.
+internal func distinct(_ lhs: Value, _ rhs: Value) -> Bool {
+  switch (lhs, rhs) {
+  case (.null, .null): false
+  case (.null, _), (_, .null): true
+  case let (lhs, rhs): matches(lhs, .equal, rhs) != true
+  }
+}
+
 /// Kleene `AND` over two three-valued operands: `false` dominates (a `false`
 /// side makes the whole `false` even against UNKNOWN), both `true` is `true`,
 /// and any other pair is UNKNOWN (`nil`).
@@ -805,6 +833,8 @@ extension Row where Self: ~Escapable {
       try like(operand, pattern, escape, negated, routines, bindings)
     case let .between(test, lower, upper, negated):
       try ranged(test, lower, upper, negated, routines, bindings)
+    case let .distinct(lhs, rhs, negated):
+      try differs(lhs, rhs, negated, routines, bindings)
     case let .and(lhs, rhs):
       // `&&`/`||` take an `@autoclosure` right operand, which would capture the
       // borrowed `~Escapable` row; spell each connective explicitly so a branch
@@ -891,6 +921,23 @@ extension Row where Self: ~Escapable {
     let high = try evaluate(upper, routines, bindings)
     let within = and(above, matches(value, .leq, high))
     return negated ? within.map { !$0 } : within
+  }
+
+  /// Evaluates a lowered `lhs IS [NOT] DISTINCT FROM rhs` against this row.
+  ///
+  /// It is the ISO null-safe comparison — TWO-VALUED, never UNKNOWN — treating
+  /// NULL as a comparable value: `distinct` yields whether the two operand
+  /// values DIFFER (both NULL are the SAME, exactly one NULL DIFFERS, two
+  /// non-NULLs DIFFER unless equal, a cross-kind pair DIFFERS). `IS DISTINCT
+  /// FROM` reads that; `IS NOT DISTINCT FROM` (`negated`, null-safe equality)
+  /// negates it. Unlike a `compare`, a NULL operand never makes the row
+  /// UNKNOWN.
+  private borrowing func differs(_ lhs: Term, _ rhs: Term, _ negated: Bool,
+                                 _ routines: Routines, _ bindings: Bindings)
+      throws(SQLError) -> Bool? {
+    let differ = try distinct(evaluate(lhs, routines, bindings),
+                              evaluate(rhs, routines, bindings))
+    return negated ? !differ : differ
   }
 
   /// Resolves a `LIKE` pattern or escape operand to a value: a term evaluates

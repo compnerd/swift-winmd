@@ -687,6 +687,8 @@ extension Predicate {
           || (escape?.aggregated ?? false)
     case let .between(test, lower, upper, _):
       test.aggregated || lower.aggregated || upper.aggregated
+    case let .distinct(lhs, rhs, _):
+      lhs.aggregated || rhs.aggregated
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.aggregated || rhs.aggregated
     case let .not(operand):
@@ -712,6 +714,8 @@ extension Predicate {
       operand.bound || pattern.bound || (escape?.bound ?? false)
     case let .between(test, lower, upper, _):
       test.bound || lower.bound || upper.bound
+    case let .distinct(lhs, rhs, _):
+      lhs.bound || rhs.bound
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.bound || rhs.bound
     case let .not(operand):
@@ -963,6 +967,9 @@ extension Predicate {
       test.collect(into: &expressions)
       lower.collect(into: &expressions)
       upper.collect(into: &expressions)
+    case let .distinct(lhs, rhs, _):
+      lhs.collect(into: &expressions)
+      rhs.collect(into: &expressions)
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.collect(into: &expressions)
       rhs.collect(into: &expressions)

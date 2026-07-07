@@ -49,6 +49,16 @@ internal indirect enum Filter: Sendable {
   /// pattern is a definite non-match (the engine's cross-kind rule), with `NOT
   /// LIKE` negating the three-valued result (UNKNOWN maps to itself).
   case like(Term, pattern: Operand, escape: Operand?, negated: Bool)
+  /// `x [NOT] BETWEEN a AND b` — the lowered form of the AST's `between`. The
+  /// test term `x` is held ONCE, the two bounds `a` and `b` beside it — each an
+  /// `Operand`, a `Term` evaluated per row or a run-time `:parameter` resolved
+  /// from the bindings — and `negated` marks `NOT BETWEEN`. Evaluating it reads
+  /// `x` once per row (an `AND`/`OR` of two comparisons would re-evaluate a
+  /// non-idempotent `x`, once per bound) and folds `x >= a` AND `x <= b` (or `x
+  /// < a` OR `x > b` when negated) over the SAME `x` under Kleene logic, so a
+  /// NULL `x`, `a`, or `b` — an unbound or NULL-bound `:parameter` included —
+  /// makes a bound UNKNOWN and the row is excluded.
+  case between(Term, Operand, Operand, negated: Bool)
   /// `lhs AND rhs`.
   case and(Filter, Filter)
   /// `lhs OR rhs`.
@@ -287,6 +297,9 @@ extension Filter {
       .like(operand.remapped(through: slot),
             pattern: pattern.remapped(through: slot),
             escape: escape?.remapped(through: slot), negated: negated)
+    case let .between(test, lower, upper, negated):
+      .between(test.remapped(through: slot), lower.remapped(through: slot),
+               upper.remapped(through: slot), negated: negated)
     case let .and(lhs, rhs):
       .and(lhs.remapped(through: slot), rhs.remapped(through: slot))
     case let .or(lhs, rhs):
@@ -373,6 +386,8 @@ extension Filter {
       // pattern being a definite non-match and a NULL UNKNOWN.
       operand.safe && pattern.safe
           && (escape.map(\.escape) ?? true)
+    case let .between(test, lower, upper, _):
+      test.safe && lower.safe && upper.safe
     case let .and(lhs, rhs): lhs.safe && rhs.safe
     case let .or(lhs, rhs): lhs.safe && rhs.safe
     case let .not(operand): operand.safe
@@ -395,17 +410,20 @@ extension Filter {
   }
 
   /// Whether this filter compares against a run-time `:parameter` — a `.bound`
-  /// anywhere in it, or a `.like` whose pattern or escape operand is a
-  /// `:parameter`. Such a predicate reads no slot yet can be UNKNOWN, because
-  /// the parameter may be unbound (or bound to NULL), so `nullable` counts it
-  /// even when `slots` is empty — keeping `'x' LIKE :p` off a pushdown below
-  /// a later unsafe conjunct the non-short-circuiting `AND` still owes.
+  /// anywhere in it, a `.like` whose pattern or escape operand is a
+  /// `:parameter`, or a `.between` whose lower or upper bound is one. Such a
+  /// predicate reads no slot yet can be UNKNOWN, because the parameter may be
+  /// unbound (or bound to NULL), so `nullable` counts it even when `slots` is
+  /// empty — keeping `'x' LIKE :p` or `1 BETWEEN :lo AND :hi` off a pushdown
+  /// below a later unsafe conjunct the non-short-circuiting `AND` still owes.
   private var parameterised: Bool {
     switch self {
     case .bound: true
     case .compare, .match, .null, .membership: false
     case let .like(_, pattern, escape, _):
       pattern.parameterised || (escape?.parameterised ?? false)
+    case let .between(_, lower, upper, _):
+      lower.parameterised || upper.parameterised
     case let .and(lhs, rhs): lhs.parameterised || rhs.parameterised
     case let .or(lhs, rhs): lhs.parameterised || rhs.parameterised
     case let .not(operand): operand.parameterised
@@ -785,6 +803,8 @@ extension Row where Self: ~Escapable {
       try member(operand, elements, negated, routines, bindings)
     case let .like(operand, pattern, escape, negated):
       try like(operand, pattern, escape, negated, routines, bindings)
+    case let .between(test, lower, upper, negated):
+      try ranged(test, lower, upper, negated, routines, bindings)
     case let .and(lhs, rhs):
       // `&&`/`||` take an `@autoclosure` right operand, which would capture the
       // borrowed `~Escapable` row; spell each connective explicitly so a branch
@@ -830,6 +850,47 @@ extension Row where Self: ~Escapable {
       if truth == true { break }
     }
     return negated ? truth.map { !$0 } : truth
+  }
+
+  /// Evaluates a lowered `test [NOT] BETWEEN lower AND upper` against this row.
+  ///
+  /// The `test` term is evaluated ONCE per row — an `AND`/`OR` of two
+  /// comparisons would re-evaluate a non-idempotent test once per bound — then
+  /// the two bounds fold against that SAME value under Kleene logic as `test >=
+  /// lower AND test <= upper`. `NOT BETWEEN` is the NEGATION of that same
+  /// truth, NOT the `test < lower OR test > upper` expansion: with a cross-kind
+  /// bound `matches` yields FALSE for EVERY ordering operator (so `test <
+  /// lower` is not the complement of `test >= lower`), and the expansion would
+  /// diverge from `NOT (test BETWEEN lower AND upper)` — e.g. `K NOT BETWEEN
+  /// 'a' AND 10` must KEEP the row (the cross-kind `K >= 'a'` is FALSE, so
+  /// BETWEEN is FALSE and its negation TRUE), which the expansion's two FALSE
+  /// ordering checks would wrongly reject. A NULL `test`, `lower`, or `upper`
+  /// makes a bound UNKNOWN (`matches` yields `nil`), so the row is excluded —
+  /// the ISO three-valued range semantics.
+  ///
+  /// The `upper` bound is evaluated ONLY when the lower does not already settle
+  /// the truth: a definitely-FALSE `test >= lower` makes BETWEEN FALSE (and NOT
+  /// BETWEEN TRUE) under Kleene `AND` without reaching the `upper` term — or
+  /// any error it would raise — so `0 BETWEEN 1 AND (1 / 0)` rejects the row
+  /// rather than dividing by zero, as the desugar's constant-false left would
+  /// leave its right unevaluated.
+  ///
+  /// Each bound is an `Operand` — a `Term` evaluated against the row or a
+  /// run-time `:parameter` resolved from the bindings (an unbound or NULL-bound
+  /// one reading UNKNOWN, excluding the row) — the same binding a comparison's
+  /// right operand accepts.
+  private borrowing func ranged(_ test: Term, _ lower: Filter.Operand,
+                                _ upper: Filter.Operand,
+                                _ negated: Bool, _ routines: Routines,
+                                _ bindings: Bindings)
+      throws(SQLError) -> Bool? {
+    let value = try evaluate(test, routines, bindings)
+    let low = try evaluate(lower, routines, bindings)
+    let above = matches(value, .geq, low)
+    guard above != false else { return negated }
+    let high = try evaluate(upper, routines, bindings)
+    let within = and(above, matches(value, .leq, high))
+    return negated ? within.map { !$0 } : within
   }
 
   /// Resolves a `LIKE` pattern or escape operand to a value: a term evaluates

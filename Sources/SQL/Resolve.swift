@@ -51,6 +51,16 @@ private func lower(_ predicate: Predicate,
     // lowers only when present. The matcher and three-valued handling live in
     // the runtime, so lowering just resolves the operand terms.
     try like(operand, pattern, escape, negated: negated, term: term)
+  case let .between(test, low, high, negated):
+    // `x [NOT] BETWEEN a AND b` lowers to a first-class `Filter.between` that
+    // evaluates the test `x` ONCE per row (an `AND`/`OR` of two comparisons
+    // would re-evaluate a non-idempotent `x`, once per bound) and folds the two
+    // bounds against that same value under Kleene logic — a NULL `x`, `a`, or
+    // `b` making a bound UNKNOWN and excluding the row, the ISO range test.
+    // Each bound lowers through the same `Operand` form a `LIKE` pattern does,
+    // a `.term` or a `:parameter` name resolved from the bindings at eval.
+    try .between(term(test), lower(low, term: term), lower(high, term: term),
+                 negated: negated)
   case let .and(lhs, rhs):
     try .and(lower(lhs, term: term), lower(rhs, term: term))
   case let .or(lhs, rhs):
@@ -973,6 +983,31 @@ internal struct Scope {
         try validate(escape, routines)
         try reject(escape, routines)
       }
+    case let .between(test, lower, upper, _):
+      // `x [NOT] BETWEEN a AND b` compares `x` against both bounds, so validate
+      // the three operands for real errors (an unknown column, a bad call). A
+      // cross-kind bound is NOT rejected: the run's `matches` yields FALSE
+      // across kinds without faulting (as an `IN` element does), so the schema
+      // check accepts what the run accepts.
+      //
+      // It respects the executor's short-circuit — the same one `ranged`
+      // evaluates with: a DEFINITELY-FALSE lower comparison (`x >= a`) settles
+      // the whole truth (BETWEEN FALSE, NOT BETWEEN TRUE — the latter is the
+      // negation of that truth, not the divergent `x < a OR x > b` expansion),
+      // leaving `upper` unreachable for BOTH spellings, so `upper` is NOT
+      // validated — `0 BETWEEN 1 AND (1 / 0)` type-checks, the lower `0 >= 1`
+      // FALSE settling the row before the `1 / 0` upper is reached, exactly as
+      // an `AND`'s constant-false left leaves its right unchecked.
+      _ = try validate(test, routines)
+      try validate(lower, routines)
+      let settled = {
+        guard let value = constant(test, routines),
+            let low = constant(lower, routines) else {
+          return false
+        }
+        return matches(value, .geq, low) == false
+      }()
+      if !settled { try validate(upper, routines) }
     case let .and(lhs, rhs):
       try check(lhs, routines)
       if constant(lhs, routines) != false { try check(rhs, routines) }
@@ -1230,6 +1265,24 @@ internal struct Scope {
         return nil
       }
       return negated ? !truth : truth
+    case let .between(test, lower, upper, negated):
+      // Fold `x [NOT] BETWEEN a AND b` as `ranged` evaluates it: BETWEEN is the
+      // Kleene `x >= a AND x <= b`, and NOT BETWEEN its NEGATION (not the
+      // `x < a OR x > b` expansion, which diverges on a cross-kind bound — see
+      // `ranged`). The folded `x >= a` short-circuits before the upper: a
+      // definitely-FALSE one settles BETWEEN FALSE (and NOT BETWEEN TRUE)
+      // without folding the upper — or any fault it carries — so
+      // `0 BETWEEN 1 AND (1 / 0)` folds definitely FALSE rather than `nil`. A
+      // side the fold cannot decide leaves it per row (`nil`).
+      guard let value = constant(test, routines),
+          let low = constant(lower, routines) else {
+        return nil
+      }
+      let above = matches(value, .geq, low)
+      if above == false { return negated }
+      guard let high = constant(upper, routines) else { return nil }
+      let within = and(above, matches(value, .leq, high))
+      return negated ? within.map { !$0 } : within
     case .bound:
       return nil
     }
@@ -1352,6 +1405,10 @@ internal struct Scope {
       try aggregates(in: operand, routines)
       try aggregates(in: pattern, routines)
       if let escape { try aggregates(in: escape, routines) }
+    case let .between(test, lower, upper, _):
+      try aggregates(in: test, routines)
+      try aggregates(in: lower, routines)
+      try aggregates(in: upper, routines)
     case let .and(lhs, rhs), let .or(lhs, rhs):
       try aggregates(in: lhs, routines)
       try aggregates(in: rhs, routines)
@@ -1522,6 +1579,21 @@ internal struct Scope {
         false
       }
       return negated ? truth.map { !$0 } : truth
+    case let .between(test, lower, upper, negated):
+      // Fold `x [NOT] BETWEEN a AND b` over the empty group as `ranged` does:
+      // BETWEEN is `x >= a AND x <= b`, and NOT BETWEEN its NEGATION (not the
+      // `x < a OR x > b` expansion, which diverges on a cross-kind bound — see
+      // `ranged`). The folded `x >= a` short-circuits before the upper: a
+      // definitely-FALSE one settles BETWEEN FALSE (and NOT BETWEEN TRUE)
+      // leaving the upper unfolded — and any fault it would raise unraised — so
+      // `HAVING 0 BETWEEN 1 AND (1 / 0)` drops the group without a `.divide`
+      // fault, exactly as the run does.
+      let value = try empty(test, routines)
+      let low = try empty(lower, routines)
+      let above = matches(value, .geq, low)
+      if above == false { return negated }
+      let within = and(above, matches(value, .leq, try empty(upper, routines)))
+      return negated ? within.map { !$0 } : within
     case let .and(lhs, rhs):
       // A `false` left proves the `AND` false without folding the right arm,
       // which a run's short-circuit never evaluates and so must not fault.
@@ -2012,6 +2084,10 @@ extension Filter {
       operand.references(into: &ordinals)
       pattern.references(into: &ordinals)
       escape?.references(into: &ordinals)
+    case let .between(test, lower, upper, _):
+      test.references(into: &ordinals)
+      lower.references(into: &ordinals)
+      upper.references(into: &ordinals)
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.references(into: &ordinals)
       rhs.references(into: &ordinals)

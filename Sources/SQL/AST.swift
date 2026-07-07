@@ -8,7 +8,8 @@
 /// ```sql
 /// SELECT <* | column (, column)*>
 ///   FROM <table> [AS alias]
-///   (JOIN <table> [AS alias] ON <column> = <column>)*
+///   ([INNER | (LEFT | RIGHT | FULL) [OUTER]] JOIN <table> [AS alias]
+///     ON <predicate>)*
 ///   [WHERE <predicate>] [ORDER BY <column> [ASC|DESC] (, …)*]
 ///   [OFFSET <skip> ROWS] [FETCH {FIRST | NEXT} <count> ROWS ONLY]
 /// ```
@@ -231,8 +232,8 @@ public struct Relation: Hashable, Sendable {
   }
 }
 
-/// A `JOIN` clause: a second relation and the `ON` predicate that relates it to
-/// the rows already in scope.
+/// A `JOIN` clause: a second relation, its join `kind`, and the `ON` predicate
+/// that relates it to the rows already in scope.
 ///
 /// The `ON` predicate is an arbitrary boolean expression over the relation
 /// joined in and the ones already in scope — the same predicate grammar a
@@ -244,22 +245,45 @@ public struct Relation: Hashable, Sendable {
 /// interprets the adapter-computed columns `Id` (every table's 1-based row
 /// identity) and a list-child's owner foreign key within the predicate's column
 /// references.
+///
+/// `kind` is the inner/outer variety: `inner` (the default) keeps only matched
+/// pairs, while a `left`/`right`/`full` OUTER join additionally preserves the
+/// unmatched rows of the left, right, or both sides, NULL-extending the other
+/// side's columns. The `ON` predicate governs MATCHING alone — an unmatched
+/// outer row is still emitted — which is distinct from a post-join `WHERE`.
 public struct Join: Hashable, Sendable {
+  /// The inner/outer variety of a join.
+  public enum Kind: Hashable, Sendable {
+    /// `[INNER] JOIN` — only matched pairs, the default.
+    case inner
+    /// `LEFT [OUTER] JOIN` — every left row, unmatched ones NULL-extended.
+    case left
+    /// `RIGHT [OUTER] JOIN` — every right row, unmatched ones NULL-extended.
+    case right
+    /// `FULL [OUTER] JOIN` — every row of both sides, unmatched NULL-extended.
+    case full
+  }
+
   /// The relation joined in.
   public let relation: Relation
+
+  /// The inner/outer variety of this join.
+  public let kind: Kind
 
   /// The `ON` predicate relating the joined-in relation to those in scope.
   public let on: Predicate
 
-  public init(relation: Relation, on: Predicate) {
+  public init(relation: Relation, kind: Kind = .inner, on: Predicate) {
     self.relation = relation
+    self.kind = kind
     self.on = on
   }
 
   /// A `column = column` equi-join over `relation` — the common shape, as the
   /// two column references its `ON` equates.
-  public init(relation: Relation, left: Column, right: Column) {
-    self.init(relation: relation,
+  public init(relation: Relation, kind: Kind = .inner, left: Column,
+              right: Column) {
+    self.init(relation: relation, kind: kind,
               on: .comparison(left: .column(left), op: .equal,
                               right: .column(right)))
   }

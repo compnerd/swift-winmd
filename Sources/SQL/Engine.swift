@@ -763,8 +763,14 @@ extension Catalog where Self: ~Escapable {
 
     let seed = from.leaf(locals[0])
     var chain = select.joins.indices.reduce(seed) { chain, index in
-      .select(matches[index].remapped(through: slot),
-              .product(chain, joined[index].leaf(locals[index + 1])))
+      let leaf = joined[index].leaf(locals[index + 1])
+      let on = matches[index].remapped(through: slot)
+      switch select.joins[index].kind {
+      case .inner:
+        return .select(on, .product(chain, leaf))
+      case .left, .right, .full:
+        return .outer(chain, leaf, on: on, kind: select.joins[index].kind)
+      }
     }
     if let predicate {
       chain = .select(predicate.remapped(through: slot), chain)
@@ -960,6 +966,14 @@ extension Catalog where Self: ~Escapable {
       try .product(optimise(left, context), optimise(right, context))
     case .join:
       plan
+    case let .outer(left, right, on, kind):
+      // Optimise each side (a nested inner join or a seekable scan inside a
+      // side still rewrites), but keep the outer node and its `on` intact — the
+      // `on` governs matching and must not fold into a product or push onto a
+      // leaf, or an unmatched preserved row would be dropped rather than
+      // NULL-extended.
+      try .outer(optimise(left, context), optimise(right, context), on: on,
+                 kind: kind)
     case let .union(left, right, all):
       // Optimise each side with the same bindings so a bound predicate inside an
       // arm seeks; the union itself merely concatenates and deduplicates,
@@ -1232,6 +1246,15 @@ extension Plan {
       try .sort(keys: keys, source.pushdown())
     case let .product(left, right):
       try .product(left.pushdown(), right.pushdown())
+    case let .outer(left, right, on, kind):
+      // Push down WITHIN each side (its own joins/filters rewrite), but the
+      // outer node is a pushdown barrier: a `WHERE` conjunct above it never
+      // rides into a side. Filtering a preserved side's rows before the outer
+      // join is equivalent, but filtering the NULL-extended side's rows before
+      // it would change which rows match, so — preferring correctness — the
+      // whole `WHERE` stays above (`distribute`'s default keeps it a `select`
+      // over this node).
+      try .outer(left.pushdown(), right.pushdown(), on: on, kind: kind)
     case let .union(left, right, all):
       try .union(left.pushdown(), right.pushdown(), all: all)
     case let .distinct(source):
@@ -1864,13 +1887,23 @@ extension Catalog where Self: ~Escapable {
     }
 
     // The left-deep chain: starting from the FROM relation's leaf, each join
-    // folds in the next relation's scan as a `Select` on that join's match over
-    // their product. The optimiser turns each `Select`-over-`Product` level into
-    // an index-nested-loop join.
+    // folds in the next relation's scan. An INNER join is a `Select` on that
+    // join's ON over the product — the optimiser turns each `Select`-over-
+    // `Product` level into an index-nested-loop join. An OUTER join is an
+    // `outer` node holding the ON directly, so the ON governs matching alone
+    // and an unmatched preserved row is NULL-extended rather than dropped; its
+    // ON is NOT distributed into the product (a `WHERE` still filters after
+    // it).
     let seed = from.leaf(locals[0])
     let chain = select.joins.indices.reduce(seed) { chain, index in
-      .select(matches[index].remapped(through: slot),
-              .product(chain, joined[index].leaf(locals[index + 1])))
+      let leaf = joined[index].leaf(locals[index + 1])
+      let on = matches[index].remapped(through: slot)
+      switch select.joins[index].kind {
+      case .inner:
+        return .select(on, .product(chain, leaf))
+      case .left, .right, .full:
+        return .outer(chain, leaf, on: on, kind: select.joins[index].kind)
+      }
     }
 
     return chain.shaped(

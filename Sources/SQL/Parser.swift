@@ -23,7 +23,8 @@
 ///                   [FROM relation (join)*
 ///                    [where] [group] [having] [order] [limit]]
 /// relation       := identifier [AS identifier]
-/// join           := JOIN relation ON predicate
+/// join           := [INNER | (LEFT | RIGHT | FULL) [OUTER]] JOIN
+///                     relation ON predicate
 /// projection     := '*' | column (',' column)*
 /// where          := WHERE predicate
 /// group          := GROUP BY column (',' column)*
@@ -324,8 +325,8 @@ internal struct Parser: ~Escapable {
     let from = try relation()
 
     var joins = Array<Join>()
-    while try match(.join) {
-      try joins.append(join())
+    while let kind = try joinKind() {
+      try joins.append(join(kind))
     }
     let predicate: Predicate? = if try match(.where) {
       try predicate()
@@ -392,16 +393,45 @@ internal struct Parser: ~Escapable {
     }
   }
 
-  /// Parses the join tail (the `JOIN` keyword is already consumed): a relation,
-  /// `ON`, and an arbitrary boolean predicate — the same grammar a `WHERE`
-  /// admits, so a join relates its sides by an equality, an inequality, an
-  /// expression equality, or any `AND`/`OR`/`NOT` of comparisons. A pure
+  /// Parses an optional join `kind` and its `JOIN` keyword at the current
+  /// position, or `nil` when no join clause begins here.
+  ///
+  /// A bare `JOIN` (or an explicit `INNER JOIN`) is `.inner`; `LEFT`/`RIGHT`/
+  /// `FULL` introduce an outer join, each admitting an optional `OUTER` noise
+  /// word before the mandatory `JOIN`. A leading `INNER`/`LEFT`/`RIGHT`/`FULL`
+  /// commits to a join clause, so a missing `JOIN` after it faults rather than
+  /// silently ending the join chain.
+  private mutating func joinKind() throws(SQLError) -> Join.Kind? {
+    if try match(.join) { return .inner }
+    let kind: Join.Kind
+    if try match(.inner) {
+      kind = .inner
+    } else if try match(.left) {
+      kind = .left
+    } else if try match(.right) {
+      kind = .right
+    } else if try match(.full) {
+      kind = .full
+    } else {
+      return nil
+    }
+    // `OUTER` is an optional noise word on `LEFT`/`RIGHT`/`FULL`; `INNER` never
+    // carries it. Either way `JOIN` must follow.
+    if kind != .inner { _ = try match(.outer) }
+    try expect(.join)
+    return kind
+  }
+
+  /// Parses the join tail (the `kind` and `JOIN` keyword are already consumed):
+  /// a relation, `ON`, and an arbitrary boolean predicate — the same grammar a
+  /// `WHERE` admits, so a join relates its sides by an equality, an inequality,
+  /// an expression equality, or any `AND`/`OR`/`NOT` of comparisons. A pure
   /// `column = column` conjunct hash-joins; the rest is a residual filter.
-  private mutating func join() throws(SQLError) -> Join {
+  private mutating func join(_ kind: Join.Kind) throws(SQLError) -> Join {
     let relation = try relation()
     try expect(.on)
     let on = try predicate()
-    return Join(relation: relation, on: on)
+    return Join(relation: relation, kind: kind, on: on)
   }
 
   // MARK: - Projection

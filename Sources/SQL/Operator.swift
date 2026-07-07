@@ -139,6 +139,17 @@ internal indirect enum Plan {
   /// paired.
   case join(Plan, name: String, ordinals: Array<Int>, base: Int,
             column: Int, keys: (left: Int, right: Int), filter: Filter?)
+  /// ⟕/⟖/⟗ — the OUTER join of `left` and `right` on the `on` predicate, in
+  /// combined slot space (the left's slots then the right's). Unlike an inner
+  /// join, the `on` predicate is NOT distributed into the product or pushed
+  /// onto a leaf — it governs MATCHING alone, so an unmatched outer row is
+  /// still emitted with the other side NULL-extended. `kind` selects which
+  /// side's unmatched rows survive: `left` every left row, `right` every right
+  /// row, `full` both — a `.inner` kind never reaches this node (an inner join
+  /// lowers to the `select`/`product`/`join` path). The executor runs it as a
+  /// nested loop that tracks matches, so it composes with an arbitrary
+  /// (non-equi) `on`.
+  case outer(Plan, Plan, on: Filter, kind: Join.Kind)
   /// ∪ — the rows of the `left` sub-plan followed by the `right`'s, in source
   /// order. With `all` the duplicates are kept (`UNION ALL`); without it the
   /// whole-row duplicates of the combined rows are removed, the first occurrence
@@ -236,6 +247,14 @@ extension Plan {
       }
     case let .join(outer, _, ordinals, _, _, _, _):
       outer.slots.map { $0 + ordinals.count }
+    case let .outer(left, right, _, _):
+      // An outer join lays the right's slots after the left's, exactly as a
+      // product does — the NULL-extended side still occupies its slots.
+      if let left = left.slots, let right = right.slots {
+        left + right
+      } else {
+        nil
+      }
     case let .union(left, _, _):
       // Both sides yield rows of the same width — the result columns — so the
       // union's width is its left side's.
@@ -334,6 +353,13 @@ extension Catalog where Self: ~Escapable {
     case let .join(outer, name, ordinals, base, column, keys, filter):
       return try join(execute(outer, context), name, ordinals, base, column,
                       keys, filter, context)
+    case let .outer(left, right, on, kind):
+      // The side widths come from the sub-plans (known for a compiled plan),
+      // so an unmatched row NULL-extends to the right width even when a side
+      // yields no rows to read a width off.
+      return try outer(execute(left, context), left.slots ?? 0,
+                       execute(right, context), right.slots ?? 0, on, kind,
+                       routines, bindings)
     case let .union(left, right, all):
       return try union(left, right, all, context)
     case let .distinct(source):
@@ -521,6 +547,86 @@ private func sift(_ outer: Array<Record>, _ inner: Array<Record>,
       if try record.evaluate(filter, routines, bindings) == true {
         records.append(record)
       }
+    }
+  }
+  return records
+}
+
+/// The OUTER join of `left` and `right` on the `on` predicate — a nested loop
+/// tracking matches so an unmatched preserved row is emitted with the other
+/// side NULL-extended.
+///
+/// `left`/`right` are the two materialised sides and `leftWidth`/`rightWidth`
+/// each side's slot count (needed to NULL-extend even when a side is empty).
+/// Each candidate pair is merged (left slots then right slots) and tested
+/// against `on` under three-valued logic — TRUE matches, UNKNOWN and FALSE do
+/// not, exactly as a `WHERE` admits; `on` governs MATCHING alone, so an
+/// unmatched preserved row is still emitted.
+///
+///   - `left`: every left row, in left-major order — each matched pair, then a
+///     right-NULL row for a left row that matched nothing.
+///   - `right`: the mirror — every right row, in right-major order, its
+///     unmatched ones left-NULL.
+///   - `full`: the left-major pass (matched pairs and right-NULL unmatched-left
+///     rows) followed by a left-NULL row for every right row no left row ever
+///     matched, so both sides' unmatched rows survive.
+///
+/// A `.inner` kind never reaches here — `compile` lowers an inner join through
+/// the product/join path.
+private func outer(_ left: Array<Record>, _ leftWidth: Int,
+                   _ right: Array<Record>, _ rightWidth: Int, _ on: Filter,
+                   _ kind: Join.Kind, _ routines: Routines,
+                   _ bindings: Bindings) throws(SQLError) -> Array<Record> {
+  let leftNulls = Record(Array(repeating: .null, count: leftWidth))
+  let rightNulls = Record(Array(repeating: .null, count: rightWidth))
+
+  // A `right` join preserves the right side, so it drives the loop right-major
+  // and NULL-extends the left. The `on` filter stays in the same combined slot
+  // space (left slots then right slots), so each candidate is still merged
+  // left-first — only the iteration order and the preserved side differ.
+  if kind == .right {
+    var records = Array<Record>()
+    for inner in right {
+      var paired = false
+      for outer in left {
+        let record = outer.merged(with: inner)
+        if try record.evaluate(on, routines, bindings) == true {
+          records.append(record)
+          paired = true
+        }
+      }
+      if !paired { records.append(leftNulls.merged(with: inner)) }
+    }
+    return records
+  }
+
+  var records = Array<Record>()
+  // Track which right rows matched some left row — a `full` join emits the
+  // never-matched ones NULL-extended after the left-major pass.
+  var matched = Array(repeating: false, count: right.count)
+
+  for outer in left {
+    var paired = false
+    for index in right.indices {
+      let record = outer.merged(with: right[index])
+      if try record.evaluate(on, routines, bindings) == true {
+        records.append(record)
+        matched[index] = true
+        paired = true
+      }
+    }
+    // An unmatched left row is preserved (right NULL) for a `left` or `full`
+    // join — the left side is preserved in both.
+    if !paired {
+      records.append(outer.merged(with: rightNulls))
+    }
+  }
+
+  // A `full` join also preserves every right row no left row matched (left
+  // NULL).
+  if kind == .full {
+    for index in right.indices where !matched[index] {
+      records.append(leftNulls.merged(with: right[index]))
     }
   }
   return records

@@ -402,6 +402,38 @@ struct JoinTests {
                                 right: .column("b.y")))),
     ])
   }
+
+  @Test func `a bare JOIN is an inner join`() throws {
+    let select = try parse(select: "SELECT * FROM A JOIN B ON a.x = b.x")
+    #expect(select.joins.first?.kind == .inner)
+  }
+
+  @Test func `parses each outer join kind, OUTER optional`() throws {
+    let cases: Array<(String, Join.Kind)> = [
+      ("INNER JOIN", .inner),
+      ("LEFT JOIN", .left),
+      ("LEFT OUTER JOIN", .left),
+      ("RIGHT JOIN", .right),
+      ("RIGHT OUTER JOIN", .right),
+      ("FULL JOIN", .full),
+      ("FULL OUTER JOIN", .full),
+    ]
+    for (spelling, kind) in cases {
+      let select = try parse(select: """
+          SELECT * FROM A \(spelling) B ON a.x = b.x
+          """)
+      #expect(select.joins == [
+        Join(relation: Relation(name: "B"), kind: kind,
+             left: Column("a.x"), right: Column("b.x")),
+      ])
+    }
+  }
+
+  @Test func `a join kind without JOIN faults`() {
+    #expect(throws: SQLError.self) {
+      _ = try Statement(parsing: "SELECT * FROM A LEFT B ON a.x = b.x")
+    }
+  }
 }
 
 // MARK: - Literals

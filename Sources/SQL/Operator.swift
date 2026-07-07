@@ -150,15 +150,19 @@ internal indirect enum Plan {
   /// nested loop that tracks matches, so it composes with an arbitrary
   /// (non-equi) `on`.
   case outer(Plan, Plan, on: Filter, kind: Join.Kind)
-  /// ∪ — the rows of the `left` sub-plan followed by the `right`'s, in source
-  /// order. With `all` the duplicates are kept (`UNION ALL`); without it the
-  /// whole-row duplicates of the combined rows are removed, the first occurrence
-  /// preserved (`UNION`). The node is binary and mirrors the left-associative
-  /// `Query` chain, so each `UNION`/`UNION ALL` honours its OWN `all`: a `UNION`
-  /// nested under a `UNION ALL` dedups its own pair before the outer node
-  /// appends the trailing arm. Both sides yield rows of the same width — the
-  /// result columns of the first arm.
-  case union(Plan, Plan, all: Bool)
+  /// A set operation of `kind` (`UNION`/`INTERSECT`/`EXCEPT`) over the `left`
+  /// and `right` sub-plans, both yielding rows of the same width — the result
+  /// columns of the first arm.
+  ///
+  /// Without `all` the result is the distinct rows the operator selects — the
+  /// rows of either (`UNION`), of both (`INTERSECT`), or of the left not in the
+  /// right (`EXCEPT`) — the first occurrence of each kept. With `all` each
+  /// operator keeps multiplicity: `UNION ALL` every row of both sides,
+  /// `INTERSECT ALL` each common row to the lesser count, `EXCEPT ALL` each
+  /// left row beyond the count the right removes. The node is binary and
+  /// mirrors the `Query` set-operation tree, so each node honours its OWN
+  /// `kind`/`all`.
+  case setop(SetOperation, Plan, Plan, all: Bool)
   /// δ — deduplicates its `source`'s rows, keeping the first occurrence of each
   /// distinct whole row and preserving their order (`SELECT DISTINCT`). It sits
   /// above the projection, so it dedups the projected output rows on the SAME
@@ -197,7 +201,7 @@ extension Plan {
     switch self {
     case let .project(terms, _):
       terms.count
-    case let .union(left, _, _):
+    case let .setop(_, left, _, _):
       left.width
     case let .distinct(source):
       // A `distinct` dedups rows without reshaping them, so it is as wide as
@@ -255,9 +259,9 @@ extension Plan {
       } else {
         nil
       }
-    case let .union(left, _, _):
+    case let .setop(_, left, _, _):
       // Both sides yield rows of the same width — the result columns — so the
-      // union's width is its left side's.
+      // set operation's width is its left side's.
       left.slots
     case let .distinct(source):
       // A `distinct` dedups rows without reshaping them, so it spans the same
@@ -296,11 +300,12 @@ extension Plan {
 /// by its typed keys major to minor, stably and each in its own direction;
 /// `product` pairs every
 /// outer record with every inner one; `join` re-resolves the inner relation,
-/// seeks it per outer record, and concatenates the matches; `union` runs its
-/// two sides — each with its own union semantics — and concatenates their rows,
-/// deduplicating the whole row unless `all`; `distinct` deduplicates its
-/// source's whole rows (`SELECT DISTINCT`); `limit` skips the first `offset` of
-/// its source's rows then takes at most `count`.
+/// seeks it per outer record, and concatenates the matches; `setop` runs its
+/// two sides — each with its own set-operation semantics — and combines their
+/// rows by its `kind` (`UNION`/`INTERSECT`/`EXCEPT`), deduplicating unless
+/// `all`; `distinct` deduplicates its source's whole rows (`SELECT DISTINCT`);
+/// `limit` skips the first `offset` of its source's rows then takes at most
+/// `count`.
 /// The catalog is borrowed throughout — a `~Escapable` source is never copied
 /// or stored.
 extension Catalog where Self: ~Escapable {
@@ -360,8 +365,8 @@ extension Catalog where Self: ~Escapable {
       return try outer(execute(left, context), left.slots ?? 0,
                        execute(right, context), right.slots ?? 0, on, kind,
                        routines, bindings)
-    case let .union(left, right, all):
-      return try union(left, right, all, context)
+    case let .setop(kind, left, right, all):
+      return try setop(kind, left, right, all, context)
     case let .distinct(source):
       return deduplicated(try execute(source, context))
     case let .aggregate(keys, aggregates, source):
@@ -390,22 +395,123 @@ private func limited(_ records: Array<Record>, _ count: Int?, _ offset: Int)
   return Array(tail.prefix(count))
 }
 
-/// Concatenates the rows of `left` followed by `right`, deduplicating the whole
-/// combined row — first occurrence kept — unless `all` (`UNION ALL`, every row
-/// kept).
+/// Combines the rows of `left` and `right` by the set operation `kind`,
+/// deduplicating the whole row unless `all`.
 ///
 /// Each side runs through the same `catalog`, `routines`, and `bindings`, so a
-/// bound parameter threads into every arm alike. A side may itself be a `union`,
-/// and it executes with its OWN semantics first — a `UNION` nested under a
-/// `UNION ALL` dedups its pair before the outer node appends `right`. A `Record`
-/// is `Hashable`, so `UNION`'s dedup keys on the materialised row.
+/// bound parameter threads into every arm alike. A side may itself be a
+/// `setop`, and it executes with its OWN semantics first — a nested operation
+/// resolves before the outer node combines its result. A `Record` is `Hashable`
+/// and keys on its `canonical` values (so `1` and `1.0` are one row), the SAME
+/// whole-row equality `UNION`'s dedup uses.
+///
+///   - `.union`: the rows of either side, `left` followed by `right`. Without
+///     `all` the whole-row duplicates are removed (first occurrence kept);
+///     with `all` (`UNION ALL`) every row is kept.
+///   - `.intersect`: the rows present in BOTH sides, in left order. Without
+///     `all` each common row appears once; with `all` (`INTERSECT ALL`) it
+///     appears the LESSER of its two multiplicities.
+///   - `.except`: the rows of `left` NOT balanced by `right`, in left order.
+///     Without `all` each left row absent from `right` appears once; with
+///     `all` (`EXCEPT ALL`) each left row appears its left count less its right
+///     count, floored at zero.
 extension Catalog where Self: ~Escapable {
-  fileprivate borrowing func union(_ left: Plan, _ right: Plan, _ all: Bool,
+  fileprivate borrowing func setop(_ kind: SetOperation, _ left: Plan,
+                                   _ right: Plan, _ all: Bool,
                                    _ context: Context)
       throws(SQLError) -> Array<Record> {
-    let rows = try execute(left, context) + execute(right, context)
-    return all ? rows : deduplicated(rows)
+    let rows = try execute(left, context)
+    switch kind {
+    case .union:
+      let combined = try rows + execute(right, context)
+      return all ? combined : deduplicated(combined)
+    case .intersect:
+      return try intersected(rows, execute(right, context), all)
+    case .except:
+      return try subtracted(rows, execute(right, context), all)
+    }
   }
+}
+
+/// A multiset of records keyed on their `canonical` cell values — the same
+/// exact, transitive whole-row equality `UNION`'s dedup uses (so `1` and `1.0`
+/// are one key), counting each distinct row's occurrences.
+///
+/// It backs the `INTERSECT`/`EXCEPT` multiplicity rules: `right`'s rows are
+/// tallied into one, and a left row is admitted while its remaining count in
+/// the map governs it. `Value` is `Hashable`, so the canonical cell array keys
+/// directly.
+private struct Multiset {
+  private var counts = Dictionary<Array<Value>, Int>()
+
+  /// Tallies each of `records` under its canonical key.
+  internal init(_ records: Array<Record>) {
+    for record in records {
+      counts[record.values.map(canonical), default: 0] += 1
+    }
+  }
+
+  /// Whether the multiset still holds an occurrence of `record`'s row.
+  internal func contains(_ record: Record) -> Bool {
+    (counts[record.values.map(canonical)] ?? 0) > 0
+  }
+
+  /// Removes one occurrence of `record`'s row, reporting whether one was
+  /// present to remove — the `EXCEPT ALL` "cancel a left row against a right"
+  /// step.
+  internal mutating func remove(_ record: Record) -> Bool {
+    let key = record.values.map(canonical)
+    guard let count = counts[key], count > 0 else { return false }
+    counts[key] = count - 1
+    return true
+  }
+}
+
+/// The rows present in both `left` and `right` — `INTERSECT`.
+///
+/// Without `all` each row common to both sides appears once, in left order
+/// (the first occurrence kept); with `all` it appears the LESSER of its left
+/// and right multiplicities. `right` is tallied into a `Multiset`; a left row
+/// is emitted while an occurrence remains to balance it, so the `all` count is
+/// naturally capped at the right side's — and, absent `all`, an emitted row is
+/// recorded in a `Seen` set so later duplicates in `left` are dropped.
+private func intersected(_ left: Array<Record>, _ right: Array<Record>,
+                         _ all: Bool) -> Array<Record> {
+  var remaining = Multiset(right)
+  var rows = Array<Record>()
+  var seen = Seen()
+  for record in left {
+    if all {
+      if remaining.remove(record) { rows.append(record) }
+    } else if remaining.contains(record) && seen.insert(record.values) {
+      rows.append(record)
+    }
+  }
+  return rows
+}
+
+/// The rows of `left` not balanced by `right` — `EXCEPT`.
+///
+/// Without `all` each `left` row with NO match in `right` appears once, in
+/// left order (the first occurrence kept); with `all` each `left` row appears
+/// its left count less its right count, floored at zero. `right` is tallied
+/// into a `Multiset`: for `all` each left row cancels one right occurrence and
+/// is emitted only once the right's copies are exhausted; absent `all` a left
+/// row is emitted when `right` holds none of it, deduplicated through a `Seen`
+/// set.
+private func subtracted(_ left: Array<Record>, _ right: Array<Record>,
+                        _ all: Bool) -> Array<Record> {
+  var remaining = Multiset(right)
+  var rows = Array<Record>()
+  var seen = Seen()
+  for record in left {
+    if all {
+      if !remaining.remove(record) { rows.append(record) }
+    } else if !remaining.contains(record) && seen.insert(record.values) {
+      rows.append(record)
+    }
+  }
+  return rows
 }
 
 /// The rows of `records` with whole-row duplicates removed — the first

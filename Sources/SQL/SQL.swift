@@ -11,7 +11,7 @@ extension Statement {
   /// [WITH [RECURSIVE] cte (, cte)*]
   /// SELECT <* | column (, column)*> FROM <table>
   ///   [WHERE <predicate>] [ORDER BY <column> [ASC|DESC]]
-  ///   (UNION [ALL] SELECT …)*
+  ///   ((UNION | INTERSECT | EXCEPT) [ALL] SELECT …)*
   /// ```
   ///
   /// The resulting AST is generic: it names a relation and its columns as

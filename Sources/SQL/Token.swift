@@ -51,6 +51,8 @@ extension Token {
     case null
     case `in`
     case union
+    case intersect
+    case except
     case all
     case with
     case recursive
@@ -134,6 +136,8 @@ extension Token.Kind {
     case .null: "NULL"
     case .in: "IN"
     case .union: "UNION"
+    case .intersect: "INTERSECT"
+    case .except: "EXCEPT"
     case .all: "ALL"
     case .with: "WITH"
     case .recursive: "RECURSIVE"

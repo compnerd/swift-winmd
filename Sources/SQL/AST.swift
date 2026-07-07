@@ -468,6 +468,15 @@ public indirect enum Expression: Hashable, Sendable {
   /// engine models one conditional. The result expressions' types must unify to
   /// one result type (see resolution).
   case `case`(Array<When>, else: Expression?)
+  /// A `CAST(operand AS type)` — the ISO explicit conversion of the `operand`
+  /// expression to the target `ValueType`. Unlike the widening `CASE` unifies
+  /// its arms with, a cast is a NOMINAL conversion whose static type is the
+  /// target, so the engine advertises `type` for the column and CONVERTS the
+  /// evaluated value to it per row (see `Value.cast(to:)`). A `NULL` operand
+  /// casts to `NULL` for any target; an unconvertible value (an unparseable
+  /// text-to-number, an out-of-range double-to-integer, a cross-kind pair with
+  /// no conversion) faults rather than yielding a wrong value.
+  case cast(Expression, ValueType)
 }
 
 /// One `WHEN predicate THEN result` branch of a `CASE` expression — the guard

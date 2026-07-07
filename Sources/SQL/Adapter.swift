@@ -60,6 +60,37 @@ public enum ValueType: Hashable, Sendable {
     return nil
   }
 
+  /// Whether a value of this type can convert to `target` under `CAST` for AT
+  /// LEAST ONE value — the STRUCTURAL half of `Value.cast(to:)`, the one shared
+  /// truth both the runtime cast and the schema type-check consult so they
+  /// cannot drift.
+  ///
+  /// A pair is castable when `Value.cast(to:)` has a conversion arm for it; an
+  /// UNSUPPORTED pair — the one that falls to `Value.cast`'s `42846` arm for
+  /// EVERY value of this kind — is not. A like-kind cast is the identity; a
+  /// numeric pair converts (`integer` ↔ `double`); `text` bridges every kind
+  /// (each type spells to and parses from text) and `blob` bridges `text`
+  /// alone. The remaining cross-kind pairs — a boolean against a number or a
+  /// blob, a number against a blob — have no ISO conversion.
+  ///
+  /// A castable pair may still fault at RUN time on a particular value — a
+  /// `text` that is not a number, a `double` past `Int` range, a `blob` that is
+  /// not UTF-8 — so a reachable good value runs; only a NEVER-castable pair is
+  /// an unconditional fault the schema rejects early.
+  internal func castable(to target: ValueType) -> Bool {
+    switch (self, target) {
+    case (.integer, .integer), (.double, .double), (.text, .text),
+         (.boolean, .boolean), (.blob, .blob):
+      true
+    case (.integer, .double), (.double, .integer):
+      true
+    case (.text, _), (_, .text):
+      true
+    default:
+      false
+    }
+  }
+
   /// The ISO `data_type` spelling of this value type.
   ///
   /// The engine's types map onto the ISO domains: exact numeric to `integer`,
@@ -127,6 +158,207 @@ extension Value {
       return .double(Double(number))
     }
     return self
+  }
+
+  /// This value CONVERTED to `type` — the ISO `CAST(… AS type)` explicit
+  /// conversion, wider than the numeric-widening `coerced(to:)`.
+  ///
+  /// `NULL` converts to `NULL` for every target. A value already of `type`
+  /// passes through. The remaining conversions form the supported matrix:
+  ///
+  /// - `integer` ↔ `double`: an integer widens to a double exactly; a double
+  ///   TRUNCATES toward zero to an integer (`1.9` → `1`, `-1.9` → `-1`), the
+  ///   ISO exact-numeric-from-approximate rule, faulting when the truncated
+  ///   magnitude exceeds `Int` (`22003`).
+  /// - number → `text`: its canonical spelling (`42`, `1.5`).
+  /// - `text` → `integer`/`double`: the parsed number, its surrounding
+  ///   whitespace trimmed; an unparseable spelling faults `22018` (invalid
+  ///   character value for cast). A `double` that parses to a non-finite
+  ///   magnitude (`1e999`) is out of range (`22003`).
+  /// - `boolean` → `text`: `true`/`false`; `text` → `boolean`: the ISO
+  ///   truth-value spellings `true`/`false`/`t`/`f`/`yes`/`no`/`on`/`off`/`1`/
+  ///   `0` (case-insensitively, trimmed), else `22018`.
+  /// - `text` ↔ `blob`: the text's UTF-8 octets, and a blob decoded as UTF-8
+  ///   text (invalid UTF-8 faults `22018`).
+  ///
+  /// Every other cross-kind pair — a number against a boolean or a blob, a
+  /// boolean against a blob — has no ISO conversion and faults `SQLError.state`
+  /// `42846` (cannot coerce). These are exactly the pairs
+  /// `ValueType.castable(to:)` rejects: its conversion arms below cover the
+  /// castable pairs, and this `default` arm faults for the rest, so the
+  /// structural predicate the schema type-check consults cannot drift from the
+  /// runtime cast.
+  internal func cast(to type: ValueType) throws(SQLError) -> Value {
+    switch (self, type) {
+    case (.null, _):
+      return .null
+
+    // A value already of the target type is unchanged.
+    case (.integer, .integer), (.double, .double), (.text, .text),
+         (.boolean, .boolean), (.blob, .blob):
+      return self
+
+    // integer ↔ double: exact widening, truncating narrowing.
+    case let (.integer(number), .double):
+      return .double(Double(number))
+    case let (.double(number), .integer):
+      let truncated = number.rounded(.towardZero)
+      guard truncated >= Double(Int.min), truncated < -Double(Int.min) else {
+        throw .magnitude("double '\(number)' out of Int range for cast")
+      }
+      return .integer(Int(truncated))
+
+    // number → text: canonical spelling.
+    case let (.integer(number), .text):
+      return .text("\(number)")
+    case let (.double(number), .text):
+      return .text("\(number)")
+
+    // text → number: parse the trimmed spelling.
+    case let (.text(text), .integer):
+      // gate the trimmed spelling against the SQL INTEGER format FIRST (mirror
+      // the text → double `decimal` split): a malformed spelling ('12abc',
+      // '1.5') is an invalid character (`22018`), while a format-valid spelling
+      // `Int(_:)` still cannot represent ('9223372036854775808') is a numeric
+      // value out of range (`22003`), the same fault an integer-literal
+      // overflow and the double → integer range check use.
+      let spelling = text.trimmed
+      guard spelling.integer else {
+        throw .state("22018", "cannot cast '\(text)' to integer")
+      }
+      guard let number = Int(spelling) else {
+        throw .magnitude("integer '\(text)' out of range for cast")
+      }
+      return .integer(number)
+    case let (.text(text), .double):
+      // `Double(_:)` accepts Swift spellings the SQL numeric grammar does not —
+      // a hex float `0x1p2`, `inf`/`infinity`/`nan`, an underscore group — so
+      // gate the trimmed spelling against the SQL DECIMAL format FIRST: only a
+      // format-valid spelling reaches `Double(_:)`, and the `isFinite` guard
+      // then catches a valid-format magnitude past range (`1e999` → `22003`).
+      let spelling = text.trimmed
+      guard spelling.decimal, let number = Double(spelling) else {
+        throw .state("22018", "cannot cast '\(text)' to double")
+      }
+      guard number.isFinite else {
+        throw .magnitude("double '\(text)' out of range for cast")
+      }
+      return .double(number)
+
+    // boolean ↔ text.
+    case let (.boolean(truth), .text):
+      return .text(truth ? "true" : "false")
+    case let (.text(text), .boolean):
+      return switch text.trimmed.lowercased() {
+      case "true", "t", "yes", "on", "1": .boolean(true)
+      case "false", "f", "no", "off", "0": .boolean(false)
+      default: throw .state("22018", "cannot cast '\(text)' to boolean")
+      }
+
+    // text ↔ blob: the UTF-8 octets, and their decode.
+    case let (.text(text), .blob):
+      return .blob(Array(text.utf8))
+    case let (.blob(bytes), .text):
+      var decoder = UTF8()
+      var iterator = bytes.makeIterator()
+      var text = ""
+      loop: while true {
+        switch decoder.decode(&iterator) {
+        case let .scalarValue(scalar): text.unicodeScalars.append(scalar)
+        case .emptyInput: break loop
+        case .error: throw .state("22018", "cannot cast blob to text")
+        }
+      }
+      return .text(text)
+
+    default:
+      throw .state("42846",
+                   "cannot cast \(self.type.domain) to \(type.domain)")
+    }
+  }
+
+  /// The `ValueType` of this value's kind — a `null` has no kind of its own, so
+  /// it reports `.integer`, the schema default; it is used only to describe an
+  /// unconvertible cast, and a `null` never reaches that arm (it casts to
+  /// `null` for every target).
+  private var type: ValueType {
+    switch self {
+    case .null, .integer: .integer
+    case .double: .double
+    case .text: .text
+    case .boolean: .boolean
+    case .blob: .blob
+    }
+  }
+}
+
+extension String {
+  /// This string with leading and trailing ASCII whitespace removed — the
+  /// surrounding space an ISO `CAST` of a character string to a number ignores.
+  fileprivate var trimmed: String {
+    let space: Set<Character> = [" ", "\t", "\n", "\r"]
+    return String(drop { space.contains($0) }.reversed()
+                      .drop { space.contains($0) }.reversed())
+  }
+
+  /// Whether this string is a SQL DECIMAL numeric spelling — an optional
+  /// leading sign, a digit run, an optional `.` fraction, and an optional
+  /// `e`/`E` exponent (its own optional sign then a digit run) — the same
+  /// grammar the lexer scans a numeric literal by. It admits NO Swift extension
+  /// `Double(_:)` accepts: no hexadecimal (`0x`, a `p` exponent), no
+  /// `inf`/`infinity`/`nan`, no underscore digit groups. A CAST of a character
+  /// string to a number validates its spelling against this before parsing, so
+  /// a format the engine would not lex is an invalid character (`22018`), never
+  /// a Swift value.
+  fileprivate var decimal: Bool {
+    var characters = Substring(self)
+    func digits() -> Bool {
+      let count = characters.count
+      characters = characters.drop { $0.isASCIIDigit }
+      return characters.count < count
+    }
+    if characters.first == "+" || characters.first == "-" {
+      characters = characters.dropFirst()
+    }
+    guard digits() else { return false }
+    if characters.first == "." {
+      characters = characters.dropFirst()
+      guard digits() else { return false }
+    }
+    if characters.first == "e" || characters.first == "E" {
+      characters = characters.dropFirst()
+      if characters.first == "+" || characters.first == "-" {
+        characters = characters.dropFirst()
+      }
+      guard digits() else { return false }
+    }
+    return characters.isEmpty
+  }
+
+  /// Whether this string is a SQL INTEGER numeric spelling — an optional
+  /// leading sign then a digit run, with NO fraction, exponent, hexadecimal,
+  /// underscore group, or `inf`/`nan`. A CAST of a character string to an
+  /// integer validates its spelling against this before parsing, so a malformed
+  /// spelling is an invalid character (`22018`) while a format-valid spelling
+  /// `Int(_:)` cannot represent is a numeric value out of range (`22003`), not
+  /// a Swift `nil` conflated with the malformed case.
+  fileprivate var integer: Bool {
+    var characters = Substring(self)
+    if characters.first == "+" || characters.first == "-" {
+      characters = characters.dropFirst()
+    }
+    let count = characters.count
+    characters = characters.drop { $0.isASCIIDigit }
+    return characters.count < count && characters.isEmpty
+  }
+}
+
+extension Character {
+  /// Whether this character is an ASCII decimal digit, `0`–`9` — the digit the
+  /// SQL numeric grammar admits, excluding the Unicode digits the broader
+  /// `Character.isNumber` would.
+  fileprivate var isASCIIDigit: Bool {
+    return isASCII && isNumber
   }
 }
 

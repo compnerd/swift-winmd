@@ -591,6 +591,8 @@ extension Expression {
     case let .case(whens, otherwise):
       whens.contains { $0.when.aggregated || $0.then.aggregated }
           || (otherwise?.aggregated ?? false)
+    case let .cast(operand, _):
+      operand.aggregated
     }
   }
 
@@ -611,6 +613,8 @@ extension Expression {
     case let .case(whens, otherwise):
       whens.contains { $0.when.bound || $0.then.bound }
           || (otherwise?.bound ?? false)
+    case let .cast(operand, _):
+      operand.bound
     }
   }
 }
@@ -858,6 +862,8 @@ extension Expression {
         branch.then.collect(into: &expressions)
       }
       otherwise?.collect(into: &expressions)
+    case let .cast(operand, _):
+      operand.collect(into: &expressions)
     }
   }
 

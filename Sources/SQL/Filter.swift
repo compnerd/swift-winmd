@@ -75,6 +75,12 @@ internal indirect enum Term: Sendable {
   /// schema advertises for the column — so the executor COERCES the selected
   /// value to it, widening an `.integer` arm of a `.double` CASE.
   case `case`(Array<(Filter, Term)>, else: Term?, type: ValueType)
+  /// A `CAST(operand AS type)` — the lowered form of the AST's
+  /// `Expression.cast`. The executor evaluates the operand `Term` and CONVERTS
+  /// the value to `type` (`Value.cast(to:)`), so an unconvertible value faults
+  /// rather than yielding a wrong one. `type` is also the term's static type —
+  /// the type the schema advertises for the column.
+  case cast(Term, ValueType)
 }
 
 extension Term {
@@ -102,6 +108,8 @@ extension Term {
         result.references(into: &slots)
       }
       otherwise?.references(into: &slots)
+    case let .cast(operand, _):
+      operand.references(into: &slots)
     }
   }
 }
@@ -125,17 +133,19 @@ extension Term {
       .case(branches.map {
               ($0.0.remapped(through: slot), $0.1.remapped(through: slot))
             }, else: otherwise?.remapped(through: slot), type: type)
+    case let .cast(operand, type):
+      .cast(operand.remapped(through: slot), type)
     }
   }
 
   /// Whether evaluating this term cannot throw — it is a bare slot read or a
-  /// constant. A `binary` arithmetic (`/` raises on a zero divisor) or an
-  /// `apply` (a scalar function may raise) is NOT known safe, whatever its
-  /// operands.
+  /// constant. A `binary` arithmetic (`/` raises on a zero divisor), an `apply`
+  /// (a scalar function may raise), or a `cast` (an unconvertible value raises)
+  /// is NOT known safe, whatever its operands.
   internal var safe: Bool {
     switch self {
     case .slot, .constant: true
-    case .apply, .binary, .case: false
+    case .apply, .binary, .case, .cast: false
     }
   }
 }
@@ -330,6 +340,11 @@ extension Row where Self: ~Escapable {
       // branch. The selected value is COERCED to the CASE's unified result
       // `type` so it matches the column type the schema advertised.
       try conditional(branches, otherwise, type, routines, bindings)
+    case let .cast(operand, type):
+      // Evaluate the operand and CONVERT it to the target type: NULL casts to
+      // NULL, an unconvertible value faults (`Value.cast(to:)`), never yielding
+      // a wrong value.
+      try evaluate(operand, routines, bindings).cast(to: type)
     }
   }
 

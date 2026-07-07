@@ -195,6 +195,10 @@ extension Schema {
       let scope = Scope([(relation, self)])
       let type = try scope.derive(whens, otherwise, routines)
       return .case(branches, else: fallback, type: type)
+    case let .cast(operand, type):
+      // Lower the operand and attach the target type; the executor converts the
+      // evaluated value to it (`Value.cast(to:)`).
+      return try .cast(term(operand, in: relation, routines), type)
     case .aggregate:
       // An aggregate has no per-row meaning — it folds over a group — so it may
       // not appear in a `WHERE`, a join `ON`, or a non-aggregate projection.
@@ -356,7 +360,22 @@ internal struct Scope {
       // reachable `ELSE`) the run yields NULL, for which `.integer` is the
       // schema default.
       try derive(whens, otherwise, routines)
+    case let .cast(operand, type):
+      // A cast's static type is the target type; the conversion is nominal, so
+      // the operand's own type does not shape it. Derive the operand anyway for
+      // its ordinal resolution — an unknown/ambiguous column faults as a
+      // projection would.
+      try derive(cast: operand, to: type, routines)
     }
+  }
+
+  /// The target `type` of a `CAST`, deriving `operand` for its ordinal
+  /// resolution — a schema-surface non-faulting derive of the operand — and
+  /// discarding its type, the conversion being nominal.
+  private func derive(cast operand: Expression, to type: ValueType,
+                      _ routines: Routines) throws(SQLError) -> ValueType {
+    _ = try derive(operand, routines)
+    return type
   }
 
   /// The nominal type of a `CASE` under `derive` — the unification of its
@@ -433,7 +452,52 @@ internal struct Scope {
       try arithmetic(op, lhs, rhs, routines)
     case let .case(whens, otherwise):
       try conditional(whens, otherwise, routines)
+    case let .cast(operand, type):
+      try validate(cast: operand, to: type, routines)
     }
+  }
+
+  /// The target `type` of a `CAST`, VALIDATING `operand` for real errors
+  /// (unknown column, bad call arity, …) as a run would fault, and REJECTING a
+  /// cast the runtime could never perform before advertising the target type.
+  ///
+  /// A cast whose (operand type → target type) PAIR is structurally
+  /// unsupported — a boolean to a number, a number to a blob — faults `42846`
+  /// for EVERY value of the operand's kind, so `SELECT CAST(TRUE AS INTEGER)`
+  /// would otherwise advertise an integer column though executing it
+  /// unconditionally throws. `ValueType.castable(to:)` — the same structural
+  /// truth the runtime cast consults — rejects that pair here, at validation.
+  ///
+  /// A castable-but-VALUE-dependent pair still passes: a `text` to a number, or
+  /// a `blob` to `text`, is a supported pair whose fault (`22018`/`22003`)
+  /// depends on the value, so a reachable good value runs — `CAST('1' AS
+  /// INTEGER)` type-checks. The exception is a CONSTANT operand that folds and
+  /// ALWAYS fails: `CAST('abc' AS INTEGER)` is unparseable for the one value it
+  /// can have, so a trial cast of the folded constant rejects it too.
+  ///
+  /// The constant fold runs FIRST, before the structural pair rejection: a
+  /// constant operand casts to ONE value, so its trial cast decides the cast
+  /// outright — it ALLOWS a statically-NULL operand (`CAST(CASE WHEN 1 = 0
+  /// THEN 1 END AS BLOB)` folds to `.null`, which casts to ANY target) even
+  /// where the operand's DERIVED type would make the pair structurally
+  /// unsupported, and it still REJECTS a constant that always fails. Only a
+  /// NON-constant operand, whose value is unknown at validation, falls to the
+  /// structural pair check.
+  private func validate(cast operand: Expression, to type: ValueType,
+                        _ routines: Routines) throws(SQLError) -> ValueType {
+    let source = try validate(operand, routines)
+    // A constant operand casts to one value only, so its trial cast is the
+    // whole decision: it ALLOWS a folded NULL to any target and REJECTS a
+    // spelling that always faults (`CAST('abc' AS INTEGER)`). A non-constant
+    // operand folds to `nil`, so the structural pair check rejects a kind that
+    // could never cast (`CAST(<boolean column> AS INTEGER)` → `42846`).
+    if let value = constant(operand, routines) {
+      _ = try value.cast(to: type)
+    } else if !source.castable(to: type) {
+      throw .state("42846",
+                   "cannot cast \(source.domain) to \(type.domain)")
+    }
+    return type
   }
 
   /// The result type of a `CASE`, validating each REACHABLE branch as a run
@@ -739,6 +803,14 @@ internal struct Scope {
       }
       guard let otherwise else { return .null }
       return constant(otherwise, routines)
+    case let .cast(operand, type):
+      // A ROW-INDEPENDENT operand folds to its converted value — the SAME
+      // `Value.cast(to:)` the run applies, so the fold matches. A would-be
+      // fault (an unconvertible value) collapses to `nil`, so the cast stays
+      // undecided rather than deciding a match, just as a would-be-faulting
+      // binary fold does.
+      guard let value = constant(operand, routines) else { return nil }
+      return try? value.cast(to: type)
     case .column, .aggregate:
       return nil
     }
@@ -855,6 +927,8 @@ internal struct Scope {
         try aggregates(in: branch.then, routines)
       }
       if let otherwise { try aggregates(in: otherwise, routines) }
+    case let .cast(operand, _):
+      try aggregates(in: operand, routines)
     }
   }
 
@@ -935,6 +1009,11 @@ internal struct Scope {
       }
       guard let otherwise else { return .null }
       return try empty(otherwise, routines).coerced(to: type)
+    case let .cast(operand, type):
+      // Convert the operand's empty-group value exactly as a run does — a NULL
+      // (the common empty-group operand) casts to NULL, an unconvertible value
+      // faults as the run would.
+      return try empty(operand, routines).cast(to: type)
     case .column:
       return .null
     }
@@ -1094,6 +1173,10 @@ internal struct Scope {
       // branch's value to the type the schema advertises.
       let type = try derive(whens, otherwise, routines)
       return .case(branches, else: fallback, type: type)
+    case let .cast(operand, type):
+      // Lower the operand across the join chain and attach the target type; the
+      // executor converts the evaluated value to it (`Value.cast(to:)`).
+      return try .cast(term(operand, routines), type)
     case .aggregate:
       // An aggregate has no per-row meaning — it folds over a group — so it may
       // not appear in a `WHERE`, a join `ON`, or a non-aggregate projection.
@@ -1298,6 +1381,10 @@ internal struct Grouping {
       // COERCES the selected branch's value to the advertised column type.
       let type = try scope.derive(whens, otherwise, routines)
       return .case(branches, else: fallback, type: type)
+    case let .cast(operand, type):
+      // Lower the operand against the grouped slot space and attach the target
+      // type; the executor converts the evaluated value to it.
+      return try .cast(term(operand, routines), type)
     case .aggregate:
       // An aggregate reaches here only when it was not collected — an internal
       // inconsistency, since the query gathers every projection/HAVING aggregate.

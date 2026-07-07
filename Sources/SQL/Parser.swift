@@ -40,10 +40,11 @@
 /// expression     := additive
 /// additive       := multiplicative (('+' | '-') multiplicative)*
 /// multiplicative := factor (('*' | '/') factor)*
-/// factor         := '(' expression ')' | case
+/// factor         := '(' expression ')' | case | cast
 ///                 | literal | aggregate | call | column
 /// case           := CASE [expression] (WHEN (predicate | expression) THEN
 ///                     expression)+ [ELSE expression] END
+/// cast           := CAST '(' expression AS type ')'
 /// literal        := string | integer | decimal | TRUE | FALSE | blob
 /// blob           := ('x' | 'X') "'" (hex hex)* "'"  // whole bytes
 /// aggregate      := COUNT '(' '*' ')'
@@ -586,6 +587,14 @@ internal struct Parser: ~Escapable {
                                   : Column(ident.text))
     }
 
+    // `CAST` is the ISO explicit-conversion operator, recognised bare (a
+    // delimited `"CAST"` is an ordinary scalar-call name) like an aggregate.
+    // Its tail is `expression AS type )`, not the comma-separated argument list
+    // a call takes, so it dispatches to its own production.
+    if !ident.quoted, ident.text.uppercased() == "CAST" {
+      return try cast()
+    }
+
     // An aggregate is one of the fixed set of names (recognised
     // case-insensitively, only when written bare — a delimited `"COUNT"` is a
     // scalar name), distinct from a scalar call: it accumulates over a group
@@ -671,6 +680,22 @@ internal struct Parser: ~Escapable {
     }
     try expect(.end)
     return .case(whens, else: otherwise)
+  }
+
+  /// Parses the `CAST` tail — `expression AS type )` (the `CAST (` is already
+  /// consumed) — into `Expression.cast`.
+  ///
+  /// The operand is a full scalar expression; `AS` (already a keyword, shared
+  /// with aliasing) separates it from the target `type`, which reuses the same
+  /// `type()` domain spellings a `CREATE FUNCTION` parameter or a column type
+  /// names (`INTEGER`, `TEXT`, `DOUBLE`, `BOOLEAN`, `BLOB`, …). The whole is
+  /// closed by `)`.
+  private mutating func cast() throws(SQLError) -> Expression {
+    let operand = try expression()
+    try expect(.as)
+    let type = try type()
+    try expect(.rparen)
+    return .cast(operand, type)
   }
 
   // MARK: - Predicate

@@ -50,6 +50,8 @@ extension Token {
     case `is`
     case null
     case `in`
+    case like
+    case escape
     case union
     case intersect
     case except
@@ -135,6 +137,8 @@ extension Token.Kind {
     case .is: "IS"
     case .null: "NULL"
     case .in: "IN"
+    case .like: "LIKE"
+    case .escape: "ESCAPE"
     case .union: "UNION"
     case .intersect: "INTERSECT"
     case .except: "EXCEPT"

@@ -38,12 +38,36 @@ internal indirect enum Filter: Sendable {
   /// first TRUE; `NOT IN` negates that three-valued truth (UNKNOWN maps to
   /// itself).
   case membership(Term, Array<Term>, negated: Bool)
+  /// `operand [NOT] LIKE pattern [ESCAPE escape]` — the lowered form of the
+  /// AST's `like`. The operand is a `Term` evaluated per row; the pattern and
+  /// optional one-character escape are each an `Operand` — a `Term` or a
+  /// run-time `:parameter` resolved from the bindings; `negated` marks `NOT
+  /// LIKE`. The runtime reads the operand and pattern text and runs the `%`/`_`
+  /// matcher (a linear two-pointer match, `%` matching any run and `_` exactly
+  /// one character, an escape character taking the next character literally); a
+  /// NULL operand, pattern, or escape is UNKNOWN and a non-text operand or
+  /// pattern is a definite non-match (the engine's cross-kind rule), with `NOT
+  /// LIKE` negating the three-valued result (UNKNOWN maps to itself).
+  case like(Term, pattern: Operand, escape: Operand?, negated: Bool)
   /// `lhs AND rhs`.
   case and(Filter, Filter)
   /// `lhs OR rhs`.
   case or(Filter, Filter)
   /// `NOT operand`.
   case not(Filter)
+
+  /// The lowered pattern or escape operand of a `Filter.like`: a `Term`
+  /// evaluated per row, or a run-time `:parameter` resolved from the engine's
+  /// bindings — the lowered form of the AST's `Predicate.Operand`, as
+  /// `Filter.bound` carries a comparison's parameter as a name resolved at run
+  /// time.
+  internal enum Operand: Sendable {
+    /// A `Term` evaluated against the row per its usual lowering.
+    case term(Term)
+    /// A `:parameter` name, resolved from the bindings at eval — an unbound one
+    /// (or one bound to `NULL`) makes the `LIKE` UNKNOWN.
+    case parameter(String)
+  }
 }
 
 // MARK: - Terms
@@ -138,6 +162,71 @@ extension Term {
     case .apply, .binary, .case: false
     }
   }
+
+  /// Whether this term is STATICALLY a valid single-character `LIKE` escape — a
+  /// constant text value of exactly one character, the only form `Row.like`
+  /// accepts without faulting. A slot, a call, or a constant that is NULL,
+  /// non-text, or a text of any other length is not: its escape validity is not
+  /// known until the row runs, so it CANNOT ride below a seek or join (see
+  /// `Filter.safe`). Reused as the escape-safety gate; it does not decide the
+  /// eval result, only the pushdown/seek classification.
+  internal var escape: Bool {
+    guard case let .constant(.text(text)) = self else { return false }
+    return text.count == 1
+  }
+}
+
+extension Filter.Operand {
+  /// This operand with its term's ordinals remapped through `slot`; a
+  /// `:parameter` reads no slot and passes unchanged.
+  internal func remapped(through slot: Dictionary<Int, Int>) -> Filter.Operand {
+    switch self {
+    case let .term(term): .term(term.remapped(through: slot))
+    case .parameter: self
+    }
+  }
+
+  /// The ordinals this operand reads, accumulated into `ordinals` — a term's
+  /// own, none for a `:parameter`.
+  internal func references(into ordinals: inout Set<Int>) {
+    switch self {
+    case let .term(term): term.references(into: &ordinals)
+    case .parameter: break
+    }
+  }
+
+  /// Whether evaluating this operand cannot throw — a safe term, or a
+  /// `:parameter` (a bindings lookup, never a fault).
+  internal var safe: Bool {
+    switch self {
+    case let .term(term): term.safe
+    case .parameter: true
+    }
+  }
+
+  /// Whether this operand is STATICALLY a valid single-character `LIKE`
+  /// escape — only a constant single-character text term. A `:parameter` is
+  /// per-run, not a static constant, so it is NOT statically valid (it may be
+  /// unbound, NULL, or the wrong length at run time) and marks the `LIKE`
+  /// unsafe, exactly as a non-constant escape term does (see `Filter.safe`).
+  internal var escape: Bool {
+    switch self {
+    case let .term(term): term.escape
+    case .parameter: false
+    }
+  }
+
+  /// Whether this operand reads a run-time `:parameter` — a `.parameter` is
+  /// one (it may be unbound or bound to NULL, so a `LIKE` over it is UNKNOWN);
+  /// a `.term` is not, a `Term` carrying no parameter of its own. `Filter.like`
+  /// folds this over its pattern and escape so a parameterised `LIKE` stays off
+  /// a pushdown below a later unsafe conjunct (see `Filter.nullable`).
+  internal var parameterised: Bool {
+    switch self {
+    case .term: false
+    case .parameter: true
+    }
+  }
 }
 
 extension Filter {
@@ -157,6 +246,10 @@ extension Filter {
       .membership(operand.remapped(through: slot),
                   elements.map { $0.remapped(through: slot) },
                   negated: negated)
+    case let .like(operand, pattern, escape, negated):
+      .like(operand.remapped(through: slot),
+            pattern: pattern.remapped(through: slot),
+            escape: escape?.remapped(through: slot), negated: negated)
     case let .and(lhs, rhs):
       .and(lhs.remapped(through: slot), rhs.remapped(through: slot))
     case let .or(lhs, rhs):
@@ -230,6 +323,19 @@ extension Filter {
     case let .null(term, _): term.safe
     case let .membership(operand, elements, _):
       operand.safe && elements.allSatisfy(\.safe)
+    case let .like(operand, pattern, escape, _):
+      // An escape makes the predicate UNSAFE unless it is STATICALLY a valid
+      // single-character escape: `Row.like` faults (`SQLError.argument`) on any
+      // escape that does not evaluate to a one-character text — a throw
+      // INDEPENDENT of whether a pair matches, so it must not ride below a seek
+      // or join and fire on an empty product (or be dropped by a hash key). A
+      // non-constant escape (a slot or call) or a constant that is NULL,
+      // non-text, or the wrong length is unsafe; only a `.constant` text of
+      // exactly one character (`escape.escape`) is safe. Plain LIKE (no escape)
+      // stays safe — the matcher itself never throws, a non-text operand or
+      // pattern being a definite non-match and a NULL UNKNOWN.
+      operand.safe && pattern.safe
+          && (escape.map(\.escape) ?? true)
     case let .and(lhs, rhs): lhs.safe && rhs.safe
     case let .or(lhs, rhs): lhs.safe && rhs.safe
     case let .not(operand): operand.safe
@@ -252,13 +358,17 @@ extension Filter {
   }
 
   /// Whether this filter compares against a run-time `:parameter` — a `.bound`
-  /// anywhere in it. Such a predicate reads no slot yet can be UNKNOWN, because
+  /// anywhere in it, or a `.like` whose pattern or escape operand is a
+  /// `:parameter`. Such a predicate reads no slot yet can be UNKNOWN, because
   /// the parameter may be unbound (or bound to NULL), so `nullable` counts it
-  /// even when `slots` is empty.
+  /// even when `slots` is empty — keeping `'x' LIKE :p` off a pushdown below
+  /// a later unsafe conjunct the non-short-circuiting `AND` still owes.
   private var parameterised: Bool {
     switch self {
     case .bound: true
     case .compare, .match, .null, .membership: false
+    case let .like(_, pattern, escape, _):
+      pattern.parameterised || (escape?.parameterised ?? false)
     case let .and(lhs, rhs): lhs.parameterised || rhs.parameterised
     case let .or(lhs, rhs): lhs.parameterised || rhs.parameterised
     case let .not(operand): operand.parameterised
@@ -573,6 +683,8 @@ extension Row where Self: ~Escapable {
       try (evaluate(term, routines, bindings) == .null) != negated
     case let .membership(operand, elements, negated):
       try member(operand, elements, negated, routines, bindings)
+    case let .like(operand, pattern, escape, negated):
+      try like(operand, pattern, escape, negated, routines, bindings)
     case let .and(lhs, rhs):
       // `&&`/`||` take an `@autoclosure` right operand, which would capture the
       // borrowed `~Escapable` row; spell each connective explicitly so a branch
@@ -619,4 +731,176 @@ extension Row where Self: ~Escapable {
     }
     return negated ? truth.map { !$0 } : truth
   }
+
+  /// Resolves a `LIKE` pattern or escape operand to a value: a term evaluates
+  /// against this row, a `:parameter` resolves from the bindings — an unbound
+  /// name yields `.null`, so it reads UNKNOWN exactly as a bound `NULL` does.
+  private borrowing func evaluate(_ operand: Filter.Operand,
+                                  _ routines: Routines,
+                                  _ bindings: Bindings)
+      throws(SQLError) -> Value {
+    switch operand {
+    case let .term(term):
+      try evaluate(term, routines, bindings)
+    case let .parameter(name):
+      bindings[name] ?? .null
+    }
+  }
+
+  /// Evaluates a lowered `operand [NOT] LIKE pattern [ESCAPE escape]` against
+  /// this row under three-valued logic.
+  ///
+  /// The operand, pattern, and optional escape are each evaluated ONCE, IN
+  /// ORDER, BEFORE the three-valued result is decided — so a faulting reached
+  /// operand (`(1 / K)` with `K = 0`) surfaces its throw rather than being
+  /// silently swallowed by a NULL escape. Only once all three have evaluated is
+  /// the result decided: a non-NULL escape that is not a single character is
+  /// `SQLError.argument` (the ISO rule); a NULL operand, pattern, or escape is
+  /// UNKNOWN (`nil`), the row excluded; a non-text operand or pattern is a
+  /// definite non-match (FALSE), mirroring the engine's cross-kind comparison
+  /// rule (`Row.matches`) rather than faulting. Otherwise the pattern runs
+  /// against the operand through the `%`/`_` matcher. The pattern and escape
+  /// may be a `:parameter` resolved from the bindings. `NOT LIKE` negates the
+  /// result (UNKNOWN maps to itself).
+  private borrowing func like(_ operand: Term, _ pattern: Filter.Operand,
+                              _ escape: Filter.Operand?, _ negated: Bool,
+                              _ routines: Routines, _ bindings: Bindings)
+      throws(SQLError) -> Bool? {
+    // Evaluate all three reached operands once, in order — a fault in any of
+    // them (a divide, an overflow) propagates HERE, before the NULL/escape
+    // result below can turn it into a silent UNKNOWN.
+    let subject = try evaluate(operand, routines, bindings)
+    let template = try evaluate(pattern, routines, bindings)
+    let separator: Value? =
+        if let escape { try evaluate(escape, routines, bindings) } else { nil }
+
+    // Decide the escape character. A NULL escape is UNKNOWN like a NULL
+    // operand; anything but a one-character text is `SQLError.argument`.
+    var character: Character? = nil
+    switch separator {
+    case .none, .null:
+      break
+    case let .text(text) where text.count == 1:
+      character = text.first
+    default:
+      throw .argument("LIKE ESCAPE must be a single character")
+    }
+
+    let truth: Bool? = switch (subject, template, separator) {
+    // A NULL operand, pattern, or escape is UNKNOWN.
+    case (.null, _, _), (_, .null, _), (_, _, .some(.null)):
+      nil
+    case let (.text(subject), .text(template), _):
+      matches(subject, template, escape: character)
+    // A non-text operand or pattern never matches — the engine's cross-kind
+    // comparison rule — so the run is a definite non-match, not a fault.
+    default:
+      false
+    }
+    return negated ? truth.map { !$0 } : truth
+  }
+}
+
+/// One decoded `LIKE` pattern atom, escape already resolved: `%` matches any
+/// run, `_` exactly one character, and a literal matches itself.
+private enum Atom: Equatable {
+  /// `%` — any run of characters (including the empty run).
+  case any
+  /// `_` — exactly one character.
+  case single
+  /// A literal character, matching itself (an escaped `%`, `_`, or escape
+  /// character among them).
+  case literal(Character)
+}
+
+/// The `pattern` decoded into atoms, its escape resolved, or `nil` when the
+/// pattern is ILL-FORMED — a trailing escape with no character to escape, which
+/// matches nothing. An escape character makes the next character a `.literal`
+/// (so escaped `%`, `_`, or the escape character are literals); every other
+/// character is `%` → `.any`, `_` → `.single`, else `.literal`.
+private func atoms(of pattern: Array<Character>,
+                   escape: Character?) -> Array<Atom>? {
+  var atoms = Array<Atom>()
+  atoms.reserveCapacity(pattern.count)
+  var index = 0
+  while index < pattern.count {
+    let symbol = pattern[index]
+    if symbol == escape {
+      // The next character is taken literally; a trailing escape (no character
+      // follows) makes the whole pattern match nothing.
+      guard index + 1 < pattern.count else { return nil }
+      atoms.append(.literal(pattern[index + 1]))
+      index += 2
+    } else {
+      switch symbol {
+      case "%": atoms.append(.any)
+      case "_": atoms.append(.single)
+      default: atoms.append(.literal(symbol))
+      }
+      index += 1
+    }
+  }
+  return atoms
+}
+
+/// Whether `text` matches the SQL `LIKE` `pattern`, in which `%` matches any
+/// run of characters (including the empty run) and `_` matches exactly one
+/// character; every other character matches itself. When `escape` is given, the
+/// character following it in the pattern matches that literal character (so
+/// `escape` followed by `%`, `_`, or `escape` matches a literal `%`, `_`, or
+/// the escape character).
+///
+/// The match is ANCHORED — the whole `text` must be consumed. It is the classic
+/// LINEAR two-pointer `LIKE` scan: a `%` is remembered (the pattern position
+/// after it, and the text mark it may extend to) and matching proceeds
+/// greedily; on a later mismatch the TEXT pointer is advanced past the mark and
+/// the scan resumes after the remembered `%`, rather than re-recursing. This is
+/// O(text · pattern) worst case — a pattern like `%a%a%a%b` against a long run
+/// of `a`s cannot blow up combinatorially, as a per-split recursion would. A
+/// trailing escape with no character to escape matches nothing, as no literal
+/// follows it. The comparison is over `Character`s (grapheme clusters), so it
+/// is Unicode-correct for the ASCII metadata names the engine filters and any
+/// wider text.
+internal func matches(_ text: String, _ pattern: String,
+                      escape: Character?) -> Bool {
+  let text = Array(text)
+  // A trailing escape makes the pattern match nothing.
+  guard let pattern = atoms(of: Array(pattern), escape: escape) else {
+    return false
+  }
+
+  var t = 0           // the text cursor.
+  var p = 0           // the pattern cursor.
+  var star = -1       // pattern position after the last `%`, or -1 for none.
+  var mark = 0        // the text position the last `%` may extend to consume.
+  while t < text.count {
+    if p < pattern.count, pattern[p] == .single
+        || pattern[p] == .literal(text[t]) {
+      // `_` or a matching literal consumes one character of each.
+      t += 1
+      p += 1
+    } else if p < pattern.count, pattern[p] == .any {
+      // Remember this `%` — its tail starts at `p + 1` and may extend the text
+      // from `t` — and first try to match it against the empty run.
+      star = p + 1
+      mark = t
+      p += 1
+    } else if star != -1 {
+      // A mismatch under a remembered `%`: let it consume one more character
+      // (advance the mark) and resume the pattern just after it. Backtracking
+      // the TEXT pointer, not re-recursing, keeps the scan linear.
+      p = star
+      mark += 1
+      t = mark
+    } else {
+      // A mismatch with no `%` to extend: no match.
+      return false
+    }
+  }
+  // The text is exhausted; consume any trailing `%` atoms (each matches the
+  // empty run). The match holds only if the whole pattern is then consumed.
+  while p < pattern.count, pattern[p] == .any {
+    p += 1
+  }
+  return p == pattern.count
 }

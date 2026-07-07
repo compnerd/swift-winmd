@@ -559,12 +559,44 @@ public indirect enum Predicate: Hashable, Sendable {
   /// TRUE when a NULL element is present). The engine lowers it to that
   /// disjunction rather than carrying a dedicated `Filter` case.
   case membership(Expression, Array<Expression>, negated: Bool)
+  /// `operand [NOT] LIKE pattern [ESCAPE escape]` — whether the operand's text
+  /// matches the pattern, in which `%` matches any sequence of characters
+  /// (including the empty one) and `_` matches exactly one character; every
+  /// other pattern character matches itself. An optional `ESCAPE escape` names
+  /// a one-character escape whose following `%`, `_`, or escape character
+  /// matches that literal character. It is three-valued: a NULL operand, a NULL
+  /// pattern, or a NULL escape makes the result UNKNOWN, and `negated` (`NOT
+  /// LIKE`) negates the three-valued result (UNKNOWN maps to itself). A
+  /// non-text operand or pattern does not match — the engine's cross-kind
+  /// comparison rule — so a run yields FALSE without faulting. The pattern and
+  /// escape are each an `Operand` — an ordinary scalar expression or a run-time
+  /// `:parameter` resolved from the engine's bindings — so a caller can bind a
+  /// pattern (`Name LIKE :pattern`) rather than interpolate it.
+  case like(Expression, pattern: Operand, escape: Operand?, negated: Bool)
   /// `lhs AND rhs`.
   case and(Predicate, Predicate)
   /// `lhs OR rhs`.
   case or(Predicate, Predicate)
   /// `NOT operand`.
   case not(Predicate)
+
+  /// The pattern or escape operand of a `LIKE` predicate: either an ordinary
+  /// scalar `Expression` (a literal, a column, or a call, evaluated per row) or
+  /// a run-time `:parameter` (a name resolved from the engine's bindings, the
+  /// same mechanism `Predicate.bound` uses for a comparison's right operand).
+  ///
+  /// SQL's grammar admits only an expression here, but a `:parameter` is not an
+  /// expression token — it is consumed by the comparison arm — so LIKE carries
+  /// its bindable operands through this dedicated form rather than widening
+  /// every expression walk with a parameter case. An unbound parameter, or one
+  /// bound to `NULL`, makes the LIKE UNKNOWN, as a `NULL` pattern or escape
+  /// does.
+  public enum Operand: Hashable, Sendable {
+    /// An ordinary scalar expression, evaluated per row.
+    case expression(Expression)
+    /// A `:parameter` placeholder, resolved at run time from the bindings.
+    case parameter(String)
+  }
 }
 
 /// A comparison operator.

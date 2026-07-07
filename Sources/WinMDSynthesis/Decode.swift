@@ -121,16 +121,16 @@ extension SignatureType {
       primitive.spelling(dialect)
     case let .pointer(pointee):
       pointee.spelling(parameter: parameter, generics: generics, const: false,
-                       with: resolver, dialect: dialect)
+                       erase: false, with: resolver, dialect: dialect)
     case let .reference(referent):
       referent.spelling(parameter: parameter, generics: generics, const: false,
-                        with: resolver, dialect: dialect)
+                        erase: false, with: resolver, dialect: dialect)
     case let .array(element):
       element.spelling(parameter: parameter, generics: generics, const: false,
-                       with: resolver, dialect: dialect)
+                       erase: false, with: resolver, dialect: dialect)
     case let .matrix(element, _):
       element.spelling(parameter: parameter, generics: generics, const: false,
-                       with: resolver, dialect: dialect)
+                       erase: false, with: resolver, dialect: dialect)
     case let .named(kind, reference):
       reference.spelling(kind: kind, parameter: parameter, with: resolver,
                          dialect: dialect)
@@ -144,6 +144,136 @@ extension SignatureType {
                    dialect: dialect)
     case .function:
       dialect.opaque
+    }
+  }
+}
+
+// MARK: - ABI erasure
+
+/// Whether a type crosses the WinRT ABI as an erased interface pointer or keeps
+/// its own representation — the reference-vs-value distinction the vtable ABI
+/// draws.
+///
+/// A WinRT interface, runtime class, delegate, generic instantiation, or
+/// `System.Object` (`ELEMENT_TYPE_OBJECT`, i.e. `IInspectable`) is a COM object
+/// reference: at the ABI it is an erased interface pointer
+/// (`IInspectable`/`IUnknown`, i.e. a raw pointer), never its own declared
+/// spelling. Any other primitive, an enum, or a struct is a value: it crosses
+/// the ABI as itself. This is the same partition windows-rs draws with its
+/// `TypeKind` (`InterfaceType` vs `CopyType`/`CloneType`); see
+/// `SignatureType.abi(…)` for the rationale and the parallel.
+public enum ABI: Sendable {
+  /// A reference type — erased to an interface pointer at the ABI (windows-rs
+  /// `InterfaceType`, whose `Type::Abi` is `*mut c_void`).
+  case reference
+  /// A value type — carried as its own representation at the ABI (windows-rs
+  /// `CopyType`/`CloneType`, whose `Type::Abi` is `Self`).
+  case value
+}
+
+extension SignatureType {
+  /// How `self` crosses the WinRT ABI — a reference (an erased interface
+  /// pointer) or a value (its own representation).
+  ///
+  /// The distinction is structural, so no resolver is needed: a `CLASS`-kinded
+  /// named type (an interface, runtime class, or delegate — all
+  /// `ELEMENT_TYPE_CLASS` in metadata) and the `ELEMENT_TYPE_OBJECT` primitive
+  /// (`System.Object`, i.e. WinRT's `IInspectable` — an object reference
+  /// despite being a primitive element type) are references; a
+  /// `VALUETYPE`-kinded named type (a struct or enum) and every other
+  /// primitive are values. A generic instantiation (`GENERICINST`) follows its
+  /// base's kind: an instantiation over a `CLASS` base (a generic interface
+  /// like `IReference`/`IVector`) is a reference and erases, while one over a
+  /// `VALUETYPE` base (a generic struct) is a value and keeps its own decoded
+  /// spelling. Two primitives stay values despite
+  /// being reference-shaped in the type system: the WinRT `String`
+  /// (`ELEMENT_TYPE_STRING`) is an `HSTRING` handle carried by value
+  /// (windows-rs `CloneType`), and `System.TypedReference`
+  /// (`ELEMENT_TYPE_TYPEDBYREF`) is a value type.
+  ///
+  /// A modifier is transparent, and so is indirection: a BYREF, pointer, array,
+  /// or matrix classifies as its (recursively unwrapped) ELEMENT, so a byref or
+  /// array of a class reference is itself a reference (its element erases),
+  /// while a pointer or array of a value stays a value. A `VAR`/`MVAR` generic
+  /// variable stands for an as-yet-unknown argument and is conservatively a
+  /// value (its erased spelling falls through to `decode`).
+  ///
+  /// This is the classification half of the ABI-erasure keystone; `abi(…)`
+  /// produces the matching erased spelling.
+  public var classification: ABI {
+    switch self {
+    case .named(kind: .class, _), .primitive(.object):
+      .reference
+    case .named(kind: .value, _), .primitive, .function:
+      .value
+    case .variable:
+      .value
+    case let .instance(base, _):
+      base.classification
+    case let .modified(inner, _),
+         let .pointer(inner),
+         let .reference(inner),
+         let .array(inner),
+         let .matrix(inner, _):
+      inner.classification
+    }
+  }
+
+  /// The ABI-erased spelling of `self` in `dialect` — the type as it actually
+  /// crosses the WinRT vtable, resolving named types through `resolver`.
+  ///
+  /// WinRT's ABI erases every object reference to an interface pointer: an
+  /// interface, runtime class, delegate, or generic-interface instantiation is
+  /// passed as an `IInspectable`/`IUnknown` — a raw pointer — never as its own
+  /// declared type. A value keeps its own representation. This is the erasure
+  /// that lets
+  /// the projected ABI protocols drop their generic, reference-typed
+  /// parameters in favour of a single erased pointer, dissolving the vtable
+  /// inheritance problem — the keystone the projection and template steps build
+  /// on.
+  ///
+  /// It mirrors windows-rs `AbiType<T> = <T as Type>::Abi`, whose `TypeKind`
+  /// draws the same partition: `InterfaceType` erases to `*mut c_void` (the
+  /// `opaque` raw pointer here), while `CopyType`/`CloneType` keep `Self`.
+  ///
+  /// The mapping:
+  /// - a scalar reference (a `CLASS`-kinded named type, a `GENERICINST` over a
+  ///   `CLASS` base, or the `ELEMENT_TYPE_OBJECT` primitive —
+  ///   `System.Object`/`IInspectable`) spells the dialect's `opaque` raw
+  ///   pointer — the erased interface pointer;
+  /// - a scalar value spells its own `decode(…)` — including a `GENERICINST`
+  ///   over a `VALUETYPE` base, which keeps its decoded generic spelling — with
+  ///   one deliberate exception: the WinRT `String` (`ELEMENT_TYPE_STRING`)
+  ///   keeps its
+  ///   `HSTRING` handle rather than erasing to a plain pointer — a value-like
+  ///   handle, not an object reference, matching windows-rs treating `HSTRING`
+  ///   as a `CloneType`;
+  /// - an indirection wrapper (a BYREF, pointer, array, or matrix) COMPOSES the
+  ///   same pointer/array spelling `decode(…)` builds, but over its element's
+  ///   erased `abi(…)` rather than its `decode(…)`. So a byref or array of a
+  ///   class reference erases its element — `reference(IFoo)` spells a pointer
+  ///   over the opaque pointer, not over `IFoo` — while a pointer or array of a
+  ///   value is unchanged (`pointer(int)` → `UnsafeMutablePointer<CInt>`), its
+  ///   erased element being its own `decode(…)`. A `.modified` type is
+  ///   transparent to its inner type, exactly as `classification` treats it.
+  public func abi(parameter: String? = nil, generics: Array<String>? = nil,
+                  with resolver: Resolver, dialect: Dialect) -> String {
+    switch self {
+    case let .pointer(element), let .reference(element),
+         let .array(element), let .matrix(element, _):
+      element.spelling(parameter: parameter, generics: generics, const: false,
+                       erase: true, with: resolver, dialect: dialect)
+    case let .modified(inner, _):
+      inner.abi(parameter: parameter, generics: generics, with: resolver,
+                dialect: dialect)
+    case .primitive, .named, .instance, .variable, .function:
+      switch classification {
+      case .reference:
+        dialect.opaque
+      case .value:
+        decode(parameter: parameter, generics: generics, with: resolver,
+               dialect: dialect)
+      }
     }
   }
 }
@@ -190,8 +320,8 @@ extension PrimitiveType {
 // MARK: - Indirection
 
 extension SignatureType {
-  /// Decodes a pointer/reference/array to a pointer over its decoded pointee,
-  /// where `self` is the pointee.
+  /// Decodes a pointer/reference/array to a pointer over its pointee, where
+  /// `self` is the pointee.
   ///
   /// `void*` collapses to the mutable raw pointer (or the const raw pointer when
   /// `const`). A pointer-to-pointer keeps an *optional* inner element so a
@@ -200,8 +330,14 @@ extension SignatureType {
   /// is `const`), and an `int**`/`IFoo**` a pointer to an optional typed pointer.
   /// Otherwise a non-`void` pointee decodes as `Unsafe{Mutable}Pointer<Pointee>`,
   /// mutable unless a `const` modifier marks the pointee.
+  ///
+  /// When `erase` is set the pointee spelling is its ABI-erased `abi(…)` rather
+  /// than its `decode(…)`, so the SAME pointer/array composition wraps the
+  /// erased element — a byref/array of a class reference wraps the opaque
+  /// pointer, not the named type. The `void` collapses are already raw ABI
+  /// forms, so `erase` leaves them untouched; only the wrapped leaf differs.
   fileprivate func spelling(parameter: String?, generics: Array<String>?,
-                            const: Bool, with resolver: Resolver,
+                            const: Bool, erase: Bool, with resolver: Resolver,
                             dialect: Dialect) -> String {
     switch self {
     case .primitive(.void):
@@ -216,19 +352,31 @@ extension SignatureType {
            const: const, dialect: dialect)
     case .pointer:
       // A non-`void` pointer-to-pointer: the inner pointer slot is itself
-      // nullable, so mark the decoded element optional (as the `void**` cases).
-      wrap(decode(parameter: parameter, generics: generics, with: resolver,
-                  dialect: dialect) + dialect.optional,
+      // nullable, so mark the leaf element optional (as the `void**` cases).
+      wrap(leaf(parameter: parameter, generics: generics, erase: erase,
+                with: resolver, dialect: dialect) + dialect.optional,
            const: const, dialect: dialect)
     case let .modified(inner, modifiers):
       inner.spelling(parameter: parameter, generics: generics,
-                     const: modifiers.constant(with: resolver),
+                     const: modifiers.constant(with: resolver), erase: erase,
                      with: resolver, dialect: dialect)
     default:
-      wrap(decode(parameter: parameter, generics: generics, with: resolver,
-                  dialect: dialect),
+      wrap(leaf(parameter: parameter, generics: generics, erase: erase,
+                with: resolver, dialect: dialect),
            const: const, dialect: dialect)
     }
+  }
+
+  /// The leaf pointee spelling a wrapper wraps: the element's ABI-erased
+  /// `abi(…)` when `erase` is set, otherwise its plain `decode(…)`. A wrapped
+  /// class reference thus erases to the opaque pointer under `erase`, while a
+  /// value is spelled identically either way (its `abi(…)` is its `decode(…)`).
+  private func leaf(parameter: String?, generics: Array<String>?, erase: Bool,
+                    with resolver: Resolver, dialect: Dialect) -> String {
+    erase ? abi(parameter: parameter, generics: generics, with: resolver,
+                dialect: dialect)
+          : decode(parameter: parameter, generics: generics, with: resolver,
+                   dialect: dialect)
   }
 }
 

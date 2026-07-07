@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 import Testing
-@testable import SQL
+@testable import SQLEngine
 
 /// Drains the streaming lexer over `text` into an array of tokens.
 private func tokens(_ text: String) throws -> Array<Token> {

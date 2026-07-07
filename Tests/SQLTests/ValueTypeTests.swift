@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 import Testing
-@testable import SQL
+@testable import SQLEngine
 
 // MARK: - Harness
 

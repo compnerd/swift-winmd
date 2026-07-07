@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 import Testing
-import SQL
+import SQLEngine
 import SQLTestSupport
 
 // MARK: - Helpers

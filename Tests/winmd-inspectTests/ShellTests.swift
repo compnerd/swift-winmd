@@ -6,7 +6,7 @@ import Testing
 @testable import winmd_inspect
 
 import ArgumentParser
-import SQL
+import SQLEngine
 import WinMDSynthesis
 import WinMD
 

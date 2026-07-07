@@ -5,7 +5,7 @@ import Testing
 
 @testable import winmd_inspect
 
-import SQL
+import SQLEngine
 @testable import WinMD
 
 /// End-to-end coverage of the WinMD → SQL-engine adapter.

@@ -5,7 +5,7 @@ import Testing
 
 @testable import winmd_inspect
 
-import SQL
+import SQLEngine
 
 // MARK: - Boolean
 

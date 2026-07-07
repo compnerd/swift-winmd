@@ -6,7 +6,7 @@ import Testing
 @testable import winmd_inspect
 
 import Mustache
-import SQL
+import SQLEngine
 @testable import WinMD
 import WinMDSynthesis
 

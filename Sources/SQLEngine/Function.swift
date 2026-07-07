@@ -294,15 +294,16 @@ public struct Routines: Sendable {
   /// stateful or read the clock: it is not executed at compile time. Pass
   /// `true` for a pure routine to let a row-independent call fold.
   //
-  // `SQL.Value` is spelled in full here and in `bitand`: `Routines` conforms to
-  // `ExpressibleByDictionaryLiteral`, whose associated `Value` is the literal's
-  // element `Routine`, so an unqualified `Value` inside `Routines` names that
-  // element, not the engine cell the routine computes.
+  // `SQLEngine.Value` is spelled in full here and in `bitand`: `Routines`
+  // conforms to `ExpressibleByDictionaryLiteral`, whose associated `Value` is
+  // the literal's element `Routine`, so an unqualified `Value` inside
+  // `Routines` names that element, not the engine cell the routine computes.
   public func registering(_ name: String, returns: ValueType = .integer,
                           parameters: Array<ValueType> = [],
                           deterministic: Bool = false,
-                          _ compute: @escaping @Sendable (Array<SQL.Value>)
-                              throws(SQLError) -> SQL.Value)
+                          _ compute:
+                              @escaping @Sendable (Array<SQLEngine.Value>)
+                                  throws(SQLError) -> SQLEngine.Value)
       throws(SQLError) -> Routines {
     try Routines.reserved(name)
     var functions = self.functions
@@ -469,7 +470,7 @@ public struct Routines: Sendable {
   /// — a NULL argument yields NULL — factored out so each routine reads as its
   /// mapping alone. Returns `true` when any argument is NULL, so the caller
   /// returns `.null` before matching a concrete kind.
-  private static func propagates(_ arguments: Array<SQL.Value>) -> Bool {
+  private static func propagates(_ arguments: Array<SQLEngine.Value>) -> Bool {
     arguments.contains(.null)
   }
 
@@ -479,8 +480,8 @@ public struct Routines: Sendable {
   /// `SQLError.arity`, which is the UNION column-count mismatch). Its declared
   /// `[.integer, .integer]` contract is what the static type-check validates a
   /// call against, mirroring these run-time faults.
-  private static func bitand(_ arguments: Array<SQL.Value>)
-      throws(SQLError) -> SQL.Value {
+  private static func bitand(_ arguments: Array<SQLEngine.Value>)
+      throws(SQLError) -> SQLEngine.Value {
     guard arguments.count == 2 else {
       throw .argument("BITAND takes two arguments")
     }
@@ -494,8 +495,8 @@ public struct Routines: Sendable {
 
   /// `UPPER(text)` — the string upper-cased. A NULL argument yields NULL; the
   /// wrong count or a non-text argument is `SQLError.argument`.
-  private static func upper(_ arguments: Array<SQL.Value>)
-      throws(SQLError) -> SQL.Value {
+  private static func upper(_ arguments: Array<SQLEngine.Value>)
+      throws(SQLError) -> SQLEngine.Value {
     guard arguments.count == 1 else {
       throw .argument("UPPER takes one argument")
     }
@@ -508,8 +509,8 @@ public struct Routines: Sendable {
 
   /// `LOWER(text)` — the string lower-cased. A NULL argument yields NULL; the
   /// wrong count or a non-text argument is `SQLError.argument`.
-  private static func lower(_ arguments: Array<SQL.Value>)
-      throws(SQLError) -> SQL.Value {
+  private static func lower(_ arguments: Array<SQLEngine.Value>)
+      throws(SQLError) -> SQLEngine.Value {
     guard arguments.count == 1 else {
       throw .argument("LOWER takes one argument")
     }
@@ -524,8 +525,8 @@ public struct Routines: Sendable {
   /// in the string (its Unicode character count, not its UTF-8 byte length). A
   /// NULL argument yields NULL; the wrong count or a non-text argument is
   /// `SQLError.argument`.
-  private static func length(_ arguments: Array<SQL.Value>)
-      throws(SQLError) -> SQL.Value {
+  private static func length(_ arguments: Array<SQLEngine.Value>)
+      throws(SQLError) -> SQLEngine.Value {
     guard arguments.count == 1 else {
       throw .argument("CHAR_LENGTH takes one argument")
     }
@@ -542,8 +543,8 @@ public struct Routines: Sendable {
   /// `start` past the end yields the empty string. A NULL argument yields NULL;
   /// the wrong count, a non-text first argument, or a non-integer second is
   /// `SQLError.argument`.
-  private static func substring(_ arguments: Array<SQL.Value>)
-      throws(SQLError) -> SQL.Value {
+  private static func substring(_ arguments: Array<SQLEngine.Value>)
+      throws(SQLError) -> SQLEngine.Value {
     guard arguments.count == 2 else {
       throw .argument("SUBSTRING takes two arguments")
     }
@@ -564,8 +565,8 @@ public struct Routines: Sendable {
   /// removed (the one-argument ISO form, whose implicit trim character is a
   /// space and whose implicit specification is BOTH). A NULL argument yields
   /// NULL; the wrong count or a non-text argument is `SQLError.argument`.
-  private static func trim(_ arguments: Array<SQL.Value>)
-      throws(SQLError) -> SQL.Value {
+  private static func trim(_ arguments: Array<SQLEngine.Value>)
+      throws(SQLError) -> SQLEngine.Value {
     guard arguments.count == 1 else {
       throw .argument("TRIM takes one argument")
     }
@@ -580,8 +581,8 @@ public struct Routines: Sendable {
 
   /// `ABS(n)` — the absolute value of a real number. A NULL argument yields
   /// NULL; the wrong count or a non-double argument is `SQLError.argument`.
-  private static func abs(_ arguments: Array<SQL.Value>)
-      throws(SQLError) -> SQL.Value {
+  private static func abs(_ arguments: Array<SQLEngine.Value>)
+      throws(SQLError) -> SQLEngine.Value {
     guard arguments.count == 1 else {
       throw .argument("ABS takes one argument")
     }
@@ -596,8 +597,8 @@ public struct Routines: Sendable {
   /// away from zero, the ISO default), carried as a double. A NULL argument
   /// yields NULL; the wrong count or a non-double argument is
   /// `SQLError.argument`.
-  private static func round(_ arguments: Array<SQL.Value>)
-      throws(SQLError) -> SQL.Value {
+  private static func round(_ arguments: Array<SQLEngine.Value>)
+      throws(SQLError) -> SQLEngine.Value {
     guard arguments.count == 1 else {
       throw .argument("ROUND takes one argument")
     }
@@ -611,8 +612,8 @@ public struct Routines: Sendable {
   /// `CEILING(n)` / `CEIL(n)` — the least integer value not less than `n`,
   /// carried as a double. A NULL argument yields NULL; the wrong count or a
   /// non-double argument is `SQLError.argument`.
-  private static func ceiling(_ arguments: Array<SQL.Value>)
-      throws(SQLError) -> SQL.Value {
+  private static func ceiling(_ arguments: Array<SQLEngine.Value>)
+      throws(SQLError) -> SQLEngine.Value {
     guard arguments.count == 1 else {
       throw .argument("CEILING takes one argument")
     }
@@ -626,8 +627,8 @@ public struct Routines: Sendable {
   /// `FLOOR(n)` — the greatest integer value not greater than `n`, carried as a
   /// double. A NULL argument yields NULL; the wrong count or a non-double
   /// argument is `SQLError.argument`.
-  private static func floor(_ arguments: Array<SQL.Value>)
-      throws(SQLError) -> SQL.Value {
+  private static func floor(_ arguments: Array<SQLEngine.Value>)
+      throws(SQLError) -> SQLEngine.Value {
     guard arguments.count == 1 else {
       throw .argument("FLOOR takes one argument")
     }
@@ -643,8 +644,8 @@ public struct Routines: Sendable {
   /// is `SQLError.divide`, as integer arithmetic's `%` by zero is. A NULL
   /// argument yields NULL; the wrong count or a non-integer argument is
   /// `SQLError.argument`.
-  private static func mod(_ arguments: Array<SQL.Value>)
-      throws(SQLError) -> SQL.Value {
+  private static func mod(_ arguments: Array<SQLEngine.Value>)
+      throws(SQLError) -> SQLEngine.Value {
     guard arguments.count == 2 else {
       throw .argument("MOD takes two arguments")
     }
@@ -667,8 +668,8 @@ public struct Routines: Sendable {
   /// of every string, including another empty string. Matching is
   /// character-wise and case-SENSITIVE (no case fold). A NULL argument yields
   /// NULL; the wrong count or a non-text argument is `SQLError.argument`.
-  private static func position(_ arguments: Array<SQL.Value>)
-      throws(SQLError) -> SQL.Value {
+  private static func position(_ arguments: Array<SQLEngine.Value>)
+      throws(SQLError) -> SQLEngine.Value {
     guard arguments.count == 2 else {
       throw .argument("POSITION takes two arguments")
     }
@@ -706,8 +707,8 @@ public struct Routines: Sendable {
   /// past the end appends, a negative `length` removes nothing, and a `length`
   /// past the end removes only to the end. This is `SUBSTRING`'s clamp
   /// discipline applied to both the prefix kept and the suffix resumed.
-  private static func overlay(_ arguments: Array<SQL.Value>)
-      throws(SQLError) -> SQL.Value {
+  private static func overlay(_ arguments: Array<SQLEngine.Value>)
+      throws(SQLError) -> SQLEngine.Value {
     guard (3 ... 4).contains(arguments.count) else {
       throw .argument("OVERLAY takes three or four arguments")
     }

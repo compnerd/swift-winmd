@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 import Testing
-@testable import SQL
+@testable import SQLEngine
 
 /// A throwaway location for cases that carry one.
 private let here = SourceLocation(line: 1, column: 1, offset: 0)

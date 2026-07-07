@@ -1,7 +1,7 @@
 // Copyright © 2026 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-import SQL
+import SQLEngine
 
 /// Fluent builders over the fixture store, so a test writes a catalog the way
 /// it reads — a nesting of relations, rows, and views — rather than assembling
@@ -100,7 +100,7 @@ public enum RowBuilder {
 /// `FixtureCatalog`.
 public enum Member {
   case relation(name: String, FixtureRelation)
-  case view(name: String, SQL.View)
+  case view(name: String, SQLEngine.View)
 }
 
 /// A named base relation: an ordered schema, its rows, and an optional seekable
@@ -147,7 +147,7 @@ public struct View {
 
   public init(_ name: String, _ sql: String, as columns: Array<String>) throws {
     let query = try Self.query(sql)
-    member = .view(name: name, SQL.View(query: query, columns: columns))
+    member = .view(name: name, SQLEngine.View(query: query, columns: columns))
   }
 
   /// Parses `sql` to a `Query`, trapping on any other statement — a fixture's
@@ -194,7 +194,7 @@ public enum CatalogBuilder {
 public func Catalog(@CatalogBuilder _ members: () throws -> Array<Member>)
     throws -> FixtureCatalog {
   var relations = Dictionary<String, FixtureRelation>()
-  var views = Dictionary<String, SQL.View>()
+  var views = Dictionary<String, SQLEngine.View>()
   for member in try members() {
     switch member {
     case let .relation(name, relation):

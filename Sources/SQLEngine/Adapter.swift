@@ -403,7 +403,7 @@ public struct View: Hashable, Sendable {
 /// a catalog that registers none returns `nil` from the default `view(named:)`.
 public protocol Catalog: ~Escapable {
   /// The table this catalog vends.
-  associatedtype Table: SQL.Table & ~Escapable
+  associatedtype Table: SQLEngine.Table & ~Escapable
 
   /// The table named `name`, or `nil` if the source has no such base relation.
   @_lifetime(borrow self)
@@ -456,7 +456,7 @@ extension Catalog where Self: ~Escapable {
 /// the table and hands back a cursor tied to that borrow.
 public protocol Table: ~Escapable {
   /// The cursor this table vends over its rows.
-  associatedtype Cursor: SQL.Cursor & ~Escapable
+  associatedtype Cursor: SQLEngine.Cursor & ~Escapable
 
   /// The number of real columns — the extent of a `SELECT *` projection.
   var width: Int { get }
@@ -565,7 +565,7 @@ extension Table where Self: ~Escapable {
 /// the cursor and never escapes that borrow.
 public protocol Cursor: ~Escapable {
   /// The row this cursor vends.
-  associatedtype Row: SQL.Row & ~Escapable
+  associatedtype Row: SQLEngine.Row & ~Escapable
 
   /// The number of rows the cursor walks.
   var count: Int { get }

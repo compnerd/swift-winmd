@@ -1,7 +1,7 @@
 // Copyright © 2026 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-import SQL
+import SQLEngine
 import Testing
 
 /// Expectation helpers that run a SQL query against a fixture catalog and check

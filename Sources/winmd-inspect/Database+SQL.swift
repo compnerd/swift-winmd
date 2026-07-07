@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 internal import SQLEngine
+internal import SQLStandard
 internal import WinMDSynthesis
 internal import WinMD
 

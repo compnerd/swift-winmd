@@ -3,6 +3,7 @@
 
 import Testing
 @testable import SQLEngine
+import SQLStandard
 
 // MARK: - In-memory adapter
 

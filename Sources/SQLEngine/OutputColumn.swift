@@ -77,13 +77,13 @@ extension Catalog where Self: ~Escapable {
   ///   an unregistered scalar function anywhere in the query, `SQLError.arity`
   ///   for a `UNION` whose arms project differing column counts; and, when
   ///   `validate`, `SQLError.operand` for an ill-typed reachable expression.
-  public borrowing func columns(of query: Query, routines: Routines = [:],
+  public borrowing func columns(of query: Query, routines: Routines,
                                 validate: Bool = true)
       throws(SQLError) -> Array<OutputColumn> {
-    // The engine prelude merged under the caller's routines, exactly as a run
-    // seeds them, so a standard call (`BITAND`) types without the caller
-    // re-supplying it. A typing path has no bindings.
-    let context = Context(routines: Routines.standard.merging(routines))
+    // Pure engine: it types calls against exactly the `routines` given, seeding
+    // no prelude. `import SQLStandard` adds a prelude-defaulting overload
+    // (`columns(of:validate:)`). A typing path has no bindings.
+    let context = Context(routines: routines)
     // Extend the scope with any `definition_schema.` store relation the query
     // names, so its result schema resolves the reserved relation the same as a
     // run would — SCHEMA-ONLY, so typing never triggers the row build.
@@ -135,7 +135,7 @@ extension Catalog where Self: ~Escapable {
   /// - Throws: the resolution faults `columns(of query:)` raises, plus
   ///   `SQLError.statement` for a `create` or a `function`.
   public borrowing func columns(of statement: Statement,
-                                routines: Routines = [:],
+                                routines: Routines,
                                 validate: Bool = true)
       throws(SQLError) -> Array<OutputColumn> {
     switch statement {
@@ -192,7 +192,7 @@ extension Catalog where Self: ~Escapable {
                                  routines: Routines,
                                  validate: Bool)
       throws(SQLError) -> Array<OutputColumn> {
-    let context = Context(routines: Routines.standard.merging(routines))
+    let context = Context(routines: routines)
     var overlay = ScopedRelations()
     for cte in ctes {
       // A name repeated in the list (case-insensitively) would silently shadow

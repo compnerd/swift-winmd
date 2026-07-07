@@ -53,6 +53,11 @@ extension Token {
     case between
     case like
     case escape
+    /// The `PLACING` keyword separating an `OVERLAY`'s source string from its
+    /// replacement.
+    case placing
+    /// The `FOR` keyword introducing an `OVERLAY`'s optional replacement span.
+    case `for`
     case union
     case intersect
     case except
@@ -143,6 +148,8 @@ extension Token.Kind {
     case .between: "BETWEEN"
     case .like: "LIKE"
     case .escape: "ESCAPE"
+    case .placing: "PLACING"
+    case .for: "FOR"
     case .union: "UNION"
     case .intersect: "INTERSECT"
     case .except: "EXCEPT"

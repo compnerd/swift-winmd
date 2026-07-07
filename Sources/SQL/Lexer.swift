@@ -439,6 +439,8 @@ internal struct Lexer: ~Escapable {
     case "BETWEEN": .between
     case "LIKE": .like
     case "ESCAPE": .escape
+    case "PLACING": .placing
+    case "FOR": .for
     case "UNION": .union
     case "INTERSECT": .intersect
     case "EXCEPT": .except

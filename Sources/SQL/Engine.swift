@@ -593,6 +593,8 @@ extension Expression {
           || (otherwise?.aggregated ?? false)
     case let .cast(operand, _):
       operand.aggregated
+    case let .coalesce(arguments):
+      arguments.contains { $0.aggregated }
     }
   }
 
@@ -615,6 +617,8 @@ extension Expression {
           || (otherwise?.bound ?? false)
     case let .cast(operand, _):
       operand.bound
+    case let .coalesce(arguments):
+      arguments.contains { $0.bound }
     }
   }
 }
@@ -900,6 +904,8 @@ extension Expression {
       otherwise?.collect(into: &expressions)
     case let .cast(operand, _):
       operand.collect(into: &expressions)
+    case let .coalesce(arguments):
+      for argument in arguments { argument.collect(into: &expressions) }
     }
   }
 

@@ -477,6 +477,17 @@ public indirect enum Expression: Hashable, Sendable {
   /// text-to-number, an out-of-range double-to-integer, a cross-kind pair with
   /// no conversion) faults rather than yielding a wrong value.
   case cast(Expression, ValueType)
+  /// `COALESCE(v1, v2, …)` — the first argument whose value is non-NULL, else
+  /// NULL. The ISO definition is the searched `CASE WHEN v1 IS NOT NULL THEN v1
+  /// … END`, but it is a FIRST-CLASS node rather than that expansion so each
+  /// argument is evaluated EXACTLY ONCE: the desugar re-referenced each `vi` in
+  /// both its `IS NOT NULL` guard and its `THEN`, evaluating a stateful
+  /// argument twice — testing one call's value for NULL and returning a
+  /// different one. The result type is the `ValueType.unified` reduction over
+  /// the arguments (the same unification a `CASE`'s results take), to which the
+  /// selected value is coerced. At least two arguments (the parser enforces
+  /// it).
+  case coalesce(Array<Expression>)
 }
 
 /// One `WHEN predicate THEN result` branch of a `CASE` expression — the guard

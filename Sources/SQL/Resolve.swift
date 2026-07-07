@@ -236,6 +236,19 @@ extension Schema {
       // Lower the operand and attach the target type; the executor converts the
       // evaluated value to it (`Value.cast(to:)`).
       return try .cast(term(operand, in: relation, routines), type)
+    case let .coalesce(arguments):
+      // Lower each argument to a `Term` over this relation and hold them in a
+      // first-class `Term.coalesce` so each is evaluated ONCE. `type` is the
+      // unified argument type the selected value coerces to, derived against a
+      // one-relation scope.
+      var elements = Array<Term>()
+      elements.reserveCapacity(arguments.count)
+      for argument in arguments {
+        try elements.append(term(argument, in: relation, routines))
+      }
+      let scope = Scope([(relation, self)])
+      let type = try scope.derive(expression, routines)
+      return .coalesce(elements, type: type)
     case .aggregate:
       // An aggregate has no per-row meaning — it folds over a group — so it may
       // not appear in a `WHERE`, a join `ON`, or a non-aggregate projection.
@@ -403,6 +416,11 @@ internal struct Scope {
       // its ordinal resolution — an unknown/ambiguous column faults as a
       // projection would.
       try derive(cast: operand, to: type, routines)
+    case let .coalesce(arguments):
+      // The result type is the unification of the arguments (the same
+      // `ValueType.unified` reduction a `CASE`'s results take), the type the
+      // selected value coerces to.
+      try unified(arguments, routines)
     }
   }
 
@@ -413,6 +431,70 @@ internal struct Scope {
                       _ routines: Routines) throws(SQLError) -> ValueType {
     _ = try derive(operand, routines)
     return type
+  }
+
+  /// The unification of the types of `arguments` — the `ValueType.unified`
+  /// reduction a `CASE`'s reachable results and a `COALESCE`'s arguments both
+  /// take. A definitively-irreconcilable pair (a text beside an integer) faults
+  /// `SQLError.operand`; a mixed integer/double pair widens to `double`. The
+  /// list is never empty (the parser requires ≥ 2 COALESCE arguments).
+  ///
+  /// Only a SELECTABLE argument shapes the type. A run skips an argument
+  /// whose value is NULL and moves on, so an argument folding to a constant
+  /// `.null` (`constant(_ expression:)`) can NEVER be the result — its type is
+  /// derived (an unknown column still faults) but is NOT merged, exactly as a
+  /// `CASE` omits an unreachable branch's result type. And an argument that is
+  /// the definite selection (`selects(_:)` — a constant NON-NULL value, or a
+  /// `COUNT` aggregate that is always non-NULL) sets the type and makes every
+  /// LATER argument unreachable — mirroring a `CASE`'s reachable-branch
+  /// unification and the faulting `validate`'s stop.
+  private func unified(_ arguments: Array<Expression>,
+                       _ routines: Routines) throws(SQLError) -> ValueType {
+    var type: ValueType?
+    for argument in arguments {
+      let next = try derive(argument, routines)
+      if case .some(.null) = constant(argument, routines) {
+        // A constant NULL is derived (for its errors) but skipped: it can never
+        // be returned, so its type must not shape the column.
+        continue
+      }
+      guard !selects(argument, routines) else {
+        // A definite selection: merge its type and stop, as every later
+        // argument is unreachable.
+        return try merged(type, next)
+      }
+      type = try merged(type, next)
+    }
+    return type ?? .integer
+  }
+
+  /// Whether `argument` is a COALESCE's definite selection — an argument the
+  /// executor's short-circuit is GUARANTEED to return, making every later
+  /// argument unreachable (neither validated nor unified). That holds when it
+  /// folds to a constant NON-NULL value (`constant(_ expression:)`), or when it
+  /// is a `COUNT` aggregate: `COUNT` alone among the aggregates always yields a
+  /// row count of 0 or more, never NULL, so it always selects — while `SUM` /
+  /// `MIN` / `MAX` / `AVG` are NULL over an empty group and so do NOT stop.
+  private func selects(_ argument: Expression, _ routines: Routines) -> Bool {
+    return switch argument {
+    case .aggregate(.count, _): true
+    default: constant(argument, routines).map { $0 != .null } ?? false
+    }
+  }
+
+  /// The unification of a COALESCE's running result type with the `next`
+  /// selectable argument's type — `next` when there is no running type yet,
+  /// else their `ValueType.unified`, faulting `SQLError.operand` on an
+  /// irreconcilable pair (a text beside an integer). Shared by the `derive`
+  /// (`unified`) and `validate` (`coalesce`) surfaces so both merge only a
+  /// selectable argument's type identically.
+  private func merged(_ running: ValueType?, _ next: ValueType)
+      throws(SQLError) -> ValueType {
+    guard let running else { return next }
+    guard let unified = running.unified(with: next) else {
+      throw .operand("COALESCE arguments have irreconcilable types")
+    }
+    return unified
   }
 
   /// The nominal type of a `CASE` under `derive` — the unification of its
@@ -491,7 +573,50 @@ internal struct Scope {
       try conditional(whens, otherwise, routines)
     case let .cast(operand, type):
       try validate(cast: operand, to: type, routines)
+    case let .coalesce(arguments):
+      try coalesce(arguments, routines)
     }
+  }
+
+  /// The result type of `COALESCE(v1, v2, …)`, validating each REACHABLE
+  /// argument as a run would fault and unifying only the SELECTABLE ones'
+  /// types (`merged`). A definitively-irreconcilable pair (a text argument
+  /// beside an integer) faults `SQLError.operand`, as the column cannot be two
+  /// kinds; a mixed integer/double pair widens to `double`.
+  ///
+  /// The executor returns the first NON-NULL argument and never evaluates a
+  /// later one, so an argument that is the definite selection (`selects(_:)` —
+  /// a constant NON-NULL value, or a `COUNT` aggregate that is always non-NULL)
+  /// makes every LATER argument unreachable — those are NOT validated
+  /// (`COALESCE(1, missing_udf())` and `COALESCE(COUNT(*), missing_udf())` both
+  /// type-check), exactly as a constant-TRUE `CASE` guard makes later branches
+  /// unreachable.
+  ///
+  /// An argument that folds to a constant `.null` is validated (for its own
+  /// errors) but its type is NOT merged: a run skips a NULL and moves on, so
+  /// that argument can never be returned — merging its declared type would
+  /// reject `COALESCE(null_text(), 1)`, a text arm that can only yield the
+  /// integer, exactly as a `CASE` omits a skipped branch's result type. An
+  /// undecidable argument (`nil`) may be selected, so its type is merged and
+  /// the walk continues.
+  private func coalesce(_ arguments: Array<Expression>, _ routines: Routines)
+      throws(SQLError) -> ValueType {
+    var type: ValueType?
+    for argument in arguments {
+      let next = try validate(argument, routines)
+      if case .some(.null) = constant(argument, routines) {
+        // A constant NULL is validated (for its errors) but skipped: it can
+        // never be returned, so its type must not shape the column.
+        continue
+      }
+      guard !selects(argument, routines) else {
+        // A definite selection: merge its type and stop, as every later
+        // argument is unreachable and unvalidated.
+        return try merged(type, next)
+      }
+      type = try merged(type, next)
+    }
+    return type ?? .integer
   }
 
   /// The target `type` of a `CAST`, VALIDATING `operand` for real errors
@@ -895,6 +1020,26 @@ internal struct Scope {
       // binary fold does.
       guard let value = constant(operand, routines) else { return nil }
       return try? value.cast(to: type)
+    case let .coalesce(arguments):
+      // Fold as the run evaluates it — the first argument that folds to a
+      // non-NULL value (COERCED to the unified type, as the executor's
+      // `Term.coalesce` coerces the selected value), else NULL when every
+      // argument folds NULL. An argument the fold cannot decide (`nil`) BEFORE
+      // a decisive non-NULL one means the taken value is per row, so the whole
+      // `COALESCE` is `nil`. Coercing an `.integer` selected from a COALESCE
+      // that unifies to `.double` folds to `.double`, matching the advertised
+      // column type — so a `.double`-typed routine over `COALESCE(1, 2.5)`
+      // folds against the SAME value the run supplies. The unified type is the
+      // one `derive`/`unified` already reduces over the selectable arguments;
+      // an irreconcilable pair (which `derive` would fault on) leaves the value
+      // uncoerced (`try?` → `nil`), a no-op the executor never reaches.
+      let type = try? unified(arguments, routines)
+      for argument in arguments {
+        guard let value = constant(argument, routines) else { return nil }
+        if case .null = value { continue }
+        return type.map { value.coerced(to: $0) } ?? value
+      }
+      return .null
     case .column, .aggregate:
       return nil
     }
@@ -1073,6 +1218,8 @@ internal struct Scope {
       if let otherwise { try aggregates(in: otherwise, routines) }
     case let .cast(operand, _):
       try aggregates(in: operand, routines)
+    case let .coalesce(arguments):
+      for argument in arguments { try aggregates(in: argument, routines) }
     }
   }
 
@@ -1171,6 +1318,18 @@ internal struct Scope {
       // (the common empty-group operand) casts to NULL, an unconvertible value
       // faults as the run would.
       return try empty(operand, routines).cast(to: type)
+    case let .coalesce(arguments):
+      // Evaluate the empty group as a run does — the first argument that folds
+      // to a non-NULL value (coerced to the unified type, as the executor
+      // coerces the selected value), else NULL. A NULL argument propagates
+      // without faulting; a later one is not reached once a non-NULL is taken.
+      let type = try unified(arguments, routines)
+      for argument in arguments {
+        let value = try empty(argument, routines)
+        if case .null = value { continue }
+        return value.coerced(to: type)
+      }
+      return .null
     case .column:
       return .null
     }
@@ -1377,6 +1536,17 @@ internal struct Scope {
       // Lower the operand across the join chain and attach the target type; the
       // executor converts the evaluated value to it (`Value.cast(to:)`).
       return try .cast(term(operand, routines), type)
+    case let .coalesce(arguments):
+      // Lower each argument to a combined-ordinal `Term` and hold them in a
+      // first-class `Term.coalesce` so each is evaluated ONCE; `type` is the
+      // unified argument type the selected value coerces to.
+      var elements = Array<Term>()
+      elements.reserveCapacity(arguments.count)
+      for argument in arguments {
+        try elements.append(term(argument, routines))
+      }
+      let type = try derive(expression, routines)
+      return .coalesce(elements, type: type)
     case .aggregate:
       // An aggregate has no per-row meaning — it folds over a group — so it may
       // not appear in a `WHERE`, a join `ON`, or a non-aggregate projection.
@@ -1585,6 +1755,17 @@ internal struct Grouping {
       // Lower the operand against the grouped slot space and attach the target
       // type; the executor converts the evaluated value to it.
       return try .cast(term(operand, routines), type)
+    case let .coalesce(arguments):
+      // Lower each argument to a grouped-space `Term` and hold them in a
+      // first-class `Term.coalesce` so each is evaluated ONCE; `type` is the
+      // unified argument type (over the grouped scope) the value coerces to.
+      var elements = Array<Term>()
+      elements.reserveCapacity(arguments.count)
+      for argument in arguments {
+        try elements.append(term(argument, routines))
+      }
+      let type = try scope.derive(expression, routines)
+      return .coalesce(elements, type: type)
     case .aggregate:
       // An aggregate reaches here only when it was not collected — an internal
       // inconsistency, since the query gathers every projection/HAVING aggregate.

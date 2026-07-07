@@ -41,11 +41,12 @@
 /// expression     := additive
 /// additive       := multiplicative (('+' | '-') multiplicative)*
 /// multiplicative := factor (('*' | '/') factor)*
-/// factor         := '(' expression ')' | case | cast
+/// factor         := '(' expression ')' | case | cast | coalesce
 ///                 | literal | aggregate | call | column
 /// case           := CASE [expression] (WHEN (predicate | expression) THEN
 ///                     expression)+ [ELSE expression] END
 /// cast           := CAST '(' expression AS type ')'
+/// coalesce       := COALESCE '(' expression (',' expression)+ ')'
 /// literal        := string | integer | decimal | TRUE | FALSE | blob
 /// blob           := ('x' | 'X') "'" (hex hex)* "'"  // whole bytes
 /// aggregate      := COUNT '(' '*' ')'
@@ -596,6 +597,15 @@ internal struct Parser: ~Escapable {
       return try cast()
     }
 
+    // `COALESCE` is an ISO-defined expansion of a searched `CASE`, recognised
+    // case-insensitively only when written bare (a delimited `"COALESCE"` is a
+    // scalar-call name). Desugar into the first-class `Expression.coalesce`
+    // here — the `(` is consumed — so the conditional's type unification,
+    // coercion, and reachability apply unchanged.
+    if !ident.quoted, ident.text.uppercased() == "COALESCE" {
+      return try coalesce()
+    }
+
     // An aggregate is one of the fixed set of names (recognised
     // case-insensitively, only when written bare — a delimited `"COUNT"` is a
     // scalar name), distinct from a scalar call: it accumulates over a group
@@ -697,6 +707,29 @@ internal struct Parser: ~Escapable {
     let type = try type()
     try expect(.rparen)
     return .cast(operand, type)
+  }
+
+  /// Parses the argument tail of `COALESCE(v1, v2, …)` — the `(` is already
+  /// consumed — into the first-class `Expression.coalesce`.
+  ///
+  /// ISO 9075 defines `COALESCE(v1, v2, …)` as `CASE WHEN v1 IS NOT NULL THEN
+  /// v1 WHEN v2 IS NOT NULL THEN v2 … ELSE NULL END`, but that expansion
+  /// re-references each `vi` in both its guard and its `THEN`, evaluating a
+  /// stateful argument twice — so this builds the first-class node the engine
+  /// evaluates each argument ONCE for, inheriting the same type unification and
+  /// coercion the CASE would. At least two arguments are required — `COALESCE`
+  /// of one value is the value itself and carries no meaning — else
+  /// `SQLError.argument`.
+  private mutating func coalesce() throws(SQLError) -> Expression {
+    var arguments = try [expression()]
+    while try match(.comma) {
+      try arguments.append(expression())
+    }
+    try expect(.rparen)
+    guard arguments.count >= 2 else {
+      throw .argument("COALESCE requires at least two arguments")
+    }
+    return .coalesce(arguments)
   }
 
   // MARK: - Predicate

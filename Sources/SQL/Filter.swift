@@ -105,6 +105,15 @@ internal indirect enum Term: Sendable {
   /// rather than yielding a wrong one. `type` is also the term's static type —
   /// the type the schema advertises for the column.
   case cast(Term, ValueType)
+  /// `COALESCE(v1, v2, …)` — the lowered form of the AST's
+  /// `Expression.coalesce`. Each element term is evaluated IN ORDER exactly
+  /// ONCE, and the first whose value is non-NULL is the result, else NULL. A
+  /// desugar to a `CASE WHEN vi IS NOT NULL THEN vi …` re-evaluated each `vi`,
+  /// so a stateful element yielded a different value to its guard and its
+  /// result; holding the element ONCE (as `membership` holds its operand) fixes
+  /// that. `type` is the unification of the element types, to which the
+  /// selected value is COERCED — the type the schema advertises.
+  case coalesce(Array<Term>, type: ValueType)
 }
 
 extension Term {
@@ -134,6 +143,10 @@ extension Term {
       otherwise?.references(into: &slots)
     case let .cast(operand, _):
       operand.references(into: &slots)
+    case let .coalesce(elements, _):
+      for element in elements {
+        element.references(into: &slots)
+      }
     }
   }
 }
@@ -159,17 +172,20 @@ extension Term {
             }, else: otherwise?.remapped(through: slot), type: type)
     case let .cast(operand, type):
       .cast(operand.remapped(through: slot), type)
+    case let .coalesce(elements, type):
+      .coalesce(elements.map { $0.remapped(through: slot) }, type: type)
     }
   }
 
   /// Whether evaluating this term cannot throw — it is a bare slot read or a
   /// constant. A `binary` arithmetic (`/` raises on a zero divisor), an `apply`
-  /// (a scalar function may raise), or a `cast` (an unconvertible value raises)
-  /// is NOT known safe, whatever its operands.
+  /// (a scalar function may raise), a `cast` (an unconvertible value raises),
+  /// or a `coalesce` (an element may raise) is NOT known safe, whatever its
+  /// operands.
   internal var safe: Bool {
     switch self {
     case .slot, .constant: true
-    case .apply, .binary, .case, .cast: false
+    case .apply, .binary, .case, .cast, .coalesce: false
     }
   }
 
@@ -455,7 +471,31 @@ extension Row where Self: ~Escapable {
       // NULL, an unconvertible value faults (`Value.cast(to:)`), never yielding
       // a wrong value.
       try evaluate(operand, routines, bindings).cast(to: type)
+    case let .coalesce(elements, type):
+      try coalesce(elements, type, routines, bindings)
     }
+  }
+
+  /// Evaluates a lowered `COALESCE(v1, v2, …)` against this row — the
+  /// `elements` visited IN ORDER exactly ONCE, returning the first whose value
+  /// is non-NULL (coerced to the unified `type` the schema advertises), else
+  /// NULL.
+  ///
+  /// Each element is evaluated ONCE: a desugar to `CASE WHEN vi IS NOT NULL
+  /// THEN vi …` evaluated each `vi` twice — its guard and its result — so a
+  /// stateful element tested one value for NULL and returned another.
+  /// `Value.coerced` widens the selected value to `type` (a `.integer` element
+  /// of a `.double` COALESCE), exactly as a `CASE` coerces its taken branch;
+  /// NULL passes unchanged.
+  private borrowing func coalesce(_ elements: Array<Term>, _ type: ValueType,
+                                  _ routines: Routines, _ bindings: Bindings)
+      throws(SQLError) -> Value {
+    for element in elements {
+      let value = try evaluate(element, routines, bindings)
+      if case .null = value { continue }
+      return value.coerced(to: type)
+    }
+    return .null
   }
 
   /// Evaluates a lowered `CASE` — its `branches` and optional `otherwise`

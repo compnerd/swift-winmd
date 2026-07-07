@@ -68,6 +68,11 @@ private func lower(_ predicate: Predicate,
     // `:parameter` form is defined, so both sides lower straight through
     // `term`.
     try .distinct(term(lhs), term(rhs), negated: negated)
+  case let .truth(inner, value, negated):
+    // `p IS [NOT] <truth value>` lowers to a first-class `Filter.truth` over
+    // the lowered inner boolean filter; the three-valued-to-definite mapping
+    // lives in the runtime (`tested`), so lowering just lowers the operand.
+    try .truth(lower(inner, term: term), value, negated: negated)
   case let .and(lhs, rhs):
     try .and(lower(lhs, term: term), lower(rhs, term: term))
   case let .or(lhs, rhs):
@@ -1032,6 +1037,11 @@ internal struct Scope {
       // accepts.
       _ = try validate(lhs, routines)
       _ = try validate(rhs, routines)
+    case let .truth(inner, _, _):
+      // `p IS [NOT] <truth value>` validates its inner boolean predicate for
+      // real errors; the truth mapping cannot itself fault, so it adds no
+      // further check.
+      try check(inner, routines)
     case let .and(lhs, rhs):
       try check(lhs, routines)
       if constant(lhs, routines) != false { try check(rhs, routines) }
@@ -1318,8 +1328,89 @@ internal struct Scope {
       }
       let differ = distinct(lhs, rhs)
       return negated ? !differ : differ
+    case let .truth(inner, value, negated):
+      // Fold `p IS [NOT] <truth value>` whenever the inner boolean is ROW-
+      // INDEPENDENT. `constant` gives its definite truth; and a `nil` from it
+      // over a `settled` inner (every operand a constant) is a definite UNKNOWN
+      // — NOT a per-row deferral — which `tested` maps to a DEFINITE result
+      // (`p IS UNKNOWN` TRUE, `p IS TRUE` FALSE), so a constant-UNKNOWN test
+      // short-circuits/type-checks as the run does rather than deferring and
+      // validating an unreachable conjunct.
+      let folded = constant(inner, routines)
+      if folded != nil || settled(inner, routines) {
+        return tested(folded, value, negated)
+      }
+      // An `IS [NOT] UNKNOWN` test folds even over a ROW-DEPENDENT inner when
+      // the inner is DEFINITE (two-valued — `IS NULL`, `IS DISTINCT FROM`,
+      // another truth test, and their `AND`/`OR`/`NOT`, never take UNKNOWN):
+      // such an inner is never the third value the test checks for, so
+      // `p IS UNKNOWN` is definitely FALSE and `p IS NOT UNKNOWN` definitely
+      // TRUE regardless of the rows — `(Flag IS NULL) IS UNKNOWN` folds FALSE.
+      // A `TRUE`/`FALSE` test still turns on the inner's per-row value, so it
+      // stays per row.
+      if value == .unknown, definite(inner) { return negated }
+      return nil
     case .bound:
       return nil
+    }
+  }
+
+  /// Whether every operand `predicate` reads folds to a ROW-INDEPENDENT
+  /// constant — so its three-valued truth is fully determined at compile time.
+  /// When it is and `constant(_ predicate:)` is `nil`, that `nil` is a definite
+  /// UNKNOWN (a NULL propagated through constant operands), NOT a per-row
+  /// deferral: the distinction `constant`'s `Bool?` cannot carry, which the
+  /// truth test needs to fold `p IS UNKNOWN`/`p IS TRUE` over a
+  /// constant-UNKNOWN `p`. A row or non-deterministic operand is NOT constant
+  /// (`constant(_ expression:)` is `nil`), so it is not settled; a `:parameter`
+  /// (`.bound`) is per-run, never settled.
+  private func settled(_ predicate: Predicate, _ routines: Routines) -> Bool {
+    switch predicate {
+    case let .comparison(left, _, right):
+      constant(left, routines) != nil && constant(right, routines) != nil
+    case let .null(operand, _):
+      constant(operand, routines) != nil
+    case let .membership(operand, values, _):
+      constant(operand, routines) != nil
+          && values.allSatisfy { constant($0, routines) != nil }
+    case let .like(operand, pattern, escape, _):
+      constant(operand, routines) != nil
+          && constant(pattern, routines) != nil
+          && (escape.map { constant($0, routines) != nil } ?? true)
+    case let .between(test, lower, upper, _):
+      constant(test, routines) != nil && constant(lower, routines) != nil
+          && constant(upper, routines) != nil
+    case let .distinct(lhs, rhs, _):
+      constant(lhs, routines) != nil && constant(rhs, routines) != nil
+    case let .truth(inner, _, _):
+      settled(inner, routines)
+    case let .and(lhs, rhs), let .or(lhs, rhs):
+      settled(lhs, routines) && settled(rhs, routines)
+    case let .not(operand):
+      settled(operand, routines)
+    case .bound:
+      false
+    }
+  }
+
+  /// Whether `predicate` is DEFINITE — two-valued, never evaluating to UNKNOWN,
+  /// even when it reads row data. `IS [NOT] NULL`, `IS [NOT] DISTINCT FROM`,
+  /// and a boolean test all collapse SQL's third value to a definite result by
+  /// construction, and `AND`/`OR`/`NOT` of definite predicates stay definite. A
+  /// comparison, membership, `LIKE`, `BETWEEN`, or bound parameter can be
+  /// UNKNOWN (a NULL operand), so none is definite. This lets an `IS [NOT]
+  /// UNKNOWN` test fold — the third value it checks for can never occur — over
+  /// a row-dependent inner `settled` cannot reach.
+  private func definite(_ predicate: Predicate) -> Bool {
+    switch predicate {
+    case .null, .distinct, .truth:
+      true
+    case let .and(lhs, rhs), let .or(lhs, rhs):
+      definite(lhs) && definite(rhs)
+    case let .not(operand):
+      definite(operand)
+    case .comparison, .membership, .like, .between, .bound:
+      false
     }
   }
 
@@ -1447,6 +1538,8 @@ internal struct Scope {
     case let .distinct(lhs, rhs, _):
       try aggregates(in: lhs, routines)
       try aggregates(in: rhs, routines)
+    case let .truth(inner, _, _):
+      try aggregates(in: inner, routines)
     case let .and(lhs, rhs), let .or(lhs, rhs):
       try aggregates(in: lhs, routines)
       try aggregates(in: rhs, routines)
@@ -1639,6 +1732,13 @@ internal struct Scope {
       // the truth is definite (never UNKNOWN, unlike a `=` over a NULL).
       let differ = distinct(try empty(lhs, routines), try empty(rhs, routines))
       return negated ? !differ : differ
+    case let .truth(inner, value, negated):
+      // Fold `p IS [NOT] <truth value>` over the empty group as `Filter.truth`
+      // evaluates it: `empty` yields the inner's genuine three-valued result
+      // (over zero rows every side is constant, so a `nil` here is a real
+      // UNKNOWN, not a per-row deferral), which `tested` maps to a DEFINITE
+      // result — never itself UNKNOWN.
+      return tested(try empty(inner, routines), value, negated)
     case let .and(lhs, rhs):
       // A `false` left proves the `AND` false without folding the right arm,
       // which a run's short-circuit never evaluates and so must not fault.
@@ -2136,6 +2236,8 @@ extension Filter {
     case let .distinct(lhs, rhs, _):
       lhs.references(into: &ordinals)
       rhs.references(into: &ordinals)
+    case let .truth(inner, _, _):
+      inner.references(into: &ordinals)
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.references(into: &ordinals)
       rhs.references(into: &ordinals)

@@ -628,6 +628,19 @@ public indirect enum Predicate: Hashable, Sendable {
   /// DISTINCT — the two differ — matching the engine's cross-kind FALSE
   /// equality. Unlike `=`, a NULL operand never makes the row UNKNOWN.
   case distinct(Expression, Expression, negated: Bool)
+  /// `p IS [NOT] <truth value>` — the ISO `<boolean test>`, whether the inner
+  /// boolean `Predicate` `p`'s THREE-VALUED result equals the `value`
+  /// (`TRUE`/`FALSE`/`UNKNOWN`), or does not when `negated`. Unlike the other
+  /// predicates the result is DEFINITE two-valued — never itself UNKNOWN — so
+  /// `p IS TRUE` is FALSE (not UNKNOWN) for an UNKNOWN `p`, and `p IS UNKNOWN`
+  /// TESTS for that UNKNOWN. The operand is a `Predicate` rather than an
+  /// `Expression`: a boolean is a predicate to this engine — a bare boolean
+  /// operand `x` bridges as the comparison `x = TRUE`, whose three-valued
+  /// truth IS `x`'s boolean value (`NULL` yielding UNKNOWN) — so a boolean
+  /// column (`flag IS TRUE`) and a parenthesised comparison (`(a > b) IS TRUE`)
+  /// share the one inner-predicate form and reuse the whole comparison
+  /// machinery to evaluate it.
+  case truth(Predicate, value: Truth, negated: Bool)
   /// `lhs AND rhs`.
   case and(Predicate, Predicate)
   /// `lhs OR rhs`.
@@ -652,6 +665,20 @@ public indirect enum Predicate: Hashable, Sendable {
     /// A `:parameter` placeholder, resolved at run time from the bindings.
     case parameter(String)
   }
+}
+
+/// A truth value a `<boolean test>` (`Predicate.truth`) tests against — the
+/// three SQL truth values, `UNKNOWN` being the spelling the test uses for a
+/// NULL boolean (SQL spells UNKNOWN as `NULL` in a value position, but names it
+/// `UNKNOWN` in this test). `p IS TRUE`/`FALSE`/`UNKNOWN` yields a DEFINITE
+/// two-valued result, never itself UNKNOWN.
+public enum Truth: Hashable, Sendable {
+  /// The truth value `TRUE`.
+  case `true`
+  /// The truth value `FALSE`.
+  case `false`
+  /// The truth value `UNKNOWN` — a NULL boolean.
+  case unknown
 }
 
 /// A comparison operator.

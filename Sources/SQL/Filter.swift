@@ -114,6 +114,12 @@ internal indirect enum Term: Sendable {
   /// that. `type` is the unification of the element types, to which the
   /// selected value is COERCED — the type the schema advertises.
   case coalesce(Array<Term>, type: ValueType)
+  /// `NULLIF(a, b)` — the lowered form of the AST's `Expression.nullif`. Both
+  /// operand terms are evaluated exactly ONCE (`va`, `vb`); the result is NULL
+  /// when `va = vb` is TRUE, else the SAME `va` that was compared. A desugar to
+  /// `CASE WHEN a = b THEN NULL ELSE a END` evaluated `a` twice — comparing one
+  /// value and returning another — which holding `a` ONCE fixes.
+  case nullif(Term, Term)
 }
 
 extension Term {
@@ -147,6 +153,9 @@ extension Term {
       for element in elements {
         element.references(into: &slots)
       }
+    case let .nullif(lhs, rhs):
+      lhs.references(into: &slots)
+      rhs.references(into: &slots)
     }
   }
 }
@@ -174,18 +183,20 @@ extension Term {
       .cast(operand.remapped(through: slot), type)
     case let .coalesce(elements, type):
       .coalesce(elements.map { $0.remapped(through: slot) }, type: type)
+    case let .nullif(lhs, rhs):
+      .nullif(lhs.remapped(through: slot), rhs.remapped(through: slot))
     }
   }
 
   /// Whether evaluating this term cannot throw — it is a bare slot read or a
   /// constant. A `binary` arithmetic (`/` raises on a zero divisor), an `apply`
   /// (a scalar function may raise), a `cast` (an unconvertible value raises),
-  /// or a `coalesce` (an element may raise) is NOT known safe, whatever its
-  /// operands.
+  /// a `coalesce` (an element may raise), or a `nullif` (an operand may raise)
+  /// is NOT known safe, whatever its operands.
   internal var safe: Bool {
     switch self {
     case .slot, .constant: true
-    case .apply, .binary, .case, .cast, .coalesce: false
+    case .apply, .binary, .case, .cast, .coalesce, .nullif: false
     }
   }
 
@@ -473,6 +484,8 @@ extension Row where Self: ~Escapable {
       try evaluate(operand, routines, bindings).cast(to: type)
     case let .coalesce(elements, type):
       try coalesce(elements, type, routines, bindings)
+    case let .nullif(lhs, rhs):
+      try nullif(lhs, rhs, routines, bindings)
     }
   }
 
@@ -496,6 +509,23 @@ extension Row where Self: ~Escapable {
       return value.coerced(to: type)
     }
     return .null
+  }
+
+  /// Evaluates a lowered `NULLIF(a, b)` against this row — `a` and `b` each
+  /// evaluated ONCE — returning NULL when `a = b` is TRUE, else the SAME `va`
+  /// that was compared.
+  ///
+  /// A desugar to `CASE WHEN a = b THEN NULL ELSE a END` evaluated `a` twice —
+  /// once in the equality and once as the `ELSE` — so a stateful `a` compared
+  /// one value and returned another; holding `va` fixes that. `matches` is
+  /// three-valued: only a definite TRUE equality nulls out, so an UNKNOWN (a
+  /// NULL operand) yields `va`.
+  private borrowing func nullif(_ lhs: Term, _ rhs: Term,
+                                _ routines: Routines, _ bindings: Bindings)
+      throws(SQLError) -> Value {
+    let va = try evaluate(lhs, routines, bindings)
+    let vb = try evaluate(rhs, routines, bindings)
+    return matches(va, .equal, vb) == true ? .null : va
   }
 
   /// Evaluates a lowered `CASE` — its `branches` and optional `otherwise`

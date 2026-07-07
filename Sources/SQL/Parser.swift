@@ -41,12 +41,13 @@
 /// expression     := additive
 /// additive       := multiplicative (('+' | '-') multiplicative)*
 /// multiplicative := factor (('*' | '/') factor)*
-/// factor         := '(' expression ')' | case | cast | coalesce
+/// factor         := '(' expression ')' | case | cast | coalesce | nullif
 ///                 | literal | aggregate | call | column
 /// case           := CASE [expression] (WHEN (predicate | expression) THEN
 ///                     expression)+ [ELSE expression] END
 /// cast           := CAST '(' expression AS type ')'
 /// coalesce       := COALESCE '(' expression (',' expression)+ ')'
+/// nullif         := NULLIF '(' expression ',' expression ')'
 /// literal        := string | integer | decimal | TRUE | FALSE | blob
 /// blob           := ('x' | 'X') "'" (hex hex)* "'"  // whole bytes
 /// aggregate      := COUNT '(' '*' ')'
@@ -606,6 +607,15 @@ internal struct Parser: ~Escapable {
       return try coalesce()
     }
 
+    // `NULLIF` is an ISO-defined expansion of a searched `CASE`, recognised
+    // case-insensitively only when written bare (a delimited `"NULLIF"` is a
+    // scalar-call name). Desugar into the first-class `Expression.nullif` here
+    // — the `(` is consumed — so the conditional's type derivation and
+    // coercion apply unchanged.
+    if !ident.quoted, ident.text.uppercased() == "NULLIF" {
+      return try nullif()
+    }
+
     // An aggregate is one of the fixed set of names (recognised
     // case-insensitively, only when written bare — a delimited `"COUNT"` is a
     // scalar name), distinct from a scalar call: it accumulates over a group
@@ -730,6 +740,22 @@ internal struct Parser: ~Escapable {
       throw .argument("COALESCE requires at least two arguments")
     }
     return .coalesce(arguments)
+  }
+
+  /// Parses the argument tail of `NULLIF(v1, v2)` — the `(` is already consumed
+  /// — into the first-class `Expression.nullif`.
+  ///
+  /// ISO 9075 defines `NULLIF(v1, v2)` as `CASE WHEN v1 = v2 THEN NULL ELSE v1
+  /// END`, but that expansion embeds `v1` in both the equality and the `ELSE`,
+  /// evaluating a stateful `v1` twice — so this builds the first-class node the
+  /// engine evaluates `v1` ONCE for. It takes exactly two arguments (else
+  /// `SQLError.argument`).
+  private mutating func nullif() throws(SQLError) -> Expression {
+    let left = try expression()
+    try expect(.comma)
+    let right = try expression()
+    try expect(.rparen)
+    return .nullif(left, right)
   }
 
   // MARK: - Predicate

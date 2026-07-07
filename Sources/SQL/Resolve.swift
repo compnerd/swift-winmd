@@ -249,6 +249,11 @@ extension Schema {
       let scope = Scope([(relation, self)])
       let type = try scope.derive(expression, routines)
       return .coalesce(elements, type: type)
+    case let .nullif(lhs, rhs):
+      // Lower both operands to `Term`s over this relation and hold them in a
+      // first-class `Term.nullif` so each is evaluated ONCE.
+      return try .nullif(term(lhs, in: relation, routines),
+                         term(rhs, in: relation, routines))
     case .aggregate:
       // An aggregate has no per-row meaning — it folds over a group — so it may
       // not appear in a `WHERE`, a join `ON`, or a non-aggregate projection.
@@ -421,7 +426,28 @@ internal struct Scope {
       // `ValueType.unified` reduction a `CASE`'s results take), the type the
       // selected value coerces to.
       try unified(arguments, routines)
+    case let .nullif(lhs, rhs):
+      // NULLIF yields either `v1` or NULL, so the column takes `v1`'s type —
+      // but derive BOTH operands for resolution, returning the LHS type: an
+      // unresolved column faults `SQLError.column` (`NULLIF(1, Missing)`) on
+      // this derive-only surface too, mirroring the `||`/arithmetic derive
+      // branch rather than leaving the RHS unresolved.
+      try nullif(lhs, rhs, routines)
     }
+  }
+
+  /// The result type of `NULLIF(v1, v2)` under `derive` — `v1`'s type, deriving
+  /// BOTH operands for resolution first: NULLIF yields either `v1` or NULL, so
+  /// its own RHS type does not shape the column, but an unresolved column still
+  /// faults `SQLError.column`, mirroring the `||`/arithmetic derive branch. So
+  /// `NULLIF(1, Missing)` faults `.column` on the derive-only paths
+  /// (`columns(of:validate:false)`, an unreachable projection) where `validate`
+  /// never runs.
+  private func nullif(_ lhs: Expression, _ rhs: Expression,
+                      _ routines: Routines) throws(SQLError) -> ValueType {
+    let type = try derive(lhs, routines)
+    _ = try derive(rhs, routines)
+    return type
   }
 
   /// The target `type` of a `CAST`, deriving `operand` for its ordinal
@@ -575,6 +601,8 @@ internal struct Scope {
       try validate(cast: operand, to: type, routines)
     case let .coalesce(arguments):
       try coalesce(arguments, routines)
+    case let .nullif(lhs, rhs):
+      try nullif(validate: lhs, rhs, routines)
     }
   }
 
@@ -617,6 +645,19 @@ internal struct Scope {
       type = try merged(type, next)
     }
     return type ?? .integer
+  }
+
+  /// The result type of `NULLIF(v1, v2)`, validating both operands as a run
+  /// would fault. The result is either `v1` or NULL, so the column takes `v1`'s
+  /// type; `v2` need not unify with it (a run compares them under `matches`,
+  /// which yields FALSE across kinds without faulting), so it is validated for
+  /// its own errors (an unknown column, a bad call) but does not shape the
+  /// type.
+  private func nullif(validate lhs: Expression, _ rhs: Expression,
+                      _ routines: Routines) throws(SQLError) -> ValueType {
+    let type = try validate(lhs, routines)
+    _ = try validate(rhs, routines)
+    return type
   }
 
   /// The target `type` of a `CAST`, VALIDATING `operand` for real errors
@@ -1040,6 +1081,15 @@ internal struct Scope {
         return type.map { value.coerced(to: $0) } ?? value
       }
       return .null
+    case let .nullif(lhs, rhs):
+      // Fold as the run evaluates it — NULL when `v1 = v2` folds definitely
+      // TRUE, else `v1`; a side the fold cannot decide leaves it per row
+      // (`nil`).
+      guard let va = constant(lhs, routines),
+          let vb = constant(rhs, routines) else {
+        return nil
+      }
+      return matches(va, .equal, vb) == true ? .null : va
     case .column, .aggregate:
       return nil
     }
@@ -1220,6 +1270,9 @@ internal struct Scope {
       try aggregates(in: operand, routines)
     case let .coalesce(arguments):
       for argument in arguments { try aggregates(in: argument, routines) }
+    case let .nullif(lhs, rhs):
+      try aggregates(in: lhs, routines)
+      try aggregates(in: rhs, routines)
     }
   }
 
@@ -1330,6 +1383,12 @@ internal struct Scope {
         return value.coerced(to: type)
       }
       return .null
+    case let .nullif(lhs, rhs):
+      // Evaluate the empty group as a run does — NULL when `v1 = v2` is TRUE,
+      // else the folded `v1`.
+      let va = try empty(lhs, routines)
+      let vb = try empty(rhs, routines)
+      return matches(va, .equal, vb) == true ? .null : va
     case .column:
       return .null
     }
@@ -1547,6 +1606,10 @@ internal struct Scope {
       }
       let type = try derive(expression, routines)
       return .coalesce(elements, type: type)
+    case let .nullif(lhs, rhs):
+      // Lower both operands to combined-ordinal `Term`s and hold them in a
+      // first-class `Term.nullif` so each is evaluated ONCE.
+      return try .nullif(term(lhs, routines), term(rhs, routines))
     case .aggregate:
       // An aggregate has no per-row meaning — it folds over a group — so it may
       // not appear in a `WHERE`, a join `ON`, or a non-aggregate projection.
@@ -1766,6 +1829,10 @@ internal struct Grouping {
       }
       let type = try scope.derive(expression, routines)
       return .coalesce(elements, type: type)
+    case let .nullif(lhs, rhs):
+      // Lower both operands to grouped-space `Term`s and hold them in a
+      // first-class `Term.nullif` so each is evaluated ONCE.
+      return try .nullif(term(lhs, routines), term(rhs, routines))
     case .aggregate:
       // An aggregate reaches here only when it was not collected — an internal
       // inconsistency, since the query gathers every projection/HAVING aggregate.

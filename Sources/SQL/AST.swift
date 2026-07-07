@@ -488,6 +488,13 @@ public indirect enum Expression: Hashable, Sendable {
   /// selected value is coerced. At least two arguments (the parser enforces
   /// it).
   case coalesce(Array<Expression>)
+  /// `NULLIF(v1, v2)` — NULL when `v1` equals `v2`, else `v1`. The ISO
+  /// definition is `CASE WHEN v1 = v2 THEN NULL ELSE v1 END`, but it is a
+  /// FIRST-CLASS node rather than that expansion so `v1` is evaluated EXACTLY
+  /// ONCE: the desugar embedded `v1` in both the equality and the `ELSE`,
+  /// evaluating a stateful `v1` twice — comparing one call's value to `v2` and
+  /// returning a different one. The result type is `v1`'s.
+  case nullif(Expression, Expression)
 }
 
 /// One `WHEN predicate THEN result` branch of a `CASE` expression — the guard

@@ -88,6 +88,8 @@ extension Token {
     case plus
     case minus
     case slash
+    /// The `||` string-concatenation operator.
+    case concat
     case comma
     case lparen
     case rparen
@@ -164,6 +166,7 @@ extension Token.Kind {
     case .plus: "+"
     case .minus: "-"
     case .slash: "/"
+    case .concat: "||"
     case .comma: ","
     case .lparen: "("
     case .rparen: ")"

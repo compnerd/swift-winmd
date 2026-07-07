@@ -400,6 +400,11 @@ internal struct Scope {
         case let .expression(argument): try derive(argument, routines)
         }
       }
+    case let .binary(.concatenate, lhs, rhs):
+      // `||` yields text; the operands' own types do not shape it, but derive
+      // both for resolution — an unresolved column faults `SQLError.column`
+      // (`Missing || 'x'`) — exactly as the arithmetic `.binary` branch does.
+      try concatenation(lhs, rhs, routines)
     case let .binary(_, lhs, rhs):
       try [derive(lhs, routines), derive(rhs, routines)].contains(.double)
           ? .double : .integer
@@ -448,6 +453,18 @@ internal struct Scope {
     let type = try derive(lhs, routines)
     _ = try derive(rhs, routines)
     return type
+  }
+
+  /// The `.text` type of `lhs || rhs`, deriving both operands for resolution
+  /// first: the result is always text and the operands' own types do not shape
+  /// it, but an unresolved column still faults `SQLError.column`, mirroring the
+  /// arithmetic `.binary` derive branch.
+  private func concatenation(_ lhs: Expression, _ rhs: Expression,
+                             _ routines: Routines)
+      throws(SQLError) -> ValueType {
+    _ = try derive(lhs, routines)
+    _ = try derive(rhs, routines)
+    return .text
   }
 
   /// The target `type` of a `CAST`, deriving `operand` for its ordinal
@@ -822,10 +839,12 @@ internal struct Scope {
     }
   }
 
-  /// The result type of `lhs op rhs` — a double when either operand is a double
-  /// (`Age + 1.5`), else an integer — validating both operands are numeric (a
-  /// text/boolean/blob operand has no arithmetic — `Arithmetic.apply` faults
-  /// `SQLError.operand`); a `/` by a literal zero is rejected up front
+  /// The result type of `lhs op rhs` — a double when either arithmetic operand
+  /// is a double (`Age + 1.5`), an integer for two integer operands, and text
+  /// for `||` — validating each operand's kind as a run would fault: an
+  /// arithmetic operator over a text/boolean/blob operand has no arithmetic and
+  /// `||` over a non-text operand has no concatenation (`Arithmetic.apply`
+  /// faults `SQLError.operand`); a `/` by a literal zero is rejected up front
   /// (`SQLError.divide`); and two literal operands are folded to reject a
   /// deterministic overflow (`SQLError.magnitude`). Typing thus faults as a run
   /// would rather than advertise a header no row can produce.
@@ -835,6 +854,20 @@ internal struct Scope {
       throws(SQLError) -> ValueType {
     let left = try validate(lhs, routines)
     let right = try validate(rhs, routines)
+    if case .concatenate = op {
+      // Both operands are validated above for their OWN errors. `||` yields
+      // text and needs two text operands — UNLESS one folds to a static NULL,
+      // in which case `Arithmetic.apply` returns NULL BEFORE it inspects EITHER
+      // kind, so the whole expression yields NULL and runs whatever the other
+      // operand's type (as the CAST path admits a folded NULL to any target):
+      // `(CASE WHEN 1 = 0 THEN 1 END) || 1` runs. A non-text, non-NULL pairing
+      // faults exactly as the run does.
+      guard left == .text && right == .text
+              || vanishing(lhs, routines) || vanishing(rhs, routines) else {
+        throw .operand("|| operands must be text")
+      }
+      return .text
+    }
     guard left.numeric, right.numeric else {
       throw .operand("operands must be numeric")
     }
@@ -849,6 +882,17 @@ internal struct Scope {
       _ = try op.apply(value(of: lhs), value(of: rhs))
     }
     return left == .double || right == .double ? .double : .integer
+  }
+
+  /// Whether `expression` folds to a static NULL — a row-independent constant
+  /// NULL. A `||` with a vanishing operand yields NULL before its
+  /// `Arithmetic.apply` inspects EITHER operand's kind, so the whole expression
+  /// is valid whatever the other operand's type, mirroring the CAST validation
+  /// path that admits a folded NULL to any target — so a no-match `CASE` typed
+  /// `.integer` that yields NULL lets `(CASE WHEN 1 = 0 THEN 1 END) || 1` run.
+  private func vanishing(_ expression: Expression, _ routines: Routines)
+      -> Bool {
+    if case .null? = constant(expression, routines) { true } else { false }
   }
 
   /// Whether `expression` is a literal zero — the statically-known divisor a

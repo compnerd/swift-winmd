@@ -109,6 +109,17 @@ internal struct Lexer: ~Escapable {
     case UInt8(ascii: "="):
       return punctuation(.equal)
 
+    // The `||` concatenation operator: two `|` bytes. A lone `|` begins no
+    // token in this dialect, so a single `|` faults where it sits.
+    case UInt8(ascii: "|"):
+      let start = location
+      advance()
+      guard peek() == UInt8(ascii: "|") else {
+        throw .character("|", at: start)
+      }
+      advance()
+      return Token(kind: .concat, location: start)
+
     case UInt8(ascii: "<"):
       let start = location
       advance()

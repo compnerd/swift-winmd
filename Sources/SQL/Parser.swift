@@ -36,7 +36,8 @@
 /// negation       := NOT negation | primary
 /// primary        := '(' predicate ')' | comparison
 /// comparison     := expression (op (expression | param) | IS [NOT] NULL
-///                 | [NOT] IN '(' expression (',' expression)* ')')
+///                 | [NOT] IN '(' expression (',' expression)* ')'
+///                 | [NOT] LIKE expression [ESCAPE expression])
 /// expression     := additive
 /// additive       := multiplicative (('+' | '-') multiplicative)*
 /// multiplicative := factor (('*' | '/') factor)*
@@ -766,8 +767,10 @@ internal struct Parser: ~Escapable {
   /// `IS NULL` (or `IS NOT NULL`) tail tests the left expression for `NULL`
   /// rather than comparing it — the way a nullable column is filtered. An `IN`
   /// (or `NOT IN`) tail tests the left expression for membership in a
-  /// parenthesised value list. A leading `NOT` here can only introduce `NOT IN`:
-  /// a prefix `NOT` predicate is consumed by `negation` before this point.
+  /// parenthesised value list. A `LIKE` (or `NOT LIKE`) tail tests the left
+  /// expression's text against a pattern, with an optional `ESCAPE` character.
+  /// A leading `NOT` here can only introduce `NOT IN` or `NOT LIKE`: a prefix
+  /// `NOT` predicate is consumed by `negation` before this point.
   private mutating func comparison() throws(SQLError) -> Predicate {
     let left = try expression()
     if try match(.is) {
@@ -778,7 +781,13 @@ internal struct Parser: ~Escapable {
     if try match(.in) {
       return try membership(left, negated: false)
     }
+    if try match(.like) {
+      return try like(left, negated: false)
+    }
     if try match(.not) {
+      if try match(.like) {
+        return try like(left, negated: true)
+      }
       try expect(.in)
       return try membership(left, negated: true)
     }
@@ -807,6 +816,37 @@ internal struct Parser: ~Escapable {
     }
     try expect(.rparen)
     return .membership(left, values, negated: negated)
+  }
+
+  /// Parses the pattern tail of `left [NOT] LIKE pattern [ESCAPE escape]` — the
+  /// `LIKE` is already consumed — into a `like` predicate over `left`.
+  ///
+  /// The pattern is an `Operand` — a scalar expression (a literal, a column, or
+  /// a call), so a pattern can be computed rather than only a literal, or a
+  /// run-time `:parameter` bound at eval (`Name LIKE :pattern`), the same
+  /// binding the comparison arm accepts as a right operand. An optional
+  /// `ESCAPE` names the escape as a further `Operand`, so it too can be bound
+  /// (`ESCAPE :e`).
+  private mutating func like(_ left: Expression, negated: Bool)
+      throws(SQLError) -> Predicate {
+    let pattern = try operand()
+    let escape: Predicate.Operand? = if try match(.escape) {
+      try operand()
+    } else {
+      nil
+    }
+    return .like(left, pattern: pattern, escape: escape, negated: negated)
+  }
+
+  /// Parses a `LIKE` pattern or escape operand: a `:parameter` placeholder
+  /// (bound at eval from the engine's bindings, as the comparison arm consumes
+  /// one after an operator) or an ordinary scalar expression.
+  private mutating func operand() throws(SQLError) -> Predicate.Operand {
+    if case let .parameter(name) = current?.kind {
+      _ = try advance(expecting: "a parameter")
+      return .parameter(name)
+    }
+    return try .expression(expression())
   }
 
   /// Parses a comparison operator.

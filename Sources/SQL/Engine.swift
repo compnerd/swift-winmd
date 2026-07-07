@@ -619,6 +619,37 @@ extension Expression {
   }
 }
 
+extension Predicate.Operand {
+  /// Whether this `LIKE` operand contains an aggregate — an expression's own,
+  /// never a `:parameter`.
+  internal var aggregated: Bool {
+    switch self {
+    case let .expression(expression): expression.aggregated
+    case .parameter: false
+    }
+  }
+
+  /// Whether this `LIKE` operand references a query binding — an expression's
+  /// own, or the operand's OWN `:parameter`, so a defined-function body that
+  /// names a `:parameter` in a `LIKE` pattern or escape is rejected at
+  /// registration (see `Expression.bound`).
+  internal var bound: Bool {
+    switch self {
+    case let .expression(expression): expression.bound
+    case .parameter: true
+    }
+  }
+
+  /// Collects the distinct aggregates within this `LIKE` operand into
+  /// `expressions` — an expression's own, none for a `:parameter`.
+  internal func collect(into expressions: inout Array<Expression>) {
+    switch self {
+    case let .expression(expression): expression.collect(into: &expressions)
+    case .parameter: break
+    }
+  }
+}
+
 extension Predicate {
   /// The flat list of top-level `AND`-conjuncts of this predicate in SOURCE
   /// ORDER (a non-`and` is a singleton). The parser leans `AND` left (`a AND b
@@ -643,6 +674,9 @@ extension Predicate {
       operand.aggregated
     case let .membership(operand, values, _):
       operand.aggregated || values.contains { $0.aggregated }
+    case let .like(operand, pattern, escape, _):
+      operand.aggregated || pattern.aggregated
+          || (escape?.aggregated ?? false)
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.aggregated || rhs.aggregated
     case let .not(operand):
@@ -664,6 +698,8 @@ extension Predicate {
       operand.bound
     case let .membership(operand, values, _):
       operand.bound || values.contains { $0.bound }
+    case let .like(operand, pattern, escape, _):
+      operand.bound || pattern.bound || (escape?.bound ?? false)
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.bound || rhs.bound
     case let .not(operand):
@@ -902,6 +938,10 @@ extension Predicate {
     case let .membership(operand, values, _):
       operand.collect(into: &expressions)
       for value in values { value.collect(into: &expressions) }
+    case let .like(operand, pattern, escape, _):
+      operand.collect(into: &expressions)
+      pattern.collect(into: &expressions)
+      escape?.collect(into: &expressions)
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.collect(into: &expressions)
       rhs.collect(into: &expressions)

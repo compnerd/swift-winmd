@@ -46,6 +46,11 @@ private func lower(_ predicate: Predicate,
     // UNKNOWN is UNKNOWN — not FALSE, and `NOT` maps that UNKNOWN to itself, so
     // `NOT IN` a list holding NULL is never TRUE.
     try membership(term(expression), values, negated: negated, term: term)
+  case let .like(operand, pattern, escape, negated):
+    // Lower each operand to a first-class `Filter.like`; the optional escape
+    // lowers only when present. The matcher and three-valued handling live in
+    // the runtime, so lowering just resolves the operand terms.
+    try like(operand, pattern, escape, negated: negated, term: term)
   case let .and(lhs, rhs):
     try .and(lower(lhs, term: term), lower(rhs, term: term))
   case let .or(lhs, rhs):
@@ -86,6 +91,38 @@ private func membership(_ left: Term, _ values: Array<Expression>,
     try elements.append(term(value))
   }
   return .membership(left, elements, negated: negated)
+}
+
+/// Lowers `operand [NOT] LIKE pattern [ESCAPE escape]` to a first-class
+/// `Filter.like`, the operand lowered through `term`, the pattern and optional
+/// escape through `operand(_:)` — an expression lowers to a term, a
+/// `:parameter` passes through as a bound name resolved at eval.
+///
+/// Lowering is a plain term resolution — the `%`/`_` matcher and the
+/// three-valued/cross-kind handling are the runtime's — so this mirrors the
+/// membership lowering, differing only in carrying the pattern and escape
+/// operands rather than a value list.
+private func like(_ operand: Expression, _ pattern: Predicate.Operand,
+                  _ escape: Predicate.Operand?, negated: Bool,
+                  term: (Expression) throws(SQLError) -> Term)
+    throws(SQLError) -> Filter {
+  let escape: Filter.Operand? =
+      if let escape { try lower(escape, term: term) } else { nil }
+  return try .like(term(operand), pattern: lower(pattern, term: term),
+                   escape: escape, negated: negated)
+}
+
+/// Lowers a `LIKE` pattern or escape `operand` to its filter form: an
+/// expression lowers to a `.term` through `term`; a `:parameter` passes through
+/// as a bound `.parameter` name resolved from the bindings at eval, the same
+/// mechanism a `Predicate.bound` comparison uses.
+private func lower(_ operand: Predicate.Operand,
+                   term: (Expression) throws(SQLError) -> Term)
+    throws(SQLError) -> Filter.Operand {
+  switch operand {
+  case let .expression(expression): try .term(term(expression))
+  case let .parameter(name): .parameter(name)
+  }
 }
 
 /// The resolved sort keys `order` lowers to, in major-to-minor order — each
@@ -714,6 +751,18 @@ internal struct Scope {
       }, equality: { value throws(SQLError) in
         matched(operand, value, routines)
       })
+    case let .like(operand, pattern, escape, _):
+      // Validate the operand, pattern, and optional escape for REAL errors
+      // (unknown column, bad arity, …); a non-text operand or pattern is NOT
+      // rejected — the run yields a definite FALSE via `Row.like` without
+      // faulting (the cross-kind rule), and the schema check must accept what
+      // the run accepts, as the `IN` cross-kind element does.
+      _ = try validate(operand, routines)
+      try validate(pattern, routines)
+      if let escape {
+        try validate(escape, routines)
+        try reject(escape, routines)
+      }
     case let .and(lhs, rhs):
       try check(lhs, routines)
       if constant(lhs, routines) != false { try check(rhs, routines) }
@@ -722,6 +771,41 @@ internal struct Scope {
       if constant(lhs, routines) != true { try check(rhs, routines) }
     case let .not(operand):
       try check(operand, routines)
+    }
+  }
+
+  /// Type-checks a `LIKE` pattern or escape `operand` for the side effect of
+  /// validation: an expression is validated (`validate`), a `:parameter` reads
+  /// nothing at compile time (its value arrives from the bindings at run time),
+  /// so it needs no check, as a `Predicate.bound` parameter needs none.
+  private func validate(_ operand: Predicate.Operand, _ routines: Routines)
+      throws(SQLError) {
+    if case let .expression(expression) = operand {
+      _ = try validate(expression, routines)
+    }
+  }
+
+  /// Rejects a STATICALLY-invalid `LIKE` `escape` at validation, as `Row.like`
+  /// would fault it on EVERY row: a ROW-INDEPENDENT escape expression that
+  /// folds (`constant`) to a value that is neither NULL (a valid UNKNOWN) nor a
+  /// single-character text (a non-text, or a wrong-length text) makes the query
+  /// un-runnable, so reject it here with the same message and condition the run
+  /// raises. A `:parameter`, a column, or any other non-constant escape is per
+  /// row and cannot be decided statically (`constant` is `nil`) — the run
+  /// validates it.
+  private func reject(_ escape: Predicate.Operand, _ routines: Routines)
+      throws(SQLError) {
+    guard case let .expression(expression) = escape,
+        let value = constant(expression, routines) else {
+      return
+    }
+    switch value {
+    case .null:
+      break
+    case let .text(text) where text.count == 1:
+      break
+    default:
+      throw .argument("LIKE ESCAPE must be a single character")
     }
   }
 
@@ -897,8 +981,68 @@ internal struct Scope {
         matched(operand, value, routines)
       }
       return negated ? truth.map { !$0 } : truth
+    case let .like(operand, pattern, escape, negated):
+      // Fold `x LIKE p` when the operand, pattern, and optional escape all fold
+      // to ROW-INDEPENDENT constants — the same `constant(_ expression:)` the
+      // run's terms evaluate through — running the SAME matcher `Row.like`
+      // does; any row-dependent operand leaves it per row (`nil`). `NOT LIKE`
+      // negates the folded truth (UNKNOWN maps to itself).
+      guard let truth = matched(operand, pattern, escape, routines) else {
+        return nil
+      }
+      return negated ? !truth : truth
     case .bound:
       return nil
+    }
+  }
+
+  /// The definite truth of `operand LIKE pattern [ESCAPE escape]` when the
+  /// operand, pattern, and optional escape all fold to ROW-INDEPENDENT
+  /// constants (via `constant(_ expression:)`), else `nil`. It folds each side
+  /// and runs the SAME `matches` the run's `Row.like` does — a NULL side is
+  /// UNKNOWN (`nil`), a non-text operand or pattern a definite non-match
+  /// (FALSE), a bad escape collapses to `nil` (undecided) rather than faulting
+  /// a compile-time reachability walk.
+  private func matched(_ operand: Expression, _ pattern: Predicate.Operand,
+                       _ escape: Predicate.Operand?, _ routines: Routines)
+      -> Bool? {
+    guard let operand = constant(operand, routines),
+        let pattern = constant(pattern, routines) else {
+      return nil
+    }
+    let character: Character?
+    switch escape {
+    case .none:
+      character = nil
+    case let .some(escape):
+      switch constant(escape, routines) {
+      case let .text(text) where text.count == 1:
+        character = text.first
+      // A NULL, absent, ill-formed, or `:parameter` escape is not a decidable
+      // fold — leave the LIKE per row (`nil`) rather than deciding a match.
+      default:
+        return nil
+      }
+    }
+    return switch (operand, pattern) {
+    case (.null, _), (_, .null):
+      nil
+    case let (.text(operand), .text(pattern)):
+      matches(operand, pattern, escape: character)
+    default:
+      false
+    }
+  }
+
+  /// The constant `Value` a `LIKE` pattern or escape `operand` folds to when it
+  /// is ROW-INDEPENDENT (`constant(_ expression:)`), else `nil`. A `:parameter`
+  /// is per run — its value arrives from the bindings — so it never folds
+  /// constant, exactly as a column does.
+  private func constant(_ operand: Predicate.Operand, _ routines: Routines)
+      -> Value? {
+    switch operand {
+    case let .expression(expression): constant(expression, routines)
+    case .parameter: nil
     }
   }
 
@@ -932,6 +1076,15 @@ internal struct Scope {
     }
   }
 
+  /// Validates the aggregate sub-expressions of a `LIKE` pattern or escape
+  /// `operand` — an expression's own, none in a `:parameter`.
+  func aggregates(in operand: Predicate.Operand, _ routines: Routines = [:])
+      throws(SQLError) {
+    if case let .expression(expression) = operand {
+      try aggregates(in: expression, routines)
+    }
+  }
+
   /// Validates the aggregate sub-expressions of `predicate` — a `HAVING`'s
   /// aggregates are collected and FOLDED by the group node before the `HAVING`
   /// filter runs, so they are reachable even in an arm the filter's
@@ -951,6 +1104,10 @@ internal struct Scope {
     case let .membership(operand, values, _):
       try aggregates(in: operand, routines)
       for value in values { try aggregates(in: value, routines) }
+    case let .like(operand, pattern, escape, _):
+      try aggregates(in: operand, routines)
+      try aggregates(in: pattern, routines)
+      if let escape { try aggregates(in: escape, routines) }
     case let .and(lhs, rhs), let .or(lhs, rhs):
       try aggregates(in: lhs, routines)
       try aggregates(in: rhs, routines)
@@ -1019,6 +1176,18 @@ internal struct Scope {
     }
   }
 
+  /// The value a `LIKE` pattern or escape `operand` folds to over the empty
+  /// group: an expression folds through `empty(_ expression:)`; a `:parameter`
+  /// is UNBOUND here — the empty-group fold carries no bindings — so it is
+  /// `.null`, reading UNKNOWN exactly as a `Predicate.bound` parameter does.
+  func empty(_ operand: Predicate.Operand, _ routines: Routines = [:])
+      throws(SQLError) -> Value {
+    switch operand {
+    case let .expression(expression): try empty(expression, routines)
+    case .parameter: .null
+    }
+  }
+
   /// Whether a `HAVING` `predicate` passes over the single empty group a
   /// constant-false `WHERE` leaves — TRUE keeps the group (the projection then
   /// runs), FALSE or UNKNOWN (`nil`) drops it (the projection is unreachable).
@@ -1058,6 +1227,37 @@ internal struct Scope {
       let lhs = try empty(operand, routines)
       let truth = try membership(of: values) { value throws(SQLError) in
         matches(lhs, .equal, try empty(value, routines))
+      }
+      return negated ? truth.map { !$0 } : truth
+    case let .like(operand, pattern, escape, negated):
+      // Fold `x LIKE p` over the empty group as `Row.like` evaluates it: the
+      // operand, pattern, and optional escape are each folded ONCE, IN ORDER,
+      // BEFORE the result is decided (so a faulting reached operand surfaces
+      // its throw rather than being swallowed by a NULL escape). Then a NULL
+      // operand, pattern, or escape is UNKNOWN, a non-text operand or pattern a
+      // definite non-match, else the `%`/`_` matcher decides; a non-NULL escape
+      // that is not a single character faults `SQLError.argument`, as the run
+      // does. `NOT LIKE` negates.
+      let subject = try empty(operand, routines)
+      let template = try empty(pattern, routines)
+      let separator: Value? =
+          if let escape { try empty(escape, routines) } else { nil }
+      var character: Character? = nil
+      switch separator {
+      case .none, .null:
+        break
+      case let .text(text) where text.count == 1:
+        character = text.first
+      default:
+        throw .argument("LIKE ESCAPE must be a single character")
+      }
+      let truth: Bool? = switch (subject, template, separator) {
+      case (.null, _, _), (_, .null, _), (_, _, .some(.null)):
+        nil
+      case let (.text(subject), .text(template), _):
+        matches(subject, template, escape: character)
+      default:
+        false
       }
       return negated ? truth.map { !$0 } : truth
     case let .and(lhs, rhs):
@@ -1516,6 +1716,10 @@ extension Filter {
       for element in elements {
         element.references(into: &ordinals)
       }
+    case let .like(operand, pattern, escape, _):
+      operand.references(into: &ordinals)
+      pattern.references(into: &ordinals)
+      escape?.references(into: &ordinals)
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.references(into: &ordinals)
       rhs.references(into: &ordinals)

@@ -81,7 +81,7 @@ private struct Accumulator {
   private var widened = false
   private var extreme: Value? = nil
 
-  init(_ function: Aggregate) {
+  internal init(_ function: Aggregate) {
     self.function = function
   }
 
@@ -94,7 +94,7 @@ private struct Accumulator {
   ///   already seen (a TEXT after an INTEGER). An integer overflow or a
   ///   non-finite double total is not raised here — the widen/overflow decision
   ///   is deferred to `value` so it is order-independent.
-  mutating func fold(_ value: Value) throws(SQLError) {
+  internal mutating func fold(_ value: Value) throws(SQLError) {
     // Every aggregate but a row-count ignores NULL — a NULL argument does not
     // fold, so an all-NULL group aggregates as an empty one.
     if case .null = value { return }
@@ -161,7 +161,7 @@ private struct Accumulator {
   ///   out-of-range total faults, never a transient prefix overflow a later
   ///   value undoes — or a `SUM`/`AVG` double result is not finite. `AVG`
   ///   divides the wide total, so an integer sum outside `Int` still averages.
-  var value: Value {
+  internal var value: Value {
     get throws(SQLError) {
       switch function {
       case .count:

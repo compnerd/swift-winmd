@@ -595,6 +595,8 @@ extension Expression {
       operand.aggregated
     case let .coalesce(arguments):
       arguments.contains { $0.aggregated }
+    case let .nullif(lhs, rhs):
+      lhs.aggregated || rhs.aggregated
     }
   }
 
@@ -619,6 +621,8 @@ extension Expression {
       operand.bound
     case let .coalesce(arguments):
       arguments.contains { $0.bound }
+    case let .nullif(lhs, rhs):
+      lhs.bound || rhs.bound
     }
   }
 }
@@ -906,6 +910,9 @@ extension Expression {
       operand.collect(into: &expressions)
     case let .coalesce(arguments):
       for argument in arguments { argument.collect(into: &expressions) }
+    case let .nullif(lhs, rhs):
+      lhs.collect(into: &expressions)
+      rhs.collect(into: &expressions)
     }
   }
 

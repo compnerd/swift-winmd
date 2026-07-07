@@ -1192,6 +1192,201 @@ struct EngineNonEquiJoinTests {
   }
 }
 
+// MARK: - Outer join tests
+
+struct EngineOuterJoinTests {
+  @Test func `a LEFT JOIN preserves an unmatched left row, right NULL`() throws {
+    // Every parent survives; Cid, with no child, emits once with the child
+    // columns NULL — the NULL-extension. Matched parents emit each pair.
+    let rows = try join("""
+        SELECT Parent.Name, Child.Name FROM Parent
+          LEFT JOIN Child ON Child.Pid = Parent.Id
+        """)
+    #expect(rows == [
+      [.text("Ada"), .text("Ann")],
+      [.text("Ada"), .text("Amy")],
+      [.text("Bee"), .text("Bob")],
+      [.text("Cid"), .null],
+    ])
+  }
+
+  @Test func `LEFT OUTER JOIN is the same as LEFT JOIN`() throws {
+    // The `OUTER` noise word is optional and changes nothing.
+    let terse = try join("""
+        SELECT Parent.Name, Child.Name FROM Parent
+          LEFT JOIN Child ON Child.Pid = Parent.Id
+        """)
+    let verbose = try join("""
+        SELECT Parent.Name, Child.Name FROM Parent
+          LEFT OUTER JOIN Child ON Child.Pid = Parent.Id
+        """)
+    #expect(terse == verbose)
+  }
+
+  @Test func `a RIGHT JOIN preserves an unmatched right row, left NULL`() throws {
+    // Every child survives, right-major; the Orphan (Pid 9) has no parent and
+    // emits once with the parent columns NULL.
+    let rows = try join("""
+        SELECT Parent.Name, Child.Name FROM Parent
+          RIGHT JOIN Child ON Child.Pid = Parent.Id
+        """)
+    #expect(rows == [
+      [.text("Ada"), .text("Ann")],
+      [.text("Ada"), .text("Amy")],
+      [.text("Bee"), .text("Bob")],
+      [.null, .text("Orphan")],
+    ])
+  }
+
+  @Test func `a FULL JOIN preserves the unmatched rows of both sides`() throws {
+    // The left-major pairs and the childless Cid (right NULL), then the
+    // parentless Orphan (left NULL) — both sides' unmatched rows survive.
+    let rows = try join("""
+        SELECT Parent.Name, Child.Name FROM Parent
+          FULL JOIN Child ON Child.Pid = Parent.Id
+        """)
+    #expect(rows == [
+      [.text("Ada"), .text("Ann")],
+      [.text("Ada"), .text("Amy")],
+      [.text("Bee"), .text("Bob")],
+      [.text("Cid"), .null],
+      [.null, .text("Orphan")],
+    ])
+  }
+
+  @Test func `an ON conjunct keeps an unmatched left row a WHERE would drop`() throws {
+    // ON vs WHERE. Restricting the MATCH with `AND Child.Name = 'Amy'` keeps
+    // every parent — the ON governs matching alone, so a parent that now
+    // matches no child is still emitted NULL-extended. Only Ada matches Amy.
+    let rows = try join("""
+        SELECT Parent.Name, Child.Name FROM Parent
+          LEFT JOIN Child ON Child.Pid = Parent.Id AND Child.Name = 'Amy'
+        """)
+    #expect(rows == [
+      [.text("Ada"), .text("Amy")],
+      [.text("Bee"), .null],
+      [.text("Cid"), .null],
+    ])
+  }
+
+  @Test func `the same predicate in WHERE drops the unmatched rows`() throws {
+    // Moving the predicate to a post-join WHERE filters AFTER the outer join,
+    // so the NULL-extended rows (whose Child.Name is NULL) fail `= 'Amy'` and
+    // drop — turning the LEFT join back to inner-like. This is the ON-vs-WHERE
+    // distinction the outer join preserves.
+    let rows = try join("""
+        SELECT Parent.Name, Child.Name FROM Parent
+          LEFT JOIN Child ON Child.Pid = Parent.Id WHERE Child.Name = 'Amy'
+        """)
+    #expect(rows == [[.text("Ada"), .text("Amy")]])
+  }
+
+  @Test func `a WHERE IS NULL over a LEFT join finds the unmatched rows`() throws {
+    // The anti-join idiom: a LEFT join then `WHERE Child.Name IS NULL` keeps
+    // only the parents with no child — Cid.
+    let rows = try join("""
+        SELECT Parent.Name FROM Parent
+          LEFT JOIN Child ON Child.Pid = Parent.Id WHERE Child.Name IS NULL
+        """)
+    #expect(rows == [[.text("Cid")]])
+  }
+
+  @Test func `a LEFT JOIN with a non-equi ON preserves unmatched rows`() throws {
+    // Outer joins compose with Part 1's non-equi ON: `ON Parent.Id > Child.Pid`
+    // pairs each parent with the children below it, and NULL-extends a parent
+    // that dominates none. Child Pids are 1,1,2,9. Ada(1) > none; Bee(2) >
+    // Pid 1 (Ann, Amy); Cid(3) > Pids 1,1,2 (Ann, Amy, Bob).
+    let rows = try join("""
+        SELECT Parent.Name, Child.Name FROM Parent
+          LEFT JOIN Child ON Parent.Id > Child.Pid
+        """)
+    #expect(rows == [
+      [.text("Ada"), .null],
+      [.text("Bee"), .text("Ann")],
+      [.text("Bee"), .text("Amy")],
+      [.text("Cid"), .text("Ann")],
+      [.text("Cid"), .text("Amy")],
+      [.text("Cid"), .text("Bob")],
+    ])
+  }
+
+  @Test func `a LEFT JOIN plans an outer node, not a distributed product`() throws {
+    // The ON must stay on the outer node — never distributed into a product or
+    // nested into a hash join — or an unmatched row would be dropped. So the
+    // plan reaches an `.outer` node and NOT a `.join`.
+    let catalog = try family()
+    let select = try parse("""
+        SELECT Parent.Name, Child.Name FROM Parent
+          LEFT JOIN Child ON Child.Pid = Parent.Id
+        """)
+    let plan =
+        try catalog.optimise(catalog.compile(select).pushdown(), [:])
+    #expect(outers(plan))
+    #expect(!joins(plan))
+  }
+
+  @Test func `an inner join then a LEFT join preserves the middle unmatched`() throws {
+    // A mixed chain: House JOIN Room (inner) then LEFT JOIN Item. The empty
+    // Attic (no item) survives the LEFT join NULL-extended, while the inner
+    // House-Room pairs are formed first.
+    let rows = try lineage("""
+        SELECT House.House, Room.Room, Item.Item FROM House
+          JOIN Room ON Room.Hid = House.Id
+          LEFT JOIN Item ON Item.Rid = Room.Id
+        """)
+    #expect(rows == [
+      [.text("Burrow"), .text("Kitchen"), .text("Kettle")],
+      [.text("Burrow"), .text("Kitchen"), .text("Pot")],
+      [.text("Burrow"), .text("Attic"), .null],
+      [.text("Manor"), .text("Hall"), .text("Banner")],
+    ])
+  }
+
+  @Test func `an empty right side NULL-extends every left row`() throws {
+    // With no child matching, a LEFT join still emits every parent, right
+    // NULL — the width comes from the plan, not from a right row.
+    let rows = try join("""
+        SELECT Parent.Name, Child.Name FROM Parent
+          LEFT JOIN Child ON Child.Pid = 999
+        """)
+    #expect(rows == [
+      [.text("Ada"), .null],
+      [.text("Bee"), .null],
+      [.text("Cid"), .null],
+    ])
+  }
+}
+
+/// Whether `plan` reaches an `.outer` node — the outer-join operator.
+private func outers(_ plan: Plan) -> Bool {
+  switch plan {
+  case .outer:
+    true
+  case let .select(_, source):
+    outers(source)
+  case let .project(_, source):
+    outers(source)
+  case let .sort(_, source):
+    outers(source)
+  case let .limit(_, _, source):
+    outers(source)
+  case let .distinct(source):
+    outers(source)
+  case let .derived(_, sub, _, _):
+    outers(sub)
+  case let .product(left, right):
+    outers(left) || outers(right)
+  case let .join(source, _, _, _, _, _, _):
+    outers(source)
+  case let .union(left, right, _):
+    outers(left) || outers(right)
+  case let .aggregate(_, _, source):
+    outers(source)
+  case .single, .scan:
+    false
+  }
+}
+
 // MARK: - Multi-way join tests
 
 struct EngineMultiJoinTests {
@@ -1392,6 +1587,8 @@ private func derived(_ plan: Plan) -> Plan? {
     derived(source)
   case let .product(left, right):
     derived(left) ?? derived(right)
+  case let .outer(left, right, _, _):
+    derived(left) ?? derived(right)
   case let .union(left, right, _):
     derived(left) ?? derived(right)
   case let .limit(_, _, source):
@@ -1424,6 +1621,8 @@ private func seeks(_ plan: Plan) -> Bool {
     // A pushed-down key seeks the join's OUTER leaf, so a seek can live inside
     // the join rather than only atop a bare scan.
     seeks(outer)
+  case let .outer(left, right, _, _):
+    seeks(left) || seeks(right)
   case let .union(left, right, _):
     seeks(left) || seeks(right)
   case let .limit(_, _, source):
@@ -1453,6 +1652,8 @@ private func filters(_ plan: Plan) -> Bool {
     filters(sub)
   case let .product(left, right):
     filters(left) || filters(right)
+  case let .outer(left, right, _, _):
+    filters(left) || filters(right)
   case let .union(left, right, _):
     filters(left) || filters(right)
   case let .limit(_, _, source):
@@ -1475,6 +1676,9 @@ private func pushed(_ plan: Plan) -> Bool {
   case let .join(outer, _, _, _, _, _, _):
     seeks(outer) || floats(outer) || pushed(outer)
   case let .product(left, right):
+    seeks(left) || floats(left) || pushed(left) || seeks(right)
+        || floats(right) || pushed(right)
+  case let .outer(left, right, _, _):
     seeks(left) || floats(left) || pushed(left) || seeks(right)
         || floats(right) || pushed(right)
   case let .select(_, source):
@@ -1537,6 +1741,8 @@ private func joins(_ plan: Plan) -> Bool {
     joins(sub)
   case let .product(left, right):
     joins(left) || joins(right)
+  case let .outer(left, right, _, _):
+    joins(left) || joins(right)
   case let .union(left, right, _):
     joins(left) || joins(right)
   case let .aggregate(_, _, source):
@@ -1569,6 +1775,8 @@ private func residual(_ plan: Plan) -> Bool {
     residual(left) || residual(right)
   case let .join(outer, _, _, _, _, _, _):
     residual(outer)
+  case let .outer(left, right, _, _):
+    residual(left) || residual(right)
   case let .union(left, right, _):
     residual(left) || residual(right)
   case let .aggregate(_, _, source):
@@ -1602,6 +1810,8 @@ private func separated(_ plan: Plan) -> Bool {
     separated(left) || separated(right)
   case let .join(outer, _, _, _, _, _, _):
     separated(outer)
+  case let .outer(left, right, _, _):
+    separated(left) || separated(right)
   case let .union(left, right, _):
     separated(left) || separated(right)
   case let .aggregate(_, _, source):
@@ -1636,6 +1846,8 @@ private func stacked(_ plan: Plan) -> Bool {
     stacked(left) || stacked(right)
   case let .join(outer, _, _, _, _, _, _):
     stacked(outer)
+  case let .outer(left, right, _, _):
+    stacked(left) || stacked(right)
   case let .union(left, right, _):
     stacked(left) || stacked(right)
   case let .aggregate(_, _, source):
@@ -1745,6 +1957,8 @@ private func injected(_ plan: Plan) -> Bool {
   case let .derived(_, sub, _, _):
     injected(sub)
   case let .product(left, right):
+    injected(left) || injected(right)
+  case let .outer(left, right, _, _):
     injected(left) || injected(right)
   case let .join(outer, _, _, _, _, _, _):
     injected(outer)
@@ -3090,11 +3304,14 @@ struct EngineBoundTests {
 
 // MARK: - UNION tests
 
-/// A three-relation catalog for `UNION`: `Left` and `Right` each hold a single
+/// A three-relation catalog for `UNION`: `Lhs` and `Rhs` each hold a single
 /// `Tag` text column, sharing the value `shared` so a union across them proves
 /// cross-relation dedup; the values are otherwise distinct. `Extra` repeats the
-/// `a` already in `Left`, so a trailing `UNION ALL Extra` keeps it a second
+/// `a` already in `Lhs`, so a trailing `UNION ALL Extra` keeps it a second
 /// time — proving an inner `UNION`'s dedup survives an outer `UNION ALL`.
+///
+/// The relations are `Lhs`/`Rhs` rather than `Left`/`Right`, now that the
+/// latter are reserved outer-join keywords.
 private func tags() -> Memory {
   let fields = [Field(name: "Tag", type: .text)]
   let left = [
@@ -3109,8 +3326,8 @@ private func tags() -> Memory {
     [.text("a")],
   ] as Array<Array<Value>>
   return Memory([
-    "Left": FixtureRelation(fields, left),
-    "Right": FixtureRelation(fields, right),
+    "Lhs": FixtureRelation(fields, left),
+    "Rhs": FixtureRelation(fields, right),
     "Extra": FixtureRelation(fields, extra),
   ])
 }
@@ -3135,7 +3352,7 @@ struct EngineUnionTests {
 
   @Test func `a UNION across two relations of matching arity merges and dedups`() throws {
     let rows = try tags().run(parse("""
-        SELECT Tag FROM Left UNION SELECT Tag FROM Right
+        SELECT Tag FROM Lhs UNION SELECT Tag FROM Rhs
         """))
     // `shared` appears in both arms but survives once, first occurrence kept.
     #expect(rows == [[.text("a")], [.text("shared")], [.text("b")]])
@@ -3143,7 +3360,7 @@ struct EngineUnionTests {
 
   @Test func `a UNION ALL across two relations keeps the shared row twice`() throws {
     let rows = try tags().run(parse("""
-        SELECT Tag FROM Left UNION ALL SELECT Tag FROM Right
+        SELECT Tag FROM Lhs UNION ALL SELECT Tag FROM Rhs
         """))
     #expect(rows == [
       [.text("a")],
@@ -3154,13 +3371,13 @@ struct EngineUnionTests {
   }
 
   @Test func `an inner UNION dedups before a trailing UNION ALL appends its arm`() throws {
-    // (Left UNION Right) UNION ALL Extra. The inner UNION dedups `shared`
-    // across Left and Right to one row — `a, shared, b` — and the outer UNION
+    // (Lhs UNION Rhs) UNION ALL Extra. The inner UNION dedups `shared`
+    // across Lhs and Rhs to one row — `a, shared, b` — and the outer UNION
     // ALL then appends Extra's `a` WITHOUT deduplicating, so `a` recurs. A
     // chain flattened to the trailing `all` would instead keep both copies of
     // `shared`; honouring each node's own flag keeps exactly one.
     let rows = try tags().run(parse("""
-        SELECT Tag FROM Left UNION SELECT Tag FROM Right
+        SELECT Tag FROM Lhs UNION SELECT Tag FROM Rhs
           UNION ALL SELECT Tag FROM Extra
         """))
     #expect(rows == [
@@ -3181,7 +3398,7 @@ struct EngineUnionTests {
 
   @Test func `a view defined as a UNION resolves and queries`() throws {
     let both = try View(query: select("""
-        SELECT Tag FROM Left UNION SELECT Tag FROM Right
+        SELECT Tag FROM Lhs UNION SELECT Tag FROM Rhs
         """), columns: ["Tag"])
     let catalog = Memory(tags().catalog, views: ["Both": both])
     let rows = try catalog.run(parse("SELECT Tag FROM Both"))
@@ -3740,7 +3957,7 @@ struct EngineWithTests {
 
   @Test func `a CTE whose body is a UNION materialises both arms`() throws {
     let rows = try statement("""
-        WITH both (Tag) AS (SELECT Tag FROM Left UNION SELECT Tag FROM Right)
+        WITH both (Tag) AS (SELECT Tag FROM Lhs UNION SELECT Tag FROM Rhs)
           SELECT Tag FROM both
         """, tags())
     #expect(rows == [[.text("a")], [.text("shared")], [.text("b")]])

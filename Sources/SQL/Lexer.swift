@@ -415,6 +415,11 @@ internal struct Lexer: ~Escapable {
     case "OR": .or
     case "NOT": .not
     case "JOIN": .join
+    case "INNER": .inner
+    case "LEFT": .left
+    case "RIGHT": .right
+    case "FULL": .full
+    case "OUTER": .outer
     case "ON": .on
     case "AS": .as
     case "IS": .is

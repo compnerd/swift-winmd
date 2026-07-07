@@ -40,6 +40,11 @@ extension Token {
     case or
     case not
     case join
+    case inner
+    case left
+    case right
+    case full
+    case outer
     case on
     case `as`
     case `is`
@@ -118,6 +123,11 @@ extension Token.Kind {
     case .or: "OR"
     case .not: "NOT"
     case .join: "JOIN"
+    case .inner: "INNER"
+    case .left: "LEFT"
+    case .right: "RIGHT"
+    case .full: "FULL"
+    case .outer: "OUTER"
     case .on: "ON"
     case .as: "AS"
     case .is: "IS"

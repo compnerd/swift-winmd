@@ -2739,21 +2739,14 @@ struct EngineStreamingProductTests {
 
 // MARK: - Scalar-function tests
 
-/// Routines with two demonstration scalar functions: `upper`, which folds a
-/// text cell to upper case, and `add`, which sums two integer cells. These
-/// stand in for the per-dialect decode functions a synthesis projection calls.
-/// Built from `Routines.standard` so the prelude (e.g. `BITAND`) resolves here
-/// as it does at the engine's public entry points, which seed the prelude by
-/// default.
+/// Routines with a demonstration scalar function `add`, which sums two integer
+/// cells — standing in for the per-dialect decode functions a synthesis
+/// projection calls. Built from `Routines.standard` so the prelude (`UPPER`,
+/// `BITAND`, …) resolves here as it does at the engine's public entry points,
+/// which seed the prelude by default; the string built-in `UPPER` folds a text
+/// cell to upper case, so no demo `upper` is registered (it is protected).
 private func routines() -> Routines {
-  Routines.standard
-    .registering("upper", returns: .text, parameters: [.text]) {
-      arguments throws(SQLError) in
-      guard case let .text(text) = arguments.first else {
-        throw .argument("upper expects one text argument")
-      }
-      return .text(text.uppercased())
-    }
+  try! Routines.standard
     .registering("add", parameters: [.integer, .integer]) {
       arguments throws(SQLError) in
       guard arguments.count == 2,
@@ -2807,14 +2800,17 @@ struct EngineFunctionTests {
   }
 
   @Test func `a function rejecting its arguments reports the fault`() throws {
-    #expect(throws: SQLError.argument("upper expects one text argument")) {
+    // The run path does not statically type-check a call — it invokes the
+    // routine, whose own kind check faults an INTEGER passed to the text
+    // built-in UPPER.
+    #expect(throws: SQLError.argument("UPPER requires a text argument")) {
       try functionRun("SELECT upper(Id) FROM People WHERE Id = 1")
     }
   }
 
   @Test func `a function call resolves its name case-insensitively`() throws {
-    // `upper` is registered; the natural SQL spelling UPPER resolves to it, as
-    // table and column identifiers do.
+    // The built-in `UPPER` resolves through the seeded prelude; the natural SQL
+    // spelling UPPER resolves to it, as table and column identifiers do.
     let rows = try functionRun("SELECT UPPER(Name) FROM People WHERE Id = 1")
     #expect(rows == [[.text("ALICE")]])
   }
@@ -2840,17 +2836,18 @@ struct EngineFunctionTests {
     }
   }
 
-  @Test func `a registered function shadows the prelude BITAND`() throws {
-    // The registry is a single flat map with no privileged tier, so a caller's
-    // `bitand` registered OVER the prelude one shadows it (house rule: a later
-    // binding wins). The user's closure returns -1, not the bitwise AND.
-    let user = Routines.standard
-        .registering("bitand", parameters: [.integer, .integer]) {
-          _ throws(SQLError) in .integer(-1)
-        }
-    let query = try parse("SELECT BITAND(6, 3) FROM People WHERE Id = 1")
-    let rows = try people().run(query, user)
-    #expect(rows == [[.integer(-1)]])
+  @Test func `registering over a protected prelude routine is rejected`() throws {
+    // BITAND is a protected standard built-in, so a caller cannot shadow it
+    // through `registering`: the binding faults (SQLSTATE 42723) rather than
+    // silently changing what a query naming BITAND computes. The prelude one
+    // therefore always wins at the query's call site.
+    #expect(throws: SQLError.state("42723",
+        "'bitand' is a standard routine and cannot be redefined")) {
+      try Routines.standard
+          .registering("bitand", parameters: [.integer, .integer]) {
+            _ throws(SQLError) in .integer(-1)
+          }
+    }
   }
 
   @Test func `routine names colliding only by case merge without trapping`() throws {
@@ -4231,7 +4228,7 @@ private func seed() -> Memory {
 /// Routines with an `inc` scalar — `inc(n) = n + 1` — standing in for the `+`
 /// the dialect lacks, so a recursive counter can advance.
 private func counting() -> Routines {
-  Routines().registering("inc", parameters: [.integer]) {
+  try! Routines().registering("inc", parameters: [.integer]) {
     arguments throws(SQLError) in
     guard case let .integer(n) = arguments.first else {
       throw .argument("inc expects one integer argument")

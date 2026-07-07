@@ -358,8 +358,8 @@ struct DatabaseSQLTests {
       var session = Session(catalog, Session.bundled())
       _ = try session.run("CREATE FUNCTION twice(n INTEGER) RETURNS INTEGER "
                           + "AS n + n")
-      let language = Routines().registering("sanitize", returns: .text,
-                                            parameters: [.text]) { $0[0] }
+      let language = try Routines().registering("sanitize", returns: .text,
+                                                parameters: [.text]) { $0[0] }
       // The OLD render composition — the static prelude, WITHOUT the
       // session's routines — cannot resolve the session helper.
       let stale = language.merging(Session.routines)

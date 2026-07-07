@@ -198,8 +198,10 @@ internal struct Language: Sendable {
     }
     // `SANITIZE` returns text over one text argument, so it declares both its
     // return type and its `[.text]` parameter contract — the signature the
-    // static type-check validates a `SANITIZE(...)` call against.
-    return Routines().registering("sanitize", returns: .text,
-                                  parameters: [.text], sanitize)
+    // static type-check validates a `SANITIZE(...)` call against. `try!`: the
+    // name is a compile-time constant and not a protected standard routine, so
+    // `registering` never faults it.
+    return try! Routines().registering("sanitize", returns: .text,
+                                       parameters: [.text], sanitize)
   }
 }

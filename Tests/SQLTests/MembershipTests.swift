@@ -230,7 +230,7 @@ struct MembershipTypeTests {
     // arithmetic faults the type check, matching the run's guarantee. (`probe`
     // returns `1`, which WOULD match `1` and short-circuit had it been folded —
     // proving the gate keys off the characteristic, not the value.)
-    let routines = Routines()
+    let routines = try Routines()
         .registering("probe", returns: .integer, deterministic: false) { _ in
           .integer(1)
         }
@@ -250,7 +250,7 @@ struct MembershipTypeTests {
     // match, so the OR-chain short-circuits before `Name + 1` and its text
     // arithmetic is never reached — `columns(of:)` succeeds. The ONLY change
     // from the prior test is the `deterministic` flag, so the gate keys off it.
-    let routines = Routines()
+    let routines = try Routines()
         .registering("probe", returns: .integer, deterministic: true) { _ in
           .integer(1)
         }
@@ -364,7 +364,7 @@ struct MembershipTypeTests {
     // stays reachable and must still fault the type check. The determinism gate
     // flows through the comparison fold — a non-deterministic operand keeps the
     // guard undecided rather than deciding a match the run might not make.
-    let routines = Routines()
+    let routines = try Routines()
         .registering("probe", returns: .integer, deterministic: false) { _ in
           .integer(1)
         }
@@ -502,7 +502,7 @@ struct MembershipOperandTests {
     // caches the operand, so the row is dropped and the counter reads exactly
     // 1.
     let counter = Counter()
-    let routines = Routines()
+    let routines = try Routines()
         .registering("stepper", returns: .integer, deterministic: false) { _ in
           .integer(counter.next())
         }

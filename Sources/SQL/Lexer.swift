@@ -426,6 +426,8 @@ internal struct Lexer: ~Escapable {
     case "NULL": .null
     case "IN": .in
     case "UNION": .union
+    case "INTERSECT": .intersect
+    case "EXCEPT": .except
     case "ALL": .all
     case "WITH": .with
     case "RECURSIVE": .recursive

@@ -43,22 +43,22 @@ extension CTE {
   /// (SELECT Id FROM Parent UNION ALL SELECT Id FROM Extra)` — whose anchor
   /// merely reads the same-named base — into the fixpoint.
   internal var recurses: Bool {
-    guard case let .union(_, arm, _) = query else { return false }
+    guard case let .setop(.union, _, arm, _) = query else { return false }
     return arm.references(name.lowercased())
   }
 }
 
 extension Query {
   /// Whether the query names the relation `name` (case-folded) in ANY member's
-  /// `FROM`/`JOIN` — walking the left-associative `UNION` chain and each arm.
-  /// Used to spot a self-reference lurking in a recursive body's anchor;
-  /// `CTE.recurses` itself inspects only the recursive arm.
+  /// `FROM`/`JOIN` — walking the set-operation tree and each arm. Used to spot
+  /// a self-reference lurking in a recursive body's anchor; `CTE.recurses`
+  /// itself inspects only the recursive arm.
   internal func references(_ name: String) -> Bool {
     switch self {
     case let .select(select):
       select.references(name)
-    case let .union(left, select, _):
-      left.references(name) || select.references(name)
+    case let .setop(_, left, right, _):
+      left.references(name) || right.references(name)
     }
   }
 }
@@ -260,7 +260,7 @@ extension Catalog where Self: ~Escapable {
     // Reject a misplaced recursive reference in an EARLIER arm when no
     // same-named base/view can seed it — the shape `with` rejects before
     // routing to the fixpoint.
-    if cte.recursive, case let .union(anchor, _, _) = cte.query,
+    if cte.recursive, case let .setop(.union, anchor, _, _) = cte.query,
         anchor.references(cte.name.lowercased()),
         case nil = table(named: cte.name),
         case nil = view(named: cte.name) {
@@ -275,8 +275,8 @@ extension Catalog where Self: ~Escapable {
     // runs in the SAME per-arm scope each arity check uses, so the operand check
     // shares the run's arm scoping and never types an anchor against the
     // CTE-self overlay.
-    if cte.recursive && cte.recurses, case let .union(anchor, recursive, _) =
-        cte.query {
+    if cte.recursive && cte.recurses,
+        case let .setop(.union, anchor, recursive, _) = cte.query {
       let scope = augment(context, for: anchor, rows: false)
       let width = try compile(anchor, scope).width
       guard width == cte.columns.count else {
@@ -289,16 +289,16 @@ extension Catalog where Self: ~Escapable {
       let empty = Materialised(columns: cte.columns, rows: [],
                                types: Array(repeating: .integer,
                                             count: cte.columns.count))
-      let probe = augment(context, for: .select(recursive), rows: false)
+      let probe = augment(context, for: recursive, rows: false)
           .binding(cte.name, to: empty)
-      let arm = try compile(.select(recursive), probe).width
+      let arm = try compile(recursive, probe).width
       guard arm == cte.columns.count else {
         throw .columns(expected: cte.columns.count, got: arm)
       }
       // The recursive arm is operand-checked with self bound to the declared
       // columns — the schema every iteration reads the CTE under.
       if typecheck {
-        try self.typecheck(.select(recursive), probe)
+        try self.typecheck(recursive, probe)
       }
     } else {
       let scope = augment(context, for: cte.query, rows: false)
@@ -314,8 +314,8 @@ extension Catalog where Self: ~Escapable {
   /// Evaluates a recursive `cte` to a fixpoint over this catalog with the
   /// `ctes` in scope, returning every produced row.
   ///
-  /// A recursive CTE's query is a `UNION` of an ANCHOR (its left arm, itself a
-  /// query) and a RECURSIVE arm (its right `SELECT`, which names the CTE). The
+  /// A recursive CTE's query is a `UNION` of an ANCHOR (its left arm) and a
+  /// RECURSIVE arm (its right arm, which names the CTE). The
   /// anchor evaluates once — with the CTE name NOT yet bound — to seed `result`
   /// and the `working` set. Each iteration then binds the CTE name to ONLY the
   /// `working` rows (the SQL semantics — the recursive arm sees just the
@@ -352,7 +352,7 @@ extension Catalog where Self: ~Escapable {
     // column using even a standard routine (`BITAND(...)`) types the same
     // inside the CTE as the identical SELECT does outside it.
     let context = augment(context, for: cte.query, rows: true)
-    guard case let .union(anchor, recursive, all) = cte.query else {
+    guard case let .setop(.union, anchor, recursive, all) = cte.query else {
       // A non-`UNION` recursive query runs once, but still binds under
       // `cte.columns`, so validate its compiled width here too — the check the
       // anchor and arm get. A body naming a base relation of the CTE's own name
@@ -389,7 +389,7 @@ extension Catalog where Self: ~Escapable {
                              types: Array(repeating: .integer,
                                           count: cte.columns.count))
     let probe = context.binding(cte.name, to: empty)
-    let arm = try compile(.select(recursive), probe).width
+    let arm = try compile(recursive, probe).width
     guard arm == cte.columns.count else {
       throw .columns(expected: cte.columns.count, got: arm)
     }
@@ -417,8 +417,7 @@ extension Catalog where Self: ~Escapable {
       let step = Materialised(columns: cte.columns, rows: working,
                               types: Array(repeating: .integer,
                                            count: cte.columns.count))
-      let produced = try run(.select(recursive), context.binding(cte.name,
-                                                                 to: step))
+      let produced = try run(recursive, context.binding(cte.name, to: step))
 
       var next = Array<Array<Value>>()
       for row in produced where all || seen.insert(row) {
@@ -974,11 +973,12 @@ extension Catalog where Self: ~Escapable {
       // NULL-extended.
       try .outer(optimise(left, context), optimise(right, context), on: on,
                  kind: kind)
-    case let .union(left, right, all):
+    case let .setop(kind, left, right, all):
       // Optimise each side with the same bindings so a bound predicate inside an
-      // arm seeks; the union itself merely concatenates and deduplicates,
-      // preserving this node's own `all`.
-      try .union(optimise(left, context), optimise(right, context), all: all)
+      // arm seeks; the set operation itself merely combines its sides,
+      // preserving this node's own `kind` and `all`.
+      try .setop(kind, optimise(left, context), optimise(right, context),
+                 all: all)
     case let .distinct(source):
       // A `distinct` dedups its source without a seek or join of its own;
       // optimise the source below it and rewrap.
@@ -1255,8 +1255,8 @@ extension Plan {
       // whole `WHERE` stays above (`distribute`'s default keeps it a `select`
       // over this node).
       try .outer(left.pushdown(), right.pushdown(), on: on, kind: kind)
-    case let .union(left, right, all):
-      try .union(left.pushdown(), right.pushdown(), all: all)
+    case let .setop(kind, left, right, all):
+      try .setop(kind, left.pushdown(), right.pushdown(), all: all)
     case let .distinct(source):
       // A `distinct` sits above the projection, so no `WHERE` conjunct reaches
       // it to push down; it recurses transparently. A filter must never cross a
@@ -1506,7 +1506,7 @@ extension Plan {
       // would be skipped for the filtered rows, suppressing a raise `derive`
       // owes by evaluating every column of every view row.
       terms.allSatisfy(\.safe) && rebase(conjunct, ordinals) != nil
-    case let .union(left, right, _):
+    case let .setop(_, left, right, _):
       left.pushable(conjunct, ordinals) && right.pushable(conjunct, ordinals)
     default:
       false
@@ -1528,8 +1528,8 @@ extension Plan {
     case let .project(terms, body):
       try .project(terms,
                    body.distribute(conjuncts.map { rebase($0, ordinals)! }))
-    case let .union(left, right, all):
-      try .union(left.inject(conjuncts, ordinals),
+    case let .setop(kind, left, right, all):
+      try .setop(kind, left.inject(conjuncts, ordinals),
                  right.inject(conjuncts, ordinals), all: all)
     default:
       // A view sub-plan is always a `project` (or a `union` of them); anything
@@ -1570,28 +1570,28 @@ extension Plan {
 extension Catalog where Self: ~Escapable {
   /// Compiles `query` over this catalog into a logical operator tree.
   ///
-  /// A single `SELECT` compiles as itself; a `UNION` compiles recursively into a
-  /// BINARY `union` plan that mirrors the left-associative `Query`:
-  /// `compile(.union(left, select, all))` is `.union(compile(left),
-  /// compile(.select(select)), all)`. Each node carries its OWN `all`, so the
-  /// executor honours every `UNION`/`UNION ALL` distinctly — `(A UNION B) UNION
-  /// ALL C` dedups `A ∪ B` before appending `C`, rather than treating the whole
-  /// chain by the trailing arm's flag. The new arm must project the same column
-  /// count as the chain's first `SELECT` — the result columns — else
+  /// A single `SELECT` compiles as itself; a set operation compiles recursively
+  /// into a BINARY `setop` plan that mirrors the `Query`:
+  /// `compile(.setop(kind, left, right, all))` is `.setop(kind, compile(left),
+  /// compile(right), all)`. Each node carries its OWN `kind`/`all`, so the
+  /// executor honours every operator distinctly — `(A UNION B) UNION ALL C`
+  /// dedups `A ∪ B` before appending `C`, rather than treating the whole chain
+  /// by the trailing arm's flag. The right arm must project the same column
+  /// count as the query's first `SELECT` — the result columns — else
   /// `SQLError.arity`.
   internal borrowing func compile(_ query: Query,
                                   _ context: Context = Context(),
                                   _ visited: Set<String> = [])
       throws(SQLError) -> Plan {
-    guard case let .union(left, select, all) = query else {
+    guard case let .setop(kind, left, right, all) = query else {
       return try compile(query.first, context, visited)
     }
 
     let width = try arity(query.first, context, visited)
-    let count = try arity(select, context, visited)
+    let count = try arity(right.first, context, visited)
     guard count == width else { throw .arity(width, count) }
-    return try .union(compile(left, context, visited),
-                      compile(.select(select), context, visited), all: all)
+    return try .setop(kind, compile(left, context, visited),
+                      compile(right, context, visited), all: all)
   }
 
   /// The number of result columns `select` projects — the extent of a `*` over

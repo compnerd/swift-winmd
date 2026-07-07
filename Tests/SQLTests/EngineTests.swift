@@ -1378,7 +1378,7 @@ private func outers(_ plan: Plan) -> Bool {
     outers(left) || outers(right)
   case let .join(source, _, _, _, _, _, _):
     outers(source)
-  case let .union(left, right, _):
+  case let .setop(_, left, right, _):
     outers(left) || outers(right)
   case let .aggregate(_, _, source):
     outers(source)
@@ -1589,7 +1589,7 @@ private func derived(_ plan: Plan) -> Plan? {
     derived(left) ?? derived(right)
   case let .outer(left, right, _, _):
     derived(left) ?? derived(right)
-  case let .union(left, right, _):
+  case let .setop(_, left, right, _):
     derived(left) ?? derived(right)
   case let .limit(_, _, source):
     derived(source)
@@ -1623,7 +1623,7 @@ private func seeks(_ plan: Plan) -> Bool {
     seeks(outer)
   case let .outer(left, right, _, _):
     seeks(left) || seeks(right)
-  case let .union(left, right, _):
+  case let .setop(_, left, right, _):
     seeks(left) || seeks(right)
   case let .limit(_, _, source):
     seeks(source)
@@ -1654,7 +1654,7 @@ private func filters(_ plan: Plan) -> Bool {
     filters(left) || filters(right)
   case let .outer(left, right, _, _):
     filters(left) || filters(right)
-  case let .union(left, right, _):
+  case let .setop(_, left, right, _):
     filters(left) || filters(right)
   case let .limit(_, _, source):
     filters(source)
@@ -1689,7 +1689,7 @@ private func pushed(_ plan: Plan) -> Bool {
     pushed(source)
   case let .derived(_, sub, _, _):
     pushed(sub)
-  case let .union(left, right, _):
+  case let .setop(_, left, right, _):
     pushed(left) || pushed(right)
   case let .limit(_, _, source):
     pushed(source)
@@ -1743,7 +1743,7 @@ private func joins(_ plan: Plan) -> Bool {
     joins(left) || joins(right)
   case let .outer(left, right, _, _):
     joins(left) || joins(right)
-  case let .union(left, right, _):
+  case let .setop(_, left, right, _):
     joins(left) || joins(right)
   case let .aggregate(_, _, source):
     joins(source)
@@ -1777,7 +1777,7 @@ private func residual(_ plan: Plan) -> Bool {
     residual(outer)
   case let .outer(left, right, _, _):
     residual(left) || residual(right)
-  case let .union(left, right, _):
+  case let .setop(_, left, right, _):
     residual(left) || residual(right)
   case let .aggregate(_, _, source):
     residual(source)
@@ -1812,7 +1812,7 @@ private func separated(_ plan: Plan) -> Bool {
     separated(outer)
   case let .outer(left, right, _, _):
     separated(left) || separated(right)
-  case let .union(left, right, _):
+  case let .setop(_, left, right, _):
     separated(left) || separated(right)
   case let .aggregate(_, _, source):
     separated(source)
@@ -1848,7 +1848,7 @@ private func stacked(_ plan: Plan) -> Bool {
     stacked(outer)
   case let .outer(left, right, _, _):
     stacked(left) || stacked(right)
-  case let .union(left, right, _):
+  case let .setop(_, left, right, _):
     stacked(left) || stacked(right)
   case let .aggregate(_, _, source):
     stacked(source)
@@ -1942,7 +1942,7 @@ private func spanned() throws -> Memory {
 /// arm's body, the per-arm rebase this fix enables.
 private func injected(_ plan: Plan) -> Bool {
   switch plan {
-  case let .union(left, right, _):
+  case let .setop(_, left, right, _):
     (seeks(left) || floats(left)) && (seeks(right) || floats(right))
   case let .select(_, source):
     injected(source)
@@ -3418,6 +3418,120 @@ struct EngineUnionTests {
       [.text("Ann")],
       [.text("Amy")],
     ])
+  }
+}
+
+// MARK: - INTERSECT / EXCEPT tests
+
+/// A two-relation catalog for `INTERSECT`/`EXCEPT` multiplicity: `A` and `B`
+/// each hold a single integer `N`, with duplicates chosen so the operators'
+/// `ALL` counts differ from their distinct forms. `A` holds `1` twice, `2`
+/// thrice, `3` once and `4` once; `B` holds `2` twice, `3` once, `5` once. Thus
+/// `2` and `3` are common (with differing multiplicities), `1`/`4` are A-only,
+/// and `5` is B-only — enough to exercise `min` (INTERSECT ALL) and the floored
+/// difference (EXCEPT ALL).
+private func multiset() -> Memory {
+  let fields = [Field(name: "N", type: .integer)]
+  let a = [1, 1, 2, 2, 2, 3, 4].map { [Value.integer($0)] }
+  let b = [2, 2, 3, 5].map { [Value.integer($0)] }
+  return Memory([
+    "A": FixtureRelation(fields, a),
+    "B": FixtureRelation(fields, b),
+  ])
+}
+
+struct EngineIntersectExceptTests {
+  @Test func `INTERSECT keeps the distinct rows present in both arms`() throws {
+    // `2` and `3` occur in both A and B; the distinct INTERSECT keeps each
+    // once, in A's (left) order, and drops A-only `1`/`4` and B-only `5`.
+    let rows = try multiset().run(parse("""
+        SELECT N FROM A INTERSECT SELECT N FROM B
+        """))
+    #expect(rows == [[.integer(2)], [.integer(3)]])
+  }
+
+  @Test func `INTERSECT ALL keeps each common row to the lesser multiplicity`() throws {
+    // A holds `2` thrice and B twice, so INTERSECT ALL keeps `min(3, 2)` = two;
+    // `3` is once in each, so one — every occurrence in A's order.
+    let rows = try multiset().run(parse("""
+        SELECT N FROM A INTERSECT ALL SELECT N FROM B
+        """))
+    #expect(rows == [[.integer(2)], [.integer(2)], [.integer(3)]])
+  }
+
+  @Test func `EXCEPT keeps the distinct left rows absent from the right`() throws {
+    // A's distinct rows not in B are `1` and `4`; `2`/`3` are removed (present
+    // in B), first occurrence order preserved.
+    let rows = try multiset().run(parse("""
+        SELECT N FROM A EXCEPT SELECT N FROM B
+        """))
+    #expect(rows == [[.integer(1)], [.integer(4)]])
+  }
+
+  @Test func `EXCEPT ALL removes one left row per matching right row`() throws {
+    // A: 1,1,2,2,2,3,4. B removes one `2` per its two copies (leaving one `2`)
+    // and its one `3` (leaving none); `1` (twice) and `4` are untouched — every
+    // survivor in A's order.
+    let rows = try multiset().run(parse("""
+        SELECT N FROM A EXCEPT ALL SELECT N FROM B
+        """))
+    #expect(rows == [
+      [.integer(1)],
+      [.integer(1)],
+      [.integer(2)],
+      [.integer(4)],
+    ])
+  }
+
+  @Test func `INTERSECT binds tighter than UNION`() throws {
+    // `A UNION B INTERSECT C` is `A UNION (B INTERSECT C)` per ISO precedence.
+    // Here the reused `tags()` relations give `B INTERSECT C` = `Rhs INTERSECT
+    // Extra`: Rhs is {shared, b}, Extra is {a}, so the intersection is empty
+    // and the whole result is just Lhs's distinct rows.
+    let rows = try tags().run(parse("""
+        SELECT Tag FROM Lhs
+          UNION SELECT Tag FROM Rhs
+          INTERSECT SELECT Tag FROM Extra
+        """))
+    #expect(rows == [[.text("a")], [.text("shared")]])
+  }
+
+  @Test func `UNION and EXCEPT are same precedence, left-associative`() throws {
+    // `A UNION B EXCEPT C` binds as `(A UNION B) EXCEPT C`. Lhs UNION Rhs is
+    // {a, shared, b}; EXCEPT Extra ({a}) removes `a`, leaving {shared, b}. A
+    // right-associative reading — `A UNION (B EXCEPT C)` — would instead keep
+    // `a` (from Lhs), so the result proves the left grouping.
+    let rows = try tags().run(parse("""
+        SELECT Tag FROM Lhs
+          UNION SELECT Tag FROM Rhs
+          EXCEPT SELECT Tag FROM Extra
+        """))
+    #expect(rows == [[.text("shared")], [.text("b")]])
+  }
+
+  @Test func `INTERSECT of arms projecting differing column counts is rejected`() throws {
+    #expect(throws: SQLError.arity(1, 2)) {
+      try people().run(parse("""
+          SELECT Id FROM People INTERSECT SELECT Id, Name FROM People
+          """))
+    }
+  }
+
+  @Test func `EXCEPT of arms projecting differing column counts is rejected`() throws {
+    #expect(throws: SQLError.arity(2, 1)) {
+      try people().run(parse("""
+          SELECT Id, Name FROM People EXCEPT SELECT Id FROM People
+          """))
+    }
+  }
+
+  @Test func `a view defined as an EXCEPT resolves and queries`() throws {
+    let diff = try View(query: select("""
+        SELECT N FROM A EXCEPT SELECT N FROM B
+        """), columns: ["N"])
+    let catalog = Memory(multiset().catalog, views: ["Diff": diff])
+    let rows = try catalog.run(parse("SELECT N FROM Diff"))
+    #expect(rows == [[.integer(1)], [.integer(4)]])
   }
 }
 

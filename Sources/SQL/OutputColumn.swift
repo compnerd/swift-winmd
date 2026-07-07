@@ -289,8 +289,9 @@ extension Catalog where Self: ~Escapable {
   /// `HAVING` of EVERY arm — throwing the run-time fault a bad operand would.
   ///
   /// The result schema types only the FIRST arm's projection (the ISO rule), so
-  /// a later `UNION` arm's or a `HAVING`'s operand-type error would otherwise
-  /// go unadvertised — `SELECT Age FROM t UNION SELECT Name + 1 FROM t` or `…
+  /// a later set-operation arm's or a `HAVING`'s operand-type error would
+  /// otherwise go unadvertised — `SELECT Age FROM t UNION SELECT Name + 1 FROM
+  /// t` or `…
   /// HAVING SUM(Name) > 0` resolves its names but `Arithmetic.apply`/
   /// `Aggregate.fold` faults `SQLError.operand` at run. `compile` cannot catch
   /// this (no evaluating term is built), so a schema path type-checks each arm
@@ -301,9 +302,9 @@ extension Catalog where Self: ~Escapable {
     switch query {
     case let .select(select):
       try typecheck(select, context, visited: visited)
-    case let .union(left, select, _):
+    case let .setop(_, left, right, _):
       try typecheck(left, context, visited: visited)
-      try typecheck(select, context, visited: visited)
+      try typecheck(right, context, visited: visited)
     }
   }
 

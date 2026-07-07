@@ -116,27 +116,49 @@ public struct CTE: Hashable, Sendable {
   }
 }
 
-/// A query: one `SELECT`, or several combined left-associatively with `UNION`.
+/// One of the ISO set operators combining two query terms.
 ///
-/// A bare `SELECT` is the `select` case; `a UNION b UNION c` nests left —
-/// `union(union(select(a), b, all:), c, all:)` — so the arms read in source
-/// order. `UNION` removes duplicate result rows; `UNION ALL` (`all` true) keeps
-/// them. Every arm must project the same number of columns, and the result
-/// columns are the FIRST arm's projection (the ISO rule).
+/// Each combines the rows of a left and a right term — its arms — into one
+/// result: `union` keeps the rows of either, `intersect` the rows of both, and
+/// `except` the rows of the left not in the right. The `Query.setop` node pairs
+/// a `kind` with an `all` flag governing duplicate handling (see `setop`).
+public enum SetOperation: Hashable, Sendable {
+  /// `UNION` — the rows of either arm.
+  case union
+  /// `INTERSECT` — the rows present in both arms.
+  case intersect
+  /// `EXCEPT` — the rows of the left arm not present in the right.
+  case except
+}
+
+/// A query: one `SELECT`, or several combined with a set operator.
+///
+/// A bare `SELECT` is the `select` case; two query terms combined by a set
+/// operator (`UNION`, `INTERSECT`, `EXCEPT`) form a `setop` node. `INTERSECT`
+/// binds tighter than `UNION`/`EXCEPT` (the ISO precedence), and
+/// same-precedence operators associate left — `a UNION b UNION c` nests left,
+/// `setop(.union, setop(.union, select(a), select(b), all:), select(c), all:)`,
+/// so the arms read in source order, while `a UNION b INTERSECT c` binds as
+/// `a UNION (b INTERSECT c)`. Without `all` a set operation removes duplicate
+/// result rows; with `all` (`ALL`) it keeps them per the operator's
+/// multiplicity rule. Every arm must project the same number of columns, and
+/// the result columns are the FIRST arm's projection (the ISO rule).
 public indirect enum Query: Hashable, Sendable {
   /// A single `SELECT`.
   case select(Select)
-  /// A `UNION` (or `UNION ALL` when `all`) of a query and a further `SELECT`,
-  /// the new arm appended on the right so the chain reads left to right.
-  case union(Query, Select, all: Bool)
+  /// A set operation of `kind` (`UNION`/`INTERSECT`/`EXCEPT`, `ALL` when `all`)
+  /// over a left and a right query term, the right appended so a
+  /// same-precedence chain reads left to right.
+  case setop(SetOperation, Query, Query, all: Bool)
 
   /// The first `SELECT` of the query — the leftmost arm, reached by descending
-  /// the left-associative chain. Its projection names the result columns (the
-  /// ISO rule), so a `CREATE VIEW` infers a union's columns from it.
+  /// the left arm of each set operation. Its projection names the result
+  /// columns (the ISO rule), so a `CREATE VIEW` infers a set operation's
+  /// columns from it.
   public var first: Select {
     switch self {
     case let .select(select): select
-    case let .union(query, _, _): query.first
+    case let .setop(_, left, _, _): left.first
     }
   }
 }

@@ -951,14 +951,15 @@ struct UnionTests {
     let query = try parse(query: "SELECT a FROM t UNION SELECT b FROM u")
     let left = Select(projection: .columns(["a"]), from: Relation(name: "t"))
     let right = Select(projection: .columns(["b"]), from: Relation(name: "u"))
-    #expect(query == .union(.select(left), right, all: false))
+    #expect(query == .setop(.union, .select(left), .select(right),
+                            all: false))
   }
 
   @Test func `parses UNION ALL into a duplicate-keeping union`() throws {
     let query = try parse(query: "SELECT a FROM t UNION ALL SELECT b FROM u")
     let left = Select(projection: .columns(["a"]), from: Relation(name: "t"))
     let right = Select(projection: .columns(["b"]), from: Relation(name: "u"))
-    #expect(query == .union(.select(left), right, all: true))
+    #expect(query == .setop(.union, .select(left), .select(right), all: true))
   }
 
   @Test func `nests a chain of UNIONs left-associatively in source order`() throws {
@@ -967,14 +968,16 @@ struct UnionTests {
     let a = Select(projection: .columns(["a"]), from: Relation(name: "t"))
     let b = Select(projection: .columns(["b"]), from: Relation(name: "u"))
     let c = Select(projection: .columns(["c"]), from: Relation(name: "v"))
-    #expect(query == .union(.union(.select(a), b, all: false), c, all: true))
+    #expect(query == .setop(.union,
+                            .setop(.union, .select(a), .select(b), all: false),
+                            .select(c), all: true))
   }
 
   @Test func `recognises lowercase union and all keywords`() throws {
     let query = try parse(query: "select a from t union all select b from u")
     let left = Select(projection: .columns(["a"]), from: Relation(name: "t"))
     let right = Select(projection: .columns(["b"]), from: Relation(name: "u"))
-    #expect(query == .union(.select(left), right, all: true))
+    #expect(query == .setop(.union, .select(left), .select(right), all: true))
   }
 
   @Test func `a CREATE VIEW over a UNION stores the query and the first arm's names`() throws {
@@ -986,7 +989,56 @@ struct UnionTests {
                        from: Relation(name: "u"))
     #expect(name == "v")
     #expect(view.columns == ["a", "b"])
-    #expect(view.query == .union(.select(left), right, all: false))
+    #expect(view.query == .setop(.union, .select(left), .select(right),
+                                 all: false))
+  }
+
+  @Test func `parses INTERSECT into a set operation of two selects`() throws {
+    let query = try parse(query: "SELECT a FROM t INTERSECT SELECT b FROM u")
+    let left = Select(projection: .columns(["a"]), from: Relation(name: "t"))
+    let right = Select(projection: .columns(["b"]), from: Relation(name: "u"))
+    #expect(query == .setop(.intersect, .select(left), .select(right),
+                            all: false))
+  }
+
+  @Test func `parses EXCEPT ALL into a duplicate-keeping set operation`() throws {
+    let query = try parse(query: "SELECT a FROM t EXCEPT ALL SELECT b FROM u")
+    let left = Select(projection: .columns(["a"]), from: Relation(name: "t"))
+    let right = Select(projection: .columns(["b"]), from: Relation(name: "u"))
+    #expect(query == .setop(.except, .select(left), .select(right), all: true))
+  }
+
+  @Test func `INTERSECT binds tighter than UNION, nesting on the right`() throws {
+    // `a UNION b INTERSECT c` is `a UNION (b INTERSECT c)` — ISO precedence.
+    let query = try parse(query:
+        "SELECT a FROM t UNION SELECT b FROM u INTERSECT SELECT c FROM v")
+    let a = Select(projection: .columns(["a"]), from: Relation(name: "t"))
+    let b = Select(projection: .columns(["b"]), from: Relation(name: "u"))
+    let c = Select(projection: .columns(["c"]), from: Relation(name: "v"))
+    #expect(query == .setop(.union, .select(a),
+                            .setop(.intersect, .select(b), .select(c),
+                                   all: false),
+                            all: false))
+  }
+
+  @Test func `UNION and EXCEPT associate left at the same precedence`() throws {
+    // `a UNION b EXCEPT c` is `(a UNION b) EXCEPT c`.
+    let query = try parse(query:
+        "SELECT a FROM t UNION SELECT b FROM u EXCEPT SELECT c FROM v")
+    let a = Select(projection: .columns(["a"]), from: Relation(name: "t"))
+    let b = Select(projection: .columns(["b"]), from: Relation(name: "u"))
+    let c = Select(projection: .columns(["c"]), from: Relation(name: "v"))
+    #expect(query == .setop(.except,
+                            .setop(.union, .select(a), .select(b), all: false),
+                            .select(c), all: false))
+  }
+
+  @Test func `recognises lowercase intersect and except keywords`() throws {
+    let query = try parse(query: "select a from t intersect select b from u")
+    let left = Select(projection: .columns(["a"]), from: Relation(name: "t"))
+    let right = Select(projection: .columns(["b"]), from: Relation(name: "u"))
+    #expect(query == .setop(.intersect, .select(left), .select(right),
+                            all: false))
   }
 }
 
@@ -1050,7 +1102,7 @@ struct WithTests {
         """)
     #expect(ctes[0].recursive == true)
     #expect(ctes[0].columns == ["n"])
-    guard case .union = ctes[0].query else {
+    guard case .setop(.union, _, _, _) = ctes[0].query else {
       Issue.record("expected the recursive CTE's query to be a UNION")
       return
     }
@@ -1062,7 +1114,8 @@ struct WithTests {
         """)
     let left = Select(projection: .columns(["x"]), from: Relation(name: "t"))
     let right = Select(projection: .columns(["y"]), from: Relation(name: "u"))
-    #expect(ctes[0].query == .union(.select(left), right, all: false))
+    #expect(ctes[0].query == .setop(.union, .select(left), .select(right),
+                                    all: false))
   }
 
   @Test func `recognises lowercase with and recursive keywords`() throws {

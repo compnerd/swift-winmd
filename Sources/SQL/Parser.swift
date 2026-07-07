@@ -18,7 +18,8 @@
 /// with           := WITH [RECURSIVE] cte (',' cte)* query
 /// cte            := identifier ['(' identifier (',' identifier)* ')']
 ///                   AS '(' query ')'
-/// query          := select (UNION [ALL] select)*
+/// query          := intersection ((UNION | EXCEPT) [ALL] intersection)*
+/// intersection   := select (INTERSECT [ALL] select)*
 /// select         := SELECT [DISTINCT | ALL] projection
 ///                   [FROM relation (join)*
 ///                    [where] [group] [having] [order] [limit]]
@@ -180,17 +181,41 @@ internal struct Parser: ~Escapable {
     return columns
   }
 
-  /// Parses `select (UNION [ALL] select)*`, left-associative.
+  /// Parses `intersection ((UNION | EXCEPT) [ALL] intersection)*`, the outer
+  /// set-operation tier, left-associative.
   ///
-  /// The leading `SELECT` is the seed `Query`; each `UNION` (optionally `ALL`)
-  /// folds the next `SELECT` onto the right, so `a UNION b UNION c` reads in
-  /// source order. `UNION ALL` keeps duplicate rows; a bare `UNION` removes
-  /// them — the distinction the engine honours.
+  /// The leading `intersection` is the seed `Query`; each `UNION`/`EXCEPT`
+  /// (optionally `ALL`) folds the next `intersection` onto the right, so a
+  /// same-precedence chain (`a UNION b EXCEPT c`) reads left to right.
+  /// `INTERSECT` binds TIGHTER — it lives in the inner `intersection` tier — so
+  /// `a UNION b INTERSECT c` parses as `a UNION (b INTERSECT c)`, the ISO
+  /// precedence. `ALL` keeps duplicate rows per the operator's multiplicity; a
+  /// bare operator removes them — the distinction the engine honours.
   private mutating func query() throws(SQLError) -> Query {
-    var query = try Query.select(select())
-    while try match(.union) {
+    var query = try intersection()
+    while let kind: SetOperation = if try match(.union) { .union }
+                                   else if try match(.except) { .except }
+                                   else { nil } {
       let all = try match(.all)
-      query = try .union(query, select(), all: all)
+      query = try .setop(kind, query, intersection(), all: all)
+    }
+    return query
+  }
+
+  /// Parses `select (INTERSECT [ALL] select)*`, the inner set-operation tier,
+  /// left-associative.
+  ///
+  /// The leading `SELECT` is the seed `Query`; each `INTERSECT` (optionally
+  /// `ALL`) folds the next `SELECT` onto the right. `INTERSECT` binds tighter
+  /// than `UNION`/`EXCEPT`, so this tier is fully consumed before the outer
+  /// `query` tier folds a `UNION`/`EXCEPT` around it. `INTERSECT ALL` keeps
+  /// duplicate rows to the lesser multiplicity; a bare `INTERSECT` removes
+  /// them.
+  private mutating func intersection() throws(SQLError) -> Query {
+    var query = try Query.select(select())
+    while try match(.intersect) {
+      let all = try match(.all)
+      query = try .setop(.intersect, query, .select(select()), all: all)
     }
     return query
   }

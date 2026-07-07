@@ -348,15 +348,15 @@ extension Catalog where Self: ~Escapable {
 
 extension Query {
   /// Collects every relation name this query names in a `FROM`/`JOIN`, across
-  /// the `UNION` chain and each arm, into `names` — the reserved store names
-  /// among them are what `Catalog.augment` builds.
+  /// the set-operation tree and each arm, into `names` — the reserved store
+  /// names among them are what `Catalog.augment` builds.
   func collect(into names: inout Set<String>) {
     switch self {
     case let .select(select):
       select.collect(into: &names)
-    case let .union(left, select, _):
+    case let .setop(_, left, right, _):
       left.collect(into: &names)
-      select.collect(into: &names)
+      right.collect(into: &names)
     }
   }
 }

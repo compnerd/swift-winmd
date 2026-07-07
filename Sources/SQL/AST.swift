@@ -606,6 +606,19 @@ public indirect enum Predicate: Hashable, Sendable {
   /// `:parameter` resolved from the engine's bindings — so a caller can bind a
   /// pattern (`Name LIKE :pattern`) rather than interpolate it.
   case like(Expression, pattern: Operand, escape: Operand?, negated: Bool)
+  /// `x [NOT] BETWEEN a AND b` — whether `x` is within the inclusive range
+  /// `[a, b]`, or outside it when `negated`. The ISO definition is `x >= a AND
+  /// x <= b` (and `x < a OR x > b` negated), but it is a FIRST-CLASS node
+  /// rather than that expansion so the test expression `x` is evaluated EXACTLY
+  /// ONCE: the desugar duplicated `x` across both bound comparisons, testing a
+  /// stateful `x`'s lower bound with one call and its upper with another. It
+  /// keeps the ISO three-valued semantics — a NULL `x`, `a`, or `b` makes a
+  /// bound UNKNOWN, excluding the row. Each bound `a` and `b` is an `Operand` —
+  /// an ordinary scalar expression or a run-time `:parameter` resolved from the
+  /// bindings (`x BETWEEN :lo AND :hi`) — the same binding the comparison and
+  /// `LIKE` arms accept, so a caller can bind a range rather than interpolate
+  /// it.
+  case between(Expression, Operand, Operand, negated: Bool)
   /// `lhs AND rhs`.
   case and(Predicate, Predicate)
   /// `lhs OR rhs`.

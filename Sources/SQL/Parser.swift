@@ -37,7 +37,9 @@
 /// primary        := '(' predicate ')' | comparison
 /// comparison     := expression (op (expression | param) | IS [NOT] NULL
 ///                 | [NOT] IN '(' expression (',' expression)* ')'
-///                 | [NOT] LIKE expression [ESCAPE expression])
+///                 | [NOT] LIKE expression [ESCAPE expression]
+///                 | [NOT] BETWEEN (expression | param) AND
+///                                 (expression | param))
 /// expression     := additive
 /// additive       := multiplicative (('+' | '-' | '||') multiplicative)*
 /// multiplicative := factor (('*' | '/') factor)*
@@ -836,8 +838,10 @@ internal struct Parser: ~Escapable {
   /// (or `NOT IN`) tail tests the left expression for membership in a
   /// parenthesised value list. A `LIKE` (or `NOT LIKE`) tail tests the left
   /// expression's text against a pattern, with an optional `ESCAPE` character.
-  /// A leading `NOT` here can only introduce `NOT IN` or `NOT LIKE`: a prefix
-  /// `NOT` predicate is consumed by `negation` before this point.
+  /// A `BETWEEN a AND b` (or `NOT BETWEEN`) tail is the ISO range test,
+  /// desugared into a conjunction (or disjunction) of bounds. A leading `NOT`
+  /// here introduces `NOT IN`, `NOT LIKE`, or `NOT BETWEEN`: a prefix `NOT`
+  /// predicate is consumed by `negation` before this point.
   private mutating func comparison() throws(SQLError) -> Predicate {
     let left = try expression()
     if try match(.is) {
@@ -851,9 +855,15 @@ internal struct Parser: ~Escapable {
     if try match(.like) {
       return try like(left, negated: false)
     }
+    if try match(.between) {
+      return try between(left, negated: false)
+    }
     if try match(.not) {
       if try match(.like) {
         return try like(left, negated: true)
+      }
+      if try match(.between) {
+        return try between(left, negated: true)
       }
       try expect(.in)
       return try membership(left, negated: true)
@@ -883,6 +893,29 @@ internal struct Parser: ~Escapable {
     }
     try expect(.rparen)
     return .membership(left, values, negated: negated)
+  }
+
+  /// Parses the bounds tail of `left [NOT] BETWEEN a AND b` — the `BETWEEN` is
+  /// already consumed — into the first-class `Predicate.between`.
+  ///
+  /// ISO 9075 defines `x BETWEEN a AND b` as `x >= a AND x <= b` (an inclusive
+  /// range) and `x NOT BETWEEN a AND b` as its negation `x < a OR x > b`, but
+  /// that expansion duplicates `x` across both bound comparisons, evaluating a
+  /// stateful `x` twice — so this parses the two bounds around the `AND`
+  /// keyword and builds the first-class node the engine evaluates `x` ONCE for,
+  /// keeping the same three-valued NULL semantics (a NULL `x`, `a`, or `b`
+  /// makes a bound UNKNOWN, and the row is excluded).
+  ///
+  /// Each bound is an `Operand` — a scalar expression, or a run-time
+  /// `:parameter` bound at eval (`Id BETWEEN :lo AND :hi`), the same binding
+  /// the comparison and `LIKE` arms accept — so a caller can bind a range
+  /// rather than fall back to the duplicated `Id >= :lo AND Id <= :hi` desugar.
+  private mutating func between(_ left: Expression, negated: Bool)
+      throws(SQLError) -> Predicate {
+    let lower = try operand()
+    try expect(.and)
+    let upper = try operand()
+    return .between(left, lower, upper, negated: negated)
   }
 
   /// Parses the pattern tail of `left [NOT] LIKE pattern [ESCAPE escape]` — the

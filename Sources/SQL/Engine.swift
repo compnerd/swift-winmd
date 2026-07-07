@@ -685,6 +685,8 @@ extension Predicate {
     case let .like(operand, pattern, escape, _):
       operand.aggregated || pattern.aggregated
           || (escape?.aggregated ?? false)
+    case let .between(test, lower, upper, _):
+      test.aggregated || lower.aggregated || upper.aggregated
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.aggregated || rhs.aggregated
     case let .not(operand):
@@ -708,6 +710,8 @@ extension Predicate {
       operand.bound || values.contains { $0.bound }
     case let .like(operand, pattern, escape, _):
       operand.bound || pattern.bound || (escape?.bound ?? false)
+    case let .between(test, lower, upper, _):
+      test.bound || lower.bound || upper.bound
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.bound || rhs.bound
     case let .not(operand):
@@ -955,6 +959,10 @@ extension Predicate {
       operand.collect(into: &expressions)
       pattern.collect(into: &expressions)
       escape?.collect(into: &expressions)
+    case let .between(test, lower, upper, _):
+      test.collect(into: &expressions)
+      lower.collect(into: &expressions)
+      upper.collect(into: &expressions)
     case let .and(lhs, rhs), let .or(lhs, rhs):
       lhs.collect(into: &expressions)
       rhs.collect(into: &expressions)
@@ -1129,6 +1137,42 @@ private func comparison(_ filter: Filter, _ bindings: Bindings)
   }
 }
 
+/// The seekable `(slot, lower, upper)` of a non-negated `x BETWEEN lower AND
+/// upper` whose test `x` is a `slot` and whose bounds EACH resolve to an
+/// integer — a `.term` integer literal, or a `:parameter` bound to an integer
+/// in `bindings`, the same resolution `comparison` applies to a `.bound` — a
+/// two-sided run the seek reads directly off the sorted key, exactly the range
+/// `x >= lower AND x <= upper` would seek, so a fully-bound parameterised range
+/// seeks rather than regressing to a scan. A `NOT BETWEEN` (the complement is
+/// two disjoint runs, not one contiguous seek), a non-slot test, or a bound
+/// that does not resolve to an integer (a non-constant term, a string, or an
+/// unbound or non-integer parameter) does not qualify, and the relation scans
+/// under the residual `between`.
+private func range(_ filter: Filter, _ bindings: Bindings) -> (Int, Int, Int)? {
+  guard case let .between(.slot(slot), lower, upper, negated: false) = filter,
+      let low = integer(lower, bindings),
+      let high = integer(upper, bindings) else {
+    return nil
+  }
+  return (slot, low, high)
+}
+
+/// The integer a BETWEEN bound seeks on: a `.term` integer literal, or a
+/// `:parameter` bound to an integer in `bindings` — the same resolution
+/// `comparison` gives a `.bound`'s parameter. Any other operand — a
+/// non-constant term, a non-integer constant, or an unbound or non-integer
+/// parameter — does not seek (`nil`), and the residual `between` runs instead.
+private func integer(_ operand: Filter.Operand, _ bindings: Bindings) -> Int? {
+  switch operand {
+  case let .term(.constant(.integer(value))):
+    value
+  case let .parameter(name):
+    if case let .integer(value)? = bindings[name] { value } else { nil }
+  case .term:
+    nil
+  }
+}
+
 extension Table where Self: ~Escapable {
   /// The boundaries `[lower, upper)` to seek for a sort-key comparison, or `nil`
   /// if `filter` does not qualify for the seek path.
@@ -1145,12 +1189,43 @@ extension Table where Self: ~Escapable {
   /// `string` operand or an unseekable column never qualifies, and the executor
   /// scans.
   ///
+  /// A first-class `x BETWEEN lower AND upper` (non-negated) whose test `x` is
+  /// the sort-key slot and whose bounds each resolve to an integer — a literal,
+  /// or a `:parameter` bound in `bindings` (so `x BETWEEN :lo AND :hi` seeks
+  /// rather than scans) — seeks a two-sided run: the intersection of the
+  /// `x >= lower` and `x <= upper` partitions, exactly the run the desugar
+  /// would seek, as an ordered-only range. A `NOT BETWEEN` (a two-run
+  /// complement, not one contiguous seek), a non-slot test, or a bound that
+  /// does not resolve to an integer does not qualify; the residual `between`
+  /// still runs over the sought rows either way.
+  ///
   /// The hash-join executor reuses this over a pushed inner filter's conjuncts
   /// to seek the inner by a seekable conjunct before bucketing, so a
   /// seekable/contradictory inner filter reads few or no inner rows.
   internal borrowing func boundaries(_ filter: Filter, _ ordinals: Array<Int>,
                                      _ count: Int, _ bindings: Bindings)
       -> Range<Int>? {
+    // A first-class `x BETWEEN lower AND upper` seeks a two-sided run directly:
+    // the lower boundary is the `x >= lower` partition (inclusive, `strict`
+    // false) and the upper is the `x <= upper` partition (inclusive, `strict`
+    // true), so their intersection `lower ..< upper` is exactly the range the
+    // desugar `x >= lower AND x <= upper` would seek. As a range it seeks ONLY
+    // an ordered key — an unordered seekable column brackets an equality, not
+    // a range — and the residual `between` still runs over the sought rows.
+    if let (slot, low, high) = range(filter, bindings) {
+      guard ordered(ordinals[slot]),
+          let lower = bound(ordinals[slot], low, strict: false),
+          let upper = bound(ordinals[slot], high, strict: true) else {
+        return nil
+      }
+      // An inverted `BETWEEN lower AND upper` (lower > upper) is a valid EMPTY
+      // range: the `x >= lower` partition starts after the `x <= upper` one
+      // ends, so `lower > upper` here and `lower ..< upper` would trap Swift's
+      // `Range(lowerBound <= upperBound)` precondition. Seek an empty run.
+      guard lower <= upper else { return lower ..< lower }
+      return lower ..< upper
+    }
+
     guard let (slot, op, value) = comparison(filter, bindings),
         let lower = bound(ordinals[slot], value, strict: false),
         let upper = bound(ordinals[slot], value, strict: true) else {

@@ -16,6 +16,7 @@ let _ =
               .library(name: "WinMDSynthesis", targets: ["WinMDSynthesis"]),
               .library(name: "Decant", targets: ["Decant"]),
               .library(name: "DecantMacros", targets: ["DecantMacros"]),
+              .library(name: "DecantBinary", targets: ["DecantBinary"]),
             ],
             dependencies: [
               .package(url: "https://github.com/apple/swift-argument-parser",
@@ -68,6 +69,18 @@ let _ =
                           ]),
               .testTarget(name: "DecantMacrosClientTests",
                           dependencies: ["DecantMacros"],
+                          swiftSettings: [
+                            .enableExperimentalFeature("Lifetimes"),
+                          ]),
+
+              .target(name: "DecantBinary", dependencies: ["Decant"],
+                      swiftSettings: [
+                        .enableExperimentalFeature("Lifetimes"),
+                      ]),
+              .testTarget(name: "DecantBinaryTests",
+                          dependencies: [
+                            "Decant", "DecantMacros", "DecantBinary",
+                          ],
                           swiftSettings: [
                             .enableExperimentalFeature("Lifetimes"),
                           ]),

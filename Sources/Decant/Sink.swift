@@ -22,6 +22,18 @@ public protocol Sink: ~Copyable, ~Escapable {
   @inlinable
   mutating func append(_ bytes: some Sequence<UInt8>) throws(DecantError)
 
+  /// Appends a contiguous run of bytes held in a `Span` to the output. Throws
+  /// `.overflow` if a fixed-capacity conformer cannot accept them.
+  ///
+  /// A `Span<UInt8>` is not a `Sequence`, so it cannot ride the sequence
+  /// overload; a caller with bytes already in a borrowed `Span` — a
+  /// `String.utf8Span`, a slice of one — bulk-appends the whole run through
+  /// this primitive with no intermediate `Array` copy. The default forwards
+  /// the span element by element through the single-byte append; a conformer
+  /// over contiguous storage overrides it with a bulk copy.
+  @inlinable
+  mutating func append(_ bytes: Span<UInt8>) throws(DecantError)
+
   /// Appends one byte to the output. Throws `.overflow` if a fixed-capacity
   /// conformer is full.
   @inlinable
@@ -34,6 +46,15 @@ extension Sink where Self: ~Copyable & ~Escapable {
   @inlinable
   public mutating func append(_ byte: UInt8) throws(DecantError) {
     try append(CollectionOfOne(byte))
+  }
+
+  /// Appends a `Span` element by element by default; a conformer over
+  /// contiguous storage overrides this with a bulk copy.
+  @inlinable
+  public mutating func append(_ bytes: Span<UInt8>) throws(DecantError) {
+    for i in 0 ..< bytes.count {
+      try append(bytes[i])
+    }
   }
 }
 
@@ -68,6 +89,21 @@ public struct ArraySink: Sink {
   public mutating func append(_ bytes: some Sequence<UInt8>)
       throws(DecantError) {
     storage.append(contentsOf: bytes)
+  }
+
+  @inlinable
+  public mutating func append(_ bytes: Span<UInt8>) throws(DecantError) {
+    // Grow the array by the run's length in one reallocation, then fill the
+    // fresh tail directly through the growable array's `OutputSpan` — a bulk
+    // copy into contiguous storage with no intermediate `Array` and no unsafe
+    // pointer. The run rides in over an `OutputSpan`, whose per-element append
+    // is a bounds-free store into the reserved tail the optimizer vectorizes.
+    let count = bytes.count
+    storage.append(addingCapacity: count) { output in
+      for i in 0 ..< count {
+        output.append(bytes[i])
+      }
+    }
   }
 
   @inlinable

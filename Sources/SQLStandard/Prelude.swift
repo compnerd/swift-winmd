@@ -56,12 +56,12 @@ extension Routines {
   ///   the static contract (the type-check is exact-equality — an integer is
   ///   not a double); an integer-domain overload (`ABS(integer) → integer`, …)
   ///   needs routine overloading, which the single-signature contract lacks.
-  public static let standard: Routines = preludeMap.protecting(preludeMap.names)
+  public static let standard: Routines = prelude.protecting(prelude.names)
 
-  /// The prelude routines as an UNPROTECTED map — `standard` wraps it with
+  /// The prelude routines UNPROTECTED — `standard` wraps this with
   /// `protecting(_:)` so its own names cannot be shadowed. Built through the
   /// dictionary-literal escape hatch, which carries no protected names.
-  private static let preludeMap: Routines = [
+  private static let prelude: Routines = [
     "bitand": Routine(returns: .integer, parameters: [.integer, .integer],
                       deterministic: true, bitand),
     "upper": Routine(returns: .text, parameters: [.text],

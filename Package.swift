@@ -13,6 +13,7 @@ let _ =
               .library(name: "SQLEngine", targets: ["SQLEngine"]),
               .library(name: "SQLStandard", targets: ["SQLStandard"]),
               .library(name: "WinMDSynthesis", targets: ["WinMDSynthesis"]),
+              .library(name: "Decant", targets: ["Decant"]),
             ],
             dependencies: [
               .package(url: "https://github.com/apple/swift-argument-parser",
@@ -22,6 +23,15 @@ let _ =
             ],
             targets: [
               .target(name: "CPE", dependencies: []),
+
+              .target(name: "Decant", dependencies: [],
+                      swiftSettings: [
+                        .enableExperimentalFeature("Lifetimes"),
+                      ]),
+              .testTarget(name: "DecantTests", dependencies: ["Decant"],
+                          swiftSettings: [
+                            .enableExperimentalFeature("Lifetimes"),
+                          ]),
 
               // SQLEngine
               .target(name: "SQLEngine", dependencies: [],

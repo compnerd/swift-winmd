@@ -10,7 +10,8 @@
 ///   FROM <table> [AS alias]
 ///   ([INNER | (LEFT | RIGHT | FULL) [OUTER]] JOIN <table> [AS alias]
 ///     ON <predicate>)*
-///   [WHERE <predicate>] [ORDER BY <column> [ASC|DESC] (, …)*]
+///   [WHERE <predicate>]
+///   [ORDER BY <integer | expression> [ASC|DESC] (, …)*]
 ///   [OFFSET <skip> ROWS] [FETCH {FIRST | NEXT} <count> ROWS ONLY]
 /// ```
 ///
@@ -235,6 +236,96 @@ public struct Select: Hashable, Sendable {
   public var table: String {
     from?.name ?? ""
   }
+
+  /// Every expression the ORDER BY sort EVALUATES over its input rows — the
+  /// direct sort-key expressions AND the projection expressions its OUTPUT
+  /// shorthands reach — the ones a reachable type-check pass must validate as
+  /// it does a projected expression.
+  ///
+  /// The compiled shape is `Project(Limit(Sort(input)))`: the sort is BELOW the
+  /// limit and evaluates each key over the input rows BEFORE the cap pages
+  /// them, so what the sort forces to evaluate is independent of whether the
+  /// projection is reachable. Each ORDER BY key resolves to the expression the
+  /// sort runs, mirroring the resolver's lowering:
+  ///
+  ///   - a direct `.expression(e)` key over the input columns yields `e`;
+  ///   - a bare unqualified column matching a projected explicit-`AS` OUTPUT
+  ///     ALIAS resolves to that projection item's OWN expression (the ISO alias
+  ///     precedence a `ORDER BY x` follows) — the term the sort recomputes
+  ///     below the limit, NOT a fresh input reference;
+  ///   - an `ordinal(n)` resolves to the `n`-th projection item's expression
+  ///     (1-based, in range), the term the sort recomputes below the limit.
+  ///
+  /// A `*` or bare-column projection carries no expression a shorthand could
+  /// reach (each output is a plain column slot compilation already resolves),
+  /// so an ordinal or bare-name key against one contributes nothing to check.
+  ///
+  /// A bare unqualified name binds to a projection OUTPUT name by the SAME rule
+  /// the resolver's `ORDER BY` lowering uses, so the type-check and the run
+  /// agree on which keys are outputs and which are input columns:
+  ///
+  ///   - a NON-grouped query resolves an output name from an EXPLICIT `AS`
+  ///     ALIAS only (`Projected.alias`) — the representation-independent ISO
+  ///     precedence a `ORDER BY x` follows, so a bare projected column (no
+  ///     `AS`) introduces no output and `ORDER BY <bareName>` stays an input
+  ///     reference whether the parser emitted the select list as `columns` or,
+  ///     forced by a sibling `AS`, as `expressions` (mirrors non-grouped
+  ///     `Scope.order`);
+  ///   - a GROUPED query resolves an output name from `Projected.name` (an
+  ///     alias, else a bare column's name) — the SAME output-name set
+  ///     `Grouping.terms`/`Grouping.order` record and bind, so a grouped
+  ///     `ORDER BY <groupcol>` naming an unaliased projected group column
+  ///     resolves to that output here exactly as it does in the run, rather
+  ///     than being (mis)validated as an ambiguous input column.
+  internal var orderKeys: Array<Expression> {
+    // A grouped query's output-name surface includes an unaliased projected
+    // group column (its `Projected.name`), matching the grouped lowering; a
+    // non-grouped query's is an explicit `AS` alias only.
+    orderKeys(named: aggregates ? \.name : \.alias)
+  }
+
+  /// The ORDER BY sort keys resolved to the expression the sort evaluates,
+  /// matching a bare output name against `output` — the projection accessor a
+  /// caller picks to mirror the resolver's lowering (see `orderKeys`).
+  private func orderKeys(named output: KeyPath<Projected, String?>)
+      -> Array<Expression> {
+    guard let order else { return [] }
+    // Only an `expressions` list carries a projection expression an ordinal or
+    // an output-name key could reach; a `*` or bare-column projection names
+    // plain column slots compilation already resolves.
+    let items: Array<Projected>
+    if case let .expressions(projected) = projection {
+      items = projected
+    } else {
+      items = []
+    }
+    var expressions = Array<Expression>()
+    for key in order.keys {
+      switch key.sort {
+      case let .ordinal(position):
+        // An ordinal names the `position`-th projected output (1-based); the
+        // sort recomputes that item's expression below the limit. An
+        // out-of-range ordinal is `compile`'s fault to raise, so skip it here.
+        if position >= 1, position <= items.count {
+          expressions.append(items[position - 1].expression)
+        }
+      case let .expression(expression):
+        // A bare unqualified name binds a matching projection OUTPUT name
+        // before an input column (the ISO precedence), resolving to that
+        // item's expression — the output surface (`output`) mirrors the
+        // resolver's lowering for this query shape.
+        if case let .column(column) = expression, column.qualifier == nil,
+            let item = items.first(where: {
+              $0[keyPath: output]?.lowercased() == column.name.lowercased()
+            }) {
+          expressions.append(item.expression)
+        } else {
+          expressions.append(expression)
+        }
+      }
+    }
+    return expressions
+  }
 }
 
 /// A named relation in a `FROM` or `JOIN`, with an optional alias.
@@ -380,6 +471,31 @@ public enum Projection: Hashable, Sendable {
   ///
   /// A `columns` projection yields each reference's name (the qualifier
   /// dropped); an `expressions` projection yields each item's inferable `name`
+  /// The per-item explicit-`AS` OUTPUT ALIASES of a projection of `count`
+  /// columns, aligned index-for-index with the lowered projection terms — an
+  /// `expressions` item's `alias` (the explicit `AS`, else `nil`); a `*` or a
+  /// bare-column list names none (`nil` throughout).
+  ///
+  /// It is the alias surface an `ORDER BY` output name resolves against, and it
+  /// is REPRESENTATION-INDEPENDENT: only an explicit `AS` introduces an
+  /// output name an `ORDER BY` may bind, so a bare projected column (`SELECT
+  /// a.Name …`) contributes `nil` here whether the parser emitted it as a
+  /// `columns` list or, forced by a sibling `AS`, as an `expressions` list —
+  /// `ORDER BY Name` then resolves identically (an input column) in both. A
+  /// bare `ORDER BY x` prefers a projected item whose explicit alias is `x`
+  /// (the ISO precedence) to an input column of the same name. `count` is the
+  /// lowered projection's width — the `expansion` of a `*`, which this itself
+  /// cannot know — so the returned array always matches the projection terms
+  /// in length.
+  internal func outputs(count: Int) -> Array<String?> {
+    switch self {
+    case .all, .columns:
+      return Array(repeating: nil, count: count)
+    case let .expressions(items):
+      return items.map(\.alias)
+    }
+  }
+
   /// (its alias, else a bare column's name); a non-column expression with no
   /// alias, and a `SELECT *`, have no inferable name and fault with
   /// `SQLError.named`.
@@ -714,8 +830,8 @@ public enum Literal: Hashable, Sendable {
   case blob(Array<UInt8>)
 }
 
-/// An `ORDER BY` clause: an ordered list of sort keys, each a column and its
-/// own direction.
+/// An `ORDER BY` clause: an ordered list of sort keys, each a sort value and
+/// its own direction.
 ///
 /// The keys are applied major to minor — `ORDER BY a, b DESC, c` sorts by `a`
 /// ascending, breaks ties by `b` descending, then breaks the rest by `c`
@@ -723,18 +839,67 @@ public enum Literal: Hashable, Sendable {
 /// the rows the earlier keys leave equal. A per-key `ASC`/`DESC` governs that
 /// key alone (default `ASC`); `keys` is never empty.
 public struct Order: Hashable, Sendable {
-  /// One sort key: the column to order on and its direction.
+  /// One sort key: the value to order on and its direction.
   public struct Key: Hashable, Sendable {
-    /// The column this key orders on.
-    public let column: Column
+    /// An ISO `<sort key>` — the value a key orders on.
+    ///
+    /// The standard makes a sort key an arbitrary value expression over the
+    /// query's columns; SQL practice adds two shorthands that name an OUTPUT
+    /// column of the select list rather than an input value: a 1-based
+    /// `ordinal` and an output `alias`. The three cases:
+    ///
+    /// - `ordinal(n)` — `ORDER BY 1` names the query's first projected output
+    ///   column (1-based). An integer-literal sort key is ALWAYS this ordinal
+    ///   (the ISO rule), never the integer constant `1`; ordering rows by a
+    ///   constant is meaningless, so the standard reads a bare integer here as
+    ///   a select-list position. An out-of-range `n` faults.
+    /// - `expression(e)` — `ORDER BY a + b`, `ORDER BY UPPER(Name)`, or a bare
+    ///   column `ORDER BY Name` (the common case) — any value expression over
+    ///   the INPUT columns, evaluated per row.
+    ///
+    /// An unqualified name is EITHER an output alias (`SELECT x AS y … ORDER BY
+    /// y`) or an input column; it lowers as an `expression(.column(name))` and
+    /// the resolver prefers a matching OUTPUT alias to an input column of the
+    /// same name (the ISO precedence for a bare `ORDER BY` name), falling back
+    /// to the input column when no alias claims it.
+    public enum Sort: Hashable, Sendable {
+      /// `ORDER BY n` — the query's `n`-th projected output column, 1-based.
+      case ordinal(Int)
+      /// `ORDER BY expression` — a value expression over the input columns (a
+      /// bare column, arithmetic, or a call), or a bare name a resolver may
+      /// bind to an output alias first.
+      case expression(Expression)
+    }
+
+    /// The value this key orders on.
+    public let sort: Sort
 
     /// Whether this key is ascending (`ASC`, the default) rather than
     /// descending (`DESC`).
     public let ascending: Bool
 
-    public init(column: Column, ascending: Bool = true) {
-      self.column = column
+    public init(sort: Sort, ascending: Bool = true) {
+      self.sort = sort
       self.ascending = ascending
+    }
+
+    /// A key ordering on a bare (possibly-qualified) column — the common shape,
+    /// lowered to the value expression `expression(.column(column))`. Retained
+    /// so the many single-column constructors keep compiling.
+    public init(column: Column, ascending: Bool = true) {
+      self.init(sort: .expression(.column(column)), ascending: ascending)
+    }
+
+    /// A short spelling of this key for a diagnostic — a bare column's name, an
+    /// ordinal's decimal, else a generic `"an expression"`. It names the
+    /// offending key in a `SELECT DISTINCT` ordering fault
+    /// (`SQLError.distinct`) without reconstructing the whole expression.
+    internal var name: String {
+      switch sort {
+      case let .ordinal(position): "\(position)"
+      case let .expression(.column(column)): column.name
+      case .expression: "an expression"
+      }
     }
   }
 

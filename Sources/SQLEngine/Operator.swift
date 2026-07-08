@@ -123,11 +123,13 @@ internal indirect enum Plan {
   /// projection is a list of `.slot` terms, so the simple path is a reorder.
   case project(Array<Term>, Plan)
   /// τ — orders the records by a list of typed sort keys, major to minor. Each
-  /// key names a `slot` and its direction; `keys[0]` is the primary key and
-  /// each later key orders only the rows the earlier keys leave equal. The sort
-  /// is stable, so rows equal on every key keep their input order. `keys` is
-  /// never empty.
-  case sort(keys: Array<(slot: Int, ascending: Bool)>, Plan)
+  /// key is a `Term` evaluated against the record (a slot read for a bare
+  /// column, but any lowered expression — `a + b`, `UPPER(Name)`, or the
+  /// expression the select list's `n`-th item or an aliased item stands for)
+  /// and its direction; `keys[0]` is the primary key and each later key orders
+  /// only the rows the earlier keys leave equal. The sort is stable, so rows
+  /// equal on every key keep their input order. `keys` is never empty.
+  case sort(keys: Array<(term: Term, ascending: Bool)>, Plan)
   /// × — every concatenation of an outer record with an inner one.
   case product(Plan, Plan)
   /// ⋈ — for each outer record, seeks the inner relation `name` on
@@ -337,23 +339,35 @@ extension Catalog where Self: ~Escapable {
           try project(terms, record, routines, bindings)
         }
     case let .sort(keys, source):
-      return try execute(source, context)
-        .enumerated()
+      // Evaluate each key's `Term` against every record UP FRONT — a bare slot
+      // read, but any lowered expression (`a + b`, `UPPER(Name)`, an ordinal's
+      // or alias's select-list item) — so the comparator sorts on precomputed
+      // values. Evaluation may throw (a scalar call, a division), which a
+      // `sorted(by:)` comparator cannot, so it happens here rather than inside
+      // the sort; it also evaluates each key once per row rather than once per
+      // comparison.
+      let rows = try execute(source, context)
+      let sortable = try rows.map { record throws(SQLError) in
+        try keys.map { key throws(SQLError) in
+          try record.evaluate(key.term, routines, bindings)
+        }
+      }
+      return sortable.indices
         .sorted { lhs, rhs in
           // Compare the keys major to minor: the first key on which the rows
           // differ decides the order; a key they are equal on falls through to
           // the next. A key's direction governs that key alone.
-          for key in keys {
-            let ordered = less(lhs.element[key.slot], rhs.element[key.slot])
-            let reverse = less(rhs.element[key.slot], lhs.element[key.slot])
+          for index in keys.indices {
+            let ordered = less(sortable[lhs][index], sortable[rhs][index])
+            let reverse = less(sortable[rhs][index], sortable[lhs][index])
             if ordered == reverse { continue }
-            return key.ascending ? ordered : reverse
+            return keys[index].ascending ? ordered : reverse
           }
           // Equal on every key: keep the source order (a stable sort) by
           // tie-breaking on the original index.
-          return lhs.offset < rhs.offset
+          return lhs < rhs
         }
-        .map(\.element)
+        .map { rows[$0] }
     case let .product(outer, inner):
       return try product(execute(outer, context), execute(inner, context))
     case let .join(outer, name, ordinals, base, column, keys, filter):

@@ -60,7 +60,7 @@
 /// aggregate      := COUNT '(' '*' ')'
 ///                 | (COUNT | SUM | MIN | MAX | AVG) '(' expression ')'
 /// order          := ORDER BY key (',' key)*
-/// key            := column [ASC | DESC]
+/// key            := (integer | expression) [ASC | DESC]
 /// limit          := [OFFSET integer ROWS]
 ///                   [FETCH (FIRST | NEXT) [integer] ROWS ONLY]
 /// column         := identifier        // a dotted identifier is qualified
@@ -1111,9 +1111,9 @@ internal struct Parser: ~Escapable {
   // MARK: - Order
 
   /// Parses `BY key (',' key)*` — a comma-separated list of sort keys, each a
-  /// column and its own optional `ASC`/`DESC` — into an `Order` (the `ORDER`
-  /// keyword is already consumed). The keys read in source order, major to
-  /// minor.
+  /// sort value and its own optional `ASC`/`DESC` — into an `Order` (the
+  /// `ORDER` keyword is already consumed). The keys read in source order, major
+  /// to minor.
   private mutating func order() throws(SQLError) -> Order {
     try expect(.by)
     var keys = [try key()]
@@ -1123,10 +1123,27 @@ internal struct Parser: ~Escapable {
     return Order(keys: keys)
   }
 
-  /// Parses one sort key — `column [ASC | DESC]`, the direction defaulting to
-  /// ascending.
+  /// Parses one sort key — `(integer | expression) [ASC | DESC]`, the direction
+  /// defaulting to ascending.
+  ///
+  /// A BARE integer-literal sort key is an ISO output-column ORDINAL (`ORDER BY
+  /// 1` names the first projected column, 1-based), never the integer constant
+  /// — ordering by a constant is meaningless, so the standard reads a lone
+  /// integer here as a select-list position. The key parses as a full value
+  /// `expression` unconditionally and then CLASSIFIES: an expression that is
+  /// exactly a bare integer literal becomes the ordinal, everything else stays
+  /// an `expression`. This keeps `ORDER BY 1 + A` and `ORDER BY 2 * Price` the
+  /// arithmetic expressions they are, and subsumes a bare column (`ORDER BY
+  /// Name`) and an arbitrary computation (`ORDER BY a + b`, `ORDER BY
+  /// UPPER(Name)`).
   private mutating func key() throws(SQLError) -> Order.Key {
-    let column = try column()
+    let sort: Order.Key.Sort
+    switch try expression() {
+    case let .literal(.integer(ordinal)):
+      sort = .ordinal(ordinal)
+    case let value:
+      sort = .expression(value)
+    }
 
     var ascending = true
     if try match(.desc) {
@@ -1134,7 +1151,7 @@ internal struct Parser: ~Escapable {
     } else {
       _ = try match(.asc)
     }
-    return Order.Key(column: column, ascending: ascending)
+    return Order.Key(sort: sort, ascending: ascending)
   }
 
   // MARK: - Row limiting

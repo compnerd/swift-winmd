@@ -468,14 +468,14 @@ internal struct Resolved {
 /// EVERY column its `order` keys read. The projection terms hold ordinals at
 /// this stage; a scalar call's arguments contribute their read ordinals too.
 private func referenced(_ projection: Array<Term>, _ filter: Filter?,
-                        _ order: Array<(column: Int, ascending: Bool)>)
+                        _ order: Array<SortKey>)
     -> Array<Int> {
   var ordinals = Set<Int>()
   for term in projection {
     term.references(into: &ordinals)
   }
   filter?.references(into: &ordinals)
-  for key in order { ordinals.insert(key.column) }
+  for key in order { key.term.references(into: &ordinals) }
   return ordinals.sorted()
 }
 
@@ -489,33 +489,59 @@ private func invert(_ ordinals: Array<Int>) -> Dictionary<Int, Int> {
   return slot
 }
 
-/// Rejects an `ORDER BY` key naming a column outside the `DISTINCT` output.
+/// Rejects an `ORDER BY` key ordering on a value outside the `DISTINCT` output.
 ///
 /// `SELECT DISTINCT` sorts the pre-projection rows then dedups the projected
-/// ones, so ordering on a column the projection drops is ill-defined — after
+/// ones, so ordering on a value the projection drops is ill-defined — after
 /// dedup one output row stands for many source rows, whose differing sort-key
 /// values leave no single order. The standard therefore requires every
-/// `ORDER BY` key under `DISTINCT` to be a column of the select list, as the
-/// grouped path requires for `GROUP BY`. Each resolved order key's ordinal
-/// (`order`, paired index-for-index with the AST `keys` for the offending
-/// name) must equal a projected term that is a bare `.slot` — a plain output
-/// column; a computed projection is not orderable-on anyway. A key naming no
-/// output column faults `SQLError.distinct`. Only a `distinct` query is
-/// checked; a plain `SELECT` may order on any source column.
+/// `ORDER BY` key under `DISTINCT` to be a value of the select list, as the
+/// grouped path requires for `GROUP BY`. An ordinal or an output-alias key
+/// references a select-list output by construction (`SortKey.output`), so it
+/// satisfies the rule whatever its term computes — its value is constant across
+/// a dedup group. An ordinary INPUT expression key satisfies it when either it
+/// reads a projected column — its resolved `Term` is a bare `.slot` (a plain
+/// column read) that a projected bare-slot term also reads — or it REPEATS a
+/// projected select-list expression: its AST `Expression` is structurally equal
+/// to a projected one (`SELECT DISTINCT A + B AS total … ORDER BY A + B`), so
+/// the key orders on a projected distinct value and is well-defined, exactly as
+/// the alias `ORDER BY total` and the ordinal `ORDER BY 1` naming that same
+/// output are. A key ordering on any other value faults `SQLError.distinct`.
 ///
-/// The check runs in whatever slot space the caller resolved into: the
-/// non-aggregate paths pass base ordinals, the grouped path passes grouped
-/// slots. Both are consistent — `order` and `projection` share it — so the
-/// one comparison serves every compile path.
-private func distinct(_ keys: Array<Order.Key>, _ order: Array<Int>,
-                      _ projection: Array<Term>) throws(SQLError) {
-  var output = Set<Int>()
-  for term in projection {
-    if case let .slot(ordinal) = term { output.insert(ordinal) }
+/// The satisfying comparison is over the RESOLVED `Term`s, not the AST: a key
+/// whose lowered `term` equals a projected item's lowered `term` orders on a
+/// projected value. Lowering normalizes column qualification to a slot, so a
+/// key that differs from its projected twin ONLY in qualification — `SELECT
+/// DISTINCT A + 1 AS v … ORDER BY People.A + 1` against a projected `A + 1`,
+/// where the two `.column`s resolve to the same slot — matches, as its
+/// unqualified spelling and its alias/ordinal already do. The one comparison
+/// runs in whatever slot space the caller resolved into (base ordinals on the
+/// non-aggregate paths, grouped slots on the grouped path); `order` and
+/// `projection` share it, so it serves every compile path, and it subsumes the
+/// bare-projected-column case (`ORDER BY <projectedColumn>` lowers to the same
+/// `.slot` the projection reads). `keys` supplies the AST key's spelling for
+/// the fault message; each resolved order key pairs index-for-index with it.
+///
+/// A matching INPUT key is REBOUND to the projected column it matched: this
+/// returns the order keys with each satisfying input key's `column` set to the
+/// index of the projection item whose term it equals, so the DISTINCT
+/// materialisation sorts on that already-materialised projected slot rather
+/// than appending and re-evaluating `term` — a re-evaluation that would
+/// misorder a non-deterministic or stateful key (`ORDER BY tick()` against a
+/// projected `tick()`). An ordinal/alias key already names its column and
+/// passes through.
+private func distinct(_ keys: Array<Order.Key>, _ order: Array<SortKey>,
+                      _ projection: Array<Term>)
+    throws(SQLError) -> Array<SortKey> {
+  var bound = order
+  for index in order.indices where !order[index].output {
+    guard let column = projection.firstIndex(of: order[index].term) else {
+      throw .distinct(keys[index].name)
+    }
+    bound[index] = SortKey(term: order[index].term,
+                           ascending: order[index].ascending, column: column)
   }
-  for index in order.indices where !output.contains(order[index]) {
-    throw .distinct(keys[index].column.name)
-  }
+  return bound
 }
 
 extension Plan {
@@ -523,33 +549,151 @@ extension Plan {
   /// omitting each layer when its clause is absent. The `projection`, `filter`,
   /// and `order` keys are in slot space; an empty `order` omits the sort.
   ///
-  /// Without `distinct` the shape is `Project(Limit(Sort(Select(_))))`: the row
-  /// `limit` sits BELOW the projection — after `WHERE` and `ORDER BY`, but
-  /// before the select list is evaluated. A row outside the requested page is
+  /// Without `distinct` and with no `ORDER BY` key naming a select-list OUTPUT
+  /// (an ordinal or an output alias), the shape is `Project(Limit(Sort(_)))`:
+  /// the row `limit` sits BELOW the projection — after `WHERE` and `ORDER BY`
+  /// but before the select list runs. A row outside the requested page is
   /// dropped by the limit before its projection runs, so a projection that
   /// could throw (`SELECT 1 / 0 … FETCH FIRST 0 ROWS ONLY`) never evaluates for
   /// a discarded row and the query returns the documented empty page.
   ///
+  /// When an `ORDER BY` key names a select-list output over a COMPUTED
+  /// expression (`SELECT next() AS n … ORDER BY n`), reusing the projection
+  /// term as the pre-projection sort key would evaluate that expression twice
+  /// — once to order, once to project — so a non-deterministic or stateful
+  /// routine sorts on one set of values and returns a second, misordering the
+  /// result. `materialised` instead computes the sort-referenced outputs ONCE
+  /// below the sort and orders an output key by that column, then a
+  /// final projection reads those SAME values it sorted on (and computes the
+  /// remaining, unreferenced outputs above the cap). `shaped` takes that shape
+  /// exactly when a key names an output; a pure input-key `ORDER BY` keeps the
+  /// simpler `Project(Sort(_))` (its keys need input columns the materialised
+  /// row has projected away).
+  ///
   /// With `distinct` (`SELECT DISTINCT`) the dedup runs on the projected rows —
   /// after `ORDER BY`, before `OFFSET`/`FETCH` (the ISO order) — so the shape
-  /// is `Limit(Distinct(Project(Sort(Select(_)))))`: the projection loses its
-  /// cap (every candidate row must be projected to dedup it), the `distinct`
-  /// dedups the projected rows, and the `limit` pages the deduplicated result.
+  /// is `Limit(Distinct(Project(Sort(_))))`: the projection loses its cap
+  /// (every candidate row must be projected to dedup it), the `distinct` dedups
+  /// the projected rows, and the `limit` pages the deduplicated result. Its
+  /// `ORDER BY` keys are all output values (the `distinct` rule), so the sort
+  /// runs over the materialised projection here too.
   internal func shaped(distinct: Bool = false, projection: Array<Term>,
-                       filter: Filter?,
-                       order: Array<(slot: Int, ascending: Bool)>,
+                       filter: Filter?, order: Array<SortKey>,
                        limit: Limit?) -> Plan {
     var plan = self
     if let filter {
       plan = .select(filter, plan)
     }
+
+    // An output key names a materialised projection column; sorting on the
+    // recomputed projection term instead would double-evaluate it (WRONG for a
+    // non-deterministic routine). Materialise the sort-referenced outputs once
+    // below the sort, so the order reflects the returned values whenever a key
+    // does — over the FILTERED `plan`, so a HAVING/WHERE above governs.
+    guard !order.contains(where: { $0.output }) else {
+      return plan.materialised(distinct: distinct, projection: projection,
+                               order: order, limit: limit)
+    }
+
     if !order.isEmpty {
-      plan = .sort(keys: order, plan)
+      let keys = order.map { (term: $0.term, ascending: $0.ascending) }
+      plan = .sort(keys: keys, plan)
     }
     guard distinct else {
       return .project(projection, plan.capped(limit: limit))
     }
     return Plan.distinct(.project(projection, plan)).capped(limit: limit)
+  }
+
+  /// This plan (already filtered) shaped so an `ORDER BY` key naming an OUTPUT
+  /// sorts on exactly the value that output returns, computing each such output
+  /// EXACTLY ONCE — the single-evaluation shape `shaped` picks when a key
+  /// references the select list.
+  ///
+  /// Only the sort-REFERENCED outputs are materialised below the sort. A `map`
+  /// projection retains the input columns (slots `0 ..< self.slots`) and
+  /// appends one materialised column per output an ORDER BY key names, then one
+  /// per ordinary INPUT sort key (an `ORDER BY a + b` over non-projected
+  /// columns still needs its input terms). The sort orders by slots into that
+  /// row — an output key by its materialised column, an input key by its
+  /// appended (or existing input) column — so a computed output key is
+  /// evaluated once and its sort value equals the value the row returns.
+  ///
+  /// The final projection produces each output from that row: a sort-referenced
+  /// output READS its materialised slot (never recomputed, preserving the
+  /// single evaluation), and any OTHER output computes its expression from the
+  /// retained input columns. Without `distinct` this final projection sits
+  /// above the cap, so an unreferenced output (`SELECT x, 1 / 0 … ORDER BY x
+  /// FETCH FIRST 0 ROWS`) evaluates only for rows the limit keeps — never for a
+  /// dropped row, restoring the lazy `Project(Limit(_))` page the all-outputs
+  /// shape regressed.
+  ///
+  /// With `distinct` the dedup runs on the WHOLE projected row, so every output
+  /// (not only the sort-referenced ones) is materialised BELOW the distinct —
+  /// the lazy split would dedup on a partial row. The `distinct` then dedups
+  /// the projected rows and `limit` pages the deduplicated result.
+  private func materialised(distinct: Bool, projection: Array<Term>,
+                            order: Array<SortKey>, limit: Limit?) -> Plan {
+    let width = projection.count
+
+    // Under DISTINCT the dedup needs the full projected row, so materialise
+    // every output below the sort (the sort keys are all outputs here) and let
+    // the distinct dedup and the limit page the projected rows.
+    if distinct {
+      var lower = projection
+      var keys = Array<(term: Term, ascending: Bool)>()
+      keys.reserveCapacity(order.count)
+      for key in order {
+        if let column = key.column {
+          keys.append((term: .slot(column), ascending: key.ascending))
+        } else {
+          keys.append((term: .slot(lower.count), ascending: key.ascending))
+          lower.append(key.term)
+        }
+      }
+      let sorted = Plan.sort(keys: keys, .project(lower, self))
+      let outputs = (0 ..< width).map { Term.slot($0) }
+      return Plan.distinct(.project(outputs, sorted)).capped(limit: limit)
+    }
+
+    // Retain the input columns, then append only the outputs an ORDER BY key
+    // names (materialised once) and the input-only sort-key expressions. A
+    // non-sort output stays out of this row — it is computed above the limit.
+    let inputs = slots ?? 0
+    var lower = (0 ..< inputs).map { Term.slot($0) }
+    var materialised = Dictionary<Int, Int>()
+    var keys = Array<(term: Term, ascending: Bool)>()
+    keys.reserveCapacity(order.count)
+    for key in order {
+      if let column = key.column {
+        // Materialise this output once, reusing its slot if an earlier key
+        // named it too, and order by that slot.
+        let slot: Int
+        if let existing = materialised[column] {
+          slot = existing
+        } else {
+          slot = lower.count
+          materialised[column] = slot
+          lower.append(projection[column])
+        }
+        keys.append((term: .slot(slot), ascending: key.ascending))
+      } else {
+        keys.append((term: .slot(lower.count), ascending: key.ascending))
+        lower.append(key.term)
+      }
+    }
+
+    let sorted = Plan.sort(keys: keys, .project(lower, self))
+    // Each output reads its materialised slot when a key named it, else
+    // computes its expression from the retained inputs (above the cap, lazily).
+    let outputs = (0 ..< width).map { column -> Term in
+      if let slot = materialised[column] {
+        .slot(slot)
+      } else {
+        projection[column]
+      }
+    }
+    return .project(outputs, sorted.capped(limit: limit))
   }
 }
 
@@ -776,8 +920,9 @@ extension Catalog where Self: ~Escapable {
     }
 
     // The `GROUP BY` keys and the aggregate arguments lower to combined
-    // base-ordinal terms; the aggregates are collected from the projection and
-    // the `HAVING` (deduplicated so the same aggregate computes once).
+    // base-ordinal terms; the aggregates are collected from the projection, the
+    // `HAVING`, and the `ORDER BY` sort keys (deduplicated so the same
+    // aggregate computes once).
     let keys = try select.grouping.map { column throws(SQLError) -> Term in
       try .slot(scope.ordinal(of: column))
     }
@@ -788,9 +933,30 @@ extension Catalog where Self: ~Escapable {
     if let having = select.having {
       having.collect(into: &expressions)
     }
+    // A grouped `ORDER BY` may sort on an aggregate that is neither projected
+    // nor in the `HAVING` (`GROUP BY Dept ORDER BY COUNT(*) DESC`), so collect
+    // its sort-key expressions too.
+    if let order = select.order {
+      for key in order.keys {
+        if case let .expression(expression) = key.sort {
+          expression.collect(into: &expressions)
+        }
+      }
+    }
+    // Resolve each collected aggregate and dedup by its RESOLVED
+    // `Aggregation` — function plus resolved argument term. `collect` deduped
+    // only exact AST spellings, so a qualification-equivalent pair
+    // (`SUM(Amount)` projected, `SUM(Sales.Amount)` in the `ORDER BY`) survived
+    // as two expressions; both resolve to the same `Aggregation` in a
+    // single-relation scope, so this folds them into ONE grouped slot — the
+    // aggregate computes once and both clauses read/order that slot (which lets
+    // the DISTINCT sort-key check accept it).
     var aggregations = Array<Aggregation>()
     for expression in expressions {
-      try aggregations.append(expression.aggregation(scope, context.routines))
+      let aggregation = try expression.aggregation(scope, context.routines)
+      if !aggregations.contains(aggregation) {
+        aggregations.append(aggregation)
+      }
     }
 
     // The source materialises exactly the ordinals the WHERE, the keys, and the
@@ -843,38 +1009,35 @@ extension Catalog where Self: ~Escapable {
     // Lower the projection, HAVING, and ORDER BY against the grouped slot space,
     // enforcing the projection rule (every non-aggregated column must be a
     // GROUP BY key).
-    var grouping = try Grouping(scope, select.grouping, expressions)
+    var grouping = try Grouping(scope, select.grouping, aggregations)
     let projection = try grouping.terms(select.projection, context.routines)
     let having: Filter? = if let clause = select.having {
       try grouping.lower(clause, context.routines)
     } else {
       nil
     }
-    let order = if let clause = select.order {
-      try grouping.order(clause)
+    var order = if let clause = select.order {
+      try grouping.order(clause, projection, context.routines)
     } else {
-      Array<(slot: Int, ascending: Bool)>()
+      Array<SortKey>()
     }
 
-    // Under DISTINCT every ORDER BY key must be a select-list column — the
-    // dedup runs on the projected rows, so ordering on a dropped column is
+    // Under DISTINCT every ORDER BY key must be a select-list value — the
+    // dedup runs on the projected rows, so ordering on a dropped value is
     // ill-defined (see `distinct`). The order keys and projection are
     // in grouped-slot space here, aligned with the AST keys index-for-index.
+    // A key matching a projected term is rebound to that projected column so
+    // the sort reuses the materialised slot rather than re-evaluating it.
     if select.distinct, let clause = select.order {
-      try distinct(clause.keys, order.map(\.slot), projection)
+      order = try distinct(clause.keys, order, projection)
     }
 
-    var plan = node
-    if let having {
-      plan = .select(having, plan)
-    }
-    if !order.isEmpty {
-      plan = .sort(keys: order, plan)
-    }
-    guard select.distinct else {
-      return .project(projection, plan.capped(limit: select.limit))
-    }
-    return Plan.distinct(.project(projection, plan)).capped(limit: select.limit)
+    // The HAVING filters groups below the sort, the slot the WHERE occupies on
+    // the non-aggregate path, so the shared `shaped` applies it identically —
+    // an ORDER BY key naming a COMPUTED aggregate output (`COUNT(*) * 2 AS n`)
+    // then materialises once and sorts on the returned value.
+    return node.shaped(distinct: select.distinct, projection: projection,
+                       filter: having, order: order, limit: select.limit)
   }
 }
 
@@ -1927,20 +2090,29 @@ extension Catalog where Self: ~Escapable {
         filter = try from.schema.lower(predicate, in: relation,
                                        context.routines)
       }
-      var order = Array<(column: Int, ascending: Bool)>()
-      if let clause = select.order {
-        order = try from.schema.order(clause, in: relation)
-      }
       let projection =
           try from.schema.terms(select.projection, in: relation,
                                 context.routines)
 
-      // Under DISTINCT every ORDER BY key must be a select-list column — the
-      // dedup runs on the projected rows, so ordering on a dropped column is
+      // The ORDER BY lowers its keys against the projection: an ordinal or an
+      // output-alias key resolves to a select-list item's own term, an ordinary
+      // expression key lowers fresh over the source. Its terms and the
+      // projection are still in base-ordinal space here.
+      var order = Array<SortKey>()
+      if let clause = select.order {
+        let names = select.projection.outputs(count: projection.count)
+        order = try from.schema.order(clause, in: relation, projection, names,
+                                      context.routines)
+      }
+
+      // Under DISTINCT every ORDER BY key must be a select-list value — the
+      // dedup runs on the projected rows, so ordering on a dropped value is
       // ill-defined (see `distinct`). The order keys and projection are
-      // still in base-ordinal space here, aligned with the AST keys by index.
+      // aligned with the AST keys by index. A key matching a projected term is
+      // rebound to that projected column so the sort reuses the materialised
+      // slot rather than re-evaluating it.
       if select.distinct, let clause = select.order {
-        try distinct(clause.keys, order.map(\.column), projection)
+        order = try distinct(clause.keys, order, projection)
       }
 
       // The referenced ordinals, in slot order: slot `i` is `ordinals[i]`.
@@ -1951,7 +2123,7 @@ extension Catalog where Self: ~Escapable {
           distinct: select.distinct,
           projection: projection.map { $0.remapped(through: slot) },
           filter: filter.map { $0.remapped(through: slot) },
-          order: order.map { (slot[$0.column]!, $0.ascending) },
+          order: order.map { $0.remapped(through: slot) },
           limit: select.limit)
     }
 
@@ -1993,17 +2165,26 @@ extension Catalog where Self: ~Escapable {
     if let clause = select.predicate {
       predicate = try scope.lower(clause, context.routines)
     }
-    var order = Array<(column: Int, ascending: Bool)>()
-    if let clause = select.order {
-      order = try scope.order(clause)
-    }
     let projection = try scope.terms(select.projection, context.routines)
 
-    // Under DISTINCT every ORDER BY key must be a select-list column (see
+    // The ORDER BY lowers its keys against the projection (as the
+    // single-relation path does): an ordinal or an output-alias key resolves to
+    // a select-list item's own term, an ordinary expression key lowers fresh
+    // over the chain. Its terms and the projection are in combined base-ordinal
+    // space here.
+    var order = Array<SortKey>()
+    if let clause = select.order {
+      let names = select.projection.outputs(count: projection.count)
+      order = try scope.order(clause, projection, names, context.routines)
+    }
+
+    // Under DISTINCT every ORDER BY key must be a select-list value (see
     // `distinct`); order keys and projection are in combined base-ordinal
-    // space here, aligned with the AST keys index-for-index.
+    // space here, aligned with the AST keys index-for-index. A key matching a
+    // projected term is rebound to that projected column so the sort reuses the
+    // materialised slot rather than re-evaluating it.
     if select.distinct, let clause = select.order {
-      try distinct(clause.keys, order.map(\.column), projection)
+      order = try distinct(clause.keys, order, projection)
     }
 
     // The combined referenced ordinals — projection ∪ every match ∪ WHERE ∪
@@ -2014,7 +2195,7 @@ extension Catalog where Self: ~Escapable {
     for term in projection { term.references(into: &references) }
     for match in matches { match.references(into: &references) }
     predicate?.references(into: &references)
-    for key in order { references.insert(key.column) }
+    for key in order { key.term.references(into: &references) }
     let combined = references.sorted()
 
     var slot = Dictionary<Int, Int>(minimumCapacity: combined.count)
@@ -2055,7 +2236,7 @@ extension Catalog where Self: ~Escapable {
         distinct: select.distinct,
         projection: projection.map { $0.remapped(through: slot) },
         filter: predicate.map { $0.remapped(through: slot) },
-        order: order.map { (slot[$0.column]!, $0.ascending) },
+        order: order.map { $0.remapped(through: slot) },
         limit: select.limit)
   }
 }

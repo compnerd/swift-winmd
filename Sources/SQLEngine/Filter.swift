@@ -15,7 +15,7 @@ public typealias Bindings = Dictionary<String, Value>
 /// off a bare slot before running it. The filter is fully
 /// escapable; the `~Escapable` row it reads materialises only transiently at
 /// evaluation.
-internal indirect enum Filter: Sendable {
+internal indirect enum Filter: Equatable, Sendable {
   /// `left <op> right`, both operands lowered to ordinal-addressed terms (a
   /// slot, a constant, or a scalar-function call).
   case compare(Term, Comparison, Term)
@@ -87,7 +87,7 @@ internal indirect enum Filter: Sendable {
   /// bindings — the lowered form of the AST's `Predicate.Operand`, as
   /// `Filter.bound` carries a comparison's parameter as a name resolved at run
   /// time.
-  internal enum Operand: Sendable {
+  internal enum Operand: Equatable, Sendable {
     /// A `Term` evaluated against the row per its usual lowering.
     case term(Term)
     /// A `:parameter` name, resolved from the bindings at eval — an unbound one
@@ -106,7 +106,7 @@ internal indirect enum Filter: Sendable {
 /// projected expression to a `Term` the executor evaluates per record against
 /// the routines; a bare-column projection lowers to a `.slot`, so the simple
 /// path stays a plain slot read.
-internal indirect enum Term: Sendable {
+internal indirect enum Term: Equatable, Sendable {
   /// The cell at `slot` of the record.
   case slot(Int)
   /// A constant value.
@@ -149,6 +149,43 @@ internal indirect enum Term: Sendable {
 }
 
 extension Term {
+  /// Structural equality over two lowered terms — the RESOLVED form column
+  /// qualification has already normalized to a slot — so a `DISTINCT` ORDER BY
+  /// key can be recognised as one of the projected select-list values it must
+  /// order on (see `distinct`). The compiler cannot synthesise `Equatable` for
+  /// `Term`: the `.case` payload is an `Array<(Filter, Term)>` of tuples, and a
+  /// tuple is not `Equatable`, so the array is not either. Every other case has
+  /// `Equatable` components (the leaf `Value`/`ValueType`/`Arithmetic` are
+  /// `Hashable`, and `Filter`/`Term` conform here), so only the `.case` branch
+  /// needs the element-wise tuple comparison spelled out.
+  internal static func ==(lhs: Term, rhs: Term) -> Bool {
+    switch (lhs, rhs) {
+    case let (.slot(lhs), .slot(rhs)):
+      lhs == rhs
+    case let (.constant(lhs), .constant(rhs)):
+      lhs == rhs
+    case let (.apply(lname, largs), .apply(rname, rargs)):
+      lname == rname && largs == rargs
+    case let (.binary(lop, ll, lr), .binary(rop, rl, rr)):
+      lop == rop && ll == rl && lr == rr
+    case let (.case(lbranches, lelse, ltype),
+              .case(rbranches, relse, rtype)):
+      ltype == rtype && lelse == relse
+          && lbranches.count == rbranches.count
+          && zip(lbranches, rbranches).allSatisfy {
+               $0.0 == $1.0 && $0.1 == $1.1
+             }
+    case let (.cast(lterm, ltype), .cast(rterm, rtype)):
+      lterm == rterm && ltype == rtype
+    case let (.coalesce(lelems, ltype), .coalesce(relems, rtype)):
+      lelems == relems && ltype == rtype
+    case let (.nullif(ll, lr), .nullif(rl, rr)):
+      ll == rl && lr == rr
+    default:
+      false
+    }
+  }
+
   /// The slots this term reads, accumulated into `slots`.
   ///
   /// A `slot` reads itself; a `constant` reads none; an `apply` reads the union

@@ -147,21 +147,119 @@ private func lower(_ operand: Predicate.Operand,
   }
 }
 
+/// One resolved sort key — a lowered `Term`, its direction, and the
+/// SELECT-list output column it names (when it names one).
+///
+/// `term` is the value the sort evaluates per record, `ascending` its own
+/// direction. `column` records the 0-based projection column an ORDINAL or an
+/// output ALIAS names — the two forms that reference the select list by
+/// construction — and is `nil` for an ordinary INPUT expression. `shaped`
+/// materialises each projected output ONCE below the sort and orders an output
+/// key by that materialised column (`slot(column)`), so a computed output is
+/// sorted on exactly the value it returns rather than recomputed by the sort.
+/// A non-deterministic or stateful routine would otherwise sort on one set of
+/// values and return a second, misordering the result. The `SELECT DISTINCT`
+/// ordering check reads `output`, since an output key is well-defined over the
+/// deduplicated rows (its value is constant across a dedup group) whether its
+/// term is a bare column or not.
+internal struct SortKey {
+  /// The value this key orders on.
+  let term: Term
+
+  /// Whether this key is ascending (`ASC`) rather than descending (`DESC`).
+  let ascending: Bool
+
+  /// The 0-based projection column this key names (an ordinal or an output
+  /// alias), or `nil` for an ordinary input expression.
+  let column: Int?
+
+  /// Whether this key references a SELECT-list output (an ordinal or an output
+  /// alias) rather than an ordinary input expression.
+  var output: Bool { column != nil }
+
+  /// This key with its `term` ordinals remapped to slots through `slot`. The
+  /// `column` is a projection-list index, not an ordinal, so it is unchanged.
+  internal func remapped(through slot: Dictionary<Int, Int>) -> SortKey {
+    SortKey(term: term.remapped(through: slot), ascending: ascending,
+            column: column)
+  }
+}
+
 /// The resolved sort keys `order` lowers to, in major-to-minor order — each
-/// key's column resolved to an ordinal through `ordinal` and its direction
-/// preserved.
+/// key's ISO `<sort key>` lowered to a `Term` and its direction preserved.
 ///
 /// A single relation and a join scope share this shape, differing only in how a
-/// key's column resolves to an ordinal (against one schema, or a combined join
-/// space); each caller supplies that resolution as `ordinal`. A grouped scope
-/// orders on projection aliases and grouped slots, so it does not share it.
-private func order(_ order: Order,
-                   ordinal: (Column) throws(SQLError) -> Int)
-    throws(SQLError) -> Array<(column: Int, ascending: Bool)> {
-  var keys = Array<(column: Int, ascending: Bool)>()
+/// key's `expression` lowers to an ordinal-addressed `Term` (against one
+/// schema, or a combined join space); each caller supplies that lowering as
+/// `term`. The grouped scope orders in a different (grouped-slot) space, so it
+/// does not share this.
+///
+/// The three sort-key forms resolve as:
+///
+/// - `ordinal(n)` names the query's `n`-th projected OUTPUT column (1-based).
+///   It resolves to that projection item's already-lowered `Term`
+///   (`projection[n - 1]`) — the SAME expression the select list computes,
+///   re-used over the source rows the sort runs on — so a bare-column ordinal
+///   reads its slot and a computed one (`SELECT a + b … ORDER BY 1`) recomputes
+///   the expression. An `n` outside `1 ... projection.count` faults
+///   `SQLError.column` (spelled as the ordinal), as an unknown column would.
+/// - `expression(.column(name))` with an unqualified `name` is EITHER an output
+///   alias or an input column. A matching output alias wins (the ISO precedence
+///   for a bare `ORDER BY` name), resolving to that projection item's lowered
+///   `Term`; absent an alias, the name lowers as an ordinary input column
+///   through `term`. A qualified column (`t.x`) is always an input reference.
+/// - Any other `expression(e)` lowers directly over the input columns through
+///   `term`.
+///
+/// `names` are the projection's per-item explicit-`AS` output aliases (else
+/// `nil`), aligned index-for-index with `projection`. Only an explicit `AS`
+/// introduces an alias a bare `ORDER BY` name may bind, so the surface is
+/// REPRESENTATION-INDEPENDENT — a bare projected column contributes no output
+/// name and `ORDER BY` resolves it as an input column whether the projection is
+/// a `columns` or an `expressions` list. An alias two items share has no single
+/// term to order on — the two aliases may compute different values, so the
+/// result must not depend on select-list order — and a bare `ORDER BY` name
+/// matching it is `SQLError.ambiguous`, as the grouped `Grouping.order` does.
+private func order(_ order: Order, _ projection: Array<Term>,
+                   _ names: Array<String?>,
+                   term: (Expression) throws(SQLError) -> Term)
+    throws(SQLError) -> Array<SortKey> {
+  // Output aliases two or more projected items share, lowercased. A bare
+  // `ORDER BY` name matching one is ambiguous rather than a silent first-match.
+  var seen = Set<String>()
+  var ambiguous = Set<String>()
+  for name in names.compactMap({ $0?.lowercased() }) {
+    if !seen.insert(name).inserted { ambiguous.insert(name) }
+  }
+  var keys = Array<SortKey>()
   keys.reserveCapacity(order.keys.count)
   for key in order.keys {
-    try keys.append((column: ordinal(key.column), ascending: key.ascending))
+    let resolved: Term
+    let column: Int?
+    switch key.sort {
+    case let .ordinal(position):
+      guard position >= 1, position <= projection.count else {
+        throw .column("\(position)")
+      }
+      resolved = projection[position - 1]
+      column = position - 1
+    case let .expression(expression):
+      if case let .column(name) = expression, name.qualifier == nil,
+          let index = names.firstIndex(where: {
+            $0?.lowercased() == name.name.lowercased()
+          }) {
+        if ambiguous.contains(name.name.lowercased()) {
+          throw .ambiguous(name.name)
+        }
+        resolved = projection[index]
+        column = index
+      } else {
+        resolved = try term(expression)
+        column = nil
+      }
+    }
+    keys.append(SortKey(term: resolved, ascending: key.ascending,
+                        column: column))
   }
   return keys
 }
@@ -229,7 +327,13 @@ extension Schema {
       for argument in arguments {
         try lowered.append(term(argument, in: relation, routines))
       }
-      return .apply(name: name, arguments: lowered)
+      // Case-fold the routine name to the SQL identifier rule the `Routines`
+      // lookup uses (lowercase), so two calls that spell the same routine with
+      // different case — `UPPER(x)` and `upper(x)` — lower to an IDENTICAL
+      // `.apply` term. Term identity then agrees with dispatch (which folds on
+      // lookup), so the DISTINCT ORDER BY guard's projected-term match, the
+      // aggregate dedup, and every other term comparison stay consistent.
+      return .apply(name: name.lowercased(), arguments: lowered)
     case let .binary(op, lhs, rhs):
       return try .binary(op, term(lhs, in: relation, routines),
                          term(rhs, in: relation, routines))
@@ -284,11 +388,20 @@ extension Schema {
   }
 
   /// The resolved sort keys an `ORDER BY` lowers to, in major-to-minor order —
-  /// each key's column an ordinal in this relation, its direction preserved.
-  internal func order(_ order: Order, in relation: Relation)
-      throws(SQLError) -> Array<(column: Int, ascending: Bool)> {
-    try SQLEngine.order(order) { column throws(SQLError) in
-      try ordinal(of: column, in: relation)
+  /// each key's ISO `<sort key>` a `Term` over this relation's ordinals, its
+  /// direction preserved.
+  ///
+  /// `projection` are the query's already-lowered projection terms and `names`
+  /// their output names, so an ordinal or an output-alias key resolves to the
+  /// matching select-list item's `Term` and an ordinary expression key lowers
+  /// fresh over this relation (see the free `order`).
+  internal func order(_ order: Order, in relation: Relation,
+                      _ projection: Array<Term>, _ names: Array<String?>,
+                      _ routines: Routines = [:])
+      throws(SQLError) -> Array<SortKey> {
+    try SQLEngine.order(order, projection, names) {
+      expression throws(SQLError) in
+      try term(expression, in: relation, routines)
     }
   }
 
@@ -355,6 +468,23 @@ internal struct Scope {
   /// `SELECT *`.
   internal var schemas: Array<Schema> {
     members.map(\.schema)
+  }
+
+  /// The number of output columns `projection` yields over this scope — the
+  /// count the lowered `terms(projection)` array carries, and the range a
+  /// 1-based `ORDER BY` ordinal must fall in. A `*` expands to every relation's
+  /// real `width` in chain order (never a virtual column); a bare-column or an
+  /// expression list is its item count. It reads only schemas, matching the
+  /// compile path's `projection.count` without lowering a term.
+  internal func width(of projection: Projection) -> Int {
+    switch projection {
+    case .all:
+      return schemas.reduce(0) { $0 + $1.width }
+    case let .columns(columns):
+      return columns.count
+    case let .expressions(items):
+      return items.count
+    }
   }
 
   /// The value type of the real column at combined `ordinal` — the type the
@@ -1830,7 +1960,10 @@ internal struct Scope {
       for argument in arguments {
         try lowered.append(term(argument, routines))
       }
-      return .apply(name: name, arguments: lowered)
+      // Case-fold the routine name to the identifier rule the lookup uses, so
+      // equivalent-case calls lower to an identical term (see the primary
+      // `term(_:in:_:)`).
+      return .apply(name: name.lowercased(), arguments: lowered)
     case let .binary(op, lhs, rhs):
       return try .binary(op, term(lhs, routines), term(rhs, routines))
     case let .case(whens, otherwise):
@@ -1879,12 +2012,19 @@ internal struct Scope {
   }
 
   /// The resolved sort keys an `ORDER BY` lowers to, in major-to-minor order —
-  /// each key's column a combined ordinal across the chain, its direction
-  /// preserved.
-  internal func order(_ order: Order) throws(SQLError)
-      -> Array<(column: Int, ascending: Bool)> {
-    try SQLEngine.order(order) { column throws(SQLError) in
-      try ordinal(of: column)
+  /// each key's ISO `<sort key>` a `Term` over the chain's combined ordinals,
+  /// its direction preserved.
+  ///
+  /// `projection` are the query's already-lowered projection terms and `names`
+  /// their output names, so an ordinal or an output-alias key resolves to the
+  /// matching select-list item's `Term` and an ordinary expression key lowers
+  /// fresh over the chain (see the free `order`).
+  internal func order(_ order: Order, _ projection: Array<Term>,
+                      _ names: Array<String?>, _ routines: Routines = [:])
+      throws(SQLError) -> Array<SortKey> {
+    try SQLEngine.order(order, projection, names) {
+      expression throws(SQLError) in
+      try term(expression, routines)
     }
   }
 
@@ -1989,14 +2129,26 @@ internal struct Grouping {
   /// key `i` sits at grouped slot `i`.
   private let keys: Dictionary<Int, Int>
 
-  /// The distinct aggregate expressions mapped to their grouped slots — aggregate
-  /// `j` sits at grouped slot `keys.count + j`.
-  private let aggregates: Dictionary<Expression, Int>
+  /// The number of `GROUP BY` keys — aggregate `j` sits at grouped slot
+  /// `offset + j`, following the key slots.
+  private let offset: Int
+
+  /// The query's distinct aggregations, in first-appearance order — aggregate
+  /// `j` sits at grouped slot `offset + j`. Deduped by RESOLVED `Aggregation`
+  /// (function + resolved argument term), so an aggregate expression's grouped
+  /// slot is found by resolving it and matching here — a
+  /// qualification-equivalent aggregate (`SUM(Amount)` vs `SUM(Sales.Amount)`)
+  /// maps to the SAME slot.
+  private let aggregates: Array<Aggregation>
 
   /// Each projected item's output name (an alias, else a bare column's name),
-  /// lowercased, mapped to its grouped term — the surface an `ORDER BY` names a
-  /// projection alias against.
-  private var aliases: Dictionary<String, Term> = [:]
+  /// lowercased, mapped to its grouped term and its 0-based projection column
+  /// — the surface an `ORDER BY` names a projection alias against. The `column`
+  /// is the position the name occupies in the select list, so an `ORDER BY`
+  /// alias sorts on exactly the output that name introduces even when two items
+  /// share one term (two calls to a `deterministic: false` routine) under
+  /// distinct aliases — a term-only lookup would collapse to the first column.
+  private var aliases: Dictionary<String, (term: Term, column: Int)> = [:]
 
   /// Output names two or more projected items share, lowercased. An `ORDER BY`
   /// that names one has no single slot to order on — the same ambiguity the
@@ -2006,26 +2158,31 @@ internal struct Grouping {
 
   /// Builds a grouping over `scope` for the `GROUP BY` `columns` and the
   /// query's distinct `aggregates` (in first-appearance order — aggregate `j` at
-  /// grouped slot `columns.count + j`).
+  /// grouped slot `columns.count + j`). The `aggregates` are already deduped by
+  /// RESOLVED `Aggregation` (see `group`), so a qualification-equivalent pair
+  /// is one entry sharing one slot.
   internal init(_ scope: Scope, _ columns: Array<Column>,
-                _ aggregates: Array<Expression>) throws(SQLError) {
+                _ aggregates: Array<Aggregation>) throws(SQLError) {
     self.scope = scope
     var keys = Dictionary<Int, Int>(minimumCapacity: columns.count)
     for index in columns.indices {
       try keys[scope.ordinal(of: columns[index])] = index
     }
     self.keys = keys
-    var map = Dictionary<Expression, Int>(minimumCapacity: aggregates.count)
-    for index in aggregates.indices {
-      map[aggregates[index]] = columns.count + index
-    }
-    self.aggregates = map
+    self.offset = columns.count
+    self.aggregates = aggregates
   }
 
-  /// The grouped slot an aggregate expression resolves to (an aggregate the
-  /// query collected), or `nil` if it is not one.
-  private func slot(of aggregate: Expression) -> Int? {
-    aggregates[aggregate]
+  /// The grouped slot an aggregate `expression` resolves to (an aggregate the
+  /// query collected), or `nil` if it is not one. The expression is RESOLVED to
+  /// an `Aggregation` — column qualification normalized to a slot — and matched
+  /// against the collected aggregations, so `SUM(Amount)` and
+  /// `SUM(Sales.Amount)` find the same slot in a single-relation scope.
+  private func slot(of expression: Expression, _ routines: Routines = [:])
+      throws(SQLError) -> Int? {
+    guard case .aggregate = expression else { return nil }
+    let aggregation = try expression.aggregation(scope, routines)
+    return aggregates.firstIndex(of: aggregation).map { offset + $0 }
   }
 
   /// Lowers a scalar `expression` to a grouped-space `Term`.
@@ -2036,7 +2193,8 @@ internal struct Grouping {
   /// standard rule.
   private func term(_ expression: Expression,
                     _ routines: Routines = [:]) throws(SQLError) -> Term {
-    if case .aggregate = expression, let slot = slot(of: expression) {
+    if case .aggregate = expression,
+       let slot = try slot(of: expression, routines) {
       return .slot(slot)
     }
     switch expression {
@@ -2052,7 +2210,10 @@ internal struct Grouping {
       for argument in arguments {
         try lowered.append(term(argument, routines))
       }
-      return .apply(name: name, arguments: lowered)
+      // Case-fold the routine name to the identifier rule the lookup uses, so
+      // equivalent-case calls lower to an identical term (see the primary
+      // `term(_:in:_:)`).
+      return .apply(name: name.lowercased(), arguments: lowered)
     case let .binary(op, lhs, rhs):
       return try .binary(op, term(lhs, routines), term(rhs, routines))
     case let .case(whens, otherwise):
@@ -2101,11 +2262,13 @@ internal struct Grouping {
     }
   }
 
-  /// Records a projected item's output `name` → grouped `term`, flagging the
-  /// name ambiguous if another projected item already claimed it.
-  private mutating func record(_ name: String, _ term: Term) {
+  /// Records a projected item's output `name` at projection `column` → its
+  /// grouped `term`, flagging the name ambiguous if another projected item
+  /// already claimed it.
+  private mutating func record(_ name: String, _ column: Int, _ term: Term) {
     let key = name.lowercased()
-    if aliases.updateValue(term, forKey: key) != nil { ambiguous.insert(key) }
+    let entry = (term: term, column: column)
+    if aliases.updateValue(entry, forKey: key) != nil { ambiguous.insert(key) }
   }
 
   /// The grouped-space projected terms, recording each item's output name for an
@@ -2126,22 +2289,22 @@ internal struct Grouping {
     case let .columns(columns):
       var terms = Array<Term>()
       terms.reserveCapacity(columns.count)
-      for column in columns {
-        let term = try term(.column(column), routines)
+      for index in columns.indices {
+        let term = try term(.column(columns[index]), routines)
         terms.append(term)
-        record(column.name, term)
+        record(columns[index].name, index, term)
       }
       return terms
     case let .expressions(items):
       var terms = Array<Term>()
       terms.reserveCapacity(items.count)
-      for item in items {
-        let term = try term(item.expression, routines)
+      for index in items.indices {
+        let term = try term(items[index].expression, routines)
         terms.append(term)
         // Record the output name (`Projected.name` — an alias, else a bare
         // column's name) so an `ORDER BY` may name it (the standard alias
         // ordering on an aggregate); a computed item names nothing.
-        if let name = item.name { record(name, term) }
+        if let name = items[index].name { record(name, index, term) }
       }
       return terms
     }
@@ -2155,45 +2318,69 @@ internal struct Grouping {
     }
   }
 
-  /// The `(slot, ascending)` keys an `ORDER BY` resolves to in grouped
-  /// space, major to minor.
+  /// The resolved sort keys an `ORDER BY` lowers to in grouped space, major to
+  /// minor — each key's ISO `<sort key>` a `Term` over the grouped record's
+  /// slots, its direction preserved.
   ///
-  /// Each order column names a projection output first — an alias, or a bare
-  /// column's name (`terms` recorded these), the standard way to order on an
-  /// aggregate — else a `GROUP BY` key column. A column that is neither is
-  /// `SQLError.grouping`, as a bare non-key column is meaningless over groups.
+  /// Each sort key resolves as, in order:
   ///
-  /// The `sort` operator orders by grouped slots, so an alias resolves only
-  /// when its projected term is a bare `.slot` — a plain group key or a whole
-  /// aggregate (`SUM(x) AS Total`). An alias over a COMPUTED expression
-  /// (`COUNT(*) * 2 AS Doubled`) has no standalone slot to sort on — the
-  /// projection computes it after the sort — so ordering on it is unsupported
-  /// rather than misreported as an unknown column.
-  internal func order(_ order: Order) throws(SQLError)
-      -> Array<(slot: Int, ascending: Bool)> {
-    var resolved = Array<(slot: Int, ascending: Bool)>()
+  /// - `ordinal(n)` — the query's `n`-th projected OUTPUT column (1-based),
+  ///   resolving to that projection item's own grouped-space `Term`
+  ///   (`projection[n - 1]`). An `n` outside `1 ... projection.count` faults
+  ///   `SQLError.column`.
+  /// - `expression(.column(name))` with an unqualified `name` — a projection
+  ///   OUTPUT alias FIRST (the standard alias ordering on an aggregate, `terms`
+  ///   recorded these), then a `GROUP BY` key column, both resolving to their
+  ///   grouped `Term`. A name two projections share is `SQLError.ambiguous`, as
+  ///   the non-grouped `Scope.order` reports for a shared join column.
+  /// - Any other `expression(e)` — an arithmetic over aggregates or keys
+  ///   (`ORDER BY COUNT(*) * 2`, `ORDER BY SUM(x) DESC`) — lowered through
+  ///   `term` into grouped space, so it may name only aggregates and `GROUP BY`
+  ///   keys (a bare non-key column faults `SQLError.grouping`).
+  ///
+  /// Because the `sort` operator now evaluates a `Term` per grouped record
+  /// rather than reading one slot, an alias over a COMPUTED expression
+  /// (`COUNT(*) * 2 AS Doubled`) orders correctly — its recorded grouped term
+  /// recomputes from the group's key and aggregate slots — where the slot-only
+  /// sort once rejected it.
+  ///
+  /// `projection` are the query's already-lowered grouped-space projection
+  /// terms — the ordinal surface the positional keys resolve against; the alias
+  /// and `GROUP BY` surfaces are the `aliases` and `keys` `terms` recorded.
+  internal func order(_ order: Order, _ projection: Array<Term>,
+                      _ routines: Routines = [:])
+      throws(SQLError) -> Array<SortKey> {
+    var resolved = Array<SortKey>()
     resolved.reserveCapacity(order.keys.count)
     for key in order.keys {
-      if key.column.qualifier == nil {
-        let name = key.column.name.lowercased()
-        // A name two projections share has no single slot to order on — reject
-        // it as ambiguous rather than pick the last, matching the non-grouped
-        // `Scope.order` fault for a shared unqualified join column.
-        if ambiguous.contains(name) { throw .ambiguous(key.column.name) }
-        if let term = aliases[name] {
-          guard case let .slot(slot) = term else {
-            throw .unsupported(
-                "ORDER BY on a computed column alias is not supported")
-          }
-          resolved.append((slot, key.ascending))
-          continue
+      switch key.sort {
+      case let .ordinal(position):
+        guard position >= 1, position <= projection.count else {
+          throw .column("\(position)")
         }
+        resolved.append(SortKey(term: projection[position - 1],
+                                ascending: key.ascending,
+                                column: position - 1))
+      case let .expression(expression):
+        if case let .column(reference) = expression,
+            reference.qualifier == nil {
+          let name = reference.name.lowercased()
+          // A name two projections share has no single term to order on —
+          // reject it as ambiguous rather than pick the last, matching the
+          // non-grouped `Scope.order` fault for a shared unqualified column.
+          if ambiguous.contains(name) { throw .ambiguous(reference.name) }
+          if let alias = aliases[name] {
+            // Order on the recorded projection column the alias occupies, not
+            // `firstIndex(of:)` — two items may share a term under distinct
+            // aliases, so a term search would collapse to the first column.
+            resolved.append(SortKey(term: alias.term, ascending: key.ascending,
+                                    column: alias.column))
+            continue
+          }
+        }
+        try resolved.append(SortKey(term: term(expression, routines),
+                                    ascending: key.ascending, column: nil))
       }
-      let ordinal = try scope.ordinal(of: key.column)
-      guard let slot = keys[ordinal] else {
-        throw .grouping(key.column.name)
-      }
-      resolved.append((slot, key.ascending))
     }
     return resolved
   }

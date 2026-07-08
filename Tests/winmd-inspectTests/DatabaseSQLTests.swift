@@ -1131,13 +1131,13 @@ struct DatabaseSQLTests {
   }
 
   @Test func `execute routes a .-token to its meta-command`() throws {
-    // The leading-token dispatch matches `.tables` to `Tables`, which lists the
-    // storage's relations; the fixture's catalog vends them, so `execute`
-    // succeeds. A SQL statement takes the parse path instead — exercised by
-    // `scriptSession` — and `.quit` throws the loop's `Stop` sentinel.
+    // The leading-token dispatch matches `.help` to `Help`, which prints the
+    // command summary, so `execute` succeeds. A SQL statement takes the parse
+    // path instead — exercised by `scriptSession` — and `.quit` throws the
+    // loop's `Stop` sentinel.
     try DatabaseSQLTests.with { catalog in
       var shell = Shell(catalog)
-      try shell.execute(".tables")
+      try shell.execute(".help")
       #expect(throws: Shell.Stop.self) { try shell.execute(".quit") }
     }
   }

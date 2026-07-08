@@ -57,7 +57,6 @@ struct ShellTests {
   @Test func `each meta-command answers to its .-prefixed spelling`() {
     // The leading-token dispatch matches a `.`-token against each `Metacommand`
     // type's `spelling`; these are the tokens `execute` routes on.
-    #expect(Tables.spelling == ".tables")
     #expect(Schema.spelling == ".schema")
     #expect(Help.spelling == ".help")
     #expect(Quit.spelling == ".quit")
@@ -170,10 +169,10 @@ struct ShellTests {
       CREATE VIEW a AS SELECT 1;
         SELECT 2 ;
       ;
-      .tables
+      .help
       """
     #expect(Array(Statements(of: script))
-            == ["CREATE VIEW a AS SELECT 1", "SELECT 2", ".tables"])
+            == ["CREATE VIEW a AS SELECT 1", "SELECT 2", ".help"])
     #expect(Array(Statements(of: "")).isEmpty)
     #expect(Array(Statements(of: "   \n  ")).isEmpty)
   }
@@ -261,7 +260,7 @@ struct ShellTests {
     // A comment-only pending is trivia, so a following `.`-meta line is still
     // recognised as a meta-command rather than glued onto the comment and sent
     // through SQL parsing.
-    #expect(Array(Statements(of: "-- note\n.tables")) == [".tables"])
+    #expect(Array(Statements(of: "-- note\n.help")) == [".help"])
     #expect(Array(Statements(of: "/* note */\n.read a.sql")) == [".read a.sql"])
   }
 
@@ -342,8 +341,8 @@ struct ShellTests {
     // a whitespace-only `pending` counts as nothing, so the `.`-line still
     // yields whole and a following statement stays a separate statement —
     // otherwise the meta-command swallows the SQL as its arguments.
-    #expect(Array(Statements(of: "SELECT 1;\n   \n.tables\nSELECT 2;"))
-            == ["SELECT 1", ".tables", "SELECT 2"])
+    #expect(Array(Statements(of: "SELECT 1;\n   \n.help\nSELECT 2;"))
+            == ["SELECT 1", ".help", "SELECT 2"])
   }
 
   @Test func `the reading stream prompts primary then continuation while pending`() {
@@ -368,12 +367,12 @@ struct ShellTests {
     // Each self-terminating statement (its own `;`) leaves nothing pending, so
     // every prompt before a read is the primary — a `.`-meta line likewise. The
     // final read past the last line sees nothing pending too.
-    var script = ["SELECT 1;", ".tables", "SELECT 2;"].makeIterator()
+    var script = ["SELECT 1;", ".help", "SELECT 2;"].makeIterator()
     var pending = Array<Bool>()
     let statements =
         Statements(reading: { script.next() },
                    prompt: { pending.append($0) })
-    #expect(Array(statements) == ["SELECT 1", ".tables", "SELECT 2"])
+    #expect(Array(statements) == ["SELECT 1", ".help", "SELECT 2"])
     #expect(pending.allSatisfy { $0 == false })
   }
 

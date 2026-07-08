@@ -143,7 +143,8 @@ struct IntrospectionTests {
   @Test func `information_schema.columns lists a view's columns and kinds`() throws {
     // `Adults` is `SELECT Name FROM People` over the `.text` `Name` column, so
     // the overlay lists its one column with the resolved text domain — a
-    // metadata consumer can discover the columns of a view `.tables` reports.
+    // metadata consumer can discover the columns of a view
+    // `information_schema.tables` reports.
     let rows = try run("""
         SELECT column_name, data_type FROM information_schema.columns
          WHERE table_name = 'Adults'

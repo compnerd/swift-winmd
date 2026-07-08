@@ -339,6 +339,30 @@ extension Catalog where Self: ~Escapable {
       throws(SQLError) {
     let routines = context.routines
     let scope = try scope(of: select, context, visited: visited)
+    // An `ORDER BY` ordinal names a 1-based SELECT-list position; one outside
+    // `1 ... width` names no output column and faults `SQLError.column` (spelled
+    // as the ordinal), exactly as the compile path's ordinal resolution does —
+    // structural and reachability-independent, so a row-dropping limit never
+    // spares it. `orderKeys` resolves an IN-RANGE ordinal to its projection
+    // expression but silently drops an out-of-range one, so this raises it here.
+    if let clause = select.order {
+      let width = scope.width(of: select.projection)
+      for key in clause.keys {
+        if case let .ordinal(position) = key.sort,
+            position < 1 || position > width {
+          throw .column("\(position)")
+        }
+      }
+    }
+    // A GROUPED `ORDER BY` sorts in the grouped slot space, so each sort key
+    // must name a `GROUP BY` key, an aggregate, or an output — resolve it
+    // through the SAME grouped lowering the run does, faulting `SQLError.grouping`
+    // on a resolvable-but-non-grouped column exactly as the compile path does.
+    // Structural, so it runs regardless of the WHERE/limit reachability the
+    // operand type-check below tracks.
+    if select.aggregates {
+      try order(grouped: select, scope, routines)
+    }
     if let predicate = select.predicate {
       try scope.check(predicate, routines)
       // A false WHERE filters every row, so a GROUP BY forms no group and a
@@ -372,14 +396,33 @@ extension Catalog where Self: ~Escapable {
           if reachable, case let .expressions(items) = select.projection {
             for item in items { _ = try scope.empty(item.expression, routines) }
           }
+          // The lone empty group is sorted BELOW the limit — the shape is
+          // `Project(Limit(Sort(…)))` — so its ORDER BY keys evaluate over
+          // that group's row UNCONDITIONALLY, ahead of a limit that would drop
+          // the projection: an unknown routine or a divide faults here as a run
+          // would. `orderKeys` resolves an ordinal or an output-name key to the
+          // projection expression the sort recomputes below the limit, so a
+          // projection term reached only via the sort is checked even where the
+          // projection block above is skipped.
+          for expression in select.orderKeys {
+            _ = try scope.empty(expression, routines)
+          }
         }
         return
       }
     }
     // Aggregate folds run before HAVING and any limit, so validate every
-    // aggregate operand in the projection and HAVING unconditionally.
+    // aggregate operand in the projection, HAVING, and ORDER BY
+    // unconditionally. A grouped `ORDER BY` may sort on an aggregate that is
+    // neither projected nor in the `HAVING` (`GROUP BY Dept ORDER BY
+    // COUNT(*)`), which `group` collects into the group plan and folds before
+    // `HAVING` — so its operand and arity are checked here, the same as a
+    // projection or `HAVING` aggregate's.
     if case let .expressions(items) = select.projection {
       for item in items { try scope.aggregates(in: item.expression, routines) }
+    }
+    for expression in select.orderKeys {
+      try scope.aggregates(in: expression, routines)
     }
     if let having = select.having {
       try scope.aggregates(in: having, routines)
@@ -403,6 +446,65 @@ extension Catalog where Self: ~Escapable {
     if reachable, case let .expressions(items) = select.projection {
       for item in items { _ = try scope.validate(item.expression, routines) }
     }
+    // The sort sits BELOW the limit — the shape is `Project(Limit(Sort(…)))`
+    // — so it evaluates every ORDER BY key over the input rows BEFORE the cap
+    // pages them, INDEPENDENT of whether the projection is reachable: a limit
+    // that drops every output row still runs the sort. So validate each key
+    // UNCONDITIONALLY — its calls, arithmetic, and column references exactly
+    // as a projected expression's. `orderKeys` resolves an `ordinal(n)` or an
+    // output-name key to the projection expression the sort recomputes below
+    // the limit, so a projection term reached only through the sort is checked
+    // even where the projection block above is skipped under the limit; a
+    // projection term NO sort key reaches stays correctly unchecked (the
+    // projection never runs under a row-dropping limit).
+    for expression in select.orderKeys {
+      _ = try scope.validate(expression, routines)
+    }
+  }
+
+  /// Resolves a GROUPED `select`'s `ORDER BY` through the SAME grouped lowering
+  /// the compile path applies, so the type-check enforces the GROUP BY rules on
+  /// each sort key exactly as a run does — a bare column must be a `GROUP BY`
+  /// key or occur inside an aggregate, else `SQLError.grouping`; an out-of-range
+  /// ordinal `SQLError.column`; a duplicated output name `SQLError.ambiguous`.
+  ///
+  /// It rebuilds the `Grouping` `group` builds — the `GROUP BY` keys and the
+  /// aggregations collected from the projection, `HAVING`, and the `ORDER BY`
+  /// sort keys, deduped by resolved `Aggregation` — then lowers the projection
+  /// and the `ORDER BY` through it, reusing `Grouping.terms`/`Grouping.order` so
+  /// the two paths cannot drift. It resolves only, reading no cursor; a run's
+  /// operand type-check over the (structurally valid) keys stays the caller's.
+  private borrowing func order(grouped select: Select, _ scope: Scope,
+                               _ routines: Routines) throws(SQLError) {
+    guard let clause = select.order else { return }
+    // Collect the distinct aggregates the grouped plan folds — the projection,
+    // the `HAVING`, and the `ORDER BY` sort-key expressions — then dedup by the
+    // RESOLVED `Aggregation`, exactly as `group` does, so a grouped `ORDER BY`
+    // over an aggregate resolves against the same slot the run folds it into.
+    var expressions = Array<Expression>()
+    for expression in select.projection.projected {
+      expression.collect(into: &expressions)
+    }
+    if let having = select.having { having.collect(into: &expressions) }
+    for key in clause.keys {
+      if case let .expression(expression) = key.sort {
+        expression.collect(into: &expressions)
+      }
+    }
+    var aggregations = Array<Aggregation>()
+    for expression in expressions {
+      let aggregation = try expression.aggregation(scope, routines)
+      if !aggregations.contains(aggregation) {
+        aggregations.append(aggregation)
+      }
+    }
+    // Build the grouping and lower the projection through it to record each
+    // output name (an alias, else a group column's own name) — the surface an
+    // `ORDER BY` output name resolves against — then lower the `ORDER BY`, which
+    // faults a non-group column, an out-of-range ordinal, or an ambiguous name.
+    var grouping = try Grouping(scope, select.grouping, aggregations)
+    let projection = try grouping.terms(select.projection, routines)
+    _ = try grouping.order(clause, projection, routines)
   }
 
   /// Whether `limit` drops the one row a `single`-row result would yield,

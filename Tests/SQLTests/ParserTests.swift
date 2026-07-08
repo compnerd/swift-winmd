@@ -248,6 +248,76 @@ struct OrderTests {
     #expect(select.order?.keys
               == [Order.Key(column: "TypeName", ascending: false)])
   }
+
+  @Test func `parses an integer sort key as an ordinal`() throws {
+    // A bare integer is the ISO output-column ORDINAL, not the constant.
+    let select = try parse(select: "SELECT A, B FROM T ORDER BY 2 DESC")
+    #expect(select.order
+              == Order(keys: [Order.Key(sort: .ordinal(2), ascending: false)]))
+  }
+
+  @Test func `parses an arithmetic sort key as an expression`() throws {
+    let select = try parse(select: "SELECT * FROM T ORDER BY A + B")
+    let sum = Expression.binary(.add, .column("A"), .column("B"))
+    #expect(select.order
+              == Order(keys: [Order.Key(sort: .expression(sum))]))
+  }
+
+  @Test func `parses a call sort key as an expression`() throws {
+    let select = try parse(select: "SELECT * FROM T ORDER BY UPPER(Name) ASC")
+    let call = Expression.call(name: "UPPER", arguments: [.column("Name")])
+    #expect(select.order
+              == Order(keys: [Order.Key(sort: .expression(call))]))
+  }
+
+  @Test func `a bare column sort key is a column expression`() throws {
+    // The convenience `Key(column:)` and the parsed `.expression(.column)` are
+    // the same key — a bare column stays the common shape.
+    let select = try parse(select: "SELECT * FROM T ORDER BY TypeName")
+    #expect(select.order?.keys == [Order.Key(column: "TypeName")])
+  }
+
+  @Test func `a bare integer sort key is an ordinal`() throws {
+    // Only a LONE integer literal is the output-column ordinal — the key
+    // parses as an expression and classifies to `.ordinal` when it is one.
+    let select = try parse(select: "SELECT A, B FROM T ORDER BY 1")
+    #expect(select.order
+              == Order(keys: [Order.Key(sort: .ordinal(1))]))
+  }
+
+  @Test func `an integer-leading arithmetic sort key is an expression`() throws {
+    // `1 + A` leads with an integer but is NOT a bare integer — it must parse
+    // as the arithmetic expression, not an ordinal `1` with `+ A` left over.
+    let select = try parse(select: "SELECT A FROM T ORDER BY 1 + A")
+    let sum = Expression.binary(.add, .literal(.integer(1)), .column("A"))
+    #expect(select.order
+              == Order(keys: [Order.Key(sort: .expression(sum))]))
+  }
+
+  @Test func `an integer-leading product sort key is an expression`() throws {
+    // `2 * Price` likewise classifies as an expression, DESC still attaching.
+    let select =
+        try parse(select: "SELECT Price FROM T ORDER BY 2 * Price DESC")
+    let product = Expression.binary(.multiply, .literal(.integer(2)),
+                                    .column("Price"))
+    #expect(select.order
+              == Order(keys: [Order.Key(sort: .expression(product),
+                                        ascending: false)]))
+  }
+
+  @Test func `a mixed list keeps an ordinal and an integer-leading expression`()
+      throws {
+    // `1` is the ordinal; `Price * 2 DESC` is an expression — the two forms
+    // compose in one list, each carrying its own direction.
+    let select =
+        try parse(select: "SELECT Price FROM T ORDER BY 1, Price * 2 DESC")
+    let product = Expression.binary(.multiply, .column("Price"),
+                                    .literal(.integer(2)))
+    #expect(select.order == Order(keys: [
+      Order.Key(sort: .ordinal(1)),
+      Order.Key(sort: .expression(product), ascending: false),
+    ]))
+  }
 }
 
 struct CompositeTests {
@@ -579,6 +649,19 @@ struct ExpressionTests {
     #expect(select.projection
                 == .expressions([
                   Projected(expression: .column("Name"), alias: "label")
+                ]))
+  }
+
+  @Test func `an AS on one item flips a bare sibling into an unaliased expression`() throws {
+    // Aliasing only the second item forces the whole list into `expressions`,
+    // but the bare first item carries NO alias (`alias: nil`) — so an
+    // `ORDER BY` output-name binding, which considers only explicit aliases,
+    // treats it exactly as it would in a `columns` list.
+    let select = try parse(select: "SELECT Name, Id AS id FROM T")
+    #expect(select.projection
+                == .expressions([
+                  Projected(expression: .column("Name")),
+                  Projected(expression: .column("Id"), alias: "id"),
                 ]))
   }
 

@@ -26,7 +26,16 @@
 /// the SOURCE's slot space (the WHERE/join chain below the aggregate), evaluated
 /// against each source record before the fold; the result lands in the grouped
 /// record.
-internal struct Aggregation {
+///
+/// Two aggregations are EQUAL when they fold the same function over the same
+/// resolved argument term — the RESOLVED form column qualification has already
+/// normalized to a slot, so `SUM(Amount)` and `SUM(Sales.Amount)` in a
+/// single-relation scope are one aggregation. Equality (not `Hashable`, since
+/// `Term` is only `Equatable`) is how the grouped path DEDUPS the aggregates
+/// collected from the projection, the `HAVING`, and the `ORDER BY` into one
+/// grouped slot each, so a qualification-equivalent aggregate written in two
+/// clauses computes once and both clauses order/read the same slot.
+internal struct Aggregation: Equatable {
   /// The aggregate function to fold over the group.
   internal let function: Aggregate
 

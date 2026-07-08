@@ -292,16 +292,16 @@ struct AggregateTests {
         """, yields: [["Games", 90], ["Books", 60], ["Toys", nil]])
   }
 
-  @Test func `ORDER BY on a computed-expression alias is rejected clearly`() throws {
-    // `Doubled` aliases a COMPUTED value (the projection evaluates it after
-    // the sort), so it has no standalone grouped slot to order on — the engine
-    // rejects it as unsupported rather than misreporting an unknown column.
-    #expect(throws: SQLError.self) {
-      try sales().run(Statement(parsing: """
-          SELECT Dept, COUNT(*) * 2 AS Doubled FROM Sales
-            GROUP BY Dept ORDER BY Doubled DESC
-          """))
-    }
+  @Test func `ORDER BY orders on a computed-expression alias`() throws {
+    // `Doubled` aliases a COMPUTED value; the sort now evaluates the alias's
+    // grouped term per row — recomputing `COUNT(*) * 2` from the group's
+    // aggregate slot — rather than reading a standalone slot, so ordering on a
+    // computed alias works. Books 6, Games 6 (a tie, stable by group order),
+    // Toys 2, descending.
+    try sales().expect("""
+        SELECT Dept, COUNT(*) * 2 AS Doubled FROM Sales
+          GROUP BY Dept ORDER BY Doubled DESC
+        """, yields: [["Books", 6], ["Games", 6], ["Toys", 2]])
   }
 
   @Test func `an aggregate query pages with OFFSET/FETCH after ORDER BY`() throws {

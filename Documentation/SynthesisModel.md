@@ -311,7 +311,7 @@ running each statement through `Shell.execute`. The shell offers:
 - `.schema <query>`, printing a query's result columns and types without running
   it; `.bind <name> <value>`, binding a `:name` parameter; `.template <name>
   '<body>'`, defining an inline Mustache template;
-- `.tables`, `.help`, `.quit`.
+- `.help`, `.quit`.
 
 Meta-commands take a `.` prefix precisely so the SQL `:name` parameter syntax
 stays free for bindings.

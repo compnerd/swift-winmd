@@ -124,7 +124,8 @@ piped on stdin). Statements run as they are entered; a `;` is optional. In
 addition to SQL, the shell understands a set of `.`-prefixed metacommands:
 
 ```
-winmd> .tables                    -- list the database's tables
+winmd> SELECT table_name FROM information_schema.tables
+                                  -- list the database's tables
 winmd> .schema SELECT * FROM TypeDef
                                   -- print a query's result columns and types
 winmd> .bind ns 'Windows.Win32.Foundation'

@@ -35,18 +35,6 @@ internal protocol Metacommand {
   func execute(against shell: inout Shell) throws
 }
 
-/// `.tables` — list the database's relations.
-internal struct Tables: Metacommand {
-  internal static let spelling = ".tables"
-
-  internal init(_ arguments: Substring) {}
-
-  internal func execute(against shell: inout Shell) throws {
-    let relations = shell.session.storage.tables
-    for index in 0 ..< relations.count { print("  \(relations[index])") }
-  }
-}
-
 /// `.schema <query>` — print a query's result columns (name and type) WITHOUT
 /// running it.
 ///
@@ -335,13 +323,12 @@ internal struct Shell: ~Escapable {
   /// computed so the metatype array (not `Sendable`) is not a shared mutable
   /// global.
   private static var commands: Array<any Metacommand.Type> {
-    [Tables.self, Schema.self, Help.self, Quit.self, Read.self, Render.self,
+    [Schema.self, Help.self, Quit.self, Read.self, Render.self,
      Bind.self, Template.self]
   }
 
   /// The command summary `.help` prints.
   internal static let help = """
-    .tables                 list the database's tables
     .schema <query>         print a query's result columns without running it
     .read <path>            run a file of `;`-separated SQL statements
     .render <iface> <tmpl>  render an interface (or `*`) through a template
@@ -1018,7 +1005,7 @@ internal struct Statements: Sequence {
         }
         // A `.`-meta line yields whole when no statement is pending — a
         // whitespace-only or comment-only line before it is trivia, so drop it
-        // rather than glue the meta line onto it (a `-- note` before `.tables`
+        // rather than glue the meta line onto it (a `-- note` before `.schema`
         // must not turn the meta into SQL). `.template` alone carries a single-
         // quoted (possibly multiline) body: when ITS quote is left open, keep
         // accumulating raw lines until the quote closes, then yield the whole

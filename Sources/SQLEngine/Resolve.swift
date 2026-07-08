@@ -410,7 +410,7 @@ internal struct Scope {
       type(of: literal)
     case let .call(name, _):
       routines[name]?.returns ?? .integer
-    case let .aggregate(function, operand):
+    case let .aggregate(function, operand, _, _):
       switch function {
       // `COUNT` always counts rows to an integer; `AVG` folds to a double;
       // `SUM`/`MIN`/`MAX` take the operand's own type (an integer for `.star`).
@@ -542,7 +542,7 @@ internal struct Scope {
   /// `MIN` / `MAX` / `AVG` are NULL over an empty group and so do NOT stop.
   private func selects(_ argument: Expression, _ routines: Routines) -> Bool {
     return switch argument {
-    case .aggregate(.count, _): true
+    case .aggregate(.count, _, _, _): true
     default: constant(argument, routines).map { $0 != .null } ?? false
     }
   }
@@ -630,8 +630,8 @@ internal struct Scope {
       type(of: literal)
     case let .call(name, arguments):
       try call(name, over: arguments, routines)
-    case let .aggregate(function, operand):
-      try aggregate(function, over: operand, routines)
+    case let .aggregate(function, operand, _, filter):
+      try aggregate(function, over: operand, filter: filter, routines)
     case let .binary(op, lhs, rhs):
       try arithmetic(op, lhs, rhs, routines)
     case let .case(whens, otherwise):
@@ -840,8 +840,32 @@ internal struct Scope {
   /// advertising `AVG(Name)` as a double or `SUM(Name)` as text for a query
   /// that cannot fold its rows.
   private func aggregate(_ function: Aggregate, over operand: Aggregand,
-                         _ routines: Routines)
+                         filter: Predicate?, _ routines: Routines)
       throws(SQLError) -> ValueType {
+    // A `FILTER (WHERE …)` is a per-row gate, so it type-checks as an ordinary
+    // predicate — its columns resolve and its comparisons are well-typed — and
+    // it may not itself contain an aggregate (ISO forbids an aggregate in a
+    // filter's search condition, as it has no per-row meaning).
+    if let filter {
+      guard !filter.aggregated else {
+        throw .unsupported("an aggregate is not allowed in a FILTER")
+      }
+      try check(filter, routines)
+      // A FILTER that STATICALLY cannot admit a row makes the operand
+      // unreachable: the executor gates on a definite TRUE (a FALSE or UNKNOWN
+      // row is skipped, and the argument is evaluated only AFTER the gate), so
+      // an operand behind a statically non-TRUE filter never folds. `SUM(1 / 0)
+      // FILTER (WHERE 1 = 0)` thus runs to the empty result (NULL) — do NOT
+      // validate the dead operand, or a fault it could never raise (a divide by
+      // zero) would wrongly reject a runnable query. The aggregate is
+      // statically empty, so advertise its declared/derived result type without
+      // the operand's run-time-fault check (`dead(_:_:)` proves the filter
+      // ROW-INDEPENDENTLY never TRUE); a filter that could be TRUE still
+      // validates the operand as a bare aggregate does.
+      if dead(filter, routines) {
+        return try empty(function, over: operand, routines)
+      }
+    }
     switch function {
     case .count:
       // `COUNT(expr)` evaluates `expr` per row to test it is non-NULL, so
@@ -865,6 +889,60 @@ internal struct Scope {
       }
       if !type.numeric { throw .operand("operands must be numeric") }
       return function == .avg ? .double : type
+    }
+  }
+
+  /// The result type of `function` folded over `operand` when a statically
+  /// non-TRUE `FILTER` makes the fold empty — the operand is UNREACHABLE, so it
+  /// is DERIVED for its type (resolving a column) but NOT validated for a
+  /// run-time fault it can never raise (a divide by zero, a non-numeric SUM).
+  /// The empty fold yields `COUNT` `0` and every other aggregate NULL, so the
+  /// type is the set-function's declared/derived one, mirroring `aggregate` but
+  /// non-faulting on the dead operand: `COUNT`/`AVG` fixed, `SUM`/`MIN`/`MAX`
+  /// the operand's own derived type (`.integer` for `.star`).
+  private func empty(_ function: Aggregate, over operand: Aggregand,
+                     _ routines: Routines) throws(SQLError) -> ValueType {
+    switch function {
+    case .count:
+      return .integer
+    case .avg:
+      return .double
+    case .sum, .min, .max:
+      switch operand {
+      case .star: return .integer
+      case let .expression(argument): return try derive(argument, routines)
+      }
+    }
+  }
+
+  /// Whether `filter` is ROW-INDEPENDENTLY never TRUE — so a `FILTER`'s gate
+  /// (which admits a row only on a definite TRUE) can never admit one and the
+  /// aggregate operand behind it is UNREACHABLE. An `AND` is TRUE only when
+  /// EVERY conjunct is TRUE, so a single conjunct that is row-independently
+  /// non-TRUE kills the whole conjunction regardless of the others: flatten the
+  /// top-level `Predicate.and` spine (`a AND (b AND c)` to `a, b, c` — each
+  /// non-AND node one conjunct, not descending into `OR`) and prove it dead
+  /// when ANY conjunct folds definitely FALSE (`constant(_:)` `false`), or is
+  /// `settled` (row-independent) and folds to UNKNOWN (`constant(_:)` `nil`).
+  /// This subsumes the whole-filter case (a settled-non-TRUE filter is a lone
+  /// conjunct). It stays SOUND — only a PROVABLY non-TRUE conjunct kills the
+  /// filter: a row-dependent conjunct (could be TRUE per row) or a settled-TRUE
+  /// one does NOT, so those still validate the operand.
+  private func dead(_ filter: Predicate, _ routines: Routines) -> Bool {
+    var conjuncts: Array<Predicate> = [filter]
+    var index = 0
+    while index < conjuncts.count {
+      if case let .and(lhs, rhs) = conjuncts[index] {
+        conjuncts[index] = lhs
+        conjuncts.append(rhs)
+      } else {
+        index += 1
+      }
+    }
+    return conjuncts.contains { conjunct in
+      let folded = constant(conjunct, routines)
+      return folded == false
+          || (folded == nil && settled(conjunct, routines))
     }
   }
 
@@ -1476,8 +1554,8 @@ internal struct Scope {
     switch expression {
     case .column, .literal:
       break
-    case let .aggregate(function, operand):
-      _ = try aggregate(function, over: operand, routines)
+    case let .aggregate(function, operand, _, filter):
+      _ = try aggregate(function, over: operand, filter: filter, routines)
     case let .call(_, arguments):
       for argument in arguments { try aggregates(in: argument, routines) }
     case let .binary(_, lhs, rhs):
@@ -1565,7 +1643,7 @@ internal struct Scope {
     switch expression {
     case let .literal(literal):
       return try value(of: literal)
-    case let .aggregate(function, _):
+    case let .aggregate(function, _, _, _):
       return function == .count ? .integer(0) : .null
     case let .binary(op, lhs, rhs):
       return try op.apply(empty(lhs, routines), empty(rhs, routines))

@@ -456,7 +456,23 @@ public indirect enum Expression: Hashable, Sendable {
   /// per row), an aggregate accumulates over every row of a group and yields one
   /// value, so the engine recognises the fixed set of aggregate names at parse
   /// time and lowers them through a dedicated mechanism rather than the routines.
-  case aggregate(Aggregate, of: Aggregand)
+  ///
+  /// `distinct` is the ISO `<set quantifier>` written inside the parentheses:
+  /// `DISTINCT` folds each DISTINCT input value once (`COUNT(DISTINCT x)`,
+  /// `SUM(DISTINCT x)`), `ALL` (the default, `distinct` `false`) folds every
+  /// value. It is a no-op for `MIN`/`MAX` — the least/greatest value is the
+  /// same with or without duplicates — but the standard admits it there, so it
+  /// is accepted and ignored. `COUNT(*)` admits no quantifier (the parser
+  /// diagnoses `COUNT(DISTINCT *)`).
+  ///
+  /// `filter`, when present, is the ISO `FILTER (WHERE <search condition>)` —
+  /// the aggregate folds only the rows of the group whose predicate is TRUE (a
+  /// FALSE or UNKNOWN row is skipped), applied as a per-row gate BEFORE the
+  /// value reaches the fold — and before the `DISTINCT` dedup, so the two
+  /// compose as "filter, then dedup". It gates even `COUNT(*)`, which counts
+  /// only the admitted rows.
+  case aggregate(Aggregate, of: Aggregand, distinct: Bool = false,
+                 filter: Predicate? = nil)
   /// A `CASE` conditional expression — the result of its FIRST `when` whose
   /// predicate is TRUE (three-valued: UNKNOWN and FALSE both skip), else the
   /// `else` result, or `NULL` when there is no `ELSE`. The `when`s are held in

@@ -927,14 +927,18 @@ extension Expression {
   }
 
   /// Lowers this AST `.aggregate` expression to an `Aggregation`, its argument
-  /// (if any) resolved to a combined base-ordinal term through `scope`.
+  /// (if any) and its `FILTER` predicate resolved to combined base-ordinal
+  /// forms through `scope`.
   ///
   /// `COUNT(*)` has no argument (it counts rows); every other aggregate lowers
-  /// its single operand expression to a term. `self` is always an `.aggregate`
-  /// — `collect` gathers only those.
+  /// its single operand expression to a term. The `DISTINCT` set quantifier
+  /// carries through as a flag; a `FILTER (WHERE …)` lowers to a source-space
+  /// `Filter` — the same combined base-ordinal space the argument resolves in,
+  /// so it reads the pre-aggregation row the fold gates on. `self` is always an
+  /// `.aggregate` — `collect` gathers only those.
   internal func aggregation(_ scope: Scope, _ routines: Routines = [:])
       throws(SQLError) -> Aggregation {
-    guard case let .aggregate(function, operand) = self else {
+    guard case let .aggregate(function, operand, distinct, filter) = self else {
       throw .unsupported("expected an aggregate")
     }
     let argument: Term? = switch operand {
@@ -943,7 +947,13 @@ extension Expression {
     case let .expression(expression):
       try scope.term(expression, routines)
     }
-    return Aggregation(function: function, argument: argument)
+    let gate: Filter? = if let filter {
+      try scope.lower(filter, routines)
+    } else {
+      nil
+    }
+    return Aggregation(function: function, argument: argument,
+                       distinct: distinct, filter: gate)
   }
 }
 

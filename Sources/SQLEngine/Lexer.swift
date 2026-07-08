@@ -414,6 +414,7 @@ internal struct Lexer: ~Escapable {
     case "ORDER": .order
     case "GROUP": .group
     case "HAVING": .having
+    case "FILTER": .filter
     case "BY": .by
     case "ASC": .asc
     case "DESC": .desc

@@ -57,8 +57,10 @@
 ///                     [FOR expression] ')'
 /// literal        := string | integer | decimal | TRUE | FALSE | blob
 /// blob           := ('x' | 'X') "'" (hex hex)* "'"  // whole bytes
-/// aggregate      := COUNT '(' '*' ')'
-///                 | (COUNT | SUM | MIN | MAX | AVG) '(' expression ')'
+/// aggregate      := COUNT '(' '*' ')' [filter]
+///                 | (COUNT | SUM | MIN | MAX | AVG)
+///                     '(' [DISTINCT | ALL] expression ')' [filter]
+/// filter         := FILTER '(' WHERE predicate ')'
 /// order          := ORDER BY key (',' key)*
 /// key            := column [ASC | DESC]
 /// limit          := [OFFSET integer ROWS]
@@ -651,7 +653,10 @@ internal struct Parser: ~Escapable {
     // rather than evaluating per row. `COUNT(*)` takes `*` in place of an
     // expression; every aggregate else takes one expression operand.
     if !ident.quoted, let aggregate = aggregate(ident.text) {
-      return try .aggregate(aggregate, of: aggregand(aggregate))
+      let (operand, distinct) = try aggregand(aggregate)
+      let filter = try self.filter()
+      return .aggregate(aggregate, of: operand, distinct: distinct,
+                        filter: filter)
     }
 
     var arguments = Array<Expression>()
@@ -678,23 +683,50 @@ internal struct Parser: ~Escapable {
     }
   }
 
-  /// Parses an aggregate's operand (the `(` is already consumed) and the closing
-  /// `)`: `*` for `COUNT(*)` — admitted only for `COUNT` — else a single
-  /// expression. A non-`COUNT` aggregate over `*` (`SUM(*)`), or an aggregate
-  /// with no operand, faults.
+  /// Parses an aggregate's operand and its optional `<set quantifier>` (the `(`
+  /// is already consumed) and the closing `)`, returning the operand and
+  /// whether `DISTINCT` was written.
+  ///
+  /// `*` is the operand of `COUNT(*)`, admitted only for `COUNT` (a non-`COUNT`
+  /// aggregate over `*` (`SUM(*)`) faults) and takes no quantifier: a
+  /// `COUNT(DISTINCT *)` is diagnosed, as `*` is the whole row rather than a
+  /// value to fold distinctly. Every other aggregate takes one expression
+  /// operand, optionally preceded by `DISTINCT` (fold each distinct value once)
+  /// or `ALL` (the explicit default, fold every value); `distinct` is `true`
+  /// only for a written `DISTINCT`.
   private mutating func aggregand(_ aggregate: Aggregate)
-      throws(SQLError) -> Aggregand {
-    let operand: Aggregand
+      throws(SQLError) -> (operand: Aggregand, distinct: Bool) {
     if try match(.star) {
       guard aggregate == .count else {
         throw .unsupported("only COUNT admits a '*' operand")
       }
-      operand = .star
-    } else {
-      operand = try .expression(expression())
+      try expect(.rparen)
+      return (.star, false)
     }
+    // The optional set quantifier precedes the value expression: `DISTINCT`
+    // folds each distinct value once, `ALL` (the default) folds every value.
+    let distinct = try match(.distinct)
+    if !distinct { _ = try match(.all) }
+    let operand = try Aggregand.expression(expression())
     try expect(.rparen)
-    return operand
+    return (operand, distinct)
+  }
+
+  /// Parses an aggregate's optional `FILTER (WHERE <predicate>)` gate,
+  /// returning the predicate, or `nil` when no `FILTER` follows.
+  ///
+  /// The ISO `<filter clause>` names a search condition an aggregate folds only
+  /// the TRUE rows of (a FALSE or UNKNOWN row skipped), so it parses the same
+  /// predicate grammar a `WHERE` admits, parenthesised after the `WHERE`
+  /// keyword. It applies before the `DISTINCT` dedup (filter, then dedup) and
+  /// gates even `COUNT(*)`.
+  private mutating func filter() throws(SQLError) -> Predicate? {
+    guard try match(.filter) else { return nil }
+    try expect(.lparen)
+    try expect(.where)
+    let predicate = try predicate()
+    try expect(.rparen)
+    return predicate
   }
 
   /// Parses a `CASE` expression (the `CASE` is the next token) into the searched

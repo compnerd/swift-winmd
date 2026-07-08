@@ -28,6 +28,9 @@ extension Token {
     case order
     case group
     case having
+    /// The `FILTER` keyword introducing an aggregate's `FILTER (WHERE …)`
+    /// per-row gate.
+    case filter
     case by
     case asc
     case desc
@@ -124,6 +127,7 @@ extension Token.Kind {
     case .order: "ORDER"
     case .group: "GROUP"
     case .having: "HAVING"
+    case .filter: "FILTER"
     case .by: "BY"
     case .asc: "ASC"
     case .desc: "DESC"

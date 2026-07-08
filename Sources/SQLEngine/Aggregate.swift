@@ -34,23 +34,43 @@ internal struct Aggregation {
   /// (which counts every row without reading a value).
   internal let argument: Term?
 
-  internal init(function: Aggregate, argument: Term?) {
+  /// Whether the aggregate folds each DISTINCT non-NULL value once (`COUNT`/
+  /// `SUM`/`AVG(DISTINCT x)`) rather than every value — the ISO `DISTINCT` set
+  /// quantifier. It has no effect on `MIN`/`MAX` (the extreme is the same with
+  /// duplicates), which honour it as a no-op.
+  internal let distinct: Bool
+
+  /// The lowered per-row gate of an aggregate's `FILTER (WHERE …)`, or `nil`
+  /// when none is written. A source record folds into the aggregate only when
+  /// this filter evaluates TRUE (a FALSE or UNKNOWN row is skipped), applied
+  /// BEFORE the `distinct` dedup.
+  internal let filter: Filter?
+
+  internal init(function: Aggregate, argument: Term?, distinct: Bool = false,
+                filter: Filter? = nil) {
     self.function = function
     self.argument = argument
+    self.distinct = distinct
+    self.filter = filter
   }
 }
 
 extension Aggregation {
-  /// This aggregation with its argument's slots remapped through `slot`.
+  /// This aggregation with its argument's and filter's slots remapped through
+  /// `slot`.
   internal func remapped(through slot: Dictionary<Int, Int>) -> Aggregation {
     Aggregation(function: function,
-                argument: argument.map { $0.remapped(through: slot) })
+                argument: argument.map { $0.remapped(through: slot) },
+                distinct: distinct,
+                filter: filter.map { $0.remapped(through: slot) })
   }
 
   /// The source slots this aggregation reads, accumulated into `slots` — its
-  /// argument's, or none for `COUNT(*)`.
+  /// argument's and its `FILTER` predicate's, or none for a `COUNT(*)` with no
+  /// filter.
   internal func references(into slots: inout Set<Int>) {
     argument?.references(into: &slots)
+    filter?.references(into: &slots)
   }
 }
 
@@ -70,6 +90,16 @@ extension Aggregation {
 /// empty or all-NULL group yields `COUNT` `0` and the others NULL.
 private struct Accumulator {
   private let function: Aggregate
+  // Whether to fold each DISTINCT non-NULL value once — the ISO `DISTINCT` set
+  // quantifier — tracking the values already folded in `seen`. `MIN`/`MAX`
+  // honour it as a no-op (an extreme is unchanged by duplicates), so the flag
+  // is normalised OFF for them in `init`: the dedup — and the `seen` set it
+  // grows — runs only for `COUNT`/`SUM`/`AVG`, where duplicate multiplicity
+  // matters. This keeps a `MIN`/`MAX(DISTINCT x)` an O(1) STREAMING fold rather
+  // than one whose memory grows with the group's distinct values for no
+  // semantic gain (its result is the same as `MIN`/`MAX(x)` either way).
+  private let distinct: Bool
+  private var seen = Set<Value>()
   private var count = 0
   // SUM/AVG numeric state, kept independent of row order: an exact WIDE integer
   // total (`Int128`, range-checked once at the end) for the all-integer case,
@@ -81,8 +111,12 @@ private struct Accumulator {
   private var widened = false
   private var extreme: Value? = nil
 
-  internal init(_ function: Aggregate) {
+  internal init(_ function: Aggregate, distinct: Bool = false) {
     self.function = function
+    // `DISTINCT` is a no-op for `MIN`/`MAX` (an extreme is unchanged by
+    // duplicates), so normalise it OFF for them: the fold never builds `seen`,
+    // staying O(1) streaming rather than O(distinct-values) memory.
+    self.distinct = distinct && function != .min && function != .max
   }
 
   /// Folds one source `value` into the running aggregate — for `COUNT(*)` the
@@ -98,6 +132,25 @@ private struct Accumulator {
     // Every aggregate but a row-count ignores NULL — a NULL argument does not
     // fold, so an all-NULL group aggregates as an empty one.
     if case .null = value { return }
+    // A double operand widens the SUM/AVG total to an approximate double, and
+    // the widen decision is order-independent: flag it from the CELL'S KIND
+    // before the DISTINCT dedup, so a double anywhere in the group widens even
+    // when it is a duplicate the dedup skips for summation. `1` and `1.0`
+    // canonicalise equal, so a group mixing them dedups to one value whose kind
+    // is whichever appeared first — but the double must still widen the sum
+    // regardless of that order, else an integer-first group faults on an
+    // integer total a double-first group widens to a finite double.
+    if case .double = value, function == .sum || function == .avg {
+      widened = true
+    }
+    // Under `DISTINCT` a value already folded does not fold again — deduped on
+    // its CANONICAL form (the same normalisation a `GROUP BY` key and the
+    // equality UNION use, so `1` and `1.0` count as one distinct value) — so a
+    // repeated value counts, sums, and averages once. `MIN`/`MAX` normalise
+    // `distinct` OFF (an extreme is unchanged by duplicates), so this never
+    // builds `seen` for them. `COUNT(*)`'s row sentinel never reaches here (a
+    // `COUNT(*)` carries no `distinct`), so every counted row still counts.
+    if distinct, !seen.insert(canonical(value)).inserted { return }
     count += 1
     switch function {
     case .count, .min, .max:
@@ -112,19 +165,18 @@ private struct Accumulator {
         }
       }
     case .sum, .avg:
-      // Total every value into a double running sum and flag whether any operand
-      // was a double, while keeping an exact wide (`Int128`) integer total for
-      // the all-integer case. Deferring the widen decision — and range-checking
-      // the wide total only at the end — keeps the result independent of row
-      // order: neither a later double nor a transient prefix overflow that a
-      // later value undoes can change the outcome.
+      // Total every value into a double running sum, while keeping an exact
+      // wide (`Int128`) integer total for the all-integer case; `widened` was
+      // already set above from the cell's kind. Deferring the widen decision —
+      // and range-checking the wide total only at the end — keeps the result
+      // independent of row order: neither a later double nor a transient prefix
+      // overflow that a later value undoes can change the outcome.
       switch value {
       case let .integer(number):
         total += Double(number)
         integer += Int128(number)
       case let .double(number):
         total += number
-        widened = true
       default:
         throw .operand("operands must be numeric")
       }
@@ -257,10 +309,21 @@ internal func grouped(_ records: Array<Record>, _ keys: Array<Term>,
     let identity = Record(cells.map(canonical))
 
     if accumulators[identity] == nil {
-      accumulators[identity] = aggregates.map { Accumulator($0.function) }
+      accumulators[identity] = aggregates.map {
+        Accumulator($0.function, distinct: $0.distinct)
+      }
       order.append(group)
     }
     for index in aggregates.indices {
+      // An aggregate's `FILTER (WHERE …)` gates the row: only a TRUE predicate
+      // admits it (a FALSE or UNKNOWN one, and an unbound `:parameter`, skips),
+      // applied before the fold — and so before the DISTINCT dedup. A
+      // filter-less aggregate folds every row.
+      if let filter = aggregates[index].filter {
+        guard try record.evaluate(filter, routines, bindings) == true else {
+          continue
+        }
+      }
       // `COUNT(*)` has no argument — count the row with a non-NULL sentinel;
       // every other aggregate folds its evaluated argument value.
       let value: Value = if let argument = aggregates[index].argument {
@@ -277,7 +340,9 @@ internal func grouped(_ records: Array<Record>, _ keys: Array<Term>,
   // `0` rather than yielding no row at all. A grouped query over no rows yields
   // no group (standard SQL).
   if keys.isEmpty && order.isEmpty {
-    let empty = aggregates.map { Accumulator($0.function) }
+    let empty = aggregates.map {
+      Accumulator($0.function, distinct: $0.distinct)
+    }
     var cells = Array<Value>()
     cells.reserveCapacity(empty.count)
     for accumulator in empty { try cells.append(accumulator.value) }

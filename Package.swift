@@ -80,6 +80,24 @@ let _ =
                             .enableExperimentalFeature("Lifetimes"),
                           ]),
 
+              // Throwaway benchmark harness (DecantJSON vs Foundation Codable).
+              .executableTarget(name: "decant-bench",
+                                dependencies: [
+                                  "Decant", "DecantMacros", "DecantJSON",
+                                ],
+                                swiftSettings: [
+                                  .enableExperimentalFeature("Lifetimes"),
+                                ]),
+              .executableTarget(name: "decant-size-decant",
+                                dependencies: [
+                                  "Decant", "DecantMacros", "DecantJSON",
+                                ],
+                                swiftSettings: [
+                                  .enableExperimentalFeature("Lifetimes"),
+                                ]),
+              .executableTarget(name: "decant-size-codable",
+                                dependencies: []),
+
               // SQLEngine
               .target(name: "SQLEngine", dependencies: [],
                       swiftSettings: [

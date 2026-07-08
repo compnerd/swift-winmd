@@ -1,6 +1,7 @@
 // swift-tools-version: 6.4
 
 import PackageDescription
+import CompilerPluginSupport
 
 let _ =
     Package(name: "SwiftWinMD",
@@ -14,12 +15,15 @@ let _ =
               .library(name: "SQLStandard", targets: ["SQLStandard"]),
               .library(name: "WinMDSynthesis", targets: ["WinMDSynthesis"]),
               .library(name: "Decant", targets: ["Decant"]),
+              .library(name: "DecantMacros", targets: ["DecantMacros"]),
             ],
             dependencies: [
               .package(url: "https://github.com/apple/swift-argument-parser",
                        from: "1.5.0"),
               .package(url: "https://github.com/hummingbird-project/swift-mustache",
                        from: "2.0.0"),
+              .package(url: "https://github.com/swiftlang/swift-syntax.git",
+                       branch: "main"),
             ],
             targets: [
               .target(name: "CPE", dependencies: []),
@@ -29,6 +33,36 @@ let _ =
                         .enableExperimentalFeature("Lifetimes"),
                       ]),
               .testTarget(name: "DecantTests", dependencies: ["Decant"],
+                          swiftSettings: [
+                            .enableExperimentalFeature("Lifetimes"),
+                          ]),
+
+              .macro(name: "DecantMacrosPlugin",
+                     dependencies: [
+                       .product(name: "SwiftSyntax",
+                                package: "swift-syntax"),
+                       .product(name: "SwiftSyntaxBuilder",
+                                package: "swift-syntax"),
+                       .product(name: "SwiftSyntaxMacros",
+                                package: "swift-syntax"),
+                       .product(name: "SwiftDiagnostics",
+                                package: "swift-syntax"),
+                       .product(name: "SwiftCompilerPlugin",
+                                package: "swift-syntax"),
+                     ]),
+              .target(name: "DecantMacros",
+                      dependencies: ["Decant", "DecantMacrosPlugin"],
+                      swiftSettings: [
+                        .enableExperimentalFeature("Lifetimes"),
+                      ]),
+              .testTarget(name: "DecantMacrosTests",
+                          dependencies: [
+                            "DecantMacrosPlugin",
+                            .product(name: "SwiftSyntaxMacroExpansion",
+                                     package: "swift-syntax"),
+                            .product(name: "SwiftSyntaxMacrosGenericTestSupport",
+                                     package: "swift-syntax"),
+                          ],
                           swiftSettings: [
                             .enableExperimentalFeature("Lifetimes"),
                           ]),

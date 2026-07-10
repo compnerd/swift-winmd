@@ -68,6 +68,30 @@ internal indirect enum Filter: Equatable, Sendable {
   /// `matches`'s cross-kind FALSE equality), and `IS DISTINCT FROM` is TRUE
   /// when they differ, `IS NOT DISTINCT FROM` when they are the same.
   case distinct(Term, Term, negated: Bool)
+  /// `[NOT] EXISTS (Q)` — the lowered form of the AST's `exists`. The subquery
+  /// occurrence is carried as its cache `Subkey` (its resolution scope composed
+  /// with `Q`) — never run during `compile`, so a schema-only path
+  /// (`columns(of:)`, view resolution) opens no cursor. At RUN time it runs
+  /// ONCE against the borrowed catalog (memoised in a `Subqueries` cache under
+  /// the `Subkey`, since it is UNCORRELATED — one result for every outer row,
+  /// under its OWN resolution context) and the case is the DEFINITE two-valued
+  /// non-empty test of that result: TRUE iff `Q` yielded a row, `negated`
+  /// flipping it (never UNKNOWN). It reads no cell of the outer row. An
+  /// EXISTS-only occurrence is materialised as a cardinality PROBE — its select
+  /// list never evaluated. A later correlated slice re-runs `Q` per outer row.
+  case exists(Subkey, negated: Bool)
+  /// `x [NOT] IN (Q)` — the lowered form of the AST's `within`. The subquery
+  /// occurrence is carried as its cache `Subkey` — never run during `compile` —
+  /// and its single-column arity is enforced at COMPILE from its compiled width
+  /// (`SQLError.arity`, no cursor). At RUN time `Q` executes ONCE against the
+  /// borrowed catalog (memoised under the `Subkey` in the `Subqueries` cache,
+  /// UNCORRELATED) and the case folds `operand = v` over its lone column under
+  /// the SAME Kleene `OR` three-valued membership the value-list
+  /// `Filter.membership` uses — a NULL operand or a NULL element making an
+  /// unmatched test UNKNOWN, an EMPTY result FALSE, and `negated` (`NOT IN`)
+  /// negating the three-valued result (UNKNOWN maps to itself). The operand
+  /// `Term` is evaluated once per row.
+  case within(Term, Subkey, negated: Bool)
   /// `p IS [NOT] <truth value>` — the lowered form of the AST's `truth`. The
   /// inner boolean `Filter` is held once and evaluated to its three-valued
   /// result, which is then MAPPED against `value` (`TRUE`/`FALSE`/`UNKNOWN`) to
@@ -356,6 +380,14 @@ extension Filter {
     case let .distinct(lhs, rhs, negated):
       .distinct(lhs.remapped(through: slot), rhs.remapped(through: slot),
                 negated: negated)
+    case let .exists(key, negated):
+      // An UNCORRELATED EXISTS reads no outer slot — its subquery names no
+      // enclosing column — so the remap passes its cache key through unchanged.
+      .exists(key, negated: negated)
+    case let .within(operand, key, negated):
+      // Only the outer operand term reads slots; the subquery is uncorrelated,
+      // so remap the operand alone and carry the cache key through.
+      .within(operand.remapped(through: slot), key, negated: negated)
     case let .truth(inner, value, negated):
       .truth(inner.remapped(through: slot), value, negated: negated)
     case let .and(lhs, rhs):
@@ -447,6 +479,15 @@ extension Filter {
     case let .between(test, lower, upper, _):
       test.safe && lower.safe && upper.safe
     case let .distinct(lhs, rhs, _): lhs.safe && rhs.safe
+    case .exists:
+      // An UNCORRELATED EXISTS reads no outer row — its subquery ran once at run
+      // start into the memo — so evaluating it is a decided lookup that cannot
+      // throw over an empty product.
+      true
+    case let .within(operand, _, _):
+      // Only the outer operand term is evaluated; the subquery's memoised
+      // values are folded under `matches`, which never throws.
+      operand.safe
     case let .truth(inner, _, _): inner.safe
     case let .and(lhs, rhs): lhs.safe && rhs.safe
     case let .or(lhs, rhs): lhs.safe && rhs.safe
@@ -455,18 +496,44 @@ extension Filter {
   }
 
   /// Whether evaluating this filter can be UNKNOWN — it reads at least one slot
-  /// (a NULL cell there makes a comparison against it UNKNOWN) or compares against
-  /// a run-time `:parameter` (which may be unbound or bound to NULL, likewise
-  /// UNKNOWN). Only a filter over constants alone is definite. Selection pushdown
-  /// must not ride a nullable conjunct below a join or into a view when a LATER
-  /// conjunct is unsafe: the evaluator's `AND` does not short-circuit, so the
-  /// un-pushed query evaluates the later conjunct even when this one is UNKNOWN —
-  /// pushing this one down would drop the UNKNOWN row before the later conjunct
-  /// runs, suppressing a throw the left-to-right `AND` owes (`A.x = 1 AND (1 /
-  /// B.y) = 0`, `A.x` NULL and `B.y = 0` on a matching pair; or `1 = :missing AND
-  /// (1 / y) = 0` over a view, `:missing` unbound — slotless yet UNKNOWN).
+  /// (a NULL cell there makes a comparison against it UNKNOWN), compares
+  /// against a run-time `:parameter` (which may be unbound or bound to NULL,
+  /// likewise UNKNOWN), or is an `IN (Q)` subquery test (three-valued: UNKNOWN
+  /// when the materialised subquery holds a NULL, even over a constant
+  /// operand — slotless yet not definite). Only a filter over constants alone
+  /// whose leaves are all definite is TRUE/FALSE for certain. Selection
+  /// pushdown must not ride a nullable conjunct below a join or into a view
+  /// when a LATER conjunct is unsafe: the evaluator's `AND` does not
+  /// short-circuit, so the un-pushed query evaluates the later conjunct even
+  /// when this one is UNKNOWN — pushing this one down drops the UNKNOWN row
+  /// before the later conjunct runs, suppressing a throw the left-to-right
+  /// `AND` owes (`A.x = 1 AND (1 / B.y) = 0`, `A.x` NULL and `B.y = 0` on a
+  /// matching pair; `1 = :missing AND (1 / y) = 0` over a view, `:missing`
+  /// unbound; or `1 IN (SELECT N FROM S) AND (1 / 0) = 0`, `S.N` a non-matching
+  /// NULL making the `IN` UNKNOWN — all slotless yet UNKNOWN).
   internal var nullable: Bool {
-    !slots.isEmpty || parameterised
+    !slots.isEmpty || parameterised || contingent
+  }
+
+  /// Whether this filter can be UNKNOWN INDEPENDENT of any slot or
+  /// `:parameter` — an `IN (Q)` subquery test (`Filter.within`), which is
+  /// three-valued: `x IN (Q)` is UNKNOWN when `Q`'s materialised column holds a
+  /// NULL and no element matches, so a slotless `1 IN (Q)` over a constant
+  /// operand is still not definite. `nullable` counts it even when `slots` is
+  /// empty and nothing is parameterised, keeping an `IN (Q)` conjunct off a
+  /// pushdown ahead of a later unsafe conjunct the non-short-circuiting `AND`
+  /// still owes. An `EXISTS (Q)` is genuinely TWO-valued — a decided non-empty
+  /// test, never UNKNOWN — so it is NOT contingent and stays freely pushable.
+  private var contingent: Bool {
+    switch self {
+    case .within: true
+    case .compare, .bound, .match, .null, .membership, .like, .between,
+         .distinct, .exists: false
+    case let .truth(inner, _, _): inner.contingent
+    case let .and(lhs, rhs): lhs.contingent || rhs.contingent
+    case let .or(lhs, rhs): lhs.contingent || rhs.contingent
+    case let .not(operand): operand.contingent
+    }
   }
 
   /// Whether this filter compares against a run-time `:parameter` — a `.bound`
@@ -480,6 +547,10 @@ extension Filter {
     switch self {
     case .bound: true
     case .compare, .match, .null, .membership, .distinct: false
+    // An UNCORRELATED subquery predicate reads no run-time `:parameter` of the
+    // OUTER query — the subquery runs once at run start with the same bindings —
+    // so neither is parameterised for the outer row.
+    case .exists, .within: false
     case let .like(_, pattern, escape, _):
       pattern.parameterised || (escape?.parameterised ?? false)
     case let .between(_, lower, upper, _):
@@ -535,7 +606,8 @@ extension Row where Self: ~Escapable {
   /// term runs over a materialised projection record or a predicate's borrowed
   /// cursor row.
   internal borrowing func evaluate(_ term: Term, _ routines: Routines,
-                                   _ bindings: Bindings = [:])
+                                   _ bindings: Bindings = [:],
+                                   _ subqueries: Subqueries = Subqueries())
       throws(SQLError) -> Value {
     switch term {
     case let .slot(slot):
@@ -543,28 +615,30 @@ extension Row where Self: ~Escapable {
     case let .constant(value):
       value
     case let .apply(name, arguments):
-      try apply(name, arguments, routines, bindings)
+      try apply(name, arguments, routines, bindings, subqueries)
     case let .binary(op, lhs, rhs):
-      try op.apply(evaluate(lhs, routines, bindings),
-                   evaluate(rhs, routines, bindings))
+      try op.apply(evaluate(lhs, routines, bindings, subqueries),
+                   evaluate(rhs, routines, bindings, subqueries))
     case let .case(branches, otherwise, type):
       // Take the FIRST branch whose guard is three-valued TRUE (UNKNOWN and
       // FALSE skip); with none matching, the `else` term, or `NULL` when there
       // is none. The guard is a `Filter`, so it evaluates over the same row,
-      // routines, and bindings a `WHERE` filter does — a `:parameter` guard
-      // resolves against the bindings, an UNKNOWN one does not select its
-      // branch. The selected value is COERCED to the CASE's unified result
-      // `type` so it matches the column type the schema advertised.
-      try conditional(branches, otherwise, type, routines, bindings)
+      // routines, bindings, and subquery results a `WHERE` filter does — a
+      // `:parameter` guard resolves against the bindings, an UNKNOWN one does
+      // not select its branch. The selected value is COERCED to the CASE's
+      // unified result `type` so it matches the column type the schema
+      // advertised.
+      try conditional(branches, otherwise, type, routines, bindings,
+                      subqueries)
     case let .cast(operand, type):
       // Evaluate the operand and CONVERT it to the target type: NULL casts to
       // NULL, an unconvertible value faults (`Value.cast(to:)`), never yielding
       // a wrong value.
-      try evaluate(operand, routines, bindings).cast(to: type)
+      try evaluate(operand, routines, bindings, subqueries).cast(to: type)
     case let .coalesce(elements, type):
-      try coalesce(elements, type, routines, bindings)
+      try coalesce(elements, type, routines, bindings, subqueries)
     case let .nullif(lhs, rhs):
-      try nullif(lhs, rhs, routines, bindings)
+      try nullif(lhs, rhs, routines, bindings, subqueries)
     }
   }
 
@@ -580,10 +654,11 @@ extension Row where Self: ~Escapable {
   /// of a `.double` COALESCE), exactly as a `CASE` coerces its taken branch;
   /// NULL passes unchanged.
   private borrowing func coalesce(_ elements: Array<Term>, _ type: ValueType,
-                                  _ routines: Routines, _ bindings: Bindings)
+                                  _ routines: Routines, _ bindings: Bindings,
+                                  _ subqueries: Subqueries)
       throws(SQLError) -> Value {
     for element in elements {
-      let value = try evaluate(element, routines, bindings)
+      let value = try evaluate(element, routines, bindings, subqueries)
       if case .null = value { continue }
       return value.coerced(to: type)
     }
@@ -600,10 +675,11 @@ extension Row where Self: ~Escapable {
   /// three-valued: only a definite TRUE equality nulls out, so an UNKNOWN (a
   /// NULL operand) yields `va`.
   private borrowing func nullif(_ lhs: Term, _ rhs: Term,
-                                _ routines: Routines, _ bindings: Bindings)
+                                _ routines: Routines, _ bindings: Bindings,
+                                _ subqueries: Subqueries)
       throws(SQLError) -> Value {
-    let va = try evaluate(lhs, routines, bindings)
-    let vb = try evaluate(rhs, routines, bindings)
+    let va = try evaluate(lhs, routines, bindings, subqueries)
+    let vb = try evaluate(rhs, routines, bindings, subqueries)
     return matches(va, .equal, vb) == true ? .null : va
   }
 
@@ -619,20 +695,24 @@ extension Row where Self: ~Escapable {
   private borrowing func conditional(_ branches: Array<(Filter, Term)>,
                                      _ otherwise: Term?, _ type: ValueType,
                                      _ routines: Routines,
-                                     _ bindings: Bindings)
+                                     _ bindings: Bindings,
+                                     _ subqueries: Subqueries)
       throws(SQLError) -> Value {
     for (gate, result) in branches {
-      if try evaluate(gate, routines, bindings) == true {
-        return try evaluate(result, routines, bindings).coerced(to: type)
+      if try evaluate(gate, routines, bindings, subqueries) == true {
+        return try evaluate(result, routines, bindings, subqueries)
+            .coerced(to: type)
       }
     }
     guard let otherwise else { return .null }
-    return try evaluate(otherwise, routines, bindings).coerced(to: type)
+    return try evaluate(otherwise, routines, bindings, subqueries)
+        .coerced(to: type)
   }
 
   /// Resolves `name` in `routines` and applies it to its evaluated `arguments`.
   private borrowing func apply(_ name: String, _ arguments: Array<Term>,
-                               _ routines: Routines, _ bindings: Bindings)
+                               _ routines: Routines, _ bindings: Bindings,
+                               _ subqueries: Subqueries)
       throws(SQLError) -> Value {
     guard let routine = routines[name] else {
       throw .function(name)
@@ -640,7 +720,7 @@ extension Row where Self: ~Escapable {
     var values = Array<Value>()
     values.reserveCapacity(arguments.count)
     for argument in arguments {
-      try values.append(evaluate(argument, routines, bindings))
+      try values.append(evaluate(argument, routines, bindings, subqueries))
     }
     let result = try routine(values)
     // A registered routine is a public producer of `Value`s that bypasses the
@@ -876,52 +956,68 @@ extension Row where Self: ~Escapable {
   /// row is non-escaping; it threads into the recursion freely and is never
   /// stored.
   internal borrowing func evaluate(_ filter: Filter, _ routines: Routines,
-                                   _ bindings: Bindings)
+                                   _ bindings: Bindings,
+                                   _ subqueries: Subqueries = Subqueries())
       throws(SQLError) -> Bool? {
     switch filter {
     case let .compare(lhs, op, rhs):
-      try matches(evaluate(lhs, routines, bindings), op,
-                  evaluate(rhs, routines, bindings))
+      try matches(evaluate(lhs, routines, bindings, subqueries), op,
+                  evaluate(rhs, routines, bindings, subqueries))
     case let .bound(term, op, parameter):
       if let operand = bindings[parameter] {
-        try matches(evaluate(term, routines, bindings), op, operand)
+        try matches(evaluate(term, routines, bindings, subqueries), op, operand)
       } else {
         nil
       }
     case let .match(left, right):
       matches(self[left], .equal, self[right])
     case let .null(term, negated):
-      try (evaluate(term, routines, bindings) == .null) != negated
+      try (evaluate(term, routines, bindings, subqueries) == .null) != negated
     case let .membership(operand, elements, negated):
-      try member(operand, elements, negated, routines, bindings)
+      try member(operand, elements, negated, routines, bindings, subqueries)
     case let .like(operand, pattern, escape, negated):
-      try like(operand, pattern, escape, negated, routines, bindings)
+      try like(operand, pattern, escape, negated, routines, bindings,
+               subqueries)
     case let .between(test, lower, upper, negated):
-      try ranged(test, lower, upper, negated, routines, bindings)
+      try ranged(test, lower, upper, negated, routines, bindings, subqueries)
     case let .distinct(lhs, rhs, negated):
-      try differs(lhs, rhs, negated, routines, bindings)
+      try differs(lhs, rhs, negated, routines, bindings, subqueries)
+    case let .exists(key, negated):
+      // The subquery ran ONCE at run start (memoised under its `Subkey` in the
+      // cache); this reads the DEFINITE two-valued non-empty test — never
+      // UNKNOWN, and reading no row of the outer relation — `negated` flipping
+      // it. An EXISTS-only occurrence's result is a cardinality probe.
+      try subqueries.present(key) != negated
+    case let .within(operand, key, negated):
+      // Fold `operand = v` over the subquery's memoised single column under the
+      // SAME three-valued membership the value-list `IN` uses.
+      try member(operand, subqueries.values(key), negated, routines,
+                 bindings, subqueries)
     case let .truth(inner, value, negated):
-      try tested(evaluate(inner, routines, bindings), value, negated)
+      try tested(evaluate(inner, routines, bindings, subqueries), value,
+                 negated)
     case let .and(lhs, rhs):
       // `&&`/`||` take an `@autoclosure` right operand, which would capture the
       // borrowed `~Escapable` row; spell each connective explicitly so a branch
       // re-borrows the row rather than capturing it. Kleene `AND`: `false`
       // dominates, an UNKNOWN left yields `false` only against a `false` right.
-      switch try evaluate(lhs, routines, bindings) {
+      switch try evaluate(lhs, routines, bindings, subqueries) {
       case false?: false
-      case true?: try evaluate(rhs, routines, bindings)
-      case nil: try evaluate(rhs, routines, bindings) == false ? false : nil
+      case true?: try evaluate(rhs, routines, bindings, subqueries)
+      case nil:
+        try evaluate(rhs, routines, bindings, subqueries) == false ? false : nil
       }
     case let .or(lhs, rhs):
       // Kleene `OR`: `true` dominates, an UNKNOWN left yields `true` only
       // against a `true` right.
-      switch try evaluate(lhs, routines, bindings) {
+      switch try evaluate(lhs, routines, bindings, subqueries) {
       case true?: true
-      case false?: try evaluate(rhs, routines, bindings)
-      case nil: try evaluate(rhs, routines, bindings) == true ? true : nil
+      case false?: try evaluate(rhs, routines, bindings, subqueries)
+      case nil:
+        try evaluate(rhs, routines, bindings, subqueries) == true ? true : nil
       }
     case let .not(operand):
-      try evaluate(operand, routines, bindings).map { !$0 }
+      try evaluate(operand, routines, bindings, subqueries).map { !$0 }
     }
   }
 
@@ -937,12 +1033,36 @@ extension Row where Self: ~Escapable {
   /// `map(!)`.
   private borrowing func member(_ operand: Term, _ elements: Array<Term>,
                                 _ negated: Bool, _ routines: Routines,
-                                _ bindings: Bindings)
+                                _ bindings: Bindings, _ subqueries: Subqueries)
       throws(SQLError) -> Bool? {
-    let value = try evaluate(operand, routines, bindings)
+    let value = try evaluate(operand, routines, bindings, subqueries)
     var truth: Bool? = false
     for element in elements {
-      let element = try evaluate(element, routines, bindings)
+      let element = try evaluate(element, routines, bindings, subqueries)
+      truth = or(truth, matches(value, .equal, element))
+      if truth == true { break }
+    }
+    return negated ? truth.map { !$0 } : truth
+  }
+
+  /// Evaluates a lowered `operand [NOT] IN (Q)` against this row over the
+  /// subquery's ALREADY-MATERIALISED single column `values`.
+  ///
+  /// It is the value-list `member` fold over constants: the `operand` is
+  /// evaluated ONCE per row, then `operand = v` folds over the materialised
+  /// `values` IN ORDER under Kleene `OR`, seeded FALSE and short-circuiting at
+  /// the first TRUE — so a NULL operand or a NULL element keeps the ISO
+  /// three-valued result (an unmatched test is UNKNOWN, not FALSE), an EMPTY
+  /// `values` folds FALSE (no witness), and `NOT IN` negates that truth,
+  /// mapping UNKNOWN to itself. It reuses the SAME `matches`/`or` primitives
+  /// the value-list `IN` does, so the two forms share one three-valued core.
+  private borrowing func member(_ operand: Term, _ values: Array<Value>,
+                                _ negated: Bool, _ routines: Routines,
+                                _ bindings: Bindings, _ subqueries: Subqueries)
+      throws(SQLError) -> Bool? {
+    let value = try evaluate(operand, routines, bindings, subqueries)
+    var truth: Bool? = false
+    for element in values {
       truth = or(truth, matches(value, .equal, element))
       if truth == true { break }
     }
@@ -979,13 +1099,13 @@ extension Row where Self: ~Escapable {
   private borrowing func ranged(_ test: Term, _ lower: Filter.Operand,
                                 _ upper: Filter.Operand,
                                 _ negated: Bool, _ routines: Routines,
-                                _ bindings: Bindings)
+                                _ bindings: Bindings, _ subqueries: Subqueries)
       throws(SQLError) -> Bool? {
-    let value = try evaluate(test, routines, bindings)
-    let low = try evaluate(lower, routines, bindings)
+    let value = try evaluate(test, routines, bindings, subqueries)
+    let low = try evaluate(lower, routines, bindings, subqueries)
     let above = matches(value, .geq, low)
     guard above != false else { return negated }
-    let high = try evaluate(upper, routines, bindings)
+    let high = try evaluate(upper, routines, bindings, subqueries)
     let within = and(above, matches(value, .leq, high))
     return negated ? within.map { !$0 } : within
   }
@@ -1000,10 +1120,11 @@ extension Row where Self: ~Escapable {
   /// negates it. Unlike a `compare`, a NULL operand never makes the row
   /// UNKNOWN.
   private borrowing func differs(_ lhs: Term, _ rhs: Term, _ negated: Bool,
-                                 _ routines: Routines, _ bindings: Bindings)
+                                 _ routines: Routines, _ bindings: Bindings,
+                                 _ subqueries: Subqueries)
       throws(SQLError) -> Bool? {
-    let differ = try distinct(evaluate(lhs, routines, bindings),
-                              evaluate(rhs, routines, bindings))
+    let differ = try distinct(evaluate(lhs, routines, bindings, subqueries),
+                              evaluate(rhs, routines, bindings, subqueries))
     return negated ? !differ : differ
   }
 
@@ -1012,11 +1133,12 @@ extension Row where Self: ~Escapable {
   /// name yields `.null`, so it reads UNKNOWN exactly as a bound `NULL` does.
   private borrowing func evaluate(_ operand: Filter.Operand,
                                   _ routines: Routines,
-                                  _ bindings: Bindings)
+                                  _ bindings: Bindings,
+                                  _ subqueries: Subqueries)
       throws(SQLError) -> Value {
     switch operand {
     case let .term(term):
-      try evaluate(term, routines, bindings)
+      try evaluate(term, routines, bindings, subqueries)
     case let .parameter(name):
       bindings[name] ?? .null
     }
@@ -1039,15 +1161,20 @@ extension Row where Self: ~Escapable {
   /// result (UNKNOWN maps to itself).
   private borrowing func like(_ operand: Term, _ pattern: Filter.Operand,
                               _ escape: Filter.Operand?, _ negated: Bool,
-                              _ routines: Routines, _ bindings: Bindings)
+                              _ routines: Routines, _ bindings: Bindings,
+                              _ subqueries: Subqueries)
       throws(SQLError) -> Bool? {
     // Evaluate all three reached operands once, in order — a fault in any of
     // them (a divide, an overflow) propagates HERE, before the NULL/escape
     // result below can turn it into a silent UNKNOWN.
-    let subject = try evaluate(operand, routines, bindings)
-    let template = try evaluate(pattern, routines, bindings)
+    let subject = try evaluate(operand, routines, bindings, subqueries)
+    let template = try evaluate(pattern, routines, bindings, subqueries)
     let separator: Value? =
-        if let escape { try evaluate(escape, routines, bindings) } else { nil }
+        if let escape {
+          try evaluate(escape, routines, bindings, subqueries)
+        } else {
+          nil
+        }
 
     // Decide the escape character. A NULL escape is UNKNOWN like a NULL
     // operand; anything but a one-character text is `SQLError.argument`.

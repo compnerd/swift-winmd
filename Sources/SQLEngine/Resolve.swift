@@ -18,6 +18,291 @@
 /// resolves is `SQLError.column`; an unqualified name both relations of a join
 /// resolve is `SQLError.ambiguous`.
 
+/// The RESOLUTION CONTEXT a subquery occurrence materialises under — the seam
+/// that keeps two AST-identical subqueries resolving under DIFFERENT overlays
+/// SEPARATE cache entries, so neither overwrites the other.
+///
+/// An uncorrelated subquery's result depends only on the overlay it resolves
+/// against, and in this slice a subquery resolves under exactly one of two
+/// contexts: the top-level CALLER's overlay (its `WITH` CTEs), or a specific
+/// VIEW body's overlay (that view's own base relations, never the caller's
+/// `WITH`). A view `VN` whose body has `EXISTS (SELECT V FROM S)` over an empty
+/// base `S`, run under a caller that binds `WITH S AS (SELECT 1)`, must read
+/// the view's own (empty) `S` — not the caller's CTE — even though both spell
+/// the same AST. Keying the cache by the `Query` VALUE alone collapses the
+/// two; a `Subscope` composed into the key keeps them disjoint. The `caller`
+/// case is distinguished from every `view` case, and two distinct view names
+/// never collide (case-folded), so the caller and view spaces cannot overlap.
+///
+/// It is reproducible at BOTH the compile site (lowering embeds it in the
+/// lowered `Filter`) and the matching materialise site (`run` materialises the
+/// top-level query's subqueries under `.caller`; `derive(name:)` materialises a
+/// view body's under `.view(name)`), so the key a lowered predicate reads is
+/// the key the materialiser wrote.
+internal enum Subscope: Hashable, Sendable {
+  /// The top-level caller's overlay — a subquery textually in the outer query
+  /// (its `WHERE`, projection, …), and an outer conjunct pushed into a view.
+  case caller
+  /// A view body's own overlay, named by the view (case-folded) — a subquery
+  /// textually in that view's registered query.
+  case view(String)
+}
+
+/// The cache identity of one collected subquery OCCURRENCE — its resolution
+/// `context` composed with its `query` AST.
+///
+/// A subquery is keyed neither by its `Query` value alone (which collapses two
+/// AST-identical subqueries under different overlays — see `Subscope`)
+/// nor by a raw counter (which two independent id spaces could not keep
+/// disjoint), but by the PAIR: within one `Subscope`, an identical `Query`
+/// resolves to an identical result, so value-discrimination is correct there;
+/// across scopes the `Subscope` keeps them separate. A caller-space key
+/// (`.caller`) and a view-space key (`.view(name)`) are unequal even for the
+/// same AST, so the two id spaces cannot collide.
+internal struct Subkey: Hashable, Sendable {
+  /// The resolution context this occurrence materialises under.
+  internal let scope: Subscope
+
+  /// The subquery's AST.
+  internal let query: Query
+
+  internal init(_ scope: Subscope, _ query: Query) {
+    self.scope = scope
+    self.query = query
+  }
+}
+
+/// One UNCORRELATED subquery already RUN ONCE at execution — the value a
+/// run-time `Subqueries` cache memoises so the row evaluator reads an
+/// `EXISTS`/`IN (Q)` predicate without re-running the inner query or itself
+/// holding the borrowing catalog.
+///
+/// An `IN (Q)` occurrence needs the subquery's single COLUMN of values, so it
+/// is materialised in FULL (`rows`). An occurrence used only by `EXISTS` needs
+/// nothing but CARDINALITY — whether the row source yields ANY row — so it is
+/// materialised as a `present` PROBE that never evaluates the select list or
+/// sort keys and stops at the first row (`EXISTS (SELECT 1 / 0 FROM S)` over a
+/// non-empty `S` is TRUE with no `.divide`, no full scan). A probe carries no
+/// `rows`, so `values` faults if an `IN` ever reads it — but a query needing
+/// its values is materialised full, so it never does.
+internal struct MaterialisedSubquery {
+  /// The subquery's result rows for an `IN` occurrence materialised in full, or
+  /// `nil` for an `EXISTS`-only occurrence materialised as a cardinality probe.
+  private let rows: Array<Array<Value>>?
+
+  /// Whether the row source yielded a row — the `EXISTS` non-empty test, read
+  /// from the full `rows` or the probe.
+  internal let present: Bool
+
+  /// A full materialisation of `rows` — an `IN` occurrence, whose select list
+  /// IS needed.
+  internal init(rows: Array<Array<Value>>) {
+    self.rows = rows
+    self.present = !rows.isEmpty
+  }
+
+  /// A cardinality probe — an `EXISTS`-only occurrence, carrying only whether
+  /// the row source yielded a row, never the select-list values.
+  internal init(present: Bool) {
+    self.rows = nil
+    self.present = present
+  }
+
+  /// The single column of the result — the `IN (Q)` membership values. Only an
+  /// occurrence materialised in FULL (its select list needed) reads this; a
+  /// probe-only entry carries none, an internal invariant break if reached.
+  internal func values() throws(SQLError) -> Array<Value> {
+    guard let rows else {
+      throw .named("a subquery materialised as a probe has no values")
+    }
+    return rows.map { $0[0] }
+  }
+}
+
+/// The COMPILE-time seam that lowers an `EXISTS`/`IN (Q)` predicate WITHOUT
+/// running its subquery — the fix for the schema-path cursor-contract violation.
+///
+/// Predicate lowering happens over escapable resolution surfaces (`Schema`,
+/// `Scope`, `Grouping`) that carry no catalog, and is shared by SCHEMA-ONLY
+/// paths (`columns(of:)`, view resolution, arity checks) documented NOT to open
+/// a cursor. So lowering carries the sub-`Query` into the `Filter` as DATA
+/// rather than running it: `exists`/`within` build the lowered node holding the
+/// query, which executes ONCE, at RUN time (see `Subqueries`). Only the
+/// single-column arity of an `IN (Q)` is decided here — from the subquery's
+/// COMPILED WIDTH, known without a cursor — so a two-column `IN` subquery faults
+/// `SQLError.arity` at compile as before, never having run.
+///
+/// The `widths` map holds each nested `Query`'s compiled column count, built by
+/// the `compile` path (where the catalog is in scope) by COMPILING — never
+/// running — every subquery ONCE ahead of lowering. A schema-only surface with
+/// no catalog passes `.unsupported`, whose `width` faults, so a subquery
+/// reaching such a surface is rejected rather than mis-lowered.
+internal struct Subquery {
+  /// The resolution context every subquery lowered against this surface
+  /// materialises under — `.caller` for a top-level compile, `.view(name)` for
+  /// a view body's — composed into each lowered `Filter`'s cache key so a
+  /// view-body occurrence and a top-level one over the same AST stay distinct.
+  private let scope: Subscope
+
+  /// Each nested `Query` mapped to its COMPILED column count — cursor-free; an
+  /// `IN (Q)` requires it be 1.
+  private let widths: Dictionary<Query, Int>
+
+  internal init(_ scope: Subscope = .caller,
+                _ widths: Dictionary<Query, Int> = [:]) {
+    self.scope = scope
+    self.widths = widths
+  }
+
+  /// A `Subquery` for a lowering surface with no catalog — a schema-only
+  /// resolve. It holds no widths, so any subquery lowered against it faults
+  /// `SQLError.unsupported` rather than mis-lower.
+  internal static var unsupported: Subquery {
+    Subquery()
+  }
+
+  /// The compiled column count of `query`, or a fault when the surface holds
+  /// none — a subquery reaching a catalog-less lowering surface.
+  private func width(_ query: Query) throws(SQLError) -> Int {
+    guard let width = widths[query] else {
+      throw .unsupported("a subquery is not supported in this position")
+    }
+    return width
+  }
+
+  /// Lowers `[NOT] EXISTS (query)` — the query carried into the `Filter` to run
+  /// at execution, `negated` flipping the non-empty test. `EXISTS` ignores the
+  /// subquery's arity (its column count is irrelevant to a cardinality test),
+  /// but the query must have been compiled in the pre-pass (else a catalog-less
+  /// surface, which faults).
+  internal func exists(_ query: Query, negated: Bool)
+      throws(SQLError) -> Filter {
+    _ = try width(query)
+    return .exists(Subkey(scope, query), negated: negated)
+  }
+
+  /// Lowers `operand [NOT] IN (query)` — `operand` already lowered to a `Term`
+  /// — requiring `query` project EXACTLY ONE column (else `SQLError.arity`,
+  /// checked from the COMPILED width, so a two-column subquery faults here
+  /// without running), then carrying the query into the `Filter` to run at
+  /// execution.
+  internal func within(_ operand: Term, _ query: Query, negated: Bool)
+      throws(SQLError) -> Filter {
+    let width = try width(query)
+    guard width == 1 else { throw .arity(1, width) }
+    return .within(operand, Subkey(scope, query), negated: negated)
+  }
+}
+
+/// The RUN-time cache that executes each UNCORRELATED subquery ONCE and
+/// memoises its result — the seam that gives the row evaluator a subquery result
+/// WITHOUT itself holding the borrowing catalog.
+///
+/// A subquery is UNCORRELATED in this slice — it names no column of the
+/// enclosing query — so its result is the SAME for every outer row and is
+/// computed at most once per outer-query execution. The `run` path, where the
+/// borrowing catalog IS in scope, populates this map BEFORE executing the plan
+/// (see `Catalog.subqueries(of:)`), so the evaluator reads it as plain
+/// escapable data. An `EXISTS` reads whether the result is non-empty; an
+/// `IN (Q)` folds over its single materialised column.
+///
+/// This lands the schema-path cursor fix and the once-per-run memoisation;
+/// per-arm SHORT-CIRCUIT laziness (skipping a subquery an `AND`/`OR` never
+/// reaches) and the per-outer-row re-execution a CORRELATED subquery needs
+/// thread a runner to the evaluation site in a follow-up.
+internal struct Subqueries {
+  private let results: Dictionary<Subkey, MaterialisedSubquery>
+
+  internal init(_ results: Dictionary<Subkey, MaterialisedSubquery> = [:]) {
+    self.results = results
+  }
+
+  /// The materialised result for `key` — every occurrence a runnable plan
+  /// references is populated at run start, so a miss is an internal invariant
+  /// break, reported rather than silently treated as empty.
+  private func result(_ key: Subkey) throws(SQLError) -> MaterialisedSubquery {
+    guard let result = results[key] else {
+      throw .named("a subquery result was not materialised")
+    }
+    return result
+  }
+
+  /// Whether the occurrence `key` yielded a row — the `EXISTS` non-empty test.
+  internal func present(_ key: Subkey) throws(SQLError) -> Bool {
+    try result(key).present
+  }
+
+  /// The single column of the occurrence `key`'s result — the `IN (Q)`
+  /// membership values. The plan compiled the query's width to 1, so the first
+  /// cell of each row is its lone value; an `IN` occurrence is always
+  /// materialised in FULL, so its values are present.
+  internal func values(_ key: Subkey) throws(SQLError) -> Array<Value> {
+    try result(key).values()
+  }
+
+  /// The DISJOINT union of this cache and `other`'s — every entry of both,
+  /// which never collide because their keys carry distinct `Subscope`s: `self`
+  /// holds one resolution context's occurrences (the caller's, keyed
+  /// `.caller`), `other` another's (a view body's, keyed `.view(name)`). A
+  /// subquery AST-identical in both is TWO occurrences under TWO scopes, so it
+  /// occupies TWO keys — neither overwrites the other, and the pushed caller
+  /// filter reads its `.caller` result while the view-body filter reads its
+  /// `.view` one. A collision would be an id-space bug (two contexts sharing a
+  /// scope); it cannot happen, so the merge keeps the existing entry.
+  internal func merged(_ other: Subqueries) -> Subqueries {
+    Subqueries(results.merging(other.results) { existing, _ in existing })
+  }
+}
+
+/// The validation-side analog of `Subquery` — the seam that lets the dry-run
+/// type-check (`check`) validate the UNCORRELATED inner query an `EXISTS`/`IN
+/// (Q)` nests without itself holding the borrowing catalog.
+///
+/// `check` runs over escapable resolution surfaces carrying no catalog, yet a
+/// subquery's inner names and routines must be validated against one for schema
+/// validation to match execution — the recurring lesson that the two must not
+/// diverge. The `typecheck` path, where the borrowing catalog and `Context`
+/// ARE in scope, supplies a `validate` closure that recursively type-checks the
+/// inner query and a `width` closure that compiles it for its column count; a
+/// surface with no catalog passes `.unsupported`, which faults so a subquery
+/// reaching such a surface is rejected rather than passed unvalidated.
+internal struct SubqueryCheck {
+  /// Each nested `Query` mapped to its compiled column count — the map the
+  /// `typecheck` path builds by validating and compiling every subquery ONCE,
+  /// ahead of the `check` walk. A query present here has already been
+  /// type-checked; `check` reads its width to enforce a `IN (Q)`'s single-
+  /// column arity.
+  private let widths: Dictionary<Query, Int>
+
+  internal init(_ widths: Dictionary<Query, Int> = [:]) {
+    self.widths = widths
+  }
+
+  /// A checker for a surface with no catalog — validating a subquery needs one,
+  /// so it holds no widths and faults `SQLError.unsupported` rather than pass a
+  /// subquery unvalidated.
+  internal static var unsupported: SubqueryCheck {
+    SubqueryCheck()
+  }
+
+  /// Asserts the inner `query` was validated in the pre-pass — a query the
+  /// surface's map holds has been type-checked and compiled; one it does not
+  /// reached a catalog-less surface and is rejected.
+  internal func validate(_ query: Query) throws(SQLError) {
+    guard widths[query] != nil else {
+      throw .unsupported("a subquery is not supported in this position")
+    }
+  }
+
+  /// The column count `query` projects — from the pre-pass compile.
+  internal func width(_ query: Query) throws(SQLError) -> Int {
+    guard let width = widths[query] else {
+      throw .unsupported("a subquery is not supported in this position")
+    }
+    return width
+  }
+}
+
 /// Lowers the name-addressed AST `predicate` to the engine's `Filter`, lowering
 /// each leaf's operand expressions through `term` and passing a `bound`
 /// comparison's `:parameter` through unchanged.
@@ -27,7 +312,8 @@
 /// (against one schema, a combined join space, or a grouped slot space); each
 /// caller supplies that resolution as `term`.
 private func lower(_ predicate: Predicate,
-                   term: (Expression) throws(SQLError) -> Term)
+                   term: (Expression) throws(SQLError) -> Term,
+                   subquery: Subquery)
     throws(SQLError) -> Filter {
   switch predicate {
   case let .comparison(left, op, right):
@@ -36,6 +322,19 @@ private func lower(_ predicate: Predicate,
     try .bound(term(left), op, parameter)
   case let .null(expression, negated):
     try .null(term(expression), negated: negated)
+  case let .exists(query, negated):
+    // `[NOT] EXISTS (Q)`. In this first slice `Q` is UNCORRELATED, so the
+    // materialiser runs it ONCE (as a CTE body materialises) and the whole
+    // predicate is the definite non-empty test of that result — never UNKNOWN,
+    // `negated` flipping it. A missing materialiser (a lowering surface with no
+    // catalog in scope) rejects the subquery rather than mis-lower it.
+    try subquery.exists(query, negated: negated)
+  case let .within(expression, query, negated):
+    // `x [NOT] IN (Q)`. `Q` is UNCORRELATED here, so the materialiser runs it
+    // ONCE, checks it projects exactly ONE column (else `SQLError.arity`), and
+    // lowers to a `Filter.within` folding `x = v` over that column under the
+    // value-list `IN`'s three-valued Kleene `OR`.
+    try subquery.within(term(expression), query, negated: negated)
   case let .membership(expression, values, negated):
     // `x IN (a, b, …)` is the disjunction `x = a OR x = b OR …` and `NOT IN`
     // its negation, lowered to a first-class `Filter.membership` that evaluates
@@ -72,13 +371,16 @@ private func lower(_ predicate: Predicate,
     // `p IS [NOT] <truth value>` lowers to a first-class `Filter.truth` over
     // the lowered inner boolean filter; the three-valued-to-definite mapping
     // lives in the runtime (`tested`), so lowering just lowers the operand.
-    try .truth(lower(inner, term: term), value, negated: negated)
+    try .truth(lower(inner, term: term, subquery: subquery), value,
+               negated: negated)
   case let .and(lhs, rhs):
-    try .and(lower(lhs, term: term), lower(rhs, term: term))
+    try .and(lower(lhs, term: term, subquery: subquery),
+             lower(rhs, term: term, subquery: subquery))
   case let .or(lhs, rhs):
-    try .or(lower(lhs, term: term), lower(rhs, term: term))
+    try .or(lower(lhs, term: term, subquery: subquery),
+            lower(rhs, term: term, subquery: subquery))
   case let .not(operand):
-    try .not(lower(operand, term: term))
+    try .not(lower(operand, term: term, subquery: subquery))
   }
 }
 
@@ -288,7 +590,8 @@ extension Schema {
   /// lowers each expression to a term. The terms hold ordinals, which the
   /// engine remaps to slots after gathering the referenced ones.
   internal func terms(_ projection: Projection, in relation: Relation,
-                      _ routines: Routines = [:])
+                      _ routines: Routines = [:],
+                      subquery: Subquery = .unsupported)
       throws(SQLError) -> Array<Term> {
     switch projection {
     case .all:
@@ -304,7 +607,8 @@ extension Schema {
       var terms = Array<Term>()
       terms.reserveCapacity(projected.count)
       for item in projected {
-        try terms.append(term(item.expression, in: relation, routines))
+        try terms.append(term(item.expression, in: relation, routines,
+                              subquery: subquery))
       }
       return terms
     }
@@ -314,7 +618,8 @@ extension Schema {
   /// `.slot(ordinal)`, a literal to a `.constant`, a call to an `.apply` over
   /// its lowered arguments.
   internal func term(_ expression: Expression, in relation: Relation,
-                     _ routines: Routines = [:])
+                     _ routines: Routines = [:],
+                     subquery: Subquery = .unsupported)
       throws(SQLError) -> Term {
     switch expression {
     case let .column(column):
@@ -325,7 +630,8 @@ extension Schema {
       var lowered = Array<Term>()
       lowered.reserveCapacity(arguments.count)
       for argument in arguments {
-        try lowered.append(term(argument, in: relation, routines))
+        try lowered.append(term(argument, in: relation, routines,
+                                subquery: subquery))
       }
       // Case-fold the routine name to the SQL identifier rule the `Routines`
       // lookup uses (lowercase), so two calls that spell the same routine with
@@ -335,19 +641,22 @@ extension Schema {
       // aggregate dedup, and every other term comparison stay consistent.
       return .apply(name: name.lowercased(), arguments: lowered)
     case let .binary(op, lhs, rhs):
-      return try .binary(op, term(lhs, in: relation, routines),
-                         term(rhs, in: relation, routines))
+      return try .binary(op, term(lhs, in: relation, routines,
+                                  subquery: subquery),
+                         term(rhs, in: relation, routines, subquery: subquery))
     case let .case(whens, otherwise):
       // Lower each branch's guard predicate to a `Filter` and its result to a
       // `Term`, and the `ELSE` to a `Term`, over this relation's resolution.
       var branches = Array<(Filter, Term)>()
       branches.reserveCapacity(whens.count)
       for branch in whens {
-        let gate = try lower(branch.when, in: relation, routines)
-        try branches.append((gate, term(branch.then, in: relation, routines)))
+        let gate = try lower(branch.when, in: relation, routines,
+                             subquery: subquery)
+        try branches.append((gate, term(branch.then, in: relation, routines,
+                                        subquery: subquery)))
       }
       let fallback: Term? = if let otherwise {
-        try term(otherwise, in: relation, routines)
+        try term(otherwise, in: relation, routines, subquery: subquery)
       } else {
         nil
       }
@@ -361,7 +670,8 @@ extension Schema {
     case let .cast(operand, type):
       // Lower the operand and attach the target type; the executor converts the
       // evaluated value to it (`Value.cast(to:)`).
-      return try .cast(term(operand, in: relation, routines), type)
+      return try .cast(term(operand, in: relation, routines,
+                            subquery: subquery), type)
     case let .coalesce(arguments):
       // Lower each argument to a `Term` over this relation and hold them in a
       // first-class `Term.coalesce` so each is evaluated ONCE. `type` is the
@@ -370,7 +680,8 @@ extension Schema {
       var elements = Array<Term>()
       elements.reserveCapacity(arguments.count)
       for argument in arguments {
-        try elements.append(term(argument, in: relation, routines))
+        try elements.append(term(argument, in: relation, routines,
+                                 subquery: subquery))
       }
       let scope = Scope([(relation, self)])
       let type = try scope.derive(expression, routines)
@@ -378,8 +689,8 @@ extension Schema {
     case let .nullif(lhs, rhs):
       // Lower both operands to `Term`s over this relation and hold them in a
       // first-class `Term.nullif` so each is evaluated ONCE.
-      return try .nullif(term(lhs, in: relation, routines),
-                         term(rhs, in: relation, routines))
+      return try .nullif(term(lhs, in: relation, routines, subquery: subquery),
+                         term(rhs, in: relation, routines, subquery: subquery))
     case .aggregate:
       // An aggregate has no per-row meaning — it folds over a group — so it may
       // not appear in a `WHERE`, a join `ON`, or a non-aggregate projection.
@@ -397,20 +708,22 @@ extension Schema {
   /// fresh over this relation (see the free `order`).
   internal func order(_ order: Order, in relation: Relation,
                       _ projection: Array<Term>, _ names: Array<String?>,
-                      _ routines: Routines = [:])
+                      _ routines: Routines = [:],
+                      subquery: Subquery = .unsupported)
       throws(SQLError) -> Array<SortKey> {
     try SQLEngine.order(order, projection, names) {
       expression throws(SQLError) in
-      try term(expression, in: relation, routines)
+      try term(expression, in: relation, routines, subquery: subquery)
     }
   }
 
   internal func lower(_ predicate: Predicate, in relation: Relation,
-                      _ routines: Routines = [:])
+                      _ routines: Routines = [:],
+                      subquery: Subquery = .unsupported)
       throws(SQLError) -> Filter {
-    try SQLEngine.lower(predicate) { expression throws(SQLError) in
-      try term(expression, in: relation, routines)
-    }
+    try SQLEngine.lower(predicate, term: { expression throws(SQLError) in
+      try term(expression, in: relation, routines, subquery: subquery)
+    }, subquery: subquery)
   }
 }
 
@@ -751,7 +1064,8 @@ internal struct Scope {
   ///
   /// This is the TYPE-CHECK surface. `derive(_:_:)` is the non-faulting schema
   /// surface, which only DERIVES the nominal output type.
-  internal func validate(_ expression: Expression, _ routines: Routines = [:])
+  internal func validate(_ expression: Expression, _ routines: Routines = [:],
+                         subquery: SubqueryCheck = .unsupported)
       throws(SQLError) -> ValueType {
     switch expression {
     case let .column(column):
@@ -759,19 +1073,20 @@ internal struct Scope {
     case let .literal(literal):
       type(of: literal)
     case let .call(name, arguments):
-      try call(name, over: arguments, routines)
+      try call(name, over: arguments, routines, subquery: subquery)
     case let .aggregate(function, operand, _, filter):
-      try aggregate(function, over: operand, filter: filter, routines)
+      try aggregate(function, over: operand, filter: filter, routines,
+                    subquery: subquery)
     case let .binary(op, lhs, rhs):
-      try arithmetic(op, lhs, rhs, routines)
+      try arithmetic(op, lhs, rhs, routines, subquery: subquery)
     case let .case(whens, otherwise):
-      try conditional(whens, otherwise, routines)
+      try conditional(whens, otherwise, routines, subquery: subquery)
     case let .cast(operand, type):
-      try validate(cast: operand, to: type, routines)
+      try validate(cast: operand, to: type, routines, subquery: subquery)
     case let .coalesce(arguments):
-      try coalesce(arguments, routines)
+      try coalesce(arguments, routines, subquery: subquery)
     case let .nullif(lhs, rhs):
-      try nullif(validate: lhs, rhs, routines)
+      try nullif(validate: lhs, rhs, routines, subquery: subquery)
     }
   }
 
@@ -796,11 +1111,12 @@ internal struct Scope {
   /// integer, exactly as a `CASE` omits a skipped branch's result type. An
   /// undecidable argument (`nil`) may be selected, so its type is merged and
   /// the walk continues.
-  private func coalesce(_ arguments: Array<Expression>, _ routines: Routines)
+  private func coalesce(_ arguments: Array<Expression>, _ routines: Routines,
+                        subquery: SubqueryCheck = .unsupported)
       throws(SQLError) -> ValueType {
     var type: ValueType?
     for argument in arguments {
-      let next = try validate(argument, routines)
+      let next = try validate(argument, routines, subquery: subquery)
       if case .some(.null) = constant(argument, routines) {
         // A constant NULL is validated (for its errors) but skipped: it can
         // never be returned, so its type must not shape the column.
@@ -823,9 +1139,11 @@ internal struct Scope {
   /// its own errors (an unknown column, a bad call) but does not shape the
   /// type.
   private func nullif(validate lhs: Expression, _ rhs: Expression,
-                      _ routines: Routines) throws(SQLError) -> ValueType {
-    let type = try validate(lhs, routines)
-    _ = try validate(rhs, routines)
+                      _ routines: Routines,
+                      subquery: SubqueryCheck = .unsupported)
+      throws(SQLError) -> ValueType {
+    let type = try validate(lhs, routines, subquery: subquery)
+    _ = try validate(rhs, routines, subquery: subquery)
     return type
   }
 
@@ -856,8 +1174,10 @@ internal struct Scope {
   /// NON-constant operand, whose value is unknown at validation, falls to the
   /// structural pair check.
   private func validate(cast operand: Expression, to type: ValueType,
-                        _ routines: Routines) throws(SQLError) -> ValueType {
-    let source = try validate(operand, routines)
+                        _ routines: Routines,
+                        subquery: SubqueryCheck = .unsupported)
+      throws(SQLError) -> ValueType {
+    let source = try validate(operand, routines, subquery: subquery)
     // A constant operand casts to one value only, so its trial cast is the
     // whole decision: it ALLOWS a folded NULL to any target and REJECTS a
     // spelling that always faults (`CAST('abc' AS INTEGER)`). A non-constant
@@ -894,7 +1214,8 @@ internal struct Scope {
   /// 1`) still faults. When no branch is reachable the run yields NULL, typed
   /// `.integer` (the schema default), with no result to validate.
   private func conditional(_ whens: Array<When>, _ otherwise: Expression?,
-                           _ routines: Routines)
+                           _ routines: Routines,
+                           subquery: SubqueryCheck = .unsupported)
       throws(SQLError) -> ValueType {
     var results = Array<Expression>()
     var decided = false
@@ -903,7 +1224,7 @@ internal struct Scope {
       // validate its operands; a constant-FALSE guard's result is unreachable
       // (skip it), a constant-TRUE one is reachable but makes every LATER branch
       // unreachable — so keep the earlier results and this one, then stop.
-      try check(branch.when, routines)
+      try check(branch.when, routines, subquery: subquery)
       switch constant(branch.when, routines) {
       case false: continue
       case true: results.append(branch.then); decided = true
@@ -913,9 +1234,9 @@ internal struct Scope {
     }
     if !decided, let otherwise { results.append(otherwise) }
     guard !results.isEmpty else { return .integer }
-    var type = try validate(results[0], routines)
+    var type = try validate(results[0], routines, subquery: subquery)
     for result in results.dropFirst() {
-      let next = try validate(result, routines)
+      let next = try validate(result, routines, subquery: subquery)
       guard let unified = type.unified(with: next) else {
         throw .operand("CASE results have irreconcilable types")
       }
@@ -941,7 +1262,8 @@ internal struct Scope {
   /// its return type over an un-evaluable argument `compile` resolved but never
   /// type-checked.
   private func call(_ name: String, over arguments: Array<Expression>,
-                    _ routines: Routines)
+                    _ routines: Routines,
+                    subquery: SubqueryCheck = .unsupported)
       throws(SQLError) -> ValueType {
     guard let routine = routines[name] else { throw .function(name) }
     guard (routine.minimum ... routine.parameters.count)
@@ -952,7 +1274,7 @@ internal struct Scope {
       throw .argument("\(name) takes \(arity) arguments")
     }
     for (argument, expected) in zip(arguments, routine.parameters) {
-      let type = try validate(argument, routines)
+      let type = try validate(argument, routines, subquery: subquery)
       guard type == expected else {
         throw .argument("\(name) requires \(expected.domain) arguments")
       }
@@ -970,7 +1292,8 @@ internal struct Scope {
   /// advertising `AVG(Name)` as a double or `SUM(Name)` as text for a query
   /// that cannot fold its rows.
   private func aggregate(_ function: Aggregate, over operand: Aggregand,
-                         filter: Predicate?, _ routines: Routines)
+                         filter: Predicate?, _ routines: Routines,
+                         subquery: SubqueryCheck = .unsupported)
       throws(SQLError) -> ValueType {
     // A `FILTER (WHERE …)` is a per-row gate, so it type-checks as an ordinary
     // predicate — its columns resolve and its comparisons are well-typed — and
@@ -980,7 +1303,7 @@ internal struct Scope {
       guard !filter.aggregated else {
         throw .unsupported("an aggregate is not allowed in a FILTER")
       }
-      try check(filter, routines)
+      try check(filter, routines, subquery: subquery)
       // A FILTER that STATICALLY cannot admit a row makes the operand
       // unreachable: the executor gates on a definite TRUE (a FALSE or UNKNOWN
       // row is skipped, and the argument is evaluated only AFTER the gate), so
@@ -1002,20 +1325,20 @@ internal struct Scope {
       // validate the operand (`COUNT(*)` has none); the result is always an
       // integer count.
       if case let .expression(argument) = operand {
-        _ = try validate(argument, routines)
+        _ = try validate(argument, routines, subquery: subquery)
       }
       return .integer
     case .min, .max:
       switch operand {
       case .star: return .integer
       case let .expression(argument):
-        return try validate(argument, routines)
+        return try validate(argument, routines, subquery: subquery)
       }
     case .sum, .avg:
       let type: ValueType = switch operand {
       case .star: .integer
       case let .expression(argument):
-        try validate(argument, routines)
+        try validate(argument, routines, subquery: subquery)
       }
       if !type.numeric { throw .operand("operands must be numeric") }
       return function == .avg ? .double : type
@@ -1087,10 +1410,11 @@ internal struct Scope {
   /// would rather than advertise a header no row can produce.
   private func arithmetic(_ op: Arithmetic, _ lhs: Expression,
                           _ rhs: Expression,
-                          _ routines: Routines)
+                          _ routines: Routines,
+                          subquery: SubqueryCheck = .unsupported)
       throws(SQLError) -> ValueType {
-    let left = try validate(lhs, routines)
-    let right = try validate(rhs, routines)
+    let left = try validate(lhs, routines, subquery: subquery)
+    let right = try validate(rhs, routines, subquery: subquery)
     if case .concatenate = op {
       // Both operands are validated above for their OWN errors. `||` yields
       // text and needs two text operands — UNLESS one folds to a static NULL,
@@ -1155,19 +1479,33 @@ internal struct Scope {
   /// not type-checked — `WHERE 1 = 0 AND Name + 1 = 2` runs, so its schema
   /// resolves rather than faulting on the unreachable `Name + 1`.
   func check(_ predicate: Predicate,
-             _ routines: Routines = [:])
+             _ routines: Routines = [:],
+             subquery: SubqueryCheck = .unsupported)
       throws(SQLError) {
     switch predicate {
     case let .comparison(left, _, right):
-      _ = try validate(left, routines)
-      _ = try validate(right, routines)
+      _ = try validate(left, routines, subquery: subquery)
+      _ = try validate(right, routines, subquery: subquery)
+    case let .exists(query, _):
+      // Validate the inner UNCORRELATED query as the run's lowering does — it
+      // resolves and type-checks against the enclosing catalog, so a bad column
+      // or routine inside it faults at validation, matching what a run rejects.
+      try subquery.validate(query)
+    case let .within(operand, query, _):
+      // Validate the operand AND the inner query, and enforce the single-column
+      // arity the lowering does (`SQLError.arity`), so schema validation
+      // matches execution — the recurring lesson that the two must not diverge.
+      _ = try validate(operand, routines, subquery: subquery)
+      try subquery.validate(query)
+      let width = try subquery.width(query)
+      guard width == 1 else { throw .arity(1, width) }
     case .bound:
       // `left op :parameter` with no binding — the schema default `[:]` —
       // yields UNKNOWN without evaluating the left term, so a run just produces
       // no rows; schema validation has no bindings, so it does not evaluate it.
       break
     case let .null(operand, _):
-      _ = try validate(operand, routines)
+      _ = try validate(operand, routines, subquery: subquery)
     case let .membership(operand, values, _):
       // `x IN (v, …)` lowers to `x = v OR …`, so type it as those comparisons:
       // validate the operand and each value for real errors (unknown column,
@@ -1192,9 +1530,9 @@ internal struct Scope {
       guard !values.isEmpty else {
         throw .unsupported("IN requires a non-empty value list")
       }
-      _ = try validate(operand, routines)
+      _ = try validate(operand, routines, subquery: subquery)
       _ = try membership(of: values, each: { value throws(SQLError) in
-        _ = try validate(value, routines)
+        _ = try validate(value, routines, subquery: subquery)
       }, equality: { value throws(SQLError) in
         matched(operand, value, routines)
       })
@@ -1204,10 +1542,10 @@ internal struct Scope {
       // rejected — the run yields a definite FALSE via `Row.like` without
       // faulting (the cross-kind rule), and the schema check must accept what
       // the run accepts, as the `IN` cross-kind element does.
-      _ = try validate(operand, routines)
-      try validate(pattern, routines)
+      _ = try validate(operand, routines, subquery: subquery)
+      try validate(pattern, routines, subquery: subquery)
       if let escape {
-        try validate(escape, routines)
+        try validate(escape, routines, subquery: subquery)
         try reject(escape, routines)
       }
     case let .between(test, lower, upper, _):
@@ -1225,8 +1563,8 @@ internal struct Scope {
       // validated — `0 BETWEEN 1 AND (1 / 0)` type-checks, the lower `0 >= 1`
       // FALSE settling the row before the `1 / 0` upper is reached, exactly as
       // an `AND`'s constant-false left leaves its right unchecked.
-      _ = try validate(test, routines)
-      try validate(lower, routines)
+      _ = try validate(test, routines, subquery: subquery)
+      try validate(lower, routines, subquery: subquery)
       let settled = {
         guard let value = constant(test, routines),
             let low = constant(lower, routines) else {
@@ -1234,7 +1572,7 @@ internal struct Scope {
         }
         return matches(value, .geq, low) == false
       }()
-      if !settled { try validate(upper, routines) }
+      if !settled { try validate(upper, routines, subquery: subquery) }
     case let .distinct(lhs, rhs, _):
       // `a IS [NOT] DISTINCT FROM b` compares both operands, so validate the
       // two for real errors (an unknown column, a bad call). BOTH are always
@@ -1243,21 +1581,25 @@ internal struct Scope {
       // rejected: the run's `distinct` treats it as DISTINCT without faulting
       // (as an `IN` element does), so the schema check accepts what the run
       // accepts.
-      _ = try validate(lhs, routines)
-      _ = try validate(rhs, routines)
+      _ = try validate(lhs, routines, subquery: subquery)
+      _ = try validate(rhs, routines, subquery: subquery)
     case let .truth(inner, _, _):
       // `p IS [NOT] <truth value>` validates its inner boolean predicate for
       // real errors; the truth mapping cannot itself fault, so it adds no
       // further check.
-      try check(inner, routines)
+      try check(inner, routines, subquery: subquery)
     case let .and(lhs, rhs):
-      try check(lhs, routines)
-      if constant(lhs, routines) != false { try check(rhs, routines) }
+      try check(lhs, routines, subquery: subquery)
+      if constant(lhs, routines) != false {
+        try check(rhs, routines, subquery: subquery)
+      }
     case let .or(lhs, rhs):
-      try check(lhs, routines)
-      if constant(lhs, routines) != true { try check(rhs, routines) }
+      try check(lhs, routines, subquery: subquery)
+      if constant(lhs, routines) != true {
+        try check(rhs, routines, subquery: subquery)
+      }
     case let .not(operand):
-      try check(operand, routines)
+      try check(operand, routines, subquery: subquery)
     }
   }
 
@@ -1265,10 +1607,11 @@ internal struct Scope {
   /// validation: an expression is validated (`validate`), a `:parameter` reads
   /// nothing at compile time (its value arrives from the bindings at run time),
   /// so it needs no check, as a `Predicate.bound` parameter needs none.
-  private func validate(_ operand: Predicate.Operand, _ routines: Routines)
+  private func validate(_ operand: Predicate.Operand, _ routines: Routines,
+                        subquery: SubqueryCheck = .unsupported)
       throws(SQLError) {
     if case let .expression(expression) = operand {
-      _ = try validate(expression, routines)
+      _ = try validate(expression, routines, subquery: subquery)
     }
   }
 
@@ -1560,6 +1903,12 @@ internal struct Scope {
       return nil
     case .bound:
       return nil
+    case .exists, .within:
+      // A subquery predicate is not a ROW-INDEPENDENT constant fold — its truth
+      // is decided by the materialised result at lowering time, not by folding
+      // operands here — so it never folds statically; treat it as undecided
+      // (per-row) so a reachability walk neither prunes nor faults on it.
+      return nil
     }
   }
 
@@ -1598,6 +1947,10 @@ internal struct Scope {
       settled(operand, routines)
     case .bound:
       false
+    case .exists, .within:
+      // A subquery predicate's truth comes from a materialised result, not from
+      // folding constant operands, so it is never settled at compile time.
+      false
     }
   }
 
@@ -1613,6 +1966,13 @@ internal struct Scope {
     switch predicate {
     case .null, .distinct, .truth:
       true
+    // `EXISTS` is DEFINITELY two-valued — a non-empty test never yields UNKNOWN
+    // — so it is definite, while `IN (Q)` is three-valued over NULLs (a NULL
+    // element or operand makes an unmatched test UNKNOWN), so it is not.
+    case .exists:
+      true
+    case .within:
+      false
     case let .and(lhs, rhs), let .or(lhs, rhs):
       definite(lhs) && definite(rhs)
     case let .not(operand):
@@ -1679,40 +2039,49 @@ internal struct Scope {
   /// a binary's operands and a call's arguments to reach an aggregate, then
   /// validates it (its operand included); a bare column or literal has none.
   func aggregates(in expression: Expression,
-                  _ routines: Routines = [:])
+                  _ routines: Routines = [:],
+                  subquery: SubqueryCheck = .unsupported)
       throws(SQLError) {
     switch expression {
     case .column, .literal:
       break
     case let .aggregate(function, operand, _, filter):
-      _ = try aggregate(function, over: operand, filter: filter, routines)
+      _ = try aggregate(function, over: operand, filter: filter, routines,
+                        subquery: subquery)
     case let .call(_, arguments):
-      for argument in arguments { try aggregates(in: argument, routines) }
+      for argument in arguments {
+        try aggregates(in: argument, routines, subquery: subquery)
+      }
     case let .binary(_, lhs, rhs):
-      try aggregates(in: lhs, routines)
-      try aggregates(in: rhs, routines)
+      try aggregates(in: lhs, routines, subquery: subquery)
+      try aggregates(in: rhs, routines, subquery: subquery)
     case let .case(whens, otherwise):
       for branch in whens {
-        try aggregates(in: branch.when, routines)
-        try aggregates(in: branch.then, routines)
+        try aggregates(in: branch.when, routines, subquery: subquery)
+        try aggregates(in: branch.then, routines, subquery: subquery)
       }
-      if let otherwise { try aggregates(in: otherwise, routines) }
+      if let otherwise {
+        try aggregates(in: otherwise, routines, subquery: subquery)
+      }
     case let .cast(operand, _):
-      try aggregates(in: operand, routines)
+      try aggregates(in: operand, routines, subquery: subquery)
     case let .coalesce(arguments):
-      for argument in arguments { try aggregates(in: argument, routines) }
+      for argument in arguments {
+        try aggregates(in: argument, routines, subquery: subquery)
+      }
     case let .nullif(lhs, rhs):
-      try aggregates(in: lhs, routines)
-      try aggregates(in: rhs, routines)
+      try aggregates(in: lhs, routines, subquery: subquery)
+      try aggregates(in: rhs, routines, subquery: subquery)
     }
   }
 
   /// Validates the aggregate sub-expressions of a `LIKE` pattern or escape
   /// `operand` — an expression's own, none in a `:parameter`.
-  func aggregates(in operand: Predicate.Operand, _ routines: Routines = [:])
+  func aggregates(in operand: Predicate.Operand, _ routines: Routines = [:],
+                  subquery: SubqueryCheck = .unsupported)
       throws(SQLError) {
     if case let .expression(expression) = operand {
-      try aggregates(in: expression, routines)
+      try aggregates(in: expression, routines, subquery: subquery)
     }
   }
 
@@ -1722,37 +2091,82 @@ internal struct Scope {
   /// short-circuit skips. It walks EVERY arm (unlike `check`), reaching an
   /// aggregate through a comparison's operands and `AND`/`OR`/`NOT`.
   func aggregates(in predicate: Predicate,
-                  _ routines: Routines = [:])
+                  _ routines: Routines = [:],
+                  subquery: SubqueryCheck = .unsupported)
       throws(SQLError) {
     switch predicate {
     case let .comparison(left, _, right):
-      try aggregates(in: left, routines)
-      try aggregates(in: right, routines)
+      try aggregates(in: left, routines, subquery: subquery)
+      try aggregates(in: right, routines, subquery: subquery)
     case let .bound(left, _, _):
-      try aggregates(in: left, routines)
+      try aggregates(in: left, routines, subquery: subquery)
     case let .null(operand, _):
-      try aggregates(in: operand, routines)
+      try aggregates(in: operand, routines, subquery: subquery)
     case let .membership(operand, values, _):
-      try aggregates(in: operand, routines)
-      for value in values { try aggregates(in: value, routines) }
+      try aggregates(in: operand, routines, subquery: subquery)
+      for value in values {
+        try aggregates(in: value, routines, subquery: subquery)
+      }
+    case .exists:
+      // A subquery is its OWN scope — any aggregate inside it folds over its
+      // group, not the enclosing one — so an `EXISTS (Q)` contributes no outer
+      // aggregate to collect.
+      break
+    case let .within(operand, _, _):
+      // Only the OUTER operand may hold an enclosing-group aggregate; the
+      // subquery is its own scope, so it is not walked here.
+      try aggregates(in: operand, routines, subquery: subquery)
     case let .like(operand, pattern, escape, _):
-      try aggregates(in: operand, routines)
-      try aggregates(in: pattern, routines)
-      if let escape { try aggregates(in: escape, routines) }
+      try aggregates(in: operand, routines, subquery: subquery)
+      try aggregates(in: pattern, routines, subquery: subquery)
+      if let escape {
+        try aggregates(in: escape, routines, subquery: subquery)
+      }
     case let .between(test, lower, upper, _):
-      try aggregates(in: test, routines)
-      try aggregates(in: lower, routines)
-      try aggregates(in: upper, routines)
+      try aggregates(in: test, routines, subquery: subquery)
+      try aggregates(in: lower, routines, subquery: subquery)
+      try aggregates(in: upper, routines, subquery: subquery)
     case let .distinct(lhs, rhs, _):
-      try aggregates(in: lhs, routines)
-      try aggregates(in: rhs, routines)
+      try aggregates(in: lhs, routines, subquery: subquery)
+      try aggregates(in: rhs, routines, subquery: subquery)
     case let .truth(inner, _, _):
-      try aggregates(in: inner, routines)
+      try aggregates(in: inner, routines, subquery: subquery)
     case let .and(lhs, rhs), let .or(lhs, rhs):
-      try aggregates(in: lhs, routines)
-      try aggregates(in: rhs, routines)
+      try aggregates(in: lhs, routines, subquery: subquery)
+      try aggregates(in: rhs, routines, subquery: subquery)
     case let .not(operand):
-      try aggregates(in: operand, routines)
+      try aggregates(in: operand, routines, subquery: subquery)
+    }
+  }
+
+  /// Validates a whole-result aggregate's PROJECTION or SORT `expression` over
+  /// the single empty group a constant-false `WHERE` leaves — the empty-fold's
+  /// per-expression check, dispatching on whether the expression nests a
+  /// subquery.
+  ///
+  /// A subquery-FREE expression is precisely EMPTY-FOLDED (`empty`): its value
+  /// over the empty group is evaluated exactly as a run does, pruning a
+  /// statically-decided `CASE` branch (a constant-false guard's arm never
+  /// folds, so it cannot fault) — the precise reachability a false-`WHERE`
+  /// whole-result aggregate gives its projection.
+  ///
+  /// An expression that NESTS a subquery cannot be folded: the empty group
+  /// carries no catalog, so a `CASE WHEN EXISTS (Q) …` guard folds UNKNOWN and
+  /// its arms would be pruned — but the subquery is row-independent and may be
+  /// TRUE at RUN, RUNNING the guarded arm. So VALIDATE it as a run would
+  /// (`validate`), which validates BOTH arms of a subquery-guarded `CASE` (a
+  /// `nil`-constant guard leaves both reachable), surfacing the fault the run
+  /// raises — `SELECT CASE WHEN EXISTS (Q) THEN 1 / 0 … WHERE 1 = 0` faults
+  /// `.divide`, matching a run that keeps the empty group and evaluates the
+  /// THEN arm. This mirrors the `having.subquery` carve-out, extended to
+  /// projection and sort expressions.
+  func fold(_ expression: Expression, _ routines: Routines = [:],
+            subquery: SubqueryCheck = .unsupported)
+      throws(SQLError) {
+    if expression.subquery {
+      _ = try validate(expression, routines, subquery: subquery)
+    } else {
+      _ = try empty(expression, routines)
     }
   }
 
@@ -1960,6 +2374,12 @@ internal struct Scope {
       return or(left, try empty(rhs, routines))
     case let .not(operand):
       return try empty(operand, routines).map { !$0 }
+    case .exists, .within:
+      // The whole-result empty-group fold carries no catalog, so it cannot
+      // materialise a subquery to decide the predicate — it reads UNKNOWN,
+      // dropping the lone empty group, the conservative outcome for the rare
+      // `HAVING <subquery predicate>` over a constant-false `WHERE`.
+      return nil
     }
   }
 
@@ -1994,7 +2414,8 @@ internal struct Scope {
   /// bare-column list as `.slot` terms at their combined ordinals, an expression
   /// list as lowered terms — in source order.
   internal func terms(_ projection: Projection,
-                      _ routines: Routines = [:]) throws(SQLError)
+                      _ routines: Routines = [:],
+                      subquery: Subquery = .unsupported) throws(SQLError)
       -> Array<Term> {
     switch projection {
     case .all:
@@ -2018,7 +2439,7 @@ internal struct Scope {
       var terms = Array<Term>()
       terms.reserveCapacity(projected.count)
       for item in projected {
-        try terms.append(term(item.expression, routines))
+        try terms.append(term(item.expression, routines, subquery: subquery))
       }
       return terms
     }
@@ -2026,7 +2447,9 @@ internal struct Scope {
 
   /// Lowers a scalar `expression` to a combined-ordinal `Term`.
   internal func term(_ expression: Expression,
-                     _ routines: Routines = [:]) throws(SQLError) -> Term {
+                     _ routines: Routines = [:],
+                     subquery: Subquery = .unsupported)
+      throws(SQLError) -> Term {
     switch expression {
     case let .column(column):
       return try .slot(ordinal(of: column))
@@ -2036,25 +2459,26 @@ internal struct Scope {
       var lowered = Array<Term>()
       lowered.reserveCapacity(arguments.count)
       for argument in arguments {
-        try lowered.append(term(argument, routines))
+        try lowered.append(term(argument, routines, subquery: subquery))
       }
       // Case-fold the routine name to the identifier rule the lookup uses, so
       // equivalent-case calls lower to an identical term (see the primary
       // `term(_:in:_:)`).
       return .apply(name: name.lowercased(), arguments: lowered)
     case let .binary(op, lhs, rhs):
-      return try .binary(op, term(lhs, routines), term(rhs, routines))
+      return try .binary(op, term(lhs, routines, subquery: subquery),
+                         term(rhs, routines, subquery: subquery))
     case let .case(whens, otherwise):
       // Lower each branch's guard to a combined-ordinal `Filter` and its result
       // to a `Term`, and the `ELSE` to a `Term`, across the join chain.
       var branches = Array<(Filter, Term)>()
       branches.reserveCapacity(whens.count)
       for branch in whens {
-        try branches.append((lower(branch.when, routines),
-                             term(branch.then, routines)))
+        try branches.append((lower(branch.when, routines, subquery: subquery),
+                             term(branch.then, routines, subquery: subquery)))
       }
       let fallback: Term? = if let otherwise {
-        try term(otherwise, routines)
+        try term(otherwise, routines, subquery: subquery)
       } else {
         nil
       }
@@ -2066,7 +2490,7 @@ internal struct Scope {
     case let .cast(operand, type):
       // Lower the operand across the join chain and attach the target type; the
       // executor converts the evaluated value to it (`Value.cast(to:)`).
-      return try .cast(term(operand, routines), type)
+      return try .cast(term(operand, routines, subquery: subquery), type)
     case let .coalesce(arguments):
       // Lower each argument to a combined-ordinal `Term` and hold them in a
       // first-class `Term.coalesce` so each is evaluated ONCE; `type` is the
@@ -2074,14 +2498,15 @@ internal struct Scope {
       var elements = Array<Term>()
       elements.reserveCapacity(arguments.count)
       for argument in arguments {
-        try elements.append(term(argument, routines))
+        try elements.append(term(argument, routines, subquery: subquery))
       }
       let type = try derive(expression, routines)
       return .coalesce(elements, type: type)
     case let .nullif(lhs, rhs):
       // Lower both operands to combined-ordinal `Term`s and hold them in a
       // first-class `Term.nullif` so each is evaluated ONCE.
-      return try .nullif(term(lhs, routines), term(rhs, routines))
+      return try .nullif(term(lhs, routines, subquery: subquery),
+                         term(rhs, routines, subquery: subquery))
     case .aggregate:
       // An aggregate has no per-row meaning — it folds over a group — so it may
       // not appear in a `WHERE`, a join `ON`, or a non-aggregate projection.
@@ -2098,11 +2523,12 @@ internal struct Scope {
   /// matching select-list item's `Term` and an ordinary expression key lowers
   /// fresh over the chain (see the free `order`).
   internal func order(_ order: Order, _ projection: Array<Term>,
-                      _ names: Array<String?>, _ routines: Routines = [:])
+                      _ names: Array<String?>, _ routines: Routines = [:],
+                      subquery: Subquery = .unsupported)
       throws(SQLError) -> Array<SortKey> {
     try SQLEngine.order(order, projection, names) {
       expression throws(SQLError) in
-      try term(expression, routines)
+      try term(expression, routines, subquery: subquery)
     }
   }
 
@@ -2150,10 +2576,12 @@ internal struct Scope {
   /// never raises), so an all-equi or otherwise all-safe `ON` still hash-joins
   /// byte-for-byte.
   internal func on(_ predicate: Predicate,
-                   _ routines: Routines = [:]) throws(SQLError) -> Filter {
+                   _ routines: Routines = [:],
+                   subquery: Subquery = .unsupported)
+      throws(SQLError) -> Filter {
     let conjuncts = predicate.conjuncts
     let lowered = try conjuncts.map { conjunct throws(SQLError) in
-      try lower(conjunct, routines)
+      try lower(conjunct, routines, subquery: subquery)
     }
     // An unsafe conjunct anywhere forbids extracting ANY key: a hoisted key
     // both skips a NULL pair before a LATER unsafe conjunct runs and drops a
@@ -2175,10 +2603,12 @@ internal struct Scope {
   /// Lowers the name-addressed AST `predicate` to the engine's `Filter`, each
   /// column reference resolved to a combined ordinal across the chain.
   internal func lower(_ predicate: Predicate,
-                      _ routines: Routines = [:]) throws(SQLError) -> Filter {
-    try SQLEngine.lower(predicate) { expression throws(SQLError) in
-      try term(expression, routines)
-    }
+                      _ routines: Routines = [:],
+                      subquery: Subquery = .unsupported)
+      throws(SQLError) -> Filter {
+    try SQLEngine.lower(predicate, term: { expression throws(SQLError) in
+      try term(expression, routines, subquery: subquery)
+    }, subquery: subquery)
   }
 }
 
@@ -2256,10 +2686,12 @@ internal struct Grouping {
   /// an `Aggregation` — column qualification normalized to a slot — and matched
   /// against the collected aggregations, so `SUM(Amount)` and
   /// `SUM(Sales.Amount)` find the same slot in a single-relation scope.
-  private func slot(of expression: Expression, _ routines: Routines = [:])
+  private func slot(of expression: Expression, _ routines: Routines = [:],
+                    subquery: Subquery = .unsupported)
       throws(SQLError) -> Int? {
     guard case .aggregate = expression else { return nil }
-    let aggregation = try expression.aggregation(scope, routines)
+    let aggregation = try expression.aggregation(scope, routines,
+                                                 subquery: subquery)
     return aggregates.firstIndex(of: aggregation).map { offset + $0 }
   }
 
@@ -2270,9 +2702,11 @@ internal struct Grouping {
   /// slot only when it is a `GROUP BY` key, else it is `SQLError.grouping` — the
   /// standard rule.
   private func term(_ expression: Expression,
-                    _ routines: Routines = [:]) throws(SQLError) -> Term {
+                    _ routines: Routines = [:],
+                    subquery: Subquery = .unsupported)
+      throws(SQLError) -> Term {
     if case .aggregate = expression,
-       let slot = try slot(of: expression, routines) {
+       let slot = try slot(of: expression, routines, subquery: subquery) {
       return .slot(slot)
     }
     switch expression {
@@ -2286,14 +2720,15 @@ internal struct Grouping {
       var lowered = Array<Term>()
       lowered.reserveCapacity(arguments.count)
       for argument in arguments {
-        try lowered.append(term(argument, routines))
+        try lowered.append(term(argument, routines, subquery: subquery))
       }
       // Case-fold the routine name to the identifier rule the lookup uses, so
       // equivalent-case calls lower to an identical term (see the primary
       // `term(_:in:_:)`).
       return .apply(name: name.lowercased(), arguments: lowered)
     case let .binary(op, lhs, rhs):
-      return try .binary(op, term(lhs, routines), term(rhs, routines))
+      return try .binary(op, term(lhs, routines, subquery: subquery),
+                         term(rhs, routines, subquery: subquery))
     case let .case(whens, otherwise):
       // Lower each branch's guard and result, and the `ELSE`, against the
       // grouped slot space — a bare column in any of them must be a `GROUP BY`
@@ -2301,11 +2736,11 @@ internal struct Grouping {
       var branches = Array<(Filter, Term)>()
       branches.reserveCapacity(whens.count)
       for branch in whens {
-        try branches.append((lower(branch.when, routines),
-                             term(branch.then, routines)))
+        try branches.append((lower(branch.when, routines, subquery: subquery),
+                             term(branch.then, routines, subquery: subquery)))
       }
       let fallback: Term? = if let otherwise {
-        try term(otherwise, routines)
+        try term(otherwise, routines, subquery: subquery)
       } else {
         nil
       }
@@ -2317,7 +2752,7 @@ internal struct Grouping {
     case let .cast(operand, type):
       // Lower the operand against the grouped slot space and attach the target
       // type; the executor converts the evaluated value to it.
-      return try .cast(term(operand, routines), type)
+      return try .cast(term(operand, routines, subquery: subquery), type)
     case let .coalesce(arguments):
       // Lower each argument to a grouped-space `Term` and hold them in a
       // first-class `Term.coalesce` so each is evaluated ONCE; `type` is the
@@ -2325,14 +2760,15 @@ internal struct Grouping {
       var elements = Array<Term>()
       elements.reserveCapacity(arguments.count)
       for argument in arguments {
-        try elements.append(term(argument, routines))
+        try elements.append(term(argument, routines, subquery: subquery))
       }
       let type = try scope.derive(expression, routines)
       return .coalesce(elements, type: type)
     case let .nullif(lhs, rhs):
       // Lower both operands to grouped-space `Term`s and hold them in a
       // first-class `Term.nullif` so each is evaluated ONCE.
-      return try .nullif(term(lhs, routines), term(rhs, routines))
+      return try .nullif(term(lhs, routines, subquery: subquery),
+                         term(rhs, routines, subquery: subquery))
     case .aggregate:
       // An aggregate reaches here only when it was not collected — an internal
       // inconsistency, since the query gathers every projection/HAVING aggregate.
@@ -2359,7 +2795,8 @@ internal struct Grouping {
   /// it — the standard alias ordering on an aggregate. A `SELECT *` has no
   /// well-defined meaning over groups (which columns?), so it faults.
   internal mutating func terms(_ projection: Projection,
-                               _ routines: Routines = [:])
+                               _ routines: Routines = [:],
+                               subquery: Subquery = .unsupported)
       throws(SQLError) -> Array<Term> {
     switch projection {
     case .all:
@@ -2368,7 +2805,8 @@ internal struct Grouping {
       var terms = Array<Term>()
       terms.reserveCapacity(columns.count)
       for index in columns.indices {
-        let term = try term(.column(columns[index]), routines)
+        let term = try term(.column(columns[index]), routines,
+                            subquery: subquery)
         terms.append(term)
         record(columns[index].name, index, term)
       }
@@ -2377,7 +2815,8 @@ internal struct Grouping {
       var terms = Array<Term>()
       terms.reserveCapacity(items.count)
       for index in items.indices {
-        let term = try term(items[index].expression, routines)
+        let term = try term(items[index].expression, routines,
+                            subquery: subquery)
         terms.append(term)
         // Record the output name (`Projected.name` — an alias, else a bare
         // column's name) so an `ORDER BY` may name it (the standard alias
@@ -2390,10 +2829,12 @@ internal struct Grouping {
 
   /// Lowers a `HAVING`/predicate to a grouped-space `Filter`.
   internal func lower(_ predicate: Predicate,
-                      _ routines: Routines = [:]) throws(SQLError) -> Filter {
-    try SQLEngine.lower(predicate) { expression throws(SQLError) in
-      try term(expression, routines)
-    }
+                      _ routines: Routines = [:],
+                      subquery: Subquery = .unsupported)
+      throws(SQLError) -> Filter {
+    try SQLEngine.lower(predicate, term: { expression throws(SQLError) in
+      try term(expression, routines, subquery: subquery)
+    }, subquery: subquery)
   }
 
   /// The resolved sort keys an `ORDER BY` lowers to in grouped space, major to
@@ -2426,7 +2867,8 @@ internal struct Grouping {
   /// terms — the ordinal surface the positional keys resolve against; the alias
   /// and `GROUP BY` surfaces are the `aliases` and `keys` `terms` recorded.
   internal func order(_ order: Order, _ projection: Array<Term>,
-                      _ routines: Routines = [:])
+                      _ routines: Routines = [:],
+                      subquery: Subquery = .unsupported)
       throws(SQLError) -> Array<SortKey> {
     var resolved = Array<SortKey>()
     resolved.reserveCapacity(order.keys.count)
@@ -2456,7 +2898,8 @@ internal struct Grouping {
             continue
           }
         }
-        try resolved.append(SortKey(term: term(expression, routines),
+        try resolved.append(SortKey(term: term(expression, routines,
+                                                subquery: subquery),
                                     ascending: key.ascending, column: nil))
       }
     }
@@ -2490,6 +2933,14 @@ extension Filter {
       for element in elements {
         element.references(into: &ordinals)
       }
+    case .exists:
+      // An UNCORRELATED EXISTS reads no outer ordinal — its subquery names no
+      // enclosing column and runs against its own relations.
+      break
+    case let .within(operand, _, _):
+      // Only the outer operand term reads ordinals; the uncorrelated subquery
+      // runs against its own relations.
+      operand.references(into: &ordinals)
     case let .like(operand, pattern, escape, _):
       operand.references(into: &ordinals)
       pattern.references(into: &ordinals)

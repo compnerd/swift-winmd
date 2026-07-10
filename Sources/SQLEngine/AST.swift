@@ -237,6 +237,72 @@ public struct Select: Hashable, Sendable {
     from?.name ?? ""
   }
 
+  /// Whether the EXISTS cardinality `probe` preserves this select's existence —
+  /// so an EXISTS-only occurrence may run the probe rather than a full run.
+  ///
+  /// It holds for a non-set-operation `SELECT` WITHOUT a `HAVING` that is
+  /// EITHER non-`DISTINCT` (its cardinality is the source's, independent of the
+  /// projected values) OR `DISTINCT` WITHOUT an `OFFSET`. `DISTINCT` collapses
+  /// a non-empty source to at least one distinct row, so `SELECT DISTINCT 1
+  /// FROM S` is non-empty iff `S` is — existence is preserved by the constant
+  /// projection. An `OFFSET` breaks that: it skips DISTINCT rows, so emptiness
+  /// depends on the REAL distinct count (`SELECT DISTINCT x FROM S OFFSET 5` is
+  /// empty iff there are `≤ 5` distinct `x`), which the constant projection —
+  /// one distinct row — would wrongly collapse; such a select is not
+  /// probe-eligible.
+  ///
+  /// An aggregate/grouped select without a `HAVING` is probe-eligible: its
+  /// cardinality is a source-only fact the probe preserves WITHOUT the original
+  /// target (see `probe`). A whole-result aggregate (no `GROUP BY`) yields
+  /// EXACTLY ONE row regardless of the source — so EXISTS is true modulo the
+  /// limit — and a grouped one yields ONE ROW PER GROUP, so existence is the
+  /// source's non-emptiness after `WHERE`. A `HAVING` is NOT eligible: group
+  /// survival depends on the aggregate VALUES (which `HAVING` may reference),
+  /// so cardinality is not a source-only fact and the target must run.
+  internal var probable: Bool {
+    guard having == nil else { return false }
+    return !distinct || limit?.offset ?? 0 == 0
+  }
+
+  /// The EXISTS cardinality-probe rewrite of this select — the same
+  /// FROM/`WHERE`/joins, the same `DISTINCT` quantifier, the same `GROUP BY`,
+  /// and the SAME original `OFFSET`/`FETCH`, but its projection replaced with a
+  /// cardinality-preserving target and its `ORDER BY` dropped — so a probe run
+  /// tests whether the row source yields ANY row WITHOUT evaluating the
+  /// original select list or sort keys.
+  ///
+  /// It preserves the row source (FROM, joins, `WHERE`) and the original row
+  /// limit EXACTLY, so its cardinality matches this select's — enough for an
+  /// existence test that honours the original limiting: a `FETCH FIRST 0 ROWS`
+  /// probes zero rows (EXISTS false) and an `OFFSET` past the end probes none
+  /// (false), neither overridden by a synthetic cap. `ORDER BY` is dropped
+  /// because existence is order-independent (the row count after `OFFSET`/
+  /// `FETCH` does not depend on order). A FROM-less `SELECT <exprs>` always
+  /// yields exactly one row and cannot carry a limit, so its probe is just
+  /// `SELECT <constant>` with NO limit — it compiles and yields one row
+  /// (EXISTS true). `DISTINCT` is retained (the caller applies the probe to a
+  /// `DISTINCT` select only when it has no `OFFSET`, so `SELECT DISTINCT 1 FROM
+  /// S` yields exactly one distinct row iff `S` is non-empty).
+  ///
+  /// The probe target is chosen to preserve cardinality without the original:
+  /// a NON-aggregate select projects the constant `1`, one row per source row;
+  /// an aggregate/grouped one projects `COUNT(*)` (with the `GROUP BY` kept), a
+  /// trivial always-computable aggregate whose grouping is the original's — a
+  /// whole-result `COUNT(*)` yields exactly one row (even over an empty source)
+  /// and a grouped one yields one row per group — so the probe's cardinality is
+  /// the original's and the original target (e.g. `SUM(1 / 0)`) never runs. It
+  /// is meaningful only where `probable` holds; the caller applies it only
+  /// there.
+  internal var probe: Select {
+    let target: Expression = aggregates
+        ? .aggregate(.count, of: .star)
+        : .literal(.integer(1))
+    let item = Projected(expression: target)
+    return Select(distinct: distinct, projection: .expressions([item]),
+                  from: from, joins: joins, predicate: predicate,
+                  grouping: grouping, having: nil, order: nil, limit: limit)
+  }
+
   /// Every expression the ORDER BY sort EVALUATES over its input rows — the
   /// direct sort-key expressions AND the projection expressions its OUTPUT
   /// shorthands reach — the ones a reachable type-check pass must validate as
@@ -760,6 +826,28 @@ public indirect enum Predicate: Hashable, Sendable {
   /// DISTINCT — the two differ — matching the engine's cross-kind FALSE
   /// equality. Unlike `=`, a NULL operand never makes the row UNKNOWN.
   case distinct(Expression, Expression, negated: Bool)
+  /// `[NOT] EXISTS (Q)` — whether the subquery `Q` yields at least one row,
+  /// `negated` marking `NOT EXISTS`. It is DEFINITELY two-valued — never
+  /// UNKNOWN — even when `Q` produces NULL-valued rows: the presence of a row
+  /// is TRUE regardless of its values, so `EXISTS` tests cardinality alone. In
+  /// this first slice `Q` is UNCORRELATED — it names no column of the enclosing
+  /// query — so the engine materialises it ONCE (as a common table expression's
+  /// body is materialised) and the whole predicate is the definite non-empty
+  /// test of that result; `negated` flips it. `Predicate` is `indirect`, so it
+  /// nests the whole `Query` without boxing.
+  case exists(Query, negated: Bool)
+  /// `x [NOT] IN (Q)` — whether the operand `x` equals any value the subquery
+  /// `Q` yields, `negated` marking `NOT IN`. `Q` must project exactly ONE
+  /// column (else `SQLError.arity`); the predicate is the three-valued
+  /// membership of `x` in that column, exactly as the value-list `membership`
+  /// is — a NULL `x` or a NULL element makes an otherwise-unmatched test
+  /// UNKNOWN rather than FALSE, and `NOT IN` its negation (never TRUE when a
+  /// NULL element is present), while an EMPTY result is FALSE (TRUE negated).
+  /// In this first slice `Q` is UNCORRELATED (it names no enclosing column), so
+  /// the engine materialises it ONCE and folds `x = v` over the materialised
+  /// column under Kleene `OR`, the SAME three-valued core the value-list `IN`
+  /// uses.
+  case within(Expression, Query, negated: Bool)
   /// `p IS [NOT] <truth value>` — the ISO `<boolean test>`, whether the inner
   /// boolean `Predicate` `p`'s THREE-VALUED result equals the `value`
   /// (`TRUE`/`FALSE`/`UNKNOWN`), or does not when `negated`. Unlike the other

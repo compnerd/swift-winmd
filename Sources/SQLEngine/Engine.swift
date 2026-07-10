@@ -119,7 +119,12 @@ extension Catalog where Self: ~Escapable {
     let context = augment(context, for: query, rows: true)
     let logical = try compile(query, context).pushdown()
     let plan = try optimise(logical, context)
-    return try execute(plan, context).map(\.values)
+    // Execute every UNCORRELATED subquery the plan nests ONCE here — where the
+    // borrowing catalog IS in scope — and thread the memoised results into the
+    // context the executor reads (never during `compile`, so a schema-only path
+    // opens no cursor). A query with no `EXISTS`/`IN (Q)` builds an empty one.
+    let subqueries = try subqueries(of: query, context)
+    return try execute(plan, context.resolving(subqueries)).map(\.values)
   }
 
   /// Runs a `Statement` against this catalog, returning its result rows.
@@ -441,11 +446,21 @@ extension Projection {
   /// faulting (`SQLError.column` for a column, `SQLError.unsupported` for `*`).
   /// The terms hold no slots, so the `single` row's empty record carries every
   /// value the projection needs.
-  internal func scalar(_ routines: Routines = [:]) throws(SQLError) -> Plan {
+  ///
+  /// `subquery` carries the compile-time width map of the UNCORRELATED
+  /// subqueries the projection nests, so an `EXISTS`/`IN (Q)` inside a scalar
+  /// term lowers exactly as it does on the FROM'd path — the FROM-less scalar
+  /// select is otherwise the ONE path that would hit the default unsupported
+  /// map and reject a subquery a run materialises. The `Subquery` is threaded,
+  /// not run, here (see `subquery(of:)`).
+  internal func scalar(_ routines: Routines = [:],
+                       subquery: Subquery = .unsupported)
+      throws(SQLError) -> Plan {
     guard case .all = self else {
       let schema = Schema(width: 0, extent: 0, names: [], types: [],
                           virtuals: [])
-      let terms = try schema.terms(self, in: Relation(name: ""), routines)
+      let terms = try schema.terms(self, in: Relation(name: ""), routines,
+                                   subquery: subquery)
       return .project(terms, .single)
     }
     // `SELECT *` names every column of the relations in scope; a FROM-less query
@@ -824,6 +839,15 @@ extension Predicate {
       operand.aggregated
     case let .membership(operand, values, _):
       operand.aggregated || values.contains { $0.aggregated }
+    case .exists:
+      // A subquery is its OWN scope, so an aggregate inside it folds over its
+      // group, not the enclosing one — it never makes the OUTER query an
+      // aggregate one.
+      false
+    case let .within(operand, _, _):
+      // Only the OUTER operand can hold an enclosing-group aggregate; the
+      // subquery is its own scope.
+      operand.aggregated
     case let .like(operand, pattern, escape, _):
       operand.aggregated || pattern.aggregated
           || (escape?.aggregated ?? false)
@@ -854,6 +878,13 @@ extension Predicate {
       operand.bound
     case let .membership(operand, values, _):
       operand.bound || values.contains { $0.bound }
+    case let .exists(query, _):
+      // A `:parameter` inside a subquery binds against the SAME run bindings
+      // (the subquery runs under the enclosing context), so a defined-function
+      // body that nests one still carries a binding to reject at registration.
+      query.bound
+    case let .within(operand, query, _):
+      operand.bound || query.bound
     case let .like(operand, pattern, escape, _):
       operand.bound || pattern.bound || (escape?.bound ?? false)
     case let .between(test, lower, upper, _):
@@ -867,6 +898,302 @@ extension Predicate {
     case let .not(operand):
       operand.bound
     }
+  }
+}
+
+extension Query {
+  /// Whether this query references a query binding — a `.bound` operand — in
+  /// any predicate within it, descending a set operation's arms. A subquery
+  /// nested in a defined-function body is walked through this to reject a
+  /// `:parameter` at registration (see `Expression.bound`).
+  internal var bound: Bool {
+    switch self {
+    case let .select(select): select.bound
+    case let .setop(_, left, right, _): left.bound || right.bound
+    }
+  }
+
+  /// The UNCORRELATED subqueries this query nests DIRECTLY — the union of every
+  /// arm's `Select.subqueries`, descending a set operation's arms but NOT a
+  /// nested subquery's OWN body (each subquery is run as a whole, resolving its
+  /// inner subqueries through its own `run`). The run path materialises these
+  /// once, keyed by occurrence, so a set operation's every arm reads its own
+  /// `EXISTS`/`IN (Q)` result from the SAME cache.
+  internal var subqueries: Array<Query> {
+    switch self {
+    case let .select(select): select.subqueries
+    case let .setop(_, left, right, _): left.subqueries + right.subqueries
+    }
+  }
+
+  /// The subqueries this query nests in an `IN (Q)` position — the ones whose
+  /// single COLUMN of values a run reads, so the materialiser runs each in FULL
+  /// rather than as a cardinality probe. A subquery only ever an `EXISTS`
+  /// operand is absent, so its select list is never evaluated; one used by BOTH
+  /// an `EXISTS` and an `IN` appears here (its values are needed), so its lone
+  /// full materialisation serves both.
+  internal var valued: Set<Query> {
+    switch self {
+    case let .select(select): select.valued
+    case let .setop(_, left, right, _): left.valued.union(right.valued)
+    }
+  }
+}
+
+extension Select {
+  /// Whether this `SELECT` references a query binding — a `.bound` operand — in
+  /// its `WHERE`, any join `ON`, or its `HAVING` (the predicate positions a
+  /// binding may occur in).
+  internal var bound: Bool {
+    if predicate?.bound ?? false { return true }
+    if joins.contains(where: { $0.on.bound }) { return true }
+    return having?.bound ?? false
+  }
+
+  /// The UNCORRELATED subqueries this `SELECT` nests DIRECTLY — those in its
+  /// `WHERE`, each join `ON`, its `HAVING`, its projection, and its `ORDER BY`
+  /// sort-key expressions — in appearance order, for the `compile`/`typecheck`
+  /// pre-pass to materialise ONCE.
+  ///
+  /// It descends this select's own predicates and expressions but NOT into a
+  /// nested subquery's OWN body: each subquery is compiled/run as a whole
+  /// (`compile(query)`/`run(query)`), which recurses into its inner subqueries
+  /// through its own pre-pass, so gathering only the directly-nested ones keeps
+  /// the walk one level and lets each subquery own its inner materialisation.
+  internal var subqueries: Array<Query> {
+    var queries = Array<Query>()
+    predicate?.collect(subqueries: &queries)
+    for join in joins { join.on.collect(subqueries: &queries) }
+    having?.collect(subqueries: &queries)
+    if case let .expressions(items) = projection {
+      for item in items { item.expression.collect(subqueries: &queries) }
+    }
+    for key in order?.keys ?? [] {
+      if case let .expression(expression) = key.sort {
+        expression.collect(subqueries: &queries)
+      }
+    }
+    return queries
+  }
+
+  /// The subqueries this `SELECT` nests in an `IN (Q)` position — the same
+  /// clauses `subqueries` walks, keeping only the `within` operands' queries,
+  /// so a run materialises each in FULL for its values while an `EXISTS`-only
+  /// subquery stays a cardinality probe.
+  internal var valued: Set<Query> {
+    var queries = Set<Query>()
+    predicate?.collect(valued: &queries)
+    for join in joins { join.on.collect(valued: &queries) }
+    having?.collect(valued: &queries)
+    if case let .expressions(items) = projection {
+      for item in items { item.expression.collect(valued: &queries) }
+    }
+    for key in order?.keys ?? [] {
+      if case let .expression(expression) = key.sort {
+        expression.collect(valued: &queries)
+      }
+    }
+    return queries
+  }
+}
+
+extension Predicate {
+  /// Collects the subqueries this predicate nests DIRECTLY into `queries` — the
+  /// whole `Query` of an `exists`/`within`, and any in an operand expression,
+  /// a `CASE` guard, or an `AND`/`OR`/`NOT` — WITHOUT descending a collected
+  /// subquery's own body (`compile`/`run` recurse into it).
+  internal func collect(subqueries queries: inout Array<Query>) {
+    switch self {
+    case let .exists(query, _):
+      queries.append(query)
+    case let .within(operand, query, _):
+      operand.collect(subqueries: &queries)
+      queries.append(query)
+    case let .comparison(left, _, right):
+      left.collect(subqueries: &queries)
+      right.collect(subqueries: &queries)
+    case let .bound(left, _, _):
+      left.collect(subqueries: &queries)
+    case let .null(operand, _):
+      operand.collect(subqueries: &queries)
+    case let .membership(operand, values, _):
+      operand.collect(subqueries: &queries)
+      for value in values { value.collect(subqueries: &queries) }
+    case let .like(operand, pattern, escape, _):
+      operand.collect(subqueries: &queries)
+      pattern.collect(subqueries: &queries)
+      escape?.collect(subqueries: &queries)
+    case let .between(test, lower, upper, _):
+      test.collect(subqueries: &queries)
+      lower.collect(subqueries: &queries)
+      upper.collect(subqueries: &queries)
+    case let .distinct(lhs, rhs, _):
+      lhs.collect(subqueries: &queries)
+      rhs.collect(subqueries: &queries)
+    case let .truth(inner, _, _):
+      inner.collect(subqueries: &queries)
+    case let .and(lhs, rhs), let .or(lhs, rhs):
+      lhs.collect(subqueries: &queries)
+      rhs.collect(subqueries: &queries)
+    case let .not(operand):
+      operand.collect(subqueries: &queries)
+    }
+  }
+
+  /// Whether this predicate nests any `EXISTS`/`IN (Q)` subquery — the schema
+  /// path's reachability check reads this to keep a subquery-bearing `HAVING`
+  /// from being pruned as unreachable, since its truth is decided at RUN by the
+  /// subquery, not statically.
+  internal var subquery: Bool {
+    var queries = Array<Query>()
+    collect(subqueries: &queries)
+    return !queries.isEmpty
+  }
+
+  /// Collects the subqueries this predicate nests in an `IN (Q)` position into
+  /// `queries` — ONLY a `within`'s `Query`, recursing the same structure
+  /// `collect(subqueries:)` does. An `exists`'s `Query` is NOT collected — its
+  /// values are never read — so it materialises as a probe.
+  internal func collect(valued queries: inout Set<Query>) {
+    switch self {
+    case .exists:
+      // An `EXISTS` operand's values are never read — it materialises as a
+      // cardinality probe — so it is NOT a valued occurrence.
+      break
+    case let .within(operand, query, _):
+      operand.collect(valued: &queries)
+      queries.insert(query)
+    case let .comparison(left, _, right):
+      left.collect(valued: &queries)
+      right.collect(valued: &queries)
+    case let .bound(left, _, _):
+      left.collect(valued: &queries)
+    case let .null(operand, _):
+      operand.collect(valued: &queries)
+    case let .membership(operand, values, _):
+      operand.collect(valued: &queries)
+      for value in values { value.collect(valued: &queries) }
+    case let .like(operand, pattern, escape, _):
+      operand.collect(valued: &queries)
+      pattern.collect(valued: &queries)
+      escape?.collect(valued: &queries)
+    case let .between(test, lower, upper, _):
+      test.collect(valued: &queries)
+      lower.collect(valued: &queries)
+      upper.collect(valued: &queries)
+    case let .distinct(lhs, rhs, _):
+      lhs.collect(valued: &queries)
+      rhs.collect(valued: &queries)
+    case let .truth(inner, _, _):
+      inner.collect(valued: &queries)
+    case let .and(lhs, rhs), let .or(lhs, rhs):
+      lhs.collect(valued: &queries)
+      rhs.collect(valued: &queries)
+    case let .not(operand):
+      operand.collect(valued: &queries)
+    }
+  }
+}
+
+extension Predicate.Operand {
+  /// Collects the subqueries in this `LIKE` operand — an expression's own, none
+  /// for a `:parameter`.
+  internal func collect(subqueries queries: inout Array<Query>) {
+    if case let .expression(expression) = self {
+      expression.collect(subqueries: &queries)
+    }
+  }
+
+  /// Collects the `IN (Q)`-position subqueries in this `LIKE` operand — an
+  /// expression's own, none for a `:parameter`.
+  internal func collect(valued queries: inout Set<Query>) {
+    if case let .expression(expression) = self {
+      expression.collect(valued: &queries)
+    }
+  }
+}
+
+extension Expression {
+  /// Collects the subqueries this expression nests DIRECTLY into `queries` —
+  /// reached through a `CASE` guard or an aggregate's argument/FILTER (a scalar
+  /// expression has no other predicate) — recursing its call arguments,
+  /// arithmetic, aggregate operand and FILTER, `CASE`, `CAST`, `COALESCE`, and
+  /// `NULLIF` sub-expressions. A scalar `Expression.subquery` is a LATER slice,
+  /// so none is collected from an expression position yet.
+  internal func collect(subqueries queries: inout Array<Query>) {
+    switch self {
+    case .column, .literal:
+      break
+    case let .aggregate(_, operand, _, filter):
+      if case let .expression(expression) = operand {
+        expression.collect(subqueries: &queries)
+      }
+      filter?.collect(subqueries: &queries)
+    case let .call(_, arguments):
+      for argument in arguments { argument.collect(subqueries: &queries) }
+    case let .binary(_, lhs, rhs):
+      lhs.collect(subqueries: &queries)
+      rhs.collect(subqueries: &queries)
+    case let .case(whens, otherwise):
+      for when in whens {
+        when.when.collect(subqueries: &queries)
+        when.then.collect(subqueries: &queries)
+      }
+      otherwise?.collect(subqueries: &queries)
+    case let .cast(operand, _):
+      operand.collect(subqueries: &queries)
+    case let .coalesce(arguments):
+      for argument in arguments { argument.collect(subqueries: &queries) }
+    case let .nullif(lhs, rhs):
+      lhs.collect(subqueries: &queries)
+      rhs.collect(subqueries: &queries)
+    }
+  }
+
+  /// Collects the `IN (Q)`-position subqueries this expression nests — reached
+  /// through a `CASE` guard or an aggregate's argument/FILTER, mirroring
+  /// `collect(subqueries:)`. An `EXISTS` guard contributes none (it probes).
+  internal func collect(valued queries: inout Set<Query>) {
+    switch self {
+    case .column, .literal:
+      break
+    case let .aggregate(_, operand, _, filter):
+      if case let .expression(expression) = operand {
+        expression.collect(valued: &queries)
+      }
+      filter?.collect(valued: &queries)
+    case let .call(_, arguments):
+      for argument in arguments { argument.collect(valued: &queries) }
+    case let .binary(_, lhs, rhs):
+      lhs.collect(valued: &queries)
+      rhs.collect(valued: &queries)
+    case let .case(whens, otherwise):
+      for when in whens {
+        when.when.collect(valued: &queries)
+        when.then.collect(valued: &queries)
+      }
+      otherwise?.collect(valued: &queries)
+    case let .cast(operand, _):
+      operand.collect(valued: &queries)
+    case let .coalesce(arguments):
+      for argument in arguments { argument.collect(valued: &queries) }
+    case let .nullif(lhs, rhs):
+      lhs.collect(valued: &queries)
+      rhs.collect(valued: &queries)
+    }
+  }
+
+  /// Whether this expression nests any `EXISTS`/`IN (Q)` subquery — reached
+  /// through a `CASE` guard or an aggregate's argument/FILTER. The empty-fold
+  /// reads this to VALIDATE a subquery-guarded projection or sort expression
+  /// (whose selected branch a run decides at RUN by the subquery, not
+  /// statically) rather than prune it, so `columns(of:)` surfaces the same
+  /// fault the run would (`SELECT CASE WHEN EXISTS (Q) THEN 1 / 0 …` raises
+  /// `.divide`). A subquery-free expression keeps the precise empty-fold.
+  internal var subquery: Bool {
+    var queries = Array<Query>()
+    collect(subqueries: &queries)
+    return !queries.isEmpty
   }
 }
 
@@ -887,7 +1214,8 @@ extension Catalog where Self: ~Escapable {
   /// in the `GROUP BY`.
   internal borrowing func group(_ select: Select, _ relation: Relation,
                                 _ from: Resolved, _ context: Context,
-                                _ visited: Set<String>)
+                                _ visited: Set<String>,
+                                _ subscope: Subscope = .caller)
       throws(SQLError) -> Plan {
     // Resolve every joined relation and lay the FROM relation and each joined
     // one end to end in one combined ordinal space (as the non-aggregate join
@@ -907,16 +1235,20 @@ extension Catalog where Self: ~Escapable {
     // resolved against only the prefix already in scope (as the non-aggregate
     // path does). A `column = column` conjunct becomes a `match` hash-join key;
     // the rest is a residual the join runs as a filter.
+    // Materialise every UNCORRELATED subquery ONCE, ahead of lowering, into a
+    // map the join ONs, WHERE, HAVING, projection, and ORDER BY read from.
+    let subquery = try subquery(of: select, context, visited, subscope)
     var matches = Array<Filter>()
     matches.reserveCapacity(select.joins.count)
     for index in select.joins.indices {
       let prefix = Scope(Array(relations[0 ... index + 1]))
       let join = select.joins[index]
-      try matches.append(prefix.on(join.on, context.routines))
+      try matches.append(prefix.on(join.on, context.routines,
+                                   subquery: subquery))
     }
     var predicate: Filter? = nil
     if let clause = select.predicate {
-      predicate = try scope.lower(clause, context.routines)
+      predicate = try scope.lower(clause, context.routines, subquery: subquery)
     }
 
     // The `GROUP BY` keys and the aggregate arguments lower to combined
@@ -953,7 +1285,8 @@ extension Catalog where Self: ~Escapable {
     // the DISTINCT sort-key check accept it).
     var aggregations = Array<Aggregation>()
     for expression in expressions {
-      let aggregation = try expression.aggregation(scope, context.routines)
+      let aggregation = try expression.aggregation(scope, context.routines,
+                                                   subquery: subquery)
       if !aggregations.contains(aggregation) {
         aggregations.append(aggregation)
       }
@@ -1010,14 +1343,16 @@ extension Catalog where Self: ~Escapable {
     // enforcing the projection rule (every non-aggregated column must be a
     // GROUP BY key).
     var grouping = try Grouping(scope, select.grouping, aggregations)
-    let projection = try grouping.terms(select.projection, context.routines)
+    let projection = try grouping.terms(select.projection, context.routines,
+                                        subquery: subquery)
     let having: Filter? = if let clause = select.having {
-      try grouping.lower(clause, context.routines)
+      try grouping.lower(clause, context.routines, subquery: subquery)
     } else {
       nil
     }
     var order = if let clause = select.order {
-      try grouping.order(clause, projection, context.routines)
+      try grouping.order(clause, projection, context.routines,
+                         subquery: subquery)
     } else {
       Array<SortKey>()
     }
@@ -1099,7 +1434,8 @@ extension Expression {
   /// `Filter` — the same combined base-ordinal space the argument resolves in,
   /// so it reads the pre-aggregation row the fold gates on. `self` is always an
   /// `.aggregate` — `collect` gathers only those.
-  internal func aggregation(_ scope: Scope, _ routines: Routines = [:])
+  internal func aggregation(_ scope: Scope, _ routines: Routines = [:],
+                            subquery: Subquery = .unsupported)
       throws(SQLError) -> Aggregation {
     guard case let .aggregate(function, operand, distinct, filter) = self else {
       throw .unsupported("expected an aggregate")
@@ -1108,10 +1444,10 @@ extension Expression {
     case .star:
       nil
     case let .expression(expression):
-      try scope.term(expression, routines)
+      try scope.term(expression, routines, subquery: subquery)
     }
     let gate: Filter? = if let filter {
-      try scope.lower(filter, routines)
+      try scope.lower(filter, routines, subquery: subquery)
     } else {
       nil
     }
@@ -1134,6 +1470,13 @@ extension Predicate {
     case let .membership(operand, values, _):
       operand.collect(into: &expressions)
       for value in values { value.collect(into: &expressions) }
+    case .exists:
+      // A subquery is its own scope — an aggregate inside it folds over its
+      // group, not the enclosing one — so it contributes none here.
+      break
+    case let .within(operand, _, _):
+      // Only the OUTER operand may hold an enclosing-group aggregate.
+      operand.collect(into: &expressions)
     case let .like(operand, pattern, escape, _):
       operand.collect(into: &expressions)
       pattern.collect(into: &expressions)
@@ -1899,17 +2242,137 @@ extension Catalog where Self: ~Escapable {
   /// `SQLError.arity`.
   internal borrowing func compile(_ query: Query,
                                   _ context: Context = Context(),
-                                  _ visited: Set<String> = [])
+                                  _ visited: Set<String> = [],
+                                  _ scope: Subscope = .caller)
       throws(SQLError) -> Plan {
     guard case let .setop(kind, left, right, all) = query else {
-      return try compile(query.first, context, visited)
+      return try compile(query.first, context, visited, scope)
     }
 
     let width = try arity(query.first, context, visited)
     let count = try arity(right.first, context, visited)
     guard count == width else { throw .arity(width, count) }
-    return try .setop(kind, compile(left, context, visited),
-                      compile(right, context, visited), all: all)
+    return try .setop(kind, compile(left, context, visited, scope),
+                      compile(right, context, visited, scope), all: all)
+  }
+
+  /// The distinct UNCORRELATED subqueries `select` nests, each COMPILED ONCE
+  /// against this catalog and `context` for its column count — NEVER run — into
+  /// a `Subquery` map the predicate/projection lowering reads for arity, the
+  /// seam that carries each sub-`Query` into its lowered `Filter` as data.
+  ///
+  /// This is CURSOR-FREE: it drives `compile`, which resolves schemas and reads
+  /// the subquery's `Plan.width` without a cursor, so a schema-only path
+  /// (`columns(of:)`, view resolution) that shares this lowering opens none and
+  /// surfaces no data-dependent error. Every subquery in the `WHERE`, join
+  /// `ON`s, `HAVING`, projection, `ORDER BY` expressions, and aggregate
+  /// arguments and FILTERs is found by a syntactic walk and keyed by its own
+  /// `Query` (which is `Hashable`), so lowering resolves each `EXISTS`/`IN (Q)`
+  /// against the map by identity. A subquery compiles ONCE even if it appears
+  /// twice; it RUNS at execution (see `subqueries(of:)`), UNCORRELATED so once.
+  ///
+  /// `scope` is the resolution context these subqueries lower under — `.caller`
+  /// for a top-level compile, `.view(name)` for a view body's — carried into
+  /// each lowered `Filter`'s cache key so a view-body occurrence and a
+  /// top-level one over the same AST stay distinct entries (see `Subscope`).
+  internal borrowing func subquery(of select: Select, _ context: Context,
+                                   _ visited: Set<String>,
+                                   _ scope: Subscope = .caller)
+      throws(SQLError) -> Subquery {
+    var widths = Dictionary<Query, Int>()
+    for query in select.subqueries where widths[query] == nil {
+      widths[query] = try compile(query, context, visited).width
+    }
+    return Subquery(scope, widths)
+  }
+
+  /// Executes every UNCORRELATED subquery `query` nests ONCE against this
+  /// catalog and `context` — the run-time counterpart of `subquery(of:)` —
+  /// memoising each result under its occurrence `Subkey` (its resolution
+  /// `scope` composed with its `Query`) into a `Subqueries` cache the row
+  /// evaluator reads.
+  ///
+  /// `scope` is the resolution context these subqueries materialise under, so
+  /// the key each writes matches the key its lowered `Filter` reads: `run`
+  /// materialises a top-level query's subqueries under `.caller`; `derive`
+  /// materialises a view body's under `.view(name)`. The two spaces are
+  /// disjoint, so a caller cache and a view-body cache `merged` without either
+  /// overwriting the other (Bug 2).
+  ///
+  /// An `IN (Q)` occurrence (its `Query` in `query.valued`) is materialised in
+  /// FULL — its single column of values IS read. An occurrence ONLY an `EXISTS`
+  /// operand needs no values, so it is materialised as a cardinality PROBE:
+  /// `probe` tests whether the row source yields ANY row WITHOUT evaluating the
+  /// select list or sort keys, so `EXISTS (SELECT 1 / 0 FROM S)` over a
+  /// non-empty `S` is TRUE with no `.divide` (Bug 3), and it honours the
+  /// original `OFFSET`/`FETCH` so a `FETCH FIRST 0 ROWS` or an `OFFSET` past
+  /// the end is EXISTS false. A `Query` used by BOTH is in `valued`, so its
+  /// single full materialisation serves the `EXISTS` occurrence too.
+  ///
+  /// This runs at RUN time, where the borrowing catalog IS in scope, NOT during
+  /// `compile` — so a schema-only path never reaches it and opens no cursor. It
+  /// gathers every arm's directly-nested subquery (a set operation's both arms
+  /// read one cache) and runs each DISTINCT `Query` at most ONCE per
+  /// outer-query execution: its result is the same for every outer row because
+  /// the subquery is UNCORRELATED. Each runs under the SAME `context` —
+  /// a nested subquery resolves ITS own inner subqueries through its own `run`,
+  /// so this walk stays one level.
+  ///
+  /// Per-arm SHORT-CIRCUIT laziness — not running a subquery an `AND`/`OR` never
+  /// reaches — is a follow-up that threads a runner to the evaluation site; this
+  /// materialises every subquery the plan syntactically nests up front.
+  internal borrowing func subqueries(of query: Query, _ context: Context,
+                                     _ scope: Subscope = .caller)
+      throws(SQLError) -> Subqueries {
+    let valued = query.valued
+    var results = Dictionary<Subkey, MaterialisedSubquery>()
+    for nested in query.subqueries {
+      let key = Subkey(scope, nested)
+      guard results[key] == nil else { continue }
+      if valued.contains(nested) {
+        // An `IN (Q)` occurrence: materialise the full result — its single
+        // column of values is folded per outer row.
+        results[key] = MaterialisedSubquery(rows: try run(nested, context))
+      } else {
+        // An `EXISTS`-only occurrence: probe cardinality without evaluating the
+        // select list or sort keys, honouring the original `OFFSET`/`FETCH`.
+        results[key] = MaterialisedSubquery(present: try probe(nested, context))
+      }
+    }
+    return Subqueries(results)
+  }
+
+  /// Whether `query`'s row source yields ANY row — the `EXISTS` cardinality
+  /// probe — WITHOUT evaluating its select list or sort keys.
+  ///
+  /// For a `probable` `SELECT` (see `Select.probable`), it runs a PROBE query
+  /// that keeps the FROM/`WHERE`/joins, the `DISTINCT` quantifier, the `GROUP
+  /// BY`, and the SAME original `OFFSET`/`FETCH` but replaces the projection
+  /// with a cardinality-preserving target and drops the `ORDER BY`, so the
+  /// original select-list expressions never evaluate (no `1 / 0` fault) while
+  /// the original limiting is honoured: a `FETCH FIRST 0 ROWS` probes zero rows
+  /// (EXISTS false) and an `OFFSET` past the end probes none (false). A
+  /// FROM-less `SELECT <exprs>` carries no limit, so its probe is a limit-free
+  /// `SELECT <constant>` that compiles and yields its one row (EXISTS true). A
+  /// `DISTINCT` select without an `OFFSET` is probable too: `SELECT DISTINCT 1
+  /// FROM S` yields exactly one distinct row iff `S` is non-empty, so the
+  /// constant projection preserves existence. An aggregate/grouped select
+  /// WITHOUT a `HAVING` is probable via a `COUNT(*)` target (see
+  /// `Select.probe`): a whole-result aggregate yields exactly one row (EXISTS
+  /// true modulo the limit, even over an empty source) and a grouped one yields
+  /// one row per group, so the probe preserves its cardinality without running
+  /// the original target. A `DISTINCT` select WITH an `OFFSET` (its emptiness
+  /// depends on the real distinct count), a `HAVING` one (group survival
+  /// depends on the aggregate values, not a source-only fact), or a set
+  /// operation is materialised in FULL and tested for emptiness — the rewrite
+  /// would not preserve its cardinality — which for those shapes evaluates the
+  /// select list as a run would anyway.
+  private borrowing func probe(_ query: Query, _ context: Context)
+      throws(SQLError) -> Bool {
+    guard case let .select(select) = query, select.probable else {
+      return try !run(query, context).isEmpty
+    }
+    return try !run(.select(select.probe), context).isEmpty
   }
 
   /// The number of result columns `select` projects — the extent of a `*` over
@@ -2011,8 +2474,12 @@ extension Catalog where Self: ~Escapable {
       // rebuilds the overlay with rows and runs the sub-plan.
       let overlay =
           augment(context.scoping([:]), for: view.query, rows: false)
+      // The body's subqueries resolve under the VIEW's overlay — never the
+      // caller's — so lower them under `.view(name)`, keeping a view-body
+      // occurrence and a top-level one over the same AST distinct entries.
       let plan =
-          try compile(view.query, overlay, visited.union([name.lowercased()]))
+          try compile(view.query, overlay, visited.union([name.lowercased()]),
+                      .view(name.lowercased()))
       let projected = plan.width
       guard view.columns.count == projected else {
         throw .columns(expected: projected, got: view.columns.count)
@@ -2057,7 +2524,8 @@ extension Catalog where Self: ~Escapable {
   /// into a join.
   internal borrowing func compile(_ select: Select,
                                   _ context: Context = Context(),
-                                  _ visited: Set<String> = [])
+                                  _ visited: Set<String> = [],
+                                  _ subscope: Subscope = .caller)
       throws(SQLError) -> Plan {
     guard let relation = select.from else {
       // A FROM-less select projects expressions over a single row; a `WHERE`,
@@ -2072,7 +2540,16 @@ extension Catalog where Self: ~Escapable {
             "a WHERE, GROUP BY, HAVING, ORDER BY, OFFSET/FETCH, or JOIN " +
             "requires a FROM clause")
       }
-      return try select.projection.scalar(context.routines)
+      // A scalar projection may still nest an UNCORRELATED subquery
+      // (`SELECT CASE WHEN EXISTS (Q) …`); compile each ONCE for its width and
+      // thread the map through so the term lowers as it does on the FROM'd path
+      // rather than hit the default unsupported map. The run path builds the
+      // matching run-time cache from `query.subqueries` (which descends the
+      // projection), so the subquery is materialised there — `compile` runs it
+      // never.
+      let subquery = try subquery(of: select, context, visited, subscope)
+      return try select.projection.scalar(context.routines,
+                                          subquery: subquery)
     }
     let from = try resolve(relation, context, visited)
 
@@ -2091,18 +2568,21 @@ extension Catalog where Self: ~Escapable {
     // `HAVING`, and `ORDER BY` against the grouped slot space. A non-aggregate
     // query compiles exactly as before.
     if select.aggregates {
-      return try group(select, relation, from, context, visited)
+      return try group(select, relation, from, context, visited, subscope)
     }
 
     guard !select.joins.isEmpty else {
+      // Materialise every UNCORRELATED subquery ONCE, ahead of lowering, into a
+      // map the WHERE/projection/ORDER BY lowering splices results from.
+      let subquery = try subquery(of: select, context, visited, subscope)
       var filter: Filter? = nil
       if let predicate = select.predicate {
         filter = try from.schema.lower(predicate, in: relation,
-                                       context.routines)
+                                       context.routines, subquery: subquery)
       }
       let projection =
           try from.schema.terms(select.projection, in: relation,
-                                context.routines)
+                                context.routines, subquery: subquery)
 
       // The ORDER BY lowers its keys against the projection: an ordinal or an
       // output-alias key resolves to a select-list item's own term, an ordinary
@@ -2112,7 +2592,7 @@ extension Catalog where Self: ~Escapable {
       if let clause = select.order {
         let names = select.projection.outputs(count: projection.count)
         order = try from.schema.order(clause, in: relation, projection, names,
-                                      context.routines)
+                                      context.routines, subquery: subquery)
       }
 
       // Under DISTINCT every ORDER BY key must be a select-list value — the
@@ -2164,18 +2644,23 @@ extension Catalog where Self: ~Escapable {
     // inequality or expression equality lowers to a residual the join filters.
     // The WHERE and ORDER lower against the whole chain, which legitimately
     // sees every relation.
+    // Materialise every UNCORRELATED subquery ONCE, ahead of lowering, into a
+    // map the join ONs, WHERE, projection, and ORDER BY splice results from.
+    let subquery = try subquery(of: select, context, visited, subscope)
     var matches = Array<Filter>()
     matches.reserveCapacity(select.joins.count)
     for index in select.joins.indices {
       let prefix = Scope(Array(relations[0 ... index + 1]))
       let join = select.joins[index]
-      try matches.append(prefix.on(join.on, context.routines))
+      try matches.append(prefix.on(join.on, context.routines,
+                                   subquery: subquery))
     }
     var predicate: Filter? = nil
     if let clause = select.predicate {
-      predicate = try scope.lower(clause, context.routines)
+      predicate = try scope.lower(clause, context.routines, subquery: subquery)
     }
-    let projection = try scope.terms(select.projection, context.routines)
+    let projection = try scope.terms(select.projection, context.routines,
+                                     subquery: subquery)
 
     // The ORDER BY lowers its keys against the projection (as the
     // single-relation path does): an ordinal or an output-alias key resolves to
@@ -2185,7 +2670,8 @@ extension Catalog where Self: ~Escapable {
     var order = Array<SortKey>()
     if let clause = select.order {
       let names = select.projection.outputs(count: projection.count)
-      order = try scope.order(clause, projection, names, context.routines)
+      order = try scope.order(clause, projection, names, context.routines,
+                              subquery: subquery)
     }
 
     // Under DISTINCT every ORDER BY key must be a select-list value (see

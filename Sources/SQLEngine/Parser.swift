@@ -33,11 +33,11 @@
 /// predicate      := disjunction
 /// disjunction    := conjunction (OR conjunction)*
 /// conjunction    := negation (AND negation)*
-/// negation       := NOT negation | primary
+/// negation       := NOT negation | [NOT] EXISTS '(' query ')' | primary
 /// primary        := '(' predicate ')' [IS [NOT] truthvalue] | comparison
 /// comparison     := expression (op (expression | param)
 ///                 | IS [NOT] (NULL | truthvalue | DISTINCT FROM expression)
-///                 | [NOT] IN '(' expression (',' expression)* ')'
+///                 | [NOT] IN '(' (expression (',' expression)* | query) ')'
 ///                 | [NOT] LIKE expression [ESCAPE expression]
 ///                 | [NOT] BETWEEN (expression | param) AND
 ///                                 (expression | param))
@@ -891,12 +891,37 @@ internal struct Parser: ~Escapable {
     return lhs
   }
 
-  /// Parses `NOT negation` or a primary.
+  /// Parses `NOT negation`, `[NOT] EXISTS (query)`, or a primary.
+  ///
+  /// `EXISTS` is a complete predicate with NO left operand — `EXISTS (Q)` — so
+  /// it is recognised HERE, ahead of the comparison tier a left expression
+  /// begins in. A prefix `NOT` before it sets the `negated` flag directly
+  /// (`NOT EXISTS (Q)`) rather than wrapping it in a `.not`, symmetric with how
+  /// `membership`/`between`/`like` carry their `NOT`; a prefix `NOT` before
+  /// anything else is the ordinary boolean negation.
   private mutating func negation() throws(SQLError) -> Predicate {
     if try match(.not) {
+      if try match(.exists) {
+        return try exists(negated: true)
+      }
       return try .not(negation())
     }
+    if try match(.exists) {
+      return try exists(negated: false)
+    }
     return try primary()
+  }
+
+  /// Parses the `(query)` tail of `[NOT] EXISTS (query)` — the `EXISTS` is
+  /// already consumed — into the first-class `Predicate.exists`, `negated`
+  /// carrying the `NOT EXISTS` spelling. The subquery is a parenthesised
+  /// `query`, so it may itself be a `UNION`; `Predicate` is `indirect`, so it
+  /// nests the whole `Query`.
+  private mutating func exists(negated: Bool) throws(SQLError) -> Predicate {
+    try expect(.lparen)
+    let query = try query()
+    try expect(.rparen)
+    return .exists(query, negated: negated)
   }
 
   /// Parses a parenthesised predicate or a comparison.
@@ -954,7 +979,9 @@ internal struct Parser: ~Escapable {
   /// bridging as the comparison `x = TRUE` the test maps to a definite truth.
   /// An `IN`
   /// (or `NOT IN`) tail tests the left expression for membership in a
-  /// parenthesised value list. A `LIKE` (or `NOT LIKE`) tail tests the left
+  /// parenthesised value list, or — when a `SELECT` follows the `(` — in the
+  /// single column a parenthesised subquery yields. A `LIKE` (or `NOT LIKE`)
+  /// tail tests the left
   /// expression's text against a pattern, with an optional `ESCAPE` character.
   /// A `BETWEEN a AND b` (or `NOT BETWEEN`) tail is the ISO range test,
   /// desugared into a conjunction (or disjunction) of bounds. A leading `NOT`
@@ -1007,16 +1034,24 @@ internal struct Parser: ~Escapable {
     return .comparison(left: left, op: op, right: right)
   }
 
-  /// Parses the value-list tail of `left [NOT] IN (…)` — the `IN` is already
-  /// consumed — into a `membership` predicate over `left`.
+  /// Parses the tail of `left [NOT] IN (…)` — the `IN` is already consumed —
+  /// into a `membership` (value-list) or a `within` (subquery) predicate over
+  /// `left`.
   ///
-  /// The list is parenthesised and non-empty: at least one value expression,
-  /// then any number of comma-separated ones. The subquery form `IN (SELECT …)`
-  /// is not supported, so the parenthesised items are ordinary scalar
-  /// expressions.
+  /// After the opening `(`, ONE token of lookahead disambiguates the two forms:
+  /// a `SELECT` begins a subquery — `left [NOT] IN (query)`, the first-class
+  /// `Predicate.within` (the query may itself be a `UNION`) — and anything
+  /// else begins the value list, a non-empty run of comma-separated
+  /// expressions, the `Predicate.membership`. No rewind is needed: `SELECT`
+  /// never begins an expression, so the peek is unambiguous.
   private mutating func membership(_ left: Expression, negated: Bool)
       throws(SQLError) -> Predicate {
     try expect(.lparen)
+    if current?.kind == .select {
+      let query = try query()
+      try expect(.rparen)
+      return .within(left, query, negated: negated)
+    }
     var values = [try expression()]
     while try match(.comma) {
       try values.append(expression())

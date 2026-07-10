@@ -334,11 +334,67 @@ extension Catalog where Self: ~Escapable {
   ///     ONLY`, or a positive `OFFSET` over a whole-result aggregate's sole row
   ///     (its output type is still DERIVED for the schema, non-faulting);
   ///     otherwise it validates fully.
+  /// A `SubqueryCheck` for a `select` — every UNCORRELATED subquery it nests
+  /// recursively TYPE-CHECKED against the SAME shape the run evaluates and
+  /// compiled for its arity ONCE, ahead of the `check` walk, into a map `check`
+  /// reads. Validating and compiling each subquery here — where the borrowing
+  /// catalog is in scope — mirrors the run path's lowering (which resolves and
+  /// materialises the inner query), so schema validation matches execution: a
+  /// bad column or routine inside a subquery faults, and a `IN (Q)`'s
+  /// single-column arity is enforced from the compiled width.
+  ///
+  /// An `IN (Q)` occurrence (its `Query` in `select.valued`) has its select
+  /// list READ at run, so its ORIGINAL shape is type-checked — an `IN (SELECT
+  /// 1 / 0 FROM S)` faults `.divide` as the run does. An occurrence ONLY an
+  /// `EXISTS` operand runs through the cardinality PROBE (`Select.probe`:
+  /// constant projection, `DISTINCT` quantifier and original `OFFSET`/`FETCH`
+  /// kept, `ORDER BY` dropped), which never evaluates the original select list
+  /// or sort keys — so its PROBED shape is type-checked, matching the run:
+  /// `EXISTS (SELECT 1 / 0 FROM S)` does NOT fault `.divide` at validate,
+  /// exactly as it does not at run, while a bad inner RELATION or `WHERE`
+  /// (retained by the probe) still faults. A `Query` used by BOTH is in
+  /// `valued`, so its original is checked (the `IN` needs its values). The
+  /// probe applies only to a `probable` `SELECT` — the shape `probe` rewrites
+  /// (a non-set-operation select WITHOUT a `HAVING` that is non-`DISTINCT` or
+  /// `DISTINCT` WITHOUT an `OFFSET`, its target the constant `1` or, for an
+  /// aggregate/grouped one, a cardinality-preserving `COUNT(*)`); any other
+  /// EXISTS-only query (a `HAVING` or set operation) runs in FULL, so its
+  /// original is checked. The arity width is always the ORIGINAL query's
+  /// (cursor-free), as `subquery(of:)` records it on the compile path.
+  private borrowing func subqueryCheck(of select: Select, _ context: Context,
+                                       visited: Set<String>)
+      throws(SQLError) -> SubqueryCheck {
+    let valued = select.valued
+    var widths = Dictionary<Query, Int>()
+    for query in select.subqueries where widths[query] == nil {
+      try typecheck(shape(of: query, valued: valued), context, visited: visited)
+      widths[query] = try compile(query, context, visited).width
+    }
+    return SubqueryCheck(widths)
+  }
+
+  /// The subquery shape a run of `query` type-checks against — the ORIGINAL for
+  /// an `IN (Q)` occurrence (in `valued`, its select list evaluated) or a query
+  /// the probe does not rewrite, else the `Select.probe` the `EXISTS`
+  /// cardinality probe runs (constant projection, `ORDER BY` dropped, original
+  /// `OFFSET`/`FETCH` kept) so validation does not evaluate a select list or
+  /// sort key the run never does.
+  private borrowing func shape(of query: Query, valued: Set<Query>) -> Query {
+    guard !valued.contains(query), case let .select(select) = query,
+        select.probable else {
+      return query
+    }
+    return .select(select.probe)
+  }
+
   private borrowing func typecheck(_ select: Select, _ context: Context,
                                    visited: Set<String>)
       throws(SQLError) {
     let routines = context.routines
     let scope = try scope(of: select, context, visited: visited)
+    // Type-check and compile every UNCORRELATED subquery ONCE, ahead of the
+    // `check` walk, into a map the checks read for validation and arity.
+    let subquery = try subqueryCheck(of: select, context, visited: visited)
     // An `ORDER BY` ordinal names a 1-based SELECT-list position; one outside
     // `1 ... width` names no output column and faults `SQLError.column` (spelled
     // as the ordinal), exactly as the compile path's ordinal resolution does —
@@ -361,10 +417,10 @@ extension Catalog where Self: ~Escapable {
     // Structural, so it runs regardless of the WHERE/limit reachability the
     // operand type-check below tracks.
     if select.aggregates {
-      try order(grouped: select, scope, routines)
+      try order(grouped: select, scope, context, visited)
     }
     if let predicate = select.predicate {
-      try scope.check(predicate, routines)
+      try scope.check(predicate, routines, subquery: subquery)
       // A false WHERE filters every row, so a GROUP BY forms no group and a
       // non-aggregate query yields no row — nothing after is reachable. A
       // whole-result aggregate (an aggregate projection or HAVING, no GROUP BY)
@@ -381,7 +437,18 @@ extension Catalog where Self: ~Escapable {
             // operands (a divide, overflow, or bad routine call faults) AND
             // yields the group's fate — a group passes only when HAVING is TRUE,
             // so FALSE or UNKNOWN drops it and the projection is unreachable.
-            if try scope.empty(having, routines) != true { return }
+            //
+            // A HAVING nesting an `EXISTS`/`IN (Q)` subquery is the exception:
+            // `empty` cannot materialise the subquery (it carries no catalog),
+            // so it folds UNKNOWN — but the subquery is row-independent and may
+            // be TRUE at RUN, keeping the group and RUNNING the projection. So
+            // a subquery-bearing HAVING is NOT-definitely-empty: fall through
+            // and VALIDATE the projection, so `columns(of:)` surfaces the fault
+            // the run would (`SELECT 1 / 0 … HAVING EXISTS (Q)` raises
+            // `.divide`). A subquery-free HAVING keeps the precise pruning.
+            if !having.subquery, try scope.empty(having, routines) != true {
+              return
+            }
           }
           // The lone empty group is itself unreachable when a limit drops the
           // one row it would emit — a zero `FETCH` or any positive `OFFSET`. A
@@ -394,7 +461,9 @@ extension Catalog where Self: ~Escapable {
           var reachable = select.distinct
           if !reachable { reachable = !drops(select.limit, single: true) }
           if reachable, case let .expressions(items) = select.projection {
-            for item in items { _ = try scope.empty(item.expression, routines) }
+            for item in items {
+              try scope.fold(item.expression, routines, subquery: subquery)
+            }
           }
           // The lone empty group is sorted BELOW the limit — the shape is
           // `Project(Limit(Sort(…)))` — so its ORDER BY keys evaluate over
@@ -405,7 +474,7 @@ extension Catalog where Self: ~Escapable {
           // projection term reached only via the sort is checked even where the
           // projection block above is skipped.
           for expression in select.orderKeys {
-            _ = try scope.empty(expression, routines)
+            try scope.fold(expression, routines, subquery: subquery)
           }
         }
         return
@@ -419,14 +488,16 @@ extension Catalog where Self: ~Escapable {
     // `HAVING` — so its operand and arity are checked here, the same as a
     // projection or `HAVING` aggregate's.
     if case let .expressions(items) = select.projection {
-      for item in items { try scope.aggregates(in: item.expression, routines) }
+      for item in items {
+        try scope.aggregates(in: item.expression, routines, subquery: subquery)
+      }
     }
     for expression in select.orderKeys {
-      try scope.aggregates(in: expression, routines)
+      try scope.aggregates(in: expression, routines, subquery: subquery)
     }
     if let having = select.having {
-      try scope.aggregates(in: having, routines)
-      try scope.check(having, routines)
+      try scope.aggregates(in: having, routines, subquery: subquery)
+      try scope.check(having, routines, subquery: subquery)
       // A false HAVING filters every group before the projection, so the
       // projection's non-aggregate work is unreachable.
       if scope.constant(having, routines) == false { return }
@@ -444,7 +515,9 @@ extension Catalog where Self: ~Escapable {
     var reachable = select.distinct
     if !reachable { reachable = !drops(select.limit, single: sole) }
     if reachable, case let .expressions(items) = select.projection {
-      for item in items { _ = try scope.validate(item.expression, routines) }
+      for item in items {
+        _ = try scope.validate(item.expression, routines, subquery: subquery)
+      }
     }
     // The sort sits BELOW the limit — the shape is `Project(Limit(Sort(…)))`
     // — so it evaluates every ORDER BY key over the input rows BEFORE the cap
@@ -458,7 +531,7 @@ extension Catalog where Self: ~Escapable {
     // projection term NO sort key reaches stays correctly unchecked (the
     // projection never runs under a row-dropping limit).
     for expression in select.orderKeys {
-      _ = try scope.validate(expression, routines)
+      _ = try scope.validate(expression, routines, subquery: subquery)
     }
   }
 
@@ -475,8 +548,16 @@ extension Catalog where Self: ~Escapable {
   /// the two paths cannot drift. It resolves only, reading no cursor; a run's
   /// operand type-check over the (structurally valid) keys stays the caller's.
   private borrowing func order(grouped select: Select, _ scope: Scope,
-                               _ routines: Routines) throws(SQLError) {
+                               _ context: Context, _ visited: Set<String>)
+      throws(SQLError) {
     guard let clause = select.order else { return }
+    let routines = context.routines
+    // A grouped aggregate's argument or FILTER may nest an UNCORRELATED
+    // subquery (`ORDER BY SUM(CASE WHEN EXISTS (Q) …)`), which lowering
+    // resolves against the materialised map, so materialise the select's
+    // subqueries ONCE here — the same map the run's `group` builds — for this
+    // structural resolve to lower those aggregates exactly as the run does.
+    let subquery = try subquery(of: select, context, visited)
     // Collect the distinct aggregates the grouped plan folds — the projection,
     // the `HAVING`, and the `ORDER BY` sort-key expressions — then dedup by the
     // RESOLVED `Aggregation`, exactly as `group` does, so a grouped `ORDER BY`
@@ -493,7 +574,8 @@ extension Catalog where Self: ~Escapable {
     }
     var aggregations = Array<Aggregation>()
     for expression in expressions {
-      let aggregation = try expression.aggregation(scope, routines)
+      let aggregation = try expression.aggregation(scope, routines,
+                                                   subquery: subquery)
       if !aggregations.contains(aggregation) {
         aggregations.append(aggregation)
       }
@@ -503,8 +585,9 @@ extension Catalog where Self: ~Escapable {
     // `ORDER BY` output name resolves against — then lower the `ORDER BY`, which
     // faults a non-group column, an out-of-range ordinal, or an ambiguous name.
     var grouping = try Grouping(scope, select.grouping, aggregations)
-    let projection = try grouping.terms(select.projection, routines)
-    _ = try grouping.order(clause, projection, routines)
+    let projection = try grouping.terms(select.projection, routines,
+                                        subquery: subquery)
+    _ = try grouping.order(clause, projection, routines, subquery: subquery)
   }
 
   /// Whether `limit` drops the one row a `single`-row result would yield,

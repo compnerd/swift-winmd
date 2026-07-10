@@ -54,6 +54,8 @@ extension Token {
     case null
     case `in`
     case between
+    /// The `EXISTS` keyword introducing an `[NOT] EXISTS (subquery)` predicate.
+    case exists
     case like
     case escape
     /// The `PLACING` keyword separating an `OVERLAY`'s source string from its
@@ -151,6 +153,7 @@ extension Token.Kind {
     case .null: "NULL"
     case .in: "IN"
     case .between: "BETWEEN"
+    case .exists: "EXISTS"
     case .like: "LIKE"
     case .escape: "ESCAPE"
     case .placing: "PLACING"

@@ -350,6 +350,11 @@ extension Query {
   /// Collects every relation name this query names in a `FROM`/`JOIN`, across
   /// the set-operation tree and each arm, into `names` — the reserved store
   /// names among them are what `Catalog.augment` builds.
+  ///
+  /// It descends into every nested `EXISTS`/`IN (Q)` subquery (recursing the
+  /// same `subqueries` walk `compile`/`run` use), so a reserved store relation
+  /// mentioned ONLY inside a subquery still reaches `augment` — the overlay is
+  /// materialised before the subquery's width compile and its run resolve it.
   func collect(into names: inout Set<String>) {
     switch self {
     case let .select(select):
@@ -358,6 +363,7 @@ extension Query {
       left.collect(into: &names)
       right.collect(into: &names)
     }
+    for subquery in subqueries { subquery.collect(into: &names) }
   }
 }
 

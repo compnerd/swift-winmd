@@ -34,22 +34,32 @@ internal struct Context {
   /// The query parameter bindings.
   internal let bindings: Bindings
 
+  /// The RUN-time results of the UNCORRELATED subqueries the executing plan
+  /// nests — each `EXISTS`/`IN (Q)` subquery run ONCE and memoised by its
+  /// `Query`, read by the row evaluator. Empty during compilation and every
+  /// schema-only path (which never opens a cursor); the `run` path populates it
+  /// (see `Catalog.subqueries(of:)`) just before executing the plan.
+  internal let subqueries: Subqueries
+
   /// A context over the three maps — an empty overlay and no bindings by
   /// default, the shape a bare query with no `WITH` and no parameters runs
-  /// under.
+  /// under. It carries no subquery results until `run` resolves them.
   internal init(relations: ScopedRelations = [:], routines: Routines = [:],
-                bindings: Bindings = [:]) {
+                bindings: Bindings = [:],
+                subqueries: Subqueries = Subqueries()) {
     self.relations = relations
     self.routines = routines
     self.bindings = bindings
+    self.subqueries = subqueries
   }
 
   /// A copy of this context with `relations` REPLACING the overlay, the same
-  /// routines and bindings — the scope a phase reads after `augment` extends
-  /// the overlay with the store relations a query names, or a recursive step
-  /// rebinds a CTE's self.
+  /// routines, bindings, and subquery results — the scope a phase reads after
+  /// `augment` extends the overlay with the store relations a query names, or a
+  /// recursive step rebinds a CTE's self.
   internal func scoping(_ relations: ScopedRelations) -> Context {
-    Context(relations: relations, routines: routines, bindings: bindings)
+    Context(relations: relations, routines: routines, bindings: bindings,
+            subqueries: subqueries)
   }
 
   /// A copy of this context whose overlay binds `materialised` to `name` (folded
@@ -60,5 +70,14 @@ internal struct Context {
     var relations = relations
     relations[name.lowercased()] = materialised
     return scoping(relations)
+  }
+
+  /// A copy of this context carrying `subqueries` as the executing plan's
+  /// materialised subquery results — the run path's extension just before it
+  /// executes a compiled plan, so the row evaluator reads each subquery result
+  /// off the SAME context that threads everywhere `execute` descends.
+  internal func resolving(_ subqueries: Subqueries) -> Context {
+    Context(relations: relations, routines: routines, bindings: bindings,
+            subqueries: subqueries)
   }
 }

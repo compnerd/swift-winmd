@@ -301,7 +301,8 @@ private func comparable(_ a: Value, _ b: Value) -> Bool {
 /// today, so it cannot yet reach one.
 internal func grouped(_ records: Array<Record>, _ keys: Array<Term>,
                       _ aggregates: Array<Aggregation>, _ routines: Routines,
-                      _ bindings: Bindings) throws(SQLError) -> Array<Record> {
+                      _ bindings: Bindings, _ subqueries: Subqueries)
+    throws(SQLError) -> Array<Record> {
   var order = Array<Record>()
   var accumulators = Dictionary<Record, Array<Accumulator>>()
 
@@ -309,7 +310,7 @@ internal func grouped(_ records: Array<Record>, _ keys: Array<Term>,
     var cells = Array<Value>()
     cells.reserveCapacity(keys.count)
     for key in keys {
-      try cells.append(record.evaluate(key, routines, bindings))
+      try cells.append(record.evaluate(key, routines, bindings, subqueries))
     }
     let group = Record(cells)
     // Key the group on the EXACT canonical form of its cells so `1` and `1.0`
@@ -329,14 +330,15 @@ internal func grouped(_ records: Array<Record>, _ keys: Array<Term>,
       // applied before the fold — and so before the DISTINCT dedup. A
       // filter-less aggregate folds every row.
       if let filter = aggregates[index].filter {
-        guard try record.evaluate(filter, routines, bindings) == true else {
+        guard try record.evaluate(filter, routines, bindings,
+                                  subqueries) == true else {
           continue
         }
       }
       // `COUNT(*)` has no argument — count the row with a non-NULL sentinel;
       // every other aggregate folds its evaluated argument value.
       let value: Value = if let argument = aggregates[index].argument {
-        try record.evaluate(argument, routines, bindings)
+        try record.evaluate(argument, routines, bindings, subqueries)
       } else {
         .integer(0)
       }

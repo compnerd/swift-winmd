@@ -9,7 +9,6 @@ let _ =
             ],
             products: [
               .executable(name: "winmd-inspect", targets: ["winmd-inspect"]),
-              .library(name: "SQL", targets: ["SQL"]),
               .library(name: "SQLEngine", targets: ["SQLEngine"]),
               .library(name: "SQLStandard", targets: ["SQLStandard"]),
               .library(name: "WinMDSynthesis", targets: ["WinMDSynthesis"]),
@@ -39,11 +38,6 @@ let _ =
                         .enableExperimentalFeature("Lifetimes"),
                       ]),
               .target(name: "SQLStandard", dependencies: ["SQLEngine"],
-                      swiftSettings: [
-                        .enableExperimentalFeature("Lifetimes"),
-                      ]),
-              .target(name: "SQL",
-                      dependencies: ["SQLEngine", "SQLStandard"],
                       swiftSettings: [
                         .enableExperimentalFeature("Lifetimes"),
                       ]),

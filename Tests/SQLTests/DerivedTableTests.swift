@@ -1269,6 +1269,86 @@ struct DerivedTableSubqueryBodyValidateThreadingTests {
   }
 }
 
+// MARK: - A short-circuited subquery's nested derived body is not validated
+
+/// The reachability walk is the SOLE validation gate: schema/shape derivation
+/// is ALWAYS lenient (a derived body's columns/types derive WITHOUT evaluating
+/// its projection), and validation applies ONLY to nodes the walk REACHES — so
+/// a derived body nested under a SHORT-CIRCUITED subquery is not validated at
+/// ANY depth. `WHERE 1 = 0 AND 1 IN (SELECT x FROM (SELECT 1 / 0 …) AS d)`
+/// short-circuits the `IN` away, so its nested derived `d` never materialises;
+/// before the fix the schema pre-pass eager-compiled `d` with `validate: true`
+/// and faulted `.divide` for a query the run drops.
+struct DerivedTableSubqueryReachabilityGateTests {
+  @Test func `an unreached subquery's nested derived body is not validated`()
+      throws {
+    // `1 = 0` short-circuits the AND, so the `IN` never materialises — the
+    // nested derived `d`'s ill-typed `1 / 0` projection is unreached. The
+    // STRICT schema path must NOT fault: the walk did not reach the subquery,
+    // so nothing nested under it is validated.
+    let query = try parse(query:
+        "SELECT V FROM S WHERE 1 = 0 AND 1 IN " +
+        "(SELECT x FROM (SELECT 1 / 0 AS x FROM S) AS d)")
+    let columns = try fixture().columns(of: query, validate: true)
+    #expect(columns.map(\.name) == ["V"])
+  }
+
+  @Test func `an unreached subquery's nested derived body runs empty`() throws {
+    // The run drops every row on the false `WHERE` before the `IN`, so the
+    // nested derived body never evaluates — the query returns empty, not a
+    // `.divide` fault.
+    try fixture().empty(
+        "SELECT V FROM S WHERE 1 = 0 AND 1 IN " +
+        "(SELECT x FROM (SELECT 1 / 0 AS x FROM S) AS d)")
+  }
+
+  @Test func `a reached subquery's nested derived body still faults`() throws {
+    // Parity: `1 = 1` does NOT short-circuit, so the walk REACHES the `IN` and
+    // validates its nested derived body — the ill-typed `1 / 0` faults
+    // `.divide` under the strict schema path, exactly as before the fix.
+    #expect(throws: SQLError.divide) {
+      let query = try parse(query:
+          "SELECT V FROM S WHERE 1 = 1 AND 1 IN " +
+          "(SELECT x FROM (SELECT 1 / 0 AS x FROM S) AS d)")
+      _ = try fixture().columns(of: query, validate: true)
+    }
+  }
+
+  @Test func `a reached subquery's nested derived body faults at run`() throws {
+    // The reached `IN` materialises the nested derived body at run, so the
+    // ill-typed `1 / 0` faults `.divide` — the reached-node strict parity.
+    try fixture().expect(
+        "SELECT V FROM S WHERE 1 = 1 AND 1 IN " +
+        "(SELECT x FROM (SELECT 1 / 0 AS x FROM S) AS d)",
+        fails: .divide)
+  }
+
+  @Test func `a deeper-nested unreached derived body is not validated`()
+      throws {
+    // Depth-independence: the ill-typed derived body is nested a derived table
+    // under a subquery under a derived table. `1 = 0` short-circuits the outer
+    // `IN`, so NOTHING nested under it — at any depth — is validated.
+    let query = try parse(query:
+        "SELECT V FROM S WHERE 1 = 0 AND 1 IN " +
+        "(SELECT y FROM (SELECT x AS y FROM " +
+        "(SELECT 1 / 0 AS x FROM S) AS e) AS d)")
+    let columns = try fixture().columns(of: query, validate: true)
+    #expect(columns.map(\.name) == ["V"])
+  }
+
+  @Test func `a deeper-nested reached derived body still faults`() throws {
+    // Parity at depth: `1 = 1` reaches the outer `IN`, so its whole nested
+    // stack validates and the innermost `1 / 0` faults `.divide`.
+    #expect(throws: SQLError.divide) {
+      let query = try parse(query:
+          "SELECT V FROM S WHERE 1 = 1 AND 1 IN " +
+          "(SELECT y FROM (SELECT x AS y FROM " +
+          "(SELECT 1 / 0 AS x FROM S) AS e) AS d)")
+      _ = try fixture().columns(of: query, validate: true)
+    }
+  }
+}
+
 // MARK: - A set-operation VIEW body runs each arm with its arm-local aliases
 
 /// A view whose body is a set operation with a DERIVED TABLE in an arm: the
@@ -1963,7 +2043,7 @@ struct DerivedTableDirectCompileTests {
     // is one column wide (`a`) — no `.relation("d")`.
     let select =
         try parse(select: "SELECT a FROM (SELECT V AS a FROM S) AS d")
-    let plan = try fixture().compile(select)
+    let plan = try fixture().compile(select, validate: true)
     #expect(plan.width == 1)
   }
 
@@ -1973,8 +2053,8 @@ struct DerivedTableDirectCompileTests {
     let select =
         try parse(select: "SELECT a FROM (SELECT V AS a FROM S) AS d")
     let catalog = try fixture()
-    let bare = try catalog.compile(select)
-    let wrapped = try catalog.compile(.select(select))
+    let bare = try catalog.compile(select, validate: true)
+    let wrapped = try catalog.compile(.select(select), validate: true)
     #expect(bare.width == wrapped.width)
   }
 
@@ -2006,7 +2086,7 @@ struct DerivedTableDirectCompileTests {
     // is the base.
     let select =
         try parse(select: "SELECT a FROM (SELECT V AS a FROM S) AS S")
-    let plan = try fixture().compile(select)
+    let plan = try fixture().compile(select, validate: true)
     #expect(plan.width == 1)
   }
 }

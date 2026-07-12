@@ -275,7 +275,7 @@ extension Catalog where Self: ~Escapable {
   /// re-type-checks a view body a run already proved runnable.
   borrowing func columns(of select: Select, _ context: Context,
                          visited: Set<String> = [],
-                         validate: Bool = true)
+                         validate: Bool, outer: Outer? = nil)
       throws(SQLError) -> Array<OutputColumn> {
     // Bind THIS select's own FROM/JOIN derived tables (and store relations)
     // before deriving either the subquery map or the scope — a set-op ARM
@@ -289,16 +289,29 @@ extension Catalog where Self: ~Escapable {
     // A scalar subquery in the projection derives its type from its inner
     // query's single column, so build the SAME cursor-free `Subquery` map the
     // compile path's lowering reads — every nested subquery compiled ONCE for
-    // its width and single-column type — and pass it to the projection walk so
-    // an output type for a `(SELECT …)` matches the type the run advertises.
-    // `subquery(of:)` REVEALS the base — this select's derived aliases are
-    // SELECT-scoped, invisible to a subquery's FROM, while a CTE a same-named
-    // derived alias shadows is resolved beneath the dropped layer.
-    let subquery = try subquery(of: select, augmented, visited,
+    // its width and single-column type, each discovering its correlation against
+    // this select's own scope (`enclosing`) — and pass it to the projection walk
+    // so an output type for a `(SELECT …)` matches the type the run advertises.
+    // The projection walk is BARRED (a correlated column of THIS query in the
+    // projection is diagnosed, as the run's projection lowering bars it).
+    // Resolve over the AUGMENTED context so a subquery naming this select's own
+    // arm-local derived alias binds it, while `subquery(of:)` REVEALS the base
+    // so the subquery's OWN FROM sees no derived alias (a CTE a same-named
+    // derived alias shadows resolved beneath the dropped layer).
+    let scope = try scope(of: select, augmented, visited: visited,
+                          validate: validate)
+    // Pass each join's PREFIX scope so an `ON`'s subquery correlates against its
+    // prefix and the WHERE's against the full scope — the SAME per-occurrence
+    // resolution the run path uses, so a name a WHERE subquery finds ambiguous in
+    // the full scope faults HERE too (typecheck↔run parity), not silently reusing
+    // an `ON` occurrence's narrower prefix.
+    let prefixes = try prefixes(of: select, augmented, visited: visited,
                                 validate: validate)
-    return try scope(of: select, augmented, visited: visited,
-                     validate: validate)
-        .columns(of: select.projection, augmented.routines, subquery: subquery)
+    let plans = try subquery(of: select, augmented, visited, .caller,
+                             enclosing: scope, outer: outer,
+                             prefixes: prefixes)
+    return try scope.columns(of: select.projection, augmented.routines,
+                             subquery: plans.rest.barred)
   }
 
   /// The name-resolution scope of `select` — its FROM relation and each joined
@@ -310,7 +323,7 @@ extension Catalog where Self: ~Escapable {
   /// reachable-operand check the same as the outer query's.
   borrowing func scope(of select: Select, _ context: Context,
                        visited: Set<String> = [],
-                       validate: Bool = true)
+                       validate: Bool)
       throws(SQLError) -> Scope {
     // Bind THIS select's own FROM/JOIN derived tables (and store relations)
     // before resolving its relations — SELECT-scoped, so a subquery select
@@ -334,6 +347,29 @@ extension Catalog where Self: ~Escapable {
     return Scope(relations)
   }
 
+  /// The PREFIX scope of each join of `select` — join `index`'s prefix is the
+  /// FROM relation and joins `0…index`, the relations available AT that join
+  /// point, never one joined LATER. A join `ON`'s subquery correlates against
+  /// its prefix (so a reference to a later-joined relation faults), matching the
+  /// compile path's `subquery(of:)`. Empty for a FROM-less or join-less select.
+  private borrowing func prefixes(of select: Select, _ context: Context,
+                                  visited: Set<String>,
+                                  validate: Bool)
+      throws(SQLError) -> Array<Scope> {
+    guard let relation = select.from, !select.joins.isEmpty else { return [] }
+    var relations =
+        [(relation, try schema(of: relation, context, visited: visited,
+                               validate: validate))]
+    for join in select.joins {
+      let joined = try schema(of: join.relation, context, visited: visited,
+                              validate: validate)
+      relations.append((join.relation, joined))
+    }
+    return select.joins.indices.map { index in
+      Scope(Array(relations[0 ... index + 1]))
+    }
+  }
+
   /// Type-checks every operand in `query` — the projection, `WHERE`, and
   /// `HAVING` of EVERY arm — throwing the run-time fault a bad operand would.
   ///
@@ -346,7 +382,7 @@ extension Catalog where Self: ~Escapable {
   /// this (no evaluating term is built), so a schema path type-checks each arm
   /// before returning metadata. It reads no cursor.
   borrowing func typecheck(_ query: Query, _ context: Context,
-                           visited: Set<String> = [])
+                           visited: Set<String> = [], outer: Outer? = nil)
       throws(SQLError) {
     // Bind the derived tables (and store relations) THIS query names in its own
     // FROM/JOIN before type-checking its arms — SELECT-scoped, so a subquery
@@ -361,10 +397,12 @@ extension Catalog where Self: ~Escapable {
                               visited: visited)
     switch query {
     case let .select(select):
-      try typecheck(select, context, visited: visited)
+      try typecheck(select, context, visited: visited, outer: outer)
     case let .setop(_, left, right, _):
-      try typecheck(left, context, visited: visited)
-      try typecheck(right, context, visited: visited)
+      // Both arms of a set-operation subquery correlate against the same
+      // enclosing scope, so each type-checks under the shared `outer`.
+      try typecheck(left, context, visited: visited, outer: outer)
+      try typecheck(right, context, visited: visited, outer: outer)
     }
   }
 
@@ -422,13 +460,25 @@ extension Catalog where Self: ~Escapable {
   /// original is checked. The arity width is always the ORIGINAL query's
   /// (cursor-free), as `subquery(of:)` records it on the compile path.
   private borrowing func subqueryCheck(of select: Select, _ context: Context,
-                                       visited: Set<String>)
+                                       visited: Set<String>,
+                                       enclosing: Scope? = nil,
+                                       outer: Outer? = nil,
+                                       prefixes: Array<Scope> = [])
       throws(SQLError) -> SubqueryCheck {
-    // An `IN (Q)` (`valued`) occurrence EVALUATES its select list at run, so
-    // its ORIGINAL shape is type-checked EAGERLY here; an `EXISTS` occurrence
-    // runs the cardinality probe, so its PROBED shape is checked. Both roles
-    // always run (a predicate is not short-circuited past), so their operand
-    // validation stays eager, driven by the original-vs-probe `shape`.
+    // Every occurrence's inner-query OPERAND validation DEFERS to the
+    // reachability walk, mirroring the lazy executor: a subquery in an
+    // unreachable `CASE`/`COALESCE` arm or a short-circuited `AND`/`OR` leg is
+    // never materialised, so a THROWING operand (`1 / 0`) the type-check finds
+    // must not fault an arm the run skips. A SCALAR occurrence's operands defer
+    // through the `.subquery` case of the walk (`SubqueryCheck.type` records it
+    // reached), an `IN`/`EXISTS`/quantified one through the `.within`/`.exists`
+    // case (`SubqueryCheck.validate` records it) — each validated in its RUN
+    // shape after the walk: an `IN`'s ORIGINAL (its select list is read), an
+    // EXISTS-only occurrence's cardinality PROBE. A REACHED bad body still
+    // faults (parity both directions). (A bad inner column/relation is a
+    // STRUCTURAL fault the outer `compile` already raised for EVERY subquery
+    // before this runs, so it never reaches here — validation and run agree on
+    // it regardless of the arm.)
     // A nested subquery's FROM resolves against base tables and enclosing CTEs,
     // NOT the enclosing SELECT's derived-table aliases — STRIP them (CTEs/store
     // kept) before type-checking/compiling each subquery, mirroring the compile
@@ -436,93 +486,202 @@ extension Catalog where Self: ~Escapable {
     // derived alias in a subquery's FROM exactly as the run does.
     let context = context.revealed()
     let scalar = select.scalar
-    let valued = select.valued
-    let existential = select.existential
-    // A scalar occurrence's inner-query OPERAND validation DEFERS to the
-    // reachability walk (mirroring the lazy executor — a scalar in an
-    // unreachable `CASE`/`COALESCE` arm never validates) UNLESS the query is
-    // ALSO an `IN` value set: an `IN`'s ORIGINAL shape is validated eagerly (it
-    // runs unconditionally), fully covering the scalar's operands too. A scalar
-    // occurrence's ONLY other eager role, an `EXISTS`, validates just the PROBE
-    // (never the select list), so it does NOT cover the scalar's operands —
-    // such a query stays deferred and its EXISTS probe is ALSO checked eagerly.
-    let deferred = scalar.subtracting(valued)
+    // EVERY scalar occurrence's operand check defers to the walk, keyed here
+    // INDEPENDENTLY of a co-existing `IN`/`EXISTS` twin over identical SQL. A
+    // valued/existential twin's eager arity/type derivation is TOTAL (no
+    // `.divide` on `1 / 0`) and does not reproduce the scalar's operand fault,
+    // and — now that an `IN`/`EXISTS` materialises LAZILY — a twin may itself
+    // sit in an unreachable leg, so it cannot stand in for a REACHABLE scalar's
+    // operand check. Deferring on `scalar` alone (not `scalar - valued`) records
+    // the scalar's own `.scalar` reach in `type` even when a `.valued` reach for
+    // the same query is also present — the two per-occurrence reaches must not
+    // dedup the scalar away.
+    let deferred = scalar
     var widths = Dictionary<Query, Int>()
     var types = Dictionary<Query, ValueType>()
-    for query in select.subqueries where widths[query] == nil {
-      // Eager operand validation runs for every occurrence a run does not
-      // short-circuit past — an `IN` (ORIGINAL shape) or an `EXISTS` (PROBE).
-      // A SCALAR-ONLY occurrence (neither) has its inner-query OPERAND check
-      // DEFERRED: a THROWING operand (`1 / 0`) the type-check detects and the
-      // lazy executor skips must not fault an unreachable arm. (A bad inner
-      // column/relation is a STRUCTURAL fault the outer `compile` already
-      // raised for EVERY subquery before this runs, so it never reaches here —
-      // validation and run agree on it regardless of the arm.)
-      if !deferred.contains(query) || existential.contains(query) {
-        try typecheck(shape(of: query, valued: valued), context,
-                      visited: visited)
-      }
-      // The width and single-column type derive for EVERY subquery — cursor-
-      // free and TOTAL for a clean-resolving inner query (deriving the type of
-      // `1 / 0` yields the integer type WITHOUT dividing), so a reached scalar
-      // shapes the outer `CASE`/projection column type correctly. Only the
-      // deferred OPERAND check that faults `.divide` waits for the reached walk.
-      let width = try compile(query, context, visited).width
-      widths[query] = width
-      types[query] =
-          try columns(of: query.first, context, visited: visited,
-                      validate: false).first?.type
-      // A scalar occurrence's single-column ARITY is enforced EAGERLY,
-      // reachability-independent — a cursor-free width check the run's lowering
-      // also makes — so a two-column scalar subquery in an unreachable arm STILL
-      // faults `SQLError.arity`, kept SEPARATE from the deferred operand check.
-      if scalar.contains(query), width != 1 {
-        throw .arity(1, width)
+    // Derive each SITE'S subqueries' cursor-free width and single-column type
+    // against THAT site's own scope, keyed PER OCCURRENCE — a join `i`'s `ON`
+    // against its PREFIX scope `prefixes[i]` (the relations AT that point, not
+    // one joined LATER), the rest against the full `enclosing` — matching the
+    // run's `subquery(of:)`. The SAME inner SQL in an `ON` and the WHERE
+    // derives TWICE — each against its own site's scope — so a name a WHERE
+    // subquery finds ambiguous in the full scope faults HERE, not the `ON`'s
+    // narrower prefix. The OPERAND validation now DEFERS to the reachability
+    // walk for EVERY site — an `ON` runs the SAME short-circuit walk the
+    // WHERE/HAVING do (`walk` calls `check` per join), so a subquery a
+    // short-circuited `AND`/`OR` leg of the `ON` never reaches is unvalidated,
+    // exactly as the run's join evaluator never materialises it.
+    for index in select.joins.indices {
+      var queries = Array<Query>()
+      select.joins[index].on.collect(subqueries: &queries)
+      let within = index < prefixes.count ? prefixes[index] : enclosing
+      for query in queries {
+        let nested = within.map { (outer ?? Outer()).nested(under: $0) }
+            ?? outer
+        try width(query, scalar, context, visited, nested, &widths, &types)
       }
     }
-    return SubqueryCheck(widths, types, deferred: deferred)
+    // The WHERE, `HAVING`, projection, and `ORDER BY` are walked by the
+    // reachability phase, so their operand check DEFERS; their width and single-
+    // column type still derive here against the full `enclosing` scope.
+    var rest = Array<Query>()
+    select.predicate?.collect(subqueries: &rest)
+    select.having?.collect(subqueries: &rest)
+    if case let .expressions(items) = select.projection {
+      for item in items { item.expression.collect(subqueries: &rest) }
+    }
+    for key in select.order?.keys ?? [] {
+      if case let .expression(expression) = key.sort {
+        expression.collect(subqueries: &rest)
+      }
+    }
+    for query in rest {
+      let nested = enclosing.map { (outer ?? Outer()).nested(under: $0) }
+          ?? outer
+      try width(query, scalar, context, visited, nested, &widths, &types)
+    }
+    // Carry THIS select's own enclosing scope `outer` so its WHERE type-check
+    // (`walk`) resolves a correlated column of THIS query against the outer,
+    // matching the run's lowering; the projection/`HAVING` walk uses `.barred`.
+    return SubqueryCheck(widths, types, deferred: deferred, outer: outer)
   }
 
-  /// The subquery shape a run of `query` type-checks against — the ORIGINAL for
-  /// an `IN (Q)` occurrence (in `valued`, its select list evaluated) or a query
-  /// the probe does not rewrite, else the `Select.probe` the `EXISTS`
-  /// cardinality probe runs (constant projection, `ORDER BY` dropped, original
-  /// `OFFSET`/`FETCH` kept) so validation does not evaluate a select list or
-  /// sort key the run never does.
-  private borrowing func shape(of query: Query, valued: Set<Query>) -> Query {
-    guard !valued.contains(query), case let .select(select) = query,
+  /// Records the cursor-free width and single-column type of `query` into
+  /// `widths`/`types` against the `nested` outer scope, and enforces a scalar
+  /// occurrence's single-column ARITY EAGERLY (reachability-independent, as the
+  /// run's lowering does). Computed ONCE per distinct query at a given site.
+  private borrowing func width(_ query: Query, _ scalar: Set<Query>,
+                               _ context: Context, _ visited: Set<String>,
+                               _ nested: Outer?,
+                               _ widths: inout Dictionary<Query, Int>,
+                               _ types: inout Dictionary<Query, ValueType>)
+      throws(SQLError) {
+    // The width and single-column type derive for EVERY subquery — cursor-free
+    // and TOTAL for a clean-resolving inner query (deriving the type of `1 / 0`
+    // yields the integer type WITHOUT dividing). A distinct query at ONE site is
+    // derived once; the SAME query at ANOTHER site re-derives against ITS scope,
+    // so a WHERE occurrence's ambiguity still faults there. The compile is
+    // SHAPE ONLY, so LENIENT (`validate: false`): this pre-pass runs for EVERY
+    // nested subquery ahead of the reachability walk, so validating a derived
+    // body it nests — `1 IN (SELECT x FROM (SELECT 1 / 0 …) AS d)` — would
+    // fault a subquery a short-circuited `AND`/`OR` leg drops BEFORE the walk
+    // reaches it. Validation of a REACHED subquery's body (and the derived
+    // tables nested within it, at any depth) is the walk's job — `typecheck(_
+    // select:)` re-derives each reached occurrence's body strictly. Structural
+    // faults (a bad inner relation/column, a UNION arity) still surface here —
+    // those resolve regardless of `validate`.
+    let width =
+        try compile(query, context, visited, .caller, nested,
+                    validate: false).width
+    let derived =
+        try columns(of: query.first, context, visited: visited,
+                    validate: false, outer: nested).first?.type
+    if widths[query] == nil {
+      widths[query] = width
+      types[query] = derived
+    }
+    // A scalar occurrence's single-column ARITY is enforced EAGERLY,
+    // reachability-independent — a cursor-free width check the run's lowering
+    // also makes — so a two-column scalar subquery in an unreachable arm STILL
+    // faults `SQLError.arity`, kept SEPARATE from the deferred operand check.
+    if scalar.contains(query), width != 1 {
+      throw .arity(1, width)
+    }
+  }
+
+  /// The subquery shape a run of the reached occurrence `reach` type-checks
+  /// against — chosen from the occurrence's OWN reached ROLE, not the union of
+  /// every role the query occupies in the select. A `scalar` reach (collapses
+  /// the cell) or a `valued` one (`IN (Q)`, its value set read) EVALUATES the
+  /// select list, so its ORIGINAL is type-checked; an `existential` reach
+  /// (`EXISTS`) runs the cardinality PROBE (`Select.probe`: constant
+  /// projection, `ORDER BY` dropped, original `OFFSET`/`FETCH` kept), never its
+  /// select list — so its PROBED shape is checked, matching the run. So the
+  /// SAME inner SQL reached ONLY as an `EXISTS` validates the probe even where
+  /// an unreached arm has it as a scalar. A query the probe does not rewrite (a
+  /// `HAVING` or set operation) runs in FULL, so its original is checked even
+  /// for an `existential` reach.
+  private borrowing func shape(of reach: Reach) -> Query {
+    guard reach.role == .existential, case let .select(select) = reach.query,
         select.probable else {
-      return query
+      return reach.query
     }
     return .select(select.probe)
   }
 
   private borrowing func typecheck(_ select: Select, _ context: Context,
-                                   visited: Set<String>)
+                                   visited: Set<String>, outer: Outer? = nil)
       throws(SQLError) {
-    // Type-check and compile every UNCORRELATED subquery ONCE, ahead of the
-    // reachability walk: the pre-pass validates each `IN`/`EXISTS` inner query
-    // (never short-circuited past) and derives every scalar subquery's
-    // cursor-free arity and type (TOTAL — no `.divide` on `1 / 0`), but DEFERS
-    // a scalar occurrence's inner-query OPERAND validation to the walk, which
-    // records the scalar occurrences it REACHES into the `SubqueryCheck`'s box.
-    // `subqueryCheck` REVEALS the base from the augmented `context`, so a
-    // subquery's FROM sees no derived alias while a shadowed CTE is preserved.
-    let subquery = try subqueryCheck(of: select, context, visited: visited)
+    // This select's OWN resolution scope — the one its nested subqueries
+    // CORRELATE against (`nil` for a FROM-less select, which adds no relations
+    // and correlates through `outer` unchanged). Built from the UNREVEALED
+    // `context` — correlation resolves against the enclosing scope's relations
+    // (its derived aliases among them), unlike an inner subquery's own FROM,
+    // which resolves against the REVEALED base below.
+    let enclosing = select.from == nil
+        ? nil : try scope(of: select, context, visited: visited,
+                          validate: true)
+    // The PREFIX scope of each join, the surface its `ON`'s subquery correlates
+    // against — matching the run's `subquery(of:)`.
+    let prefixes = try prefixes(of: select, context, visited: visited,
+                               validate: true)
+    // Type-check and compile every subquery ONCE, ahead of the reachability
+    // walk: the pre-pass validates each `IN`/`EXISTS` inner query (never
+    // short-circuited past) and derives every scalar subquery's cursor-free
+    // arity and type (TOTAL — no `.divide` on `1 / 0`), but DEFERS a scalar
+    // occurrence's inner-query OPERAND validation to the walk. Each nested
+    // query's CORRELATION resolves against `enclosing` (a join `ON`'s against
+    // its prefix) here, matching the run.
+    let subquery = try subqueryCheck(of: select, context, visited: visited,
+                                     enclosing: enclosing, outer: outer,
+                                     prefixes: prefixes)
     // Walk the query's operands reachability-aware, so an unreachable
-    // `CASE`/`COALESCE` arm's scalar subquery is left unrecorded and unchecked.
-    try walk(select, context, subquery: subquery, visited: visited)
-    // Validate the inner query of each scalar occurrence the walk REACHED,
-    // where the borrowing catalog is in scope — mirroring the lazy executor,
-    // which materialises only a reached scalar subquery. A reached
-    // `(SELECT 1 / 0 …)` faults `.divide` here exactly as the run does; a
-    // skipped one is never reached, so never validated. A subquery's FROM sees
-    // base tables and enclosing CTEs, NOT the enclosing SELECT's derived-table
-    // aliases, so type-check each against the REVEALED base — the derived
-    // layers dropped, the CTEs/store (a shadowed CTE among them) kept.
+    // `CASE`/`COALESCE` arm's subquery is left unrecorded and unchecked.
+    try walk(select, context, subquery: subquery, visited: visited,
+             outer: outer, prefixes: prefixes)
+    // Validate the inner query of each occurrence the walk REACHED — a scalar
+    // or an `IN`/`EXISTS`/quantified one — in the RUN shape of ITS OWN reached
+    // role: an `existential` reach the cardinality PROBE (never its select
+    // list), a `scalar`/`valued` reach the ORIGINAL. The shape is chosen from
+    // the occurrence's role, NOT the union of every role the query occupies in
+    // the select — so the SAME inner SQL reached only as an `EXISTS` validates
+    // the probe even where an UNREACHED arm has it as a scalar. Its correlated
+    // columns resolve against THIS select's scope (nearest), stacked past
+    // `outer` — mirroring the lazy executor. A reached `(SELECT 1 / 0 …)`
+    // faults `.divide` here exactly as the run does, while an unreached one in
+    // a skipped arm does not.
+    //
+    // A subquery's own FROM sees base tables and enclosing CTEs, NOT the
+    // enclosing SELECT's derived-table aliases, so recurse against the REVEALED
+    // base — the derived layers dropped, the CTEs/store (a shadowed CTE among
+    // them) kept — while the correlation `outer` above still carries the
+    // enclosing scope's ordinals.
     let inner = context.revealed()
-    for query in subquery.visited {
-      try typecheck(query, inner, visited: visited)
+    let nested = enclosing.map { (outer ?? Outer()).nested(under: $0) } ?? outer
+    for reach in subquery.visited {
+      try typecheck(shape(of: reach), inner, visited: visited, outer: nested)
+    }
+    // Each join `ON` runs through the SAME reachability/short-circuit walk the
+    // WHERE does, but PREFIX-scoped: an `ON` predicate short-circuits its
+    // `AND`/`OR` at run (`Scope.on` lowers the conjunction the join evaluator
+    // steps), so a subquery a short-circuited leg never reaches is NOT
+    // validated — `ON 1 = 0 AND 1 IN (SELECT 1 / 0 …)` does not fault, exactly
+    // as the join never materialises it — while a REACHED `ON` subquery IS
+    // validated (parity). The `ON`'s LOCAL scope is the join's PREFIX
+    // (`prefixes[index]`, the relations AT that point, never one joined LATER),
+    // so a correlated reference to a later-joined relation faults per that
+    // prefix; its enclosing `outer` stays the select's, so a correlated `ON`
+    // subquery column resolves against THAT prefix stacked past the outer,
+    // matching the run's `subquery(of:)`.
+    for index in select.joins.indices {
+      guard index < prefixes.count else { continue }
+      let prefix = prefixes[index]
+      let scope = (outer ?? Outer()).nested(under: prefix)
+      let on = subquery.scoped(outer)
+      try prefix.check(select.joins[index].on, context.routines, subquery: on)
+      for reach in on.visited {
+        try typecheck(shape(of: reach), inner, visited: visited, outer: scope)
+      }
     }
   }
 
@@ -531,10 +690,18 @@ extension Catalog where Self: ~Escapable {
   /// would evaluate and RECORDING (via `subquery`) each scalar subquery it
   /// reaches, so the caller validates only the reached scalars' inner queries.
   private borrowing func walk(_ select: Select, _ context: Context,
-                              subquery: SubqueryCheck, visited: Set<String>)
+                              subquery: SubqueryCheck, visited: Set<String>,
+                              outer: Outer? = nil,
+                              prefixes: Array<Scope> = [])
       throws(SQLError) {
     let routines = context.routines
-    let scope = try scope(of: select, context, visited: visited)
+    let scope = try scope(of: select, context, visited: visited,
+                          validate: true)
+    // The WHERE admits a correlated column of THIS query (`subquery`); the
+    // projection, `HAVING`, and `ORDER BY` bar it (`barred`), diagnosing the
+    // unsupported correlated-projection/HAVING case exactly as the run's
+    // lowering does.
+    let barred = subquery.barred
     // An `ORDER BY` ordinal names a 1-based SELECT-list position; one outside
     // `1 ... width` names no output column and faults `SQLError.column` (spelled
     // as the ordinal), exactly as the compile path's ordinal resolution does —
@@ -557,7 +724,8 @@ extension Catalog where Self: ~Escapable {
     // Structural, so it runs regardless of the WHERE/limit reachability the
     // operand type-check below tracks.
     if select.aggregates {
-      try order(grouped: select, scope, context, visited)
+      try order(grouped: select, scope, context, visited,
+                outer: outer, prefixes: prefixes)
     }
     if let predicate = select.predicate {
       try scope.check(predicate, routines, subquery: subquery)
@@ -602,7 +770,7 @@ extension Catalog where Self: ~Escapable {
           if !reachable { reachable = !drops(select.limit, single: true) }
           if reachable, case let .expressions(items) = select.projection {
             for item in items {
-              try scope.fold(item.expression, routines, subquery: subquery)
+              try scope.fold(item.expression, routines, subquery: barred)
             }
           }
           // The lone empty group is sorted BELOW the limit — the shape is
@@ -614,7 +782,7 @@ extension Catalog where Self: ~Escapable {
           // projection term reached only via the sort is checked even where the
           // projection block above is skipped.
           for expression in select.orderKeys {
-            try scope.fold(expression, routines, subquery: subquery)
+            try scope.fold(expression, routines, subquery: barred)
           }
         }
         return
@@ -629,15 +797,15 @@ extension Catalog where Self: ~Escapable {
     // projection or `HAVING` aggregate's.
     if case let .expressions(items) = select.projection {
       for item in items {
-        try scope.aggregates(in: item.expression, routines, subquery: subquery)
+        try scope.aggregates(in: item.expression, routines, subquery: barred)
       }
     }
     for expression in select.orderKeys {
-      try scope.aggregates(in: expression, routines, subquery: subquery)
+      try scope.aggregates(in: expression, routines, subquery: barred)
     }
     if let having = select.having {
-      try scope.aggregates(in: having, routines, subquery: subquery)
-      try scope.check(having, routines, subquery: subquery)
+      try scope.aggregates(in: having, routines, subquery: barred)
+      try scope.check(having, routines, subquery: barred)
       // A false HAVING filters every group before the projection, so the
       // projection's non-aggregate work is unreachable.
       if scope.constant(having, routines) == false { return }
@@ -656,7 +824,7 @@ extension Catalog where Self: ~Escapable {
     if !reachable { reachable = !drops(select.limit, single: sole) }
     if reachable, case let .expressions(items) = select.projection {
       for item in items {
-        _ = try scope.validate(item.expression, routines, subquery: subquery)
+        _ = try scope.validate(item.expression, routines, subquery: barred)
       }
     }
     // The sort sits BELOW the limit — the shape is `Project(Limit(Sort(…)))`
@@ -671,7 +839,7 @@ extension Catalog where Self: ~Escapable {
     // projection term NO sort key reaches stays correctly unchecked (the
     // projection never runs under a row-dropping limit).
     for expression in select.orderKeys {
-      _ = try scope.validate(expression, routines, subquery: subquery)
+      _ = try scope.validate(expression, routines, subquery: barred)
     }
   }
 
@@ -688,16 +856,24 @@ extension Catalog where Self: ~Escapable {
   /// the two paths cannot drift. It resolves only, reading no cursor; a run's
   /// operand type-check over the (structurally valid) keys stays the caller's.
   private borrowing func order(grouped select: Select, _ scope: Scope,
-                               _ context: Context, _ visited: Set<String>)
+                               _ context: Context, _ visited: Set<String>,
+                               outer: Outer? = nil,
+                               prefixes: Array<Scope> = [])
       throws(SQLError) {
     guard let clause = select.order else { return }
     let routines = context.routines
-    // A grouped aggregate's argument or FILTER may nest an UNCORRELATED
-    // subquery (`ORDER BY SUM(CASE WHEN EXISTS (Q) …)`), which lowering
-    // resolves against the materialised map, so materialise the select's
-    // subqueries ONCE here — the same map the run's `group` builds — for this
-    // structural resolve to lower those aggregates exactly as the run does.
-    let subquery = try subquery(of: select, context, visited)
+    // A grouped aggregate's argument or FILTER may nest a subquery (`ORDER BY
+    // SUM(CASE WHEN EXISTS (Q) …)`), which lowering resolves against the
+    // materialised map, so build the select's subquery seam ONCE here — the
+    // same one the run's `group` builds — for this structural resolve to lower
+    // those aggregates exactly as the run does. It threads the SAME
+    // `enclosing`/`outer`/`prefixes` the run path passes, so a CORRELATED inner
+    // query (`WHERE S.k = T.k`) resolves its outer column here exactly as at
+    // run, rather than compiling with no enclosing scope and faulting
+    // `SQLError.column`.
+    let subquery = try subquery(of: select, context, visited, .caller,
+                                enclosing: scope, outer: outer,
+                                prefixes: prefixes).rest
     // Collect the distinct aggregates the grouped plan folds — the projection,
     // the `HAVING`, and the `ORDER BY` sort-key expressions — then dedup by the
     // RESOLVED `Aggregation`, exactly as `group` does, so a grouped `ORDER BY`

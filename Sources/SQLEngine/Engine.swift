@@ -143,15 +143,27 @@ extension Catalog where Self: ~Escapable {
     // resolves the whole query below.
     if case let .setop(kind, left, right, all) = query {
       // Validate the whole query (per-arm resolution and the cross-arm arity
-      // check) exactly as a single select does, then run each arm on its own.
-      // `validate: false` — the preflight must not eager-type-check a derived
-      // body a data-dependent filter never reaches (execution faults only on a
-      // REACHED operand), matching the non-derived path.
+      // check) exactly as a single select does, then run each arm on its own —
+      // each arm's `run` threads its OWN lazy subquery box. `validate: false` —
+      // the preflight must not eager-type-check a derived body a data-dependent
+      // filter never reaches (execution faults only on a REACHED operand),
+      // matching the non-derived path.
       _ = try compile(query, context, validate: false)
       let combined = try combine(kind, run(left, context).map(Record.init),
                                  run(right, context).map(Record.init), all)
       return combined.map(\.values)
     }
+    // Thread a fresh LAZY subquery cache — a shared box — through BOTH compile
+    // and execute. The executor's row evaluator runs each nested subquery into
+    // it on first reach (where the borrowing catalog IS in scope; a schema-only
+    // path never reaches it, so opens no cursor): an UNCORRELATED occurrence
+    // runs once and memoises, while a CORRELATED one re-executes per outer row
+    // against the correlated bindings, bypassing the memo. Compile stashes each
+    // CORRELATED occurrence's inner PLAN here (compiled once with its enclosing
+    // scope, so its correlated columns are bound `Term.parameter`s), so the
+    // evaluator re-executes THAT plan rather than recompiling the inner query
+    // with no outer scope.
+    let context = context.resolving(Subqueries())
     // Compile from the un-augmented `context` (idempotently augmented inside
     // `compile`, which reveals the base for a nested subquery) — this query's
     // derived aliases are invisible to a subquery's FROM, and a CTE a
@@ -190,18 +202,18 @@ extension Catalog where Self: ~Escapable {
     // and a REACHED operand still faults at execution).
     let augmented = try augment(context, for: query, rows: true,
                                 validate: false)
+    // Record the caller's overlay under `.caller` so a subquery lowered under
+    // it (even one a pushdown moved INTO a view) re-runs against the caller's
+    // relations, not the view's base. REVEAL the base first — this query's
+    // derived-table aliases are SELECT-scoped, invisible to a subquery's FROM,
+    // while the CTEs and `definition_schema.` store relations a `.caller`
+    // subquery's FROM resolves against are kept, so a subquery `FROM d` reads a
+    // CTE `d` a same-named derived alias shadows rather than the derived rows.
+    // The shared box survives from the un-augmented compile into execution.
+    augmented.subqueries.record(overlay: augmented.revealed().relations,
+                                for: .caller)
     let plan = try optimise(logical, augmented)
-    // Execute every UNCORRELATED subquery the plan nests ONCE here — where the
-    // borrowing catalog IS in scope — and thread the memoised results into the
-    // context the executor reads (never during `compile`, so a schema-only path
-    // opens no cursor). A query with no `EXISTS`/`IN (Q)` builds an empty one.
-    // The subqueries materialise against the un-augmented `context` — this
-    // query's own derived aliases are SELECT-scoped, invisible to a subquery's
-    // FROM (`subqueries(of:)` reveals the base, dropping any enclosing derived
-    // alias but keeping CTEs and store relations), so a CTE a same-named
-    // derived alias shadows stays visible to the subquery.
-    let subqueries = try subqueries(of: query, context)
-    return try execute(plan, augmented.resolving(subqueries)).map(\.values)
+    return try execute(plan, augmented).map(\.values)
   }
 
   /// Runs a `Statement` against this catalog, returning its result rows.
@@ -551,6 +563,12 @@ extension Projection {
   /// select is otherwise the ONE path that would hit the default unsupported
   /// map and reject a subquery a run materialises. The `Subquery` is threaded,
   /// not run, here (see `subquery(of:)`).
+  ///
+  /// A projection is a BARRED clause position, so a correlated column of THIS
+  /// query has no evaluator here. `Schema.terms` bars the seam intrinsically,
+  /// so this FROM-less projection CANNOT admit correlation even when handed the
+  /// admitting `plans.rest` — the same cut `columns(of:)` applies on the schema
+  /// path, keeping run and derive in lockstep.
   internal func scalar(_ routines: Routines = [:],
                        subquery: Subquery = .unsupported)
       throws(SQLError) -> Plan {
@@ -1171,6 +1189,19 @@ extension Select {
     }
     return queries
   }
+
+  /// The `Role`s `query` occupies within this `SELECT` — `scalar`, `valued`,
+  /// and/or `existential` — the SHAPES the lowered nodes carry in their
+  /// `Subkey`. The same inner SQL used in more than one position occupies more
+  /// than one role, so a correlated occurrence's pre-compiled plan is recorded
+  /// under each, matching every lowered node that looks it up.
+  internal func roles(of query: Query) -> Array<Role> {
+    var roles = Array<Role>()
+    if scalar.contains(query) { roles.append(.scalar) }
+    if valued.contains(query) { roles.append(.valued) }
+    if existential.contains(query) { roles.append(.existential) }
+    return roles
+  }
 }
 
 extension Predicate {
@@ -1589,7 +1620,8 @@ extension Catalog where Self: ~Escapable {
                                 _ from: Resolved, _ context: Context,
                                 _ visited: Set<String>,
                                 _ subscope: Subscope = .caller,
-                                validate: Bool = true)
+                                _ outer: Outer? = nil,
+                                validate: Bool)
       throws(SQLError) -> Plan {
     // The augmented `context` threads to `subquery(of:)`, which REVEALS the
     // base — this select's and every enclosing select's derived aliases
@@ -1616,21 +1648,34 @@ extension Catalog where Self: ~Escapable {
     // resolved against only the prefix already in scope (as the non-aggregate
     // path does). A `column = column` conjunct becomes a `match` hash-join key;
     // the rest is a residual the join runs as a filter.
-    // Materialise every UNCORRELATED subquery ONCE, ahead of lowering, into a
-    // map the join ONs, WHERE, HAVING, projection, and ORDER BY read from.
-    let subquery = try subquery(of: select, context, visited, subscope,
-                                validate: validate)
+    // Each join's PREFIX scope — the relations available AT that join point,
+    // never one joined LATER — the scope its `ON` lowers against and a subquery
+    // in that `ON` correlates against.
+    let prefixes = select.joins.indices.map { index in
+      Scope(Array(relations[0 ... index + 1]))
+    }
+    // Compile every nested subquery ONCE for arity/type, ahead of lowering, and
+    // discover each one's CORRELATION: a join `ON`'s against its PREFIX scope,
+    // the WHERE against the join `scope`. Only the WHERE and join ONs admit a
+    // correlated column of THIS query; the aggregations, projection, `HAVING`,
+    // and `ORDER BY` lower under a BARRED seam. `validate` gates the eager
+    // type-check of a filtered-out derived body a nested subquery names, off on
+    // the RUN path, on for a schema check.
+    let plans = try subquery(of: select, context, visited, subscope,
+                             enclosing: scope, outer: outer,
+                             prefixes: prefixes)
+    let barred = plans.rest.barred
     var matches = Array<Filter>()
     matches.reserveCapacity(select.joins.count)
     for index in select.joins.indices {
-      let prefix = Scope(Array(relations[0 ... index + 1]))
       let join = select.joins[index]
-      try matches.append(prefix.on(join.on, context.routines,
-                                   subquery: subquery))
+      try matches.append(prefixes[index].on(join.on, context.routines,
+                                            subquery: plans.on(index)))
     }
     var predicate: Filter? = nil
     if let clause = select.predicate {
-      predicate = try scope.lower(clause, context.routines, subquery: subquery)
+      predicate = try scope.lower(clause, context.routines,
+                                  subquery: plans.rest)
     }
 
     // The `GROUP BY` keys and the aggregate arguments lower to combined
@@ -1668,7 +1713,7 @@ extension Catalog where Self: ~Escapable {
     var aggregations = Array<Aggregation>()
     for expression in expressions {
       let aggregation = try expression.aggregation(scope, context.routines,
-                                                   subquery: subquery)
+                                                   subquery: barred)
       if !aggregations.contains(aggregation) {
         aggregations.append(aggregation)
       }
@@ -1726,15 +1771,15 @@ extension Catalog where Self: ~Escapable {
     // GROUP BY key).
     var grouping = try Grouping(scope, select.grouping, aggregations)
     let projection = try grouping.terms(select.projection, context.routines,
-                                        subquery: subquery)
+                                        subquery: barred)
     let having: Filter? = if let clause = select.having {
-      try grouping.lower(clause, context.routines, subquery: subquery)
+      try grouping.lower(clause, context.routines, subquery: barred)
     } else {
       nil
     }
     var order = if let clause = select.order {
       try grouping.order(clause, projection, context.routines,
-                         subquery: subquery)
+                         subquery: barred)
     } else {
       Array<SortKey>()
     }
@@ -2691,7 +2736,8 @@ extension Catalog where Self: ~Escapable {
                                   _ context: Context = Context(),
                                   _ visited: Set<String> = [],
                                   _ scope: Subscope = .caller,
-                                  validate: Bool = true)
+                                  _ outer: Outer? = nil,
+                                  validate: Bool)
       throws(SQLError) -> Plan {
     // Bind the derived tables (and store relations) THIS query names in its own
     // FROM/JOIN before resolving its relations — SELECT-scoped, so a subquery
@@ -2715,7 +2761,7 @@ extension Catalog where Self: ~Escapable {
     let context = try augment(context, for: query, rows: false,
                               visited: visited, validate: validate)
     guard case let .setop(kind, left, right, all) = query else {
-      return try compile(query.first, context, visited, scope,
+      return try compile(query.first, context, visited, scope, outer,
                          validate: validate)
     }
 
@@ -2737,10 +2783,12 @@ extension Catalog where Self: ~Escapable {
     let width = try arity(query.first, head, visited, validate: validate)
     let count = try arity(right.first, tail, visited, validate: validate)
     guard count == width else { throw .arity(width, count) }
+    // Both arms of a set-operation subquery correlate against the SAME
+    // enclosing scope, so each lowers under the shared `outer`.
     return try .setop(kind,
-                      compile(left, context, visited, scope,
+                      compile(left, context, visited, scope, outer,
                               validate: validate),
-                      compile(right, context, visited, scope,
+                      compile(right, context, visited, scope, outer,
                               validate: validate), all: all)
   }
 
@@ -2763,10 +2811,74 @@ extension Catalog where Self: ~Escapable {
   /// for a top-level compile, `.view(name)` for a view body's — carried into
   /// each lowered `Filter`'s cache key so a view-body occurrence and a
   /// top-level one over the same AST stay distinct entries (see `Subscope`).
+  ///
+  /// `enclosing` is the select's OWN resolution scope — the one its nested
+  /// subqueries CORRELATE against: each nested query compiles under a fresh
+  /// `Outer` extending `outer` (this select's own enclosing scope, when it is
+  /// itself a subquery) with `enclosing` as the nearest scope, so a nested
+  /// query's inner `WHERE` column that binds none of ITS relations resolves
+  /// against the enclosing select (and outward), lowering to a synthetic
+  /// `Term.parameter` and RECORDING the correlation the lowered node carries.
+  /// The returned `Subquery` also carries `outer` so THIS select's own columns
+  /// correlate outward when it is a subquery.
+  ///
+  /// `prefixes`, when supplied, gives the PREFIX scope each join `ON` lowers
+  /// against — the FROM relation and joins `0…index`, never a relation joined
+  /// LATER — so a subquery in join `i`'s `ON` correlates against `prefixes[i]`
+  /// (the relations available AT that join point) rather than the full join
+  /// `enclosing`. A correlated reference to a later-joined relation then binds
+  /// against NONE of the prefix's relations and faults `SQLError.column`,
+  /// matching the DIRECT `ON` resolver, which already uses the prefix scope. A
+  /// non-join surface (WHERE/projection/HAVING/ORDER) correlates against
+  /// `enclosing` as before.
   internal borrowing func subquery(of select: Select, _ context: Context,
                                    _ visited: Set<String>,
                                    _ scope: Subscope = .caller,
-                                   validate: Bool = true)
+                                   enclosing: Scope? = nil, outer: Outer? = nil,
+                                   prefixes: Array<Scope> = [])
+      throws(SQLError) -> Plans {
+    // Resolve each SITE'S subqueries against THAT site's own scope, keyed PER
+    // OCCURRENCE: a join `i`'s `ON` against its PREFIX scope `prefixes[i]` (the
+    // relations available AT that join point), the WHERE/HAVING/projection/ORDER
+    // against the full join `enclosing`. The SAME inner SQL in both an `ON` and
+    // the WHERE is resolved TWICE — each against its own site's scope — so the
+    // WHERE occurrence sees the full scope and reports a genuine ambiguity rather
+    // than reusing the first `ON` occurrence's narrower prefix correlation.
+    var lowerings = Array<Subquery>()
+    lowerings.reserveCapacity(select.joins.count)
+    for index in select.joins.indices {
+      var queries = Array<Query>()
+      select.joins[index].on.collect(subqueries: &queries)
+      let within = index < prefixes.count ? prefixes[index] : enclosing
+      try lowerings.append(subquery(queries, select, context, visited, scope,
+                                    within: within, outer: outer))
+    }
+    var rest = Array<Query>()
+    select.predicate?.collect(subqueries: &rest)
+    select.having?.collect(subqueries: &rest)
+    if case let .expressions(items) = select.projection {
+      for item in items { item.expression.collect(subqueries: &rest) }
+    }
+    for key in select.order?.keys ?? [] {
+      if case let .expression(expression) = key.sort {
+        expression.collect(subqueries: &rest)
+      }
+    }
+    let remainder = try subquery(rest, select, context, visited, scope,
+                                 within: enclosing, outer: outer)
+    return Plans(lowerings, remainder)
+  }
+
+  /// Builds ONE lowering `Subquery` over the directly-nested `queries` of a
+  /// single SITE, resolving each against `within` — the scope THAT site's
+  /// subqueries correlate against (a join `ON`'s prefix, or the full
+  /// `enclosing` for the WHERE/HAVING/projection/ORDER). Each distinct `Query`
+  /// is compiled ONCE here; the SAME inner SQL at a DIFFERENT site is resolved
+  /// by that site's own call, against its own scope.
+  private borrowing func subquery(_ queries: Array<Query>, _ select: Select,
+                                  _ context: Context, _ visited: Set<String>,
+                                  _ scope: Subscope, within: Scope?,
+                                  outer: Outer?)
       throws(SQLError) -> Subquery {
     // A nested subquery's FROM resolves against base tables and enclosing CTEs,
     // NOT the enclosing SELECT's derived-table aliases (SELECT-scoped, unseen
@@ -2776,14 +2888,34 @@ extension Catalog where Self: ~Escapable {
     let context = context.revealed()
     var widths = Dictionary<Query, Int>()
     var types = Dictionary<Query, ValueType>()
-    for query in select.subqueries where widths[query] == nil {
-      // `validate` gates the eager type-check of a derived body THIS subquery
-      // nests: a RUN passes `false` so a filtered-out `FROM (SELECT …) AS d` in
-      // an `EXISTS`/`IN (Q)`/scalar subquery is TRUSTED, not rejected, matching
-      // the outer query; a schema check passes `true`. The type derivation
-      // below is already schema-only lenient (`validate: false`).
-      widths[query] =
-          try compile(query, context, visited, validate: validate).width
+    var correlations = Dictionary<Query, Correlation>()
+    for query in queries where widths[query] == nil {
+      // A fresh `Outer` per nested query — its enclosing scope is THIS select
+      // (nearest, `within`), stacked past this select's own enclosing scope
+      // `outer`. A FROM-less select adds no relations, but it is STILL a scope
+      // FRAME: it pushes an EMPTY `Scope` so correlation DEPTH counts this
+      // level. Its own plan runs over a `single` empty record, so a deeper
+      // reference to the true outer must NOT bind as this frame's `.slot` (an
+      // empty record has no such cell) — the empty frame makes that reference
+      // a grandparent one, resolved `.bound` and threaded through `bindings`,
+      // while a genuinely-immediate correlation to a REAL enclosing FROM (a
+      // non-nil `within`) stays `.slot` as before.
+      let nested = (outer ?? Outer()).nested(under: within ?? Scope([]))
+      // A nested subquery's body derivation is SHAPE ONLY, so ALWAYS lenient
+      // (`validate: false`) — this pass exists to record the subquery's width,
+      // arity, and correlation, never to validate its body. Validation of a
+      // subquery's body (and the derived tables nested within it, at any depth)
+      // is the reachability walk's job: `typecheck(_ select:)` re-derives each
+      // REACHED occurrence's body strictly over `subquery.visited`. Compiling a
+      // derived body THIS subquery nests with `validate: true` here would
+      // eager-type-check it BEFORE the walk decides the subquery is reached —
+      // faulting `WHERE 1 = 0 AND 1 IN (SELECT x FROM (SELECT 1 / 0 …) AS d)`,
+      // whose `IN` a run short-circuits away. Structural faults (a bad inner
+      // relation/column, a UNION arity) still surface — they resolve regardless
+      // of `validate`. The type derivation below is already lenient.
+      let plan = try compile(query, context, visited, scope, nested,
+                             validate: false)
+      widths[query] = plan.width
       // A scalar subquery contributes its single-column output type; a wider or
       // an `EXISTS`/`IN (Q)` subquery still records the FIRST column's type
       // (harmless — only a width-1 scalar occurrence reads it, and the lowering
@@ -2791,108 +2923,56 @@ extension Catalog where Self: ~Escapable {
       // the width compile uses, so it matches what the run advertises.
       types[query] =
           try columns(of: query.first, context, visited: visited,
-                      validate: false).first?.type
-    }
-    return Subquery(scope, widths, types)
-  }
-
-  /// Executes every UNCORRELATED subquery `query` nests ONCE against this
-  /// catalog and `context` — the run-time counterpart of `subquery(of:)` —
-  /// memoising each result under its occurrence `Subkey` (its resolution
-  /// `scope` composed with its `Query`) into a `Subqueries` cache the row
-  /// evaluator reads.
-  ///
-  /// `scope` is the resolution context these subqueries materialise under, so
-  /// the key each writes matches the key its lowered `Filter` reads: `run`
-  /// materialises a top-level query's subqueries under `.caller`; `derive`
-  /// materialises a view body's under `.view(name)`. The two spaces are
-  /// disjoint, so a caller cache and a view-body cache `merged` without either
-  /// overwriting the other (Bug 2).
-  ///
-  /// An `IN (Q)` occurrence (its `Query` in `query.valued`) is materialised in
-  /// FULL — its single column of values IS read. An occurrence ONLY an `EXISTS`
-  /// operand needs no values, so it is materialised as a cardinality PROBE:
-  /// `probe` tests whether the row source yields ANY row WITHOUT evaluating the
-  /// select list or sort keys, so `EXISTS (SELECT 1 / 0 FROM S)` over a
-  /// non-empty `S` is TRUE with no `.divide` (Bug 3), and it honours the
-  /// original `OFFSET`/`FETCH` so a `FETCH FIRST 0 ROWS` or an `OFFSET` past
-  /// the end is EXISTS false. A `Query` used by BOTH is in `valued`, so its
-  /// single full materialisation serves the `EXISTS` occurrence too.
-  ///
-  /// A SCALAR occurrence is NOT materialised here: it collapses LAZILY on the
-  /// first evaluation of its `Term.subquery` (see the evaluator's `.subquery`
-  /// case, which runs `cell(of:)` where the catalog is in scope and memoises
-  /// the result), so a scalar subquery in an unreachable `CASE`/`COALESCE` arm
-  /// never runs and its `.cardinality` or inner fault never fires. The returned
-  /// cache carries an empty scalar memo the evaluator fills on first reach.
-  ///
-  /// This runs at RUN time, where the borrowing catalog IS in scope, NOT during
-  /// `compile` — so a schema-only path never reaches it and opens no cursor. It
-  /// gathers every arm's directly-nested subquery (a set operation's both arms
-  /// read one cache) and runs each DISTINCT `IN`/`EXISTS` `Query` at most ONCE
-  /// per outer-query execution: its result is the same for every outer row
-  /// because the subquery is UNCORRELATED. Each runs under the SAME `context` —
-  /// a nested subquery resolves ITS own inner subqueries through its own `run`,
-  /// so this walk stays one level.
-  ///
-  /// Per-arm SHORT-CIRCUIT laziness for the `IN`/`EXISTS` roles — not running a
-  /// subquery an `AND`/`OR` never reaches — is a follow-up that threads a
-  /// runner to the predicate site; those roles still materialise up front here.
-  internal borrowing func subqueries(of query: Query, _ context: Context,
-                                     _ scope: Subscope = .caller)
-      throws(SQLError) -> Subqueries {
-    // A nested subquery's FROM resolves against base tables and enclosing CTEs,
-    // NOT the enclosing SELECT's derived-table aliases — REVEAL the base
-    // (CTEs/store kept, the derived layers dropped) before running/probing each
-    // subquery, mirroring the compile-path reveal in `subquery(of:)`, so a
-    // `FROM d` naming an outer derived alias faults at run exactly as it does
-    // at `columns(of:)`, while a CTE the alias shadowed is exposed beneath.
-    let context = context.revealed()
-    let valued = query.valued
-    let existential = query.existential
-    var results = Dictionary<Subkey, MaterialisedSubquery>()
-    for nested in query.subqueries {
-      // The SAME inner query can occur in more than one ROLE at once — a
-      // scalar subquery, an `IN` value set, and an `EXISTS` probe over
-      // identical SQL — each needing its OWN materialisation SHAPE under its
-      // OWN key, so a scalar read never hits an `IN`/`EXISTS` entry and vice
-      // versa (the role discriminates the key, see `Role`). Materialise one
-      // entry per role the occurrence appears in, each at most once.
-      //
-      // A SCALAR occurrence is NOT materialised here: it collapses LAZILY, on
-      // the FIRST evaluation of its `Term.subquery` (see the evaluator's
-      // `.subquery` case), memoised under its `(scope, query, .scalar)` key,
-      // so an occurrence in an unreachable `CASE`/`COALESCE` arm never runs —
-      // never throws `.cardinality` or an inner fault. The eager roles below
-      // are the `IN`/`EXISTS` operands a `WHERE`/`ON` is not short-circuited
-      // past.
-      if valued.contains(nested) {
-        // An `IN (Q)` occurrence: materialise the full result — its single
-        // column of values is folded per outer row.
-        let key = Subkey(scope, nested, .valued)
-        if results[key] == nil {
-          results[key] = MaterialisedSubquery(rows: try run(nested, context))
-        }
-      }
-      if existential.contains(nested) {
-        // An `EXISTS (Q)` occurrence: probe cardinality without evaluating the
-        // select list or sort keys, honouring the original `OFFSET`/`FETCH`.
-        let key = Subkey(scope, nested, .existential)
-        if results[key] == nil {
-          results[key] = MaterialisedSubquery(present: try probe(nested,
-                                                                 context))
+                      validate: false, outer: nested).first?.type
+      // The correlation the nested compile discovered — the outer columns its
+      // inner `WHERE`/`ON` named — carried into the lowered subquery node so the
+      // per-outer-row re-execution binds them. Empty for an UNCORRELATED one.
+      correlations[query] = nested.correlation
+      // A CORRELATED occurrence's inner PLAN was just compiled with THIS site's
+      // enclosing scope, so its correlated columns are `Term.parameter`s bound
+      // from the outer row. Stash it into the run path's `context.subqueries`
+      // memo (which survives into execution) so the evaluator RE-EXECUTES this
+      // plan per outer row rather than recompiling the inner query fresh —
+      // which, with no outer scope in hand at eval, would fault on the outer
+      // column. Record it under the occurrence's `PlanKey` — its `Subkey` for
+      // each ROLE this query occupies (scalar / `IN` / `EXISTS`) composed with
+      // the correlation's parameter names — the same identity the lowered node
+      // looks up. The names distinguish two occurrences of IDENTICAL inner SQL
+      // under DIFFERENT outer layouts (two set-operation arms whose correlated
+      // column sits at different ordinals), so each arm's node finds ITS OWN
+      // plan rather than the first arm's. The `existential` role records the
+      // PROBED shape
+      // (`probed`: the cardinality-only rewrite when `probable`, else the full
+      // query) so the per-outer-row EXISTS re-execution tests non-emptiness
+      // WITHOUT evaluating the select list — a `1 / 0` projection never runs —
+      // exactly as the UNCORRELATED EXISTS probes. A schema-only path threads a
+      // throwaway memo, harmless there.
+      if !nested.correlation.isEmpty {
+        for role in select.roles(of: query) {
+          // Recompile the EXISTS probe LENIENTLY (`validate: false`), the SAME
+          // way the `plan` above compiled: this builds the run-time plan a
+          // correlated re-execution reuses, so it must not eager-type-check a
+          // filtered-out projection the per-outer-row probe never evaluates.
+          // The reachability walk validates a REACHED occurrence's probe shape
+          // itself (`typecheck(shape(of: reach), …)`), so validation stays the
+          // walk's, never this shape-deriving pass'.
+          let recorded = try role == .existential
+              ? compile(probed(query), context, visited, scope, nested,
+                        validate: false)
+              : plan
+          // Push selection down into the inner plan as the top-level `run` does
+          // (line ~134), so a correlated re-execution enjoys the same seeks and
+          // join placement. The pushdown's nullability analysis treats a
+          // conjunct carrying a correlated `Term.parameter` as nullable, so it
+          // never rides ahead of a LATER unsafe conjunct the inner `AND` still
+          // owes.
+          context.subqueries.record(plan: try recorded.pushdown(),
+                                    for: Subkey(scope, query, role),
+                                    nested.correlation)
         }
       }
     }
-    // Carry the REVEALED base scope the eager occurrences ran against, keyed
-    // under THIS `scope`, so the LAZY scalar path resolves its inner query
-    // against the SAME base — a CTE a same-named derived alias shadows stays
-    // visible to it, exactly as it does to the eager `EXISTS`/`IN (Q)`
-    // occurrences above. Keying per `scope` keeps a view-body cache's relations
-    // distinct from the caller's when the two are `merged` (the evaluator
-    // threads only the executing plan's overlay, which cannot tell them apart),
-    // so a `.view` scalar reads the view's scope.
-    return Subqueries(results, ScalarMemo(), [scope: context.relations])
+    return Subquery(scope, widths, types, correlations, outer: outer)
   }
 
   /// The single VALUE a SCALAR subquery `query` collapses to against this
@@ -2948,12 +3028,24 @@ extension Catalog where Self: ~Escapable {
   /// operation is materialised in FULL and tested for emptiness — the rewrite
   /// would not preserve its cardinality — which for those shapes evaluates the
   /// select list as a run would anyway.
-  private borrowing func probe(_ query: Query, _ context: Context)
+  internal borrowing func probe(_ query: Query, _ context: Context)
       throws(SQLError) -> Bool {
+    return try !run(probed(query), context).isEmpty
+  }
+
+  /// The cardinality-only shape of `query` an `EXISTS` tests for non-emptiness:
+  /// a `probable` `SELECT`'s probe rewrite (`Select.probe` — its select list
+  /// and `ORDER BY` replaced by a cardinality-preserving target, so a `1 / 0`
+  /// projection never evaluates) and the full `query` otherwise (a `HAVING`
+  /// select, a `DISTINCT`-with-`OFFSET` one, or a set operation, whose empty
+  /// test is not a source-only fact the rewrite preserves). The `probe(_:)` run
+  /// and the CORRELATED `existential` plan both compile/execute THIS shape, so
+  /// a correlated EXISTS probes per outer row as an uncorrelated one does.
+  internal borrowing func probed(_ query: Query) -> Query {
     guard case let .select(select) = query, select.probable else {
-      return try !run(query, context).isEmpty
+      return query
     }
-    return try !run(.select(select.probe), context).isEmpty
+    return .select(select.probe)
   }
 
   /// The number of result columns `select` projects — the extent of a `*` over
@@ -2962,7 +3054,7 @@ extension Catalog where Self: ~Escapable {
   /// consulted first.
   private borrowing func arity(_ select: Select, _ context: Context,
                                _ visited: Set<String>,
-                               validate: Bool = true)
+                               validate: Bool)
       throws(SQLError) -> Int {
     switch select.projection {
     case .all:
@@ -3123,7 +3215,8 @@ extension Catalog where Self: ~Escapable {
                                   _ context: Context = Context(),
                                   _ visited: Set<String> = [],
                                   _ subscope: Subscope = .caller,
-                                  validate: Bool = true)
+                                  _ outer: Outer? = nil,
+                                  validate: Bool)
       throws(SQLError) -> Plan {
     // Bind THIS select's own FROM/JOIN derived tables (and store relations)
     // before resolving its relations — SELECT-scoped, so a select reaching
@@ -3167,10 +3260,17 @@ extension Catalog where Self: ~Escapable {
       // matching run-time cache from `query.subqueries` (which descends the
       // projection), so the subquery is materialised there — `compile` runs it
       // never.
-      let subquery = try subquery(of: select, context, visited, subscope,
-                                  validate: validate)
+      // A FROM-less select adds no relations, so its nested subqueries
+      // correlate against this select's own enclosing scope `outer` unchanged;
+      // and its OWN columns (none but a projected outer reference) correlate
+      // outward through `outer` too. The seam is `plans.rest`; `scalar` (via
+      // `Schema.terms`) BARS it — a projection is a barred clause position — so
+      // a correlated column of THIS query is diagnosed, not lowered to a
+      // `Term.parameter`, matching `columns(of:)`'s schema-path rejection.
+      let plans = try subquery(of: select, context, visited, subscope,
+                               outer: outer)
       return try select.projection.scalar(context.routines,
-                                          subquery: subquery)
+                                          subquery: plans.rest)
     }
     let from = try resolve(relation, context, visited, validate: validate)
 
@@ -3190,22 +3290,30 @@ extension Catalog where Self: ~Escapable {
     // query compiles exactly as before.
     if select.aggregates {
       return try group(select, relation, from, context, visited, subscope,
-                       validate: validate)
+                       outer, validate: validate)
     }
 
     guard !select.joins.isEmpty else {
-      // Materialise every UNCORRELATED subquery ONCE, ahead of lowering, into a
-      // map the WHERE/projection/ORDER BY lowering splices results from.
-      let subquery = try subquery(of: select, context, visited, subscope,
-                                  validate: validate)
+      // Compile every nested subquery ONCE for its arity/type, ahead of
+      // lowering, into a map the WHERE/projection/ORDER BY lowering reads — and
+      // discover each one's CORRELATION against this select's single-relation
+      // scope (`enclosing`). This select's OWN columns correlate outward through
+      // `outer`.
+      let enclosing = Scope([(relation, from.schema)])
+      let plans = try subquery(of: select, context, visited, subscope,
+                               enclosing: enclosing, outer: outer)
       var filter: Filter? = nil
       if let predicate = select.predicate {
         filter = try from.schema.lower(predicate, in: relation,
-                                       context.routines, subquery: subquery)
+                                       context.routines, subquery: plans.rest)
       }
+      // The projection and ORDER BY are BARRED clause positions (only the WHERE
+      // admits a correlated column of THIS query); `terms`/`order` bar the seam
+      // intrinsically, so passing `plans.rest` cannot admit one. A nested
+      // subquery there still lowers with its OWN inner correlation.
       let projection =
           try from.schema.terms(select.projection, in: relation,
-                                context.routines, subquery: subquery)
+                                context.routines, subquery: plans.rest)
 
       // The ORDER BY lowers its keys against the projection: an ordinal or an
       // output-alias key resolves to a select-list item's own term, an ordinary
@@ -3215,7 +3323,7 @@ extension Catalog where Self: ~Escapable {
       if let clause = select.order {
         let names = select.projection.outputs(count: projection.count)
         order = try from.schema.order(clause, in: relation, projection, names,
-                                      context.routines, subquery: subquery)
+                                      context.routines, subquery: plans.rest)
       }
 
       // Under DISTINCT every ORDER BY key must be a select-list value — the
@@ -3268,24 +3376,41 @@ extension Catalog where Self: ~Escapable {
     // inequality or expression equality lowers to a residual the join filters.
     // The WHERE and ORDER lower against the whole chain, which legitimately
     // sees every relation.
-    // Materialise every UNCORRELATED subquery ONCE, ahead of lowering, into a
-    // map the join ONs, WHERE, projection, and ORDER BY splice results from.
-    let subquery = try subquery(of: select, context, visited, subscope,
-                                validate: validate)
+    // Each join's PREFIX scope — the FROM relation and joins `0…index`, the
+    // relations available AT that join point, never one joined LATER — the scope
+    // its `ON` lowers against and a subquery in that `ON` correlates against.
+    let prefixes = select.joins.indices.map { index in
+      Scope(Array(relations[0 ... index + 1]))
+    }
+    // Compile every nested subquery ONCE for arity/type, ahead of lowering,
+    // into a map the join ONs, WHERE, projection, and ORDER BY lowering reads —
+    // and discover each one's CORRELATION. A join `ON`'s subquery correlates
+    // against its PREFIX scope; the WHERE/projection/ORDER against the whole
+    // join `scope`. This select's OWN columns correlate outward through `outer`.
+    // `validate` gates a nested filtered-out derived body's eager type-check.
+    let plans = try subquery(of: select, context, visited, subscope,
+                             enclosing: scope, outer: outer,
+                             prefixes: prefixes)
     var matches = Array<Filter>()
     matches.reserveCapacity(select.joins.count)
     for index in select.joins.indices {
-      let prefix = Scope(Array(relations[0 ... index + 1]))
       let join = select.joins[index]
-      try matches.append(prefix.on(join.on, context.routines,
-                                   subquery: subquery))
+      try matches.append(prefixes[index].on(join.on, context.routines,
+                                            subquery: plans.on(index)))
     }
     var predicate: Filter? = nil
     if let clause = select.predicate {
-      predicate = try scope.lower(clause, context.routines, subquery: subquery)
+      predicate = try scope.lower(clause, context.routines,
+                                  subquery: plans.rest)
     }
+    // The projection and ORDER BY are BARRED clause positions: a correlated
+    // column of THIS query is out of the minimal (b) cut there (only its
+    // WHERE/ON admits one), so `terms`/`order` bar the seam intrinsically and
+    // it is diagnosed rather than mis-resolved. A nested subquery in the
+    // projection still lowers — its OWN inner WHERE correlation was discovered
+    // in the pre-pass.
     let projection = try scope.terms(select.projection, context.routines,
-                                     subquery: subquery)
+                                     subquery: plans.rest)
 
     // The ORDER BY lowers its keys against the projection (as the
     // single-relation path does): an ordinal or an output-alias key resolves to
@@ -3296,7 +3421,7 @@ extension Catalog where Self: ~Escapable {
     if let clause = select.order {
       let names = select.projection.outputs(count: projection.count)
       order = try scope.order(clause, projection, names, context.routines,
-                              subquery: subquery)
+                              subquery: plans.rest)
     }
 
     // Under DISTINCT every ORDER BY key must be a select-list value (see

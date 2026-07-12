@@ -103,83 +103,313 @@ internal struct Subkey: Hashable, Sendable {
   }
 }
 
-/// One UNCORRELATED subquery already RUN ONCE at execution — the value a
-/// run-time `Subqueries` cache memoises so the row evaluator reads an
-/// `EXISTS`/`IN (Q)` predicate without re-running the inner query or itself
-/// holding the borrowing catalog.
+/// The cache identity of one CORRELATED subquery occurrence's pre-compiled plan
+/// — its occurrence `Subkey` composed with the SET OF SYNTHETIC PARAMETER NAMES
+/// its correlation binds.
 ///
-/// An `IN (Q)` occurrence needs the subquery's single COLUMN of values, so it
-/// is materialised in FULL (`rows`). An occurrence used only by `EXISTS` needs
-/// nothing but CARDINALITY — whether the row source yields ANY row — so it is
-/// materialised as a `present` PROBE that never evaluates the select list or
-/// sort keys and stops at the first row (`EXISTS (SELECT 1 / 0 FROM S)` over a
-/// non-empty `S` is TRUE with no `.divide`, no full scan). A probe carries no
-/// `rows`, so `values` faults if an `IN` ever reads it — but a query needing
-/// its values is materialised full, so it never does.
-///
-/// A SCALAR subquery occurrence is NOT materialised here — it collapses LAZILY,
-/// on the first evaluation of its `Term.subquery`, so a scalar subquery in an
-/// unreachable `CASE`/`COALESCE` arm never runs (see `Subqueries.scalar`). The
-/// eager entries this holds are therefore only the `IN` full result and the
-/// `EXISTS` probe.
-internal struct MaterialisedSubquery {
-  /// The subquery's result rows for an `IN` occurrence materialised in full, or
-  /// `nil` for an `EXISTS`-only probe (which carries no full rows).
-  private let rows: Array<Array<Value>>?
+/// The `Subkey` alone (scope + query + role) does NOT separate two occurrences
+/// of IDENTICAL inner SQL that compile under DIFFERENT outer layouts — the two
+/// arms of a set operation, `SELECT (SELECT m FROM Src WHERE m = k) FROM Outer1
+/// UNION ALL SELECT (SELECT m FROM Src WHERE m = k) FROM Outer2` where
+/// `Outer1.k` sits at ordinal 0 and `Outer2.k` at ordinal 1. Both arms carry
+/// the SAME `Subkey` (same `.caller` scope, same AST, same role), so keying the
+/// plan memo by `Subkey` alone lets the right arm READ the LEFT arm's plan —
+/// which binds `:__correlated_0_0` while the right arm's outer row binds
+/// `:__correlated_0_1`, yielding NULL/wrong results. The correlation's PARAMETER
+/// NAMES (`:__correlated_<depth>_<ordinal>`) encode each occurrence's own outer
+/// layout and are STABLE across the ordinal remap `optimise` applies (it rewrites
+/// the `Source` values, never the keys), so they match at the RECORD site (the
+/// pre-pass compile) and the LOOKUP site (the lowered node) while DIFFERING
+/// between the two arms. Adding them to the key gives each arm its OWN plan yet
+/// preserves legitimate SHARING: an identical occurrence under an identical
+/// outer layout binds the same names and reuses the one plan.
+internal struct PlanKey: Hashable, Sendable {
+  /// The occurrence's `Subkey` — scope, query, and role.
+  private let key: Subkey
 
-  /// Whether the row source yielded a row — the `EXISTS` non-empty test, read
-  /// from the full `rows` or the probe.
-  internal let present: Bool
+  /// The synthetic parameter names this occurrence's correlation binds — its
+  /// outer-layout identity, remap-stable.
+  private let names: Set<String>
 
-  /// A full materialisation of `rows` — an `IN` occurrence, whose select list
-  /// IS needed.
-  internal init(rows: Array<Array<Value>>) {
-    self.rows = rows
-    self.present = !rows.isEmpty
-  }
-
-  /// A cardinality probe — an `EXISTS`-only occurrence, carrying only whether
-  /// the row source yielded a row, never the select-list values.
-  internal init(present: Bool) {
-    self.rows = nil
-    self.present = present
-  }
-
-  /// The single column of the result — the `IN (Q)` membership values. Only an
-  /// occurrence materialised in FULL (its select list needed) reads this; a
-  /// probe-only entry carries none, an internal invariant break if reached.
-  internal func values() throws(SQLError) -> Array<Value> {
-    guard let rows else {
-      throw .named("a subquery materialised as a probe has no values")
-    }
-    return rows.map { $0[0] }
+  internal init(_ key: Subkey, _ correlation: Correlation) {
+    self.key = key
+    self.names = Set(correlation.keys)
   }
 }
 
-/// The mutable memo a `Subqueries` cache shares by REFERENCE for the scalar
-/// subqueries it materialises LAZILY.
+/// Where a correlated synthetic parameter's per-outer-row value comes from — a
+/// cell of the IMMEDIATE enclosing row (`slot`), or an ALREADY-bound parameter
+/// the containing subquery threads through (`bound`).
 ///
-/// A scalar subquery collapses on the FIRST evaluation of its `Term.subquery`,
-/// not eagerly at run start, so an occurrence in an unreachable
-/// `CASE`/`COALESCE` arm never runs (never throws `.cardinality` or an inner
-/// fault). It is UNCORRELATED, so its collapsed value is row-invariant: the
-/// first reached evaluation runs and caches it here, keyed by its `Subkey`, and
-/// every later read of the same key returns the cached value WITHOUT
-/// re-running. The cache is a class so the memo survives `Subqueries` being
-/// copied by value down the evaluate tree — every copy shares the one box.
-internal final class ScalarMemo {
-  private var cells: Dictionary<Subkey, Value> = [:]
+/// A correlation to the subquery's IMMEDIATE enclosing query reads that outer
+/// row directly: `slot` is the outer combined ordinal the re-execution binds
+/// from the current outer row. A correlation to a scope TWO OR MORE levels up
+/// (a NESTED subquery naming a grandparent column) is bound by the CONTAINING
+/// subquery — which the bubble-up marks correlated to that same grandparent, so
+/// it re-executes and binds the parameter — and the inner occurrence only reads
+/// it back through `bindings`, so its source is `bound`: the eval leaves the
+/// threaded binding intact rather than overwriting it from the inner's own row.
+internal enum Source: Hashable, Sendable {
+  /// The value is the current outer row's cell at this combined ordinal.
+  case slot(Int)
+  /// The value is already in `bindings` — threaded down by the containing
+  /// subquery — so the eval passes it through unchanged.
+  case bound
+}
 
-  /// The already-collapsed value for `key`, or `nil` when it has not yet been
-  /// evaluated — the evaluator runs and `store`s it on a miss.
-  internal func value(_ key: Subkey) -> Value? {
-    cells[key]
+/// The CORRELATION of a subquery occurrence — the synthetic bound parameters
+/// its inner query names, each mapped to the `Source` its per-outer-row value
+/// comes from (an immediate-enclosing-row cell, or a threaded binding).
+///
+/// A CORRELATED subquery references a column of an enclosing query
+/// (`SELECT V FROM S WHERE S.k = T.k`, the inner `T.k` outer). This slice ships
+/// the MINIMAL (b) cut: an outer column is allowed ONLY in the inner query's
+/// `WHERE`/`ON` (a comparison operand or a `WHERE`-position term), where it
+/// lowers to a synthetic `Term.parameter(name)` — reusing the run's `bindings`
+/// with NO new evaluator beyond that leaf. This map records, per synthetic
+/// name, the `Source` the per-outer-row re-execution binds it from. An EMPTY map
+/// is an UNCORRELATED occurrence, materialised once and memoised; a NON-empty
+/// one re-runs the inner plan per outer row against a `bindings` extended with
+/// each named cell, bypassing the materialise cache.
+///
+/// An outer column in the inner PROJECTION / `GROUP BY` / `HAVING` is OUT of
+/// this cut — it needs the general (a)-style outer-row evaluator, not a bound
+/// param — so it is DIAGNOSED as unsupported rather than mis-resolved (see
+/// `Outer.parameter`). A column binding neither locally nor in any enclosing
+/// scope stays the ordinary unknown-column fault.
+internal typealias Correlation = Dictionary<String, Source>
+
+extension Dictionary where Key == String, Value == Source {
+  /// This correlation with every `slot` outer ordinal remapped to its packed
+  /// slot through `slot`, so a per-outer-row re-execution reads the outer
+  /// record's cell; a `bound` source is unchanged — it reads a threaded binding,
+  /// not the outer record.
+  internal func remapped(through slot: Dictionary<Int, Int>) -> Correlation {
+    mapValues { source in
+      switch source {
+      case let .slot(ordinal):
+        .slot(slot[ordinal]!)
+      case .bound:
+        .bound
+      }
+    }
   }
 
-  /// Records `value` as the collapsed value of the scalar occurrence `key`, so
-  /// a later read of the same key returns it without re-running the subquery.
-  internal func store(_ value: Value, for key: Subkey) {
-    cells[key] = value
+  /// The outer ordinals this correlation reads from the immediate enclosing row
+  /// — every `slot` source's ordinal, excluding the `bound` (threaded-binding)
+  /// sources — the cells that must be materialised for a per-outer-row
+  /// re-execution.
+  internal var slots: Set<Int> {
+    var slots = Set<Int>()
+    for source in values {
+      if case let .slot(ordinal) = source { slots.insert(ordinal) }
+    }
+    return slots
+  }
+}
+
+/// The ENCLOSING resolution scope a subquery lowers against for its CORRELATED
+/// columns — the scope STACK the minimal (b) correlation cut consults when an
+/// inner column binds against none of the subquery's OWN in-scope relations.
+///
+/// A subquery resolves its columns against its own relations FIRST; a name none
+/// of them binds is a candidate CORRELATED reference to an enclosing query. This
+/// carries the enclosing `Scope`s, innermost last, and — as lowering reaches
+/// each such candidate — resolves it against them (nearest first), MINTS a
+/// synthetic `:parameter` name for the outer combined ordinal, and RECORDS the
+/// (name → ordinal) pair into the shared `correlation` accumulator so the
+/// per-outer-row re-execution can bind that cell. It is a class so the
+/// accumulator survives the seam being copied by value down the lowering, and so
+/// the SAME occurrence lowered on the run and the schema paths accretes into one
+/// map.
+///
+/// A name no enclosing scope binds either stays the ordinary unknown-column
+/// fault (the local surface already raised `SQLError.column`); this only
+/// intercepts a name the OUTER scope binds. Correlation is admitted ONLY where a
+/// synthetic bound param is a valid lowering — a `WHERE`/`ON` term — so a scope
+/// with no admitted position (a projection / `GROUP BY` / `HAVING` surface)
+/// carries no `Outer` and the outer column stays unresolved, DIAGNOSED as
+/// unsupported rather than mis-bound.
+internal final class Outer {
+  /// The enclosing scopes, OUTERMOST first — a column resolves against the
+  /// nearest enclosing (last) that binds it, matching lexical scoping. The LAST
+  /// scope is this subquery's IMMEDIATE parent; any earlier one is a grandparent
+  /// (or further) whose correlation BUBBLES UP to the containing subquery.
+  private let scopes: Array<Scope>
+
+  /// The enclosing subquery's `Outer` — the one holding `scopes` MINUS the last
+  /// — up which a correlation to a non-immediate scope propagates, so the
+  /// CONTAINING subquery is marked correlated to that grandparent column too.
+  /// `nil` at the outermost level (a top-level select's `Outer`).
+  private let parent: Outer?
+
+  /// The correlated references discovered so far — each synthetic `:parameter`
+  /// name mapped to the `Source` its per-outer-row value comes from (this
+  /// subquery's immediate-enclosing-row cell, or a threaded binding).
+  private(set) var correlation: Correlation = [:]
+
+  internal init(_ scopes: Array<Scope> = [], parent: Outer? = nil) {
+    self.scopes = scopes
+    self.parent = parent
+  }
+
+  /// This outer scope extended with `scope` as the NEAREST enclosing one — the
+  /// stack a nested subquery lowers against, seeing its immediate parent last,
+  /// with `self` as the parent so a correlation to a grandparent scope bubbles
+  /// up. The accumulator starts fresh: correlation is recorded PER occurrence,
+  /// not shared across sibling subqueries.
+  internal func nested(under scope: Scope) -> Outer {
+    Outer(scopes + [scope], parent: self)
+  }
+
+  /// The synthetic `:parameter` name a correlated reference to enclosing
+  /// combined `ordinal` at scope `depth` lowers to — deterministic in BOTH, so
+  /// the run and schema lowerings of the SAME occurrence mint identical names
+  /// and the re-execution binds them from the outer row. The `depth` (the
+  /// scope-stack index the reference resolves at) disambiguates two references
+  /// from DIFFERENT enclosing scopes that share an ordinal — a `T.id`
+  /// (grandparent) and a `U.u` (parent) both at combined ordinal 0 — so each
+  /// gets its OWN synthetic param and correlation entry rather than colliding
+  /// on `:__correlated_0`. The depth is a scope-stack index, stable across the
+  /// bubble-up (a parent sees the shared prefix scope at the SAME index), so
+  /// the binding level and the threading levels agree on the name.
+  private func name(for ordinal: Int, at depth: Int) -> String {
+    ":__correlated_\(depth)_\(ordinal)"
+  }
+
+  /// The synthetic bound-parameter name `column` correlates to, or `nil` when no
+  /// enclosing scope binds it (the ordinary unknown-column fault stands).
+  ///
+  /// The enclosing scopes are consulted NEAREST first (the innermost enclosing
+  /// query shadows an outer one, as lexical scoping requires). On a match it
+  /// records the correlation (see `record(_:matching:)`) and returns the name,
+  /// so the caller lowers the column to a `Term.parameter`. A nearer scope that
+  /// binds the name AMBIGUOUSLY (in more than one of its relations) SHADOWS the
+  /// farther ones: `correlated` faults `SQLError.ambiguous`, which propagates
+  /// rather than falling through to rebind the name to a farther relation. Only
+  /// a NOT-FOUND (`nil`) keeps the walk moving outward.
+  internal func parameter(for column: Column) throws(SQLError) -> String? {
+    for depth in scopes.indices.reversed() {
+      guard let ordinal = try scopes[depth].correlated(column) else { continue }
+      let name = name(for: ordinal, at: depth)
+      record(name, ordinal, matching: depth)
+      return name
+    }
+    return nil
+  }
+
+  /// Records the correlation of `name` (the outer combined `ordinal` it reads)
+  /// matched at enclosing-scope `depth`.
+  ///
+  /// A match at the LAST scope (this subquery's immediate parent) reads that
+  /// outer row directly, so the source is the parent-row `slot`. A match at an
+  /// EARLIER scope is a correlation of the CONTAINING subquery too: it is
+  /// recorded `bound` here — the eval threads the value through `bindings`
+  /// rather than reading this subquery's own row — and propagated up to `parent`
+  /// (whose last scope is one level nearer), so the containing occurrence is
+  /// itself marked correlated and re-executes per its enclosing row. Since a
+  /// `Scope` lays relations at cumulative offsets from 0, the `ordinal` is the
+  /// same in every level that shares the matched scope, so the ancestor that
+  /// owns it as its IMMEDIATE parent reads the right cell.
+  private func record(_ name: String, _ ordinal: Int, matching depth: Int) {
+    let immediate = depth == scopes.count - 1
+    correlation[name] = immediate ? .slot(ordinal) : .bound
+    if !immediate { parent?.record(name, ordinal, matching: depth) }
+  }
+
+  /// The value type of the enclosing column `column` names, or `nil` when no
+  /// enclosing scope binds it — the static type a correlated reference
+  /// contributes to the type-check surface (`validate`), so a correlated column
+  /// types as its outer column rather than a placeholder. It records NO
+  /// correlation (a pure type probe); the lowering's `parameter(for:)` records
+  /// the binding. Like `parameter(for:)`, a nearer scope binding the name
+  /// AMBIGUOUSLY SHADOWS the farther ones — `correlated` faults
+  /// `SQLError.ambiguous`, which propagates rather than falling through — so the
+  /// schema-derive and the run's lowering AGREE on the ambiguity.
+  internal func type(for column: Column) throws(SQLError) -> ValueType? {
+    for scope in scopes.reversed() {
+      guard let ordinal = try scope.correlated(column) else { continue }
+      return scope.type(at: ordinal)
+    }
+    return nil
+  }
+}
+
+/// The mutable memo a `Subqueries` cache shares by REFERENCE for the
+/// UNCORRELATED subqueries it materialises LAZILY, keyed by occurrence `Subkey`.
+///
+/// Every subquery ROLE — scalar collapse, `IN` value set, `EXISTS` probe — is
+/// materialised LAZILY, on the FIRST evaluation of its lowered node, so an
+/// occurrence in an unreachable `CASE`/`COALESCE` arm or a short-circuited
+/// `AND`/`OR` never runs (never throws its inner fault) — the folded-in lazy
+/// `IN`/`EXISTS` that the earlier slice left eager. An UNCORRELATED occurrence
+/// is row-invariant, so the first reached evaluation runs it ONCE and caches the
+/// result here; every later read of the same key returns it WITHOUT re-running.
+/// A CORRELATED occurrence is NOT memoised (its result depends on the bound
+/// outer row), so it never reads or writes this — it re-runs per outer row.
+///
+/// It is a class so the memo survives `Subqueries` being copied by value down
+/// the evaluate tree — every copy shares the one box.
+internal final class SubqueryMemo {
+  /// The collapsed scalar value memoised per scalar occurrence.
+  private var scalars: Dictionary<Subkey, Value> = [:]
+  /// The `EXISTS` non-empty result memoised per existential occurrence.
+  private var probes: Dictionary<Subkey, Bool> = [:]
+  /// The `IN (Q)` single-column value set memoised per valued occurrence.
+  private var columns: Dictionary<Subkey, Array<Value>> = [:]
+
+  /// The RESOLUTION OVERLAY each `Subscope`'s subqueries run under — the
+  /// caller's `WITH`/store overlay under `.caller`, a view body's own overlay
+  /// under `.view(name)` — recorded as each scope BEGINS executing, so the lazy
+  /// evaluator runs a subquery against the overlay of the scope it was TEXTUALLY
+  /// lowered under, NOT the (possibly different) overlay of the execution site a
+  /// predicate pushdown moved it to. A caller conjunct pushed INTO a view thus
+  /// still resolves its subquery's `FROM S` against the caller's `S`, not the
+  /// view's base — the correctness the disjoint `Subscope` keying and the
+  /// captured overlay together preserve.
+  private var overlays: Dictionary<Subscope, ScopedRelations> = [:]
+
+  internal func scalar(_ key: Subkey) -> Value? { scalars[key] }
+  internal func store(scalar value: Value, for key: Subkey) {
+    scalars[key] = value
+  }
+
+  internal func present(_ key: Subkey) -> Bool? { probes[key] }
+  internal func store(present value: Bool, for key: Subkey) {
+    probes[key] = value
+  }
+
+  internal func values(_ key: Subkey) -> Array<Value>? { columns[key] }
+  internal func store(values: Array<Value>, for key: Subkey) {
+    columns[key] = values
+  }
+
+  /// The COMPILED inner plan of each CORRELATED occurrence, keyed by its
+  /// occurrence `PlanKey` (its `Subkey` composed with the parameter names its
+  /// correlation binds) — compiled ONCE (with the enclosing scope as its
+  /// `Outer`, so its correlated columns lowered to `Term.parameter`) by the run
+  /// path's compile and stashed here, so the evaluator RE-EXECUTES that plan per
+  /// outer row against the correlated bindings rather than RE-COMPILING the
+  /// inner query fresh (which, with no outer scope in hand at eval, would fault
+  /// on the outer column). Keying by the `PlanKey` keeps two occurrences of the
+  /// SAME inner SQL — under a `.caller` and a `.view(name)` scope, or across two
+  /// set-operation arms whose correlated column has a DIFFERENT outer ordinal —
+  /// DISJOINT, so each executes its OWN plan rather than the first occurrence's,
+  /// while an identical occurrence under an identical outer layout still SHARES.
+  /// An UNCORRELATED occurrence carries none — it re-runs its `Query`
+  /// (recompiling resolves without an outer scope) and memoises.
+  private var plans: Dictionary<PlanKey, Plan> = [:]
+
+  internal func overlay(_ scope: Subscope) -> ScopedRelations? {
+    overlays[scope]
+  }
+  internal func record(overlay: ScopedRelations, for scope: Subscope) {
+    overlays[scope] = overlay
+  }
+
+  internal func plan(_ key: PlanKey) -> Plan? { plans[key] }
+  internal func record(plan: Plan, for key: PlanKey) {
+    if plans[key] == nil { plans[key] = plan }
   }
 }
 
@@ -219,12 +449,40 @@ internal struct Subquery {
   /// occurrence (whose type is irrelevant) may be absent.
   private let types: Dictionary<Query, ValueType>
 
+  /// Each nested `Query` mapped to its CORRELATION — the synthetic bound params
+  /// its inner `WHERE`/`ON` names of an enclosing column, discovered by the
+  /// pre-pass compiling the nested query under this select's scope as its
+  /// `Outer`. An UNCORRELATED nested query maps to the empty correlation (or is
+  /// absent), so its lowered node bypasses nothing; a correlated one carries its
+  /// map into the lowered `Filter`/`Term` so the per-outer-row re-execution
+  /// binds the named cells.
+  private let correlations: Dictionary<Query, Correlation>
+
+  /// The ENCLOSING scope THIS select's OWN columns correlate against — set when
+  /// this select is itself a subquery, so a column its relations do not bind
+  /// resolves against the outer query and lowers to a `Term.parameter`. `nil`
+  /// for a top-level select (no enclosing scope), leaving an unbound column the
+  /// ordinary fault.
+  private let outer: Outer?
+
+  /// Whether this lowering surface ADMITS a correlated column — TRUE for the
+  /// inner `WHERE`/`ON` (a synthetic bound param is a valid lowering there),
+  /// FALSE for the projection / `GROUP BY` / `HAVING` (the minimal (b) cut has
+  /// no evaluator for an outer column there). A barred surface DIAGNOSES a
+  /// correlated column as unsupported rather than mis-resolving it.
+  private let admits: Bool
+
   internal init(_ scope: Subscope = .caller,
                 _ widths: Dictionary<Query, Int> = [:],
-                _ types: Dictionary<Query, ValueType> = [:]) {
+                _ types: Dictionary<Query, ValueType> = [:],
+                _ correlations: Dictionary<Query, Correlation> = [:],
+                outer: Outer? = nil, admits: Bool = true) {
     self.scope = scope
     self.widths = widths
     self.types = types
+    self.correlations = correlations
+    self.outer = outer
+    self.admits = admits
   }
 
   /// A `Subquery` for a lowering surface with no catalog — a schema-only
@@ -232,6 +490,53 @@ internal struct Subquery {
   /// `SQLError.unsupported` rather than mis-lower.
   internal static var unsupported: Subquery {
     Subquery()
+  }
+
+  /// This seam with correlation BARRED — the surface a projection / `GROUP BY`
+  /// / `HAVING` lowers under, where an outer column is out of the minimal (b)
+  /// cut. It keeps the widths/types/correlations (nested subqueries there still
+  /// lower and carry their OWN inner correlation) but rejects a correlated
+  /// column of THIS query as unsupported.
+  internal var barred: Subquery {
+    Subquery(scope, widths, types, correlations, outer: outer, admits: false)
+  }
+
+  /// The synthetic bound-parameter name a CORRELATED reference to `column`
+  /// lowers to, or `nil` when no enclosing scope binds it (the ordinary
+  /// unknown-column fault stands). A `.column` lowering consults this ONLY after
+  /// its own relations fail to bind the name.
+  ///
+  /// On a barred surface (a projection / `GROUP BY` / `HAVING`) an outer column
+  /// IS out of the minimal (b) cut, so a name the enclosing scope binds is
+  /// DIAGNOSED `SQLError.unsupported` rather than mis-resolved — the same fault
+  /// on the run and the schema paths, keeping typecheck↔run parity.
+  internal func correlate(_ column: Column) throws(SQLError) -> String? {
+    guard let name = try outer?.parameter(for: column) else { return nil }
+    guard admits else {
+      throw .unsupported(
+          "a correlated column is only supported in a subquery's WHERE")
+    }
+    return name
+  }
+
+  /// The outer type a correlated reference to `column` contributes to a SCHEMA
+  /// derive, or `nil` when no enclosing scope binds it — the non-recording,
+  /// non-faulting type probe `derive` reads so a correlated column types as its
+  /// outer column rather than faulting `SQLError.column`. A BARRED surface still
+  /// diagnoses it, so this schema surface and the run's lowering AGREE.
+  internal func correlated(_ column: Column) throws(SQLError) -> ValueType? {
+    guard let type = try outer?.type(for: column) else { return nil }
+    guard admits else {
+      throw .unsupported(
+          "a correlated column is only supported in a subquery's WHERE")
+    }
+    return type
+  }
+
+  /// The correlation of the nested `query` — its synthetic outer bindings —
+  /// discovered by the pre-pass, or the empty map for an UNCORRELATED one.
+  private func correlation(of query: Query) -> Correlation {
+    correlations[query] ?? [:]
   }
 
   /// The compiled column count of `query`, or a fault when the surface holds
@@ -272,7 +577,8 @@ internal struct Subquery {
   internal func exists(_ query: Query, negated: Bool)
       throws(SQLError) -> Filter {
     _ = try width(query)
-    return .exists(Subkey(scope, query, .existential), negated: negated)
+    return .exists(Subkey(scope, query, .existential),
+                   correlation: correlation(of: query), negated: negated)
   }
 
   /// Lowers `operand [NOT] IN (query)` — `operand` already lowered to a `Term`
@@ -284,7 +590,8 @@ internal struct Subquery {
       throws(SQLError) -> Filter {
     let width = try width(query)
     guard width == 1 else { throw .arity(1, width) }
-    return .within(operand, Subkey(scope, query, .valued), negated: negated)
+    return .within(operand, Subkey(scope, query, .valued),
+                   correlation: correlation(of: query), negated: negated)
   }
 
   /// Lowers `operand op {ANY | ALL} (query)` — `operand` already lowered to a
@@ -292,13 +599,17 @@ internal struct Subquery {
   /// `SQLError.arity`, from the COMPILED width, so a two-column subquery faults
   /// here WITHOUT running), then carrying the query into the `Filter` under the
   /// SAME `.valued` role `within` uses — the full column is materialised and
-  /// folded per outer row — to run at execution.
+  /// folded per outer row — with the discovered `correlation` threaded exactly
+  /// as `within` threads it, so a CORRELATED quantified re-runs its inner plan
+  /// per outer row (an UNCORRELATED one carries an empty correlation and
+  /// memoises once), to run at execution.
   internal func quantified(_ operand: Term, _ op: Comparison,
                            _ quantifier: Quantifier, _ query: Query)
       throws(SQLError) -> Filter {
     let width = try width(query)
     guard width == 1 else { throw .arity(1, width) }
-    return .quantified(operand, op, quantifier, Subkey(scope, query, .valued))
+    return .quantified(operand, op, quantifier, Subkey(scope, query, .valued),
+                       correlation: correlation(of: query))
   }
 
   /// Lowers a scalar subquery `(query)` to a `Term.subquery` reading its
@@ -312,162 +623,197 @@ internal struct Subquery {
   internal func scalar(_ query: Query) throws(SQLError) -> Term {
     let width = try width(query)
     guard width == 1 else { throw .arity(1, width) }
-    return try .subquery(Subkey(scope, query, .scalar), type: output(query))
+    return try .subquery(Subkey(scope, query, .scalar),
+                         correlation: correlation(of: query),
+                         type: output(query))
   }
 }
 
-/// The RUN-time cache that executes each UNCORRELATED subquery ONCE and
-/// memoises its result — the seam that gives the row evaluator a subquery result
-/// WITHOUT itself holding the borrowing catalog.
+/// The PER-SITE lowering seams a select's pre-pass discovers — ONE `Subquery`
+/// per join `ON` (resolved against that join's PREFIX scope) and one for the
+/// REST (the WHERE, `HAVING`, projection, and `ORDER BY`, resolved against the
+/// full join scope).
 ///
-/// A subquery is UNCORRELATED in this slice — it names no column of the
-/// enclosing query — so its result is the SAME for every outer row and is
-/// computed at most once per outer-query execution. The `run` path, where the
-/// borrowing catalog IS in scope, populates this map BEFORE executing the plan
-/// (see `Catalog.subqueries(of:)`), so the evaluator reads it as plain
-/// escapable data. An `EXISTS` reads whether the result is non-empty; an
-/// `IN (Q)` folds over its single materialised column.
+/// The same inner SQL in both an `ON` and the WHERE is resolved TWICE, each
+/// against its OWN site's scope, so a name the `ON`'s narrow prefix binds
+/// UNAMBIGUOUSLY yet the WHERE's full scope binds in MORE than one relation is a
+/// prefix correlation in the `ON` and a genuine ambiguity in the WHERE — each
+/// per its own site, not the first occurrence's prefix (see `subquery(of:)`).
+internal struct Plans {
+  /// The lowering seam of each join `ON`, in join order — `on(i)` reads the
+  /// `i`-th, resolved against `prefixes[i]`.
+  private let ons: Array<Subquery>
+
+  /// The lowering seam the WHERE, `HAVING`, projection, and `ORDER BY` share,
+  /// resolved against the full join scope.
+  internal let rest: Subquery
+
+  internal init(_ ons: Array<Subquery>, _ rest: Subquery) {
+    self.ons = ons
+    self.rest = rest
+  }
+
+  /// The lowering seam of join `index`'s `ON`.
+  internal func on(_ index: Int) -> Subquery {
+    ons[index]
+  }
+}
+
+/// The RUN-time cache that runs each UNCORRELATED subquery ONCE, LAZILY on the
+/// first reach of its lowered node, and memoises the result — the seam that
+/// gives the row evaluator a subquery result WITHOUT itself holding the
+/// borrowing catalog stored.
 ///
-/// An `IN`/`EXISTS` occurrence is materialised EAGERLY here — its full result
-/// or its probe run at run start, since a `WHERE`/`ON` predicate referencing it
-/// is not short-circuited past. A SCALAR occurrence instead materialises
-/// LAZILY, on the first evaluation of its `Term.subquery` (memoised in
-/// `scalars`), so an occurrence in an unreachable `CASE`/`COALESCE` arm never
-/// runs. Per-arm short-circuit for the `IN`/`EXISTS` roles and the
-/// per-outer-row re-execution a CORRELATED subquery needs thread a runner to
-/// the predicate site in a follow-up.
+/// The evaluator (a `Catalog` method, the catalog IN scope) runs a subquery
+/// itself: it reads this cache first and, on a miss, runs the inner plan and
+/// `store`s the result. An UNCORRELATED occurrence names no enclosing column, so
+/// its result is the SAME for every outer row and is memoised under its
+/// occurrence `Subkey`; a later reach returns it WITHOUT re-running. A CORRELATED
+/// occurrence's result depends on the bound outer row, so it BYPASSES this cache
+/// entirely — the evaluator re-runs its inner plan per outer row against a
+/// `bindings` extended with the correlated cells (this slice does NOT memoise
+/// across distinct binding tuples — a flagged future optimisation). Every role
+/// (scalar / `IN` / `EXISTS`) is lazy, so a subquery an unreachable `CASE` arm
+/// or a short-circuited `AND`/`OR` never reaches never runs.
 internal struct Subqueries {
-  private let results: Dictionary<Subkey, MaterialisedSubquery>
+  /// The shared memo of the UNCORRELATED occurrences materialised LAZILY on
+  /// first reach — a reference so every by-value copy of this cache down the
+  /// evaluate tree shares the one box, keeping each materialise-once.
+  private let memo: SubqueryMemo
 
-  /// The shared memo of the scalar occurrences materialised LAZILY on first
-  /// evaluation — a reference so every by-value copy of this cache down the
-  /// evaluate tree shares the one box, keeping a scalar materialise-once.
-  private let scalars: ScalarMemo
-
-  /// The REVEALED base scope the eager occurrences of this cache ran against,
-  /// keyed PER `Subscope` — the enclosing scope with this SELECT's derived
-  /// aliases revealed away and its CTEs/store relations intact
-  /// (`Context.revealed`), stored under the `Subscope` those occurrences
-  /// materialised in. A LAZY scalar occurrence resolves its inner query against
-  /// the scope of its OWN `Subkey`, not the augmented overlay threaded down the
-  /// evaluate tree: the executor threads only the EXECUTING plan's overlay, so
-  /// after a `merged` folds a view-body cache into the caller's it cannot tell
-  /// a view-body occurrence's scope from the caller's. Keying PER `Subscope`
-  /// keeps a `.view(name)` scalar reading the VIEW's own relations and a
-  /// `.caller` scalar the caller's — one shared scope resolved a view-body
-  /// scalar against the caller's overlay (the round-15 fault). Empty for a
-  /// scope the cache carries no eager occurrence of (a bare `Subqueries()` a
-  /// schema path threads), so the lazy scalar falls back to the threaded
-  /// overlay — whose derived layer a `cell(of:)` reveal drops to expose a CTE a
-  /// same-named derived alias shadows.
-  private let scopes: Dictionary<Subscope, ScopedRelations>
-
-  internal init(_ results: Dictionary<Subkey, MaterialisedSubquery> = [:],
-                _ scalars: ScalarMemo = ScalarMemo(),
-                _ scopes: Dictionary<Subscope, ScopedRelations> = [:]) {
-    self.results = results
-    self.scalars = scalars
-    self.scopes = scopes
+  internal init(_ memo: SubqueryMemo = SubqueryMemo()) {
+    self.memo = memo
   }
 
-  /// The revealed base relations the occurrences of `scope` ran against, or an
-  /// empty map when the cache carries none — the scope a LAZY scalar of that
-  /// `Subscope` resolves its inner query against, falling back to the threaded
-  /// overlay when empty (a schema path's bare cache).
-  internal func relations(_ scope: Subscope) -> ScopedRelations {
-    scopes[scope] ?? [:]
+  /// The memoised `EXISTS` non-empty result for the UNCORRELATED occurrence
+  /// `key`, or `nil` when it has not yet run — the evaluator probes on a miss
+  /// and `store`s it.
+  internal func present(cached key: Subkey) -> Bool? {
+    memo.present(key)
   }
 
-  /// The materialised result for `key` — every occurrence a runnable plan
-  /// references is populated at run start, so a miss is an internal invariant
-  /// break, reported rather than silently treated as empty.
-  private func result(_ key: Subkey) throws(SQLError) -> MaterialisedSubquery {
-    guard let result = results[key] else {
-      throw .named("a subquery result was not materialised")
-    }
-    return result
+  /// Records the `EXISTS` non-empty result of the UNCORRELATED occurrence `key`.
+  internal func store(present value: Bool, for key: Subkey) {
+    memo.store(present: value, for: key)
   }
 
-  /// Whether the occurrence `key` yielded a row — the `EXISTS` non-empty test.
-  internal func present(_ key: Subkey) throws(SQLError) -> Bool {
-    try result(key).present
+  /// The memoised `IN (Q)` single column for the UNCORRELATED occurrence `key`,
+  /// or `nil` when it has not yet run — the evaluator materialises on a miss and
+  /// `store`s it.
+  internal func values(cached key: Subkey) -> Array<Value>? {
+    memo.values(key)
   }
 
-  /// The single column of the occurrence `key`'s result — the `IN (Q)`
-  /// membership values. The plan compiled the query's width to 1, so the first
-  /// cell of each row is its lone value; an `IN` occurrence is always
-  /// materialised in FULL, so its values are present.
-  internal func values(_ key: Subkey) throws(SQLError) -> Array<Value> {
-    try result(key).values()
+  /// Records the `IN (Q)` single-column value set of the UNCORRELATED
+  /// occurrence `key`.
+  internal func store(values: Array<Value>, for key: Subkey) {
+    memo.store(values: values, for: key)
   }
 
-  /// The already-collapsed value memoised for the scalar occurrence `key`, or
-  /// `nil` when it has not yet been evaluated. The evaluator reads this first;
-  /// on a miss it runs the subquery (where the catalog is in scope) and
-  /// `store`s the collapsed value, so a scalar in an unreachable arm never runs
-  /// and a reached one runs at most once.
+  /// The already-collapsed value memoised for the scalar UNCORRELATED
+  /// occurrence `key`, or `nil` when it has not yet been evaluated.
   internal func scalar(cached key: Subkey) -> Value? {
-    scalars.value(key)
+    memo.scalar(key)
   }
 
-  /// Records `value` as the collapsed value of the scalar occurrence `key` —
-  /// the evaluator's memoisation after the first reached evaluation runs the
-  /// subquery, so a later read of the same key returns it without re-running.
+  /// Records `value` as the collapsed value of the scalar UNCORRELATED
+  /// occurrence `key`.
   internal func store(scalar value: Value, for key: Subkey) {
-    scalars.store(value, for: key)
+    memo.store(scalar: value, for: key)
   }
 
-  /// The DISJOINT union of this cache and `other`'s — every entry of both,
-  /// which never collide because their keys carry distinct `Subscope`s: `self`
-  /// holds one resolution context's occurrences (the caller's, keyed
-  /// `.caller`), `other` another's (a view body's, keyed `.view(name)`). A
-  /// subquery AST-identical in both is TWO occurrences under TWO scopes, so it
-  /// occupies TWO keys — neither overwrites the other, and the pushed caller
-  /// filter reads its `.caller` result while the view-body filter reads its
-  /// `.view` one. A collision would be an id-space bug (two contexts sharing a
-  /// scope); it cannot happen, so the merge keeps the existing entry. The
-  /// merged cache keeps `self`'s scalar memo and UNIONS the per-`Subscope`
-  /// base scopes of both — a caller cache and a view-body cache resolve
-  /// DISJOINT scalar keys, so one shared memo serves both spaces, and each
-  /// `Subscope` keeps its OWN base relations (the `.caller` map and the
-  /// `.view(name)` map ride through side by side), so a view-body lazy scalar
-  /// resolves against the VIEW's relations and a caller scalar the caller's —
-  /// keeping only `self`'s left-hand scope would resolve a view-body scalar
-  /// against the caller overlay. Two contexts sharing a `Subscope` would be an
-  /// id-space bug, so a scope collision keeps `self`'s.
+  /// The resolution overlay `scope`'s subqueries run under — the overlay
+  /// recorded as `scope` began executing (see `SubqueryMemo.overlays`), or `nil`
+  /// when none was recorded (a top-level run always records `.caller`).
+  internal func overlay(_ scope: Subscope) -> ScopedRelations? {
+    memo.overlay(scope)
+  }
+
+  /// Records `overlay` as the resolution overlay `scope`'s subqueries run
+  /// under — the caller's before executing the top-level plan, a view body's
+  /// before deriving it — so a subquery lowered under `scope` re-runs against
+  /// ITS overlay even when a pushdown moved its predicate to another site.
+  internal func record(overlay: ScopedRelations, for scope: Subscope) {
+    memo.record(overlay: overlay, for: scope)
+  }
+
+  /// The pre-compiled inner plan of the CORRELATED occurrence `key` under
+  /// `correlation` — compiled once with its enclosing scope so its correlated
+  /// columns are `Term.parameter` — or `nil` for an UNCORRELATED one (which
+  /// recompiles fresh per run). Keyed by the occurrence's `PlanKey` (its `Subkey`
+  /// plus the correlation's parameter names), so two occurrences of the SAME
+  /// inner SQL under DIFFERENT outer layouts — two set-operation arms whose
+  /// correlated column sits at different ordinals — each find their OWN plan.
+  internal func plan(_ key: Subkey, _ correlation: Correlation) -> Plan? {
+    memo.plan(PlanKey(key, correlation))
+  }
+
+  /// Stashes `plan` as the pre-compiled inner plan of the CORRELATED occurrence
+  /// `key` under `correlation`, for the evaluator to re-execute per outer row.
+  internal func record(plan: Plan, for key: Subkey,
+                       _ correlation: Correlation) {
+    memo.record(plan: plan, for: PlanKey(key, correlation))
+  }
+
+  /// This cache — the memo is a shared box the whole run accretes into, so a
+  /// caller cache and a view-body cache share one box, their disjoint `Subscope`
+  /// keys never colliding. The prior eager merge collapses to identity now that
+  /// every occurrence is memoised lazily against this one shared box.
   internal func merged(_ other: Subqueries) -> Subqueries {
-    Subqueries(results.merging(other.results) { existing, _ in existing },
-               scalars,
-               scopes.merging(other.scopes) { existing, _ in existing })
+    self
   }
 }
 
-/// The mutable set of SCALAR-subquery inner queries the type-check walk
-/// REACHED, shared by a `SubqueryCheck` by REFERENCE.
+/// One subquery OCCURRENCE the type-check walk reached — its inner `query`
+/// and the `role` it materialises in AT THAT occurrence.
 ///
-/// A scalar subquery's inner-query OPERAND validation is DEFERRED to the
-/// reachability walk (`Scope.validate`), mirroring the lazy executor: an
-/// occurrence in an unreachable `CASE`/`COALESCE` arm never validates, exactly
-/// as it never runs. The walk cannot itself hold the borrowing catalog a
-/// recursive type-check needs, so as it REACHES each scalar `.subquery` it
-/// records the inner query here; the catalog-bearing `typecheck` phase reads
-/// this set AFTER the walk and type-checks only the reached inner queries. The
-/// box is a class so the reached set survives `SubqueryCheck` being copied by
-/// value down the walk — every copy shares the one box, the same way
-/// `ScalarMemo` shares the run's lazy collapse.
-internal final class ReachedScalars {
-  private var queries: Set<Query> = []
+/// The role is recorded PER OCCURRENCE (not derived from the union of every
+/// role the query occupies in the select) so the deferred type-check picks the
+/// occurrence's OWN run shape: an `existential` reach validates the EXISTS
+/// PROBE (no projection), a `scalar`/`valued` reach the original. So the SAME
+/// inner SQL reached only as an `EXISTS` validates the probe even where an
+/// unreached arm has it as a scalar.
+internal struct Reach: Hashable, Sendable {
+  /// The reached occurrence's inner query.
+  internal let query: Query
 
-  /// Records `query` as a scalar occurrence the walk reached, so the deferred
-  /// type-check phase validates its inner query.
-  internal func reach(_ query: Query) {
-    queries.insert(query)
+  /// The role the occurrence materialises in — the shape its deferred
+  /// type-check validates.
+  internal let role: Role
+
+  internal init(_ query: Query, _ role: Role) {
+    self.query = query
+    self.role = role
+  }
+}
+
+/// The mutable set of subquery OCCURRENCES the type-check walk REACHED, shared
+/// by a `SubqueryCheck` by REFERENCE.
+///
+/// A subquery's inner-query OPERAND validation is DEFERRED to the reachability
+/// walk (`Scope.validate`), mirroring the lazy executor: an occurrence in an
+/// unreachable `CASE`/`COALESCE` arm or a short-circuited `AND`/`OR` leg never
+/// validates, exactly as it never runs. The walk cannot itself hold the
+/// borrowing catalog a recursive type-check needs, so as it REACHES each
+/// occurrence it records the inner query AND its role here; the catalog-bearing
+/// `typecheck` phase reads this set AFTER the walk and type-checks only the
+/// reached occurrences, each in its OWN role's shape. The box is a class so the
+/// reached set survives `SubqueryCheck` being copied by value down the walk —
+/// every copy shares the one box, the same way `ScalarMemo` shares the run's
+/// lazy collapse.
+internal final class ReachedScalars {
+  private var occurrences: Set<Reach> = []
+
+  /// Records `query` as an occurrence the walk reached in `role`, so the
+  /// deferred type-check phase validates its inner query in that role's shape.
+  internal func reach(_ query: Query, as role: Role) {
+    occurrences.insert(Reach(query, role))
   }
 
-  /// The scalar inner queries the walk reached — the ones the deferred phase
-  /// type-checks.
-  internal var reached: Set<Query> {
-    queries
+  /// The subquery occurrences the walk reached — the ones the deferred phase
+  /// type-checks, each in its own role's shape.
+  internal var reached: Set<Reach> {
+    occurrences
   }
 }
 
@@ -506,9 +852,11 @@ internal struct SubqueryCheck {
   /// result schema (`validate`/`derive`), matching the lowering's `Subquery`.
   private let types: Dictionary<Query, ValueType>
 
-  /// The scalar inner queries whose OPERAND validation is DEFERRED to the walk
-  /// — the ones NOT eagerly type-checked in the pre-pass (a scalar-ONLY
-  /// occurrence). The `.subquery` case records a reached one into `reached`.
+  /// The scalar inner queries whose OPERAND validation is DEFERRED through the
+  /// `.subquery` case of the walk — a scalar-ONLY occurrence, recorded reached
+  /// by `type`. An `IN`/`EXISTS`/quantified occurrence defers through
+  /// `validate` instead (its arity/type derivation stays total), so the two
+  /// record paths stay distinct.
   private let deferred: Set<Query>
 
   /// The shared box the walk records each reached scalar occurrence into, read
@@ -516,14 +864,29 @@ internal struct SubqueryCheck {
   /// reached inner queries.
   private let reached: ReachedScalars
 
+  /// The ENCLOSING scope this select's OWN columns correlate against — the
+  /// validation-side analog of `Subquery.outer`, so a correlated column resolves
+  /// against the outer query exactly as the run's lowering does, keeping
+  /// typecheck↔run parity. `nil` for a top-level select.
+  private let outer: Outer?
+
+  /// Whether this surface ADMITS a correlated column — the inner `WHERE`/`ON`
+  /// (TRUE) versus a projection / `GROUP BY` / `HAVING` (FALSE, diagnosed) — the
+  /// analog of `Subquery.admits`, so validation faults the unsupported
+  /// correlated-projection case exactly where the run does.
+  private let admits: Bool
+
   internal init(_ widths: Dictionary<Query, Int> = [:],
                 _ types: Dictionary<Query, ValueType> = [:],
                 deferred: Set<Query> = [],
-                reached: ReachedScalars = ReachedScalars()) {
+                reached: ReachedScalars = ReachedScalars(),
+                outer: Outer? = nil, admits: Bool = true) {
     self.widths = widths
     self.types = types
     self.deferred = deferred
     self.reached = reached
+    self.outer = outer
+    self.admits = admits
   }
 
   /// A checker for a surface with no catalog — validating a subquery needs one,
@@ -533,13 +896,61 @@ internal struct SubqueryCheck {
     SubqueryCheck()
   }
 
-  /// Asserts the inner `query` was validated in the pre-pass — a query the
-  /// surface's map holds has been type-checked and compiled; one it does not
-  /// reached a catalog-less surface and is rejected.
-  internal func validate(_ query: Query) throws(SQLError) {
+  /// This checker with correlation BARRED — the surface a projection / `GROUP
+  /// BY` / `HAVING` type-checks under, where an outer column is out of the (b)
+  /// cut and is diagnosed rather than resolved. Mirrors `Subquery.barred`.
+  internal var barred: SubqueryCheck {
+    SubqueryCheck(widths, types, deferred: deferred, reached: reached,
+                  outer: outer, admits: false)
+  }
+
+  /// This checker over a FRESH `reached` box, carrying `outer` — the surface a
+  /// join `ON` type-checks under. The `ON` shares this select's width/type
+  /// derivation and its enclosing `outer` (a correlated `ON` column resolves
+  /// against the containing query as the WHERE's does), but the caller runs its
+  /// reachability walk against the join's PREFIX scope (its LOCAL relations),
+  /// so a reference to a later-joined relation faults per the prefix. The fresh
+  /// box keeps its reached occurrences separate for the caller to validate
+  /// against that prefix.
+  internal func scoped(_ outer: Outer?) -> SubqueryCheck {
+    SubqueryCheck(widths, types, deferred: deferred,
+                  reached: ReachedScalars(), outer: outer)
+  }
+
+  /// The outer type `column` correlates to, or `nil` when no enclosing scope
+  /// binds it — the validation-side `Subquery.correlate`: it resolves against
+  /// `outer`, faulting `.unsupported` on a BARRED surface (a projection / `GROUP
+  /// BY` / `HAVING`) so validation rejects the unsupported correlated-projection
+  /// case exactly as the run's lowering does, and returns the outer column's
+  /// type so `validate` types the reference as that column. Consulted ONLY after
+  /// the local relations fail to bind the name.
+  internal func correlated(_ column: Column) throws(SQLError) -> ValueType? {
+    guard let type = try outer?.type(for: column) else { return nil }
+    guard admits else {
+      throw .unsupported(
+          "a correlated column is only supported in a subquery's WHERE")
+    }
+    return type
+  }
+
+  /// Asserts the inner `query` was compiled in the pre-pass — a query the
+  /// surface's map holds has had its arity/type derived; one it does not
+  /// reached a catalog-less surface and is rejected — and RECORDS it reached in
+  /// `role`, so the `typecheck` phase validates its OPERANDS after the walk in
+  /// that role's shape. This is the WALK-reach point for an
+  /// `IN`/`EXISTS`/quantified occurrence: `check` calls it only when the
+  /// reachability walk arrives at the `.within`/`.exists`/`.quantified` node,
+  /// so an occurrence in a skipped `CASE`/`COALESCE` arm or a short-circuited
+  /// `AND`/`OR` leg is never recorded — its body is not type-checked, exactly
+  /// as the lazy executor never materialises it. A REACHED one is validated in
+  /// its OWN role's shape (an `EXISTS` reach → the probe), so a reached bad
+  /// body still faults (parity both directions), while an unreached arm's role
+  /// never widens a reached occurrence's shape.
+  internal func validate(_ query: Query, as role: Role) throws(SQLError) {
     guard widths[query] != nil else {
       throw .unsupported("a subquery is not supported in this position")
     }
+    reached.reach(query, as: role)
   }
 
   /// The column count `query` projects — from the pre-pass compile.
@@ -560,13 +971,14 @@ internal struct SubqueryCheck {
   /// pre-pass (`subqueryCheck`), so a two-column subquery in a skipped arm still
   /// faults.
   internal func type(_ query: Query) throws(SQLError) -> ValueType {
-    // A DEFERRED scalar occurrence is REACHED here: record it for the
-    // `typecheck` phase to validate its inner query's OPERANDS, mirroring the
-    // lazy executor materialising only a reached scalar. Its arity and single-
-    // column type were derived eagerly in `subqueryCheck` (cursor-free, total),
-    // so this reads them exactly as an eagerly-checked occurrence does — only
-    // the operand fault (`.divide`) it might raise defers to the reached walk.
-    if deferred.contains(query) { reached.reach(query) }
+    // A DEFERRED scalar occurrence is REACHED here in the `scalar` role: record
+    // it for the `typecheck` phase to validate its inner query's OPERANDS,
+    // mirroring the lazy executor materialising only a reached scalar. Its
+    // arity and single-column type were derived eagerly in `subqueryCheck`
+    // (cursor-free, total), so this reads them exactly as an eagerly-checked
+    // occurrence does — only the operand fault (`.divide`) it might raise
+    // defers to the reached walk.
+    if deferred.contains(query) { reached.reach(query, as: .scalar) }
     let width = try width(query)
     guard width == 1 else { throw .arity(1, width) }
     guard let type = types[query] else {
@@ -575,10 +987,14 @@ internal struct SubqueryCheck {
     return type
   }
 
-  /// The scalar inner queries the walk reached — the ones the `typecheck` phase
-  /// validates after the walk, mirroring the lazy executor's evaluation of only
-  /// a reached scalar subquery.
-  internal var visited: Set<Query> {
+  /// The occurrences the walk reached — the scalar ones recorded by `type` and
+  /// the `IN`/`EXISTS`/quantified ones recorded by `validate` — each paired
+  /// with the ROLE it reached in. The `typecheck` phase validates only these
+  /// after the walk, mirroring the lazy executor's evaluation of only a reached
+  /// subquery, picking each one's RUN shape from ITS OWN reached role (an
+  /// `existential` → the EXISTS probe, a `scalar`/`valued` → the original), not
+  /// from the union of every role the query occupies in the select.
+  internal var visited: Set<Reach> {
     reached.reached
   }
 }
@@ -872,6 +1288,33 @@ extension Schema {
     return ordinal
   }
 
+  /// The ordinal `column` resolves to in `relation`, or `nil` when it is a
+  /// candidate CORRELATED reference to an enclosing scope — this relation does
+  /// not name it — the not-found probe the single-relation `.column` lowering
+  /// consults before correlating outward.
+  ///
+  /// The two not-found situations `ordinal(of:in:)` conflates as `.column` are
+  /// DISTINGUISHED here. A qualifier this relation does NOT answer (its alias,
+  /// else its name), or an unqualified name it does not carry, is a genuine
+  /// not-found → `nil`, so the walk correlates to the outer query. But a
+  /// qualifier this relation DOES answer, naming a column it LACKS, is a hard
+  /// `SQLError.column` that PROPAGATES: the local alias SHADOWS a same-named
+  /// outer relation, so the miss faults against the inner relation rather than
+  /// falling through to bind the outer one. This is the single-relation analog
+  /// of `Scope.find`.
+  internal func find(_ column: Column, in relation: Relation)
+      throws(SQLError) -> Int? {
+    if let qualifier = column.qualifier,
+        (relation.alias ?? relation.name) != qualifier {
+      return nil
+    }
+    guard let ordinal = ordinal(of: column.name) else {
+      guard column.qualifier == nil else { throw .column(column.name) }
+      return nil
+    }
+    return ordinal
+  }
+
   /// The projected terms of `projection`, addressed by ordinal: a `*` or a
   /// bare-column list yields one `.slot(ordinal)` per column; an expression list
   /// lowers each expression to a term. The terms hold ordinals, which the
@@ -880,14 +1323,25 @@ extension Schema {
                       _ routines: Routines = [:],
                       subquery: Subquery = .unsupported)
       throws(SQLError) -> Array<Term> {
+    // A projection is a BARRED clause position: a correlated column of THIS
+    // query has no evaluator here (only WHERE/ON/HAVING admit one). The cut is
+    // intrinsic to the entry, so a caller CANNOT pass an admitting seam into a
+    // projection — the FROM-less scalar path included — keeping the run's
+    // lowering and the schema `columns(of:)` derive in lockstep.
+    let subquery = subquery.barred
     switch projection {
     case .all:
       return (0 ..< width).map { .slot($0) }
     case let .columns(columns):
+      // Lower each bare column through `term`, so a name this relation does not
+      // bind consults the `subquery` surface: a correlated reference on the
+      // BARRED projection surface is diagnosed unsupported (parity with the
+      // schema path) rather than faulting `SQLError.column`.
       var terms = Array<Term>()
       terms.reserveCapacity(columns.count)
       for column in columns {
-        try terms.append(.slot(ordinal(of: column, in: relation)))
+        try terms.append(term(.column(column), in: relation, routines,
+                              subquery: subquery))
       }
       return terms
     case let .expressions(projected):
@@ -910,6 +1364,15 @@ extension Schema {
       throws(SQLError) -> Term {
     switch expression {
     case let .column(column):
+      // Resolve against this relation first; a name it does not bind is a
+      // candidate CORRELATED reference to the enclosing scope, lowered to a
+      // synthetic `Term.parameter` when the outer scope binds it, else the
+      // ordinary unknown-column fault. A QUALIFIED miss on THIS relation (its
+      // alias names it, but the column is absent) is a HARD `.column` `find`
+      // propagates — never a fall-through to correlate a same-qualifier outer
+      // relation, which the local alias SHADOWS.
+      if let ordinal = try find(column, in: relation) { return .slot(ordinal) }
+      if let name = try subquery.correlate(column) { return .parameter(name) }
       return try .slot(ordinal(of: column, in: relation))
     case let .literal(literal):
       return try .constant(value(of: literal))
@@ -1005,7 +1468,10 @@ extension Schema {
                       _ routines: Routines = [:],
                       subquery: Subquery = .unsupported)
       throws(SQLError) -> Array<SortKey> {
-    try SQLEngine.order(order, projection, names) {
+    // An ORDER BY is BARRED, as the projection is: a correlated column of THIS
+    // query is out of the cut here, so the entry bars the seam by construction.
+    let subquery = subquery.barred
+    return try SQLEngine.order(order, projection, names) {
       expression throws(SQLError) in
       try term(expression, in: relation, routines, subquery: subquery)
     }
@@ -1143,7 +1609,17 @@ internal struct Scope {
       throws(SQLError) -> ValueType {
     return switch expression {
     case let .column(column):
-      try type(at: ordinal(of: column))
+      // A column this scope does not bind may be a CORRELATED reference to an
+      // enclosing query (in an inner `WHERE`); type it as the outer column, else
+      // the ordinary column fault. A LOCALLY AMBIGUOUS name is a HARD error
+      // `find` propagates, never a fall-through to outer correlation.
+      if let ordinal = try find(column) {
+        type(at: ordinal)
+      } else if let type = try subquery.correlated(column) {
+        type
+      } else {
+        try type(at: ordinal(of: column))
+      }
     case let .literal(literal):
       type(of: literal)
     case let .call(name, _):
@@ -1381,7 +1857,19 @@ internal struct Scope {
       throws(SQLError) -> ValueType {
     switch expression {
     case let .column(column):
-      try type(at: ordinal(of: column))
+      // A column this scope does not bind may be a CORRELATED reference to an
+      // enclosing query (validated exactly as the run resolves it — a `WHERE`
+      // one types as its outer column, a projection/`HAVING` one faults
+      // unsupported); else the ordinary column fault. A LOCALLY AMBIGUOUS name
+      // is a HARD error `find` propagates, never a fall-through to outer
+      // correlation.
+      if let ordinal = try find(column) {
+        type(at: ordinal)
+      } else if let type = try subquery.correlated(column) {
+        type
+      } else {
+        try type(at: ordinal(of: column))
+      }
     case let .literal(literal):
       type(of: literal)
     case let .call(name, arguments):
@@ -1809,21 +2297,26 @@ internal struct Scope {
       // Validate the inner UNCORRELATED query as the run's lowering does — it
       // resolves and type-checks against the enclosing catalog, so a bad column
       // or routine inside it faults at validation, matching what a run rejects.
-      try subquery.validate(query)
+      // Reached in the `existential` role, so the deferred phase validates its
+      // cardinality PROBE (no select list), never the original projection.
+      try subquery.validate(query, as: .existential)
     case let .within(operand, query, _):
       // Validate the operand AND the inner query, and enforce the single-column
       // arity the lowering does (`SQLError.arity`), so schema validation
       // matches execution — the recurring lesson that the two must not diverge.
+      // Reached in the `valued` role — its value set is read, so the deferred
+      // phase validates the ORIGINAL query.
       _ = try validate(operand, routines, subquery: subquery)
-      try subquery.validate(query)
+      try subquery.validate(query, as: .valued)
       let width = try subquery.width(query)
       guard width == 1 else { throw .arity(1, width) }
     case let .quantified(operand, _, _, query):
       // As `within`: validate the operand and the inner query, and enforce the
       // single-column arity the lowering does (`SQLError.arity`), so schema
-      // validation matches execution.
+      // validation matches execution. Reached `valued` (its values are read),
+      // so the deferred phase validates the ORIGINAL query.
       _ = try validate(operand, routines, subquery: subquery)
-      try subquery.validate(query)
+      try subquery.validate(query, as: .valued)
       let width = try subquery.width(query)
       guard width == 1 else { throw .arity(1, width) }
     case .bound:
@@ -2736,6 +3229,20 @@ internal struct Scope {
     return (member.relation.alias ?? member.relation.name) == qualifier
   }
 
+  /// Whether `column` is a QUALIFIED reference whose qualifier a relation of
+  /// this scope answers — a qualified name a present alias (else a table name)
+  /// names. An UNqualified name is FALSE (it names no one local relation to
+  /// shadow an outer one), as is a qualified name no local relation answers.
+  ///
+  /// A qualified name a local relation answers but none of this scope binds is
+  /// a QUALIFIED MISS on that relation — the local alias SHADOWS a same-named
+  /// enclosing relation, so `find` faults it hard rather than correlating
+  /// outward; an unadmitted qualifier is genuinely not local and correlates.
+  private func shadows(_ column: Column) -> Bool {
+    guard column.qualifier != nil else { return false }
+    return members.contains { admits($0, column) }
+  }
+
   /// The combined ordinal `column` resolves to.
   ///
   /// The name resolves against every admitted relation: present in exactly one
@@ -2754,6 +3261,48 @@ internal struct Scope {
     return resolved
   }
 
+  /// The combined ordinal `column` resolves to as an ENCLOSING reference, or
+  /// `nil` when this scope binds it in NONE of its relations — the probe a
+  /// nested subquery's `Outer` consults for a candidate correlated column. The
+  /// three outcomes are DISTINCT: a name bound by exactly one relation yields
+  /// its ordinal, a name bound by NONE reports `nil` (the `Outer` walk keeps
+  /// looking outward), and a name bound by MORE than one relation of this scope
+  /// is `SQLError.ambiguous` and PROPAGATES — a nearer ambiguous scope SHADOWS
+  /// farther ones rather than falling through to rebind the name to an outer
+  /// column. Only the not-found `SQLError.column` becomes `nil`; every other
+  /// fault (an ambiguity or a qualifier fault) propagates. This is the enclosing
+  /// analog of `find`, which the LOCAL lowering consults for the same reason.
+  internal func correlated(_ column: Column) throws(SQLError) -> Int? {
+    try find(column)
+  }
+
+  /// The combined ordinal `column` resolves to, or `nil` when it is a candidate
+  /// CORRELATED reference to an enclosing scope — the not-found probe a
+  /// `.column` lowering consults before correlating outward. FOUR outcomes stay
+  /// DISTINCT.
+  ///
+  /// A name bound by exactly one relation yields its ordinal (found → bind). A
+  /// name bound by MORE than one relation is `SQLError.ambiguous`, PROPAGATED
+  /// (never `nil`): a local ambiguity is a hard error, not a fall-through, so
+  /// `try?`-swallowing it would silently rebind an ambiguous local name to an
+  /// outer column. The remaining `SQLError.column` — no relation binds the name
+  /// — splits on whether some local relation ADMITTED the qualifier: an
+  /// UNADMITTED qualifier (or an absent unqualified name) is a genuine
+  /// not-found → `nil`, so the walk correlates outward; a qualifier a local
+  /// relation DOES admit, naming a column it LACKS, is a QUALIFIED MISS that
+  /// PROPAGATES as a hard `.column` — the local alias SHADOWS a same-qualifier
+  /// enclosing relation, so it faults against the inner relation rather than
+  /// falling through to bind the outer one.
+  internal func find(_ column: Column) throws(SQLError) -> Int? {
+    do {
+      return try ordinal(of: column)
+    } catch let error {
+      guard case .column = error else { throw error }
+      guard !shadows(column) else { throw error }
+      return nil
+    }
+  }
+
   /// The combined-ordinal projected terms: every real column of every relation
   /// for `*` (in chain order, never a virtual column) as `.slot` terms, a
   /// bare-column list as `.slot` terms at their combined ordinals, an expression
@@ -2762,6 +3311,10 @@ internal struct Scope {
                       _ routines: Routines = [:],
                       subquery: Subquery = .unsupported) throws(SQLError)
       -> Array<Term> {
+    // A projection is a BARRED clause position (see `Schema.terms`): the entry
+    // bars the seam, so no join-scope projection can admit a correlated column
+    // of THIS query.
+    let subquery = subquery.barred
     switch projection {
     case .all:
       // Every real column of every relation, at its combined ordinal — in chain
@@ -2774,10 +3327,14 @@ internal struct Scope {
       }
       return terms
     case let .columns(columns):
+      // Lower each bare column through `term`, so a name none of this scope's
+      // relations bind consults the `subquery` surface: a correlated reference
+      // on the BARRED projection surface is diagnosed unsupported (parity with
+      // the schema path) rather than faulting `SQLError.column`.
       var terms = Array<Term>()
       terms.reserveCapacity(columns.count)
       for column in columns {
-        try terms.append(.slot(ordinal(of: column)))
+        try terms.append(term(.column(column), routines, subquery: subquery))
       }
       return terms
     case let .expressions(projected):
@@ -2797,6 +3354,15 @@ internal struct Scope {
       throws(SQLError) -> Term {
     switch expression {
     case let .column(column):
+      // Resolve the column against this scope's own relations first; a name none
+      // binds is a candidate CORRELATED reference — consult the enclosing scope,
+      // lowering to a synthetic `Term.parameter` bound from the outer row when it
+      // resolves there, else the ordinary unknown-column fault. A LOCALLY
+      // AMBIGUOUS name (bound by more than one relation) is a HARD error `find`
+      // propagates — never a fall-through to outer correlation that would rebind
+      // it to an outer column.
+      if let ordinal = try find(column) { return .slot(ordinal) }
+      if let name = try subquery.correlate(column) { return .parameter(name) }
       return try .slot(ordinal(of: column))
     case let .literal(literal):
       return try .constant(value(of: literal))
@@ -2878,17 +3444,12 @@ internal struct Scope {
                       _ names: Array<String?>, _ routines: Routines = [:],
                       subquery: Subquery = .unsupported)
       throws(SQLError) -> Array<SortKey> {
-    try SQLEngine.order(order, projection, names) {
+    // An ORDER BY is BARRED, as the projection is (see `Schema.order`).
+    let subquery = subquery.barred
+    return try SQLEngine.order(order, projection, names) {
       expression throws(SQLError) in
       try term(expression, routines, subquery: subquery)
     }
-  }
-
-  /// Lowers a join's `ON left = right` to a `match` conjunct, each side
-  /// resolved to a combined ordinal across the chain.
-  internal func match(_ left: Column, _ right: Column) throws(SQLError)
-      -> Filter {
-    try .match(ordinal(of: left), ordinal(of: right))
   }
 
   /// Lowers a join's `ON predicate` to the engine's `Filter` across the chain,
@@ -2897,14 +3458,19 @@ internal struct Scope {
   /// `ON` is safe, and otherwise lowering the entire conjunction as one
   /// residual.
   ///
-  /// A `column = column` conjunct is the hash-join key `nest` folds into a
-  /// physical `Join`, so it lowers to a `match(left, right)` — the same node
-  /// the equi-only `ON` produced — rather than a `compare(.slot, .equal,
-  /// .slot)`, which `nest` would not recognise as a key. Every other leaf (an
-  /// inequality, an expression equality such as `a.x = b.y + 1`, an `IS NULL`,
-  /// a membership, an `OR`/`NOT`) lowers through `lower`, becoming a residual
-  /// the join runs as a filter over the product — nested-loop semantics,
-  /// correct if O(n·m).
+  /// The key is READ OFF the ALREADY-LOWERED conjunct, not by re-resolving the
+  /// AST: a conjunct whose lowered form is a `compare(.slot, .equal, .slot)` —
+  /// both operands columns of the join prefix — IS the hash-join key `nest`
+  /// folds into a physical `Join`, so it is rewritten to the `match(left,
+  /// right)` node `nest` recognises. A conjunct that lowered to a `.parameter`
+  /// operand is a CORRELATED outer reference (`ON V.x = T.id` under an EXISTS,
+  /// lowering to `compare(.slot, .equal, .parameter)`), NOT a column = column
+  /// key, so it stays the residual `ON` filter — re-resolving its AST would
+  /// consult only the prefix and fault `SQLError.column` on the outer column
+  /// that already lowered correctly. Every other leaf (an inequality, an
+  /// expression equality such as `a.x = b.y + 1`, an `IS NULL`, a membership,
+  /// an `OR`/`NOT`) lowers through `lower`, becoming a residual the join runs
+  /// as a filter over the product — nested-loop semantics, correct if O(n·m).
   ///
   /// A `match` key is extracted ONLY WHEN EVERY lowered conjunct is `safe`; if
   /// ANY conjunct is unsafe, the whole `ON` lowers to a single residual and NO
@@ -2940,14 +3506,18 @@ internal struct Scope {
     // non-match before an EARLIER one does — either suppressing the throw the
     // whole-ON residual owes. Lower the entire conjunction as one residual.
     guard lowered.allSatisfy(\.safe) else { return lowered.conjunction! }
-    var filters = Array<Filter>()
-    for (conjunct, residual) in zip(conjuncts, lowered) {
-      if case let .comparison(.column(left),
-                              .equal, .column(right)) = conjunct {
-        try filters.append(match(left, right))
-      } else {
-        filters.append(residual)
+    // Read the equi-join key off the ALREADY-LOWERED term rather than
+    // re-resolving the AST: a key is a `compare(.slot, .equal, .slot)` whose
+    // BOTH operands are columns of the join prefix. A conjunct that lowered to
+    // a `.parameter` operand is a CORRELATED outer reference (`V.x = :outer`),
+    // NOT a column = column key, so it stays the residual `ON` filter — a
+    // re-resolution of its AST would consult only the prefix and fault
+    // `SQLError.column` on the outer column already lowered correctly.
+    let filters = lowered.map { residual -> Filter in
+      if case let .compare(.slot(left), .equal, .slot(right)) = residual {
+        return .match(left, right)
       }
+      return residual
     }
     return filters.conjunction!
   }
@@ -3156,6 +3726,10 @@ internal struct Grouping {
                                _ routines: Routines = [:],
                                subquery: Subquery = .unsupported)
       throws(SQLError) -> Array<Term> {
+    // A grouped projection is a BARRED clause position (see `Schema.terms`):
+    // the entry bars the seam so it cannot admit a correlated column of THIS
+    // query.
+    let subquery = subquery.barred
     switch projection {
     case .all:
       throw .unsupported("SELECT * is not allowed with GROUP BY or aggregates")
@@ -3228,6 +3802,8 @@ internal struct Grouping {
                       _ routines: Routines = [:],
                       subquery: Subquery = .unsupported)
       throws(SQLError) -> Array<SortKey> {
+    // A grouped ORDER BY is BARRED, as the projection is (see `Schema.order`).
+    let subquery = subquery.barred
     var resolved = Array<SortKey>()
     resolved.reserveCapacity(order.keys.count)
     for key in order.keys {
@@ -3291,18 +3867,22 @@ extension Filter {
       for element in elements {
         element.references(into: &ordinals)
       }
-    case .exists:
-      // An UNCORRELATED EXISTS reads no outer ordinal — its subquery names no
-      // enclosing column and runs against its own relations.
-      break
-    case let .within(operand, _, _):
-      // Only the outer operand term reads ordinals; the uncorrelated subquery
-      // runs against its own relations.
+    case let .exists(_, correlation, _):
+      // A CORRELATED EXISTS reads the enclosing row's cells its inner `WHERE`
+      // names — the correlation's `slot` outer ordinals — so those must be
+      // materialised for the per-row re-execution (a `bound` source reads a
+      // threaded binding, not the outer record). An UNCORRELATED one names none.
+      ordinals.formUnion(correlation.slots)
+    case let .within(operand, _, correlation, _):
+      // The outer operand term reads ordinals; a CORRELATED subquery ALSO reads
+      // the outer `slot` cells its inner `WHERE` names.
       operand.references(into: &ordinals)
-    case let .quantified(operand, _, _, _):
-      // As `within`: only the outer operand reads ordinals; the uncorrelated
-      // subquery runs against its own relations.
+      ordinals.formUnion(correlation.slots)
+    case let .quantified(operand, _, _, _, correlation):
+      // As `within`: the outer operand term reads ordinals; a CORRELATED
+      // subquery ALSO reads the outer `slot` cells its inner `WHERE` names.
       operand.references(into: &ordinals)
+      ordinals.formUnion(correlation.slots)
     case let .like(operand, pattern, escape, _):
       operand.references(into: &ordinals)
       pattern.references(into: &ordinals)

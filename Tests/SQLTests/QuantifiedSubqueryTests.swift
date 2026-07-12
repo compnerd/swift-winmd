@@ -289,3 +289,85 @@ struct QuantifiedTypeTests {
     }
   }
 }
+
+// MARK: - Correlated quantified execution
+
+/// An outer relation and an inner relation sharing a key `k`, so a quantified
+/// subquery referencing an outer column is CORRELATED: its lone column depends
+/// on the enclosing row, forcing the per-outer-row re-execution the discovered
+/// correlation threads (rather than a once-memoised uncorrelated run).
+private func correlated() throws -> FixtureCatalog {
+  try Catalog {
+    Relation("Toll", ["x": .integer, "k": .integer]) {
+      Row(10, 1)
+      Row(20, 2)
+      Row(99, 3)
+    }
+    Relation("Inn", ["x": .integer, "k": .integer]) {
+      Row(10, 1)
+      Row(20, 2)
+      Row(30, 2)
+    }
+  }
+}
+
+struct CorrelatedQuantifiedTests {
+  @Test func `a correlated = ANY binds the outer key per row`() throws {
+    // `Toll.x = ANY (SELECT i.x FROM Inn i WHERE i.k = Toll.k)` correlates to
+    // `Toll.k`, so the inner column is re-materialised per outer row: row
+    // (10, 1) → {10} (10 = ANY → TRUE), row (20, 2) → {20, 30} (TRUE), row
+    // (99, 3) → {} (FALSE). A `[:]`-correlation eval would re-run the inner
+    // query WITHOUT the outer scope and fail to bind `Toll.k`.
+    let sql = """
+        SELECT x FROM Toll \
+        WHERE x = ANY (SELECT i.x FROM Inn i WHERE i.k = Toll.k) \
+        ORDER BY x
+        """
+    let columns = try correlated().columns(of: parse(query: sql),
+                                           validate: true)
+    #expect(columns.count == 1)
+    try correlated().expect(sql, yields: [[10], [20]])
+  }
+
+  @Test func `a correlated <> ALL keeps the row with no inner match`() throws {
+    // `<> ALL` over the per-row inner column: row (10, 1) → 10 <> ALL {10} is
+    // FALSE, row (20, 2) → 20 <> ALL {20, 30} is FALSE, row (99, 3) → 99 <> ALL
+    // {} is TRUE (an empty ALL is vacuously TRUE). Only row 99 survives.
+    let sql = """
+        SELECT x FROM Toll \
+        WHERE x <> ALL (SELECT i.x FROM Inn i WHERE i.k = Toll.k) \
+        ORDER BY x
+        """
+    let columns = try correlated().columns(of: parse(query: sql),
+                                           validate: true)
+    #expect(columns.count == 1)
+    try correlated().expect(sql, yields: [[99]])
+  }
+
+  @Test func `a correlated > ALL exceeds the per-row inner column`() throws {
+    // `> ALL` over the per-row inner column: row (10, 1) → 10 > ALL {10} FALSE,
+    // row (20, 2) → 20 > ALL {20, 30} FALSE, row (99, 3) → 99 > ALL {} TRUE
+    // (empty ALL). Only row 99 exceeds its (empty) inner column.
+    let sql = """
+        SELECT x FROM Toll \
+        WHERE x > ALL (SELECT i.x FROM Inn i WHERE i.k = Toll.k) \
+        ORDER BY x
+        """
+    try correlated().expect(sql, yields: [[99]])
+  }
+
+  @Test func `an uncorrelated quantified still memoises once`() throws {
+    // With NO outer reference the quantified subquery is uncorrelated — empty
+    // correlation — so it materialises its column ONCE (memoised), folded per
+    // outer row: `Inn.x` ∈ {10, 20, 30}, so `Toll.x = ANY {10, 20, 30}` keeps
+    // rows 10 and 20 (99 is absent).
+    let sql = """
+        SELECT x FROM Toll \
+        WHERE x = ANY (SELECT i.x FROM Inn i) ORDER BY x
+        """
+    let columns = try correlated().columns(of: parse(query: sql),
+                                           validate: true)
+    #expect(columns.count == 1)
+    try correlated().expect(sql, yields: [[10], [20]])
+  }
+}

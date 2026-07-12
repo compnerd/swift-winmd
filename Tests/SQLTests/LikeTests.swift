@@ -368,9 +368,10 @@ struct LikeSafetyTests {
     // slot — an escape that faults regardless of the pair. Unsafe, it bars the
     // equi from becoming a hash key: `nest` forms no `.join`, the level is a
     // residual `.select` over the `.product`, so the whole `ON` runs per pair.
-    let plan = try mismatched().optimise(mismatched().compile(query("""
+    let compiled = try mismatched().compile(query("""
         SELECT A.K FROM A JOIN B ON A.K = B.K AND A.Name LIKE 'a%' ESCAPE A.E
-        """)).pushdown(), [:])
+        """), validate: true)
+    let plan = try mismatched().optimise(compiled.pushdown(), [:])
     #expect(!joins(plan))
     #expect(residual(plan))
   }
@@ -399,9 +400,8 @@ struct LikeSafetyTests {
     let sql = """
         SELECT A.K FROM A JOIN B ON A.K = B.K AND A.Name LIKE 'a%' ESCAPE 'ab'
         """
-    let plan =
-        try mismatched().optimise(mismatched().compile(query(sql)).pushdown(),
-                                  [:])
+    let compiled = try mismatched().compile(query(sql), validate: true)
+    let plan = try mismatched().optimise(compiled.pushdown(), [:])
     #expect(!joins(plan))
     #expect(residual(plan))
     try mismatched().expect(sql,
@@ -419,9 +419,10 @@ struct LikeSafetyTests {
         Row(2, "xyz")
       }
     }
-    let plan = try catalog.optimise(catalog.compile(query("""
+    let compiled = try catalog.compile(query("""
         SELECT Id FROM S WHERE Name LIKE '_%' ESCAPE '\\' AND Id = 2
-        """)).pushdown(), [:])
+        """), validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(seeks(plan))
 
     // …and it still matches correctly: only row 2 has `Id = 2`, and its
@@ -442,9 +443,10 @@ struct LikeSafetyTests {
         Row(2, "xyz")
       }
     }
-    let plan = try catalog.optimise(catalog.compile(query("""
+    let compiled = try catalog.compile(query("""
         SELECT Id FROM S WHERE Name LIKE 'x%' AND Id = 2
-        """)).pushdown(), [:])
+        """), validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(seeks(plan))
     try catalog.expect("SELECT Id FROM S WHERE Name LIKE 'x%' AND Id = 2",
                        yields: [[2]])
@@ -646,7 +648,8 @@ struct LikeParameterTests {
       Issue.record("expected a SELECT statement")
       return
     }
-    let plan = try catalog.optimise(catalog.compile(query).pushdown(),
+    let compiled = try catalog.compile(query, validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(),
                                     ["e": .text("\\")])
     #expect(!seeks(plan))
   }
@@ -713,9 +716,10 @@ struct LikeParameterisedTests {
     // LIKE :p` into the view would drop every row first, suppressing the
     // throw — so a parameterised LIKE is nullable and must stay outer.
     let catalog = try maybe()
-    let plan = try catalog.optimise(catalog.compile(query("""
+    let compiled = try catalog.compile(query("""
         SELECT x FROM V WHERE 'x' LIKE :p AND (1 / y) = 0
-        """)).pushdown(), [:])
+        """), validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
 
     // The parameterised LIKE floats above the derived leaf rather than riding
     // into the view below the unsafe division.

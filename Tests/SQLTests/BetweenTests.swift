@@ -383,7 +383,7 @@ struct BetweenSeekTests {
     // not scan all ten rows.
     let catalog = try sorted()
     let query = try query("SELECT Id FROM T WHERE Id BETWEEN 3 AND 7")
-    let plan = try catalog.optimise(catalog.compile(query), [:])
+    let plan = try catalog.optimise(catalog.compile(query, validate: true), [:])
     #expect(seek(plan) == 2 ..< 7)
     try catalog.expect("SELECT Id FROM T WHERE Id BETWEEN 3 AND 7",
                        yields: [[3], [4], [5], [6], [7]])
@@ -399,8 +399,8 @@ struct BetweenSeekTests {
     let catalog = try sorted()
     let comparison =
         try query("SELECT Id FROM T WHERE Id >= 3 AND Id <= 7")
-    let range = try #require(seek(catalog.optimise(catalog.compile(comparison),
-                                                   [:])))
+    let compiled = try catalog.compile(comparison, validate: true)
+    let range = try #require(seek(catalog.optimise(compiled, [:])))
     #expect(range.lowerBound <= 2 && range.upperBound >= 7)
     try catalog.expect("SELECT Id FROM T WHERE Id BETWEEN 3 AND 7",
                        equals: "SELECT Id FROM T WHERE Id >= 3 AND Id <= 7")
@@ -413,7 +413,7 @@ struct BetweenSeekTests {
     // out-of-range rows.
     let catalog = try sorted()
     let query = try query("SELECT Id FROM T WHERE Id NOT BETWEEN 3 AND 7")
-    let plan = try catalog.optimise(catalog.compile(query), [:])
+    let plan = try catalog.optimise(catalog.compile(query, validate: true), [:])
     #expect(seek(plan) == nil)
     try catalog.expect("SELECT Id FROM T WHERE Id NOT BETWEEN 3 AND 7",
                        yields: [[1], [2], [8], [9], [10]])
@@ -426,7 +426,7 @@ struct BetweenSeekTests {
     // same rows the seeked `Id BETWEEN 3 AND 7` would.
     let catalog = try sorted()
     let query = try query("SELECT Id FROM T WHERE Id + 1 BETWEEN 4 AND 8")
-    let plan = try catalog.optimise(catalog.compile(query), [:])
+    let plan = try catalog.optimise(catalog.compile(query, validate: true), [:])
     #expect(seek(plan) == nil)
     try catalog.expect("SELECT Id FROM T WHERE Id + 1 BETWEEN 4 AND 8",
                        yields: [[3], [4], [5], [6], [7]])
@@ -439,7 +439,7 @@ struct BetweenSeekTests {
     // every row whose `Id >= 3` (each row's own `Id` is its upper bound).
     let catalog = try sorted()
     let query = try query("SELECT Id FROM T WHERE Id BETWEEN 3 AND Id")
-    let plan = try catalog.optimise(catalog.compile(query), [:])
+    let plan = try catalog.optimise(catalog.compile(query, validate: true), [:])
     #expect(seek(plan) == nil)
     try catalog.expect("SELECT Id FROM T WHERE Id BETWEEN 3 AND Id",
                        yields: [[3], [4], [5], [6], [7], [8], [9], [10]])
@@ -455,7 +455,7 @@ struct BetweenSeekTests {
     // the query returns no rows and never traps.
     let catalog = try sorted()
     let query = try query("SELECT Id FROM T WHERE Id BETWEEN 10 AND 1")
-    let plan = try catalog.optimise(catalog.compile(query), [:])
+    let plan = try catalog.optimise(catalog.compile(query, validate: true), [:])
     let range = try #require(seek(plan))
     #expect(range.isEmpty)
     try catalog.empty("SELECT Id FROM T WHERE Id BETWEEN 10 AND 1")
@@ -471,7 +471,8 @@ struct BetweenSeekTests {
     let catalog = try sorted()
     let query = try query("SELECT Id FROM T WHERE Id BETWEEN :lo AND :hi")
     let bindings: Bindings = ["lo": .integer(3), "hi": .integer(7)]
-    let plan = try catalog.optimise(catalog.compile(query), bindings)
+    let compiled = try catalog.compile(query, validate: true)
+    let plan = try catalog.optimise(compiled, bindings)
     #expect(seek(plan) == 2 ..< 7)
     try catalog.expect("SELECT Id FROM T WHERE Id BETWEEN :lo AND :hi",
                        yields: [[3], [4], [5], [6], [7]], bindings: bindings)
@@ -484,7 +485,7 @@ struct BetweenSeekTests {
     // so none passes. It seeks nothing rather than mis-seeking.
     let catalog = try sorted()
     let query = try query("SELECT Id FROM T WHERE Id BETWEEN :lo AND :hi")
-    let plan = try catalog.optimise(catalog.compile(query),
+    let plan = try catalog.optimise(catalog.compile(query, validate: true),
                                     ["lo": .integer(3)])
     #expect(seek(plan) == nil)
     try catalog.empty("SELECT Id FROM T WHERE Id BETWEEN :lo AND :hi",

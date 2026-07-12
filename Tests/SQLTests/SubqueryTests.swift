@@ -540,6 +540,37 @@ struct AggregateSubqueryTests {
       try resolve()
     }
   }
+
+  @Test func `columns validates a grouped ORDER BY CORRELATED subquery`()
+      throws {
+    // Batch 7, Item 1: a grouped query whose ORDER BY aggregate argument nests
+    // a CORRELATED subquery (`S.V = T.K`, the inner `T.K` an outer column of the
+    // grouped select). The run path's `group` gives the ORDER BY subquery
+    // lowering the enclosing scope, so it resolves `T.K` and runs; VALIDATION
+    // must thread the SAME enclosing scope, else it compiles the inner query
+    // with NO outer scope and falsely faults `SQLError.column("K")`. It must
+    // succeed exactly as the run does.
+    let query = try parse(query:
+        "SELECT K FROM T GROUP BY K "
+        + "ORDER BY SUM(CASE WHEN EXISTS "
+        + "(SELECT 1 FROM S WHERE S.V = T.K) THEN 1 ELSE 0 END), K")
+    let columns = try fixture().columns(of: query, validate: true)
+    #expect(columns.count == 1)
+  }
+
+  @Test func `a grouped ORDER BY CORRELATED subquery orders the run`() throws {
+    // The correlated `EXISTS (SELECT 1 FROM S WHERE S.V = T.K)` is TRUE for the
+    // groups whose `K` is in `S.V` ({10, 20, 99}) — groups 10 and 20 — and
+    // FALSE for groups NULL and 30, so the ORDER BY key is 0 for {NULL, 30} and
+    // 1 for {10, 20}. Sorting on that key then `K` yields NULL, 30 (key 0) then
+    // 10, 20 (key 1). The run must execute the per-group correlated subquery and
+    // order the groups by it.
+    try fixture().expect(
+        "SELECT K FROM T GROUP BY K "
+        + "ORDER BY SUM(CASE WHEN EXISTS "
+        + "(SELECT 1 FROM S WHERE S.V = T.K) THEN 1 ELSE 0 END), K",
+        yields: [[nil], [30], [10], [20]])
+  }
 }
 
 // MARK: - Deferred execution
@@ -1387,6 +1418,184 @@ struct InPushdownNullabilityTests {
   }
 }
 
+// MARK: - Lazy subquery pushdown safety
+
+/// A LAZY subquery (`EXISTS`/`IN`/quantified) is NEVER pushdown-`safe`: under
+/// lazy materialisation its FIRST evaluation RUNS the inner query, which may
+/// FAULT. A subquery conjunct beside a SEEKABLE conjunct must therefore NOT be
+/// classified safe and left as a residual over a seeked (narrowed) scan: the
+/// non-short-circuiting inner `AND` owes the throw for a row the seek skips, so
+/// riding the subquery below the seek SUPPRESSES that throw.
+///
+/// `T` is SORTED on `Id`, so `Id < 0` is a seekable predicate over an EMPTY
+/// run; `S.z` is zero, so `1 / z` FAULTS `.divide` the moment the subquery is
+/// evaluated. With the subquery the LEFT conjunct (`subquery AND Id < 0`), the
+/// non-short-circuiting `AND` evaluates the subquery FIRST for every scanned
+/// row, so a correct run FAULTS. Pre-fix the subquery reported `safe`, so the
+/// planner seeked on `Id < 0` (an empty run) and left the subquery a residual
+/// over ZERO rows — never evaluating it, wrongly returning zero rows and hiding
+/// the throw. Post-fix the subquery is NOT safe, the seek keeps it above the
+/// scan, and the run FAULTS as the left-to-right `AND` owes.
+struct LazySubqueryPushdownSafetyTests {
+  private func fixture() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("T", ["Id": .integer], sorted: "Id") {
+        Row(1)
+        Row(2)
+      }
+      Relation("S", ["z": .integer]) {
+        Row(0)
+      }
+      try View("VW", "SELECT Id FROM T", as: ["Id"])
+    }
+  }
+
+  @Test func `an EXISTS conjunct is not seeked past a skipped row`() throws {
+    // Pre-fix: the uncorrelated `EXISTS` reported `safe`, so it rode below the
+    // `Id < 0` seek as a residual over the empty run and never evaluated —
+    // returning zero rows, SUPPRESSING the `.divide` the leading conjunct owes.
+    // Post-fix it is NOT safe, so the seek keeps it and the run faults.
+    try fixture().expect(
+        """
+        SELECT Id FROM VW \
+        WHERE EXISTS (SELECT 1 FROM S WHERE 1 / z = 0) AND Id < 0
+        """,
+        fails: .divide)
+  }
+
+  @Test func `an IN conjunct is not seeked past a skipped row`() throws {
+    // The `IN (Q)` variant: `Id IN (SELECT 1 / z FROM S)` faults on the first
+    // reach. Pre-fix the `.within` term was `safe` and rode below the empty
+    // `Id < 0` seek, suppressing the throw; post-fix the run faults `.divide`.
+    try fixture().expect(
+        "SELECT Id FROM VW WHERE Id IN (SELECT 1 / z FROM S) AND Id < 0",
+        fails: .divide)
+  }
+
+  @Test func `a quantified conjunct is not seeked past a skipped row`()
+      throws {
+    // The quantified `= ANY (Q)` variant: `Id = ANY (SELECT 1 / z FROM S)`
+    // faults on the first reach. Pre-fix the `.quantified` term was `safe` and
+    // rode below the empty `Id < 0` seek, suppressing the throw; post-fix the
+    // run faults `.divide`.
+    try fixture().expect(
+        "SELECT Id FROM VW WHERE Id = ANY (SELECT 1 / z FROM S) AND Id < 0",
+        fails: .divide)
+  }
+
+  @Test func `an EXISTS still drops rows behind a short-circuiting filter`()
+      throws {
+    // The safety change does NOT over-fault: with the SEEKABLE `Id < 0` the
+    // LEFT conjunct, the non-short-circuiting `AND`'s Kleene evaluation returns
+    // FALSE from the leading `Id < 0` for every row without reaching the
+    // subquery, so the run yields zero rows rather than faulting — the subquery
+    // stays genuinely unreached.
+    try fixture().empty(
+        """
+        SELECT Id FROM VW \
+        WHERE Id < 0 AND EXISTS (SELECT 1 FROM S WHERE 1 / z = 0)
+        """)
+  }
+}
+
+// MARK: - Correlated subquery own derived tables
+
+/// A CORRELATED subquery with its OWN `WITH` item or derived table must AUGMENT
+/// that own relation before executing its precompiled plan per outer row — the
+/// same augmentation the uncorrelated `run`/`probe` paths perform — so the
+/// derived/CTE relation binds during per-outer-row execution rather than
+/// faulting `SQLError.relation` (or resolving to an unintended base relation).
+struct CorrelatedOwnDerivationTests {
+  /// An outer `T(Id)` alone — the correlated subqueries below carry their OWN
+  /// inner derivation.
+  private func fixture() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("T", ["Id": .integer]) {
+        Row(1)
+        Row(2)
+        Row(3)
+      }
+    }
+  }
+
+  @Test func `a correlated EXISTS binds its own derived table`() throws {
+    // Pre-fix: the correlated `execute(plan, context)` ran the precompiled plan
+    // under only the parent overlay, so the plan's `.scan("d")` for the derived
+    // table `(SELECT 1 AS k) AS d` faulted `SQLError.relation("d")`. Post-fix
+    // the execute path augments the subquery's own derived rows first, binding
+    // `d`. The self-contained `d.k` is 1, correlated `= T.Id` in the subquery's
+    // WHERE, so the EXISTS is TRUE only for the outer row `Id = 1`.
+    try fixture().expect(
+        """
+        SELECT Id FROM T \
+        WHERE EXISTS (SELECT 1 FROM (SELECT 1 AS k) AS d WHERE d.k = T.Id)
+        """,
+        yields: [[1]])
+  }
+
+  @Test func `a correlated scalar subquery binds its own derived table`()
+      throws {
+    // The scalar variant: `(SELECT d.k FROM (SELECT 1 AS k) AS d WHERE d.k =
+    // T.Id)` derives `d.k` (a self-contained 1) and correlates it `= T.Id` per
+    // outer row, collapsing to 1 for `Id = 1` and NULL (no matching row) for
+    // the rest. Pre-fix it faulted `.relation("d")`; post-fix `d` binds a row.
+    try fixture().expect(
+        """
+        SELECT (SELECT d.k FROM (SELECT 1 AS k) AS d WHERE d.k = T.Id) \
+        FROM T
+        """,
+        yields: [[1], [nil], [nil]])
+  }
+
+  @Test func `a correlated IN binds its own derived table`() throws {
+    // The `IN (Q)` variant: `Id IN (SELECT d.k FROM (SELECT 1 AS k) AS d WHERE
+    // d.k = T.Id)` — the correlated subquery yields its self-contained `d.k`
+    // (1) only when `d.k = T.Id`, so it is TRUE for `Id = 1` alone. Pre-fix the
+    // per-row execute faulted `.relation("d")`; post-fix `d` binds each row.
+    try fixture().expect(
+        """
+        SELECT Id FROM T \
+        WHERE Id IN (SELECT d.k FROM (SELECT 1 AS k) AS d WHERE d.k = T.Id)
+        """,
+        yields: [[1]])
+  }
+
+  @Test func `a correlated EXISTS setop binds each arm's derived table`()
+      throws {
+    // The SET-OPERATION shape: the correlated `EXISTS` subquery is a `UNION
+    // ALL` whose LEFT arm derives its own `d` and correlates it `d.k = T.Id`,
+    // and whose RIGHT arm is a bare `SELECT 2`. Pre-fix the correlated
+    // augment-and-execute augmented at the QUERY level, binding no arm-local
+    // `d`, so the left arm's `.scan("d")` faulted `.relation("d")`; post-fix
+    // it augments EACH ARM, so `d` binds per outer row. The right arm always
+    // yields a row, so the EXISTS is TRUE for every outer row.
+    try fixture().expect(
+        """
+        SELECT Id FROM T WHERE EXISTS ( \
+        SELECT k FROM (SELECT 1 AS k) AS d WHERE d.k = T.Id \
+        UNION ALL SELECT 2)
+        """,
+        yields: [[1], [2], [3]])
+  }
+
+  @Test func `a correlated IN setop keeps only the row its arm derives`()
+      throws {
+    // A DISCRIMINATING setop: `Id IN (SELECT d.k … WHERE d.k = T.Id UNION ALL
+    // SELECT 9)`. The right arm contributes the constant 9 (never an `Id`), so
+    // the membership turns ONLY on the left arm's per-row correlated
+    // derivation — `d.k` (1) is in the column iff `T.Id = 1`. So only the outer
+    // row `Id = 1` is kept, proving each arm augments its OWN `d` under the
+    // per-row correlation rather than merely not faulting.
+    try fixture().expect(
+        """
+        SELECT Id FROM T WHERE Id IN ( \
+        SELECT d.k FROM (SELECT 1 AS k) AS d WHERE d.k = T.Id \
+        UNION ALL SELECT 9)
+        """,
+        yields: [[1]])
+  }
+}
+
 // MARK: - HAVING subquery reachability
 
 /// A whole-result aggregate under a statically-false `WHERE` emits one empty
@@ -1651,5 +1860,118 @@ struct FromlessScalarReservedRelationTests {
         + "THEN 1 ELSE 0 END")
     let columns = try fixture().columns(of: query, validate: true)
     #expect(columns.count == 1)
+  }
+}
+
+// MARK: - Per-occurrence correlated plan cache
+
+/// Two outer relations whose correlated key `k` sits at DIFFERENT ordinals —
+/// `Outer1.k` at ordinal 0, `Outer2.k` at ordinal 1 — and one inner source
+/// `Src`, so the SAME scalar subquery SQL `(SELECT m FROM Src WHERE m = k)` in
+/// each arm of a `UNION ALL` compiles under a DIFFERENT outer layout: the left
+/// arm binds `:__correlated_0_0`, the right `:__correlated_0_1`.
+private func layouts() throws -> FixtureCatalog {
+  try Catalog {
+    Relation("Outer1", ["k": .integer, "a": .integer]) {
+      Row(1, 100)
+      Row(2, 200)
+    }
+    Relation("Outer2", ["b": .integer, "k": .integer]) {
+      Row(300, 3)
+      Row(400, 4)
+    }
+    Relation("Src", ["m": .integer]) {
+      Row(1)
+      Row(2)
+      Row(3)
+      Row(4)
+    }
+  }
+}
+
+/// Batch 7, Item 2: identical CORRELATED inner SQL in two set-operation arms
+/// under DIFFERENT outer layouts must each execute the plan keyed to ITS OWN
+/// correlation. Keying the plan cache by the occurrence `Subkey` alone
+/// (scope + query + role) collapses the two arms — same `.caller` scope, same
+/// AST, same `.scalar` role — so the right arm read the LEFT arm's plan (which
+/// binds `:__correlated_0_0`) while its own row binds `:__correlated_0_1`,
+/// yielding NULL. The `PlanKey` composes the correlation's parameter names into
+/// the cache identity, so each arm finds its own plan.
+struct CorrelatedPlanOccurrenceTests {
+  @Test func `identical correlated SQL in two UNION ALL arms binds each`()
+      throws {
+    // `Outer1.k` at ordinal 0 → `:__correlated_0_0`; `Outer2.k` at ordinal 1 →
+    // `:__correlated_0_1`. The scalar `(SELECT m FROM Src WHERE m = k)` returns
+    // its lone matching `m` per outer row: the left arm over `k` {1, 2} yields
+    // 1, 2; the right arm over `k` {3, 4} yields 3, 4. Pre-fix the right arm
+    // read the left arm's plan and yielded NULL, NULL.
+    try layouts().expect(
+        """
+        SELECT (SELECT m FROM Src WHERE m = k) FROM Outer1 \
+        UNION ALL SELECT (SELECT m FROM Src WHERE m = k) FROM Outer2
+        """,
+        yields: [[1], [2], [3], [4]])
+  }
+}
+
+/// A join `ON` in a correlated subquery whose equality references an ENCLOSING
+/// column: an outer `T`, and a subquery joining `U` and `V` whose `ON`
+/// correlates `V.x` to the outer `T.Id`.
+///
+/// `V.x` matches `T.Id` ∈ {1, 2}; `U` is a single row, so the correlated
+/// `EXISTS (SELECT 1 FROM U JOIN V ON V.x = T.Id)` is TRUE exactly for those
+/// outer rows. The uncorrelated parity `ON V.x = U.y` is a genuine
+/// column = column equi-join key (`U.y` = 2 matches `V.x` = 2), so it is STILL
+/// extracted as the hash-join match key and the join runs.
+private func joined() throws -> FixtureCatalog {
+  try Catalog {
+    Relation("T", ["Id": .integer]) {
+      Row(1)
+      Row(2)
+      Row(3)
+      Row(4)
+    }
+    Relation("U", ["y": .integer]) {
+      Row(2)
+    }
+    Relation("V", ["x": .integer]) {
+      Row(1)
+      Row(2)
+    }
+  }
+}
+
+struct CorrelatedJoinOnTests {
+  @Test func `a correlated join ON stays the residual filter`() throws {
+    // `ON V.x = T.Id` lowers to `compare(.slot, .equal, .parameter)` — a
+    // CORRELATED equality against the outer `T.Id`, not a column = column key.
+    // Reading the key off the lowered term leaves it the residual `ON` filter,
+    // evaluated per outer `T` row (`V.x = :outer_Id`). Pre-fix the fast path
+    // re-resolved the ORIGINAL AST via `match(V.x, T.Id)`, which consults ONLY
+    // the join prefix (`U`, `V`) and faulted `SQLError.column("Id")` on the
+    // already-lowered outer column. `V.x` ∈ {1, 2} matches `T.Id` ∈ {1, 2}.
+    try joined().expect(
+        "SELECT Id FROM T WHERE EXISTS (SELECT 1 FROM U JOIN V ON V.x = T.Id)",
+        yields: [[1], [2]])
+  }
+
+  @Test func `columns validates a correlated join ON`() throws {
+    // The schema path must accept exactly what the run does — no prefix-only
+    // re-resolution fault on the correlated outer column.
+    let query = try parse(query:
+        "SELECT Id FROM T WHERE EXISTS (SELECT 1 FROM U JOIN V ON V.x = T.Id)")
+    let columns = try joined().columns(of: query, validate: true)
+    #expect(columns.count == 1)
+  }
+
+  @Test func `an uncorrelated join ON still extracts its equi key`() throws {
+    // PARITY: `ON V.x = U.y` is a genuine column = column equality lowering to
+    // `compare(.slot, .equal, .slot)`, so it is STILL extracted as the
+    // hash-join match key (see `EngineNonEquiJoinTests` for the plan-shape
+    // guard). `U.y` = 2 matches `V.x` = 2, so the join is non-empty and the
+    // UNCORRELATED `EXISTS` is TRUE for EVERY outer `T` row.
+    try joined().expect(
+        "SELECT Id FROM T WHERE EXISTS (SELECT 1 FROM U JOIN V ON V.x = U.y)",
+        yields: [[1], [2], [3], [4]])
   }
 }

@@ -550,13 +550,13 @@ struct EngineCodedKeyTests {
 
     let equal = try parse("SELECT Name FROM Attribute WHERE Parent = 4")
     let equalPlan =
-        try catalog.optimise(catalog.compile(equal), [:])
+        try catalog.optimise(catalog.compile(equal, validate: true), [:])
     #expect(seeks(equalPlan))
     #expect(!filters(equalPlan))
 
     let less = try parse("SELECT Name FROM Attribute WHERE Parent < 5")
     let lessPlan =
-        try catalog.optimise(catalog.compile(less), [:])
+        try catalog.optimise(catalog.compile(less, validate: true), [:])
     #expect(!seeks(lessPlan))
     #expect(filters(lessPlan))
   }
@@ -585,7 +585,7 @@ struct EngineCodedKeyTests {
       }
     }
     let query = try parse("SELECT * FROM T WHERE Id = 1")
-    let plan = try catalog.optimise(catalog.compile(query), [:])
+    let plan = try catalog.optimise(catalog.compile(query, validate: true), [:])
     #expect(seeks(plan))
   }
 
@@ -596,7 +596,7 @@ struct EngineCodedKeyTests {
       Relation("T", ["Id": .integer], sorted: "Id")
     }
     let query = try parse("SELECT * FROM T WHERE Id = 1")
-    let plan = try catalog.optimise(catalog.compile(query), [:])
+    let plan = try catalog.optimise(catalog.compile(query, validate: true), [:])
     #expect(seeks(plan))
   }
 }
@@ -798,8 +798,8 @@ struct EngineNonEquiJoinTests {
         SELECT Parent.Name, Child.Name FROM Parent
           JOIN Child ON Parent.Id < Child.Pid
         """)
-    let plan =
-        try catalog.optimise(catalog.compile(select).pushdown(), [:])
+    let compiled = try catalog.compile(select, validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(!joins(plan))
     #expect(residual(plan))
   }
@@ -829,8 +829,8 @@ struct EngineNonEquiJoinTests {
         SELECT Parent.Name, Child.Name FROM Parent
           JOIN Child ON Child.Pid = Parent.Id AND Parent.Name < Child.Name
         """)
-    let plan =
-        try catalog.optimise(catalog.compile(select).pushdown(), [:])
+    let compiled = try catalog.compile(select, validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(joins(plan))
   }
 
@@ -853,8 +853,8 @@ struct EngineNonEquiJoinTests {
         SELECT Parent.Name, Child.Name FROM Parent
           JOIN Child ON Child.Pid = Parent.Id + 1
         """)
-    let plan =
-        try catalog.optimise(catalog.compile(select).pushdown(), [:])
+    let compiled = try catalog.compile(select, validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(!joins(plan))
     #expect(residual(plan))
   }
@@ -914,8 +914,8 @@ struct EngineNonEquiJoinTests {
     let select = try parse("""
         SELECT A.k FROM A JOIN B ON (1 / A.x) = 0 AND A.k = B.k
         """)
-    let plan =
-        try catalog.optimise(catalog.compile(select).pushdown(), [:])
+    let compiled = try catalog.compile(select, validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(!joins(plan))
     #expect(residual(plan))
   }
@@ -933,9 +933,10 @@ struct EngineNonEquiJoinTests {
       "B": FixtureRelation([Field(name: "k", type: .integer)],
                     [[.integer(2)]] as Array<Array<Value>>),
     ])
-    let plan = try catalog.optimise(catalog.compile(parse("""
+    let compiled = try catalog.compile(parse("""
         SELECT A.k FROM A JOIN B ON A.k = B.k AND (1 / A.x) = 0
-        """)).pushdown(), [:])
+        """), validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(!joins(plan))
     #expect(residual(plan))
   }
@@ -954,9 +955,10 @@ struct EngineNonEquiJoinTests {
       "B": FixtureRelation([Field(name: "k", type: .integer)],
                     [[.integer(2)]] as Array<Array<Value>>),
     ])
-    let plan = try catalog.optimise(catalog.compile(parse("""
+    let compiled = try catalog.compile(parse("""
         SELECT A.k FROM A JOIN B ON A.k = B.k AND (1 / A.x) = 0
-        """)).pushdown(), [:])
+        """), validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(!joins(plan))
     #expect(residual(plan))
     #expect(throws: SQLError.divide) {
@@ -1005,8 +1007,8 @@ struct EngineNonEquiJoinTests {
     // Key pairs (1,1) with 5 < 8 kept; (2,2) with 10 < 3 dropped.
     let rows = try catalog.run(parse(text))
     #expect(rows == [[.integer(1), .integer(8)]])
-    let plan =
-        try catalog.optimise(catalog.compile(parse(text)).pushdown(), [:])
+    let compiled = try catalog.compile(parse(text), validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(joins(plan))
   }
 
@@ -1018,8 +1020,8 @@ struct EngineNonEquiJoinTests {
         SELECT Parent.Name, Child.Name FROM Parent
           JOIN Child ON Child.Pid = Parent.Id
         """)
-    let plan =
-        try catalog.optimise(catalog.compile(select).pushdown(), [:])
+    let compiled = try catalog.compile(select, validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(joins(plan))
   }
 
@@ -1038,8 +1040,8 @@ struct EngineNonEquiJoinTests {
                            [[.integer(2)]] as Array<Array<Value>>),
     ])
     let text = "SELECT A.k FROM A JOIN B ON A.k < B.k WHERE (1 / A.x) = 0"
-    let plan =
-        try catalog.optimise(catalog.compile(parse(text)).pushdown(), [:])
+    let compiled = try catalog.compile(parse(text), validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(separated(plan))
     #expect(residual(plan))
     #expect(try catalog.run(parse(text)).isEmpty)
@@ -1104,8 +1106,8 @@ struct EngineNonEquiJoinTests {
         SELECT A.k1 FROM A
           JOIN B ON A.k1 = B.k1 AND A.k2 = B.k2 WHERE (1 / A.x) = 0
         """
-    let plan =
-        try catalog.optimise(catalog.compile(parse(text)).pushdown(), [:])
+    let compiled = try catalog.compile(parse(text), validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     // The equi key still hash-joins; the leftover match gates above it, and the
     // `WHERE` is a SEPARATE `select` above that gate, not fused with the match.
     #expect(joins(plan))
@@ -1162,8 +1164,8 @@ struct EngineNonEquiJoinTests {
         SELECT A.tag, B.note FROM A
           JOIN B ON A.k1 = B.k1 AND A.k2 = B.k2 WHERE A.tag = 'keep'
         """
-    let plan =
-        try catalog.optimise(catalog.compile(parse(text)).pushdown(), [:])
+    let compiled = try catalog.compile(parse(text), validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(joins(plan))
     #expect(try catalog.run(parse(text)) == [[.text("keep"), .text("bee")]])
   }
@@ -1185,8 +1187,8 @@ struct EngineNonEquiJoinTests {
                            [[.integer(1)]] as Array<Array<Value>>),
     ])
     let text = "SELECT A.k FROM A JOIN B ON A.k = B.k WHERE (1 / A.x) = 1"
-    let plan =
-        try catalog.optimise(catalog.compile(parse(text)).pushdown(), [:])
+    let compiled = try catalog.compile(parse(text), validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(joins(plan))
     #expect(try catalog.run(parse(text)) == [[.integer(1)]])
   }
@@ -1319,8 +1321,8 @@ struct EngineOuterJoinTests {
         SELECT Parent.Name, Child.Name FROM Parent
           LEFT JOIN Child ON Child.Pid = Parent.Id
         """)
-    let plan =
-        try catalog.optimise(catalog.compile(select).pushdown(), [:])
+    let compiled = try catalog.compile(select, validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(outers(plan))
     #expect(!joins(plan))
   }
@@ -1567,7 +1569,8 @@ struct EngineViewTests {
     // `.scan` (a non-nil seek) and carry no `.select` over a raw scan.
     let catalog = try views()
     let select = try parse("SELECT Key, Label FROM Adults")
-    let plan = try catalog.optimise(catalog.compile(select), [:])
+    let compiled = try catalog.compile(select, validate: true)
+    let plan = try catalog.optimise(compiled, [:])
     let sub = try #require(derived(plan))
     #expect(seeks(sub))
     #expect(!filters(sub))
@@ -1979,8 +1982,8 @@ struct EnginePushdownTests {
         SELECT Child.Name FROM Parent JOIN Child ON Child.Pid = Parent.Id
           WHERE Parent.Name = 'Ada'
         """)
-    let plan =
-        try catalog.optimise(catalog.compile(select).pushdown(), [:])
+    let compiled = try catalog.compile(select, validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(pushed(plan))
   }
 
@@ -1992,8 +1995,8 @@ struct EnginePushdownTests {
         SELECT Child.Name FROM Parent JOIN Child ON Child.Pid = Parent.Id
           WHERE Parent.Id = 2
         """)
-    let plan =
-        try catalog.optimise(catalog.compile(select).pushdown(), [:])
+    let compiled = try catalog.compile(select, validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(seeks(plan))
     #expect(pushed(plan))
   }
@@ -2018,8 +2021,8 @@ struct EnginePushdownTests {
     let select = try parse("""
         SELECT Name FROM T WHERE Name <> 'x' AND Age > 0 AND Id = 5
         """)
-    let plan =
-        try catalog.optimise(catalog.compile(select).pushdown(), [:])
+    let compiled = try catalog.compile(select, validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(seeks(plan))
   }
 
@@ -2045,8 +2048,8 @@ struct EnginePushdownTests {
         """)
 
     // The unsafe `(1 / x) = 0` residual bars the `id < 0` seek — the plan scans.
-    let plan =
-        try catalog.optimise(catalog.compile(select).pushdown(), [:])
+    let compiled = try catalog.compile(select, validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(!seeks(plan))
 
     // …and the scan raises the division rather than seeking past the empty run.
@@ -2075,8 +2078,8 @@ struct EnginePushdownTests {
         SELECT Child.Name, Parent.Name FROM Child
           JOIN Parent ON Parent.Id = Child.Pid WHERE Parent.Name <> 'zz'
         """)
-    let plan =
-        try catalog.optimise(catalog.compile(select).pushdown(), [:])
+    let compiled = try catalog.compile(select, validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(joins(plan))
 
     // …and it returns the correct rows: every child with a matching parent,
@@ -2100,8 +2103,8 @@ struct EnginePushdownTests {
         SELECT Child.Name, Parent.Name FROM Parent
           JOIN Child ON Child.Pid = Parent.Id WHERE Parent.Name <> Child.Name
         """)
-    let plan =
-        try catalog.optimise(catalog.compile(select).pushdown(), [:])
+    let compiled = try catalog.compile(select, validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(joins(plan))
     #expect(floats(plan))
 
@@ -2228,8 +2231,8 @@ struct EnginePushdownTests {
     // and seeking the sorted `Alpha` arm.
     let catalog = try spanned()
     let select = try parse("SELECT Tag FROM Both WHERE Key = 2")
-    let plan =
-        try catalog.optimise(catalog.compile(select).pushdown(), [:])
+    let compiled = try catalog.compile(select, validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(injected(plan))
     #expect(seeks(plan))
 
@@ -2300,8 +2303,8 @@ struct EnginePushdownTests {
 
     // `A.x = 1` is nullable and precedes the unsafe division, so it is NOT
     // pushed to the `A` leaf — it floats at the product level.
-    let plan =
-        try catalog.optimise(catalog.compile(select).pushdown(), [:])
+    let compiled = try catalog.compile(select, validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(!pushed(plan))
     #expect(floats(plan))
 
@@ -2329,8 +2332,8 @@ struct EnginePushdownTests {
 
     // `x = 1` is nullable and precedes the unsafe division, so it is NOT
     // injected into the view — it floats above the derived leaf.
-    let plan =
-        try catalog.optimise(catalog.compile(select).pushdown(), [:])
+    let compiled = try catalog.compile(select, validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(floats(plan))
 
     // …and the query raises rather than silently dropping the row.
@@ -2359,8 +2362,8 @@ struct EnginePushdownTests {
     // `1 = :missing` is a slotless bound predicate, hence nullable; it precedes
     // the unsafe division, so it is NOT injected into the view — it floats above
     // the derived leaf.
-    let plan =
-        try catalog.optimise(catalog.compile(select).pushdown(), [:])
+    let compiled = try catalog.compile(select, validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(floats(plan))
 
     // …and the query raises rather than silently dropping the row.
@@ -2665,8 +2668,8 @@ struct EngineStreamingProductTests {
         SELECT Child.Name, Adults.Label FROM Child
           JOIN Adults ON Adults.Key = Child.Pid
         """)
-    let plan =
-        try catalog.optimise(catalog.compile(select).pushdown(), [:])
+    let compiled = try catalog.compile(select, validate: true)
+    let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(residual(plan))
   }
 
@@ -3271,7 +3274,7 @@ struct EngineBoundTests {
     // seeks the run rather than scanning and filtering the whole relation.
     let select = try parse("SELECT Name FROM Parent WHERE Id = :id")
     let catalog = try family()
-    let plan = try catalog.optimise(catalog.compile(select),
+    let plan = try catalog.optimise(catalog.compile(select, validate: true),
                                     ["id": .integer(2)])
     #expect(seeks(plan))
     #expect(!filters(plan))
@@ -3280,7 +3283,8 @@ struct EngineBoundTests {
   @Test func `an unbound key cannot seek and scans under the filter`() throws {
     let select = try parse("SELECT Name FROM Parent WHERE Id = :id")
     let catalog = try family()
-    let plan = try catalog.optimise(catalog.compile(select), [:])
+    let compiled = try catalog.compile(select, validate: true)
+    let plan = try catalog.optimise(compiled, [:])
     #expect(!seeks(plan))
     #expect(filters(plan))
   }
@@ -3291,7 +3295,7 @@ struct EngineBoundTests {
     // supplied, so a reusable view is as fast as the inlined query.
     let select = try parse("SELECT Key, Label FROM Picked")
     let catalog = try views()
-    let plan = try catalog.optimise(catalog.compile(select),
+    let plan = try catalog.optimise(catalog.compile(select, validate: true),
                                     ["id": .integer(2)])
     let sub = try #require(derived(plan))
     #expect(seeks(sub))

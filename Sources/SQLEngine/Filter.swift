@@ -79,7 +79,7 @@ internal indirect enum Filter: Equatable, Sendable {
   /// flipping it (never UNKNOWN). It reads no cell of the outer row. An
   /// EXISTS-only occurrence is materialised as a cardinality PROBE — its select
   /// list never evaluated. A later correlated slice re-runs `Q` per outer row.
-  case exists(Subkey, negated: Bool)
+  case exists(Subkey, correlation: Correlation, negated: Bool)
   /// `x [NOT] IN (Q)` — the lowered form of the AST's `within`. The subquery
   /// occurrence is carried as its cache `Subkey` — never run during `compile` —
   /// and its single-column arity is enforced at COMPILE from its compiled width
@@ -91,7 +91,7 @@ internal indirect enum Filter: Equatable, Sendable {
   /// unmatched test UNKNOWN, an EMPTY result FALSE, and `negated` (`NOT IN`)
   /// negating the three-valued result (UNKNOWN maps to itself). The operand
   /// `Term` is evaluated once per row.
-  case within(Term, Subkey, negated: Bool)
+  case within(Term, Subkey, correlation: Correlation, negated: Bool)
   /// `x op {ANY | ALL} (Q)` — the lowered form of the AST's `quantified`. The
   /// operand term `x` is held ONCE, the comparison `op` and the `Quantifier`
   /// beside it, and the subquery occurrence as its cache `Subkey` (its
@@ -104,8 +104,11 @@ internal indirect enum Filter: Equatable, Sendable {
   /// FALSE), Kleene `AND` for `all` (seeded TRUE), so a NULL `x` or element
   /// makes an otherwise-undecided fold UNKNOWN, and an EMPTY column takes the
   /// seed — `any` FALSE, `all` TRUE. The operand `Term` is evaluated once per
-  /// row.
-  case quantified(Term, Comparison, Quantifier, Subkey)
+  /// row. A CORRELATED occurrence carries the discovered `correlation` (as
+  /// `within` does) and re-runs its inner plan per outer row; an UNCORRELATED
+  /// one carries an empty correlation and memoises once.
+  case quantified(Term, Comparison, Quantifier, Subkey,
+                  correlation: Correlation)
   /// `p IS [NOT] <truth value>` — the lowered form of the AST's `truth`. The
   /// inner boolean `Filter` is held once and evaluated to its three-valued
   /// result, which is then MAPPED against `value` (`TRUE`/`FALSE`/`UNKNOWN`) to
@@ -147,6 +150,14 @@ internal indirect enum Filter: Equatable, Sendable {
 internal indirect enum Term: Equatable, Sendable {
   /// The cell at `slot` of the record.
   case slot(Int)
+  /// A run-time `:parameter`, resolved from the engine's bindings — the lowered
+  /// form of a CORRELATED subquery's reference to an ENCLOSING query's column.
+  /// An outer column the inner query names binds neither locally nor as an
+  /// ordinary parameter; it lowers to this synthetic name, and the per-outer-row
+  /// re-execution binds it to that row's cell before running the inner plan (see
+  /// `Correlation`). An unbound name (or one bound to NULL) reads `.null`, so a
+  /// comparison against it is UNKNOWN, exactly as a `Filter.bound` operand is.
+  case parameter(String)
   /// A constant value.
   case constant(Value)
   /// A call to the named scalar function over its argument terms, in order.
@@ -196,7 +207,7 @@ internal indirect enum Term: Equatable, Sendable {
   /// value, COERCED to `type` — the inner column's single-column type — as a
   /// `CASE` coerces its selected arm. A later correlated slice re-runs it per
   /// outer row.
-  case subquery(Subkey, type: ValueType)
+  case subquery(Subkey, correlation: Correlation, type: ValueType)
 }
 
 extension Term {
@@ -212,6 +223,8 @@ extension Term {
   internal static func ==(lhs: Term, rhs: Term) -> Bool {
     switch (lhs, rhs) {
     case let (.slot(lhs), .slot(rhs)):
+      lhs == rhs
+    case let (.parameter(lhs), .parameter(rhs)):
       lhs == rhs
     case let (.constant(lhs), .constant(rhs)):
       lhs == rhs
@@ -232,8 +245,8 @@ extension Term {
       lelems == relems && ltype == rtype
     case let (.nullif(ll, lr), .nullif(rl, rr)):
       ll == rl && lr == rr
-    case let (.subquery(lkey, ltype), .subquery(rkey, rtype)):
-      lkey == rkey && ltype == rtype
+    case let (.subquery(lkey, lcorr, ltype), .subquery(rkey, rcorr, rtype)):
+      lkey == rkey && lcorr == rcorr && ltype == rtype
     default:
       false
     }
@@ -248,6 +261,11 @@ extension Term {
     switch self {
     case let .slot(slot):
       slots.insert(slot)
+    case .parameter:
+      // A correlated `:parameter` reads no cell of THIS row — its value comes
+      // from an enclosing row bound into the run's bindings — so it references
+      // no slot of the current record.
+      break
     case .constant:
       break
     case let .apply(_, arguments):
@@ -272,10 +290,14 @@ extension Term {
     case let .nullif(lhs, rhs):
       lhs.references(into: &slots)
       rhs.references(into: &slots)
-    case .subquery:
-      // An UNCORRELATED scalar subquery reads no cell of the outer row — its
-      // value is materialised once from the cache — so it references no slot.
-      break
+    case let .subquery(_, correlation, _):
+      // A CORRELATED scalar subquery reads the enclosing row's cells its inner
+      // `WHERE` names — the correlation's `slot` outer ordinals — so those must
+      // be materialised into the outer record for the per-row re-execution to
+      // bind them. A `bound` source is a threaded binding, not an outer cell, so
+      // it references none. An UNCORRELATED one (empty correlation) references
+      // none — its value is a single cache lookup.
+      slots.formUnion(correlation.slots)
     }
   }
 }
@@ -288,6 +310,10 @@ extension Term {
     switch self {
     case let .slot(ordinal):
       .slot(slot[ordinal]!)
+    case .parameter:
+      // A correlated `:parameter` reads the bindings, not a slot, so the
+      // ordinal-to-slot remap leaves it unchanged.
+      self
     case .constant:
       self
     case let .apply(name, arguments):
@@ -305,9 +331,13 @@ extension Term {
       .coalesce(elements.map { $0.remapped(through: slot) }, type: type)
     case let .nullif(lhs, rhs):
       .nullif(lhs.remapped(through: slot), rhs.remapped(through: slot))
-    case .subquery:
-      // A scalar subquery reads no ordinal (uncorrelated), so it is unchanged.
-      self
+    case let .subquery(key, correlation, type):
+      // A CORRELATED scalar subquery's correlation reads OUTER ordinals; remap
+      // each `slot` to its packed slot so the per-row re-execution reads the
+      // outer record's cell (a `bound` source is unchanged — it reads a threaded
+      // binding). An UNCORRELATED one has an empty map and is unchanged.
+      .subquery(key, correlation: correlation.remapped(through: slot),
+                type: type)
     }
   }
 
@@ -318,8 +348,35 @@ extension Term {
   /// is NOT known safe, whatever its operands.
   internal var safe: Bool {
     switch self {
-    case .slot, .constant: true
+    // A `:parameter` is a bindings lookup, never a fault — safe, as
+    // `Filter.Operand.parameter` is.
+    case .slot, .parameter, .constant: true
     case .apply, .binary, .case, .cast, .coalesce, .nullif, .subquery: false
+    }
+  }
+
+  /// Whether this term reads a run-time `:parameter` anywhere — a CORRELATED
+  /// subquery's synthetic outer binding, which may be unbound or bound to NULL,
+  /// so a comparison over it can be UNKNOWN even when it reads NO slot. Selection
+  /// pushdown reads this (through `Filter.nullable`) so a `.compare`/`.null` over
+  /// a correlated `:parameter` — a slotless `outer_id = 1` — is not moved ahead
+  /// of a later unsafe conjunct the non-short-circuiting `AND` still owes, the
+  /// same treatment a `Filter.bound` parameter already gets.
+  internal var parameterised: Bool {
+    switch self {
+    case .parameter: true
+    case .slot, .constant: false
+    case let .apply(_, arguments): arguments.contains(where: \.parameterised)
+    case let .binary(_, lhs, rhs): lhs.parameterised || rhs.parameterised
+    case let .case(branches, otherwise, _):
+      branches.contains { $0.0.parameterised || $0.1.parameterised }
+          || (otherwise?.parameterised ?? false)
+    case let .cast(operand, _): operand.parameterised
+    case let .coalesce(elements, _): elements.contains(where: \.parameterised)
+    case let .nullif(lhs, rhs): lhs.parameterised || rhs.parameterised
+    // A scalar `.subquery` carries its correlation on the `Filter` side and is
+    // never `safe`, so it stays un-pushed regardless; report false here.
+    case .subquery: false
     }
   }
 
@@ -377,13 +434,14 @@ extension Filter.Operand {
   }
 
   /// Whether this operand reads a run-time `:parameter` — a `.parameter` is
-  /// one (it may be unbound or bound to NULL, so a `LIKE` over it is UNKNOWN);
-  /// a `.term` is not, a `Term` carrying no parameter of its own. `Filter.like`
-  /// folds this over its pattern and escape so a parameterised `LIKE` stays off
-  /// a pushdown below a later unsafe conjunct (see `Filter.nullable`).
+  /// one (it may be unbound or bound to NULL, so a `LIKE` over it is UNKNOWN),
+  /// and a `.term` is one when its `Term` itself carries a correlated
+  /// `Term.parameter`. `Filter.like` folds this over its pattern and escape so a
+  /// parameterised `LIKE` stays off a pushdown below a later unsafe conjunct
+  /// (see `Filter.nullable`).
   internal var parameterised: Bool {
     switch self {
-    case .term: false
+    case let .term(term): term.parameterised
     case .parameter: true
     }
   }
@@ -416,18 +474,26 @@ extension Filter {
     case let .distinct(lhs, rhs, negated):
       .distinct(lhs.remapped(through: slot), rhs.remapped(through: slot),
                 negated: negated)
-    case let .exists(key, negated):
-      // An UNCORRELATED EXISTS reads no outer slot — its subquery names no
-      // enclosing column — so the remap passes its cache key through unchanged.
-      .exists(key, negated: negated)
-    case let .within(operand, key, negated):
-      // Only the outer operand term reads slots; the subquery is uncorrelated,
-      // so remap the operand alone and carry the cache key through.
-      .within(operand.remapped(through: slot), key, negated: negated)
-    case let .quantified(operand, op, quantifier, key):
-      // As `within`: only the outer operand reads slots; the uncorrelated
-      // subquery's cache key passes through unchanged.
-      .quantified(operand.remapped(through: slot), op, quantifier, key)
+    case let .exists(key, correlation, negated):
+      // A CORRELATED EXISTS reads the enclosing row's cells its inner `WHERE`
+      // names; remap each `slot` outer ordinal to its packed slot (a `bound`
+      // source is unchanged). An UNCORRELATED one has an empty map and passes its
+      // cache key through unchanged.
+      .exists(key, correlation: correlation.remapped(through: slot),
+              negated: negated)
+    case let .within(operand, key, correlation, negated):
+      // The outer operand term reads slots; a CORRELATED subquery ALSO reads the
+      // outer cells its inner `WHERE` names, so remap both. An UNCORRELATED one
+      // carries an empty correlation.
+      .within(operand.remapped(through: slot), key,
+              correlation: correlation.remapped(through: slot),
+              negated: negated)
+    case let .quantified(operand, op, quantifier, key, correlation):
+      // As `within`: the outer operand term reads slots; a CORRELATED subquery
+      // ALSO reads the outer cells its inner `WHERE` names, so remap both. An
+      // UNCORRELATED one carries an empty correlation.
+      .quantified(operand.remapped(through: slot), op, quantifier, key,
+                  correlation: correlation.remapped(through: slot))
     case let .truth(inner, value, negated):
       .truth(inner.remapped(through: slot), value, negated: negated)
     case let .and(lhs, rhs):
@@ -519,19 +585,17 @@ extension Filter {
     case let .between(test, lower, upper, _):
       test.safe && lower.safe && upper.safe
     case let .distinct(lhs, rhs, _): lhs.safe && rhs.safe
-    case .exists:
-      // An UNCORRELATED EXISTS reads no outer row — its subquery ran once at run
-      // start into the memo — so evaluating it is a decided lookup that cannot
-      // throw over an empty product.
-      true
-    case let .within(operand, _, _):
-      // Only the outer operand term is evaluated; the subquery's memoised
-      // values are folded under `matches`, which never throws.
-      operand.safe
-    case let .quantified(operand, _, _, _):
-      // As `within`: only the outer operand is evaluated, the memoised values
-      // folded under `matches`, which never throws.
-      operand.safe
+    case .exists, .within, .quantified:
+      // A subquery predicate is NEVER safe to push below a seek or short-
+      // circuiting derived/view filter. Under LAZY materialisation the FIRST
+      // evaluation of even an UNCORRELATED occurrence RUNS the inner query,
+      // which may FAULT (`EXISTS (SELECT 1 FROM S WHERE 1 / z = 0)`); a
+      // CORRELATED one re-runs per outer row. Pushed below a short-circuiting
+      // filter — a view's `WHERE 1 = 0`, a seek — it would be evaluated for a
+      // row the filter drops, raising a throw the unmoved query never reaches,
+      // so it stays at the product level, run only where the outer predicate
+      // reaches it.
+      false
     case let .truth(inner, _, _): inner.safe
     case let .and(lhs, rhs): lhs.safe && rhs.safe
     case let .or(lhs, rhs): lhs.safe && rhs.safe
@@ -585,24 +649,41 @@ extension Filter {
   }
 
   /// Whether this filter compares against a run-time `:parameter` — a `.bound`
-  /// anywhere in it, a `.like` whose pattern or escape operand is a
-  /// `:parameter`, or a `.between` whose lower or upper bound is one. Such a
-  /// predicate reads no slot yet can be UNKNOWN, because the parameter may be
-  /// unbound (or bound to NULL), so `nullable` counts it even when `slots` is
-  /// empty — keeping `'x' LIKE :p` or `1 BETWEEN :lo AND :hi` off a pushdown
-  /// below a later unsafe conjunct the non-short-circuiting `AND` still owes.
-  private var parameterised: Bool {
+  /// anywhere in it, a `.compare`/`.null`/`.membership`/`.distinct` whose TERM
+  /// carries a `Term.parameter` (a CORRELATED subquery's synthetic outer
+  /// binding), a `.like` whose pattern or escape operand is a `:parameter`, or a
+  /// `.between` whose test or bound carries one. Such a predicate reads no slot
+  /// yet can be UNKNOWN, because the parameter may be unbound (or bound to
+  /// NULL), so `nullable` counts it even when `slots` is empty — keeping `'x'
+  /// LIKE :p`, `1 BETWEEN :lo AND :hi`, or a correlated slotless `outer_id = 1`
+  /// off a pushdown below a later unsafe conjunct the non-short-circuiting `AND`
+  /// still owes.
+  ///
+  /// `internal` (not `private`) so `Term.parameterised` can consult a `.case`
+  /// guard `Filter` for a correlated `:parameter`.
+  internal var parameterised: Bool {
     switch self {
     case .bound: true
-    case .compare, .match, .null, .membership, .distinct: false
+    // A term-bearing predicate is parameterised when a TERM carries a correlated
+    // `Term.parameter` — a slotless comparison that can be UNKNOWN, so it must
+    // not ride ahead of a later unsafe conjunct, the same treatment `.bound`
+    // gets.
+    case let .compare(lhs, _, rhs): lhs.parameterised || rhs.parameterised
+    case let .null(term, _): term.parameterised
+    case let .membership(operand, elements, _):
+      operand.parameterised || elements.contains(where: \.parameterised)
+    case let .distinct(lhs, rhs, _): lhs.parameterised || rhs.parameterised
+    case .match: false
     // An UNCORRELATED subquery predicate reads no run-time `:parameter` of the
     // OUTER query — the subquery runs once at run start with the same bindings —
-    // so none is parameterised for the outer row.
+    // so none is parameterised for the outer row. A CORRELATED one is already
+    // NOT `safe` (it re-runs per row), so it never rides a pushdown regardless.
     case .exists, .within, .quantified: false
-    case let .like(_, pattern, escape, _):
-      pattern.parameterised || (escape?.parameterised ?? false)
-    case let .between(_, lower, upper, _):
-      lower.parameterised || upper.parameterised
+    case let .like(operand, pattern, escape, _):
+      operand.parameterised || pattern.parameterised
+          || (escape?.parameterised ?? false)
+    case let .between(test, lower, upper, _):
+      test.parameterised || lower.parameterised || upper.parameterised
     case let .truth(inner, _, _): inner.parameterised
     case let .and(lhs, rhs): lhs.parameterised || rhs.parameterised
     case let .or(lhs, rhs): lhs.parameterised || rhs.parameterised
@@ -676,6 +757,12 @@ extension Catalog where Self: ~Escapable {
     switch term {
     case let .slot(slot):
       row[slot]
+    case let .parameter(name):
+      // A correlated `:parameter` reads its value from the bindings — the
+      // enclosing row's cell, merged in by the per-outer-row re-execution. An
+      // unbound name reads `.null` (a comparison against it is UNKNOWN), exactly
+      // as a `Filter.bound` operand resolves an absent parameter.
+      bindings[name] ?? .null
     case let .constant(value):
       value
     case let .apply(name, arguments):
@@ -709,13 +796,170 @@ extension Catalog where Self: ~Escapable {
                    subqueries)
     case let .nullif(lhs, rhs):
       try nullif(row, lhs, rhs, relations, routines, bindings, subqueries)
-    case let .subquery(key, type):
+    case let .subquery(key, correlation, type):
       // Materialise the scalar subquery LAZILY on this first reach — an
       // occurrence in a skipped `CASE`/`COALESCE` arm is never reached, so it
       // never runs (never throws). COERCE the collapsed value to the inner
-      // column's type, as a `CASE` coerces its selected arm.
-      try scalar(key, type, relations, routines, bindings, subqueries)
+      // column's type, as a `CASE` coerces its selected arm. An UNCORRELATED one
+      // memoises; a CORRELATED one re-runs against this row's correlated
+      // bindings.
+      try scalar(row, key, correlation, type, relations, routines, bindings,
+                 subqueries)
     }
+  }
+
+  /// The `bindings` extended with `correlation`'s outer cells — a `slot` entry
+  /// bound to the cell at that packed ordinal of the IMMEDIATE enclosing `row`,
+  /// a `bound` entry left as the incoming binding the CONTAINING subquery
+  /// already threaded down (a NESTED correlation to a grandparent column) — the
+  /// per-outer-row binding a CORRELATED subquery re-executes under. An
+  /// UNCORRELATED occurrence has an empty correlation, so this returns the
+  /// bindings unchanged.
+  private borrowing func correlated(_ row: borrowing some Row & ~Escapable,
+                                    _ correlation: Correlation,
+                                    _ bindings: Bindings) -> Bindings {
+    guard !correlation.isEmpty else { return bindings }
+    var extended = bindings
+    for (name, source) in correlation {
+      // A `bound` source is already in `bindings` (threaded by the containing
+      // subquery), so it passes through unchanged; only a `slot` reads this
+      // subquery's immediate enclosing row.
+      if case let .slot(slot) = source { extended[name] = row[slot] }
+    }
+    return extended
+  }
+
+  /// The rows a CORRELATED subquery occurrence `key` yields for `row` — the
+  /// SINGLE augment-and-execute path every correlated caller (`present`,
+  /// `values`, `scalar`) routes through, so none can skip the augmentation or
+  /// the per-row overlay. It extends `bindings` with this row's correlated
+  /// values, builds the execution context from the occurrence's scope overlay
+  /// AUGMENTED with the subquery's OWN `WITH`/derived-table rows, looks up the
+  /// PRE-COMPILED plan, and executes it.
+  ///
+  /// The precompiled plan resolves a `WITH` item or a derived table `d` — `FROM
+  /// (SELECT …) AS d` — to a `.scan("d")` the executor binds by NAME from
+  /// `context.relations`, so the rows must be MATERIALISED into the overlay
+  /// first, exactly as the UNCORRELATED `run`/`probe`/`cell` path augments the
+  /// query before running it. Without this the `.scan("d")` faults
+  /// `SQLError.relation("d")` (or mis-binds an outer relation of the same
+  /// name). Augmenting on top of the per-row overlay PRESERVES both the
+  /// correlation bindings and the parent overlay: `augment` only ADDS this
+  /// query's own aliases, and `validate: false` matches the lenient run path (a
+  /// REACHED body operand still faults at execution).
+  ///
+  /// A SET OPERATION binds NO derived alias at the query level — its arms are
+  /// SELECT-scoped, each `FROM (SELECT …) AS d` local to its own arm — so a
+  /// whole-query augment misses them and an arm's `.scan("d")` would fault
+  /// `.relation("d")`. When the plan is a set operation this descends the plan
+  /// and query in lockstep and augments EACH ARM's own aliases before executing
+  /// that arm's sub-plan, exactly as the run and view setop paths do, while the
+  /// correlation bindings and parent overlay ride into every arm through the
+  /// shared `context`.
+  private borrowing func executed(_ row: borrowing some Row & ~Escapable,
+                                  _ key: Subkey, _ correlation: Correlation,
+                                  _ overlay: ScopedRelations,
+                                  _ routines: Routines, _ bindings: Bindings,
+                                  _ subqueries: Subqueries)
+      throws(SQLError) -> Array<Record> {
+    let bindings = correlated(row, correlation, bindings)
+    let context = Context(relations: overlay, routines: routines,
+                          bindings: bindings, subqueries: subqueries)
+    guard let plan = subqueries.plan(key, correlation) else {
+      throw .named("a correlated subquery plan was not compiled")
+    }
+    // A SET-OPERATION plan augments PER ARM (arm-local derived aliases the
+    // query-level augment misses); a single plan augments the whole query once.
+    if case .setop = plan {
+      return try arms(plan, key.query, context)
+    }
+    let augmented =
+        try augment(context, for: key.query, rows: true, validate: false)
+    return try execute(plan, augmented)
+  }
+
+  /// Executes a correlated subquery's SET-OPERATION `plan` arm by arm — the
+  /// plan and its `query` descend in lockstep (compile builds `.setop(kind,
+  /// compile(left), compile(right), all)` from `.setop(kind, left, right,
+  /// all)`), a `.setop` node recursing into both arms and `combine`-ing the
+  /// results and a LEAF arm augmenting THAT arm's own derived aliases into
+  /// `context` (rows, so its `.scan` reads them) before executing its sub-plan.
+  ///
+  /// `context` already carries the per-row correlation bindings and the parent
+  /// overlay, so each arm's augment ADDS only that arm's aliases and every arm
+  /// runs under the same correlated bindings — mirroring the run and view setop
+  /// per-arm augmentation for the correlated shape. Executing the arm sub-plans
+  /// (not re-running the arm queries) preserves any pushed conjunct in the arm
+  /// plan; `validate: false` keeps a data-dependent-empty arm body lenient, as
+  /// the run path is.
+  private borrowing func arms(_ plan: Plan, _ query: Query, _ context: Context)
+      throws(SQLError) -> Array<Record> {
+    if case let .setop(kind, left, right, all) = plan,
+        case let .setop(_, leftQuery, rightQuery, _) = query {
+      return try combine(kind, arms(left, leftQuery, context),
+                         arms(right, rightQuery, context), all)
+    }
+    let augmented =
+        try augment(context, for: query, rows: true, validate: false)
+    return try execute(plan, augmented)
+  }
+
+  /// The `EXISTS` non-empty result of the occurrence `key`, run LAZILY: an
+  /// UNCORRELATED one (empty `correlation`) reads the memo and, on a miss, probes
+  /// once and stores it; a CORRELATED one re-probes per outer row against the
+  /// correlated bindings, never touching the memo.
+  private borrowing func present(_ row: borrowing some Row & ~Escapable,
+                                 _ key: Subkey, _ correlation: Correlation,
+                                 _ relations: ScopedRelations,
+                                 _ routines: Routines, _ bindings: Bindings,
+                                 _ subqueries: Subqueries)
+      throws(SQLError) -> Bool {
+    // Run under the overlay the occurrence's SCOPE was lowered under — the
+    // caller's or the view body's — not the current execution site a pushdown
+    // may have moved this predicate to.
+    let overlay = subqueries.overlay(key.scope) ?? relations
+    // A CORRELATED EXISTS re-executes its PRE-COMPILED PROBE plan (correlated
+    // columns are bound `Term.parameter`s; the plan is the cardinality-only
+    // probed shape, so its select list — a would-fault `1 / 0` — never runs)
+    // against this row's correlated bindings, testing non-empty — bypassing the
+    // memo (the result depends on the row). An UNCORRELATED one memoises and
+    // probes cardinality once, the SAME probed shape.
+    guard correlation.isEmpty else {
+      return try !executed(row, key, correlation, overlay, routines, bindings,
+                           subqueries).isEmpty
+    }
+    let context = Context(relations: overlay, routines: routines,
+                          bindings: bindings, subqueries: subqueries)
+    if let cached = subqueries.present(cached: key) { return cached }
+    let present = try probe(key.query, context)
+    subqueries.store(present: present, for: key)
+    return present
+  }
+
+  /// The `IN (Q)` single column of the occurrence `key`, materialised LAZILY: an
+  /// UNCORRELATED one reads the memo and, on a miss, runs the inner query once
+  /// and stores its lone column; a CORRELATED one re-runs per outer row against
+  /// the correlated bindings, bypassing the memo.
+  private borrowing func values(_ row: borrowing some Row & ~Escapable,
+                                _ key: Subkey, _ correlation: Correlation,
+                                _ relations: ScopedRelations,
+                                _ routines: Routines, _ bindings: Bindings,
+                                _ subqueries: Subqueries)
+      throws(SQLError) -> Array<Value> {
+    let overlay = subqueries.overlay(key.scope) ?? relations
+    // A CORRELATED `IN (Q)` re-executes its PRE-COMPILED inner plan against this
+    // row's correlated bindings for its lone column, bypassing the memo. An
+    // UNCORRELATED one memoises and re-runs its `Query` (recompiling resolves).
+    guard correlation.isEmpty else {
+      return try executed(row, key, correlation, overlay, routines, bindings,
+                          subqueries).map { $0.values[0] }
+    }
+    let context = Context(relations: overlay, routines: routines,
+                          bindings: bindings, subqueries: subqueries)
+    if let cached = subqueries.values(cached: key) { return cached }
+    let values = try run(key.query, context).map { $0[0] }
+    subqueries.store(values: values, for: key)
+    return values
   }
 
   /// The value of a scalar subquery occurrence `key`, materialised LAZILY and
@@ -727,30 +971,30 @@ extension Catalog where Self: ~Escapable {
   /// The subquery is UNCORRELATED, so its value is row-invariant — one run per
   /// REACHED occurrence, none for one only in a skipped arm. The value is
   /// COERCED to the inner column's `type`, as a `CASE` coerces its taken arm.
-  private borrowing func scalar(_ key: Subkey, _ type: ValueType,
+  private borrowing func scalar(_ row: borrowing some Row & ~Escapable,
+                                _ key: Subkey, _ correlation: Correlation,
+                                _ type: ValueType,
                                 _ relations: ScopedRelations,
                                 _ routines: Routines, _ bindings: Bindings,
                                 _ subqueries: Subqueries)
       throws(SQLError) -> Value {
+    let overlay = subqueries.overlay(key.scope) ?? relations
+    // A CORRELATED scalar subquery re-executes its PRE-COMPILED inner plan per
+    // outer row against the correlated bindings, collapsing to its lone cell
+    // (empty → NULL, one row → the cell, more → `.cardinality`), bypassing the
+    // memo (its cell depends on the row). An UNCORRELATED one memoises and
+    // re-runs its `Query`.
+    guard correlation.isEmpty else {
+      let rows = try executed(row, key, correlation, overlay, routines,
+                              bindings, subqueries)
+      guard rows.count <= 1 else { throw .cardinality }
+      return (rows.first?.values.first ?? .null).coerced(to: type)
+    }
+    let context = Context(relations: overlay, routines: routines,
+                          bindings: bindings, subqueries: subqueries)
     if let cached = subqueries.scalar(cached: key) {
       return cached.coerced(to: type)
     }
-    // Resolve the inner query against the cache's BASE scope for THIS
-    // occurrence's OWN `Subscope` — the one the eager `EXISTS`/`IN (Q)`
-    // occurrences of that scope ran against (the revealed base
-    // `subqueries(of:)` kept), which `cell(of:)` reveals for the scalar's FROM.
-    // Picking the scope by `key.scope` keeps a `.view(name)` scalar reading the
-    // VIEW's relations and a `.caller` scalar the caller's after a `merged`
-    // folds the two — the executor threads only the EXECUTING plan's overlay
-    // down the evaluate tree, which cannot tell a view-body scope from the
-    // caller's, so the per-`Subscope` cache scope carries each. An empty cache
-    // scope (a schema path's bare `Subqueries`) falls back to the threaded
-    // overlay, whose derived layer a `cell(of:)` reveal drops to expose a CTE a
-    // same-named derived alias shadows.
-    let owned = subqueries.relations(key.scope)
-    let scope = owned.isEmpty ? relations : owned
-    let context = Context(relations: scope, routines: routines,
-                          bindings: bindings, subqueries: subqueries)
     let value = try cell(of: key.query, context)
     subqueries.store(scalar: value, for: key)
     return value.coerced(to: type)
@@ -1130,22 +1374,34 @@ extension Catalog where Self: ~Escapable {
     case let .distinct(lhs, rhs, negated):
       try differs(row, lhs, rhs, negated, relations, routines, bindings,
                   subqueries)
-    case let .exists(key, negated):
-      // The subquery ran ONCE at run start (memoised under its `Subkey` in the
-      // cache); this reads the DEFINITE two-valued non-empty test — never
-      // UNKNOWN, and reading no row of the outer relation — `negated` flipping
-      // it. An EXISTS-only occurrence's result is a cardinality probe.
-      try subqueries.present(key) != negated
-    case let .within(operand, key, negated):
-      // Fold `operand = v` over the subquery's memoised single column under the
-      // SAME three-valued membership the value-list `IN` uses.
-      try member(row, operand, subqueries.values(key), negated, relations,
-                 routines, bindings, subqueries)
-    case let .quantified(operand, op, quantifier, key):
-      // Fold `operand op v` over the subquery's memoised single column with the
-      // SAME `matches`/Kleene primitives `within` uses — Kleene `OR` (seeded
-      // FALSE) for `any`, Kleene `AND` (seeded TRUE) for `all`.
-      try quantified(row, operand, op, quantifier, subqueries.values(key),
+    case let .exists(key, correlation, negated):
+      // The DEFINITE two-valued `EXISTS` non-empty test — never UNKNOWN,
+      // `negated` flipping it. The subquery runs LAZILY on this first reach (so
+      // an `EXISTS` a short-circuited `AND`/`OR` or an unreached `CASE` arm
+      // guards never runs): an UNCORRELATED one memoises under its `Subkey`; a
+      // CORRELATED one re-runs against this row's correlated bindings, bypassing
+      // the memo.
+      try present(row, key, correlation, relations, routines, bindings,
+                  subqueries) != negated
+    case let .within(operand, key, correlation, negated):
+      // Fold `operand = v` over the subquery's single column under the SAME
+      // three-valued membership the value-list `IN` uses. The column is
+      // materialised LAZILY on this first reach (an UNCORRELATED one memoised, a
+      // CORRELATED one re-run per row against this row's correlated bindings).
+      try member(row, operand,
+                 values(row, key, correlation, relations, routines, bindings,
+                        subqueries),
+                 negated, relations, routines, bindings, subqueries)
+    case let .quantified(operand, op, quantifier, key, correlation):
+      // Fold `operand op v` over the subquery's single column with the SAME
+      // `matches`/Kleene primitives `within` uses — Kleene `OR` (seeded FALSE)
+      // for `any`, Kleene `AND` (seeded TRUE) for `all`. It materialises its
+      // lone column LAZILY through the SAME `values` path `within` drives: an
+      // UNCORRELATED one memoises under its `Subkey`, a CORRELATED one re-runs
+      // its inner plan per outer row against this row's correlated bindings.
+      try quantified(row, operand, op, quantifier,
+                     values(row, key, correlation, relations, routines,
+                            bindings, subqueries),
                      relations, routines, bindings, subqueries)
     case let .truth(inner, value, negated):
       try tested(evaluate(row, inner, relations, routines, bindings,

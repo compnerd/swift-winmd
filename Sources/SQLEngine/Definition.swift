@@ -412,7 +412,7 @@ extension Catalog where Self: ~Escapable {
       // walk validates the body's nested subqueries exactly as the run path
       // does (`run` compiles from the same base context).
       if validate {
-        _ = try compile(query, context, visited)
+        _ = try compile(query, context, visited, validate: true)
         try typecheck(query, context, visited: visited)
       }
       captured = []
@@ -561,7 +561,7 @@ extension Catalog where Self: ~Escapable {
       // run and is not advertised here.
       guard let overlay = try? augment(context.scoping([:]), for: view.query,
                                        rows: false),
-          let plan = try? compile(view.query, overlay),
+          let plan = try? compile(view.query, overlay, validate: true),
           plan.width == view.columns.count else { continue }
       // Type the columns from the body's first arm; type-check every arm's
       // REACHABLE operands and calls too — an unknown call or a bad operand in
@@ -572,7 +572,8 @@ extension Catalog where Self: ~Escapable {
       guard (try? typecheck(view.query, overlay,
                             visited: [name.lowercased()])) != nil,
           let resolved = try? columns(of: view.query.first, overlay,
-                                      visited: [name.lowercased()]),
+                                      visited: [name.lowercased()],
+                                      validate: true),
           resolved.count == view.columns.count else { continue }
       for ordinal in view.columns.indices {
         rows.append([.text(name), .text(view.columns[ordinal]),

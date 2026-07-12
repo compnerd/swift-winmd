@@ -103,7 +103,7 @@ private func derived(_ text: String) throws -> ValueType {
     Issue.record("expected a single projected expression")
     throw SQLError.incomplete(expected: "one projected expression")
   }
-  let scope = try people().scope(of: select, Context())
+  let scope = try people().scope(of: select, Context(), validate: true)
   return try scope.derive(items[0].expression)
 }
 

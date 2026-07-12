@@ -45,8 +45,10 @@
 /// expression     := additive
 /// additive       := multiplicative (('+' | '-' | '||') multiplicative)*
 /// multiplicative := factor (('*' | '/') factor)*
-/// factor         := '(' expression ')' | case | cast | coalesce | nullif
-///                 | position | overlay | literal | aggregate | call | column
+/// factor         := subquery | '(' expression ')' | case | cast | coalesce
+///                 | nullif | position | overlay | literal | aggregate | call
+///                 | column
+/// subquery       := '(' query ')'  // scalar: yields <= 1 row x 1 col at run
 /// case           := CASE [expression] (WHEN (predicate | expression) THEN
 ///                     expression)+ [ELSE expression] END
 /// cast           := CAST '(' expression AS type ')'
@@ -571,6 +573,17 @@ internal struct Parser: ~Escapable {
   /// empty.
   private mutating func factor() throws(SQLError) -> Expression {
     if try match(.lparen) {
+      // ONE token of lookahead after `(` disambiguates a SCALAR SUBQUERY from a
+      // parenthesised expression: a `SELECT` begins a subquery — `(query)`, the
+      // first-class `Expression.subquery` (the query may itself be a `UNION`) —
+      // and anything else begins a parenthesised expression. No rewind is
+      // needed: `SELECT` never begins an expression, so the peek is
+      // unambiguous, exactly as the `IN (…)` and `EXISTS (…)` lookaheads are.
+      if current?.kind == .select {
+        let query = try query()
+        try expect(.rparen)
+        return .subquery(query)
+      }
       let expression = try expression()
       try expect(.rparen)
       return expression

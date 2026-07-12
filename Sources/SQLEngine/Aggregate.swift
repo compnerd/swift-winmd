@@ -299,10 +299,12 @@ private func comparable(_ a: Value, _ b: Value) -> Bool {
 /// UNBOUND. The key evaluation threads them for the same reason and to keep the
 /// two evaluate sites consistent, though a `GROUP BY` key is a bare column
 /// today, so it cannot yet reach one.
-internal func grouped(_ records: Array<Record>, _ keys: Array<Term>,
-                      _ aggregates: Array<Aggregation>, _ routines: Routines,
-                      _ bindings: Bindings, _ subqueries: Subqueries)
-    throws(SQLError) -> Array<Record> {
+internal func grouped<C>(_ records: Array<Record>, _ keys: Array<Term>,
+                         _ aggregates: Array<Aggregation>,
+                         _ catalog: borrowing C, _ relations: ScopedRelations,
+                         _ routines: Routines, _ bindings: Bindings,
+                         _ subqueries: Subqueries)
+    throws(SQLError) -> Array<Record> where C: Catalog & ~Escapable {
   var order = Array<Record>()
   var accumulators = Dictionary<Record, Array<Accumulator>>()
 
@@ -310,7 +312,8 @@ internal func grouped(_ records: Array<Record>, _ keys: Array<Term>,
     var cells = Array<Value>()
     cells.reserveCapacity(keys.count)
     for key in keys {
-      try cells.append(record.evaluate(key, routines, bindings, subqueries))
+      try cells.append(record.evaluate(key, catalog, relations, routines,
+                                       bindings, subqueries))
     }
     let group = Record(cells)
     // Key the group on the EXACT canonical form of its cells so `1` and `1.0`
@@ -325,20 +328,21 @@ internal func grouped(_ records: Array<Record>, _ keys: Array<Term>,
       order.append(group)
     }
     for index in aggregates.indices {
-      // An aggregate's `FILTER (WHERE …)` gates the row: only a TRUE predicate
-      // admits it (a FALSE or UNKNOWN one, and an unbound `:parameter`, skips),
-      // applied before the fold — and so before the DISTINCT dedup. A
-      // filter-less aggregate folds every row.
+      // An aggregate's `FILTER (WHERE …)` gates the row: only a TRUE
+      // predicate admits it (a FALSE or UNKNOWN one, and an unbound
+      // `:parameter`, skips), applied before the fold — and so before the
+      // DISTINCT dedup. A filter-less aggregate folds every row.
       if let filter = aggregates[index].filter {
-        guard try record.evaluate(filter, routines, bindings,
-                                  subqueries) == true else {
+        guard try record.evaluate(filter, catalog, relations, routines,
+                                  bindings, subqueries) == true else {
           continue
         }
       }
       // `COUNT(*)` has no argument — count the row with a non-NULL sentinel;
       // every other aggregate folds its evaluated argument value.
       let value: Value = if let argument = aggregates[index].argument {
-        try record.evaluate(argument, routines, bindings, subqueries)
+        try record.evaluate(argument, catalog, relations, routines, bindings,
+                            subqueries)
       } else {
         .integer(0)
       }
@@ -346,10 +350,10 @@ internal func grouped(_ records: Array<Record>, _ keys: Array<Term>,
     }
   }
 
-  // A whole-result aggregation with no matching row still yields one group — the
-  // empty group — so the degenerate `SELECT COUNT(*) FROM T` over no rows counts
-  // `0` rather than yielding no row at all. A grouped query over no rows yields
-  // no group (standard SQL).
+  // A whole-result aggregation with no matching row still yields one group —
+  // the empty group — so the degenerate `SELECT COUNT(*) FROM T` over no rows
+  // counts `0` rather than yielding no row at all. A grouped query over no
+  // rows yields no group (standard SQL).
   if keys.isEmpty && order.isEmpty {
     let empty = aggregates.map {
       Accumulator($0.function, distinct: $0.distinct)

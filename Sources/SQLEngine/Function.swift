@@ -194,9 +194,45 @@ public struct Routine: Sendable {
           where !argument.matches(expected) {
         throw .argument("requires \(expected.domain) arguments")
       }
+      // The body's lowered `term` cannot nest a subquery — a `CREATE FUNCTION`
+      // body lowers against `Subquery.unsupported` (no catalog), which rejects
+      // one at registration — so the subquery-free evaluate suffices.
       return try Record(arguments).evaluate(term, routines)
     }
   }
+}
+
+/// An empty `Catalog` vending no relation — the stand-in for the absent catalog
+/// where the evaluator runs a subquery-FREE term.
+///
+/// A `CREATE FUNCTION` body lowers against `Subquery.unsupported`, so its term
+/// can never nest a scalar subquery and its evaluation never needs a catalog to
+/// materialise one. Passing this empty catalog keeps ONE evaluator: a term that
+/// did reach a `.subquery` would run `cell(of:)` against a catalog resolving no
+/// relation and fault, but a function body never does.
+internal struct NoCatalog: Catalog {
+  internal struct Table: SQLEngine.Table {
+    internal struct Cursor: SQLEngine.Cursor {
+      internal struct Row: SQLEngine.Row {
+        internal subscript(_ column: Int) -> Value { .null }
+      }
+
+      internal var count: Int { 0 }
+      internal func row(_ index: Int) -> Row? { nil }
+    }
+
+    internal var width: Int { 0 }
+    internal var names: Array<String> { [] }
+    internal func ordinal(of name: String) -> Int? { nil }
+    internal func bound(_ column: Int, _ value: Int, strict: Bool) -> Int? {
+      nil
+    }
+
+    internal func cursor() -> Cursor { Cursor() }
+  }
+
+  internal func table(named name: String) -> Table? { nil }
+  internal func relations() -> Array<String> { [] }
 }
 
 extension Value {

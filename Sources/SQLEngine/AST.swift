@@ -693,6 +693,20 @@ public indirect enum Expression: Hashable, Sendable {
   /// evaluating a stateful `v1` twice — comparing one call's value to `v2` and
   /// returning a different one. The result type is `v1`'s.
   case nullif(Expression, Expression)
+  /// A scalar subquery `(SELECT …)` — a nested `Query` in expression position,
+  /// yielding ONE value: its lone cell when it returns exactly one row, NULL
+  /// when it returns none, and `SQLError.cardinality` when it returns more. The
+  /// inner query must project EXACTLY ONE column (checked at compile, cursor-
+  /// free, from its compiled width); the value's type is that column's. `Query`
+  /// is `indirect`, so nesting it here composes the synthesized `Hashable`.
+  ///
+  /// In this slice the subquery is UNCORRELATED — it names no column of the
+  /// enclosing query — so it runs ONCE per outer-query execution (memoised in
+  /// the same `Subqueries` cache an `EXISTS`/`IN (Q)` predicate uses) and its
+  /// value is the same for every outer row. A reference to an outer column
+  /// resolves (or faults) as any other column would; correlation is a later
+  /// slice.
+  case subquery(Query)
 }
 
 /// One `WHEN predicate THEN result` branch of a `CASE` expression — the guard

@@ -48,17 +48,44 @@ internal enum Subscope: Hashable, Sendable {
   case view(String)
 }
 
+/// The ROLE a subquery occurrence materialises in — its SHAPE in the cache.
+///
+/// The SAME inner SQL can occur in three roles at once, each needing a
+/// DIFFERENT materialisation, so the role discriminates the cache entry: a
+/// `scalar` occurrence (`Expression.subquery`) collapses to one cell
+/// (`cell(of:)`), a `valued` occurrence (`IN (SELECT …)`, `Predicate.within`)
+/// keeps the materialised rows for its value set, and an `existential`
+/// occurrence (`EXISTS (SELECT …)`) is a cardinality PROBE that never runs
+/// the select list. Keying the cache without the role collapses the three onto
+/// one entry, so an `IN` reading a scalar entry faults (no rows) and an
+/// `EXISTS` reading a scalar entry mis-reads `present` — the role keeps them
+/// disjoint.
+internal enum Role: Hashable, Sendable {
+  /// A scalar-subquery occurrence — collapsed to a single cell.
+  case scalar
+  /// An `IN (SELECT …)` occurrence — materialised in full for its value
+  /// set.
+  case valued
+  /// An `EXISTS (SELECT …)` occurrence — a cardinality probe.
+  case existential
+}
+
 /// The cache identity of one collected subquery OCCURRENCE — its resolution
-/// `context` composed with its `query` AST.
+/// `context` composed with its `query` AST and its `role`.
 ///
 /// A subquery is keyed neither by its `Query` value alone (which collapses two
 /// AST-identical subqueries under different overlays — see `Subscope`)
 /// nor by a raw counter (which two independent id spaces could not keep
-/// disjoint), but by the PAIR: within one `Subscope`, an identical `Query`
+/// disjoint), but by the TRIPLE: within one `Subscope`, an identical `Query`
 /// resolves to an identical result, so value-discrimination is correct there;
 /// across scopes the `Subscope` keeps them separate. A caller-space key
 /// (`.caller`) and a view-space key (`.view(name)`) are unequal even for the
 /// same AST, so the two id spaces cannot collide.
+///
+/// The `role` keeps the three materialisation SHAPES of one `(scope, query)`
+/// disjoint (see `Role`): a `scalar` read can never hit a `valued` or an
+/// `existential` entry and vice versa, so identical inner SQL used in more than
+/// one role no longer cross-reads the wrong entry.
 internal struct Subkey: Hashable, Sendable {
   /// The resolution context this occurrence materialises under.
   internal let scope: Subscope
@@ -66,9 +93,13 @@ internal struct Subkey: Hashable, Sendable {
   /// The subquery's AST.
   internal let query: Query
 
-  internal init(_ scope: Subscope, _ query: Query) {
+  /// The role this occurrence materialises in — its cache SHAPE.
+  internal let role: Role
+
+  internal init(_ scope: Subscope, _ query: Query, _ role: Role) {
     self.scope = scope
     self.query = query
+    self.role = role
   }
 }
 
@@ -85,9 +116,15 @@ internal struct Subkey: Hashable, Sendable {
 /// non-empty `S` is TRUE with no `.divide`, no full scan). A probe carries no
 /// `rows`, so `values` faults if an `IN` ever reads it — but a query needing
 /// its values is materialised full, so it never does.
+///
+/// A SCALAR subquery occurrence is NOT materialised here — it collapses LAZILY,
+/// on the first evaluation of its `Term.subquery`, so a scalar subquery in an
+/// unreachable `CASE`/`COALESCE` arm never runs (see `Subqueries.scalar`). The
+/// eager entries this holds are therefore only the `IN` full result and the
+/// `EXISTS` probe.
 internal struct MaterialisedSubquery {
   /// The subquery's result rows for an `IN` occurrence materialised in full, or
-  /// `nil` for an `EXISTS`-only occurrence materialised as a cardinality probe.
+  /// `nil` for an `EXISTS`-only probe (which carries no full rows).
   private let rows: Array<Array<Value>>?
 
   /// Whether the row source yielded a row — the `EXISTS` non-empty test, read
@@ -119,6 +156,33 @@ internal struct MaterialisedSubquery {
   }
 }
 
+/// The mutable memo a `Subqueries` cache shares by REFERENCE for the scalar
+/// subqueries it materialises LAZILY.
+///
+/// A scalar subquery collapses on the FIRST evaluation of its `Term.subquery`,
+/// not eagerly at run start, so an occurrence in an unreachable
+/// `CASE`/`COALESCE` arm never runs (never throws `.cardinality` or an inner
+/// fault). It is UNCORRELATED, so its collapsed value is row-invariant: the
+/// first reached evaluation runs and caches it here, keyed by its `Subkey`, and
+/// every later read of the same key returns the cached value WITHOUT
+/// re-running. The cache is a class so the memo survives `Subqueries` being
+/// copied by value down the evaluate tree — every copy shares the one box.
+internal final class ScalarMemo {
+  private var cells: Dictionary<Subkey, Value> = [:]
+
+  /// The already-collapsed value for `key`, or `nil` when it has not yet been
+  /// evaluated — the evaluator runs and `store`s it on a miss.
+  internal func value(_ key: Subkey) -> Value? {
+    cells[key]
+  }
+
+  /// Records `value` as the collapsed value of the scalar occurrence `key`, so
+  /// a later read of the same key returns it without re-running the subquery.
+  internal func store(_ value: Value, for key: Subkey) {
+    cells[key] = value
+  }
+}
+
 /// The COMPILE-time seam that lowers an `EXISTS`/`IN (Q)` predicate WITHOUT
 /// running its subquery — the fix for the schema-path cursor-contract violation.
 ///
@@ -145,13 +209,22 @@ internal struct Subquery {
   private let scope: Subscope
 
   /// Each nested `Query` mapped to its COMPILED column count — cursor-free; an
-  /// `IN (Q)` requires it be 1.
+  /// `IN (Q)` and a scalar subquery each require it be 1.
   private let widths: Dictionary<Query, Int>
 
+  /// Each nested `Query` mapped to its single-column output TYPE, derived
+  /// cursor-free in the compile pre-pass — the static type a scalar subquery
+  /// contributes (the executor coerces its collapsed value to it, as a `CASE`
+  /// coerces its arms). Only a width-1 query has one, so an `EXISTS`/`IN (Q)`
+  /// occurrence (whose type is irrelevant) may be absent.
+  private let types: Dictionary<Query, ValueType>
+
   internal init(_ scope: Subscope = .caller,
-                _ widths: Dictionary<Query, Int> = [:]) {
+                _ widths: Dictionary<Query, Int> = [:],
+                _ types: Dictionary<Query, ValueType> = [:]) {
     self.scope = scope
     self.widths = widths
+    self.types = types
   }
 
   /// A `Subquery` for a lowering surface with no catalog — a schema-only
@@ -170,6 +243,27 @@ internal struct Subquery {
     return width
   }
 
+  /// The single-column output type `query` contributes as a scalar subquery.
+  /// The compile pre-pass records it beside the width for every subquery, so a
+  /// scalar occurrence reads it; a surface with no catalog holds none and
+  /// faults, rejecting the subquery rather than mis-typing it.
+  private func output(_ query: Query) throws(SQLError) -> ValueType {
+    guard let type = types[query] else {
+      throw .unsupported("a subquery is not supported in this position")
+    }
+    return type
+  }
+
+  /// The static single-column type a scalar subquery `query` contributes to a
+  /// SCHEMA derive — its single-column arity enforced first (else
+  /// `SQLError.arity`, matching the lowering), so this schema surface and the
+  /// run's lowering AGREE on both the arity fault and the type.
+  internal func scalar(type query: Query) throws(SQLError) -> ValueType {
+    let width = try width(query)
+    guard width == 1 else { throw .arity(1, width) }
+    return try output(query)
+  }
+
   /// Lowers `[NOT] EXISTS (query)` — the query carried into the `Filter` to run
   /// at execution, `negated` flipping the non-empty test. `EXISTS` ignores the
   /// subquery's arity (its column count is irrelevant to a cardinality test),
@@ -178,7 +272,7 @@ internal struct Subquery {
   internal func exists(_ query: Query, negated: Bool)
       throws(SQLError) -> Filter {
     _ = try width(query)
-    return .exists(Subkey(scope, query), negated: negated)
+    return .exists(Subkey(scope, query, .existential), negated: negated)
   }
 
   /// Lowers `operand [NOT] IN (query)` — `operand` already lowered to a `Term`
@@ -190,7 +284,21 @@ internal struct Subquery {
       throws(SQLError) -> Filter {
     let width = try width(query)
     guard width == 1 else { throw .arity(1, width) }
-    return .within(operand, Subkey(scope, query), negated: negated)
+    return .within(operand, Subkey(scope, query, .valued), negated: negated)
+  }
+
+  /// Lowers a scalar subquery `(query)` to a `Term.subquery` reading its
+  /// collapsed value from the run-time cache, requiring `query` project EXACTLY
+  /// ONE column (else `SQLError.arity`, from the COMPILED width, so a wider
+  /// subquery faults here WITHOUT running). The term carries the subquery's
+  /// occurrence `Subkey` — its resolution scope composed with `query` — and its
+  /// single-column TYPE, to which the executor coerces the collapsed value (the
+  /// empty → NULL and >1-row → cardinality cases are decided at RUN, in the
+  /// materialiser).
+  internal func scalar(_ query: Query) throws(SQLError) -> Term {
+    let width = try width(query)
+    guard width == 1 else { throw .arity(1, width) }
+    return try .subquery(Subkey(scope, query, .scalar), type: output(query))
   }
 }
 
@@ -206,15 +314,26 @@ internal struct Subquery {
 /// escapable data. An `EXISTS` reads whether the result is non-empty; an
 /// `IN (Q)` folds over its single materialised column.
 ///
-/// This lands the schema-path cursor fix and the once-per-run memoisation;
-/// per-arm SHORT-CIRCUIT laziness (skipping a subquery an `AND`/`OR` never
-/// reaches) and the per-outer-row re-execution a CORRELATED subquery needs
-/// thread a runner to the evaluation site in a follow-up.
+/// An `IN`/`EXISTS` occurrence is materialised EAGERLY here — its full result
+/// or its probe run at run start, since a `WHERE`/`ON` predicate referencing it
+/// is not short-circuited past. A SCALAR occurrence instead materialises
+/// LAZILY, on the first evaluation of its `Term.subquery` (memoised in
+/// `scalars`), so an occurrence in an unreachable `CASE`/`COALESCE` arm never
+/// runs. Per-arm short-circuit for the `IN`/`EXISTS` roles and the
+/// per-outer-row re-execution a CORRELATED subquery needs thread a runner to
+/// the predicate site in a follow-up.
 internal struct Subqueries {
   private let results: Dictionary<Subkey, MaterialisedSubquery>
 
-  internal init(_ results: Dictionary<Subkey, MaterialisedSubquery> = [:]) {
+  /// The shared memo of the scalar occurrences materialised LAZILY on first
+  /// evaluation — a reference so every by-value copy of this cache down the
+  /// evaluate tree shares the one box, keeping a scalar materialise-once.
+  private let scalars: ScalarMemo
+
+  internal init(_ results: Dictionary<Subkey, MaterialisedSubquery> = [:],
+                _ scalars: ScalarMemo = ScalarMemo()) {
     self.results = results
+    self.scalars = scalars
   }
 
   /// The materialised result for `key` — every occurrence a runnable plan
@@ -240,6 +359,22 @@ internal struct Subqueries {
     try result(key).values()
   }
 
+  /// The already-collapsed value memoised for the scalar occurrence `key`, or
+  /// `nil` when it has not yet been evaluated. The evaluator reads this first;
+  /// on a miss it runs the subquery (where the catalog is in scope) and
+  /// `store`s the collapsed value, so a scalar in an unreachable arm never runs
+  /// and a reached one runs at most once.
+  internal func scalar(cached key: Subkey) -> Value? {
+    scalars.value(key)
+  }
+
+  /// Records `value` as the collapsed value of the scalar occurrence `key` —
+  /// the evaluator's memoisation after the first reached evaluation runs the
+  /// subquery, so a later read of the same key returns it without re-running.
+  internal func store(scalar value: Value, for key: Subkey) {
+    scalars.store(value, for: key)
+  }
+
   /// The DISJOINT union of this cache and `other`'s — every entry of both,
   /// which never collide because their keys carry distinct `Subscope`s: `self`
   /// holds one resolution context's occurrences (the caller's, keyed
@@ -248,9 +383,41 @@ internal struct Subqueries {
   /// occupies TWO keys — neither overwrites the other, and the pushed caller
   /// filter reads its `.caller` result while the view-body filter reads its
   /// `.view` one. A collision would be an id-space bug (two contexts sharing a
-  /// scope); it cannot happen, so the merge keeps the existing entry.
+  /// scope); it cannot happen, so the merge keeps the existing entry. The
+  /// merged cache keeps `self`'s scalar memo — a caller cache and a view-body
+  /// cache resolve DISJOINT scalar keys, so one shared memo serves both spaces.
   internal func merged(_ other: Subqueries) -> Subqueries {
-    Subqueries(results.merging(other.results) { existing, _ in existing })
+    Subqueries(results.merging(other.results) { existing, _ in existing },
+               scalars)
+  }
+}
+
+/// The mutable set of SCALAR-subquery inner queries the type-check walk
+/// REACHED, shared by a `SubqueryCheck` by REFERENCE.
+///
+/// A scalar subquery's inner-query OPERAND validation is DEFERRED to the
+/// reachability walk (`Scope.validate`), mirroring the lazy executor: an
+/// occurrence in an unreachable `CASE`/`COALESCE` arm never validates, exactly
+/// as it never runs. The walk cannot itself hold the borrowing catalog a
+/// recursive type-check needs, so as it REACHES each scalar `.subquery` it
+/// records the inner query here; the catalog-bearing `typecheck` phase reads
+/// this set AFTER the walk and type-checks only the reached inner queries. The
+/// box is a class so the reached set survives `SubqueryCheck` being copied by
+/// value down the walk — every copy shares the one box, the same way
+/// `ScalarMemo` shares the run's lazy collapse.
+internal final class ReachedScalars {
+  private var queries: Set<Query> = []
+
+  /// Records `query` as a scalar occurrence the walk reached, so the deferred
+  /// type-check phase validates its inner query.
+  internal func reach(_ query: Query) {
+    queries.insert(query)
+  }
+
+  /// The scalar inner queries the walk reached — the ones the deferred phase
+  /// type-checks.
+  internal var reached: Set<Query> {
+    queries
   }
 }
 
@@ -262,20 +429,51 @@ internal struct Subqueries {
 /// subquery's inner names and routines must be validated against one for schema
 /// validation to match execution — the recurring lesson that the two must not
 /// diverge. The `typecheck` path, where the borrowing catalog and `Context`
-/// ARE in scope, supplies a `validate` closure that recursively type-checks the
-/// inner query and a `width` closure that compiles it for its column count; a
-/// surface with no catalog passes `.unsupported`, which faults so a subquery
-/// reaching such a surface is rejected rather than passed unvalidated.
+/// ARE in scope, builds this from the maps it fills by validating and compiling
+/// every subquery ahead of the `check` walk; a surface with no catalog passes
+/// `.unsupported`, which faults so a subquery reaching such a surface is
+/// rejected rather than passed unvalidated.
+///
+/// An `EXISTS`/`IN (Q)` inner query is type-checked EAGERLY in that pre-pass
+/// (its predicate is not short-circuited past, so it always runs), as is every
+/// scalar subquery's cursor-free ARITY and TYPE derivation (TOTAL — a CASE's
+/// static column type unifies all arms regardless of runtime reachability, and
+/// deriving the type of `1 / 0` yields the integer type WITHOUT dividing). A
+/// scalar subquery's inner-query OPERAND validation is instead DEFERRED: the
+/// `.subquery` case of the reachability walk records the reached query into the
+/// shared `reached` box, and the `typecheck` phase validates only those after
+/// the walk — so an unreachable arm's scalar subquery is not validated, exactly
+/// as the executor does not evaluate it.
 internal struct SubqueryCheck {
   /// Each nested `Query` mapped to its compiled column count — the map the
-  /// `typecheck` path builds by validating and compiling every subquery ONCE,
-  /// ahead of the `check` walk. A query present here has already been
-  /// type-checked; `check` reads its width to enforce a `IN (Q)`'s single-
-  /// column arity.
+  /// `typecheck` path builds by compiling every subquery ONCE, ahead of the
+  /// `check` walk. `check` reads its width to enforce a `IN (Q)`'s or a scalar
+  /// subquery's single-column arity.
   private let widths: Dictionary<Query, Int>
 
-  internal init(_ widths: Dictionary<Query, Int> = [:]) {
+  /// Each nested `Query` mapped to its single-column output TYPE, derived by
+  /// the `typecheck` pre-pass — the type a scalar subquery reports to the
+  /// result schema (`validate`/`derive`), matching the lowering's `Subquery`.
+  private let types: Dictionary<Query, ValueType>
+
+  /// The scalar inner queries whose OPERAND validation is DEFERRED to the walk
+  /// — the ones NOT eagerly type-checked in the pre-pass (a scalar-ONLY
+  /// occurrence). The `.subquery` case records a reached one into `reached`.
+  private let deferred: Set<Query>
+
+  /// The shared box the walk records each reached scalar occurrence into, read
+  /// by the catalog-bearing `typecheck` phase after the walk to validate the
+  /// reached inner queries.
+  private let reached: ReachedScalars
+
+  internal init(_ widths: Dictionary<Query, Int> = [:],
+                _ types: Dictionary<Query, ValueType> = [:],
+                deferred: Set<Query> = [],
+                reached: ReachedScalars = ReachedScalars()) {
     self.widths = widths
+    self.types = types
+    self.deferred = deferred
+    self.reached = reached
   }
 
   /// A checker for a surface with no catalog — validating a subquery needs one,
@@ -300,6 +498,38 @@ internal struct SubqueryCheck {
       throw .unsupported("a subquery is not supported in this position")
     }
     return width
+  }
+
+  /// The single-column output type `query` contributes as a scalar subquery —
+  /// from the pre-pass derive — validating its single-column arity first (else
+  /// `SQLError.arity`, matching the run's lowering). This is the WALK-reached
+  /// path, so a scalar occurrence whose operand validation was deferred is
+  /// recorded REACHED here, for the `typecheck` phase to validate its inner
+  /// query. The cursor-free arity/type derivation stays SEPARATE and total: the
+  /// arity of an unreachable scalar was already enforced eagerly in the
+  /// pre-pass (`subqueryCheck`), so a two-column subquery in a skipped arm still
+  /// faults.
+  internal func type(_ query: Query) throws(SQLError) -> ValueType {
+    // A DEFERRED scalar occurrence is REACHED here: record it for the
+    // `typecheck` phase to validate its inner query's OPERANDS, mirroring the
+    // lazy executor materialising only a reached scalar. Its arity and single-
+    // column type were derived eagerly in `subqueryCheck` (cursor-free, total),
+    // so this reads them exactly as an eagerly-checked occurrence does — only
+    // the operand fault (`.divide`) it might raise defers to the reached walk.
+    if deferred.contains(query) { reached.reach(query) }
+    let width = try width(query)
+    guard width == 1 else { throw .arity(1, width) }
+    guard let type = types[query] else {
+      throw .unsupported("a subquery is not supported in this position")
+    }
+    return type
+  }
+
+  /// The scalar inner queries the walk reached — the ones the `typecheck` phase
+  /// validates after the walk, mirroring the lazy executor's evaluation of only
+  /// a reached scalar subquery.
+  internal var visited: Set<Query> {
+    reached.reached
   }
 }
 
@@ -665,7 +895,8 @@ extension Schema {
       // branch's value to the type the schema advertises. Derive it against a
       // one-relation scope, this Schema's own resolution surface.
       let scope = Scope([(relation, self)])
-      let type = try scope.derive(whens, otherwise, routines)
+      let type = try scope.derive(whens, otherwise, routines,
+                                  subquery: subquery)
       return .case(branches, else: fallback, type: type)
     case let .cast(operand, type):
       // Lower the operand and attach the target type; the executor converts the
@@ -684,13 +915,19 @@ extension Schema {
                                  subquery: subquery))
       }
       let scope = Scope([(relation, self)])
-      let type = try scope.derive(expression, routines)
+      let type = try scope.derive(expression, routines, subquery: subquery)
       return .coalesce(elements, type: type)
     case let .nullif(lhs, rhs):
       // Lower both operands to `Term`s over this relation and hold them in a
       // first-class `Term.nullif` so each is evaluated ONCE.
       return try .nullif(term(lhs, in: relation, routines, subquery: subquery),
                          term(rhs, in: relation, routines, subquery: subquery))
+    case let .subquery(query):
+      // A scalar subquery lowers to a `Term.subquery` reading its collapsed
+      // value from the run-time cache, carrying its occurrence `Subkey` and
+      // single-column type, the single-column arity enforced from the compiled
+      // width (no cursor). The query is UNCORRELATED — it reads no cell here.
+      return try subquery.scalar(query)
     case .aggregate:
       // An aggregate has no per-row meaning — it folds over a group — so it may
       // not appear in a `WHERE`, a join `ON`, or a non-aggregate projection.
@@ -844,7 +1081,8 @@ internal struct Scope {
   ///
   /// This is the SCHEMA surface. `validate(_:_:)` is the type-check surface: it
   /// faults exactly as a run would on a bad operand or an unknown/misused call.
-  internal func derive(_ expression: Expression, _ routines: Routines = [:])
+  internal func derive(_ expression: Expression, _ routines: Routines = [:],
+                       subquery: Subquery = .unsupported)
       throws(SQLError) -> ValueType {
     return switch expression {
     case let .column(column):
@@ -862,16 +1100,18 @@ internal struct Scope {
       case .sum, .min, .max:
         switch operand {
         case .star: .integer
-        case let .expression(argument): try derive(argument, routines)
+        case let .expression(argument):
+          try derive(argument, routines, subquery: subquery)
         }
       }
     case let .binary(.concatenate, lhs, rhs):
       // `||` yields text; the operands' own types do not shape it, but derive
       // both for resolution — an unresolved column faults `SQLError.column`
       // (`Missing || 'x'`) — exactly as the arithmetic `.binary` branch does.
-      try concatenation(lhs, rhs, routines)
+      try concatenation(lhs, rhs, routines, subquery: subquery)
     case let .binary(_, lhs, rhs):
-      try [derive(lhs, routines), derive(rhs, routines)].contains(.double)
+      try [derive(lhs, routines, subquery: subquery),
+           derive(rhs, routines, subquery: subquery)].contains(.double)
           ? .double : .integer
     case let .case(whens, otherwise):
       // The result type is the unification of every REACHABLE branch result (and
@@ -884,25 +1124,32 @@ internal struct Scope {
       // one `WHEN`; when none is reachable (every guard constant-false, no
       // reachable `ELSE`) the run yields NULL, for which `.integer` is the
       // schema default.
-      try derive(whens, otherwise, routines)
+      try derive(whens, otherwise, routines, subquery: subquery)
     case let .cast(operand, type):
       // A cast's static type is the target type; the conversion is nominal, so
       // the operand's own type does not shape it. Derive the operand anyway for
       // its ordinal resolution — an unknown/ambiguous column faults as a
       // projection would.
-      try derive(cast: operand, to: type, routines)
+      try derive(cast: operand, to: type, routines, subquery: subquery)
     case let .coalesce(arguments):
       // The result type is the unification of the arguments (the same
       // `ValueType.unified` reduction a `CASE`'s results take), the type the
       // selected value coerces to.
-      try unified(arguments, routines)
+      try unified(arguments, routines, subquery: subquery)
     case let .nullif(lhs, rhs):
       // NULLIF yields either `v1` or NULL, so the column takes `v1`'s type —
       // but derive BOTH operands for resolution, returning the LHS type: an
       // unresolved column faults `SQLError.column` (`NULLIF(1, Missing)`) on
       // this derive-only surface too, mirroring the `||`/arithmetic derive
       // branch rather than leaving the RHS unresolved.
-      try nullif(lhs, rhs, routines)
+      try nullif(lhs, rhs, routines, subquery: subquery)
+    case let .subquery(query):
+      // A scalar subquery's static type is its single-column output type — the
+      // compile pre-pass recorded it beside the width for every subquery, so
+      // `derive` reads it (enforcing the single-column arity). A surface with
+      // no catalog holds none and faults, rejecting the subquery rather than
+      // mis-typing it, so this derive and the run's lowering AGREE.
+      try subquery.scalar(type: query)
     }
   }
 
@@ -914,9 +1161,11 @@ internal struct Scope {
   /// (`columns(of:validate:false)`, an unreachable projection) where `validate`
   /// never runs.
   private func nullif(_ lhs: Expression, _ rhs: Expression,
-                      _ routines: Routines) throws(SQLError) -> ValueType {
-    let type = try derive(lhs, routines)
-    _ = try derive(rhs, routines)
+                      _ routines: Routines,
+                      subquery: Subquery = .unsupported)
+      throws(SQLError) -> ValueType {
+    let type = try derive(lhs, routines, subquery: subquery)
+    _ = try derive(rhs, routines, subquery: subquery)
     return type
   }
 
@@ -925,10 +1174,11 @@ internal struct Scope {
   /// it, but an unresolved column still faults `SQLError.column`, mirroring the
   /// arithmetic `.binary` derive branch.
   private func concatenation(_ lhs: Expression, _ rhs: Expression,
-                             _ routines: Routines)
+                             _ routines: Routines,
+                             subquery: Subquery = .unsupported)
       throws(SQLError) -> ValueType {
-    _ = try derive(lhs, routines)
-    _ = try derive(rhs, routines)
+    _ = try derive(lhs, routines, subquery: subquery)
+    _ = try derive(rhs, routines, subquery: subquery)
     return .text
   }
 
@@ -936,8 +1186,10 @@ internal struct Scope {
   /// resolution — a schema-surface non-faulting derive of the operand — and
   /// discarding its type, the conversion being nominal.
   private func derive(cast operand: Expression, to type: ValueType,
-                      _ routines: Routines) throws(SQLError) -> ValueType {
-    _ = try derive(operand, routines)
+                      _ routines: Routines,
+                      subquery: Subquery = .unsupported)
+      throws(SQLError) -> ValueType {
+    _ = try derive(operand, routines, subquery: subquery)
     return type
   }
 
@@ -957,10 +1209,12 @@ internal struct Scope {
   /// LATER argument unreachable — mirroring a `CASE`'s reachable-branch
   /// unification and the faulting `validate`'s stop.
   private func unified(_ arguments: Array<Expression>,
-                       _ routines: Routines) throws(SQLError) -> ValueType {
+                       _ routines: Routines,
+                       subquery: Subquery = .unsupported)
+      throws(SQLError) -> ValueType {
     var type: ValueType?
     for argument in arguments {
-      let next = try derive(argument, routines)
+      let next = try derive(argument, routines, subquery: subquery)
       if case .some(.null) = constant(argument, routines) {
         // A constant NULL is derived (for its errors) but skipped: it can never
         // be returned, so its type must not shape the column.
@@ -1013,13 +1267,14 @@ internal struct Scope {
   /// faulting `validate` (`conditional`) — a mixed integer/double `CASE` still
   /// widens to `double`.
   internal func derive(_ whens: Array<When>, _ otherwise: Expression?,
-                       _ routines: Routines)
+                       _ routines: Routines,
+                       subquery: Subquery = .unsupported)
       throws(SQLError) -> ValueType {
     let results = reachable(whens, otherwise, routines)
     guard !results.isEmpty else { return .integer }
-    var type = try derive(results[0], routines)
+    var type = try derive(results[0], routines, subquery: subquery)
     for result in results.dropFirst() {
-      let next = try derive(result, routines)
+      let next = try derive(result, routines, subquery: subquery)
       guard let unified = type.unified(with: next) else {
         throw .operand("CASE results have irreconcilable types")
       }
@@ -1087,6 +1342,13 @@ internal struct Scope {
       try coalesce(arguments, routines, subquery: subquery)
     case let .nullif(lhs, rhs):
       try nullif(validate: lhs, rhs, routines, subquery: subquery)
+    case let .subquery(query):
+      // A scalar subquery's static type is its single-column output type — the
+      // pre-pass validated and compiled its inner query and derived the type,
+      // enforcing the single-column arity (else `SQLError.arity`), so this
+      // reads that type exactly as the run's lowering does. A surface with no
+      // catalog holds none and faults, rejecting the subquery unvalidated.
+      try subquery.type(query)
     }
   }
 
@@ -1754,7 +2016,10 @@ internal struct Scope {
         return nil
       }
       return matches(va, .equal, vb) == true ? .null : va
-    case .column, .aggregate:
+    case .column, .aggregate, .subquery:
+      // A `subquery` is row-independent but is materialised at RUN (this
+      // compile-time fold has no cache), so it is not statically foldable —
+      // `nil`, like a `column` or `aggregate`.
       return nil
     }
   }
@@ -2043,7 +2308,10 @@ internal struct Scope {
                   subquery: SubqueryCheck = .unsupported)
       throws(SQLError) {
     switch expression {
-    case .column, .literal:
+    case .column, .literal, .subquery:
+      // A scalar `subquery` nests no OUTER aggregate — its inner aggregates are
+      // validated within the subquery's own type-check — so it contributes none
+      // here, like a bare `column`.
       break
     case let .aggregate(function, operand, _, filter):
       _ = try aggregate(function, over: operand, filter: filter, routines,
@@ -2243,7 +2511,12 @@ internal struct Scope {
       let va = try empty(lhs, routines)
       let vb = try empty(rhs, routines)
       return matches(va, .equal, vb) == true ? .null : va
-    case .column:
+    case .column, .subquery:
+      // A bare column cannot appear over an empty group (a grouping error
+      // `compile` rejected). A scalar `subquery` is materialised at RUN (this
+      // fold carries no cache), and its value is uncorrelated — group-
+      // independent — so this pre-run fold treats it as the undecided `.null`,
+      // never faulting on a subquery the run would materialise cleanly.
       return .null
     }
   }
@@ -2485,7 +2758,7 @@ internal struct Scope {
       // Attach the unified result type — the same `ValueType.unified` reduction
       // `derive`/`validate` compute — so the executor COERCES the selected
       // branch's value to the type the schema advertises.
-      let type = try derive(whens, otherwise, routines)
+      let type = try derive(whens, otherwise, routines, subquery: subquery)
       return .case(branches, else: fallback, type: type)
     case let .cast(operand, type):
       // Lower the operand across the join chain and attach the target type; the
@@ -2500,13 +2773,20 @@ internal struct Scope {
       for argument in arguments {
         try elements.append(term(argument, routines, subquery: subquery))
       }
-      let type = try derive(expression, routines)
+      let type = try derive(expression, routines, subquery: subquery)
       return .coalesce(elements, type: type)
     case let .nullif(lhs, rhs):
       // Lower both operands to combined-ordinal `Term`s and hold them in a
       // first-class `Term.nullif` so each is evaluated ONCE.
       return try .nullif(term(lhs, routines, subquery: subquery),
                          term(rhs, routines, subquery: subquery))
+    case let .subquery(query):
+      // A scalar subquery lowers to a `Term.subquery` reading its collapsed
+      // value from the run-time cache, carrying its occurrence `Subkey` and
+      // single-column type; the single-column arity is enforced from the
+      // compiled width here (no cursor). The query is UNCORRELATED, so it reads
+      // no cell of this row.
+      return try subquery.scalar(query)
     case .aggregate:
       // An aggregate has no per-row meaning — it folds over a group — so it may
       // not appear in a `WHERE`, a join `ON`, or a non-aggregate projection.
@@ -2747,7 +3027,8 @@ internal struct Grouping {
       // Attach the unified result type — the same `ValueType.unified` reduction
       // `derive`/`validate` compute — over the grouped scope, so the executor
       // COERCES the selected branch's value to the advertised column type.
-      let type = try scope.derive(whens, otherwise, routines)
+      let type = try scope.derive(whens, otherwise, routines,
+                                  subquery: subquery)
       return .case(branches, else: fallback, type: type)
     case let .cast(operand, type):
       // Lower the operand against the grouped slot space and attach the target
@@ -2762,13 +3043,18 @@ internal struct Grouping {
       for argument in arguments {
         try elements.append(term(argument, routines, subquery: subquery))
       }
-      let type = try scope.derive(expression, routines)
+      let type = try scope.derive(expression, routines, subquery: subquery)
       return .coalesce(elements, type: type)
     case let .nullif(lhs, rhs):
       // Lower both operands to grouped-space `Term`s and hold them in a
       // first-class `Term.nullif` so each is evaluated ONCE.
       return try .nullif(term(lhs, routines, subquery: subquery),
                          term(rhs, routines, subquery: subquery))
+    case let .subquery(query):
+      // A scalar subquery is UNCORRELATED — row-independent, so it needs no
+      // `GROUP BY` key — and lowers to a `Term.subquery` reading its collapsed
+      // value from the cache, carrying its `Subkey` and single-column type.
+      return try subquery.scalar(query)
     case .aggregate:
       // An aggregate reaches here only when it was not collected — an internal
       // inconsistency, since the query gathers every projection/HAVING aggregate.

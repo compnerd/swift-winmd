@@ -258,8 +258,14 @@ extension Catalog where Self: ~Escapable {
                          visited: Set<String> = [],
                          validate: Bool = true)
       throws(SQLError) -> Array<OutputColumn> {
-    try scope(of: select, context, visited: visited, validate: validate)
-        .columns(of: select.projection, context.routines)
+    // A scalar subquery in the projection derives its type from its inner
+    // query's single column, so build the SAME cursor-free `Subquery` map the
+    // compile path's lowering reads — every nested subquery compiled ONCE for
+    // its width and single-column type — and pass it to the projection walk so
+    // an output type for a `(SELECT …)` matches the type the run advertises.
+    let subquery = try subquery(of: select, context, visited)
+    return try scope(of: select, context, visited: visited, validate: validate)
+        .columns(of: select.projection, context.routines, subquery: subquery)
   }
 
   /// The name-resolution scope of `select` — its FROM relation and each joined
@@ -364,13 +370,57 @@ extension Catalog where Self: ~Escapable {
   private borrowing func subqueryCheck(of select: Select, _ context: Context,
                                        visited: Set<String>)
       throws(SQLError) -> SubqueryCheck {
+    // An `IN (Q)` (`valued`) occurrence EVALUATES its select list at run, so
+    // its ORIGINAL shape is type-checked EAGERLY here; an `EXISTS` occurrence
+    // runs the cardinality probe, so its PROBED shape is checked. Both roles
+    // always run (a predicate is not short-circuited past), so their operand
+    // validation stays eager, driven by the original-vs-probe `shape`.
+    let scalar = select.scalar
     let valued = select.valued
+    let existential = select.existential
+    // A scalar occurrence's inner-query OPERAND validation DEFERS to the
+    // reachability walk (mirroring the lazy executor — a scalar in an
+    // unreachable `CASE`/`COALESCE` arm never validates) UNLESS the query is
+    // ALSO an `IN` value set: an `IN`'s ORIGINAL shape is validated eagerly (it
+    // runs unconditionally), fully covering the scalar's operands too. A scalar
+    // occurrence's ONLY other eager role, an `EXISTS`, validates just the PROBE
+    // (never the select list), so it does NOT cover the scalar's operands —
+    // such a query stays deferred and its EXISTS probe is ALSO checked eagerly.
+    let deferred = scalar.subtracting(valued)
     var widths = Dictionary<Query, Int>()
+    var types = Dictionary<Query, ValueType>()
     for query in select.subqueries where widths[query] == nil {
-      try typecheck(shape(of: query, valued: valued), context, visited: visited)
-      widths[query] = try compile(query, context, visited).width
+      // Eager operand validation runs for every occurrence a run does not
+      // short-circuit past — an `IN` (ORIGINAL shape) or an `EXISTS` (PROBE).
+      // A SCALAR-ONLY occurrence (neither) has its inner-query OPERAND check
+      // DEFERRED: a THROWING operand (`1 / 0`) the type-check detects and the
+      // lazy executor skips must not fault an unreachable arm. (A bad inner
+      // column/relation is a STRUCTURAL fault the outer `compile` already
+      // raised for EVERY subquery before this runs, so it never reaches here —
+      // validation and run agree on it regardless of the arm.)
+      if !deferred.contains(query) || existential.contains(query) {
+        try typecheck(shape(of: query, valued: valued), context,
+                      visited: visited)
+      }
+      // The width and single-column type derive for EVERY subquery — cursor-
+      // free and TOTAL for a clean-resolving inner query (deriving the type of
+      // `1 / 0` yields the integer type WITHOUT dividing), so a reached scalar
+      // shapes the outer `CASE`/projection column type correctly. Only the
+      // deferred OPERAND check that faults `.divide` waits for the reached walk.
+      let width = try compile(query, context, visited).width
+      widths[query] = width
+      types[query] =
+          try columns(of: query.first, context, visited: visited,
+                      validate: false).first?.type
+      // A scalar occurrence's single-column ARITY is enforced EAGERLY,
+      // reachability-independent — a cursor-free width check the run's lowering
+      // also makes — so a two-column scalar subquery in an unreachable arm STILL
+      // faults `SQLError.arity`, kept SEPARATE from the deferred operand check.
+      if scalar.contains(query), width != 1 {
+        throw .arity(1, width)
+      }
     }
-    return SubqueryCheck(widths)
+    return SubqueryCheck(widths, types, deferred: deferred)
   }
 
   /// The subquery shape a run of `query` type-checks against — the ORIGINAL for
@@ -390,11 +440,35 @@ extension Catalog where Self: ~Escapable {
   private borrowing func typecheck(_ select: Select, _ context: Context,
                                    visited: Set<String>)
       throws(SQLError) {
+    // Type-check and compile every UNCORRELATED subquery ONCE, ahead of the
+    // reachability walk: the pre-pass validates each `IN`/`EXISTS` inner query
+    // (never short-circuited past) and derives every scalar subquery's
+    // cursor-free arity and type (TOTAL — no `.divide` on `1 / 0`), but DEFERS
+    // a scalar occurrence's inner-query OPERAND validation to the walk, which
+    // records the scalar occurrences it REACHES into the `SubqueryCheck`'s box.
+    let subquery = try subqueryCheck(of: select, context, visited: visited)
+    // Walk the query's operands reachability-aware, so an unreachable
+    // `CASE`/`COALESCE` arm's scalar subquery is left unrecorded and unchecked.
+    try walk(select, context, subquery: subquery, visited: visited)
+    // Validate the inner query of each scalar occurrence the walk REACHED,
+    // where the borrowing catalog is in scope — mirroring the lazy executor,
+    // which materialises only a reached scalar subquery. A reached
+    // `(SELECT 1 / 0 …)` faults `.divide` here exactly as the run does; a
+    // skipped one is never reached, so never validated.
+    for query in subquery.visited {
+      try typecheck(query, context, visited: visited)
+    }
+  }
+
+  /// Walks the operands of `select` reachability-aware — the SAME order and
+  /// short-circuit rules the executor applies — validating each operand a run
+  /// would evaluate and RECORDING (via `subquery`) each scalar subquery it
+  /// reaches, so the caller validates only the reached scalars' inner queries.
+  private borrowing func walk(_ select: Select, _ context: Context,
+                              subquery: SubqueryCheck, visited: Set<String>)
+      throws(SQLError) {
     let routines = context.routines
     let scope = try scope(of: select, context, visited: visited)
-    // Type-check and compile every UNCORRELATED subquery ONCE, ahead of the
-    // `check` walk, into a map the checks read for validation and arity.
-    let subquery = try subqueryCheck(of: select, context, visited: visited)
     // An `ORDER BY` ordinal names a 1-based SELECT-list position; one outside
     // `1 ... width` names no output column and faults `SQLError.column` (spelled
     // as the ordinal), exactly as the compile path's ordinal resolution does —
@@ -681,7 +755,8 @@ extension Scope {
   /// The output columns a `projection` yields over this scope, named and typed
   /// — `routines` type a scalar call from its declared return type.
   internal func columns(of projection: Projection,
-                        _ routines: Routines = [:])
+                        _ routines: Routines = [:],
+                        subquery: Subquery = .unsupported)
       throws(SQLError) -> Array<OutputColumn> {
     return switch projection {
     case .all:
@@ -690,7 +765,7 @@ extension Scope {
       try references.map { column throws(SQLError) in try output(of: column) }
     case let .expressions(items):
       try items.indices.map { index throws(SQLError) in
-        try output(items[index], at: index, routines)
+        try output(items[index], at: index, routines, subquery: subquery)
       }
     }
   }
@@ -719,14 +794,17 @@ extension Scope {
   /// source type and a literal its own; a scalar call its routine's declared
   /// return type; every other expression `.integer`.
   internal func output(_ item: Projected, at index: Int,
-                       _ routines: Routines = [:])
+                       _ routines: Routines = [:],
+                       subquery: Subquery = .unsupported)
       throws(SQLError) -> OutputColumn {
     let name = item.name ?? "column \(index + 1)"
     // DERIVE the nominal output type: the schema reports the type a run would
     // produce and never faults on an operand. Run-time operand and call
     // validation is `typecheck`'s job, reachability-aware, so a schema resolves
-    // even for an expression a zero-row limit makes unreachable.
+    // even for an expression a zero-row limit makes unreachable. A scalar
+    // subquery derives its single-column type from the `subquery` map.
     return try OutputColumn(name: name,
-                            type: derive(item.expression, routines))
+                            type: derive(item.expression, routines,
+                                         subquery: subquery))
   }
 }

@@ -737,7 +737,9 @@ extension Expression {
   /// Whether the expression contains an aggregate call anywhere within it.
   internal var aggregated: Bool {
     switch self {
-    case .column, .literal:
+    case .column, .literal, .subquery:
+      // An aggregate INSIDE a scalar subquery belongs to that subquery, not the
+      // enclosing query, so a `subquery` is not an aggregated expression here.
       false
     case .aggregate:
       true
@@ -765,7 +767,9 @@ extension Expression {
   /// registration rather than silently evaluating that reference as UNBOUND.
   internal var bound: Bool {
     switch self {
-    case .column, .literal, .aggregate:
+    case .column, .literal, .aggregate, .subquery:
+      // An UNCORRELATED scalar subquery references no query binding of the
+      // enclosing query (correlation is a later slice), so it is not bound.
       false
     case let .call(_, arguments):
       arguments.contains { $0.bound }
@@ -938,6 +942,32 @@ extension Query {
     case let .setop(_, left, right, _): left.valued.union(right.valued)
     }
   }
+
+  /// The subqueries this query nests in a SCALAR-subquery position — the ones a
+  /// run collapses to a single VALUE (empty → NULL, one row → the cell, more →
+  /// `SQLError.cardinality`), distinct from a `valued` (`IN`) or `EXISTS`-probe
+  /// occurrence. The materialiser reads this to decide a scalar occurrence's
+  /// materialisation.
+  internal var scalar: Set<Query> {
+    switch self {
+    case let .select(select): select.scalar
+    case let .setop(_, left, right, _): left.scalar.union(right.scalar)
+    }
+  }
+
+  /// The subqueries this query nests in an `EXISTS (Q)` position — the ones a
+  /// run materialises as a cardinality PROBE. The SAME query may ALSO occur as
+  /// a `valued` (`IN`) or `scalar` occurrence over identical SQL; each role is
+  /// a DISTINCT cache entry (see `Role`), so the materialiser produces an
+  /// existential probe entry whenever a query occurs here — never reusing a
+  /// `valued`/`scalar` entry for an `EXISTS` read.
+  internal var existential: Set<Query> {
+    switch self {
+    case let .select(select): select.existential
+    case let .setop(_, left, right, _):
+      left.existential.union(right.existential)
+    }
+  }
 }
 
 extension Select {
@@ -991,6 +1021,48 @@ extension Select {
     for key in order?.keys ?? [] {
       if case let .expression(expression) = key.sort {
         expression.collect(valued: &queries)
+      }
+    }
+    return queries
+  }
+
+  /// The subqueries this `SELECT` nests in a SCALAR-subquery position — the
+  /// same clauses `subqueries` walks, keeping only the `Expression.subquery`
+  /// queries, so a run materialises each as its collapsed single VALUE (empty →
+  /// NULL, one row → the cell, more → `SQLError.cardinality`), distinct from a
+  /// `valued` (`IN`, full column) or `EXISTS`-probe occurrence.
+  internal var scalar: Set<Query> {
+    var queries = Set<Query>()
+    predicate?.collect(scalar: &queries)
+    for join in joins { join.on.collect(scalar: &queries) }
+    having?.collect(scalar: &queries)
+    if case let .expressions(items) = projection {
+      for item in items { item.expression.collect(scalar: &queries) }
+    }
+    for key in order?.keys ?? [] {
+      if case let .expression(expression) = key.sort {
+        expression.collect(scalar: &queries)
+      }
+    }
+    return queries
+  }
+
+  /// The subqueries this `SELECT` nests in an `EXISTS (Q)` position — the
+  /// same clauses `subqueries` walks, keeping only the `exists` operands'
+  /// queries, so a run materialises each as a cardinality PROBE under its own
+  /// `existential` key, distinct from any `valued`/`scalar` occurrence over the
+  /// same SQL.
+  internal var existential: Set<Query> {
+    var queries = Set<Query>()
+    predicate?.collect(existential: &queries)
+    for join in joins { join.on.collect(existential: &queries) }
+    having?.collect(existential: &queries)
+    if case let .expressions(items) = projection {
+      for item in items { item.expression.collect(existential: &queries) }
+    }
+    for key in order?.keys ?? [] {
+      if case let .expression(expression) = key.sort {
+        expression.collect(existential: &queries)
       }
     }
     return queries
@@ -1093,6 +1165,90 @@ extension Predicate {
       operand.collect(valued: &queries)
     }
   }
+
+  /// Collects the SCALAR-subquery-position queries this predicate nests into
+  /// `queries` — an operand expression's own `subquery`, a `CASE` guard's, and
+  /// those under `AND`/`OR`/`NOT`, mirroring `collect(subqueries:)`. An
+  /// `EXISTS`/`IN (Q)`'s own `Query` is NOT a scalar occurrence — it is
+  /// probed/valued — so it is not collected here.
+  internal func collect(scalar queries: inout Set<Query>) {
+    switch self {
+    case .exists:
+      break
+    case let .within(operand, _, _):
+      operand.collect(scalar: &queries)
+    case let .comparison(left, _, right):
+      left.collect(scalar: &queries)
+      right.collect(scalar: &queries)
+    case let .bound(left, _, _):
+      left.collect(scalar: &queries)
+    case let .null(operand, _):
+      operand.collect(scalar: &queries)
+    case let .membership(operand, values, _):
+      operand.collect(scalar: &queries)
+      for value in values { value.collect(scalar: &queries) }
+    case let .like(operand, pattern, escape, _):
+      operand.collect(scalar: &queries)
+      pattern.collect(scalar: &queries)
+      escape?.collect(scalar: &queries)
+    case let .between(test, lower, upper, _):
+      test.collect(scalar: &queries)
+      lower.collect(scalar: &queries)
+      upper.collect(scalar: &queries)
+    case let .distinct(lhs, rhs, _):
+      lhs.collect(scalar: &queries)
+      rhs.collect(scalar: &queries)
+    case let .truth(inner, _, _):
+      inner.collect(scalar: &queries)
+    case let .and(lhs, rhs), let .or(lhs, rhs):
+      lhs.collect(scalar: &queries)
+      rhs.collect(scalar: &queries)
+    case let .not(operand):
+      operand.collect(scalar: &queries)
+    }
+  }
+
+  /// Collects the `EXISTS (Q)`-position subqueries this predicate nests into
+  /// `queries` — ONLY an `exists`'s `Query`, recursing the same structure
+  /// `collect(subqueries:)` does. An `IN (Q)`'s `Query` is NOT collected
+  /// here — its values are read, so it is a `valued` occurrence, not an
+  /// existential one — but its operand's own subqueries are still descended.
+  internal func collect(existential queries: inout Set<Query>) {
+    switch self {
+    case let .exists(query, _):
+      queries.insert(query)
+    case let .within(operand, _, _):
+      operand.collect(existential: &queries)
+    case let .comparison(left, _, right):
+      left.collect(existential: &queries)
+      right.collect(existential: &queries)
+    case let .bound(left, _, _):
+      left.collect(existential: &queries)
+    case let .null(operand, _):
+      operand.collect(existential: &queries)
+    case let .membership(operand, values, _):
+      operand.collect(existential: &queries)
+      for value in values { value.collect(existential: &queries) }
+    case let .like(operand, pattern, escape, _):
+      operand.collect(existential: &queries)
+      pattern.collect(existential: &queries)
+      escape?.collect(existential: &queries)
+    case let .between(test, lower, upper, _):
+      test.collect(existential: &queries)
+      lower.collect(existential: &queries)
+      upper.collect(existential: &queries)
+    case let .distinct(lhs, rhs, _):
+      lhs.collect(existential: &queries)
+      rhs.collect(existential: &queries)
+    case let .truth(inner, _, _):
+      inner.collect(existential: &queries)
+    case let .and(lhs, rhs), let .or(lhs, rhs):
+      lhs.collect(existential: &queries)
+      rhs.collect(existential: &queries)
+    case let .not(operand):
+      operand.collect(existential: &queries)
+    }
+  }
 }
 
 extension Predicate.Operand {
@@ -1111,19 +1267,39 @@ extension Predicate.Operand {
       expression.collect(valued: &queries)
     }
   }
+
+  /// Collects the scalar-subquery-position queries in this `LIKE` operand — an
+  /// expression's own, none for a `:parameter`.
+  internal func collect(scalar queries: inout Set<Query>) {
+    if case let .expression(expression) = self {
+      expression.collect(scalar: &queries)
+    }
+  }
+
+  /// Collects the `EXISTS (Q)`-position subqueries in this `LIKE` operand —
+  /// an expression's own, none for a `:parameter`.
+  internal func collect(existential queries: inout Set<Query>) {
+    if case let .expression(expression) = self {
+      expression.collect(existential: &queries)
+    }
+  }
 }
 
 extension Expression {
   /// Collects the subqueries this expression nests DIRECTLY into `queries` —
-  /// reached through a `CASE` guard or an aggregate's argument/FILTER (a scalar
-  /// expression has no other predicate) — recursing its call arguments,
-  /// arithmetic, aggregate operand and FILTER, `CASE`, `CAST`, `COALESCE`, and
-  /// `NULLIF` sub-expressions. A scalar `Expression.subquery` is a LATER slice,
-  /// so none is collected from an expression position yet.
+  /// its own scalar `subquery`, and those reached through a `CASE` guard or an
+  /// aggregate's argument/FILTER — recursing its call arguments, arithmetic,
+  /// aggregate operand and FILTER, `CASE`, `CAST`, `COALESCE`, and `NULLIF`
+  /// sub-expressions WITHOUT descending a collected subquery's own body
+  /// (`compile`/`run` recurse into it). A scalar `Expression.subquery` is
+  /// collected so the pre-pass compiles it (for its width and type) and the run
+  /// materialises its single value.
   internal func collect(subqueries queries: inout Array<Query>) {
     switch self {
     case .column, .literal:
       break
+    case let .subquery(query):
+      queries.append(query)
     case let .aggregate(_, operand, _, filter):
       if case let .expression(expression) = operand {
         expression.collect(subqueries: &queries)
@@ -1152,10 +1328,13 @@ extension Expression {
 
   /// Collects the `IN (Q)`-position subqueries this expression nests — reached
   /// through a `CASE` guard or an aggregate's argument/FILTER, mirroring
-  /// `collect(subqueries:)`. An `EXISTS` guard contributes none (it probes).
+  /// `collect(subqueries:)`. An `EXISTS` guard contributes none (it probes),
+  /// and a SCALAR `subquery` contributes none here — its single value is read
+  /// (`scalar`), not its column (`values`), so it is a `scalar` occurrence, not
+  /// a `valued` one.
   internal func collect(valued queries: inout Set<Query>) {
     switch self {
-    case .column, .literal:
+    case .column, .literal, .subquery:
       break
     case let .aggregate(_, operand, _, filter):
       if case let .expression(expression) = operand {
@@ -1183,13 +1362,86 @@ extension Expression {
     }
   }
 
-  /// Whether this expression nests any `EXISTS`/`IN (Q)` subquery — reached
-  /// through a `CASE` guard or an aggregate's argument/FILTER. The empty-fold
-  /// reads this to VALIDATE a subquery-guarded projection or sort expression
-  /// (whose selected branch a run decides at RUN by the subquery, not
-  /// statically) rather than prune it, so `columns(of:)` surfaces the same
-  /// fault the run would (`SELECT CASE WHEN EXISTS (Q) THEN 1 / 0 …` raises
-  /// `.divide`). A subquery-free expression keeps the precise empty-fold.
+  /// Collects the SCALAR-subquery-position queries this expression nests — its
+  /// own `subquery`, and those reached through a `CASE` guard or an aggregate's
+  /// argument/FILTER, mirroring `collect(subqueries:)`. A scalar occurrence is
+  /// materialised as its collapsed single VALUE (empty → NULL, one row → the
+  /// cell, more → `SQLError.cardinality`), distinct from a `valued` (`IN`) or
+  /// `EXISTS`-probe occurrence.
+  internal func collect(scalar queries: inout Set<Query>) {
+    switch self {
+    case .column, .literal:
+      break
+    case let .subquery(query):
+      queries.insert(query)
+    case let .aggregate(_, operand, _, filter):
+      if case let .expression(expression) = operand {
+        expression.collect(scalar: &queries)
+      }
+      filter?.collect(scalar: &queries)
+    case let .call(_, arguments):
+      for argument in arguments { argument.collect(scalar: &queries) }
+    case let .binary(_, lhs, rhs):
+      lhs.collect(scalar: &queries)
+      rhs.collect(scalar: &queries)
+    case let .case(whens, otherwise):
+      for when in whens {
+        when.when.collect(scalar: &queries)
+        when.then.collect(scalar: &queries)
+      }
+      otherwise?.collect(scalar: &queries)
+    case let .cast(operand, _):
+      operand.collect(scalar: &queries)
+    case let .coalesce(arguments):
+      for argument in arguments { argument.collect(scalar: &queries) }
+    case let .nullif(lhs, rhs):
+      lhs.collect(scalar: &queries)
+      rhs.collect(scalar: &queries)
+    }
+  }
+
+  /// Collects the `EXISTS (Q)`-position subqueries this expression nests —
+  /// reached through a `CASE` guard or an aggregate's FILTER, mirroring
+  /// `collect(subqueries:)`. A scalar `subquery` contributes none here — its
+  /// value is read, so it is a `scalar` occurrence, not an existential one.
+  internal func collect(existential queries: inout Set<Query>) {
+    switch self {
+    case .column, .literal, .subquery:
+      break
+    case let .aggregate(_, operand, _, filter):
+      if case let .expression(expression) = operand {
+        expression.collect(existential: &queries)
+      }
+      filter?.collect(existential: &queries)
+    case let .call(_, arguments):
+      for argument in arguments { argument.collect(existential: &queries) }
+    case let .binary(_, lhs, rhs):
+      lhs.collect(existential: &queries)
+      rhs.collect(existential: &queries)
+    case let .case(whens, otherwise):
+      for when in whens {
+        when.when.collect(existential: &queries)
+        when.then.collect(existential: &queries)
+      }
+      otherwise?.collect(existential: &queries)
+    case let .cast(operand, _):
+      operand.collect(existential: &queries)
+    case let .coalesce(arguments):
+      for argument in arguments { argument.collect(existential: &queries) }
+    case let .nullif(lhs, rhs):
+      lhs.collect(existential: &queries)
+      rhs.collect(existential: &queries)
+    }
+  }
+
+  /// Whether this expression nests any `EXISTS`/`IN (Q)`/scalar subquery —
+  /// reached through a `CASE` guard or an aggregate's argument/FILTER, or its
+  /// own scalar `subquery`. The empty-fold reads this to VALIDATE a
+  /// subquery-guarded projection or sort expression (whose selected branch a
+  /// run decides at RUN by the subquery, not statically) rather than prune it,
+  /// so `columns(of:)` surfaces the same fault the run would (`SELECT CASE WHEN
+  /// EXISTS (Q) THEN 1 / 0 …` raises `.divide`). A subquery-free expression
+  /// keeps the precise empty-fold.
   internal var subquery: Bool {
     var queries = Array<Query>()
     collect(subqueries: &queries)
@@ -1397,7 +1649,10 @@ extension Expression {
   /// computes once.
   internal func collect(into expressions: inout Array<Expression>) {
     switch self {
-    case .column, .literal:
+    case .column, .literal, .subquery:
+      // An aggregate inside a scalar `subquery` belongs to THAT subquery's own
+      // grouping, not the enclosing query's, so it is not collected here — the
+      // subquery is compiled and run as a whole plan.
       break
     case .aggregate:
       if !expressions.contains(self) {
@@ -2280,10 +2535,19 @@ extension Catalog where Self: ~Escapable {
                                    _ scope: Subscope = .caller)
       throws(SQLError) -> Subquery {
     var widths = Dictionary<Query, Int>()
+    var types = Dictionary<Query, ValueType>()
     for query in select.subqueries where widths[query] == nil {
       widths[query] = try compile(query, context, visited).width
+      // A scalar subquery contributes its single-column output type; a wider or
+      // an `EXISTS`/`IN (Q)` subquery still records the FIRST column's type
+      // (harmless — only a width-1 scalar occurrence reads it, and the lowering
+      // rejects a wider one). It derives cursor-free against the SAME context
+      // the width compile uses, so it matches what the run advertises.
+      types[query] =
+          try columns(of: query.first, context, visited: visited,
+                      validate: false).first?.type
     }
-    return Subquery(scope, widths)
+    return Subquery(scope, widths, types)
   }
 
   /// Executes every UNCORRELATED subquery `query` nests ONCE against this
@@ -2309,37 +2573,86 @@ extension Catalog where Self: ~Escapable {
   /// the end is EXISTS false. A `Query` used by BOTH is in `valued`, so its
   /// single full materialisation serves the `EXISTS` occurrence too.
   ///
+  /// A SCALAR occurrence is NOT materialised here: it collapses LAZILY on the
+  /// first evaluation of its `Term.subquery` (see the evaluator's `.subquery`
+  /// case, which runs `cell(of:)` where the catalog is in scope and memoises
+  /// the result), so a scalar subquery in an unreachable `CASE`/`COALESCE` arm
+  /// never runs and its `.cardinality` or inner fault never fires. The returned
+  /// cache carries an empty scalar memo the evaluator fills on first reach.
+  ///
   /// This runs at RUN time, where the borrowing catalog IS in scope, NOT during
   /// `compile` — so a schema-only path never reaches it and opens no cursor. It
   /// gathers every arm's directly-nested subquery (a set operation's both arms
-  /// read one cache) and runs each DISTINCT `Query` at most ONCE per
-  /// outer-query execution: its result is the same for every outer row because
-  /// the subquery is UNCORRELATED. Each runs under the SAME `context` —
+  /// read one cache) and runs each DISTINCT `IN`/`EXISTS` `Query` at most ONCE
+  /// per outer-query execution: its result is the same for every outer row
+  /// because the subquery is UNCORRELATED. Each runs under the SAME `context` —
   /// a nested subquery resolves ITS own inner subqueries through its own `run`,
   /// so this walk stays one level.
   ///
-  /// Per-arm SHORT-CIRCUIT laziness — not running a subquery an `AND`/`OR` never
-  /// reaches — is a follow-up that threads a runner to the evaluation site; this
-  /// materialises every subquery the plan syntactically nests up front.
+  /// Per-arm SHORT-CIRCUIT laziness for the `IN`/`EXISTS` roles — not running a
+  /// subquery an `AND`/`OR` never reaches — is a follow-up that threads a
+  /// runner to the predicate site; those roles still materialise up front here.
   internal borrowing func subqueries(of query: Query, _ context: Context,
                                      _ scope: Subscope = .caller)
       throws(SQLError) -> Subqueries {
     let valued = query.valued
+    let existential = query.existential
     var results = Dictionary<Subkey, MaterialisedSubquery>()
     for nested in query.subqueries {
-      let key = Subkey(scope, nested)
-      guard results[key] == nil else { continue }
+      // The SAME inner query can occur in more than one ROLE at once — a
+      // scalar subquery, an `IN` value set, and an `EXISTS` probe over
+      // identical SQL — each needing its OWN materialisation SHAPE under its
+      // OWN key, so a scalar read never hits an `IN`/`EXISTS` entry and vice
+      // versa (the role discriminates the key, see `Role`). Materialise one
+      // entry per role the occurrence appears in, each at most once.
+      //
+      // A SCALAR occurrence is NOT materialised here: it collapses LAZILY, on
+      // the FIRST evaluation of its `Term.subquery` (see the evaluator's
+      // `.subquery` case), memoised under its `(scope, query, .scalar)` key,
+      // so an occurrence in an unreachable `CASE`/`COALESCE` arm never runs —
+      // never throws `.cardinality` or an inner fault. The eager roles below
+      // are the `IN`/`EXISTS` operands a `WHERE`/`ON` is not short-circuited
+      // past.
       if valued.contains(nested) {
         // An `IN (Q)` occurrence: materialise the full result — its single
         // column of values is folded per outer row.
-        results[key] = MaterialisedSubquery(rows: try run(nested, context))
-      } else {
-        // An `EXISTS`-only occurrence: probe cardinality without evaluating the
+        let key = Subkey(scope, nested, .valued)
+        if results[key] == nil {
+          results[key] = MaterialisedSubquery(rows: try run(nested, context))
+        }
+      }
+      if existential.contains(nested) {
+        // An `EXISTS (Q)` occurrence: probe cardinality without evaluating the
         // select list or sort keys, honouring the original `OFFSET`/`FETCH`.
-        results[key] = MaterialisedSubquery(present: try probe(nested, context))
+        let key = Subkey(scope, nested, .existential)
+        if results[key] == nil {
+          results[key] = MaterialisedSubquery(present: try probe(nested,
+                                                                 context))
+        }
       }
     }
     return Subqueries(results)
+  }
+
+  /// The single VALUE a SCALAR subquery `query` collapses to against this
+  /// catalog and `context`: NULL when it yields no row, its lone cell when it
+  /// yields exactly one, and `SQLError.cardinality` when it yields more than
+  /// one (the ISO `<scalar subquery>` cardinality rule).
+  ///
+  /// The compile pre-pass checked `query`'s width to exactly 1
+  /// (`SQLError.arity`, cursor-free), so each result row has exactly one cell
+  /// and the collapse reads the first. A wider subquery never reaches here — it
+  /// faulted at compile.
+  ///
+  /// The evaluator calls this LAZILY, on the first reach of a scalar
+  /// `Term.subquery`, so an occurrence in an unreachable `CASE`/`COALESCE` arm
+  /// never runs it — preserving short-circuit semantics — and memoises the
+  /// result for the reached occurrence's later reads.
+  internal borrowing func cell(of query: Query, _ context: Context)
+      throws(SQLError) -> Value {
+    let rows = try run(query, context)
+    guard rows.count <= 1 else { throw .cardinality }
+    return rows.first?.first ?? .null
   }
 
   /// Whether `query`'s row source yields ANY row — the `EXISTS` cardinality

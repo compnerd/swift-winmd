@@ -125,6 +125,12 @@ public enum SQLError: Error, Hashable, Sendable {
   /// ill-defined; the standard requires every `ORDER BY` key under `DISTINCT`
   /// to be an output column. The string is the offending column's name.
   case distinct(String)
+  /// A scalar subquery `(SELECT …)` used where at most one row is admitted
+  /// yielded MORE THAN ONE row — the ISO `<scalar subquery>` requires a
+  /// cardinality of at most one, an empty result standing for NULL and a single
+  /// row for its lone cell. A wider result cannot collapse to one value, so a
+  /// run raises rather than picking one arbitrarily.
+  case cardinality
 }
 
 extension SQLError: CustomStringConvertible {
@@ -183,6 +189,8 @@ extension SQLError: CustomStringConvertible {
           + "or be used in an aggregate function"
     case let .distinct(name):
       "ORDER BY column '\(name)' must appear in the SELECT DISTINCT list"
+    case .cardinality:
+      "a scalar subquery yielded more than one row"
     }
   }
 }
@@ -218,9 +226,11 @@ extension SQLError {
   ///   (a `CREATE VIEW`, or a malformed `WITH` member), `SS003`, a recursive
   ///   CTE that did not reach a fixpoint within the iteration cap, `SS004`, an
   ///   aggregate query naming a non-aggregated column absent from the `GROUP
-  ///   BY`, and `SS005`, a `SELECT DISTINCT` ordering on a column absent from
-  ///   its select list. ISO leaves classes whose first character is `5`–`9` or
-  ///   `I`–`Z` implementation-defined, so `SS` is a safe squat.
+  ///   BY`, `SS005`, a `SELECT DISTINCT` ordering on a column absent from its
+  ///   select list, and `SS006`, a scalar subquery yielding more than one row
+  ///   (ISO's `21000` cardinality violation, kept in the engine's own class for
+  ///   uniformity with its siblings). ISO leaves classes whose first character
+  ///   is `5`–`9` or `I`–`Z` implementation-defined, so `SS` is a safe squat.
   public var sqlstate: String {
     switch self {
     case let .state(code, _):
@@ -263,6 +273,8 @@ extension SQLError {
       "SS004"
     case .distinct:
       "SS005"
+    case .cardinality:
+      "SS006"
     }
   }
 

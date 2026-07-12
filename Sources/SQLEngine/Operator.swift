@@ -332,15 +332,23 @@ extension Catalog where Self: ~Escapable {
       // Fuse a residual product with its filter: stream each pair through the
       // predicate rather than materialising the whole cross product first.
       return try sift(execute(outer, context), execute(inner, context),
-                      filter, routines, bindings, subqueries)
+                      filter, self, context.relations, routines, bindings,
+                      subqueries)
     case let .select(filter, source):
-      return try admitted(execute(source, context), filter, routines,
-                          bindings, subqueries)
+      return try admitted(execute(source, context), filter, self,
+                          context.relations, routines, bindings, subqueries)
     case let .project(terms, source):
-      return try execute(source, context)
-        .map { record throws(SQLError) in
-          try project(terms, record, routines, bindings, subqueries)
-        }
+      // An explicit loop, not a `.map` closure: the borrowed `~Escapable` self
+      // a projected scalar subquery materialises against cannot be captured by
+      // a closure, so each record projects in a direct re-borrow.
+      let source = try execute(source, context)
+      var projected = Array<Record>()
+      projected.reserveCapacity(source.count)
+      for record in source {
+        try projected.append(project(terms, record, self, context.relations,
+                                     routines, bindings, subqueries))
+      }
+      return projected
     case let .sort(keys, source):
       // Evaluate each key's `Term` against every record UP FRONT — a bare slot
       // read, but any lowered expression (`a + b`, `UPPER(Name)`, an ordinal's
@@ -348,12 +356,19 @@ extension Catalog where Self: ~Escapable {
       // values. Evaluation may throw (a scalar call, a division), which a
       // `sorted(by:)` comparator cannot, so it happens here rather than inside
       // the sort; it also evaluates each key once per row rather than once per
-      // comparison.
+      // comparison. An explicit loop keeps the borrowed `self` a scalar sort
+      // key materialises against out of a closure capture.
       let rows = try execute(source, context)
-      let sortable = try rows.map { record throws(SQLError) in
-        try keys.map { key throws(SQLError) in
-          try record.evaluate(key.term, routines, bindings, subqueries)
+      var sortable = Array<Array<Value>>()
+      sortable.reserveCapacity(rows.count)
+      for record in rows {
+        var cells = Array<Value>()
+        cells.reserveCapacity(keys.count)
+        for key in keys {
+          try cells.append(record.evaluate(key.term, self, context.relations,
+                                           routines, bindings, subqueries))
         }
+        sortable.append(cells)
       }
       return sortable.indices
         .sorted { lhs, rhs in
@@ -382,14 +397,14 @@ extension Catalog where Self: ~Escapable {
       // yields no rows to read a width off.
       return try outer(execute(left, context), left.slots ?? 0,
                        execute(right, context), right.slots ?? 0, on, kind,
-                       routines, bindings, subqueries)
+                       self, context.relations, routines, bindings, subqueries)
     case let .setop(kind, left, right, all):
       return try setop(kind, left, right, all, context)
     case let .distinct(source):
       return deduplicated(try execute(source, context))
     case let .aggregate(keys, aggregates, source):
-      return try grouped(execute(source, context), keys, aggregates,
-                         routines, bindings, subqueries)
+      return try grouped(execute(source, context), keys, aggregates, self,
+                         context.relations, routines, bindings, subqueries)
     case let .limit(count, offset, source):
       return limited(try execute(source, context), count, offset)
     }
@@ -548,29 +563,36 @@ private func deduplicated(_ records: Array<Record>) -> Array<Record> {
 }
 
 /// Evaluates each projected `term` against `record` through `routines` to the
-/// output row, in order — slot `i` of the result is `terms[i]`.
-private func project(_ terms: Array<Term>, _ record: Record,
-                     _ routines: Routines, _ bindings: Bindings,
-                     _ subqueries: Subqueries)
-    throws(SQLError) -> Record {
+/// output row, in order — slot `i` of the result is `terms[i]`. The `catalog`
+/// and `relations` thread through so a projected scalar subquery materialises
+/// lazily on first reach (see the evaluator's `.subquery` case).
+private func project<C>(_ terms: Array<Term>, _ record: Record,
+                        _ catalog: borrowing C, _ relations: ScopedRelations,
+                        _ routines: Routines, _ bindings: Bindings,
+                        _ subqueries: Subqueries)
+    throws(SQLError) -> Record where C: Catalog & ~Escapable {
   var cells = Array<Value>()
   cells.reserveCapacity(terms.count)
   for term in terms {
-    try cells.append(record.evaluate(term, routines, bindings, subqueries))
+    try cells.append(record.evaluate(term, catalog, relations, routines,
+                                     bindings, subqueries))
   }
   return Record(cells)
 }
 
 /// Keeps the `records` the `filter` admits — those it evaluates to `true` under
 /// three-valued logic (UNKNOWN and `false` both reject), resolving scalar calls
-/// through `routines` and parameters from `bindings`.
-private func admitted(_ records: Array<Record>, _ filter: Filter,
-                      _ routines: Routines, _ bindings: Bindings,
-                      _ subqueries: Subqueries)
-    throws(SQLError) -> Array<Record> {
+/// through `routines` and parameters from `bindings`. The `catalog` and
+/// `relations` thread through for a scalar subquery in `filter`.
+private func admitted<C>(_ records: Array<Record>, _ filter: Filter,
+                         _ catalog: borrowing C, _ relations: ScopedRelations,
+                         _ routines: Routines, _ bindings: Bindings,
+                         _ subqueries: Subqueries)
+    throws(SQLError) -> Array<Record> where C: Catalog & ~Escapable {
   var kept = Array<Record>()
   for record in records {
-    if try record.evaluate(filter, routines, bindings, subqueries) == true {
+    if try record.evaluate(filter, catalog, relations, routines, bindings,
+                           subqueries) == true {
       kept.append(record)
     }
   }
@@ -681,15 +703,17 @@ private func product(_ outer: Array<Record>, _ inner: Array<Record>)
 /// product: outer-major, each admitted inner in its own order. A pair the
 /// `filter` evaluates to `true` under three-valued logic is kept; UNKNOWN and
 /// `false` both drop, exactly as `admitted`.
-private func sift(_ outer: Array<Record>, _ inner: Array<Record>,
-                  _ filter: Filter, _ routines: Routines, _ bindings: Bindings,
-                  _ subqueries: Subqueries)
-    throws(SQLError) -> Array<Record> {
+private func sift<C>(_ outer: Array<Record>, _ inner: Array<Record>,
+                     _ filter: Filter, _ catalog: borrowing C,
+                     _ relations: ScopedRelations, _ routines: Routines,
+                     _ bindings: Bindings, _ subqueries: Subqueries)
+    throws(SQLError) -> Array<Record> where C: Catalog & ~Escapable {
   var records = Array<Record>()
   for left in outer {
     for right in inner {
       let record = left.merged(with: right)
-      if try record.evaluate(filter, routines, bindings, subqueries) == true {
+      if try record.evaluate(filter, catalog, relations, routines, bindings,
+                             subqueries) == true {
         records.append(record)
       }
     }
@@ -718,11 +742,12 @@ private func sift(_ outer: Array<Record>, _ inner: Array<Record>,
 ///
 /// A `.inner` kind never reaches here — `compile` lowers an inner join through
 /// the product/join path.
-private func outer(_ left: Array<Record>, _ leftWidth: Int,
-                   _ right: Array<Record>, _ rightWidth: Int, _ on: Filter,
-                   _ kind: Join.Kind, _ routines: Routines,
-                   _ bindings: Bindings, _ subqueries: Subqueries)
-    throws(SQLError) -> Array<Record> {
+private func outer<C>(_ left: Array<Record>, _ leftWidth: Int,
+                      _ right: Array<Record>, _ rightWidth: Int, _ on: Filter,
+                      _ kind: Join.Kind, _ catalog: borrowing C,
+                      _ relations: ScopedRelations, _ routines: Routines,
+                      _ bindings: Bindings, _ subqueries: Subqueries)
+    throws(SQLError) -> Array<Record> where C: Catalog & ~Escapable {
   let leftNulls = Record(Array(repeating: .null, count: leftWidth))
   let rightNulls = Record(Array(repeating: .null, count: rightWidth))
 
@@ -736,7 +761,8 @@ private func outer(_ left: Array<Record>, _ leftWidth: Int,
       var paired = false
       for outer in left {
         let record = outer.merged(with: inner)
-        if try record.evaluate(on, routines, bindings, subqueries) == true {
+        if try record.evaluate(on, catalog, relations, routines, bindings,
+                               subqueries) == true {
           records.append(record)
           paired = true
         }
@@ -755,7 +781,8 @@ private func outer(_ left: Array<Record>, _ leftWidth: Int,
     var paired = false
     for index in right.indices {
       let record = outer.merged(with: right[index])
-      if try record.evaluate(on, routines, bindings, subqueries) == true {
+      if try record.evaluate(on, catalog, relations, routines, bindings,
+                             subqueries) == true {
         records.append(record)
         matched[index] = true
         paired = true
@@ -866,16 +893,17 @@ extension Catalog where Self: ~Escapable {
       for index in 0 ..< cte.rows.count {
         let right = cte.record(index, ordinals)
         if let filter,
-            try right.evaluate(filter, routines, bindings,
-                               subqueries) != true { continue }
+            try right.evaluate(filter, self, context.relations, routines,
+                               bindings, subqueries) != true { continue }
         inner.append(right)
       }
       return joined(outer, inner, base, keys)
     }
     guard let inner = table(named: name) else { throw .relation(name) }
     guard inner.seekable(column) else {
-      return try inner.hashed(outer, ordinals, base, keys, filter, routines,
-                              bindings, subqueries)
+      return try inner.hashed(outer, ordinals, base, keys, filter, self,
+                              context.relations, routines, bindings,
+                              subqueries)
     }
 
     let cursor = inner.cursor()
@@ -897,8 +925,8 @@ extension Catalog where Self: ~Escapable {
         // A pushed inner filter is applied as each candidate materialises,
         // before it can pair — an inner row it rejects joins to nothing.
         if let filter,
-            try right.evaluate(filter, routines, bindings,
-                               subqueries) != true { continue }
+            try right.evaluate(filter, self, context.relations, routines,
+                               bindings, subqueries) != true { continue }
         // Equal by the SAME rule the predicate uses — integer/integer exact,
         // mixed integer/double promoted — so a seek that scanned wide still
         // pairs exactly.
@@ -938,13 +966,16 @@ extension Catalog where Self: ~Escapable {
 /// WHERE (`… WHERE key IS NULL`, or one pruning every row) must not force a full
 /// scan of a large unseekable inner.
 extension Table where Self: ~Escapable {
-  fileprivate borrowing func hashed(_ outer: Array<Record>,
-                                    _ ordinals: Array<Int>, _ base: Int,
-                                    _ keys: (left: Int, right: Int),
-                                    _ filter: Filter?, _ routines: Routines,
-                                    _ bindings: Bindings,
-                                    _ subqueries: Subqueries)
-      throws(SQLError) -> Array<Record> {
+  fileprivate borrowing func hashed<C>(_ outer: Array<Record>,
+                                       _ ordinals: Array<Int>, _ base: Int,
+                                       _ keys: (left: Int, right: Int),
+                                       _ filter: Filter?,
+                                       _ catalog: borrowing C,
+                                       _ relations: ScopedRelations,
+                                       _ routines: Routines,
+                                       _ bindings: Bindings,
+                                       _ subqueries: Subqueries)
+      throws(SQLError) -> Array<Record> where C: Catalog & ~Escapable {
     guard outer.contains(where: {
       if case .null = $0[keys.left] { false } else { true }
     }) else { return [] }
@@ -962,7 +993,7 @@ extension Table where Self: ~Escapable {
       // Apply the whole pushed filter before bucketing — a filtered inner row
       // is never a join candidate.
       if let filter,
-          try right.evaluate(filter, routines, bindings,
+          try right.evaluate(filter, catalog, relations, routines, bindings,
                              subqueries) != true { continue }
       if case .null = right[slot] { continue }
       buckets[bucket(right[slot]), default: Array<Record>()].append(right)

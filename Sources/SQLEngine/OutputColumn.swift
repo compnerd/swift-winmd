@@ -86,12 +86,20 @@ extension Catalog where Self: ~Escapable {
     let context = Context(routines: routines)
     // Extend the scope with any `definition_schema.` store relation the query
     // names, so its result schema resolves the reserved relation the same as a
-    // run would — SCHEMA-ONLY, so typing never triggers the row build.
-    let scope = augment(context, for: query, rows: false)
+    // run would — SCHEMA-ONLY, so typing never triggers the row build. A
+    // derived body is validated only when `validate`: a `validate: false`
+    // derive after a run trusts the body rather than re-checking a reachable
+    // operand a data-dependent filter never reached (matching the non-derived
+    // path, whose empty run never evaluates it).
+    let scope = try augment(context, for: query, rows: false,
+                            validate: validate)
     // Validate the whole query without executing — the same compile the run
     // path drives, resolving every arm and cross-checking a UNION's arity — so
-    // a schema is returned only for a query that could actually run.
-    _ = try compile(query, scope)
+    // a schema is returned only for a query that could actually run. `validate`
+    // threads through: a `validate: false` derive after a run must NOT eager-
+    // type-check a derived body in a subquery a data-dependent filter dropped,
+    // matching the run's lenient compile.
+    _ = try compile(query, scope, validate: validate)
     // Type-check every REACHABLE operand and call across all arms — the
     // projection, `WHERE`, and `HAVING` of each. `compile` resolves a call's
     // arguments but cannot check the routine EXISTS or that it is called with
@@ -235,10 +243,21 @@ extension Catalog where Self: ~Escapable {
       // its body.
       overlay[cte.name.lowercased()] = declared
     }
-    let scope = augment(context.scoping(overlay), for: query, rows: false)
-    _ = try compile(query, scope)
-    if validate { try typecheck(query, scope) }
-    return try columns(of: query.first, scope, validate: validate)
+    // Compile/type-check/derive from the base `context.scoping(overlay)`
+    // (idempotently augmented within each, which pushes the trailing query's
+    // derived layer and reveals the base for a nested subquery), so a nested
+    // subquery's FROM sees the CTE overlay and base tables but NOT this query's
+    // derived aliases, and a CTE a same-named derived alias shadows stays
+    // visible beneath the revealed base. Thread `validate` into `compile` as
+    // the non-`WITH` path does: a `validate: false` derive after a successful
+    // run must NOT eager-type-check a derived body in the trailing query — a
+    // data-dependent body expression a filter drops (`FROM (SELECT Label + 1 AS
+    // x FROM K WHERE k = 0) AS d`) is TRUSTED, not rejected, matching the run.
+    // `validate: true` keeps the strict schema check.
+    let base = context.scoping(overlay)
+    _ = try compile(query, base, validate: validate)
+    if validate { try typecheck(query, base) }
+    return try columns(of: query.first, base, validate: validate)
   }
 
   /// The result columns of a single `select`, resolved against this catalog
@@ -258,14 +277,28 @@ extension Catalog where Self: ~Escapable {
                          visited: Set<String> = [],
                          validate: Bool = true)
       throws(SQLError) -> Array<OutputColumn> {
+    // Bind THIS select's own FROM/JOIN derived tables (and store relations)
+    // before deriving either the subquery map or the scope — a set-op ARM
+    // reaches here directly (`columns(of query.first, …)`), and the top-level
+    // augment collected NO arm-local aliases (arms are SELECT-scoped), so a
+    // subquery naming the arm's own derived alias (`WHERE Id IN (SELECT Id FROM
+    // d)`) would else compile against a scope missing `d`. Schema-only, no
+    // cursor; `validate` gates a derived body's own operand check.
+    let augmented = try augment(context, for: .select(select), rows: false,
+                                visited: visited, validate: validate)
     // A scalar subquery in the projection derives its type from its inner
     // query's single column, so build the SAME cursor-free `Subquery` map the
     // compile path's lowering reads — every nested subquery compiled ONCE for
     // its width and single-column type — and pass it to the projection walk so
     // an output type for a `(SELECT …)` matches the type the run advertises.
-    let subquery = try subquery(of: select, context, visited)
-    return try scope(of: select, context, visited: visited, validate: validate)
-        .columns(of: select.projection, context.routines, subquery: subquery)
+    // `subquery(of:)` REVEALS the base — this select's derived aliases are
+    // SELECT-scoped, invisible to a subquery's FROM, while a CTE a same-named
+    // derived alias shadows is resolved beneath the dropped layer.
+    let subquery = try subquery(of: select, augmented, visited,
+                                validate: validate)
+    return try scope(of: select, augmented, visited: visited,
+                     validate: validate)
+        .columns(of: select.projection, augmented.routines, subquery: subquery)
   }
 
   /// The name-resolution scope of `select` — its FROM relation and each joined
@@ -279,6 +312,16 @@ extension Catalog where Self: ~Escapable {
                        visited: Set<String> = [],
                        validate: Bool = true)
       throws(SQLError) -> Scope {
+    // Bind THIS select's own FROM/JOIN derived tables (and store relations)
+    // before resolving its relations — SELECT-scoped, so a subquery select
+    // whose schema is derived directly here (a scalar subquery's output type)
+    // resolves its OWN aliases. Schema-only: `scope` reads no cursor. `visited`
+    // carries the cyclic-view guard into a derived body's materialise, and
+    // `validate` gates that body's own reachable-operand check the same as the
+    // outer query's — a `validate: false` derive trusts a run-proven body.
+    let context =
+        try augment(context, for: .select(select), rows: false,
+                    visited: visited, validate: validate)
     guard let relation = select.from else { return Scope([]) }
     var relations =
         [(relation, try schema(of: relation, context, visited: visited,
@@ -305,6 +348,17 @@ extension Catalog where Self: ~Escapable {
   borrowing func typecheck(_ query: Query, _ context: Context,
                            visited: Set<String> = [])
       throws(SQLError) {
+    // Bind the derived tables (and store relations) THIS query names in its own
+    // FROM/JOIN before type-checking its arms — SELECT-scoped, so a subquery
+    // type-checked through here (e.g. from `subqueryCheck`) resolves its OWN
+    // aliases. Schema-only (`rows: false`): the type-check reads no cursor.
+    // `visited` carries the cyclic-view guard into a derived body's derive.
+    // A nested subquery's FROM sees base tables and enclosing CTEs, NOT this
+    // query's derived aliases — its type-check lowers against the base
+    // `subqueryCheck` REVEALS from the augmented `context` (enclosing derived
+    // aliases dropped, CTEs and store kept, a shadowed CTE preserved).
+    let context = try augment(context, for: query, rows: false,
+                              visited: visited)
     switch query {
     case let .select(select):
       try typecheck(select, context, visited: visited)
@@ -375,6 +429,12 @@ extension Catalog where Self: ~Escapable {
     // runs the cardinality probe, so its PROBED shape is checked. Both roles
     // always run (a predicate is not short-circuited past), so their operand
     // validation stays eager, driven by the original-vs-probe `shape`.
+    // A nested subquery's FROM resolves against base tables and enclosing CTEs,
+    // NOT the enclosing SELECT's derived-table aliases — STRIP them (CTEs/store
+    // kept) before type-checking/compiling each subquery, mirroring the compile
+    // path's strip in `subquery(of:)`, so the schema path faults an outer
+    // derived alias in a subquery's FROM exactly as the run does.
+    let context = context.revealed()
     let scalar = select.scalar
     let valued = select.valued
     let existential = select.existential
@@ -446,6 +506,8 @@ extension Catalog where Self: ~Escapable {
     // cursor-free arity and type (TOTAL — no `.divide` on `1 / 0`), but DEFERS
     // a scalar occurrence's inner-query OPERAND validation to the walk, which
     // records the scalar occurrences it REACHES into the `SubqueryCheck`'s box.
+    // `subqueryCheck` REVEALS the base from the augmented `context`, so a
+    // subquery's FROM sees no derived alias while a shadowed CTE is preserved.
     let subquery = try subqueryCheck(of: select, context, visited: visited)
     // Walk the query's operands reachability-aware, so an unreachable
     // `CASE`/`COALESCE` arm's scalar subquery is left unrecorded and unchecked.
@@ -454,9 +516,13 @@ extension Catalog where Self: ~Escapable {
     // where the borrowing catalog is in scope — mirroring the lazy executor,
     // which materialises only a reached scalar subquery. A reached
     // `(SELECT 1 / 0 …)` faults `.divide` here exactly as the run does; a
-    // skipped one is never reached, so never validated.
+    // skipped one is never reached, so never validated. A subquery's FROM sees
+    // base tables and enclosing CTEs, NOT the enclosing SELECT's derived-table
+    // aliases, so type-check each against the REVEALED base — the derived
+    // layers dropped, the CTEs/store (a shadowed CTE among them) kept.
+    let inner = context.revealed()
     for query in subquery.visited {
-      try typecheck(query, context, visited: visited)
+      try typecheck(query, inner, visited: visited)
     }
   }
 
@@ -723,8 +789,15 @@ extension Catalog where Self: ~Escapable {
       // operand a `SELECT * FROM v` run would evaluate — a `WHERE`/`HAVING`, a
       // later `UNION` arm — while skipping an arm a short-circuit proves
       // unreachable.
-      let overlay = augment(context.scoping([:]), for: view.query, rows: false)
+      // The view name enters `visited` BEFORE its body's derived tables
+      // materialise, so a derived table naming this view (`FROM (SELECT * FROM
+      // <self>) AS d`) re-enters with the view already visited and faults
+      // `.recursion` rather than recursing to a stack overflow — the guard
+      // rides through `augment`/`materialise` into the derived body.
       let inner = visited.union([name.lowercased()])
+      let overlay =
+          try augment(context.scoping([:]), for: view.query, rows: false,
+                      visited: inner, validate: validate)
       // Gate the body's reachable-operand check on `validate`: a `validate:
       // false` derive skips it, so a data-dependent-empty body (a text
       // arithmetic under an unmatched filter) does not fault a `SELECT *` over

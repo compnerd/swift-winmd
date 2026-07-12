@@ -735,7 +735,21 @@ extension Catalog where Self: ~Escapable {
     if let cached = subqueries.scalar(cached: key) {
       return cached.coerced(to: type)
     }
-    let context = Context(relations: relations, routines: routines,
+    // Resolve the inner query against the cache's BASE scope for THIS
+    // occurrence's OWN `Subscope` — the one the eager `EXISTS`/`IN (Q)`
+    // occurrences of that scope ran against (the revealed base
+    // `subqueries(of:)` kept), which `cell(of:)` reveals for the scalar's FROM.
+    // Picking the scope by `key.scope` keeps a `.view(name)` scalar reading the
+    // VIEW's relations and a `.caller` scalar the caller's after a `merged`
+    // folds the two — the executor threads only the EXECUTING plan's overlay
+    // down the evaluate tree, which cannot tell a view-body scope from the
+    // caller's, so the per-`Subscope` cache scope carries each. An empty cache
+    // scope (a schema path's bare `Subqueries`) falls back to the threaded
+    // overlay, whose derived layer a `cell(of:)` reveal drops to expose a CTE a
+    // same-named derived alias shadows.
+    let owned = subqueries.relations(key.scope)
+    let scope = owned.isEmpty ? relations : owned
+    let context = Context(relations: scope, routines: routines,
                           bindings: bindings, subqueries: subqueries)
     let value = try cell(of: key.query, context)
     subqueries.store(scalar: value, for: key)

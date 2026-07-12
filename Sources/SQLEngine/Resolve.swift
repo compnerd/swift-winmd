@@ -344,10 +344,38 @@ internal struct Subqueries {
   /// evaluate tree shares the one box, keeping a scalar materialise-once.
   private let scalars: ScalarMemo
 
+  /// The REVEALED base scope the eager occurrences of this cache ran against,
+  /// keyed PER `Subscope` — the enclosing scope with this SELECT's derived
+  /// aliases revealed away and its CTEs/store relations intact
+  /// (`Context.revealed`), stored under the `Subscope` those occurrences
+  /// materialised in. A LAZY scalar occurrence resolves its inner query against
+  /// the scope of its OWN `Subkey`, not the augmented overlay threaded down the
+  /// evaluate tree: the executor threads only the EXECUTING plan's overlay, so
+  /// after a `merged` folds a view-body cache into the caller's it cannot tell
+  /// a view-body occurrence's scope from the caller's. Keying PER `Subscope`
+  /// keeps a `.view(name)` scalar reading the VIEW's own relations and a
+  /// `.caller` scalar the caller's — one shared scope resolved a view-body
+  /// scalar against the caller's overlay (the round-15 fault). Empty for a
+  /// scope the cache carries no eager occurrence of (a bare `Subqueries()` a
+  /// schema path threads), so the lazy scalar falls back to the threaded
+  /// overlay — whose derived layer a `cell(of:)` reveal drops to expose a CTE a
+  /// same-named derived alias shadows.
+  private let scopes: Dictionary<Subscope, ScopedRelations>
+
   internal init(_ results: Dictionary<Subkey, MaterialisedSubquery> = [:],
-                _ scalars: ScalarMemo = ScalarMemo()) {
+                _ scalars: ScalarMemo = ScalarMemo(),
+                _ scopes: Dictionary<Subscope, ScopedRelations> = [:]) {
     self.results = results
     self.scalars = scalars
+    self.scopes = scopes
+  }
+
+  /// The revealed base relations the occurrences of `scope` ran against, or an
+  /// empty map when the cache carries none — the scope a LAZY scalar of that
+  /// `Subscope` resolves its inner query against, falling back to the threaded
+  /// overlay when empty (a schema path's bare cache).
+  internal func relations(_ scope: Subscope) -> ScopedRelations {
+    scopes[scope] ?? [:]
   }
 
   /// The materialised result for `key` — every occurrence a runnable plan
@@ -398,11 +426,19 @@ internal struct Subqueries {
   /// filter reads its `.caller` result while the view-body filter reads its
   /// `.view` one. A collision would be an id-space bug (two contexts sharing a
   /// scope); it cannot happen, so the merge keeps the existing entry. The
-  /// merged cache keeps `self`'s scalar memo — a caller cache and a view-body
-  /// cache resolve DISJOINT scalar keys, so one shared memo serves both spaces.
+  /// merged cache keeps `self`'s scalar memo and UNIONS the per-`Subscope`
+  /// base scopes of both — a caller cache and a view-body cache resolve
+  /// DISJOINT scalar keys, so one shared memo serves both spaces, and each
+  /// `Subscope` keeps its OWN base relations (the `.caller` map and the
+  /// `.view(name)` map ride through side by side), so a view-body lazy scalar
+  /// resolves against the VIEW's relations and a caller scalar the caller's —
+  /// keeping only `self`'s left-hand scope would resolve a view-body scalar
+  /// against the caller overlay. Two contexts sharing a `Subscope` would be an
+  /// id-space bug, so a scope collision keeps `self`'s.
   internal func merged(_ other: Subqueries) -> Subqueries {
     Subqueries(results.merging(other.results) { existing, _ in existing },
-               scalars)
+               scalars,
+               scopes.merging(other.scopes) { existing, _ in existing })
   }
 }
 

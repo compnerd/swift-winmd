@@ -80,4 +80,25 @@ internal struct Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries)
   }
+
+  /// A copy of this context with every enclosing SELECT's derived-table aliases
+  /// REVEALED away — the overlay's derived layers dropped, its common table
+  /// expressions and `definition_schema.` store relations (the base layer)
+  /// KEPT — the scope a NESTED subquery's FROM resolves against.
+  ///
+  /// A derived-table alias is SELECT-scoped: it names a relation only in its
+  /// OWN SELECT's FROM/JOIN and expressions, invisible to a nested subquery's
+  /// FROM exactly as a base-table alias in the enclosing FROM is (a subquery
+  /// does not see the enclosing query's FROM relations; only base tables and
+  /// enclosing CTEs are in its relation scope). A CTE, by contrast, is
+  /// statement-scoped — visible inside a nested subquery's FROM — so it stays.
+  /// The seam that compiles/materialises a nested subquery (`subquery(of:)`,
+  /// `subqueries(of:)`, `cell(of:)`, and the type-check counterparts) reveals
+  /// the base so a subquery's `FROM d` cannot scan an outer derived alias `d`,
+  /// while a same-named CTE `d` the derived alias SHADOWED is resolved again
+  /// — the layered overlay never deleted it. The subquery re-augments its OWN
+  /// derived tables into a fresh layer.
+  internal func revealed() -> Context {
+    scoping(relations.revealed())
+  }
 }

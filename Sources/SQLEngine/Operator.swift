@@ -606,16 +606,24 @@ extension Catalog where Self: ~Escapable {
                                    _ right: Plan, _ all: Bool,
                                    _ context: Context)
       throws(SQLError) -> Array<Record> {
-    let rows = try execute(left, context)
-    switch kind {
-    case .union:
-      let combined = try rows + execute(right, context)
-      return all ? combined : deduplicated(combined)
-    case .intersect:
-      return try intersected(rows, execute(right, context), all)
-    case .except:
-      return try subtracted(rows, execute(right, context), all)
-    }
+    try combine(kind, execute(left, context), execute(right, context), all)
+  }
+}
+
+/// Combines two set-operation arms' records under `kind` and `all` — `union`
+/// keeps the rows of either, `intersect` those of both, `except` the left's not
+/// balanced by the right — the executor's `setop` node and the per-arm run path
+/// share this ONE combiner so the two agree on duplicate handling.
+internal func combine(_ kind: SetOperation, _ left: Array<Record>,
+                      _ right: Array<Record>, _ all: Bool) -> Array<Record> {
+  switch kind {
+  case .union:
+    let combined = left + right
+    return all ? combined : deduplicated(combined)
+  case .intersect:
+    return intersected(left, right, all)
+  case .except:
+    return subtracted(left, right, all)
   }
 }
 
@@ -765,32 +773,116 @@ extension Catalog where Self: ~Escapable {
                                  _ ordinals: Array<Int>, _ seek: Range<Int>?,
                                  _ context: Context)
       throws(SQLError) -> Array<Record> {
-    var overlay = if let view = resolve(view: name) {
-      augment(context.scoping([:]), for: view.query, rows: true)
-    } else {
-      context.scoping([:])
-    }
-    // A view body may itself nest `EXISTS`/`IN (Q)` predicates whose subqueries
-    // its own compiled plan carries; resolve them ONCE here — against the view's
-    // overlay, where this catalog is in scope — so the sub-plan's row evaluator
-    // reads each result, just as the top-level `run` resolves a query's own.
-    // Materialise them under `.view(name)` — the SAME scope the body compiled
-    // its lowered `Filter`s under — and MERGE with the caller's cache (keyed
-    // `.caller`). The two id spaces are DISJOINT (see `Subscope`): a view-body
-    // `EXISTS (SELECT V FROM S)` over the view's OWN base `S` and a caller's
-    // pushed `EXISTS (SELECT V FROM S)` over the caller's CTE `S` are the same
-    // AST but SEPARATE occurrences, so each keeps its own result — the pushed
-    // caller conjunct reads its `.caller` entry, the view-body conjunct its
-    // `.view` entry — neither overwriting the other, which a value-keyed merge
-    // would.
+    var overlay = context.scoping([:])
     if let view = resolve(view: name) {
-      let inner = try subqueries(of: view.query, overlay,
-                                 .view(name.lowercased()))
-      overlay = overlay.resolving(context.subqueries.merged(inner))
+      // EXECUTION-path materialise (`rows: true`): a nested derived body's
+      // schema is derived schema-only inside `materialise`, so `validate:
+      // false` keeps that lenient — a data-dependent-empty derived body in a
+      // view body must not fault at run, matching the top-level run path.
+      // Seed the cyclic-view guard with THIS view's own name, as
+      // `resolve(view:)` does, so a body materialising this view through a
+      // derived table (`FROM (SELECT * FROM <self>) AS d`) faults `.recursion`
+      // in `materialise` rather than re-running the body without end.
+      let visited: Set<String> = [name.lowercased()]
+      overlay = try augment(context.scoping([:]), for: view.query, rows: true,
+                            visited: visited, validate: false)
     }
-    let rows = try execute(plan, overlay)
+    let rows: Array<Record>
+    if let view = resolve(view: name), case .setop = view.query,
+        case .setop = plan {
+      // A SET-OPERATION view body executes each ARM's sub-plan under an overlay
+      // AUGMENTED with THAT arm's own derived aliases. A `setop` collects NO
+      // derived aliases at the query level (arms are SELECT-scoped), so the
+      // overlay built above binds none; a `CREATE VIEW v AS SELECT * FROM
+      // (SELECT Id FROM T) AS d UNION ALL …` would else execute an arm `.scan`
+      // over an unbound `d`. Executing the arm SUB-PLANS (not re-running the
+      // arm queries) preserves any conjunct the caller PUSHED into the view's
+      // plan — the pushed filter lives in each arm's sub-plan — while the
+      // per-arm augment binds the arm-local `d` the whole-body overlay missed.
+      //
+      // Its subqueries are resolved PER ARM inside `setop`, not here over the
+      // whole-view overlay: an arm's direct `EXISTS`/`IN (Q)` may name that
+      // arm's arm-local derived alias, so materialising it (running it) demands
+      // the arm's own augment in scope — the whole-view overlay binds no arm
+      // alias, so a whole-view materialise would fault `.relation("d")` before
+      // an arm ever ran. Mirrors the per-arm run and `SELECT *` arity paths.
+      rows = try setop(plan, view.query, overlay, name.lowercased())
+    } else {
+      // A single-arm view body may itself nest `EXISTS`/`IN (Q)` predicates
+      // whose subqueries its own compiled plan carries; resolve them ONCE here
+      // — against the view's overlay, where this catalog is in scope — so the
+      // sub-plan's row evaluator reads each result, just as the top-level `run`
+      // resolves a query's own. Materialise them under `.view(name)` — the SAME
+      // scope the body compiled its lowered `Filter`s under — and MERGE with
+      // the caller's cache (keyed `.caller`). The two id spaces are DISJOINT
+      // (see `Subscope`): a view-body `EXISTS (SELECT V FROM S)` over the
+      // view's OWN base `S` and a caller's pushed `EXISTS (SELECT V FROM S)`
+      // over the caller's CTE `S` are the same AST but SEPARATE occurrences, so
+      // each keeps its own result — the pushed caller conjunct reads its
+      // `.caller` entry, the view-body conjunct its `.view` entry — neither
+      // overwriting the other, which a value-keyed merge would.
+      if let view = resolve(view: name) {
+        let inner = try subqueries(of: view.query, overlay,
+                                   .view(name.lowercased()))
+        overlay = overlay.resolving(context.subqueries.merged(inner))
+      }
+      rows = try execute(plan, overlay)
+    }
     let range = seek ?? 0 ..< rows.count
     return range.map { rows[$0].project(ordinals) }
+  }
+
+  /// Executes a view body's SET-OPERATION `plan` arm by arm, each arm sub-plan
+  /// under `overlay` AUGMENTED with THAT arm's own derived aliases, combining
+  /// the arms under each node's operator.
+  ///
+  /// The `plan` tree mirrors the `query` tree (compile builds `.setop(kind,
+  /// compile(left), compile(right), all)` from `.setop(kind, left, right,
+  /// all)`), so this descends the two in lockstep: a `.setop` node recurses
+  /// into both arms and `combine`s the results, and a LEAF arm — a `.select`
+  /// query, its sub-plan any non-`setop` node — augments the arm's derived
+  /// aliases into `overlay` (rows, so its `.scan` reads them) and executes the
+  /// sub-plan under that arm-local scope. Executing the sub-plan (not
+  /// re-running the arm query) keeps any conjunct the caller pushed into the
+  /// plan; the per-arm augment binds the arm-local derived alias the whole-body
+  /// overlay omitted; and each arm's `d` stays scoped to its arm (two arms may
+  /// reuse `d`).
+  ///
+  /// A leaf arm's DIRECT `EXISTS`/`IN (Q)` subqueries are materialised here
+  /// too, against the arm-local augmented scope and MERGED into it under
+  /// `.view(name)` — the same scope the arm sub-plan's lowered `Filter`s
+  /// compiled under — so an arm subquery naming that arm's arm-local derived
+  /// alias resolves. The whole-view overlay binds no arm alias, so
+  /// materialising these at the view level would fault `.relation` before an
+  /// arm ran.
+  ///
+  /// Each arm resolves with ITS OWN `inner` cache first — `inner.merged(...)`,
+  /// not the reverse — so the arm keeps `inner`'s FRESH per-arm scalar memo
+  /// rather than the shared caller memo `overlay` carries. Both arms compile
+  /// their scalar subqueries under the SAME `.view(name)` scope, so identical
+  /// scalar text across arms lowers to the SAME `Subkey`; sharing one memo box
+  /// would let the first arm's collapsed value be REUSED by the second — even
+  /// though each arm's scalar reads that arm's OWN arm-local relation and must
+  /// yield its OWN value. A per-arm memo isolates the lazy scalar the way the
+  /// eager per-arm `IN`/`EXISTS` results already are, completing the per-arm
+  /// isolation beyond the eager roles. `merged` keeps `inner`'s scalar box and
+  /// unions the results keeping `inner`'s on a collision; the caller's own
+  /// `.caller` results (a pushed `EXISTS`/`IN (Q)`, which alone are safe enough
+  /// to push into an arm — a scalar-subquery conjunct is UNSAFE and never
+  /// pushes in) ride through under their disjoint scope, so the arm still reads
+  /// a pushed caller `EXISTS`/`IN (Q)` while its own scalar memo stays private.
+  private borrowing func setop(_ plan: Plan, _ query: Query, _ overlay: Context,
+                               _ name: String)
+      throws(SQLError) -> Array<Record> {
+    if case let .setop(kind, left, right, all) = plan,
+        case let .setop(_, leftQuery, rightQuery, _) = query {
+      return try combine(kind, setop(left, leftQuery, overlay, name),
+                         setop(right, rightQuery, overlay, name), all)
+    }
+    var scope = try augment(overlay, for: query, rows: true, validate: false)
+    let inner = try subqueries(of: query, scope, .view(name))
+    scope = scope.resolving(inner.merged(overlay.subqueries))
+    return try execute(plan, scope)
   }
 }
 

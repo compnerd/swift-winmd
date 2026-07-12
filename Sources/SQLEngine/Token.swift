@@ -177,8 +177,7 @@ extension Token.Kind {
     case let .string(value): "'\(value)'"
     case let .integer(value): "\(value)"
     case let .decimal(value): "\(value)"
-    case let .blob(bytes):
-      "x'" + bytes.reduce(into: "") { $0 += Self.hex($1) } + "'"
+    case let .blob(bytes): "x'" + bytes.reduce(into: "") { $0 += hex($1) } + "'"
     case let .parameter(name): ":\(name)"
     case .star: "*"
     case .plus: "+"
@@ -196,11 +195,15 @@ extension Token.Kind {
     case .geq: ">="
     }
   }
+}
 
-  /// `byte` as two lowercase-hex nibbles, high nibble first — a byte's fixed
-  /// two-digit spelling, keeping its leading zero.
-  private static func hex(_ byte: UInt8) -> String {
-    let digits = Array("0123456789abcdef")
-    return String([digits[Int(byte >> 4)], digits[Int(byte & 0x0f)]])
-  }
+
+private let kHexDigits: InlineArray<_, Character> = [
+  "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"
+]
+
+/// `byte` as two lowercase-hex nibbles, high nibble first — a byte's fixed
+/// two-digit spelling, keeping its leading zero.
+private func hex(_ byte: UInt8) -> String {
+  return String([kHexDigits[Int(byte >> 4)], kHexDigits[Int(byte & 0x0f)]])
 }

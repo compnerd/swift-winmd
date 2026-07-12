@@ -299,79 +299,82 @@ private func comparable(_ a: Value, _ b: Value) -> Bool {
 /// UNBOUND. The key evaluation threads them for the same reason and to keep the
 /// two evaluate sites consistent, though a `GROUP BY` key is a bare column
 /// today, so it cannot yet reach one.
-internal func grouped<C>(_ records: Array<Record>, _ keys: Array<Term>,
-                         _ aggregates: Array<Aggregation>,
-                         _ catalog: borrowing C, _ relations: ScopedRelations,
-                         _ routines: Routines, _ bindings: Bindings,
-                         _ subqueries: Subqueries)
-    throws(SQLError) -> Array<Record> where C: Catalog & ~Escapable {
-  var order = Array<Record>()
-  var accumulators = Dictionary<Record, Array<Accumulator>>()
+extension Catalog where Self: ~Escapable {
+  internal borrowing func grouped(_ records: Array<Record>,
+                                  _ keys: Array<Term>,
+                                  _ aggregates: Array<Aggregation>,
+                                  _ relations: ScopedRelations,
+                                  _ routines: Routines, _ bindings: Bindings,
+                                  _ subqueries: Subqueries)
+      throws(SQLError) -> Array<Record> {
+    var order = Array<Record>()
+    var accumulators = Dictionary<Record, Array<Accumulator>>()
 
-  for record in records {
-    var cells = Array<Value>()
-    cells.reserveCapacity(keys.count)
-    for key in keys {
-      try cells.append(record.evaluate(key, catalog, relations, routines,
-                                       bindings, subqueries))
+    for record in records {
+      var cells = Array<Value>()
+      cells.reserveCapacity(keys.count)
+      for key in keys {
+        try cells.append(evaluate(record, key, relations, routines, bindings,
+                                  subqueries))
+      }
+      let group = Record(cells)
+      // Key the group on the EXACT canonical form of its cells so `1` and `1.0`
+      // fall in one group (the equality UNION and predicates use), while the
+      // emitted group keeps the first-appearance ORIGINAL values.
+      let identity = Record(cells.map(canonical))
+
+      if accumulators[identity] == nil {
+        accumulators[identity] = aggregates.map {
+          Accumulator($0.function, distinct: $0.distinct)
+        }
+        order.append(group)
+      }
+      for index in aggregates.indices {
+        // An aggregate's `FILTER (WHERE …)` gates the row: only a TRUE
+        // predicate admits it (a FALSE or UNKNOWN one, and an unbound
+        // `:parameter`, skips), applied before the fold — and so before the
+        // DISTINCT dedup. A filter-less aggregate folds every row.
+        if let filter = aggregates[index].filter {
+          guard try evaluate(record, filter, relations, routines, bindings,
+                             subqueries) == true else {
+            continue
+          }
+        }
+        // `COUNT(*)` has no argument — count the row with a non-NULL sentinel;
+        // every other aggregate folds its evaluated argument value.
+        let value: Value = if let argument = aggregates[index].argument {
+          try evaluate(record, argument, relations, routines, bindings,
+                       subqueries)
+        } else {
+          .integer(0)
+        }
+        try accumulators[identity]![index].fold(value)
+      }
     }
-    let group = Record(cells)
-    // Key the group on the EXACT canonical form of its cells so `1` and `1.0`
-    // fall in one group (the equality UNION and predicates use), while the
-    // emitted group keeps the first-appearance ORIGINAL values.
-    let identity = Record(cells.map(canonical))
 
-    if accumulators[identity] == nil {
-      accumulators[identity] = aggregates.map {
+    // A whole-result aggregation with no matching row still yields one group —
+    // the empty group — so the degenerate `SELECT COUNT(*) FROM T` over no rows
+    // counts `0` rather than yielding no row at all. A grouped query over no
+    // rows yields no group (standard SQL).
+    if keys.isEmpty && order.isEmpty {
+      let empty = aggregates.map {
         Accumulator($0.function, distinct: $0.distinct)
       }
-      order.append(group)
+      var cells = Array<Value>()
+      cells.reserveCapacity(empty.count)
+      for accumulator in empty { try cells.append(accumulator.value) }
+      return [Record(cells)]
     }
-    for index in aggregates.indices {
-      // An aggregate's `FILTER (WHERE …)` gates the row: only a TRUE
-      // predicate admits it (a FALSE or UNKNOWN one, and an unbound
-      // `:parameter`, skips), applied before the fold — and so before the
-      // DISTINCT dedup. A filter-less aggregate folds every row.
-      if let filter = aggregates[index].filter {
-        guard try record.evaluate(filter, catalog, relations, routines,
-                                  bindings, subqueries) == true else {
-          continue
-        }
-      }
-      // `COUNT(*)` has no argument — count the row with a non-NULL sentinel;
-      // every other aggregate folds its evaluated argument value.
-      let value: Value = if let argument = aggregates[index].argument {
-        try record.evaluate(argument, catalog, relations, routines, bindings,
-                            subqueries)
-      } else {
-        .integer(0)
-      }
-      try accumulators[identity]![index].fold(value)
-    }
-  }
 
-  // A whole-result aggregation with no matching row still yields one group —
-  // the empty group — so the degenerate `SELECT COUNT(*) FROM T` over no rows
-  // counts `0` rather than yielding no row at all. A grouped query over no
-  // rows yields no group (standard SQL).
-  if keys.isEmpty && order.isEmpty {
-    let empty = aggregates.map {
-      Accumulator($0.function, distinct: $0.distinct)
+    var groups = Array<Record>()
+    groups.reserveCapacity(order.count)
+    for group in order {
+      var cells = group.values
+      for accumulator in accumulators[Record(cells.map(canonical))]! {
+        try cells.append(accumulator.value)
+      }
+      groups.append(Record(cells))
     }
-    var cells = Array<Value>()
-    cells.reserveCapacity(empty.count)
-    for accumulator in empty { try cells.append(accumulator.value) }
-    return [Record(cells)]
+    return groups
   }
-
-  var groups = Array<Record>()
-  groups.reserveCapacity(order.count)
-  for group in order {
-    var cells = group.values
-    for accumulator in accumulators[Record(cells.map(canonical))]! {
-      try cells.append(accumulator.value)
-    }
-    groups.append(Record(cells))
-  }
-  return groups
 }

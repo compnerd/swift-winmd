@@ -332,11 +332,11 @@ extension Catalog where Self: ~Escapable {
       // Fuse a residual product with its filter: stream each pair through the
       // predicate rather than materialising the whole cross product first.
       return try sift(execute(outer, context), execute(inner, context),
-                      filter, self, context.relations, routines, bindings,
+                      filter, context.relations, routines, bindings,
                       subqueries)
     case let .select(filter, source):
-      return try admitted(execute(source, context), filter, self,
-                          context.relations, routines, bindings, subqueries)
+      return try admitted(execute(source, context), filter, context.relations,
+                          routines, bindings, subqueries)
     case let .project(terms, source):
       // An explicit loop, not a `.map` closure: the borrowed `~Escapable` self
       // a projected scalar subquery materialises against cannot be captured by
@@ -345,7 +345,7 @@ extension Catalog where Self: ~Escapable {
       var projected = Array<Record>()
       projected.reserveCapacity(source.count)
       for record in source {
-        try projected.append(project(terms, record, self, context.relations,
+        try projected.append(project(terms, record, context.relations,
                                      routines, bindings, subqueries))
       }
       return projected
@@ -365,8 +365,8 @@ extension Catalog where Self: ~Escapable {
         var cells = Array<Value>()
         cells.reserveCapacity(keys.count)
         for key in keys {
-          try cells.append(record.evaluate(key.term, self, context.relations,
-                                           routines, bindings, subqueries))
+          try cells.append(evaluate(record, key.term, context.relations,
+                                    routines, bindings, subqueries))
         }
         sortable.append(cells)
       }
@@ -397,17 +397,170 @@ extension Catalog where Self: ~Escapable {
       // yields no rows to read a width off.
       return try outer(execute(left, context), left.slots ?? 0,
                        execute(right, context), right.slots ?? 0, on, kind,
-                       self, context.relations, routines, bindings, subqueries)
+                       context.relations, routines, bindings, subqueries)
     case let .setop(kind, left, right, all):
       return try setop(kind, left, right, all, context)
     case let .distinct(source):
       return deduplicated(try execute(source, context))
     case let .aggregate(keys, aggregates, source):
-      return try grouped(execute(source, context), keys, aggregates, self,
+      return try grouped(execute(source, context), keys, aggregates,
                          context.relations, routines, bindings, subqueries)
     case let .limit(count, offset, source):
       return limited(try execute(source, context), count, offset)
     }
+  }
+
+  /// Evaluates each projected `term` against `record` through `routines` to the
+  /// output row, in order — slot `i` of the result is `terms[i]`. This catalog
+  /// and `relations` thread through so a projected scalar subquery materialises
+  /// lazily on first reach (see the evaluator's `.subquery` case).
+  private borrowing func project(_ terms: Array<Term>, _ record: Record,
+                                 _ relations: ScopedRelations,
+                                 _ routines: Routines, _ bindings: Bindings,
+                                 _ subqueries: Subqueries)
+      throws(SQLError) -> Record {
+    var cells = Array<Value>()
+    cells.reserveCapacity(terms.count)
+    for term in terms {
+      try cells.append(evaluate(record, term, relations, routines, bindings,
+                                subqueries))
+    }
+    return Record(cells)
+  }
+
+  /// Keeps the `records` the `filter` admits — those it evaluates to `true`
+  /// under three-valued logic (UNKNOWN and `false` both reject), resolving
+  /// scalar calls through `routines` and parameters from `bindings`. This
+  /// catalog and `relations` thread through for a scalar subquery in `filter`.
+  private borrowing func admitted(_ records: Array<Record>, _ filter: Filter,
+                                  _ relations: ScopedRelations,
+                                  _ routines: Routines, _ bindings: Bindings,
+                                  _ subqueries: Subqueries)
+      throws(SQLError) -> Array<Record> {
+    var kept = Array<Record>()
+    for record in records {
+      if try evaluate(record, filter, relations, routines, bindings,
+                      subqueries) == true {
+        kept.append(record)
+      }
+    }
+    return kept
+  }
+
+  /// The Cartesian product of `outer` and `inner` filtered row by row by
+  /// `filter` — the fused product-under-select, streamed.
+  ///
+  /// A residual (non-equi) `product` under a `select` would otherwise
+  /// materialise the whole `outer.count * inner.count` cross product and only
+  /// then filter it, a memory blowup quadratic in the inputs. Here each pair is
+  /// merged, tested, and kept or dropped in turn, so only the surviving rows —
+  /// not the full product — are ever held. The order is identical to filtering
+  /// the eager product: outer-major, each admitted inner in its own order. A
+  /// pair the `filter` evaluates to `true` under three-valued logic is kept;
+  /// UNKNOWN and `false` both drop, exactly as `admitted`.
+  private borrowing func sift(_ outer: Array<Record>,
+                              _ inner: Array<Record>, _ filter: Filter,
+                              _ relations: ScopedRelations,
+                              _ routines: Routines, _ bindings: Bindings,
+                              _ subqueries: Subqueries)
+      throws(SQLError) -> Array<Record> {
+    var records = Array<Record>()
+    for left in outer {
+      for right in inner {
+        let record = left.merged(with: right)
+        if try evaluate(record, filter, relations, routines, bindings,
+                        subqueries) == true {
+          records.append(record)
+        }
+      }
+    }
+    return records
+  }
+
+  /// The OUTER join of `left` and `right` on the `on` predicate — a nested loop
+  /// tracking matches so an unmatched preserved row is emitted with the other
+  /// side NULL-extended.
+  ///
+  /// `left`/`right` are the two materialised sides and `leftWidth`/`rightWidth`
+  /// each side's slot count (needed to NULL-extend even when a side is empty).
+  /// Each candidate pair is merged (left slots then right slots) and tested
+  /// against `on` under three-valued logic — TRUE matches, UNKNOWN and FALSE do
+  /// not, exactly as a `WHERE` admits; `on` governs MATCHING alone, so an
+  /// unmatched preserved row is still emitted.
+  ///
+  ///   - `left`: every left row, in left-major order — each matched pair, then
+  ///     a right-NULL row for a left row that matched nothing.
+  ///   - `right`: the mirror — every right row, in right-major order, its
+  ///     unmatched ones left-NULL.
+  ///   - `full`: the left-major pass (matched pairs and right-NULL
+  ///     unmatched-left rows) followed by a left-NULL row for every right row
+  ///     no left row ever matched, so both sides' unmatched rows survive.
+  ///
+  /// A `.inner` kind never reaches here — `compile` lowers an inner join
+  /// through the product/join path.
+  private borrowing func outer(_ left: Array<Record>, _ leftWidth: Int,
+                               _ right: Array<Record>, _ rightWidth: Int,
+                               _ on: Filter, _ kind: Join.Kind,
+                               _ relations: ScopedRelations,
+                               _ routines: Routines, _ bindings: Bindings,
+                               _ subqueries: Subqueries)
+      throws(SQLError) -> Array<Record> {
+    let leftNulls = Record(Array(repeating: .null, count: leftWidth))
+    let rightNulls = Record(Array(repeating: .null, count: rightWidth))
+
+    // A `right` join preserves the right side, so it drives the loop
+    // right-major and NULL-extends the left. The `on` filter stays in the same
+    // combined slot space (left slots then right slots), so each candidate is
+    // still merged left-first — only the iteration order and the preserved side
+    // differ.
+    if kind == .right {
+      var records = Array<Record>()
+      for inner in right {
+        var paired = false
+        for lhs in left {
+          let record = lhs.merged(with: inner)
+          if try evaluate(record, on, relations, routines, bindings,
+                          subqueries) == true {
+            records.append(record)
+            paired = true
+          }
+        }
+        if !paired { records.append(leftNulls.merged(with: inner)) }
+      }
+      return records
+    }
+
+    var records = Array<Record>()
+    // Track which right rows matched some left row — a `full` join emits the
+    // never-matched ones NULL-extended after the left-major pass.
+    var matched = Array(repeating: false, count: right.count)
+
+    for lhs in left {
+      var paired = false
+      for index in right.indices {
+        let record = lhs.merged(with: right[index])
+        if try evaluate(record, on, relations, routines, bindings,
+                        subqueries) == true {
+          records.append(record)
+          matched[index] = true
+          paired = true
+        }
+      }
+      // An unmatched left row is preserved (right NULL) for a `left` or `full`
+      // join — the left side is preserved in both.
+      if !paired {
+        records.append(lhs.merged(with: rightNulls))
+      }
+    }
+
+    // A `full` join also preserves every right row no left row matched (left
+    // NULL).
+    if kind == .full {
+      for index in right.indices where !matched[index] {
+        records.append(leftNulls.merged(with: right[index]))
+      }
+    }
+    return records
   }
 }
 
@@ -562,43 +715,6 @@ private func deduplicated(_ records: Array<Record>) -> Array<Record> {
   return rows
 }
 
-/// Evaluates each projected `term` against `record` through `routines` to the
-/// output row, in order — slot `i` of the result is `terms[i]`. The `catalog`
-/// and `relations` thread through so a projected scalar subquery materialises
-/// lazily on first reach (see the evaluator's `.subquery` case).
-private func project<C>(_ terms: Array<Term>, _ record: Record,
-                        _ catalog: borrowing C, _ relations: ScopedRelations,
-                        _ routines: Routines, _ bindings: Bindings,
-                        _ subqueries: Subqueries)
-    throws(SQLError) -> Record where C: Catalog & ~Escapable {
-  var cells = Array<Value>()
-  cells.reserveCapacity(terms.count)
-  for term in terms {
-    try cells.append(record.evaluate(term, catalog, relations, routines,
-                                     bindings, subqueries))
-  }
-  return Record(cells)
-}
-
-/// Keeps the `records` the `filter` admits — those it evaluates to `true` under
-/// three-valued logic (UNKNOWN and `false` both reject), resolving scalar calls
-/// through `routines` and parameters from `bindings`. The `catalog` and
-/// `relations` thread through for a scalar subquery in `filter`.
-private func admitted<C>(_ records: Array<Record>, _ filter: Filter,
-                         _ catalog: borrowing C, _ relations: ScopedRelations,
-                         _ routines: Routines, _ bindings: Bindings,
-                         _ subqueries: Subqueries)
-    throws(SQLError) -> Array<Record> where C: Catalog & ~Escapable {
-  var kept = Array<Record>()
-  for record in records {
-    if try record.evaluate(filter, catalog, relations, routines, bindings,
-                           subqueries) == true {
-      kept.append(record)
-    }
-  }
-  return kept
-}
-
 /// Materialises the referenced `ordinals` of the relation `name` over the
 /// seek's row range (the whole relation when `nil`) into dense slot `Record`s.
 ///
@@ -692,119 +808,6 @@ private func product(_ outer: Array<Record>, _ inner: Array<Record>)
   return records
 }
 
-/// The Cartesian product of `outer` and `inner` filtered row by row by
-/// `filter` — the fused product-under-select, streamed.
-///
-/// A residual (non-equi) `product` under a `select` would otherwise materialise
-/// the whole `outer.count * inner.count` cross product and only then filter it,
-/// a memory blowup quadratic in the inputs. Here each pair is merged, tested,
-/// and kept or dropped in turn, so only the surviving rows — not the full
-/// product — are ever held. The order is identical to filtering the eager
-/// product: outer-major, each admitted inner in its own order. A pair the
-/// `filter` evaluates to `true` under three-valued logic is kept; UNKNOWN and
-/// `false` both drop, exactly as `admitted`.
-private func sift<C>(_ outer: Array<Record>, _ inner: Array<Record>,
-                     _ filter: Filter, _ catalog: borrowing C,
-                     _ relations: ScopedRelations, _ routines: Routines,
-                     _ bindings: Bindings, _ subqueries: Subqueries)
-    throws(SQLError) -> Array<Record> where C: Catalog & ~Escapable {
-  var records = Array<Record>()
-  for left in outer {
-    for right in inner {
-      let record = left.merged(with: right)
-      if try record.evaluate(filter, catalog, relations, routines, bindings,
-                             subqueries) == true {
-        records.append(record)
-      }
-    }
-  }
-  return records
-}
-
-/// The OUTER join of `left` and `right` on the `on` predicate — a nested loop
-/// tracking matches so an unmatched preserved row is emitted with the other
-/// side NULL-extended.
-///
-/// `left`/`right` are the two materialised sides and `leftWidth`/`rightWidth`
-/// each side's slot count (needed to NULL-extend even when a side is empty).
-/// Each candidate pair is merged (left slots then right slots) and tested
-/// against `on` under three-valued logic — TRUE matches, UNKNOWN and FALSE do
-/// not, exactly as a `WHERE` admits; `on` governs MATCHING alone, so an
-/// unmatched preserved row is still emitted.
-///
-///   - `left`: every left row, in left-major order — each matched pair, then a
-///     right-NULL row for a left row that matched nothing.
-///   - `right`: the mirror — every right row, in right-major order, its
-///     unmatched ones left-NULL.
-///   - `full`: the left-major pass (matched pairs and right-NULL unmatched-left
-///     rows) followed by a left-NULL row for every right row no left row ever
-///     matched, so both sides' unmatched rows survive.
-///
-/// A `.inner` kind never reaches here — `compile` lowers an inner join through
-/// the product/join path.
-private func outer<C>(_ left: Array<Record>, _ leftWidth: Int,
-                      _ right: Array<Record>, _ rightWidth: Int, _ on: Filter,
-                      _ kind: Join.Kind, _ catalog: borrowing C,
-                      _ relations: ScopedRelations, _ routines: Routines,
-                      _ bindings: Bindings, _ subqueries: Subqueries)
-    throws(SQLError) -> Array<Record> where C: Catalog & ~Escapable {
-  let leftNulls = Record(Array(repeating: .null, count: leftWidth))
-  let rightNulls = Record(Array(repeating: .null, count: rightWidth))
-
-  // A `right` join preserves the right side, so it drives the loop right-major
-  // and NULL-extends the left. The `on` filter stays in the same combined slot
-  // space (left slots then right slots), so each candidate is still merged
-  // left-first — only the iteration order and the preserved side differ.
-  if kind == .right {
-    var records = Array<Record>()
-    for inner in right {
-      var paired = false
-      for outer in left {
-        let record = outer.merged(with: inner)
-        if try record.evaluate(on, catalog, relations, routines, bindings,
-                               subqueries) == true {
-          records.append(record)
-          paired = true
-        }
-      }
-      if !paired { records.append(leftNulls.merged(with: inner)) }
-    }
-    return records
-  }
-
-  var records = Array<Record>()
-  // Track which right rows matched some left row — a `full` join emits the
-  // never-matched ones NULL-extended after the left-major pass.
-  var matched = Array(repeating: false, count: right.count)
-
-  for outer in left {
-    var paired = false
-    for index in right.indices {
-      let record = outer.merged(with: right[index])
-      if try record.evaluate(on, catalog, relations, routines, bindings,
-                             subqueries) == true {
-        records.append(record)
-        matched[index] = true
-        paired = true
-      }
-    }
-    // An unmatched left row is preserved (right NULL) for a `left` or `full`
-    // join — the left side is preserved in both.
-    if !paired {
-      records.append(outer.merged(with: rightNulls))
-    }
-  }
-
-  // A `full` join also preserves every right row no left row matched (left
-  // NULL).
-  if kind == .full {
-    for index in right.indices where !matched[index] {
-      records.append(leftNulls.merged(with: right[index]))
-    }
-  }
-  return records
-}
-
 /// The equi-join of `outer` against the inner relation `name`, resolved through
 /// `ctes` first then `catalog`, seeking or hashing the inner as its shape allows.
 ///
@@ -893,8 +896,8 @@ extension Catalog where Self: ~Escapable {
       for index in 0 ..< cte.rows.count {
         let right = cte.record(index, ordinals)
         if let filter,
-            try right.evaluate(filter, self, context.relations, routines,
-                               bindings, subqueries) != true { continue }
+            try evaluate(right, filter, context.relations, routines, bindings,
+                         subqueries) != true { continue }
         inner.append(right)
       }
       return joined(outer, inner, base, keys)
@@ -925,8 +928,8 @@ extension Catalog where Self: ~Escapable {
         // A pushed inner filter is applied as each candidate materialises,
         // before it can pair — an inner row it rejects joins to nothing.
         if let filter,
-            try right.evaluate(filter, self, context.relations, routines,
-                               bindings, subqueries) != true { continue }
+            try evaluate(right, filter, context.relations, routines, bindings,
+                         subqueries) != true { continue }
         // Equal by the SAME rule the predicate uses — integer/integer exact,
         // mixed integer/double promoted — so a seek that scanned wide still
         // pairs exactly.
@@ -993,8 +996,8 @@ extension Table where Self: ~Escapable {
       // Apply the whole pushed filter before bucketing — a filtered inner row
       // is never a join candidate.
       if let filter,
-          try right.evaluate(filter, catalog, relations, routines, bindings,
-                             subqueries) != true { continue }
+          try catalog.evaluate(right, filter, relations, routines, bindings,
+                               subqueries) != true { continue }
       if case .null = right[slot] { continue }
       buckets[bucket(right[slot]), default: Array<Record>()].append(right)
     }

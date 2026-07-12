@@ -394,20 +394,55 @@ public struct Select: Hashable, Sendable {
   }
 }
 
-/// A named relation in a `FROM` or `JOIN`, with an optional alias.
+/// A relation in a `FROM` or `JOIN`: a base relation named by an identifier, or
+/// a DERIVED TABLE — a parenthesised subquery `(SELECT …)` — each with an
+/// alias.
 ///
-/// `name` is the relation's spelling; `alias`, when present, is the short name
-/// a qualified column reference may use in its place (`FROM TypeDef AS t`).
+/// A `named` relation's `name` is its spelling; its `alias`, when present, is
+/// the short name a qualified column reference may use in its place (`FROM
+/// TypeDef AS t`). A `derived` relation wraps a `Query`, materialised once
+/// and resolved under a MANDATORY alias — ISO requires a derived table be named
+/// (`FROM (SELECT …) AS t`) — so `alias` is always present and `name` is that
+/// alias, the key the resolution scope binds its materialised rows under.
 public struct Relation: Hashable, Sendable {
-  /// The relation's name.
-  public let name: String
+  /// Where a relation's rows come from: a named base relation/view/CTE, or a
+  /// derived table's inner query.
+  public enum Source: Hashable, Sendable {
+    /// A relation named by an identifier — a base table, a view, or a CTE.
+    case named(String)
+    /// A derived table — the inner `Query` a `FROM (SELECT …) AS t` runs.
+    case derived(Query)
+  }
 
-  /// The alias bound to the relation, if any.
+  /// The relation's source — a named relation or a derived table's query.
+  public let source: Source
+
+  /// The alias bound to the relation. Optional for a `named` relation, always
+  /// present for a `derived` one (ISO requires a derived table be aliased).
   public let alias: String?
 
+  /// A named base relation, view, or CTE with an optional alias.
   public init(name: String, alias: String? = nil) {
-    self.name = name
+    self.source = .named(name)
     self.alias = alias
+  }
+
+  /// A derived table over `query`, resolved under the mandatory `alias`.
+  public init(derived query: Query, as alias: String) {
+    self.source = .derived(query)
+    self.alias = alias
+  }
+
+  /// The name the resolution scope keys this relation under: the identifier for
+  /// a `named` relation, the alias for a `derived` one (a derived table's rows
+  /// are bound under its alias, the only name a column may qualify it by).
+  public var name: String {
+    switch source {
+    case let .named(name):
+      name
+    case .derived:
+      alias ?? ""
+    }
   }
 }
 

@@ -23,7 +23,8 @@
 /// select         := SELECT [DISTINCT | ALL] projection
 ///                   [FROM relation (join)*
 ///                    [where] [group] [having] [order] [limit]]
-/// relation       := identifier [AS identifier]
+/// relation       := (identifier | derived) [AS identifier]
+/// derived        := '(' query ')' AS identifier  // a derived table (aliased)
 /// join           := [INNER | (LEFT | RIGHT | FULL) [OUTER]] JOIN
 ///                     relation ON predicate
 /// projection     := '*' | column (',' column)*
@@ -408,13 +409,47 @@ internal struct Parser: ~Escapable {
 
   // MARK: - Relation
 
-  /// Parses a relation name and an optional alias.
+  /// Parses a relation — a named base relation/view/CTE, or a DERIVED TABLE (a
+  /// parenthesised subquery) — with its alias.
   ///
-  /// The alias may be introduced by `AS` (`TypeDef AS t`) or written directly
-  /// after the name (`TypeDef t`); the latter is admitted only when the next
-  /// token is a bare identifier, so a following keyword (`JOIN`, `WHERE`, …) or
-  /// the end of input is not mistaken for an alias.
+  /// A leading `(` is disambiguated by ONE token of lookahead: a `SELECT` after
+  /// it begins a derived table `(SELECT …) AS t` (the query may itself be a
+  /// `UNION`), so it parses `query`; anything else is a parenthesised relation
+  /// `(a JOIN b)`, which this dialect does not yet accept in a relation
+  /// position. The peek is unambiguous — `SELECT` never begins a relation
+  /// name — exactly as the scalar-subquery and `IN (…)` lookaheads are, so
+  /// no rewind is needed.
+  ///
+  /// Derived table's alias is REQUIRED (ISO): `FROM (SELECT …)` with no `AS t`
+  /// faults. A named relation's alias is optional and may be introduced by `AS`
+  /// (`TypeDef AS t`) or written directly after the name (`TypeDef t`); the
+  /// latter is admitted only when the next token is a bare identifier, so a
+  /// following keyword (`JOIN`, `WHERE`, …) or the end of input is not mistaken
+  /// for an alias.
   private mutating func relation() throws(SQLError) -> Relation {
+    if try match(.lparen) {
+      guard let token = current else {
+        throw .incomplete(expected: "a derived table '(SELECT …)'")
+      }
+      guard token.kind == .select else {
+        throw .unexpected(token.kind.description,
+                          expected: "a derived table '(SELECT …)'",
+                          at: token.location)
+      }
+      let query = try query()
+      try expect(.rparen)
+      // ISO requires a derived table be named, so the alias is MANDATORY — an
+      // `AS`-less spelling faults rather than binding an unnamed relation.
+      guard try match(.as) || isName(current?.kind) else {
+        guard let token = current else {
+          throw .incomplete(expected: "'AS' and an alias for the derived table")
+        }
+        throw .unexpected(token.kind.description,
+                          expected: "'AS' and an alias for the derived table",
+                          at: token.location)
+      }
+      return try Relation(derived: query, as: identifier())
+    }
     let name = try identifier()
     let alias: String? = if try match(.as) {
       try identifier()

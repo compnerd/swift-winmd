@@ -195,8 +195,8 @@ public struct Routine: Sendable {
         throw .argument("requires \(expected.domain) arguments")
       }
       // The body's lowered `term` cannot nest a subquery — a `CREATE FUNCTION`
-      // body lowers against `Subquery.unsupported` (no catalog), which rejects
-      // one at registration — so the subquery-free evaluate suffices.
+      // body lowers against `Resolution.unsupported` (no catalog), which
+      // rejects one at registration — so the subquery-free evaluate suffices.
       return try Record(arguments).evaluate(term, routines)
     }
   }
@@ -205,11 +205,11 @@ public struct Routine: Sendable {
 /// An empty `Catalog` vending no relation — the stand-in for the absent catalog
 /// where the evaluator runs a subquery-FREE term.
 ///
-/// A `CREATE FUNCTION` body lowers against `Subquery.unsupported`, so its term
-/// can never nest a scalar subquery and its evaluation never needs a catalog to
-/// materialise one. Passing this empty catalog keeps ONE evaluator: a term that
-/// did reach a `.subquery` would run `cell(of:)` against a catalog resolving no
-/// relation and fault, but a function body never does.
+/// A `CREATE FUNCTION` body lowers against `Resolution.unsupported`, so its
+/// term can never nest a scalar subquery and its evaluation never needs a
+/// catalog to materialise one. Passing this empty catalog keeps ONE evaluator:
+/// a term that did reach a `.subquery` would run `cell(of:)` against a catalog
+/// resolving no relation and fault, but a function body never does.
 internal struct NoCatalog: Catalog {
   internal struct Table: SQLEngine.Table {
     internal struct Cursor: SQLEngine.Cursor {

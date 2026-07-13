@@ -287,7 +287,7 @@ extension Catalog where Self: ~Escapable {
     let augmented = try augment(context, for: .select(select), rows: false,
                                 visited: visited, validate: validate)
     // A scalar subquery in the projection derives its type from its inner
-    // query's single column, so build the SAME cursor-free `Subquery` map the
+    // query's single column, so build the SAME cursor-free `Resolution` map the
     // compile path's lowering reads — every nested subquery compiled ONCE for
     // its width and single-column type, each discovering its correlation against
     // this select's own scope (`enclosing`) — and pass it to the projection walk
@@ -1005,7 +1005,7 @@ extension Scope {
   /// — `routines` type a scalar call from its declared return type.
   internal func columns(of projection: Projection,
                         _ routines: Routines = [:],
-                        subquery: Subquery = .unsupported)
+                        subquery: Resolution = .unsupported)
       throws(SQLError) -> Array<OutputColumn> {
     return switch projection {
     case .all:
@@ -1044,7 +1044,7 @@ extension Scope {
   /// return type; every other expression `.integer`.
   internal func output(_ item: Projected, at index: Int,
                        _ routines: Routines = [:],
-                       subquery: Subquery = .unsupported)
+                       subquery: Resolution = .unsupported)
       throws(SQLError) -> OutputColumn {
     let name = item.name ?? "column \(index + 1)"
     // DERIVE the nominal output type: the schema reports the type a run would

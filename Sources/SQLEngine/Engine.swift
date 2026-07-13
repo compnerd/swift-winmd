@@ -562,8 +562,8 @@ extension Projection {
   /// subqueries the projection nests, so an `EXISTS`/`IN (Q)` inside a scalar
   /// term lowers exactly as it does on the FROM'd path — the FROM-less scalar
   /// select is otherwise the ONE path that would hit the default unsupported
-  /// map and reject a subquery a run materialises. The `Subquery` is threaded,
-  /// not run, here (see `subquery(of:)`).
+  /// map and reject a subquery a run materialises. The `Resolution` is
+  /// threaded, not run, here (see `subquery(of:)`).
   ///
   /// A projection is a BARRED clause position, so a correlated column of THIS
   /// query has no evaluator here. `Schema.terms` bars the seam intrinsically,
@@ -571,7 +571,7 @@ extension Projection {
   /// admitting `plans.rest` — the same cut `columns(of:)` applies on the schema
   /// path, keeping run and derive in lockstep.
   internal func scalar(_ routines: Routines = [:],
-                       subquery: Subquery = .unsupported)
+                       subquery: Resolution = .unsupported)
       throws(SQLError) -> Plan {
     guard case .all = self else {
       let schema = Schema(width: 0, extent: 0, names: [], types: [],
@@ -1866,7 +1866,7 @@ extension Expression {
   /// so it reads the pre-aggregation row the fold gates on. `self` is always an
   /// `.aggregate` — `collect` gathers only those.
   internal func aggregation(_ scope: Scope, _ routines: Routines = [:],
-                            subquery: Subquery = .unsupported)
+                            subquery: Resolution = .unsupported)
       throws(SQLError) -> Aggregation {
     guard case let .aggregate(function, operand, distinct, filter) = self else {
       throw .unsupported("expected an aggregate")
@@ -2795,7 +2795,7 @@ extension Catalog where Self: ~Escapable {
 
   /// The distinct UNCORRELATED subqueries `select` nests, each COMPILED ONCE
   /// against this catalog and `context` for its column count — NEVER run — into
-  /// a `Subquery` map the predicate/projection lowering reads for arity, the
+  /// a `Resolution` map the predicate/projection lowering reads for arity, the
   /// seam that carries each sub-`Query` into its lowered `Filter` as data.
   ///
   /// This is CURSOR-FREE: it drives `compile`, which resolves schemas and reads
@@ -2820,8 +2820,8 @@ extension Catalog where Self: ~Escapable {
   /// query's inner `WHERE` column that binds none of ITS relations resolves
   /// against the enclosing select (and outward), lowering to a synthetic
   /// `Term.parameter` and RECORDING the correlation the lowered node carries.
-  /// The returned `Subquery` also carries `outer` so THIS select's own columns
-  /// correlate outward when it is a subquery.
+  /// The returned `Resolution` also carries `outer` so THIS select's own
+  /// columns correlate outward when it is a subquery.
   ///
   /// `prefixes`, when supplied, gives the PREFIX scope each join `ON` lowers
   /// against — the FROM relation and joins `0…index`, never a relation joined
@@ -2845,7 +2845,7 @@ extension Catalog where Self: ~Escapable {
     // the WHERE is resolved TWICE — each against its own site's scope — so the
     // WHERE occurrence sees the full scope and reports a genuine ambiguity rather
     // than reusing the first `ON` occurrence's narrower prefix correlation.
-    var lowerings = Array<Subquery>()
+    var lowerings = Array<Resolution>()
     lowerings.reserveCapacity(select.joins.count)
     for index in select.joins.indices {
       var queries = Array<Query>()
@@ -2870,7 +2870,7 @@ extension Catalog where Self: ~Escapable {
     return Plans(lowerings, remainder)
   }
 
-  /// Builds ONE lowering `Subquery` over the directly-nested `queries` of a
+  /// Builds ONE lowering `Resolution` over the directly-nested `queries` of a
   /// single SITE, resolving each against `within` — the scope THAT site's
   /// subqueries correlate against (a join `ON`'s prefix, or the full
   /// `enclosing` for the WHERE/HAVING/projection/ORDER). Each distinct `Query`
@@ -2880,7 +2880,7 @@ extension Catalog where Self: ~Escapable {
                                   _ context: Context, _ visited: Set<String>,
                                   _ scope: Subscope, within: Scope?,
                                   outer: Outer?)
-      throws(SQLError) -> Subquery {
+      throws(SQLError) -> Resolution {
     // A nested subquery's FROM resolves against base tables and enclosing CTEs,
     // NOT the enclosing SELECT's derived-table aliases (SELECT-scoped, unseen
     // by a subquery's FROM as a base-table alias would be) — so STRIP them, the
@@ -2973,7 +2973,7 @@ extension Catalog where Self: ~Escapable {
         }
       }
     }
-    return Subquery(scope, widths, types, correlations, outer: outer)
+    return Resolution(scope, widths, types, correlations, outer: outer)
   }
 
   /// The single VALUE a SCALAR subquery `query` collapses to against this

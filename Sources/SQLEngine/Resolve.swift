@@ -431,7 +431,7 @@ internal final class SubqueryMemo {
 /// running — every subquery ONCE ahead of lowering. A schema-only surface with
 /// no catalog passes `.unsupported`, whose `width` faults, so a subquery
 /// reaching such a surface is rejected rather than mis-lowered.
-internal struct Subquery {
+internal struct Resolution {
   /// The resolution context every subquery lowered against this surface
   /// materialises under — `.caller` for a top-level compile, `.view(name)` for
   /// a view body's — composed into each lowered `Filter`'s cache key so a
@@ -485,11 +485,11 @@ internal struct Subquery {
     self.admits = admits
   }
 
-  /// A `Subquery` for a lowering surface with no catalog — a schema-only
+  /// A `Resolution` for a lowering surface with no catalog — a schema-only
   /// resolve. It holds no widths, so any subquery lowered against it faults
   /// `SQLError.unsupported` rather than mis-lower.
-  internal static var unsupported: Subquery {
-    Subquery()
+  internal static var unsupported: Resolution {
+    Resolution()
   }
 
   /// This seam with correlation BARRED — the surface a projection / `GROUP BY`
@@ -497,8 +497,8 @@ internal struct Subquery {
   /// cut. It keeps the widths/types/correlations (nested subqueries there still
   /// lower and carry their OWN inner correlation) but rejects a correlated
   /// column of THIS query as unsupported.
-  internal var barred: Subquery {
-    Subquery(scope, widths, types, correlations, outer: outer, admits: false)
+  internal var barred: Resolution {
+    Resolution(scope, widths, types, correlations, outer: outer, admits: false)
   }
 
   /// The synthetic bound-parameter name a CORRELATED reference to `column`
@@ -629,7 +629,7 @@ internal struct Subquery {
   }
 }
 
-/// The PER-SITE lowering seams a select's pre-pass discovers — ONE `Subquery`
+/// The PER-SITE lowering seams a select's pre-pass discovers — ONE `Resolution`
 /// per join `ON` (resolved against that join's PREFIX scope) and one for the
 /// REST (the WHERE, `HAVING`, projection, and `ORDER BY`, resolved against the
 /// full join scope).
@@ -642,19 +642,19 @@ internal struct Subquery {
 internal struct Plans {
   /// The lowering seam of each join `ON`, in join order — `on(i)` reads the
   /// `i`-th, resolved against `prefixes[i]`.
-  private let ons: Array<Subquery>
+  private let ons: Array<Resolution>
 
   /// The lowering seam the WHERE, `HAVING`, projection, and `ORDER BY` share,
   /// resolved against the full join scope.
-  internal let rest: Subquery
+  internal let rest: Resolution
 
-  internal init(_ ons: Array<Subquery>, _ rest: Subquery) {
+  internal init(_ ons: Array<Resolution>, _ rest: Resolution) {
     self.ons = ons
     self.rest = rest
   }
 
   /// The lowering seam of join `index`'s `ON`.
-  internal func on(_ index: Int) -> Subquery {
+  internal func on(_ index: Int) -> Resolution {
     ons[index]
   }
 }
@@ -817,7 +817,7 @@ internal final class ReachedScalars {
   }
 }
 
-/// The validation-side analog of `Subquery` — the seam that lets the dry-run
+/// The validation-side analog of `Resolution` — the seam that lets the dry-run
 /// type-check (`check`) validate the UNCORRELATED inner query an `EXISTS`/`IN
 /// (Q)` nests without itself holding the borrowing catalog.
 ///
@@ -849,7 +849,7 @@ internal struct SubqueryCheck {
 
   /// Each nested `Query` mapped to its single-column output TYPE, derived by
   /// the `typecheck` pre-pass — the type a scalar subquery reports to the
-  /// result schema (`validate`/`derive`), matching the lowering's `Subquery`.
+  /// result schema (`validate`/`derive`), matching the lowering's `Resolution`.
   private let types: Dictionary<Query, ValueType>
 
   /// The scalar inner queries whose OPERAND validation is DEFERRED through the
@@ -865,14 +865,14 @@ internal struct SubqueryCheck {
   private let reached: ReachedScalars
 
   /// The ENCLOSING scope this select's OWN columns correlate against — the
-  /// validation-side analog of `Subquery.outer`, so a correlated column resolves
-  /// against the outer query exactly as the run's lowering does, keeping
-  /// typecheck↔run parity. `nil` for a top-level select.
+  /// validation-side analog of `Resolution.outer`, so a correlated column
+  /// resolves against the outer query exactly as the run's lowering does,
+  /// keeping typecheck↔run parity. `nil` for a top-level select.
   private let outer: Outer?
 
   /// Whether this surface ADMITS a correlated column — the inner `WHERE`/`ON`
   /// (TRUE) versus a projection / `GROUP BY` / `HAVING` (FALSE, diagnosed) — the
-  /// analog of `Subquery.admits`, so validation faults the unsupported
+  /// analog of `Resolution.admits`, so validation faults the unsupported
   /// correlated-projection case exactly where the run does.
   private let admits: Bool
 
@@ -898,7 +898,7 @@ internal struct SubqueryCheck {
 
   /// This checker with correlation BARRED — the surface a projection / `GROUP
   /// BY` / `HAVING` type-checks under, where an outer column is out of the (b)
-  /// cut and is diagnosed rather than resolved. Mirrors `Subquery.barred`.
+  /// cut and is diagnosed rather than resolved. Mirrors `Resolution.barred`.
   internal var barred: SubqueryCheck {
     SubqueryCheck(widths, types, deferred: deferred, reached: reached,
                   outer: outer, admits: false)
@@ -918,7 +918,7 @@ internal struct SubqueryCheck {
   }
 
   /// The outer type `column` correlates to, or `nil` when no enclosing scope
-  /// binds it — the validation-side `Subquery.correlate`: it resolves against
+  /// binds it — the validation-side `Resolution.correlate`: it resolves against
   /// `outer`, faulting `.unsupported` on a BARRED surface (a projection / `GROUP
   /// BY` / `HAVING`) so validation rejects the unsupported correlated-projection
   /// case exactly as the run's lowering does, and returns the outer column's
@@ -1009,7 +1009,7 @@ internal struct SubqueryCheck {
 /// caller supplies that resolution as `term`.
 private func lower(_ predicate: Predicate,
                    term: (Expression) throws(SQLError) -> Term,
-                   subquery: Subquery)
+                   subquery: Resolution)
     throws(SQLError) -> Filter {
   switch predicate {
   case let .comparison(left, op, right):
@@ -1321,7 +1321,7 @@ extension Schema {
   /// engine remaps to slots after gathering the referenced ones.
   internal func terms(_ projection: Projection, in relation: Relation,
                       _ routines: Routines = [:],
-                      subquery: Subquery = .unsupported)
+                      subquery: Resolution = .unsupported)
       throws(SQLError) -> Array<Term> {
     // A projection is a BARRED clause position: a correlated column of THIS
     // query has no evaluator here (only WHERE/ON/HAVING admit one). The cut is
@@ -1360,7 +1360,7 @@ extension Schema {
   /// its lowered arguments.
   internal func term(_ expression: Expression, in relation: Relation,
                      _ routines: Routines = [:],
-                     subquery: Subquery = .unsupported)
+                     subquery: Resolution = .unsupported)
       throws(SQLError) -> Term {
     switch expression {
     case let .column(column):
@@ -1466,7 +1466,7 @@ extension Schema {
   internal func order(_ order: Order, in relation: Relation,
                       _ projection: Array<Term>, _ names: Array<String?>,
                       _ routines: Routines = [:],
-                      subquery: Subquery = .unsupported)
+                      subquery: Resolution = .unsupported)
       throws(SQLError) -> Array<SortKey> {
     // An ORDER BY is BARRED, as the projection is: a correlated column of THIS
     // query is out of the cut here, so the entry bars the seam by construction.
@@ -1479,7 +1479,7 @@ extension Schema {
 
   internal func lower(_ predicate: Predicate, in relation: Relation,
                       _ routines: Routines = [:],
-                      subquery: Subquery = .unsupported)
+                      subquery: Resolution = .unsupported)
       throws(SQLError) -> Filter {
     try SQLEngine.lower(predicate, term: { expression throws(SQLError) in
       try term(expression, in: relation, routines, subquery: subquery)
@@ -1605,7 +1605,7 @@ internal struct Scope {
   /// This is the SCHEMA surface. `validate(_:_:)` is the type-check surface: it
   /// faults exactly as a run would on a bad operand or an unknown/misused call.
   internal func derive(_ expression: Expression, _ routines: Routines = [:],
-                       subquery: Subquery = .unsupported)
+                       subquery: Resolution = .unsupported)
       throws(SQLError) -> ValueType {
     return switch expression {
     case let .column(column):
@@ -1695,7 +1695,7 @@ internal struct Scope {
   /// never runs.
   private func nullif(_ lhs: Expression, _ rhs: Expression,
                       _ routines: Routines,
-                      subquery: Subquery = .unsupported)
+                      subquery: Resolution = .unsupported)
       throws(SQLError) -> ValueType {
     let type = try derive(lhs, routines, subquery: subquery)
     _ = try derive(rhs, routines, subquery: subquery)
@@ -1708,7 +1708,7 @@ internal struct Scope {
   /// arithmetic `.binary` derive branch.
   private func concatenation(_ lhs: Expression, _ rhs: Expression,
                              _ routines: Routines,
-                             subquery: Subquery = .unsupported)
+                             subquery: Resolution = .unsupported)
       throws(SQLError) -> ValueType {
     _ = try derive(lhs, routines, subquery: subquery)
     _ = try derive(rhs, routines, subquery: subquery)
@@ -1720,7 +1720,7 @@ internal struct Scope {
   /// discarding its type, the conversion being nominal.
   private func derive(cast operand: Expression, to type: ValueType,
                       _ routines: Routines,
-                      subquery: Subquery = .unsupported)
+                      subquery: Resolution = .unsupported)
       throws(SQLError) -> ValueType {
     _ = try derive(operand, routines, subquery: subquery)
     return type
@@ -1743,7 +1743,7 @@ internal struct Scope {
   /// unification and the faulting `validate`'s stop.
   private func unified(_ arguments: Array<Expression>,
                        _ routines: Routines,
-                       subquery: Subquery = .unsupported)
+                       subquery: Resolution = .unsupported)
       throws(SQLError) -> ValueType {
     var type: ValueType?
     for argument in arguments {
@@ -1801,7 +1801,7 @@ internal struct Scope {
   /// widens to `double`.
   internal func derive(_ whens: Array<When>, _ otherwise: Expression?,
                        _ routines: Routines,
-                       subquery: Subquery = .unsupported)
+                       subquery: Resolution = .unsupported)
       throws(SQLError) -> ValueType {
     let results = reachable(whens, otherwise, routines)
     guard !results.isEmpty else { return .integer }
@@ -3309,7 +3309,7 @@ internal struct Scope {
   /// list as lowered terms — in source order.
   internal func terms(_ projection: Projection,
                       _ routines: Routines = [:],
-                      subquery: Subquery = .unsupported) throws(SQLError)
+                      subquery: Resolution = .unsupported) throws(SQLError)
       -> Array<Term> {
     // A projection is a BARRED clause position (see `Schema.terms`): the entry
     // bars the seam, so no join-scope projection can admit a correlated column
@@ -3350,7 +3350,7 @@ internal struct Scope {
   /// Lowers a scalar `expression` to a combined-ordinal `Term`.
   internal func term(_ expression: Expression,
                      _ routines: Routines = [:],
-                     subquery: Subquery = .unsupported)
+                     subquery: Resolution = .unsupported)
       throws(SQLError) -> Term {
     switch expression {
     case let .column(column):
@@ -3442,7 +3442,7 @@ internal struct Scope {
   /// fresh over the chain (see the free `order`).
   internal func order(_ order: Order, _ projection: Array<Term>,
                       _ names: Array<String?>, _ routines: Routines = [:],
-                      subquery: Subquery = .unsupported)
+                      subquery: Resolution = .unsupported)
       throws(SQLError) -> Array<SortKey> {
     // An ORDER BY is BARRED, as the projection is (see `Schema.order`).
     let subquery = subquery.barred
@@ -3495,7 +3495,7 @@ internal struct Scope {
   /// byte-for-byte.
   internal func on(_ predicate: Predicate,
                    _ routines: Routines = [:],
-                   subquery: Subquery = .unsupported)
+                   subquery: Resolution = .unsupported)
       throws(SQLError) -> Filter {
     let conjuncts = predicate.conjuncts
     let lowered = try conjuncts.map { conjunct throws(SQLError) in
@@ -3526,7 +3526,7 @@ internal struct Scope {
   /// column reference resolved to a combined ordinal across the chain.
   internal func lower(_ predicate: Predicate,
                       _ routines: Routines = [:],
-                      subquery: Subquery = .unsupported)
+                      subquery: Resolution = .unsupported)
       throws(SQLError) -> Filter {
     try SQLEngine.lower(predicate, term: { expression throws(SQLError) in
       try term(expression, routines, subquery: subquery)
@@ -3609,7 +3609,7 @@ internal struct Grouping {
   /// against the collected aggregations, so `SUM(Amount)` and
   /// `SUM(Sales.Amount)` find the same slot in a single-relation scope.
   private func slot(of expression: Expression, _ routines: Routines = [:],
-                    subquery: Subquery = .unsupported)
+                    subquery: Resolution = .unsupported)
       throws(SQLError) -> Int? {
     guard case .aggregate = expression else { return nil }
     let aggregation = try expression.aggregation(scope, routines,
@@ -3625,7 +3625,7 @@ internal struct Grouping {
   /// standard rule.
   private func term(_ expression: Expression,
                     _ routines: Routines = [:],
-                    subquery: Subquery = .unsupported)
+                    subquery: Resolution = .unsupported)
       throws(SQLError) -> Term {
     if case .aggregate = expression,
        let slot = try slot(of: expression, routines, subquery: subquery) {
@@ -3724,7 +3724,7 @@ internal struct Grouping {
   /// well-defined meaning over groups (which columns?), so it faults.
   internal mutating func terms(_ projection: Projection,
                                _ routines: Routines = [:],
-                               subquery: Subquery = .unsupported)
+                               subquery: Resolution = .unsupported)
       throws(SQLError) -> Array<Term> {
     // A grouped projection is a BARRED clause position (see `Schema.terms`):
     // the entry bars the seam so it cannot admit a correlated column of THIS
@@ -3762,7 +3762,7 @@ internal struct Grouping {
   /// Lowers a `HAVING`/predicate to a grouped-space `Filter`.
   internal func lower(_ predicate: Predicate,
                       _ routines: Routines = [:],
-                      subquery: Subquery = .unsupported)
+                      subquery: Resolution = .unsupported)
       throws(SQLError) -> Filter {
     try SQLEngine.lower(predicate, term: { expression throws(SQLError) in
       try term(expression, routines, subquery: subquery)
@@ -3800,7 +3800,7 @@ internal struct Grouping {
   /// and `GROUP BY` surfaces are the `aliases` and `keys` `terms` recorded.
   internal func order(_ order: Order, _ projection: Array<Term>,
                       _ routines: Routines = [:],
-                      subquery: Subquery = .unsupported)
+                      subquery: Resolution = .unsupported)
       throws(SQLError) -> Array<SortKey> {
     // A grouped ORDER BY is BARRED, as the projection is (see `Schema.order`).
     let subquery = subquery.barred

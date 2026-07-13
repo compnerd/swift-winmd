@@ -56,6 +56,10 @@ extension Token {
     case between
     /// The `EXISTS` keyword introducing an `[NOT] EXISTS (subquery)` predicate.
     case exists
+    /// The `ANY` keyword introducing a quantified comparison `x op ANY (Q)`.
+    case any
+    /// The `SOME` keyword — a synonym for `ANY` in a quantified comparison.
+    case some
     case like
     case escape
     /// The `PLACING` keyword separating an `OVERLAY`'s source string from its
@@ -154,6 +158,8 @@ extension Token.Kind {
     case .in: "IN"
     case .between: "BETWEEN"
     case .exists: "EXISTS"
+    case .any: "ANY"
+    case .some: "SOME"
     case .like: "LIKE"
     case .escape: "ESCAPE"
     case .placing: "PLACING"

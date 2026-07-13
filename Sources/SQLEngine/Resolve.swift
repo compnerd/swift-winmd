@@ -287,6 +287,20 @@ internal struct Subquery {
     return .within(operand, Subkey(scope, query, .valued), negated: negated)
   }
 
+  /// Lowers `operand op {ANY | ALL} (query)` — `operand` already lowered to a
+  /// `Term` — requiring `query` project EXACTLY ONE column (else
+  /// `SQLError.arity`, from the COMPILED width, so a two-column subquery faults
+  /// here WITHOUT running), then carrying the query into the `Filter` under the
+  /// SAME `.valued` role `within` uses — the full column is materialised and
+  /// folded per outer row — to run at execution.
+  internal func quantified(_ operand: Term, _ op: Comparison,
+                           _ quantifier: Quantifier, _ query: Query)
+      throws(SQLError) -> Filter {
+    let width = try width(query)
+    guard width == 1 else { throw .arity(1, width) }
+    return .quantified(operand, op, quantifier, Subkey(scope, query, .valued))
+  }
+
   /// Lowers a scalar subquery `(query)` to a `Term.subquery` reading its
   /// collapsed value from the run-time cache, requiring `query` project EXACTLY
   /// ONE column (else `SQLError.arity`, from the COMPILED width, so a wider
@@ -565,6 +579,13 @@ private func lower(_ predicate: Predicate,
     // lowers to a `Filter.within` folding `x = v` over that column under the
     // value-list `IN`'s three-valued Kleene `OR`.
     try subquery.within(term(expression), query, negated: negated)
+  case let .quantified(expression, op, quantifier, query):
+    // `x op {ANY | ALL} (Q)`. `Q` is UNCORRELATED here, so the materialiser
+    // runs it ONCE, checks it projects exactly ONE column (else
+    // `SQLError.arity`), and lowers to a `Filter.quantified` folding `x op v`
+    // over that column with the SAME `matches`/Kleene primitives `within` uses
+    // — Kleene `OR` for `any`, Kleene `AND` for `all`.
+    try subquery.quantified(term(expression), op, quantifier, query)
   case let .membership(expression, values, negated):
     // `x IN (a, b, …)` is the disjunction `x = a OR x = b OR …` and `NOT IN`
     // its negation, lowered to a first-class `Filter.membership` that evaluates
@@ -1761,6 +1782,14 @@ internal struct Scope {
       try subquery.validate(query)
       let width = try subquery.width(query)
       guard width == 1 else { throw .arity(1, width) }
+    case let .quantified(operand, _, _, query):
+      // As `within`: validate the operand and the inner query, and enforce the
+      // single-column arity the lowering does (`SQLError.arity`), so schema
+      // validation matches execution.
+      _ = try validate(operand, routines, subquery: subquery)
+      try subquery.validate(query)
+      let width = try subquery.width(query)
+      guard width == 1 else { throw .arity(1, width) }
     case .bound:
       // `left op :parameter` with no binding — the schema default `[:]` —
       // yields UNKNOWN without evaluating the left term, so a run just produces
@@ -2168,7 +2197,7 @@ internal struct Scope {
       return nil
     case .bound:
       return nil
-    case .exists, .within:
+    case .exists, .within, .quantified:
       // A subquery predicate is not a ROW-INDEPENDENT constant fold — its truth
       // is decided by the materialised result at lowering time, not by folding
       // operands here — so it never folds statically; treat it as undecided
@@ -2212,7 +2241,7 @@ internal struct Scope {
       settled(operand, routines)
     case .bound:
       false
-    case .exists, .within:
+    case .exists, .within, .quantified:
       // A subquery predicate's truth comes from a materialised result, not from
       // folding constant operands, so it is never settled at compile time.
       false
@@ -2236,7 +2265,10 @@ internal struct Scope {
     // element or operand makes an unmatched test UNKNOWN), so it is not.
     case .exists:
       true
-    case .within:
+    // A quantified comparison is three-valued over NULLs exactly as `IN (Q)` —
+    // a NULL element or operand makes an undecided fold UNKNOWN — so it is not
+    // definite either.
+    case .within, .quantified:
       false
     case let .and(lhs, rhs), let .or(lhs, rhs):
       definite(lhs) && definite(rhs)
@@ -2383,6 +2415,10 @@ internal struct Scope {
     case let .within(operand, _, _):
       // Only the OUTER operand may hold an enclosing-group aggregate; the
       // subquery is its own scope, so it is not walked here.
+      try aggregates(in: operand, routines, subquery: subquery)
+    case let .quantified(operand, _, _, _):
+      // As `within`: only the OUTER operand may hold an enclosing-group
+      // aggregate; the subquery is its own scope.
       try aggregates(in: operand, routines, subquery: subquery)
     case let .like(operand, pattern, escape, _):
       try aggregates(in: operand, routines, subquery: subquery)
@@ -2647,7 +2683,7 @@ internal struct Scope {
       return or(left, try empty(rhs, routines))
     case let .not(operand):
       return try empty(operand, routines).map { !$0 }
-    case .exists, .within:
+    case .exists, .within, .quantified:
       // The whole-result empty-group fold carries no catalog, so it cannot
       // materialise a subquery to decide the predicate — it reads UNKNOWN,
       // dropping the lone empty group, the conservative outcome for the rare
@@ -3226,6 +3262,10 @@ extension Filter {
     case let .within(operand, _, _):
       // Only the outer operand term reads ordinals; the uncorrelated subquery
       // runs against its own relations.
+      operand.references(into: &ordinals)
+    case let .quantified(operand, _, _, _):
+      // As `within`: only the outer operand reads ordinals; the uncorrelated
+      // subquery runs against its own relations.
       operand.references(into: &ordinals)
     case let .like(operand, pattern, escape, _):
       operand.references(into: &ordinals)

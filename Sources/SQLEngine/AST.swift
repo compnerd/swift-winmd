@@ -862,6 +862,23 @@ public indirect enum Predicate: Hashable, Sendable {
   /// column under Kleene `OR`, the SAME three-valued core the value-list `IN`
   /// uses.
   case within(Expression, Query, negated: Bool)
+  /// `x op {ANY | SOME | ALL} (Q)` — a QUANTIFIED comparison, whether `x op v`
+  /// holds for at least one (`ANY`/`SOME`) or every (`ALL`) value `v` the
+  /// subquery `Q` yields, `op` any of `= <> < <= > >=`. `Q` must project
+  /// exactly ONE column (else `SQLError.arity`). It is three-valued exactly as
+  /// `within` (`IN`) is — reusing the SAME `matches` comparison and Kleene
+  /// combine — folding `x op v` over `Q`'s column under Kleene `OR` for `any`
+  /// (TRUE at the first TRUE, else UNKNOWN if any comparison is UNKNOWN through
+  /// a NULL `x` or element, else FALSE) and under Kleene `AND` for `all` (FALSE
+  /// at the first FALSE, else UNKNOWN if any is UNKNOWN, else TRUE). An EMPTY
+  /// `Q` takes the fold's identity — `any` FALSE (no witness), `all` TRUE
+  /// (vacuous). `= ANY` is `IN` and `<> ALL` is `NOT IN`, but the case is kept
+  /// distinct for the general operator. `SOME` is a synonym for `ANY`,
+  /// normalised to `any` at parse time. In this slice `Q` is UNCORRELATED — it
+  /// names no column of the enclosing query — so the engine materialises it
+  /// ONCE (as `within` does) and folds over that single column; correlation is
+  /// a later slice.
+  case quantified(Expression, Comparison, Quantifier, Query)
   /// `p IS [NOT] <truth value>` — the ISO `<boolean test>`, whether the inner
   /// boolean `Predicate` `p`'s THREE-VALUED result equals the `value`
   /// (`TRUE`/`FALSE`/`UNKNOWN`), or does not when `negated`. Unlike the other
@@ -913,6 +930,22 @@ public enum Truth: Hashable, Sendable {
   case `false`
   /// The truth value `UNKNOWN` — a NULL boolean.
   case unknown
+}
+
+/// The quantifier of a quantified comparison subquery `x op {ANY|ALL} (Q)`.
+///
+/// `ANY` (and its synonym `SOME`, normalised to `any` at parse time) holds when
+/// `x op v` is TRUE for AT LEAST ONE value `v` the subquery yields; `ALL` holds
+/// when it is TRUE for EVERY value. Both are three-valued over NULLs and take
+/// the empty-set identity of their Kleene fold — `ANY` over no rows is FALSE
+/// (OR's identity), `ALL` over no rows is TRUE (AND's identity). `x = ANY (Q)`
+/// is the `IN (Q)` special case and `x <> ALL (Q)` the `NOT IN (Q)` one, but
+/// the general operator makes `< ANY`, `>= ALL`, and the rest first-class.
+public enum Quantifier: Hashable, Sendable {
+  /// `ANY` (or `SOME`) — TRUE for at least one subquery value.
+  case any
+  /// `ALL` — TRUE for every subquery value.
+  case all
 }
 
 /// A comparison operator.

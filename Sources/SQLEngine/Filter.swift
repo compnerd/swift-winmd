@@ -92,6 +92,20 @@ internal indirect enum Filter: Equatable, Sendable {
   /// negating the three-valued result (UNKNOWN maps to itself). The operand
   /// `Term` is evaluated once per row.
   case within(Term, Subkey, negated: Bool)
+  /// `x op {ANY | ALL} (Q)` — the lowered form of the AST's `quantified`. The
+  /// operand term `x` is held ONCE, the comparison `op` and the `Quantifier`
+  /// beside it, and the subquery occurrence as its cache `Subkey` (its
+  /// `.valued` role, the FULL column materialised as `within`'s is) — never
+  /// run during `compile`, its single-column arity enforced at COMPILE from the
+  /// compiled width (`SQLError.arity`, no cursor). At RUN `Q` executes ONCE
+  /// against the borrowed catalog (memoised under the `Subkey`, UNCORRELATED)
+  /// and the case folds `x op v` over its lone column with the SAME
+  /// `matches`/Kleene primitives `within` uses: Kleene `OR` for `any` (seeded
+  /// FALSE), Kleene `AND` for `all` (seeded TRUE), so a NULL `x` or element
+  /// makes an otherwise-undecided fold UNKNOWN, and an EMPTY column takes the
+  /// seed — `any` FALSE, `all` TRUE. The operand `Term` is evaluated once per
+  /// row.
+  case quantified(Term, Comparison, Quantifier, Subkey)
   /// `p IS [NOT] <truth value>` — the lowered form of the AST's `truth`. The
   /// inner boolean `Filter` is held once and evaluated to its three-valued
   /// result, which is then MAPPED against `value` (`TRUE`/`FALSE`/`UNKNOWN`) to
@@ -410,6 +424,10 @@ extension Filter {
       // Only the outer operand term reads slots; the subquery is uncorrelated,
       // so remap the operand alone and carry the cache key through.
       .within(operand.remapped(through: slot), key, negated: negated)
+    case let .quantified(operand, op, quantifier, key):
+      // As `within`: only the outer operand reads slots; the uncorrelated
+      // subquery's cache key passes through unchanged.
+      .quantified(operand.remapped(through: slot), op, quantifier, key)
     case let .truth(inner, value, negated):
       .truth(inner.remapped(through: slot), value, negated: negated)
     case let .and(lhs, rhs):
@@ -510,6 +528,10 @@ extension Filter {
       // Only the outer operand term is evaluated; the subquery's memoised
       // values are folded under `matches`, which never throws.
       operand.safe
+    case let .quantified(operand, _, _, _):
+      // As `within`: only the outer operand is evaluated, the memoised values
+      // folded under `matches`, which never throws.
+      operand.safe
     case let .truth(inner, _, _): inner.safe
     case let .and(lhs, rhs): lhs.safe && rhs.safe
     case let .or(lhs, rhs): lhs.safe && rhs.safe
@@ -548,7 +570,11 @@ extension Filter {
   /// test, never UNKNOWN — so it is NOT contingent and stays freely pushable.
   private var contingent: Bool {
     switch self {
-    case .within: true
+    // A quantified comparison is three-valued exactly as `IN (Q)` is — a NULL
+    // in `Q`'s column (or a NULL operand) can make an otherwise-undecided fold
+    // UNKNOWN, slotless yet not definite — so both stay off a pushdown ahead of
+    // a later unsafe conjunct the non-short-circuiting `AND` still owes.
+    case .within, .quantified: true
     case .compare, .bound, .match, .null, .membership, .like, .between,
          .distinct, .exists: false
     case let .truth(inner, _, _): inner.contingent
@@ -571,8 +597,8 @@ extension Filter {
     case .compare, .match, .null, .membership, .distinct: false
     // An UNCORRELATED subquery predicate reads no run-time `:parameter` of the
     // OUTER query — the subquery runs once at run start with the same bindings —
-    // so neither is parameterised for the outer row.
-    case .exists, .within: false
+    // so none is parameterised for the outer row.
+    case .exists, .within, .quantified: false
     case let .like(_, pattern, escape, _):
       pattern.parameterised || (escape?.parameterised ?? false)
     case let .between(_, lower, upper, _):
@@ -1101,6 +1127,12 @@ extension Catalog where Self: ~Escapable {
       // SAME three-valued membership the value-list `IN` uses.
       try member(row, operand, subqueries.values(key), negated, relations,
                  routines, bindings, subqueries)
+    case let .quantified(operand, op, quantifier, key):
+      // Fold `operand op v` over the subquery's memoised single column with the
+      // SAME `matches`/Kleene primitives `within` uses — Kleene `OR` (seeded
+      // FALSE) for `any`, Kleene `AND` (seeded TRUE) for `all`.
+      try quantified(row, operand, op, quantifier, subqueries.values(key),
+                     relations, routines, bindings, subqueries)
     case let .truth(inner, value, negated):
       try tested(evaluate(row, inner, relations, routines, bindings,
                           subqueries), value, negated)
@@ -1191,6 +1223,44 @@ extension Catalog where Self: ~Escapable {
       if truth == true { break }
     }
     return negated ? truth.map { !$0 } : truth
+  }
+
+  /// Evaluates a lowered `operand op {ANY | ALL} (Q)` against `row` over the
+  /// subquery's ALREADY-MATERIALISED single column `values`.
+  ///
+  /// The `operand` is evaluated ONCE per row, then `operand op v` folds over
+  /// the materialised `values` IN ORDER with the SAME `matches`/Kleene
+  /// primitives the value-list and `IN (Q)` `member` folds use — Kleene `OR`
+  /// seeded FALSE for `any` (short-circuiting at the first TRUE), Kleene `AND`
+  /// seeded TRUE for `all` (short-circuiting at the first FALSE). So a NULL
+  /// `operand` or a NULL element makes an otherwise-undecided fold UNKNOWN (not
+  /// FALSE), an EMPTY `values` takes the seed — `any` FALSE (no witness), `all`
+  /// TRUE (vacuous) — and the identity falls out of the fold rather than a
+  /// special case. `= ANY` reduces to the `member` `IN` fold and `<> ALL` to
+  /// its negation, sharing one three-valued core with `within`.
+  private borrowing func quantified(_ row: borrowing some Row & ~Escapable,
+                                    _ operand: Term, _ op: Comparison,
+                                    _ quantifier: Quantifier,
+                                    _ values: Array<Value>,
+                                    _ relations: ScopedRelations,
+                                    _ routines: Routines, _ bindings: Bindings,
+                                    _ subqueries: Subqueries)
+      throws(SQLError) -> Bool? {
+    let value = try evaluate(row, operand, relations, routines, bindings,
+                             subqueries)
+    var truth: Bool? = quantifier == .any ? false : true
+    for element in values {
+      let matched = matches(value, op, element)
+      switch quantifier {
+      case .any:
+        truth = or(truth, matched)
+        if truth == true { return true }
+      case .all:
+        truth = and(truth, matched)
+        if truth == false { return false }
+      }
+    }
+    return truth
   }
 
   /// Evaluates a lowered `test [NOT] BETWEEN lower AND upper` against this row.

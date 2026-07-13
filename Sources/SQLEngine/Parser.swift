@@ -35,12 +35,14 @@
 /// conjunction    := negation (AND negation)*
 /// negation       := NOT negation | [NOT] EXISTS '(' query ')' | primary
 /// primary        := '(' predicate ')' [IS [NOT] truthvalue] | comparison
-/// comparison     := expression (op (expression | param)
+/// comparison     := expression (op (quantifier '(' query ')'
+///                                    | expression | param)
 ///                 | IS [NOT] (NULL | truthvalue | DISTINCT FROM expression)
 ///                 | [NOT] IN '(' (expression (',' expression)* | query) ')'
 ///                 | [NOT] LIKE expression [ESCAPE expression]
 ///                 | [NOT] BETWEEN (expression | param) AND
 ///                                 (expression | param))
+/// quantifier     := ANY | SOME | ALL      // SOME is a synonym for ANY
 /// truthvalue     := TRUE | FALSE | UNKNOWN
 /// expression     := additive
 /// additive       := multiplicative (('+' | '-' | '||') multiplicative)*
@@ -1039,12 +1041,35 @@ internal struct Parser: ~Escapable {
       return try membership(left, negated: true)
     }
     let op = try op()
+    if let quantifier = try quantifier() {
+      // `left op {ANY | SOME | ALL} (query)` — a quantified comparison. The
+      // quantifier follows the operator, so the peek is unambiguous: it is
+      // never a right operand. The subquery is parenthesised as `IN (Q)` is.
+      try expect(.lparen)
+      let query = try query()
+      try expect(.rparen)
+      return .quantified(left, op, quantifier, query)
+    }
     if case let .parameter(name) = current?.kind {
       _ = try advance(expecting: "a parameter")
       return .bound(left: left, op: op, parameter: name)
     }
     let right = try expression()
     return .comparison(left: left, op: op, right: right)
+  }
+
+  /// Consumes an `ANY`, `SOME`, or `ALL` quantifier keyword at the head of a
+  /// quantified comparison's right side — the `ANY`/`ALL` `Quantifier`, `SOME`
+  /// a synonym for `ANY` normalised to `any` here — or `nil` when the next
+  /// token is none of them (an ordinary right operand, which the caller then
+  /// parses). `ALL` is the same keyword a `UNION ALL`/`SELECT ALL` uses,
+  /// disambiguated by grammar position: after a comparison operator it is only
+  /// ever the quantifier.
+  private mutating func quantifier() throws(SQLError) -> Quantifier? {
+    if try match(.any) { return .any }
+    if try match(.some) { return .any }
+    if try match(.all) { return .all }
+    return nil
   }
 
   /// Parses the tail of `left [NOT] IN (…)` — the `IN` is already consumed —

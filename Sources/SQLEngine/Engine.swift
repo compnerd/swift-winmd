@@ -852,6 +852,10 @@ extension Predicate {
       // Only the OUTER operand can hold an enclosing-group aggregate; the
       // subquery is its own scope.
       operand.aggregated
+    case let .quantified(operand, _, _, _):
+      // As `within`: only the OUTER operand can hold an enclosing-group
+      // aggregate; the subquery is its own scope.
+      operand.aggregated
     case let .like(operand, pattern, escape, _):
       operand.aggregated || pattern.aggregated
           || (escape?.aggregated ?? false)
@@ -888,6 +892,8 @@ extension Predicate {
       // body that nests one still carries a binding to reject at registration.
       query.bound
     case let .within(operand, query, _):
+      operand.bound || query.bound
+    case let .quantified(operand, _, _, query):
       operand.bound || query.bound
     case let .like(operand, pattern, escape, _):
       operand.bound || pattern.bound || (escape?.bound ?? false)
@@ -1081,6 +1087,9 @@ extension Predicate {
     case let .within(operand, query, _):
       operand.collect(subqueries: &queries)
       queries.append(query)
+    case let .quantified(operand, _, _, query):
+      operand.collect(subqueries: &queries)
+      queries.append(query)
     case let .comparison(left, _, right):
       left.collect(subqueries: &queries)
       right.collect(subqueries: &queries)
@@ -1135,6 +1144,12 @@ extension Predicate {
     case let .within(operand, query, _):
       operand.collect(valued: &queries)
       queries.insert(query)
+    case let .quantified(operand, _, _, query):
+      // A quantified comparison reads the subquery's full COLUMN — folding `x
+      // op v` over every value — so it materialises FULL under the `.valued`
+      // role, exactly as `IN (Q)` does, never a cardinality probe.
+      operand.collect(valued: &queries)
+      queries.insert(query)
     case let .comparison(left, _, right):
       left.collect(valued: &queries)
       right.collect(valued: &queries)
@@ -1177,6 +1192,10 @@ extension Predicate {
       break
     case let .within(operand, _, _):
       operand.collect(scalar: &queries)
+    case let .quantified(operand, _, _, _):
+      // As `within`: the quantified subquery is `valued`, not scalar; only the
+      // outer operand's own subqueries are descended.
+      operand.collect(scalar: &queries)
     case let .comparison(left, _, right):
       left.collect(scalar: &queries)
       right.collect(scalar: &queries)
@@ -1218,6 +1237,10 @@ extension Predicate {
     case let .exists(query, _):
       queries.insert(query)
     case let .within(operand, _, _):
+      operand.collect(existential: &queries)
+    case let .quantified(operand, _, _, _):
+      // A quantified subquery is `valued` (its full column is read), not an
+      // existential probe; only the outer operand is descended here.
       operand.collect(existential: &queries)
     case let .comparison(left, _, right):
       left.collect(existential: &queries)
@@ -1731,6 +1754,10 @@ extension Predicate {
       break
     case let .within(operand, _, _):
       // Only the OUTER operand may hold an enclosing-group aggregate.
+      operand.collect(into: &expressions)
+    case let .quantified(operand, _, _, _):
+      // As `within`: only the OUTER operand may hold an enclosing-group
+      // aggregate.
       operand.collect(into: &expressions)
     case let .like(operand, pattern, escape, _):
       operand.collect(into: &expressions)

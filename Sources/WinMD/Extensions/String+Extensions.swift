@@ -11,8 +11,8 @@ extension String {
   /// Decodes a borrowed byte span as a string in the given encoding, failing
   /// on any invalid code-unit sequence rather than substituting the U+FFFD
   /// replacement character.
-  init?<Encoding: Unicode.Encoding>(validating span: RawSpan,
-                                    as encoding: Encoding.Type)
+  internal init?<Encoding: Unicode.Encoding>(validating span: RawSpan,
+                                             as encoding: Encoding.Type)
       where Encoding.CodeUnit == UInt8 {
     let value = span.withUnsafeBytes {
       String(validating: $0, as: encoding)

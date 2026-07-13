@@ -6,8 +6,12 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  actions: write
+  contents: read
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ format('{0}-{1}', github.workflow, github.ref) }}
   cancel-in-progress: true
 
 jobs:
@@ -29,24 +33,20 @@ jobs:
 
       - uses: actions/checkout@v7.0.0
       - name: Configure LLVM CAS cache
-        id: cas-cache-key
         shell: pwsh
         run: |
-          $casPath = [IO.Path]::Join("${{ github.workspace }}", ".build", "llvm-cas")
-          "SWIFT_CAS_PATH=$casPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $path = [IO.Path]::Join("${{ github.workspace }}", ".build", "llvm-cas")
+          "SWIFT_CAS_PATH=$path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          $now = Get-Date
-          $year = [Globalization.ISOWeek]::GetYear($now)
-          $week = [Globalization.ISOWeek]::GetWeekOfYear($now)
-          "epoch=$year-$($week.ToString('D2'))" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $prefix = "llvm-cas-${{ runner.os }}-"
+          $key = "{0}{1}-{2}" -f $prefix, "${{ matrix.tag }}", "${{ hashFiles('Package.resolved') }}"
+          "LLVM_CAS_CACHE_PREFIX=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "LLVM_CAS_CACHE_KEY=$key" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Restore LLVM CAS
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: ${{ env.SWIFT_CAS_PATH }}
-          key: llvm-cas-${{ runner.os }}-${{ github.workflow }}-${{ matrix.tag }}-${{ hashFiles('Package.resolved') }}-${{ steps.cas-cache-key.outputs.epoch }}
-          restore-keys: |
-            llvm-cas-${{ runner.os }}-${{ github.workflow }}-${{ matrix.tag }}-${{ hashFiles('Package.resolved') }}-
-            llvm-cas-${{ runner.os }}-${{ github.workflow }}-${{ matrix.tag }}-
+          key: ${{ env.LLVM_CAS_CACHE_KEY }}
       - name: Build
         run: >-
           swift build -v
@@ -65,3 +65,22 @@ jobs:
           -Xswiftc -cas-path
           -Xswiftc $env:SWIFT_CAS_PATH
           -Xswiftc -Rcache-compile-job
+      - name: Remove previous LLVM CAS cache
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $caches = @(gh cache list --key $env:LLVM_CAS_CACHE_PREFIX --limit 10000 --json id | ConvertFrom-Json)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          foreach ($cache in $caches) {
+            gh cache delete $cache.id --repo $env:GITHUB_REPOSITORY
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Save LLVM CAS
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ env.SWIFT_CAS_PATH }}
+          key: ${{ env.LLVM_CAS_CACHE_KEY }}

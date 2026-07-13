@@ -728,7 +728,7 @@ private func deduplicated(_ records: Array<Record>) -> Array<Record> {
 ///
 /// A common table expression `name` (in `ctes`, consulted first — a CTE shadows
 /// a base relation) materialises its records directly from the in-engine
-/// `Materialised` rows; else the base relation re-resolves through this
+/// `RelationInstance` rows; else the base relation re-resolves through this
 /// catalog, its cursor opened.
 ///
 /// - Throws: `SQLError.relation` if the name resolves to neither.

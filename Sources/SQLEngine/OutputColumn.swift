@@ -162,7 +162,7 @@ extension Catalog where Self: ~Escapable {
   /// The result columns the trailing `query` of a `WITH` would yield, resolved
   /// against a SCHEMA-ONLY overlay of the `ctes` in scope.
   ///
-  /// Each CTE binds a `Materialised` of its DECLARED columns with no rows —
+  /// Each CTE binds a `RelationInstance` of its DECLARED columns with no rows —
   /// the schema the run's materialised CTE resolves to (columns from the
   /// declared list, every type `.integer`) — laid into the overlay in source
   /// order so a later CTE, and the trailing query, resolve a name the same
@@ -215,9 +215,9 @@ extension Catalog where Self: ~Escapable {
       // the recursive arm's operand check and, after validation, into the
       // overlay a later CTE and the trailing query resolve against.
       let declared =
-          Materialised(columns: cte.columns, rows: [],
-                       types: Array(repeating: .integer,
-                                    count: cte.columns.count))
+          RelationInstance(columns: cte.columns, rows: [],
+                           types: Array(repeating: .integer,
+                                        count: cte.columns.count))
       // Validate the body's SHAPE and ARITY against the scope of the PRIOR CTEs
       // by the SAME code a run uses — `Engine.validate` — so a schema is not
       // advertised for a `WITH` a run would reject, and this path never again

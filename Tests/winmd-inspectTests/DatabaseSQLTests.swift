@@ -509,6 +509,54 @@ struct DatabaseSQLTests {
     }
   }
 
+  @Test func `the SIGNATURE UDF decodes a MethodDef's Signature blob`() throws {
+    // The `SIGNATURE` UDF decodes the `MethodDef.Signature` `#Blob` (surfaced
+    // as a real `.blob` column) to its return type's neutral spelling; the
+    // fixture's sole method's signature is `void Method(i4, string)`, so its
+    // return decodes to `void`. This reuses the SAME decoder the render's
+    // `decode(return:in:)` navigates a method Id through — here driven off the
+    // raw blob cell with no database resolution.
+    try DatabaseSQLTests.with { catalog in
+      let rows = try DatabaseSQLTests.run(
+          "SELECT SIGNATURE(Signature) FROM MethodDef", catalog)
+      #expect(rows == [[.text("void")]])
+    }
+  }
+
+  @Test func `the SIGNATURE UDF is NULL on a malformed blob`() throws {
+    // A blob that is not a decodable method signature yields SQL NULL,
+    // mirroring `GUID`'s NULL-on-mismatch: `x'ff'` (an invalid prolog) does not
+    // decode, so the projection is NULL. It resolves through the session's
+    // routines, the same set the render binds.
+    try DatabaseSQLTests.with { catalog in
+      let rows = try DatabaseSQLTests.run(
+          "SELECT SIGNATURE(x'ff') FROM MethodDef", catalog)
+      #expect(rows == [[.null]])
+    }
+  }
+
+  @Test func `the SIGNATURE UDF propagates a NULL argument`() throws {
+    // A NULL argument propagates to NULL, exactly as `GUID` does — invoked
+    // directly against the session's `signature` routine (the dialect has no
+    // bare `NULL` literal in expression position, so this exercises the
+    // propagation off the routine itself).
+    let routine = Session.routines["signature"]
+    #expect(try routine?([.null]) == .null)
+  }
+
+  @Test func `the bundled signatures view decodes a method's return`() throws {
+    // The bundled `signatures` view projects `SIGNATURE(Signature) AS Type`
+    // over a `TypeDef`'s methods, bound by `:parent` — the render-facing
+    // demonstration of the UDF. `IMyInterface` (Id 1) owns `MyMethod`, whose
+    // signature's return decodes to `void`.
+    try DatabaseSQLTests.with { catalog in
+      let rows = try DatabaseSQLTests.run(
+          "SELECT Name, Type FROM signatures", Session.bundled(), catalog,
+          ["parent": .integer(1)])
+      #expect(rows == [[.text("MyMethod"), .text("void")]])
+    }
+  }
+
   @Test func `excludes the virtual columns from SELECT *`() throws {
     // `SELECT *` projects exactly the six real `TypeDef` fields — neither
     // `Id` nor an owner-FK column appears — for each of the two fixture types.

@@ -474,6 +474,30 @@ internal struct SignatureDecoder: ~Escapable {
   }
 }
 
+// MARK: - Blob decoding
+
+/// The `MethodSignature` a raw method-signature `#Blob` payload decodes to
+/// (ECMA-335 §II.23.2.1).
+///
+/// This is the escapable, bytes → value form of `Row<MethodDef>.prototype`: a
+/// caller that has already copied a `MethodDef.Signature` `#Blob` out of the
+/// borrowed scan (the SQL adapter's `.blob` cell, whose payload is the
+/// length-prefix-stripped signature) decodes it here, without a `Row`. It
+/// mirrors `iid(decoding:)`, the analogous decode over a copied
+/// `CustomAttribute.Value` blob. `bytes` must be the WHOLE signature — the
+/// decode consumes every byte (`end()`) — and, as `prototype` requires, name a
+/// `DEFAULT`/`VARARG` convention; anything else is malformed metadata and
+/// throws.
+public func decode(method bytes: Array<UInt8>) throws(WinMDError)
+    -> MethodSignature {
+  var decoder = SignatureDecoder(bytes.span.bytes)
+  let signature = try decoder.method()
+  guard signature.convention == .default ||
+      signature.convention == .vararg else { throw .BadImageFormat }
+  try decoder.end()
+  return signature
+}
+
 // MARK: - Accessors
 
 extension Row where Schema == Metadata.Tables.MethodDef {

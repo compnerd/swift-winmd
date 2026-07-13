@@ -195,8 +195,14 @@ extension Session {
     // — and its `[.blob]` parameter contract, which the static type-check
     // validates a `GUID(...)` call against. `try!`: the name is a compile-time
     // constant and not a protected standard routine, so it never faults.
-    try! Routines.standard.registering("guid", returns: .text,
-                                       parameters: [.blob], Session.guid)
+    //
+    // `SIGNATURE` joins it under the same `[.blob] -> .text` contract, decoding
+    // a `MethodDef.Signature` `#Blob` to its return type's neutral spelling.
+    try! Routines.standard
+        .registering("guid", returns: .text, parameters: [.blob],
+                     Session.guid)
+        .registering("signature", returns: .text, parameters: [.blob],
+                     Session.signature)
   }
 
   /// `GUID(blob)` — the UUID a `GuidAttribute` `CustomAttribute` value blob
@@ -218,6 +224,56 @@ extension Session {
     }
     guard let uuid = try? WinMD.iid(decoding: bytes) else { return .null }
     return .text("\(uuid)")
+  }
+
+  /// `SIGNATURE(blob)` — the return type a `MethodDef.Signature` `#Blob` names,
+  /// as its neutral spelling, or `NULL` when the blob is not a decodable method
+  /// signature.
+  ///
+  /// The value → value companion of the storage's `decode(return:in:)`: where
+  /// that navigates from a method `Id` and spells against a target `Dialect`,
+  /// this decodes a raw signature `#Blob` cell — the payload a `.blob` column
+  /// surfaces — with no database in hand, so a caller queries a return type
+  /// without a render round-trip. It reuses the EXISTING decoder end to end:
+  /// `WinMD.decode(method:)` reads the `MethodSignature`, and the synthesis
+  /// tier's `SignatureType.decode` spells the return. Named types resolve
+  /// through an EMPTY `Resolver` (there is no borrowed storage to navigate from
+  /// a native routine), so a named return degrades to the `neutral` dialect's
+  /// opaque spelling — the DB-free path the decoder already documents — while a
+  /// primitive, pointer, reference, array, or generic variable spells exactly.
+  /// A NULL argument propagates to NULL; a non-blob argument is
+  /// `SQLError.argument`; a malformed or absent signature is NULL, mirroring
+  /// `GUID`'s NULL-on-mismatch.
+  private static func signature(_ arguments: Array<Value>)
+      throws(SQLError) -> Value {
+    guard arguments.count == 1 else {
+      throw .argument("SIGNATURE takes one argument")
+    }
+    if case .null = arguments[0] { return .null }
+    guard case let .blob(bytes) = arguments[0] else {
+      throw .argument("SIGNATURE requires a blob argument")
+    }
+    guard let method = try? WinMD.decode(method: bytes) else { return .null }
+    return .text(method.returns.decode(with: Resolver([:]),
+                                       dialect: Session.neutral))
+  }
+
+  /// The language-neutral `Dialect` `SIGNATURE` spells against — the ECMA-335
+  /// neutral primitive names (an empty `primitives` table falls each key back
+  /// to its own neutral name) with plain pointer, generic, and variable
+  /// spellings, so a DB-free decode yields a readable type without a loaded
+  /// language spec. An unresolvable named type degrades to `opaque`.
+  private static var neutral: Dialect {
+    Dialect(primitives: [:],
+            pointer: (typed: (mutable: "ptr", constant: "ptr"),
+                      untyped: (mutable: "rawptr", constant: "rawptr")),
+            optional: "?",
+            generic: (open: "<", close: ">"),
+            variable: (type: "T", method: "M"),
+            opaque: "object",
+            guid: (iid: "iid", clsid: "clsid"),
+            known: [:],
+            escape: { $0 })
   }
 }
 

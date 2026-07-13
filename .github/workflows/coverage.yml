@@ -45,14 +45,6 @@ jobs:
           restore-keys: |
             llvm-cas-${{ runner.os }}-${{ github.workflow }}-${{ matrix.tag }}-${{ hashFiles('Package.resolved') }}-
             llvm-cas-${{ runner.os }}-${{ github.workflow }}-${{ matrix.tag }}-
-      - name: Build
-        run: >-
-          swift build -v
-          -Xswiftc -explicit-module-build
-          -Xswiftc -cache-compile-job
-          -Xswiftc -cas-path
-          -Xswiftc $env:SWIFT_CAS_PATH
-          -Xswiftc -Rcache-compile-job
       - name: Run tests
         run: >-
           swift test -v --enable-code-coverage

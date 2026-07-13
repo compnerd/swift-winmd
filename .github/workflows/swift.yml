@@ -18,6 +18,10 @@ jobs:
   windows:
     runs-on: windows-latest
 
+    env:
+      # Keep the shared cache quick to restore and small enough to replace often.
+      LLVM_CAS_MAX_SIZE_BYTES: 536870912 # 512 MiB
+
     strategy:
       fail-fast: false
       matrix:
@@ -65,6 +69,12 @@ jobs:
           -Xswiftc -cas-path
           -Xswiftc $env:SWIFT_CAS_PATH
           -Xswiftc -Rcache-compile-job
+      - name: Prune LLVM CAS
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        shell: pwsh
+        run: |
+          $script = [IO.Path]::Join("${{ github.workspace }}", ".github", "scripts", "Prune-SwiftCAS.ps1")
+          & $script -Path $env:SWIFT_CAS_PATH -SizeLimit ([int64]$env:LLVM_CAS_MAX_SIZE_BYTES)
       - name: Remove previous LLVM CAS cache
         if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         shell: pwsh

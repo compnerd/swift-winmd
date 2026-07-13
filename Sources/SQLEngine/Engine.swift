@@ -296,9 +296,9 @@ extension Catalog where Self: ~Escapable {
         rows = try run(cte.query, scope)
       }
       relations[cte.name.lowercased()] =
-          Materialised(columns: cte.columns, rows: rows,
-                       types: Array(repeating: .integer,
-                                    count: cte.columns.count))
+          RelationInstance(columns: cte.columns, rows: rows,
+                           types: Array(repeating: .integer,
+                                        count: cte.columns.count))
     }
     return try run(query, context.scoping(relations))
   }
@@ -387,9 +387,9 @@ extension Catalog where Self: ~Escapable {
       // evaluates it in — so a text-arithmetic anchor faults against the base
       // relation, not the CTE's declared (integer) columns.
       if typecheck { try self.typecheck(anchor, scope) }
-      let empty = Materialised(columns: cte.columns, rows: [],
-                               types: Array(repeating: .integer,
-                                            count: cte.columns.count))
+      let empty = RelationInstance(columns: cte.columns, rows: [],
+                                   types: Array(repeating: .integer,
+                                                count: cte.columns.count))
       // Bind the CTE self BEFORE augmenting the recursive arm, so a derived
       // body in the arm that names the CTE (`FROM (SELECT n FROM a) AS d`)
       // resolves it — `augment` materialises derived bodies eagerly, so the
@@ -440,15 +440,16 @@ extension Catalog where Self: ~Escapable {
   ///
   /// The anchor and the recursive arm are each validated against
   /// `cte.columns.count` by their compiled `Plan.width` BEFORE any rows bind
-  /// under the declared columns: the loop binds `working` as a `Materialised`
-  /// of `cte.columns`, so an arm narrower or wider than the column list — a
-  /// two-column anchor under a three-column list, or a recursive arm of a width
-  /// differing from the anchor's — would trap in `Materialised.record` when the
-  /// next iteration reads it. Checking the compiled width faults with
-  /// `SQLError.columns` regardless of how many rows an arm yields, so even a
-  /// `SELECT *` arm filtered to zero rows is caught. The anchor compiles with
-  /// the CTE name NOT in scope (it does not reference itself); the recursive
-  /// arm compiles with the name bound to `cte.columns`, the schema it reads.
+  /// under the declared columns: the loop binds `working` as a
+  /// `RelationInstance` of `cte.columns`, so an arm narrower or wider than the
+  /// column list — a two-column anchor under a three-column list, or a
+  /// recursive arm of a width differing from the anchor's — would trap in
+  /// `RelationInstance.record` when the next iteration reads it. Checking the
+  /// compiled width faults with `SQLError.columns` regardless of how many rows
+  /// an arm yields, so even a `SELECT *` arm filtered to zero rows is caught.
+  /// The anchor compiles with the CTE name NOT in scope (it does not reference
+  /// itself); the recursive arm compiles with the name bound to `cte.columns`,
+  /// the schema it reads.
   internal borrowing func fixpoint(_ cte: CTE, _ context: Context)
       throws(SQLError) -> Array<Array<Value>> {
     // Extend the scope with any `definition_schema.` store relation the CTE's
@@ -484,7 +485,7 @@ extension Catalog where Self: ~Escapable {
 
     // Validate the anchor's compiled width against the declared columns BEFORE
     // it seeds the working set: the loop binds `working` under `cte.columns` as
-    // a `Materialised`, so an anchor narrower than the column list — a
+    // a `RelationInstance`, so an anchor narrower than the column list — a
     // two-column `Parent` under `t(a, b, c)` — would trap when the recursive
     // arm reads the absent ordinal, rather than surfacing `SQLError.columns`.
     // The anchor is the base case and does not reference the CTE, so its width
@@ -498,9 +499,9 @@ extension Catalog where Self: ~Escapable {
     // schema every iteration reads it under — so its width resolves too (a
     // `SELECT *` arm spans that schema). Checking it here catches a mismatch
     // even when the arm is filtered to zero rows in every iteration.
-    let empty = Materialised(columns: cte.columns, rows: [],
-                             types: Array(repeating: .integer,
-                                          count: cte.columns.count))
+    let empty = RelationInstance(columns: cte.columns, rows: [],
+                                 types: Array(repeating: .integer,
+                                              count: cte.columns.count))
     let probe = context.binding(cte.name, to: empty)
     let arm = try compile(recursive, probe, validate: false).width
     guard arm == cte.columns.count else {
@@ -527,9 +528,9 @@ extension Catalog where Self: ~Escapable {
 
       // Bind the CTE name to ONLY the previous step's output and run the
       // recursive arm against the base catalog plus the earlier CTEs.
-      let step = Materialised(columns: cte.columns, rows: working,
-                              types: Array(repeating: .integer,
-                                           count: cte.columns.count))
+      let step = RelationInstance(columns: cte.columns, rows: working,
+                                  types: Array(repeating: .integer,
+                                               count: cte.columns.count))
       let produced = try run(recursive, context.binding(cte.name, to: step))
 
       var next = Array<Array<Value>>()

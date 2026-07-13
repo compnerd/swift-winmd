@@ -65,7 +65,7 @@ internal struct Context {
   /// A copy of this context whose overlay binds `materialised` to `name` (folded
   /// to lower case), the binding shadowing any existing one — the recursive
   /// step's rebinding of a CTE's self to the previous iteration's rows.
-  internal func binding(_ name: String, to materialised: Materialised)
+  internal func binding(_ name: String, to materialised: RelationInstance)
       -> Context {
     var relations = relations
     relations[name.lowercased()] = materialised

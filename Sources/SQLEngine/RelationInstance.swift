@@ -8,7 +8,7 @@
 /// It is threaded alongside the borrowed base catalog through every resolution
 /// phase: when the engine resolves a relation name, it consults
 /// `ScopedRelations` first, and a bound leaf materialises its records from the
-/// `Materialised` rows rather than opening a base cursor. An empty
+/// `RelationInstance` rows rather than opening a base cursor. An empty
 /// `ScopedRelations` is the default — a query with no `WITH` and no derived
 /// table resolves exactly as before. Threading escapable data sidesteps
 /// wrapping the borrowed `~Escapable` base catalog in a unifying overlay type.
@@ -30,7 +30,7 @@ internal struct ScopedRelations: Hashable, Sendable,
   /// `definition_schema.` store relation in scope (`derivation == nil`). It is
   /// what a nested subquery's FROM and a revealed body resolve against: a CTE
   /// is statement-scoped, visible under any number of enclosing derived layers.
-  private var base: Dictionary<String, Materialised>
+  private var base: Dictionary<String, RelationInstance>
 
   /// The stack of SELECT-scoped derived layers, outermost first. Each
   /// `augment` for a SELECT with `FROM (SELECT …) AS t` derived tables pushes
@@ -38,7 +38,7 @@ internal struct ScopedRelations: Hashable, Sendable,
   /// innermost (last) layer that binds it, so an inner derived alias shadows an
   /// outer same-named one and both shadow the base. Empty for a query with no
   /// derived table.
-  private var layers: Array<Dictionary<String, Materialised>>
+  private var layers: Array<Dictionary<String, RelationInstance>>
 
   /// An empty overlay — the scope a bare query with no `WITH` and no derived
   /// table runs under.
@@ -47,7 +47,7 @@ internal struct ScopedRelations: Hashable, Sendable,
     self.layers = []
   }
 
-  internal init(dictionaryLiteral elements: (String, Materialised)...) {
+  internal init(dictionaryLiteral elements: (String, RelationInstance)...) {
     self.base = Dictionary(uniqueKeysWithValues: elements)
     self.layers = []
   }
@@ -57,7 +57,7 @@ internal struct ScopedRelations: Hashable, Sendable,
   /// `name` in the INNERMOST layer (the current derived layer, else the base),
   /// shadowing an outer same-named binding without deleting it; setting `nil`
   /// removes it from that layer only.
-  internal subscript(name: String) -> Materialised? {
+  internal subscript(name: String) -> RelationInstance? {
     get {
       for layer in layers.reversed() {
         if let materialised = layer[name] { return materialised }
@@ -81,7 +81,7 @@ internal struct ScopedRelations: Hashable, Sendable,
   /// run→compile→typecheck chain re-augments the same query) is a no-op, so
   /// the stack stays bounded and a self-named alias's body still reads the
   /// base.
-  internal func pushing(_ derivations: Dictionary<String, Materialised>)
+  internal func pushing(_ derivations: Dictionary<String, RelationInstance>)
       -> ScopedRelations {
     guard !derivations.isEmpty else { return self }
     if layers.last == derivations { return self }
@@ -125,18 +125,19 @@ internal struct ScopedRelations: Hashable, Sendable,
 
 /// An escapable, in-engine relation over `(columns, rows)`.
 ///
-/// A `Materialised` is fully owned data — a common table expression's query run
-/// to a fixed set of rows, named by its columns — that the engine resolves a
-/// CTE name to. It is escapable, so it sits beside the `~Escapable` base
-/// catalog without the lifetime machinery a borrowed source needs: the engine
-/// threads a `Dictionary<String, Materialised>` of the in-scope CTEs alongside
-/// the borrowed base catalog, consulting it first when it resolves a name, and
-/// builds the leaf records directly from `rows` rather than opening a cursor.
+/// A `RelationInstance` is fully owned data — a common table expression's
+/// query run to a fixed set of rows, named by its columns — that the engine
+/// resolves a CTE name to. It is escapable, so it sits beside the `~Escapable`
+/// base catalog without the lifetime machinery a borrowed source needs: the
+/// engine threads a `Dictionary<String, RelationInstance>` of the in-scope
+/// CTEs alongside the borrowed base catalog, consulting it first when it
+/// resolves a name, and builds the leaf records directly from `rows` rather
+/// than opening a cursor.
 ///
 /// It exposes the universal `Id` virtual column at `width`, so a CTE
 /// resolves columns exactly as a base relation does (a real column below
 /// `width`, the `Id` at `width`).
-internal struct Materialised: Hashable, Sendable {
+internal struct RelationInstance: Hashable, Sendable {
   /// The relation's column names, in ordinal order.
   internal let columns: Array<String>
 

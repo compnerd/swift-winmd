@@ -4435,7 +4435,7 @@ struct EngineRecursiveTests {
     // `Edge` is a two-column relation, but the column list declares three
     // names; the anchor's `SELECT *` compiles to a two-wide plan the fixpoint
     // would bind under the three-column schema, so the recursive arm's read of
-    // the absent third ordinal would trap in `Materialised.record`. The
+    // the absent third ordinal would trap in `RelationInstance.record`. The
     // anchor's compiled width is checked against the declared arity BEFORE it
     // seeds the working set, so the fault surfaces as `SQLError.columns` rather
     // than a trap.

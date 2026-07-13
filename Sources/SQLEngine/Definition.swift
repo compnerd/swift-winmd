@@ -124,21 +124,22 @@ extension View {
 /// a base table, and the engine answers it by ENUMERATING the catalog rather
 /// than reading a stored relation: `store(_:rows:)` walks the catalog's
 /// `relations()`/`views()` and each relation's schema and builds the named
-/// relation's rows as an escapable `Materialised`. It builds no cached state,
-/// so the engine resolves a `definition_schema.` name lazily, building only the
-/// one a query references. The portable `INFORMATION_SCHEMA` relations are
-/// ordinary VIEWS over these.
+/// relation's rows as an escapable `RelationInstance`. It builds no cached
+/// state, so the engine resolves a `definition_schema.` name lazily, building
+/// only the one a query references. The portable `INFORMATION_SCHEMA`
+/// relations are ordinary VIEWS over these.
 ///
 /// The store is dialect-neutral: it reads only the adapter surface every
 /// `Catalog` shares, so any source gets it for free. It is built in engine core
 /// rather than by an adapter because `Schema` — a relation's `names`/`types` —
 /// is internal to the engine.
 extension Catalog where Self: ~Escapable {
-  /// The `Materialised` for the reserved `definition_schema.` `relation`, built
-  /// over this catalog. When `rows` is `true` the relation is ENUMERATED into
-  /// its rows — `store` walks the catalog's `relations()`/`views()` and each
-  /// relation's schema; when `false` it vends a SCHEMA-ONLY relation (columns +
-  /// types, no rows), exactly what a lazy system table's `schema()` would.
+  /// The `RelationInstance` for the reserved `definition_schema.` `relation`,
+  /// built over this catalog. When `rows` is `true` the relation is ENUMERATED
+  /// into its rows — `store` walks the catalog's `relations()`/`views()` and
+  /// each relation's schema; when `false` it vends a SCHEMA-ONLY relation
+  /// (columns + types, no rows), exactly what a lazy system table's `schema()`
+  /// would.
   ///
   /// The typing paths (the view-body type resolution and the schema path in
   /// `columns(of:)`) resolve a reserved name schema-only, so they read only the
@@ -148,10 +149,10 @@ extension Catalog where Self: ~Escapable {
   /// references.
   borrowing func store(_ relation: Definition, rows: Bool,
                        _ routines: Routines = [:])
-      -> Materialised {
+      -> RelationInstance {
     guard rows else {
-      return Materialised(columns: relation.names, rows: [],
-                          types: relation.types)
+      return RelationInstance(columns: relation.names, rows: [],
+                              types: relation.types)
     }
     return switch relation {
     case .tables:
@@ -163,8 +164,9 @@ extension Catalog where Self: ~Escapable {
 
   /// `context` with its `relations` overlay extended by every
   /// `definition_schema.` store relation `query` names, each built over this
-  /// catalog as a `Materialised` — the resolution surface the engine consults
-  /// for a reserved store relation, threaded onward as the working scope.
+  /// catalog as a `RelationInstance` — the resolution surface the engine
+  /// consults for a reserved store relation, threaded onward as the working
+  /// scope.
   ///
   /// The store sits AFTER the common table expressions and BEFORE the base
   /// catalog: a `definition_schema.` name is added only when the overlay does
@@ -184,16 +186,17 @@ extension Catalog where Self: ~Escapable {
   /// context's `routines`.
   ///
   /// The overlay also binds every DERIVED TABLE THIS query names in its own
-  /// FROM/JOIN — a `FROM (SELECT …) AS t` — under its alias as a `Materialised`
-  /// so the FROM/JOIN resolves it exactly as it resolves a common table
-  /// expression (the `ScopedRelations` path). It binds ONLY this query's own
-  /// aliases, not a nested subquery's: `augment` runs at every query level
-  /// (`run`, `compile`, `typecheck`, and `materialise` each augment the query
-  /// they receive), so a subquery binds its own aliases in its OWN scope. This
-  /// SELECT-scopes derived tables — unlike a statement-scoped, uniquely-named
-  /// CTE — so two sibling subqueries may reuse an alias `t` without colliding,
-  /// and this query's `t` SHADOWS an outer CTE or derived table of the same
-  /// name. A derived table is UNCORRELATED in this cut: its inner query
+  /// FROM/JOIN — a `FROM (SELECT …) AS t` — under its alias as a
+  /// `RelationInstance` so the FROM/JOIN resolves it exactly as it resolves a
+  /// common table expression (the `ScopedRelations` path). It binds ONLY this
+  /// query's own aliases, not a nested subquery's: `augment` runs at every
+  /// query level (`run`, `compile`, `typecheck`, and `materialise` each
+  /// augment the query they receive), so a subquery binds its own aliases in
+  /// its OWN scope. This SELECT-scopes derived tables — unlike a
+  /// statement-scoped, uniquely-named CTE — so two sibling subqueries may reuse
+  /// an alias `t` without colliding, and this query's `t` SHADOWS an outer CTE
+  /// or derived table of the same name. A derived table is UNCORRELATED in this
+  /// cut: its inner query
   /// materialises ONCE, against the overlay WITHOUT its own alias (base catalog
   /// plus the store relations and CTEs in scope, NOT its sibling FROM items),
   /// so a reference to an outer or sibling column resolves as an unknown column
@@ -295,7 +298,7 @@ extension Catalog where Self: ~Escapable {
     // them as one derived layer that SHADOWS an outer CTE or derived alias of
     // the same name in the scope THIS SELECT resolves its OWN references
     // against (projection/WHERE/JOIN-ON/GROUP/HAVING).
-    var layer = Dictionary<String, Materialised>()
+    var layer = Dictionary<String, RelationInstance>()
     for (alias, inner) in derivations {
       layer[alias.lowercased()] =
           try materialise(inner, scope, rows: rows, visited: visited,
@@ -304,13 +307,13 @@ extension Catalog where Self: ~Escapable {
     return context.scoping(augmented.pushing(layer))
   }
 
-  /// A DERIVED TABLE's `query` materialised into a `Materialised` bound under
-  /// its alias: its OUTPUT columns name the relation's columns (the ISO rule —
-  /// a derived table's columns are its inner query's output names), typed from
-  /// the same output-schema walk a scalar subquery's width and a CTE's schema
-  /// use. `rows` selects the build — a run captures the inner query's rows, a
-  /// typing path leaves them empty (schema-only, no cursor) — so the alias
-  /// resolves and types identically on both paths.
+  /// A DERIVED TABLE's `query` materialised into a `RelationInstance` bound
+  /// under its alias: its OUTPUT columns name the relation's columns (the ISO
+  /// rule — a derived table's columns are its inner query's output names),
+  /// typed from the same output-schema walk a scalar subquery's width and a
+  /// CTE's schema use. `rows` selects the build — a run captures the inner
+  /// query's rows, a typing path leaves them empty (schema-only, no cursor) —
+  /// so the alias resolves and types identically on both paths.
   ///
   /// The inner query resolves against `context` (the base catalog plus the
   /// store relations and CTEs in scope), NOT its sibling FROM items, so the
@@ -323,7 +326,7 @@ extension Catalog where Self: ~Escapable {
   private borrowing func materialise(_ query: Query, _ context: Context,
                                      rows: Bool, visited: Set<String> = [],
                                      validate: Bool = true)
-      throws(SQLError) -> Materialised {
+      throws(SQLError) -> RelationInstance {
     // Bind the inner query's OWN derived tables (and store relations) before
     // deriving its schema — a run augments them recursively, so the schema
     // path must too, or a nested derived table's alias resolves as unknown
@@ -417,8 +420,8 @@ extension Catalog where Self: ~Escapable {
       }
       captured = []
     }
-    return Materialised(columns: outputs.map(\.name), rows: captured,
-                        types: outputs.map(\.type), derivation: query)
+    return RelationInstance(columns: outputs.map(\.name), rows: captured,
+                            types: outputs.map(\.type), derivation: query)
   }
 
   /// `context` rescoped to the `definition_schema.` overlay a view's body
@@ -504,7 +507,7 @@ extension Catalog where Self: ~Escapable {
   /// a view (a user view or a built-in `information_schema.` one);
   /// `table_catalog`/`table_schema` are `NULL` (the store models a single
   /// unnamed catalog and schema).
-  private borrowing func tables() -> Materialised {
+  private borrowing func tables() -> RelationInstance {
     var rows = Array<Array<Value>>()
     for name in bases() {
       rows.append([.null, .null, .text(name), .text("BASE TABLE")])
@@ -512,8 +515,8 @@ extension Catalog where Self: ~Escapable {
     for name in listable() {
       rows.append([.null, .null, .text(name), .text("VIEW")])
     }
-    return Materialised(columns: Definition.tables.names, rows: rows,
-                        types: Definition.tables.types)
+    return RelationInstance(columns: Definition.tables.names, rows: rows,
+                            types: Definition.tables.types)
   }
 
   /// `definition_schema.columns` — one row per real column of every base
@@ -530,7 +533,7 @@ extension Catalog where Self: ~Escapable {
   /// `GUID(...)` column advertises `character varying`, not the integer
   /// default.
   private borrowing func columns(_ context: Context)
-      -> Materialised {
+      -> RelationInstance {
     var rows = Array<Array<Value>>()
     for name in bases() {
       guard let table = table(named: name) else { continue }
@@ -581,8 +584,8 @@ extension Catalog where Self: ~Escapable {
                      .text(resolved[ordinal].type.domain), .text("YES")])
       }
     }
-    return Materialised(columns: Definition.columns.names, rows: rows,
-                        types: Definition.columns.types)
+    return RelationInstance(columns: Definition.columns.names, rows: rows,
+                            types: Definition.columns.types)
   }
 }
 

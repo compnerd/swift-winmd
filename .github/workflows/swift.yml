@@ -20,13 +20,44 @@ jobs:
     steps:
       - uses: compnerd/gha-setup-swift@main
         with:
-          tag: ${{ matrix.tag }}
-          branch: ${{ matrix.branch }}
+          swift-build: ${{ matrix.tag }}
+          swift-version: ${{ matrix.branch }}
 
       - uses: actions/checkout@v7.0.0
+      - name: Configure LLVM CAS cache
+        id: cas-cache-key
+        shell: pwsh
+        run: |
+          $casPath = [IO.Path]::Join("${{ github.workspace }}", ".build", "llvm-cas")
+          "SWIFT_CAS_PATH=$casPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          $now = Get-Date
+          $year = [Globalization.ISOWeek]::GetYear($now)
+          $week = [Globalization.ISOWeek]::GetWeekOfYear($now)
+          "epoch=$year-$($week.ToString('D2'))" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Restore LLVM CAS
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.SWIFT_CAS_PATH }}
+          key: llvm-cas-${{ runner.os }}-${{ github.workflow }}-${{ matrix.tag }}-${{ hashFiles('Package.resolved') }}-${{ steps.cas-cache-key.outputs.epoch }}
+          restore-keys: |
+            llvm-cas-${{ runner.os }}-${{ github.workflow }}-${{ matrix.tag }}-${{ hashFiles('Package.resolved') }}-
+            llvm-cas-${{ runner.os }}-${{ github.workflow }}-${{ matrix.tag }}-
       - name: Build
-        run: swift build -v
+        run: >-
+          swift build -v
+          -Xswiftc -explicit-module-build
+          -Xswiftc -cache-compile-job
+          -Xswiftc -cas-path
+          -Xswiftc $env:SWIFT_CAS_PATH
+          -Xswiftc -Rcache-compile-job
         env:
           AR: llvm-ar
       - name: Run tests
-        run: swift test -v
+        run: >-
+          swift test -v
+          -Xswiftc -explicit-module-build
+          -Xswiftc -cache-compile-job
+          -Xswiftc -cas-path
+          -Xswiftc $env:SWIFT_CAS_PATH
+          -Xswiftc -Rcache-compile-job

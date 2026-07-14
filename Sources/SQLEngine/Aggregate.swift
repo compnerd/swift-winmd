@@ -303,9 +303,7 @@ extension Catalog where Self: ~Escapable {
   internal borrowing func grouped(_ records: Array<Record>,
                                   _ keys: Array<Term>,
                                   _ aggregates: Array<Aggregation>,
-                                  _ relations: ScopedRelations,
-                                  _ routines: Routines, _ bindings: Bindings,
-                                  _ subqueries: Subqueries)
+                                  _ context: Context)
       throws(SQLError) -> Array<Record> {
     var order = Array<Record>()
     var accumulators = Dictionary<Record, Array<Accumulator>>()
@@ -314,8 +312,7 @@ extension Catalog where Self: ~Escapable {
       var cells = Array<Value>()
       cells.reserveCapacity(keys.count)
       for key in keys {
-        try cells.append(evaluate(record, key, relations, routines, bindings,
-                                  subqueries))
+        try cells.append(evaluate(record, key, context))
       }
       let group = Record(cells)
       // Key the group on the EXACT canonical form of its cells so `1` and `1.0`
@@ -335,16 +332,14 @@ extension Catalog where Self: ~Escapable {
         // `:parameter`, skips), applied before the fold — and so before the
         // DISTINCT dedup. A filter-less aggregate folds every row.
         if let filter = aggregates[index].filter {
-          guard try evaluate(record, filter, relations, routines, bindings,
-                             subqueries) == true else {
+          guard try evaluate(record, filter, context) == true else {
             continue
           }
         }
         // `COUNT(*)` has no argument — count the row with a non-NULL sentinel;
         // every other aggregate folds its evaluated argument value.
         let value: Value = if let argument = aggregates[index].argument {
-          try evaluate(record, argument, relations, routines, bindings,
-                       subqueries)
+          try evaluate(record, argument, context)
         } else {
           .integer(0)
         }

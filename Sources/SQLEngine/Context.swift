@@ -72,6 +72,15 @@ internal struct Context {
     return scoping(relations)
   }
 
+  /// A copy of this context with `bindings` REPLACING the parameter bindings,
+  /// the same overlay, routines, and subquery results — a correlated subquery's
+  /// per-outer-row rebinding, which extends the bindings with the enclosing
+  /// row's cells before re-executing its inner plan.
+  internal func binding(_ bindings: Bindings) -> Context {
+    Context(relations: relations, routines: routines, bindings: bindings,
+            subqueries: subqueries)
+  }
+
   /// A copy of this context carrying `subqueries` as the executing plan's
   /// materialised subquery results — the run path's extension just before it
   /// executes a compiled plan, so the row evaluator reads each subquery result

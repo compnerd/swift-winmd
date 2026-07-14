@@ -734,7 +734,8 @@ extension Row where Self: ~Escapable {
   internal borrowing func evaluate(_ term: Term, _ routines: Routines,
                                    _ bindings: Bindings = [:])
       throws(SQLError) -> Value {
-    try NoCatalog().evaluate(self, term, [:], routines, bindings)
+    try NoCatalog().evaluate(self, term,
+                             Context(routines: routines, bindings: bindings))
   }
 }
 
@@ -748,11 +749,7 @@ extension Catalog where Self: ~Escapable {
   /// runs it). The `borrowing` row is non-escaping — a term runs over a
   /// materialised projection record or a predicate's borrowed cursor row.
   internal borrowing func evaluate(_ row: borrowing some Row & ~Escapable,
-                                   _ term: Term,
-                                   _ relations: ScopedRelations,
-                                   _ routines: Routines,
-                                   _ bindings: Bindings = [:],
-                                   _ subqueries: Subqueries = Subqueries())
+                                   _ term: Term, _ context: Context)
       throws(SQLError) -> Value {
     switch term {
     case let .slot(slot):
@@ -762,17 +759,13 @@ extension Catalog where Self: ~Escapable {
       // enclosing row's cell, merged in by the per-outer-row re-execution. An
       // unbound name reads `.null` (a comparison against it is UNKNOWN), exactly
       // as a `Filter.bound` operand resolves an absent parameter.
-      bindings[name] ?? .null
+      context.bindings[name] ?? .null
     case let .constant(value):
       value
     case let .apply(name, arguments):
-      try apply(row, name, arguments, relations, routines, bindings,
-                subqueries)
+      try apply(row, name, arguments, context)
     case let .binary(op, lhs, rhs):
-      try op.apply(evaluate(row, lhs, relations, routines, bindings,
-                            subqueries),
-                   evaluate(row, rhs, relations, routines, bindings,
-                            subqueries))
+      try op.apply(evaluate(row, lhs, context), evaluate(row, rhs, context))
     case let .case(branches, otherwise, type):
       // Take the FIRST branch whose guard is three-valued TRUE (UNKNOWN and
       // FALSE skip); with none matching, the `else` term, or `NULL` when there
@@ -783,19 +776,16 @@ extension Catalog where Self: ~Escapable {
       // unified result `type` so it matches the column type the schema
       // advertised. A scalar subquery in an UNREACHED arm is never evaluated,
       // so it never runs (never throws) — the lazy `.subquery` case honours it.
-      try conditional(row, branches, otherwise, type, relations, routines,
-                      bindings, subqueries)
+      try conditional(row, branches, otherwise, type, context)
     case let .cast(operand, type):
       // Evaluate the operand and CONVERT it to the target type: NULL casts to
       // NULL, an unconvertible value faults (`Value.cast(to:)`), never yielding
       // a wrong value.
-      try evaluate(row, operand, relations, routines, bindings, subqueries)
-          .cast(to: type)
+      try evaluate(row, operand, context).cast(to: type)
     case let .coalesce(elements, type):
-      try coalesce(row, elements, type, relations, routines, bindings,
-                   subqueries)
+      try coalesce(row, elements, type, context)
     case let .nullif(lhs, rhs):
-      try nullif(row, lhs, rhs, relations, routines, bindings, subqueries)
+      try nullif(row, lhs, rhs, context)
     case let .subquery(key, correlation, type):
       // Materialise the scalar subquery LAZILY on this first reach — an
       // occurrence in a skipped `CASE`/`COALESCE` arm is never reached, so it
@@ -803,8 +793,7 @@ extension Catalog where Self: ~Escapable {
       // column's type, as a `CASE` coerces its selected arm. An UNCORRELATED one
       // memoises; a CORRELATED one re-runs against this row's correlated
       // bindings.
-      try scalar(row, key, correlation, type, relations, routines, bindings,
-                 subqueries)
+      try scalar(row, key, correlation, type, context)
     }
   }
 
@@ -858,14 +847,11 @@ extension Catalog where Self: ~Escapable {
   /// shared `context`.
   private borrowing func executed(_ row: borrowing some Row & ~Escapable,
                                   _ key: Subkey, _ correlation: Correlation,
-                                  _ overlay: ScopedRelations,
-                                  _ routines: Routines, _ bindings: Bindings,
-                                  _ subqueries: Subqueries)
+                                  _ context: Context)
       throws(SQLError) -> Array<Record> {
-    let bindings = correlated(row, correlation, bindings)
-    let context = Context(relations: overlay, routines: routines,
-                          bindings: bindings, subqueries: subqueries)
-    guard let plan = subqueries.plan(key, correlation) else {
+    let bindings = correlated(row, correlation, context.bindings)
+    let context = context.binding(bindings)
+    guard let plan = context.subqueries.plan(key, correlation) else {
       throw .named("a correlated subquery plan was not compiled")
     }
     // A SET-OPERATION plan augments PER ARM (arm-local derived aliases the
@@ -910,14 +896,14 @@ extension Catalog where Self: ~Escapable {
   /// correlated bindings, never touching the memo.
   private borrowing func present(_ row: borrowing some Row & ~Escapable,
                                  _ key: Subkey, _ correlation: Correlation,
-                                 _ relations: ScopedRelations,
-                                 _ routines: Routines, _ bindings: Bindings,
-                                 _ subqueries: Subqueries)
+                                 _ context: Context)
       throws(SQLError) -> Bool {
     // Run under the overlay the occurrence's SCOPE was lowered under — the
     // caller's or the view body's — not the current execution site a pushdown
     // may have moved this predicate to.
-    let overlay = subqueries.overlay(key.scope) ?? relations
+    let context =
+        context.scoping(context.subqueries.overlay(key.scope)
+                        ?? context.relations)
     // A CORRELATED EXISTS re-executes its PRE-COMPILED PROBE plan (correlated
     // columns are bound `Term.parameter`s; the plan is the cardinality-only
     // probed shape, so its select list — a would-fault `1 / 0` — never runs)
@@ -925,14 +911,11 @@ extension Catalog where Self: ~Escapable {
     // memo (the result depends on the row). An UNCORRELATED one memoises and
     // probes cardinality once, the SAME probed shape.
     guard correlation.isEmpty else {
-      return try !executed(row, key, correlation, overlay, routines, bindings,
-                           subqueries).isEmpty
+      return try !executed(row, key, correlation, context).isEmpty
     }
-    let context = Context(relations: overlay, routines: routines,
-                          bindings: bindings, subqueries: subqueries)
-    if let cached = subqueries.present(cached: key) { return cached }
+    if let cached = context.subqueries.present(cached: key) { return cached }
     let present = try probe(key.query, context)
-    subqueries.store(present: present, for: key)
+    context.subqueries.store(present: present, for: key)
     return present
   }
 
@@ -942,23 +925,20 @@ extension Catalog where Self: ~Escapable {
   /// the correlated bindings, bypassing the memo.
   private borrowing func values(_ row: borrowing some Row & ~Escapable,
                                 _ key: Subkey, _ correlation: Correlation,
-                                _ relations: ScopedRelations,
-                                _ routines: Routines, _ bindings: Bindings,
-                                _ subqueries: Subqueries)
+                                _ context: Context)
       throws(SQLError) -> Array<Value> {
-    let overlay = subqueries.overlay(key.scope) ?? relations
+    let context =
+        context.scoping(context.subqueries.overlay(key.scope)
+                        ?? context.relations)
     // A CORRELATED `IN (Q)` re-executes its PRE-COMPILED inner plan against this
     // row's correlated bindings for its lone column, bypassing the memo. An
     // UNCORRELATED one memoises and re-runs its `Query` (recompiling resolves).
     guard correlation.isEmpty else {
-      return try executed(row, key, correlation, overlay, routines, bindings,
-                          subqueries).map { $0.values[0] }
+      return try executed(row, key, correlation, context).map { $0.values[0] }
     }
-    let context = Context(relations: overlay, routines: routines,
-                          bindings: bindings, subqueries: subqueries)
-    if let cached = subqueries.values(cached: key) { return cached }
+    if let cached = context.subqueries.values(cached: key) { return cached }
     let values = try run(key.query, context).map { $0[0] }
-    subqueries.store(values: values, for: key)
+    context.subqueries.store(values: values, for: key)
     return values
   }
 
@@ -973,30 +953,26 @@ extension Catalog where Self: ~Escapable {
   /// COERCED to the inner column's `type`, as a `CASE` coerces its taken arm.
   private borrowing func scalar(_ row: borrowing some Row & ~Escapable,
                                 _ key: Subkey, _ correlation: Correlation,
-                                _ type: ValueType,
-                                _ relations: ScopedRelations,
-                                _ routines: Routines, _ bindings: Bindings,
-                                _ subqueries: Subqueries)
+                                _ type: ValueType, _ context: Context)
       throws(SQLError) -> Value {
-    let overlay = subqueries.overlay(key.scope) ?? relations
+    let context =
+        context.scoping(context.subqueries.overlay(key.scope)
+                        ?? context.relations)
     // A CORRELATED scalar subquery re-executes its PRE-COMPILED inner plan per
     // outer row against the correlated bindings, collapsing to its lone cell
     // (empty → NULL, one row → the cell, more → `.cardinality`), bypassing the
     // memo (its cell depends on the row). An UNCORRELATED one memoises and
     // re-runs its `Query`.
     guard correlation.isEmpty else {
-      let rows = try executed(row, key, correlation, overlay, routines,
-                              bindings, subqueries)
+      let rows = try executed(row, key, correlation, context)
       guard rows.count <= 1 else { throw .cardinality }
       return (rows.first?.values.first ?? .null).coerced(to: type)
     }
-    let context = Context(relations: overlay, routines: routines,
-                          bindings: bindings, subqueries: subqueries)
-    if let cached = subqueries.scalar(cached: key) {
+    if let cached = context.subqueries.scalar(cached: key) {
       return cached.coerced(to: type)
     }
     let value = try cell(of: key.query, context)
-    subqueries.store(scalar: value, for: key)
+    context.subqueries.store(scalar: value, for: key)
     return value.coerced(to: type)
   }
 
@@ -1012,13 +988,10 @@ extension Catalog where Self: ~Escapable {
   /// NULL passes unchanged.
   private borrowing func coalesce(_ row: borrowing some Row & ~Escapable,
                                   _ elements: Array<Term>, _ type: ValueType,
-                                  _ relations: ScopedRelations,
-                                  _ routines: Routines, _ bindings: Bindings,
-                                  _ subqueries: Subqueries)
+                                  _ context: Context)
       throws(SQLError) -> Value {
     for element in elements {
-      let value = try evaluate(row, element, relations, routines, bindings,
-                               subqueries)
+      let value = try evaluate(row, element, context)
       if case .null = value { continue }
       return value.coerced(to: type)
     }
@@ -1035,13 +1008,10 @@ extension Catalog where Self: ~Escapable {
   /// three-valued: only a definite TRUE equality nulls out, so an UNKNOWN (a
   /// NULL operand) yields `va`.
   private borrowing func nullif(_ row: borrowing some Row & ~Escapable,
-                                _ lhs: Term, _ rhs: Term,
-                                _ relations: ScopedRelations,
-                                _ routines: Routines, _ bindings: Bindings,
-                                _ subqueries: Subqueries)
+                                _ lhs: Term, _ rhs: Term, _ context: Context)
       throws(SQLError) -> Value {
-    let va = try evaluate(row, lhs, relations, routines, bindings, subqueries)
-    let vb = try evaluate(row, rhs, relations, routines, bindings, subqueries)
+    let va = try evaluate(row, lhs, context)
+    let vb = try evaluate(row, rhs, context)
     return matches(va, .equal, vb) == true ? .null : va
   }
 
@@ -1057,39 +1027,30 @@ extension Catalog where Self: ~Escapable {
   private borrowing func conditional(_ row: borrowing some Row & ~Escapable,
                                      _ branches: Array<(Filter, Term)>,
                                      _ otherwise: Term?, _ type: ValueType,
-                                     _ relations: ScopedRelations,
-                                     _ routines: Routines,
-                                     _ bindings: Bindings,
-                                     _ subqueries: Subqueries)
+                                     _ context: Context)
       throws(SQLError) -> Value {
     for (gate, result) in branches {
-      if try evaluate(row, gate, relations, routines, bindings,
-                      subqueries) == true {
-        return try evaluate(row, result, relations, routines, bindings,
-                            subqueries).coerced(to: type)
+      if try evaluate(row, gate, context) == true {
+        return try evaluate(row, result, context).coerced(to: type)
       }
     }
     guard let otherwise else { return .null }
-    return try evaluate(row, otherwise, relations, routines, bindings,
-                        subqueries).coerced(to: type)
+    return try evaluate(row, otherwise, context).coerced(to: type)
   }
 
   /// Resolves `name` in `routines` and applies it to its `arguments` evaluated
   /// against `row`.
   private borrowing func apply(_ row: borrowing some Row & ~Escapable,
                                _ name: String, _ arguments: Array<Term>,
-                               _ relations: ScopedRelations,
-                               _ routines: Routines, _ bindings: Bindings,
-                               _ subqueries: Subqueries)
+                               _ context: Context)
       throws(SQLError) -> Value {
-    guard let routine = routines[name] else {
+    guard let routine = context.routines[name] else {
       throw .function(name)
     }
     var values = Array<Value>()
     values.reserveCapacity(arguments.count)
     for argument in arguments {
-      try values.append(evaluate(row, argument, relations, routines, bindings,
-                                 subqueries))
+      try values.append(evaluate(row, argument, context))
     }
     let result = try routine(values)
     // A registered routine is a public producer of `Value`s that bypasses the
@@ -1315,7 +1276,8 @@ extension Row where Self: ~Escapable {
   internal borrowing func evaluate(_ filter: Filter, _ routines: Routines,
                                    _ bindings: Bindings)
       throws(SQLError) -> Bool? {
-    try NoCatalog().evaluate(self, filter, [:], routines, bindings)
+    try NoCatalog().evaluate(self, filter,
+                             Context(routines: routines, bindings: bindings))
   }
 }
 
@@ -1338,42 +1300,29 @@ extension Catalog where Self: ~Escapable {
   /// row is non-escaping; it threads into the recursion freely and is never
   /// stored.
   internal borrowing func evaluate(_ row: borrowing some Row & ~Escapable,
-                                   _ filter: Filter,
-                                   _ relations: ScopedRelations,
-                                   _ routines: Routines,
-                                   _ bindings: Bindings,
-                                   _ subqueries: Subqueries = Subqueries())
+                                   _ filter: Filter, _ context: Context)
       throws(SQLError) -> Bool? {
     switch filter {
     case let .compare(lhs, op, rhs):
-      try matches(evaluate(row, lhs, relations, routines, bindings,
-                           subqueries), op,
-                  evaluate(row, rhs, relations, routines, bindings,
-                           subqueries))
+      try matches(evaluate(row, lhs, context), op, evaluate(row, rhs, context))
     case let .bound(term, op, parameter):
-      if let operand = bindings[parameter] {
-        try matches(evaluate(row, term, relations, routines, bindings,
-                             subqueries), op, operand)
+      if let operand = context.bindings[parameter] {
+        try matches(evaluate(row, term, context), op, operand)
       } else {
         nil
       }
     case let .match(left, right):
       matches(row[left], .equal, row[right])
     case let .null(term, negated):
-      try (evaluate(row, term, relations, routines, bindings,
-                    subqueries) == .null) != negated
+      try (evaluate(row, term, context) == .null) != negated
     case let .membership(operand, elements, negated):
-      try member(row, operand, elements, negated, relations, routines,
-                 bindings, subqueries)
+      try member(row, operand, elements, negated, context)
     case let .like(operand, pattern, escape, negated):
-      try like(row, operand, pattern, escape, negated, relations, routines,
-               bindings, subqueries)
+      try like(row, operand, pattern, escape, negated, context)
     case let .between(test, lower, upper, negated):
-      try ranged(row, test, lower, upper, negated, relations, routines,
-                 bindings, subqueries)
+      try ranged(row, test, lower, upper, negated, context)
     case let .distinct(lhs, rhs, negated):
-      try differs(row, lhs, rhs, negated, relations, routines, bindings,
-                  subqueries)
+      try differs(row, lhs, rhs, negated, context)
     case let .exists(key, correlation, negated):
       // The DEFINITE two-valued `EXISTS` non-empty test — never UNKNOWN,
       // `negated` flipping it. The subquery runs LAZILY on this first reach (so
@@ -1381,17 +1330,14 @@ extension Catalog where Self: ~Escapable {
       // guards never runs): an UNCORRELATED one memoises under its `Subkey`; a
       // CORRELATED one re-runs against this row's correlated bindings, bypassing
       // the memo.
-      try present(row, key, correlation, relations, routines, bindings,
-                  subqueries) != negated
+      try present(row, key, correlation, context) != negated
     case let .within(operand, key, correlation, negated):
       // Fold `operand = v` over the subquery's single column under the SAME
       // three-valued membership the value-list `IN` uses. The column is
       // materialised LAZILY on this first reach (an UNCORRELATED one memoised, a
       // CORRELATED one re-run per row against this row's correlated bindings).
-      try member(row, operand,
-                 values(row, key, correlation, relations, routines, bindings,
-                        subqueries),
-                 negated, relations, routines, bindings, subqueries)
+      try member(row, operand, values(row, key, correlation, context),
+                 negated, context)
     case let .quantified(operand, op, quantifier, key, correlation):
       // Fold `operand op v` over the subquery's single column with the SAME
       // `matches`/Kleene primitives `within` uses — Kleene `OR` (seeded FALSE)
@@ -1400,41 +1346,33 @@ extension Catalog where Self: ~Escapable {
       // UNCORRELATED one memoises under its `Subkey`, a CORRELATED one re-runs
       // its inner plan per outer row against this row's correlated bindings.
       try quantified(row, operand, op, quantifier,
-                     values(row, key, correlation, relations, routines,
-                            bindings, subqueries),
-                     relations, routines, bindings, subqueries)
+                     values(row, key, correlation, context), context)
     case let .truth(inner, value, negated):
-      try tested(evaluate(row, inner, relations, routines, bindings,
-                          subqueries), value, negated)
+      try tested(evaluate(row, inner, context), value, negated)
     case let .and(lhs, rhs):
       // `&&`/`||` take an `@autoclosure` right operand, which would capture the
       // borrowed `~Escapable` row; spell each connective explicitly so a branch
       // re-borrows the row rather than capturing it. Kleene `AND`: `false`
       // dominates, an UNKNOWN left yields `false` only against a `false` right.
-      switch try evaluate(row, lhs, relations, routines, bindings,
-                          subqueries) {
+      switch try evaluate(row, lhs, context) {
       case false?: false
       case true?:
-        try evaluate(row, rhs, relations, routines, bindings, subqueries)
+        try evaluate(row, rhs, context)
       case nil:
-        try evaluate(row, rhs, relations, routines, bindings,
-                     subqueries) == false ? false : nil
+        try evaluate(row, rhs, context) == false ? false : nil
       }
     case let .or(lhs, rhs):
       // Kleene `OR`: `true` dominates, an UNKNOWN left yields `true` only
       // against a `true` right.
-      switch try evaluate(row, lhs, relations, routines, bindings,
-                          subqueries) {
+      switch try evaluate(row, lhs, context) {
       case true?: true
       case false?:
-        try evaluate(row, rhs, relations, routines, bindings, subqueries)
+        try evaluate(row, rhs, context)
       case nil:
-        try evaluate(row, rhs, relations, routines, bindings,
-                     subqueries) == true ? true : nil
+        try evaluate(row, rhs, context) == true ? true : nil
       }
     case let .not(operand):
-      try evaluate(row, operand, relations, routines, bindings,
-                   subqueries).map { !$0 }
+      try evaluate(row, operand, context).map { !$0 }
     }
   }
 
@@ -1450,17 +1388,12 @@ extension Catalog where Self: ~Escapable {
   /// `map(!)`.
   private borrowing func member(_ row: borrowing some Row & ~Escapable,
                                 _ operand: Term, _ elements: Array<Term>,
-                                _ negated: Bool,
-                                _ relations: ScopedRelations,
-                                _ routines: Routines, _ bindings: Bindings,
-                                _ subqueries: Subqueries)
+                                _ negated: Bool, _ context: Context)
       throws(SQLError) -> Bool? {
-    let value = try evaluate(row, operand, relations, routines, bindings,
-                             subqueries)
+    let value = try evaluate(row, operand, context)
     var truth: Bool? = false
     for element in elements {
-      let element = try evaluate(row, element, relations, routines, bindings,
-                                 subqueries)
+      let element = try evaluate(row, element, context)
       truth = or(truth, matches(value, .equal, element))
       if truth == true { break }
     }
@@ -1480,13 +1413,9 @@ extension Catalog where Self: ~Escapable {
   /// the value-list `IN` does, so the two forms share one three-valued core.
   private borrowing func member(_ row: borrowing some Row & ~Escapable,
                                 _ operand: Term, _ values: Array<Value>,
-                                _ negated: Bool,
-                                _ relations: ScopedRelations,
-                                _ routines: Routines, _ bindings: Bindings,
-                                _ subqueries: Subqueries)
+                                _ negated: Bool, _ context: Context)
       throws(SQLError) -> Bool? {
-    let value = try evaluate(row, operand, relations, routines, bindings,
-                             subqueries)
+    let value = try evaluate(row, operand, context)
     var truth: Bool? = false
     for element in values {
       truth = or(truth, matches(value, .equal, element))
@@ -1511,13 +1440,9 @@ extension Catalog where Self: ~Escapable {
   private borrowing func quantified(_ row: borrowing some Row & ~Escapable,
                                     _ operand: Term, _ op: Comparison,
                                     _ quantifier: Quantifier,
-                                    _ values: Array<Value>,
-                                    _ relations: ScopedRelations,
-                                    _ routines: Routines, _ bindings: Bindings,
-                                    _ subqueries: Subqueries)
+                                    _ values: Array<Value>, _ context: Context)
       throws(SQLError) -> Bool? {
-    let value = try evaluate(row, operand, relations, routines, bindings,
-                             subqueries)
+    let value = try evaluate(row, operand, context)
     var truth: Bool? = quantifier == .any ? false : true
     for element in values {
       let matched = matches(value, op, element)
@@ -1563,18 +1488,13 @@ extension Catalog where Self: ~Escapable {
   private borrowing func ranged(_ row: borrowing some Row & ~Escapable,
                                 _ test: Term, _ lower: Filter.Operand,
                                 _ upper: Filter.Operand, _ negated: Bool,
-                                _ relations: ScopedRelations,
-                                _ routines: Routines, _ bindings: Bindings,
-                                _ subqueries: Subqueries)
+                                _ context: Context)
       throws(SQLError) -> Bool? {
-    let value = try evaluate(row, test, relations, routines, bindings,
-                             subqueries)
-    let low = try evaluate(row, lower, relations, routines, bindings,
-                           subqueries)
+    let value = try evaluate(row, test, context)
+    let low = try evaluate(row, lower, context)
     let above = matches(value, .geq, low)
     guard above != false else { return negated }
-    let high = try evaluate(row, upper, relations, routines, bindings,
-                            subqueries)
+    let high = try evaluate(row, upper, context)
     let within = and(above, matches(value, .leq, high))
     return negated ? within.map { !$0 } : within
   }
@@ -1590,15 +1510,10 @@ extension Catalog where Self: ~Escapable {
   /// UNKNOWN.
   private borrowing func differs(_ row: borrowing some Row & ~Escapable,
                                  _ lhs: Term, _ rhs: Term, _ negated: Bool,
-                                 _ relations: ScopedRelations,
-                                 _ routines: Routines, _ bindings: Bindings,
-                                 _ subqueries: Subqueries)
+                                 _ context: Context)
       throws(SQLError) -> Bool? {
-    let differ =
-        try distinct(evaluate(row, lhs, relations, routines, bindings,
-                              subqueries),
-                     evaluate(row, rhs, relations, routines, bindings,
-                              subqueries))
+    let differ = try distinct(evaluate(row, lhs, context),
+                              evaluate(row, rhs, context))
     return negated ? !differ : differ
   }
 
@@ -1606,16 +1521,13 @@ extension Catalog where Self: ~Escapable {
   /// against `row`, a `:parameter` resolves from the bindings — an unbound name
   /// yields `.null`, so it reads UNKNOWN exactly as a bound `NULL` does.
   private borrowing func evaluate(_ row: borrowing some Row & ~Escapable,
-                                  _ operand: Filter.Operand,
-                                  _ relations: ScopedRelations,
-                                  _ routines: Routines, _ bindings: Bindings,
-                                  _ subqueries: Subqueries)
+                                  _ operand: Filter.Operand, _ context: Context)
       throws(SQLError) -> Value {
     switch operand {
     case let .term(term):
-      try evaluate(row, term, relations, routines, bindings, subqueries)
+      try evaluate(row, term, context)
     case let .parameter(name):
-      bindings[name] ?? .null
+      context.bindings[name] ?? .null
     }
   }
 
@@ -1637,20 +1549,16 @@ extension Catalog where Self: ~Escapable {
   private borrowing func like(_ row: borrowing some Row & ~Escapable,
                               _ operand: Term, _ pattern: Filter.Operand,
                               _ escape: Filter.Operand?, _ negated: Bool,
-                              _ relations: ScopedRelations,
-                              _ routines: Routines, _ bindings: Bindings,
-                              _ subqueries: Subqueries)
+                              _ context: Context)
       throws(SQLError) -> Bool? {
     // Evaluate all three reached operands once, in order — a fault in any of
     // them (a divide, an overflow) propagates HERE, before the NULL/escape
     // result below can turn it into a silent UNKNOWN.
-    let subject = try evaluate(row, operand, relations, routines, bindings,
-                               subqueries)
-    let template = try evaluate(row, pattern, relations, routines, bindings,
-                                subqueries)
+    let subject = try evaluate(row, operand, context)
+    let template = try evaluate(row, pattern, context)
     let separator: Value? =
         if let escape {
-          try evaluate(row, escape, relations, routines, bindings, subqueries)
+          try evaluate(row, escape, context)
         } else {
           nil
         }

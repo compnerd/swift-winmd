@@ -41,16 +41,48 @@ internal struct Context {
   /// (see `Catalog.subqueries(of:)`) just before executing the plan.
   internal let subqueries: Subqueries
 
-  /// A context over the three maps — an empty overlay and no bindings by
-  /// default, the shape a bare query with no `WITH` and no parameters runs
-  /// under. It carries no subquery results until `run` resolves them.
+  /// The cyclic-view guard — the view names currently under resolution, so a
+  /// view body that materialises itself (directly or through a derived table)
+  /// faults `SQLError.recursion` rather than resolving without end.
+  internal let visited: Set<String>
+
+  /// Whether a derived table's body is EAGER type-checked at resolution. A RUN
+  /// preflight, or a schema-only path after a run has proved the statement
+  /// runnable, passes `false` so a data-dependent-empty body expression an
+  /// execution never evaluates is not rejected; a strict schema check keeps it
+  /// `true`.
+  internal let validate: Bool
+
+  /// The resolution overlay a nested subquery lowers its cache key under —
+  /// `.caller` for a top-level compile, `.view(name)` for a view body's — so a
+  /// view-body occurrence and a top-level one over the same AST stay distinct
+  /// cache entries (see `Subscope`).
+  internal let subscope: Subscope
+
+  /// The enclosing correlation stack a nested subquery correlates against — the
+  /// `Outer` scopes an inner `WHERE` column that binds none of ITS relations
+  /// resolves outward through, lowering to a synthetic `Term.parameter` and
+  /// recording the correlation. `nil` at the top level (no enclosing query).
+  internal let outer: Outer?
+
+  /// A context over the maps and resolution scope — an empty overlay, no
+  /// bindings, an empty visited guard, eager validation, the caller scope, and
+  /// no enclosing correlation by default: the shape a bare top-level query with
+  /// no `WITH` and no parameters resolves and runs under. It carries no
+  /// subquery results until `run` resolves them.
   internal init(relations: ScopedRelations = [:], routines: Routines = [:],
                 bindings: Bindings = [:],
-                subqueries: Subqueries = Subqueries()) {
+                subqueries: Subqueries = Subqueries(),
+                visited: Set<String> = [], validate: Bool = true,
+                subscope: Subscope = .caller, outer: Outer? = nil) {
     self.relations = relations
     self.routines = routines
     self.bindings = bindings
     self.subqueries = subqueries
+    self.visited = visited
+    self.validate = validate
+    self.subscope = subscope
+    self.outer = outer
   }
 
   /// A copy of this context with `relations` REPLACING the overlay, the same
@@ -59,7 +91,23 @@ internal struct Context {
   /// recursive step rebinds a CTE's self.
   internal func scoping(_ relations: ScopedRelations) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
-            subqueries: subqueries)
+            subqueries: subqueries, visited: visited, validate: validate,
+            subscope: subscope, outer: outer)
+  }
+
+  /// A copy of this context ENTERING a fresh body scope over `relations` — the
+  /// SINGLE derivation every view/derived-table/CTE body-entry seam routes
+  /// through, `scoping(relations)` with the enclosing correlation stack CLEARED
+  /// (`uncorrelated()`). A body scope — a view definition, a non-LATERAL derived
+  /// table, or a CTE — is resolved INDEPENDENTLY of its call site, so it must
+  /// NOT correlate against an enclosing query's row: an unbound column in the
+  /// body must fault rather than bind outward to the caller. Folding the reset
+  /// INTO body-entry makes the clear intrinsic — a future body seam that routes
+  /// through `body(_:)` cannot forget to append `uncorrelated()`. A site that
+  /// also guards the cyclic-view chain or gates the eager type-check chains
+  /// `visiting(_:)`/`validating(_:)` AFTER `body(_:)`.
+  internal func body(_ relations: ScopedRelations) -> Context {
+    scoping(relations).uncorrelated()
   }
 
   /// A copy of this context whose overlay binds `materialised` to `name` (folded
@@ -78,7 +126,8 @@ internal struct Context {
   /// row's cells before re-executing its inner plan.
   internal func binding(_ bindings: Bindings) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
-            subqueries: subqueries)
+            subqueries: subqueries, visited: visited, validate: validate,
+            subscope: subscope, outer: outer)
   }
 
   /// A copy of this context carrying `subqueries` as the executing plan's
@@ -87,7 +136,8 @@ internal struct Context {
   /// off the SAME context that threads everywhere `execute` descends.
   internal func resolving(_ subqueries: Subqueries) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
-            subqueries: subqueries)
+            subqueries: subqueries, visited: visited, validate: validate,
+            subscope: subscope, outer: outer)
   }
 
   /// A copy of this context with every enclosing SELECT's derived-table aliases
@@ -109,5 +159,67 @@ internal struct Context {
   /// derived tables into a fresh layer.
   internal func revealed() -> Context {
     scoping(relations.revealed())
+  }
+
+  /// A copy of this context with `name` (folded to lower case) ADDED to the
+  /// cyclic-view guard — the scope a view body resolves under, so a nested
+  /// reference back to the view faults `SQLError.recursion` rather than
+  /// resolving without end.
+  internal func visiting(_ name: String) -> Context {
+    var visited = visited
+    visited.insert(name.lowercased())
+    return Context(relations: relations, routines: routines,
+                   bindings: bindings, subqueries: subqueries,
+                   visited: visited, validate: validate, subscope: subscope,
+                   outer: outer)
+  }
+
+  /// A copy of this context with the eager-typecheck gate set to `flag` — a RUN
+  /// preflight or a post-run schema-only path passes `false` to keep a
+  /// data-dependent body lenient.
+  internal func validating(_ flag: Bool) -> Context {
+    Context(relations: relations, routines: routines, bindings: bindings,
+            subqueries: subqueries, visited: visited, validate: flag,
+            subscope: subscope, outer: outer)
+  }
+
+  /// A copy of this context resolving its nested subqueries under `subscope` —
+  /// `.view(name)` for a view body, `.caller` for a top-level compile — so an
+  /// occurrence's cache key carries the scope it lowered under.
+  internal func scoped(as subscope: Subscope) -> Context {
+    Context(relations: relations, routines: routines, bindings: bindings,
+            subqueries: subqueries, visited: visited, validate: validate,
+            subscope: subscope, outer: outer)
+  }
+
+  /// A copy of this context whose enclosing correlation stack is EXTENDED with
+  /// `scope` as the nearest enclosing one (`Outer.nested(under:)`, starting a
+  /// fresh stack at the top level) — the scope a nested subquery correlates
+  /// against, so an inner column binding none of its own relations resolves
+  /// outward and records the correlation.
+  internal func nesting(under scope: Scope) -> Context {
+    with(outer: (outer ?? Outer()).nested(under: scope))
+  }
+
+  /// A copy of this context carrying `outer` as its enclosing correlation stack
+  /// — the direct set a caller uses when it already holds the `Outer` a nested
+  /// subquery lowers against.
+  internal func with(outer: Outer?) -> Context {
+    Context(relations: relations, routines: routines, bindings: bindings,
+            subqueries: subqueries, visited: visited, validate: validate,
+            subscope: subscope, outer: outer)
+  }
+
+  /// A copy of this context with the enclosing correlation stack CLEARED — the
+  /// scope a body that must NOT correlate against the caller's row resolves
+  /// under: a view body and a non-LATERAL derived table body. Neither may see
+  /// an enclosing query's columns (a view is defined independently of its call
+  /// site; a derived table is uncorrelated), so an unbound column in either
+  /// must fault rather than bind outward to the caller. Every OTHER field —
+  /// the relation overlay, routines, bindings, subquery results, the visited
+  /// guard, the validate gate, and the subscope — is preserved; only `outer`
+  /// resets to `nil`, restoring the top-level default.
+  internal func uncorrelated() -> Context {
+    with(outer: nil)
   }
 }

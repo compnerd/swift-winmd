@@ -370,7 +370,7 @@ struct LikeSafetyTests {
     // residual `.select` over the `.product`, so the whole `ON` runs per pair.
     let compiled = try mismatched().compile(query("""
         SELECT A.K FROM A JOIN B ON A.K = B.K AND A.Name LIKE 'a%' ESCAPE A.E
-        """), validate: true)
+        """))
     let plan = try mismatched().optimise(compiled.pushdown(), [:])
     #expect(!joins(plan))
     #expect(residual(plan))
@@ -400,7 +400,7 @@ struct LikeSafetyTests {
     let sql = """
         SELECT A.K FROM A JOIN B ON A.K = B.K AND A.Name LIKE 'a%' ESCAPE 'ab'
         """
-    let compiled = try mismatched().compile(query(sql), validate: true)
+    let compiled = try mismatched().compile(query(sql))
     let plan = try mismatched().optimise(compiled.pushdown(), [:])
     #expect(!joins(plan))
     #expect(residual(plan))
@@ -421,7 +421,7 @@ struct LikeSafetyTests {
     }
     let compiled = try catalog.compile(query("""
         SELECT Id FROM S WHERE Name LIKE '_%' ESCAPE '\\' AND Id = 2
-        """), validate: true)
+        """))
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(seeks(plan))
 
@@ -445,7 +445,7 @@ struct LikeSafetyTests {
     }
     let compiled = try catalog.compile(query("""
         SELECT Id FROM S WHERE Name LIKE 'x%' AND Id = 2
-        """), validate: true)
+        """))
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(seeks(plan))
     try catalog.expect("SELECT Id FROM S WHERE Name LIKE 'x%' AND Id = 2",
@@ -648,7 +648,7 @@ struct LikeParameterTests {
       Issue.record("expected a SELECT statement")
       return
     }
-    let compiled = try catalog.compile(query, validate: true)
+    let compiled = try catalog.compile(query)
     let plan = try catalog.optimise(compiled.pushdown(),
                                     ["e": .text("\\")])
     #expect(!seeks(plan))
@@ -718,7 +718,7 @@ struct LikeParameterisedTests {
     let catalog = try maybe()
     let compiled = try catalog.compile(query("""
         SELECT x FROM V WHERE 'x' LIKE :p AND (1 / y) = 0
-        """), validate: true)
+        """))
     let plan = try catalog.optimise(compiled.pushdown(), [:])
 
     // The parameterised LIKE floats above the derived leaf rather than riding

@@ -750,7 +750,7 @@ extension Catalog where Self: ~Escapable {
                                  _ ordinals: Array<Int>, _ seek: Range<Int>?,
                                  _ context: Context)
       throws(SQLError) -> Array<Record> {
-    var overlay = context.scoping([:])
+    var overlay = context.body([:])
     if let view = resolve(view: name) {
       // EXECUTION-path materialise (`rows: true`): a nested derived body's
       // schema is derived schema-only inside `materialise`, so `validate:
@@ -759,10 +759,12 @@ extension Catalog where Self: ~Escapable {
       // Seed the cyclic-view guard with THIS view's own name, as
       // `resolve(view:)` does, so a body materialising this view through a
       // derived table (`FROM (SELECT * FROM <self>) AS d`) faults `.recursion`
-      // in `materialise` rather than re-running the body without end.
-      let visited: Set<String> = [name.lowercased()]
-      overlay = try augment(context.scoping([:]), for: view.query, rows: true,
-                            visited: visited, validate: false)
+      // in `materialise` rather than re-running the body without end. `body([:])`
+      // enters the view-body scope with the caller's correlation stack CLEARED,
+      // so a nested derived body's schema (derived while `augment`/`materialise`
+      // resolves it) cannot bind an unbound column outward to an enclosing row.
+      let fresh = context.body([:]).visiting(name).validating(false)
+      overlay = try augment(fresh, for: view.query, rows: true)
       // Record the view body's OWN overlay under `.view(name)` so its LAZY
       // subqueries re-run against the view's base relations, while a caller
       // conjunct PUSHED into this body keeps its `.caller` overlay and re-runs
@@ -844,7 +846,7 @@ extension Catalog where Self: ~Escapable {
       return try combine(kind, setop(left, leftQuery, overlay, name),
                          setop(right, rightQuery, overlay, name), all)
     }
-    let scope = try augment(overlay, for: query, rows: true, validate: false)
+    let scope = try augment(overlay.validating(false), for: query, rows: true)
     scope.subqueries.record(overlay: scope.revealed().relations,
                             for: .view(name))
     return try execute(plan, scope)

@@ -550,13 +550,13 @@ struct EngineCodedKeyTests {
 
     let equal = try parse("SELECT Name FROM Attribute WHERE Parent = 4")
     let equalPlan =
-        try catalog.optimise(catalog.compile(equal, validate: true), [:])
+        try catalog.optimise(catalog.compile(equal), [:])
     #expect(seeks(equalPlan))
     #expect(!filters(equalPlan))
 
     let less = try parse("SELECT Name FROM Attribute WHERE Parent < 5")
     let lessPlan =
-        try catalog.optimise(catalog.compile(less, validate: true), [:])
+        try catalog.optimise(catalog.compile(less), [:])
     #expect(!seeks(lessPlan))
     #expect(filters(lessPlan))
   }
@@ -585,7 +585,7 @@ struct EngineCodedKeyTests {
       }
     }
     let query = try parse("SELECT * FROM T WHERE Id = 1")
-    let plan = try catalog.optimise(catalog.compile(query, validate: true), [:])
+    let plan = try catalog.optimise(catalog.compile(query), [:])
     #expect(seeks(plan))
   }
 
@@ -596,7 +596,7 @@ struct EngineCodedKeyTests {
       Relation("T", ["Id": .integer], sorted: "Id")
     }
     let query = try parse("SELECT * FROM T WHERE Id = 1")
-    let plan = try catalog.optimise(catalog.compile(query, validate: true), [:])
+    let plan = try catalog.optimise(catalog.compile(query), [:])
     #expect(seeks(plan))
   }
 }
@@ -798,7 +798,7 @@ struct EngineNonEquiJoinTests {
         SELECT Parent.Name, Child.Name FROM Parent
           JOIN Child ON Parent.Id < Child.Pid
         """)
-    let compiled = try catalog.compile(select, validate: true)
+    let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(!joins(plan))
     #expect(residual(plan))
@@ -829,7 +829,7 @@ struct EngineNonEquiJoinTests {
         SELECT Parent.Name, Child.Name FROM Parent
           JOIN Child ON Child.Pid = Parent.Id AND Parent.Name < Child.Name
         """)
-    let compiled = try catalog.compile(select, validate: true)
+    let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(joins(plan))
   }
@@ -853,7 +853,7 @@ struct EngineNonEquiJoinTests {
         SELECT Parent.Name, Child.Name FROM Parent
           JOIN Child ON Child.Pid = Parent.Id + 1
         """)
-    let compiled = try catalog.compile(select, validate: true)
+    let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(!joins(plan))
     #expect(residual(plan))
@@ -914,7 +914,7 @@ struct EngineNonEquiJoinTests {
     let select = try parse("""
         SELECT A.k FROM A JOIN B ON (1 / A.x) = 0 AND A.k = B.k
         """)
-    let compiled = try catalog.compile(select, validate: true)
+    let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(!joins(plan))
     #expect(residual(plan))
@@ -935,7 +935,7 @@ struct EngineNonEquiJoinTests {
     ])
     let compiled = try catalog.compile(parse("""
         SELECT A.k FROM A JOIN B ON A.k = B.k AND (1 / A.x) = 0
-        """), validate: true)
+        """))
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(!joins(plan))
     #expect(residual(plan))
@@ -957,7 +957,7 @@ struct EngineNonEquiJoinTests {
     ])
     let compiled = try catalog.compile(parse("""
         SELECT A.k FROM A JOIN B ON A.k = B.k AND (1 / A.x) = 0
-        """), validate: true)
+        """))
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(!joins(plan))
     #expect(residual(plan))
@@ -1007,7 +1007,7 @@ struct EngineNonEquiJoinTests {
     // Key pairs (1,1) with 5 < 8 kept; (2,2) with 10 < 3 dropped.
     let rows = try catalog.run(parse(text))
     #expect(rows == [[.integer(1), .integer(8)]])
-    let compiled = try catalog.compile(parse(text), validate: true)
+    let compiled = try catalog.compile(parse(text))
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(joins(plan))
   }
@@ -1020,7 +1020,7 @@ struct EngineNonEquiJoinTests {
         SELECT Parent.Name, Child.Name FROM Parent
           JOIN Child ON Child.Pid = Parent.Id
         """)
-    let compiled = try catalog.compile(select, validate: true)
+    let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(joins(plan))
   }
@@ -1040,7 +1040,7 @@ struct EngineNonEquiJoinTests {
                            [[.integer(2)]] as Array<Array<Value>>),
     ])
     let text = "SELECT A.k FROM A JOIN B ON A.k < B.k WHERE (1 / A.x) = 0"
-    let compiled = try catalog.compile(parse(text), validate: true)
+    let compiled = try catalog.compile(parse(text))
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(separated(plan))
     #expect(residual(plan))
@@ -1106,7 +1106,7 @@ struct EngineNonEquiJoinTests {
         SELECT A.k1 FROM A
           JOIN B ON A.k1 = B.k1 AND A.k2 = B.k2 WHERE (1 / A.x) = 0
         """
-    let compiled = try catalog.compile(parse(text), validate: true)
+    let compiled = try catalog.compile(parse(text))
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     // The equi key still hash-joins; the leftover match gates above it, and the
     // `WHERE` is a SEPARATE `select` above that gate, not fused with the match.
@@ -1164,7 +1164,7 @@ struct EngineNonEquiJoinTests {
         SELECT A.tag, B.note FROM A
           JOIN B ON A.k1 = B.k1 AND A.k2 = B.k2 WHERE A.tag = 'keep'
         """
-    let compiled = try catalog.compile(parse(text), validate: true)
+    let compiled = try catalog.compile(parse(text))
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(joins(plan))
     #expect(try catalog.run(parse(text)) == [[.text("keep"), .text("bee")]])
@@ -1187,7 +1187,7 @@ struct EngineNonEquiJoinTests {
                            [[.integer(1)]] as Array<Array<Value>>),
     ])
     let text = "SELECT A.k FROM A JOIN B ON A.k = B.k WHERE (1 / A.x) = 1"
-    let compiled = try catalog.compile(parse(text), validate: true)
+    let compiled = try catalog.compile(parse(text))
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(joins(plan))
     #expect(try catalog.run(parse(text)) == [[.integer(1)]])
@@ -1321,7 +1321,7 @@ struct EngineOuterJoinTests {
         SELECT Parent.Name, Child.Name FROM Parent
           LEFT JOIN Child ON Child.Pid = Parent.Id
         """)
-    let compiled = try catalog.compile(select, validate: true)
+    let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(outers(plan))
     #expect(!joins(plan))
@@ -1569,11 +1569,192 @@ struct EngineViewTests {
     // `.scan` (a non-nil seek) and carry no `.select` over a raw scan.
     let catalog = try views()
     let select = try parse("SELECT Key, Label FROM Adults")
-    let compiled = try catalog.compile(select, validate: true)
+    let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled, [:])
     let sub = try #require(derived(plan))
     #expect(seeks(sub))
     #expect(!filters(sub))
+  }
+}
+
+// MARK: - A view body must not correlate against the caller's row
+
+/// A view is DEFINED independently of its call site, so its body must NOT bind
+/// an unbound column to an enclosing query's row — even when the view is used
+/// from inside a (correlated) subquery, whose compile threads its enclosing
+/// scope as the correlation stack.
+///
+/// Folding the correlation stack into `Context` made the view-body compile path
+/// inherit the caller's `outer`, so an unbound column in the view DEFINITION
+/// (`WHERE k = 1`, where `k` is NOT in the view's own FROM) wrongly bound to a
+/// caller's row when the enclosing relation happened to have a column `k`.
+/// Clearing the correlation stack entering the view-body overlay restores the
+/// fault: the view body cannot see the caller's row, so `k` is unbound at BOTH
+/// compile and run.
+struct EngineViewCorrelationTests {
+  /// An outer `Env` carrying a column `k` a leaking view body could bind to,
+  /// a source `Src` WITHOUT `k`, and a view `Bad` whose body references the
+  /// unbound `k`.
+  private func leaky() throws -> Memory {
+    let bad = try View(query: select("SELECT n FROM Src WHERE k = 1"),
+                       columns: ["n"])
+    return Memory([
+      "Env": FixtureRelation([Field(name: "k", type: .integer)],
+                               [[.integer(1)]] as Array<Array<Value>>),
+      "Src": FixtureRelation([Field(name: "n", type: .integer)],
+                             [[.integer(7)]] as Array<Array<Value>>),
+    ], views: ["Bad": bad])
+  }
+
+  @Test func `a view body under a subquery does not bind the caller's column`()
+      throws {
+    // `SELECT k FROM Env WHERE EXISTS (SELECT n FROM Bad)` — the EXISTS
+    // subquery compiles with `Env` as its enclosing scope, so the view `Bad`
+    // resolves under a non-nil correlation stack. Its body `WHERE k = 1` names
+    // `k`, absent from its own FROM (`Src`); it must fault as unbound, NOT
+    // bind to `Env.k`.
+    try leaky().expect(
+        "SELECT k FROM Env WHERE EXISTS (SELECT n FROM Bad)",
+        fails: .column("k"))
+  }
+
+  @Test func `the view faults at compile under a subquery, not only at run`()
+      throws {
+    // Schema ↔ run parity: the STRICT schema pass faults the view body's
+    // unbound `k` too, rather than binding it to the caller — the leak the fold
+    // introduced would have compiled a schema for a view that cannot run.
+    let query = try parse(
+        "SELECT k FROM Env WHERE EXISTS (SELECT n FROM Bad)")
+    #expect(throws: SQLError.self) {
+      _ = try leaky().columns(of: query, validate: true)
+    }
+  }
+
+  @Test func `a valid view under a subquery still resolves and runs`() throws {
+    // Control: a LEGITIMATE view (its body self-contained) used from a nested
+    // subquery still resolves and runs — clearing the view body's correlation
+    // stack does not disturb a well-formed view. `Good` reads `Src` (one row),
+    // so the EXISTS holds for every `Env` row.
+    let good = try View(query: select("SELECT n FROM Src"), columns: ["n"])
+    let catalog = Memory([
+      "Env": FixtureRelation([Field(name: "k", type: .integer)],
+                               [[.integer(1)], [.integer(2)]]
+                                   as Array<Array<Value>>),
+      "Src": FixtureRelation([Field(name: "n", type: .integer)],
+                             [[.integer(7)]] as Array<Array<Value>>),
+    ], views: ["Good": good])
+    try catalog.expect(
+        "SELECT k FROM Env WHERE EXISTS (SELECT n FROM Good) ORDER BY k",
+        yields: [[1], [2]])
+  }
+
+  @Test func `a genuine correlation to the caller still works`() throws {
+    // Guard: clearing the VIEW body's correlation must not break a legitimately
+    // correlated subquery. The EXISTS subquery itself references the outer
+    // `Env.k` (`Src.n = k`), a genuine correlation — it still lowers and runs
+    // per outer row. Only the `k = 1` outer row keeps the EXISTS (Src has n = 1
+    // there), so the result is that row alone.
+    let catalog = Memory([
+      "Env": FixtureRelation([Field(name: "k", type: .integer)],
+                               [[.integer(1)], [.integer(2)]]
+                                   as Array<Array<Value>>),
+      "Src": FixtureRelation([Field(name: "n", type: .integer)],
+                             [[.integer(1)]] as Array<Array<Value>>),
+    ])
+    try catalog.expect(
+        "SELECT k FROM Env WHERE EXISTS (SELECT n FROM Src WHERE n = k) " +
+        "ORDER BY k",
+        yields: [[1]])
+  }
+
+  // MARK: - schema(of:) view-body derivation must not correlate either
+
+  /// The `schema(of:)` seam — the view-body SCHEMA/type derivation `scope(of:)`
+  /// drives, resolving a `FROM <view>`'s relations to their types — entered the
+  /// view-body overlay via `scoping([:]).visiting(name)` WITHOUT clearing the
+  /// caller's correlation stack, the ONE view-body body-entry the prior round
+  /// missed. So when a view whose DEFINITION references a column absent from its
+  /// own FROM had its schema derived while under a correlated subquery whose
+  /// outer relation HAS that column, the type-derivation bound the unbound
+  /// column OUTWARD to the caller's row rather than faulting — disagreeing with
+  /// the compile/run path `resolve`/`overlay` now clear. Routing every body-
+  /// entry through `Context.body(_:)` (which appends `uncorrelated()`) closes
+  /// it: `schema(of:)` faults the unbound column, consistent with compile/run.
+
+  /// An outer `Env(k)` a leaking view PROJECTION could bind to, a source `Src`
+  /// WITHOUT `k`, and a view `Proj` whose body PROJECTS the unbound `k` — so its
+  /// SCHEMA (the projection's type) is what a leak would derive from the caller.
+  private func schemaLeak() throws -> Memory {
+    let proj = try View(query: select("SELECT k AS m FROM Src"),
+                        columns: ["m"])
+    return Memory([
+      "Env": FixtureRelation([Field(name: "k", type: .integer)],
+                               [[.integer(1)]] as Array<Array<Value>>),
+      "Src": FixtureRelation([Field(name: "n", type: .integer)],
+                             [[.integer(7)]] as Array<Array<Value>>),
+    ], views: ["Proj": proj])
+  }
+
+  /// A correlation stack whose NEAREST enclosing scope is `Env(k)` — the
+  /// context a nested subquery's schema derivation runs under, so a leaking
+  /// `schema(of:)` could bind an unbound view-projection column to `Env.k`. It
+  /// nests a scope built from `Env`'s own schema (derived off the catalog),
+  /// exactly as `compile`/`columns` thread an enclosing scope into a subquery.
+  private func enclosingEnv(_ catalog: borrowing Memory) throws -> Context {
+    let schema = try catalog.schema(of: Relation(name: "Env"), Context())
+    return Context().nesting(under: Scope([(Relation(name: "Env"), schema)]))
+  }
+
+  @Test
+  func `schema of a view under a correlated scope does not bind the caller`()
+      throws {
+    // Directly exercise the `schema(of:)` seam in ISOLATION: derive the scope
+    // of `SELECT m FROM Proj` under a correlation stack whose enclosing scope
+    // is `Env(k)`. `scope(of:)` calls `schema(of: Proj)`, which enters the
+    // view body to type its projection `k` — absent from `Proj`'s own FROM
+    // (`Src`). It must fault `k` as unbound, NOT bind it to the enclosing
+    // `Env.k`. This is the seam the run/compile path (`resolve`/`overlay`)
+    // clears elsewhere but `schema(of:)` did NOT until routed through `body`.
+    let catalog = try schemaLeak()
+    let target = try select("SELECT m FROM Proj").first
+    let context = try enclosingEnv(catalog)
+    var raised: SQLError?
+    do {
+      _ = try catalog.scope(of: target, context)
+    } catch let fault {
+      raised = fault
+    }
+    #expect(raised == .column("k"))
+  }
+
+  @Test
+  func `schema of a valid view under a correlated scope still derives`()
+      throws {
+    // Control: a well-formed view whose projection is self-contained still has
+    // its schema derived under the SAME correlated scope — clearing the schema
+    // path's correlation stack does not disturb a legitimate view. `Fine`
+    // projects `n` (in its own `Src`), so `scope(of:)` derives cleanly.
+    let fine = try View(query: select("SELECT n AS m FROM Src"),
+                        columns: ["m"])
+    let catalog = Memory([
+      "Env": FixtureRelation([Field(name: "k", type: .integer)],
+                               [[.integer(1)]] as Array<Array<Value>>),
+      "Src": FixtureRelation([Field(name: "n", type: .integer)],
+                             [[.integer(7)]] as Array<Array<Value>>),
+    ], views: ["Fine": fine])
+    let target = try select("SELECT m FROM Fine").first
+    let context = try enclosingEnv(catalog)
+    // Eager rather than `#expect(throws:)` — a borrowed `~Escapable` catalog
+    // cannot be captured by the assertion's escaping closure.
+    _ = try catalog.scope(of: target, context)
+  }
+
+  @Test func `a view projecting an unbound column faults consistently`()
+      throws {
+    // End-to-end parity control: running `SELECT m FROM Proj` (outside any
+    // correlation) faults the unbound projection `k` too, so the schema seam's
+    // fault under a correlated scope AGREES with the plain run — schema ↔ run.
+    try schemaLeak().expect("SELECT m FROM Proj", fails: .column("k"))
   }
 }
 
@@ -1982,7 +2163,7 @@ struct EnginePushdownTests {
         SELECT Child.Name FROM Parent JOIN Child ON Child.Pid = Parent.Id
           WHERE Parent.Name = 'Ada'
         """)
-    let compiled = try catalog.compile(select, validate: true)
+    let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(pushed(plan))
   }
@@ -1995,7 +2176,7 @@ struct EnginePushdownTests {
         SELECT Child.Name FROM Parent JOIN Child ON Child.Pid = Parent.Id
           WHERE Parent.Id = 2
         """)
-    let compiled = try catalog.compile(select, validate: true)
+    let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(seeks(plan))
     #expect(pushed(plan))
@@ -2021,7 +2202,7 @@ struct EnginePushdownTests {
     let select = try parse("""
         SELECT Name FROM T WHERE Name <> 'x' AND Age > 0 AND Id = 5
         """)
-    let compiled = try catalog.compile(select, validate: true)
+    let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(seeks(plan))
   }
@@ -2048,7 +2229,7 @@ struct EnginePushdownTests {
         """)
 
     // The unsafe `(1 / x) = 0` residual bars the `id < 0` seek — the plan scans.
-    let compiled = try catalog.compile(select, validate: true)
+    let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(!seeks(plan))
 
@@ -2078,7 +2259,7 @@ struct EnginePushdownTests {
         SELECT Child.Name, Parent.Name FROM Child
           JOIN Parent ON Parent.Id = Child.Pid WHERE Parent.Name <> 'zz'
         """)
-    let compiled = try catalog.compile(select, validate: true)
+    let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(joins(plan))
 
@@ -2103,7 +2284,7 @@ struct EnginePushdownTests {
         SELECT Child.Name, Parent.Name FROM Parent
           JOIN Child ON Child.Pid = Parent.Id WHERE Parent.Name <> Child.Name
         """)
-    let compiled = try catalog.compile(select, validate: true)
+    let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(joins(plan))
     #expect(floats(plan))
@@ -2231,7 +2412,7 @@ struct EnginePushdownTests {
     // and seeking the sorted `Alpha` arm.
     let catalog = try spanned()
     let select = try parse("SELECT Tag FROM Both WHERE Key = 2")
-    let compiled = try catalog.compile(select, validate: true)
+    let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(injected(plan))
     #expect(seeks(plan))
@@ -2303,7 +2484,7 @@ struct EnginePushdownTests {
 
     // `A.x = 1` is nullable and precedes the unsafe division, so it is NOT
     // pushed to the `A` leaf — it floats at the product level.
-    let compiled = try catalog.compile(select, validate: true)
+    let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(!pushed(plan))
     #expect(floats(plan))
@@ -2332,7 +2513,7 @@ struct EnginePushdownTests {
 
     // `x = 1` is nullable and precedes the unsafe division, so it is NOT
     // injected into the view — it floats above the derived leaf.
-    let compiled = try catalog.compile(select, validate: true)
+    let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(floats(plan))
 
@@ -2362,7 +2543,7 @@ struct EnginePushdownTests {
     // `1 = :missing` is a slotless bound predicate, hence nullable; it precedes
     // the unsafe division, so it is NOT injected into the view — it floats above
     // the derived leaf.
-    let compiled = try catalog.compile(select, validate: true)
+    let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(floats(plan))
 
@@ -2668,7 +2849,7 @@ struct EngineStreamingProductTests {
         SELECT Child.Name, Adults.Label FROM Child
           JOIN Adults ON Adults.Key = Child.Pid
         """)
-    let compiled = try catalog.compile(select, validate: true)
+    let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(residual(plan))
   }
@@ -3274,7 +3455,7 @@ struct EngineBoundTests {
     // seeks the run rather than scanning and filtering the whole relation.
     let select = try parse("SELECT Name FROM Parent WHERE Id = :id")
     let catalog = try family()
-    let plan = try catalog.optimise(catalog.compile(select, validate: true),
+    let plan = try catalog.optimise(catalog.compile(select),
                                     ["id": .integer(2)])
     #expect(seeks(plan))
     #expect(!filters(plan))
@@ -3283,7 +3464,7 @@ struct EngineBoundTests {
   @Test func `an unbound key cannot seek and scans under the filter`() throws {
     let select = try parse("SELECT Name FROM Parent WHERE Id = :id")
     let catalog = try family()
-    let compiled = try catalog.compile(select, validate: true)
+    let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled, [:])
     #expect(!seeks(plan))
     #expect(filters(plan))
@@ -3295,7 +3476,7 @@ struct EngineBoundTests {
     // supplied, so a reusable view is as fast as the inlined query.
     let select = try parse("SELECT Key, Label FROM Picked")
     let catalog = try views()
-    let plan = try catalog.optimise(catalog.compile(select, validate: true),
+    let plan = try catalog.optimise(catalog.compile(select),
                                     ["id": .integer(2)])
     let sub = try #require(derived(plan))
     #expect(seeks(sub))

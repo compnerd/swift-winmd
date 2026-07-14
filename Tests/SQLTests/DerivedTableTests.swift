@@ -802,6 +802,74 @@ struct DerivedTableCorrelationTests {
   }
 }
 
+// MARK: - No correlation into an ENCLOSING row (non-LATERAL, under a subquery)
+
+/// A non-LATERAL derived table nested inside a CORRELATED subquery must NOT see
+/// the enclosing query's row either — the same no-LATERAL rule a sibling
+/// reference obeys applies outward across the enclosing subquery boundary.
+///
+/// Folding the correlation stack into `Context` made the derived-body scope
+/// inherit the enclosing subquery's `outer`, so the STRICT schema/typecheck
+/// pass bound the derived body's `T.k` to the caller's row while the lenient
+/// run shape pass recorded NO correlation for it and then FAULTED at execution
+/// — a schema/run MISMATCH. Clearing the correlation stack entering derived
+/// materialisation restores the documented no-LATERAL behaviour: the derived
+/// body cannot see `T.k`, so BOTH passes fault CONSISTENTLY.
+struct DerivedTableEnclosingCorrelationTests {
+  /// An outer `T` and an inner `S`, each with a `k` a derived body would try to
+  /// equate — so the leak, had it bound, would have compiled.
+  private func keyed() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("T", ["k": .integer]) {
+        Row(1)
+        Row(2)
+      }
+      Relation("S", ["k": .integer]) {
+        Row(1)
+      }
+    }
+  }
+
+  @Test func `a derived body under a correlated IN cannot see the outer row`()
+      throws {
+    // `… 1 IN (SELECT x FROM (SELECT 1 AS x FROM S WHERE S.k = T.k) AS d)` —
+    // the `IN` subquery correlates against `T`, but the derived body `d` is
+    // non-LATERAL, so its `T.k` is an unknown column at BOTH the schema pass
+    // and the run, never bound outward to the caller's row.
+    let sql =
+        "SELECT k FROM T " +
+        "WHERE 1 IN (SELECT x FROM " +
+        "(SELECT 1 AS x FROM S WHERE S.k = T.k) AS d)"
+    try keyed().expect(sql, fails: .column("k"))
+  }
+
+  @Test func `the schema pass faults the derived body exactly as the run does`()
+      throws {
+    // Schema ↔ run parity: the STRICT `columns(of:)` pass faults the derived
+    // body's `T.k` too, rather than binding it while the run faults — the
+    // mismatch the leak introduced.
+    let query = try parse(query:
+        "SELECT k FROM T " +
+        "WHERE 1 IN (SELECT x FROM " +
+        "(SELECT 1 AS x FROM S WHERE S.k = T.k) AS d)")
+    #expect(throws: SQLError.self) {
+      _ = try keyed().columns(of: query, validate: true)
+    }
+  }
+
+  @Test func `a non-correlated derived body under a subquery still runs`()
+      throws {
+    // Control: the SAME shape with an UNCORRELATED derived body (`S.k = 1`, no
+    // outer reference) resolves and runs — clearing the correlation stack does
+    // not disturb a legitimate derived table. `1 IN {1}` keeps every `T` row.
+    try keyed().expect(
+        "SELECT k FROM T " +
+        "WHERE 1 IN (SELECT x FROM " +
+        "(SELECT 1 AS x FROM S WHERE S.k = 1) AS d) ORDER BY k",
+        yields: [[1], [2]])
+  }
+}
+
 // MARK: - Set-operation arm scoping
 
 /// A derived table's alias is scoped to the ARM that names it: a `setop` never
@@ -2043,7 +2111,7 @@ struct DerivedTableDirectCompileTests {
     // is one column wide (`a`) — no `.relation("d")`.
     let select =
         try parse(select: "SELECT a FROM (SELECT V AS a FROM S) AS d")
-    let plan = try fixture().compile(select, validate: true)
+    let plan = try fixture().compile(select)
     #expect(plan.width == 1)
   }
 
@@ -2053,8 +2121,8 @@ struct DerivedTableDirectCompileTests {
     let select =
         try parse(select: "SELECT a FROM (SELECT V AS a FROM S) AS d")
     let catalog = try fixture()
-    let bare = try catalog.compile(select, validate: true)
-    let wrapped = try catalog.compile(.select(select), validate: true)
+    let bare = try catalog.compile(select)
+    let wrapped = try catalog.compile(.select(select))
     #expect(bare.width == wrapped.width)
   }
 
@@ -2064,8 +2132,7 @@ struct DerivedTableDirectCompileTests {
     // advertises the derived alias's projected column `a`, matching the run.
     let select =
         try parse(select: "SELECT a FROM (SELECT V AS a FROM S) AS d")
-    let columns = try fixture().columns(of: select, Context(),
-                                        validate: true)
+    let columns = try fixture().columns(of: select, Context())
     #expect(columns.map(\.name) == ["a"])
   }
 
@@ -2086,7 +2153,7 @@ struct DerivedTableDirectCompileTests {
     // is the base.
     let select =
         try parse(select: "SELECT a FROM (SELECT V AS a FROM S) AS S")
-    let plan = try fixture().compile(select, validate: true)
+    let plan = try fixture().compile(select)
     #expect(plan.width == 1)
   }
 }

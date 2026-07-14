@@ -204,8 +204,7 @@ extension Catalog where Self: ~Escapable {
   /// store: a run materialises the inner query's rows, a typing path resolves
   /// its OUTPUT columns to a schema-only relation (no cursor) and validates the
   /// inner body, so a derived table's alias types exactly as a run's would.
-  borrowing func augment(_ context: Context, for query: Query, rows: Bool,
-                         visited: Set<String> = [], validate: Bool = true)
+  borrowing func augment(_ context: Context, for query: Query, rows: Bool)
       throws(SQLError) -> Context {
     var names = Set<String>()
     query.collect(into: &names)
@@ -277,7 +276,13 @@ extension Catalog where Self: ~Escapable {
     // Revealing keeps a derived table UNCORRELATED/no-LATERAL — a sibling
     // `FROM` item lives in the layer being built, invisible to the revealed
     // base scope, so `FROM (…) AS a JOIN (SELECT v FROM a) AS b` faults `a`.
-    let scope = context.scoping(augmented.revealed())
+    // `uncorrelated()` likewise CLEARS the enclosing correlation stack: a
+    // non-LATERAL derived body must NOT see an ENCLOSING query's row either, so
+    // `… IN (SELECT x FROM (SELECT 1 AS x FROM S WHERE S.k = T.k) AS d)` faults
+    // on `T.k` — and CONSISTENTLY at both the strict schema pass and the
+    // run, rather than the strict pass binding it while the lenient run records
+    // no correlation and then faults at execution (a schema/run MISMATCH).
+    let scope = context.body(augmented.revealed())
     // The idempotent re-augment keys on the derivation IDENTITY, not the name.
     // The run→compile→typecheck chain each augments the query it receives, so
     // the innermost derived layer may ALREADY bind THIS select's aliases to
@@ -301,8 +306,7 @@ extension Catalog where Self: ~Escapable {
     var layer = Dictionary<String, RelationInstance>()
     for (alias, inner) in derivations {
       layer[alias.lowercased()] =
-          try materialise(inner, scope, rows: rows, visited: visited,
-                          validate: validate)
+          try materialise(inner, scope, rows: rows)
     }
     return context.scoping(augmented.pushing(layer))
   }
@@ -324,8 +328,7 @@ extension Catalog where Self: ~Escapable {
   /// schema and run paths bind the same nested aliases before either reads the
   /// inner query.
   private borrowing func materialise(_ query: Query, _ context: Context,
-                                     rows: Bool, visited: Set<String> = [],
-                                     validate: Bool = true)
+                                     rows: Bool)
       throws(SQLError) -> RelationInstance {
     // Bind the inner query's OWN derived tables (and store relations) before
     // deriving its schema — a run augments them recursively, so the schema
@@ -343,8 +346,7 @@ extension Catalog where Self: ~Escapable {
     // would EXECUTE a nested derived body once for the schema and AGAIN in that
     // run, so a stateful routine in a `FROM (SELECT tick() …)` nested a level
     // down would fire twice for one query.
-    let scope = try augment(context, for: query, rows: false, visited: visited,
-                            validate: validate)
+    let scope = try augment(context, for: query, rows: false)
     // The derived table's columns are its inner query's OUTPUT columns (the ISO
     // rule) — the FIRST arm's projection, the same arm the result-schema walk
     // and a CTE's declared list resolve against — typed against the augmented
@@ -360,8 +362,7 @@ extension Catalog where Self: ~Escapable {
     // NOT eager-type-checked before execution, exactly as the non-derived path
     // never evaluates an unreached operand — while the strict schema path
     // (`validate: true`) still faults it.
-    let outputs = try columns(of: query.first, scope, visited: visited,
-                              validate: validate)
+    let outputs = try columns(of: query.first, scope)
     // A derived table's columns are its inner query's OUTPUT names, so two
     // same-named ones (`SELECT Id AS x, V AS x`) leave the shadowed one
     // unreachable through the alias — exactly the case the Parser rejects for a
@@ -388,7 +389,7 @@ extension Catalog where Self: ~Escapable {
       // `false`. `validate: false` keeps it structural: the recursion guard
       // fires in `resolve` regardless, while a data-dependent operand a filter
       // drops is NOT eager-type-checked.
-      _ = try compile(query, context, visited, validate: false)
+      _ = try compile(query, context.validating(false))
       // A run captures the inner query's rows once (uncorrelated).
       captured = try run(query, context)
     } else {
@@ -414,9 +415,9 @@ extension Catalog where Self: ~Escapable {
       // the dropped layer — the layered overlay never overwrote it. The schema
       // walk validates the body's nested subqueries exactly as the run path
       // does (`run` compiles from the same base context).
-      if validate {
-        _ = try compile(query, context, visited, validate: true)
-        try typecheck(query, context, visited: visited)
+      if context.validate {
+        _ = try compile(query, context.validating(true))
+        try typecheck(query, context)
       }
       captured = []
     }
@@ -445,13 +446,17 @@ extension Catalog where Self: ~Escapable {
   /// execution happens at `derive`/run.
   borrowing func overlay(_ name: String, _ context: Context)
       throws(SQLError) -> Context {
-    let fresh = context.scoping([:])
+    // `uncorrelated()` CLEARS the caller's correlation stack: a view body is
+    // resolved independently of its call site, so it must NOT correlate against
+    // an enclosing row when the view is optimised from inside a correlated
+    // subquery.
+    let fresh = context.body([:])
     guard let view = resolve(view: name) else { return fresh }
     // `validate: false` — this overlay is the OPTIMISER's schema-only view-body
     // scope on the RUN path (`resolve`/`compile` already validated the body
     // under the caller's `validate`), so a data-dependent-empty derived body
     // the view nests must not be re-type-checked and fault a run.
-    return try augment(fresh, for: view.query, rows: false, validate: false)
+    return try augment(fresh.validating(false), for: view.query, rows: false)
   }
 
   /// The view named `name`, or `nil`, by the precedence a query name follows.
@@ -561,22 +566,25 @@ extension Catalog where Self: ~Escapable {
       // The body must compile AND its width must equal the view's DECLARED
       // column count: `resolve` rejects a view whose declared arity differs
       // from its body's (`v(x) AS SELECT * FROM People`), so such a view cannot
-      // run and is not advertised here.
-      guard let overlay = try? augment(context.scoping([:]), for: view.query,
-                                       rows: false),
-          let plan = try? compile(view.query, overlay, validate: true),
+      // run and is not advertised here. `uncorrelated()` CLEARS the correlation
+      // stack: a view body is defined independently of any call site, so the
+      // schema-only listing must resolve it exactly as the compile path does —
+      // never binding an unbound view-definition column to an enclosing row.
+      let fresh = context.body([:]).validating(true)
+      guard let overlay = try? augment(fresh, for: view.query, rows: false),
+          let plan = try? compile(view.query, overlay),
           plan.width == view.columns.count else { continue }
+      // The type-check and derive resolve the body under the cyclic-view guard
+      // seeded with THIS view's name.
+      let inner = overlay.visiting(name)
       // Type the columns from the body's first arm; type-check every arm's
       // REACHABLE operands and calls too — an unknown call or a bad operand in
       // a `WHERE`/`HAVING` or a later `UNION` arm faults a run, but the
       // first-arm resolve would miss it (`compile` cannot check a routine
       // exists), while an arm a short-circuit proves unreachable is skipped. A
       // view a `SELECT *` could not evaluate is not advertised.
-      guard (try? typecheck(view.query, overlay,
-                            visited: [name.lowercased()])) != nil,
-          let resolved = try? columns(of: view.query.first, overlay,
-                                      visited: [name.lowercased()],
-                                      validate: true),
+      guard (try? typecheck(view.query, inner)) != nil,
+          let resolved = try? columns(of: view.query.first, inner),
           resolved.count == view.columns.count else { continue }
       for ordinal in view.columns.indices {
         rows.append([.text(name), .text(view.columns[ordinal]),

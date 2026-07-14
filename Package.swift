@@ -10,6 +10,7 @@ let _ =
             products: [
               .executable(name: "winmd-inspect", targets: ["winmd-inspect"]),
               .library(name: "SQLEngine", targets: ["SQLEngine"]),
+              .library(name: "SQLQuery", targets: ["SQLQuery"]),
               .library(name: "SQLStandard", targets: ["SQLStandard"]),
               .library(name: "WinMDSynthesis", targets: ["WinMDSynthesis"]),
               .library(name: "Decant", targets: ["Decant"]),
@@ -41,6 +42,16 @@ let _ =
                       swiftSettings: [
                         .enableExperimentalFeature("Lifetimes"),
                       ]),
+              .target(name: "SQLQuery", dependencies: ["SQLEngine"],
+                      swiftSettings: [
+                        .enableExperimentalFeature("Lifetimes"),
+                      ]),
+              .testTarget(name: "SQLQueryTests",
+                          dependencies: ["SQLEngine", "SQLQuery",
+                                         "SQLStandard", "SQLTestSupport"],
+                          swiftSettings: [
+                            .enableExperimentalFeature("Lifetimes"),
+                          ]),
               .target(name: "SQLTestSupport",
                       dependencies: ["SQLEngine", "SQLStandard"],
                       swiftSettings: [

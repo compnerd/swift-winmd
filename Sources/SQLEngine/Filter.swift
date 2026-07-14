@@ -860,7 +860,7 @@ extension Catalog where Self: ~Escapable {
       return try arms(plan, key.query, context)
     }
     let augmented =
-        try augment(context, for: key.query, rows: true, validate: false)
+        try augment(context.validating(false), for: key.query, rows: true)
     return try execute(plan, augmented)
   }
 
@@ -886,7 +886,7 @@ extension Catalog where Self: ~Escapable {
                          arms(right, rightQuery, context), all)
     }
     let augmented =
-        try augment(context, for: query, rows: true, validate: false)
+        try augment(context.validating(false), for: query, rows: true)
     return try execute(plan, augmented)
   }
 

@@ -807,7 +807,7 @@ extension Catalog where Self: ~Escapable {
   private borrowing func correlated(_ row: borrowing some Row & ~Escapable,
                                     _ correlation: Correlation,
                                     _ bindings: Bindings) -> Bindings {
-    guard !correlation.isEmpty else { return bindings }
+    if correlation.isEmpty { return bindings }
     var extended = bindings
     for (name, source) in correlation {
       // A `bound` source is already in `bindings` (threaded by the containing
@@ -1208,7 +1208,7 @@ extension Arithmetic {
     // integers is an unreachable operand fault.
     case .concatenate: throw .operand("|| operands must be text")
     }
-    guard !outcome.overflow else { throw .magnitude("integer overflow") }
+    if outcome.overflow { throw .magnitude("integer overflow") }
     return .integer(outcome.partialValue)
   }
 
@@ -1577,7 +1577,7 @@ extension Catalog where Self: ~Escapable {
     let value = try evaluate(row, test, context)
     let low = try evaluate(row, lower, context)
     let above = matches(value, .geq, low)
-    guard above != false else { return negated }
+    if above == false { return negated }
     let high = try evaluate(row, upper, context)
     let within = and(above, matches(value, .leq, high))
     return negated ? within.map { !$0 } : within

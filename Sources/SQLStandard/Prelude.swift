@@ -283,10 +283,10 @@ extension Routines {
         case let .integer(b) = arguments[1] else {
       throw .argument("MOD requires integer arguments")
     }
-    guard b != 0 else { throw .divide }
+    if b == 0 { throw .divide }
     // `a % -1` is mathematically 0, but `Int.min % -1` overflows the implied
     // division and traps, so a divisor of -1 short-circuits to that 0.
-    guard b != -1 else { return .integer(0) }
+    if b == -1 { return .integer(0) }
     return .integer(a % b)
   }
 
@@ -308,7 +308,7 @@ extension Routines {
       throw .argument("POSITION requires text arguments")
     }
     // The empty substring is a prefix of every string, so it occurs at 1.
-    guard !substring.isEmpty else { return .integer(1) }
+    if substring.isEmpty { return .integer(1) }
     // Character-wise search over the Unicode scalars `CHAR_LENGTH` counts, so
     // the reported position is a 1-based character index, not a byte offset.
     let haystack = Array(string), needle = Array(substring)

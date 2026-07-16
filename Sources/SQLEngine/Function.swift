@@ -136,7 +136,7 @@ public struct Routine: Sendable {
     // guard) would always be UNBOUND at call time — the caller's `bindings`
     // never reach a routine body — and silently pick the wrong branch. Reject
     // a `.bound` anywhere in the body at registration rather than lowering it.
-    guard !body.bound else {
+    if body.bound {
       throw .argument("the body cannot reference a query parameter")
     }
     let schema = Schema(width: names.count, extent: names.count,
@@ -344,7 +344,7 @@ public struct Routines: Sendable {
   /// no semantic case models a reserved-name fault, and `.function`'s message
   /// ("no such function") would misdescribe the condition.
   private func reserved(_ name: String) throws(SQLError) {
-    guard !protected.contains(name.lowercased()) else {
+    if protected.contains(name.lowercased()) {
       throw .state("42723", "'\(name)' is a standard routine and "
                        + "cannot be redefined")
     }

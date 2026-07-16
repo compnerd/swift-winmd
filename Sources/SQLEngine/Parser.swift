@@ -457,7 +457,7 @@ internal struct Parser: ~Escapable {
       return try Relation(derived: query, as: identifier(), lateral: lateral)
     }
     // `LATERAL` introduces a derived table; a named relation may not follow it.
-    guard !lateral else {
+    if lateral {
       guard let token = current else {
         throw .incomplete(expected: "a derived table after LATERAL")
       }
@@ -1341,7 +1341,7 @@ internal struct Parser: ~Escapable {
       cap = nil
     }
 
-    guard offset != 0 || cap != nil else { return nil }
+    if offset == 0 && cap == nil { return nil }
     return Limit(count: cap, offset: offset)
   }
 

@@ -155,7 +155,7 @@ internal struct AttributeDecoder: ~Escapable {
   /// name or value.
   internal mutating func string() throws(WinMDError) -> String? {
     guard position < bytes.byteCount else { throw .BadImageFormat }
-    guard bytes.read(at: position, as: UInt8.self) != 0xff else {
+    if bytes.read(at: position, as: UInt8.self) == 0xff {
       position = position + 1
       return nil
     }

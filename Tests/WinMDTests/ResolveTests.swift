@@ -154,7 +154,7 @@ struct ResolveTests {
     // `Database.resolve(_:)`'s body, against an in-memory storage: the tag guard
     // must reject the reference rather than trap on `TypeDefOrRef.tables[tag]`.
     #expect(throws: WinMDError.BadImageFormat) {
-      guard reference.row != 0 else { return }
+      if reference.row == 0 { return }
       guard reference.tag < TypeDefOrRef.tables.count,
           let schema = TypeDefOrRef.tables[reference.tag]
       else { throw WinMDError.BadImageFormat }
@@ -309,7 +309,7 @@ struct ResolveTests {
     // admits the reference, but the out-of-range row makes `storage.tuple` return
     // nil, which must be surfaced as a malformed image.
     #expect(throws: WinMDError.BadImageFormat) {
-      guard reference.row != 0 else { return }
+      if reference.row == 0 { return }
       guard reference.tag < TypeDefOrRef.tables.count,
           let schema = TypeDefOrRef.tables[reference.tag]
       else { throw WinMDError.BadImageFormat }
@@ -398,7 +398,7 @@ struct ResolveTests {
     // admits the reference, but the absent target table makes `storage.tuple`
     // return nil, which must be surfaced as a malformed image.
     #expect(throws: WinMDError.BadImageFormat) {
-      guard reference.row != 0 else { return }
+      if reference.row == 0 { return }
       guard reference.tag < TypeDefOrRef.tables.count,
           let schema = TypeDefOrRef.tables[reference.tag]
       else { throw WinMDError.BadImageFormat }

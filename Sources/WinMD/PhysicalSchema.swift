@@ -41,7 +41,7 @@ extension PhysicalSchema {
       // A reserved tag names no table, so it contributes no rows to the width.
       guard let table = tables[tag] else { continue }
       // An absent target table has no rows, so it cannot force a wide index.
-      guard valid & (1 << table.number) != 0 else { continue }
+      if valid & (1 << table.number) == 0 { continue }
       // A present table forces the full 32-bit index once its row count reaches
       // the range; below it the compressed width suffices.
       if rows(of: table.number) >= range { return 4 }

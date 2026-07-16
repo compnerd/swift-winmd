@@ -522,7 +522,7 @@ internal struct Resolution {
   /// a correlated column, which lowers to a `Term.parameter` the apply binds
   /// per outer row.
   internal var barred: Resolution {
-    guard !everywhere else { return self }
+    if everywhere { return self }
     return Resolution(scope, widths, types, correlations, outer: outer,
                       admits: false, everywhere: everywhere)
   }
@@ -940,7 +940,7 @@ internal struct SubqueryCheck {
   /// so the projection/`HAVING` walk keeps admitting the correlated preceding
   /// column the run's lowering binds.
   internal var barred: SubqueryCheck {
-    guard !everywhere else { return self }
+    if everywhere { return self }
     return SubqueryCheck(widths, types, deferred: deferred, reached: reached,
                          outer: outer, admits: false, everywhere: everywhere)
   }
@@ -989,7 +989,7 @@ internal struct SubqueryCheck {
   /// body still faults (parity both directions), while an unreached arm's role
   /// never widens a reached occurrence's shape.
   internal func validate(_ query: Query, as role: Role) throws(SQLError) {
-    guard widths[query] != nil else {
+    if widths[query] == nil {
       throw .state("0A000", "a subquery is not supported in this position")
     }
     reached.reach(query, as: role)
@@ -1151,7 +1151,7 @@ private func membership(_ left: Term, _ values: Array<Expression>,
                         negated: Bool,
                         term: (Expression) throws(SQLError) -> Term)
     throws(SQLError) -> Filter {
-  guard !values.isEmpty else {
+  if values.isEmpty {
     throw .state("42601", "IN requires a non-empty value list")
   }
   var elements = Array<Term>()
@@ -1795,7 +1795,7 @@ internal struct Scope {
         // be returned, so its type must not shape the column.
         continue
       }
-      guard !selects(argument, routines) else {
+      if selects(argument, routines) {
         // A definite selection: merge its type and stop, as every later
         // argument is unreachable.
         return try merged(type, next)
@@ -1846,7 +1846,7 @@ internal struct Scope {
                        subquery: Resolution = .unsupported)
       throws(SQLError) -> ValueType {
     let results = reachable(whens, otherwise, routines)
-    guard !results.isEmpty else { return .integer }
+    if results.isEmpty { return .integer }
     var type = try derive(results[0], routines, subquery: subquery)
     for result in results.dropFirst() {
       let next = try derive(result, routines, subquery: subquery)
@@ -1971,7 +1971,7 @@ internal struct Scope {
         // never be returned, so its type must not shape the column.
         continue
       }
-      guard !selects(argument, routines) else {
+      if selects(argument, routines) {
         // A definite selection: merge its type and stop, as every later
         // argument is unreachable and unvalidated.
         return try merged(type, next)
@@ -2082,7 +2082,7 @@ internal struct Scope {
       if decided { break }
     }
     if !decided, let otherwise { results.append(otherwise) }
-    guard !results.isEmpty else { return .integer }
+    if results.isEmpty { return .integer }
     var type = try validate(results[0], routines, subquery: subquery)
     for result in results.dropFirst() {
       let next = try validate(result, routines, subquery: subquery)
@@ -2149,7 +2149,7 @@ internal struct Scope {
     // it may not itself contain an aggregate (ISO forbids an aggregate in a
     // filter's search condition, as it has no per-row meaning).
     if let filter {
-      guard !filter.aggregated else {
+      if filter.aggregated {
         throw .state("42803", "an aggregate is not allowed in a FILTER")
       }
       try check(filter, routines, subquery: subquery)
@@ -2389,7 +2389,7 @@ internal struct Scope {
       // no seed), so reject it here too — the parser rejects `IN ()`, but a
       // caller can build `.membership(_, [], …)` directly, so this validation
       // faults on that shape rather than typing it as an always-false chain.
-      guard !values.isEmpty else {
+      if values.isEmpty {
         throw .state("42601", "IN requires a non-empty value list")
       }
       _ = try validate(operand, routines, subquery: subquery)
@@ -3173,7 +3173,7 @@ internal struct Scope {
       // otherwise fold `false` (`true` under `NOT IN`) here while both compile
       // (`lower`) and schema (`check`) reject it. The parser rejects `IN ()`,
       // but a caller can build `.membership(_, [], …)` directly.
-      guard !values.isEmpty else {
+      if values.isEmpty {
         throw .state("42601", "IN requires a non-empty value list")
       }
       let lhs = try empty(operand, routines)
@@ -3281,7 +3281,7 @@ internal struct Scope {
   /// enclosing relation, so `find` faults it hard rather than correlating
   /// outward; an unadmitted qualifier is genuinely not local and correlates.
   private func shadows(_ column: Column) -> Bool {
-    guard column.qualifier != nil else { return false }
+    if column.qualifier == nil { return false }
     return members.contains { admits($0, column) }
   }
 
@@ -3340,7 +3340,7 @@ internal struct Scope {
       return try ordinal(of: column)
     } catch let error {
       guard case .column = error else { throw error }
-      guard !shadows(column) else { throw error }
+      if shadows(column) { throw error }
       return nil
     }
   }

@@ -51,12 +51,11 @@ jobs:
           key: ${{ env.LLVM_CAS_CACHE_KEY }}
       - name: Run tests
         run: >-
-          swift test -v --enable-code-coverage
+          swift test --quiet --disable-xctest --enable-code-coverage
           -Xswiftc -explicit-module-build
           -Xswiftc -cache-compile-job
           -Xswiftc -cas-path
           -Xswiftc $env:SWIFT_CAS_PATH
-          -Xswiftc -Rcache-compile-job
       - name: Process Coverage Information
         run: |
           $bin = swift build --show-bin-path

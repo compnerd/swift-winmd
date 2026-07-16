@@ -31,17 +31,17 @@ extension CTE {
   /// stamps on every member.
   ///
   /// The parser marks each member of a `WITH RECURSIVE` list recursive whether
-  /// or not it names itself, but only a self-referential CTE has a recursive arm
-  /// to iterate; running a non-self-referential one through the fixpoint would
-  /// re-evaluate an arm that never reads the CTE, repeating its rows without end
-  /// (a `UNION ALL`) or needlessly (a `UNION`). A CTE is recursive in truth when
-  /// its recursive arm — the right member of the top-level `UNION`, the one the
-  /// fixpoint compiles with the CTE bound — names `name` in a `FROM`/`JOIN`.
-  /// The anchor is the base case, compiled with the name NOT in scope, so a
-  /// `FROM <name>` there reads a base relation of that name, not the CTE.
-  /// Scanning the anchor too would misroute `WITH RECURSIVE Parent(Id) AS
-  /// (SELECT Id FROM Parent UNION ALL SELECT Id FROM Extra)` — whose anchor
-  /// merely reads the same-named base — into the fixpoint.
+  /// or not it names itself, but only a self-referential CTE has a recursive
+  /// arm to iterate; running a non-self-referential one through the fixpoint
+  /// would re-evaluate an arm that never reads the CTE, repeating its rows
+  /// without end (a `UNION ALL`) or needlessly (a `UNION`). A CTE is recursive
+  /// in truth when its recursive arm — the right member of the top-level
+  /// `UNION`, the one the fixpoint compiles with the CTE bound — names `name`
+  /// in a `FROM`/`JOIN`. The anchor is the base case, compiled with the name
+  /// NOT in scope, so a `FROM <name>` there reads a base relation of that name,
+  /// not the CTE. Scanning the anchor too would misroute `WITH RECURSIVE
+  /// Parent(Id) AS (SELECT Id FROM Parent UNION ALL SELECT Id FROM Extra)` —
+  /// whose anchor merely reads the same-named base — into the fixpoint.
   internal var recurses: Bool {
     guard case let .setop(.union, _, arm, _) = query else { return false }
     return arm.references(name.lowercased())
@@ -106,10 +106,10 @@ extension Catalog where Self: ~Escapable {
   /// concatenates the rows in source order — `UNION ALL` keeps every row, a
   /// bare `UNION` removes whole-row duplicates (first occurrence kept). The
   /// plan is binary and mirrors the left-associative chain, so each
-  /// `UNION`/`UNION ALL` honours its own flag — `(A UNION B) UNION ALL C` dedups
-  /// `A ∪ B` before appending `C`. The result columns are the first arm's
-  /// projection (the ISO rule); each arm keeps its own `ORDER BY`, applied
-  /// before the union.
+  /// `UNION`/`UNION ALL` honours its own flag — `(A UNION B) UNION ALL C`
+  /// dedups `A ∪ B` before appending `C`. The result columns are the first
+  /// arm's projection (the ISO rule); each arm keeps its own `ORDER BY`,
+  /// applied before the union.
   ///
   /// - Throws: `SQLError.relation` if the catalog resolves no such relation,
   ///   `SQLError.column` if a referenced column is absent, `SQLError.ambiguous`
@@ -279,9 +279,9 @@ extension Catalog where Self: ~Escapable {
       // The scope for this CTE's body: the base catalog plus every earlier CTE,
       // over the run's routines and bindings. `body(_:)` enters this fresh
       // statement-scoped body with the correlation stack CLEARED — a CTE is
-      // resolved independently of any call site (a `WITH` is statement-level, so
-      // the stack is already empty here; routing through `body(_:)` keeps the
-      // clear intrinsic to entering a body scope rather than incidental).
+      // resolved independently of any call site (a `WITH` is statement-level,
+      // so the stack is already empty here; routing through `body(_:)` keeps
+      // the clear intrinsic to entering a body scope rather than incidental).
       let scope = context.body(relations)
       // Validate the CTE's SHAPE and ARITY against the CTEs done so far — the
       // compile-time structural check, shared with the dry-run schema path so a
@@ -311,45 +311,45 @@ extension Catalog where Self: ~Escapable {
   /// `cte` against the base catalog plus the CTEs done so far (`ctes`), WITHOUT
   /// materialising a row — the compile-time structural check `with` runs before
   /// each CTE materialises, factored out so the dry-run result-schema path
-  /// (`columns(of:with:)`) validates a `WITH` by the SAME code a run does, ending
-  /// the divergence between the two.
+  /// (`columns(of:with:)`) validates a `WITH` by the SAME code a run does,
+  /// ending the divergence between the two.
   ///
   /// It reproduces, without executing, the two structural faults `with` and
   /// `fixpoint` raise:
   ///
-  ///   - The RECURSIVE SHAPE. A `WITH RECURSIVE` member's recursive reference
-  ///     must be its FINAL `UNION` arm — the engine's model is anchor members
-  ///     then ONE recursive arm. A reference to the CTE's own name in an EARLIER
-  ///     arm resolves against the base scope (the CTE is not in scope outside
-  ///     the recursive arm), so a same-named base or view is a valid seed; but
-  ///     with no such base/view the reference can only be a misplaced recursive
-  ///     arm — recursion before the final arm, or a second recursive arm — a
-  ///     shape the engine does not support, faulted `SQLError.unsupported`.
+  /// - The RECURSIVE SHAPE. A `WITH RECURSIVE` member's recursive reference
+  /// must be its FINAL `UNION` arm — the engine's model is anchor members then
+  /// ONE recursive arm. A reference to the CTE's own name in an EARLIER arm
+  /// resolves against the base scope (the CTE is not in scope outside the
+  /// recursive arm), so a same-named base or view is a valid seed; but with no
+  /// such base/view the reference can only be a misplaced recursive arm —
+  /// recursion before the final arm, or a second recursive arm — a shape the
+  /// engine does not support, faulted `SQLError.unsupported`.
   ///
-  ///   - The DECLARED ARITY. Each CTE body must project exactly the arity its
-  ///     column list declares, or a later reader indexes out of bounds. The
-  ///     body's width is known once it COMPILES — never opening a cursor — so
-  ///     the compiled `Plan.width` is checked against the declared count,
-  ///     faulting `SQLError.columns` on a mismatch. A recursive (self-naming)
-  ///     CTE checks its ANCHOR (self NOT in scope) and its RECURSIVE arm (self
-  ///     bound to the declared columns) separately, exactly as `fixpoint` does;
-  ///     every other CTE checks its whole body with self NOT in scope. This is
-  ///     why the schema path must NOT bind the CTE's self for the whole body: a
-  ///     `WITH RECURSIVE t(n) AS (SELECT n FROM t UNION SELECT n FROM t)` faults
-  ///     the recursive shape here — self is not in scope in the anchor — rather
-  ///     than resolving a self-reference the run would reject.
+  /// - The DECLARED ARITY. Each CTE body must project exactly the arity its
+  /// column list declares, or a later reader indexes out of bounds. The body's
+  /// width is known once it COMPILES — never opening a cursor — so the compiled
+  /// `Plan.width` is checked against the declared count, faulting
+  /// `SQLError.columns` on a mismatch. A recursive (self-naming) CTE checks its
+  /// ANCHOR (self NOT in scope) and its RECURSIVE arm (self bound to the
+  /// declared columns) separately, exactly as `fixpoint` does; every other CTE
+  /// checks its whole body with self NOT in scope. This is why the schema path
+  /// must NOT bind the CTE's self for the whole body: a `WITH RECURSIVE t(n) AS
+  /// (SELECT n FROM t UNION SELECT n FROM t)` faults the recursive shape here —
+  /// self is not in scope in the anchor — rather than resolving a
+  /// self-reference the run would reject.
   ///
   /// The reachable-operand type-check the schema path also wants is NOT part of
   /// the shape/arity check the run relies on — the run DEFERS it to execution.
   /// It rides in through `typecheck`: the run path passes `false` (it defers),
-  /// the schema path passes `true` (it must fault an ill-typed body statically).
-  /// Folding it here rather than layering it in the schema path keeps ONE per-arm
-  /// scoping for BOTH the structural check and the operand check — a recursive
-  /// CTE's ANCHOR is operand-checked against base + prior CTEs (self NOT in
-  /// scope, the scope the run evaluates the anchor in), NOT the CTE-self overlay,
-  /// so `SELECT Name + 1 FROM People` in the anchor faults `SQLError.operand`
-  /// against the BASE `People` a run reads it against, never wrongly types clean
-  /// against the CTE's declared columns.
+  /// the schema path passes `true` (it must fault an ill-typed body
+  /// statically). Folding it here rather than layering it in the schema path
+  /// keeps ONE per-arm scoping for BOTH the structural check and the operand
+  /// check — a recursive CTE's ANCHOR is operand-checked against base + prior
+  /// CTEs (self NOT in scope, the scope the run evaluates the anchor in), NOT
+  /// the CTE-self overlay, so `SELECT Name + 1 FROM People` in the anchor
+  /// faults `SQLError.operand` against the BASE `People` a run reads it
+  /// against, never wrongly types clean against the CTE's declared columns.
   ///
   /// `typecheck` ALSO gates the eager type-check of a DERIVED body the CTE
   /// body nests: the arity `augment`/`compile` below thread `validate:
@@ -376,10 +376,10 @@ extension Catalog where Self: ~Escapable {
     // recursive (self-naming) CTE checks its anchor and recursive arm the way
     // `fixpoint` does: the anchor with self NOT in scope, the recursive arm
     // with self bound to the declared columns. Every other CTE checks its whole
-    // body with self NOT in scope. When `typecheck`, the reachable-operand check
-    // runs in the SAME per-arm scope each arity check uses, so the operand check
-    // shares the run's arm scoping and never types an anchor against the
-    // CTE-self overlay.
+    // body with self NOT in scope. When `typecheck`, the reachable-operand
+    // check runs in the SAME per-arm scope each arity check uses, so the
+    // operand check shares the run's arm scoping and never types an anchor
+    // against the CTE-self overlay.
     if cte.recursive && cte.recurses,
         case let .setop(.union, anchor, recursive, _) = cte.query {
       let scope = try augment(context.validating(typecheck), for: anchor,
@@ -388,9 +388,9 @@ extension Catalog where Self: ~Escapable {
       guard width == cte.columns.count else {
         throw .columns(expected: cte.columns.count, got: width)
       }
-      // The anchor is operand-checked with self NOT in scope — the scope the run
-      // evaluates it in — so a text-arithmetic anchor faults against the base
-      // relation, not the CTE's declared (integer) columns.
+      // The anchor is operand-checked with self NOT in scope — the scope the
+      // run evaluates it in — so a text-arithmetic anchor faults against the
+      // base relation, not the CTE's declared (integer) columns.
       if typecheck { try self.typecheck(anchor, scope) }
       let empty = RelationInstance(columns: cte.columns, rows: [],
                                    types: Array(repeating: .integer,
@@ -438,9 +438,9 @@ extension Catalog where Self: ~Escapable {
   ///
   /// A non-`UNION` recursive query has no recursive arm to iterate, so it runs
   /// once like a non-recursive CTE — its compiled width validated the same way
-  /// before it materialises, so a non-`UNION` body binding rows of a width other
-  /// than the column list (e.g. a base relation of the CTE's own name) faults
-  /// with `SQLError.columns` rather than trapping on a later read.
+  /// before it materialises, so a non-`UNION` body binding rows of a width
+  /// other than the column list (e.g. a base relation of the CTE's own name)
+  /// faults with `SQLError.columns` rather than trapping on a later read.
   ///
   /// The anchor and the recursive arm are each validated against
   /// `cte.columns.count` by their compiled `Plan.width` BEFORE any rows bind
@@ -484,8 +484,8 @@ extension Catalog where Self: ~Escapable {
     }
 
     // A misplaced recursive reference in the anchor (a same-named base/view is
-    // absent) was already rejected in `with`, before routing here, so the anchor
-    // is a genuine base case by this point.
+    // absent) was already rejected in `with`, before routing here, so the
+    // anchor is a genuine base case by this point.
 
     // Validate the anchor's compiled width against the declared columns BEFORE
     // it seeds the working set: the loop binds `working` under `cte.columns` as
@@ -556,8 +556,8 @@ extension Projection {
   /// `single` leaf yields.
   ///
   /// The projection resolves against an empty schema (no columns), so only
-  /// literals, scalar calls, and arithmetic over them lower; a `SELECT *` has no
-  /// relation to expand and a bare-column reference no column to bind, each
+  /// literals, scalar calls, and arithmetic over them lower; a `SELECT *` has
+  /// no relation to expand and a bare-column reference no column to bind, each
   /// faulting (`SQLError.column` for a column, `SQLError.unsupported` for `*`).
   /// The terms hold no slots, so the `single` row's empty record carries every
   /// value the projection needs.
@@ -584,8 +584,8 @@ extension Projection {
                                    subquery: subquery)
       return .project(terms, .single)
     }
-    // `SELECT *` names every column of the relations in scope; a FROM-less query
-    // has none, so there is nothing to expand.
+    // `SELECT *` names every column of the relations in scope; a FROM-less
+    // query has none, so there is nothing to expand.
     throw .unsupported("SELECT * requires a FROM clause")
   }
 }
@@ -1619,8 +1619,8 @@ extension Catalog where Self: ~Escapable {
   /// group, yielding grouped records whose slots are the key values then the
   /// aggregate results. The projection, `HAVING`, and `ORDER BY` lower against
   /// that grouped slot space through a `Grouping`, which also enforces the
-  /// standard rule that every non-aggregated projection/`ORDER BY` column appear
-  /// in the `GROUP BY`.
+  /// standard rule that every non-aggregated projection/`ORDER BY` column
+  /// appear in the `GROUP BY`.
   internal borrowing func group(_ select: Select, _ relation: Relation,
                                 _ from: Resolved, _ context: Context)
       throws(SQLError) -> Plan {
@@ -1629,13 +1629,13 @@ extension Catalog where Self: ~Escapable {
     // dropped, the CTEs and store relations kept — before lowering a nested
     // subquery, so its FROM sees no derived alias while a CTE a same-named
     // derived alias shadows stays visible (a grouped `ORDER BY SUM((SELECT x
-    // FROM d))` reads the CTE `d` beneath the derived `d`).
-    // Resolve every joined relation and lay the FROM relation and each joined
-    // one end to end in one combined ordinal space (as the non-aggregate join
-    // path does), so the WHERE, keys, and aggregate arguments resolve uniformly.
-    // A LATERAL join under a GROUP BY / aggregate query is a deliberate
-    // follow-up — the grouped path forms a single-relation chain differently
-    // from the correlated apply — so fault it rather than mis-plan.
+    // FROM d))` reads the CTE `d` beneath the derived `d`). Resolve every
+    // joined relation and lay the FROM relation and each joined one end to end
+    // in one combined ordinal space (as the non-aggregate join path does), so
+    // the WHERE, keys, and aggregate arguments resolve uniformly. A LATERAL
+    // join under a GROUP BY / aggregate query is a deliberate follow-up — the
+    // grouped path forms a single-relation chain differently from the
+    // correlated apply — so fault it rather than mis-plan.
     for join in select.joins where join.relation.lateral {
       throw .state("0A000",
                    "a LATERAL join under an aggregate is not supported")
@@ -1736,7 +1736,9 @@ extension Catalog where Self: ~Escapable {
     for match in matches { match.references(into: &references) }
     predicate?.references(into: &references)
     for key in keys { key.references(into: &references) }
-    for aggregation in aggregations { aggregation.references(into: &references) }
+    for aggregation in aggregations {
+      aggregation.references(into: &references)
+    }
     let combined = references.sorted()
 
     var slot = Dictionary<Int, Int>(minimumCapacity: combined.count)
@@ -1775,9 +1777,9 @@ extension Catalog where Self: ~Escapable {
                                 $0.remapped(through: slot)
                               }, chain)
 
-    // Lower the projection, HAVING, and ORDER BY against the grouped slot space,
-    // enforcing the projection rule (every non-aggregated column must be a
-    // GROUP BY key).
+    // Lower the projection, HAVING, and ORDER BY against the grouped slot
+    // space, enforcing the projection rule (every non-aggregated column must be
+    // a GROUP BY key).
     var grouping = try Grouping(scope, select.grouping, aggregations,
                                 subquery: barred)
     let projection = try grouping.terms(select.projection, context.routines,
@@ -1830,8 +1832,8 @@ extension Projection {
 
 extension Expression {
   /// Collects the distinct aggregate expressions within this expression into
-  /// `expressions`, in first-appearance order — the same aggregate written twice
-  /// computes once.
+  /// `expressions`, in first-appearance order — the same aggregate written
+  /// twice computes once.
   internal func collect(into expressions: inout Array<Expression>) {
     switch self {
     case .column, .literal, .subquery:
@@ -2018,16 +2020,16 @@ extension Catalog where Self: ~Escapable {
       try .outer(optimise(left, context), optimise(right, context), on: on,
                  kind: kind)
     case let .apply(left, key, correlation, ordinals, on, kind):
-      // Optimise the left side (a seekable scan or a nested join inside it still
-      // rewrites), but keep the apply node, its `on`, and its recorded body plan
-      // intact — the body re-executes per outer row and was already compiled and
-      // pushed down under its own scope, so the outer optimise never reshapes
-      // it.
+      // Optimise the left side (a seekable scan or a nested join inside it
+      // still rewrites), but keep the apply node, its `on`, and its recorded
+      // body plan intact — the body re-executes per outer row and was already
+      // compiled and pushed down under its own scope, so the outer optimise
+      // never reshapes it.
       try .apply(optimise(left, context), key: key, correlation: correlation,
                  ordinals: ordinals, on: on, kind: kind)
     case let .setop(kind, left, right, all):
-      // Optimise each side with the same bindings so a bound predicate inside an
-      // arm seeks; the set operation itself merely combines its sides,
+      // Optimise each side with the same bindings so a bound predicate inside
+      // an arm seeks; the set operation itself merely combines its sides,
       // preserving this node's own `kind` and `all`.
       try .setop(kind, optimise(left, context), optimise(right, context),
                  all: all)
@@ -2038,9 +2040,9 @@ extension Catalog where Self: ~Escapable {
     case let .aggregate(keys, aggregates, source):
       // An aggregate reshapes its source and has no seek or join of its own;
       // optimise its source (the WHERE/join chain below it seeks and nests as
-      // usual) and rewrap. The `HAVING`/projection sit above it as `select`s the
-      // recursion reaches through here, but their grouped-space slots never seek
-      // a base relation.
+      // usual) and rewrap. The `HAVING`/projection sit above it as `select`s
+      // the recursion reaches through here, but their grouped-space slots never
+      // seek a base relation.
       try .aggregate(keys: keys, aggregates: aggregates,
                      optimise(source, context))
     case let .limit(count, offset, source):
@@ -2211,8 +2213,8 @@ private func integer(_ operand: Filter.Operand, _ bindings: Bindings) -> Int? {
 }
 
 extension Table where Self: ~Escapable {
-  /// The boundaries `[lower, upper)` to seek for a sort-key comparison, or `nil`
-  /// if `filter` does not qualify for the seek path.
+  /// The boundaries `[lower, upper)` to seek for a sort-key comparison, or
+  /// `nil` if `filter` does not qualify for the seek path.
   ///
   /// It qualifies when `filter` is a sort-key equality or range whose operand
   /// is an integer — a literal, or a bound parameter resolved from `bindings`
@@ -2295,12 +2297,13 @@ extension Catalog where Self: ~Escapable {
   /// index-nested-loop `Join` when a `match` conjunct relates the two sides,
   /// else leaves the product (a plain nested loop) under the filter.
   ///
-  /// The inner side is a bare `Scan(inner, _, nil)`, or that scan under a pushed
-  /// single-relation filter — `Select(inner-filter, Scan(inner, _, nil))`, the
-  /// shape selection pushdown leaves when a `WHERE` conjunct references only the
-  /// joined-in relation. Either way the join folds in the scan; the pushed
-  /// filter is preserved so the joined-in relation's non-key predicate still
-  /// rides the `Join` path rather than degrading to a residual product.
+  /// The inner side is a bare `Scan(inner, _, nil)`, or that scan under a
+  /// pushed single-relation filter — `Select(inner-filter, Scan(inner, _,
+  /// nil))`, the shape selection pushdown leaves when a `WHERE` conjunct
+  /// references only the joined-in relation. Either way the join folds in the
+  /// scan; the pushed filter is preserved so the joined-in relation's non-key
+  /// predicate still rides the `Join` path rather than degrading to a residual
+  /// product.
   ///
   /// The left side's slot count is the boundary `base` in the combined slot
   /// space: a slot below it is an outer-side key, a slot at or above it an
@@ -2308,14 +2311,14 @@ extension Catalog where Self: ~Escapable {
   /// table ordinal (`column`) through the inner scan's `ordinals` for the
   /// seek's `bound`. The matching conjunct is consumed; any remaining conjuncts
   /// stay as a residual `Select`. The pushed inner filter rides on the `Join`
-  /// node itself — in the inner's OWN 0-based standalone slot space, the space it
-  /// already lives in on the inner scan — so the executor applies it WHILE
+  /// node itself — in the inner's OWN 0-based standalone slot space, the space
+  /// it already lives in on the inner scan — so the executor applies it WHILE
   /// materialising inner rows (before bucketing / as part of the inner scan),
-  /// rather than lifting it into the residual to run after the join. Applying it
-  /// during materialisation means a pair forms only when the filter holds, so it
-  /// still gates a later unsafe residual conjunct (the pushdown barrier having
-  /// kept the safe inner filter ahead of any unsafe conjunct). When the inner
-  /// side is neither shape, the product is preserved.
+  /// rather than lifting it into the residual to run after the join. Applying
+  /// it during materialisation means a pair forms only when the filter holds,
+  /// so it still gates a later unsafe residual conjunct (the pushdown barrier
+  /// having kept the safe inner filter ahead of any unsafe conjunct). When the
+  /// inner side is neither shape, the product is preserved.
   private borrowing func nest(_ filter: Filter, _ left: Plan, _ right: Plan,
                               _ context: Context)
       throws(SQLError) -> Plan {
@@ -2346,12 +2349,12 @@ extension Catalog where Self: ~Escapable {
       // The pushed inner filter stays in the inner's 0-based standalone slot
       // space and rides on the `Join` node, applied while the executor
       // materialises the inner (before bucketing / as part of the inner scan) —
-      // NOT lifted into the residual to run after the join. It is always safe and
-      // the pushdown barrier kept it ahead of any unsafe conjunct, so applying it
-      // during materialisation still gates a later unsafe residual (a pair forms
-      // only when the filter holds), without letting that conjunct throw first
-      // (`Parent.Name = 'nope' AND (1 / Child.x) = 0`, the false name excluding
-      // the row before the division runs).
+      // NOT lifted into the residual to run after the join. It is always safe
+      // and the pushdown barrier kept it ahead of any unsafe conjunct, so
+      // applying it during materialisation still gates a later unsafe residual
+      // (a pair forms only when the filter holds), without letting that
+      // conjunct throw first (`Parent.Name = 'nope' AND (1 / Child.x) = 0`, the
+      // false name excluding the row before the division runs).
       let join = try Plan.join(optimise(left, context),
                                name: inner.name, ordinals: inner.ordinals,
                                base: base,
@@ -2385,23 +2388,23 @@ private func keys(_ lhs: Int, _ rhs: Int, _ base: Int)
 // MARK: - Selection pushdown
 
 extension Plan {
-  /// Pushes each `WHERE` conjunct that references a single relation's slots down
-  /// to just above that relation's leaf, before the join/product chain folds it
-  /// in — so a relation is filtered as it is read rather than after the whole
-  /// product is formed.
+  /// Pushes each `WHERE` conjunct that references a single relation's slots
+  /// down to just above that relation's leaf, before the join/product chain
+  /// folds it in — so a relation is filtered as it is read rather than after
+  /// the whole product is formed.
   ///
-  /// `compile` leaves the `WHERE` as one `select` atop the left-deep chain, so a
-  /// join runs on unfiltered inputs. This pass descends the chain: a conjunct
+  /// `compile` leaves the `WHERE` as one `select` atop the left-deep chain, so
+  /// a join runs on unfiltered inputs. This pass descends the chain: a conjunct
   /// whose slots all fall in one relation's contiguous slot run rides down to
   /// that relation's leaf as a `select` over its `scan`/`derived`, where the
   /// seek and nest rewrites can then act on it; a conjunct spanning two
   /// relations (a residual, an `OR` across sides) stays at the level whose two
-  /// children it straddles. A conjunct over a `derived` view's output columns is
-  /// pushed INTO the view's sub-plan — its outer slot mapped back through the
-  /// view's projection to the sub-plan slot the column reads — recursing below
-  /// the view's own joins. A `union` pushes into every arm. The pass is a pure
-  /// logical rewrite; `optimise` runs after it and still sees the `select`s the
-  /// seek and nest rewrites match.
+  /// children it straddles. A conjunct over a `derived` view's output columns
+  /// is pushed INTO the view's sub-plan — its outer slot mapped back through
+  /// the view's projection to the sub-plan slot the column reads — recursing
+  /// below the view's own joins. A `union` pushes into every arm. The pass is a
+  /// pure logical rewrite; `optimise` runs after it and still sees the
+  /// `select`s the seek and nest rewrites match.
   internal func pushdown() throws(SQLError) -> Plan {
     switch self {
     case .single, .scan, .join:
@@ -2428,11 +2431,11 @@ extension Plan {
       try .outer(left.pushdown(), right.pushdown(), on: on, kind: kind)
     case let .apply(left, key, correlation, ordinals, on, kind):
       // Push down WITHIN the left side (its own joins/filters rewrite), but the
-      // apply is a pushdown barrier: its right side is not a static sub-plan but
-      // a per-outer-row re-execution, so a `WHERE` conjunct above it never rides
-      // into it (mirroring the `.outer` gate — `distribute`'s default keeps the
-      // conjunct a `select` over this node). The recorded body plan was already
-      // pushed down at its compile.
+      // apply is a pushdown barrier: its right side is not a static sub-plan
+      // but a per-outer-row re-execution, so a `WHERE` conjunct above it never
+      // rides into it (mirroring the `.outer` gate — `distribute`'s default
+      // keeps the conjunct a `select` over this node). The recorded body plan
+      // was already pushed down at its compile.
       try .apply(left.pushdown(), key: key, correlation: correlation,
                  ordinals: ordinals, on: on, kind: kind)
     case let .setop(kind, left, right, all):
@@ -2447,21 +2450,22 @@ extension Plan {
       // An aggregate reshapes rows into a fresh grouped slot space, so it is a
       // pushdown barrier: a `HAVING`/projection filter above it is in grouped
       // space and stays there (`distribute`'s default keeps it as a `select`
-      // over the aggregate), while the WHERE below it — already placed under the
-      // aggregate at compile — pushes down within the source as usual.
+      // over the aggregate), while the WHERE below it — already placed under
+      // the aggregate at compile — pushes down within the source as usual.
       try .aggregate(keys: keys, aggregates: aggregates, source.pushdown())
     case let .limit(count, offset, source):
-      // A `limit` is the outermost operator, so no `WHERE` conjunct ever reaches
-      // it to push down; it recurses transparently, its source pushed as usual.
-      // A filter must never cross it — capping before or after a filter yields
-      // different rows — and none can, since the cap sits above the projection.
+      // A `limit` is the outermost operator, so no `WHERE` conjunct ever
+      // reaches it to push down; it recurses transparently, its source pushed
+      // as usual. A filter must never cross it — capping before or after a
+      // filter yields different rows — and none can, since the cap sits above
+      // the projection.
       try .limit(count: count, offset: offset, source.pushdown())
     }
   }
 
   /// Places each of `conjuncts` as deep in the already-pushed `self` as the
-  /// slots it reads allow, wrapping the level whose children a conjunct straddles
-  /// in a residual `select`.
+  /// slots it reads allow, wrapping the level whose children a conjunct
+  /// straddles in a residual `select`.
   ///
   /// At a `product`, `left.slots` is the boundary: a conjunct entirely below it
   /// belongs to the left child and rides down; one entirely at or above it
@@ -2503,19 +2507,20 @@ extension Plan {
         // order the `AND` chain wrote — when a preceding conjunct was unsafe
         // (`barrier`), when it reads no slots (e.g. `(1 / 0) = 0`, where
         // `allSatisfy` is vacuously true), when evaluating it can throw (a
-        // division or scalar call, e.g. `(1 / A.x) = 0`), or when it is nullable
-        // (reads a slot, so a NULL there makes it UNKNOWN) and a LATER conjunct
-        // is unsafe. Riding a throwing conjunct down would raise while scanning a
-        // child even when the join's other side is empty; riding a safe conjunct
-        // PAST an earlier unsafe one would filter its rows before the unsafe one
-        // runs, suppressing a throw the left-to-right `AND` owes (`(1 / A.x) = 0
-        // AND A.x <> 0`, `A.x = 0`, on a matching pair). Because the evaluator's
-        // `AND` does not short-circuit, riding a nullable conjunct BELOW a later
-        // unsafe one likewise suppresses a throw: the un-pushed `AND` runs the
-        // later conjunct even for the UNKNOWN row, but the pushed conjunct drops
-        // that row first (`A.x = 1 AND (1 / B.y) = 0`, `A.x` NULL and `B.y = 0`).
-        // Only a safe single-relation conjunct with no unsafe predecessor — and,
-        // if nullable, no unsafe successor — rides down.
+        // division or scalar call, e.g. `(1 / A.x) = 0`), or when it is
+        // nullable (reads a slot, so a NULL there makes it UNKNOWN) and a LATER
+        // conjunct is unsafe. Riding a throwing conjunct down would raise while
+        // scanning a child even when the join's other side is empty; riding a
+        // safe conjunct PAST an earlier unsafe one would filter its rows before
+        // the unsafe one runs, suppressing a throw the left-to-right `AND` owes
+        // (`(1 / A.x) = 0 AND A.x <> 0`, `A.x = 0`, on a matching pair).
+        // Because the evaluator's `AND` does not short-circuit, riding a
+        // nullable conjunct BELOW a later unsafe one likewise suppresses a
+        // throw: the un-pushed `AND` runs the later conjunct even for the
+        // UNKNOWN row, but the pushed conjunct drops that row first (`A.x = 1
+        // AND (1 / B.y) = 0`, `A.x` NULL and `B.y = 0`). Only a safe
+        // single-relation conjunct with no unsafe predecessor — and, if
+        // nullable, no unsafe successor — rides down.
         let hazard =
             conjunct.nullable && conjuncts[(index + 1)...].contains { !$0.safe }
         if barrier || slots.isEmpty || !conjunct.safe || hazard {
@@ -2606,8 +2611,8 @@ extension Plan {
 
   /// Pushes `conjuncts` INTO this `derived` view's sub-plan, below its own
   /// projection and joins, mapping each conjunct's outer slot (a slot into the
-  /// leaf's `ordinals`, i.e. a view output column) back to the sub-plan slot the
-  /// column reads.
+  /// leaf's `ordinals`, i.e. a view output column) back to the sub-plan slot
+  /// the column reads.
   ///
   /// A view's sub-plan is `Project(terms, body)` (or a `union` of such), so an
   /// output column `ordinals[slot]` is `terms[ordinals[slot]]`. A conjunct
@@ -2617,25 +2622,25 @@ extension Plan {
   /// `union` sub-plan admits a conjunct only when every arm's projection admits
   /// it — the arms are combined, so a conjunct that cannot push into one arm
   /// must stay outside them all. The admitted conjuncts, still in the view's
-  /// OUTPUT slot space, push in through `inject`, which rebases each against the
-  /// projection it lands under — PER ARM for a union, since the arms map the
-  /// same output column to DIFFERENT body slots; the rest wrap the leaf.
+  /// OUTPUT slot space, push in through `inject`, which rebases each against
+  /// the projection it lands under — PER ARM for a union, since the arms map
+  /// the same output column to DIFFERENT body slots; the rest wrap the leaf.
   ///
-  /// The partition carries the SAME ordering barrier `distribute`'s product loop
-  /// has: a conjunct stays `outer` — on the derived leaf, run in the `AND`
-  /// chain's order — when a preceding conjunct was unsafe (`barrier`), when it is
-  /// itself unsafe (a division or scalar call), when it is nullable and a LATER
-  /// conjunct is unsafe, or when the view's projection cannot admit it; only a
-  /// safe conjunct with no unsafe predecessor — and, if nullable, no unsafe
-  /// successor — pushes in. An unsafe conjunct bars every later one from riding
-  /// into the view: pushing a later conjunct past it would let the view seek and
-  /// drop the row before the unsafe outer conjunct runs, suppressing a throw the
-  /// left-to-right `AND` owes (`(1 / x) = 0 AND x = 1` over a view whose `x` is
-  /// sorted, the `x = 1` seek dropping the `x = 0` row before the outer division
-  /// raises). Symmetrically a nullable conjunct pushed BELOW a later unsafe one
-  /// suppresses a throw: the non-short-circuiting `AND` runs the later conjunct
-  /// even for the UNKNOWN row, but the injected conjunct drops that row first
-  /// (`x = 1 AND (1 / y) = 0`, `x` NULL and `y = 0`).
+  /// The partition carries the SAME ordering barrier `distribute`'s product
+  /// loop has: a conjunct stays `outer` — on the derived leaf, run in the `AND`
+  /// chain's order — when a preceding conjunct was unsafe (`barrier`), when it
+  /// is itself unsafe (a division or scalar call), when it is nullable and a
+  /// LATER conjunct is unsafe, or when the view's projection cannot admit it;
+  /// only a safe conjunct with no unsafe predecessor — and, if nullable, no
+  /// unsafe successor — pushes in. An unsafe conjunct bars every later one from
+  /// riding into the view: pushing a later conjunct past it would let the view
+  /// seek and drop the row before the unsafe outer conjunct runs, suppressing a
+  /// throw the left-to-right `AND` owes (`(1 / x) = 0 AND x = 1` over a view
+  /// whose `x` is sorted, the `x = 1` seek dropping the `x = 0` row before the
+  /// outer division raises). Symmetrically a nullable conjunct pushed BELOW a
+  /// later unsafe one suppresses a throw: the non-short-circuiting `AND` runs
+  /// the later conjunct even for the UNKNOWN row, but the injected conjunct
+  /// drops that row first (`x = 1 AND (1 / y) = 0`, `x` NULL and `y = 0`).
   private func into(_ conjuncts: Array<Filter>) throws(SQLError) -> Plan {
     guard case let .derived(name, plan, ordinals, seek) = self else {
       return residual(conjuncts)
@@ -2644,13 +2649,13 @@ extension Plan {
     var outer = Array<Filter>()
     var barrier = false
     for (index, conjunct) in conjuncts.enumerated() {
-      // A nullable conjunct (reads a slot, so a NULL there makes it UNKNOWN) must
-      // also stay outer when a LATER conjunct is unsafe: the evaluator's `AND`
-      // does not short-circuit, so the un-pushed query runs the later conjunct
-      // even for the UNKNOWN row, but injecting this one into the view would seek
-      // or filter that row away first — suppressing a throw the left-to-right
-      // `AND` owes (`x = 1 AND (1 / y) = 0` over a view exposing `x`/`y`, `x`
-      // NULL and `y = 0`).
+      // A nullable conjunct (reads a slot, so a NULL there makes it UNKNOWN)
+      // must also stay outer when a LATER conjunct is unsafe: the evaluator's
+      // `AND` does not short-circuit, so the un-pushed query runs the later
+      // conjunct even for the UNKNOWN row, but injecting this one into the view
+      // would seek or filter that row away first — suppressing a throw the
+      // left-to-right `AND` owes (`x = 1 AND (1 / y) = 0` over a view exposing
+      // `x`/`y`, `x` NULL and `y = 0`).
       let hazard =
           conjunct.nullable && conjuncts[(index + 1)...].contains { !$0.safe }
       if barrier || !conjunct.safe || hazard
@@ -2680,11 +2685,11 @@ extension Plan {
   private func pushable(_ conjunct: Filter, _ ordinals: Array<Int>) -> Bool {
     switch self {
     case let .project(terms, _):
-      // A conjunct pushes below the projection only when every projected term is
-      // safe: pushing it filters rows before the projection runs, so a throwing
-      // term — a division or scalar call, even one the conjunct does not read —
-      // would be skipped for the filtered rows, suppressing a raise `derive`
-      // owes by evaluating every column of every view row.
+      // A conjunct pushes below the projection only when every projected term
+      // is safe: pushing it filters rows before the projection runs, so a
+      // throwing term — a division or scalar call, even one the conjunct does
+      // not read — would be skipped for the filtered rows, suppressing a raise
+      // `derive` owes by evaluating every column of every view row.
       terms.allSatisfy(\.safe) && rebase(conjunct, ordinals) != nil
     case let .setop(_, left, right, _):
       left.pushable(conjunct, ordinals) && right.pushable(conjunct, ordinals)
@@ -2699,9 +2704,9 @@ extension Plan {
   ///
   /// For a `union` each arm rebases the conjuncts against ITS OWN projection —
   /// the same output column sits at different body slots across arms, so a
-  /// single pre-rebased filter cannot serve them all; the rebase must happen per
-  /// arm. `pushable` has already vetted every conjunct against every arm, so the
-  /// per-arm `rebase` is guaranteed non-nil.
+  /// single pre-rebased filter cannot serve them all; the rebase must happen
+  /// per arm. `pushable` has already vetted every conjunct against every arm,
+  /// so the per-arm `rebase` is guaranteed non-nil.
   private func inject(_ conjuncts: Array<Filter>, _ ordinals: Array<Int>)
       throws(SQLError) -> Plan {
     switch self {
@@ -2713,7 +2718,8 @@ extension Plan {
                  right.inject(conjuncts, ordinals), all: all)
     default:
       // A view sub-plan is always a `project` (or a `union` of them); anything
-      // else keeps the conjuncts as an outer `select` rather than dropping them.
+      // else keeps the conjuncts as an outer `select` rather than dropping
+      // them.
       residual(conjuncts)
     }
   }
@@ -2724,9 +2730,9 @@ extension Plan {
   /// pushed in.
   ///
   /// Slot `s` of the leaf reads view column `ordinals[s]`, whose value is the
-  /// projection term `terms[ordinals[s]]`; the conjunct pushes in only when that
-  /// term is a bare `.slot(body)`, in which case `s` maps to `body`. Shared by
-  /// `pushable` (the non-nil check) and `inject` (the rebased value).
+  /// projection term `terms[ordinals[s]]`; the conjunct pushes in only when
+  /// that term is a bare `.slot(body)`, in which case `s` maps to `body`.
+  /// Shared by `pushable` (the non-nil check) and `inject` (the rebased value).
   private func rebase(_ conjunct: Filter, _ ordinals: Array<Int>) -> Filter? {
     guard case let .project(terms, _) = self else { return nil }
     var map = Dictionary<Int, Int>(minimumCapacity: conjunct.slots.count)
@@ -2853,11 +2859,12 @@ extension Catalog where Self: ~Escapable {
       throws(SQLError) -> Plans {
     // Resolve each SITE'S subqueries against THAT site's own scope, keyed PER
     // OCCURRENCE: a join `i`'s `ON` against its PREFIX scope `prefixes[i]` (the
-    // relations available AT that join point), the WHERE/HAVING/projection/ORDER
-    // against the full join `enclosing`. The SAME inner SQL in both an `ON` and
-    // the WHERE is resolved TWICE — each against its own site's scope — so the
-    // WHERE occurrence sees the full scope and reports a genuine ambiguity rather
-    // than reusing the first `ON` occurrence's narrower prefix correlation.
+    // relations available AT that join point), the
+    // WHERE/HAVING/projection/ORDER against the full join `enclosing`. The SAME
+    // inner SQL in both an `ON` and the WHERE is resolved TWICE — each against
+    // its own site's scope — so the WHERE occurrence sees the full scope and
+    // reports a genuine ambiguity rather than reusing the first `ON`
+    // occurrence's narrower prefix correlation.
     var lowerings = Array<Resolution>()
     lowerings.reserveCapacity(select.joins.count)
     for index in select.joins.indices {
@@ -2917,9 +2924,9 @@ extension Catalog where Self: ~Escapable {
       // shape-only lenience below. `unlateralized()` clears the LATERAL-body
       // flag so a nested ORDINARY subquery within a lateral body builds its OWN
       // Resolution with `everywhere: false` — the lateral everywhere-admission
-      // covers ONLY the lateral body's own projection, NOT a subquery inside it,
-      // so an ordinary correlated scalar-subquery projection is barred exactly
-      // as it is outside a lateral body.
+      // covers ONLY the lateral body's own projection, NOT a subquery inside
+      // it, so an ordinary correlated scalar-subquery projection is barred
+      // exactly as it is outside a lateral body.
       let inner =
           context.with(outer: nested).validating(false).unlateralized()
       // A nested subquery's body derivation is SHAPE ONLY, so ALWAYS lenient
@@ -2944,8 +2951,9 @@ extension Catalog where Self: ~Escapable {
       types[query] =
           try columns(of: query.first, inner).first?.type
       // The correlation the nested compile discovered — the outer columns its
-      // inner `WHERE`/`ON` named — carried into the lowered subquery node so the
-      // per-outer-row re-execution binds them. Empty for an UNCORRELATED one.
+      // inner `WHERE`/`ON` named — carried into the lowered subquery node so
+      // the per-outer-row re-execution binds them. Empty for an UNCORRELATED
+      // one.
       correlations[query] = nested.correlation
       // A CORRELATED occurrence's inner PLAN was just compiled with THIS site's
       // enclosing scope, so its correlated columns are `Term.parameter`s bound
@@ -3074,9 +3082,9 @@ extension Catalog where Self: ~Escapable {
   /// Resolves the FROM `relation` and its `joins` into one combined scope, the
   /// single source three call sites share: the aggregate compile path, the
   /// non-aggregate compile path, and the `SELECT *` arity check. The caller
-  /// resolves FROM once (it needs the leaf for its own base lowering) and passes
-  /// its `schema` here, so FROM is never re-resolved; each join then resolves
-  /// into one running, end-to-end ordinal space.
+  /// resolves FROM once (it needs the leaf for its own base lowering) and
+  /// passes its `schema` here, so FROM is never re-resolved; each join then
+  /// resolves into one running, end-to-end ordinal space.
   ///
   /// The returned `joined` holds each join's `Resolved` (its schema and leaf
   /// factory) in source order — the plan lowers each into the combined slot
@@ -3123,9 +3131,10 @@ extension Catalog where Self: ~Escapable {
       }
       // The FROM resolves once here; each join then resolves through the shared
       // helper, which threads each join's PRECEDING scope into its resolve — so
-      // a LATERAL arm's body derives its projected preceding-FROM column against
-      // the relations before it rather than against no scope, which would fault
-      // the arity check even though the per-arm compile passes the prefix.
+      // a LATERAL arm's body derives its projected preceding-FROM column
+      // against the relations before it rather than against no scope, which
+      // would fault the arity check even though the per-arm compile passes the
+      // prefix.
       let schema = try resolve(relation, context).schema
       let (_, relations) = try resolve(from: relation, schema: schema,
                                        joins: select.joins, context)
@@ -3160,10 +3169,10 @@ extension Catalog where Self: ~Escapable {
   /// otherwise resolve against the base catalog (and other views) alone.
   ///
   /// A view's `columns` must name exactly one column per value its query
-  /// projects, or the view's schema would let a query index past a sub-plan row.
-  /// The parser checks this whenever the projection's arity is statically known;
-  /// this is the backstop for a `SELECT *` view, whose width is known only here,
-  /// after the sub-plan compiles — a mismatch is `SQLError.columns`.
+  /// projects, or the view's schema would let a query index past a sub-plan
+  /// row. The parser checks this whenever the projection's arity is statically
+  /// known; this is the backstop for a `SELECT *` view, whose width is known
+  /// only here, after the sub-plan compiles — a mismatch is `SQLError.columns`.
   ///
   /// `visited` names the views already being resolved down this chain. A view
   /// whose body reaches back to itself — `A` over `B` over `A`, or a view over
@@ -3172,11 +3181,11 @@ extension Catalog where Self: ~Escapable {
   /// definition, reported as `.recursion` rather than hung. The
   /// `definition_schema.` store's `columns` builder, which compiles every view
   /// to advertise it, relies on this: a cyclic view's `try? compile` catches
-  /// the fault and skips it.
-  /// Compiles a LATERAL derived table's `body` against the PRECEDING FROM
-  /// `scope`, discovering its correlation and stashing the pre-compiled plan for
-  /// the per-outer-row apply to re-execute — the FROM-clause analog of a
-  /// correlated subquery's compile pre-pass (`subquery(_:_:_:within:)`).
+  /// the fault and skips it. Compiles a LATERAL derived table's `body` against
+  /// the PRECEDING FROM `scope`, discovering its correlation and stashing the
+  /// pre-compiled plan for the per-outer-row apply to re-execute — the
+  /// FROM-clause analog of a correlated subquery's compile pre-pass
+  /// (`subquery(_:_:_:within:)`).
   ///
   /// The body compiles under a fresh `Outer` frame nested under `scope` (the
   /// FROM relation and the joins BEFORE this one), so a body column naming a
@@ -3185,9 +3194,10 @@ extension Catalog where Self: ~Escapable {
   /// lenient (`validate: false`), as the correlated-subquery pre-pass is — this
   /// pass discovers the shape, and the run's per-row execution faults a REACHED
   /// operand. The plan is recorded under the occurrence's `Subkey` (this
-  /// select's `subscope`, the body query, the `.lateral` role) composed with the
-  /// correlation, the same identity `Plan.apply` looks up through `executed`.
-  /// Returns the occurrence `Subkey` and the discovered correlation.
+  /// select's `subscope`, the body query, the `.lateral` role) composed with
+  /// the correlation, the same identity `Plan.apply` looks up through
+  /// `executed`. Returns the occurrence `Subkey` and the discovered
+  /// correlation.
   ///
   /// A lateral body's SCHEMA + VALIDATION route through the SAME derived-body
   /// machinery a NON-LATERAL derived body uses (`materialise`, `rows: false`),
@@ -3354,11 +3364,11 @@ extension Catalog where Self: ~Escapable {
   /// (the projection, the `filter`, the order column, and each join's keys)
   /// through `ordinal → slot` so the records the operators address are dense
   /// arrays. The combined slot space lays the relations end to end in chain
-  /// order — relation `i`'s referenced ordinals take a contiguous slot run after
-  /// every earlier relation's — matching the merged record (each relation's
-  /// cells concatenated in order). The tree is logical: every scan is a full
-  /// `Scan(_, _, nil)`; the optimiser turns scans into seeks and each product
-  /// into a join.
+  /// order — relation `i`'s referenced ordinals take a contiguous slot run
+  /// after every earlier relation's — matching the merged record (each
+  /// relation's cells concatenated in order). The tree is logical: every scan
+  /// is a full `Scan(_, _, nil)`; the optimiser turns scans into seeks and each
+  /// product into a join.
   ///
   internal borrowing func compile(_ select: Select,
                                   _ context: Context = Context())
@@ -3387,9 +3397,10 @@ extension Catalog where Self: ~Escapable {
     guard let relation = select.from else {
       // A FROM-less select projects expressions over a single row; a `WHERE`,
       // `GROUP BY`, `HAVING`, `ORDER BY`, `OFFSET`/`FETCH`, or `JOIN` has no
-      // relation to apply to. The parser never produces that shape, but a direct
-      // `Select(from: nil, …)` can, so reject it rather than silently ignore the
-      // clause — a scalar projection would drop a `GROUP BY`/`HAVING` otherwise.
+      // relation to apply to. The parser never produces that shape, but a
+      // direct `Select(from: nil, …)` can, so reject it rather than silently
+      // ignore the clause — a scalar projection would drop a `GROUP
+      // BY`/`HAVING` otherwise.
       guard select.joins.isEmpty, select.predicate == nil,
           select.grouping.isEmpty, select.having == nil,
           select.order == nil, select.limit == nil else {
@@ -3425,9 +3436,10 @@ extension Catalog where Self: ~Escapable {
     let from = try resolve(relation, context)
 
     if let limit = select.limit {
-      // The parser yields only non-negative counts (a `-` is its own token), but
-      // a direct `Limit(count:offset:)` may carry negatives the executor's skip
-      // and take would trap on. Reject them as a query error rather than crash.
+      // The parser yields only non-negative counts (a `-` is its own token),
+      // but a direct `Limit(count:offset:)` may carry negatives the executor's
+      // skip and take would trap on. Reject them as a query error rather than
+      // crash.
       guard limit.offset >= 0 else {
         throw .state("2201X", "OFFSET row count must be non-negative")
       }
@@ -3436,8 +3448,8 @@ extension Catalog where Self: ~Escapable {
       }
     }
 
-    // An aggregate query — one with a `GROUP BY`, a `HAVING`, or an aggregate in
-    // its projection — compiles through the grouped path, which places an
+    // An aggregate query — one with a `GROUP BY`, a `HAVING`, or an aggregate
+    // in its projection — compiles through the grouped path, which places an
     // `aggregate` node above the WHERE/join chain and lowers the projection,
     // `HAVING`, and `ORDER BY` against the grouped slot space. A non-aggregate
     // query compiles exactly as before.
@@ -3449,8 +3461,8 @@ extension Catalog where Self: ~Escapable {
       // Compile every nested subquery ONCE for its arity/type, ahead of
       // lowering, into a map the WHERE/projection/ORDER BY lowering reads — and
       // discover each one's CORRELATION against this select's single-relation
-      // scope (`enclosing`). This select's OWN columns correlate outward through
-      // `outer`.
+      // scope (`enclosing`). This select's OWN columns correlate outward
+      // through `outer`.
       let enclosing = Scope([(relation, from.schema)])
       let plans = try subquery(of: select, context, enclosing: enclosing)
       var filter: Filter? = nil
@@ -3519,10 +3531,10 @@ extension Catalog where Self: ~Escapable {
     // A `column = column` conjunct lowers to a `match` hash-join key; any
     // inequality or expression equality lowers to a residual the join filters.
     // The WHERE and ORDER lower against the whole chain, which legitimately
-    // sees every relation.
-    // Each join's PREFIX scope — the FROM relation and joins `0…index`, the
-    // relations available AT that join point, never one joined LATER — the scope
-    // its `ON` lowers against and a subquery in that `ON` correlates against.
+    // sees every relation. Each join's PREFIX scope — the FROM relation and
+    // joins `0…index`, the relations available AT that join point, never one
+    // joined LATER — the scope its `ON` lowers against and a subquery in that
+    // `ON` correlates against.
     let prefixes = select.joins.indices.map { index in
       Scope(Array(relations[0 ... index + 1]))
     }
@@ -3550,8 +3562,9 @@ extension Catalog where Self: ~Escapable {
     // into a map the join ONs, WHERE, projection, and ORDER BY lowering reads —
     // and discover each one's CORRELATION. A join `ON`'s subquery correlates
     // against its PREFIX scope; the WHERE/projection/ORDER against the whole
-    // join `scope`. This select's OWN columns correlate outward through `outer`.
-    // `validate` gates a nested filtered-out derived body's eager type-check.
+    // join `scope`. This select's OWN columns correlate outward through
+    // `outer`. `validate` gates a nested filtered-out derived body's eager
+    // type-check.
     let plans = try subquery(of: select, context, enclosing: scope,
                              prefixes: prefixes)
     var matches = Array<Filter>()
@@ -3599,7 +3612,8 @@ extension Catalog where Self: ~Escapable {
     // The combined referenced ordinals — projection ∪ every match ∪ WHERE ∪
     // order — packed per relation in chain order: relation i's referenced
     // ordinals take a contiguous slot run after every earlier relation's,
-    // building the combined-ordinal → slot map and each relation's leaf ordinals.
+    // building the combined-ordinal → slot map and each relation's leaf
+    // ordinals.
     var references = Set<Int>()
     for term in projection { term.references(into: &references) }
     for match in matches { match.references(into: &references) }
@@ -3607,8 +3621,8 @@ extension Catalog where Self: ~Escapable {
     for key in order { key.term.references(into: &references) }
     // A LATERAL apply reads its correlation's outer ordinals from the left
     // chain's record, so those preceding-relation ordinals must be MATERIALISED
-    // (given a packed slot) even when no clause of THIS select references them —
-    // else the correlation's remap through `slot` finds no slot for the outer
+    // (given a packed slot) even when no clause of THIS select references them
+    // — else the correlation's remap through `slot` finds no slot for the outer
     // column its body names.
     for lateral in laterals {
       references.formUnion(lateral?.correlation.slots ?? [])

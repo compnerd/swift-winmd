@@ -4,15 +4,15 @@
 /// A relation's name-resolution surface, lifted off the live data source.
 ///
 /// Compilation resolves a column name to an ordinal, classifies a projection,
-/// and lowers a predicate using only a relation's `width`, its `extent`, and its
-/// name → ordinal map — never its `bound` seekability or its `cursor`, which the
-/// optimiser and executor re-read from the live source by name. A `Schema` is
-/// that escapable resolution surface, pure data: a base `Table` projects to one
-/// (its real `names` below `width`, its `virtuals` at and past it), and a
-/// compiled `View` projects to one too (its `columns` in projection order, no
-/// virtual column). Lifting resolution onto a `Schema` lets a join resolve a
-/// base table against a view uniformly — the two live sources need not share a
-/// type, only a schema.
+/// and lowers a predicate using only a relation's `width`, its `extent`, and
+/// its name → ordinal map — never its `bound` seekability or its `cursor`,
+/// which the optimiser and executor re-read from the live source by name. A
+/// `Schema` is that escapable resolution surface, pure data: a base `Table`
+/// projects to one (its real `names` below `width`, its `virtuals` at and past
+/// it), and a compiled `View` projects to one too (its `columns` in projection
+/// order, no virtual column). Lifting resolution onto a `Schema` lets a join
+/// resolve a base table against a view uniformly — the two live sources need
+/// not share a type, only a schema.
 internal struct Schema {
   /// The real columns — the extent of a `SELECT *` projection.
   internal let width: Int
@@ -47,9 +47,9 @@ internal struct Schema {
   ///
   /// A real column resolves against `names` to an ordinal `< width`; a virtual
   /// column resolves against `virtuals` to its ordinal `width + i`. The real
-  /// lookup wins, so a relation never hides a real column behind a virtual name.
-  /// The match is case-insensitive, as a metadata source's column names are
-  /// (`TypeName`, `Id`); a schema never carries two names differing only in
+  /// lookup wins, so a relation never hides a real column behind a virtual
+  /// name. The match is case-insensitive, as a metadata source's column names
+  /// are (`TypeName`, `Id`); a schema never carries two names differing only in
   /// case, so the match stays unambiguous.
   internal func ordinal(of name: String) -> Int? {
     let folded = name.lowercased()

@@ -104,8 +104,8 @@ internal struct Parser: ~Escapable {
   /// Parses a complete statement and asserts the input is exhausted.
   ///
   /// A leading `CREATE` selects the `CREATE VIEW`/`CREATE FUNCTION` form; a
-  /// leading `WITH` the common-table-expression form; anything else is a `query`
-  /// — a `SELECT` or a `UNION` of several.
+  /// leading `WITH` the common-table-expression form; anything else is a
+  /// `query` — a `SELECT` or a `UNION` of several.
   internal mutating func parse() throws(SQLError) -> Statement {
     let statement = switch current?.kind {
     case .create: try create()
@@ -142,8 +142,8 @@ internal struct Parser: ~Escapable {
   /// query ')'`, binding it `recursive` per the enclosing `WITH`.
   ///
   /// An explicit `(c, …)` list names the CTE's columns; absent one, the names
-  /// are inferred from the query's first arm, exactly as a view's are — the same
-  /// arity, naming, and case-insensitive uniqueness rules `columns(_:_:)`
+  /// are inferred from the query's first arm, exactly as a view's are — the
+  /// same arity, naming, and case-insensitive uniqueness rules `columns(_:_:)`
   /// applies.
   private mutating func cte(recursive: Bool) throws(SQLError) -> CTE {
     let name = try identifier()
@@ -176,8 +176,8 @@ internal struct Parser: ~Escapable {
   ///
   /// An explicit list must name exactly one column per projected value when the
   /// first arm's arity is statically known — a `.columns`/`.expressions`
-  /// projection, but not a `SELECT *`, whose width is known only at resolution —
-  /// else `SQLError.columns`. Absent a list, the names are inferred from the
+  /// projection, but not a `SELECT *`, whose width is known only at resolution
+  /// — else `SQLError.columns`. Absent a list, the names are inferred from the
   /// projection (`Projection.names()`). The final names — explicit or inferred
   /// — must be case-insensitively unique, matching `Schema.ordinal(of:)`'s
   /// resolution, or the shadowed column would be unreachable
@@ -240,8 +240,8 @@ internal struct Parser: ~Escapable {
   }
 
   /// Parses a `CREATE` statement — `CREATE VIEW …` or `CREATE FUNCTION …` (the
-  /// leading `CREATE` is the next token). The keyword after `CREATE` selects the
-  /// form.
+  /// leading `CREATE` is the next token). The keyword after `CREATE` selects
+  /// the form.
   private mutating func create() throws(SQLError) -> Statement {
     try expect(.create)
     if try match(.function) {
@@ -268,13 +268,13 @@ internal struct Parser: ~Escapable {
                                   columns: columns(explicit, query)))
   }
 
-  /// Parses the `FUNCTION` tail — `identifier '(' [param (, param)*] ')' RETURNS
-  /// type AS expression` (the `CREATE FUNCTION` is already consumed), each
-  /// `param` an `identifier type`.
+  /// Parses the `FUNCTION` tail — `identifier '(' [param (, param)*] ')'
+  /// RETURNS type AS expression` (the `CREATE FUNCTION` is already consumed),
+  /// each `param` an `identifier type`.
   ///
-  /// The parameter list is parenthesised and may be empty (`f() RETURNS …`). The
-  /// body is a single scalar `expression` over the declared parameters, so a
-  /// call binds its arguments to the parameter names and evaluates it. The
+  /// The parameter list is parenthesised and may be empty (`f() RETURNS …`).
+  /// The body is a single scalar `expression` over the declared parameters, so
+  /// a call binds its arguments to the parameter names and evaluates it. The
   /// parameter names must be case-insensitively unique — the body resolves a
   /// reference against them, and a duplicate would make the shadowed one
   /// unreachable — else `SQLError.duplicate`.
@@ -337,8 +337,8 @@ internal struct Parser: ~Escapable {
   }
 
   /// The number of values `projection` projects, or `nil` when it is not
-  /// statically known — a `SELECT *`, whose width depends on the relations it is
-  /// resolved against. A `.columns` or `.expressions` projection has a fixed
+  /// statically known — a `SELECT *`, whose width depends on the relations it
+  /// is resolved against. A `.columns` or `.expressions` projection has a fixed
   /// item count.
   private func arity(_ projection: Projection) -> Int? {
     switch projection {
@@ -353,9 +353,10 @@ internal struct Parser: ~Escapable {
 
   /// Parses a `SELECT` query.
   ///
-  /// `FROM` is optional: a FROM-less `SELECT <expr-list>` projects over a single
-  /// empty row (the standard way to compute a scalar, `SELECT 1 + 1`), and so
-  /// admits no relation, joins, `WHERE`, `ORDER BY`, or `LIMIT` to follow.
+  /// `FROM` is optional: a FROM-less `SELECT <expr-list>` projects over a
+  /// single empty row (the standard way to compute a scalar, `SELECT 1 + 1`),
+  /// and so admits no relation, joins, `WHERE`, `ORDER BY`, or `LIMIT` to
+  /// follow.
   private mutating func select() throws(SQLError) -> Select {
     try expect(.select)
     // An optional set quantifier: `DISTINCT` deduplicates the result rows;
@@ -423,7 +424,8 @@ internal struct Parser: ~Escapable {
   /// An optional leading `LATERAL` marks the derived table lateral (ISO
   /// `LATERAL (query)`): its body may reference the PRECEDING FROM items, so it
   /// re-evaluates per their rows. `LATERAL` introduces a derived table alone —
-  /// a `(SELECT …)` must follow — so a `LATERAL` before a named relation faults.
+  /// a `(SELECT …)` must follow — so a `LATERAL` before a named relation
+  /// faults.
   ///
   /// Derived table's alias is REQUIRED (ISO): `FROM (SELECT …)` with no `AS t`
   /// faults. A named relation's alias is optional and may be introduced by `AS`
@@ -477,8 +479,8 @@ internal struct Parser: ~Escapable {
   }
 
   /// Whether `kind` begins an identifier — a bare or a delimited name — the
-  /// token an optional (`AS`-less) relation alias may start with, so a following
-  /// keyword or the end of input is not mistaken for an alias.
+  /// token an optional (`AS`-less) relation alias may start with, so a
+  /// following keyword or the end of input is not mistaken for an alias.
   private func isName(_ kind: Token.Kind?) -> Bool {
     switch kind {
     case .identifier, .quoted: true
@@ -619,10 +621,10 @@ internal struct Parser: ~Escapable {
   /// integer, or decimal literal, a function call (`name(args)`), or a bare
   /// (possibly-qualified) column.
   ///
-  /// Parentheses override the precedence the cascade encodes. A function call is
-  /// an identifier immediately followed by `(`; an identifier not so followed is
-  /// a column. The arguments are a comma-separated list of expressions, possibly
-  /// empty.
+  /// Parentheses override the precedence the cascade encodes. A function call
+  /// is an identifier immediately followed by `(`; an identifier not so
+  /// followed is a column. The arguments are a comma-separated list of
+  /// expressions, possibly empty.
   private mutating func factor() throws(SQLError) -> Expression {
     if try match(.lparen) {
       // ONE token of lookahead after `(` disambiguates a SCALAR SUBQUERY from a
@@ -666,8 +668,9 @@ internal struct Parser: ~Escapable {
 
     let ident = try name()
     guard try match(.lparen) else {
-      // A delimited name is a verbatim column (a dot in it is part of the name);
-      // a bare one may be a qualified reference that `Column(_:)` splits.
+      // A delimited name is a verbatim column (a dot in it is part of the
+      // name); a bare one may be a qualified reference that `Column(_:)`
+      // splits.
       return .column(ident.quoted ? Column(name: ident.text)
                                   : Column(ident.text))
     }
@@ -794,15 +797,15 @@ internal struct Parser: ~Escapable {
     return predicate
   }
 
-  /// Parses a `CASE` expression (the `CASE` is the next token) into the searched
-  /// `Expression.case`, admitting both ISO forms.
+  /// Parses a `CASE` expression (the `CASE` is the next token) into the
+  /// searched `Expression.case`, admitting both ISO forms.
   ///
   /// A `WHEN` directly after `CASE` is the SEARCHED form — each `WHEN` a full
   /// predicate. An expression after `CASE` is the SIMPLE form's operand — each
-  /// `WHEN value` is normalised to the equality `operand = value`, so both forms
-  /// share one searched AST. At least one `WHEN` is required; an optional `ELSE`
-  /// gives the no-branch result (absent, the result is `NULL`); the whole is
-  /// closed by `END`.
+  /// `WHEN value` is normalised to the equality `operand = value`, so both
+  /// forms share one searched AST. At least one `WHEN` is required; an optional
+  /// `ELSE` gives the no-branch result (absent, the result is `NULL`); the
+  /// whole is closed by `END`.
   private mutating func conditional() throws(SQLError) -> Expression {
     try expect(.case)
     let operand: Expression? = current?.kind == .when ? nil
@@ -991,11 +994,11 @@ internal struct Parser: ~Escapable {
 
   /// Parses a parenthesised predicate or a comparison.
   ///
-  /// A leading `(` is ambiguous: it opens either a parenthesised predicate
-  /// (`(a = 1 AND b = 2)`) or the parenthesised left operand of a comparison
-  /// (`(Age + 1) = 26`, where `factor` consumes the `(expression)`). The
-  /// comparison is tried first; if it fails, the group was a predicate, so the
-  /// parser rewinds to the saved lexer and lookahead token and parses it as one.
+  /// A leading `(` is ambiguous: it opens either a parenthesised predicate (`(a
+  /// = 1 AND b = 2)`) or the parenthesised left operand of a comparison (`(Age
+  /// + 1) = 26`, where `factor` consumes the `(expression)`). The comparison is
+  /// tried first; if it fails, the group was a predicate, so the parser rewinds
+  /// to the saved lexer and lookahead token and parses it as one.
   private mutating func primary() throws(SQLError) -> Predicate {
     guard current?.kind == .lparen else {
       return try comparison()
@@ -1317,11 +1320,11 @@ internal struct Parser: ~Escapable {
   ///
   /// The two ISO clauses are independent: an `OFFSET` without a `FETCH` skips
   /// rows with no cap (`count` `nil`), a `FETCH` without an `OFFSET` caps from
-  /// the start. `ROW` and `ROWS` are interchangeable, as are `FIRST` and `NEXT`,
-  /// and the `FETCH` count defaults to `1` when omitted (`FETCH FIRST ROW
-  /// ONLY`). Both counts are non-negative integer literals; a bare or negative
-  /// spelling is not one (the lexer scans a `-` as its own token), so it faults
-  /// as any other misplaced token would.
+  /// the start. `ROW` and `ROWS` are interchangeable, as are `FIRST` and
+  /// `NEXT`, and the `FETCH` count defaults to `1` when omitted (`FETCH FIRST
+  /// ROW ONLY`). Both counts are non-negative integer literals; a bare or
+  /// negative spelling is not one (the lexer scans a `-` as its own token), so
+  /// it faults as any other misplaced token would.
   private mutating func rowLimit() throws(SQLError) -> Limit? {
     let offset: Int
     if try match(.offset) {
@@ -1358,11 +1361,12 @@ internal struct Parser: ~Escapable {
     return value
   }
 
-  /// Consumes an identifier — bare or delimited — as its text and whether it was
-  /// delimited (double-quoted). A delimited name is verbatim, so a caller
+  /// Consumes an identifier — bare or delimited — as its text and whether it
+  /// was delimited (double-quoted). A delimited name is verbatim, so a caller
   /// building a column keeps a dot in it as part of the name rather than a
   /// qualifier.
-  private mutating func name() throws(SQLError) -> (text: String, quoted: Bool) {
+  private mutating func name()
+      throws(SQLError) -> (text: String, quoted: Bool) {
     let token = try advance(expecting: "an identifier")
     switch token.kind {
     case let .identifier(text):
@@ -1376,8 +1380,8 @@ internal struct Parser: ~Escapable {
   }
 
   /// Consumes an identifier — bare or delimited — and returns its name. Callers
-  /// that name a relation, alias, or CTE take the text alone; the delimited flag
-  /// matters only where a dot could be a qualifier (`column`).
+  /// that name a relation, alias, or CTE take the text alone; the delimited
+  /// flag matters only where a dot could be a qualifier (`column`).
   private mutating func identifier() throws(SQLError) -> String {
     try name().text
   }
@@ -1385,9 +1389,9 @@ internal struct Parser: ~Escapable {
   /// Consumes an identifier and parses it as a column reference.
   ///
   /// A bare identifier's qualifying dot is part of the one token the lexer
-  /// scans, so `Column(_:)` splits it (`t.Name` → qualifier `t`, name `Name`). A
-  /// delimited identifier is verbatim, so a dot in it belongs to an unqualified
-  /// name (`"a.b"` is the column `a.b`, not `a`.`b`).
+  /// scans, so `Column(_:)` splits it (`t.Name` → qualifier `t`, name `Name`).
+  /// A delimited identifier is verbatim, so a dot in it belongs to an
+  /// unqualified name (`"a.b"` is the column `a.b`, not `a`.`b`).
   private mutating func column() throws(SQLError) -> Column {
     let ident = try name()
     return ident.quoted ? Column(name: ident.text) : Column(ident.text)

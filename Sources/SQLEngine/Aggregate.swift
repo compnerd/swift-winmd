@@ -6,16 +6,16 @@
 ///
 /// An aggregate query groups its filtered rows by the `GROUP BY` columns (or
 /// treats the whole result as one group when there is none) and folds a
-/// `COUNT`/`SUM`/`MIN`/`MAX`/`AVG` accumulator over every row of a group. Unlike
-/// a scalar function — evaluated per row through the `Routines` — an aggregate
-/// accumulates over a group, so it is a separate mechanism the engine
+/// `COUNT`/`SUM`/`MIN`/`MAX`/`AVG` accumulator over every row of a group.
+/// Unlike a scalar function — evaluated per row through the `Routines` — an
+/// aggregate accumulates over a group, so it is a separate mechanism the engine
 /// recognises by name at parse time and lowers to an `Aggregation` here, never
 /// routed through `Function.swift`.
 ///
 /// The `Aggregate` node yields one grouped `Record` per group whose slots are
-/// the group-key values (slots `0 ..< keys.count`, in key order) followed by the
-/// aggregate results (slot `keys.count + j` is aggregate `j`), the slot space
-/// the projection, the `HAVING`, and the `ORDER BY` are lowered against.
+/// the group-key values (slots `0 ..< keys.count`, in key order) followed by
+/// the aggregate results (slot `keys.count + j` is aggregate `j`), the slot
+/// space the projection, the `HAVING`, and the `ORDER BY` are lowered against.
 
 /// A lowered aggregate — the ordinal-addressed form of an AST `Expression`'s
 /// `.aggregate`, ready for the executor to fold over a group.
@@ -23,9 +23,9 @@
 /// The `function` is the standard aggregate; `argument` is the term evaluated
 /// per source record whose non-NULL values the aggregate folds, or `nil` for
 /// `COUNT(*)`, which counts rows without reading any value. The argument is in
-/// the SOURCE's slot space (the WHERE/join chain below the aggregate), evaluated
-/// against each source record before the fold; the result lands in the grouped
-/// record.
+/// the SOURCE's slot space (the WHERE/join chain below the aggregate),
+/// evaluated against each source record before the fold; the result lands in
+/// the grouped record.
 ///
 /// Two aggregations are EQUAL when they fold the same function over the same
 /// resolved argument term — the RESOLVED form column qualification has already
@@ -88,15 +88,16 @@ extension Aggregation {
 /// A running aggregate over the rows of a group — the fold's state.
 ///
 /// One accumulator per aggregate per group folds each source record's argument
-/// value in, then `value` reads off the result. `COUNT` counts rows (or non-NULL
-/// values); `SUM`/`AVG` total the non-NULL numeric values — an all-integer
-/// total stays an exact integer, any double operand widens the total to an
-/// approximate double, and the widen/overflow choice is deferred to the end so
-/// the result does not depend on row order — `AVG` then dividing by the non-NULL
-/// count as real division to an approximate-numeric double; `MIN`/`MAX` keep
-/// the least/greatest non-NULL value by the engine's typed `less`. Every
-/// aggregate but `COUNT` IGNORES NULLs — a NULL argument does not fold — and an
-/// empty or all-NULL group yields `COUNT` `0` and the others NULL.
+/// value in, then `value` reads off the result. `COUNT` counts rows (or
+/// non-NULL values); `SUM`/`AVG` total the non-NULL numeric values — an
+/// all-integer total stays an exact integer, any double operand widens the
+/// total to an approximate double, and the widen/overflow choice is deferred to
+/// the end so the result does not depend on row order — `AVG` then dividing by
+/// the non-NULL count as real division to an approximate-numeric double;
+/// `MIN`/`MAX` keep the least/greatest non-NULL value by the engine's typed
+/// `less`. Every aggregate but `COUNT` IGNORES NULLs — a NULL argument does not
+/// fold — and an empty or all-NULL group yields `COUNT` `0` and the others
+/// NULL.
 private struct Accumulator {
   private let function: Aggregate
   // Whether to fold each DISTINCT non-NULL value once — the ISO `DISTINCT` set
@@ -113,8 +114,9 @@ private struct Accumulator {
   // SUM/AVG numeric state, kept independent of row order: an exact WIDE integer
   // total (`Int128`, range-checked once at the end) for the all-integer case,
   // and a parallel double total used once any operand is a double. A wide total
-  // means a transient prefix overflow cannot latch a fault a later value undoes,
-  // and the widen decision is deferred so a double anywhere widens the group.
+  // means a transient prefix overflow cannot latch a fault a later value
+  // undoes, and the widen decision is deferred so a double anywhere widens the
+  // group.
   private var integer: Int128 = 0
   private var total = 0.0
   private var widened = false
@@ -164,9 +166,10 @@ private struct Accumulator {
     switch function {
     case .count, .min, .max:
       if function != .count {
-        // Keep the least (`MIN`) or greatest (`MAX`) value by the engine's typed
-        // comparison; the first non-NULL value seeds it, and a later value of an
-        // unorderable kind is a type error, not an order-dependent keep.
+        // Keep the least (`MIN`) or greatest (`MAX`) value by the engine's
+        // typed comparison; the first non-NULL value seeds it, and a later
+        // value of an unorderable kind is a type error, not an order-dependent
+        // keep.
         extreme = if let current = extreme {
           try keep(value, over: current)
         } else {
@@ -196,9 +199,9 @@ private struct Accumulator {
   /// the lesser for `MIN`, the greater for `MAX`, by the engine's typed `less`.
   ///
   /// - Throws: `SQLError.operand` if the two kinds have no ordering (a TEXT and
-  ///   an INTEGER, say). `less` orders neither way for such a pair, so keeping
-  ///   the first-seen value would make MIN/MAX depend on row order; a type error
-  ///   is deterministic instead.
+  /// an INTEGER, say). `less` orders neither way for such a pair, so keeping
+  /// the first-seen value would make MIN/MAX depend on row order; a type error
+  /// is deterministic instead.
   private func keep(_ candidate: Value, over extreme: Value)
       throws(SQLError) -> Value {
     guard comparable(candidate, extreme) else {
@@ -281,16 +284,16 @@ private func comparable(_ a: Value, _ b: Value) -> Bool {
 /// Groups `records` by the `keys` terms and folds each `aggregates` accumulator
 /// over every record of a group, yielding one grouped record per group.
 ///
-/// A grouped record's slots are the key values (slots `0 ..< keys.count`, in key
-/// order) followed by the aggregate results (slot `keys.count + j` is
+/// A grouped record's slots are the key values (slots `0 ..< keys.count`, in
+/// key order) followed by the aggregate results (slot `keys.count + j` is
 /// `aggregates[j]`). Groups are keyed on the EXACT canonical form of the
 /// evaluated key values (`canonical` — so `1` and `1.0` fall in one group, the
-/// equality UNION and predicates use), and each group emits its FIRST-appearance
-/// original key values, in first-appearance order, so a later `ORDER BY`
-/// re-sorts deterministically. With no `keys` the whole input
-/// is ONE group — the degenerate whole-result aggregation (`SELECT COUNT(*) FROM
-/// T`) — which yields a single grouped record even over an empty input (`COUNT`
-/// `0`, the others NULL), the standard SQL rule.
+/// equality UNION and predicates use), and each group emits its
+/// FIRST-appearance original key values, in first-appearance order, so a later
+/// `ORDER BY` re-sorts deterministically. With no `keys` the whole input is ONE
+/// group — the degenerate whole-result aggregation (`SELECT COUNT(*) FROM T`) —
+/// which yields a single grouped record even over an empty input (`COUNT` `0`,
+/// the others NULL), the standard SQL rule.
 ///
 /// The `bindings` thread through both the key and the argument evaluation — the
 /// same bindings the projection and the `WHERE` filter resolve against — so a

@@ -228,7 +228,7 @@ private struct Accumulator {
       case .count:
         return .integer(count)
       case .sum:
-        guard count != 0 else { return .null }
+        if count == 0 { return .null }
         if widened {
           guard total.isFinite else {
             throw .magnitude("double result is not finite")
@@ -246,7 +246,7 @@ private struct Accumulator {
         // is NULL. It divides the WIDE total (the exact Int128, or the double
         // total when a double widened it), so an all-integer sum outside Int
         // still averages rather than faulting like SUM's Int-bounded result.
-        guard count != 0 else { return .null }
+        if count == 0 { return .null }
         let sum: Double = widened ? total : Double(integer)
         let average = sum / Double(count)
         guard average.isFinite else {

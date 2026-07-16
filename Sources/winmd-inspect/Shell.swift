@@ -63,7 +63,7 @@ internal struct Schema: Metacommand {
   }
 
   internal func execute(against shell: inout Shell) throws {
-    guard !query.isEmpty else { throw Shell.MetaError.unknown(Schema.spelling) }
+    if query.isEmpty { throw Shell.MetaError.unknown(Schema.spelling) }
     // Route through the statement-level, CTE-aware derive with `validate:
     // true`: it types a `SELECT`/`UNION` AND a `WITH` (the CTE scope kept in
     // place) and faults a `CREATE VIEW`, so `.schema` describes every runnable
@@ -113,7 +113,7 @@ internal struct Read: Metacommand {
   }
 
   internal func execute(against shell: inout Shell) throws {
-    guard !path.isEmpty else { throw Shell.MetaError.unknown(Read.spelling) }
+    if path.isEmpty { throw Shell.MetaError.unknown(Read.spelling) }
     try shell.read(path)
   }
 }
@@ -182,7 +182,7 @@ internal struct Bind: Metacommand {
   }
 
   internal func execute(against shell: inout Shell) throws {
-    guard !name.isEmpty else { throw Shell.MetaError.unknown(Bind.spelling) }
+    if name.isEmpty { throw Shell.MetaError.unknown(Bind.spelling) }
     if let value {
       shell.bindings[name] = value
       note("bound :\(name) = \(value.display)")
@@ -216,7 +216,7 @@ internal struct Render: Metacommand {
   }
 
   internal func execute(against shell: inout Shell) throws {
-    guard !interface.isEmpty, !template.isEmpty else {
+    if interface.isEmpty || template.isEmpty {
       throw Shell.MetaError.unknown(Render.spelling)
     }
     print(try shell.render(interface, template: template))
@@ -256,7 +256,7 @@ internal struct Template: Metacommand {
   }
 
   internal func execute(against shell: inout Shell) throws {
-    guard !name.isEmpty else { throw Shell.MetaError.unknown(Template.spelling) }
+    if name.isEmpty { throw Shell.MetaError.unknown(Template.spelling) }
     shell.templates[name] = body
     note("defined template \(name)")
   }
@@ -674,7 +674,7 @@ internal struct Shell: ~Escapable {
   private borrowing func declarations(of id: Value, _ routines: Routines,
                                       search: Array<String>) throws
       -> Array<String> {
-    guard session.storage.opened("GenericParam") != nil else { return [] }
+    if session.storage.opened("GenericParam") == nil { return [] }
     let clause =
         try Shell.select(Shell.query(named: "generics", search: search))
     let declared = try session.run(clause, routines, bindings: ["parent": id])

@@ -83,7 +83,7 @@ internal struct ScopedRelations: Hashable, Sendable,
   /// base.
   internal func pushing(_ derivations: Dictionary<String, RelationInstance>)
       -> ScopedRelations {
-    guard !derivations.isEmpty else { return self }
+    if derivations.isEmpty { return self }
     if layers.last == derivations { return self }
     var copy = self
     copy.layers.append(derivations)

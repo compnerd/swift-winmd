@@ -871,7 +871,7 @@ extension WinMD.Storage {
     }
     let position = param[sequence]
     let origin = owner(of: parameter - 1, link)
-    guard origin != 0 else { return nil }
+    if origin == 0 { return nil }
     let methods = WinMD.Cursor(copy self, link.parent)
     guard let method = methods[origin - 1],
         let row = Row<Metadata.Tables.MethodDef>(method),

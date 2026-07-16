@@ -164,14 +164,14 @@ public struct Tuple: ~Escapable {
     switch type(of: column) {
     case let .index(.simple(schema)):
       let index = self[column]
-      guard index != 0 else { return nil }
+      if index == 0 { return nil }
       guard let tuple = try storage.tuple(index - 1, of: schema) else {
         throw .BadImageFormat
       }
       return tuple
     case let .index(.coded(coded)):
       let value: any CodedIndex = coded.init(rawValue: self[column])
-      guard value.row != 0 else { return nil }
+      if value.row == 0 { return nil }
       guard value.tag < coded.tables.count,
           let schema = coded.tables[value.tag]
       else { throw .BadImageFormat }

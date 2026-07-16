@@ -970,7 +970,7 @@ extension Catalog where Self: ~Escapable {
       // re-enter this view forever, so break the cycle and fall back to the
       // declared schema (every type the `.integer` default). `try?` cannot
       // catch this — the recursion overflows the stack rather than throwing.
-      guard !context.visited.contains(name.lowercased()) else { return base }
+      if context.visited.contains(name.lowercased()) { return base }
       // Type-check the body's REACHABLE operands and calls across every arm and
       // clause — `compile` cannot check a routine EXISTS, the first-arm resolve
       // below sees only the first projection, and the outer query's walk does

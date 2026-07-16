@@ -726,7 +726,7 @@ extension Plan {
     // non-deterministic routine). Materialise the sort-referenced outputs once
     // below the sort, so the order reflects the returned values whenever a key
     // does — over the FILTERED `plan`, so a HAVING/WHERE above governs.
-    guard !order.contains(where: { $0.output }) else {
+    if order.contains(where: { $0.output }) {
       return plan.materialised(distinct: distinct, projection: projection,
                                order: order, limit: limit)
     }
@@ -3275,7 +3275,7 @@ extension Catalog where Self: ~Escapable {
       // stack overflow, not an `SQLError`). `visited` names the views already
       // being resolved down this chain; re-encountering one is a cyclic
       // definition, reported as `.recursion` rather than hung.
-      guard !context.visited.contains(name.lowercased()) else {
+      if context.visited.contains(name.lowercased()) {
         throw .recursion(name)
       }
       // The view body compiles OUTSIDE the caller's statement CTEs, but it may
@@ -3418,7 +3418,7 @@ extension Catalog where Self: ~Escapable {
     // A LATERAL first FROM item has no PRECEDING relation to correlate against,
     // so it is meaningless (and ISO forbids it) — fault rather than resolve a
     // lateral body against nothing.
-    guard !relation.lateral else {
+    if relation.lateral {
       throw .state("42601",
                    "a LATERAL derived table needs a preceding FROM item")
     }

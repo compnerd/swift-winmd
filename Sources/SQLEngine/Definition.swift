@@ -217,7 +217,7 @@ extension Catalog where Self: ~Escapable {
     }
     var derivations = Array<(String, Query)>()
     query.collect(derived: &derivations)
-    guard !derivations.isEmpty else { return context.scoping(augmented) }
+    if derivations.isEmpty { return context.scoping(augmented) }
     // A derived table's alias sharing a RANGE NAME with another FROM/JOIN item
     // in THIS SELECT's own scope collides: the alias-keyed overlay holds one
     // binding under that name, so binding the derived rows would SHADOW the

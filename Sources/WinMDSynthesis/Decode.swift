@@ -85,7 +85,7 @@ public struct Dialect: Sendable {
   /// `` `in` `` — matching the escaped spelling a `VAR` use of the same
   /// parameter produces, so declaration and use agree.
   public func generics(_ names: Array<String>) -> String? {
-    guard !names.isEmpty else { return nil }
+    if names.isEmpty { return nil }
     return generic.open + names.map(escape).joined(separator: ", ")
         + generic.close
   }
@@ -466,7 +466,7 @@ extension SignatureType {
     // An unresolved base (e.g. a TypeSpec with no identity) decodes to the
     // opaque pointer; a generic over it is meaningless, so degrade to that
     // opaque pointer rather than emit `UnsafeMutableRawPointer<…>`.
-    guard base != dialect.opaque else { return base }
+    if base == dialect.opaque { return base }
     // Strip the CLR arity suffix, THEN escape the base identifier: the full
     // `Foo``1` never matches a keyword, so a keyword base (`protocol``1`) must
     // be escaped after the strip, not before, to spell `` `protocol`<…> ``.

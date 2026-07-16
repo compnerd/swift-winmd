@@ -90,7 +90,7 @@ internal struct Language: Sendable {
     var wellKnown = Dictionary<String, String>()
     for line in text.split(whereSeparator: \.isNewline) {
       let trimmed = String(line).trimmed
-      guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { continue }
+      if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
       let key = trimmed.prefix { !$0.isWhitespace }
       let value = trimmed[key.endIndex...].trimmed
       switch key {

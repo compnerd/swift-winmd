@@ -80,7 +80,7 @@ public struct TablesStream: ~Escapable {
     var offset = base + 24 + Valid.nonzeroBitCount * MemoryLayout<UInt32>.size
 
     for schema in kRegisteredTables {
-      guard Valid & (1 << schema.number) != 0 else { continue }
+      if Valid & (1 << schema.number) == 0 { continue }
 
       let records = catalog.rows(of: schema.number)
 

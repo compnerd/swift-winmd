@@ -59,7 +59,7 @@ package struct Storage: ~Escapable {
     // `tables` is dense and ordered by table number, so a present table's
     // slot is the number of present tables below it: the population count of
     // the lower bits of `Valid` (the same slot the row counts are read from).
-    guard valid & (1 << Schema.number) != 0 else {
+    if valid & (1 << Schema.number) == 0 {
       throw .TableNotFound
     }
     let slot = (valid & ((1 << Schema.number) - 1)).nonzeroBitCount
@@ -78,7 +78,7 @@ package struct Storage: ~Escapable {
   @_lifetime(copy self)
   internal func tuple(_ row: Int, of schema: TableSchema.Type)
       throws(WinMDError) -> Tuple? {
-    guard valid & (1 << schema.number) != 0 else { return nil }
+    if valid & (1 << schema.number) == 0 { return nil }
     let slot = (valid & ((1 << schema.number) - 1)).nonzeroBitCount
     let table = tables[slot]
     guard row >= 0, row < Int(table.rows) else { return nil }
@@ -94,7 +94,7 @@ package struct Storage: ~Escapable {
   /// signature names against a borrowed `Storage` rather than a `Database`.
   @_lifetime(copy self)
   package func resolve(_ reference: TypeDefOrRef) throws(WinMDError) -> Tuple? {
-    guard reference.row != 0 else { return nil }
+    if reference.row == 0 { return nil }
     guard reference.tag < TypeDefOrRef.tables.count,
         let schema = TypeDefOrRef.tables[reference.tag] else {
       throw .BadImageFormat
@@ -117,7 +117,7 @@ package struct Storage: ~Escapable {
                             in schema: TableSchema.Type,
                             by column: Int)
       throws(WinMDError) -> Filter<Cursor> {
-    guard valid & (1 << schema.number) != 0 else {
+    if valid & (1 << schema.number) == 0 {
       throw .TableNotFound
     }
     let slot = (valid & ((1 << schema.number) - 1)).nonzeroBitCount

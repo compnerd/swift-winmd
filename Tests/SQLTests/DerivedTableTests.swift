@@ -1770,6 +1770,84 @@ struct DerivedTableCyclicViewTests {
   }
 }
 
+// MARK: - Cyclic-view guard on a PLAIN FROM (no derived table)
+
+/// A catalog with cyclic views whose bodies name each other (and one that names
+/// itself) through a PLAIN `FROM`, not a derived table. `A` reads `B` and `B`
+/// reads `A`; `Self` reads `Self`. The `Loop` fixture above cycles through a
+/// derived table (which re-enters the guard via `augment`/`materialise`); this
+/// fixture cycles through the direct `resolve(relation:)` view path, so it
+/// covers the plain-`FROM` guard the derived-table one does not exercise. A
+/// non-cyclic `Src` over the base `S` resolves as any other view.
+private func cyclicViews() throws -> FixtureCatalog {
+  try Catalog {
+    Relation("S", ["V": .integer]) {
+      Row(10)
+      Row(20)
+      Row(30)
+    }
+    // Two views whose bodies read each other — a 2-view cycle.
+    try View("A", "SELECT * FROM B", as: ["V"])
+    try View("B", "SELECT * FROM A", as: ["V"])
+    // A view whose body reads itself — a self-cycle.
+    try View("Self", "SELECT * FROM Self", as: ["V"])
+    // A well-formed control view.
+    try View("Src", "SELECT V FROM S", as: ["V"])
+  }
+}
+
+struct CyclicViewPlainFromTests {
+  @Test func `a two-view cycle faults recursion at run`() throws {
+    // `run` compiles `SELECT * FROM A` before it executes; `resolve` enters
+    // `A`'s body, whose `FROM B` enters `B`'s body, whose `FROM A` re-enters a
+    // visited view and faults `.recursion` — never a stack overflow. The fault
+    // is raised at COMPILE, so no row ever materialises.
+    try cyclicViews().expect("SELECT * FROM A", fails: .recursion("A"))
+  }
+
+  @Test func `a two-view cycle faults recursion at columns`() throws {
+    // Schema ↔ run parity: `columns(of:)` compiles the same cyclic chain, so it
+    // raises the same `.recursion` — never a hang — as the run does.
+    let query = try parse(query: "SELECT * FROM A")
+    let raised: SQLError?
+    do {
+      _ = try cyclicViews().columns(of: query, validate: true)
+      raised = nil
+    } catch let fault as SQLError {
+      raised = fault
+    }
+    #expect(raised == .recursion("A"))
+  }
+
+  @Test func `a self-referential view faults recursion at run`() throws {
+    // A view whose body reads itself through a plain `FROM` re-enters the
+    // visited guard on its own name at compile and faults `.recursion` rather
+    // than recursing to a stack overflow.
+    try cyclicViews().expect("SELECT * FROM Self", fails: .recursion("Self"))
+  }
+
+  @Test func `a self-referential view faults recursion at columns`() throws {
+    // Schema ↔ run parity for the self-cycle: `columns(of:)` raises the same
+    // `.recursion` the run does.
+    let query = try parse(query: "SELECT * FROM Self")
+    let raised: SQLError?
+    do {
+      _ = try cyclicViews().columns(of: query, validate: true)
+      raised = nil
+    } catch let fault as SQLError {
+      raised = fault
+    }
+    #expect(raised == .recursion("Self"))
+  }
+
+  @Test func `a non-cyclic view resolves`() throws {
+    // Control: a well-formed view beside the cyclic ones still resolves and
+    // runs — the guard fires only on a genuine cycle.
+    try cyclicViews().expect("SELECT V FROM Src ORDER BY V",
+                             yields: [[10], [20], [30]])
+  }
+}
+
 // MARK: - An enclosing derived alias is invisible to a nested subquery's FROM
 
 /// A derived-table alias in the outer SELECT's FROM is SELECT-scoped: it names

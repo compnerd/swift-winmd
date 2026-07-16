@@ -4499,7 +4499,7 @@ struct EngineRecursiveTests {
         )
         SELECT n FROM c
         """)
-    #expect(throws: SQLError.unsupported(
+    #expect(throws: SQLError.state("0A000",
         "recursive WITH references the CTE outside its final UNION arm")) {
       _ = try seed().run(query, counting())
     }
@@ -4520,7 +4520,7 @@ struct EngineRecursiveTests {
         )
         SELECT Id FROM Parent
         """)
-    #expect(throws: SQLError.unsupported(
+    #expect(throws: SQLError.state("0A000",
         "recursive WITH references the CTE outside its final UNION arm")) {
       _ = try seed().run(query, counting())
     }

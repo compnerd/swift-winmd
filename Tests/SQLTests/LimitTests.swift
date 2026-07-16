@@ -166,17 +166,17 @@ struct LimitTests {
       Issue.record("expected a single SELECT")
       return
     }
-    let fault =
-        SQLError.unsupported("OFFSET and FETCH row counts must be non-negative")
     let catalog = try people()
     let negativeOffset = Select(projection: base.projection, from: base.from,
                                 limit: Limit(count: 1, offset: -1))
-    #expect(throws: fault) {
+    #expect(throws:
+        SQLError.state("2201X", "OFFSET row count must be non-negative")) {
       try catalog.run(.select(negativeOffset))
     }
     let negativeCount = Select(projection: base.projection, from: base.from,
                                limit: Limit(count: -1))
-    #expect(throws: fault) {
+    #expect(throws:
+        SQLError.state("2201W", "FETCH row count must be non-negative")) {
       try catalog.run(.select(negativeCount))
     }
   }

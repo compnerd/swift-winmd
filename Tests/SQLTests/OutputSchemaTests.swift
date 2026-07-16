@@ -578,7 +578,7 @@ struct OutputSchemaTests {
           SELECT n FROM t UNION SELECT n FROM t
         ) SELECT n FROM t
         """)
-    let error = SQLError.unsupported(
+    let error = SQLError.state("0A000",
         "recursive WITH references the CTE outside its final UNION arm")
     #expect(throws: error) {
       let _ = try catalog().columns(of: statement, validate: true)

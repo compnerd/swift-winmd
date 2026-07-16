@@ -368,8 +368,9 @@ extension Catalog where Self: ~Escapable {
         anchor.references(cte.name.lowercased()),
         case nil = table(named: cte.name),
         case nil = view(named: cte.name) {
-      throw .unsupported(
-          "recursive WITH references the CTE outside its final UNION arm")
+      throw .state("0A000",
+                   "recursive WITH references the CTE outside its final " +
+                   "UNION arm")
     }
     // Check the declared arity by compiling the body — never a cursor. A
     // recursive (self-naming) CTE checks its anchor and recursive arm the way
@@ -1636,7 +1637,8 @@ extension Catalog where Self: ~Escapable {
     // follow-up — the grouped path forms a single-relation chain differently
     // from the correlated apply — so fault it rather than mis-plan.
     for join in select.joins where join.relation.lateral {
-      throw .unsupported("a LATERAL join under an aggregate is not supported")
+      throw .state("0A000",
+                   "a LATERAL join under an aggregate is not supported")
     }
     let (joined, relations) = try resolve(from: relation, schema: from.schema,
                                           joins: select.joins, context)
@@ -1876,7 +1878,7 @@ extension Expression {
                             subquery: Resolution = .unsupported)
       throws(SQLError) -> Aggregation {
     guard case let .aggregate(function, operand, distinct, filter) = self else {
-      throw .unsupported("expected an aggregate")
+      throw .state("XX000", "expected an aggregate")
     }
     let argument: Term? = switch operand {
     case .star:
@@ -3417,7 +3419,8 @@ extension Catalog where Self: ~Escapable {
     // so it is meaningless (and ISO forbids it) — fault rather than resolve a
     // lateral body against nothing.
     guard !relation.lateral else {
-      throw .unsupported("a LATERAL derived table needs a preceding FROM item")
+      throw .state("42601",
+                   "a LATERAL derived table needs a preceding FROM item")
     }
     let from = try resolve(relation, context)
 
@@ -3425,8 +3428,11 @@ extension Catalog where Self: ~Escapable {
       // The parser yields only non-negative counts (a `-` is its own token), but
       // a direct `Limit(count:offset:)` may carry negatives the executor's skip
       // and take would trap on. Reject them as a query error rather than crash.
-      guard limit.offset >= 0, (limit.count ?? 0) >= 0 else {
-        throw .unsupported("OFFSET and FETCH row counts must be non-negative")
+      guard limit.offset >= 0 else {
+        throw .state("2201X", "OFFSET row count must be non-negative")
+      }
+      guard (limit.count ?? 0) >= 0 else {
+        throw .state("2201W", "FETCH row count must be non-negative")
       }
     }
 
@@ -3535,7 +3541,7 @@ extension Catalog where Self: ~Escapable {
       guard join.relation.lateral,
           case let .derived(body) = join.relation.source else { continue }
       guard join.kind == .inner || join.kind == .left else {
-        throw .unsupported("a RIGHT/FULL LATERAL join is not supported")
+        throw .state("0A000", "a RIGHT/FULL LATERAL join is not supported")
       }
       let preceding = Scope(Array(relations[0 ... index]))
       laterals[index] = try lateral(body, against: preceding, context)

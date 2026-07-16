@@ -115,7 +115,7 @@ struct LateralExecutionTests {
     // relation it has nothing to correlate against, so it faults.
     try fixture().expect(
         "SELECT d.x FROM LATERAL (SELECT x FROM S) AS d",
-        fails: .unsupported(
+        fails: .state("42601",
             "a LATERAL derived table needs a preceding FROM item"))
   }
 
@@ -321,7 +321,7 @@ struct OuterApplyTests {
     try fixture().expect(
         "SELECT T.Id, d.x FROM T " +
         "RIGHT JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1",
-        fails: .unsupported("a RIGHT/FULL LATERAL join is not supported"))
+        fails: .state("0A000", "a RIGHT/FULL LATERAL join is not supported"))
   }
 
   @Test func `a FULL LATERAL join is unsupported`() throws {
@@ -330,7 +330,7 @@ struct OuterApplyTests {
     try fixture().expect(
         "SELECT T.Id, d.x FROM T " +
         "FULL JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1",
-        fails: .unsupported("a RIGHT/FULL LATERAL join is not supported"))
+        fails: .state("0A000", "a RIGHT/FULL LATERAL join is not supported"))
   }
 }
 
@@ -442,7 +442,7 @@ struct LateralProjectionCorrelationTests {
     // alone, never an ordinary subquery.
     try fixture().expect(
         "SELECT (SELECT T.Id) FROM T",
-        fails: .unsupported(
+        fails: .state("0A000",
             "a correlated column is only supported in a subquery's WHERE"))
   }
 
@@ -462,7 +462,7 @@ struct LateralProjectionCorrelationTests {
     let query = try parse(query:
         "SELECT d.x FROM T " +
         "JOIN LATERAL (SELECT (SELECT T.Id) AS x) AS d ON 1 = 1")
-    #expect(throws: SQLError.unsupported(
+    #expect(throws: SQLError.state("0A000",
         "a correlated column is only supported in a subquery's WHERE")) {
       _ = try fixture().columns(of: query, validate: true)
     }
@@ -554,7 +554,7 @@ struct LateralAggregateCorrelationTests {
     // the LATERAL `everywhere` surface, never opened for every grouped subquery.
     try fixture().expect(
         "SELECT (SELECT T.Id FROM S GROUP BY S.k) FROM T",
-        fails: .unsupported(
+        fails: .state("0A000",
             "a correlated column is only supported in a subquery's WHERE"))
   }
 
@@ -566,7 +566,7 @@ struct LateralAggregateCorrelationTests {
     try fixture().expect(
         "SELECT COUNT(*) AS n FROM T " +
         "JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1",
-        fails: .unsupported(
+        fails: .state("0A000",
             "a LATERAL join under an aggregate is not supported"))
   }
 }

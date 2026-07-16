@@ -328,9 +328,14 @@ extension Catalog where Self: ~Escapable {
     // outer query's — a `validate: false` derive trusts a run-proven body.
     let context = try augment(context, for: .select(select), rows: false)
     guard let relation = select.from else { return Scope([]) }
+    // Build the running scope INCREMENTALLY so a LATERAL join's schema derives
+    // against the PRECEDING FROM — per ISO its projection may name a preceding
+    // column, so its output shape types from that scope. A non-lateral join's
+    // schema is correlation-independent, so the preceding scope is harmless.
     var relations = [(relation, try schema(of: relation, context))]
     for join in select.joins {
-      let joined = try schema(of: join.relation, context)
+      let joined =
+          try schema(of: join.relation, context, preceding: Scope(relations))
       relations.append((join.relation, joined))
     }
     return Scope(relations)
@@ -344,9 +349,12 @@ extension Catalog where Self: ~Escapable {
   private borrowing func prefixes(of select: Select, _ context: Context)
       throws(SQLError) -> Array<Scope> {
     guard let relation = select.from, !select.joins.isEmpty else { return [] }
+    // Build the running scope INCREMENTALLY so a LATERAL join's schema derives
+    // against the PRECEDING FROM (the same reason `scope(of:)` does).
     var relations = [(relation, try schema(of: relation, context))]
     for join in select.joins {
-      let joined = try schema(of: join.relation, context)
+      let joined =
+          try schema(of: join.relation, context, preceding: Scope(relations))
       relations.append((join.relation, joined))
     }
     return select.joins.indices.map { index in
@@ -527,9 +535,11 @@ extension Catalog where Self: ~Escapable {
     // Carry THIS select's own enclosing scope `context.outer` so its WHERE
     // type-check (`walk`) resolves a correlated column of THIS query against
     // the outer, matching the run's lowering; the projection/`HAVING` walk uses
-    // `.barred`.
+    // `.barred` — a NO-OP for a LATERAL body (`everywhere`), whose projection
+    // ISO puts the preceding references in scope for, so validation admits the
+    // projected correlated column exactly as the run's lowering does.
     return SubqueryCheck(widths, types, deferred: deferred,
-                         outer: context.outer)
+                         outer: context.outer, everywhere: context.lateral)
   }
 
   /// Records the cursor-free width and single-column type of `query` into
@@ -877,7 +887,8 @@ extension Catalog where Self: ~Escapable {
     // output name (an alias, else a group column's own name) — the surface an
     // `ORDER BY` output name resolves against — then lower the `ORDER BY`, which
     // faults a non-group column, an out-of-range ordinal, or an ambiguous name.
-    var grouping = try Grouping(scope, select.grouping, aggregations)
+    var grouping = try Grouping(scope, select.grouping, aggregations,
+                                subquery: subquery)
     let projection = try grouping.terms(select.projection, routines,
                                         subquery: subquery)
     _ = try grouping.order(clause, projection, routines, subquery: subquery)
@@ -907,9 +918,36 @@ extension Catalog where Self: ~Escapable {
   /// types WITHOUT re-checking its reachable operands, so a view whose body is
   /// data-dependent-empty — a text-arithmetic projection under a filter that
   /// matched no row — does not fault a `SELECT *` over it that already ran.
-  borrowing func schema(of relation: Relation, _ context: Context)
+  borrowing func schema(of relation: Relation, _ context: Context,
+                        preceding: Scope? = nil)
       throws(SQLError) -> Schema {
     let name = relation.name
+    // A LATERAL derived table is not bound in the overlay (it is never
+    // materialised once as a constant), so derive its schema through the SAME
+    // derived-body machinery a non-lateral body uses (`materialise`, `rows:
+    // false`) — over the REVEALED base (base + CTEs + store, its own alias out
+    // of scope), so a body naming a CTE resolves it, exactly as a non-lateral
+    // body does.
+    //
+    // Per ISO a LATERAL body's preceding-FROM references are in scope
+    // throughout its query expression, INCLUDING the SELECT list, so its output
+    // SHAPE is NOT correlation-independent — a projected preceding column
+    // (`SELECT T.Id AS id`) types from that outer column. So the schema derive
+    // THREADS the `preceding` scope as the correlation stack (`with(outer:)`)
+    // and marks the body a lateral one (`lateralizing`), the SAME
+    // revealed-base-with-outer context `compile(select)`'s `lateral` compiles
+    // it under — schema, validation, and compile share it, so a projected
+    // preceding column derives its type here exactly as the run lowers it to a
+    // bound parameter. `validate: false` keeps the derive lenient; the strict
+    // operand/function type-check rides through `compile(select)`'s `lateral`
+    // path where the `validate` gate is honoured, so it is not duplicated here.
+    if relation.lateral, case let .derived(query) = relation.source {
+      let stack = context.outer ?? Outer()
+      let nested = stack.nested(under: preceding ?? Scope([]))
+      let scope = context.revealed().with(outer: nested)
+          .lateralizing().validating(false)
+      return try materialise(query, scope, rows: false).schema()
+    }
     if let cte = context.relations[name.lowercased()] {
       return cte.schema()
     }
@@ -988,7 +1026,9 @@ extension Scope {
     case .all:
       outputs()
     case let .columns(references):
-      try references.map { column throws(SQLError) in try output(of: column) }
+      try references.map { column throws(SQLError) in
+        try output(of: column, subquery: subquery)
+      }
     case let .expressions(items):
       try items.indices.map { index throws(SQLError) in
         try output(items[index], at: index, routines, subquery: subquery)
@@ -1008,10 +1048,23 @@ extension Scope {
   }
 
   /// The output column a bare `column` reference yields: its own name (its
-  /// spelling as written), typed from the relation that resolves it.
-  internal func output(of column: Column) throws(SQLError) -> OutputColumn {
-    let type = try type(at: ordinal(of: column))
-    return OutputColumn(name: column.name, type: type)
+  /// spelling as written), typed from the relation that resolves it — or, for a
+  /// name no local relation binds, from the correlation `subquery` surface,
+  /// mirroring the expression path's `derive`. Under a LATERAL body's admitting
+  /// (`everywhere`) surface a preceding-FROM column types as its outer column;
+  /// under an ordinary barred surface it faults `.unsupported`. A genuinely
+  /// unknown name re-throws the `.column` fault.
+  internal func output(of column: Column,
+                       subquery: Resolution = .unsupported)
+      throws(SQLError) -> OutputColumn {
+    if let ordinal = try find(column) {
+      return OutputColumn(name: column.name, type: type(at: ordinal))
+    }
+    if let type = try subquery.correlated(column) {
+      return OutputColumn(name: column.name, type: type)
+    }
+    return try OutputColumn(name: column.name,
+                            type: type(at: ordinal(of: column)))
   }
 
   /// The output column a projected `item` at 0-based `index` yields: its

@@ -1380,6 +1380,8 @@ private func outers(_ plan: Plan) -> Bool {
     outers(left) || outers(right)
   case let .join(source, _, _, _, _, _, _):
     outers(source)
+  case let .apply(left, _, _, _, _, _):
+    outers(left)
   case let .setop(_, left, right, _):
     outers(left) || outers(right)
   case let .aggregate(_, _, source):
@@ -1773,6 +1775,8 @@ private func derived(_ plan: Plan) -> Plan? {
     derived(left) ?? derived(right)
   case let .outer(left, right, _, _):
     derived(left) ?? derived(right)
+  case let .apply(left, _, _, _, _, _):
+    derived(left)
   case let .setop(_, left, right, _):
     derived(left) ?? derived(right)
   case let .limit(_, _, source):
@@ -1807,6 +1811,8 @@ private func seeks(_ plan: Plan) -> Bool {
     seeks(outer)
   case let .outer(left, right, _, _):
     seeks(left) || seeks(right)
+  case let .apply(left, _, _, _, _, _):
+    seeks(left)
   case let .setop(_, left, right, _):
     seeks(left) || seeks(right)
   case let .limit(_, _, source):
@@ -1838,6 +1844,8 @@ private func filters(_ plan: Plan) -> Bool {
     filters(left) || filters(right)
   case let .outer(left, right, _, _):
     filters(left) || filters(right)
+  case let .apply(left, _, _, _, _, _):
+    filters(left)
   case let .setop(_, left, right, _):
     filters(left) || filters(right)
   case let .limit(_, _, source):
@@ -1865,6 +1873,8 @@ private func pushed(_ plan: Plan) -> Bool {
   case let .outer(left, right, _, _):
     seeks(left) || floats(left) || pushed(left) || seeks(right)
         || floats(right) || pushed(right)
+  case let .apply(left, _, _, _, _, _):
+    seeks(left) || floats(left) || pushed(left)
   case let .select(_, source):
     pushed(source)
   case let .project(_, source):
@@ -1927,6 +1937,8 @@ private func joins(_ plan: Plan) -> Bool {
     joins(left) || joins(right)
   case let .outer(left, right, _, _):
     joins(left) || joins(right)
+  case let .apply(left, _, _, _, _, _):
+    joins(left)
   case let .setop(_, left, right, _):
     joins(left) || joins(right)
   case let .aggregate(_, _, source):
@@ -1961,6 +1973,8 @@ private func residual(_ plan: Plan) -> Bool {
     residual(outer)
   case let .outer(left, right, _, _):
     residual(left) || residual(right)
+  case let .apply(left, _, _, _, _, _):
+    residual(left)
   case let .setop(_, left, right, _):
     residual(left) || residual(right)
   case let .aggregate(_, _, source):
@@ -1996,6 +2010,8 @@ private func separated(_ plan: Plan) -> Bool {
     separated(outer)
   case let .outer(left, right, _, _):
     separated(left) || separated(right)
+  case let .apply(left, _, _, _, _, _):
+    separated(left)
   case let .setop(_, left, right, _):
     separated(left) || separated(right)
   case let .aggregate(_, _, source):
@@ -2032,6 +2048,8 @@ private func stacked(_ plan: Plan) -> Bool {
     stacked(outer)
   case let .outer(left, right, _, _):
     stacked(left) || stacked(right)
+  case let .apply(left, _, _, _, _, _):
+    stacked(left)
   case let .setop(_, left, right, _):
     stacked(left) || stacked(right)
   case let .aggregate(_, _, source):
@@ -2144,6 +2162,8 @@ private func injected(_ plan: Plan) -> Bool {
     injected(left) || injected(right)
   case let .outer(left, right, _, _):
     injected(left) || injected(right)
+  case let .apply(left, _, _, _, _, _):
+    injected(left)
   case let .join(outer, _, _, _, _, _, _):
     injected(outer)
   case let .aggregate(_, _, source):

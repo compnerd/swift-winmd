@@ -43,6 +43,9 @@ extension Token {
     case or
     case not
     case join
+    /// The `LATERAL` keyword introducing a FROM/JOIN derived table whose body
+    /// may reference the preceding FROM items (a correlated apply).
+    case lateral
     case inner
     case left
     case right
@@ -146,6 +149,7 @@ extension Token.Kind {
     case .or: "OR"
     case .not: "NOT"
     case .join: "JOIN"
+    case .lateral: "LATERAL"
     case .inner: "INNER"
     case .left: "LEFT"
     case .right: "RIGHT"

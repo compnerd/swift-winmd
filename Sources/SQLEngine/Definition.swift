@@ -320,15 +320,23 @@ extension Catalog where Self: ~Escapable {
   /// so the alias resolves and types identically on both paths.
   ///
   /// The inner query resolves against `context` (the base catalog plus the
-  /// store relations and CTEs in scope), NOT its sibling FROM items, so the
-  /// derived table is UNCORRELATED: a reference to an outer or sibling column
-  /// faults as an unknown column (LATERAL is a later feature). Its OWN derived
+  /// store relations and CTEs in scope), NOT its sibling FROM items. The OUTER
+  /// treatment is the CALLER's: a NON-LATERAL derived body's caller
+  /// (`augment`) enters through `context.body(…)`, CLEARING the correlation
+  /// stack — so a reference to an outer or sibling column faults as an unknown
+  /// column (the derived table is UNCORRELATED); a LATERAL body's caller
+  /// (`lateral`) instead THREADS the preceding-FROM scope as `context.outer`,
+  /// so a correlated reference to a preceding relation resolves outward. This
+  /// derive is otherwise IDENTICAL for both — the same revealed-base overlay,
+  /// output-schema walk, duplicate-column check, and `validate`-gated body
+  /// type-check — so a lateral body inherits the CTE visibility and the
+  /// operand/function validation a non-lateral body gets. Its OWN derived
   /// tables (a `FROM (SELECT … FROM (…) AS x) AS y`) are augmented into `scope`
   /// FIRST — the schema derivation resolves `x` exactly as a run would — so the
   /// schema and run paths bind the same nested aliases before either reads the
   /// inner query.
-  private borrowing func materialise(_ query: Query, _ context: Context,
-                                     rows: Bool)
+  borrowing func materialise(_ query: Query, _ context: Context,
+                             rows: Bool)
       throws(SQLError) -> RelationInstance {
     // Bind the inner query's OWN derived tables (and store relations) before
     // deriving its schema — a run augments them recursively, so the schema
@@ -707,15 +715,20 @@ extension Select {
     }
   }
 
-  /// Collects this select's `FROM` and `JOIN` derived tables — each alias with
-  /// its inner query — into `derivations`.
+  /// Collects this select's `FROM` and `JOIN` NON-LATERAL derived tables — each
+  /// alias with its inner query — into `derivations`. A LATERAL derived table
+  /// is SKIPPED: it is not materialised once as a constant relation but resolved
+  /// against the preceding FROM and re-evaluated per its rows (a correlated
+  /// apply), so `compile(select)` binds and executes it directly rather than
+  /// through the overlay `augment` builds.
   func collect(derived derivations: inout Array<(String, Query)>) {
-    if case let .derived(query) = from?.source, let alias = from?.alias {
+    if case let .derived(query) = from?.source, let alias = from?.alias,
+        !(from?.lateral ?? false) {
       derivations.append((alias, query))
     }
     for join in joins {
       if case let .derived(query) = join.relation.source,
-          let alias = join.relation.alias {
+          let alias = join.relation.alias, !join.relation.lateral {
         derivations.append((alias, query))
       }
     }

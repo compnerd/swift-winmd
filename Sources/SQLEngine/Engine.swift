@@ -1632,6 +1632,12 @@ extension Catalog where Self: ~Escapable {
     // Resolve every joined relation and lay the FROM relation and each joined
     // one end to end in one combined ordinal space (as the non-aggregate join
     // path does), so the WHERE, keys, and aggregate arguments resolve uniformly.
+    // A LATERAL join under a GROUP BY / aggregate query is a deliberate
+    // follow-up — the grouped path forms a single-relation chain differently
+    // from the correlated apply — so fault it rather than mis-plan.
+    for join in select.joins where join.relation.lateral {
+      throw .unsupported("a LATERAL join under an aggregate is not supported")
+    }
     let (joined, relations) = try resolve(from: relation, schema: from.schema,
                                           joins: select.joins, context)
     let scope = Scope(relations)
@@ -1674,7 +1680,17 @@ extension Catalog where Self: ~Escapable {
     // `HAVING`, and the `ORDER BY` sort keys (deduplicated so the same
     // aggregate computes once).
     let keys = try select.grouping.map { column throws(SQLError) -> Term in
-      try .slot(scope.ordinal(of: column))
+      // A grouping key a local relation binds reads its combined slot; one NONE
+      // binds is a candidate CORRELATED reference (a LATERAL body grouping on a
+      // preceding column) — the same `barred` surface the projection/HAVING use
+      // lowers it to a `Term.parameter` the apply binds per outer row (a
+      // per-invocation constant → one group), admitting it only under the
+      // LATERAL `everywhere` seam and faulting `.unsupported` on an ordinary
+      // grouped subquery. The final `ordinal(of:)` re-throws a genuine
+      // unknown-column `.column`.
+      if let ordinal = try scope.find(column) { return .slot(ordinal) }
+      if let name = try barred.correlate(column) { return .parameter(name) }
+      return try .slot(scope.ordinal(of: column))
     }
     var expressions = Array<Expression>()
     for expression in select.projection.projected {
@@ -1760,7 +1776,8 @@ extension Catalog where Self: ~Escapable {
     // Lower the projection, HAVING, and ORDER BY against the grouped slot space,
     // enforcing the projection rule (every non-aggregated column must be a
     // GROUP BY key).
-    var grouping = try Grouping(scope, select.grouping, aggregations)
+    var grouping = try Grouping(scope, select.grouping, aggregations,
+                                subquery: barred)
     let projection = try grouping.terms(select.projection, context.routines,
                                         subquery: barred)
     let having: Filter? = if let clause = select.having {
@@ -1998,6 +2015,14 @@ extension Catalog where Self: ~Escapable {
       // NULL-extended.
       try .outer(optimise(left, context), optimise(right, context), on: on,
                  kind: kind)
+    case let .apply(left, key, correlation, ordinals, on, kind):
+      // Optimise the left side (a seekable scan or a nested join inside it still
+      // rewrites), but keep the apply node, its `on`, and its recorded body plan
+      // intact — the body re-executes per outer row and was already compiled and
+      // pushed down under its own scope, so the outer optimise never reshapes
+      // it.
+      try .apply(optimise(left, context), key: key, correlation: correlation,
+                 ordinals: ordinals, on: on, kind: kind)
     case let .setop(kind, left, right, all):
       // Optimise each side with the same bindings so a bound predicate inside an
       // arm seeks; the set operation itself merely combines its sides,
@@ -2399,6 +2424,15 @@ extension Plan {
       // whole `WHERE` stays above (`distribute`'s default keeps it a `select`
       // over this node).
       try .outer(left.pushdown(), right.pushdown(), on: on, kind: kind)
+    case let .apply(left, key, correlation, ordinals, on, kind):
+      // Push down WITHIN the left side (its own joins/filters rewrite), but the
+      // apply is a pushdown barrier: its right side is not a static sub-plan but
+      // a per-outer-row re-execution, so a `WHERE` conjunct above it never rides
+      // into it (mirroring the `.outer` gate — `distribute`'s default keeps the
+      // conjunct a `select` over this node). The recorded body plan was already
+      // pushed down at its compile.
+      try .apply(left.pushdown(), key: key, correlation: correlation,
+                 ordinals: ordinals, on: on, kind: kind)
     case let .setop(kind, left, right, all):
       try .setop(kind, left.pushdown(), right.pushdown(), all: all)
     case let .distinct(source):
@@ -2878,8 +2912,14 @@ extension Catalog where Self: ~Escapable {
       let nested = (context.outer ?? Outer()).nested(under: within ?? Scope([]))
       // The context each nested compile/derive threads: the revealed base with
       // this frame's `nested` as the enclosing correlation stack and the
-      // shape-only lenience below.
-      let inner = context.with(outer: nested).validating(false)
+      // shape-only lenience below. `unlateralized()` clears the LATERAL-body
+      // flag so a nested ORDINARY subquery within a lateral body builds its OWN
+      // Resolution with `everywhere: false` — the lateral everywhere-admission
+      // covers ONLY the lateral body's own projection, NOT a subquery inside it,
+      // so an ordinary correlated scalar-subquery projection is barred exactly
+      // as it is outside a lateral body.
+      let inner =
+          context.with(outer: nested).validating(false).unlateralized()
       // A nested subquery's body derivation is SHAPE ONLY, so ALWAYS lenient
       // (`validate: false`) — this pass exists to record the subquery's width,
       // arity, and correlation, never to validate its body. Validation of a
@@ -2948,8 +2988,12 @@ extension Catalog where Self: ~Escapable {
         }
       }
     }
+    // A LATERAL body's `Resolution` admits a correlated preceding-FROM column
+    // EVERYWHERE (`everywhere`), so its projection lowers such a column to a
+    // `Term.parameter` rather than barring it — the ISO scoping a lateral body
+    // gets and an ordinary subquery (`context.lateral == false`) does not.
     return Resolution(scope, widths, types, correlations,
-                      outer: context.outer)
+                      outer: context.outer, everywhere: context.lateral)
   }
 
   /// The single VALUE a SCALAR subquery `query` collapses to against this
@@ -3040,10 +3084,13 @@ extension Catalog where Self: ~Escapable {
   /// and `relations.reduce(0) { $0 + $1.1.width }` the `SELECT *` width — every
   /// downstream derivation reads out of this one resolution.
   ///
-  /// `relations` is built INCREMENTALLY: resolve join `i`, append it, then
-  /// resolve join `i + 1`. Each join's schema is correlation-independent of the
-  /// relations preceding it, so the order is a no-op here; the incremental shape
-  /// is what a per-join preceding scope would thread through.
+  /// `relations` is built INCREMENTALLY, each join resolving against the
+  /// PRECEDING FROM (`Scope` of the relations before it): a LATERAL arm's
+  /// projection may name a preceding column, so its output SHAPE depends on
+  /// that scope. A non-lateral join's schema is correlation-independent, so the
+  /// preceding scope is harmless — the incremental order is a no-op for it. The
+  /// preceding scope threads through here rather than at each call site, so the
+  /// arity check gets a LATERAL arm's shape without duplicating the loop.
   private borrowing func resolve(from relation: Relation, schema: Schema,
                                  joins: Array<Join>, _ context: Context)
       throws(SQLError) -> (joined: Array<Resolved>,
@@ -3052,7 +3099,8 @@ extension Catalog where Self: ~Escapable {
     joined.reserveCapacity(joins.count)
     var relations = [(relation, schema)]
     for join in joins {
-      let resolved = try resolve(join.relation, context)
+      let resolved =
+          try resolve(join.relation, context, preceding: Scope(relations))
       joined.append(resolved)
       relations.append((join.relation, resolved.schema))
     }
@@ -3071,6 +3119,11 @@ extension Catalog where Self: ~Escapable {
       guard let relation = select.from else {
         throw .named("SELECT * with no FROM")
       }
+      // The FROM resolves once here; each join then resolves through the shared
+      // helper, which threads each join's PRECEDING scope into its resolve — so
+      // a LATERAL arm's body derives its projected preceding-FROM column against
+      // the relations before it rather than against no scope, which would fault
+      // the arity check even though the per-arm compile passes the prefix.
       let schema = try resolve(relation, context).schema
       let (_, relations) = try resolve(from: relation, schema: schema,
                                        joins: select.joins, context)
@@ -3118,9 +3171,95 @@ extension Catalog where Self: ~Escapable {
   /// `definition_schema.` store's `columns` builder, which compiles every view
   /// to advertise it, relies on this: a cyclic view's `try? compile` catches
   /// the fault and skips it.
-  internal borrowing func resolve(_ relation: Relation, _ context: Context)
+  /// Compiles a LATERAL derived table's `body` against the PRECEDING FROM
+  /// `scope`, discovering its correlation and stashing the pre-compiled plan for
+  /// the per-outer-row apply to re-execute — the FROM-clause analog of a
+  /// correlated subquery's compile pre-pass (`subquery(_:_:_:within:)`).
+  ///
+  /// The body compiles under a fresh `Outer` frame nested under `scope` (the
+  /// FROM relation and the joins BEFORE this one), so a body column naming a
+  /// preceding relation binds none of its OWN relations and resolves outward to
+  /// a synthetic `Term.parameter`, minting a `Correlation`. The plan compile is
+  /// lenient (`validate: false`), as the correlated-subquery pre-pass is — this
+  /// pass discovers the shape, and the run's per-row execution faults a REACHED
+  /// operand. The plan is recorded under the occurrence's `Subkey` (this
+  /// select's `subscope`, the body query, the `.lateral` role) composed with the
+  /// correlation, the same identity `Plan.apply` looks up through `executed`.
+  /// Returns the occurrence `Subkey` and the discovered correlation.
+  ///
+  /// A lateral body's SCHEMA + VALIDATION route through the SAME derived-body
+  /// machinery a NON-LATERAL derived body uses (`materialise`, `rows: false`),
+  /// differing ONLY in the OUTER treatment: a non-lateral body CLEARS the
+  /// correlation stack (`body(_:)`, uncorrelated), while a lateral body THREADS
+  /// the preceding-FROM `nested` outer so its correlated references resolve. So
+  /// a lateral body inherits the revealed-base overlay (base + CTEs + store,
+  /// its own alias out of scope) — a CTE stays visible in the body — AND the
+  /// `validate`-gated operand/function type-check, exactly as a non-lateral
+  /// body does. Under `validate: false` (a lenient run/shape pass) the body is
+  /// NOT eagerly type-checked, matching the reachability-gated validation the
+  /// rest of the engine applies; a REACHED bad operand still faults at run.
+  private borrowing func lateral(_ body: Query, against scope: Scope,
+                                 _ context: Context)
+      throws(SQLError) -> (key: Subkey, correlation: Correlation) {
+    let nested = (context.outer ?? Outer()).nested(under: scope)
+    // Derive the body's schema and — under `validate` — type-check its operands
+    // and functions through the SHARED derived-body path, over the revealed
+    // base (CTEs visible) with the preceding-FROM outer THREADED so a
+    // correlated reference resolves rather than faulting as unknown. The
+    // returned schema is discarded here (`resolve`/`schema(of:)` advertises the
+    // columns); this call exists to run the same validation a non-lateral body
+    // gets.
+    // Mark the body a LATERAL body (`lateralizing`) so its `Resolution`/
+    // `SubqueryCheck` admit a correlated preceding-FROM column EVERYWHERE,
+    // including its projection — per ISO a LATERAL body's preceding references
+    // are in scope throughout, unlike an ordinary subquery whose projection
+    // stays barred. The flag rides through the shared derived-body machinery to
+    // the projection lowering, where a projected preceding column lowers to a
+    // `Term.parameter` rather than faulting `.unsupported`.
+    let revealed = context.revealed().with(outer: nested).lateralizing()
+    _ = try materialise(body, revealed, rows: false)
+    // Compile the body LENIENTLY for the per-outer-row apply plan (the shape
+    // pass a correlated subquery's pre-pass runs), recording it under the
+    // occurrence's key composed with the discovered correlation. It compiles
+    // over the SAME revealed base the schema/validation pass above used (base +
+    // CTEs + store, this select's derived aliases STRIPPED) with the
+    // preceding-FROM outer threaded, so a body `FROM d` cannot bind a CALLER
+    // derived alias `d` as a relation — the compile and the schema path resolve
+    // the body's FROM identically, faulting an unknown relation consistently
+    // rather than the run-only compile scanning a caller alias the schema pass
+    // faults.
+    let inner = revealed.validating(false)
+    let plan = try compile(body, inner)
+    let key = Subkey(context.subscope, body, .lateral)
+    context.subqueries.record(plan: try plan.pushdown(), for: key,
+                              nested.correlation)
+    // The per-outer-row apply re-runs this plan under the occurrence scope's
+    // RECORDED revealed overlay (`revealed(under:)`), which the run stores as
+    // `revealed().relations` for `key.scope` — the SAME revealed base compiled
+    // here — so execution resolves the body's `FROM` identically and a shadowed
+    // CTE cannot diverge between compile and run.
+    return (key, nested.correlation)
+  }
+
+  internal borrowing func resolve(_ relation: Relation, _ context: Context,
+                                  preceding: Scope? = nil)
       throws(SQLError) -> Resolved {
     let name = relation.name
+    // A LATERAL derived table is not bound in the overlay — its rows are not a
+    // constant relation but a correlated apply's right side, materialised per
+    // outer row. Resolve only its SCHEMA here; the join loop compiles its body
+    // against the preceding FROM and emits a `Plan.apply` rather than calling
+    // the `leaf`, so the leaf is never reached for a lateral relation. Its
+    // output SHAPE is NOT correlation-independent (per ISO its projection may
+    // name a preceding column), so thread the `preceding` scope — the FROM
+    // relation and the joins BEFORE this one — so a projected preceding column
+    // types from that outer column exactly as the run lowers it.
+    if relation.lateral {
+      let schema = try schema(of: relation, context, preceding: preceding)
+      return Resolved(schema: schema) { ordinals in
+        .scan(name: name, ordinals: ordinals, seek: nil)
+      }
+    }
     if let cte = context.relations[name.lowercased()] {
       let schema = cte.schema()
       return Resolved(schema: schema) { ordinals in
@@ -3274,6 +3413,12 @@ extension Catalog where Self: ~Escapable {
       return try select.projection.scalar(context.routines,
                                           subquery: plans.rest)
     }
+    // A LATERAL first FROM item has no PRECEDING relation to correlate against,
+    // so it is meaningless (and ISO forbids it) — fault rather than resolve a
+    // lateral body against nothing.
+    guard !relation.lateral else {
+      throw .unsupported("a LATERAL derived table needs a preceding FROM item")
+    }
     let from = try resolve(relation, context)
 
     if let limit = select.limit {
@@ -3350,7 +3495,9 @@ extension Catalog where Self: ~Escapable {
 
     // Resolve every joined relation and lay all relations — the FROM relation
     // first, then each joined one in source order — end to end in one combined
-    // ordinal space.
+    // ordinal space. The helper builds the running `relations` INCREMENTALLY
+    // and threads each join's PRECEDING FROM as its resolve scope, so a LATERAL
+    // arm's schema derives against the relations before it.
     let (joined, relations) = try resolve(from: relation, schema: from.schema,
                                           joins: select.joins, context)
     let scope = Scope(relations)
@@ -3372,6 +3519,25 @@ extension Catalog where Self: ~Escapable {
     // its `ON` lowers against and a subquery in that `ON` correlates against.
     let prefixes = select.joins.indices.map { index in
       Scope(Array(relations[0 ... index + 1]))
+    }
+    // Resolve each LATERAL join's body ONCE against the PRECEDING FROM — the
+    // FROM relation and the joins BEFORE this one (`relations[0…index]`, ONE
+    // less than the prefix, which includes the join's own relation) — so a body
+    // column naming a preceding relation correlates outward and the body's plan
+    // is pre-compiled for the per-outer-row apply. A non-lateral join records
+    // nothing here (its `nil` slot). The apply is INNER only for now; a
+    // LEFT/OUTER lateral join is a deliberate follow-up, so fault it.
+    let empty: (key: Subkey, correlation: Correlation)? = nil
+    var laterals = Array(repeating: empty, count: select.joins.count)
+    for index in select.joins.indices {
+      let join = select.joins[index]
+      guard join.relation.lateral,
+          case let .derived(body) = join.relation.source else { continue }
+      guard join.kind == .inner else {
+        throw .unsupported("a LEFT/RIGHT/FULL LATERAL join is not supported")
+      }
+      let preceding = Scope(Array(relations[0 ... index]))
+      laterals[index] = try lateral(body, against: preceding, context)
     }
     // Compile every nested subquery ONCE for arity/type, ahead of lowering,
     // into a map the join ONs, WHERE, projection, and ORDER BY lowering reads —
@@ -3432,6 +3598,14 @@ extension Catalog where Self: ~Escapable {
     for match in matches { match.references(into: &references) }
     predicate?.references(into: &references)
     for key in order { key.term.references(into: &references) }
+    // A LATERAL apply reads its correlation's outer ordinals from the left
+    // chain's record, so those preceding-relation ordinals must be MATERIALISED
+    // (given a packed slot) even when no clause of THIS select references them —
+    // else the correlation's remap through `slot` finds no slot for the outer
+    // column its body names.
+    for lateral in laterals {
+      references.formUnion(lateral?.correlation.slots ?? [])
+    }
     let combined = references.sorted()
 
     var slot = Dictionary<Int, Int>(minimumCapacity: combined.count)
@@ -3456,15 +3630,29 @@ extension Catalog where Self: ~Escapable {
     // and an unmatched preserved row is NULL-extended rather than dropped; its
     // ON is NOT distributed into the product (a `WHERE` still filters after
     // it).
-    let seed = from.leaf(locals[0])
-    let chain = select.joins.indices.reduce(seed) { chain, index in
-      let leaf = joined[index].leaf(locals[index + 1])
+    var chain = from.leaf(locals[0])
+    for index in select.joins.indices {
       let on = matches[index].remapped(through: slot)
+      // A LATERAL join re-evaluates its pre-compiled body per outer row (a
+      // correlated apply): the apply node carries the body occurrence's `key`
+      // and its correlation (its `slot` outer ordinals remapped to the left
+      // chain's packed slots, so the per-row bind reads the correct cell) plus
+      // the referenced body-output `ordinals` this select takes, laid after the
+      // left's slots. Its `on` filters the concatenated pair; INNER APPLY drops
+      // a left row with no surviving right row.
+      if let lateral = laterals[index] {
+        chain = .apply(chain, key: lateral.key,
+                       correlation: lateral.correlation.remapped(through: slot),
+                       ordinals: locals[index + 1], on: on,
+                       kind: select.joins[index].kind)
+        continue
+      }
+      let leaf = joined[index].leaf(locals[index + 1])
       switch select.joins[index].kind {
       case .inner:
-        return .select(on, .product(chain, leaf))
+        chain = .select(on, .product(chain, leaf))
       case .left, .right, .full:
-        return .outer(chain, leaf, on: on, kind: select.joins[index].kind)
+        chain = .outer(chain, leaf, on: on, kind: select.joins[index].kind)
       }
     }
 

@@ -68,6 +68,11 @@ internal enum Role: Hashable, Sendable {
   case valued
   /// An `EXISTS (SELECT …)` occurrence — a cardinality probe.
   case existential
+  /// A `LATERAL (SELECT …)` FROM/JOIN occurrence — a correlated apply's right
+  /// side, materialised in full per outer row. Distinct from the predicate
+  /// roles so a lateral body's pre-compiled plan keys disjointly from any
+  /// scalar/`IN`/`EXISTS` occurrence of the same inner SQL.
+  case lateral
 }
 
 /// The cache identity of one collected subquery OCCURRENCE — its resolution
@@ -472,17 +477,30 @@ internal struct Resolution {
   /// correlated column as unsupported rather than mis-resolving it.
   private let admits: Bool
 
+  /// Whether the surface admits a correlated column EVERYWHERE — in the barred
+  /// clause positions (the projection / `GROUP BY` / `HAVING`) as well as the
+  /// `WHERE`/`ON` — set ONLY when lowering a LATERAL derived table's body. Per
+  /// ISO 9075 a `LATERAL` body's preceding-FROM references are in scope
+  /// throughout its query expression, INCLUDING the select list, so a lateral
+  /// body correlates everywhere while an ordinary subquery's projection stays
+  /// barred. When `true`, `barred` is a NO-OP — it keeps `admits`, so a
+  /// projected preceding column still lowers to a `Term.parameter` — and the
+  /// per-outer-row apply binds it exactly as a `WHERE`-correlated one.
+  private let everywhere: Bool
+
   internal init(_ scope: Subscope = .caller,
                 _ widths: Dictionary<Query, Int> = [:],
                 _ types: Dictionary<Query, ValueType> = [:],
                 _ correlations: Dictionary<Query, Correlation> = [:],
-                outer: Outer? = nil, admits: Bool = true) {
+                outer: Outer? = nil, admits: Bool = true,
+                everywhere: Bool = false) {
     self.scope = scope
     self.widths = widths
     self.types = types
     self.correlations = correlations
     self.outer = outer
     self.admits = admits
+    self.everywhere = everywhere
   }
 
   /// A `Resolution` for a lowering surface with no catalog — a schema-only
@@ -497,8 +515,16 @@ internal struct Resolution {
   /// cut. It keeps the widths/types/correlations (nested subqueries there still
   /// lower and carry their OWN inner correlation) but rejects a correlated
   /// column of THIS query as unsupported.
+  ///
+  /// A LATERAL body's surface (`everywhere`) is the exception: ISO puts the
+  /// preceding-FROM references in scope throughout the body INCLUDING the
+  /// select list, so `barred` is a NO-OP there — the projection keeps admitting
+  /// a correlated column, which lowers to a `Term.parameter` the apply binds
+  /// per outer row.
   internal var barred: Resolution {
-    Resolution(scope, widths, types, correlations, outer: outer, admits: false)
+    guard !everywhere else { return self }
+    return Resolution(scope, widths, types, correlations, outer: outer,
+                      admits: false, everywhere: everywhere)
   }
 
   /// The synthetic bound-parameter name a CORRELATED reference to `column`
@@ -876,17 +902,26 @@ internal struct SubqueryCheck {
   /// correlated-projection case exactly where the run does.
   private let admits: Bool
 
+  /// Whether the surface admits a correlated column EVERYWHERE — a LATERAL
+  /// body's validation surface, the analog of `Resolution.everywhere` — so
+  /// `barred` is a NO-OP and the projection/`HAVING` walk of a lateral body
+  /// validates a correlated preceding column rather than faulting, matching the
+  /// run's lowering (typecheck↔run parity).
+  private let everywhere: Bool
+
   internal init(_ widths: Dictionary<Query, Int> = [:],
                 _ types: Dictionary<Query, ValueType> = [:],
                 deferred: Set<Query> = [],
                 reached: ReachedScalars = ReachedScalars(),
-                outer: Outer? = nil, admits: Bool = true) {
+                outer: Outer? = nil, admits: Bool = true,
+                everywhere: Bool = false) {
     self.widths = widths
     self.types = types
     self.deferred = deferred
     self.reached = reached
     self.outer = outer
     self.admits = admits
+    self.everywhere = everywhere
   }
 
   /// A checker for a surface with no catalog — validating a subquery needs one,
@@ -898,10 +933,14 @@ internal struct SubqueryCheck {
 
   /// This checker with correlation BARRED — the surface a projection / `GROUP
   /// BY` / `HAVING` type-checks under, where an outer column is out of the (b)
-  /// cut and is diagnosed rather than resolved. Mirrors `Resolution.barred`.
+  /// cut and is diagnosed rather than resolved. Mirrors `Resolution.barred` —
+  /// including the LATERAL-body exception (`everywhere`), where it is a NO-OP
+  /// so the projection/`HAVING` walk keeps admitting the correlated preceding
+  /// column the run's lowering binds.
   internal var barred: SubqueryCheck {
-    SubqueryCheck(widths, types, deferred: deferred, reached: reached,
-                  outer: outer, admits: false)
+    guard !everywhere else { return self }
+    return SubqueryCheck(widths, types, deferred: deferred, reached: reached,
+                         outer: outer, admits: false, everywhere: everywhere)
   }
 
   /// This checker over a FRESH `reached` box, carrying `outer` — the surface a
@@ -3592,11 +3631,26 @@ internal struct Grouping {
   /// RESOLVED `Aggregation` (see `group`), so a qualification-equivalent pair
   /// is one entry sharing one slot.
   internal init(_ scope: Scope, _ columns: Array<Column>,
-                _ aggregates: Array<Aggregation>) throws(SQLError) {
+                _ aggregates: Array<Aggregation>,
+                subquery: Resolution = .unsupported) throws(SQLError) {
     self.scope = scope
     var keys = Dictionary<Int, Int>(minimumCapacity: columns.count)
     for index in columns.indices {
-      try keys[scope.ordinal(of: columns[index])] = index
+      // A grouping key a local relation binds maps its combined ordinal to its
+      // grouped slot. A key NONE binds is a candidate CORRELATED reference (a
+      // LATERAL body grouping on a preceding column): the correlation surface's
+      // non-recording `correlated` probe distinguishes it from a genuine unknown
+      // column, and it occupies grouped slot `index` as a `.parameter` key (in
+      // `group`'s keys array) with NO ordinal→slot entry — the projection reads
+      // it via the same correlation, never through this key dict. A genuinely
+      // unknown column re-throws the `.column` fault; a barred surface diagnoses
+      // a bound outer column `.unsupported`. `correlated` records nothing, so it
+      // stays idempotent against `group`'s own correlation of the same key.
+      if let ordinal = try scope.find(columns[index]) {
+        keys[ordinal] = index
+      } else if try subquery.correlated(columns[index]) == nil {
+        _ = try scope.ordinal(of: columns[index])
+      }
     }
     self.keys = keys
     self.offset = columns.count
@@ -3633,9 +3687,20 @@ internal struct Grouping {
     }
     switch expression {
     case let .column(column):
-      let ordinal = try scope.ordinal(of: column)
-      guard let slot = keys[ordinal] else { throw .grouping(column.name) }
-      return .slot(slot)
+      // Resolve the column against this scope's own relations first, mirroring
+      // `Scope.term`'s `.column`: a name a local relation binds must be a `GROUP
+      // BY` key (the standard grouping rule), else `SQLError.grouping`. A name
+      // NONE binds is a candidate CORRELATED reference — consult the surface,
+      // which admits it (a `Term.parameter` the apply binds per outer row) only
+      // for a LATERAL body's `everywhere` seam and diagnoses it `.unsupported` on
+      // an ordinary barred grouped surface. The final `ordinal(of:)` re-throws
+      // the genuine unknown-column `.column` fault, exactly as `Scope.term` does.
+      if let ordinal = try scope.find(column) {
+        guard let slot = keys[ordinal] else { throw .grouping(column.name) }
+        return .slot(slot)
+      }
+      if let name = try subquery.correlate(column) { return .parameter(name) }
+      return try .slot(scope.ordinal(of: column))
     case let .literal(literal):
       return try .constant(value(of: literal))
     case let .call(name, arguments):

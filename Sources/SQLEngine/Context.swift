@@ -65,6 +65,17 @@ internal struct Context {
   /// recording the correlation. `nil` at the top level (no enclosing query).
   internal let outer: Outer?
 
+  /// Whether the query being resolved is a LATERAL derived table's BODY — set
+  /// only by `lateral(_:against:_:)` as it derives/compiles the body. Per ISO
+  /// 9075 a `LATERAL` body's preceding-FROM references are in scope throughout
+  /// its query expression, INCLUDING the select list, so the body admits a
+  /// correlated column EVERYWHERE (not only its `WHERE`/`ON`). This flag
+  /// threads into the `Resolution`/`SubqueryCheck` the body's lowering and
+  /// validation build (`everywhere`), lifting the projection-correlation bar
+  /// for the lateral body ALONE — an ordinary subquery's projection stays
+  /// barred (`false`).
+  internal let lateral: Bool
+
   /// A context over the maps and resolution scope — an empty overlay, no
   /// bindings, an empty visited guard, eager validation, the caller scope, and
   /// no enclosing correlation by default: the shape a bare top-level query with
@@ -74,7 +85,8 @@ internal struct Context {
                 bindings: Bindings = [:],
                 subqueries: Subqueries = Subqueries(),
                 visited: Set<String> = [], validate: Bool = true,
-                subscope: Subscope = .caller, outer: Outer? = nil) {
+                subscope: Subscope = .caller, outer: Outer? = nil,
+                lateral: Bool = false) {
     self.relations = relations
     self.routines = routines
     self.bindings = bindings
@@ -83,6 +95,7 @@ internal struct Context {
     self.validate = validate
     self.subscope = subscope
     self.outer = outer
+    self.lateral = lateral
   }
 
   /// A copy of this context with `relations` REPLACING the overlay, the same
@@ -92,7 +105,7 @@ internal struct Context {
   internal func scoping(_ relations: ScopedRelations) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer)
+            subscope: subscope, outer: outer, lateral: lateral)
   }
 
   /// A copy of this context ENTERING a fresh body scope over `relations` — the
@@ -127,7 +140,7 @@ internal struct Context {
   internal func binding(_ bindings: Bindings) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer)
+            subscope: subscope, outer: outer, lateral: lateral)
   }
 
   /// A copy of this context carrying `subqueries` as the executing plan's
@@ -137,7 +150,7 @@ internal struct Context {
   internal func resolving(_ subqueries: Subqueries) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer)
+            subscope: subscope, outer: outer, lateral: lateral)
   }
 
   /// A copy of this context with every enclosing SELECT's derived-table aliases
@@ -171,7 +184,7 @@ internal struct Context {
     return Context(relations: relations, routines: routines,
                    bindings: bindings, subqueries: subqueries,
                    visited: visited, validate: validate, subscope: subscope,
-                   outer: outer)
+                   outer: outer, lateral: lateral)
   }
 
   /// A copy of this context with the eager-typecheck gate set to `flag` — a RUN
@@ -180,7 +193,7 @@ internal struct Context {
   internal func validating(_ flag: Bool) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: flag,
-            subscope: subscope, outer: outer)
+            subscope: subscope, outer: outer, lateral: lateral)
   }
 
   /// A copy of this context resolving its nested subqueries under `subscope` —
@@ -189,7 +202,7 @@ internal struct Context {
   internal func scoped(as subscope: Subscope) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer)
+            subscope: subscope, outer: outer, lateral: lateral)
   }
 
   /// A copy of this context whose enclosing correlation stack is EXTENDED with
@@ -207,7 +220,20 @@ internal struct Context {
   internal func with(outer: Outer?) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer)
+            subscope: subscope, outer: outer, lateral: lateral)
+  }
+
+  /// A copy of this context marking the query it resolves as a LATERAL derived
+  /// table's BODY (`lateral`) — the SINGLE seam `lateral(_:against:_:)` routes
+  /// its body's schema derivation and plan compile through, so the body's
+  /// `Resolution`/`SubqueryCheck` admit a correlated preceding-FROM column
+  /// EVERYWHERE, including the projection, per ISO. Every OTHER field is
+  /// preserved; the flag is scoped to the body's own lowering (a nested
+  /// NON-lateral body clears it through `body(_:)`).
+  internal func lateralizing() -> Context {
+    Context(relations: relations, routines: routines, bindings: bindings,
+            subqueries: subqueries, visited: visited, validate: validate,
+            subscope: subscope, outer: outer, lateral: true)
   }
 
   /// A copy of this context with the enclosing correlation stack CLEARED — the
@@ -217,9 +243,22 @@ internal struct Context {
   /// site; a derived table is uncorrelated), so an unbound column in either
   /// must fault rather than bind outward to the caller. Every OTHER field —
   /// the relation overlay, routines, bindings, subquery results, the visited
-  /// guard, the validate gate, and the subscope — is preserved; only `outer`
-  /// resets to `nil`, restoring the top-level default.
+  /// guard, the validate gate, and the subscope — is preserved; `outer` resets
+  /// to `nil` (restoring the top-level default) and the LATERAL-body flag
+  /// clears, so a non-lateral body nested inside a lateral one does NOT inherit
+  /// the everywhere-correlation admission.
   internal func uncorrelated() -> Context {
-    with(outer: nil)
+    with(outer: nil).unlateralized()
+  }
+
+  /// A copy of this context with the LATERAL-body flag CLEARED — the reset
+  /// `uncorrelated()`/`body(_:)` fold in, and the seam a nested ordinary
+  /// subquery within a lateral body compiles under, so a body that must NOT
+  /// correlate against the caller (a view or a non-lateral derived table) does
+  /// not carry an enclosing lateral body's everywhere-correlation admission.
+  internal func unlateralized() -> Context {
+    Context(relations: relations, routines: routines, bindings: bindings,
+            subqueries: subqueries, visited: visited, validate: validate,
+            subscope: subscope, outer: outer, lateral: false)
   }
 }

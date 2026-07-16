@@ -1997,6 +1997,17 @@ extension Catalog where Self: ~Escapable {
       try .derived(name: name,
                    plan: optimise(view: name, plan, context),
                    ordinals: ordinals, seek: seek)
+    case let .select(filter, source) where filter.constant == true:
+      // A PROVABLY-always-true filter admits every row, so the select is a
+      // no-op: drop it and optimise the source alone — identical result, one
+      // fewer per-row predicate. This composes with the seek and nest cases
+      // below: a constant-true filter over a `.scan` or `.product` never
+      // reaches them, becoming just the optimised source (a plain scan or
+      // product), not a seek over a true residual or a nest with a true gate. A
+      // constant-FALSE filter is NOT folded — there is no empty-relation Plan
+      // node, so a false filter is left filtering correctly (see the deferred
+      // empty-plan follow-up).
+      try optimise(source, context)
     case let .select(filter, .scan(name, ordinals, nil)):
       try seek(filter, name, ordinals, context)
     case let .select(filter, .product(left, right)):

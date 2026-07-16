@@ -694,6 +694,69 @@ extension Filter {
     case let .not(operand): operand.parameterised
     }
   }
+
+  /// This filter's PROVABLE two-valued truth INDEPENDENT of any row, binding,
+  /// or subquery — `true` when it is always TRUE, `false` when always FALSE,
+  /// and `nil` when it is not statically decidable (the CONSERVATIVE default).
+  /// A `select` treats UNKNOWN as reject, so the optimiser folds only a
+  /// definite `true` (drops the select) and never mistakes an undecidable
+  /// filter for one.
+  ///
+  /// The ONLY provable leaf is a `compare(a, op, b)` over TWO `.constant`
+  /// operands: it evaluates through the SAME `matches` three-valued primitive
+  /// the executor uses, so a NULL-bearing constant compare is UNKNOWN
+  /// (`matches` yields `nil`) and reports `nil` — NOT provably true and NOT
+  /// provably false — so a `WHERE NULL = 1` is left filtering (correctly
+  /// rejecting), never folded to true. Any other leaf reads a slot, a
+  /// `:parameter`, or a
+  /// subquery — `bound`, a `compare` with a non-constant term, `match`, `null`,
+  /// `membership`, `like`, `between`, `distinct`, `exists`, `within`,
+  /// `quantified` — so its truth is not known here and it reports `nil`. The
+  /// connectives require BOTH operands to be DEFINITE: `and`/`or` report a
+  /// definite result only when neither side is `nil` (an undecidable side makes
+  /// the whole compound `nil`), `not` flips a definite operand, and `truth`
+  /// maps a DEFINITE inner through `tested`. This is STRICTER than the Kleene
+  /// dominance the executor uses (a `false` conjunct or `true` disjunct short-
+  /// circuiting the other side): dominance is sound for COMBINING already-
+  /// evaluated results, but `constant` licenses the optimiser to SKIP a filter
+  /// entirely, and an undecidable operand reads row data and can THROW — so it
+  /// must never be dropped, and its parent can never be a compile-time
+  /// constant.
+  internal var constant: Bool? {
+    switch self {
+    case let .compare(.constant(lhs), op, .constant(rhs)):
+      // Both operands are constants: evaluate through the engine's own
+      // three-valued `matches`. A NULL on either side is UNKNOWN (`nil`) — not
+      // provably true and not provably false — so a NULL-bearing compare is
+      // never folded.
+      matches(lhs, op, rhs)
+    // A comparison against a non-constant term reads a slot or `:parameter`;
+    // its truth is not statically known.
+    case .compare, .bound, .match, .null, .membership, .like, .between,
+         .distinct, .exists, .within, .quantified:
+      nil
+    case let .and(lhs, rhs):
+      // Both operands must be DEFINITE: a compile-time constant is only sound
+      // for FOLDING when the fold skips no runtime work. An undecidable operand
+      // reads row data and can THROW (e.g. `1 / X`), so it MUST be evaluated —
+      // even a `false`/`true` sibling cannot license dropping it. The Kleene
+      // dominance that lets `matches` short-circuit already-evaluated results
+      // is UNSOUND here, where a definite `constant` authorises skipping the
+      // evaluation.
+      if let l = lhs.constant, let r = rhs.constant { l && r } else { nil }
+    case let .or(lhs, rhs):
+      // Both operands must be DEFINITE (see `.and`): a `true` disjunct cannot
+      // license dropping an undecidable sibling that reads row data and may
+      // throw — the parent is a compile-time constant only when both sides are.
+      if let l = lhs.constant, let r = rhs.constant { l || r } else { nil }
+    case let .not(operand):
+      operand.constant.map { !$0 }
+    case let .truth(inner, value, negated):
+      // `IS <truth>` is a DEFINITE two-valued test, but only when the inner's
+      // value is itself statically decided; an undecidable inner leaves `nil`.
+      inner.constant == nil ? nil : tested(inner.constant, value, negated)
+    }
+  }
 }
 
 extension Array where Element == Filter {
@@ -935,6 +998,11 @@ extension Catalog where Self: ~Escapable {
     // An unmatched left row under OUTER APPLY (`.left`) is NULL-extended by the
     // taken width, mirroring `outer(…)`'s NULL-padding of an unmatched row.
     let rightNulls = Record(Array(repeating: .null, count: ordinals.count))
+    // A LATERAL/CROSS/OUTER apply always emits `ON 1 = 1` — a PROVABLY-true
+    // predicate every merged row passes — so a constant-true `on` skips the
+    // redundant per-row `evaluate(paired, on, context)` and admits the pair
+    // directly (identical result). A non-trivial `on` still runs per row.
+    let unconditional = on.constant == true
     for record in left {
       let right = try executed(record, key, correlation, body)
       let width = right.first?.values.count ?? 0
@@ -946,7 +1014,9 @@ extension Catalog where Self: ~Escapable {
       for index in right.indices {
         let taken = instance.record(index, ordinals)
         let paired = record.merged(with: taken)
-        if try evaluate(paired, on, context) == true {
+        let admits =
+            try unconditional ? true : evaluate(paired, on, context) == true
+        if admits {
           records.append(paired)
           matched = true
         }

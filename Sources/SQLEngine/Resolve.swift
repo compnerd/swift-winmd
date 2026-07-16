@@ -539,8 +539,9 @@ internal struct Resolution {
   internal func correlate(_ column: Column) throws(SQLError) -> String? {
     guard let name = try outer?.parameter(for: column) else { return nil }
     guard admits else {
-      throw .unsupported(
-          "a correlated column is only supported in a subquery's WHERE")
+      throw .state("0A000",
+                   "a correlated column is only supported in a subquery's " +
+                   "WHERE")
     }
     return name
   }
@@ -553,8 +554,9 @@ internal struct Resolution {
   internal func correlated(_ column: Column) throws(SQLError) -> ValueType? {
     guard let type = try outer?.type(for: column) else { return nil }
     guard admits else {
-      throw .unsupported(
-          "a correlated column is only supported in a subquery's WHERE")
+      throw .state("0A000",
+                   "a correlated column is only supported in a subquery's " +
+                   "WHERE")
     }
     return type
   }
@@ -569,7 +571,7 @@ internal struct Resolution {
   /// none — a subquery reaching a catalog-less lowering surface.
   private func width(_ query: Query) throws(SQLError) -> Int {
     guard let width = widths[query] else {
-      throw .unsupported("a subquery is not supported in this position")
+      throw .state("0A000", "a subquery is not supported in this position")
     }
     return width
   }
@@ -580,7 +582,7 @@ internal struct Resolution {
   /// faults, rejecting the subquery rather than mis-typing it.
   private func output(_ query: Query) throws(SQLError) -> ValueType {
     guard let type = types[query] else {
-      throw .unsupported("a subquery is not supported in this position")
+      throw .state("0A000", "a subquery is not supported in this position")
     }
     return type
   }
@@ -966,8 +968,9 @@ internal struct SubqueryCheck {
   internal func correlated(_ column: Column) throws(SQLError) -> ValueType? {
     guard let type = try outer?.type(for: column) else { return nil }
     guard admits else {
-      throw .unsupported(
-          "a correlated column is only supported in a subquery's WHERE")
+      throw .state("0A000",
+                   "a correlated column is only supported in a subquery's " +
+                   "WHERE")
     }
     return type
   }
@@ -987,7 +990,7 @@ internal struct SubqueryCheck {
   /// never widens a reached occurrence's shape.
   internal func validate(_ query: Query, as role: Role) throws(SQLError) {
     guard widths[query] != nil else {
-      throw .unsupported("a subquery is not supported in this position")
+      throw .state("0A000", "a subquery is not supported in this position")
     }
     reached.reach(query, as: role)
   }
@@ -995,7 +998,7 @@ internal struct SubqueryCheck {
   /// The column count `query` projects — from the pre-pass compile.
   internal func width(_ query: Query) throws(SQLError) -> Int {
     guard let width = widths[query] else {
-      throw .unsupported("a subquery is not supported in this position")
+      throw .state("0A000", "a subquery is not supported in this position")
     }
     return width
   }
@@ -1021,7 +1024,7 @@ internal struct SubqueryCheck {
     let width = try width(query)
     guard width == 1 else { throw .arity(1, width) }
     guard let type = types[query] else {
-      throw .unsupported("a subquery is not supported in this position")
+      throw .state("0A000", "a subquery is not supported in this position")
     }
     return type
   }
@@ -1149,7 +1152,7 @@ private func membership(_ left: Term, _ values: Array<Expression>,
                         term: (Expression) throws(SQLError) -> Term)
     throws(SQLError) -> Filter {
   guard !values.isEmpty else {
-    throw .unsupported("IN requires a non-empty value list")
+    throw .state("42601", "IN requires a non-empty value list")
   }
   var elements = Array<Term>()
   elements.reserveCapacity(values.count)
@@ -1490,7 +1493,7 @@ extension Schema {
     case .aggregate:
       // An aggregate has no per-row meaning — it folds over a group — so it may
       // not appear in a `WHERE`, a join `ON`, or a non-aggregate projection.
-      throw .unsupported("an aggregate is not allowed here")
+      throw .state("42803", "an aggregate is not allowed here")
     }
   }
 
@@ -2147,7 +2150,7 @@ internal struct Scope {
     // filter's search condition, as it has no per-row meaning).
     if let filter {
       guard !filter.aggregated else {
-        throw .unsupported("an aggregate is not allowed in a FILTER")
+        throw .state("42803", "an aggregate is not allowed in a FILTER")
       }
       try check(filter, routines, subquery: subquery)
       // A FILTER that STATICALLY cannot admit a row makes the operand
@@ -2387,7 +2390,7 @@ internal struct Scope {
       // caller can build `.membership(_, [], …)` directly, so this validation
       // faults on that shape rather than typing it as an always-false chain.
       guard !values.isEmpty else {
-        throw .unsupported("IN requires a non-empty value list")
+        throw .state("42601", "IN requires a non-empty value list")
       }
       _ = try validate(operand, routines, subquery: subquery)
       _ = try membership(of: values, each: { value throws(SQLError) in
@@ -3171,7 +3174,7 @@ internal struct Scope {
       // (`lower`) and schema (`check`) reject it. The parser rejects `IN ()`,
       // but a caller can build `.membership(_, [], …)` directly.
       guard !values.isEmpty else {
-        throw .unsupported("IN requires a non-empty value list")
+        throw .state("42601", "IN requires a non-empty value list")
       }
       let lhs = try empty(operand, routines)
       let truth = try membership(of: values) { value throws(SQLError) in
@@ -3467,7 +3470,7 @@ internal struct Scope {
     case .aggregate:
       // An aggregate has no per-row meaning — it folds over a group — so it may
       // not appear in a `WHERE`, a join `ON`, or a non-aggregate projection.
-      throw .unsupported("an aggregate is not allowed here")
+      throw .state("42803", "an aggregate is not allowed here")
     }
   }
 
@@ -3765,7 +3768,7 @@ internal struct Grouping {
     case .aggregate:
       // An aggregate reaches here only when it was not collected — an internal
       // inconsistency, since the query gathers every projection/HAVING aggregate.
-      throw .unsupported("uncollected aggregate")
+      throw .state("XX000", "uncollected aggregate")
     }
   }
 
@@ -3797,7 +3800,8 @@ internal struct Grouping {
     let subquery = subquery.barred
     switch projection {
     case .all:
-      throw .unsupported("SELECT * is not allowed with GROUP BY or aggregates")
+      throw .state("0A000",
+                   "SELECT * is not allowed with GROUP BY or aggregates")
     case let .columns(columns):
       var terms = Array<Term>()
       terms.reserveCapacity(columns.count)

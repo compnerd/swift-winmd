@@ -347,7 +347,7 @@ struct ScalarSubqueryCorrelationTests {
     }
     try fixture().expect(
         "SELECT (SELECT T.V FROM S) FROM T",
-        fails: .unsupported(
+        fails: .state("0A000",
             "a correlated column is only supported in a subquery's WHERE"))
   }
 
@@ -366,7 +366,7 @@ struct ScalarSubqueryCorrelationTests {
     }
     try fixture().expect(
         "SELECT (SELECT T.Id) FROM T",
-        fails: .unsupported(
+        fails: .state("0A000",
             "a correlated column is only supported in a subquery's WHERE"))
   }
 

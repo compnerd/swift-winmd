@@ -763,7 +763,7 @@ internal struct Parser: ~Escapable {
       throws(SQLError) -> (operand: Aggregand, distinct: Bool) {
     if try match(.star) {
       guard aggregate == .count else {
-        throw .unsupported("only COUNT admits a '*' operand")
+        throw .state("42601", "only COUNT admits a '*' operand")
       }
       try expect(.rparen)
       return (.star, false)

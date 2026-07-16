@@ -421,7 +421,7 @@ struct MembershipTypeTests {
     // fold from the compile-path guard.
     let having = Predicate.membership(.literal(.integer(1)), [], negated: true)
     #expect(throws:
-        SQLError.unsupported("IN requires a non-empty value list")) {
+        SQLError.state("42601", "IN requires a non-empty value list")) {
       _ = try Scope([]).empty(having)
     }
   }
@@ -444,7 +444,7 @@ struct MembershipTypeTests {
       try members().columns(of: query, validate: true)
     }
     #expect(throws:
-        SQLError.unsupported("IN requires a non-empty value list")) {
+        SQLError.state("42601", "IN requires a non-empty value list")) {
       try resolve()
     }
   }
@@ -454,7 +454,7 @@ struct MembershipTypeTests {
     // OR-chain reduction) rather than crashing on the force-unwrap.
     let query = select(where: .membership(.column("Id"), [], negated: false))
     #expect(throws:
-        SQLError.unsupported("IN requires a non-empty value list")) {
+        SQLError.state("42601", "IN requires a non-empty value list")) {
       _ = try members().run(query)
     }
   }

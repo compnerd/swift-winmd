@@ -1632,15 +1632,8 @@ extension Catalog where Self: ~Escapable {
     // Resolve every joined relation and lay the FROM relation and each joined
     // one end to end in one combined ordinal space (as the non-aggregate join
     // path does), so the WHERE, keys, and aggregate arguments resolve uniformly.
-    var joined = Array<Resolved>()
-    joined.reserveCapacity(select.joins.count)
-    for join in select.joins {
-      try joined.append(resolve(join.relation, context))
-    }
-    var relations = [(relation, from.schema)]
-    for index in select.joins.indices {
-      relations.append((select.joins[index].relation, joined[index].schema))
-    }
+    let (joined, relations) = try resolve(from: relation, schema: from.schema,
+                                          joins: select.joins, context)
     let scope = Scope(relations)
 
     // Each join's ON predicate lowers to a `Filter` at its own chain level,
@@ -3032,6 +3025,40 @@ extension Catalog where Self: ~Escapable {
     return .select(select.probe)
   }
 
+  /// Resolves the FROM `relation` and its `joins` into one combined scope, the
+  /// single source three call sites share: the aggregate compile path, the
+  /// non-aggregate compile path, and the `SELECT *` arity check. The caller
+  /// resolves FROM once (it needs the leaf for its own base lowering) and passes
+  /// its `schema` here, so FROM is never re-resolved; each join then resolves
+  /// into one running, end-to-end ordinal space.
+  ///
+  /// The returned `joined` holds each join's `Resolved` (its schema and leaf
+  /// factory) in source order — the plan lowers each into the combined slot
+  /// space from these. The returned `relations` lays the FROM relation first,
+  /// then each joined one, each paired with its schema: `Scope(relations)` is
+  /// the full-chain scope, `relations[0 ... index + 1]` a join's prefix scope,
+  /// and `relations.reduce(0) { $0 + $1.1.width }` the `SELECT *` width — every
+  /// downstream derivation reads out of this one resolution.
+  ///
+  /// `relations` is built INCREMENTALLY: resolve join `i`, append it, then
+  /// resolve join `i + 1`. Each join's schema is correlation-independent of the
+  /// relations preceding it, so the order is a no-op here; the incremental shape
+  /// is what a per-join preceding scope would thread through.
+  private borrowing func resolve(from relation: Relation, schema: Schema,
+                                 joins: Array<Join>, _ context: Context)
+      throws(SQLError) -> (joined: Array<Resolved>,
+                           relations: Array<(Relation, Schema)>) {
+    var joined = Array<Resolved>()
+    joined.reserveCapacity(joins.count)
+    var relations = [(relation, schema)]
+    for join in joins {
+      let resolved = try resolve(join.relation, context)
+      joined.append(resolved)
+      relations.append((join.relation, resolved.schema))
+    }
+    return (joined, relations)
+  }
+
   /// The number of result columns `select` projects — the extent of a `*` over
   /// its relations, else the count of its projected items — for the `UNION`
   /// arity check. The relations resolve through this catalog, the overlay
@@ -3044,11 +3071,10 @@ extension Catalog where Self: ~Escapable {
       guard let relation = select.from else {
         throw .named("SELECT * with no FROM")
       }
-      var width = try resolve(relation, context).schema.width
-      for join in select.joins {
-        try width += resolve(join.relation, context).schema.width
-      }
-      return width
+      let schema = try resolve(relation, context).schema
+      let (_, relations) = try resolve(from: relation, schema: schema,
+                                       joins: select.joins, context)
+      return relations.reduce(0) { $0 + $1.1.width }
     case let .columns(columns):
       return columns.count
     case let .expressions(items):
@@ -3325,16 +3351,8 @@ extension Catalog where Self: ~Escapable {
     // Resolve every joined relation and lay all relations — the FROM relation
     // first, then each joined one in source order — end to end in one combined
     // ordinal space.
-    var joined = Array<Resolved>()
-    joined.reserveCapacity(select.joins.count)
-    for join in select.joins {
-      try joined.append(resolve(join.relation, context))
-    }
-
-    var relations = [(relation, from.schema)]
-    for index in select.joins.indices {
-      relations.append((select.joins[index].relation, joined[index].schema))
-    }
+    let (joined, relations) = try resolve(from: relation, schema: from.schema,
+                                          joins: select.joins, context)
     let scope = Scope(relations)
 
     // Each join's ON predicate lowers to a `Filter` at its own chain level,

@@ -3525,16 +3525,17 @@ extension Catalog where Self: ~Escapable {
     // less than the prefix, which includes the join's own relation) — so a body
     // column naming a preceding relation correlates outward and the body's plan
     // is pre-compiled for the per-outer-row apply. A non-lateral join records
-    // nothing here (its `nil` slot). The apply is INNER only for now; a
-    // LEFT/OUTER lateral join is a deliberate follow-up, so fault it.
+    // nothing here (its `nil` slot). The apply is `.inner` (CROSS APPLY, which
+    // drops an unmatched outer row) or `.left` (OUTER APPLY, which NULL-extends
+    // one); `.right`/`.full` are nonsensical for a correlated body, so fault.
     let empty: (key: Subkey, correlation: Correlation)? = nil
     var laterals = Array(repeating: empty, count: select.joins.count)
     for index in select.joins.indices {
       let join = select.joins[index]
       guard join.relation.lateral,
           case let .derived(body) = join.relation.source else { continue }
-      guard join.kind == .inner else {
-        throw .unsupported("a LEFT/RIGHT/FULL LATERAL join is not supported")
+      guard join.kind == .inner || join.kind == .left else {
+        throw .unsupported("a RIGHT/FULL LATERAL join is not supported")
       }
       let preceding = Scope(Array(relations[0 ... index]))
       laterals[index] = try lateral(body, against: preceding, context)

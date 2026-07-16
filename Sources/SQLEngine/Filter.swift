@@ -885,13 +885,15 @@ extension Catalog where Self: ~Escapable {
     return try execute(plan, augmented)
   }
 
-  /// The INNER/CROSS APPLY of a LATERAL derived table: for each `left` record,
+  /// The CROSS/OUTER APPLY of a LATERAL derived table: for each `left` record,
   /// re-executes the pre-compiled body (`key`/`correlation`) against that
   /// record's correlated cells, takes `ordinals` from each produced right
   /// record, concatenates it onto the left, and keeps the pair the `on`
-  /// predicate admits — a left record with no surviving right record is DROPPED
-  /// (`.inner`, the only kind the compiler emits for now; a LEFT/OUTER apply
-  /// that NULL-extends an unmatched left row is a deliberate follow-up).
+  /// predicate admits. `.inner` (CROSS APPLY) DROPS a left record with no
+  /// surviving right record; `.left` (OUTER APPLY) preserves it, NULL-extending
+  /// the taken width (`ordinals.count` NULL cells) — the same NULL-padding a
+  /// regular outer join's `outer(…)` uses for an unmatched row. A `.right` or
+  /// `.full` apply makes no sense for a correlated body: rejected at compile.
   ///
   /// The lateral body runs through the SAME `executed` path a correlated
   /// subquery does — it binds the correlation's `slot` sources from the borrowed
@@ -926,6 +928,9 @@ extension Catalog where Self: ~Escapable {
     // predicate over the merged record's ordinals, and any subquery in it
     // scopes to its OWN recorded overlay.
     let body = revealed(under: key, context)
+    // An unmatched left row under OUTER APPLY (`.left`) is NULL-extended by the
+    // taken width, mirroring `outer(…)`'s NULL-padding of an unmatched row.
+    let rightNulls = Record(Array(repeating: .null, count: ordinals.count))
     for record in left {
       let right = try executed(record, key, correlation, body)
       let width = right.first?.values.count ?? 0
@@ -933,12 +938,17 @@ extension Catalog where Self: ~Escapable {
           RelationInstance(columns: Array(repeating: "", count: width),
                            rows: right.map(\.values),
                            types: Array(repeating: .integer, count: width))
+      var matched = false
       for index in right.indices {
         let taken = instance.record(index, ordinals)
         let paired = record.merged(with: taken)
         if try evaluate(paired, on, context) == true {
           records.append(paired)
+          matched = true
         }
+      }
+      if !matched && kind == .left {
+        records.append(record.merged(with: rightNulls))
       }
     }
     return records

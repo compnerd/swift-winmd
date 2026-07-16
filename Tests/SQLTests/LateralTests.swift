@@ -272,6 +272,68 @@ struct LateralExecutionTests {
   }
 }
 
+// MARK: - OUTER APPLY (LEFT LATERAL joins)
+
+/// A `LEFT JOIN LATERAL` (T-SQL `OUTER APPLY`, ISO `LEFT JOIN LATERAL`)
+/// NULL-extends a left row whose correlated body admits no surviving pair —
+/// preserving it, unlike the `.inner` CROSS APPLY that drops it. A `.right` or
+/// `.full` LATERAL stays unsupported: the body correlates to the left, so a
+/// RIGHT/FULL apply makes no sense and faults at compile.
+struct OuterApplyTests {
+  @Test func `OUTER APPLY NULL-extends a left row with no right rows`() throws {
+    // `T.Id` 3 has no child in `S`, so the OUTER apply (`LEFT JOIN LATERAL`)
+    // PRESERVES it NULL-extended: Id 1 → {100, 101}, Id 2 → {200}, Id 3 →
+    // (3, NULL) — the left row kept with a NULL right column.
+    try fixture().expect(
+        "SELECT T.Id, d.x FROM T " +
+        "LEFT JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1 " +
+        "ORDER BY T.Id, d.x",
+        yields: [[1, 100], [1, 101], [2, 200], [3, nil]])
+  }
+
+  @Test func `the INNER CROSS APPLY twin drops the unmatched row`() throws {
+    // CONTRAST: the SAME body under `JOIN LATERAL` (INNER/CROSS APPLY) DROPS
+    // `T.Id` 3 — the drop the OUTER apply above replaces with a NULL-extended
+    // row. Only 1 and 2 survive.
+    try fixture().expect(
+        "SELECT T.Id, d.x FROM T " +
+        "JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1 " +
+        "ORDER BY T.Id, d.x",
+        yields: [[1, 100], [1, 101], [2, 200]])
+  }
+
+  @Test func `OUTER APPLY NULL-extends when the ON filters all right rows`()
+      throws {
+    // A body that DOES produce rows but whose every merged pair fails the join
+    // `ON` still counts as unmatched: `ON d.x > 1000` rejects every child, so
+    // EACH left row — even Ids 1 and 2 with children — is NULL-extended, just
+    // as Id 3 (no children) is. No pair survives, so all three preserve NULL.
+    try fixture().expect(
+        "SELECT T.Id, d.x FROM T " +
+        "LEFT JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d " +
+        "ON d.x > 1000 ORDER BY T.Id",
+        yields: [[1, nil], [2, nil], [3, nil]])
+  }
+
+  @Test func `a RIGHT LATERAL join is unsupported`() throws {
+    // A RIGHT apply is nonsensical — the body correlates to the LEFT, so there
+    // is nothing to preserve on the right. The compile guard faults it.
+    try fixture().expect(
+        "SELECT T.Id, d.x FROM T " +
+        "RIGHT JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1",
+        fails: .unsupported("a RIGHT/FULL LATERAL join is not supported"))
+  }
+
+  @Test func `a FULL LATERAL join is unsupported`() throws {
+    // FULL apply is nonsensical for the same reason as RIGHT — the correlated
+    // body has no independent right extent to preserve. The guard faults it.
+    try fixture().expect(
+        "SELECT T.Id, d.x FROM T " +
+        "FULL JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1",
+        fails: .unsupported("a RIGHT/FULL LATERAL join is not supported"))
+  }
+}
+
 // MARK: - LATERAL body projects a preceding-FROM column (ISO scoping)
 
 /// Per ISO 9075 a LATERAL derived table's preceding-FROM references are in

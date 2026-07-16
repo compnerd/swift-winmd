@@ -23,10 +23,13 @@
 /// select         := SELECT [DISTINCT | ALL] projection
 ///                   [FROM relation (join)*
 ///                    [where] [group] [having] [order] [limit]]
-/// relation       := (identifier | derived) [AS identifier]
+/// relation       := (identifier | [LATERAL] derived) [AS identifier]
+///                   // LATERAL is legal only on a derived table in a join
 /// derived        := '(' query ')' AS identifier  // a derived table (aliased)
 /// join           := [INNER | (LEFT | RIGHT | FULL) [OUTER]] JOIN
 ///                     relation ON predicate
+///                   // INNER JOIN LATERAL = CROSS APPLY, LEFT = OUTER APPLY;
+///                   // the derived body may reference preceding FROM items
 /// projection     := '*' | column (',' column)*
 /// where          := WHERE predicate
 /// group          := GROUP BY column (',' column)*
@@ -40,7 +43,8 @@
 ///                                    | expression | param)
 ///                 | IS [NOT] (NULL | truthvalue | DISTINCT FROM expression)
 ///                 | [NOT] IN '(' (expression (',' expression)* | query) ')'
-///                 | [NOT] LIKE expression [ESCAPE expression]
+///                 | [NOT] LIKE (expression | param)
+///                     [ESCAPE (expression | param)]
 ///                 | [NOT] BETWEEN (expression | param) AND
 ///                                 (expression | param))
 /// quantifier     := ANY | SOME | ALL      // SOME is a synonym for ANY

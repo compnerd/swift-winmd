@@ -225,9 +225,9 @@ internal struct Lexer: ~Escapable {
   /// `FieldLayout` declare), or a spelling outside the identifier bytes. Its
   /// text is taken verbatim and case-sensitively — never matched against the
   /// keywords — so it is a `quoted` token, distinct from a bare `identifier` so
-  /// the parser keeps a dot in it as part of the name rather than a qualifier; a
-  /// doubled quote `""` is an escaped quote, mirroring a string literal's `''`.
-  /// Faults if unclosed.
+  /// the parser keeps a dot in it as part of the name rather than a qualifier;
+  /// a doubled quote `""` is an escaped quote, mirroring a string literal's
+  /// `''`. Faults if unclosed.
   private mutating func delimited() throws(SQLError) -> Token {
     let start = location
     advance()

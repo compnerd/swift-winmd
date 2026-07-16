@@ -129,15 +129,16 @@ extension Catalog where Self: ~Escapable {
   /// reference the CTEs bind — a `SELECT *` over a CTE, or a name a CTE shadows
   /// off a same-named base relation — resolves against the CTE the run did, not
   /// the base catalog: `WITH t(x) AS (SELECT 1) SELECT * FROM t` reports one
-  /// column `x`, even where a base `t` of a different width exists. The scope is
-  /// SCHEMA-ONLY — each CTE contributes its declared column list (typed
+  /// column `x`, even where a base `t` of a different width exists. The scope
+  /// is SCHEMA-ONLY — each CTE contributes its declared column list (typed
   /// `.integer`, the default a materialised relation reports) without running
   /// its body — so the derive never opens a cursor, exactly as `columns(of
   /// query:)` never does. A `create` and a `function` name no result, so each
   /// faults `SQLError.statement` the way running one does.
   ///
   /// `routines` and `validate` carry the meaning `columns(of query:)` gives
-  /// them; pass `validate: false` after a run has proved the statement runnable.
+  /// them; pass `validate: false` after a run has proved the statement
+  /// runnable.
   ///
   /// - Throws: the resolution faults `columns(of query:)` raises, plus
   ///   `SQLError.statement` for a `create` or a `function`.
@@ -175,26 +176,26 @@ extension Catalog where Self: ~Escapable {
   /// `SQLError.redefinition`, the same fault `Engine.with` raises before
   /// materialising, rather than silently shadowing the earlier binding.
   ///
-  /// When `validate`, each CTE BODY is validated before its schema is trusted by
-  /// the SAME code a run drives — `Engine.validate`, the compile-time structural
-  /// check `Engine.with` runs before materialising: the recursive shape (a
-  /// recursive reference must be the final `UNION` arm; a self-reference in the
-  /// anchor with no same-named base faults `SQLError.unsupported`, the recursive
-  /// shape a run rejects BEFORE materialising) and the declared arity (the
-  /// compiled body width against the column list, `SQLError.columns` on a
-  /// mismatch — the anchor and recursive arm checked separately, self bound only
-  /// in the recursive arm). The schema path also asks that helper to run its
-  /// reachable-operand type-check (`typecheck: true` — the run defers this to
-  /// execution, so it stays OFF the run path): folding it in rather than layering
-  /// it here keeps ONE per-arm scoping for both, so a recursive CTE's ANCHOR is
-  /// operand-checked against the base scope the run evaluates it in, NOT the
-  /// CTE-self overlay. So a dry-run schema is advertised only for a `WITH` that
-  /// could actually run, never for one whose body's shape or width contradicts
-  /// its declared list — nor for one whose reachable operand a run would fault.
-  /// When `validate` is `false` — a
-  /// derive after a successful run — the bodies are TRUSTED, not compiled: the
-  /// run already proved them consistent, and re-checking a data-dependent-empty
-  /// body would fault a statement that succeeded.
+  /// When `validate`, each CTE BODY is validated before its schema is trusted
+  /// by the SAME code a run drives — `Engine.validate`, the compile-time
+  /// structural check `Engine.with` runs before materialising: the recursive
+  /// shape (a recursive reference must be the final `UNION` arm; a
+  /// self-reference in the anchor with no same-named base faults
+  /// `SQLError.unsupported`, the recursive shape a run rejects BEFORE
+  /// materialising) and the declared arity (the compiled body width against the
+  /// column list, `SQLError.columns` on a mismatch — the anchor and recursive
+  /// arm checked separately, self bound only in the recursive arm). The schema
+  /// path also asks that helper to run its reachable-operand type-check
+  /// (`typecheck: true` — the run defers this to execution, so it stays OFF the
+  /// run path): folding it in rather than layering it here keeps ONE per-arm
+  /// scoping for both, so a recursive CTE's ANCHOR is operand-checked against
+  /// the base scope the run evaluates it in, NOT the CTE-self overlay. So a
+  /// dry-run schema is advertised only for a `WITH` that could actually run,
+  /// never for one whose body's shape or width contradicts its declared list —
+  /// nor for one whose reachable operand a run would fault. When `validate` is
+  /// `false` — a derive after a successful run — the bodies are TRUSTED, not
+  /// compiled: the run already proved them consistent, and re-checking a
+  /// data-dependent-empty body would fault a statement that succeeded.
   private borrowing func columns(of query: Query, with ctes: Array<CTE>,
                                  routines: Routines,
                                  validate: Bool)
@@ -203,9 +204,9 @@ extension Catalog where Self: ~Escapable {
     var overlay = ScopedRelations()
     for cte in ctes {
       // A name repeated in the list (case-insensitively) would silently shadow
-      // the earlier binding in the overlay, so reject it rather than overwrite —
-      // the same fault `Engine.with` raises before materialising, so a schema is
-      // advertised only for a `WITH` that could actually run.
+      // the earlier binding in the overlay, so reject it rather than overwrite
+      // — the same fault `Engine.with` raises before materialising, so a schema
+      // is advertised only for a `WITH` that could actually run.
       guard overlay[cte.name.lowercased()] == nil else {
         throw .redefinition(cte.name)
       }
@@ -225,11 +226,12 @@ extension Catalog where Self: ~Escapable {
       // recursive reference in the final arm resolves while a self-reference in
       // the anchor faults the recursive shape exactly as the run does. The
       // schema path adds ONE thing the run defers to execution: a
-      // reachable-operand type-check over the body — passed IN as `typecheck` so
-      // it runs in the SAME per-arm scope the shared helper computes, checking a
-      // recursive CTE's anchor against the base scope the run evaluates it in
-      // (NOT the CTE-self overlay). A `validate: false` derive skips both — the
-      // run already proved the bodies consistent — so `typecheck: false` there.
+      // reachable-operand type-check over the body — passed IN as `typecheck`
+      // so it runs in the SAME per-arm scope the shared helper computes,
+      // checking a recursive CTE's anchor against the base scope the run
+      // evaluates it in (NOT the CTE-self overlay). A `validate: false` derive
+      // skips both — the run already proved the bodies consistent — so
+      // `typecheck: false` there.
       if validate {
         // `self.` escapes the shadow the `validate` Bool parameter casts over
         // the shared `validate(_:against:)` engine helper.
@@ -237,9 +239,9 @@ extension Catalog where Self: ~Escapable {
                           typecheck: true)
       }
       // Bind the CTE's schema-only self into the overlay AFTER its body is
-      // validated — the scope a later CTE and the trailing query resolve against
-      // — exactly as `Engine.with` binds the materialised relation after running
-      // its body.
+      // validated — the scope a later CTE and the trailing query resolve
+      // against — exactly as `Engine.with` binds the materialised relation
+      // after running its body.
       overlay[cte.name.lowercased()] = declared
     }
     // Compile/type-check/derive from the base `context.scoping(overlay)`
@@ -285,21 +287,22 @@ extension Catalog where Self: ~Escapable {
     // A scalar subquery in the projection derives its type from its inner
     // query's single column, so build the SAME cursor-free `Resolution` map the
     // compile path's lowering reads — every nested subquery compiled ONCE for
-    // its width and single-column type, each discovering its correlation against
-    // this select's own scope (`enclosing`) — and pass it to the projection walk
-    // so an output type for a `(SELECT …)` matches the type the run advertises.
-    // The projection walk is BARRED (a correlated column of THIS query in the
-    // projection is diagnosed, as the run's projection lowering bars it).
-    // Resolve over the AUGMENTED context so a subquery naming this select's own
-    // arm-local derived alias binds it, while `subquery(of:)` REVEALS the base
-    // so the subquery's OWN FROM sees no derived alias (a CTE a same-named
-    // derived alias shadows resolved beneath the dropped layer).
+    // its width and single-column type, each discovering its correlation
+    // against this select's own scope (`enclosing`) — and pass it to the
+    // projection walk so an output type for a `(SELECT …)` matches the type the
+    // run advertises. The projection walk is BARRED (a correlated column of
+    // THIS query in the projection is diagnosed, as the run's projection
+    // lowering bars it). Resolve over the AUGMENTED context so a subquery
+    // naming this select's own arm-local derived alias binds it, while
+    // `subquery(of:)` REVEALS the base so the subquery's OWN FROM sees no
+    // derived alias (a CTE a same-named derived alias shadows resolved beneath
+    // the dropped layer).
     let scope = try scope(of: select, augmented)
-    // Pass each join's PREFIX scope so an `ON`'s subquery correlates against its
-    // prefix and the WHERE's against the full scope — the SAME per-occurrence
-    // resolution the run path uses, so a name a WHERE subquery finds ambiguous in
-    // the full scope faults HERE too (typecheck↔run parity), not silently reusing
-    // an `ON` occurrence's narrower prefix.
+    // Pass each join's PREFIX scope so an `ON`'s subquery correlates against
+    // its prefix and the WHERE's against the full scope — the SAME
+    // per-occurrence resolution the run path uses, so a name a WHERE subquery
+    // finds ambiguous in the full scope faults HERE too (typecheck↔run parity),
+    // not silently reusing an `ON` occurrence's narrower prefix.
     let prefixes = try prefixes(of: select, augmented)
     // These derivations lower under `.caller` — a schema-only type derive keys
     // its subqueries in the caller id space regardless of an enclosing view
@@ -344,8 +347,9 @@ extension Catalog where Self: ~Escapable {
   /// The PREFIX scope of each join of `select` — join `index`'s prefix is the
   /// FROM relation and joins `0…index`, the relations available AT that join
   /// point, never one joined LATER. A join `ON`'s subquery correlates against
-  /// its prefix (so a reference to a later-joined relation faults), matching the
-  /// compile path's `subquery(of:)`. Empty for a FROM-less or join-less select.
+  /// its prefix (so a reference to a later-joined relation faults), matching
+  /// the compile path's `subquery(of:)`. Empty for a FROM-less or join-less
+  /// select.
   private borrowing func prefixes(of select: Select, _ context: Context)
       throws(SQLError) -> Array<Scope> {
     guard let relation = select.from, !select.joins.isEmpty else { return [] }
@@ -484,10 +488,10 @@ extension Catalog where Self: ~Escapable {
     // `.divide` on `1 / 0`) and does not reproduce the scalar's operand fault,
     // and — now that an `IN`/`EXISTS` materialises LAZILY — a twin may itself
     // sit in an unreachable leg, so it cannot stand in for a REACHABLE scalar's
-    // operand check. Deferring on `scalar` alone (not `scalar - valued`) records
-    // the scalar's own `.scalar` reach in `type` even when a `.valued` reach for
-    // the same query is also present — the two per-occurrence reaches must not
-    // dedup the scalar away.
+    // operand check. Deferring on `scalar` alone (not `scalar - valued`)
+    // records the scalar's own `.scalar` reach in `type` even when a `.valued`
+    // reach for the same query is also present — the two per-occurrence reaches
+    // must not dedup the scalar away.
     let deferred = scalar
     var widths = Dictionary<Query, Int>()
     var types = Dictionary<Query, ValueType>()
@@ -514,8 +518,8 @@ extension Catalog where Self: ~Escapable {
       }
     }
     // The WHERE, `HAVING`, projection, and `ORDER BY` are walked by the
-    // reachability phase, so their operand check DEFERS; their width and single-
-    // column type still derive here against the full `enclosing` scope.
+    // reachability phase, so their operand check DEFERS; their width and
+    // single- column type still derive here against the full `enclosing` scope.
     var rest = Array<Query>()
     select.predicate?.collect(subqueries: &rest)
     select.having?.collect(subqueries: &rest)
@@ -553,20 +557,20 @@ extension Catalog where Self: ~Escapable {
       throws(SQLError) {
     // The width and single-column type derive for EVERY subquery — cursor-free
     // and TOTAL for a clean-resolving inner query (deriving the type of `1 / 0`
-    // yields the integer type WITHOUT dividing). A distinct query at ONE site is
-    // derived once; the SAME query at ANOTHER site re-derives against ITS scope,
-    // so a WHERE occurrence's ambiguity still faults there. The compile is
-    // SHAPE ONLY, so LENIENT (`validate: false`): this pre-pass runs for EVERY
-    // nested subquery ahead of the reachability walk, so validating a derived
-    // body it nests — `1 IN (SELECT x FROM (SELECT 1 / 0 …) AS d)` — would
-    // fault a subquery a short-circuited `AND`/`OR` leg drops BEFORE the walk
-    // reaches it. Validation of a REACHED subquery's body (and the derived
+    // yields the integer type WITHOUT dividing). A distinct query at ONE site
+    // is derived once; the SAME query at ANOTHER site re-derives against ITS
+    // scope, so a WHERE occurrence's ambiguity still faults there. The compile
+    // is SHAPE ONLY, so LENIENT (`validate: false`): this pre-pass runs for
+    // EVERY nested subquery ahead of the reachability walk, so validating a
+    // derived body it nests — `1 IN (SELECT x FROM (SELECT 1 / 0 …) AS d)` —
+    // would fault a subquery a short-circuited `AND`/`OR` leg drops BEFORE the
+    // walk reaches it. Validation of a REACHED subquery's body (and the derived
     // tables nested within it, at any depth) is the walk's job — `typecheck(_
     // select:)` re-derives each reached occurrence's body strictly. Structural
     // faults (a bad inner relation/column, a UNION arity) still surface here —
-    // those resolve regardless of `validate`.
-    // Lower under `.caller`, this frame's `nested` outer, and shape-only
-    // lenience (`validate: false`) — the schema pre-pass's cursor-free derive.
+    // those resolve regardless of `validate`. Lower under `.caller`, this
+    // frame's `nested` outer, and shape-only lenience (`validate: false`) — the
+    // schema pre-pass's cursor-free derive.
     let inner =
         context.scoped(as: .caller).with(outer: nested).validating(false)
     let width = try compile(query, inner).width
@@ -693,11 +697,12 @@ extension Catalog where Self: ~Escapable {
     // lowering does.
     let barred = subquery.barred
     // An `ORDER BY` ordinal names a 1-based SELECT-list position; one outside
-    // `1 ... width` names no output column and faults `SQLError.column` (spelled
-    // as the ordinal), exactly as the compile path's ordinal resolution does —
-    // structural and reachability-independent, so a row-dropping limit never
-    // spares it. `orderKeys` resolves an IN-RANGE ordinal to its projection
-    // expression but silently drops an out-of-range one, so this raises it here.
+    // `1 ... width` names no output column and faults `SQLError.column`
+    // (spelled as the ordinal), exactly as the compile path's ordinal
+    // resolution does — structural and reachability-independent, so a
+    // row-dropping limit never spares it. `orderKeys` resolves an IN-RANGE
+    // ordinal to its projection expression but silently drops an out-of-range
+    // one, so this raises it here.
     if let clause = select.order {
       let width = scope.width(of: select.projection)
       for key in clause.keys {
@@ -709,10 +714,10 @@ extension Catalog where Self: ~Escapable {
     }
     // A GROUPED `ORDER BY` sorts in the grouped slot space, so each sort key
     // must name a `GROUP BY` key, an aggregate, or an output — resolve it
-    // through the SAME grouped lowering the run does, faulting `SQLError.grouping`
-    // on a resolvable-but-non-grouped column exactly as the compile path does.
-    // Structural, so it runs regardless of the WHERE/limit reachability the
-    // operand type-check below tracks.
+    // through the SAME grouped lowering the run does, faulting
+    // `SQLError.grouping` on a resolvable-but-non-grouped column exactly as the
+    // compile path does. Structural, so it runs regardless of the WHERE/limit
+    // reachability the operand type-check below tracks.
     if select.aggregates {
       try order(grouped: select, scope, context, prefixes: prefixes)
     }
@@ -732,8 +737,9 @@ extension Catalog where Self: ~Escapable {
             // evaluate it UNCONDITIONALLY — a zero `FETCH` or positive `OFFSET`
             // spares only the projection, never HAVING. It validates its
             // operands (a divide, overflow, or bad routine call faults) AND
-            // yields the group's fate — a group passes only when HAVING is TRUE,
-            // so FALSE or UNKNOWN drops it and the projection is unreachable.
+            // yields the group's fate — a group passes only when HAVING is
+            // TRUE, so FALSE or UNKNOWN drops it and the projection is
+            // unreachable.
             //
             // A HAVING nesting an `EXISTS`/`IN (Q)` subquery is the exception:
             // `empty` cannot materialise the subquery (it carries no catalog),
@@ -835,15 +841,17 @@ extension Catalog where Self: ~Escapable {
   /// Resolves a GROUPED `select`'s `ORDER BY` through the SAME grouped lowering
   /// the compile path applies, so the type-check enforces the GROUP BY rules on
   /// each sort key exactly as a run does — a bare column must be a `GROUP BY`
-  /// key or occur inside an aggregate, else `SQLError.grouping`; an out-of-range
-  /// ordinal `SQLError.column`; a duplicated output name `SQLError.ambiguous`.
+  /// key or occur inside an aggregate, else `SQLError.grouping`; an
+  /// out-of-range ordinal `SQLError.column`; a duplicated output name
+  /// `SQLError.ambiguous`.
   ///
   /// It rebuilds the `Grouping` `group` builds — the `GROUP BY` keys and the
   /// aggregations collected from the projection, `HAVING`, and the `ORDER BY`
   /// sort keys, deduped by resolved `Aggregation` — then lowers the projection
-  /// and the `ORDER BY` through it, reusing `Grouping.terms`/`Grouping.order` so
-  /// the two paths cannot drift. It resolves only, reading no cursor; a run's
-  /// operand type-check over the (structurally valid) keys stays the caller's.
+  /// and the `ORDER BY` through it, reusing `Grouping.terms`/`Grouping.order`
+  /// so the two paths cannot drift. It resolves only, reading no cursor; a
+  /// run's operand type-check over the (structurally valid) keys stays the
+  /// caller's.
   private borrowing func order(grouped select: Select, _ scope: Scope,
                                _ context: Context,
                                prefixes: Array<Scope> = [])
@@ -885,8 +893,9 @@ extension Catalog where Self: ~Escapable {
     }
     // Build the grouping and lower the projection through it to record each
     // output name (an alias, else a group column's own name) — the surface an
-    // `ORDER BY` output name resolves against — then lower the `ORDER BY`, which
-    // faults a non-group column, an out-of-range ordinal, or an ambiguous name.
+    // `ORDER BY` output name resolves against — then lower the `ORDER BY`,
+    // which faults a non-group column, an out-of-range ordinal, or an ambiguous
+    // name.
     var grouping = try Grouping(scope, select.grouping, aggregations,
                                 subquery: subquery)
     let projection = try grouping.terms(select.projection, routines,

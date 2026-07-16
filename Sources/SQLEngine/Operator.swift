@@ -11,14 +11,15 @@
 /// slot-indexed row the adapter's borrowed cells are copied into at a leaf.
 ///
 /// The plan is *escapable and name-holding*: a `Plan` references each relation
-/// by its catalog NAME rather than by a `~Escapable` `Table` (an `indirect enum`
-/// cannot box a `~Escapable` payload), and carries the ordinals the query
-/// actually reads from it. The executor re-resolves a name to a transient table,
-/// opens its cursor, and materialises *only the referenced ordinals* into a
-/// dense slot array — reals out of the cursor, virtuals (ordinals `>= width`)
-/// computed by the `Row`. Slot `i` of the record holds the cell of the scan's
-/// `i`th referenced ordinal; the operators address slots, never ordinals, so a
-/// record is a dense `Array<Value>` with no gaps and no per-row hashing.
+/// by its catalog NAME rather than by a `~Escapable` `Table` (an `indirect
+/// enum` cannot box a `~Escapable` payload), and carries the ordinals the query
+/// actually reads from it. The executor re-resolves a name to a transient
+/// table, opens its cursor, and materialises *only the referenced ordinals*
+/// into a dense slot array — reals out of the cursor, virtuals (ordinals `>=
+/// width`) computed by the `Row`. Slot `i` of the record holds the cell of the
+/// scan's `i`th referenced ordinal; the operators address slots, never
+/// ordinals, so a record is a dense `Array<Value>` with no gaps and no per-row
+/// hashing.
 
 // MARK: - Record
 
@@ -90,17 +91,17 @@ internal struct Record: Row, Hashable {
 /// An escapable, name-holding relational operator tree.
 ///
 /// Every relation a `SELECT` names is held by its catalog NAME, not by a
-/// `~Escapable` `Table`, so the whole tree is a plain escapable `indirect enum`.
-/// The leaf `scan` carries the relation name, the ordinals the query reads from
-/// it (reals and virtuals, in materialisation order — the order that defines the
-/// scan's slots), and an optional seek — the row range to read. The unary
-/// operators wrap a sub-plan: `select` keeps the records a `Filter` admits,
-/// `project` restricts and reorders to the projected slots, and `sort` orders by
-/// a typed key on a slot. `product` is the Cartesian product of two sub-plans
-/// (records merged); `join` is the index-nested-loop equi-join that seeks the
-/// inner relation per outer record rather than forming the product, the inner
-/// named and its referenced ordinals carried for the executor to re-resolve and
-/// materialise.
+/// `~Escapable` `Table`, so the whole tree is a plain escapable `indirect
+/// enum`. The leaf `scan` carries the relation name, the ordinals the query
+/// reads from it (reals and virtuals, in materialisation order — the order that
+/// defines the scan's slots), and an optional seek — the row range to read. The
+/// unary operators wrap a sub-plan: `select` keeps the records a `Filter`
+/// admits, `project` restricts and reorders to the projected slots, and `sort`
+/// orders by a typed key on a slot. `product` is the Cartesian product of two
+/// sub-plans (records merged); `join` is the index-nested-loop equi-join that
+/// seeks the inner relation per outer record rather than forming the product,
+/// the inner named and its referenced ordinals carried for the executor to
+/// re-resolve and materialise.
 internal indirect enum Plan {
   /// The single-row leaf of a FROM-less `SELECT`: it yields exactly one empty
   /// record (no slots), the row a scalar projection (`SELECT 1 + 1`) computes
@@ -132,14 +133,14 @@ internal indirect enum Plan {
   case sort(keys: Array<(term: Term, ascending: Bool)>, Plan)
   /// × — every concatenation of an outer record with an inner one.
   case product(Plan, Plan)
-  /// ⋈ — for each outer record, seeks the inner relation `name` on
-  /// `keys.right == outer[keys.left]` and concatenates each match. `keys.left`
-  /// and `keys.right` are combined-space slots, `base` the inner's first slot
-  /// in that combined space, and `column` the inner ordinal `keys.right` reads
-  /// (for the seek `bound`). `filter` is a single-relation predicate pushed onto
-  /// the inner — in the inner's OWN 0-based standalone slot space — applied WHILE
-  /// each inner row is materialised, so an inner row that fails it is never
-  /// paired.
+  /// ⋈ — for each outer record, seeks the inner relation `name` on `keys.right
+  /// == outer[keys.left]` and concatenates each match. `keys.left` and
+  /// `keys.right` are combined-space slots, `base` the inner's first slot in
+  /// that combined space, and `column` the inner ordinal `keys.right` reads
+  /// (for the seek `bound`). `filter` is a single-relation predicate pushed
+  /// onto the inner — in the inner's OWN 0-based standalone slot space —
+  /// applied WHILE each inner row is materialised, so an inner row that fails
+  /// it is never paired.
   case join(Plan, name: String, ordinals: Array<Int>, base: Int,
             column: Int, keys: (left: Int, right: Int), filter: Filter?)
   /// ⟕/⟖/⟗ — the OUTER join of `left` and `right` on the `on` predicate, in
@@ -160,10 +161,10 @@ internal indirect enum Plan {
   /// into the combined space laid AFTER the left's slots, concatenates it onto
   /// the left, and keeps the pair the `on` predicate admits. INNER/CROSS APPLY
   /// (`kind` `.inner`, the only kind emitted): a left record with no surviving
-  /// right record is DROPPED. Unlike a `product`/`outer` the right side is not a
-  /// static sub-plan — it re-runs per left row against the correlated bindings —
-  /// so the optimiser treats it as an opaque pushdown BARRIER and never rebases
-  /// a conjunct across it.
+  /// right record is DROPPED. Unlike a `product`/`outer` the right side is not
+  /// a static sub-plan — it re-runs per left row against the correlated
+  /// bindings — so the optimiser treats it as an opaque pushdown BARRIER and
+  /// never rebases a conjunct across it.
   case apply(Plan, key: Subkey, correlation: Correlation,
              ordinals: Array<Int>, on: Filter, kind: Join.Kind)
   /// A set operation of `kind` (`UNION`/`INTERSECT`/`EXCEPT`) over the `left`
@@ -186,15 +187,16 @@ internal indirect enum Plan {
   /// (equivalently `SELECT ALL`) omits it.
   case distinct(Plan)
   /// Γ — groups its `source`'s records by the `keys` terms and folds each
-  /// `aggregates` accumulator over every record of a group, yielding one grouped
-  /// record per group. The grouped record's slots are the `keys` values (slots
-  /// `0 ..< keys.count`, in key order) followed by the aggregate results (slot
-  /// `keys.count + j` is `aggregates[j]`), the slot space the projection, the
-  /// `HAVING`, and the `ORDER BY` are lowered against. With no `keys` the whole
-  /// source is one group — the degenerate `SELECT COUNT(*) FROM T` — yielding a
-  /// single grouped record even over an empty source (`COUNT` `0`, the others
-  /// NULL). It sits above the WHERE/join chain and below the projection, so it
-  /// aggregates the filtered rows and the projection reads its output.
+  /// `aggregates` accumulator over every record of a group, yielding one
+  /// grouped record per group. The grouped record's slots are the `keys` values
+  /// (slots `0 ..< keys.count`, in key order) followed by the aggregate results
+  /// (slot `keys.count + j` is `aggregates[j]`), the slot space the projection,
+  /// the `HAVING`, and the `ORDER BY` are lowered against. With no `keys` the
+  /// whole source is one group — the degenerate `SELECT COUNT(*) FROM T` —
+  /// yielding a single grouped record even over an empty source (`COUNT` `0`,
+  /// the others NULL). It sits above the WHERE/join chain and below the
+  /// projection, so it aggregates the filtered rows and the projection reads
+  /// its output.
   case aggregate(keys: Array<Term>, aggregates: Array<Aggregation>, Plan)
   /// A row cap on its `source`'s output: skips the first `offset` records then
   /// takes at most `count` of the rest, in the source's order. It sits over the
@@ -244,8 +246,8 @@ extension Plan {
   ///
   /// A scan or a derived view's width is its referenced-ordinal count; a
   /// `select` is as wide as its source; a `product` is the sum of its sides and
-  /// a `join` the sum of its outer side and the inner's referenced ordinals — so
-  /// a left-deep chain of products or joins measures correctly, letting the
+  /// a `join` the sum of its outer side and the inner's referenced ordinals —
+  /// so a left-deep chain of products or joins measures correctly, letting the
   /// nest rewrite recurse into a multi-relation chain.
   internal var slots: Int? {
     switch self {
@@ -292,8 +294,8 @@ extension Plan {
       // as its source.
       source.slots
     case let .aggregate(keys, aggregates, _):
-      // A grouped record reshapes its source into the key values followed by the
-      // aggregate results — a fresh slot space of that width.
+      // A grouped record reshapes its source into the key values followed by
+      // the aggregate results — a fresh slot space of that width.
       keys.count + aggregates.count
     default:
       nil
@@ -316,18 +318,16 @@ extension Plan {
 /// Each operator transforms the records its sub-plan yields: `scan` re-resolves
 /// the relation by name, opens its cursor, and materialises its referenced
 /// ordinals over the seek range into dense slots; `select` keeps the admitted
-/// records; `project` rebuilds each from the projected slots; `sort` orders them
-/// by its typed keys major to minor, stably and each in its own direction;
-/// `product` pairs every
-/// outer record with every inner one; `join` re-resolves the inner relation,
-/// seeks it per outer record, and concatenates the matches; `setop` runs its
-/// two sides — each with its own set-operation semantics — and combines their
-/// rows by its `kind` (`UNION`/`INTERSECT`/`EXCEPT`), deduplicating unless
-/// `all`; `distinct` deduplicates its source's whole rows (`SELECT DISTINCT`);
-/// `limit` skips the first `offset` of its source's rows then takes at most
-/// `count`.
-/// The catalog is borrowed throughout — a `~Escapable` source is never copied
-/// or stored.
+/// records; `project` rebuilds each from the projected slots; `sort` orders
+/// them by its typed keys major to minor, stably and each in its own direction;
+/// `product` pairs every outer record with every inner one; `join` re-resolves
+/// the inner relation, seeks it per outer record, and concatenates the matches;
+/// `setop` runs its two sides — each with its own set-operation semantics — and
+/// combines their rows by its `kind` (`UNION`/`INTERSECT`/`EXCEPT`),
+/// deduplicating unless `all`; `distinct` deduplicates its source's whole rows
+/// (`SELECT DISTINCT`); `limit` skips the first `offset` of its source's rows
+/// then takes at most `count`. The catalog is borrowed throughout — a
+/// `~Escapable` source is never copied or stored.
 extension Catalog where Self: ~Escapable {
   internal borrowing func execute(_ plan: Plan, _ context: Context)
       throws(SQLError) -> Array<Record> {
@@ -566,9 +566,9 @@ extension Catalog where Self: ~Escapable {
 ///
 /// A `nil` `count` is no cap — every row after the skip (an `OFFSET` without a
 /// `FETCH`). An `offset` at or past the end yields no rows; a `count` reaching
-/// past the remaining rows takes all of them. Both are non-negative, so the skip
-/// and the take never index before the start. The take is a `prefix` of the
-/// skipped slice rather than an `offset + count` bound, so a `count` near
+/// past the remaining rows takes all of them. Both are non-negative, so the
+/// skip and the take never index before the start. The take is a `prefix` of
+/// the skipped slice rather than an `offset + count` bound, so a `count` near
 /// `Int.max` caps the slice instead of overflowing.
 private func limited(_ records: Array<Record>, _ count: Int?, _ offset: Int)
     -> Array<Record> {
@@ -750,22 +750,23 @@ extension Catalog where Self: ~Escapable {
 }
 
 extension Catalog where Self: ~Escapable {
-  /// Executes a view's sub-`plan` against this catalog and re-lays each resulting
-  /// record to the referenced `ordinals` (slots into the view's columns) over the
-  /// seek's row range (the whole result when `nil`).
+  /// Executes a view's sub-`plan` against this catalog and re-lays each
+  /// resulting record to the referenced `ordinals` (slots into the view's
+  /// columns) over the seek's row range (the whole result when `nil`).
   ///
-  /// The sub-plan yields full-width view records — its columns at slots
-  /// `0 ..< columns.count`; this projects each to the `ordinals` the outer query
-  /// reads, in the slot order the outer scan expects (slot `i` is `ordinals[i]`).
+  /// The sub-plan yields full-width view records — its columns at slots `0 ..<
+  /// columns.count`; this projects each to the `ordinals` the outer query
+  /// reads, in the slot order the outer scan expects (slot `i` is
+  /// `ordinals[i]`).
   ///
   /// The sub-plan runs OUTSIDE the statement's CTE scope — never the caller's
   /// `WITH` — so a caller's `WITH` never reaches into a stored view's body: a
-  /// view's own `FROM`/`JOIN` names resolve to base relations (and other views),
-  /// never to a statement-local CTE that happens to share a name. Its scope is
-  /// instead the `definition_schema.` overlay the view's OWN query names (empty
-  /// when it names none), so a view defined over a store relation materialises
-  /// exactly as the inline query does — the same overlay the body compiled and
-  /// optimised under.
+  /// view's own `FROM`/`JOIN` names resolve to base relations (and other
+  /// views), never to a statement-local CTE that happens to share a name. Its
+  /// scope is instead the `definition_schema.` overlay the view's OWN query
+  /// names (empty when it names none), so a view defined over a store relation
+  /// materialises exactly as the inline query does — the same overlay the body
+  /// compiled and optimised under.
   internal borrowing func derive(_ name: String, _ plan: Plan,
                                  _ ordinals: Array<Int>, _ seek: Range<Int>?,
                                  _ context: Context)
@@ -775,13 +776,13 @@ extension Catalog where Self: ~Escapable {
       // EXECUTION-path materialise (`rows: true`): a nested derived body's
       // schema is derived schema-only inside `materialise`, so `validate:
       // false` keeps that lenient — a data-dependent-empty derived body in a
-      // view body must not fault at run, matching the top-level run path.
-      // Seed the cyclic-view guard with THIS view's own name, as
-      // `resolve(view:)` does, so a body materialising this view through a
-      // derived table (`FROM (SELECT * FROM <self>) AS d`) faults `.recursion`
-      // in `materialise` rather than re-running the body without end. `body([:])`
-      // enters the view-body scope with the caller's correlation stack CLEARED,
-      // so a nested derived body's schema (derived while `augment`/`materialise`
+      // view body must not fault at run, matching the top-level run path. Seed
+      // the cyclic-view guard with THIS view's own name, as `resolve(view:)`
+      // does, so a body materialising this view through a derived table (`FROM
+      // (SELECT * FROM <self>) AS d`) faults `.recursion` in `materialise`
+      // rather than re-running the body without end. `body([:])` enters the
+      // view-body scope with the caller's correlation stack CLEARED, so a
+      // nested derived body's schema (derived while `augment`/`materialise`
       // resolves it) cannot bind an unbound column outward to an enclosing row.
       let fresh = context.body([:]).visiting(name).validating(false)
       overlay = try augment(fresh, for: view.query, rows: true)
@@ -888,23 +889,24 @@ private func product(_ outer: Array<Record>, _ inner: Array<Record>)
 }
 
 /// The equi-join of `outer` against the inner relation `name`, resolved through
-/// `ctes` first then `catalog`, seeking or hashing the inner as its shape allows.
+/// `ctes` first then `catalog`, seeking or hashing the inner as its shape
+/// allows.
 ///
-/// A materialised CTE inner has no sort key, so it is scanned in full and joined
-/// by the equality on its `keys.right` slot (`joined`). A base relation that
-/// reports `column` (the inner ordinal `keys.right` reads) seekable is sought per
-/// outer record — an index-nested loop, cheap because the seek narrows the scan;
-/// one that is NOT seekable is scanned ONCE into a hash map keyed by its join
-/// value and each outer record probes it in O(1) (`hashed`), rather than reading
-/// the whole inner once per outer record. Every strategy materialises a candidate
-/// over the referenced `ordinals` into inner slots `0 ..< ordinals.count`, admits
-/// it only when the pushed inner `filter` (in the inner's standalone slot space)
-/// also holds — applied WHILE the inner row is materialised, so a filtered inner
-/// row is never paired or bucketed — keys on the inner's `keys.right` slot
-/// (`keys.right - base` in the standalone inner record), and concatenates a match
-/// (the inner's slots landing at `base` in the combined space). A NULL key joins
-/// to nothing, and every path preserves outer-major order, the inner matches in
-/// cursor order within each outer.
+/// A materialised CTE inner has no sort key, so it is scanned in full and
+/// joined by the equality on its `keys.right` slot (`joined`). A base relation
+/// that reports `column` (the inner ordinal `keys.right` reads) seekable is
+/// sought per outer record — an index-nested loop, cheap because the seek
+/// narrows the scan; one that is NOT seekable is scanned ONCE into a hash map
+/// keyed by its join value and each outer record probes it in O(1) (`hashed`),
+/// rather than reading the whole inner once per outer record. Every strategy
+/// materialises a candidate over the referenced `ordinals` into inner slots `0
+/// ..< ordinals.count`, admits it only when the pushed inner `filter` (in the
+/// inner's standalone slot space) also holds — applied WHILE the inner row is
+/// materialised, so a filtered inner row is never paired or bucketed — keys on
+/// the inner's `keys.right` slot (`keys.right - base` in the standalone inner
+/// record), and concatenates a match (the inner's slots landing at `base` in
+/// the combined space). A NULL key joins to nothing, and every path preserves
+/// outer-major order, the inner matches in cursor order within each outer.
 ///
 /// The HASH-JOIN bucket a key falls in — a grouping key, NOT the equality. A
 /// numeric value buckets by its `Double` magnitude (an `.integer` promoted), so
@@ -1029,18 +1031,18 @@ extension Catalog where Self: ~Escapable {
 /// DURING this scan, before a row is bucketed: the inner is SEEKED by the
 /// filter's seekable conjunct — `boundaries` over each conjunct, the same
 /// boundary logic the scan seek uses, mapping a slot back to its table column
-/// through `ordinals` — so a seekable/contradictory inner filter reads few or no
-/// inner rows rather than scanning the whole table; when no conjunct is seekable
-/// the whole inner scans. Each read row is then admitted only when the whole
-/// `filter` holds, so a filtered inner row is never bucketed or paired.
+/// through `ordinals` — so a seekable/contradictory inner filter reads few or
+/// no inner rows rather than scanning the whole table; when no conjunct is
+/// seekable the whole inner scans. Each read row is then admitted only when the
+/// whole `filter` holds, so a filtered inner row is never bucketed or paired.
 ///
 /// An outer with no non-null key has no probe that can match — an empty outer
 /// has no probes at all, and a NULL key joins to nothing — so no match can
 /// result; return before scanning and bucketing the inner rather than reading
 /// every inner row to answer nothing. The nested-loop path this replaces read
 /// zero inner rows for such an outer, and a selective or contradictory outer
-/// WHERE (`… WHERE key IS NULL`, or one pruning every row) must not force a full
-/// scan of a large unseekable inner.
+/// WHERE (`… WHERE key IS NULL`, or one pruning every row) must not force a
+/// full scan of a large unseekable inner.
 extension Table where Self: ~Escapable {
   fileprivate borrowing func hashed<C>(_ outer: Array<Record>,
                                        _ ordinals: Array<Int>, _ base: Int,
@@ -1133,9 +1135,9 @@ extension Table where Self: ~Escapable {
 /// A seekable column reports a boundary for a valid key; an unseekable one
 /// reports `nil`. The probe key must be a VALID one: a decoded coded-index join
 /// key is 1-based and reports `nil` for the null reference `0`, so probing with
-/// `0` would misclassify a seekable coded-index column as unseekable and force a
-/// hash build even for a selective join. `1` — the least valid key — answers for
-/// every seekable column (`Id`, an owner foreign key, a sorted key, a
+/// `0` would misclassify a seekable coded-index column as unseekable and force
+/// a hash build even for a selective join. `1` — the least valid key — answers
+/// for every seekable column (`Id`, an owner foreign key, a sorted key, a
 /// coded-index key); its value is otherwise irrelevant, since this is only a
 /// capability check (the join loop seeks with the real outer key).
 extension Table where Self: ~Escapable {

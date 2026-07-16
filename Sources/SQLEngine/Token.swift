@@ -87,8 +87,9 @@ extension Token {
 
     // Operands.
     case identifier(String)
-    /// A delimited (double-quoted) identifier — a name taken verbatim, so unlike
-    /// a bare `identifier` a dot in it is part of the name, not a qualifier.
+    /// A delimited (double-quoted) identifier — a name taken verbatim, so
+    /// unlike a bare `identifier` a dot in it is part of the name, not a
+    /// qualifier.
     case quoted(String)
     case string(String)
     /// A bare integer literal — a run of digits with no fraction or exponent.

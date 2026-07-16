@@ -70,8 +70,8 @@ public enum SQLError: Error, Hashable, Sendable {
   /// silent coercion; the string describes the fault. A NULL operand is not a
   /// fault: it propagates to a NULL result.
   case operand(String)
-  /// A binary arithmetic expression divides by zero — standard SQL raises rather
-  /// than yielding a value.
+  /// A binary arithmetic expression divides by zero — standard SQL raises
+  /// rather than yielding a value.
   case divide
   /// A binary arithmetic expression's integer result exceeds the platform `Int`
   /// — reported rather than trapped; the string describes the fault.
@@ -99,8 +99,8 @@ public enum SQLError: Error, Hashable, Sendable {
   /// columns of every arm must align — carrying the first arm's width and the
   /// offending arm's.
   case arity(Int, Int)
-  /// A query uses a construct the engine does not support in the shape given — a
-  /// `SELECT *` with no `FROM`, or a `WHERE`/`ORDER BY`/`JOIN` on a FROM-less
+  /// A query uses a construct the engine does not support in the shape given —
+  /// a `SELECT *` with no `FROM`, or a `WHERE`/`ORDER BY`/`JOIN` on a FROM-less
   /// select (which projects only expressions over a single row); the string
   /// describes it.
   case unsupported(String)
@@ -202,35 +202,34 @@ extension SQLError {
   /// characters are the class and whose last three are the subclass. Every case
   /// maps to a code, so any `SQLError` exposes one.
   ///
-  /// The codes draw on ISO/IEC 9075-2 Annex B (SQLSTATE class values) and, where
-  /// ISO leaves the subclass implementation-defined, the de-facto PostgreSQL
-  /// assignments:
+  /// The codes draw on ISO/IEC 9075-2 Annex B (SQLSTATE class values) and,
+  /// where ISO leaves the subclass implementation-defined, the de-facto
+  /// PostgreSQL assignments:
   ///
   /// - Class `42` — syntax error or access rule violation — covers the
-  ///   lexer/parser faults (`42601` syntax error), the undefined-object faults
-  ///   (`42P01` table, `42703` column, `42883` function), and the name-collision
-  ///   faults (`42702` ambiguous, `42701` duplicate). `42P01` is a PostgreSQL
-  ///   subclass; ISO itself leaves the `42` subclass implementation-defined, so
-  ///   this is a deliberate choice noted alongside `42703`/`42883`, which are
-  ///   likewise PostgreSQL subclasses on the same class.
-  /// - Class `22` — data exception — covers the value faults: `22003` numeric
-  ///   value out of range (the out-of-range integer literal and the arithmetic
-  ///   overflow), `22012` division by zero, and `22023` invalid parameter value
-  ///   (a scalar function's rejected argument).
-  /// - `42804` (datatype mismatch) is the non-numeric arithmetic operand — a
-  ///   type error at evaluation rather than a value-range fault.
-  /// - Class `SS` — the implementation-defined class this engine squats on
-  ///   (SwiftSQL) for a condition with no standard ISO code — `SS001`, a query
-  ///   shape the engine does not support (a FROM-less `SELECT *`, or a clause
-  ///   with no `FROM`), `SS002`, a statement that is not runnable as a query
-  ///   (a `CREATE VIEW`, or a malformed `WITH` member), `SS003`, a recursive
-  ///   CTE that did not reach a fixpoint within the iteration cap, `SS004`, an
-  ///   aggregate query naming a non-aggregated column absent from the `GROUP
-  ///   BY`, `SS005`, a `SELECT DISTINCT` ordering on a column absent from its
-  ///   select list, and `SS006`, a scalar subquery yielding more than one row
-  ///   (ISO's `21000` cardinality violation, kept in the engine's own class for
-  ///   uniformity with its siblings). ISO leaves classes whose first character
-  ///   is `5`–`9` or `I`–`Z` implementation-defined, so `SS` is a safe squat.
+  /// lexer/parser faults (`42601` syntax error), the undefined-object faults
+  /// (`42P01` table, `42703` column, `42883` function), and the name-collision
+  /// faults (`42702` ambiguous, `42701` duplicate). `42P01` is a PostgreSQL
+  /// subclass; ISO itself leaves the `42` subclass implementation-defined, so
+  /// this is a deliberate choice noted alongside `42703`/`42883`, which are
+  /// likewise PostgreSQL subclasses on the same class. - Class `22` — data
+  /// exception — covers the value faults: `22003` numeric value out of range
+  /// (the out-of-range integer literal and the arithmetic overflow), `22012`
+  /// division by zero, and `22023` invalid parameter value (a scalar function's
+  /// rejected argument). - `42804` (datatype mismatch) is the non-numeric
+  /// arithmetic operand — a type error at evaluation rather than a value-range
+  /// fault. - Class `SS` — the implementation-defined class this engine squats
+  /// on (SwiftSQL) for a condition with no standard ISO code — `SS001`, a query
+  /// shape the engine does not support (a FROM-less `SELECT *`, or a clause
+  /// with no `FROM`), `SS002`, a statement that is not runnable as a query (a
+  /// `CREATE VIEW`, or a malformed `WITH` member), `SS003`, a recursive CTE
+  /// that did not reach a fixpoint within the iteration cap, `SS004`, an
+  /// aggregate query naming a non-aggregated column absent from the `GROUP BY`,
+  /// `SS005`, a `SELECT DISTINCT` ordering on a column absent from its select
+  /// list, and `SS006`, a scalar subquery yielding more than one row (ISO's
+  /// `21000` cardinality violation, kept in the engine's own class for
+  /// uniformity with its siblings). ISO leaves classes whose first character is
+  /// `5`–`9` or `I`–`Z` implementation-defined, so `SS` is a safe squat.
   public var sqlstate: String {
     switch self {
     case let .state(code, _):

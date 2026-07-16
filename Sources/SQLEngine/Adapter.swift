@@ -113,8 +113,8 @@ public enum ValueType: Hashable, Sendable {
 /// data, not rendered text — so a client may format, compare, or re-key it. A
 /// cell may also be `null` — SQL's absent value, distinct from any integer or
 /// text, unordered and unequal to everything (itself included) — which a source
-/// yields for a column that has no value in a row (a decoded attribute that does
-/// not apply), and which a comparison evaluates under three-valued logic.
+/// yields for a column that has no value in a row (a decoded attribute that
+/// does not apply), and which a comparison evaluates under three-valued logic.
 public enum Value: Hashable, Sendable {
   /// SQL `NULL` — the absence of a value.
   case null
@@ -579,8 +579,8 @@ public protocol Cursor: ~Escapable {
 
 /// A positional view over the cells of a single row.
 ///
-/// A cell is read by ordinal as a typed `Value` — the source decides whether the
-/// ordinal names an integral or a textual cell, and a virtual ordinal (one
+/// A cell is read by ordinal as a typed `Value` — the source decides whether
+/// the ordinal names an integral or a textual cell, and a virtual ordinal (one
 /// `>= Table.width`) is computed here rather than stored. The row borrows its
 /// cursor and never escapes that borrow; the `Value` it yields is owned and
 /// escapable.

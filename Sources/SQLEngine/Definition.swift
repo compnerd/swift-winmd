@@ -717,10 +717,10 @@ extension Select {
 
   /// Collects this select's `FROM` and `JOIN` NON-LATERAL derived tables — each
   /// alias with its inner query — into `derivations`. A LATERAL derived table
-  /// is SKIPPED: it is not materialised once as a constant relation but resolved
-  /// against the preceding FROM and re-evaluated per its rows (a correlated
-  /// apply), so `compile(select)` binds and executes it directly rather than
-  /// through the overlay `augment` builds.
+  /// is SKIPPED: it is not materialised once as a constant relation but
+  /// resolved against the preceding FROM and re-evaluated per its rows (a
+  /// correlated apply), so `compile(select)` binds and executes it directly
+  /// rather than through the overlay `augment` builds.
   func collect(derived derivations: inout Array<(String, Query)>) {
     if case let .derived(query) = from?.source, let alias = from?.alias,
         !(from?.lateral ?? false) {

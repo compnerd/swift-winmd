@@ -8,14 +8,14 @@
 /// A query runs against a `~Escapable` `Catalog` (borrowed, never copied) plus
 /// this `Context` (fully owned value data):
 ///
-///   - `relations` — the in-scope relation overlay: the materialised common
-///     table expressions a `WITH` binds and any `definition_schema.` store
-///     relation the query names, keyed case-folded. The resolver consults it
-///     BEFORE the base catalog, so a name it binds shadows a base table or view.
-///   - `routines` — the scalar functions (UDFs) a call resolves through, keyed
-///     case-folded; the engine prelude (`BITAND`) merged under the caller's.
-///   - `bindings` — the query parameters, each `:name` mapped to its bound
-///     value, read by a `bound` filter and the seek planner.
+/// - `relations` — the in-scope relation overlay: the materialised common table
+/// expressions a `WITH` binds and any `definition_schema.` store relation the
+/// query names, keyed case-folded. The resolver consults it BEFORE the base
+/// catalog, so a name it binds shadows a base table or view. - `routines` — the
+/// scalar functions (UDFs) a call resolves through, keyed case-folded; the
+/// engine prelude (`BITAND`) merged under the caller's. - `bindings` — the
+/// query parameters, each `:name` mapped to its bound value, read by a `bound`
+/// filter and the seek planner.
 ///
 /// It is plain escapable data, so it needs none of the lifetime machinery the
 /// borrowed catalog does: extending the `relations` overlay for a CTE's scope,
@@ -111,21 +111,22 @@ internal struct Context {
   /// A copy of this context ENTERING a fresh body scope over `relations` — the
   /// SINGLE derivation every view/derived-table/CTE body-entry seam routes
   /// through, `scoping(relations)` with the enclosing correlation stack CLEARED
-  /// (`uncorrelated()`). A body scope — a view definition, a non-LATERAL derived
-  /// table, or a CTE — is resolved INDEPENDENTLY of its call site, so it must
-  /// NOT correlate against an enclosing query's row: an unbound column in the
-  /// body must fault rather than bind outward to the caller. Folding the reset
-  /// INTO body-entry makes the clear intrinsic — a future body seam that routes
-  /// through `body(_:)` cannot forget to append `uncorrelated()`. A site that
-  /// also guards the cyclic-view chain or gates the eager type-check chains
-  /// `visiting(_:)`/`validating(_:)` AFTER `body(_:)`.
+  /// (`uncorrelated()`). A body scope — a view definition, a non-LATERAL
+  /// derived table, or a CTE — is resolved INDEPENDENTLY of its call site, so
+  /// it must NOT correlate against an enclosing query's row: an unbound column
+  /// in the body must fault rather than bind outward to the caller. Folding the
+  /// reset INTO body-entry makes the clear intrinsic — a future body seam that
+  /// routes through `body(_:)` cannot forget to append `uncorrelated()`. A site
+  /// that also guards the cyclic-view chain or gates the eager type-check
+  /// chains `visiting(_:)`/`validating(_:)` AFTER `body(_:)`.
   internal func body(_ relations: ScopedRelations) -> Context {
     scoping(relations).uncorrelated()
   }
 
-  /// A copy of this context whose overlay binds `materialised` to `name` (folded
-  /// to lower case), the binding shadowing any existing one — the recursive
-  /// step's rebinding of a CTE's self to the previous iteration's rows.
+  /// A copy of this context whose overlay binds `materialised` to `name`
+  /// (folded to lower case), the binding shadowing any existing one — the
+  /// recursive step's rebinding of a CTE's self to the previous iteration's
+  /// rows.
   internal func binding(_ name: String, to materialised: RelationInstance)
       -> Context {
     var relations = relations

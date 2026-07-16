@@ -164,8 +164,8 @@ public indirect enum Query: Hashable, Sendable {
   }
 }
 
-/// A `SELECT` query: a projection over one relation or a chain of joins, with an
-/// optional predicate, ordering, and row limit.
+/// A `SELECT` query: a projection over one relation or a chain of joins, with
+/// an optional predicate, ordering, and row limit.
 ///
 /// `from` is optional: a FROM-less `SELECT <expr-list>` yields exactly one row
 /// whose columns are the evaluated projection expressions, the standard SQL
@@ -681,9 +681,10 @@ public indirect enum Expression: Hashable, Sendable {
   case binary(Arithmetic, Expression, Expression)
   /// An aggregate function over a group of rows — `COUNT(*)`, `COUNT(x)`,
   /// `SUM(x)`, `MIN(x)`, `MAX(x)`, `AVG(x)`. Unlike a scalar `call` (evaluated
-  /// per row), an aggregate accumulates over every row of a group and yields one
-  /// value, so the engine recognises the fixed set of aggregate names at parse
-  /// time and lowers them through a dedicated mechanism rather than the routines.
+  /// per row), an aggregate accumulates over every row of a group and yields
+  /// one value, so the engine recognises the fixed set of aggregate names at
+  /// parse time and lowers them through a dedicated mechanism rather than the
+  /// routines.
   ///
   /// `distinct` is the ISO `<set quantifier>` written inside the parentheses:
   /// `DISTINCT` folds each DISTINCT input value once (`COUNT(DISTINCT x)`,
@@ -707,10 +708,10 @@ public indirect enum Expression: Hashable, Sendable {
   /// source order.
   ///
   /// Both ISO forms reduce to this searched shape: a SEARCHED `CASE WHEN cond
-  /// THEN r … END` carries its predicates directly, and a SIMPLE `CASE op WHEN v
-  /// THEN r … END` is normalised at parse time to `WHEN op = v THEN r …`, so the
-  /// engine models one conditional. The result expressions' types must unify to
-  /// one result type (see resolution).
+  /// THEN r … END` carries its predicates directly, and a SIMPLE `CASE op WHEN
+  /// v THEN r … END` is normalised at parse time to `WHEN op = v THEN r …`, so
+  /// the engine models one conditional. The result expressions' types must
+  /// unify to one result type (see resolution).
   case `case`(Array<When>, else: Expression?)
   /// A `CAST(operand AS type)` — the ISO explicit conversion of the `operand`
   /// expression to the target `ValueType`. Unlike the widening `CASE` unifies
@@ -758,9 +759,9 @@ public indirect enum Expression: Hashable, Sendable {
 /// One `WHEN predicate THEN result` branch of a `CASE` expression — the guard
 /// and the value it yields when the guard is the first TRUE one.
 public struct When: Hashable, Sendable {
-  /// The guard predicate — TRUE selects this branch (UNKNOWN and FALSE skip it).
-  /// A simple `CASE`'s `WHEN value` is normalised to the equality `operand =
-  /// value` here.
+  /// The guard predicate — TRUE selects this branch (UNKNOWN and FALSE skip
+  /// it). A simple `CASE`'s `WHEN value` is normalised to the equality `operand
+  /// = value` here.
   public let when: Predicate
 
   /// The result expression this branch yields when its guard is the first TRUE.
@@ -844,11 +845,12 @@ public indirect enum Predicate: Hashable, Sendable {
   case null(Expression, negated: Bool)
   /// `operand IN (v, …)`, or `NOT IN` when `negated` — whether the operand
   /// equals any value of the non-empty `values` list. It is ISO shorthand for a
-  /// disjunction of equalities under three-valued logic: `x IN (a, b)` is `x = a
-  /// OR x = b`, so a NULL operand or a NULL element makes an otherwise-unmatched
-  /// test UNKNOWN rather than FALSE, and `NOT IN` is the negation of that (never
-  /// TRUE when a NULL element is present). The engine lowers it to that
-  /// disjunction rather than carrying a dedicated `Filter` case.
+  /// disjunction of equalities under three-valued logic: `x IN (a, b)` is `x =
+  /// a OR x = b`, so a NULL operand or a NULL element makes an
+  /// otherwise-unmatched test UNKNOWN rather than FALSE, and `NOT IN` is the
+  /// negation of that (never TRUE when a NULL element is present). The engine
+  /// lowers it to that disjunction rather than carrying a dedicated `Filter`
+  /// case.
   case membership(Expression, Array<Expression>, negated: Bool)
   /// `operand [NOT] LIKE pattern [ESCAPE escape]` — whether the operand's text
   /// matches the pattern, in which `%` matches any sequence of characters
@@ -1118,11 +1120,11 @@ public struct Order: Hashable, Sendable {
 ///
 /// It applies to the ordered result — after `WHERE` and `ORDER BY`, but before
 /// the projection, so a row outside the page is never projected: skip the first
-/// `offset` rows, then take at most `count`. The two ISO clauses are independent
-/// — an `OFFSET` written without a `FETCH` leaves `count` `nil` (no cap, every
-/// row after the skip), and a `FETCH` without an `OFFSET` caps from the start
-/// (`offset` `0`). Both counts are non-negative; a `count` of `0` yields no rows
-/// and an `offset` past the end yields none.
+/// `offset` rows, then take at most `count`. The two ISO clauses are
+/// independent — an `OFFSET` written without a `FETCH` leaves `count` `nil` (no
+/// cap, every row after the skip), and a `FETCH` without an `OFFSET` caps from
+/// the start (`offset` `0`). Both counts are non-negative; a `count` of `0`
+/// yields no rows and an `offset` past the end yields none.
 public struct Limit: Hashable, Sendable {
   /// The greatest number of rows the result yields, or `nil` for no cap — an
   /// `OFFSET` written without a `FETCH`.

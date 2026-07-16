@@ -818,6 +818,27 @@ extension Catalog where Self: ~Escapable {
     return extended
   }
 
+  /// `context` re-scoped to the RECORDED revealed overlay of the occurrence
+  /// `key`'s scope — the SAME revealed base (CTEs plus `definition_schema.`
+  /// store relations, every enclosing SELECT's derived aliases STRIPPED) the
+  /// occurrence's plan was COMPILED against. The run records it under the scope
+  /// (`.caller` at the top level, `.view(name)` in a view body) as
+  /// `revealed().relations`; scoping the EXECUTION context to it makes a
+  /// re-executed body resolve its `FROM` identically to compile, so a body
+  /// `.scan` binds the CTE compile chose rather than a caller derived alias of
+  /// the same name the unrevealed execution overlay would carry. On a miss (no
+  /// box recorded) it leaves the overlay unchanged.
+  ///
+  /// The predicate-subquery paths (`present`/`values`/`scalar`) and the LATERAL
+  /// apply share this ONE seam, so the body plan a `Plan.apply` re-runs
+  /// per left row resolves under the identical revealed overlay `lateral(_:
+  /// against:_:)` used at compile — the FROM-clause and predicate correlation
+  /// paths cannot diverge from it.
+  private borrowing func revealed(under key: Subkey, _ context: Context)
+      -> Context {
+    context.scoping(context.subqueries.overlay(key.scope) ?? context.relations)
+  }
+
   /// The rows a CORRELATED subquery occurrence `key` yields for `row` — the
   /// SINGLE augment-and-execute path every correlated caller (`present`,
   /// `values`, `scalar`) routes through, so none can skip the augmentation or
@@ -864,6 +885,65 @@ extension Catalog where Self: ~Escapable {
     return try execute(plan, augmented)
   }
 
+  /// The INNER/CROSS APPLY of a LATERAL derived table: for each `left` record,
+  /// re-executes the pre-compiled body (`key`/`correlation`) against that
+  /// record's correlated cells, takes `ordinals` from each produced right
+  /// record, concatenates it onto the left, and keeps the pair the `on`
+  /// predicate admits — a left record with no surviving right record is DROPPED
+  /// (`.inner`, the only kind the compiler emits for now; a LEFT/OUTER apply
+  /// that NULL-extends an unmatched left row is a deliberate follow-up).
+  ///
+  /// The lateral body runs through the SAME `executed` path a correlated
+  /// subquery does — it binds the correlation's `slot` sources from the borrowed
+  /// left `record`, augments the body's OWN aliases, and runs the pre-compiled
+  /// plan — so the borrow is never retained: `executed` returns owned
+  /// `Record`s, and the pair merges two owned records. The right record is the
+  /// body's FULL output, so `ordinals` select the referenced columns into the
+  /// combined space laid after the left's slots, exactly as a scan's referenced
+  /// ordinals sit after the left in a `product`.
+  ///
+  /// A lateral derived table exposes the universal virtual `Id` column at its
+  /// real `width` — its resolution schema is a `RelationInstance.schema()`, so
+  /// a body reference `d.Id` puts the virtual ordinal `width` into `ordinals`.
+  /// The `executed` body rows hold only the REAL columns (`0 ..< width`), so
+  /// taking `right.values[width]` would trap. This wraps THIS left row's body
+  /// output as a `RelationInstance` and materialises each right record through
+  /// `RelationInstance.record`, so the virtual `Id` ordinal yields the 1-based
+  /// row position within this left row's output — the SAME id derivation a
+  /// non-lateral derived table's `record` produces — while a real ordinal reads
+  /// its stored cell.
+  internal borrowing func applied(_ left: Array<Record>, _ key: Subkey,
+                                  _ correlation: Correlation,
+                                  _ ordinals: Array<Int>, _ on: Filter,
+                                  _ kind: Join.Kind, _ context: Context)
+      throws(SQLError) -> Array<Record> {
+    var records = Array<Record>()
+    // Re-run the pre-compiled body under the SAME revealed overlay it was
+    // COMPILED against — the occurrence scope's recorded revealed base — so a
+    // body `FROM e` scans the CTE `e` compile chose, not a caller derived alias
+    // `e` that shadows it in the UNREVEALED execution overlay. The `on`
+    // predicate stays on the caller `context`: it is a caller-level join
+    // predicate over the merged record's ordinals, and any subquery in it
+    // scopes to its OWN recorded overlay.
+    let body = revealed(under: key, context)
+    for record in left {
+      let right = try executed(record, key, correlation, body)
+      let width = right.first?.values.count ?? 0
+      let instance =
+          RelationInstance(columns: Array(repeating: "", count: width),
+                           rows: right.map(\.values),
+                           types: Array(repeating: .integer, count: width))
+      for index in right.indices {
+        let taken = instance.record(index, ordinals)
+        let paired = record.merged(with: taken)
+        if try evaluate(paired, on, context) == true {
+          records.append(paired)
+        }
+      }
+    }
+    return records
+  }
+
   /// Executes a correlated subquery's SET-OPERATION `plan` arm by arm — the
   /// plan and its `query` descend in lockstep (compile builds `.setop(kind,
   /// compile(left), compile(right), all)` from `.setop(kind, left, right,
@@ -901,9 +981,7 @@ extension Catalog where Self: ~Escapable {
     // Run under the overlay the occurrence's SCOPE was lowered under — the
     // caller's or the view body's — not the current execution site a pushdown
     // may have moved this predicate to.
-    let context =
-        context.scoping(context.subqueries.overlay(key.scope)
-                        ?? context.relations)
+    let context = revealed(under: key, context)
     // A CORRELATED EXISTS re-executes its PRE-COMPILED PROBE plan (correlated
     // columns are bound `Term.parameter`s; the plan is the cardinality-only
     // probed shape, so its select list — a would-fault `1 / 0` — never runs)
@@ -927,9 +1005,7 @@ extension Catalog where Self: ~Escapable {
                                 _ key: Subkey, _ correlation: Correlation,
                                 _ context: Context)
       throws(SQLError) -> Array<Value> {
-    let context =
-        context.scoping(context.subqueries.overlay(key.scope)
-                        ?? context.relations)
+    let context = revealed(under: key, context)
     // A CORRELATED `IN (Q)` re-executes its PRE-COMPILED inner plan against this
     // row's correlated bindings for its lone column, bypassing the memo. An
     // UNCORRELATED one memoises and re-runs its `Query` (recompiling resolves).
@@ -955,9 +1031,7 @@ extension Catalog where Self: ~Escapable {
                                 _ key: Subkey, _ correlation: Correlation,
                                 _ type: ValueType, _ context: Context)
       throws(SQLError) -> Value {
-    let context =
-        context.scoping(context.subqueries.overlay(key.scope)
-                        ?? context.relations)
+    let context = revealed(under: key, context)
     // A CORRELATED scalar subquery re-executes its PRE-COMPILED inner plan per
     // outer row against the correlated bindings, collapsing to its lone cell
     // (empty → NULL, one row → the cell, more → `.cardinality`), bypassing the

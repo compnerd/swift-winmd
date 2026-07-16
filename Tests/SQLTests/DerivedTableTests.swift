@@ -53,7 +53,8 @@ private func parse(query text: String) throws -> Query {
 
 struct DerivedTableParsingTests {
   @Test func `parses a derived table in FROM with an alias`() throws {
-    let select = try parse(select: "SELECT t.a FROM (SELECT V AS a FROM S) AS t")
+    let select = try parse(select:
+        "SELECT t.a FROM (SELECT V AS a FROM S) AS t")
     let inner = try parse(query: "SELECT V AS a FROM S")
     #expect(select.from == Relation(derived: inner, as: "t"))
   }
@@ -99,6 +100,35 @@ struct DerivedTableParsingTests {
     // `Hashable`/`Equatable`.
     let text = "SELECT t.a FROM (SELECT V AS a FROM S) AS t"
     #expect(try parse(query: text) == parse(query: text))
+  }
+
+  @Test func `parses LATERAL before a JOIN derived table and sets the flag`()
+      throws {
+    // A leading `LATERAL` before a `(SELECT …)` derived table sets the
+    // `lateral` flag, so the resolver threads the preceding FROM outward.
+    let select = try parse(select:
+        "SELECT T.Id FROM T " +
+        "JOIN LATERAL (SELECT V AS v FROM S WHERE V = T.Id) AS d ON T.Id = d.v")
+    let inner = try parse(query: "SELECT V AS v FROM S WHERE V = T.Id")
+    #expect(select.joins.count == 1)
+    #expect(select.joins[0].relation
+            == Relation(derived: inner, as: "d", lateral: true))
+    #expect(select.joins[0].relation.lateral)
+  }
+
+  @Test func `a non-lateral derived table has the flag clear`() throws {
+    // The default is non-lateral — a plain `(SELECT …)` never sets `lateral`.
+    let select = try parse(select:
+        "SELECT t.a FROM (SELECT V AS a FROM S) AS t")
+    #expect(!(select.from?.lateral ?? true))
+  }
+
+  @Test func `LATERAL before a named relation faults`() throws {
+    // `LATERAL` introduces a derived table alone, so a named relation after it
+    // faults rather than marking the base relation lateral.
+    #expect(throws: SQLError.self) {
+      _ = try parse(select: "SELECT a FROM T JOIN LATERAL S ON T.Id = S.k")
+    }
   }
 }
 

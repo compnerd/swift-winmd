@@ -269,6 +269,7 @@ private func seeks(_ plan: Plan) -> Bool {
   case let .product(left, right): seeks(left) || seeks(right)
   case let .join(outer, _, _, _, _, _, _): seeks(outer)
   case let .outer(left, right, _, _): seeks(left) || seeks(right)
+  case let .apply(left, _, _, _, _, _): seeks(left)
   case let .setop(_, left, right, _): seeks(left) || seeks(right)
   case .single: false
   }
@@ -288,6 +289,7 @@ private func joins(_ plan: Plan) -> Bool {
   case let .derived(_, sub, _, _): joins(sub)
   case let .product(left, right): joins(left) || joins(right)
   case let .outer(left, right, _, _): joins(left) || joins(right)
+  case let .apply(left, _, _, _, _, _): joins(left)
   case let .setop(_, left, right, _): joins(left) || joins(right)
   case .single, .scan: false
   }
@@ -309,6 +311,7 @@ private func residual(_ plan: Plan) -> Bool {
   case let .product(left, right): residual(left) || residual(right)
   case let .join(outer, _, _, _, _, _, _): residual(outer)
   case let .outer(left, right, _, _): residual(left) || residual(right)
+  case let .apply(left, _, _, _, _, _): residual(left)
   case let .setop(_, left, right, _): residual(left) || residual(right)
   case .single, .scan: false
   }

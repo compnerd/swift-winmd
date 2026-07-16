@@ -421,16 +421,27 @@ public struct Relation: Hashable, Sendable {
   /// present for a `derived` one (ISO requires a derived table be aliased).
   public let alias: String?
 
+  /// Whether a `LATERAL` derived table — its body may reference the PRECEDING
+  /// FROM items, so it re-evaluates per their rows (a correlated apply), rather
+  /// than materialising once. Always `false` for a `named` relation and for a
+  /// plain (non-`LATERAL`) derived table, which resolves independently of its
+  /// call site.
+  public let lateral: Bool
+
   /// A named base relation, view, or CTE with an optional alias.
   public init(name: String, alias: String? = nil) {
     self.source = .named(name)
     self.alias = alias
+    self.lateral = false
   }
 
-  /// A derived table over `query`, resolved under the mandatory `alias`.
-  public init(derived query: Query, as alias: String) {
+  /// A derived table over `query`, resolved under the mandatory `alias`. A
+  /// `lateral` one resolves against the preceding FROM items and re-evaluates
+  /// per their rows; a plain one materialises once, independent of the caller.
+  public init(derived query: Query, as alias: String, lateral: Bool = false) {
     self.source = .derived(query)
     self.alias = alias
+    self.lateral = lateral
   }
 
   /// The name the resolution scope keys this relation under: the identifier for

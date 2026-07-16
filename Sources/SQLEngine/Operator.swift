@@ -153,6 +153,19 @@ internal indirect enum Plan {
   /// nested loop that tracks matches, so it composes with an arbitrary
   /// (non-equi) `on`.
   case outer(Plan, Plan, on: Filter, kind: Join.Kind)
+  /// A correlated APPLY — a `LATERAL` derived table's nested loop. For each
+  /// record of the left sub-plan it re-executes the pre-compiled body plan
+  /// (looked up by `key` composed with `correlation`, whose `slot` sources bind
+  /// from that left record), takes `ordinals` from each produced right record
+  /// into the combined space laid AFTER the left's slots, concatenates it onto
+  /// the left, and keeps the pair the `on` predicate admits. INNER/CROSS APPLY
+  /// (`kind` `.inner`, the only kind emitted): a left record with no surviving
+  /// right record is DROPPED. Unlike a `product`/`outer` the right side is not a
+  /// static sub-plan — it re-runs per left row against the correlated bindings —
+  /// so the optimiser treats it as an opaque pushdown BARRIER and never rebases
+  /// a conjunct across it.
+  case apply(Plan, key: Subkey, correlation: Correlation,
+             ordinals: Array<Int>, on: Filter, kind: Join.Kind)
   /// A set operation of `kind` (`UNION`/`INTERSECT`/`EXCEPT`) over the `left`
   /// and `right` sub-plans, both yielding rows of the same width — the result
   /// columns of the first arm.
@@ -262,6 +275,10 @@ extension Plan {
       } else {
         nil
       }
+    case let .apply(left, _, _, ordinals, _, _):
+      // An apply lays the lateral body's taken `ordinals` after the left's
+      // slots, exactly as a product lays a scan's referenced ordinals.
+      left.slots.map { $0 + ordinals.count }
     case let .setop(_, left, _, _):
       // Both sides yield rows of the same width — the result columns — so the
       // set operation's width is its left side's.
@@ -389,6 +406,9 @@ extension Catalog where Self: ~Escapable {
       return try outer(execute(left, context), left.slots ?? 0,
                        execute(right, context), right.slots ?? 0, on, kind,
                        context)
+    case let .apply(left, key, correlation, ordinals, on, kind):
+      return try applied(execute(left, context), key, correlation, ordinals,
+                         on, kind, context)
     case let .setop(kind, left, right, all):
       return try setop(kind, left, right, all, context)
     case let .distinct(source):

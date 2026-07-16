@@ -420,6 +420,11 @@ internal struct Parser: ~Escapable {
   /// name — exactly as the scalar-subquery and `IN (…)` lookaheads are, so
   /// no rewind is needed.
   ///
+  /// An optional leading `LATERAL` marks the derived table lateral (ISO
+  /// `LATERAL (query)`): its body may reference the PRECEDING FROM items, so it
+  /// re-evaluates per their rows. `LATERAL` introduces a derived table alone —
+  /// a `(SELECT …)` must follow — so a `LATERAL` before a named relation faults.
+  ///
   /// Derived table's alias is REQUIRED (ISO): `FROM (SELECT …)` with no `AS t`
   /// faults. A named relation's alias is optional and may be introduced by `AS`
   /// (`TypeDef AS t`) or written directly after the name (`TypeDef t`); the
@@ -427,6 +432,7 @@ internal struct Parser: ~Escapable {
   /// following keyword (`JOIN`, `WHERE`, …) or the end of input is not mistaken
   /// for an alias.
   private mutating func relation() throws(SQLError) -> Relation {
+    let lateral = try match(.lateral)
     if try match(.lparen) {
       guard let token = current else {
         throw .incomplete(expected: "a derived table '(SELECT …)'")
@@ -448,7 +454,16 @@ internal struct Parser: ~Escapable {
                           expected: "'AS' and an alias for the derived table",
                           at: token.location)
       }
-      return try Relation(derived: query, as: identifier())
+      return try Relation(derived: query, as: identifier(), lateral: lateral)
+    }
+    // `LATERAL` introduces a derived table; a named relation may not follow it.
+    guard !lateral else {
+      guard let token = current else {
+        throw .incomplete(expected: "a derived table after LATERAL")
+      }
+      throw .unexpected(token.kind.description,
+                        expected: "a derived table '(SELECT …)' after LATERAL",
+                        at: token.location)
     }
     let name = try identifier()
     let alias: String? = if try match(.as) {

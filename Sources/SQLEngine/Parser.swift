@@ -19,7 +19,8 @@
 /// cte            := identifier ['(' identifier (',' identifier)* ')']
 ///                   AS '(' query ')'
 /// query          := intersection ((UNION | EXCEPT) [ALL] intersection)*
-/// intersection   := select (INTERSECT [ALL] select)*
+/// intersection   := term (INTERSECT [ALL] term)*
+/// term           := select | TABLE identifier   // TABLE t = SELECT * FROM t
 /// select         := SELECT [DISTINCT | ALL] projection
 ///                   [FROM relation (join)*
 ///                    [where] [group] [having] [order] [limit]]
@@ -226,22 +227,43 @@ internal struct Parser: ~Escapable {
     return query
   }
 
-  /// Parses `select (INTERSECT [ALL] select)*`, the inner set-operation tier,
+  /// Parses `term (INTERSECT [ALL] term)*`, the inner set-operation tier,
   /// left-associative.
   ///
-  /// The leading `SELECT` is the seed `Query`; each `INTERSECT` (optionally
-  /// `ALL`) folds the next `SELECT` onto the right. `INTERSECT` binds tighter
+  /// The leading `term` is the seed `Query`; each `INTERSECT` (optionally
+  /// `ALL`) folds the next `term` onto the right. `INTERSECT` binds tighter
   /// than `UNION`/`EXCEPT`, so this tier is fully consumed before the outer
   /// `query` tier folds a `UNION`/`EXCEPT` around it. `INTERSECT ALL` keeps
   /// duplicate rows to the lesser multiplicity; a bare `INTERSECT` removes
   /// them.
   private mutating func intersection() throws(SQLError) -> Query {
-    var query = try Query.select(select())
+    var query = try term()
     while try match(.intersect) {
       let all = try match(.all)
-      query = try .setop(.intersect, query, .select(select()), all: all)
+      query = try .setop(.intersect, query, term(), all: all)
     }
     return query
+  }
+
+  /// Parses a query primary — a `SELECT …` or the ISO `TABLE t` shorthand — the
+  /// leaf both set-operation tiers compose over.
+  ///
+  /// `TABLE t` is exactly `SELECT * FROM t` (ISO 9075 `<explicit table>`): it
+  /// lowers to the SAME AST a star-projection single-relation select builds — a
+  /// `.all` projection over one named `Relation`, no `WHERE`/`GROUP`/`HAVING`/
+  /// order/limit — so compile, execute, and the `SELECT *` column expansion all
+  /// apply unchanged and it composes with `UNION`/`INTERSECT`/`EXCEPT` as a
+  /// parenthesised select would. The operand is a bare table or view NAME (the
+  /// same `identifier` a relation names); a derived table is not admitted, as
+  /// `TABLE (…)` is not an ISO form. Ordering is a select-internal clause here,
+  /// so a `TABLE t ORDER BY …` tail is not accepted at this primary level — the
+  /// `SELECT * FROM t ORDER BY …` spelling carries an order.
+  private mutating func term() throws(SQLError) -> Query {
+    guard try match(.table) else {
+      return try .select(select())
+    }
+    let name = try identifier()
+    return .select(Select(projection: .all, from: Relation(name: name)))
   }
 
   /// Parses a `CREATE` statement — `CREATE VIEW …` or `CREATE FUNCTION …` (the
@@ -444,7 +466,8 @@ internal struct Parser: ~Escapable {
       guard let token = current else {
         throw .incomplete(expected: "a derived table '(SELECT …)'")
       }
-      guard token.kind == .select else {
+      // A derived table is any query, so `TABLE t` opens one as `SELECT` does.
+      guard [.select, .table].contains(token.kind) else {
         throw .unexpected(token.kind.description,
                           expected: "a derived table '(SELECT …)'",
                           at: token.location)
@@ -656,12 +679,12 @@ internal struct Parser: ~Escapable {
   private mutating func factor() throws(SQLError) -> Expression {
     if try match(.lparen) {
       // ONE token of lookahead after `(` disambiguates a SCALAR SUBQUERY from a
-      // parenthesised expression: a `SELECT` begins a subquery — `(query)`, the
-      // first-class `Expression.subquery` (the query may itself be a `UNION`) —
-      // and anything else begins a parenthesised expression. No rewind is
-      // needed: `SELECT` never begins an expression, so the peek is
+      // parenthesised expression: a `SELECT` or `TABLE` begins a subquery —
+      // `(query)`, the first-class `Expression.subquery` (the query may itself
+      // be a `UNION`) — and anything else begins a parenthesised expression. No
+      // rewind is needed: neither keyword begins an expression, so the peek is
       // unambiguous, exactly as the `IN (…)` and `EXISTS (…)` lookaheads are.
-      if current?.kind == .select {
+      if [.select, .table].contains(current?.kind) {
         let query = try query()
         try expect(.rparen)
         return .subquery(query)
@@ -1166,7 +1189,7 @@ internal struct Parser: ~Escapable {
   private mutating func membership(_ left: Expression, negated: Bool)
       throws(SQLError) -> Predicate {
     try expect(.lparen)
-    if current?.kind == .select {
+    if [.select, .table].contains(current?.kind) {
       let query = try query()
       try expect(.rparen)
       return .within(left, query, negated: negated)

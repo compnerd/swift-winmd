@@ -408,6 +408,7 @@ internal struct Lexer: ~Escapable {
     case "FUNCTION": .function
     case "RETURNS": .returns
     case "SELECT": .select
+    case "TABLE": .table
     case "DISTINCT": .distinct
     case "FROM": .from
     case "WHERE": .where

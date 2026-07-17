@@ -30,7 +30,7 @@ package struct Storage: ~Escapable {
   internal let guid: RawSpan
 
   /// The bitset of present tables (`TablesStream.Valid`).
-  package let valid: UInt64
+  internal let valid: UInt64
 
   /// The bitset of physically sorted tables (`TablesStream.Sorted`).
   ///
@@ -40,7 +40,7 @@ package struct Storage: ~Escapable {
   package let sorted: UInt64
 
   @_lifetime(copy bytes, copy relations, copy strings, copy blob, copy guid)
-  package init(bytes: RawSpan, relations: Span<Table>, strings: RawSpan,
+  internal init(bytes: RawSpan, relations: Span<Table>, strings: RawSpan,
                 blob: RawSpan, guid: RawSpan, valid: UInt64, sorted: UInt64) {
     self.bytes = bytes
     self.tables = relations

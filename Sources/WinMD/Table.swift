@@ -79,7 +79,7 @@ public struct Table: Sendable {
   /// them within `Database.bytes`.
   internal let range: Range<Int>
 
-  package var number: Int { schema.number }
+  internal var number: Int { schema.number }
 
   internal init(_ schema: TableSchema.Type, rows: UInt32,
                 range: Range<Int>, wide: UInt32, stride: Int) {

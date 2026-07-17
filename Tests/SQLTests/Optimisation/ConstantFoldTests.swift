@@ -8,15 +8,6 @@ import SQLTestSupport
 
 // MARK: - Fixtures
 
-/// Parses `text` to a query, failing on any other statement.
-private func parse(query text: String) throws -> Query {
-  guard case let .select(query) = try Statement(parsing: text) else {
-    Issue.record("expected a SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return query
-}
-
 /// A single-relation catalog for the constant-fold result oracles.
 private func numbers() throws -> FixtureCatalog {
   try Catalog {

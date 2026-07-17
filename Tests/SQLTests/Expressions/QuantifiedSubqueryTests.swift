@@ -15,44 +15,10 @@ import SQLTestSupport
 /// `Flag` used to filter the inner query to empty or to non-empty. `N` holds a
 /// single NULL-bearing column for the NULL-element corners.
 private func fixture() throws -> FixtureCatalog {
-  try Catalog {
-    Relation("T", ["Id": .integer, "K": .integer]) {
-      Row(1, 10)
-      Row(2, 20)
-      Row(3, nil)
-      Row(4, 30)
-    }
-    Relation("S", ["V": .integer, "Flag": .integer]) {
-      Row(10, 1)
-      Row(20, 1)
-      Row(99, 0)
-    }
-    // A relation whose single column holds a NULL, for the NULL-element
-    // corners — `V` is `{2, NULL}`.
-    Relation("N", ["V": .integer]) {
-      Row(2)
-      Row(nil)
-    }
-  }
+  try subqueries()
 }
 
-/// Parses `text` and returns its `Select`, failing on any other shape.
-private func parse(select text: String) throws -> Select {
-  guard case let .select(.select(select)) = try Statement(parsing: text) else {
-    Issue.record("expected a single SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return select
-}
 
-/// Parses `text` to a query, failing on any other statement.
-private func parse(query text: String) throws -> Query {
-  guard case let .select(query) = try Statement(parsing: text) else {
-    Issue.record("expected a SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return query
-}
 
 // MARK: - Parsing
 
@@ -79,8 +45,8 @@ struct QuantifiedSubqueryParsingTests {
       ("<", .lt), ("<=", .leq), (">", .gt), (">=", .geq),
     ]
     for (spelling, op) in cases {
-      let select = try parse(
-          select: "SELECT Id FROM T WHERE K \(spelling) ANY (SELECT V FROM S)")
+      let select = try parse(select:
+          "SELECT Id FROM T WHERE K \(spelling) ANY (SELECT V FROM S)")
       #expect(select.predicate == .quantified(.column("K"), op, .any, inner))
     }
   }
@@ -255,8 +221,8 @@ struct QuantifiedArityTests {
   @Test func `a two-column quantified subquery faults the schema check too`()
       throws {
     // The schema path enforces the SAME single-column arity as the run.
-    let query = try parse(
-        query: "SELECT Id FROM T WHERE K < ANY (SELECT V, Flag FROM S)")
+    let query = try parse(query:
+         "SELECT Id FROM T WHERE K < ANY (SELECT V, Flag FROM S)")
     let resolve = { () throws -> Array<OutputColumn> in
       try fixture().columns(of: query, validate: true)
     }
@@ -270,8 +236,8 @@ struct QuantifiedArityTests {
 
 struct QuantifiedTypeCheckingTests {
   @Test func `columns validates a quantified query matching the run`() throws {
-    let query = try parse(
-        query: "SELECT Id FROM T WHERE K < ANY (SELECT V FROM S)")
+    let query = try parse(query:
+         "SELECT Id FROM T WHERE K < ANY (SELECT V FROM S)")
     let columns = try fixture().columns(of: query, validate: true)
     #expect(columns.count == 1)
   }
@@ -279,8 +245,8 @@ struct QuantifiedTypeCheckingTests {
   @Test func `a bad inner column faults the schema check`() throws {
     // The inner query is type-checked too, so an unknown column inside it
     // faults validation exactly as a run would reject it.
-    let query = try parse(
-        query: "SELECT Id FROM T WHERE K > ALL (SELECT Missing FROM S)")
+    let query = try parse(query:
+         "SELECT Id FROM T WHERE K > ALL (SELECT Missing FROM S)")
     let resolve = { () throws -> Array<OutputColumn> in
       try fixture().columns(of: query, validate: true)
     }

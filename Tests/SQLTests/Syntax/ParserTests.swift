@@ -4,15 +4,7 @@
 import Testing
 @testable import SQLEngine
 
-/// Parses `text` and returns its `Select`, failing the test on any other shape
-/// — a non-`SELECT` statement, or a `UNION` of several selects.
-private func parse(select text: String) throws -> Select {
-  guard case let .select(.select(select)) = try Statement(parsing: text) else {
-    Issue.record("expected a single SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return select
-}
+import func SQLTestSupport.parse
 
 struct ProjectionTests {
   @Test func `parses a SELECT * projection`() throws {
@@ -1019,15 +1011,6 @@ struct CreateFunctionTests {
 }
 
 // MARK: - UNION
-
-/// Parses `text` and returns its `Query`, failing on any other statement shape.
-private func parse(query text: String) throws -> Query {
-  guard case let .select(query) = try Statement(parsing: text) else {
-    Issue.record("expected a SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return query
-}
 
 struct UnionTests {
   @Test func `parses UNION into a deduplicating union of two selects`() throws {

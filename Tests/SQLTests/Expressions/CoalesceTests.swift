@@ -6,40 +6,6 @@ import Testing
 
 import SQLTestSupport
 
-// MARK: - Fixture
-
-/// A relation exercising `COALESCE`: a nullable integer `K` and a text `Name`,
-/// so a NULL fallthrough and a type unification are reachable.
-private func things() throws -> FixtureCatalog {
-  try Catalog {
-    Relation("T", ["Id": .integer, "K": .integer, "Name": .text]) {
-      Row(1, 10, "a")
-      Row(2, nil, "b")
-    }
-  }
-}
-
-/// Parses `text` and returns its `Select`, failing on any other shape.
-private func parse(select text: String) throws -> Select {
-  guard case let .select(.select(select)) = try Statement(parsing: text) else {
-    Issue.record("expected a single SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return select
-}
-
-/// The single output column type of a one-column query's schema.
-private func type(of text: String, _ routines: Routines = [:])
-    throws -> ValueType {
-  guard case let .select(query) = try Statement(parsing: text) else {
-    Issue.record("expected a SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  let columns = try things().columns(of: query, routines: routines)
-  #expect(columns.count == 1)
-  return columns[0].type
-}
-
 // MARK: - COALESCE
 
 struct CoalesceTests {
@@ -54,24 +20,25 @@ struct CoalesceTests {
   }
 
   @Test func `takes the first non-NULL argument`() throws {
-    try things().expect("SELECT COALESCE(K, K, 3) FROM T WHERE K IS NULL",
+    try nullable().expect("SELECT COALESCE(K, K, 3) FROM T WHERE K IS NULL",
                         yields: [[3]])
   }
 
   @Test func `an earlier non-NULL argument wins`() throws {
-    try things().expect("SELECT COALESCE(K, 99) FROM T WHERE Id = 1",
+    try nullable().expect("SELECT COALESCE(K, 99) FROM T WHERE Id = 1",
                         yields: [[10]])
   }
 
   @Test func `all-NULL arguments yield NULL`() throws {
-    try things().expect("SELECT COALESCE(K, K) FROM T WHERE K IS NULL",
+    try nullable().expect("SELECT COALESCE(K, K) FROM T WHERE K IS NULL",
                         yields: [[nil]])
   }
 
   @Test func `mixed integer and double arguments widen to double`() throws {
     // The arguments unify like a CASE's results — the integer widens.
-    #expect(try type(of: "SELECT COALESCE(K, 2.5) AS C FROM T") == .double)
-    try things().expect("SELECT COALESCE(K, 2.5) FROM T",
+    #expect(try nullable().type(of: "SELECT COALESCE(K, 2.5) AS C FROM T")
+                == .double)
+    try nullable().expect("SELECT COALESCE(K, 2.5) FROM T",
                         yields: [[10.0], [2.5]])
   }
 
@@ -90,21 +57,12 @@ struct CoalesceTests {
     }
     #expect(throws:
         SQLError.operand("COALESCE arguments have irreconcilable types")) {
-      _ = try things().columns(of: query)
+      _ = try nullable().columns(of: query)
     }
   }
 }
 
 // MARK: - Argument reachability
-
-/// Parses `text` to a `Query`, failing on any other shape.
-private func query(_ text: String) throws -> Query {
-  guard case let .select(query) = try Statement(parsing: text) else {
-    Issue.record("expected a SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return query
-}
 
 struct CoalesceReachabilityTests {
   @Test func `a constant non-NULL prefix leaves a later argument unreachable`()
@@ -114,22 +72,24 @@ struct CoalesceReachabilityTests {
     // on — so the typecheck, mirroring that short-circuit, must NOT validate
     // the unreachable call. `columns(of:)` succeeds and the run yields the `1`.
     let text = "SELECT COALESCE(1, missing_udf()) FROM T"
-    _ = try things().columns(of: query(text))
-    try things().expect(text, yields: [[1], [1]])
+    _ = try nullable().columns(of: parse(query: text))
+    try nullable().expect(text, yields: [[1], [1]])
   }
 
   @Test func `a constant non-NULL prefix determines the column type`() throws {
     // The reachable prefix (the constant `1`) shapes the column — an integer —
     // exactly as a constant-TRUE CASE guard's branch does; the unreachable text
     // argument does not unify into it.
-    #expect(try type(of: "SELECT COALESCE(1, missing_udf()) AS C FROM T")
+    #expect(try nullable().type(
+        of: "SELECT COALESCE(1, missing_udf()) AS C FROM T")
                 == .integer)
   }
 
   @Test func `a bad operand after a constant prefix is unreachable`() throws {
     // `Name + 1` over the text `Name` would fault `.operand` if reached, but
     // the constant `1` selects first, so it is unreachable and not validated.
-    _ = try things().columns(of: query("SELECT COALESCE(1, Name + 1) FROM T"))
+    let query = try parse(query: "SELECT COALESCE(1, Name + 1) FROM T")
+    _ = try nullable().columns(of: query)
   }
 
   @Test func `a constant NULL prefix does not stop validation`() throws {
@@ -143,8 +103,8 @@ struct CoalesceReachabilityTests {
           .null
         }
     #expect(throws: SQLError.function("missing_udf")) {
-      _ = try things().columns(of:
-          query("SELECT COALESCE(nought(), missing_udf()) FROM T"),
+      _ = try nullable().columns(of:
+          parse(query: "SELECT COALESCE(nought(), missing_udf()) FROM T"),
           routines: routines)
     }
   }
@@ -156,8 +116,8 @@ struct CoalesceReachabilityTests {
     // `.function` (both integer-typed, so the fault is the unknown call, not a
     // type clash).
     #expect(throws: SQLError.function("missing_udf")) {
-      _ = try things().columns(of:
-          query("SELECT COALESCE(K, missing_udf()) FROM T"))
+      _ = try nullable().columns(of:
+          parse(query: "SELECT COALESCE(K, missing_udf()) FROM T"))
     }
   }
 
@@ -175,9 +135,9 @@ struct CoalesceReachabilityTests {
           .null
         }
     let text = "SELECT COALESCE(null_text(), 1) FROM T"
-    _ = try things().columns(of: query(text), routines: routines)
-    #expect(try type(of: text, routines) == .integer)
-    try things().expect(text, yields: [[1], [1]], routines: routines)
+    _ = try nullable().columns(of: parse(query: text), routines: routines)
+    #expect(try nullable().type(of: text, routines: routines) == .integer)
+    try nullable().expect(text, yields: [[1], [1]], routines: routines)
   }
 
   @Test func `a COUNT prefix leaves a later argument unreachable`() throws {
@@ -188,14 +148,15 @@ struct CoalesceReachabilityTests {
     // validate the unreachable call. `columns(of:)` succeeds over the
     // whole-result group and the run yields the count (2).
     let text = "SELECT COALESCE(COUNT(*), missing_udf()) FROM T"
-    _ = try things().columns(of: query(text))
-    try things().expect(text, yields: [[2]])
+    _ = try nullable().columns(of: parse(query: text))
+    try nullable().expect(text, yields: [[2]])
   }
 
   @Test func `a COUNT prefix determines the column type`() throws {
     // The reachable prefix (`COUNT(*)`) shapes the column — an integer — and
     // the unreachable later argument does not unify into it.
-    #expect(try type(of: "SELECT COALESCE(COUNT(*), missing_udf()) AS C FROM T")
+    #expect(try nullable().type(
+        of: "SELECT COALESCE(COUNT(*), missing_udf()) AS C FROM T")
                 == .integer)
   }
 
@@ -205,8 +166,8 @@ struct CoalesceReachabilityTests {
     // reachable and MUST be validated: `missing_udf()` after `SUM(K)` still
     // faults `.function`.
     #expect(throws: SQLError.function("missing_udf")) {
-      _ = try things().columns(of:
-          query("SELECT COALESCE(SUM(K), missing_udf()) FROM T"))
+      _ = try nullable().columns(of:
+          parse(query: "SELECT COALESCE(SUM(K), missing_udf()) FROM T"))
     }
   }
 
@@ -215,8 +176,8 @@ struct CoalesceReachabilityTests {
     // derives the later `0` (SUM is nullable, not a stop), unifying to
     // `.integer`, and runs — SUM over the two-row group is the sum of K.
     let text = "SELECT COALESCE(SUM(K), 0) FROM T"
-    #expect(try type(of: text) == .integer)
-    try things().expect(text, yields: [[10]])
+    #expect(try nullable().type(of: text) == .integer)
+    try nullable().expect(text, yields: [[10]])
   }
 }
 
@@ -323,7 +284,7 @@ struct CoalesceTypeCheckingTests {
           WHERE is_double(COALESCE(2.5, 1)) = 1 AND Id = 1
         """
     #expect(throws: SQLError.operand("operands must be numeric")) {
-      _ = try things().columns(of: query(text),
+      _ = try nullable().columns(of: parse(query: text),
                                routines: doubling(taking: .double))
     }
   }
@@ -337,7 +298,7 @@ struct CoalesceTypeCheckingTests {
         SELECT Name + 1 AS C FROM T
           WHERE is_double(COALESCE(1, 2)) = 1 AND Id = 1
         """
-    let columns = try things().columns(of: query(text),
+    let columns = try nullable().columns(of: parse(query: text),
                                        routines: doubling(taking: .integer))
     #expect(columns.count == 1)
   }

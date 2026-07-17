@@ -82,8 +82,7 @@ public struct FixtureRelation: Sendable {
   /// materialise fewer rows.
   public let counter: FixtureCounter?
 
-  public init(_ fields: Array<FixtureField>,
-              _ records: Array<Array<Value>>,
+  public init(_ fields: Array<FixtureField>, _ records: Array<Array<Value>>,
               sorted: Int? = nil, coded: Int? = nil,
               counter: FixtureCounter? = nil) {
     self.fields = fields

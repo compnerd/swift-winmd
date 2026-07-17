@@ -24,15 +24,6 @@ private func flags() throws -> FixtureCatalog {
   }
 }
 
-/// Parses `text` and returns its `Select`, failing on any other shape.
-private func parse(select text: String) throws -> Select {
-  guard case let .select(.select(select)) = try Statement(parsing: text) else {
-    Issue.record("expected a single SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return select
-}
-
 /// The boolean predicate a bare boolean operand `x` bridges to — the comparison
 /// `x = TRUE`, whose three-valued truth IS `x`'s boolean value — the inner
 /// `Predicate` a column truth test wraps.
@@ -238,15 +229,6 @@ struct TruthDefiniteTests {
 
 // MARK: - Constant folding
 
-/// Parses `text` to a `Query`, failing on any other shape.
-private func query(_ text: String) throws -> Query {
-  guard case let .select(query) = try Statement(parsing: text) else {
-    Issue.record("expected a SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return query
-}
-
 struct TruthConstantTests {
   /// A relation with a text `Name`, so `Name + 1` is a reachable operand fault.
   private func named() throws -> FixtureCatalog {
@@ -269,7 +251,7 @@ struct TruthConstantTests {
     // row-dependent, the RHS was validated, and it faulted.
     let text = "SELECT Id FROM T "
         + "WHERE CASE WHEN 1 = 0 THEN TRUE END IS TRUE AND Name + 1 = 0"
-    _ = try named().columns(of: query(text))
+    _ = try named().columns(of: parse(query: text))
     try named().empty(text)
   }
 
@@ -290,7 +272,7 @@ struct TruthConstantTests {
     // SUCCEEDS and the run drops every row.
     let text = "SELECT Id FROM T "
         + "WHERE (Name IS NULL) IS UNKNOWN AND Name + 1 = 0"
-    _ = try named().columns(of: query(text))
+    _ = try named().columns(of: parse(query: text))
     try named().empty(text)
   }
 

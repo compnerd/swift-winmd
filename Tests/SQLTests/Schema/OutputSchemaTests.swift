@@ -5,6 +5,8 @@ import Testing
 @testable import SQLEngine
 import SQLStandard
 
+import func SQLTestSupport.parse
+
 // MARK: - In-memory adapter
 
 /// A typed in-memory relation — a column name/kind list and rows — for the
@@ -113,18 +115,9 @@ private func catalog() -> SchemaCatalog {
 
 // MARK: - Helpers
 
-/// Parses `text` to a query, failing on any other statement.
-private func parse(_ text: String) throws -> Query {
-  guard case let .select(query) = try Statement(parsing: text) else {
-    Issue.record("expected a SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return query
-}
-
 /// The `(name, kind)` pairs of a query's resolved result schema.
 private func schema(_ text: String) throws -> Array<(String, ValueType)> {
-  let columns = try catalog().columns(of: parse(text))
+  let columns = try catalog().columns(of: parse(query: text))
   return columns.map { ($0.name, $0.type) }
 }
 
@@ -217,7 +210,7 @@ struct OutputSchemaTests {
     let source = SchemaCatalog([
       "People": SchemaRelation([("Name", .text), ("Age", .integer)]),
     ], views: ["Named": definition])
-    let query = try parse("SELECT * FROM Named")
+    let query = try parse(query: "SELECT * FROM Named")
     let columns = try source.columns(of: query)
     // A view's columns are its registered names; its kinds are resolved from
     // the view body, so `Label` (over the `.text` `Name`) reports `.text`
@@ -245,7 +238,7 @@ struct OutputSchemaTests {
     let source = SchemaCatalog([
       "People": SchemaRelation([("Name", .text), ("Age", .integer)]),
     ], views: ["Empty": definition])
-    let query = try parse("SELECT * FROM Empty")
+    let query = try parse(query: "SELECT * FROM Empty")
     // `validate: false` derives the header without re-validating the body.
     let derived = try source.columns(of: query, validate: false)
     #expect(derived.count == 1)
@@ -259,14 +252,14 @@ struct OutputSchemaTests {
 
   @Test func `an unknown relation faults exactly as compilation would`() throws {
     #expect(throws: SQLError.self) {
-      let _ = try catalog().columns(of: parse("SELECT * FROM Absent"))
+      let _ = try catalog().columns(of: parse(query: "SELECT * FROM Absent"))
     }
   }
 
   @Test func `an unknown column faults exactly as compilation would`() throws {
     #expect(throws: SQLError.self) {
       let _ =
-          try catalog().columns(of: parse("SELECT Absent FROM People"))
+          try catalog().columns(of: parse(query: "SELECT Absent FROM People"))
     }
   }
 
@@ -281,7 +274,7 @@ struct OutputSchemaTests {
     // The projection names a real column, so a first-arm-only walk would return
     // a schema; the whole-query validation resolves the WHERE too and faults as
     // a run would.
-    let query = try parse("SELECT Name FROM People WHERE Missing = 1")
+    let query = try parse(query: "SELECT Name FROM People WHERE Missing = 1")
     let resolve = { () throws -> Array<OutputColumn> in
       try catalog().columns(of: query)
     }
@@ -292,7 +285,7 @@ struct OutputSchemaTests {
     // The first arm projects one column and the second two — a run would fault
     // with `SQLError.arity`, so the schema resolution must too rather than name
     // the result off the first arm.
-    let query = try parse("""
+    let query = try parse(query: """
         SELECT Name FROM People UNION SELECT Species, Legs FROM Pet
         """)
     let resolve = { () throws -> Array<OutputColumn> in

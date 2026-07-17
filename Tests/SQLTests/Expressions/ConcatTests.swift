@@ -19,15 +19,6 @@ private func things() throws -> FixtureCatalog {
   }
 }
 
-/// Parses `text` and returns its `Select`, failing on any other shape.
-private func parse(select text: String) throws -> Select {
-  guard case let .select(.select(select)) = try Statement(parsing: text) else {
-    Issue.record("expected a single SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return select
-}
-
 // MARK: - Parsing
 
 struct ConcatParsingTests {
@@ -106,21 +97,6 @@ struct ConcatEvaluationTests {
 
 // MARK: - Derivation
 
-/// Parses `text` to a `Query`, failing on any other shape.
-private func query(_ text: String) throws -> Query {
-  guard case let .select(query) = try Statement(parsing: text) else {
-    Issue.record("expected a SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return query
-}
-
-/// A `People` catalog with a text `Name` — the base for a derive-level test.
-private func people() -> FixtureCatalog {
-  FixtureCatalog(
-    ["People": FixtureRelation([FixtureField(name: "Name", type: .text)], [])])
-}
-
 /// The type `derive` reports for the sole projected expression of `text`, over
 /// a `People` scope — the schema-only derive surface (`scope(of:)` reads no
 /// cursor and skips `compile`), so `derive` alone resolves the operands.
@@ -131,7 +107,7 @@ private func derived(_ text: String) throws -> ValueType {
     Issue.record("expected a single projected expression")
     throw SQLError.incomplete(expected: "one projected expression")
   }
-  let scope = try people().scope(of: select, Context())
+  let scope = try derivation().scope(of: select, Context())
   return try scope.derive(items[0].expression)
 }
 

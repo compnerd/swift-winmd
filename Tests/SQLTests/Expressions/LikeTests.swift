@@ -24,15 +24,6 @@ private func names() throws -> FixtureCatalog {
 
 // MARK: - Parsing
 
-/// Parses `text` and returns its `Select`, failing on any other shape.
-private func parse(select text: String) throws -> Select {
-  guard case let .select(.select(select)) = try Statement(parsing: text) else {
-    Issue.record("expected a single SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return select
-}
-
 struct LikeParsingTests {
   @Test func `parses a LIKE pattern`() throws {
     let select = try parse(select: "SELECT * FROM T WHERE Name LIKE 'a%'")
@@ -222,27 +213,18 @@ struct LikeThreeValuedTests {
 // MARK: - Type checking
 
 struct LikeTypeCheckingTests {
-  /// Parses `text` to a query, failing on any other statement.
-  private func parse(_ text: String) throws -> Query {
-    guard case let .select(query) = try Statement(parsing: text) else {
-      Issue.record("expected a SELECT statement")
-      throw SQLError.incomplete(expected: "a SELECT statement")
-    }
-    return query
-  }
-
   @Test func `a non-text operand does not fault the schema check`() throws {
     // `K` is an integer column, but `K LIKE '10'` does NOT fault the schema
     // check: the run yields a definite FALSE without faulting (the cross-kind
     // rule), so the check must accept what the run accepts.
-    let query = try parse("SELECT Id FROM T WHERE K LIKE '10'")
+    let query = try parse(query: "SELECT Id FROM T WHERE K LIKE '10'")
     _ = try names().columns(of: query, validate: true)
   }
 
   @Test func `a bad operand expression faults the schema check`() throws {
     // The operand and pattern are still validated for REAL errors: `Name + 1`
     // is text arithmetic, which faults exactly as a run would.
-    let query = try parse("SELECT Id FROM T WHERE Name + 1 LIKE 'a%'")
+    let query = try parse(query: "SELECT Id FROM T WHERE Name + 1 LIKE 'a%'")
     let resolve = { () throws -> Array<OutputColumn> in
       try names().columns(of: query, validate: true)
     }
@@ -356,22 +338,13 @@ struct LikeSafetyTests {
     }
   }
 
-  /// Parses `text` to a query, failing on any other statement.
-  private func query(_ text: String) throws -> Query {
-    guard case let .select(query) = try Statement(parsing: text) else {
-      Issue.record("expected a SELECT statement")
-      throw SQLError.incomplete(expected: "a SELECT statement")
-    }
-    return query
-  }
-
   @Test func `a non-constant escape is unsafe and bars ON key extraction`()
       throws {
     // `ON A.K = B.K AND A.Name LIKE 'a%' ESCAPE A.E`, `A.E` a multi-character
     // slot — an escape that faults regardless of the pair. Unsafe, it bars the
     // equi from becoming a hash key: `nest` forms no `.join`, the level is a
     // residual `.select` over the `.product`, so the whole `ON` runs per pair.
-    let compiled = try mismatched().compile(query("""
+    let compiled = try mismatched().compile(parse(query: """
         SELECT A.K FROM A JOIN B ON A.K = B.K AND A.Name LIKE 'a%' ESCAPE A.E
         """))
     let plan = try mismatched().optimise(compiled.pushdown(), [:])
@@ -403,7 +376,7 @@ struct LikeSafetyTests {
     let sql = """
         SELECT A.K FROM A JOIN B ON A.K = B.K AND A.Name LIKE 'a%' ESCAPE 'ab'
         """
-    let compiled = try mismatched().compile(query(sql))
+    let compiled = try mismatched().compile(parse(query: sql))
     let plan = try mismatched().optimise(compiled.pushdown(), [:])
     #expect(!joins(plan))
     #expect(residual(plan))
@@ -422,7 +395,7 @@ struct LikeSafetyTests {
         Row(2, "xyz")
       }
     }
-    let compiled = try catalog.compile(query("""
+    let compiled = try catalog.compile(parse(query: """
         SELECT Id FROM S WHERE Name LIKE '_%' ESCAPE '\\' AND Id = 2
         """))
     let plan = try catalog.optimise(compiled.pushdown(), [:])
@@ -446,7 +419,7 @@ struct LikeSafetyTests {
         Row(2, "xyz")
       }
     }
-    let compiled = try catalog.compile(query("""
+    let compiled = try catalog.compile(parse(query: """
         SELECT Id FROM S WHERE Name LIKE 'x%' AND Id = 2
         """))
     let plan = try catalog.optimise(compiled.pushdown(), [:])
@@ -522,20 +495,12 @@ struct LikeEvaluationOrderTests {
 /// is rejected at VALIDATION (`columns(of:validate:)`), not left to fault on
 /// every row — `check` folds a row-independent escape and rejects a bad one.
 struct LikeEscapeValidationTests {
-  /// Parses `text` to a query, failing on any other statement.
-  private func query(_ text: String) throws -> Query {
-    guard case let .select(query) = try Statement(parsing: text) else {
-      Issue.record("expected a SELECT statement")
-      throw SQLError.incomplete(expected: "a SELECT statement")
-    }
-    return query
-  }
-
   @Test func `a constant multi-character escape faults validation`() throws {
     // `ESCAPE 'xy'` is a constant text of the wrong length — un-runnable — so
     // `columns(of:validate:)` rejects it at validation with the run's message.
     // ADVERSARIAL: reverting the check drops this validation throw.
-    let query = try query("SELECT Id FROM T WHERE Name LIKE 'x' ESCAPE 'xy'")
+    let query = try parse(query:
+        "SELECT Id FROM T WHERE Name LIKE 'x' ESCAPE 'xy'")
     #expect(throws:
         SQLError.argument("LIKE ESCAPE must be a single character")) {
       try names().columns(of: query, validate: true)
@@ -545,7 +510,8 @@ struct LikeEscapeValidationTests {
   @Test func `a constant non-text escape faults validation`() throws {
     // `ESCAPE 1` is a constant integer — never a valid escape — so it too is
     // rejected at validation rather than faulting per row.
-    let query = try query("SELECT Id FROM T WHERE Name LIKE 'x' ESCAPE 1")
+    let query = try parse(query:
+        "SELECT Id FROM T WHERE Name LIKE 'x' ESCAPE 1")
     #expect(throws:
         SQLError.argument("LIKE ESCAPE must be a single character")) {
       try names().columns(of: query, validate: true)
@@ -554,7 +520,8 @@ struct LikeEscapeValidationTests {
 
   @Test func `a valid single-character escape validates`() throws {
     // `ESCAPE '\'` is a valid single-character constant, so it validates.
-    let query = try query("SELECT Id FROM T WHERE Name LIKE 'x' ESCAPE '\\'")
+    let query = try parse(query:
+        "SELECT Id FROM T WHERE Name LIKE 'x' ESCAPE '\\'")
     _ = try names().columns(of: query, validate: true)
   }
 
@@ -562,7 +529,8 @@ struct LikeEscapeValidationTests {
     // A column escape is per row and cannot be checked statically, so
     // validation accepts it (the run validates it) — here `Name` stands in as
     // a non-constant escape term.
-    let query = try query("SELECT Id FROM T WHERE Name LIKE 'x' ESCAPE Name")
+    let query = try parse(query:
+        "SELECT Id FROM T WHERE Name LIKE 'x' ESCAPE Name")
     _ = try names().columns(of: query, validate: true)
   }
 }
@@ -678,15 +646,6 @@ struct LikeParameterisedTests {
     }
   }
 
-  /// Parses `text` to a query, failing on any other statement.
-  private func query(_ text: String) throws -> Query {
-    guard case let .select(query) = try Statement(parsing: text) else {
-      Issue.record("expected a SELECT statement")
-      throw SQLError.incomplete(expected: "a SELECT statement")
-    }
-    return query
-  }
-
   @Test func `a parameterised LIKE is nullable`() throws {
     // A `.like` whose pattern operand is a `:parameter` reads no slot yet is
     // nullable — the pattern may be unbound or NULL, making the LIKE UNKNOWN.
@@ -719,7 +678,7 @@ struct LikeParameterisedTests {
     // LIKE :p` into the view would drop every row first, suppressing the
     // throw — so a parameterised LIKE is nullable and must stay outer.
     let catalog = try maybe()
-    let compiled = try catalog.compile(query("""
+    let compiled = try catalog.compile(parse(query: """
         SELECT x FROM V WHERE 'x' LIKE :p AND (1 / y) = 0
         """))
     let plan = try catalog.optimise(compiled.pushdown(), [:])

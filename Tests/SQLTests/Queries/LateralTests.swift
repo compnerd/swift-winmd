@@ -6,14 +6,6 @@ import Testing
 
 import SQLTestSupport
 
-/// Parses `text` to a query, failing on any other statement.
-private func parse(query text: String) throws -> Query {
-  guard case let .select(query) = try Statement(parsing: text) else {
-    Issue.record("expected a SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return query
-}
 
 // MARK: - LATERAL execution
 

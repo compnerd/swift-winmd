@@ -5,17 +5,6 @@ import Testing
 import SQLEngine
 import SQLTestSupport
 
-// MARK: - Helpers
-
-/// Parses `text` to a query, failing on any other statement.
-private func parse(_ text: String) throws -> Query {
-  guard case let .select(query) = try Statement(parsing: text) else {
-    Issue.record("expected a SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return query
-}
-
 // MARK: - Tests
 
 @Suite struct DefinitionSchemaTests {
@@ -37,8 +26,8 @@ private func parse(_ text: String) throws -> Query {
     // `.recursion` instead, which the builder's `try? compile` catches so it
     // skips the cyclic view. The store must not hang or crash, and an unrelated
     // base relation still reports.
-    let a = try parse("SELECT * FROM B")
-    let b = try parse("SELECT * FROM A")
+    let a = try parse(query: "SELECT * FROM B")
+    let b = try parse(query: "SELECT * FROM A")
     let catalog = FixtureCatalog(
         ["People": FixtureRelation([FixtureField(name: "Name", type: .text)],
                                    [])],
@@ -60,14 +49,14 @@ private func parse(_ text: String) throws -> Query {
     // does not hang or crash reaching it. Assert the catalog's own names all
     // appear (a superset check, so a later slice adding engine-provided rows
     // does not break this).
-    let a = try parse("SELECT * FROM B")
-    let b = try parse("SELECT * FROM A")
+    let a = try parse(query: "SELECT * FROM B")
+    let b = try parse(query: "SELECT * FROM A")
     let catalog = FixtureCatalog(
         ["People": FixtureRelation([FixtureField(name: "Name", type: .text)],
                                    [])],
         views: ["A": View(query: a, columns: ["x"]),
                 "B": View(query: b, columns: ["y"])])
-    let names = try catalog.run(parse("""
+    let names = try catalog.run(parse(query: """
         SELECT table_name FROM definition_schema.tables
         """))
     #expect(names.contains([.text("People")]))

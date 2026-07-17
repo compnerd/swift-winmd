@@ -22,15 +22,6 @@ private func things() throws -> FixtureCatalog {
   }
 }
 
-/// Parses `text` and returns its `Select`, failing on any other shape.
-private func parse(select text: String) throws -> Select {
-  guard case let .select(.select(select)) = try Statement(parsing: text) else {
-    Issue.record("expected a single SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return select
-}
-
 // MARK: - Parsing
 
 struct BetweenParsingTests {
@@ -303,15 +294,6 @@ struct BetweenShortCircuitTests {
 
 // MARK: - Typecheck short-circuit
 
-/// Parses `text` to a `Query`, failing on any other shape.
-private func query(_ text: String) throws -> Query {
-  guard case let .select(query) = try Statement(parsing: text) else {
-    Issue.record("expected a SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return query
-}
-
 struct BetweenTypeCheckingTests {
   /// A relation with a text `Name`, so `Name + 1` is a reachable operand fault.
   private func named() throws -> FixtureCatalog {
@@ -331,7 +313,7 @@ struct BetweenTypeCheckingTests {
     // reached) is unreachable, and `columns(of:validate:)` SUCCEEDS. The run
     // drops every row before the projection, yielding no rows and NO throw.
     let text = "SELECT Name + 1 FROM T WHERE 0 BETWEEN 1 AND (1 / 0)"
-    _ = try named().columns(of: query(text))
+    _ = try named().columns(of: parse(query: text))
     try named().empty(text)
   }
 }
@@ -382,7 +364,7 @@ struct BetweenSeekTests {
     // `> 7` at index 7) — exactly the range `Id >= 3 AND Id <= 7` would seek,
     // not scan all ten rows.
     let catalog = try sorted()
-    let query = try query("SELECT Id FROM T WHERE Id BETWEEN 3 AND 7")
+    let query = try parse(query: "SELECT Id FROM T WHERE Id BETWEEN 3 AND 7")
     let plan = try catalog.optimise(catalog.compile(query), [:])
     #expect(seek(plan) == 2 ..< 7)
     try catalog.expect("SELECT Id FROM T WHERE Id BETWEEN 3 AND 7",
@@ -398,7 +380,7 @@ struct BetweenSeekTests {
     // the rows, and the BETWEEN run sits within the comparison's.
     let catalog = try sorted()
     let comparison =
-        try query("SELECT Id FROM T WHERE Id >= 3 AND Id <= 7")
+        try parse(query: "SELECT Id FROM T WHERE Id >= 3 AND Id <= 7")
     let compiled = try catalog.compile(comparison)
     let range = try #require(seek(catalog.optimise(compiled, [:])))
     #expect(range.lowerBound <= 2 && range.upperBound >= 7)
@@ -412,7 +394,8 @@ struct BetweenSeekTests {
     // contiguous seek — so it scans under the residual and returns the
     // out-of-range rows.
     let catalog = try sorted()
-    let query = try query("SELECT Id FROM T WHERE Id NOT BETWEEN 3 AND 7")
+    let query = try parse(query:
+        "SELECT Id FROM T WHERE Id NOT BETWEEN 3 AND 7")
     let plan = try catalog.optimise(catalog.compile(query), [:])
     #expect(seek(plan) == nil)
     try catalog.expect("SELECT Id FROM T WHERE Id NOT BETWEEN 3 AND 7",
@@ -425,7 +408,8 @@ struct BetweenSeekTests {
     // so it does not qualify for the seek; it scans and filters, admitting the
     // same rows the seeked `Id BETWEEN 3 AND 7` would.
     let catalog = try sorted()
-    let query = try query("SELECT Id FROM T WHERE Id + 1 BETWEEN 4 AND 8")
+    let query = try parse(query:
+        "SELECT Id FROM T WHERE Id + 1 BETWEEN 4 AND 8")
     let plan = try catalog.optimise(catalog.compile(query), [:])
     #expect(seek(plan) == nil)
     try catalog.expect("SELECT Id FROM T WHERE Id + 1 BETWEEN 4 AND 8",
@@ -438,7 +422,7 @@ struct BetweenSeekTests {
     // integer literal, so it does not qualify for the seek; it scans and admits
     // every row whose `Id >= 3` (each row's own `Id` is its upper bound).
     let catalog = try sorted()
-    let query = try query("SELECT Id FROM T WHERE Id BETWEEN 3 AND Id")
+    let query = try parse(query: "SELECT Id FROM T WHERE Id BETWEEN 3 AND Id")
     let plan = try catalog.optimise(catalog.compile(query), [:])
     #expect(seek(plan) == nil)
     try catalog.expect("SELECT Id FROM T WHERE Id BETWEEN 3 AND Id",
@@ -454,7 +438,7 @@ struct BetweenSeekTests {
     // guard detects the inversion and seeks the EMPTY run `9 ..< 9` instead, so
     // the query returns no rows and never traps.
     let catalog = try sorted()
-    let query = try query("SELECT Id FROM T WHERE Id BETWEEN 10 AND 1")
+    let query = try parse(query: "SELECT Id FROM T WHERE Id BETWEEN 10 AND 1")
     let plan = try catalog.optimise(catalog.compile(query), [:])
     let range = try #require(seek(plan))
     #expect(range.isEmpty)
@@ -469,7 +453,8 @@ struct BetweenSeekTests {
     // feature replaces does not regress against the `Id >= :lo AND Id <= :hi`
     // desugar's seek.
     let catalog = try sorted()
-    let query = try query("SELECT Id FROM T WHERE Id BETWEEN :lo AND :hi")
+    let query = try parse(query:
+        "SELECT Id FROM T WHERE Id BETWEEN :lo AND :hi")
     let bindings: Bindings = ["lo": .integer(3), "hi": .integer(7)]
     let compiled = try catalog.compile(query)
     let plan = try catalog.optimise(compiled, bindings)
@@ -484,7 +469,8 @@ struct BetweenSeekTests {
     // `between` — which reads the unbound `:hi` as NULL, UNKNOWN for every row,
     // so none passes. It seeks nothing rather than mis-seeking.
     let catalog = try sorted()
-    let query = try query("SELECT Id FROM T WHERE Id BETWEEN :lo AND :hi")
+    let query = try parse(query:
+        "SELECT Id FROM T WHERE Id BETWEEN :lo AND :hi")
     let plan = try catalog.optimise(catalog.compile(query),
                                     ["lo": .integer(3)])
     #expect(seek(plan) == nil)
@@ -517,7 +503,7 @@ struct BetweenEmptyGroupTests {
         SELECT COUNT(*) FROM T WHERE 1 = 0
         HAVING 0 BETWEEN 1 AND (1 / 0)
         """
-    _ = try numbers().columns(of: query(text))
+    _ = try numbers().columns(of: parse(query: text))
     try numbers().empty(text)
   }
 }

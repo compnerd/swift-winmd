@@ -38,23 +38,7 @@ private func fixture() throws -> FixtureCatalog {
   }
 }
 
-/// Parses `text` and returns its `Select`, failing on any other shape.
-private func parse(select text: String) throws -> Select {
-  guard case let .select(.select(select)) = try Statement(parsing: text) else {
-    Issue.record("expected a single SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return select
-}
 
-/// Parses `text` to a query, failing on any other statement.
-private func parse(query text: String) throws -> Query {
-  guard case let .select(query) = try Statement(parsing: text) else {
-    Issue.record("expected a SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return query
-}
 
 // MARK: - Parsing
 
@@ -73,8 +57,8 @@ struct ScalarSubqueryParsingTests {
   }
 
   @Test func `parses a scalar subquery as a comparison operand`() throws {
-    let select = try parse(
-        select: "SELECT Id FROM T WHERE V = (SELECT MIN(V) FROM S)")
+    let select = try parse(select:
+        "SELECT Id FROM T WHERE V = (SELECT MIN(V) FROM S)")
     let inner = try parse(query: "SELECT MIN(V) FROM S")
     #expect(select.predicate
                 == .comparison(left: .column("V"), op: .equal,

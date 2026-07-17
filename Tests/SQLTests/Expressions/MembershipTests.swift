@@ -25,15 +25,6 @@ private func members() throws -> FixtureCatalog {
 
 // MARK: - Parsing
 
-/// Parses `text` and returns its `Select`, failing on any other shape.
-private func parse(select text: String) throws -> Select {
-  guard case let .select(.select(select)) = try Statement(parsing: text) else {
-    Issue.record("expected a single SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return select
-}
-
 struct MembershipParsingTests {
   @Test func `parses an IN value list`() throws {
     let select = try parse(select: "SELECT * FROM T WHERE K IN (1, 2, 3)")
@@ -122,23 +113,14 @@ struct MembershipEvaluationTests {
 // MARK: - Type checking
 
 struct MembershipTypeCheckingTests {
-  /// Parses `text` to a query, failing on any other statement.
-  private func parse(_ text: String) throws -> Query {
-    guard case let .select(query) = try Statement(parsing: text) else {
-      Issue.record("expected a SELECT statement")
-      throw SQLError.incomplete(expected: "a SELECT statement")
-    }
-    return query
-  }
-
   @Test func `a cross-kind element does not fault the schema check`() throws {
     // `K` is an integer column and `'x'` is a text element, but the schema
     // check does NOT reject it: the lowered `K = 'x'` comparison yields FALSE
     // at runtime via `Row.matches` without faulting, so the row still runs and
     // may match the like-kind `10` element. The check must accept what the run
     // accepts — so `K IN (10, 'x')` types exactly as `K IN (10)`.
-    let mixed = try parse("SELECT Id FROM T WHERE K IN (10, 'x')")
-    let plain = try parse("SELECT Id FROM T WHERE K IN (10)")
+    let mixed = try parse(query: "SELECT Id FROM T WHERE K IN (10, 'x')")
+    let plain = try parse(query: "SELECT Id FROM T WHERE K IN (10)")
     let columns = try members().columns(of: mixed)
     #expect(columns == (try members().columns(of: plain)))
     // The run keeps the `K = 10` row: the text arm silently non-matches.
@@ -149,7 +131,7 @@ struct MembershipTypeCheckingTests {
   @Test func `a numeric element of the other numeric kind is admitted`() throws {
     // An integer operand and a double element are comparable (both numeric), so
     // the schema check passes and the run matches by magnitude.
-    let query = try parse("SELECT Id FROM T WHERE K IN (10.0, 20.0)")
+    let query = try parse(query: "SELECT Id FROM T WHERE K IN (10.0, 20.0)")
     _ = try members().columns(of: query)
     try members().expect("SELECT Id FROM T WHERE K IN (10.0, 20.0)",
                          yields: [[1], [2]])
@@ -160,7 +142,7 @@ struct MembershipTypeCheckingTests {
     // disjunct is a definite constant match, so the OR-chain short-circuits and
     // `Name + 1` (text arithmetic) is unreachable — the type check does not
     // validate it, and the query runs (matching every row).
-    let query = try parse("SELECT Id FROM T WHERE 1 IN (1, Name + 1)")
+    let query = try parse(query: "SELECT Id FROM T WHERE 1 IN (1, Name + 1)")
     _ = try members().columns(of: query, validate: true)
     try members().expect("SELECT Id FROM T WHERE 1 IN (1, Name + 1)",
                          yields: [[1], [2], [3], [4]])
@@ -173,7 +155,8 @@ struct MembershipTypeCheckingTests {
     // `Name + 1` (text arithmetic) is unreachable — the type check must fold
     // the constant element and stop rather than continuing into it, and the
     // run, matching `1 = 1 + 0` first, keeps every row.
-    let query = try parse("SELECT Id FROM T WHERE 1 IN (1 + 0, Name + 1)")
+    let query = try parse(query:
+        "SELECT Id FROM T WHERE 1 IN (1 + 0, Name + 1)")
     _ = try members().columns(of: query, validate: true)
     try members().expect("SELECT Id FROM T WHERE 1 IN (1 + 0, Name + 1)",
                          yields: [[1], [2], [3], [4]])
@@ -184,7 +167,8 @@ struct MembershipTypeCheckingTests {
     // NOT match, so `Name + 1` stays reachable — the pruning is PRECISE, not
     // over-eager — and its text arithmetic must still fault the type check,
     // matching the run, which would evaluate `2 = Name + 1` and fault.
-    let query = try parse("SELECT Id FROM T WHERE 2 IN (1 + 0, Name + 1)")
+    let query = try parse(query:
+        "SELECT Id FROM T WHERE 2 IN (1 + 0, Name + 1)")
     let resolve = { () throws -> Array<OutputColumn> in
       try members().columns(of: query, validate: true)
     }
@@ -196,7 +180,7 @@ struct MembershipTypeCheckingTests {
   @Test func `no definite match leaves a bad element reachable`() throws {
     // `2 IN (1, Name + 1)` never definitely matches `1`, so `Name + 1` is
     // reachable and its text arithmetic must still fault the type check.
-    let query = try parse("SELECT Id FROM T WHERE 2 IN (1, Name + 1)")
+    let query = try parse(query: "SELECT Id FROM T WHERE 2 IN (1, Name + 1)")
     let resolve = { () throws -> Array<OutputColumn> in
       try members().columns(of: query, validate: true)
     }
@@ -215,7 +199,7 @@ struct MembershipTypeCheckingTests {
     // keeps every row. (`BITAND` is a standard prelude routine, seeded like the
     // existing constant-expression tests.)
     let text = "SELECT Id FROM T WHERE 1 IN (BITAND(1, 1), Name + 1)"
-    let query = try parse(text)
+    let query = try parse(query: text)
     _ = try members().columns(of: query, validate: true)
     try members().expect(text, yields: [[1], [2], [3], [4]])
   }
@@ -235,7 +219,7 @@ struct MembershipTypeCheckingTests {
           .integer(1)
         }
     let text = "SELECT Id FROM T WHERE 1 IN (probe(), Name + 1)"
-    let query = try parse(text)
+    let query = try parse(query: text)
     let resolve = { () throws -> Array<OutputColumn> in
       try members().columns(of: query, routines: routines, validate: true)
     }
@@ -255,7 +239,7 @@ struct MembershipTypeCheckingTests {
           .integer(1)
         }
     let text = "SELECT Id FROM T WHERE 1 IN (probe(), Name + 1)"
-    let query = try parse(text)
+    let query = try parse(query: text)
     _ = try members().columns(of: query, routines: routines, validate: true)
     try members().expect(text, yields: [[1], [2], [3], [4]],
                          routines: routines)
@@ -267,7 +251,7 @@ struct MembershipTypeCheckingTests {
     // — the routine fold is PRECISE, not over-eager — and its text arithmetic
     // must still fault the type check, matching the run.
     let text = "SELECT Id FROM T WHERE 2 IN (BITAND(1, 1), Name + 1)"
-    let query = try parse(text)
+    let query = try parse(query: text)
     let resolve = { () throws -> Array<OutputColumn> in
       try members().columns(of: query, validate: true)
     }
@@ -286,7 +270,7 @@ struct MembershipTypeCheckingTests {
     // the run, matching `1 = <CASE>` first, keeps every row.
     let text = "SELECT Id FROM T WHERE 1 IN "
         + "(CASE WHEN 1 = 1 THEN 1 ELSE Name + 1 END, Name + 1)"
-    let query = try parse(text)
+    let query = try parse(query: text)
     _ = try members().columns(of: query, validate: true)
     try members().expect(text, yields: [[1], [2], [3], [4]])
   }
@@ -298,7 +282,7 @@ struct MembershipTypeCheckingTests {
     // arithmetic must still fault the type check, matching the run.
     let text = "SELECT Id FROM T WHERE 2 IN "
         + "(CASE WHEN 1 = 1 THEN 1 ELSE Name + 1 END, Name + 1)"
-    let query = try parse(text)
+    let query = try parse(query: text)
     let resolve = { () throws -> Array<OutputColumn> in
       try members().columns(of: query, validate: true)
     }
@@ -315,7 +299,7 @@ struct MembershipTypeCheckingTests {
     // reachable, so its text arithmetic must still fault the type check.
     let text = "SELECT Id FROM T WHERE 1 IN "
         + "(CASE WHEN Id = 2 THEN 1 ELSE 0 END, Name + 1)"
-    let query = try parse(text)
+    let query = try parse(query: text)
     let resolve = { () throws -> Array<OutputColumn> in
       try members().columns(of: query, validate: true)
     }
@@ -334,7 +318,7 @@ struct MembershipTypeCheckingTests {
     // the run, matching `1 = <CASE>` first, keeps every row.
     let text = "SELECT Id FROM T WHERE 1 IN "
         + "(CASE WHEN 1 + 0 = 1 THEN 1 END, Name + 1)"
-    let query = try parse(text)
+    let query = try parse(query: text)
     _ = try members().columns(of: query, validate: true)
     try members().expect(text, yields: [[1], [2], [3], [4]])
   }
@@ -347,7 +331,7 @@ struct MembershipTypeCheckingTests {
     // the run. The pruning is PRECISE: a folded-FALSE guard prunes nothing.
     let text = "SELECT Id FROM T WHERE 1 IN "
         + "(CASE WHEN 1 + 0 = 2 THEN 1 END, Name + 1)"
-    let query = try parse(text)
+    let query = try parse(query: text)
     let resolve = { () throws -> Array<OutputColumn> in
       try members().columns(of: query, validate: true)
     }
@@ -370,7 +354,7 @@ struct MembershipTypeCheckingTests {
         }
     let text = "SELECT Id FROM T WHERE 1 IN "
         + "(CASE WHEN probe() = 1 THEN 1 END, Name + 1)"
-    let query = try parse(text)
+    let query = try parse(query: text)
     let resolve = { () throws -> Array<OutputColumn> in
       try members().columns(of: query, routines: routines, validate: true)
     }
@@ -388,7 +372,7 @@ struct MembershipTypeCheckingTests {
     // arithmetic). This exercises the generalised `.null` predicate fold.
     let text = "SELECT Id FROM T WHERE 1 IN "
         + "(CASE WHEN 1 + 0 IS NOT NULL THEN 1 END, Name + 1)"
-    let query = try parse(text)
+    let query = try parse(query: text)
     _ = try members().columns(of: query, validate: true)
     try members().expect(text, yields: [[1], [2], [3], [4]])
   }
@@ -399,7 +383,7 @@ struct MembershipTypeCheckingTests {
     // whose HAVING `1 IN (1, 1 / 0)` the schema path (`columns(of:)`) folds. The
     // OR-chain short-circuits on the literal `1 = 1`, so `1 / 0` is unreachable
     // and must not fault `.divide` — the schema resolves and the query runs.
-    let query = try parse(
+    let query = try parse(query:
         "SELECT COUNT(*) FROM T WHERE 1 = 0 HAVING 1 IN (1, 1 / 0)")
     let columns = try members().columns(of: query)
     #expect(columns.count == 1)

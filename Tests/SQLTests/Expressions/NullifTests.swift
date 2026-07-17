@@ -6,49 +6,6 @@ import Testing
 
 import SQLTestSupport
 
-// MARK: - Fixture
-
-/// A relation exercising `NULLIF`: a nullable integer `K` and a text `Name`, so
-/// a NULL result and a first-argument type are both reachable.
-private func things() throws -> FixtureCatalog {
-  try Catalog {
-    Relation("T", ["Id": .integer, "K": .integer, "Name": .text]) {
-      Row(1, 10, "a")
-      Row(2, nil, "b")
-    }
-  }
-}
-
-/// Parses `text` and returns its `Select`, failing on any other shape.
-private func parse(select text: String) throws -> Select {
-  guard case let .select(.select(select)) = try Statement(parsing: text) else {
-    Issue.record("expected a single SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return select
-}
-
-/// Parses `text` to a `Query`, failing on any other shape.
-private func query(_ text: String) throws -> Query {
-  guard case let .select(query) = try Statement(parsing: text) else {
-    Issue.record("expected a SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return query
-}
-
-/// The single output column type of a one-column query's schema.
-private func type(of text: String, _ routines: Routines = [:])
-    throws -> ValueType {
-  guard case let .select(query) = try Statement(parsing: text) else {
-    Issue.record("expected a SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  let columns = try things().columns(of: query, routines: routines)
-  #expect(columns.count == 1)
-  return columns[0].type
-}
-
 // MARK: - NULLIF
 
 struct NullifTests {
@@ -62,20 +19,21 @@ struct NullifTests {
   }
 
   @Test func `equal arguments yield NULL`() throws {
-    try things().expect("SELECT NULLIF(1, 1)", yields: [[nil]])
+    try nullable().expect("SELECT NULLIF(1, 1)", yields: [[nil]])
   }
 
   @Test func `unequal integer arguments yield the first`() throws {
-    try things().expect("SELECT NULLIF(1, 2)", yields: [[1]])
+    try nullable().expect("SELECT NULLIF(1, 2)", yields: [[1]])
   }
 
   @Test func `unequal text arguments yield the first`() throws {
-    try things().expect("SELECT NULLIF('a', 'b')", yields: [["a"]])
+    try nullable().expect("SELECT NULLIF('a', 'b')", yields: [["a"]])
   }
 
   @Test func `the column type is the first argument's`() throws {
     // The NULL result imposes no type; the ELSE (the first argument) types it.
-    #expect(try type(of: "SELECT NULLIF(Name, 'x') AS C FROM T") == .text)
+    #expect(try nullable().type(of: "SELECT NULLIF(Name, 'x') AS C FROM T")
+                == .text)
   }
 
   @Test func `rejects a single argument`() {
@@ -87,12 +45,6 @@ struct NullifTests {
 
 // MARK: - Derivation resolves both operands
 
-/// A `People` catalog with a text `Name` — the base for a derive-level test.
-private func people() -> FixtureCatalog {
-  FixtureCatalog(
-    ["People": FixtureRelation([FixtureField(name: "Name", type: .text)], [])])
-}
-
 /// The type `derive` reports for the sole projected expression of `text`, over
 /// a `People` scope — the schema-only derive surface (`scope(of:)` reads no
 /// cursor and skips `compile`), so `derive` alone resolves the operands.
@@ -103,7 +55,7 @@ private func derived(_ text: String) throws -> ValueType {
     Issue.record("expected a single projected expression")
     throw SQLError.incomplete(expected: "one projected expression")
   }
-  let scope = try people().scope(of: select, Context())
+  let scope = try derivation().scope(of: select, Context())
   return try scope.derive(items[0].expression)
 }
 

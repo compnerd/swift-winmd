@@ -26,15 +26,6 @@ private func things() throws -> FixtureCatalog {
 
 // MARK: - Parsing
 
-/// Parses `text` and returns its `Select`, failing on any other shape.
-private func parse(select text: String) throws -> Select {
-  guard case let .select(.select(select)) = try Statement(parsing: text) else {
-    Issue.record("expected a single SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return select
-}
-
 struct CastParsingTests {
   @Test func `parses a CAST to a typed conversion`() throws {
     let select = try parse(select: "SELECT CAST(Id AS DOUBLE) FROM C")
@@ -157,26 +148,14 @@ struct CastValueTests {
 // MARK: - Schema and column
 
 struct CastSchemaTests {
-  private func parse(_ text: String) throws -> Query {
-    guard case let .select(query) = try Statement(parsing: text) else {
-      Issue.record("expected a SELECT statement")
-      throw SQLError.incomplete(expected: "a SELECT statement")
-    }
-    return query
-  }
-
-  /// The single output column type of a one-column query's schema.
-  private func type(of text: String) throws -> ValueType {
-    let columns = try things().columns(of: parse(text))
-    #expect(columns.count == 1)
-    return columns[0].type
-  }
-
   @Test func `the schema reports the target type`() throws {
     // The cast's static type is the target, whatever the operand's own type.
-    #expect(try type(of: "SELECT CAST(Id AS DOUBLE) AS V FROM C") == .double)
-    #expect(try type(of: "SELECT CAST(D AS INTEGER) AS V FROM C") == .integer)
-    #expect(try type(of: "SELECT CAST(Id AS TEXT) AS V FROM C") == .text)
+    #expect(try things().type(of: "SELECT CAST(Id AS DOUBLE) AS V FROM C")
+                == .double)
+    #expect(try things().type(of: "SELECT CAST(D AS INTEGER) AS V FROM C")
+                == .integer)
+    #expect(try things().type(of: "SELECT CAST(Id AS TEXT) AS V FROM C")
+                == .text)
   }
 
   @Test func `casting over a column converts each row`() throws {
@@ -198,7 +177,7 @@ struct CastSchemaTests {
     // schema type-check rejects it rather than advertising an integer column.
     #expect(throws: SQLError.state("42846",
                                    "cannot cast boolean to integer")) {
-      _ = try things().columns(of: parse("SELECT CAST(TRUE AS INTEGER)"))
+      _ = try things().columns(of: parse(query: "SELECT CAST(TRUE AS INTEGER)"))
     }
   }
 
@@ -206,8 +185,8 @@ struct CastSchemaTests {
     // A castable-but-value-dependent pair — `integer` → `double` always
     // convertible, `text` → `integer` convertible for a good spelling —
     // type-checks and reports the target type; only a bad VALUE faults at run.
-    #expect(try type(of: "SELECT CAST(1 AS DOUBLE)") == .double)
-    #expect(try type(of: "SELECT CAST('1' AS INTEGER)") == .integer)
+    #expect(try things().type(of: "SELECT CAST(1 AS DOUBLE)") == .double)
+    #expect(try things().type(of: "SELECT CAST('1' AS INTEGER)") == .integer)
   }
 
   @Test func `a constant cast that always fails is rejected at validation`()
@@ -217,7 +196,8 @@ struct CastSchemaTests {
     // at validation, not only at run.
     #expect(throws: SQLError.state("22018",
                                    "cannot cast 'abc' to integer")) {
-      _ = try things().columns(of: parse("SELECT CAST('abc' AS INTEGER)"))
+      let query = try parse(query: "SELECT CAST('abc' AS INTEGER)")
+      _ = try things().columns(of: query)
     }
   }
 
@@ -228,7 +208,7 @@ struct CastSchemaTests {
     // to `.blob` — a NULL casts to ANY target — and validation SUCCEEDS with a
     // blob column rather than rejecting `42846` a query the run would perform.
     let sql = "SELECT CAST(CASE WHEN 1 = 0 THEN 1 END AS BLOB)"
-    let columns = try things().columns(of: parse(sql), validate: true)
+    let columns = try things().columns(of: parse(query: sql), validate: true)
     #expect(columns.count == 1)
     #expect(columns[0].type == .blob)
     try things().expect(sql, yields: [[nil]])
@@ -240,7 +220,7 @@ struct CastSchemaTests {
     // `42846`, the same fault the structural check would raise.
     #expect(throws: SQLError.state("42846",
                                    "cannot cast boolean to integer")) {
-      _ = try things().columns(of: parse("SELECT CAST(TRUE AS INTEGER)"),
+      _ = try things().columns(of: parse(query: "SELECT CAST(TRUE AS INTEGER)"),
                                validate: true)
     }
   }
@@ -252,7 +232,8 @@ struct CastSchemaTests {
     // without a value to trial.
     #expect(throws: SQLError.state("42846",
                                    "cannot cast boolean to integer")) {
-      _ = try things().columns(of: parse("SELECT CAST(B AS INTEGER) FROM C"),
+      let query = try parse(query: "SELECT CAST(B AS INTEGER) FROM C")
+      _ = try things().columns(of: query,
                                validate: true)
     }
   }
@@ -261,7 +242,7 @@ struct CastSchemaTests {
     // `CAST('1' AS INTEGER)` is a castable pair whose fault depends on the
     // value, so it type-checks as an integer column even after the reorder —
     // the trial cast of the constant `'1'` succeeds.
-    #expect(try type(of: "SELECT CAST('1' AS INTEGER)") == .integer)
+    #expect(try things().type(of: "SELECT CAST('1' AS INTEGER)") == .integer)
   }
 }
 

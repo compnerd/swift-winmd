@@ -22,37 +22,34 @@ import Testing
 /// caller's, and runs through the engine's public `Catalog.run`, so the
 /// framework needs no `@testable` import.
 
-/// Parses `sql` to a `Query`, trapping on any other statement.
-private func query(_ sql: String) throws(SQLError) -> Query {
-  guard case let .select(query) = try Statement(parsing: sql) else {
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return query
-}
-
 extension Catalog where Self: ~Escapable {
   /// Runs `sql` against this catalog through the given routines and bindings.
   private borrowing func run(_ sql: String, routines: Routines,
                              bindings: Bindings)
       throws(SQLError) -> Array<Array<Value>> {
-    try run(query(sql), routines, bindings: bindings)
+    try run(parse(query: sql), routines, bindings: bindings)
   }
 
   /// Checks `sql` run against this catalog yields exactly `rows`, each row a
   /// list of Swift literals lifted into `Value`s.
   public borrowing func expect(_ sql: String,
-      yields rows: Array<Array<(any ValueConvertible)?>>,
-      routines: Routines = .standard, bindings: Bindings = [:],
-      location: Testing.SourceLocation = #_sourceLocation) throws {
+                               yields rows: Array<Array<(any ValueConvertible)?>>,
+                               routines: Routines = .standard,
+                               bindings: Bindings = [:],
+                               location: Testing.SourceLocation =
+                                  #_sourceLocation)
+      throws {
     let expected = rows.map { $0.map { $0?.value ?? .null } }
     let actual = try run(sql, routines: routines, bindings: bindings)
     #expect(actual == expected, sourceLocation: location)
   }
 
   /// Checks `sql` run against this catalog yields no rows.
-  public borrowing func empty(_ sql: String,
-      routines: Routines = .standard, bindings: Bindings = [:],
-      location: Testing.SourceLocation = #_sourceLocation) throws {
+  public borrowing func empty(_ sql: String, routines: Routines = .standard,
+                              bindings: Bindings = [:],
+                              location: Testing.SourceLocation =
+                                  #_sourceLocation)
+      throws {
     let actual = try run(sql, routines: routines, bindings: bindings)
     #expect(actual.isEmpty, sourceLocation: location)
   }
@@ -79,8 +76,11 @@ extension Catalog where Self: ~Escapable {
   /// Checks two queries run against this catalog yield the same rows — the
   /// seek / scan (or hash / seek) equivalence idiom.
   public borrowing func expect(_ lhs: String, equals rhs: String,
-      routines: Routines = .standard, bindings: Bindings = [:],
-      location: Testing.SourceLocation = #_sourceLocation) throws {
+                               routines: Routines = .standard,
+                               bindings: Bindings = [:],
+                               location: Testing.SourceLocation =
+                                  #_sourceLocation)
+      throws {
     let left = try run(lhs, routines: routines, bindings: bindings)
     let right = try run(rhs, routines: routines, bindings: bindings)
     #expect(left == right, sourceLocation: location)

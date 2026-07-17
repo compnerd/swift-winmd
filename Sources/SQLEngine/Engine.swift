@@ -2438,7 +2438,14 @@ extension Catalog where Self: ~Escapable {
       return decorrelated(semijoins: filter, source, context)
           ?? .select(filter, source)
     case let .project(terms, source):
-      return try .project(terms, decorrelate(source, context))
+      // Decorrelate the source first (a nested apply/exists/IN inside it still
+      // rewrites), then attempt to lift each top-level correlated scalar
+      // `.subquery` TERM of this projection into its own LEFT join. On any
+      // doubt the whole `.project` is left correlated (`decorrelated(scalars:)`
+      // returns `nil`), so execution is unchanged.
+      let source = try decorrelate(source, context)
+      return decorrelated(scalars: terms, source, context)
+          ?? .project(terms, source)
     case let .sort(keys, source):
       return try .sort(keys: keys, decorrelate(source, context))
     case let .product(left, right):
@@ -2880,6 +2887,163 @@ extension Catalog where Self: ~Escapable {
     conjuncts.append(contentsOf: shifted)
     let on = conjuncts.conjunction ?? matched
     return .semijoin(left, scan, on: on, anti: negated)
+  }
+
+  /// Lift every decorrelatable correlated scalar `.subquery` TERM of a
+  /// projection into its OWN LEFT `.outer` join STACKED under the projection,
+  /// replacing the term with a coercion-preserving read of the joined column,
+  /// or `nil` when NO term is liftable — in which case the caller leaves the
+  /// `.project` correlated (conservative default). A correlated scalar subquery
+  /// `(SELECT v FROM R WHERE R.Id = T.fk [AND p_R])` today re-executes per
+  /// outer row; over the UNIQUE virtual `Id` key each left row matches AT MOST
+  /// ONE `R` row (a residual `p_R` can only drop the single candidate), so it
+  /// becomes a plain LEFT join reading `v` from the joined column.
+  ///
+  /// **UNIQUENESS (load-bearing).** `join(scalar:)` decorrelates ONLY when the
+  /// equi correlation's inner key is the relation's virtual `Id`, at ordinal
+  /// EXACTLY `== width` (a 1-based unique row index). A non-`Id` key (an owner
+  /// foreign key or a coded-index key at an ordinal `> width`, or a real column
+  /// `< width`) is NOT unique — many rows share it — so admitting it would
+  /// silently COLLAPSE many matches to one. The at-most-one match makes the
+  /// `>1` cardinality throw impossible, so the LEFT join reproduces it without
+  /// a MIN aggregate (which would materialise-and-group all of `R` and could
+  /// throw for a group no left row reaches).
+  ///
+  /// **NO SIBLING THROW HAZARD.** Unlike the semijoin/anti-join lifts (which
+  /// DROP left rows), a LEFT join drops NOTHING — every left row is emitted
+  /// exactly once — so a throwing SIBLING projection term is evaluated on
+  /// exactly the same rows it was correlated; nothing is suppressed. The body
+  /// residual is gated `safe` and the unique key makes the cardinality throw
+  /// impossible, so the join reads `R` once introducing no new throw. Hence no
+  /// safe-gate over the siblings is needed.
+  ///
+  /// Each `.outer` appends `R`'s ordinals AFTER the running node, never
+  /// shifting slots `0 ..< base`, so an unreplaced projection term keeps its
+  /// ORIGINAL source slot verbatim and the j-th lifted scalar reads its joined
+  /// `v` at `base_j + vSlot_j` (the running slot count before that join plus
+  /// `v`'s combined-space slot). The final `.project` sits atop the whole stack
+  /// and re-selects, discarding the extra right columns, so the output geometry
+  /// stays `terms.count`.
+  private borrowing func decorrelated(scalars terms: Array<Term>,
+                                      _ source: Plan, _ context: Context)
+      -> Plan? {
+    guard var base = source.slots else { return nil }
+    var node = source
+    var projected = terms
+    var lifted = false
+    for (position, term) in terms.enumerated() {
+      guard case let .subquery(key, correlation, type) = term,
+          !correlation.isEmpty,       // uncorrelated: leave (already memoised)
+          let body = context.subqueries.plan(key, correlation),
+          let (outer, slot) = join(scalar: body, node, key, correlation, base,
+                                   context)
+        else { continue }
+      node = outer
+      // COERCION-PRESERVING: `.coalesce([.slot(slot)], type)` applies exactly
+      // `Value.coerced(to: type)` to a non-NULL cell and passes NULL through —
+      // byte-identical to `scalar()`'s `(value ?? .null).coerced(to: type)`. A
+      // raw `.slot` would DROP the coercion (a `.double`-typed scalar over an
+      // `.integer` cell); a `.cast` is WRONG (it faults/truncates rather than
+      // widens). Use `.coalesce`.
+      projected[position] = .coalesce([.slot(slot)], type: type)
+      base = node.slots ?? base       // width grew by R's ordinals
+      lifted = true
+    }
+    guard lifted else { return nil }
+    return .project(projected, node)
+  }
+
+  /// The LEFT `.outer` join and the combined-space slot of the joined value `v`
+  /// for a correlated scalar `.subquery` body over `left`, or `nil` when the
+  /// `body` is not decorrelatable — the SAME guards the semijoin recogniser
+  /// applies PLUS the unique-`Id`-key guard.
+  ///
+  /// The body must be `project(projection, select(where, scan(R, _, nil)))`
+  /// with the projection EXACTLY ONE bare `.slot(v)` (the scalar's column), no
+  /// body-local derived table, `R` a genuine BASE relation, a single `.slot`
+  /// correlation source, and a `where` splitting into EXACTLY one equi
+  /// correlation conjunct plus safe, non-parameterised residual conjuncts
+  /// `p_R`. The equi conjunct's inner scan slot must map (through the scan's
+  /// referenced ordinals) to the relation ordinal `== width` AND that
+  /// width-ordinal virtual (`virtuals.first`) must be the UNIQUE `Id`, and ONLY
+  /// it — a non-`Id` first virtual, which the `Table.virtuals` contract
+  /// permits, is not unique and must stay correlated. The correlation match
+  /// becomes a straddling
+  /// `.match` (the executor hash key), the residual shifts into combined `left
+  /// ++ scan` space, and the two conjoin into the LEFT join's `on`.
+  private borrowing func join(scalar body: Plan, _ left: Plan, _ key: Subkey,
+                              _ correlation: Correlation, _ base: Int,
+                              _ context: Context) -> (Plan, Int)? {
+    guard case let .project(projection, .select(filter, leaf)) = body,
+        case let .scan(name, scanOrdinals, nil) = leaf,
+        left.slots == base else { return nil }
+    // No body-local derived table: its per-execution alias cannot be relaid as
+    // a caller-level scan — the SAME hazard the semijoin recogniser guards.
+    var derivations = Array<(String, Query)>()
+    key.query.collect(derived: &derivations)
+    guard derivations.isEmpty else { return nil }
+    // The scan must name a genuine BASE relation, not a CTE/store overlay entry
+    // or a view — a CTE/view `.scan` re-resolves against the wrong overlay when
+    // relaid at the caller level. Leave either correlated.
+    guard context.relations[name.lowercased()] == nil,
+        resolve(view: name) == nil else { return nil }
+    // The projection must be EXACTLY ONE bare `.slot(v)` — the scalar's column,
+    // whose joined value replaces the term. A multi-term or expression
+    // projection has no single value slot, so it is not decorrelatable.
+    guard projection.count == 1,
+        case let .slot(vSlot) = projection[0] else { return nil }
+    // The correlation must be a single `.slot` source (no `.bound` parent):
+    // the outer key is that source's ordinal, already in the left's slot space.
+    guard correlation.count == 1,
+        case let (name: parameter, source: .slot(outer))? =
+            correlation.first.map({ (name: $0.key, source: $0.value) })
+        else { return nil }
+
+    // Split the body WHERE into the ONE equi correlation conjunct
+    // (`correlate.inner = :parameter`) and the local residual `p_R`. Any other
+    // parameterised conjunct is a non-equi/expression correlation — bail. Every
+    // residual must be safe (a throwing body term could fire for an inner row
+    // no left row reaches under set-based execution).
+    var inner: Int? = nil
+    var residual = Array<Filter>()
+    for conjunct in filter.conjuncts {
+      if inner == nil, let slot = equated(conjunct, to: parameter) {
+        inner = slot
+        continue
+      }
+      guard conjunct.safe, !conjunct.parameterised else { return nil }
+      residual.append(conjunct)
+    }
+    guard let inner else { return nil }
+    // UNIQUENESS GUARD: the equi conjunct's inner scan slot must map to the
+    // relation ordinal `== width` AND that width-ordinal virtual must be the
+    // unique `Id` — a 1-based unique row index, and ONLY it. An ordinal `>
+    // width` is another (non-unique) virtual; an ordinal `< width` is a real
+    // column: neither is a unique key. The width-ordinal virtual is
+    // `virtuals.first`, and the `Table.virtuals` contract permits a conformer
+    // whose first virtual is NOT `Id` (a non-unique `Owner`, say) — such a key
+    // matches many rows, so decorrelating over it would silently collapse them
+    // and drop the correlated scalar's `.cardinality`; it must stay correlated.
+    // `table(named:)` resolves the base relation (the caller-level checks above
+    // already ensured `name` is not a CTE/view), and `scanOrdinals[inner]` maps
+    // the equi conjunct's 0-based scan slot to its relation ordinal.
+    guard let table = table(named: name),
+        scanOrdinals[inner] == table.width,
+        table.virtuals.first?.lowercased() == "id" else { return nil }
+
+    // The scan is relaid after the left, so the body's 0-based scan slots shift
+    // by `base` into the combined space. The correlation equality becomes a
+    // straddling `.match` (the executor's hash key), and the residual `p_R`
+    // shifts alongside into this `left ++ scan` space.
+    let scan = Plan.scan(name: name, ordinals: scanOrdinals, seek: nil)
+    let matched = Filter.match(outer, base + inner)
+    let shifted = residual.map { $0.shifted(by: -base) }
+    let on = ([matched] + shifted).conjunction ?? matched
+    // A unique-`Id` key matches AT MOST ONE R row, so a plain LEFT join reads
+    // `v` from the joined column: an unmatched left row NULL-extends (the empty
+    // → NULL of the correlated scalar), a matched one reads its lone cell. `v`
+    // lands at `base + vSlot` in the combined `left ++ scan` space.
+    return (.outer(left, scan, on: on, kind: .left), base + vSlot)
   }
 }
 

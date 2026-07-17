@@ -122,7 +122,7 @@ struct FilterConstantTests {
                            .constant(.integer(1))).constant == nil)
   }
 
-  @Test func `AND folds only when BOTH operands are constant`() {
+  @Test func `AND folds only when both operands are constant`() {
     let t = Filter.compare(.constant(.integer(1)), .equal,
                            .constant(.integer(1)))
     let f = Filter.compare(.constant(.integer(1)), .equal,
@@ -138,7 +138,7 @@ struct FilterConstantTests {
     #expect(Filter.and(slot, f).constant == nil)
   }
 
-  @Test func `OR folds only when BOTH operands are constant`() {
+  @Test func `OR folds only when both operands are constant`() {
     let t = Filter.compare(.constant(.integer(1)), .equal,
                            .constant(.integer(1)))
     let f = Filter.compare(.constant(.integer(1)), .equal,
@@ -214,7 +214,7 @@ struct ConstantSelectFoldTests {
     try numbers().empty("SELECT Id FROM N WHERE 1 = NULLIF(1, 1)")
   }
 
-  @Test func `an always-true OR does NOT drop a throwing operand`() throws {
+  @Test func `an always-true OR does not drop a throwing operand`() throws {
     // The reviewer case: `(1 / X) = 0` reads a row slot and, with `X = 0`,
     // THROWS `SQLError.divide` when evaluated. The `OR 1 = 1` disjunct is
     // constant-true, but the compound OR is NOT a compile-time constant (the
@@ -254,7 +254,7 @@ struct ConstantApplyFoldTests {
         yields: [[1, 100], [1, 101], [2, 200]])
   }
 
-  @Test func `a LATERAL ON does NOT skip a throwing predicate`() throws {
+  @Test func `a LATERAL ON does not skip a throwing predicate`() throws {
     // The apply's `ON` is not always `1 = 1`: `(1 / (T.Id - 1)) = 0 OR 1 = 1`
     // has an undecidable, throwing left disjunct, so the compound is NOT a
     // compile-time constant and the `ON` is NOT skipped. The outer `T.Id = 1`

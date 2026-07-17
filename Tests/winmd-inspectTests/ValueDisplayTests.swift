@@ -9,7 +9,7 @@ import SQLEngine
 
 // MARK: - Boolean
 
-@Suite("BOOLEAN display")
+@Suite
 private struct BooleanDisplayTests {
   @Test func `a boolean renders as TRUE or FALSE`() {
     #expect(Value.boolean(true).display == "TRUE")
@@ -19,7 +19,7 @@ private struct BooleanDisplayTests {
 
 // MARK: - Double
 
-@Suite("DOUBLE display")
+@Suite
 private struct DoubleDisplayTests {
   @Test func `a double renders through its round-tripping description`() {
     #expect(Value.double(3.14).display == "3.14")
@@ -34,7 +34,7 @@ private struct DoubleDisplayTests {
 
 // MARK: - Blob
 
-@Suite("BLOB display")
+@Suite
 private struct BlobDisplayTests {
   @Test func `a blob renders as a lowercase-hex x'…' literal`() {
     #expect(Value.blob([0x53, 0x51, 0x4c]).display == "x'53514c'")

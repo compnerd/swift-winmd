@@ -1025,14 +1025,14 @@ struct OrderByLazyProjectionTests {
         """)
   }
 
-  @Test func `an unreferenced output IS computed for a surviving row`() throws {
+  @Test func `an unreferenced output is computed for a surviving row`() throws {
     // A non-empty page: `y` (unreferenced by the sort) computes correctly for
     // each surviving row, so the lazy split still returns the right values.
     try people().expect("SELECT Id AS x, Id * 2 AS y FROM People ORDER BY x",
                         yields: [[1, 2], [2, 4], [3, 6], [4, 8]])
   }
 
-  @Test func `an unreferenced faulting output STILL faults for a surviving row`() throws {
+  @Test func `an unreferenced faulting output still faults for a surviving row`() throws {
     // The laziness is a page skip, not a licence to drop a fault: with rows
     // surviving the cap the unreferenced `1 / 0` must still evaluate and fault.
     try people().expect("""

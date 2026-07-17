@@ -268,7 +268,7 @@ struct QuantifiedArityTests {
 
 // MARK: - Type checking
 
-struct QuantifiedTypeTests {
+struct QuantifiedTypeCheckingTests {
   @Test func `columns validates a quantified query matching the run`() throws {
     let query = try parse(
         query: "SELECT Id FROM T WHERE K < ANY (SELECT V FROM S)")

@@ -312,7 +312,7 @@ private func query(_ text: String) throws -> Query {
   return query
 }
 
-struct BetweenTypecheckTests {
+struct BetweenTypeCheckingTests {
   /// A relation with a text `Name`, so `Name + 1` is a reachable operand fault.
   private func named() throws -> FixtureCatalog {
     try Catalog {

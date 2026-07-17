@@ -42,7 +42,7 @@ private func arithmetic(_ lhs: Value, _ op: Arithmetic,
 
 // MARK: - Comparison
 
-@Suite("DOUBLE comparison")
+@Suite
 private struct DoubleComparisonTests {
   @Test func `like doubles compare by magnitude`() {
     #expect(compare(.double(1.5), .equal, .double(1.5)) == true)
@@ -61,8 +61,8 @@ private struct DoubleComparisonTests {
 
 // MARK: - Mixed integer/double
 
-@Suite("mixed integer/double comparison")
-private struct MixedComparisonTests {
+@Suite
+private struct MixedNumericComparisonTests {
   @Test func `an integer equals a like-valued double — numeric, not cross-type`() {
     // Both operands are numeric, so `1 = 1.0` is TRUE, not a cross-kind miss.
     #expect(compare(.integer(1), .equal, .double(1.0)) == true)
@@ -81,7 +81,7 @@ private struct MixedComparisonTests {
 
 // MARK: - Arithmetic
 
-@Suite("DOUBLE arithmetic")
+@Suite
 private struct DoubleArithmeticTests {
   @Test func `double arithmetic yields a double`() throws {
     #expect(try arithmetic(.double(1.5), .add, .double(2.0)) == .double(3.5))
@@ -167,7 +167,7 @@ private struct DoubleArithmeticTests {
 
 // MARK: - NULL
 
-@Suite("DOUBLE NULL propagation")
+@Suite
 private struct DoubleNullTests {
   @Test func `a NULL operand is UNKNOWN in a comparison`() {
     #expect(compare(.double(1.5), .equal, .null) == nil)
@@ -182,7 +182,7 @@ private struct DoubleNullTests {
 
 // MARK: - Sort
 
-@Suite("DOUBLE sort ordering")
+@Suite
 private struct DoubleSortTests {
   @Test func `doubles sort ascending by magnitude, NULL first`() {
     // `less` is the sort primitive: NULL precedes every value, and two doubles
@@ -212,7 +212,7 @@ private struct DoubleSortTests {
 
 // MARK: - Literal
 
-@Suite("DOUBLE literal parsing")
+@Suite
 private struct DoubleLiteralTests {
   @Test func `a decimal literal lowers to a double value`() throws {
     let lowered = try value(of: .double(3.14))

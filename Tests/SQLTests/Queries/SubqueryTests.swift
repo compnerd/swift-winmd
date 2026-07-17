@@ -287,7 +287,7 @@ struct InQueryArityTests {
 
 // MARK: - Type checking
 
-struct SubqueryTypeTests {
+struct SubqueryTypeCheckingTests {
   @Test func `columns validates a query using EXISTS`() throws {
     let query =
         try parse(query: "SELECT Id FROM T WHERE EXISTS (SELECT V FROM S)")

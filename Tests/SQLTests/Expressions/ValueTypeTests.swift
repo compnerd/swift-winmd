@@ -33,8 +33,8 @@ private func compare(_ cell: Value, _ op: Comparison,
 
 // MARK: - Boolean
 
-@Suite("BOOLEAN value type")
-private struct BooleanTests {
+@Suite
+private struct BooleanValueTests {
   @Test func `false orders before true`() {
     #expect(compare(.boolean(false), .lt, .boolean(true)) == true)
     #expect(compare(.boolean(true), .lt, .boolean(false)) == false)
@@ -59,8 +59,8 @@ private struct BooleanTests {
 
 // MARK: - Blob
 
-@Suite("BLOB value type")
-private struct BlobTests {
+@Suite
+private struct BlobValueTests {
   @Test func `like blobs compare by byte equality`() {
     #expect(compare(.blob([0x53, 0x51, 0x4c]), .equal,
                     .blob([0x53, 0x51, 0x4c])) == true)
@@ -92,8 +92,8 @@ private struct BlobTests {
 
 // MARK: - Cross-type
 
-@Suite("cross-type comparison")
-private struct CrossTypeTests {
+@Suite
+private struct CrossTypeComparisonTests {
   @Test func `unlike types never match — no coercion`() {
     // Every non-null cross-type pair falls to the switch's `default: false`.
     #expect(compare(.boolean(true), .equal, .integer(1)) == false)

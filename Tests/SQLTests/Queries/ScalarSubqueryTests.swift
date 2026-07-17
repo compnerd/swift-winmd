@@ -273,7 +273,7 @@ struct ScalarSubqueryWidthTests {
 
 // MARK: - Type checking
 
-struct ScalarSubqueryTypeTests {
+struct ScalarSubqueryTypeCheckingTests {
   @Test func `columns validates a scalar-subquery query`() throws {
     let query = try parse(query: "SELECT (SELECT MAX(V) FROM S) FROM T")
     let columns = try fixture().columns(of: query, validate: true)

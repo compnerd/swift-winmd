@@ -411,9 +411,9 @@ extension Catalog where Self: ~Escapable {
       // The side widths come from the sub-plans (known for a compiled plan),
       // so an unmatched row NULL-extends to the right width even when a side
       // yields no rows to read a width off.
-      return try outer(execute(left, context), left.slots ?? 0,
-                       execute(right, context), right.slots ?? 0, on, kind,
-                       context)
+      return try outer(execute(left, context), execute(right, context),
+                       widths: (left: left.slots ?? 0, right: right.slots ?? 0),
+                       on, kind, context)
     case let .apply(left, key, correlation, ordinals, on, kind):
       return try applied(execute(left, context), key, correlation, ordinals,
                          on, kind, context)
@@ -490,8 +490,8 @@ extension Catalog where Self: ~Escapable {
   /// tracking matches so an unmatched preserved row is emitted with the other
   /// side NULL-extended.
   ///
-  /// `left`/`right` are the two materialised sides and `leftWidth`/`rightWidth`
-  /// each side's slot count (needed to NULL-extend even when a side is empty).
+  /// `left`/`right` are the two materialised sides and `widths` each side's
+  /// slot count (needed to NULL-extend even when a side is empty).
   /// Each candidate pair is merged (left slots then right slots) and tested
   /// against `on` under three-valued logic — TRUE matches, UNKNOWN and FALSE do
   /// not, exactly as a `WHERE` admits; `on` governs MATCHING alone, so an
@@ -507,13 +507,65 @@ extension Catalog where Self: ~Escapable {
   ///
   /// A `.inner` kind never reaches here — `compile` lowers an inner join
   /// through the product/join path.
-  private borrowing func outer(_ left: Array<Record>, _ leftWidth: Int,
-                               _ right: Array<Record>, _ rightWidth: Int,
+  ///
+  /// FAST PATH: when `on` carries an equi `.match` conjunct straddling the two
+  /// sides (a left slot `< widths.left` equal to a right slot `>= widths.left`
+  /// — the shape a decorrelated OUTER APPLY emits), a `.left`/`.full` join
+  /// hashes the right side by that key ONCE and probes per left row
+  /// (`bucketed`), turning the O(left × right) nested loop into O(left +
+  /// right). The probe re-checks the WHOLE `on` on each bucket candidate — the
+  /// bucket over-groups (two large integers can share a `Double` bucket) and
+  /// `on` may carry residual conjuncts beyond the key — so the surviving pairs,
+  /// the NULL-extension of unmatched left rows, and (for `.full`) the left-NULL
+  /// of never-matched right rows are byte-identical to the nested-loop below. A
+  /// NULL key buckets/probes nothing, so it stays unmatched exactly as the
+  /// nested loop's UNKNOWN `.match` leaves it. A non-equi `on` (no straddling
+  /// `.match`) takes the nested loop.
+  ///
+  /// The fast path fires ONLY when the WHOLE `on` is `safe` (cannot throw): it
+  /// evaluates `on` for the bucket candidates alone, so it SKIPS a non-matching
+  /// or NULL-key right row ENTIRELY — never evaluating `on` for it — whereas
+  /// the nested loop evaluates the whole `on` for EVERY pair. (This is NOT
+  /// about AND short-circuiting: the evaluator IS Kleene and DOES short-circuit
+  /// an `AND` on a FALSE left, but only on a FALSE one — an UNKNOWN or TRUE
+  /// left still evaluates the right, and either side of the `on` may throw.) An
+  /// UNSAFE `on` — a straddling `.match` AND a throwing conjunct like
+  /// `(1 / B.x) = 0` — could therefore SUPPRESS a throw the nested loop raises
+  /// on a skipped pair, so it falls to the nested loop below, which evaluates
+  /// every pair and throws identically.
+  /// A `safe` `on` throws on NO pair, so skipping the non-bucket/NULL rows
+  /// suppresses nothing. A decorrelated OUTER APPLY's `on` is safe by
+  /// construction (the recogniser gates the residual and apply predicate
+  /// `safe`), so it keeps the fast path.
+  ///
+  /// In PRACTICE every `.match`-carrying `on` that reaches here is ALREADY
+  /// safe: the `on()` recogniser (`Resolve.swift`) forms NO `.match` unless the
+  /// whole ON is `allSatisfy(\.safe)`, and the OUTER APPLY decorrelation only
+  /// folds a `.match` when its body residual and apply `on` are `safe`. This
+  /// `on.safe` guard is defence-in-depth — it keeps the executor locally sound
+  /// without relying on that distant invariant, so a future `.match` producer
+  /// cannot silently suppress a throw here.
+  private borrowing func outer(_ left: Array<Record>,
+                               _ right: Array<Record>,
+                               widths: (left: Int, right: Int),
                                _ on: Filter, _ kind: Join.Kind,
                                _ context: Context)
       throws(SQLError) -> Array<Record> {
-    let leftNulls = Record(Array(repeating: .null, count: leftWidth))
-    let rightNulls = Record(Array(repeating: .null, count: rightWidth))
+    let nulls =
+        (left: Record(Array(repeating: .null, count: widths.left)),
+         right: Record(Array(repeating: .null, count: widths.right)))
+
+    // The hash fast-path applies to the left-preserving kinds (`.left`/`.full`)
+    // whose loop is left-major; a straddling equi `.match` conjunct gives the
+    // probe key. `.right` keeps its own right-major nested loop above.
+    if (kind == .left || kind == .full),
+        let key = equikey(on, widths.left), on.safe {
+      // `key.right` is in the combined `left ++ right` space; the right side is
+      // materialised standalone, so its own slot is `key.right - widths.left`.
+      return try bucketed(left, right,
+                          key: (key.left, key.right - widths.left),
+                          on, kind, nulls, context)
+    }
 
     // A `right` join preserves the right side, so it drives the loop
     // right-major and NULL-extends the left. The `on` filter stays in the same
@@ -531,7 +583,7 @@ extension Catalog where Self: ~Escapable {
             paired = true
           }
         }
-        if !paired { records.append(leftNulls.merged(with: inner)) }
+        if !paired { records.append(nulls.left.merged(with: inner)) }
       }
       return records
     }
@@ -554,7 +606,7 @@ extension Catalog where Self: ~Escapable {
       // An unmatched left row is preserved (right NULL) for a `left` or `full`
       // join — the left side is preserved in both.
       if !paired {
-        records.append(lhs.merged(with: rightNulls))
+        records.append(lhs.merged(with: nulls.right))
       }
     }
 
@@ -562,11 +614,103 @@ extension Catalog where Self: ~Escapable {
     // NULL).
     if kind == .full {
       for index in right.indices where !matched[index] {
-        records.append(leftNulls.merged(with: right[index]))
+        records.append(nulls.left.merged(with: right[index]))
       }
     }
     return records
   }
+
+  /// The hash fast-path of a `.left`/`.full` OUTER join: the right side hashed
+  /// ONCE by `key.right` into buckets, then each left row probed by `key.left`
+  /// in O(1). Behaviour-identical to the nested loop `outer` above — same
+  /// surviving pairs, same NULL-extension, same order.
+  ///
+  /// The right side is bucketed by its key's promoted `bucket` (a NULL key
+  /// buckets nothing — it can never equi-match, exactly as the nested loop's
+  /// UNKNOWN `.match` leaves it unmatched). Each left row probes its own key's
+  /// bucket, and every candidate is CONFIRMED against the WHOLE `on` — the
+  /// bucket over-groups and `on` may carry residual conjuncts beyond the key —
+  /// so a bucket collision or a failing residual drops the pair exactly as the
+  /// nested loop's per-pair `on` test does. A left row with no confirmed pair
+  /// is NULL-extended (right NULL), preserving it. For `.full`, a right row no
+  /// left row confirmed is emitted left-NULL after the left-major pass,
+  /// mirroring the nested loop's `matched` tracking.
+  ///
+  /// The iteration is left-major and, within a left row, walks the bucket in
+  /// the order rows were inserted (right-cursor order), so the emitted order
+  /// matches the nested loop's left-major/right-order pass. A left row whose
+  /// key is NULL probes nothing and is NULL-extended.
+  ///
+  /// `key.left` is a combined-space slot (the left side is the record's
+  /// prefix), while `key.right` is the right side's OWN standalone slot — the
+  /// caller maps the combined right slot down by `widths.left` before the call.
+  private borrowing func bucketed(_ left: Array<Record>,
+                                  _ right: Array<Record>,
+                                  key: (left: Int, right: Int),
+                                  _ on: Filter, _ kind: Join.Kind,
+                                  _ nulls: (left: Record, right: Record),
+                                  _ context: Context)
+      throws(SQLError) -> Array<Record> {
+    // Bucket the right side by its key, remembering each row's index so a
+    // `.full` join can emit the never-matched right rows left-NULL afterwards.
+    var buckets = Dictionary<Value, Array<Int>>()
+    for index in right.indices {
+      let value = right[index][key.right]
+      if case .null = value { continue }
+      buckets[bucket(value), default: Array<Int>()].append(index)
+    }
+
+    var records = Array<Record>()
+    var matched = Array(repeating: false, count: right.count)
+    for lhs in left {
+      let value = lhs[key.left]
+      var paired = false
+      // A NULL left key equi-matches nothing, so it probes no bucket and stays
+      // unmatched — the `guard` skips straight to the NULL-extension below.
+      if case .null = value {} else {
+        for index in buckets[bucket(value)] ?? [] {
+          let record = lhs.merged(with: right[index])
+          // Confirm the WHOLE `on` — the bucket over-groups and `on` may carry
+          // residual conjuncts beyond the equi key, so a collision or a failing
+          // residual drops the pair, exactly as the nested loop's `on` test.
+          if try evaluate(record, on, context) == true {
+            records.append(record)
+            matched[index] = true
+            paired = true
+          }
+        }
+      }
+      if !paired { records.append(lhs.merged(with: nulls.right)) }
+    }
+
+    // A `.full` join also preserves every right row no left row confirmed.
+    if kind == .full {
+      for index in right.indices where !matched[index] {
+        records.append(nulls.left.merged(with: right[index]))
+      }
+    }
+    return records
+  }
+}
+
+/// The `(left, right)` slot pair of an equi `.match` conjunct in `on` that
+/// STRADDLES the join boundary `boundary` — one slot on the left side
+/// (`< boundary`), the other on the right (`>= boundary`) — or `nil` when no
+/// such conjunct exists (a non-equi `on`, or a `.match` wholly on one side).
+/// The first straddling `.match` among the top-level `AND` conjuncts is the
+/// hash key; any further conjuncts ride the whole-`on` confirm the probe
+/// applies.
+private func equikey(_ on: Filter, _ boundary: Int)
+    -> (left: Int, right: Int)? {
+  for conjunct in on.conjuncts {
+    guard case let .match(lhs, rhs) = conjunct else { continue }
+    switch (lhs < boundary, rhs < boundary) {
+    case (true, false): return (lhs, rhs)
+    case (false, true): return (rhs, lhs)
+    default: continue
+    }
+  }
+  return nil
 }
 
 /// Caps `records` to at most `count` rows after skipping the first `offset`, in

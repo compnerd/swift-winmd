@@ -233,6 +233,76 @@ private func membership(_ filter: Filter) -> Bool {
   }
 }
 
+/// Whether `plan` (or any descendant) carries a scalar `.subquery` TERM — the
+/// witness a correlated (or uncorrelated) scalar subquery was NOT decorrelated
+/// into a LEFT join, the scalar analogue of `exists(in:)`/`within(in:)`. Scans
+/// the projection terms of each `.project` and the operand terms every
+/// `.select` filter reaches, so a residual scalar surviving in either clause is
+/// caught.
+private func subquery(in plan: Plan) -> Bool {
+  switch plan {
+  case let .project(terms, source):
+    return terms.contains { subquery($0) } || subquery(in: source)
+  case let .select(filter, source):
+    return subquery(filter) || subquery(in: source)
+  case let .derived(_, source, _, _), let .sort(_, source),
+       let .distinct(source), let .limit(_, _, source),
+       let .aggregate(_, _, source):
+    return subquery(in: source)
+  case let .product(left, right), let .outer(left, right, _, _),
+       let .semijoin(left, right, _, _), let .setop(_, left, right, _):
+    return subquery(in: left) || subquery(in: right)
+  case .single, .scan, .join, .apply:
+    return false
+  }
+}
+
+/// Whether `term` is (or, through any nested term, reaches) a scalar
+/// `.subquery` — a correlated scalar subquery still lowered as a projection or
+/// operand term rather than replaced by a joined-column read.
+private func subquery(_ term: Term) -> Bool {
+  switch term {
+  case .subquery:
+    return true
+  case let .apply(_, arguments):
+    return arguments.contains { subquery($0) }
+  case let .binary(_, lhs, rhs), let .nullif(lhs, rhs):
+    return subquery(lhs) || subquery(rhs)
+  case let .coalesce(elements, _):
+    return elements.contains { subquery($0) }
+  case let .cast(operand, _):
+    return subquery(operand)
+  case let .case(branches, otherwise, _):
+    return branches.contains { subquery($0.0) || subquery($0.1) }
+        || otherwise.map { subquery($0) } ?? false
+  case .slot, .parameter, .constant:
+    return false
+  }
+}
+
+/// Whether `filter` reaches a scalar `.subquery` in any operand `Term` —
+/// through the boolean connectives and the comparison/predicate operands a
+/// `.select` filter is built from. Used to detect a scalar subquery left
+/// correlated in a WHERE clause (the v1 non-projection cut).
+private func subquery(_ filter: Filter) -> Bool {
+  switch filter {
+  case let .compare(lhs, _, rhs):
+    return subquery(lhs) || subquery(rhs)
+  case let .bound(operand, _, _):
+    return subquery(operand)
+  case let .null(operand, _):
+    return subquery(operand)
+  case let .membership(operand, elements, _):
+    return subquery(operand) || elements.contains { subquery($0) }
+  case let .and(lhs, rhs), let .or(lhs, rhs):
+    return subquery(lhs) || subquery(rhs)
+  case let .not(operand):
+    return subquery(operand)
+  default:
+    return false
+  }
+}
+
 extension Catalog where Self: ~Escapable {
   /// The optimised plan for `sql`, threading a shared subquery box through the
   /// SAME compile → pushdown → decorrelate → optimise pipeline `run` uses, so a
@@ -1896,5 +1966,546 @@ struct DecorrelateInThrowVisibilityTests {
     #expect(!semijoins(plan))                    // nothing lifted (unsafe kin)
     #expect(within(in: plan))                    // still a residual IN
     catalog.expect(sql, fails: .divide)          // and it MUST throw
+  }
+}
+
+// MARK: - Decorrelatable scalar subquery → LEFT join: result + plan shape
+
+/// A parent `T` whose `fk` column points at a child `R` row by its 1-based
+/// virtual `Id` — `fk` 1 → R's row 1, `fk` 3 → R's row 3, `fk` 5 → NO R row
+/// (past the end), `fk` NULL → nothing. `R.Id` is the UNIQUE virtual key the
+/// scalar `(SELECT R.v FROM R WHERE R.Id = T.fk)` decorrelates over.
+private func scalarFixture() throws -> FixtureCatalog {
+  try Catalog {
+    Relation("T", ["fk": .integer]) {
+      Row(1)              // → R row 1 (v = 100)
+      Row(3)              // → R row 3 (v = 300)
+      Row(5)              // → no R row ⇒ scalar NULL
+      Row(nil)            // NULL key ⇒ scalar NULL
+    }
+    Relation("R", ["v": .integer]) {
+      Row(100)            // Id 1
+      Row(200)            // Id 2
+      Row(300)            // Id 3
+    }
+  }
+}
+
+/// Behaviour-preserving oracles for the correlated scalar `.subquery` → LEFT
+/// join decorrelation. A scalar subquery over the UNIQUE virtual `Id` key
+/// matches AT MOST ONE inner row, so it becomes a plain LEFT join reading the
+/// value from a joined column (an unmatched left row NULL-extends, the empty →
+/// NULL of the correlated scalar). Each case compares the run against the
+/// KNOWN-CORRECT multiset the correlated `scalar` evaluator produces and pins
+/// the plan shape: a decorrelatable scalar becomes an `.outer` (LEFT) join with
+/// NO residual `.subquery` term, an excluded one stays a `.subquery`.
+struct DecorrelateScalarTests {
+  /// (1) 0 MATCHES → NULL: `fk` 5 and the NULL key reach no `R.Id`, so the LEFT
+  /// join NULL-extends and the coalesce passes the NULL through — exactly the
+  /// empty → NULL the correlated scalar yields.
+  @Test func `an unmatched scalar key yields NULL`() throws {
+    try scalarFixture().expect(
+        "SELECT (SELECT R.v FROM R WHERE R.Id = T.fk) AS v FROM T " +
+        "ORDER BY v",
+        yields: [[nil], [nil], [100], [300]])
+  }
+
+  /// (2) 1 MATCH → THE VALUE, and the plan is a LEFT `.outer` join with NO
+  /// residual `.subquery` term — the pass fired.
+  @Test func `a matched scalar key reads the joined value`() throws {
+    let sql = "SELECT (SELECT R.v FROM R WHERE R.Id = T.fk) AS v FROM T"
+    let plan = try scalarFixture().optimised(sql)
+    #expect(outers(plan))
+    #expect(!subquery(in: plan))
+    try scalarFixture().expect(sql + " ORDER BY v",
+                               yields: [[nil], [nil], [100], [300]])
+  }
+
+  /// (3) TYPE COERCION (pins the coalesce, not a raw slot): the scalar's column
+  /// is `.double` but its cells are stored as integers, so the coalesce must
+  /// widen a matched `.integer` cell to `.double` (`100` → `100.0`) and pass a
+  /// NULL (an unmatched key) through unchanged — byte-identical to the scalar
+  /// evaluator's `(value ?? .null).coerced(to: .double)`. A raw slot would drop
+  /// the widening.
+  @Test func `a double-typed scalar widens the integer cell`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["fk": .integer]) {
+        Row(1)            // → R row 1 (d = 100 stored as integer)
+        Row(5)            // → no R row ⇒ NULL under .double
+      }
+      Relation("R", ["d": .double]) {
+        Row(100)          // an integer cell in a .double column
+      }
+    }
+    let sql = "SELECT (SELECT R.d FROM R WHERE R.Id = T.fk) AS d FROM T"
+    #expect(outers(try catalog.optimised(sql)))
+    // The matched cell widens to .double(100.0); the unmatched key stays NULL.
+    try catalog.expect(sql + " ORDER BY d",
+                       yields: [[Value.null], [Value.double(100.0)]])
+  }
+
+  /// (4) DUPLICATE LEFT ROWS read the scalar N times: a LEFT join emits each
+  /// left row once (a unique key never multiplies), so three copies of `fk` 1
+  /// each read `R.Id` 1's value — the same value three times, not deduped.
+  @Test func `duplicate left rows each read the scalar`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["fk": .integer]) {
+        Row(1)
+        Row(1)
+        Row(1)
+      }
+      Relation("R", ["v": .integer]) {
+        Row(100)          // Id 1
+      }
+    }
+    let sql = "SELECT (SELECT R.v FROM R WHERE R.Id = T.fk) AS v FROM T"
+    #expect(outers(try catalog.optimised(sql)))
+    try catalog.expect(sql, yields: [[100], [100], [100]])
+  }
+
+  /// (5) SCALAR BESIDE A THROWING SIBLING TERM: a LEFT join drops NO row, so
+  /// the sibling `1 / T.z` is evaluated on exactly the rows it was correlated.
+  /// The `z = 0` row makes it divide by zero, and the decorrelated plan MUST
+  /// throw identically to the correlated one — nothing is suppressed.
+  @Test func `a throwing sibling term throws after decorrelation`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["fk": .integer, "z": .integer]) {
+        Row(1, 2)         // scalar 100, 1 / 2 = 0
+        Row(3, 0)         // 1 / 0 ⇒ divide by zero
+      }
+      Relation("R", ["v": .integer]) {
+        Row(100)          // Id 1
+        Row(200)          // Id 2
+        Row(300)          // Id 3
+      }
+    }
+    let sql =
+        "SELECT (SELECT R.v FROM R WHERE R.Id = T.fk), 1 / T.z FROM T"
+    // The scalar decorrelates (a LEFT join, no residual scalar term) yet the
+    // sibling still faults — the LEFT join drops no row.
+    #expect(outers(try catalog.optimised(sql)))
+    #expect(!subquery(in: try catalog.optimised(sql)))
+    catalog.expect(sql, fails: .divide)
+  }
+
+  /// (6) NON-UNIQUE KEY STAYS CORRELATED: the body keys on a REAL column
+  /// (`R.owner`, ordinal `< width`) rather than the unique virtual `Id`, so the
+  /// uniqueness guard bails and the scalar stays a `.subquery`. The correlated
+  /// run is correct; a key matching TWO rows still throws `.cardinality`
+  /// per-row.
+  @Test func `a non-unique real key stays correlated`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["fk": .integer]) {
+        Row(7)            // matches R's single owner-7 row
+        Row(9)            // matches no owner ⇒ NULL
+      }
+      Relation("R", ["owner": .integer, "v": .integer]) {
+        Row(7, 100)       // owner 7 — one row
+      }
+    }
+    let sql =
+        "SELECT (SELECT R.v FROM R WHERE R.owner = T.fk) AS v FROM T"
+    let plan = try catalog.optimised(sql)
+    #expect(!outers(plan))                       // NOT decorrelated
+    #expect(subquery(in: plan))                  // still a residual scalar
+    try catalog.expect(sql + " ORDER BY v", yields: [[nil], [100]])
+  }
+
+  /// (6b) A non-unique key that matches MANY rows still throws `.cardinality`
+  /// per-row under the correlated path — the scalar was correctly left
+  /// correlated, preserving the >1-row fault a LEFT join could not reproduce.
+  @Test func `a non-unique key matching many rows still faults`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["fk": .integer]) {
+        Row(7)            // matches TWO owner-7 rows ⇒ cardinality
+      }
+      Relation("R", ["owner": .integer, "v": .integer]) {
+        Row(7, 100)
+        Row(7, 200)       // a second owner-7 row
+      }
+    }
+    let sql =
+        "SELECT (SELECT R.v FROM R WHERE R.owner = T.fk) AS v FROM T"
+    #expect(subquery(in: try catalog.optimised(sql)))   // NOT decorrelated
+    catalog.expect(sql, fails: .cardinality)
+  }
+
+  /// (8) MULTIPLE SCALAR SUBQUERIES → two stacked LEFT joins: each replaced
+  /// term reads its OWN joined column, an unreplaced term keeps its original
+  /// slot, and both values are correct. `fk1` → R.v, `fk2` → R.w over one R.
+  @Test func `two scalar subqueries stack into two LEFT joins`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["fk1": .integer, "fk2": .integer]) {
+        Row(1, 2)         // R.v of Id 1 = 100, R.w of Id 2 = 21
+        Row(3, 5)         // R.v of Id 3 = 300, Id 5 absent ⇒ NULL
+      }
+      Relation("R", ["v": .integer, "w": .integer]) {
+        Row(100, 11)      // Id 1
+        Row(200, 21)      // Id 2
+        Row(300, 31)      // Id 3
+      }
+    }
+    let sql =
+        "SELECT (SELECT R.v FROM R WHERE R.Id = T.fk1), " +
+        "(SELECT R.w FROM R WHERE R.Id = T.fk2) FROM T"
+    let plan = try catalog.optimised(sql)
+    #expect(!subquery(in: plan))                 // BOTH decorrelated
+    #expect(outers(plan))
+    try catalog.expect(sql + " ORDER BY 1",
+                       yields: [[100, 21], [300, nil]])
+  }
+
+  /// (8b) An unreplaced projection term keeps its ORIGINAL source slot as the
+  /// scalar joins stack after it: `T.fk1` (source slot 0) still reads correctly
+  /// beside the two decorrelated scalars whose joins append columns after it.
+  @Test func `an unreplaced term keeps its slot under stacked joins`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["fk1": .integer, "fk2": .integer]) {
+        Row(1, 3)         // fk1 = 1, R.v of Id 1 = 100, R.v of Id 3 = 300
+      }
+      Relation("R", ["v": .integer]) {
+        Row(100)          // Id 1
+        Row(200)          // Id 2
+        Row(300)          // Id 3
+      }
+    }
+    let sql =
+        "SELECT T.fk1, (SELECT R.v FROM R WHERE R.Id = T.fk1), " +
+        "(SELECT R.v FROM R WHERE R.Id = T.fk2) FROM T"
+    #expect(!subquery(in: try catalog.optimised(sql)))
+    try catalog.expect(sql, yields: [[1, 100, 300]])
+  }
+
+  /// (9) SCALAR IN WHERE stays correlated (the v1 non-projection cut) and runs
+  /// correctly: only `fk` 1 has `R.Id = 1` with `v = 100`, so the predicate
+  /// `(SELECT …) = 100` admits it alone.
+  @Test func `a scalar subquery in WHERE stays correlated`() throws {
+    let sql =
+        "SELECT T.fk FROM T " +
+        "WHERE (SELECT R.v FROM R WHERE R.Id = T.fk) = 100"
+    #expect(subquery(in: try scalarFixture().optimised(sql)))   // v1 cut
+    try scalarFixture().expect(sql, yields: [[1]])
+  }
+}
+
+// MARK: - Scalar subquery excluded bodies: STAY correlated, run correctly
+
+/// The G3 exclusions the scalar recogniser shares with the semijoin/apply
+/// paths — a body that is not the canonical filter+project over a single base
+/// scan — plus the uniqueness cut. Each stays a `.subquery` and runs correctly.
+struct DecorrelateScalarExclusionTests {
+  /// (7a) AGGREGATE body: a `MAX(R.v)` body is not a bare-`.slot` projection
+  /// over a plain scan, so it stays a `.subquery` — and runs correctly (fk 1 →
+  /// MAX over the one matching R row).
+  @Test func `an aggregate body stays a subquery`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["fk": .integer]) {
+        Row(1)
+      }
+      Relation("R", ["v": .integer]) {
+        Row(100)          // Id 1
+      }
+    }
+    let sql =
+        "SELECT (SELECT MAX(R.v) FROM R WHERE R.Id = T.fk) AS v FROM T"
+    #expect(subquery(in: try catalog.optimised(sql)))   // NOT decorrelated
+    try catalog.expect(sql, yields: [[100]])
+  }
+
+  /// (7b) NON-EQUI correlation (`R.Id > T.fk`): no equi key to hash on, so it
+  /// stays a `.subquery`. fk 2 sees R.Id ∈ {3} > 2 — one row (v = 300); a run
+  /// is correct.
+  @Test func `a non-equi correlation stays a subquery`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["fk": .integer]) {
+        Row(2)            // R.Id > 2 → {3} → v = 300 (one row)
+      }
+      Relation("R", ["v": .integer]) {
+        Row(100)          // Id 1
+        Row(200)          // Id 2
+        Row(300)          // Id 3
+      }
+    }
+    let sql =
+        "SELECT (SELECT R.v FROM R WHERE R.Id > T.fk) AS v FROM T"
+    #expect(subquery(in: try catalog.optimised(sql)))   // NOT decorrelated
+    try catalog.expect(sql, yields: [[300]])
+  }
+
+  /// (7c) LIMIT body: a `FETCH FIRST 1 ROW` body wears a `.limit` node, not the
+  /// canonical filter+project, so it stays a `.subquery` — and runs correctly.
+  @Test func `a limited body stays a subquery`() throws {
+    let sql =
+        "SELECT (SELECT R.v FROM R WHERE R.Id = T.fk " +
+        "ORDER BY R.v OFFSET 0 ROWS FETCH FIRST 1 ROW ONLY) AS v FROM T"
+    #expect(subquery(in: try scalarFixture().optimised(sql)))   // NOT decorr.
+    try scalarFixture().expect(sql + " ORDER BY v",
+                               yields: [[nil], [nil], [100], [300]])
+  }
+
+  /// (7d) DISTINCT body: a `SELECT DISTINCT` body is a `.distinct` node, not
+  /// the canonical shape, so it stays a `.subquery` — and runs correctly.
+  @Test func `a distinct body stays a subquery`() throws {
+    let sql =
+        "SELECT (SELECT DISTINCT R.v FROM R WHERE R.Id = T.fk) AS v FROM T"
+    #expect(subquery(in: try scalarFixture().optimised(sql)))   // NOT decorr.
+    try scalarFixture().expect(sql + " ORDER BY v",
+                               yields: [[nil], [nil], [100], [300]])
+  }
+
+  /// (7e) SET-OP body: a `UNION` body is a `.setop`, not the canonical shape,
+  /// so it stays a `.subquery` — and runs correctly (the union of the matching
+  /// row with the empty other arm).
+  @Test func `a setop body stays a subquery`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["fk": .integer]) {
+        Row(1)
+      }
+      Relation("R", ["v": .integer]) {
+        Row(100)          // Id 1
+      }
+      Relation("Q", ["v": .integer]) {
+        Row(999)          // never matched (Id 2 absent)
+      }
+    }
+    let sql =
+        "SELECT (SELECT R.v FROM R WHERE R.Id = T.fk " +
+        "UNION SELECT Q.v FROM Q WHERE Q.Id = 2) AS v FROM T"
+    #expect(subquery(in: try catalog.optimised(sql)))   // NOT decorrelated
+    try catalog.expect(sql, yields: [[100]])
+  }
+
+  /// (7f) BODY-LOCAL DERIVED table: the body reads its OWN derived `e` over R,
+  /// a per-execution materialised alias the set-based rewrite cannot relay, so
+  /// it stays a `.subquery` — and runs correctly.
+  @Test func `a body-local derived table stays a subquery`() throws {
+    let sql =
+        "SELECT (SELECT e.v FROM (SELECT R.Id AS Id, R.v AS v FROM R) AS e " +
+        "WHERE e.Id = T.fk) AS v FROM T"
+    #expect(subquery(in: try scalarFixture().optimised(sql)))   // NOT decorr.
+    try scalarFixture().expect(sql + " ORDER BY v",
+                               yields: [[nil], [nil], [100], [300]])
+  }
+
+  /// (7g) VIEW body: the body scans a registered VIEW, not a base relation, so
+  /// its `.scan` re-resolves against the wrong overlay when relaid — the
+  /// recogniser leaves it a `.subquery`. It runs correctly.
+  @Test func `a view body stays a subquery`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["fk": .integer]) {
+        Row(1)
+        Row(5)            // no matching view row ⇒ NULL
+      }
+      Relation("R", ["v": .integer]) {
+        Row(100)          // Id 1
+      }
+      try View("RV", "SELECT R.Id AS Id, R.v AS v FROM R", as: ["Id", "v"])
+    }
+    let sql =
+        "SELECT (SELECT RV.v FROM RV WHERE RV.Id = T.fk) AS v FROM T"
+    #expect(subquery(in: try catalog.optimised(sql)))   // NOT decorrelated
+    try catalog.expect(sql + " ORDER BY v", yields: [[nil], [100]])
+  }
+
+  /// (10) NULL CORRELATION KEY → NULL: a NULL `fk` makes the `.match` UNKNOWN,
+  /// so the LEFT join NULL-extends and the coalesce passes NULL through —
+  /// identical to the per-row `WHERE R.Id = :outer` (`:outer` NULL) empty →
+  /// NULL. Decorrelated (an `.outer`) and correct.
+  @Test func `a NULL correlation key NULL-extends to NULL`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["fk": .integer]) {
+        Row(1)            // → v = 100
+        Row(nil)          // NULL key ⇒ NULL
+      }
+      Relation("R", ["v": .integer]) {
+        Row(100)          // Id 1
+      }
+    }
+    let sql = "SELECT (SELECT R.v FROM R WHERE R.Id = T.fk) AS v FROM T"
+    #expect(outers(try catalog.optimised(sql)))          // decorrelated
+    try catalog.expect(sql + " ORDER BY v", yields: [[nil], [100]])
+  }
+}
+
+// MARK: - Non-`Id` first virtual: the width-ordinal virtual is NOT unique
+
+/// A minimal `Table` whose FIRST virtual is NOT `Id` — its width-ordinal
+/// virtual is a NON-unique `Owner` — beside the standard `Id`-at-`width`
+/// fixture the builders always vend.
+///
+/// The `Table.virtuals` contract permits a conformer whose first virtual is not
+/// `Id` (the default is empty, and a source names its own virtuals in any
+/// order). Such a virtual still sits at ordinal `== width`, yet — unlike the
+/// unique `Id` — it can repeat across rows, so a scalar keyed on it may match
+/// many rows and must raise `.cardinality`. The `FixtureCatalog` builders hard
+/// wire `Id` at `width`, so this hand-rolled adapter is the only way to model a
+/// non-`Id` width-ordinal virtual: it proves the scalar recogniser's uniqueness
+/// guard consults the virtual's NAME, not merely its ordinal.
+///
+/// It carries one real column `v` (`width == 1`) and one virtual column (at
+/// ordinal `1`) named `virtual`. When `owners` holds a cell per row that is the
+/// virtual value — a value that MAY repeat, the many-match shape a unique `Id`
+/// never produces; when `owners` is empty the virtual is the 1-based `Id`.
+private struct OwnerRelation: Sendable {
+  /// The real `v` cell of each row, in row order.
+  let values: Array<Value>
+
+  /// The name of the lone virtual column at ordinal `width` — `Owner` for the
+  /// non-unique case, `Id` for the positive control.
+  let virtual: String
+
+  /// The virtual cell each row computes, in row order, or empty for the 1-based
+  /// `Id`. A stored cell MAY repeat, so a scalar keyed on it can match many.
+  let owners: Array<Value>
+}
+
+/// A `Catalog` vending a standard `T` (a real `fk`, a virtual `Id`) and an
+/// `OwnerRelation` `R` whose lone virtual is named by the relation.
+private struct OwnerCatalog: Catalog {
+  let parents: Array<Value>
+  let child: OwnerRelation
+
+  func table(named name: String) -> OwnerTable? {
+    switch name.lowercased() {
+    case "t":
+      return OwnerTable(names: ["fk"], values: parents.map { [$0] },
+                        virtual: "Id")
+    case "r":
+      return OwnerTable(names: ["v"], values: child.values.map { [$0] },
+                        virtual: child.virtual, owners: child.owners)
+    default:
+      return nil
+    }
+  }
+
+  func view(named name: String) -> SQLEngine.View? { nil }
+  func relations() -> Array<String> { ["T", "R"] }
+  func views() -> Array<String> { [] }
+}
+
+/// A `Table` with real columns `names` and ONE virtual column `virtual` at
+/// ordinal `width`. When `owners` is empty the virtual is the 1-based `Id`;
+/// when it holds a cell per row the virtual reads that cell — a value that may
+/// repeat.
+private struct OwnerTable: Table {
+  let names: Array<String>
+  let values: Array<Array<Value>>
+  let virtual: String
+  let owners: Array<Value>
+
+  init(names: Array<String>, values: Array<Array<Value>>, virtual: String,
+       owners: Array<Value> = []) {
+    self.names = names
+    self.values = values
+    self.virtual = virtual
+    self.owners = owners
+  }
+
+  var width: Int { names.count }
+  var types: Array<ValueType> { Array(repeating: .integer, count: width) }
+  var virtuals: Array<String> { [virtual] }
+  var extent: Int { width + 1 }
+
+  func ordinal(of name: String) -> Int? {
+    let folded = name.lowercased()
+    if let real = names.firstIndex(where: { $0.lowercased() == folded }) {
+      return real
+    }
+    return virtual.lowercased() == folded ? width : nil
+  }
+
+  func bound(_ column: Int, _ value: Int, strict: Bool) -> Int? { nil }
+  func ordered(_ column: Int) -> Bool { true }
+
+  func cursor() -> OwnerCursor {
+    OwnerCursor(values: values, width: width, owners: owners)
+  }
+}
+
+/// An index-addressed cursor over an `OwnerTable`'s rows.
+private struct OwnerCursor: SQLEngine.Cursor {
+  let values: Array<Array<Value>>
+  let width: Int
+  let owners: Array<Value>
+
+  var count: Int { values.count }
+
+  func row(_ index: Int) -> OwnerRow? {
+    guard index < values.count else { return nil }
+    return OwnerRow(cells: values[index], width: width,
+                    owner: owners.isEmpty ? nil : owners[index], index: index)
+  }
+}
+
+/// A positional view over one row — a real ordinal reads the stored cell, the
+/// virtual ordinal `width` reads the row's `owner` cell (a repeatable value)
+/// or, absent one, the 1-based `Id`.
+private struct OwnerRow: SQLEngine.Row {
+  let cells: Array<Value>
+  let width: Int
+  let owner: Value?
+  let index: Int
+
+  subscript(_ column: Int) -> Value {
+    borrowing get {
+      if column == width { return owner ?? .integer(index + 1) }
+      return cells[column]
+    }
+  }
+}
+
+/// The reviewer's scenario: a relation whose FIRST virtual is a NON-unique
+/// `Owner` (at ordinal `== width`) must NOT decorrelate a scalar keyed on it —
+/// the guard must consult the virtual's NAME, not merely its ordinal. Were it
+/// to lift the scalar into a LEFT join, a key matching many rows would emit the
+/// values rather than raising `.cardinality`: silent corruption.
+struct DecorrelateScalarVirtualTests {
+  /// A scalar keyed on the non-`Id` width-ordinal virtual STAYS correlated: the
+  /// optimised plan keeps the `.subquery` term and gains NO `.outer` from it.
+  @Test func `a non-Id width-ordinal virtual stays correlated`() throws {
+    let catalog = OwnerCatalog(
+        parents: [.integer(7), .integer(9)],
+        child: OwnerRelation(values: [.integer(100)], virtual: "Owner",
+                             owners: [.integer(7)]))
+    let sql =
+        "SELECT (SELECT R.v FROM R WHERE R.Owner = T.fk) AS v FROM T"
+    let plan = try catalog.optimised(sql)
+    #expect(subquery(in: plan))                  // still a residual scalar
+    #expect(!outers(plan))                        // NOT decorrelated
+    try catalog.expect(sql + " ORDER BY v", yields: [[nil], [100]])
+  }
+
+  /// When an outer row's `fk` matches MORE THAN ONE R row on the non-unique
+  /// `Owner`, the correlated per-row scalar raises `.cardinality` — the fault a
+  /// wrongly-lifted LEFT join would silence by emitting both values.
+  @Test func `a many-match non-Id virtual raises cardinality`() throws {
+    let catalog = OwnerCatalog(
+        parents: [.integer(7)],
+        child: OwnerRelation(values: [.integer(100), .integer(200)],
+                             virtual: "Owner",
+                             owners: [.integer(7), .integer(7)]))
+    let sql =
+        "SELECT (SELECT R.v FROM R WHERE R.Owner = T.fk) AS v FROM T"
+    #expect(subquery(in: try catalog.optimised(sql)))   // NOT decorrelated
+    catalog.expect(sql, fails: .cardinality)
+  }
+
+  /// POSITIVE CONTROL: the SAME adapter shape keyed on a genuine `Id` virtual
+  /// (its first virtual IS `Id`) still DOES decorrelate — the guard did not
+  /// over-tighten. The virtual here is the row's 1-based `Id`, so `fk` 1 reads
+  /// R's row 1.
+  @Test func `an Id width-ordinal virtual still decorrelates`() throws {
+    let catalog = OwnerCatalog(
+        parents: [.integer(1), .integer(3)],
+        child: OwnerRelation(values: [.integer(100), .integer(200),
+                                      .integer(300)],
+                             virtual: "Id",   // first virtual IS Id
+                             owners: []))     // empty ⇒ virtual is the Id
+    let sql =
+        "SELECT (SELECT R.v FROM R WHERE R.Id = T.fk) AS v FROM T"
+    let plan = try catalog.optimised(sql)
+    #expect(outers(plan))                         // decorrelated
+    #expect(!subquery(in: plan))                  // no residual scalar
+    try catalog.expect(sql + " ORDER BY v", yields: [[100], [300]])
   }
 }

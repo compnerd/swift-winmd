@@ -132,7 +132,7 @@ struct CoalesceReachabilityTests {
     _ = try things().columns(of: query("SELECT COALESCE(1, Name + 1) FROM T"))
   }
 
-  @Test func `a constant NULL prefix does NOT stop validation`() throws {
+  @Test func `a constant NULL prefix does not stop validation`() throws {
     // COALESCE steps PAST a NULL argument, so a later one is reachable and MUST
     // be validated. `NULL` is not an expression literal (it is UNKNOWN, spelled
     // only in `IS NULL`), so a DETERMINISTIC routine folding to `.null` stands
@@ -149,7 +149,7 @@ struct CoalesceReachabilityTests {
     }
   }
 
-  @Test func `a non-constant prefix does NOT stop validation`() throws {
+  @Test func `a non-constant prefix does not stop validation`() throws {
     // A row-dependent argument (`K`, a nullable integer) is not a definite
     // selection — the run may fall through it — so a later argument is
     // reachable and validated: `missing_udf()` after `K` still faults
@@ -161,7 +161,7 @@ struct CoalesceReachabilityTests {
     }
   }
 
-  @Test func `a constant NULL prefix does NOT shape the type`() throws {
+  @Test func `a constant NULL prefix does not shape the type`() throws {
     // A run skips a NULL argument and moves on, so an argument that folds to a
     // constant `.null` can never be returned — its DECLARED type must not unify
     // into the column, exactly as a `CASE` omits a skipped branch's result
@@ -199,7 +199,7 @@ struct CoalesceReachabilityTests {
                 == .integer)
   }
 
-  @Test func `a SUM prefix does NOT stop validation`() throws {
+  @Test func `a SUM prefix does not stop validation`() throws {
     // Unlike COUNT, SUM is NULL over an empty group, so it is NOT a definite
     // selection — the run may fall through it — and a later argument stays
     // reachable and MUST be validated: `missing_udf()` after `SUM(K)` still
@@ -312,7 +312,7 @@ struct CoalesceConstantTests {
 /// `COALESCE`: an arm the run reaches must be type-checked, so the COALESCE's
 /// coerced fold value cannot let validation skip a projection execution runs —
 /// mirroring the CASE-coercion end-to-end shape.
-struct CoalesceTypecheckTests {
+struct CoalesceTypeCheckingTests {
   @Test func `a reachable projection is type-checked`() throws {
     // `WHERE is_double(COALESCE(2.5, 1)) = 1 AND …` — the COALESCE selects the
     // `.double` constant, so `is_double` reports 1 and the guard folds TRUE:

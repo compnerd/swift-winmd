@@ -121,7 +121,7 @@ struct MembershipEvaluationTests {
 
 // MARK: - Type checking
 
-struct MembershipTypeTests {
+struct MembershipTypeCheckingTests {
   /// Parses `text` to a query, failing on any other statement.
   private func parse(_ text: String) throws -> Query {
     guard case let .select(query) = try Statement(parsing: text) else {

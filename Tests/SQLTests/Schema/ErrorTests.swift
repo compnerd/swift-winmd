@@ -9,7 +9,7 @@ import SQLTestSupport
 /// A throwaway location for cases that carry one.
 private let here = SourceLocation(line: 1, column: 1, offset: 0)
 
-@Suite("SQLSTATE")
+@Suite
 struct SQLStateTests {
   @Test func `an undefined column reports 42703`() {
     #expect(SQLError.column("Missing").sqlstate == "42703")
@@ -117,7 +117,7 @@ private func sqlstate(_ sql: String, _ catalog: borrowing FixtureCatalog)
   }
 }
 
-@Suite("reclassified SQLSTATE")
+@Suite
 struct ReclassifiedSQLStateTests {
   @Test func `an empty IN list reports 42601`() throws {
     // A `Predicate.membership` with an empty list, built directly to bypass the

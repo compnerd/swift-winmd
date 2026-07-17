@@ -160,7 +160,7 @@ struct CaseEvaluationTests {
 
 // MARK: - Type unification
 
-struct CaseTypeTests {
+struct CaseTypeUnificationTests {
   private func parse(_ text: String) throws -> Query {
     guard case let .select(query) = try Statement(parsing: text) else {
       Issue.record("expected a SELECT statement")

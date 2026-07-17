@@ -997,7 +997,7 @@ extension Catalog where Self: ~Escapable {
     let body = revealed(under: key, context)
     // An unmatched left row under OUTER APPLY (`.left`) is NULL-extended by the
     // taken width, mirroring `outer(…)`'s NULL-padding of an unmatched row.
-    let rightNulls = Record(Array(repeating: .null, count: ordinals.count))
+    let nulls = Record(Array(repeating: .null, count: ordinals.count))
     // A LATERAL/CROSS/OUTER apply always emits `ON 1 = 1` — a PROVABLY-true
     // predicate every merged row passes — so a constant-true `on` skips the
     // redundant per-row `evaluate(paired, on, context)` and admits the pair
@@ -1022,7 +1022,7 @@ extension Catalog where Self: ~Escapable {
         }
       }
       if !matched && kind == .left {
-        records.append(record.merged(with: rightNulls))
+        records.append(record.merged(with: nulls))
       }
     }
     return records

@@ -54,6 +54,25 @@ private func joins(_ plan: Plan) -> Bool {
   }
 }
 
+/// Whether `plan` (or any descendant) carries an `.outer` node — the witness an
+/// OUTER APPLY (`.left`) decorrelated to a LEFT `.outer` join.
+private func outers(_ plan: Plan) -> Bool {
+  switch plan {
+  case .outer:
+    return true
+  case let .derived(_, source, _, _):
+    return outers(source)
+  case let .select(_, source), let .project(_, source), let .sort(_, source),
+       let .distinct(source), let .limit(_, _, source),
+       let .aggregate(_, _, source):
+    return outers(source)
+  case let .product(left, right), let .setop(_, left, right, _):
+    return outers(left) || outers(right)
+  case .single, .scan, .join, .apply:
+    return false
+  }
+}
+
 extension Catalog where Self: ~Escapable {
   /// The optimised plan for `sql`, threading a shared subquery box through the
   /// SAME compile → pushdown → decorrelate → optimise pipeline `run` uses, so a
@@ -484,5 +503,423 @@ struct DecorrelateOuterJoinWidthTests {
         "FULL JOIN U ON 1 = 0 ORDER BY T.Id, d.x, U.u",
         yields: [[nil, nil, 700], [nil, nil, 701],
                  [1, 100, nil], [1, 101, nil], [2, 200, nil]])
+  }
+}
+
+// MARK: - Decorrelatable OUTER APPLY (`.left`): result-equivalence + plan shape
+
+/// Behaviour-preserving oracles for the OUTER APPLY (`LEFT JOIN LATERAL`) →
+/// LEFT `.outer` join decorrelation. An OUTER APPLY NULL-extends an unmatched
+/// left row (ONCE) and multiplies a matched one by its match count — the SAME
+/// multiset the correlated `applied` (`.left`) executor produces. Each case
+/// compares the run against that known-correct multiset and pins the plan
+/// shape: a decorrelatable OUTER APPLY becomes an `.outer` with NO `.apply`
+/// node.
+struct DecorrelateOuterApplyTests {
+  /// NULL-EXTENSION: Id 3 has no child, so the OUTER apply PRESERVES it
+  /// NULL-extended — Id 1 → {100, 101}, Id 2 → {200}, Id 3 → (3, NULL) — the
+  /// exact multiset the correlated `.left` `applied` yields, unlike the CROSS
+  /// APPLY that would drop Id 3.
+  @Test func `an OUTER APPLY NULL-extends an unmatched left row`() throws {
+    try fixture().expect(
+        "SELECT T.Id, d.x FROM T " +
+        "LEFT JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1 " +
+        "ORDER BY T.Id, d.x",
+        yields: [[1, 100], [1, 101], [2, 200], [3, nil]])
+  }
+
+  /// MULTIPLICITY: Id 1 matches two inner rows and appears TWICE (matched, NOT
+  /// NULL-extended); it is not deduped — the LEFT join multiplies a matched
+  /// left row by its match count exactly as the per-row run does.
+  @Test func `a matched OUTER APPLY left row is multiplied not deduped`()
+      throws {
+    let rows = try fixture().run(parse(query:
+        "SELECT T.Id FROM T " +
+        "LEFT JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1 " +
+        "ORDER BY T.Id"), .standard)
+    // Id 1 twice (two children, matched — no NULL row), Id 2 once, Id 3 once
+    // (NULL-extended). The left row is preserved, matched rows not deduped.
+    #expect(rows == [[.integer(1)], [.integer(1)], [.integer(2)],
+                     [.integer(3)]])
+  }
+
+  /// NULL CORRELATION KEY: a NULL outer `Id` matches nothing (NULL ≠ NULL), so
+  /// the OUTER apply NULL-extends it — Id 1 → 100, the NULL-Id row → NULL. The
+  /// inner NULL-keyed `(NULL, 999)` never pairs. Identical to the per-row
+  /// `WHERE S.k = :outer` NULL-drop then NULL-extension.
+  @Test func `a NULL correlation key NULL-extends the left row`() throws {
+    try nullFixture().expect(
+        "SELECT T.Id, d.x FROM T " +
+        "LEFT JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1 " +
+        "ORDER BY d.x",
+        yields: [[nil, nil], [1, 100]])
+  }
+
+  /// The apply's `ON` (safe) still governs matching: `ON d.x > 100` rejects Id
+  /// 1's child 100 and Id 2's child 200 stays (`200 > 100`), so Id 1 keeps only
+  /// 101, Id 2 keeps 200, and Id 3 (no child) NULL-extends — every left row
+  /// preserved, exactly as the correlated OUTER apply's per-pair `ON`.
+  @Test func `a safe apply ON governs the decorrelated match`() throws {
+    try fixture().expect(
+        "SELECT T.Id, d.x FROM T " +
+        "LEFT JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d " +
+        "ON d.x > 100 ORDER BY T.Id, d.x",
+        yields: [[1, 101], [2, 200], [3, nil]])
+  }
+
+  /// The apply `ON` rejects EVERY pair: `ON d.x > 1000` matches no child, so
+  /// EACH left row — even Ids 1 and 2 with children — is NULL-extended, just as
+  /// Id 3 is. The correlated OUTER apply preserves every left row; the
+  /// decorrelated LEFT join must too.
+  @Test func `an ON rejecting every pair NULL-extends every left row`()
+      throws {
+    try fixture().expect(
+        "SELECT T.Id, d.x FROM T " +
+        "LEFT JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d " +
+        "ON d.x > 1000 ORDER BY T.Id",
+        yields: [[1, nil], [2, nil], [3, nil]])
+  }
+
+  /// A safe local body predicate `p_R` (`S.x < 200`) folds into the LEFT join's
+  /// `on`: Id 1 keeps both children, Id 2 loses its only child (200) and
+  /// NULL-extends, Id 3 NULL-extends — the multiset the per-row run produces.
+  @Test func `a safe local body predicate folds into the outer join`() throws {
+    try fixture().expect(
+        "SELECT T.Id, d.x FROM T " +
+        "LEFT JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id AND S.x < 200) " +
+        "AS d ON 1 = 1 ORDER BY T.Id, d.x",
+        yields: [[1, 100], [1, 101], [2, nil], [3, nil]])
+  }
+
+  /// PLAN SHAPE: the decorrelatable OUTER APPLY optimises to an `.outer` join
+  /// with NO surviving `.apply` node — the pass fired.
+  @Test func `a decorrelatable OUTER APPLY optimises to an outer join`()
+      throws {
+    let plan = try fixture().optimised(
+        "SELECT T.Id, d.x FROM T " +
+        "LEFT JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1")
+    #expect(!applies(plan))
+    #expect(outers(plan))
+  }
+
+  /// PLAN SHAPE: a safe residual `ON` and a local body predicate still
+  /// decorrelate — no `.apply` node survives, an `.outer` node appears.
+  @Test func `an OUTER APPLY with safe ON and body predicate decorrelates`()
+      throws {
+    let plan = try fixture().optimised(
+        "SELECT T.Id, d.x FROM T " +
+        "LEFT JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id AND S.x < 200) " +
+        "AS d ON d.x > 50")
+    #expect(!applies(plan))
+    #expect(outers(plan))
+  }
+}
+
+// MARK: - OUTER APPLY excluded bodies: STAY correlated, run correctly
+
+/// The `.left`-specific exclusions plus the shared G3 ones. The load-bearing
+/// one is the UNSAFE apply `ON`: a LEFT join cannot split its `on`, so folding
+/// an unsafe `on` beside a nullable body residual would throw for a pair the
+/// correlated body WHERE dropped — so an unsafe `on` LEAVES the apply
+/// correlated (the safe-gate), running identically to the base.
+struct DecorrelateOuterApplyExclusionTests {
+  /// UNSAFE APPLY `ON` (the safe-gate, `.left`-specific): a body residual
+  /// `S.k = T.Id` can be UNKNOWN for a non-matching inner row, and the apply
+  /// `ON (1 /
+  /// d.x) = 0` divides by a child's `x`. `S` has a child `(2, 0)`, so `1 / d.x`
+  /// divides by zero for Id 2's matched child. The correlated OUTER apply
+  /// evaluates the body WHERE FIRST and reaches the `ON` only for a surviving
+  /// pair, so it DOES throw for Id 2's matched (2, 0). Folding into one LEFT-
+  /// join `on` would ALSO throw — but the recogniser cannot prove throw-
+  /// equivalence
+  /// for an unsafe `on`, so it LEAVES the apply correlated and the run throws
+  /// `.divide` exactly as the base.
+  @Test func `an unsafe apply ON stays correlated and throws identically`()
+      throws {
+    let catalog = try Catalog {
+      Relation("T", ["Id": .integer]) {
+        Row(1)
+        Row(2)
+      }
+      Relation("S", ["k": .integer, "x": .integer]) {
+        Row(1, 100)
+        Row(2, 0)          // 1 / 0 → divide by zero for Id 2's matched child
+      }
+    }
+    let sql =
+        "SELECT T.Id, d.x FROM T " +
+        "LEFT JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d " +
+        "ON (1 / d.x) = 0"
+    #expect(applies(try catalog.optimised(sql)))   // NOT decorrelated
+    catalog.expect(sql, fails: .divide)
+  }
+
+  /// NON-EQUI correlation: `S.k > T.Id` has no equi-key to hash on, so the
+  /// OUTER apply stays correlated — and runs correctly with NULL-extension. Id
+  /// 1 → k > 1 → child (2, 200) → 200; Id 2 → k > 2 → none → NULL; Id 3 → none
+  /// → NULL.
+  @Test func `a non-equi correlation stays an apply and NULL-extends`()
+      throws {
+    let sql =
+        "SELECT T.Id, d.x FROM T " +
+        "LEFT JOIN LATERAL (SELECT x FROM S WHERE S.k > T.Id) AS d ON 1 = 1"
+    #expect(applies(try fixture().optimised(sql)))   // NOT decorrelated
+    try fixture().expect(sql + " ORDER BY T.Id, d.x",
+                         yields: [[1, 200], [2, nil], [3, nil]])
+  }
+
+  /// BODY-LOCAL DERIVED table: the body reads its OWN derived `e` (over `S`), a
+  /// per-execution materialised alias the set-based rewrite cannot relay. The
+  /// OUTER apply stays correlated and NULL-extends Id 3 — the derived `e` reads
+  /// `S` (100, 101, 200), never a same-named base relation.
+  @Test func `a body-local derived table stays an apply and NULL-extends`()
+      throws {
+    let sql =
+        "SELECT T.Id, d.x FROM T " +
+        "LEFT JOIN LATERAL (SELECT x FROM (SELECT k, x FROM S) AS e " +
+        "WHERE e.k = T.Id) AS d ON 1 = 1"
+    #expect(applies(try fixture().optimised(sql)))   // NOT decorrelated
+    try fixture().expect(sql + " ORDER BY T.Id, d.x",
+                         yields: [[1, 100], [1, 101], [2, 200], [3, nil]])
+  }
+
+  /// AGGREGATE body: a `COUNT(*)` body is not a plain filter+project, so the
+  /// OUTER apply stays correlated — and runs correctly. Every left row is
+  /// preserved (a LEFT apply), each with its child count: Id 1 → 2, Id 2 → 1,
+  /// Id 3 → 0 (the aggregate over an empty group yields 0, not NULL).
+  @Test func `an aggregate body stays an apply and runs correctly`() throws {
+    let sql =
+        "SELECT T.Id, d.n FROM T LEFT JOIN LATERAL " +
+        "(SELECT COUNT(*) AS n FROM S WHERE S.k = T.Id) AS d ON 1 = 1"
+    #expect(applies(try fixture().optimised(sql)))   // NOT decorrelated
+    try fixture().expect(sql + " ORDER BY T.Id",
+                         yields: [[1, 2], [2, 1], [3, 0]])
+  }
+}
+
+// MARK: - OUTER APPLY adversarial throw-visibility (G4, safe-gate)
+
+struct DecorrelateOuterApplyThrowTests {
+  /// ADVERSARIAL (soundness): an OUTER APPLY whose body WHERE divides by zero
+  /// for an inner row NO left row pairs with. `S`'s divide-by-zero row `(1,
+  /// 100)` is keyed to the ABSENT Id 1, and the body WHERE carries the UNSAFE
+  /// term `1 / (S.x - 100) > 0`. The per-row correlated run never binds `:outer
+  /// = 1`, so it never reaches that inner row — yielding Id 2 (matched (2,
+  /// 200): `1 / 100 = 0`, so `> 0` false ⇒ no match ⇒ NULL-extended) and Id 3
+  /// (no
+  /// child ⇒ NULL), with NO throw. A set-based join over the whole `S` WOULD
+  /// evaluate the divide on `(1, 100)` and throw. The recogniser LEAVES it
+  /// correlated (the body term is unsafe), so the run NULL-extends both left
+  /// rows with no spurious throw — the base behaviour.
+  @Test func `an unreachable throwing inner row is not decorrelated`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["Id": .integer]) {
+        Row(2)
+        Row(3)
+      }
+      Relation("S", ["k": .integer, "x": .integer]) {
+        Row(1, 100)      // x - 100 = 0 → divide by zero, keyed to absent Id 1
+        Row(2, 200)      // safe for Id 2
+      }
+    }
+    let sql =
+        "SELECT T.Id, d.x FROM T " +
+        "LEFT JOIN LATERAL " +
+        "(SELECT x FROM S WHERE S.k = T.Id AND 1 / (S.x - 100) > 0) AS d " +
+        "ON 1 = 1"
+    #expect(applies(try catalog.optimised(sql)))   // NOT decorrelated
+    // Id 2: child (2, 200) → 1 / 100 = 0 → `> 0` false ⇒ no match ⇒ NULL. Id 3:
+    // no child ⇒ NULL. The divide on the Id-1 child is never reached ⇒ no
+    // throw.
+    let rows = try catalog.run(parse(query: sql + " ORDER BY T.Id"), .standard)
+    #expect(rows == [[.integer(2), .null], [.integer(3), .null]])
+  }
+}
+
+// MARK: - Decorrelated OUTER APPLY as an outer join's NULL-extended left side
+
+/// A decorrelated OUTER APPLY tops out in a `.project` (over an `.outer`) that
+/// restores the apply's output geometry. As the LEFT of a further RIGHT/FULL
+/// join, `Plan.slots` must measure that project's width so an unmatched right
+/// row NULL-extends across the FULL left width — the same `Plan.slots`
+/// exhaustiveness the CROSS APPLY case relies on.
+struct DecorrelateOuterApplyWidthTests {
+  private func widthFixture() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("T", ["Id": .integer]) {
+        Row(1)
+        Row(2)
+        Row(3)
+      }
+      Relation("S", ["k": .integer, "x": .integer]) {
+        Row(1, 100)
+        Row(1, 101)
+        Row(2, 200)
+      }
+      Relation("U", ["u": .integer]) {
+        Row(700)
+        Row(701)
+      }
+    }
+  }
+
+  /// RIGHT JOIN forcing left NULL-extension over a decorrelated OUTER APPLY.
+  /// The lateral yields the `T ++ d` rows including Id 3's NULL-extended row,
+  /// but
+  /// `RIGHT JOIN U ON 1 = 0` matches none, so every `U` row survives with the
+  /// WHOLE `T ++ d` left width NULL — `U.u` at ordinal 2, `T.Id`/`d.x` NULL.
+  @Test func `a decorrelated OUTER APPLY as a RIGHT join left NULL-extends`()
+      throws {
+    let sql =
+        "SELECT T.Id, d.x, U.u FROM T " +
+        "LEFT JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1 " +
+        "RIGHT JOIN U ON 1 = 0"
+    let plan = try widthFixture().optimised(sql)
+    #expect(!applies(plan))
+    #expect(outers(plan))
+    try widthFixture().expect(sql + " ORDER BY U.u",
+                              yields: [[nil, nil, 700], [nil, nil, 701]])
+  }
+}
+
+// MARK: - OUTER APPLY hash fast-path equivalence
+
+/// The `.outer` executor's hash fast-path must be behaviour-identical to the
+/// nested loop it replaces — same rows, same NULL-extension. A larger-ish
+/// OUTER APPLY (enough keys that the hash and nested-loop paths could diverge
+/// on bucketing or order) is compared against the KNOWN-CORRECT multiset the
+/// correlated OUTER apply produces.
+struct DecorrelateOuterApplyHashTests {
+  /// A wider parent/child so the right side hashes into several buckets. Ids
+  /// 1..5 each key children; Id 4 has none (NULL-extended), Id 5 has two. The
+  /// decorrelated LEFT join's hash fast-path must yield the same multiset the
+  /// correlated OUTER apply does: each matched left row multiplied, each
+  /// unmatched one NULL-extended once.
+  @Test func `the hash fast-path yields the correlated OUTER APPLY multiset`()
+      throws {
+    let catalog = try Catalog {
+      Relation("T", ["Id": .integer]) {
+        Row(1)
+        Row(2)
+        Row(3)
+        Row(4)
+        Row(5)
+      }
+      Relation("S", ["k": .integer, "x": .integer]) {
+        Row(1, 10)
+        Row(2, 20)
+        Row(3, 30)
+        Row(5, 50)
+        Row(5, 51)          // Id 5 has two children (multiplied)
+      }
+    }
+    let sql =
+        "SELECT T.Id, d.x FROM T " +
+        "LEFT JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1 " +
+        "ORDER BY T.Id, d.x"
+    // The hash path fired (an `.outer`, no `.apply`).
+    #expect(!applies(try catalog.optimised(sql)))
+    #expect(outers(try catalog.optimised(sql)))
+    try catalog.expect(sql, yields: [[1, 10], [2, 20], [3, 30], [4, nil],
+                                     [5, 50], [5, 51]])
+  }
+}
+
+// MARK: - OUTER join throw-visibility (fast-path safe-gate)
+
+/// An UNSAFE outer-join `on` — a straddling equi `A.k = B.k` AND a throwing
+/// conjunct like `(1 / B.x) = 0` — must FAULT on a pair the throwing term hits,
+/// never silently NULL-extend the left row. The nested-loop `.outer` executor
+/// evaluates `on` for EVERY (left, right) pair (this evaluator does NOT
+/// short-circuit `AND`: a `false`/UNKNOWN key term still evaluates a throwing
+/// residual), so a non-matching or NULL-key pair whose `(1 / B.x)` divides by
+/// zero raises `.divide`. The `.outer` hash fast-path would SKIP such a pair
+/// (it probes `on` for a left row's matching-key bucket alone) and thus
+/// SUPPRESS the throw — so a `.match`-carrying `on` must never reach the fast
+/// path unless the WHOLE `on` is `safe`. TWO layers enforce this: (1) the
+/// `on()` recogniser (`Resolve.swift`) refuses to form ANY `.match` when the ON
+/// is not `allSatisfy(\.safe)` — so an unsafe user `A.k = B.k` stays a plain
+/// `.compare`, `equikey` finds no key, and the nested loop runs; (2) the
+/// executor's own `on.safe` gate on the fast path (this PR), defence-in-depth
+/// against a future `.match` producer that skips the recogniser's invariant.
+/// These end-to-end oracles PIN the observable invariant across both layers on
+/// a PLAIN LEFT/FULL JOIN (no APPLY).
+struct OuterJoinSafeGateTests {
+  /// A non-matching right row (`B.k = 2 ≠ 1`, `B.x = 0`) makes the throwing
+  /// conjunct `(1 / B.x) = 0` fault under the nested loop, which evaluates it
+  /// for that pair. The unsafe `on` never forms a `.match`, so the nested loop
+  /// runs and raises `.divide` — never NULL-extending `A`.
+  @Test func `an unsafe LEFT JOIN on faults on a non-matching pair`() throws {
+    let catalog = try Catalog {
+      Relation("A", ["k": .integer]) {
+        Row(1)
+      }
+      Relation("B", ["k": .integer, "x": .integer]) {
+        Row(2, 0)           // non-matching key (2 ≠ 1), x = 0 ⇒ 1 / 0 faults
+      }
+    }
+    catalog.expect(
+        "SELECT A.k FROM A LEFT JOIN B ON (1 / B.x) = 0 AND A.k = B.k",
+        fails: .divide)
+  }
+
+  /// A NULL-key right row (`B.k` NULL, `B.x = 0`) would be skipped by the fast
+  /// path (a NULL key buckets/probes nothing), but the nested loop the unsafe
+  /// `on` takes evaluates its throwing conjunct. It must raise `.divide`, not
+  /// NULL-extend `A`.
+  @Test func `an unsafe LEFT JOIN on faults on a NULL-key pair`() throws {
+    let catalog = try Catalog {
+      Relation("A", ["k": .integer]) {
+        Row(1)
+      }
+      Relation("B", ["k": .integer, "x": .integer]) {
+        Row(nil, 0)         // NULL key a fast path would skip; x = 0 ⇒ 1 / 0
+      }
+    }
+    catalog.expect(
+        "SELECT A.k FROM A LEFT JOIN B ON (1 / B.x) = 0 AND A.k = B.k",
+        fails: .divide)
+  }
+
+  /// A FULL join shares the same left-major fast path, so its unsafe `on` must
+  /// fault identically — the recogniser forms no `.match`, the nested loop
+  /// evaluates the non-matching pair, and it raises `.divide`.
+  @Test func `an unsafe FULL JOIN on faults on a non-matching pair`() throws {
+    let catalog = try Catalog {
+      Relation("A", ["k": .integer]) {
+        Row(1)
+      }
+      Relation("B", ["k": .integer, "x": .integer]) {
+        Row(2, 0)           // non-matching key, x = 0 ⇒ 1 / 0 faults
+      }
+    }
+    catalog.expect(
+        "SELECT A.k FROM A FULL JOIN B ON (1 / B.x) = 0 AND A.k = B.k",
+        fails: .divide)
+  }
+
+  /// CONTROL: a SAFE equi LEFT JOIN still takes the fast path and returns the
+  /// correct rows — a matched left row (multiplied by its match count), an
+  /// unmatched one NULL-extended, and a NULL-key left row NULL-extended. An
+  /// added SAFE residual (`B.flag = 1`) keeps `on` safe and still filters.
+  @Test func `a safe equi LEFT JOIN with a residual returns correct rows`()
+      throws {
+    let catalog = try Catalog {
+      Relation("A", ["k": .integer]) {
+        Row(1)              // matches two B rows, one of which fails B.flag = 1
+        Row(2)              // matches no live B row ⇒ NULL-extended
+        Row(nil)            // NULL key ⇒ NULL-extended
+      }
+      Relation("B", ["k": .integer, "flag": .integer]) {
+        Row(1, 1)           // A.k = 1 kept (flag = 1)
+        Row(1, 0)           // A.k = 1 dropped (flag ≠ 1)
+        Row(2, 0)           // A.k = 2 dropped (flag ≠ 1) ⇒ 2 NULL-extends
+      }
+    }
+    try catalog.expect(
+        "SELECT A.k, B.flag FROM A " +
+        "LEFT JOIN B ON A.k = B.k AND B.flag = 1 " +
+        "ORDER BY A.k",
+        yields: [[nil, nil], [1, 1], [2, nil]])
   }
 }

@@ -544,6 +544,30 @@ struct JoinTests {
       _ = try Statement(parsing: "SELECT * FROM A LEFT B ON a.x = b.x")
     }
   }
+
+  @Test func `a CROSS JOIN is an inner join over a constant-true ON`() throws {
+    // `CROSS JOIN` parses to an `.inner` join whose synthesized `ON` is the
+    // always-true `1 = 1`, so it shares the inner-join lowering and the
+    // optimiser elides the constant filter down to a bare product.
+    let select = try parse(select: "SELECT * FROM A CROSS JOIN B")
+    #expect(select.joins == [
+      Join(relation: Relation(name: "B"), kind: .inner,
+           on: .comparison(left: .literal(.integer(1)), op: .equal,
+                           right: .literal(.integer(1)))),
+    ])
+  }
+
+  @Test func `a CROSS JOIN with an ON faults`() {
+    #expect(throws: SQLError.self) {
+      _ = try Statement(parsing: "SELECT * FROM A CROSS JOIN B ON a.x = b.x")
+    }
+  }
+
+  @Test func `a CROSS without JOIN faults`() {
+    #expect(throws: SQLError.self) {
+      _ = try Statement(parsing: "SELECT * FROM A CROSS B")
+    }
+  }
 }
 
 // MARK: - Literals

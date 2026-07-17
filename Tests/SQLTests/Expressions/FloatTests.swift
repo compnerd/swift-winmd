@@ -40,22 +40,127 @@ private func arithmetic(_ lhs: Value, _ op: Arithmetic,
                            Routines())
 }
 
+private struct Comparing: Sendable, CustomTestStringConvertible {
+  internal let name: String
+  internal let lhs: Value
+  internal let op: Comparison
+  internal let rhs: Value
+  internal let expected: Bool?
+
+  internal var testDescription: String { name }
+}
+
+private let kDoubles: Array<Comparing> = [
+  Comparing(name: "equal", lhs: .double(1.5), op: .equal,
+            rhs: .double(1.5), expected: true),
+  Comparing(name: "not equal", lhs: .double(1.5), op: .equal,
+            rhs: .double(2.5), expected: false),
+  Comparing(name: "unequal", lhs: .double(1.5), op: .unequal,
+            rhs: .double(2.5), expected: true),
+  Comparing(name: "less", lhs: .double(1.5), op: .lt,
+            rhs: .double(2.5), expected: true),
+  Comparing(name: "not less", lhs: .double(2.5), op: .lt,
+            rhs: .double(1.5), expected: false),
+  Comparing(name: "greater", lhs: .double(2.5), op: .gt,
+            rhs: .double(1.5), expected: true),
+  Comparing(name: "less or equal", lhs: .double(1.5), op: .leq,
+            rhs: .double(1.5), expected: true),
+  Comparing(name: "greater or equal", lhs: .double(2.5), op: .geq,
+            rhs: .double(2.5), expected: true),
+]
+
+private let kMixed: Array<Comparing> = [
+  Comparing(name: "integer equals double", lhs: .integer(1), op: .equal,
+            rhs: .double(1.0), expected: true),
+  Comparing(name: "double equals integer", lhs: .double(1.0), op: .equal,
+            rhs: .integer(1), expected: true),
+  Comparing(name: "unlike magnitudes", lhs: .integer(2), op: .equal,
+            rhs: .double(2.5), expected: false),
+  Comparing(name: "mixed inequality", lhs: .integer(1), op: .unequal,
+            rhs: .double(1.5), expected: true),
+  Comparing(name: "integer less than double", lhs: .integer(1), op: .lt,
+            rhs: .double(1.5), expected: true),
+  Comparing(name: "double greater than integer", lhs: .double(1.5), op: .gt,
+            rhs: .integer(1), expected: true),
+  Comparing(name: "integer not less than double", lhs: .integer(2), op: .lt,
+            rhs: .double(1.5), expected: false),
+  Comparing(name: "double less than integer", lhs: .double(0.5), op: .lt,
+            rhs: .integer(1), expected: true),
+]
+
+private struct Calculating: Sendable, CustomTestStringConvertible {
+  internal let name: String
+  internal let lhs: Value
+  internal let op: Arithmetic
+  internal let rhs: Value
+  internal let expected: Value
+
+  internal var testDescription: String { name }
+}
+
+private let kArithmetic: Array<Calculating> = [
+  Calculating(name: "double addition", lhs: .double(1.5), op: .add,
+              rhs: .double(2.0), expected: .double(3.5)),
+  Calculating(name: "double subtraction", lhs: .double(2.5), op: .subtract,
+              rhs: .double(1.0), expected: .double(1.5)),
+  Calculating(name: "double multiplication", lhs: .double(1.5), op: .multiply,
+              rhs: .double(2.0), expected: .double(3.0)),
+  Calculating(name: "real division", lhs: .double(5.0), op: .divide,
+              rhs: .double(2.0), expected: .double(2.5)),
+  Calculating(name: "mixed division", lhs: .integer(5), op: .divide,
+              rhs: .double(2.0), expected: .double(2.5)),
+  Calculating(name: "mixed multiplication", lhs: .integer(2), op: .multiply,
+              rhs: .double(1.5), expected: .double(3.0)),
+  Calculating(name: "mixed addition", lhs: .double(1.5), op: .add,
+              rhs: .integer(1), expected: .double(2.5)),
+  Calculating(name: "integer division", lhs: .integer(5), op: .divide,
+              rhs: .integer(2), expected: .integer(2)),
+]
+
+private struct Sorting: Sendable, CustomTestStringConvertible {
+  internal let name: String
+  internal let lhs: Value
+  internal let rhs: Value
+  internal let expected: Bool
+
+  internal var testDescription: String { name }
+}
+
+private let kSorting: Array<Sorting> = [
+  Sorting(name: "ascending doubles", lhs: .double(1.5), rhs: .double(2.5),
+          expected: true),
+  Sorting(name: "descending doubles", lhs: .double(2.5), rhs: .double(1.5),
+          expected: false),
+  Sorting(name: "NULL first", lhs: .null, rhs: .double(1.5), expected: true),
+  Sorting(name: "double after NULL", lhs: .double(1.5), rhs: .null,
+          expected: false),
+  Sorting(name: "integer before double", lhs: .integer(1), rhs: .double(1.5),
+          expected: true),
+  Sorting(name: "double before integer", lhs: .double(1.5), rhs: .integer(2),
+          expected: true),
+  Sorting(name: "double after integer", lhs: .double(2.5), rhs: .integer(2),
+          expected: false),
+]
+
+private struct Lowering: Sendable, CustomTestStringConvertible {
+  internal let literal: Literal
+  internal let expected: Value
+
+  internal var testDescription: String { "\(literal)" }
+}
+
+private let kLiterals: Array<Lowering> = [
+  Lowering(literal: .double(3.14), expected: .double(3.14)),
+  Lowering(literal: .integer(3), expected: .integer(3)),
+]
+
 // MARK: - Comparison
 
 @Suite
 private struct DoubleComparisonTests {
-  @Test func `like doubles compare by magnitude`() {
-    #expect(compare(.double(1.5), .equal, .double(1.5)) == true)
-    #expect(compare(.double(1.5), .equal, .double(2.5)) == false)
-    #expect(compare(.double(1.5), .unequal, .double(2.5)) == true)
-  }
-
-  @Test func `doubles order by magnitude`() {
-    #expect(compare(.double(1.5), .lt, .double(2.5)) == true)
-    #expect(compare(.double(2.5), .lt, .double(1.5)) == false)
-    #expect(compare(.double(2.5), .gt, .double(1.5)) == true)
-    #expect(compare(.double(1.5), .leq, .double(1.5)) == true)
-    #expect(compare(.double(2.5), .geq, .double(2.5)) == true)
+  @Test(arguments: kDoubles)
+  fileprivate func compares(_ test: Comparing) {
+    #expect(compare(test.lhs, test.op, test.rhs) == test.expected)
   }
 }
 
@@ -63,19 +168,9 @@ private struct DoubleComparisonTests {
 
 @Suite
 private struct MixedNumericComparisonTests {
-  @Test func `an integer equals a like-valued double — numeric, not cross-type`() {
-    // Both operands are numeric, so `1 = 1.0` is TRUE, not a cross-kind miss.
-    #expect(compare(.integer(1), .equal, .double(1.0)) == true)
-    #expect(compare(.double(1.0), .equal, .integer(1)) == true)
-    #expect(compare(.integer(2), .equal, .double(2.5)) == false)
-    #expect(compare(.integer(1), .unequal, .double(1.5)) == true)
-  }
-
-  @Test func `an integer orders against a double by magnitude`() {
-    #expect(compare(.integer(1), .lt, .double(1.5)) == true)
-    #expect(compare(.double(1.5), .gt, .integer(1)) == true)
-    #expect(compare(.integer(2), .lt, .double(1.5)) == false)
-    #expect(compare(.double(0.5), .lt, .integer(1)) == true)
+  @Test(arguments: kMixed)
+  fileprivate func compares(_ test: Comparing) {
+    #expect(compare(test.lhs, test.op, test.rhs) == test.expected)
   }
 }
 
@@ -83,34 +178,9 @@ private struct MixedNumericComparisonTests {
 
 @Suite
 private struct DoubleArithmeticTests {
-  @Test func `double arithmetic yields a double`() throws {
-    #expect(try arithmetic(.double(1.5), .add, .double(2.0)) == .double(3.5))
-    #expect(try arithmetic(.double(2.5), .subtract, .double(1.0))
-                == .double(1.5))
-    #expect(try arithmetic(.double(1.5), .multiply, .double(2.0))
-                == .double(3.0))
-  }
-
-  @Test func `double division is real, not truncated`() throws {
-    #expect(try arithmetic(.double(5.0), .divide, .double(2.0))
-                == .double(2.5))
-  }
-
-  @Test func `a mixed integer/double is numeric and yields a double`() throws {
-    // `5 / 2.0` is real division `2.5`, and `2 * 1.5` is `3.0` — the integer
-    // promotes to `Double`, so the result is approximate-numeric.
-    #expect(try arithmetic(.integer(5), .divide, .double(2.0))
-                == .double(2.5))
-    #expect(try arithmetic(.integer(2), .multiply, .double(1.5))
-                == .double(3.0))
-    #expect(try arithmetic(.double(1.5), .add, .integer(1))
-                == .double(2.5))
-  }
-
-  @Test func `an integer pair still divides as integers`() throws {
-    // The mixed-numeric widening does not touch the exact-numeric path: `5 / 2`
-    // is still `2`, not `2.5`.
-    #expect(try arithmetic(.integer(5), .divide, .integer(2)) == .integer(2))
+  @Test(arguments: kArithmetic)
+  fileprivate func calculates(_ test: Calculating) throws {
+    #expect(try arithmetic(test.lhs, test.op, test.rhs) == test.expected)
   }
 
   @Test func `a double divide by zero raises, matching the integer policy`() {
@@ -184,21 +254,9 @@ private struct DoubleNullTests {
 
 @Suite
 private struct DoubleSortTests {
-  @Test func `doubles sort ascending by magnitude, NULL first`() {
-    // `less` is the sort primitive: NULL precedes every value, and two doubles
-    // order by magnitude.
-    #expect(less(.double(1.5), .double(2.5)) == true)
-    #expect(less(.double(2.5), .double(1.5)) == false)
-    #expect(less(.null, .double(1.5)) == true)
-    #expect(less(.double(1.5), .null) == false)
-  }
-
-  @Test func `a mixed integer/double slot sorts by magnitude`() {
-    // A slot that happens to mix exact and approximate numerics still orders by
-    // magnitude rather than tying at the kind boundary.
-    #expect(less(.integer(1), .double(1.5)) == true)
-    #expect(less(.double(1.5), .integer(2)) == true)
-    #expect(less(.double(2.5), .integer(2)) == false)
+  @Test(arguments: kSorting)
+  fileprivate func sorts(_ test: Sorting) {
+    #expect(less(test.lhs, test.rhs) == test.expected)
   }
 
   @Test func `a double past Int.max still orders against Int.max, not a false tie`() {
@@ -214,13 +272,8 @@ private struct DoubleSortTests {
 
 @Suite
 private struct DoubleLiteralTests {
-  @Test func `a decimal literal lowers to a double value`() throws {
-    let lowered = try value(of: .double(3.14))
-    #expect(lowered == .double(3.14))
-  }
-
-  @Test func `an integer literal stays an integer value`() throws {
-    let lowered = try value(of: .integer(3))
-    #expect(lowered == .integer(3))
+  @Test(arguments: kLiterals)
+  fileprivate func lowers(_ test: Lowering) throws {
+    #expect(try value(of: test.literal) == test.expected)
   }
 }

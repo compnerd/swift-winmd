@@ -24,6 +24,78 @@ private func library() throws -> FixtureCatalog {
   }
 }
 
+private struct Evaluation: Sendable, CustomTestStringConvertible {
+  internal let name: String
+  internal let text: String
+  internal let expected: Array<Array<Value>>
+
+  internal var testDescription: String { name }
+}
+
+private let kPositions: Array<Evaluation> = [
+  Evaluation(name: "1-based occurrence",
+             text: "SELECT POSITION('bc' IN Text) FROM S WHERE Id = 1",
+             expected: [[.integer(2)]]),
+  Evaluation(name: "absent substring",
+             text: "SELECT POSITION('zz' IN Text) FROM S WHERE Id = 1",
+             expected: [[.integer(0)]]),
+  Evaluation(name: "empty literal substring",
+             text: "SELECT POSITION('' IN Text) FROM S WHERE Id = 1",
+             expected: [[.integer(1)]]),
+  Evaluation(name: "empty column substring",
+             text: "SELECT POSITION(Sub IN Text) FROM S WHERE Id = 3",
+             expected: [[.integer(1)]]),
+  Evaluation(name: "case-sensitive miss",
+             text: "SELECT POSITION('BC' IN Text) FROM S WHERE Id = 1",
+             expected: [[.integer(0)]]),
+  Evaluation(name: "oversized substring",
+             text: "SELECT POSITION('helloworld' IN Text) FROM S WHERE Id = 3",
+             expected: [[.integer(0)]]),
+]
+
+private let kOverlays: Array<Evaluation> = [
+  Evaluation(name: "FOR-many replacement",
+             text: "SELECT OVERLAY('abcabc' PLACING 'XY' FROM 3 FOR 2) "
+                 + "FROM S WHERE Id = 1",
+             expected: [[.text("abXYbc")]]),
+  Evaluation(name: "default replacement length",
+             text: "SELECT OVERLAY('abcabc' PLACING 'XYZ' FROM 3) "
+                 + "FROM S WHERE Id = 1",
+             expected: [[.text("abXYZc")]]),
+  Evaluation(name: "zero-length insertion",
+             text: "SELECT OVERLAY('abcabc' PLACING '--' FROM 3 FOR 0) "
+                 + "FROM S WHERE Id = 1",
+             expected: [[.text("ab--cabc")]]),
+  Evaluation(name: "column-computed span",
+             text: "SELECT OVERLAY(Text PLACING Sub FROM Start FOR Len) "
+                 + "FROM S WHERE Id = 1",
+             expected: [[.text("abbcbc")]]),
+  Evaluation(name: "zero start",
+             text: "SELECT OVERLAY('abc' PLACING 'X' FROM 0 FOR 1) "
+                 + "FROM S WHERE Id = 1",
+             expected: [[.text("Xbc")]]),
+  Evaluation(name: "minimum start",
+             text: "SELECT OVERLAY(Text PLACING 'X' FROM Start FOR 1) "
+                 + "FROM S WHERE Id = 3",
+             expected: [[.text("Xello")]]),
+  Evaluation(name: "start past end",
+             text: "SELECT OVERLAY('abc' PLACING 'XY' FROM 99 FOR 1) "
+                 + "FROM S WHERE Id = 1",
+             expected: [[.text("abcXY")]]),
+  Evaluation(name: "oversized length",
+             text: "SELECT OVERLAY('abc' PLACING 'XY' FROM 2 FOR 99) "
+                 + "FROM S WHERE Id = 1",
+             expected: [[.text("aXY")]]),
+  Evaluation(name: "negative length",
+             text: "SELECT OVERLAY('abc' PLACING 'XY' FROM 2 FOR 0 - 5) "
+                 + "FROM S WHERE Id = 1",
+             expected: [[.text("aXYbc")]]),
+  Evaluation(name: "minimum length",
+             text: "SELECT OVERLAY(Text PLACING 'X' FROM 1 FOR Len) "
+                 + "FROM S WHERE Id = 3",
+             expected: [[.text("Xhello")]]),
+]
+
 @Suite struct PositionTests {
   @Test func `POSITION declares its standard signature`() {
     #expect(Routines.standard["position"]?.returns == .integer)
@@ -31,38 +103,10 @@ private func library() throws -> FixtureCatalog {
     #expect(Routines.standard["position"]?.deterministic == true)
   }
 
-  @Test func `POSITION reports a 1-based occurrence`() throws {
-    // 'bc' first occurs at character 2 of 'abcabc'.
-    try library().expect("SELECT POSITION('bc' IN Text) FROM S WHERE Id = 1",
-                         yields: [[2]], routines: .standard)
-  }
-
-  @Test func `POSITION reports 0 when the substring is absent`() throws {
-    try library().expect("SELECT POSITION('zz' IN Text) FROM S WHERE Id = 1",
-                         yields: [[0]], routines: .standard)
-  }
-
-  @Test func `POSITION reports 1 for an empty substring`() throws {
-    // The empty string is a prefix of every string, so it occurs at 1 (ISO).
-    try library().expect("SELECT POSITION('' IN Text) FROM S WHERE Id = 1",
-                         yields: [[1]], routines: .standard)
-    // The empty-column substring over the empty string is 1 too.
-    try library().expect("SELECT POSITION(Sub IN Text) FROM S WHERE Id = 3",
-                         yields: [[1]], routines: .standard)
-  }
-
-  @Test func `POSITION is case-sensitive`() throws {
-    // 'BC' does not occur in the lower-cased 'abcabc'.
-    try library().expect("SELECT POSITION('BC' IN Text) FROM S WHERE Id = 1",
-                         yields: [[0]], routines: .standard)
-  }
-
-  @Test func `POSITION does not find an oversized substring`() throws {
-    // A needle longer than the haystack cannot occur; the length guard reports
-    // 0 rather than indexing out of bounds.
-    try library().expect("SELECT POSITION('helloworld' IN Text) FROM S "
-                             + "WHERE Id = 3",
-                         yields: [[0]], routines: .standard)
+  @Test(arguments: kPositions)
+  fileprivate func evaluates(_ test: Evaluation) throws {
+    let query = try parse(query: test.text)
+    #expect(try library().run(query, .standard) == test.expected)
   }
 
   @Test func `POSITION propagates NULL`() throws {
@@ -113,20 +157,10 @@ private final class Talker: @unchecked Sendable {
     #expect(Routines.standard["overlay"]?.deterministic == true)
   }
 
-  @Test func `OVERLAY replaces FOR-many characters`() throws {
-    // Replace 2 characters of 'abcabc' from position 3 ('ca') with 'XY'.
-    try library().expect(
-        "SELECT OVERLAY('abcabc' PLACING 'XY' FROM 3 FOR 2) FROM S "
-            + "WHERE Id = 1",
-        yields: [["abXYbc"]], routines: .standard)
-  }
-
-  @Test func `OVERLAY defaults its length to the replacement`() throws {
-    // With no FOR, ISO removes as many characters as the replacement holds:
-    // 'XYZ' is three long, so three characters of 'abcabc' from 3 ('cab') go.
-    try library().expect(
-        "SELECT OVERLAY('abcabc' PLACING 'XYZ' FROM 3) FROM S WHERE Id = 1",
-        yields: [["abXYZc"]], routines: .standard)
+  @Test(arguments: kOverlays)
+  fileprivate func evaluates(_ test: Evaluation) throws {
+    let query = try parse(query: test.text)
+    #expect(try library().run(query, .standard) == test.expected)
   }
 
   @Test func `OVERLAY evaluates its replacement once without FOR`() throws {
@@ -148,58 +182,6 @@ private final class Talker: @unchecked Sendable {
         "SELECT OVERLAY('abcdef' PLACING talker() FROM 2) FROM S WHERE Id = 1",
         yields: [["aXXdef"]], routines: routines)
     #expect(counter.count == 1)
-  }
-
-  @Test func `OVERLAY inserts when FOR is zero`() throws {
-    // A zero length removes nothing, so the replacement is inserted before the
-    // start position.
-    try library().expect(
-        "SELECT OVERLAY('abcabc' PLACING '--' FROM 3 FOR 0) FROM S "
-            + "WHERE Id = 1",
-        yields: [["ab--cabc"]], routines: .standard)
-  }
-
-  @Test func `OVERLAY over the columns replaces a computed span`() throws {
-    // 'bc' placed into 'abcabc' from Start=3 FOR Len=2 replaces 'ca'.
-    try library().expect(
-        "SELECT OVERLAY(Text PLACING Sub FROM Start FOR Len) FROM S "
-            + "WHERE Id = 1",
-        yields: [["abbcbc"]], routines: .standard)
-  }
-
-  @Test func `OVERLAY clamps a start at or before 1 to the front`() throws {
-    // A start of 0 or the extreme Int.min clamps to the first character; the
-    // Int.min case would trap on a naive `start - 1`.
-    try library().expect(
-        "SELECT OVERLAY('abc' PLACING 'X' FROM 0 FOR 1) FROM S WHERE Id = 1",
-        yields: [["Xbc"]], routines: .standard)
-    try library().expect(
-        "SELECT OVERLAY(Text PLACING 'X' FROM Start FOR 1) FROM S "
-            + "WHERE Id = 3",
-        yields: [["Xello"]], routines: .standard)
-  }
-
-  @Test func `OVERLAY clamps a start past the end to an append`() throws {
-    try library().expect(
-        "SELECT OVERLAY('abc' PLACING 'XY' FROM 99 FOR 1) FROM S "
-            + "WHERE Id = 1",
-        yields: [["abcXY"]], routines: .standard)
-  }
-
-  @Test func `OVERLAY clamps an oversized or negative length`() throws {
-    // A length past the end removes only to the end; a negative length removes
-    // nothing. The Int.min length exercises the overflow-safe capacity compare.
-    try library().expect(
-        "SELECT OVERLAY('abc' PLACING 'XY' FROM 2 FOR 99) FROM S "
-            + "WHERE Id = 1",
-        yields: [["aXY"]], routines: .standard)
-    try library().expect(
-        "SELECT OVERLAY('abc' PLACING 'XY' FROM 2 FOR 0 - 5) FROM S "
-            + "WHERE Id = 1",
-        yields: [["aXYbc"]], routines: .standard)
-    try library().expect(
-        "SELECT OVERLAY(Text PLACING 'X' FROM 1 FOR Len) FROM S WHERE Id = 3",
-        yields: [["Xhello"]], routines: .standard)
   }
 
   @Test func `OVERLAY propagates NULL`() throws {

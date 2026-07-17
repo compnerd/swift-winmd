@@ -744,6 +744,8 @@ private func outers(_ plan: Plan) -> Bool {
     outers(left) || outers(right)
   case let .join(source, _, _, _, _, _, _):
     outers(source)
+  case let .semijoin(left, right, _, _):
+    outers(left) || outers(right)
   case let .apply(left, _, _, _, _, _):
     outers(left)
   case let .setop(_, left, right, _):

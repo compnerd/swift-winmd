@@ -27,7 +27,7 @@ private func applies(_ plan: Plan) -> Bool {
        let .aggregate(_, _, source):
     return applies(source)
   case let .product(left, right), let .outer(left, right, _, _),
-       let .setop(_, left, right, _):
+       let .semijoin(left, right, _, _), let .setop(_, left, right, _):
     return applies(left) || applies(right)
   case .single, .scan, .join:
     return false
@@ -47,7 +47,7 @@ private func joins(_ plan: Plan) -> Bool {
        let .aggregate(_, _, source):
     return joins(source)
   case let .product(left, right), let .outer(left, right, _, _),
-       let .setop(_, left, right, _):
+       let .semijoin(left, right, _, _), let .setop(_, left, right, _):
     return joins(left) || joins(right)
   case .single, .scan, .apply:
     return false
@@ -66,9 +66,87 @@ private func outers(_ plan: Plan) -> Bool {
        let .distinct(source), let .limit(_, _, source),
        let .aggregate(_, _, source):
     return outers(source)
-  case let .product(left, right), let .setop(_, left, right, _):
+  case let .product(left, right), let .semijoin(left, right, _, _),
+       let .setop(_, left, right, _):
     return outers(left) || outers(right)
   case .single, .scan, .join, .apply:
+    return false
+  }
+}
+
+/// Whether `plan` (or a descendant) carries a `.semijoin` node — the witness a
+/// correlated `EXISTS`/`NOT EXISTS` conjunct decorrelated. `anti` distinguishes
+/// the two senses: a plain `EXISTS` yields `anti == false`, a `NOT EXISTS`
+/// `anti == true`.
+private func semijoins(_ plan: Plan) -> Bool {
+  switch plan {
+  case .semijoin:
+    return true
+  case let .derived(_, source, _, _):
+    return semijoins(source)
+  case let .select(_, source), let .project(_, source), let .sort(_, source),
+       let .distinct(source), let .limit(_, _, source),
+       let .aggregate(_, _, source):
+    return semijoins(source)
+  case let .product(left, right), let .outer(left, right, _, _),
+       let .setop(_, left, right, _):
+    return semijoins(left) || semijoins(right)
+  case .single, .scan, .join, .apply:
+    return false
+  }
+}
+
+/// Whether `plan` (or any descendant) carries a `.semijoin` node of the given
+/// `anti` sense — a SEMIJOIN (`anti == false`) or ANTI-join (`anti == true`).
+private func semijoins(_ plan: Plan, anti wanted: Bool) -> Bool {
+  switch plan {
+  case let .semijoin(_, _, _, anti):
+    return anti == wanted
+  case let .derived(_, source, _, _):
+    return semijoins(source, anti: wanted)
+  case let .select(_, source), let .project(_, source), let .sort(_, source),
+       let .distinct(source), let .limit(_, _, source),
+       let .aggregate(_, _, source):
+    return semijoins(source, anti: wanted)
+  case let .product(left, right), let .outer(left, right, _, _),
+       let .setop(_, left, right, _):
+    return semijoins(left, anti: wanted) || semijoins(right, anti: wanted)
+  case .single, .scan, .join, .apply:
+    return false
+  }
+}
+
+/// Whether `plan` (or any descendant) carries a residual correlated `.exists`
+/// conjunct in a `.select`'s filter — the witness an EXISTS was NOT rewritten
+/// (it stayed correlated). Scans every conjunct of each `.select` filter, so an
+/// EXISTS surviving beside other conjuncts (or nested in an `.or`) is caught.
+private func exists(in plan: Plan) -> Bool {
+  switch plan {
+  case let .select(filter, source):
+    return filter.conjuncts.contains { existential($0) } || exists(in: source)
+  case let .derived(_, source, _, _), let .project(_, source),
+       let .sort(_, source), let .distinct(source), let .limit(_, _, source),
+       let .aggregate(_, _, source):
+    return exists(in: source)
+  case let .product(left, right), let .outer(left, right, _, _),
+       let .semijoin(left, right, _, _), let .setop(_, left, right, _):
+    return exists(in: left) || exists(in: right)
+  case .single, .scan, .join, .apply:
+    return false
+  }
+}
+
+/// Whether `filter` is (or, through `and`/`or`/`not`, reaches) an `.exists`
+/// conjunct — a correlated `EXISTS`/`NOT EXISTS` still lowered as a predicate.
+private func existential(_ filter: Filter) -> Bool {
+  switch filter {
+  case .exists:
+    return true
+  case let .and(lhs, rhs), let .or(lhs, rhs):
+    return existential(lhs) || existential(rhs)
+  case let .not(operand):
+    return existential(operand)
+  default:
     return false
   }
 }
@@ -921,5 +999,348 @@ struct OuterJoinSafeGateTests {
         "LEFT JOIN B ON A.k = B.k AND B.flag = 1 " +
         "ORDER BY A.k",
         yields: [[nil, nil], [1, 1], [2, nil]])
+  }
+}
+
+// MARK: - Decorrelatable EXISTS → semijoin: result-equivalence + plan shape
+
+/// Behaviour-preserving oracles for the correlated `EXISTS` → SEMIJOIN and
+/// `NOT EXISTS` → ANTI-join decorrelation. A semijoin is a per-row EXISTENCE
+/// test: a left row survives AT MOST ONCE regardless of how many inner rows it
+/// matches (unlike a join, which multiplies). Every case compares the run
+/// against the KNOWN-CORRECT multiset the correlated `exists` evaluator
+/// produces and pins the plan shape: a decorrelatable EXISTS becomes a
+/// `.semijoin` with NO residual `.exists`, an excluded one stays an `.exists`.
+struct DecorrelateExistsTests {
+  /// AT-MOST-ONCE (G1): Id 1's body matches TWO inner rows, yet the left row
+  /// appears EXACTLY ONCE — a semijoin tests existence, it does NOT multiply.
+  /// Id 1 and Id 2 have children (kept), Id 3 has none (dropped).
+  @Test func `a left row matching many inner rows appears exactly once`()
+      throws {
+    try fixture().expect(
+        "SELECT T.Id FROM T " +
+        "WHERE EXISTS (SELECT 1 FROM S WHERE S.k = T.Id) ORDER BY T.Id",
+        yields: [[1], [2]])
+  }
+
+  /// PLAN SHAPE: the decorrelatable EXISTS optimises to a `.semijoin` (the SEMI
+  /// sense) with NO surviving `.exists` conjunct — the pass fired.
+  @Test func `a decorrelatable EXISTS optimises to a semijoin`() throws {
+    let plan = try fixture().optimised(
+        "SELECT T.Id FROM T " +
+        "WHERE EXISTS (SELECT 1 FROM S WHERE S.k = T.Id)")
+    #expect(semijoins(plan, anti: false))
+    #expect(!exists(in: plan))
+  }
+
+  /// NOT EXISTS → ANTI-join: the complement of the SEMI case — a left row
+  /// survives iff NO inner row matches. Only Id 3 (no child) survives.
+  @Test func `a NOT EXISTS yields the anti-join complement`() throws {
+    try fixture().expect(
+        "SELECT T.Id FROM T " +
+        "WHERE NOT EXISTS (SELECT 1 FROM S WHERE S.k = T.Id) ORDER BY T.Id",
+        yields: [[3]])
+  }
+
+  /// PLAN SHAPE: a `NOT EXISTS` optimises to a `.semijoin` of the ANTI sense
+  /// (`anti == true`), NO `.exists` surviving.
+  @Test func `a decorrelatable NOT EXISTS optimises to an anti-join`() throws {
+    let plan = try fixture().optimised(
+        "SELECT T.Id FROM T " +
+        "WHERE NOT EXISTS (SELECT 1 FROM S WHERE S.k = T.Id)")
+    #expect(semijoins(plan, anti: true))
+    #expect(!exists(in: plan))
+  }
+
+  /// NULL KEY (SEMI): a left row with a NULL correlation key matches nothing
+  /// (NULL ≠ NULL), so EXISTS is FALSE and the SEMI drops it. Id 1 survives,
+  /// NULL-Id row does not. The inner NULL-keyed `(NULL, 999)` never matches.
+  @Test func `a NULL key makes EXISTS false and the semijoin drops the row`()
+      throws {
+    try nullFixture().expect(
+        "SELECT T.Id FROM T " +
+        "WHERE EXISTS (SELECT 1 FROM S WHERE S.k = T.Id) ORDER BY T.Id",
+        yields: [[1]])
+  }
+
+  /// NULL KEY (ANTI): a NULL correlation key makes NOT EXISTS TRUE,
+  /// so the ANTI-join KEEPS the NULL-Id row. Id 1 (has a child) is dropped, the
+  /// NULL-Id row survives.
+  @Test func `a NULL key makes NOT EXISTS true and the anti-join keeps it`()
+      throws {
+    try nullFixture().expect(
+        "SELECT T.Id FROM T " +
+        "WHERE NOT EXISTS (SELECT 1 FROM S WHERE S.k = T.Id)",
+        yields: [[nil]])
+  }
+
+  /// EMPTY INNER (SEMI): no inner row matches ANY left row, so EXISTS is FALSE
+  /// for all — the SEMI emits nothing.
+  @Test func `an empty matching inner drops every SEMI left row`() throws {
+    try fixture().empty(
+        "SELECT T.Id FROM T " +
+        "WHERE EXISTS (SELECT 1 FROM S WHERE S.k = T.Id AND S.x > 10000)")
+  }
+
+  /// EMPTY INNER (ANTI): no inner row matches, so NOT EXISTS is TRUE for every
+  /// left row — the ANTI-join keeps them all.
+  @Test func `an empty matching inner keeps every ANTI left row`() throws {
+    try fixture().expect(
+        "SELECT T.Id FROM T " +
+        "WHERE NOT EXISTS (SELECT 1 FROM S WHERE S.k = T.Id AND S.x > 10000) " +
+        "ORDER BY T.Id",
+        yields: [[1], [2], [3]])
+  }
+
+  /// DUPLICATE LEFT ROWS (SEMI): a left relation with duplicate keys preserves
+  /// every duplicate that passes the existence test — the semijoin filters, it
+  /// does not dedup. Both copies of Id 1 survive; Id 3 (no child) drops.
+  @Test func `duplicate left rows are preserved by the semijoin`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["Id": .integer]) {
+        Row(1)
+        Row(1)            // a duplicate left key
+        Row(3)
+      }
+      Relation("S", ["k": .integer, "x": .integer]) {
+        Row(1, 100)
+        Row(1, 101)       // Id 1 matches many; each left copy appears once
+      }
+    }
+    try catalog.expect(
+        "SELECT T.Id FROM T " +
+        "WHERE EXISTS (SELECT 1 FROM S WHERE S.k = T.Id)",
+        yields: [[1], [1]])
+  }
+
+  /// DUPLICATE LEFT ROWS (ANTI): the mirror — every duplicate that FAILS the
+  /// existence test is preserved. Both copies of Id 3 survive, Id 1 drops.
+  @Test func `duplicate left rows are preserved by the anti-join`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["Id": .integer]) {
+        Row(3)
+        Row(3)            // a duplicate left key with no child
+        Row(1)
+      }
+      Relation("S", ["k": .integer, "x": .integer]) {
+        Row(1, 100)
+      }
+    }
+    try catalog.expect(
+        "SELECT T.Id FROM T " +
+        "WHERE NOT EXISTS (SELECT 1 FROM S WHERE S.k = T.Id)",
+        yields: [[3], [3]])
+  }
+
+  /// BODY RESIDUAL `p_R`: a safe local conjunct in the EXISTS WHERE (`S.x <
+  /// 200`) rides the semijoin `on` alongside the correlation key. Id 1 keeps a
+  /// matching child (100 or 101 < 200), Id 2's only child (200) fails it ⇒ Id 2
+  /// drops, Id 3 has none. Only Id 1 survives.
+  @Test func `a safe body residual filters the semijoin`() throws {
+    try fixture().expect(
+        "SELECT T.Id FROM T " +
+        "WHERE EXISTS (SELECT 1 FROM S WHERE S.k = T.Id AND S.x < 200) " +
+        "ORDER BY T.Id",
+        yields: [[1]])
+  }
+
+  /// A NULL body residual makes the match UNKNOWN — "not a match". A child with
+  /// a NULL `flag` and the body `S.flag = 1` yields UNKNOWN for that row, so it
+  /// does not satisfy EXISTS. Id 1's only child has a NULL flag ⇒ EXISTS false
+  /// ⇒ dropped; Id 2's child (flag 1) satisfies it ⇒ kept.
+  @Test func `a NULL body residual is not a match`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["Id": .integer]) {
+        Row(1)
+        Row(2)
+      }
+      Relation("S", ["k": .integer, "flag": .integer]) {
+        Row(1, nil)       // flag NULL ⇒ S.flag = 1 UNKNOWN ⇒ not a match
+        Row(2, 1)         // flag 1 ⇒ a match
+      }
+    }
+    try catalog.expect(
+        "SELECT T.Id FROM T " +
+        "WHERE EXISTS (SELECT 1 FROM S WHERE S.k = T.Id AND S.flag = 1)",
+        yields: [[2]])
+  }
+
+  /// A SAFE SIBLING beside the EXISTS still decorrelates: `T.Id < 3 AND
+  /// EXISTS(...)`. Id 1 (child, < 3) survives, Id 2 (child, < 3) survives, Id 3
+  /// fails the sibling. The semijoin fires (a safe sibling permits it) and the
+  /// sibling stays in a `.select` above.
+  @Test func `a safe sibling conjunct still decorrelates`() throws {
+    let sql =
+        "SELECT T.Id FROM T " +
+        "WHERE T.Id < 3 AND EXISTS (SELECT 1 FROM S WHERE S.k = T.Id)"
+    let plan = try fixture().optimised(sql)
+    #expect(semijoins(plan, anti: false))
+    #expect(!exists(in: plan))
+    try fixture().expect(sql + " ORDER BY T.Id", yields: [[1], [2]])
+  }
+}
+
+// MARK: - EXISTS that STAYS correlated, run correctly (and adversarial throws)
+
+/// The excluded shapes: a body that is not a plain filter+project over a base
+/// scan, a non-equi correlation, an unsafe body term, an unsafe SIBLING, and an
+/// EXISTS nested in an `.or`. Each MUST stay a residual `.exists` (no
+/// `.semijoin`) and run correctly — and the two throw-visibility cases must
+/// throw exactly as the correlated plan does.
+struct DecorrelateExistsExclusionTests {
+  /// ADVERSARIAL SIBLING THROW-VISIBILITY (the step-4 guard, load-bearing): a
+  /// sibling `(1 / T.v) = 0` divides by zero for a T row whose `v = 0`,
+  /// AND that SAME row's EXISTS is FALSE. The correlated select evaluates the
+  /// whole `AND` for the row and THROWS `.divide`. A wrongly-decorrelated plan
+  /// would let the SEMIJOIN DROP that exists-false row and HIDE the throw. So
+  /// the recogniser MUST leave it correlated (unsafe sibling) — and the run
+  /// MUST throw.
+  @Test func `an unsafe sibling stays correlated and throws`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["Id": .integer, "v": .integer]) {
+        Row(9, 0)         // v = 0 ⇒ 1 / v faults; Id 9 has NO child ⇒ EXISTS
+                          // false, so a semijoin drops it and hides the fault
+      }
+      Relation("S", ["k": .integer, "x": .integer]) {
+        Row(1, 100)       // keyed to Id 1, never to Id 9
+      }
+    }
+    let sql =
+        "SELECT T.Id FROM T " +
+        "WHERE (1 / T.v) = 0 AND EXISTS (SELECT 1 FROM S WHERE S.k = T.Id)"
+    let plan = try catalog.optimised(sql)
+    #expect(!semijoins(plan))                   // NOT decorrelated
+    #expect(exists(in: plan))                   // still a residual EXISTS
+    catalog.expect(sql, fails: .divide)         // and it MUST throw
+  }
+
+  /// ADVERSARIAL BODY THROW-VISIBILITY (G4): an EXISTS body carries an UNSAFE
+  /// term `1 / (S.x - 100) > 0` that divides by zero for the child `(1, 100)`,
+  /// which is keyed to the ABSENT Id 1. The per-row correlated run never binds
+  /// `:outer = 1`, so it never reaches that inner row and never throws. A
+  /// set-based semijoin over the whole `S` WOULD evaluate the divide. The
+  /// recogniser leaves it correlated (unsafe body), so the run is throw-free.
+  @Test func `an unreachable throwing body row stays correlated`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["Id": .integer]) {
+        Row(2)
+        Row(3)
+      }
+      Relation("S", ["k": .integer, "x": .integer]) {
+        Row(1, 100)      // x - 100 = 0 ⇒ divide by zero, keyed to absent Id 1
+        Row(2, 200)      // safe for Id 2
+      }
+    }
+    let sql =
+        "SELECT T.Id FROM T WHERE EXISTS " +
+        "(SELECT 1 FROM S WHERE S.k = T.Id AND 1 / (S.x - 100) > 0)"
+    #expect(!semijoins(try catalog.optimised(sql)))
+    #expect(exists(in: try catalog.optimised(sql)))
+    // Id 2: child (2, 200) ⇒ 1 / 100 = 0 ⇒ `> 0` false ⇒ EXISTS false; Id 3:
+    // none. The Id-1 divide is never reached, so no rows and NO throw.
+    let rows = try catalog.run(parse(query: sql), .standard)
+    #expect(rows.isEmpty)
+  }
+
+  /// NON-EQUI correlation `S.k > T.Id`: no equi key to hash on, so the EXISTS
+  /// stays correlated and runs correctly. Id 1 has a child with k > 1 (k = 2),
+  /// Id 2 has none (only k ≤ 2), Id 3 none. Only Id 1 survives.
+  @Test func `a non-equi correlation stays an exists and runs correctly`()
+      throws {
+    let sql =
+        "SELECT T.Id FROM T " +
+        "WHERE EXISTS (SELECT 1 FROM S WHERE S.k > T.Id)"
+    #expect(!semijoins(try fixture().optimised(sql)))
+    #expect(exists(in: try fixture().optimised(sql)))
+    try fixture().expect(sql + " ORDER BY T.Id", yields: [[1]])
+  }
+
+  /// AGGREGATE body: a `COUNT(*)` body is not a plain filter+project,
+  /// so the EXISTS stays correlated. The body is always non-empty (COUNT of an
+  /// empty group yields a row), so EXISTS is TRUE for every left row — kept.
+  @Test func `an aggregate body stays an exists and runs correctly`() throws {
+    let sql =
+        "SELECT T.Id FROM T WHERE EXISTS " +
+        "(SELECT COUNT(*) FROM S WHERE S.k = T.Id)"
+    #expect(!semijoins(try fixture().optimised(sql)))
+    #expect(exists(in: try fixture().optimised(sql)))
+    try fixture().expect(sql + " ORDER BY T.Id", yields: [[1], [2], [3]])
+  }
+
+  /// LIMIT body: a `FETCH FIRST` body is not the canonical filter+project,
+  /// so the EXISTS stays correlated — and runs correctly (a body limited to one
+  /// row still exists iff a matching child exists). Id 1, Id 2 kept, Id 3 not.
+  @Test func `a limit body stays an exists and runs correctly`() throws {
+    let sql =
+        "SELECT T.Id FROM T WHERE EXISTS (SELECT x FROM S " +
+        "WHERE S.k = T.Id ORDER BY S.x FETCH FIRST 1 ROW ONLY)"
+    #expect(!semijoins(try fixture().optimised(sql)))
+    #expect(exists(in: try fixture().optimised(sql)))
+    try fixture().expect(sql + " ORDER BY T.Id", yields: [[1], [2]])
+  }
+
+  /// DISTINCT body: a `SELECT DISTINCT` body is not the canonical shape, so the
+  /// EXISTS stays correlated — and runs correctly (dedup does not change
+  /// existence). Id 1, Id 2 kept, Id 3 not.
+  @Test func `a distinct body stays an exists and runs correctly`() throws {
+    let sql =
+        "SELECT T.Id FROM T WHERE EXISTS " +
+        "(SELECT DISTINCT x FROM S WHERE S.k = T.Id)"
+    #expect(!semijoins(try fixture().optimised(sql)))
+    #expect(exists(in: try fixture().optimised(sql)))
+    try fixture().expect(sql + " ORDER BY T.Id", yields: [[1], [2]])
+  }
+
+  /// SETOP body: a `UNION` body is not the canonical single-scan shape, so the
+  /// EXISTS stays correlated — and runs correctly. Id 1, Id 2 have a matching
+  /// arm; Id 3 has none.
+  @Test func `a setop body stays an exists and runs correctly`() throws {
+    let sql =
+        "SELECT T.Id FROM T WHERE EXISTS " +
+        "(SELECT x FROM S WHERE S.k = T.Id " +
+        "UNION SELECT x FROM S WHERE S.k = T.Id)"
+    #expect(!semijoins(try fixture().optimised(sql)))
+    #expect(exists(in: try fixture().optimised(sql)))
+    try fixture().expect(sql + " ORDER BY T.Id", yields: [[1], [2]])
+  }
+
+  /// NESTED SUBQUERY in the body: the EXISTS body itself nests an `IN (Q)`, so
+  /// its plan is not the canonical filter+project over a single scan — it stays
+  /// correlated and runs correctly. Id 1, Id 2 have a child whose x is in the
+  /// inner set; Id 3 has none.
+  @Test func `a nested subquery body stays an exists and runs correctly`()
+      throws {
+    let sql =
+        "SELECT T.Id FROM T WHERE EXISTS (SELECT 1 FROM S " +
+        "WHERE S.k = T.Id AND S.x IN (SELECT x FROM S))"
+    #expect(!semijoins(try fixture().optimised(sql)))
+    #expect(exists(in: try fixture().optimised(sql)))
+    try fixture().expect(sql + " ORDER BY T.Id", yields: [[1], [2]])
+  }
+
+  /// BODY-LOCAL DERIVED table: the EXISTS body reads its OWN derived `e` (over
+  /// `S`), a per-execution alias the set-based rewrite cannot relay. It stays
+  /// correlated — and the derived `e` reads `S`, so Id 1, Id 2 are kept.
+  @Test func `a body-local derived table stays an exists`() throws {
+    let sql =
+        "SELECT T.Id FROM T WHERE EXISTS " +
+        "(SELECT 1 FROM (SELECT k FROM S) AS e WHERE e.k = T.Id)"
+    #expect(!semijoins(try fixture().optimised(sql)))
+    #expect(exists(in: try fixture().optimised(sql)))
+    try fixture().expect(sql + " ORDER BY T.Id", yields: [[1], [2]])
+  }
+
+  /// EXISTS INSIDE AN `.or`: an EXISTS that is NOT a top-level `AND` conjunct
+  /// (it sits under an `OR`) is left correlated — the recogniser lifts only a
+  /// top-level conjunct. `T.Id = 3 OR EXISTS(...)`: Id 3 (the OR's left) and
+  /// Ids 1, 2 (the EXISTS arm) survive.
+  @Test func `an EXISTS under an OR stays correlated and runs correctly`()
+      throws {
+    let sql =
+        "SELECT T.Id FROM T " +
+        "WHERE T.Id = 3 OR EXISTS (SELECT 1 FROM S WHERE S.k = T.Id)"
+    #expect(!semijoins(try fixture().optimised(sql)))
+    #expect(exists(in: try fixture().optimised(sql)))
+    try fixture().expect(sql + " ORDER BY T.Id", yields: [[1], [2], [3]])
   }
 }

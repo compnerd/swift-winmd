@@ -154,6 +154,24 @@ internal indirect enum Plan {
   /// nested loop that tracks matches, so it composes with an arbitrary
   /// (non-equi) `on`.
   case outer(Plan, Plan, on: Filter, kind: Join.Kind)
+  /// A SEMIJOIN of `left` against `right` on the `on` predicate — an EXISTENCE
+  /// test whose output is the LEFT side's slots ALONE. Unlike an inner or outer
+  /// join it neither appends the right's columns nor NULL-extends: it merely
+  /// KEEPS or DROPS each left row by whether the right holds a match, so a left
+  /// row survives with its own width unchanged and its slot geometry preserved.
+  /// `on` addresses the combined `left ++ right` slot space (the left's slots
+  /// then the right's), so a candidate is merged to EVALUATE it — but the LEFT
+  /// record alone is emitted. `anti` selects the sense: `false` keeps a left
+  /// row iff SOME right row makes `on` TRUE (a decorrelated `EXISTS`), `true`
+  /// keeps it iff NO right row does (a decorrelated `NOT EXISTS`). A left row
+  /// emitted AT MOST ONCE regardless of its match count — the semijoin short-
+  /// circuits on the first match, never multiplying a left row by the number of
+  /// right rows it matches, exactly as `EXISTS` is a decided per-row test. The
+  /// decorrelation pass emits it for a top-level correlated `EXISTS`/`NOT
+  /// EXISTS` conjunct; the executor runs it as a nested loop (or a hash probe
+  /// when `on` carries a straddling equi key), so it composes with an arbitrary
+  /// `on`.
+  case semijoin(Plan, Plan, on: Filter, anti: Bool)
   /// A correlated APPLY — a `LATERAL` derived table's nested loop. For each
   /// record of the left sub-plan it re-executes the pre-compiled body plan
   /// (looked up by `key` composed with `correlation`, whose `slot` sources bind
@@ -277,6 +295,10 @@ extension Plan {
       } else {
         nil
       }
+    case let .semijoin(left, _, _, _):
+      // A semijoin is an existence test: it keeps or drops each left row but
+      // appends nothing, so it spans exactly the left side's slots.
+      left.slots
     case let .apply(left, _, _, ordinals, _, _):
       // An apply lays the lateral body's taken `ordinals` after the left's
       // slots, exactly as a product lays a scan's referenced ordinals.
@@ -414,6 +436,14 @@ extension Catalog where Self: ~Escapable {
       return try outer(execute(left, context), execute(right, context),
                        widths: (left: left.slots ?? 0, right: right.slots ?? 0),
                        on, kind, context)
+    case let .semijoin(left, right, on, anti):
+      // The side widths come from the sub-plans (known for a compiled plan), so
+      // the hash fast-path can map a straddling equi key's right slot into the
+      // right side's own standalone space.
+      return try semijoin(execute(left, context), execute(right, context),
+                          widths: (left: left.slots ?? 0,
+                                   right: right.slots ?? 0),
+                          on, anti: anti, context)
     case let .apply(left, key, correlation, ordinals, on, kind):
       return try applied(execute(left, context), key, correlation, ordinals,
                          on, kind, context)
@@ -688,6 +718,138 @@ extension Catalog where Self: ~Escapable {
       for index in right.indices where !matched[index] {
         records.append(nulls.left.merged(with: right[index]))
       }
+    }
+    return records
+  }
+
+  /// The SEMIJOIN of `left` against `right` on `on` — an EXISTENCE
+  /// test emitting each surviving LEFT record UNCHANGED, never merged with a
+  /// right one and never NULL-extended.
+  ///
+  /// `left`/`right` are the two materialised sides, `widths` each side's slot
+  /// count (the fast path maps the equi key's combined-space right slot down by
+  /// `widths.left` into the right side's own space). A candidate pair is merged
+  /// (left slots then right slots) ONLY to evaluate `on` in the combined space;
+  /// the LEFT record alone is what a survivor emits.
+  ///
+  ///   - SEMI (`anti == false`): a left row is kept iff SOME right row makes
+  ///     merged `on` evaluate TRUE under three-valued logic (UNKNOWN and FALSE
+  ///     do not match, exactly as a `WHERE` admits). The scan SHORT-CIRCUITS on
+  ///     the first match, so a left row appears AT MOST ONCE regardless of how
+  ///     many right rows it matches — `EXISTS` is a decided per-row test, never
+  ///     a multiplication.
+  ///   - ANTI (`anti == true`): a left row is kept iff NO right row makes `on`
+  ///     TRUE — the complement, a decorrelated `NOT EXISTS`.
+  ///
+  /// A NULL correlation key makes the equi `.match` UNKNOWN, so no right row
+  /// matches: SEMI drops such a left row, ANTI keeps it — `EXISTS` two-valued,
+  /// never UNKNOWN. An EMPTY right side matches nothing, so SEMI emits nothing
+  /// and ANTI emits every left row.
+  ///
+  /// FAST PATH: when `on` carries a straddling equi `.match` conjunct (shape
+  /// a decorrelated `EXISTS` emits, found by `equikey`) AND the WHOLE `on` is
+  /// `safe`, the right side is bucketed by its key ONCE and each left probes
+  /// its own bucket, confirming the WHOLE `on` per candidate (the bucket over-
+  /// groups and `on` may carry residual conjuncts beyond the key) and short-
+  /// circuiting on the first confirmed match — turning the O(left × right)
+  /// nested loop into O(left + right). A NULL left key probes no bucket and so
+  /// never matches, exactly as the nested loop's UNKNOWN `.match` leaves it.
+  ///
+  /// The fast path fires ONLY when `on` is `safe`, for the SAME reason the
+  /// `.outer` executor gates its own hash path: it evaluates `on` for a left
+  /// row's matching-key bucket candidates ALONE, SKIPPING every non-bucket and
+  /// NULL-key right row, whereas the nested loop evaluates `on` for EVERY pair.
+  /// (This is NOT `AND` short-circuiting: the evaluator is Kleene and DOES
+  /// circuit an `AND` on a FALSE left, but an UNKNOWN or TRUE left still
+  /// evaluates the right, and either side may throw.) An UNSAFE `on` could
+  /// therefore SUPPRESS a throw the nested loop raises on a skipped pair, so it
+  /// falls to the nested loop, which evaluates every pair and throws
+  /// identically. In PRACTICE the decorrelation only ever builds a `safe` `on`
+  /// (its correlation `.match` and residual are gated `safe`), so this gate is
+  /// defence-in-depth against a future producer.
+  private borrowing func semijoin(_ left: Array<Record>,
+                                  _ right: Array<Record>,
+                                  widths: (left: Int, right: Int),
+                                  _ on: Filter, anti: Bool,
+                                  _ context: Context)
+      throws(SQLError) -> Array<Record> {
+    if let key = equikey(on, widths.left), on.safe {
+      // `key.right` is in the combined `left ++ right` space; the right side is
+      // materialised standalone, so its own slot is `key.right - widths.left`.
+      return try bucketed(left, right,
+                          key: (key.left, key.right - widths.left),
+                          on, anti: anti, context)
+    }
+
+    var records = Array<Record>()
+    for lhs in left {
+      // Short-circuit on the first right row that confirms `on` — a left row
+      // survives (SEMI) or is excluded (ANTI) by EXISTENCE alone, so it need
+      // never scan past the first match, and is emitted AT MOST ONCE.
+      var found = false
+      for rhs in right where try evaluate(lhs.merged(with: rhs), on,
+                                          context) == true {
+        found = true
+        break
+      }
+      // SEMI keeps a matched left row, ANTI keeps an unmatched one — and the
+      // LEFT record alone is emitted, never the merge.
+      if found != anti { records.append(lhs) }
+    }
+    return records
+  }
+
+  /// The hash fast-path of a semijoin: the right hashed ONCE by `key.right`
+  /// into buckets, then each left row probed by `key.left` in O(1) and short-
+  /// circuited on the first confirmed match. Behaviour-identical to the nested
+  /// loop `semijoin` above — same survivors, each emitted at most once.
+  ///
+  /// The right side is bucketed by its key's promoted `bucket` (a NULL key
+  /// buckets nothing — it can never equi-match, exactly as the nested loop's
+  /// UNKNOWN `.match` leaves it). Each left row probes its own key's bucket and
+  /// every candidate is CONFIRMED against the WHOLE `on` — the bucket over-
+  /// groups and `on` may carry residual conjuncts beyond the key — the first
+  /// confirmed match deciding existence. A left row whose key is NULL probes
+  /// nothing and matches nothing. SEMI emits a matched left row (unchanged, at
+  /// most once); ANTI emits an unmatched one — the complement.
+  ///
+  /// `key.left` is a combined-space slot (the left is the record's prefix),
+  /// while `key.right` is the right's OWN standalone slot — the caller maps
+  /// the combined right slot down by `widths.left` before the call.
+  private borrowing func bucketed(_ left: Array<Record>,
+                                  _ right: Array<Record>,
+                                  key: (left: Int, right: Int),
+                                  _ on: Filter, anti: Bool,
+                                  _ context: Context)
+      throws(SQLError) -> Array<Record> {
+    // Bucket the right side by its key; a NULL-keyed right row equi-matches
+    // nothing, so it is never bucketed.
+    var buckets = Dictionary<Value, Array<Int>>()
+    for index in right.indices {
+      let value = right[index][key.right]
+      if case .null = value { continue }
+      buckets[bucket(value), default: Array<Int>()].append(index)
+    }
+
+    var records = Array<Record>()
+    for lhs in left {
+      let value = lhs[key.left]
+      var found = false
+      // A NULL left key equi-matches nothing, so it probes no bucket and stays
+      // unmatched — SEMI drops it, ANTI keeps it.
+      if case .null = value {} else {
+        for index in buckets[bucket(value)] ?? [] {
+          // Confirm the WHOLE `on` — the bucket over-groups and `on` may carry
+          // residual conjuncts beyond the equi key, so a collision or a failing
+          // residual is not a match, exactly as the nested loop's `on` test.
+          // The first confirmed match decides existence, so stop scanning.
+          if try evaluate(lhs.merged(with: right[index]), on, context) == true {
+            found = true
+            break
+          }
+        }
+      }
+      if found != anti { records.append(lhs) }
     }
     return records
   }

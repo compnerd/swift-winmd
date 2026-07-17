@@ -2036,6 +2036,14 @@ extension Catalog where Self: ~Escapable {
       // NULL-extended.
       try .outer(optimise(left, context), optimise(right, context), on: on,
                  kind: kind)
+    case let .semijoin(left, right, on, anti):
+      // Optimise each side (a nested join or seekable scan inside a side still
+      // rewrites), but keep the semijoin node and its `on` intact — the `on`
+      // governs the existence test and must not fold into a product or onto
+      // a leaf, or a surviving/excluded left row would change. The executor's
+      // hash fast-path keys on the straddling equi `.match` this `on` holds.
+      try .semijoin(optimise(left, context), optimise(right, context), on: on,
+                    anti: anti)
     case let .apply(left, key, correlation, ordinals, on, kind):
       // Optimise the left side (a seekable scan or a nested join inside it
       // still rewrites), but keep the apply node, its `on`, and its recorded
@@ -2421,7 +2429,14 @@ extension Catalog where Self: ~Escapable {
       return try .derived(name: name, plan: decorrelate(plan, context),
                           ordinals: ordinals, seek: seek)
     case let .select(filter, source):
-      return try .select(filter, decorrelate(source, context))
+      // Decorrelate the source first (a nested apply/exists inside it still
+      // rewrites), then attempt to lift a top-level correlated `EXISTS`/`NOT
+      // EXISTS` conjunct of this select's filter into a semijoin. On any doubt
+      // the whole `.select` is left correlated (`decorrelated(exists:)` returns
+      // `nil`), so execution is unchanged.
+      let source = try decorrelate(source, context)
+      return decorrelated(exists: filter, source, context)
+          ?? .select(filter, source)
     case let .project(terms, source):
       return try .project(terms, decorrelate(source, context))
     case let .sort(keys, source):
@@ -2432,6 +2447,12 @@ extension Catalog where Self: ~Escapable {
     case let .outer(left, right, on, kind):
       return try .outer(decorrelate(left, context), decorrelate(right, context),
                         on: on, kind: kind)
+    case let .semijoin(left, right, on, anti):
+      // A semijoin this pass ITSELF produced (from a decorrelated `EXISTS`);
+      // recurse structurally into both sides so a nested correlated apply
+      // inside either still rewrites, preserving the node.
+      return try .semijoin(decorrelate(left, context),
+                           decorrelate(right, context), on: on, anti: anti)
     case let .apply(left, key, correlation, ordinals, on, kind):
       // Decorrelate the LEFT first (a nested apply inside it still rewrites),
       // then attempt this apply. `.inner` (CROSS APPLY) folds to an inner hash
@@ -2657,6 +2678,136 @@ extension Catalog where Self: ~Escapable {
       return nil
     }
   }
+
+  /// The semijoin rewrite of a `.select` whose `filter` carries a top-level
+  /// correlated `EXISTS`/`NOT EXISTS` conjunct over an already-decorrelated
+  /// `source`, or `nil` when no such conjunct is decorrelatable — in which case
+  /// the caller leaves the `.select` correlated (conservative default). A plain
+  /// `EXISTS` conjunct becomes a SEMIJOIN, a `NOT EXISTS` an ANTI-join, the
+  /// REMAINING conjuncts kept in a `.select` ABOVE it.
+  ///
+  /// An `EXISTS` is a two-valued existence test — TRUE iff the body yields a
+  /// row, never UNKNOWN — so a semijoin is result-equivalent to the per-row
+  /// re-execution the `exists` evaluator does, WITHOUT the NOT-IN NULL trap (a
+  /// NULL correlation key is simply "no match", dropping a SEMI left row and
+  /// keeping an ANTI one). The body must be the SAME simple filter+project over
+  /// a single base-relation scan the CROSS APPLY recogniser requires, MINUS the
+  /// projection/taken-ordinal handling: a semijoin takes NO output column from
+  /// the body (existence only), so the projection CONTENT is irrelevant — only
+  /// the scan+select shape and a `nil` seek matter. The correlation must be a
+  /// single `.slot` source and the body WHERE must split into EXACTLY one equi
+  /// correlation conjunct plus safe, non-parameterised residual conjuncts `p_R`
+  /// (an unsafe or parameterised residual — a non-equi correlation — bails, G3/
+  /// G4).
+  ///
+  /// **SIBLING THROW-VISIBILITY (load-bearing).** A semijoin DROPS left rows
+  /// (SEMI drops exists-false rows, ANTI drops exists-true rows), so a sibling
+  /// conjunct of the enclosing `AND` that is UNSAFE could be SKIPPED for a row
+  /// the semijoin drops — suppressing a throw the correlated `.select` raises
+  /// (it evaluates every conjunct of the `AND` for the row before the row is
+  /// dropped). This is the throw-visibility class the OUTER APPLY safe gate
+  /// guards. THEREFORE the exists is lifted ONLY when EVERY OTHER conjunct of
+  /// the enclosing filter is `safe`; if any sibling is unsafe the whole
+  /// `.select` stays correlated. Conservative is correct — a missed
+  /// decorrelation is a perf loss, a wrong one is silent data corruption.
+  ///
+  /// Exactly ONE exists is lifted per pass; a further decorrelatable exists in
+  /// the remaining conjuncts is picked up when the `.select` recursion re-runs
+  /// over the residual (the semijoin's output width is the source's, so the
+  /// remaining conjuncts and everything above still address the same slots).
+  private borrowing func decorrelated(exists filter: Filter, _ source: Plan,
+                                      _ context: Context) -> Plan? {
+    let conjuncts = filter.conjuncts
+    for (position, conjunct) in conjuncts.enumerated() {
+      guard case let .exists(key, correlation, negated) = conjunct else {
+        continue
+      }
+      // The remaining conjuncts — everything but this exists — are both the
+      // SIBLINGS whose safety the throw-visibility guard tests and the residual
+      // kept above the semijoin.
+      let remaining = conjuncts.enumerated()
+          .filter { $0.offset != position }
+          .map(\.element)
+      // SIBLING THROW-VISIBILITY: every OTHER conjunct of the enclosing `AND`
+      // must be safe, or lifting this exists into a row-dropping semijoin could
+      // suppress a throw the correlated select raises for a dropped row.
+      guard remaining.allSatisfy(\.safe) else { continue }
+      guard let body = context.subqueries.plan(key, correlation),
+          let node = semijoin(source, body, key, correlation, negated,
+                              context) else { continue }
+      // Keep the remaining conjuncts in a `.select` ABOVE the semijoin. The
+      // semijoin's width == the source's, so they and everything above still
+      // address the same slots.
+      return remaining.conjunction.map { .select($0, node) } ?? node
+    }
+    return nil
+  }
+
+  /// The `.semijoin` node for a correlated `EXISTS`/`NOT EXISTS` body over
+  /// `left`, or `nil` when the `body` is not decorrelatable — the SAME guards
+  /// the CROSS APPLY recogniser applies MINUS the projection handling (a
+  /// semijoin tests existence, taking no body column). `negated` selects the
+  /// ANTI sense.
+  ///
+  /// The body must be `project(_, select(where, scan(R, _, nil)))` — the
+  /// projection content is irrelevant — with no body-local derived table (the
+  /// body-local-derived hazard), `R` a genuine BASE relation (not a CTE/store
+  /// overlay entry or a view), a single `.slot` correlation source, and a
+  /// `where` splitting into EXACTLY one equi correlation conjunct plus safe,
+  /// non-parameterised residual conjuncts. The correlation equality becomes a
+  /// straddling `.match` (the executor's hash key), the residual shifts into
+  /// combined `left ++ scan` space alongside, and the two conjoin into the
+  /// semijoin's `on`.
+  private borrowing func semijoin(_ left: Plan, _ body: Plan, _ key: Subkey,
+                                  _ correlation: Correlation, _ negated: Bool,
+                                  _ context: Context) -> Plan? {
+    guard case let .project(_, .select(filter, leaf)) = body,
+        case let .scan(name, scanOrdinals, nil) = leaf,
+        let base = left.slots else { return nil }
+    // No body-local derived table: its per-execution alias cannot be relaid as
+    // a caller-level scan — the SAME hazard the CROSS APPLY recogniser guards.
+    var derivations = Array<(String, Query)>()
+    key.query.collect(derived: &derivations)
+    guard derivations.isEmpty else { return nil }
+    // The scan must name a genuine BASE relation, not a CTE/store overlay entry
+    // or a view — a CTE/view `.scan` re-resolves against the wrong overlay when
+    // relaid at the caller level. Leave either correlated.
+    guard context.relations[name.lowercased()] == nil,
+        resolve(view: name) == nil else { return nil }
+    // The correlation must be a single `.slot` source (no `.bound` parent):
+    // the outer key is that source's ordinal, already in the left's slot space.
+    guard correlation.count == 1,
+        case let (name: parameter, source: .slot(outer))? =
+            correlation.first.map({ (name: $0.key, source: $0.value) })
+        else { return nil }
+
+    // Split the body WHERE into the ONE equi correlation conjunct
+    // (`correlate.inner = :parameter`) and the local residual `p_R`. Any other
+    // parameterised conjunct is a non-equi/expression correlation — bail. Every
+    // residual must be safe (a throwing body term could fire for an inner
+    // left row reaches under set-based execution).
+    var inner: Int? = nil
+    var residual = Array<Filter>()
+    for conjunct in filter.conjuncts {
+      if inner == nil, let slot = equated(conjunct, to: parameter) {
+        inner = slot
+        continue
+      }
+      guard conjunct.safe, !conjunct.parameterised else { return nil }
+      residual.append(conjunct)
+    }
+    guard let inner else { return nil }
+
+    // The scan is relaid after the left, so the body's 0-based scan slots shift
+    // by `base` into the combined space. The correlation equality becomes a
+    // straddling `.match` (the executor's hash key), and the residual `p_R`
+    // shifts alongside into this `left ++ scan` space.
+    let scan = Plan.scan(name: name, ordinals: scanOrdinals, seek: nil)
+    let matched = Filter.match(outer, base + inner)
+    let shifted = residual.map { $0.shifted(by: -base) }
+    let on = ([matched] + shifted).conjunction ?? matched
+    return .semijoin(left, scan, on: on, anti: negated)
+  }
 }
 
 /// The inner-key slot of an EQUI correlation conjunct `slot = :parameter` (in
@@ -2752,6 +2903,16 @@ extension Plan {
       // whole `WHERE` stays above (`distribute`'s default keeps it a `select`
       // over this node).
       try .outer(left.pushdown(), right.pushdown(), on: on, kind: kind)
+    case let .semijoin(left, right, on, anti):
+      // Push down WITHIN each side (its own joins/filters rewrite), but the
+      // semijoin node is a pushdown barrier: a `WHERE` conjunct above it never
+      // rides into a side. The semijoin DROPS left rows by the existence test,
+      // so filtering a side's rows before it could change which left rows
+      // survive — preferring correctness, the whole `WHERE` stays above
+      // (`distribute`'s default keeps it a `select` over this node). Pushdown
+      // runs BEFORE decorrelate, so this arm handles only a semijoin a nested
+      // pass produced; a top-level plan never carries one at this point.
+      try .semijoin(left.pushdown(), right.pushdown(), on: on, anti: anti)
     case let .apply(left, key, correlation, ordinals, on, kind):
       // Push down WITHIN the left side (its own joins/filters rewrite), but the
       // apply is a pushdown barrier: its right side is not a static sub-plan

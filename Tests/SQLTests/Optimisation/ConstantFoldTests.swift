@@ -70,6 +70,8 @@ private func selects(_ plan: Plan) -> Bool {
     selects(left) || selects(right)
   case let .outer(left, right, _, _):
     selects(left) || selects(right)
+  case let .semijoin(left, right, _, _):
+    selects(left) || selects(right)
   case let .join(source, _, _, _, _, _, _):
     selects(source)
   case let .apply(left, _, _, _, _, _):

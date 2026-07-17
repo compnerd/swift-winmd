@@ -197,6 +197,42 @@ private func existential(_ filter: Filter) -> Bool {
   }
 }
 
+/// Whether `plan` (or any descendant) carries a residual `.within` conjunct in
+/// a `.select`'s filter — the witness an `IN (Q)` was NOT rewritten (it stayed
+/// correlated), the `IN` analogue of `exists(in:)`. Scans every conjunct of
+/// each `.select` filter, so an `IN` surviving beside other conjuncts (or
+/// nested in an `.or`) is caught.
+private func within(in plan: Plan) -> Bool {
+  switch plan {
+  case let .select(filter, source):
+    return filter.conjuncts.contains { membership($0) } || within(in: source)
+  case let .derived(_, source, _, _), let .project(_, source),
+       let .sort(_, source), let .distinct(source), let .limit(_, _, source),
+       let .aggregate(_, _, source):
+    return within(in: source)
+  case let .product(left, right), let .outer(left, right, _, _),
+       let .semijoin(left, right, _, _), let .setop(_, left, right, _):
+    return within(in: left) || within(in: right)
+  case .single, .scan, .join, .apply:
+    return false
+  }
+}
+
+/// Whether `filter` is (or, through `and`/`or`/`not`, reaches) a `.within`
+/// conjunct — a correlated `IN (Q)`/`NOT IN (Q)` still lowered as a predicate.
+private func membership(_ filter: Filter) -> Bool {
+  switch filter {
+  case .within:
+    return true
+  case let .and(lhs, rhs), let .or(lhs, rhs):
+    return membership(lhs) || membership(rhs)
+  case let .not(operand):
+    return membership(operand)
+  default:
+    return false
+  }
+}
+
 extension Catalog where Self: ~Escapable {
   /// The optimised plan for `sql`, threading a shared subquery box through the
   /// SAME compile → pushdown → decorrelate → optimise pipeline `run` uses, so a
@@ -1543,5 +1579,322 @@ struct DecorrelateMultiExistsTests {
     #expect(semijoins(plan, anti: false))
     #expect(!exists(in: plan))
     try twoChildFixture().expect(sql + " ORDER BY T.Id", yields: [[1], [2]])
+  }
+}
+
+// MARK: - Decorrelatable correlated IN → semijoin: result + plan shape
+
+/// A parent `T` (with an `x` value to test membership against) and a child `S`
+/// keyed on `T.Id` — Id 1's `x = 100` matches a child value, Id 2's `x = 999`
+/// does not (its key matches but no value equals), Id 3 has no child at all.
+/// The three shapes a correlated `IN (Q)` semijoin keeps, drops on value, and
+/// drops on key.
+private func inFixture() throws -> FixtureCatalog {
+  try Catalog {
+    Relation("T", ["Id": .integer, "x": .integer]) {
+      Row(1, 100)         // key AND value match ⇒ kept
+      Row(2, 999)         // key matches, value does not ⇒ dropped
+      Row(3, 300)         // no child at all ⇒ dropped
+    }
+    Relation("S", ["k": .integer, "v": .integer]) {
+      Row(1, 100)
+      Row(1, 101)
+      Row(2, 200)
+    }
+  }
+}
+
+/// Behaviour-preserving oracles for the POSITIVE correlated `IN (Q)` → SEMIJOIN
+/// decorrelation. `operand IN (SELECT col FROM S WHERE S.k = :outer …)` is a
+/// per-row membership test — TRUE iff some correlated inner row's `col` equals
+/// `operand` — so it lifts to a semijoin whose `on` conjoins the correlation
+/// key with the membership equality. Like EXISTS it is AT-MOST-ONCE. Each pins
+/// BOTH the plan shape (a `.semijoin`, no residual `.within`) and the
+/// known-correct multiset the correlated `within` evaluator produces.
+struct DecorrelateInTests {
+  /// The canonical lift: `T.x IN (SELECT S.v FROM S WHERE S.k = T.Id)`. Id 1
+  /// (key 1, x = 100 = child 100) survives, Id 2 (key 2, x = 999 ≠ child 200)
+  /// drops on value, Id 3 (no child) drops on key.
+  @Test func `a correlated IN lifts to a semijoin with the correct rows`()
+      throws {
+    let sql =
+        "SELECT T.Id FROM T " +
+        "WHERE T.x IN (SELECT S.v FROM S WHERE S.k = T.Id)"
+    let plan = try inFixture().optimised(sql)
+    #expect(semijoinCount(plan) == 1)
+    #expect(semijoins(plan, anti: false))
+    #expect(!within(in: plan))                   // no residual IN
+    try inFixture().expect(sql + " ORDER BY T.Id", yields: [[1]])
+  }
+
+  /// AT-MOST-ONCE: an outer row whose operand matches MANY inner rows appears
+  /// EXACTLY ONCE — a semijoin tests membership, it does not multiply. Id 1's
+  /// `x = 100` equals two inner values (100 appears once, but 7 keyed to Id 1
+  /// twice below), yet Id 1 surfaces once.
+  @Test func `an outer row matching many inner rows appears once`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["Id": .integer, "x": .integer]) {
+        Row(1, 7)
+      }
+      Relation("S", ["k": .integer, "v": .integer]) {
+        Row(1, 7)
+        Row(1, 7)          // Id 1's operand equals TWO inner rows
+      }
+    }
+    let sql =
+        "SELECT T.Id FROM T " +
+        "WHERE T.x IN (SELECT S.v FROM S WHERE S.k = T.Id)"
+    #expect(semijoinCount(try catalog.optimised(sql)) == 1)
+    // A join would emit Id 1 twice; the SEMI emits it ONCE.
+    try catalog.expect(sql, yields: [[1]])
+  }
+
+  /// NULL OPERAND: `x IN (Q)` with a NULL operand is UNKNOWN (never TRUE), so
+  /// the SEMI drops the row. A NULL inner element does not falsely match a
+  /// non-null operand either. Id 1 (x NULL) drops; Id 2 (x = 100, child 100
+  /// beside a NULL child) survives — the NULL element is simply not a match.
+  @Test func `a NULL operand drops and a NULL element never falsely matches`()
+      throws {
+    let catalog = try Catalog {
+      Relation("T", ["Id": .integer, "x": .integer]) {
+        Row(1, nil)        // NULL operand ⇒ IN UNKNOWN ⇒ dropped
+        Row(2, 100)        // matches the non-null child 100
+      }
+      Relation("S", ["k": .integer, "v": .integer]) {
+        Row(1, 100)        // keyed to Id 1, but Id 1's operand is NULL
+        Row(2, nil)        // a NULL element — never a definite match
+        Row(2, 100)        // Id 2's real match
+      }
+    }
+    let sql =
+        "SELECT T.Id FROM T " +
+        "WHERE T.x IN (SELECT S.v FROM S WHERE S.k = T.Id)"
+    #expect(semijoinCount(try catalog.optimised(sql)) == 1)
+    try catalog.expect(sql, yields: [[2]])
+  }
+
+  /// BODY RESIDUAL `p_R`: a safe local conjunct in the IN subquery WHERE
+  /// (`S.v < 200`) rides the semijoin `on` alongside the correlation key and
+  /// membership. Only children with `v < 200` are candidates. Id 1's x = 100
+  /// equals child 100 (< 200) ⇒ kept; if the residual excluded 100 it would
+  /// drop.
+  @Test func `a safe body residual filters the semijoin`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["Id": .integer, "x": .integer]) {
+        Row(1, 100)        // 100 < 200 ⇒ candidate ⇒ kept
+        Row(2, 200)        // 200 not < 200 ⇒ excluded by residual ⇒ dropped
+      }
+      Relation("S", ["k": .integer, "v": .integer]) {
+        Row(1, 100)
+        Row(2, 200)
+      }
+    }
+    let sql =
+        "SELECT T.Id FROM T " +
+        "WHERE T.x IN (SELECT S.v FROM S WHERE S.k = T.Id AND S.v < 200)"
+    let plan = try catalog.optimised(sql)
+    #expect(semijoinCount(plan) == 1)
+    #expect(!within(in: plan))
+    try catalog.expect(sql + " ORDER BY T.Id", yields: [[1]])
+  }
+
+  /// A DECORRELATED IN beside a SAFE sibling: `T.Id < 3 AND T.x IN (…)`. The IN
+  /// lifts into a semijoin and the safe sibling stays in a `.select` above. Id
+  /// 1 (< 3, x = 100 matches) survives; Id 2 (< 3, x = 999 no match) drops on
+  /// value; Id 3 fails the sibling.
+  @Test func `a correlated IN beside a safe sibling lifts`() throws {
+    let sql =
+        "SELECT T.Id FROM T " +
+        "WHERE T.Id < 3 AND T.x IN (SELECT S.v FROM S WHERE S.k = T.Id)"
+    let plan = try inFixture().optimised(sql)
+    #expect(semijoinCount(plan) == 1)
+    #expect(semijoins(plan, anti: false))
+    #expect(!within(in: plan))
+    try inFixture().expect(sql + " ORDER BY T.Id", yields: [[1]])
+  }
+}
+
+// MARK: - IN that STAYS correlated, run correctly
+
+/// The excluded IN shapes: a deferred `NOT IN`, an UNCORRELATED IN, a non-equi
+/// correlation, a non-canonical body (aggregate/limit/distinct), a body-local
+/// derived table, and an IN whose subquery projects an EXPRESSION. Each MUST
+/// stay a residual `.within` (no `.semijoin`) and run correctly.
+struct DecorrelateInExclusionTests {
+  /// DEFERRED `NOT IN`: the NULL trap makes it not a plain anti-join, so it is
+  /// left correlated. Over the base fixture Id 1 (x = 100 IN {100, 101}) is
+  /// excluded by NOT IN; Id 2 (x = 999 NOT IN {200}) survives; Id 3 has no
+  /// child so `NOT IN ()` is TRUE — kept.
+  @Test func `a NOT IN stays correlated and runs correctly`() throws {
+    let sql =
+        "SELECT T.Id FROM T " +
+        "WHERE T.x NOT IN (SELECT S.v FROM S WHERE S.k = T.Id)"
+    #expect(!semijoins(try inFixture().optimised(sql)))
+    #expect(within(in: try inFixture().optimised(sql)))
+    try inFixture().expect(sql + " ORDER BY T.Id", yields: [[2], [3]])
+  }
+
+  /// UNCORRELATED IN: `x IN (SELECT v FROM S)` has an empty correlation (v1
+  /// lifts CORRELATED IN only), so it stays a residual `.within`. The inner set
+  /// is {100, 101, 200}; Id 1 (x = 100) and Id 2? x = 999 not in ⇒ drop; Id 3 x
+  /// = 300 not in ⇒ drop. Only Id 1 survives.
+  @Test func `an uncorrelated IN stays correlated and runs correctly`() throws {
+    let sql =
+        "SELECT T.Id FROM T WHERE T.x IN (SELECT S.v FROM S)"
+    #expect(!semijoins(try inFixture().optimised(sql)))
+    #expect(within(in: try inFixture().optimised(sql)))
+    try inFixture().expect(sql + " ORDER BY T.Id", yields: [[1]])
+  }
+
+  /// NON-EQUI correlation `S.k > T.Id`: no equi key to hash on, so the IN stays
+  /// correlated. Id 1: children with k > 1 → k = 2 → v = 200; x = 100 ∉ {200} ⇒
+  /// drop. Id 2: k > 2 → none ⇒ drop. Id 3: none ⇒ drop. No rows.
+  @Test func `a non-equi correlation stays correlated and runs correctly`()
+      throws {
+    let sql =
+        "SELECT T.Id FROM T " +
+        "WHERE T.x IN (SELECT S.v FROM S WHERE S.k > T.Id)"
+    #expect(!semijoins(try inFixture().optimised(sql)))
+    #expect(within(in: try inFixture().optimised(sql)))
+    try inFixture().empty(sql)
+  }
+
+  /// AGGREGATE body: a `SUM(S.v)` body is not a plain filter+project, so the IN
+  /// stays correlated. Id 1's children sum to 201, x = 100 ≠ 201 ⇒ drop; Id 2's
+  /// sum is 200, x = 999 ≠ 200 ⇒ drop; Id 3's group is empty (SUM ⇒ NULL), IN
+  /// UNKNOWN ⇒ drop. No rows.
+  @Test func `an aggregate body stays correlated and runs correctly`() throws {
+    let sql =
+        "SELECT T.Id FROM T " +
+        "WHERE T.x IN (SELECT SUM(S.v) FROM S WHERE S.k = T.Id)"
+    #expect(!semijoins(try inFixture().optimised(sql)))
+    #expect(within(in: try inFixture().optimised(sql)))
+    try inFixture().empty(sql)
+  }
+
+  /// LIMIT body: a `FETCH FIRST` body is not the canonical filter+project, so
+  /// the IN stays correlated — and runs correctly. Id 1's first-by-v child is
+  /// 100, x = 100 ⇒ kept; Id 2's is 200, x = 999 ⇒ drop; Id 3 none ⇒ drop.
+  @Test func `a limit body stays correlated and runs correctly`() throws {
+    let sql =
+        "SELECT T.Id FROM T WHERE T.x IN " +
+        "(SELECT S.v FROM S WHERE S.k = T.Id ORDER BY S.v FETCH FIRST 1 ROW " +
+        "ONLY)"
+    #expect(!semijoins(try inFixture().optimised(sql)))
+    #expect(within(in: try inFixture().optimised(sql)))
+    try inFixture().expect(sql + " ORDER BY T.Id", yields: [[1]])
+  }
+
+  /// DISTINCT body: a `SELECT DISTINCT` body is not the canonical shape, so the
+  /// IN stays correlated — dedup does not change membership. Id 1 (x = 100 ∈
+  /// {100, 101}) kept; Id 2, Id 3 drop.
+  @Test func `a distinct body stays correlated and runs correctly`() throws {
+    let sql =
+        "SELECT T.Id FROM T " +
+        "WHERE T.x IN (SELECT DISTINCT S.v FROM S WHERE S.k = T.Id)"
+    #expect(!semijoins(try inFixture().optimised(sql)))
+    #expect(within(in: try inFixture().optimised(sql)))
+    try inFixture().expect(sql + " ORDER BY T.Id", yields: [[1]])
+  }
+
+  /// BODY-LOCAL DERIVED table: the IN body reads its OWN derived `e` (over
+  /// `S`), a per-execution alias the set-based rewrite cannot relay. It stays
+  /// correlated — the derived `e` reads `S`, so Id 1 (x = 100 ∈ {100, 101})
+  /// survives; Id 2, Id 3 drop.
+  @Test func `a body-local derived table stays correlated`() throws {
+    let sql =
+        "SELECT T.Id FROM T WHERE T.x IN " +
+        "(SELECT e.v FROM (SELECT k, v FROM S) AS e WHERE e.k = T.Id)"
+    #expect(!semijoins(try inFixture().optimised(sql)))
+    #expect(within(in: try inFixture().optimised(sql)))
+    try inFixture().expect(sql + " ORDER BY T.Id", yields: [[1]])
+  }
+
+  /// EXPRESSION projection: the IN subquery projects `S.v + 1`, not a bare
+  /// column, so there is no single membership slot and the IN stays correlated.
+  /// Id 1's candidate values are {101, 102}; x = 100 ∉ ⇒ drop. Add an Id whose
+  /// x equals a shifted value to prove it still runs: Id 4 x = 401 = 400 + 1.
+  @Test func `an expression projection stays correlated and runs correctly`()
+      throws {
+    let catalog = try Catalog {
+      Relation("T", ["Id": .integer, "x": .integer]) {
+        Row(1, 100)        // 100 ∉ {101, 102} ⇒ drop
+        Row(4, 401)        // 401 = 400 + 1 ⇒ kept
+      }
+      Relation("S", ["k": .integer, "v": .integer]) {
+        Row(1, 100)
+        Row(1, 101)
+        Row(4, 400)
+      }
+    }
+    let sql =
+        "SELECT T.Id FROM T " +
+        "WHERE T.x IN (SELECT S.v + 1 FROM S WHERE S.k = T.Id)"
+    #expect(!semijoins(try catalog.optimised(sql)))
+    #expect(within(in: try catalog.optimised(sql)))
+    try catalog.expect(sql + " ORDER BY T.Id", yields: [[4]])
+  }
+}
+
+// MARK: - IN adversarial throw-visibility (operand + sibling)
+
+/// The two throw-visibility guards specific to the IN lift: an UNSAFE operand
+/// (evaluated per outer row by the correlated `within`, even when the inner is
+/// empty, so a semijoin that never evaluates `on` for a no-match row would
+/// SUPPRESS its throw) and an UNSAFE non-IN sibling (the shared sibling guard).
+/// Both MUST stay correlated (no semijoin) and throw exactly as the correlated
+/// plan does.
+struct DecorrelateInThrowVisibilityTests {
+  /// UNSAFE OPERAND (load-bearing): `(1 / T.v) IN (SELECT S.v FROM S WHERE
+  /// S.k = T.Id)` with a `v = 0` row whose key has NO child. The correlated
+  /// `within` evaluates the operand `1 / 0` for that row EVEN THOUGH the inner
+  /// is empty, so it THROWS `.divide`. A semijoin never evaluates `on` for a
+  /// left row with no right rows, so it would SUPPRESS the throw — the
+  /// recogniser must leave it correlated (unsafe operand), and the run MUST
+  /// throw.
+  @Test func `an unsafe operand stays correlated and throws`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["Id": .integer, "v": .integer]) {
+        Row(9, 0)          // v = 0 ⇒ 1 / v faults; Id 9 has NO child ⇒ inner
+                           // empty, so a semijoin never confirms `on` and hides
+                           // the fault
+      }
+      Relation("S", ["k": .integer, "v": .integer]) {
+        Row(1, 100)        // keyed to Id 1, never to Id 9
+      }
+    }
+    let sql =
+        "SELECT T.Id FROM T " +
+        "WHERE (1 / T.v) IN (SELECT S.v FROM S WHERE S.k = T.Id)"
+    let plan = try catalog.optimised(sql)
+    #expect(!semijoins(plan))                    // NOT decorrelated
+    #expect(within(in: plan))                    // still a residual IN
+    catalog.expect(sql, fails: .divide)          // and it MUST throw
+  }
+
+  /// UNSAFE SIBLING (the shared sibling guard, on the IN-lift path): a
+  /// non-IN sibling `(1 / T.v) = 0` divides by zero for a `v = 0` row whose IN
+  /// is FALSE. The correlated select evaluates the whole `AND` (the sibling
+  /// first) and THROWS `.divide`. A plan that lifted the IN into a semijoin and
+  /// dropped the IN-false row would HIDE the throw, so the guard leaves the
+  /// WHOLE select correlated — and the run MUST throw.
+  @Test func `an unsafe sibling stays correlated and throws`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["Id": .integer, "x": .integer, "v": .integer]) {
+        Row(9, 100, 0)     // v = 0 ⇒ 1 / v faults; Id 9 has NO child ⇒ IN
+                           // false, so a semijoin would drop it, hide the fault
+      }
+      Relation("S", ["k": .integer, "v": .integer]) {
+        Row(1, 100)        // keyed to Id 1, never to Id 9
+      }
+    }
+    let sql =
+        "SELECT T.Id FROM T " +
+        "WHERE (1 / T.v) = 0 " +
+        "AND T.x IN (SELECT S.v FROM S WHERE S.k = T.Id)"
+    let plan = try catalog.optimised(sql)
+    #expect(!semijoins(plan))                    // nothing lifted (unsafe kin)
+    #expect(within(in: plan))                    // still a residual IN
+    catalog.expect(sql, fails: .divide)          // and it MUST throw
   }
 }

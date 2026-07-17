@@ -25,15 +25,6 @@ private func things() throws -> FixtureCatalog {
   }
 }
 
-/// Parses `text` and returns its `Select`, failing on any other shape.
-private func parse(select text: String) throws -> Select {
-  guard case let .select(.select(select)) = try Statement(parsing: text) else {
-    Issue.record("expected a single SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return select
-}
-
 // MARK: - Parsing
 
 struct DistinctFromParsingTests {

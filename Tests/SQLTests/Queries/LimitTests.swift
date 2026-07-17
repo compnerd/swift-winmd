@@ -35,17 +35,6 @@ private func blocks() throws -> FixtureCatalog {
   }
 }
 
-// MARK: - Helpers
-
-/// Parses `text` to a query, failing on any other statement.
-private func parse(_ text: String) throws -> Query {
-  guard case let .select(query) = try Statement(parsing: text) else {
-    Issue.record("expected a SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return query
-}
-
 // MARK: - Tests
 
 struct LimitTests {
@@ -162,7 +151,8 @@ struct LimitTests {
     // The parser cannot spell a negative count, but a direct `Limit` can — the
     // executor's skip and take would trap on it, so the engine rejects it as a
     // query error instead.
-    guard case let .select(base) = try parse("SELECT Id FROM People") else {
+    let query = try parse(query: "SELECT Id FROM People")
+    guard case let .select(base) = query else {
       Issue.record("expected a single SELECT")
       return
     }

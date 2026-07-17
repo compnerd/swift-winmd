@@ -36,24 +36,15 @@ private func catalog() throws -> MetaCatalog {
     "People": MetaRelation([("Name", .text), ("Age", .integer)],
                            [[.text("Ann"), .integer(30)]]),
     "Widget": MetaRelation([("Label", .text)], [[.text("cog")]]),
-  ], views: ["Adults": View(query: try parse("SELECT Name FROM People"),
+  ], views: ["Adults": View(query: try parse(query: "SELECT Name FROM People"),
                             columns: ["Name"])])
 }
 
 // MARK: - Helpers
 
-/// Parses `text` to a query, failing on any other statement.
-private func parse(_ text: String) throws -> Query {
-  guard case let .select(query) = try Statement(parsing: text) else {
-    Issue.record("expected a SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return query
-}
-
 /// Runs `text` against the introspection `catalog`, yielding the result rows.
 private func run(_ text: String) throws -> Array<Array<Value>> {
-  try catalog().run(parse(text))
+  try catalog().run(parse(query: text))
 }
 
 // MARK: - Tests
@@ -112,7 +103,7 @@ struct IntrospectionTests {
     let cat = MetaCatalog([
       "information_schema.tables": MetaRelation([("x", .integer)], []),
     ])
-    let rows = try cat.run(parse("""
+    let rows = try cat.run(parse(query: """
         SELECT table_type FROM definition_schema.tables
          WHERE table_name = 'information_schema.tables'
         """))
@@ -157,11 +148,12 @@ struct IntrospectionTests {
     // `Meta` reads `information_schema.tables`, whose `table_name` is text, so
     // the builder must seed the view body's OWN introspection overlay for
     // `Meta`'s column to advertise the text domain, not the integer default.
-    let body = try parse("SELECT table_name FROM information_schema.tables")
+    let body = try parse(query:
+        "SELECT table_name FROM information_schema.tables")
     let meta = MetaCatalog(
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["Meta": View(query: body, columns: ["Label"])])
-    let rows = try meta.run(parse("""
+    let rows = try meta.run(parse(query: """
         SELECT data_type FROM information_schema.columns
          WHERE table_name = 'Meta'
         """))
@@ -190,17 +182,17 @@ struct IntrospectionTests {
     // `People` is both a base relation and a view; `resolve` picks the
     // view, so the overlay lists the name once as a VIEW and reports the view's
     // columns — never a base row `SELECT *` can no longer reach.
-    let body = try parse("SELECT Name FROM Widget")
+    let body = try parse(query: "SELECT Name FROM Widget")
     let cat = MetaCatalog(
         ["People": MetaRelation([("Age", .integer)], []),
          "Widget": MetaRelation([("Name", .text)], [])],
         views: ["People": View(query: body, columns: ["Name"])])
-    let tables = try cat.run(parse("""
+    let tables = try cat.run(parse(query: """
         SELECT table_type FROM information_schema.tables
          WHERE table_name = 'People'
         """))
     #expect(tables == [[.text("VIEW")]])
-    let cols = try cat.run(parse("""
+    let cols = try cat.run(parse(query: """
         SELECT column_name FROM information_schema.columns
          WHERE table_name = 'People'
         """))
@@ -211,11 +203,12 @@ struct IntrospectionTests {
     // A view reading `information_schema.columns` ITSELF must resolve against a
     // schema-only seed of that relation, so its `column_name` column advertises
     // the text domain rather than falling back to the integer default.
-    let body = try parse("SELECT column_name FROM information_schema.columns")
+    let body = try parse(query:
+        "SELECT column_name FROM information_schema.columns")
     let cat = MetaCatalog(
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["c": View(query: body, columns: ["name"])])
-    let rows = try cat.run(parse("""
+    let rows = try cat.run(parse(query: """
         SELECT data_type FROM information_schema.columns
          WHERE table_name = 'c'
         """))
@@ -227,13 +220,14 @@ struct IntrospectionTests {
     // columns overlay must not re-enter itself through `B`'s resolution of `A`
     // — it terminates (rather than overflowing), and the schema-only seed rides
     // through so `B`'s column keeps `column_name`'s text kind.
-    let a = try parse("SELECT column_name FROM information_schema.columns")
-    let b = try parse("SELECT a FROM A")
+    let a = try parse(query:
+        "SELECT column_name FROM information_schema.columns")
+    let b = try parse(query: "SELECT a FROM A")
     let cat = MetaCatalog(
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["A": View(query: a, columns: ["a"]),
                 "B": View(query: b, columns: ["b"])])
-    let rows = try cat.run(parse("""
+    let rows = try cat.run(parse(query: """
         SELECT column_name, data_type FROM information_schema.columns
          WHERE table_name = 'B'
         """))
@@ -245,11 +239,11 @@ struct IntrospectionTests {
     // `SELECT * FROM v` throws. The overlay validates the WHOLE body — as the
     // public schema API does — and does not advertise `v` as queryable
     // metadata.
-    let body = try parse("SELECT Name FROM People WHERE Missing = 1")
+    let body = try parse(query: "SELECT Name FROM People WHERE Missing = 1")
     let cat = MetaCatalog(
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["v": View(query: body, columns: ["Name"])])
-    let rows = try cat.run(parse("""
+    let rows = try cat.run(parse(query: """
         SELECT column_name FROM information_schema.columns
          WHERE table_name = 'v'
         """))
@@ -260,13 +254,13 @@ struct IntrospectionTests {
     // The leading arm resolves, but the second names a missing column, so the
     // whole view cannot run — the overlay must validate EVERY arm, not just the
     // first, and not list `u`.
-    let body = try parse("""
+    let body = try parse(query: """
         SELECT Name FROM People UNION SELECT Missing FROM People
         """)
     let cat = MetaCatalog(
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["u": View(query: body, columns: ["Name"])])
-    let rows = try cat.run(parse("""
+    let rows = try cat.run(parse(query: """
         SELECT column_name FROM information_schema.columns
          WHERE table_name = 'u'
         """))
@@ -277,7 +271,7 @@ struct IntrospectionTests {
     // The join's ON names a column `People` does not have, so `SELECT * FROM v`
     // fails to compile — the overlay validates each join's ON, not just the
     // projection, and does not list `v`.
-    let body = try parse("""
+    let body = try parse(query: """
         SELECT People.Name FROM People
           JOIN Pet ON People.Missing = Pet.Id
         """)
@@ -285,7 +279,7 @@ struct IntrospectionTests {
         ["People": MetaRelation([("Name", .text)], []),
          "Pet": MetaRelation([("Id", .integer)], [])],
         views: ["v": View(query: body, columns: ["Name"])])
-    let rows = try cat.run(parse("""
+    let rows = try cat.run(parse(query: """
         SELECT column_name FROM information_schema.columns
          WHERE table_name = 'v'
         """))
@@ -295,11 +289,11 @@ struct IntrospectionTests {
   @Test func `information_schema.columns hides a view whose GROUP BY is invalid`() throws {
     // GROUP BY names a missing column, so `SELECT * FROM v` fails to compile —
     // the overlay validates the grouping, not just the projection.
-    let body = try parse("SELECT Name FROM People GROUP BY Missing")
+    let body = try parse(query: "SELECT Name FROM People GROUP BY Missing")
     let cat = MetaCatalog(
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["v": View(query: body, columns: ["Name"])])
-    let rows = try cat.run(parse("""
+    let rows = try cat.run(parse(query: """
         SELECT column_name FROM information_schema.columns
          WHERE table_name = 'v'
         """))
@@ -315,11 +309,11 @@ struct IntrospectionTests {
     // the real `compile` — which lowers a call's arguments — closes that
     // gap, so `v` is not listed. This passes through the compile-based
     // validation, not a hand-added argument check.
-    let body = try parse("SELECT BITAND(Missing, 1) AS x FROM People")
+    let body = try parse(query: "SELECT BITAND(Missing, 1) AS x FROM People")
     let cat = MetaCatalog(
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["v": View(query: body, columns: ["x"])])
-    let rows = try cat.run(parse("""
+    let rows = try cat.run(parse(query: """
         SELECT column_name FROM information_schema.columns
          WHERE table_name = 'v'
         """))
@@ -330,13 +324,13 @@ struct IntrospectionTests {
     // HAVING names a column that is neither a GROUP BY key nor aggregated, so
     // `SELECT * FROM v` fails to compile — the overlay validates the HAVING
     // too.
-    let body = try parse("""
+    let body = try parse(query: """
         SELECT Name FROM People GROUP BY Name HAVING Missing > 0
         """)
     let cat = MetaCatalog(
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["v": View(query: body, columns: ["Name"])])
-    let rows = try cat.run(parse("""
+    let rows = try cat.run(parse(query: """
         SELECT column_name FROM information_schema.columns
          WHERE table_name = 'v'
         """))
@@ -347,13 +341,13 @@ struct IntrospectionTests {
     // `w`'s WHERE is invalid and `v` reads `w`; `SELECT * FROM v` fails because
     // `w` cannot run, so the overlay validates the nested body and lists
     // neither.
-    let w = try parse("SELECT Name FROM People WHERE Missing = 1")
-    let v = try parse("SELECT Name FROM w")
+    let w = try parse(query: "SELECT Name FROM People WHERE Missing = 1")
+    let v = try parse(query: "SELECT Name FROM w")
     let cat = MetaCatalog(
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["w": View(query: w, columns: ["Name"]),
                 "v": View(query: v, columns: ["Name"])])
-    let listed = try cat.run(parse("""
+    let listed = try cat.run(parse(query: """
         SELECT table_name FROM information_schema.columns
          WHERE table_name = 'v'
         """))
@@ -365,13 +359,13 @@ struct IntrospectionTests {
     // faults and `SELECT * FROM v` cannot run; the nested resolution must
     // propagate that mismatch, not mask it with `w`'s declared schema, so `v`
     // is not listed.
-    let w = try parse("SELECT Name, Age FROM People")
-    let v = try parse("SELECT x FROM w")
+    let w = try parse(query: "SELECT Name, Age FROM People")
+    let v = try parse(query: "SELECT x FROM w")
     let cat = MetaCatalog(
         ["People": MetaRelation([("Name", .text), ("Age", .integer)], [])],
         views: ["w": View(query: w, columns: ["x"]),
                 "v": View(query: v, columns: ["x"])])
-    let rows = try cat.run(parse("""
+    let rows = try cat.run(parse(query: """
         SELECT table_name FROM information_schema.columns
          WHERE table_name = 'v'
         """))
@@ -383,11 +377,11 @@ struct IntrospectionTests {
     // projects two, so `resolve` faults `SELECT * FROM v`. The builder
     // compares the compiled body width to the declared count, so `v` is not
     // listed.
-    let body = try parse("SELECT * FROM People")
+    let body = try parse(query: "SELECT * FROM People")
     let cat = MetaCatalog(
         ["People": MetaRelation([("Name", .text), ("Age", .integer)], [])],
         views: ["v": View(query: body, columns: ["x"])])
-    let rows = try cat.run(parse("""
+    let rows = try cat.run(parse(query: """
         SELECT column_name FROM information_schema.columns
          WHERE table_name = 'v'
         """))
@@ -401,18 +395,18 @@ struct IntrospectionTests {
     // and does not advertise a view that could never be queried. The cycle must
     // not hang or corrupt an UNRELATED metadata query either — `People` still
     // reports normally, and the cyclic views are absent.
-    let a = try parse("SELECT * FROM B")
-    let b = try parse("SELECT * FROM A")
+    let a = try parse(query: "SELECT * FROM B")
+    let b = try parse(query: "SELECT * FROM A")
     let cat = MetaCatalog(
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["A": View(query: a, columns: ["x"]),
                 "B": View(query: b, columns: ["y"])])
-    let people = try cat.run(parse("""
+    let people = try cat.run(parse(query: """
         SELECT column_name, data_type FROM information_schema.columns
          WHERE table_name = 'People'
         """))
     #expect(people == [[.text("Name"), .text("character varying")]])
-    let cyclic = try cat.run(parse("""
+    let cyclic = try cat.run(parse(query: """
         SELECT column_name FROM information_schema.columns
          WHERE table_name = 'A' OR table_name = 'B'
         """))
@@ -425,13 +419,13 @@ struct IntrospectionTests {
     // crash, not an `SQLError`). The cycle guard threaded through
     // `compile`/`resolve` now reports `.recursion` instead — the same
     // definition-does-not-terminate condition a runaway recursive CTE raises.
-    let a = try parse("SELECT * FROM B")
-    let b = try parse("SELECT * FROM A")
+    let a = try parse(query: "SELECT * FROM B")
+    let b = try parse(query: "SELECT * FROM A")
     let cat = MetaCatalog([:],
         views: ["A": View(query: a, columns: ["x"]),
                 "B": View(query: b, columns: ["y"])])
     #expect(throws: SQLError.recursion("A")) {
-      let _ = try cat.run(parse("SELECT * FROM A"))
+      let _ = try cat.run(parse(query: "SELECT * FROM A"))
     }
   }
 
@@ -472,7 +466,8 @@ struct IntrospectionTests {
       "information_schema.tables":
           MetaRelation([("x", .integer)], [[.integer(7)]]),
     ])
-    let rows = try cat.run(parse("SELECT * FROM information_schema.tables"))
+    let query = try parse(query: "SELECT * FROM information_schema.tables")
+    let rows = try cat.run(query)
     #expect(rows == [[.integer(7)]])
   }
 
@@ -486,7 +481,7 @@ struct IntrospectionTests {
   }
 
   @Test func `columns(of:) resolves an information_schema relation's headers`() throws {
-    let query = try parse("SELECT * FROM information_schema.tables")
+    let query = try parse(query: "SELECT * FROM information_schema.tables")
     let columns = try catalog().columns(of: query)
     #expect(columns.map(\.name) == ["table_catalog", "table_schema",
                                     "table_name", "table_type"])
@@ -521,7 +516,7 @@ struct IntrospectionTests {
     // A view whose body selects from a reserved introspection relation must
     // resolve its overlay from ITS OWN query, so selecting from the view yields
     // exactly what the inline query does.
-    let body = try parse("""
+    let body = try parse(query: """
         SELECT table_name FROM information_schema.tables
           WHERE table_type = 'BASE TABLE' ORDER BY table_name
         """)
@@ -531,13 +526,13 @@ struct IntrospectionTests {
     ], views: ["meta": View(query: body, columns: ["table_name"])])
     let inline = try source.run(body)
     let viewed =
-        try source.run(parse("SELECT table_name FROM meta"))
+        try source.run(parse(query: "SELECT table_name FROM meta"))
     #expect(viewed == inline)
     #expect(viewed == [[.text("People")], [.text("Widget")]])
   }
 
   @Test func `a view over information_schema.columns yields the inline rows`() throws {
-    let body = try parse("""
+    let body = try parse(query: """
         SELECT column_name, data_type FROM information_schema.columns
           WHERE table_name = 'People'
           ORDER BY column_name
@@ -547,7 +542,7 @@ struct IntrospectionTests {
     ], views: ["cols": View(query: body,
                             columns: ["column_name", "data_type"])])
     let inline = try source.run(body)
-    let viewed = try source.run(parse("""
+    let viewed = try source.run(parse(query: """
         SELECT column_name, data_type FROM cols ORDER BY column_name
         """))
     #expect(viewed == inline)
@@ -562,7 +557,7 @@ struct IntrospectionTests {
     // integer, `table_name`/`data_type` text — not a synthesized all-integer
     // schema.
     let columns =
-        try catalog().columns(of: parse("""
+        try catalog().columns(of: parse(query: """
             SELECT * FROM information_schema.columns
             """))
     let typed = Dictionary(uniqueKeysWithValues:
@@ -578,7 +573,7 @@ struct IntrospectionTests {
     // — so resolving the body's kinds is what reports the `.text` here rather
     // than the integer default.
     let columns =
-        try catalog().columns(of: parse("SELECT * FROM Adults"))
+        try catalog().columns(of: parse(query: "SELECT * FROM Adults"))
     #expect(columns == [OutputColumn(name: "Name", type: .text)])
   }
 
@@ -589,14 +584,14 @@ struct IntrospectionTests {
     // advertises `character varying`, not the `.integer` default a call fell to
     // before routines declared a return type. The run carries `TAG`, so its
     // return type reaches the store builder's view typing.
-    let body = try parse("SELECT TAG(Name) AS iid FROM People")
+    let body = try parse(query: "SELECT TAG(Name) AS iid FROM People")
     let cat = MetaCatalog(
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["v": View(query: body, columns: ["iid"])])
     let routines =
         try Routines().registering("tag", returns: .text,
                                    parameters: [.text]) { _ in .text("x") }
-    let rows = try cat.run(parse("""
+    let rows = try cat.run(parse(query: """
         SELECT column_name, data_type FROM information_schema.columns
          WHERE table_name = 'v'
         """), routines)
@@ -607,7 +602,7 @@ struct IntrospectionTests {
     // The public schema API takes the SAME routines a run would, so a projected
     // `TAG(Name)` reports its declared `.text` return type, not `.integer`.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
-    let query = try parse("SELECT TAG(Name) AS t FROM People")
+    let query = try parse(query: "SELECT TAG(Name) AS t FROM People")
     let routines =
         try Routines().registering("tag", returns: .text,
                                    parameters: [.text]) { _ in .text("x") }
@@ -622,7 +617,7 @@ struct IntrospectionTests {
     // The unknown `NOPE` is in the WHERE, invisible to the first-arm projection
     // walk; the whole-query inventory faults it, exactly as a run would.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
-    let query = try parse("SELECT Name FROM People WHERE NOPE(Name) = 1")
+    let query = try parse(query: "SELECT Name FROM People WHERE NOPE(Name) = 1")
     #expect(throws: SQLError.self) { let _ = try cat.columns(of: query) }
   }
 
@@ -633,7 +628,7 @@ struct IntrospectionTests {
       "People": MetaRelation([("Name", .text)], []),
       "Pet": MetaRelation([("Species", .text)], []),
     ])
-    let query = try parse("""
+    let query = try parse(query: """
         SELECT Name FROM People UNION SELECT NOPE(Species) FROM Pet
         """)
     #expect(throws: SQLError.self) { let _ = try cat.columns(of: query) }
@@ -643,7 +638,7 @@ struct IntrospectionTests {
     // `w` projects `TAG(Name)`; `SELECT * FROM w` must report `t` as the
     // routine's declared `.text`, so schema resolution threads the return map
     // across the view boundary rather than dropping it to `.integer`.
-    let body = try parse("SELECT TAG(Name) AS t FROM People")
+    let body = try parse(query: "SELECT TAG(Name) AS t FROM People")
     let cat = MetaCatalog(
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["w": View(query: body, columns: ["t"])])
@@ -651,7 +646,7 @@ struct IntrospectionTests {
         try Routines().registering("tag", returns: .text,
                                    parameters: [.text]) { _ in .text("x") }
     let typed =
-        try cat.columns(of: parse("SELECT * FROM w"), routines: routines)
+        try cat.columns(of: parse(query: "SELECT * FROM w"), routines: routines)
     #expect(typed == [OutputColumn(name: "t", type: .text)])
   }
 
@@ -659,12 +654,12 @@ struct IntrospectionTests {
     // `SELECT * FROM v` names no call, but v's body calls the unregistered
     // `NOPE` in its WHERE — a clause the view-boundary first-arm walk misses.
     // The body's call inventory must fault, as `SELECT * FROM v` would at run.
-    let body = try parse("SELECT Name FROM People WHERE NOPE(Name) = 1")
+    let body = try parse(query: "SELECT Name FROM People WHERE NOPE(Name) = 1")
     let cat = MetaCatalog(
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["v": View(query: body, columns: ["Name"])])
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("SELECT * FROM v"))
+      let _ = try cat.columns(of: parse(query: "SELECT * FROM v"))
     }
   }
 
@@ -673,7 +668,8 @@ struct IntrospectionTests {
     // non-NULL text row, so the schema faults rather than typing `.integer`.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("SELECT Name + 1 AS x FROM People"))
+      let query = try parse(query: "SELECT Name + 1 AS x FROM People")
+      let _ = try cat.columns(of: query)
     }
   }
 
@@ -682,29 +678,29 @@ struct IntrospectionTests {
     // so `SUM(Name)`/`AVG(Name)` fault rather than typing text/double.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("SELECT SUM(Name) FROM People"))
+      let _ = try cat.columns(of: parse(query: "SELECT SUM(Name) FROM People"))
     }
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("SELECT AVG(Name) FROM People"))
+      let _ = try cat.columns(of: parse(query: "SELECT AVG(Name) FROM People"))
     }
   }
 
   @Test func `columns(of:) types numeric aggregates and arithmetic`() throws {
     let cat = MetaCatalog(["T": MetaRelation(
         [("Name", .text), ("Age", .integer), ("Score", .double)], [])])
-    #expect(try cat.columns(of: parse("SELECT SUM(Age) AS x FROM T"))
+    #expect(try cat.columns(of: parse(query: "SELECT SUM(Age) AS x FROM T"))
                 == [OutputColumn(name: "x", type: .integer)])
-    #expect(try cat.columns(of: parse("SELECT SUM(Score) AS x FROM T"))
+    #expect(try cat.columns(of: parse(query: "SELECT SUM(Score) AS x FROM T"))
                 == [OutputColumn(name: "x", type: .double)])
-    #expect(try cat.columns(of: parse("SELECT AVG(Age) AS x FROM T"))
+    #expect(try cat.columns(of: parse(query: "SELECT AVG(Age) AS x FROM T"))
                 == [OutputColumn(name: "x", type: .double)])
-    #expect(try cat.columns(of: parse("SELECT Age + 1 AS x FROM T"))
+    #expect(try cat.columns(of: parse(query: "SELECT Age + 1 AS x FROM T"))
                 == [OutputColumn(name: "x", type: .integer)])
-    #expect(try cat.columns(of: parse("SELECT Age + Score AS x FROM T"))
+    #expect(try cat.columns(of: parse(query: "SELECT Age + Score AS x FROM T"))
                 == [OutputColumn(name: "x", type: .double)])
     // MIN/MAX compare rather than fold, so they keep the operand's own type —
     // even a non-numeric one.
-    #expect(try cat.columns(of: parse("SELECT MIN(Name) AS x FROM T"))
+    #expect(try cat.columns(of: parse(query: "SELECT MIN(Name) AS x FROM T"))
                 == [OutputColumn(name: "x", type: .text)])
   }
 
@@ -714,7 +710,7 @@ struct IntrospectionTests {
     let cat = MetaCatalog(["People":
         MetaRelation([("Name", .text), ("Age", .integer)], [])])
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("""
+      let _ = try cat.columns(of: parse(query: """
           SELECT Age FROM People UNION SELECT Name + 1 FROM People
           """))
     }
@@ -725,7 +721,7 @@ struct IntrospectionTests {
     // it; the whole-query type-check faults it, as a run would.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("""
+      let _ = try cat.columns(of: parse(query: """
           SELECT Name FROM People GROUP BY Name HAVING SUM(Name) > 0
           """))
     }
@@ -735,7 +731,7 @@ struct IntrospectionTests {
     let cat = MetaCatalog(["People":
         MetaRelation([("Name", .text), ("Age", .integer)], [])])
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("""
+      let _ = try cat.columns(of: parse(query: """
           SELECT Age FROM People WHERE Name + 1 = 2
           """))
     }
@@ -744,10 +740,10 @@ struct IntrospectionTests {
   @Test func `columns(of:) types a valid later arm and HAVING`() throws {
     let cat = MetaCatalog(["People":
         MetaRelation([("Name", .text), ("Age", .integer)], [])])
-    #expect(try cat.columns(of: parse("""
+    #expect(try cat.columns(of: parse(query: """
         SELECT Age FROM People UNION SELECT Age + 1 FROM People
         """)) == [OutputColumn(name: "Age", type: .integer)])
-    #expect(try cat.columns(of: parse("""
+    #expect(try cat.columns(of: parse(query: """
         SELECT Name FROM People GROUP BY Name HAVING SUM(Age) > 0
         """)) == [OutputColumn(name: "Name", type: .text)])
   }
@@ -755,13 +751,13 @@ struct IntrospectionTests {
   @Test func `information_schema.columns hides a view with a bad HAVING operand`() throws {
     // The view's HAVING folds `SUM(Name)` over text — a run faults — so the
     // view is not advertised, though its projection types cleanly.
-    let body = try parse("""
+    let body = try parse(query: """
         SELECT Name FROM People GROUP BY Name HAVING SUM(Name) > 0
         """)
     let cat = MetaCatalog(
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["v": View(query: body, columns: ["Name"])])
-    let rows = try cat.run(parse("""
+    let rows = try cat.run(parse(query: """
         SELECT column_name FROM information_schema.columns
          WHERE table_name = 'v'
         """))
@@ -772,14 +768,14 @@ struct IntrospectionTests {
     // `1 = 0` is constantly false, so the executor never evaluates `Name + 1`;
     // the schema resolves rather than faulting on the unreachable arm.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
-    #expect(try cat.columns(of: parse("""
+    #expect(try cat.columns(of: parse(query: """
         SELECT Name FROM People WHERE 1 = 0 AND Name + 1 = 2
         """)) == [OutputColumn(name: "Name", type: .text)])
   }
 
   @Test func `columns(of:) skips an arm a constant-true OR short-circuits`() throws {
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
-    #expect(try cat.columns(of: parse("""
+    #expect(try cat.columns(of: parse(query: """
         SELECT Name FROM People WHERE 1 = 1 OR Name + 1 = 2
         """)) == [OutputColumn(name: "Name", type: .text)])
   }
@@ -790,25 +786,25 @@ struct IntrospectionTests {
     let cat = MetaCatalog(["People":
         MetaRelation([("Name", .text), ("Age", .integer)], [])])
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("""
+      let _ = try cat.columns(of: parse(query: """
           SELECT Name FROM People WHERE 1 = 1 AND Name + 1 = 2
           """))
     }
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("""
+      let _ = try cat.columns(of: parse(query: """
           SELECT Name FROM People WHERE Age = 0 AND Name + 1 = 2
           """))
     }
   }
 
   @Test func `information_schema.columns lists a view with a short-circuited arm`() throws {
-    let body = try parse("""
+    let body = try parse(query: """
         SELECT Name FROM People WHERE 1 = 0 AND Name + 1 = 2
         """)
     let cat = MetaCatalog(
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["v": View(query: body, columns: ["Name"])])
-    let rows = try cat.run(parse("""
+    let rows = try cat.run(parse(query: """
         SELECT column_name FROM information_schema.columns
          WHERE table_name = 'v'
         """))
@@ -820,10 +816,10 @@ struct IntrospectionTests {
     // never evaluates it and the query runs — the schema resolves, and call
     // validation rides the same short-circuit-aware walk as operand checking.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
-    #expect(try cat.columns(of: parse("""
+    #expect(try cat.columns(of: parse(query: """
         SELECT Name FROM People WHERE 1 = 0 AND NOPE(Name) = 1
         """)) == [OutputColumn(name: "Name", type: .text)])
-    #expect(try cat.columns(of: parse("""
+    #expect(try cat.columns(of: parse(query: """
         SELECT Name FROM People WHERE 1 = 1 OR NOPE(Name) = 1
         """)) == [OutputColumn(name: "Name", type: .text)])
   }
@@ -831,20 +827,20 @@ struct IntrospectionTests {
   @Test func `columns(of:) still faults on a reachable unknown call`() throws {
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("""
+      let _ = try cat.columns(of: parse(query: """
           SELECT Name FROM People WHERE 1 = 1 AND NOPE(Name) = 1
           """))
     }
   }
 
   @Test func `information_schema.columns lists a view with an unreachable call`() throws {
-    let body = try parse("""
+    let body = try parse(query: """
         SELECT Name FROM People WHERE 1 = 0 AND NOPE(Name) = 1
         """)
     let cat = MetaCatalog(
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["v": View(query: body, columns: ["Name"])])
-    let rows = try cat.run(parse("""
+    let rows = try cat.run(parse(query: """
         SELECT column_name FROM information_schema.columns
          WHERE table_name = 'v'
         """))
@@ -856,7 +852,7 @@ struct IntrospectionTests {
     // projection, so `Name + 1` is never evaluated; the schema DERIVES its
     // nominal type without faulting on the non-numeric operand.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
-    #expect(try cat.columns(of: parse("""
+    #expect(try cat.columns(of: parse(query: """
         SELECT Name + 1 AS x FROM People FETCH FIRST 0 ROWS ONLY
         """)) == [OutputColumn(name: "x", type: .integer)])
   }
@@ -865,20 +861,20 @@ struct IntrospectionTests {
     // A non-zero limit projects rows, so the operand is reachable and faults.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("""
+      let _ = try cat.columns(of: parse(query: """
           SELECT Name + 1 AS x FROM People FETCH FIRST 2 ROWS ONLY
           """))
     }
   }
 
   @Test func `information_schema.columns lists a zero-row-limit view`() throws {
-    let body = try parse("""
+    let body = try parse(query: """
         SELECT Name + 1 AS x FROM People FETCH FIRST 0 ROWS ONLY
         """)
     let cat = MetaCatalog(
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["v": View(query: body, columns: ["x"])])
-    let rows = try cat.run(parse("""
+    let rows = try cat.run(parse(query: """
         SELECT column_name, data_type FROM information_schema.columns
          WHERE table_name = 'v'
         """))
@@ -892,11 +888,11 @@ struct IntrospectionTests {
     let cat = MetaCatalog(["People":
         MetaRelation([("Name", .text), ("Age", .integer)], [])])
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("""
+      let _ = try cat.columns(of: parse(query: """
           SELECT SUM(Name) FROM People FETCH FIRST 0 ROWS ONLY
           """))
     }
-    #expect(try cat.columns(of: parse("""
+    #expect(try cat.columns(of: parse(query: """
         SELECT SUM(Age) AS x FROM People FETCH FIRST 0 ROWS ONLY
         """)) == [OutputColumn(name: "x", type: .integer)])
   }
@@ -906,10 +902,10 @@ struct IntrospectionTests {
     // the executor skips the guarded arm; the schema resolves rather than
     // faulting on the unreachable operand or call.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
-    #expect(try cat.columns(of: parse("""
+    #expect(try cat.columns(of: parse(query: """
         SELECT Name FROM People WHERE 1 IS NULL AND Name + 1 = 2
         """)) == [OutputColumn(name: "Name", type: .text)])
-    #expect(try cat.columns(of: parse("""
+    #expect(try cat.columns(of: parse(query: """
         SELECT Name FROM People WHERE 1 IS NOT NULL OR NOPE(Name) = 1
         """)) == [OutputColumn(name: "Name", type: .text)])
   }
@@ -918,18 +914,18 @@ struct IntrospectionTests {
     // `WHERE 1 = 0` filters every row before projecting, so `Name + 1` is
     // unreachable and the schema resolves.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
-    #expect(try cat.columns(of: parse("""
+    #expect(try cat.columns(of: parse(query: """
         SELECT Name + 1 AS x FROM People WHERE 1 = 0
         """)) == [OutputColumn(name: "x", type: .integer)])
     // An aggregate folds zero rows, so its text operand is never evaluated.
-    let summed = try cat.columns(of: parse("""
+    let summed = try cat.columns(of: parse(query: """
         SELECT SUM(Name) AS s FROM People WHERE 1 = 0
         """))
     #expect(summed.count == 1)
     // But a whole-result aggregate still emits ONE empty group, so a scalar
     // call projecting it runs — an unregistered routine faults, as a run does.
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("""
+      let _ = try cat.columns(of: parse(query: """
           SELECT NOPE(COUNT(*)) AS x FROM People WHERE 1 = 0
           """))
     }
@@ -939,46 +935,46 @@ struct IntrospectionTests {
     let cat = MetaCatalog(["People": MetaRelation([("Age", .integer)], [])])
     // A false HAVING drops the empty group before the projection, so its call
     // is unreachable — the query returns an empty result and types cleanly.
-    #expect(try cat.columns(of: parse("""
+    #expect(try cat.columns(of: parse(query: """
         SELECT NOPE(COUNT(*)) AS x FROM People WHERE 1 = 0 HAVING 1 = 0
         """)) == [OutputColumn(name: "x", type: .integer)])
     // A true HAVING keeps the empty group, so the projection's call runs.
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("""
+      let _ = try cat.columns(of: parse(query: """
           SELECT NOPE(COUNT(*)) AS x FROM People WHERE 1 = 0 HAVING 1 = 1
           """))
     }
     // COUNT is 0 over the empty group, so COUNT(*) / 0 is a real divide.
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("""
+      let _ = try cat.columns(of: parse(query: """
           SELECT COUNT(*) / 0 AS x FROM People WHERE 1 = 0
           """))
     }
     // Every other aggregate is NULL, so SUM(Age) / 0 propagates NULL, no fault.
-    #expect(try cat.columns(of: parse("""
+    #expect(try cat.columns(of: parse(query: """
         SELECT SUM(Age) / 0 AS x FROM People WHERE 1 = 0
         """)) == [OutputColumn(name: "x", type: .integer)])
     // A literal fault in the projection beside an aggregate still runs.
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("""
+      let _ = try cat.columns(of: parse(query: """
           SELECT COUNT(*) AS c, 1 / 0 AS x FROM People WHERE 1 = 0
           """))
     }
     // A registered routine runs over the empty group, so a wrong-arity call
     // (BITAND takes two) faults as the run would.
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("""
+      let _ = try cat.columns(of: parse(query: """
           SELECT BITAND(COUNT(*)) AS x FROM People WHERE 1 = 0
           """))
     }
     // A HAVING false over the empty group (COUNT is 0) drops it, so a faulting
     // projection is never reached — the query returns no rows, types cleanly.
-    #expect(try cat.columns(of: parse("""
+    #expect(try cat.columns(of: parse(query: """
         SELECT 1 / 0 AS x FROM People WHERE 1 = 0 HAVING COUNT(*) = 1
         """)).count == 1)
     // A HAVING true over the empty group keeps it, so the projection runs.
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("""
+      let _ = try cat.columns(of: parse(query: """
           SELECT 1 / 0 AS x FROM People WHERE 1 = 0 HAVING COUNT(*) = 0
           """))
     }
@@ -988,7 +984,7 @@ struct IntrospectionTests {
     let cat = MetaCatalog(["People": MetaRelation([("Age", .integer)], [])])
     // With no binding, `... = :p` yields UNKNOWN without evaluating the left,
     // so the divide never runs — the query returns no rows and types cleanly.
-    #expect(try cat.columns(of: parse("""
+    #expect(try cat.columns(of: parse(query: """
         SELECT COUNT(*) AS c FROM People WHERE 1 = 0 HAVING COUNT(*) / 0 = :p
         """)).count == 1)
   }
@@ -1002,7 +998,7 @@ struct IntrospectionTests {
     // The empty group projects BAD(), a non-finite double the run rejects
     // (SQLError.magnitude), so the schema must reject it too.
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("""
+      let _ = try cat.columns(of: parse(query: """
           SELECT BAD() AS x FROM People WHERE 1 = 0 HAVING 1 = 1
           """), routines: routines)
     }
@@ -1014,12 +1010,15 @@ struct IntrospectionTests {
     // COUNT evaluates its operand per row to test non-NULL, so a bad operand
     // (or an unknown call) faults; a valid operand counts as integer.
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("SELECT COUNT(Name + 1) FROM People"))
+      let query = try parse(query: "SELECT COUNT(Name + 1) FROM People")
+      let _ = try cat.columns(of: query)
     }
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("SELECT COUNT(NOPE(Name)) FROM People"))
+      let query = try parse(query: "SELECT COUNT(NOPE(Name)) FROM People")
+      let _ = try cat.columns(of: query)
     }
-    #expect(try cat.columns(of: parse("SELECT COUNT(Age) AS c FROM People"))
+    let query = try parse(query: "SELECT COUNT(Age) AS c FROM People")
+    #expect(try cat.columns(of: query)
                 == [OutputColumn(name: "c", type: .integer)])
   }
 
@@ -1028,11 +1027,11 @@ struct IntrospectionTests {
     // is unreachable and the schema resolves — but an aggregate fold, which the
     // group node runs before HAVING, is still validated.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
-    #expect(try cat.columns(of: parse("""
+    #expect(try cat.columns(of: parse(query: """
         SELECT Name + 1 AS x FROM People GROUP BY Name HAVING 1 = 0
         """)) == [OutputColumn(name: "x", type: .integer)])
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("""
+      let _ = try cat.columns(of: parse(query: """
           SELECT SUM(Name) FROM People GROUP BY Name HAVING 1 = 0
           """))
     }
@@ -1045,11 +1044,11 @@ struct IntrospectionTests {
     let cat = MetaCatalog(["People":
         MetaRelation([("Name", .text), ("Age", .integer)], [])])
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("""
+      let _ = try cat.columns(of: parse(query: """
           SELECT Name FROM People GROUP BY Name HAVING 1 = 0 AND SUM(Name) > 0
           """))
     }
-    #expect(try cat.columns(of: parse("""
+    #expect(try cat.columns(of: parse(query: """
         SELECT Name FROM People GROUP BY Name HAVING 1 = 0 AND SUM(Age) > 0
         """)) == [OutputColumn(name: "Name", type: .text)])
   }
@@ -1057,10 +1056,10 @@ struct IntrospectionTests {
   @Test func `columns(of:) rejects a statically-known division by zero`() throws {
     let cat = MetaCatalog(["People": MetaRelation([("Age", .integer)], [])])
     #expect(throws: SQLError.divide) {
-      let _ = try cat.columns(of: parse("SELECT 1 / 0 AS x FROM People"))
+      let _ = try cat.columns(of: parse(query: "SELECT 1 / 0 AS x FROM People"))
     }
     // A non-literal divisor is data-dependent, so it is not rejected.
-    #expect(try cat.columns(of: parse("SELECT 1 / Age AS x FROM People"))
+    #expect(try cat.columns(of: parse(query: "SELECT 1 / Age AS x FROM People"))
                 == [OutputColumn(name: "x", type: .integer)])
   }
 
@@ -1070,14 +1069,14 @@ struct IntrospectionTests {
     // SELECT at once); the schema rejects it rather than advertise a column.
     #expect(throws: SQLError.self) {
       let _ = try cat.columns(of:
-          parse("SELECT 9223372036854775807 + 1 AS x FROM People"))
+          parse(query: "SELECT 9223372036854775807 + 1 AS x FROM People"))
     }
     #expect(throws: SQLError.self) {
       let _ = try cat.columns(of:
-          parse("SELECT 1e308 * 1e308 AS x FROM People"))
+          parse(query: "SELECT 1e308 * 1e308 AS x FROM People"))
     }
     // A non-literal operand is data-dependent, so it is not rejected.
-    #expect(try cat.columns(of: parse("SELECT Age + 1 AS x FROM People"))
+    #expect(try cat.columns(of: parse(query: "SELECT Age + 1 AS x FROM People"))
                 == [OutputColumn(name: "x", type: .integer)])
   }
 
@@ -1086,7 +1085,7 @@ struct IntrospectionTests {
     // without evaluating the left term, so the query runs (no rows) and the
     // schema resolves rather than faulting on the text arithmetic.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
-    #expect(try cat.columns(of: parse("""
+    #expect(try cat.columns(of: parse(query: """
         SELECT Name FROM People WHERE Name + 1 = :p
         """)) == [OutputColumn(name: "Name", type: .text)])
   }
@@ -1096,7 +1095,7 @@ struct IntrospectionTests {
     // faults; typing recurses into the arguments, as a run would.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("""
+      let _ = try cat.columns(of: parse(query: """
           SELECT BITAND(Name + 1, 1) FROM People
           """))
     }
@@ -1104,7 +1103,7 @@ struct IntrospectionTests {
 
   @Test func `columns(of:) types a call over valid arguments`() throws {
     let cat = MetaCatalog(["People": MetaRelation([("Age", .integer)], [])])
-    #expect(try cat.columns(of: parse("""
+    #expect(try cat.columns(of: parse(query: """
         SELECT BITAND(Age, 1) AS b FROM People
         """)) == [OutputColumn(name: "b", type: .integer)])
   }
@@ -1116,7 +1115,7 @@ struct IntrospectionTests {
     // must reject it rather than advertise an integer column no row produces.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("""
+      let _ = try cat.columns(of: parse(query: """
           SELECT BITAND(Name, 1) AS x FROM People
           """))
     }
@@ -1128,7 +1127,7 @@ struct IntrospectionTests {
     // rejects it rather than typing an integer column.
     let cat = MetaCatalog(["People": MetaRelation([("Age", .integer)], [])])
     #expect(throws: SQLError.self) {
-      let _ = try cat.columns(of: parse("""
+      let _ = try cat.columns(of: parse(query: """
           SELECT BITAND(Age) AS x FROM People
           """))
     }
@@ -1139,7 +1138,7 @@ struct IntrospectionTests {
     // definition_schema.columns even when a recursive CTE names the store
     // directly — the cached CTE store entry is seeded with the routine returns,
     // so `BITAND(...)` types inside the CTE as it does outside it.
-    let body = try parse("SELECT BITAND(Age, 1) AS b FROM People")
+    let body = try parse(query: "SELECT BITAND(Age, 1) AS b FROM People")
     let cat = MetaCatalog(
         ["People": MetaRelation([("Age", .integer)], [])],
         views: ["v": View(query: body, columns: ["b"])])
@@ -1162,7 +1161,7 @@ struct IntrospectionTests {
       "People": MetaRelation([("Name", .text)], []),
       "definition_schema.tables": MetaRelation([("x", .integer)], []),
     ])
-    let rows = try cat.run(parse("""
+    let rows = try cat.run(parse(query: """
         SELECT table_name FROM information_schema.tables ORDER BY table_name
         """))
     // `People` and the two built-in views — but NOT the shadowed reserved base.
@@ -1177,11 +1176,11 @@ struct IntrospectionTests {
     // `v` projects `NOPE(Name)`; `NOPE` is not registered, so `SELECT * FROM v`
     // faults at run. `compile` lowers the call without checking the routine, so
     // the unknown function surfaces at typing — the view is not listed.
-    let body = try parse("SELECT NOPE(Name) AS x FROM People")
+    let body = try parse(query: "SELECT NOPE(Name) AS x FROM People")
     let cat = MetaCatalog(
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["v": View(query: body, columns: ["x"])])
-    let rows = try cat.run(parse("""
+    let rows = try cat.run(parse(query: """
         SELECT column_name FROM information_schema.columns
          WHERE table_name = 'v'
         """))
@@ -1192,11 +1191,11 @@ struct IntrospectionTests {
     // The unknown `NOPE` is in the WHERE, not the projection, so the first-arm
     // type walk never sees it — only the whole-body call inventory does, and a
     // run of `SELECT * FROM v` would fault `SQLError.function`.
-    let body = try parse("SELECT Name FROM People WHERE NOPE(Name) = 1")
+    let body = try parse(query: "SELECT Name FROM People WHERE NOPE(Name) = 1")
     let cat = MetaCatalog(
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["v": View(query: body, columns: ["Name"])])
-    let rows = try cat.run(parse("""
+    let rows = try cat.run(parse(query: """
         SELECT column_name FROM information_schema.columns
          WHERE table_name = 'v'
         """))
@@ -1206,13 +1205,13 @@ struct IntrospectionTests {
   @Test func `information_schema.columns hides a view whose later arm calls unknown`() throws {
     // The first arm types cleanly; the unknown `NOPE` is in the second UNION
     // arm, which the first-arm walk never types — the inventory spans arms.
-    let body = try parse("""
+    let body = try parse(query: """
         SELECT Name FROM People UNION SELECT NOPE(Name) FROM People
         """)
     let cat = MetaCatalog(
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["v": View(query: body, columns: ["Name"])])
-    let rows = try cat.run(parse("""
+    let rows = try cat.run(parse(query: """
         SELECT column_name FROM information_schema.columns
          WHERE table_name = 'v'
         """))
@@ -1222,11 +1221,12 @@ struct IntrospectionTests {
   @Test func `information_schema.columns lists a view whose predicate calls known`() throws {
     // The gate rejects only an UNKNOWN routine — a registered one in the WHERE
     // (`BITAND`, the standard prelude) leaves the view advertised.
-    let body = try parse("SELECT Name FROM People WHERE BITAND(1, 1) = 1")
+    let body = try parse(query:
+        "SELECT Name FROM People WHERE BITAND(1, 1) = 1")
     let cat = MetaCatalog(
         ["People": MetaRelation([("Name", .text)], [])],
         views: ["v": View(query: body, columns: ["Name"])])
-    let rows = try cat.run(parse("""
+    let rows = try cat.run(parse(query: """
         SELECT column_name FROM information_schema.columns
          WHERE table_name = 'v'
         """))
@@ -1296,7 +1296,7 @@ struct IntrospectionTests {
     // `information_schema.` view over it — resolves and runs the same as the
     // inline query: the store overlay reaches the view body's compile and
     // execution (`resolve`/`derive`), not only the top-level query.
-    let body = try parse("""
+    let body = try parse(query: """
         SELECT table_name FROM definition_schema.tables
           WHERE table_type = 'BASE TABLE' ORDER BY table_name
         """)
@@ -1305,7 +1305,7 @@ struct IntrospectionTests {
       "Widget": MetaRelation([("Label", .text)]),
     ], views: ["meta": View(query: body, columns: ["table_name"])])
     let inline = try source.run(body)
-    let viewed = try source.run(parse("""
+    let viewed = try source.run(parse(query: """
         SELECT table_name FROM meta ORDER BY table_name
         """))
     #expect(viewed == inline)
@@ -1313,7 +1313,7 @@ struct IntrospectionTests {
   }
 
   @Test func `a view over definition_schema.columns yields the inline rows`() throws {
-    let body = try parse("""
+    let body = try parse(query: """
         SELECT column_name, data_type FROM definition_schema.columns
           WHERE table_name = 'People'
           ORDER BY column_name
@@ -1323,7 +1323,7 @@ struct IntrospectionTests {
     ], views: ["cols": View(query: body,
                             columns: ["column_name", "data_type"])])
     let inline = try source.run(body)
-    let viewed = try source.run(parse("""
+    let viewed = try source.run(parse(query: """
         SELECT column_name, data_type FROM cols ORDER BY column_name
         """))
     #expect(viewed == inline)

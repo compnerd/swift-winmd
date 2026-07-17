@@ -23,15 +23,6 @@ private func things() throws -> FixtureCatalog {
 
 // MARK: - Parsing
 
-/// Parses `text` and returns its `Select`, failing on any other shape.
-private func parse(select text: String) throws -> Select {
-  guard case let .select(.select(select)) = try Statement(parsing: text) else {
-    Issue.record("expected a single SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return select
-}
-
 struct CaseParsingTests {
   @Test func `parses a searched CASE`() throws {
     let select = try parse(select: """
@@ -161,34 +152,20 @@ struct CaseEvaluationTests {
 // MARK: - Type unification
 
 struct CaseTypeUnificationTests {
-  private func parse(_ text: String) throws -> Query {
-    guard case let .select(query) = try Statement(parsing: text) else {
-      Issue.record("expected a SELECT statement")
-      throw SQLError.incomplete(expected: "a SELECT statement")
-    }
-    return query
-  }
-
-  /// The single output column type of a one-column query's schema.
-  private func type(of text: String) throws -> ValueType {
-    let columns = try things().columns(of: parse(text))
-    #expect(columns.count == 1)
-    return columns[0].type
-  }
-
   @Test func `like result types unify to that type`() throws {
-    #expect(try type(of: "SELECT CASE WHEN K = 1 THEN K ELSE 0 END AS C FROM T")
+    #expect(try things().type(
+        of: "SELECT CASE WHEN K = 1 THEN K ELSE 0 END AS C FROM T")
                 == .integer)
   }
 
   @Test func `mixed integer and double results widen to double`() throws {
-    #expect(try type(of:
+    #expect(try things().type(of:
         "SELECT CASE WHEN K = 1 THEN 1 ELSE 2.5 END AS C FROM T") == .double)
   }
 
   @Test func `irreconcilable result types fault`() throws {
     // An integer result beside a text result cannot yield one column type.
-    let query = try parse(
+    let query = try parse(query:
         "SELECT CASE WHEN K = 1 THEN 1 ELSE Name END AS C FROM T")
     let resolve = { () throws -> Array<OutputColumn> in
       try things().columns(of: query)
@@ -212,7 +189,7 @@ struct CaseTypeUnificationTests {
     try things().expect(text,
         fails: .operand("CASE results have irreconcilable types"))
     let resolve = { () throws -> Array<OutputColumn> in
-      try things().columns(of: parse(text))
+      try things().columns(of: parse(query: text))
     }
     #expect(throws:
         SQLError.operand("CASE results have irreconcilable types")) {
@@ -228,19 +205,12 @@ struct CaseTypeUnificationTests {
 /// so its operands are not validated; once an earlier guard is constant-TRUE
 /// every later branch and the `ELSE` are unreachable too.
 struct CaseReachabilityTests {
-  private func parse(_ text: String) throws -> Query {
-    guard case let .select(query) = try Statement(parsing: text) else {
-      Issue.record("expected a SELECT statement")
-      throw SQLError.incomplete(expected: "a SELECT statement")
-    }
-    return query
-  }
 
   @Test func `a constant-false guard's bad result is unreachable`() throws {
     // `1 = 0` is statically false, so `Name + 1` (text arithmetic) is never
     // evaluated — the type check validates the reachable `ELSE 0` only and the
     // column types as its integer.
-    let query = try parse(
+    let query = try parse(query:
         "SELECT CASE WHEN 1 = 0 THEN Name + 1 ELSE 0 END AS C FROM T")
     let columns = try things().columns(of: query, validate: true)
     #expect(columns.count == 1)
@@ -258,7 +228,7 @@ struct CaseReachabilityTests {
   @Test func `a reachable bad result still faults`() throws {
     // `Id = 1` is per-row, not statically false, so `Name + 1` IS reachable and
     // the text arithmetic must still fault.
-    let query = try parse(
+    let query = try parse(query:
         "SELECT CASE WHEN Id = 1 THEN Name + 1 ELSE 0 END AS C FROM T")
     let resolve = { () throws -> Array<OutputColumn> in
       try things().columns(of: query, validate: true)
@@ -274,7 +244,7 @@ struct CaseReachabilityTests {
     // `WHEN 1 = 1 THEN Name + 1` is unreachable — its operands are not
     // validated, so the type check passes and the column types as the first
     // result's integer.
-    let query = try parse("""
+    let query = try parse(query: """
         SELECT CASE WHEN 1 = 1 THEN 0 WHEN 1 = 1 THEN Name + 1 END AS C FROM T
         """)
     let columns = try things().columns(of: query, validate: true)
@@ -289,7 +259,7 @@ struct CaseReachabilityTests {
     // is REACHABLE and its `Name + 1` (text arithmetic) must still fault. The
     // constant-TRUE guard drops only the STRICTLY-LATER branches and the ELSE,
     // not the branches before it.
-    let query = try parse("""
+    let query = try parse(query: """
         SELECT CASE WHEN Id = 1 THEN Name + 1 WHEN 1 = 1 THEN 0 END AS C FROM T
         """)
     let resolve = { () throws -> Array<OutputColumn> in
@@ -305,7 +275,7 @@ struct CaseReachabilityTests {
     // The earlier reachable `THEN Name` (text) and the constant-TRUE guard's
     // `THEN 0` (integer) both shape the column, so their irreconcilable types
     // must be reported rather than the constant-TRUE branch's alone winning.
-    let query = try parse("""
+    let query = try parse(query: """
         SELECT CASE WHEN Id = 1 THEN Name WHEN 1 = 1 THEN 0 END AS C FROM T
         """)
     let resolve = { () throws -> Array<OutputColumn> in
@@ -326,13 +296,6 @@ struct CaseReachabilityTests {
 /// as the executor's `Row.conditional` does, or the folded value clashes the
 /// advertised column type and a routine argument the run accepts is rejected.
 struct CaseEmptyGroupTests {
-  private func parse(_ text: String) throws -> Query {
-    guard case let .select(query) = try Statement(parsing: text) else {
-      Issue.record("expected a SELECT statement")
-      throw SQLError.incomplete(expected: "a SELECT statement")
-    }
-    return query
-  }
 
   /// `CASE WHEN COUNT(*) = 0 THEN COUNT(*) ELSE 2.5 END` — a mixed CASE whose
   /// guard is NOT statically decidable (a `COUNT(*)` operand), so BOTH arms are
@@ -366,7 +329,7 @@ struct CaseEmptyGroupTests {
     let f = Function(parameters: [Function.Parameter(name: "x", type: .double)],
                      returns: .double, body: .column("x"))
     let routines = try Routines().registering("f", f)
-    let query = try parse("""
+    let query = try parse(query: """
         SELECT f(CASE WHEN COUNT(*) = 0 THEN COUNT(*) ELSE 2.5 END) AS C
           FROM T WHERE 1 = 0
         """)

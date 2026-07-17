@@ -14,50 +14,10 @@ import SQLTestSupport
 /// `V` holds a `NULL` (so `IN (SELECT V …)` sees a NULL element) and a `Flag`
 /// used to filter the inner query to empty or to non-empty.
 private func fixture() throws -> FixtureCatalog {
-  try Catalog {
-    Relation("T", ["Id": .integer, "K": .integer]) {
-      Row(1, 10)
-      Row(2, 20)
-      Row(3, nil)
-      Row(4, 30)
-    }
-    Relation("S", ["V": .integer, "Flag": .integer]) {
-      Row(10, 1)
-      Row(20, 1)
-      Row(99, 0)
-    }
-    // A relation whose single column holds a NULL, for the `IN (…, NULL)`
-    // corners — `V` is `{2, NULL}` when filtered to its first two rows.
-    Relation("N", ["V": .integer]) {
-      Row(2)
-      Row(nil)
-    }
-  }
+  try subqueries()
 }
 
-/// Parses `text` and returns its `Select`, failing on any other shape.
-private func parse(select text: String) throws -> Select {
-  guard case let .select(.select(select)) = try Statement(parsing: text) else {
-    Issue.record("expected a single SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return select
-}
 
-/// Parses `text` to a query, failing on any other statement.
-private func parse(query text: String) throws -> Query {
-  guard case let .select(query) = try Statement(parsing: text) else {
-    Issue.record("expected a SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return query
-}
-
-/// Parses `text` to a `Statement` — the shape `Catalog.run(_:_:)` takes when a
-/// test asserts on invocation side effects rather than on rows alone.
-private func parse(statement text: String) throws -> Statement {
-  try Statement(parsing: text)
-}
 
 // MARK: - Parsing
 
@@ -274,8 +234,8 @@ struct InQueryArityTests {
       throws {
     // The schema path enforces the SAME single-column arity as the run, so
     // validation matches execution.
-    let query = try parse(
-        query: "SELECT Id FROM T WHERE K IN (SELECT V, Flag FROM S)")
+    let query = try parse(query:
+         "SELECT Id FROM T WHERE K IN (SELECT V, Flag FROM S)")
     let resolve = { () throws -> Array<OutputColumn> in
       try fixture().columns(of: query, validate: true)
     }
@@ -305,8 +265,8 @@ struct SubqueryTypeCheckingTests {
   @Test func `a bad inner column faults the schema check`() throws {
     // The inner query is type-checked too, so an unknown column inside it
     // faults validation exactly as a run would reject it.
-    let query = try parse(
-        query: "SELECT Id FROM T WHERE EXISTS (SELECT Missing FROM S)")
+    let query = try parse(query:
+         "SELECT Id FROM T WHERE EXISTS (SELECT Missing FROM S)")
     let resolve = { () throws -> Array<OutputColumn> in
       try fixture().columns(of: query, validate: true)
     }
@@ -319,8 +279,8 @@ struct SubqueryTypeCheckingTests {
       throws {
     // An unregistered routine inside the subquery faults validation as the run
     // would (`SQLError.function`).
-    let query = try parse(
-        query: "SELECT Id FROM T WHERE K IN (SELECT nope(V) FROM S)")
+    let query = try parse(query:
+         "SELECT Id FROM T WHERE K IN (SELECT nope(V) FROM S)")
     let resolve = { () throws -> Array<OutputColumn> in
       try fixture().columns(of: query, validate: true)
     }
@@ -613,8 +573,8 @@ struct SubqueryDeferralTests {
     // never invoked, so the counter stays at 0 — proving compile opens no
     // cursor on `S`.
     let counter = Counter()
-    let query = try parse(
-        query: "SELECT Id FROM T WHERE EXISTS (SELECT tick() FROM S)")
+    let query = try parse(query:
+         "SELECT Id FROM T WHERE EXISTS (SELECT tick() FROM S)")
     let columns =
         try fixture().columns(of: query, routines: routines(counter),
                               validate: true)
@@ -631,8 +591,8 @@ struct SubqueryDeferralTests {
     // cursor), and the RUN materialises the occurrence as a cardinality PROBE
     // that never evaluates the select list, so it does NOT fault either:
     // `EXISTS` over non-empty `S` is TRUE, every row of `T` is admitted.
-    let query = try parse(
-        query: "SELECT Id FROM T WHERE EXISTS (SELECT 1 / (Flag - 1) FROM S)")
+    let query = try parse(query:
+         "SELECT Id FROM T WHERE EXISTS (SELECT 1 / (Flag - 1) FROM S)")
     let columns = try fixture().columns(of: query, validate: true)
     #expect(columns.count == 1)
     // The run does NOT surface the divide — the EXISTS probe never evaluates
@@ -647,8 +607,8 @@ struct SubqueryDeferralTests {
     // arity is decided from the compiled width, never by running the inner
     // query, so `tick()` stays uninvoked.
     let counter = Counter()
-    let query = try parse(
-        query: "SELECT Id FROM T WHERE K IN (SELECT tick() FROM S)")
+    let query = try parse(query:
+         "SELECT Id FROM T WHERE K IN (SELECT tick() FROM S)")
     let columns =
         try fixture().columns(of: query, routines: routines(counter),
                               validate: true)
@@ -665,7 +625,7 @@ struct SubqueryDeferralTests {
     // `EXISTS` over non-empty `S` is still TRUE, admitting every row of `T`.
     let counter = Counter()
     let statement =
-        try parse(statement:
+        try Statement(parsing:
             "SELECT Id FROM T WHERE EXISTS (SELECT tick() FROM S)")
     let rows = try fixture().run(statement, routines(counter))
     let expected: Array<Array<Value>> =
@@ -680,7 +640,7 @@ struct SubqueryDeferralTests {
     // not once per (outer row × S row).
     let counter = Counter()
     let statement =
-        try parse(statement:
+        try Statement(parsing:
             "SELECT Id FROM T WHERE K IN (SELECT tick() FROM S)")
     _ = try fixture().run(statement, routines(counter))
     #expect(counter.count == 3)
@@ -699,7 +659,7 @@ struct SubqueryDeferralTests {
     // behaviour so the follow-up flips it deliberately.
     let counter = Counter()
     let statement =
-        try parse(statement:
+        try Statement(parsing:
             "SELECT Id FROM T WHERE 1 = 0 AND EXISTS (SELECT tick() FROM S)")
     let rows = try fixture().run(statement, routines(counter))
     #expect(rows.isEmpty)
@@ -862,8 +822,8 @@ struct DistinctExistsProbeTests {
     // The type-check validates the SAME probed shape the run evaluates, so the
     // `1 / 0` select list is not checked and validation is clean — matching the
     // run, which does not fault.
-    let query = try parse(
-        query: "SELECT Id FROM T WHERE EXISTS (SELECT DISTINCT 1 / 0 FROM S)")
+    let query = try parse(query:
+         "SELECT Id FROM T WHERE EXISTS (SELECT DISTINCT 1 / 0 FROM S)")
     let columns = try fixture().columns(of: query, validate: true)
     #expect(columns.count == 1)
   }
@@ -969,8 +929,8 @@ struct AggregateExistsProbeTests {
   @Test func `columns validates a whole-result aggregate EXISTS`() throws {
     // The type-check validates the SAME probed `COUNT(*)` shape the run uses,
     // so the `1 / 0` target is not checked — clean, matching the run.
-    let query = try parse(
-        query: "SELECT Id FROM T WHERE EXISTS (SELECT SUM(1 / 0) FROM S)")
+    let query = try parse(query:
+         "SELECT Id FROM T WHERE EXISTS (SELECT SUM(1 / 0) FROM S)")
     let columns = try fixture().columns(of: query, validate: true)
     #expect(columns.count == 1)
   }
@@ -1305,7 +1265,7 @@ struct ViewPushdownSubqueryTests {
     // EXISTS reads the empty CTE and is FALSE, dropping every row, while the
     // view body's own EXISTS still reads base `S` and keeps them — so the
     // result is EMPTY, NOT the base-table interpretation's two rows.
-    let statement = try parse(statement:
+    let statement = try Statement(parsing:
         "WITH S(V) AS (SELECT Id FROM T WHERE 1 = 0) "
         + "SELECT Id FROM VN WHERE EXISTS (SELECT V FROM S)")
     let rows = try nested().run(statement, .standard)
@@ -1331,7 +1291,7 @@ struct ViewPushdownSubqueryTests {
     // and drops every row, while the caller's `.caller` pushed EXISTS reads the
     // non-empty CTE and keeps them. The view filters CORRECTLY (its base `S` is
     // empty), so the result is EMPTY.
-    let statement = try parse(statement:
+    let statement = try Statement(parsing:
         "WITH S(V) AS (SELECT 1) "
         + "SELECT Id FROM VN WHERE EXISTS (SELECT V FROM S)")
     let rows = try hollow().run(statement, .standard)
@@ -1352,14 +1312,14 @@ struct ViewPushdownSubqueryTests {
     // make the view body drop too (still empty, but for the wrong reason), so
     // this pairs with the base-`S`-empty/CTE-non-empty inverse above — together
     // they pin BOTH directions.
-    let empty = try parse(statement:
+    let empty = try Statement(parsing:
         "WITH S(V) AS (SELECT Id FROM T WHERE 1 = 0) "
         + "SELECT Id FROM VN WHERE EXISTS (SELECT V FROM S)")
     #expect(try nested().run(empty, .standard).isEmpty)
     // Caller CTE non-empty: the pushed EXISTS is TRUE and the view body's own
     // EXISTS (base `S` non-empty) is TRUE too, so every row survives — the
     // caller's CTE result did NOT collapse the view body's base read.
-    let full = try parse(statement:
+    let full = try Statement(parsing:
         "WITH S(V) AS (SELECT 1) "
         + "SELECT Id FROM VN WHERE EXISTS (SELECT V FROM S)")
     let kept: Array<Array<Value>> = [[.integer(1)], [.integer(2)]]

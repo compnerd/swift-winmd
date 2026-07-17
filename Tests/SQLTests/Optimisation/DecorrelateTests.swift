@@ -13,14 +13,6 @@ import SQLTestSupport
 /// pins the plan shape: a decorrelatable CROSS APPLY becomes a `.join` with NO
 /// `.apply` node, and an EXCLUDED body stays an `.apply`, run correctly.
 
-/// Parses `text` to a query, failing on any other statement.
-private func query(_ text: String) throws -> Query {
-  guard case let .select(query) = try Statement(parsing: text) else {
-    Issue.record("expected a SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return query
-}
 
 /// Whether `plan` (or any descendant) carries a correlated `.apply` node — the
 /// witness a shape was NOT decorrelated.
@@ -70,7 +62,7 @@ extension Catalog where Self: ~Escapable {
   /// does, so a correlated body's plan is compiled into the box the decorrelate
   /// pass reads.
   fileprivate borrowing func optimised(_ sql: String) throws -> Plan {
-    let parsed = try query(sql)
+    let parsed = try parse(query: sql)
     let context = Context().resolving(Subqueries())
     let logical = try compile(parsed, context.validating(false)).pushdown()
     let augmented = try augment(context.validating(false), for: parsed,
@@ -133,7 +125,7 @@ struct DecorrelateCrossApplyTests {
   /// join multiplies the left row by the match count, it is NOT deduped.
   @Test func `a left row matching many inner rows is multiplied not deduped`()
       throws {
-    let rows = try fixture().run(query(
+    let rows = try fixture().run(parse(query:
         "SELECT T.Id FROM T " +
         "JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1 " +
         "ORDER BY T.Id"), .standard)
@@ -144,7 +136,7 @@ struct DecorrelateCrossApplyTests {
   /// NO MATCH: Id 3 has no child, so the INNER join DROPS it — never NULL-
   /// extended, exactly as CROSS APPLY drops an unmatched left row.
   @Test func `a left row with no match is dropped`() throws {
-    let rows = try fixture().run(query(
+    let rows = try fixture().run(parse(query:
         "SELECT T.Id FROM T " +
         "JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1"),
         .standard)
@@ -406,7 +398,7 @@ struct DecorrelateThrowVisibilityTests {
     // Id 2 matches child (2, 200): 1 / (200 - 100) = 0, so `> 0` is false ⇒ no
     // row; Id 3 matches nothing. The divide on the Id-1 child is never reached,
     // so the run yields nothing and does NOT throw — the base behaviour.
-    let rows = try catalog.run(query(sql), .standard)
+    let rows = try catalog.run(parse(query: sql), .standard)
     #expect(rows.isEmpty)
   }
 }

@@ -251,11 +251,7 @@ func engineSelect(_ text: String) throws -> Query {
 
 /// Parses `text` to a query, failing on any other statement.
 func engineParse(_ text: String) throws -> Query {
-  guard case let .select(query) = try Statement(parsing: text) else {
-    Issue.record("expected a SELECT statement")
-    throw SQLError.incomplete(expected: "a SELECT statement")
-  }
-  return query
+  try parse(query: text)
 }
 
 /// Runs `text` against the single-relation `People` catalog.
@@ -292,4 +288,3 @@ func engineNullable(_ text: String) throws -> Array<Array<Value>> {
 func engineLineage(_ text: String) throws -> Array<Array<Value>> {
   try engineLineage().run(engineParse(text))
 }
-

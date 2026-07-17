@@ -457,7 +457,7 @@ internal struct WinMDRelation: SQLEngine.Table, ~Escapable {
     // which rejects it (no real decoded key equals the huge value).
     if let key = key(for: column), value >= 1,
         value <= Int.max >> key.kind.bits, key.column == table.schema.key,
-        storage.sorted & (1 << table.number) != 0 {
+        storage.sorted & (1 << table.schema.number) != 0 {
       let encoded = (value << key.kind.bits) | key.tag
       return storage.bound(table, key.column, encoded, count, strict: strict)
     }
@@ -465,7 +465,7 @@ internal struct WinMDRelation: SQLEngine.Table, ~Escapable {
     // A real column is seekable only when it is the table's intrinsic sort key
     // and this database physically sorts the table; otherwise the engine scans.
     guard table.schema.key == column,
-        storage.sorted & (1 << table.number) != 0 else {
+        storage.sorted & (1 << table.schema.number) != 0 else {
       return nil
     }
     return storage.bound(table, column, value, count, strict: strict)

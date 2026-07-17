@@ -390,15 +390,10 @@ public struct Cursor: ~Escapable {
   }
 
   /// The open table this cursor walks.
-  ///
-  /// Exposed to the structured-query executor (`where(_: Predicate)`), which
-  /// inspects the table's schema and `Sorted` bit to decide between a binary
-  /// search and a scan, and to the SQL-engine adapter, which reads the table's
-  /// schema to describe the relation.
-  package var relation: Table { table }
+  internal var relation: Table { table }
 
   /// The borrowed storage view this cursor reads from.
-  package var backing: Storage {
+  internal var backing: Storage {
     @_lifetime(copy self)
     get { storage }
   }

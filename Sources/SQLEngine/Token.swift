@@ -47,6 +47,9 @@ extension Token {
     /// may reference the preceding FROM items (a correlated apply).
     case lateral
     case inner
+    /// The `CROSS` keyword introducing a `CROSS JOIN` — the unqualified
+    /// Cartesian product of two relations, admitting no `ON`/`USING` clause.
+    case cross
     case left
     case right
     case full
@@ -152,6 +155,7 @@ extension Token.Kind {
     case .join: "JOIN"
     case .lateral: "LATERAL"
     case .inner: "INNER"
+    case .cross: "CROSS"
     case .left: "LEFT"
     case .right: "RIGHT"
     case .full: "FULL"

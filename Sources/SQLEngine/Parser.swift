@@ -26,8 +26,9 @@
 /// relation       := (identifier | [LATERAL] derived) [AS identifier]
 ///                   // LATERAL is legal only on a derived table in a join
 /// derived        := '(' query ')' AS identifier  // a derived table (aliased)
-/// join           := [INNER | (LEFT | RIGHT | FULL) [OUTER]] JOIN
-///                     relation ON predicate
+/// join           := ([INNER | (LEFT | RIGHT | FULL) [OUTER]] JOIN
+///                     relation ON predicate)
+///                  | (CROSS JOIN relation)  // Cartesian product, no ON/USING
 ///                   // INNER JOIN LATERAL = CROSS APPLY, LEFT = OUTER APPLY;
 ///                   // the derived body may reference preceding FROM items
 /// projection     := '*' | column (',' column)*
@@ -375,7 +376,7 @@ internal struct Parser: ~Escapable {
 
     var joins = Array<Join>()
     while let kind = try joinKind() {
-      try joins.append(join(kind))
+      try joins.append(join(kind.kind, cross: kind.cross))
     }
     let predicate: Predicate? = if try match(.where) {
       try predicate()
@@ -493,15 +494,24 @@ internal struct Parser: ~Escapable {
   }
 
   /// Parses an optional join `kind` and its `JOIN` keyword at the current
-  /// position, or `nil` when no join clause begins here.
+  /// position, or `nil` when no join clause begins here. The `cross` flag marks
+  /// a `CROSS JOIN` — an unqualified Cartesian product taking no `ON`/`USING`.
   ///
   /// A bare `JOIN` (or an explicit `INNER JOIN`) is `.inner`; `LEFT`/`RIGHT`/
   /// `FULL` introduce an outer join, each admitting an optional `OUTER` noise
-  /// word before the mandatory `JOIN`. A leading `INNER`/`LEFT`/`RIGHT`/`FULL`
-  /// commits to a join clause, so a missing `JOIN` after it faults rather than
-  /// silently ending the join chain.
-  private mutating func joinKind() throws(SQLError) -> Join.Kind? {
-    if try match(.join) { return .inner }
+  /// word before the mandatory `JOIN`; `CROSS` introduces a Cartesian product,
+  /// lowered as an `.inner` join over a synthesized always-true predicate. A
+  /// leading `INNER`/`CROSS`/`LEFT`/`RIGHT`/`FULL` commits to a join clause, so
+  /// a missing `JOIN` after it faults rather than silently ending the chain.
+  private mutating func joinKind()
+      throws(SQLError) -> (kind: Join.Kind, cross: Bool)? {
+    if try match(.join) { return (.inner, false) }
+    if try match(.cross) {
+      // `CROSS JOIN` is the Cartesian product; it carries no inner/outer word
+      // and no `ON`, and lowers as an `.inner` join over an always-true `on`.
+      try expect(.join)
+      return (.inner, true)
+    }
     let kind: Join.Kind
     if try match(.inner) {
       kind = .inner
@@ -518,18 +528,32 @@ internal struct Parser: ~Escapable {
     // carries it. Either way `JOIN` must follow.
     if kind != .inner { _ = try match(.outer) }
     try expect(.join)
-    return kind
+    return (kind, false)
   }
 
   /// Parses the join tail (the `kind` and `JOIN` keyword are already consumed):
-  /// a relation, `ON`, and an arbitrary boolean predicate — the same grammar a
-  /// `WHERE` admits, so a join relates its sides by an equality, an inequality,
-  /// an expression equality, or any `AND`/`OR`/`NOT` of comparisons. A pure
-  /// `column = column` conjunct hash-joins; the rest is a residual filter.
-  private mutating func join(_ kind: Join.Kind) throws(SQLError) -> Join {
+  /// a relation and, unless `cross`, an `ON` and an arbitrary boolean predicate
+  /// — the same grammar a `WHERE` admits, so a join relates its sides by an
+  /// equality, an inequality, an expression equality, or any `AND`/`OR`/`NOT`
+  /// of comparisons. A pure `column = column` conjunct hash-joins; the rest is
+  /// a residual filter.
+  ///
+  /// A `CROSS JOIN` (`cross`) takes NO `ON`/`USING` — a trailing `ON` is a
+  /// syntax error, caught by leaving `on` unconsumed for the caller's `where`/
+  /// end-of-select expectation to reject. Its `on` is a synthesized `1 = 1`,
+  /// which lowers to a constant-true filter the optimiser elides, collapsing
+  /// the join to a bare `.product` — the Cartesian product, equivalent to an
+  /// inner join written `ON 1 = 1`.
+  private mutating func join(_ kind: Join.Kind,
+                             cross: Bool) throws(SQLError) -> Join {
     let relation = try relation()
-    try expect(.on)
-    let on = try predicate()
+    guard cross else {
+      try expect(.on)
+      let on = try predicate()
+      return Join(relation: relation, kind: kind, on: on)
+    }
+    let on = Predicate.comparison(left: .literal(.integer(1)), op: .equal,
+                                  right: .literal(.integer(1)))
     return Join(relation: relation, kind: kind, on: on)
   }
 

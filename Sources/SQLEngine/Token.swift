@@ -22,6 +22,9 @@ extension Token {
     case function
     case returns
     case select
+    /// The `TABLE` keyword introducing the `TABLE t` query primary — the ISO
+    /// shorthand for `SELECT * FROM t`.
+    case table
     case distinct
     case from
     case `where`
@@ -134,6 +137,7 @@ extension Token.Kind {
     case .function: "FUNCTION"
     case .returns: "RETURNS"
     case .select: "SELECT"
+    case .table: "TABLE"
     case .distinct: "DISTINCT"
     case .from: "FROM"
     case .where: "WHERE"

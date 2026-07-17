@@ -2679,12 +2679,13 @@ extension Catalog where Self: ~Escapable {
     }
   }
 
-  /// The semijoin rewrite of a `.select` whose `filter` carries a top-level
-  /// correlated `EXISTS`/`NOT EXISTS` conjunct over an already-decorrelated
-  /// `source`, or `nil` when no such conjunct is decorrelatable — in which case
-  /// the caller leaves the `.select` correlated (conservative default). A plain
-  /// `EXISTS` conjunct becomes a SEMIJOIN, a `NOT EXISTS` an ANTI-join, the
-  /// REMAINING conjuncts kept in a `.select` ABOVE it.
+  /// The semijoin rewrite of a `.select` whose `filter` carries one or more
+  /// top-level correlated `EXISTS`/`NOT EXISTS` conjuncts over an
+  /// already-decorrelated `source`, or `nil` when no conjunct is
+  /// decorrelatable — in which case the caller leaves the `.select` correlated
+  /// (conservative default). EVERY decorrelatable `EXISTS` conjunct becomes its
+  /// own SEMIJOIN (a `NOT EXISTS` an ANTI-join), the semijoins STACKED over the
+  /// source; the conjuncts NOT lifted are kept in a `.select` ABOVE the stack.
   ///
   /// An `EXISTS` is a two-valued existence test — TRUE iff the body yields a
   /// row, never UNKNOWN — so a semijoin is result-equivalent to the per-row
@@ -2706,41 +2707,51 @@ extension Catalog where Self: ~Escapable {
   /// the semijoin drops — suppressing a throw the correlated `.select` raises
   /// (it evaluates every conjunct of the `AND` for the row before the row is
   /// dropped). This is the throw-visibility class the OUTER APPLY safe gate
-  /// guards. THEREFORE the exists is lifted ONLY when EVERY OTHER conjunct of
-  /// the enclosing filter is `safe`; if any sibling is unsafe the whole
-  /// `.select` stays correlated. Conservative is correct — a missed
-  /// decorrelation is a perf loss, a wrong one is silent data corruption.
+  /// guards. THEREFORE lifting proceeds ONLY when EVERY conjunct NOT lifted
+  /// into a semijoin is `safe`; a decorrelatable exists body is itself safe
+  /// (a filter+project over one base scan with safe residuals), so the lifted
+  /// conjuncts add no throw, but a non-decorrelatable exists left in the
+  /// residual is unsafe and blocks all lifting. If any non-lifted conjunct is
+  /// unsafe the whole `.select` stays correlated. Conservative is correct — a
+  /// missed decorrelation is a perf loss, a wrong one is silent data
+  /// corruption.
   ///
-  /// Exactly ONE exists is lifted per pass; a further decorrelatable exists in
-  /// the remaining conjuncts is picked up when the `.select` recursion re-runs
-  /// over the residual (the semijoin's output width is the source's, so the
-  /// remaining conjuncts and everything above still address the same slots).
+  /// The decorrelatable exists conjuncts are ALL lifted, each into its own
+  /// semijoin stacked over the source; the rest (a non-decorrelatable exists,
+  /// or any non-exists predicate) are the SIBLINGS the throw-visibility guard
+  /// tests and are kept in the `.select` above the stack. Each semijoin's
+  /// output width is the source's, so every stacked semijoin sees the same
+  /// source slots — the correlation-key ordinals stay valid through the stack —
+  /// and the residual select and everything above still address those slots.
   private borrowing func decorrelated(exists filter: Filter, _ source: Plan,
                                       _ context: Context) -> Plan? {
-    let conjuncts = filter.conjuncts
-    for (position, conjunct) in conjuncts.enumerated() {
-      guard case let .exists(key, correlation, negated) = conjunct else {
+    // Lift EVERY decorrelatable exists conjunct into its own semijoin STACKED
+    // over `source`; a conjunct that is not a decorrelatable exists is kept in
+    // `remaining` (both the SIBLINGS the throw-visibility guard tests and the
+    // residual select above the stack).
+    var node = source
+    var remaining = Array<Filter>()
+    var lifted = false
+    for conjunct in filter.conjuncts {
+      if case let .exists(key, correlation, negated) = conjunct,
+          let body = context.subqueries.plan(key, correlation),
+          let next = semijoin(node, body, key, correlation, negated, context) {
+        node = next
+        lifted = true
         continue
       }
-      // The remaining conjuncts — everything but this exists — are both the
-      // SIBLINGS whose safety the throw-visibility guard tests and the residual
-      // kept above the semijoin.
-      let remaining = conjuncts.enumerated()
-          .filter { $0.offset != position }
-          .map(\.element)
-      // SIBLING THROW-VISIBILITY: every OTHER conjunct of the enclosing `AND`
-      // must be safe, or lifting this exists into a row-dropping semijoin could
-      // suppress a throw the correlated select raises for a dropped row.
-      guard remaining.allSatisfy(\.safe) else { continue }
-      guard let body = context.subqueries.plan(key, correlation),
-          let node = semijoin(source, body, key, correlation, negated,
-                              context) else { continue }
-      // Keep the remaining conjuncts in a `.select` ABOVE the semijoin. The
-      // semijoin's width == the source's, so they and everything above still
-      // address the same slots.
-      return remaining.conjunction.map { .select($0, node) } ?? node
+      remaining.append(conjunct)
     }
-    return nil
+    guard lifted else { return nil }
+    // SIBLING THROW-VISIBILITY: every conjunct NOT lifted into a semijoin must
+    // be safe — a row a semijoin drops could otherwise suppress a throw the
+    // correlated select raises for it. A non-decorrelatable exists is itself
+    // unsafe, so it (conservatively) blocks all lifting here.
+    guard remaining.allSatisfy(\.safe) else { return nil }
+    // Keep the remaining conjuncts in a `.select` ABOVE the stack. Each
+    // semijoin's width == the source's, so they and everything above still
+    // address the same slots.
+    return remaining.conjunction.map { .select($0, node) } ?? node
   }
 
   /// The `.semijoin` node for a correlated `EXISTS`/`NOT EXISTS` body over

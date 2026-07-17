@@ -116,6 +116,52 @@ private func semijoins(_ plan: Plan, anti wanted: Bool) -> Bool {
   }
 }
 
+/// The number of `.semijoin` nodes `plan` (and its descendants) carries — the
+/// count of EXISTS conjuncts lifted into the stack. Two decorrelatable EXISTS
+/// of one WHERE lift into TWO stacked semijoins, so this returns 2.
+private func semijoinCount(_ plan: Plan) -> Int {
+  switch plan {
+  case let .semijoin(left, right, _, _):
+    return 1 + semijoinCount(left) + semijoinCount(right)
+  case let .derived(_, source, _, _):
+    return semijoinCount(source)
+  case let .select(_, source), let .project(_, source), let .sort(_, source),
+       let .distinct(source), let .limit(_, _, source),
+       let .aggregate(_, _, source):
+    return semijoinCount(source)
+  case let .product(left, right), let .outer(left, right, _, _),
+       let .setop(_, left, right, _):
+    return semijoinCount(left) + semijoinCount(right)
+  case .single, .scan, .join, .apply:
+    return 0
+  }
+}
+
+/// The number of `.semijoin` nodes of the given `anti` sense `plan` (and its
+/// descendants) carries. Unlike `semijoins(_:anti:)`, which inspects only the
+/// FIRST semijoin it reaches, this descends THROUGH a semijoin's own left, so a
+/// stacked SEMI-over-ANTI reports one of each.
+private func semijoinCount(_ plan: Plan, anti wanted: Bool) -> Int {
+  switch plan {
+  case let .semijoin(left, right, _, anti):
+    return (anti == wanted ? 1 : 0)
+        + semijoinCount(left, anti: wanted)
+        + semijoinCount(right, anti: wanted)
+  case let .derived(_, source, _, _):
+    return semijoinCount(source, anti: wanted)
+  case let .select(_, source), let .project(_, source), let .sort(_, source),
+       let .distinct(source), let .limit(_, _, source),
+       let .aggregate(_, _, source):
+    return semijoinCount(source, anti: wanted)
+  case let .product(left, right), let .outer(left, right, _, _),
+       let .setop(_, left, right, _):
+    return semijoinCount(left, anti: wanted)
+        + semijoinCount(right, anti: wanted)
+  case .single, .scan, .join, .apply:
+    return 0
+  }
+}
+
 /// Whether `plan` (or any descendant) carries a residual correlated `.exists`
 /// conjunct in a `.select`'s filter — the witness an EXISTS was NOT rewritten
 /// (it stayed correlated). Scans every conjunct of each `.select` filter, so an
@@ -1342,5 +1388,160 @@ struct DecorrelateExistsExclusionTests {
     #expect(!semijoins(try fixture().optimised(sql)))
     #expect(exists(in: try fixture().optimised(sql)))
     try fixture().expect(sql + " ORDER BY T.Id", yields: [[1], [2], [3]])
+  }
+}
+
+// MARK: - Multiple decorrelatable EXISTS → STACKED semijoins
+
+/// Oracles for lifting MORE THAN ONE decorrelatable EXISTS conjunct of a single
+/// WHERE. Each such conjunct becomes its OWN semijoin stacked over the source,
+/// so the AND of independent existence tests is an AND of stacked semijoins —
+/// order-independent, at-most-once per left row. Each case pins BOTH the count
+/// of stacked semijoins (no residual `.exists`) AND the known-correct multiset
+/// the correlated `exists` evaluator produces.
+struct DecorrelateMultiExistsTests {
+  /// A parent `T` and TWO children `S`, `U` keyed on `T.Id`. Id 1 has a match
+  /// in BOTH, Id 2 only in `S`, Id 3 in NEITHER — the AND survives Id 1 alone,
+  /// so lifting both semijoins must drop Ids 2 and 3.
+  private func twoChildFixture() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("T", ["Id": .integer]) {
+        Row(1)
+        Row(2)
+        Row(3)
+      }
+      Relation("S", ["k": .integer, "x": .integer]) {
+        Row(1, 100)
+        Row(2, 200)       // Id 2 matches S only
+      }
+      Relation("U", ["k": .integer, "y": .integer]) {
+        Row(1, 900)       // Id 1 matches U (and S); Id 2, 3 do not
+      }
+    }
+  }
+
+  /// BOTH LIFT: two decorrelatable EXISTS of one WHERE become TWO stacked
+  /// semijoins (no residual `.exists`), the result the rows matching BOTH: Id 1
+  /// alone (Id 2 matches only `S`, dropped; Id 3 matches neither, dropped).
+  @Test func `two decorrelatable EXISTS lift into two stacked semijoins`()
+      throws {
+    let sql =
+        "SELECT T.Id FROM T " +
+        "WHERE EXISTS (SELECT 1 FROM S WHERE S.k = T.Id) " +
+        "AND EXISTS (SELECT 1 FROM U WHERE U.k = T.Id)"
+    let plan = try twoChildFixture().optimised(sql)
+    #expect(semijoinCount(plan) == 2)           // BOTH lifted
+    #expect(!exists(in: plan))                   // no residual EXISTS
+    try twoChildFixture().expect(sql + " ORDER BY T.Id", yields: [[1]])
+  }
+
+  /// AT-MOST-ONCE ACROSS THE STACK: an outer row whose BOTH bodies match MANY
+  /// inner rows appears EXACTLY ONCE — a semijoin tests existence, it does not
+  /// multiply, and stacking two preserves at-most-once. Id 1 matches two `S`
+  /// rows and two `U` rows (four combinations a join would emit), yet the SEMI
+  /// stack yields it once.
+  @Test func `an outer row matching many in both bodies appears once`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["Id": .integer]) {
+        Row(1)
+      }
+      Relation("S", ["k": .integer, "x": .integer]) {
+        Row(1, 100)
+        Row(1, 101)       // Id 1 matches S twice
+      }
+      Relation("U", ["k": .integer, "y": .integer]) {
+        Row(1, 900)
+        Row(1, 901)       // Id 1 matches U twice
+      }
+    }
+    let sql =
+        "SELECT T.Id FROM T " +
+        "WHERE EXISTS (SELECT 1 FROM S WHERE S.k = T.Id) " +
+        "AND EXISTS (SELECT 1 FROM U WHERE U.k = T.Id)"
+    #expect(semijoinCount(try catalog.optimised(sql)) == 2)
+    // A join would emit Id 1 four times (2 × 2); the SEMI stack emits it ONCE.
+    try catalog.expect(sql, yields: [[1]])
+  }
+
+  /// MIXED SENSE: `EXISTS(...) AND NOT EXISTS(...)` lifts a SEMI over `S` and
+  /// an ANTI over `U` — the complement rows. Id 1 has a child in BOTH (SEMI
+  /// keeps, ANTI drops), Id 2 in `S` only (SEMI keeps, ANTI keeps), Id 3 in
+  /// neither (SEMI drops). Only Id 2 survives both.
+  @Test func `a SEMI and an ANTI in one WHERE both lift`() throws {
+    let sql =
+        "SELECT T.Id FROM T " +
+        "WHERE EXISTS (SELECT 1 FROM S WHERE S.k = T.Id) " +
+        "AND NOT EXISTS (SELECT 1 FROM U WHERE U.k = T.Id)"
+    let plan = try twoChildFixture().optimised(sql)
+    #expect(semijoinCount(plan) == 2)
+    #expect(semijoinCount(plan, anti: false) == 1)   // the EXISTS over S
+    #expect(semijoinCount(plan, anti: true) == 1)    // the NOT EXISTS over U
+    #expect(!exists(in: plan))
+    try twoChildFixture().expect(sql + " ORDER BY T.Id", yields: [[2]])
+  }
+
+  /// A DECORRELATABLE EXISTS beside a NON-decorrelatable one (an aggregate
+  /// body): the whole select STAYS correlated. The non-decorrelatable exists is
+  /// an UNSAFE non-lifted sibling, so it blocks all lifting (no semijoin). The
+  /// run is still correct: Id 1's `S` child exists AND its aggregate body
+  /// always yields a row (COUNT of an empty group is 0), so Ids 1, 2 (S
+  /// children) survive, Id 3 does not.
+  @Test func `a decorrelatable plus a non-decorrelatable EXISTS stay bound`()
+      throws {
+    let sql =
+        "SELECT T.Id FROM T " +
+        "WHERE EXISTS (SELECT 1 FROM S WHERE S.k = T.Id) " +
+        "AND EXISTS (SELECT COUNT(*) FROM U WHERE U.k = T.Id)"
+    let plan = try twoChildFixture().optimised(sql)
+    #expect(semijoinCount(plan) == 0)            // nothing lifted
+    #expect(exists(in: plan))                    // still residual EXISTS
+    try twoChildFixture().expect(sql + " ORDER BY T.Id", yields: [[1], [2]])
+  }
+
+  /// ADVERSARIAL SIBLING THROW-VISIBILITY across TWO liftable EXISTS: an unsafe
+  /// non-exists sibling `(1 / T.v) = 0` shares the WHERE with two
+  /// decorrelatable EXISTS. A `v = 0` row whose EXISTS conjuncts do NOT all
+  /// hold makes the correlated select evaluate the whole AND and THROW
+  /// `.divide` (the sibling is first, so it is reached before the false
+  /// EXISTS). A stack that dropped that row via a semijoin would HIDE the
+  /// throw, so the guard leaves the WHOLE select correlated (no semijoin) — and
+  /// the run MUST throw.
+  @Test func `an unsafe sibling blocks all lifting and throws`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["Id": .integer, "v": .integer]) {
+        Row(9, 0)         // v = 0 ⇒ 1 / v faults; Id 9 has NO S/U child, so its
+                          // EXISTS conjuncts are false ⇒ a stack would drop it
+      }
+      Relation("S", ["k": .integer, "x": .integer]) {
+        Row(1, 100)       // keyed to Id 1, never to Id 9
+      }
+      Relation("U", ["k": .integer, "y": .integer]) {
+        Row(1, 900)       // keyed to Id 1, never to Id 9
+      }
+    }
+    let sql =
+        "SELECT T.Id FROM T " +
+        "WHERE (1 / T.v) = 0 " +
+        "AND EXISTS (SELECT 1 FROM S WHERE S.k = T.Id) " +
+        "AND EXISTS (SELECT 1 FROM U WHERE U.k = T.Id)"
+    let plan = try catalog.optimised(sql)
+    #expect(semijoinCount(plan) == 0)            // nothing lifted (unsafe kin)
+    #expect(exists(in: plan))                    // still residual EXISTS
+    catalog.expect(sql, fails: .divide)          // and it MUST throw
+  }
+
+  /// REGRESSION: a SINGLE decorrelatable EXISTS beside a SAFE non-exists kin
+  /// still lifts EXACTLY as before — one semijoin, the sibling kept in a
+  /// `.select` above. `T.Id < 3 AND EXISTS(over S)`: Id 1, Id 2 (S child, < 3)
+  /// survive; Id 3 fails the sibling. The multi-lift path is a strict superset.
+  @Test func `a single EXISTS beside a safe sibling still lifts once`() throws {
+    let sql =
+        "SELECT T.Id FROM T " +
+        "WHERE T.Id < 3 AND EXISTS (SELECT 1 FROM S WHERE S.k = T.Id)"
+    let plan = try twoChildFixture().optimised(sql)
+    #expect(semijoinCount(plan) == 1)           // exactly one lift
+    #expect(semijoins(plan, anti: false))
+    #expect(!exists(in: plan))
+    try twoChildFixture().expect(sql + " ORDER BY T.Id", yields: [[1], [2]])
   }
 }

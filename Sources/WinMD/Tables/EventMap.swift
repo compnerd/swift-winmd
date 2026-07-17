@@ -10,7 +10,7 @@ private let _fields: InlineArray<_, Field> = [
   Field(name: "EventList", type: .index(.simple(Metadata.Tables.EventDef.self))),
 ]
 
-private let _offsets = offsets(_fields)
+private let offsets = WinMD.offsets(of: _fields)
 
 extension Metadata.Tables {
 /// See §II.22.12.
@@ -22,7 +22,7 @@ public enum EventMap: TableSchema {
   }
 
   public static func offset(_ i: Int) -> Int {
-    _offsets[i]
+    offsets[i]
   }
 }
 }

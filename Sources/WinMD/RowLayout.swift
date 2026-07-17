@@ -23,12 +23,12 @@ extension Field {
 /// fields preceding it. These offsets are a compile-time property of a schema;
 /// the wide indices of a particular database shift them by the width bitset at
 /// read time.
-internal func offsets<let N: Int>(_ fields: InlineArray<N, Field>)
+internal func offsets<let N: Int>(of fields: InlineArray<N, Field>)
     -> InlineArray<N, Int> {
-  InlineArray<N, Int> { i in
+  InlineArray<N, Int> { index in
     var offset = 0
-    for j in 0 ..< i {
-      offset = offset + fields[j].width
+    for position in 0 ..< index {
+      offset = offset + fields[position].width
     }
     return offset
   }

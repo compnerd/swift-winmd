@@ -14,7 +14,7 @@ private let _fields: InlineArray<_, Field> = [
   Field(name: "AssemblyRef", type: .index(.simple(Metadata.Tables.AssemblyRef.self))),
 ]
 
-private let _offsets = offsets(_fields)
+private let offsets = WinMD.offsets(of: _fields)
 
 extension Metadata.Tables {
 /// See §II.22.3.
@@ -26,7 +26,7 @@ public enum AssemblyRefOS: TableSchema {
   }
 
   public static func offset(_ i: Int) -> Int {
-    _offsets[i]
+    offsets[i]
   }
 }
 }

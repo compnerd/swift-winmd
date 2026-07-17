@@ -6,6 +6,101 @@ import Testing
 
 import func SQLTestSupport.parse
 
+private struct Failure: Sendable, CustomTestStringConvertible {
+  internal let name: String
+  internal let text: String
+
+  internal var testDescription: String { name }
+}
+
+private let kBlobs: Array<Failure> = [
+  Failure(name: "odd hex digit count",
+          text: "SELECT * FROM T WHERE a = x'abc'"),
+  Failure(name: "non-hex digit", text: "SELECT * FROM T WHERE a = x'gg'"),
+  Failure(name: "unterminated blob",
+          text: "SELECT * FROM T WHERE a = x'abcd"),
+]
+
+private let kSyntax: Array<Failure> = [
+  Failure(name: "missing FROM", text: "SELECT TypeName TypeDef"),
+  Failure(name: "invalid operator", text: "SELECT * FROM T WHERE a ! 1"),
+  Failure(name: "unterminated string",
+          text: "SELECT * FROM T WHERE a = 'unterminated"),
+  Failure(name: "trailing tokens", text: "SELECT * FROM T t garbage"),
+  Failure(name: "empty projection", text: "SELECT FROM T"),
+  Failure(name: "FROM without a relation", text: "SELECT * FROM"),
+]
+
+private struct Quantifier: Sendable, CustomTestStringConvertible {
+  internal let name: String
+  internal let text: String
+  internal let distinct: Bool
+  internal let columns: Array<Column>?
+  internal let fromless: Bool
+
+  internal var testDescription: String { name }
+}
+
+private let kQuantifiers: Array<Quantifier> = [
+  Quantifier(name: "plain SELECT", text: "SELECT TypeName FROM TypeDef",
+             distinct: false, columns: nil, fromless: false),
+  Quantifier(name: "SELECT DISTINCT",
+             text: "SELECT DISTINCT TypeName FROM TypeDef", distinct: true,
+             columns: ["TypeName"], fromless: false),
+  Quantifier(name: "SELECT ALL", text: "SELECT ALL TypeName FROM TypeDef",
+             distinct: false, columns: ["TypeName"], fromless: false),
+  Quantifier(name: "case-insensitive DISTINCT",
+             text: "select distinct TypeName from TypeDef", distinct: true,
+             columns: nil, fromless: false),
+  Quantifier(name: "FROM-less DISTINCT", text: "SELECT DISTINCT 1",
+             distinct: true, columns: nil, fromless: true),
+]
+
+private struct Direction: Sendable, CustomTestStringConvertible {
+  internal let name: String
+  internal let text: String
+  internal let ascending: Bool
+
+  internal var testDescription: String { name }
+}
+
+private let kDirections: Array<Direction> = [
+  Direction(name: "implicit ascending",
+            text: "SELECT * FROM T ORDER BY TypeName", ascending: true),
+  Direction(name: "explicit ascending",
+            text: "SELECT * FROM T ORDER BY TypeName ASC", ascending: true),
+  Direction(name: "descending",
+            text: "SELECT * FROM T ORDER BY TypeName DESC", ascending: false),
+]
+
+private struct Splitting: Sendable, CustomTestStringConvertible {
+  internal let text: String
+  internal let qualifier: String?
+  internal let name: String
+
+  internal var testDescription: String { text }
+}
+
+private let kColumns: Array<Splitting> = [
+  Splitting(text: "t.Name", qualifier: "t", name: "Name"),
+  Splitting(text: "Name", qualifier: nil, name: "Name"),
+  Splitting(text: "t.a.b", qualifier: "t.a", name: "b"),
+]
+
+private struct Aliasing: Sendable, CustomTestStringConvertible {
+  internal let name: String
+  internal let text: String
+  internal let alias: String?
+
+  internal var testDescription: String { name }
+}
+
+private let kAliases: Array<Aliasing> = [
+  Aliasing(name: "bare relation", text: "SELECT * FROM TypeDef", alias: nil),
+  Aliasing(name: "AS alias", text: "SELECT * FROM TypeDef AS t", alias: "t"),
+  Aliasing(name: "implicit alias", text: "SELECT * FROM TypeDef t", alias: "t"),
+]
+
 struct ProjectionTests {
   @Test func `parses a SELECT * projection`() throws {
     let select = try parse(select: "SELECT * FROM TypeDef")
@@ -63,32 +158,16 @@ struct KeywordTests {
 }
 
 struct SetQuantifierTests {
-  @Test func `a plain SELECT is not distinct`() throws {
-    let select = try parse(select: "SELECT TypeName FROM TypeDef")
-    #expect(!select.distinct)
-  }
-
-  @Test func `SELECT DISTINCT sets the distinct flag`() throws {
-    let select = try parse(select: "SELECT DISTINCT TypeName FROM TypeDef")
-    #expect(select.distinct)
-    #expect(select.projection == .columns(["TypeName"]))
-  }
-
-  @Test func `SELECT ALL is the default, not distinct`() throws {
-    let select = try parse(select: "SELECT ALL TypeName FROM TypeDef")
-    #expect(!select.distinct)
-    #expect(select.projection == .columns(["TypeName"]))
-  }
-
-  @Test func `DISTINCT is case-insensitive`() throws {
-    let select = try parse(select: "select distinct TypeName from TypeDef")
-    #expect(select.distinct)
-  }
-
-  @Test func `DISTINCT applies to a FROM-less scalar select`() throws {
-    let select = try parse(select: "SELECT DISTINCT 1")
-    #expect(select.distinct)
-    #expect(select.from == nil)
+  @Test(arguments: kQuantifiers)
+  fileprivate func parses(_ test: Quantifier) throws {
+    let select = try parse(select: test.text)
+    #expect(select.distinct == test.distinct)
+    if let columns = test.columns {
+      #expect(select.projection == .columns(columns))
+    }
+    if test.fromless {
+      #expect(select.from == nil)
+    }
   }
 }
 
@@ -210,19 +289,11 @@ struct PredicateTests {
 }
 
 struct OrderTests {
-  @Test func `defaults ORDER BY to ascending`() throws {
-    let select = try parse(select: "SELECT * FROM T ORDER BY TypeName")
-    #expect(select.order == Order(column: "TypeName", ascending: true))
-  }
-
-  @Test func `parses an explicit ASC order`() throws {
-    let select = try parse(select: "SELECT * FROM T ORDER BY TypeName ASC")
-    #expect(select.order == Order(column: "TypeName", ascending: true))
-  }
-
-  @Test func `parses a DESC order`() throws {
-    let select = try parse(select: "SELECT * FROM T ORDER BY TypeName DESC")
-    #expect(select.order == Order(column: "TypeName", ascending: false))
+  @Test(arguments: kDirections)
+  fileprivate func parses(_ test: Direction) throws {
+    let select = try parse(select: test.text)
+    #expect(select.order
+                == Order(column: "TypeName", ascending: test.ascending))
   }
 
   @Test func `parses a comma-separated list of sort keys`() throws {
@@ -333,43 +404,20 @@ struct CompositeTests {
 }
 
 struct ColumnTests {
-  @Test func `splits a dotted column into qualifier and name`() {
-    let column = Column("t.Name")
-    #expect(column.qualifier == "t")
-    #expect(column.name == "Name")
-  }
-
-  @Test func `leaves an undotted column unqualified`() {
-    let column = Column("Name")
-    #expect(column.qualifier == nil)
-    #expect(column.name == "Name")
-  }
-
-  @Test func `splits on the last dot only`() {
-    // A two-part relation name may qualify a column — the reserved
-    // `information_schema.tables.table_name` — so the split takes the text
-    // before the LAST dot as the qualifier and the rest as the name.
-    let column = Column("t.a.b")
-    #expect(column.qualifier == "t.a")
-    #expect(column.name == "b")
+  @Test(arguments: kColumns)
+  fileprivate func splits(_ test: Splitting) {
+    let column = Column(test.text)
+    #expect(column.qualifier == test.qualifier)
+    #expect(column.name == test.name)
   }
 }
 
 struct RelationTests {
-  @Test func `parses a bare FROM relation with no alias`() throws {
-    let select = try parse(select: "SELECT * FROM TypeDef")
-    #expect(select.from == Relation(name: "TypeDef"))
+  @Test(arguments: kAliases)
+  fileprivate func parses(_ test: Aliasing) throws {
+    let select = try parse(select: test.text)
+    #expect(select.from == Relation(name: "TypeDef", alias: test.alias))
     #expect(select.joins.isEmpty)
-  }
-
-  @Test func `parses an AS alias on the FROM relation`() throws {
-    let select = try parse(select: "SELECT * FROM TypeDef AS t")
-    #expect(select.from == Relation(name: "TypeDef", alias: "t"))
-  }
-
-  @Test func `parses an implicit (AS-less) alias`() throws {
-    let select = try parse(select: "SELECT * FROM TypeDef t")
-    #expect(select.from == Relation(name: "TypeDef", alias: "t"))
   }
 
   @Test func `does not mistake a following keyword for an alias`() throws {
@@ -547,65 +595,19 @@ struct LiteralTests {
     #expect(select.projection == .columns(["x"]))
   }
 
-  @Test func `rejects a blob with an odd hex digit count`() {
+  @Test(arguments: kBlobs)
+  fileprivate func rejects(_ test: Failure) {
     #expect(throws: SQLError.self) {
-      _ = try Statement(parsing: "SELECT * FROM T WHERE a = x'abc'")
-    }
-  }
-
-  @Test func `rejects a blob with a non-hex digit`() {
-    #expect(throws: SQLError.self) {
-      _ = try Statement(parsing: "SELECT * FROM T WHERE a = x'gg'")
-    }
-  }
-
-  @Test func `rejects an unterminated blob`() {
-    #expect(throws: SQLError.self) {
-      _ = try Statement(parsing: "SELECT * FROM T WHERE a = x'abcd")
+      _ = try Statement(parsing: test.text)
     }
   }
 }
 
 struct ErrorTests {
-  @Test func `rejects a query missing FROM`() {
+  @Test(arguments: kSyntax)
+  fileprivate func rejects(_ test: Failure) {
     #expect(throws: SQLError.self) {
-      _ = try Statement(parsing: "SELECT TypeName TypeDef")
-    }
-  }
-
-  @Test func `rejects an invalid operator`() {
-    #expect(throws: SQLError.self) {
-      _ = try Statement(parsing: "SELECT * FROM T WHERE a ! 1")
-    }
-  }
-
-  @Test func `rejects an unterminated string`() {
-    #expect(throws: SQLError.self) {
-      _ = try Statement(parsing: "SELECT * FROM T WHERE a = 'unterminated")
-    }
-  }
-
-  @Test func `rejects trailing tokens`() {
-    // A bare identifier after the relation is now an implicit alias, so
-    // trailing garbage must come after a clause that admits no alias — here a
-    // second identifier past the relation's (implicit) alias.
-    #expect(throws: SQLError.self) {
-      _ = try Statement(parsing: "SELECT * FROM T t garbage")
-    }
-  }
-
-  @Test func `rejects an empty projection`() {
-    #expect(throws: SQLError.self) {
-      _ = try Statement(parsing: "SELECT FROM T")
-    }
-  }
-
-  @Test func `rejects a FROM keyword with no following relation`() {
-    // FROM is now optional, so `SELECT *` parses as a FROM-less projection (the
-    // engine rejects a `*` with no relation). A bare FROM with no relation,
-    // though, ends the input where a relation is required.
-    #expect(throws: SQLError.self) {
-      _ = try Statement(parsing: "SELECT * FROM")
+      _ = try Statement(parsing: test.text)
     }
   }
 

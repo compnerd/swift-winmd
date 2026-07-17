@@ -8,47 +8,42 @@ import SQLTestSupport
 
 // MARK: - NULL tests
 
+private struct Selection: Sendable, CustomTestStringConvertible {
+  internal let name: String
+  internal let text: String
+  internal let expected: Array<Array<Value>>
+
+  internal var testDescription: String { name }
+}
+
+private let kNullable: Array<Selection> = [
+  Selection(name: "IS NULL", text: "SELECT Id FROM Maybe WHERE Note IS NULL",
+            expected: [[.integer(2)], [.integer(4)]]),
+  Selection(name: "IS NOT NULL",
+            text: "SELECT Id FROM Maybe WHERE Note IS NOT NULL",
+            expected: [[.integer(1)], [.integer(3)]]),
+  Selection(name: "comparison against NULL",
+            text: "SELECT Id FROM Maybe WHERE Note = 'alpha'",
+            expected: [[.integer(1)]]),
+  Selection(name: "NOT of a NULL comparison",
+            text: "SELECT Id FROM Maybe WHERE NOT Note = 'alpha'",
+            expected: [[.integer(3)]]),
+  Selection(name: "NULL projection",
+            text: "SELECT Note FROM Maybe WHERE Id = 2", expected: [[.null]]),
+  Selection(name: "ascending NULL order",
+            text: "SELECT Id FROM Maybe ORDER BY Note ASC",
+            expected: [[.integer(2)], [.integer(4)], [.integer(1)],
+                       [.integer(3)]]),
+  Selection(name: "descending NULL order",
+            text: "SELECT Id FROM Maybe ORDER BY Note DESC",
+            expected: [[.integer(3)], [.integer(1)], [.integer(2)],
+                       [.integer(4)]]),
+]
+
 struct EngineNullTests {
-  @Test func `IS NULL admits only the NULL rows`() throws {
-    try engineNullable().expect("SELECT Id FROM Maybe WHERE Note IS NULL",
-                          yields: [[2], [4]])
-  }
-
-  @Test func `IS NOT NULL admits only the non-NULL rows`() throws {
-    let rows = try engineNullable("SELECT Id FROM Maybe WHERE Note IS NOT NULL")
-    #expect(rows == [[.integer(1)], [.integer(3)]])
-  }
-
-  @Test func `a comparison against a NULL cell is UNKNOWN and rejects`() throws {
-    // For the NULL rows (2, 4) `Note = 'alpha'` is UNKNOWN, not false, so they
-    // are not admitted; only the row whose Note equals 'alpha' survives.
-    try engineNullable().expect("SELECT Id FROM Maybe WHERE Note = 'alpha'",
-                          yields: [[1]])
-  }
-
-  @Test func `NOT of a NULL comparison stays UNKNOWN and rejects`() throws {
-    // The NULL rows are UNKNOWN; NOT UNKNOWN is UNKNOWN, so they still reject —
-    // only the non-null, non-'alpha' row survives.
-    let rows = try engineNullable("SELECT Id FROM Maybe WHERE NOT Note = 'alpha'")
-    #expect(rows == [[.integer(3)]])
-  }
-
-  @Test func `a NULL cell projects as a NULL value`() throws {
-    try engineNullable().expect("SELECT Note FROM Maybe WHERE Id = 2",
-                          yields: [[nil]])
-  }
-
-  @Test func `ORDER BY ascending sorts NULL keys first, then by value`() throws {
-    // NULL holds a stable position — first in ascending order — so the non-null
-    // notes still sort among themselves ('alpha' before 'gamma') rather than
-    // tying with the nulls and leaving the order undefined.
-    try engineNullable().expect("SELECT Id FROM Maybe ORDER BY Note ASC",
-                          yields: [[2], [4], [1], [3]])
-  }
-
-  @Test func `ORDER BY descending sorts NULL keys last`() throws {
-    try engineNullable().expect("SELECT Id FROM Maybe ORDER BY Note DESC",
-                          yields: [[3], [1], [2], [4]])
+  @Test(arguments: kNullable)
+  fileprivate func runs(_ test: Selection) throws {
+    #expect(try engineNullable(test.text) == test.expected)
   }
 
   @Test func `a NULL outer join key matches no inner row`() throws {
@@ -74,32 +69,40 @@ private func boundRun(_ text: String, _ bindings: Bindings)
   try engineFamily().run(engineParse(text), Routines(), bindings: bindings)
 }
 
+private struct Binding: Sendable, CustomTestStringConvertible {
+  internal let name: String
+  internal let text: String
+  internal let bindings: Bindings
+  internal let expected: Array<Array<Value>>
+
+  internal var testDescription: String { name }
+}
+
+private let kBindings: Array<Binding> = [
+  Binding(name: "bound integer",
+          text: "SELECT Name FROM Child WHERE Pid = :pid",
+          bindings: ["pid": .integer(1)],
+          expected: [[.text("Ann")], [.text("Amy")]]),
+  Binding(name: "bound text", text: "SELECT Id FROM Parent WHERE Name = :who",
+          bindings: ["who": .text("Bee")], expected: [[.integer(2)]]),
+  Binding(name: "unbound", text: "SELECT Name FROM Child WHERE Pid = :pid",
+          bindings: [:], expected: []),
+  Binding(name: "bound conjunction",
+          text: "SELECT Name FROM Child WHERE Pid = :pid AND Name = 'Amy'",
+          bindings: ["pid": .integer(1)], expected: [[.text("Amy")]]),
+  Binding(name: "unbound under NOT",
+          text: "SELECT Name FROM Child WHERE NOT Pid = :pid", bindings: [:],
+          expected: []),
+  Binding(name: "bound under NOT",
+          text: "SELECT Name FROM Child WHERE NOT Pid = :pid",
+          bindings: ["pid": .integer(1)],
+          expected: [[.text("Bob")], [.text("Orphan")]]),
+]
+
 struct EngineBoundTests {
-  @Test func `a bound parameter filters rows by an outer value`() throws {
-    // The child relation keyed on a bound parent id — the section primitive: a
-    // template renders an interface's methods by binding the interface key and
-    // running the child query.
-    let rows = try boundRun("SELECT Name FROM Child WHERE Pid = :pid",
-                            ["pid": .integer(1)])
-    #expect(rows == [[.text("Ann")], [.text("Amy")]])
-  }
-
-  @Test func `a bound text parameter compares against a text column`() throws {
-    let rows = try boundRun("SELECT Id FROM Parent WHERE Name = :who",
-                            ["who": .text("Bee")])
-    #expect(rows == [[.integer(2)]])
-  }
-
-  @Test func `an unbound parameter admits no row`() throws {
-    let rows = try boundRun("SELECT Name FROM Child WHERE Pid = :pid", [:])
-    #expect(rows.isEmpty)
-  }
-
-  @Test func `a bound parameter conjoined with another predicate`() throws {
-    let rows = try boundRun("""
-        SELECT Name FROM Child WHERE Pid = :pid AND Name = 'Amy'
-        """, ["pid": .integer(1)])
-    #expect(rows == [[.text("Amy")]])
+  @Test(arguments: kBindings)
+  fileprivate func runs(_ test: Binding) throws {
+    #expect(try boundRun(test.text, test.bindings) == test.expected)
   }
 
   @Test func `a correlated section runs a child query per outer row`() throws {
@@ -129,19 +132,6 @@ struct EngineBoundTests {
     #expect(sections[1].children == ["Bob"])
     #expect(sections[2].parent == "Cid")
     #expect(sections[2].children.isEmpty)
-  }
-
-  @Test func `an unbound parameter under NOT still admits no rows`() throws {
-    // A missing binding is UNKNOWN, not false; NOT preserves UNKNOWN rather
-    // than inverting it into a match, so the predicate admits nothing.
-    let rows = try boundRun("SELECT Name FROM Child WHERE NOT Pid = :pid", [:])
-    #expect(rows.isEmpty)
-  }
-
-  @Test func `a bound parameter under NOT inverts the match`() throws {
-    let rows = try boundRun("SELECT Name FROM Child WHERE NOT Pid = :pid",
-                            ["pid": .integer(1)])
-    #expect(rows == [[.text("Bob")], [.text("Orphan")]])
   }
 
   @Test func `a bound key plans a seek when its value is known`() throws {

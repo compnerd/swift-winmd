@@ -19,136 +19,102 @@ private func lex(_ text: String) throws -> Array<Token.Kind> {
   try tokens(text).map(\.kind)
 }
 
+private struct Lexing: Sendable, CustomTestStringConvertible {
+  internal let name: String
+  internal let text: String
+  internal let expected: Array<Token.Kind>
+
+  internal var testDescription: String { name }
+}
+
+private let kLexing: Array<Lexing> = [
+  Lexing(name: "every keyword",
+         text: "SELECT FROM WHERE ORDER BY ASC DESC AND OR NOT",
+         expected: [.select, .from, .where, .order, .by, .asc, .desc,
+                    .and, .or, .not]),
+  Lexing(name: "case-insensitive keywords", text: "select Order by",
+         expected: [.select, .order, .by]),
+  Lexing(name: "join keywords", text: "JOIN ON AS",
+         expected: [.join, .on, .as]),
+  Lexing(name: "case-insensitive join keywords", text: "join on As",
+         expected: [.join, .on, .as]),
+  Lexing(name: "NULL-test keywords", text: "IS NOT NULL is null",
+         expected: [.is, .not, .null, .is, .null]),
+  Lexing(name: "WITH-clause keywords", text: "WITH RECURSIVE",
+         expected: [.with, .recursive]),
+  Lexing(name: "case-insensitive WITH-clause keywords",
+         text: "with Recursive", expected: [.with, .recursive]),
+  Lexing(name: "row-limiting keywords and synonyms",
+         text: "OFFSET FETCH FIRST ROWS ONLY ROW NEXT",
+         expected: [.offset, .fetch, .first, .rows, .only, .rows, .first]),
+  Lexing(name: "comparison operators", text: "= <> < > <= >=",
+         expected: [.equal, .unequal, .lt, .gt, .leq, .geq]),
+  Lexing(name: "punctuation", text: "* , ( )",
+         expected: [.star, .comma, .lparen, .rparen]),
+  Lexing(name: "dotted identifier", text: "TypeDef.TypeName",
+         expected: [.identifier("TypeDef.TypeName")]),
+  Lexing(name: "integer literals", text: "0 42 1024",
+         expected: [.integer(0), .integer(42), .integer(1024)]),
+  Lexing(name: "decimal fractions", text: "3.14 1.0 0.5",
+         expected: [.decimal(3.14), .decimal(1.0), .decimal(0.5)]),
+  Lexing(name: "decimal exponents", text: "1e3 2.5e-1 6E2 1.5e+2",
+         expected: [.decimal(1e3), .decimal(2.5e-1),
+                    .decimal(6e2), .decimal(1.5e2)]),
+  Lexing(name: "bare digits remain integers", text: "7 100",
+         expected: [.integer(7), .integer(100)]),
+  Lexing(name: "fractions require a digit after the dot", text: "1.5 1.5e0",
+         expected: [.decimal(1.5), .decimal(1.5)]),
+  Lexing(name: "an e without exponent digits", text: "1e",
+         expected: [.integer(1), .identifier("e")]),
+  Lexing(name: "qualified reference", text: "Field.Flags",
+         expected: [.identifier("Field.Flags")]),
+  Lexing(name: "quoted string", text: "'Windows.Win32.Foundation'",
+         expected: [.string("Windows.Win32.Foundation")]),
+  Lexing(name: "doubled quote in a string", text: "'O''Brien'",
+         expected: [.string("O'Brien")]),
+  Lexing(name: "empty string", text: "''", expected: [.string("")]),
+  Lexing(name: "delimited identifiers",
+         text: "\"Offset\" \"select\" \"a.b\"",
+         expected: [.quoted("Offset"), .quoted("select"), .quoted("a.b")]),
+  Lexing(name: "doubled quote in a delimited identifier",
+         text: "\"a\"\"b\"", expected: [.quoted("a\"b")]),
+  Lexing(name: "tokens without whitespace", text: "a<=1",
+         expected: [.identifier("a"), .leq, .integer(1)]),
+  Lexing(name: "line comment between tokens",
+         text: "SELECT -- pick a star\n*", expected: [.select, .star]),
+  Lexing(name: "line comment at end of input",
+         text: "SELECT * -- trailing", expected: [.select, .star]),
+  Lexing(name: "block comment spanning a newline",
+         text: "SELECT /* a\n block */ *", expected: [.select, .star]),
+  Lexing(name: "block comment between tokens",
+         text: "SELECT /* star */ *", expected: [.select, .star]),
+  Lexing(name: "lone minus and slash operators", text: "a - 1 / 2",
+         expected: [.identifier("a"), .minus, .integer(1), .slash,
+                    .integer(2)]),
+  Lexing(name: "bound-parameter placeholder", text: "WHERE a = :pid",
+         expected: [.where, .identifier("a"), .equal, .parameter("pid")]),
+]
+
+private struct Fault: Sendable, CustomTestStringConvertible {
+  internal let name: String
+  internal let text: String
+
+  internal var testDescription: String { name }
+}
+
+private let kFaults: Array<Fault> = [
+  Fault(name: "decimal overflow", text: "1e9999"),
+  Fault(name: "unexpected character", text: "SELECT @ FROM T"),
+  Fault(name: "unterminated string", text: "'oops"),
+  Fault(name: "unterminated delimited identifier", text: "\"oops"),
+  Fault(name: "unterminated block comment", text: "SELECT /* oops"),
+  Fault(name: "colon without an identifier", text: "SELECT : FROM T"),
+]
+
 struct LexerTests {
-  @Test func `lexes every keyword`() throws {
-    #expect(try lex("SELECT FROM WHERE ORDER BY ASC DESC AND OR NOT")
-                == [.select, .from, .where, .order, .by, .asc, .desc,
-                    .and, .or, .not])
-  }
-
-  @Test func `lexes keywords case-insensitively`() throws {
-    #expect(try lex("select Order by") == [.select, .order, .by])
-  }
-
-  @Test func `lexes the join keywords`() throws {
-    #expect(try lex("JOIN ON AS") == [.join, .on, .as])
-  }
-
-  @Test func `lexes the join keywords case-insensitively`() throws {
-    #expect(try lex("join on As") == [.join, .on, .as])
-  }
-
-  @Test func `lexes the NULL-test keywords`() throws {
-    #expect(try lex("IS NOT NULL") == [.is, .not, .null])
-    #expect(try lex("is null") == [.is, .null])
-  }
-
-  @Test func `lexes the WITH-clause keywords`() throws {
-    #expect(try lex("WITH RECURSIVE") == [.with, .recursive])
-  }
-
-  @Test func `lexes the WITH-clause keywords case-insensitively`() throws {
-    #expect(try lex("with Recursive") == [.with, .recursive])
-  }
-
-  @Test func `lexes the row-limiting keywords`() throws {
-    #expect(try lex("OFFSET FETCH FIRST ROWS ONLY")
-                == [.offset, .fetch, .first, .rows, .only])
-    // ROW is a synonym of ROWS, and NEXT of FIRST.
-    #expect(try lex("ROW NEXT") == [.rows, .first])
-  }
-
-  @Test func `lexes the comparison operators`() throws {
-    #expect(try lex("= <> < > <= >=")
-                == [.equal, .unequal, .lt, .gt, .leq, .geq])
-  }
-
-  @Test func `lexes punctuation tokens`() throws {
-    #expect(try lex("* , ( )")
-                == [.star, .comma, .lparen, .rparen])
-  }
-
-  @Test func `lexes a dotted identifier as one token`() throws {
-    #expect(try lex("TypeDef.TypeName") == [.identifier("TypeDef.TypeName")])
-  }
-
-  @Test func `lexes integer literals`() throws {
-    #expect(try lex("0 42 1024")
-                == [.integer(0), .integer(42), .integer(1024)])
-  }
-
-  @Test func `lexes decimal literals with a fraction`() throws {
-    #expect(try lex("3.14 1.0 0.5")
-                == [.decimal(3.14), .decimal(1.0), .decimal(0.5)])
-  }
-
-  @Test func `lexes decimal literals with an exponent`() throws {
-    // A bare integer with an exponent is approximate-numeric, as is one with a
-    // signed exponent or a fraction and an exponent together.
-    #expect(try lex("1e3 2.5e-1 6E2 1.5e+2")
-                == [.decimal(1e3), .decimal(2.5e-1),
-                    .decimal(6e2), .decimal(1.5e2)])
-  }
-
-  @Test func `a bare run of digits stays an integer`() throws {
-    // Neither a `.` nor an `e` follows, so each is exact numeric.
-    #expect(try lex("7 100") == [.integer(7), .integer(100)])
-  }
-
-  @Test func `a dot fraction is taken only when a digit follows`() throws {
-    // A `.` begins a fraction only before a digit: `1.5` is one decimal, while
-    // `1.5e0` also folds the exponent in.
-    #expect(try lex("1.5") == [.decimal(1.5)])
-    #expect(try lex("1.5e0") == [.decimal(1.5)])
-  }
-
-  @Test func `an e with no exponent digit is not an exponent`() throws {
-    // `1e` has no exponent digit, so the number ends at `1` and `e` begins an
-    // identifier.
-    #expect(try lex("1e") == [.integer(1), .identifier("e")])
-  }
-
-  @Test func `a decimal literal past Double's range is an overflow`() {
-    // `Double("1e9999")` is `inf`, not nil — reject it as an overflow, like an
-    // out-of-range integer, so no `inf` enters the token stream.
-    #expect(throws: SQLError.self) { _ = try lex("1e9999") }
-  }
-
-  @Test func `a qualified reference is not read as a decimal`() throws {
-    // A qualified name begins with a letter, so it never enters the numeric
-    // scanner — `Field.Flags` is one identifier, dot and all.
-    #expect(try lex("Field.Flags") == [.identifier("Field.Flags")])
-  }
-
-  @Test func `lexes a quoted string literal`() throws {
-    #expect(try lex("'Windows.Win32.Foundation'")
-                == [.string("Windows.Win32.Foundation")])
-  }
-
-  @Test func `unescapes a doubled quote in a string`() throws {
-    #expect(try lex("'O''Brien'") == [.string("O'Brien")])
-  }
-
-  @Test func `lexes an empty string literal`() throws {
-    #expect(try lex("''") == [.string("")])
-  }
-
-  @Test func `lexes a delimited identifier verbatim`() throws {
-    // A double-quoted name is a `quoted` token, case-preserved and never a
-    // keyword — distinct from a bare identifier so a dot in it is kept.
-    #expect(try lex("\"Offset\"") == [.quoted("Offset")])
-    #expect(try lex("\"select\"") == [.quoted("select")])
-    #expect(try lex("\"a.b\"") == [.quoted("a.b")])
-  }
-
-  @Test func `unescapes a doubled quote in a delimited identifier`() throws {
-    #expect(try lex("\"a\"\"b\"") == [.quoted("a\"b")])
-  }
-
-  @Test func `lexes tokens with no separating whitespace`() throws {
-    // No whitespace required between an identifier and an operator.
-    #expect(try lex("a<=1")
-                == [.identifier("a"), .leq, .integer(1)])
+  @Test(arguments: kLexing)
+  fileprivate func lexes(_ test: Lexing) throws {
+    #expect(try lex(test.text) == test.expected)
   }
 
   @Test func `records each token's byte offset`() throws {
@@ -180,46 +146,9 @@ struct LexerTests {
     #expect(try lexer.next() == nil)
   }
 
-  @Test func `rejects an unexpected character`() {
-    #expect(throws: SQLError.self) { _ = try lex("SELECT @ FROM T") }
-  }
-
-  @Test func `rejects an unterminated string`() {
-    #expect(throws: SQLError.self) { _ = try lex("'oops") }
-  }
-
-  @Test func `rejects an unterminated delimited identifier`() {
-    #expect(throws: SQLError.self) { _ = try lex("\"oops") }
-  }
-
-  @Test func `skips a line comment between tokens`() throws {
-    #expect(try lex("SELECT -- pick a star\n*")
-                == [.select, .star])
-  }
-
-  @Test func `skips a line comment at end of input`() throws {
-    // An unterminated `--` comment at EOF is not a fault.
-    #expect(try lex("SELECT * -- trailing") == [.select, .star])
-  }
-
-  @Test func `skips a block comment spanning a newline`() throws {
-    #expect(try lex("SELECT /* a\n block */ *") == [.select, .star])
-  }
-
-  @Test func `skips a block comment between tokens on one line`() throws {
-    #expect(try lex("SELECT /* star */ *") == [.select, .star])
-  }
-
-  @Test func `lexes a lone minus and slash as operators`() throws {
-    // A single `-` or `/` is still an operator; only `--` and `/*` begin a
-    // comment.
-    #expect(try lex("a - 1 / 2")
-                == [.identifier("a"), .minus, .integer(1), .slash,
-                    .integer(2)])
-  }
-
-  @Test func `rejects an unterminated block comment`() {
-    #expect(throws: SQLError.self) { _ = try lex("SELECT /* oops") }
+  @Test(arguments: kFaults)
+  fileprivate func rejects(_ test: Fault) {
+    #expect(throws: SQLError.self) { _ = try lex(test.text) }
   }
 
   @Test func `tracks line and column across a block comment`() throws {
@@ -229,12 +158,4 @@ struct LexerTests {
     #expect(locations.map(\.column) == [1, 6])
   }
 
-  @Test func `scans a bound-parameter placeholder`() throws {
-    #expect(try lex("WHERE a = :pid")
-                == [.where, .identifier("a"), .equal, .parameter("pid")])
-  }
-
-  @Test func `rejects a colon not followed by an identifier`() {
-    #expect(throws: SQLError.self) { _ = try lex("SELECT : FROM T") }
-  }
 }

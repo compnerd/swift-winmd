@@ -7,13 +7,38 @@ import Testing
 
 import SQLEngine
 
+private struct Display: Sendable, CustomTestStringConvertible {
+  internal let value: Value
+  internal let expected: String
+
+  internal var testDescription: String { expected }
+}
+
+private let kBooleans: Array<Display> = [
+  Display(value: .boolean(true), expected: "TRUE"),
+  Display(value: .boolean(false), expected: "FALSE"),
+]
+
+private let kDoubles: Array<Display> = [
+  Display(value: .double(3.14), expected: "3.14"),
+  Display(value: .double(2.5), expected: "2.5"),
+  Display(value: .double(1.0), expected: "1.0"),
+  Display(value: .double(1000.0), expected: "1000.0"),
+]
+
+private let kBlobs: Array<Display> = [
+  Display(value: .blob([0x53, 0x51, 0x4c]), expected: "x'53514c'"),
+  Display(value: .blob([0x00, 0x0f, 0xab, 0xff]), expected: "x'000fabff'"),
+  Display(value: .blob([]), expected: "x''"),
+]
+
 // MARK: - Boolean
 
 @Suite
 private struct BooleanDisplayTests {
-  @Test func `a boolean renders as TRUE or FALSE`() {
-    #expect(Value.boolean(true).display == "TRUE")
-    #expect(Value.boolean(false).display == "FALSE")
+  @Test(arguments: kBooleans)
+  fileprivate func renders(_ test: Display) {
+    #expect(test.value.display == test.expected)
   }
 }
 
@@ -21,14 +46,9 @@ private struct BooleanDisplayTests {
 
 @Suite
 private struct DoubleDisplayTests {
-  @Test func `a double renders through its round-tripping description`() {
-    #expect(Value.double(3.14).display == "3.14")
-    #expect(Value.double(2.5).display == "2.5")
-  }
-
-  @Test func `a whole double keeps its .0, marking it approximate-numeric`() {
-    #expect(Value.double(1.0).display == "1.0")
-    #expect(Value.double(1000.0).display == "1000.0")
+  @Test(arguments: kDoubles)
+  fileprivate func renders(_ test: Display) {
+    #expect(test.value.display == test.expected)
   }
 }
 
@@ -36,15 +56,8 @@ private struct DoubleDisplayTests {
 
 @Suite
 private struct BlobDisplayTests {
-  @Test func `a blob renders as a lowercase-hex x'…' literal`() {
-    #expect(Value.blob([0x53, 0x51, 0x4c]).display == "x'53514c'")
-  }
-
-  @Test func `hex is lowercase and keeps a byte's leading zero`() {
-    #expect(Value.blob([0x00, 0x0f, 0xab, 0xff]).display == "x'000fabff'")
-  }
-
-  @Test func `an empty blob renders as x''`() {
-    #expect(Value.blob([]).display == "x''")
+  @Test(arguments: kBlobs)
+  fileprivate func renders(_ test: Display) {
+    #expect(test.value.display == test.expected)
   }
 }

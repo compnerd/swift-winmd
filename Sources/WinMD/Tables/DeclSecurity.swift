@@ -12,7 +12,7 @@ private let _fields: InlineArray<_, Field> = [
   Field(name: "PermissionSet", type: .index(.heap(.blob))),
 ]
 
-private let _offsets = offsets(_fields)
+private let offsets = WinMD.offsets(of: _fields)
 
 extension Metadata.Tables {
 /// See §II.22.11.
@@ -27,7 +27,7 @@ public enum DeclSecurity: TableSchema {
   }
 
   public static func offset(_ i: Int) -> Int {
-    _offsets[i]
+    offsets[i]
   }
 }
 }

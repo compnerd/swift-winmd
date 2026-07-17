@@ -18,7 +18,7 @@ private let _fields: InlineArray<_, Field> = [
   Field(name: "MethodList", type: .index(.simple(Metadata.Tables.MethodDef.self))),
 ]
 
-private let _offsets = offsets(_fields)
+private let offsets = WinMD.offsets(of: _fields)
 
 extension Metadata.Tables {
 /// See §II.22.37.
@@ -30,7 +30,7 @@ public enum TypeDef: TableSchema {
   }
 
   public static func offset(_ i: Int) -> Int {
-    _offsets[i]
+    offsets[i]
   }
 }
 }

@@ -12,7 +12,7 @@ private let _fields: InlineArray<_, Field> = [
   Field(name: "Value", type: .index(.heap(.blob))),
 ]
 
-private let _offsets = offsets(_fields)
+private let offsets = WinMD.offsets(of: _fields)
 
 extension Metadata.Tables {
 /// See §II.22.10.
@@ -27,7 +27,7 @@ public enum CustomAttribute: TableSchema {
   }
 
   public static func offset(_ i: Int) -> Int {
-    _offsets[i]
+    offsets[i]
   }
 }
 }

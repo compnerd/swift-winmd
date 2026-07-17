@@ -297,8 +297,16 @@ extension Plan {
       // A grouped record reshapes its source into the key values followed by
       // the aggregate results — a fresh slot space of that width.
       keys.count + aggregates.count
-    default:
-      nil
+    case let .project(terms, _):
+      // A projection's output is exactly its projected terms, so the next
+      // relation's slots begin at `terms.count` — regardless of the source's
+      // width. A decorrelated CROSS APPLY tops out in a `project`, so this is
+      // what lets it measure correctly as the left side of an outer join.
+      terms.count
+    case let .sort(_, source):
+      // A `sort` reorders rows without reshaping them, so it spans the same
+      // slots as its source.
+      source.slots
     }
   }
 

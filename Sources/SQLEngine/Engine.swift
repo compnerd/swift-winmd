@@ -212,7 +212,13 @@ extension Catalog where Self: ~Escapable {
     // The shared box survives from the un-augmented compile into execution.
     augmented.subqueries.record(overlay: augmented.revealed().relations,
                                 for: .caller)
-    let plan = try optimise(logical, augmented)
+    // Rewrite each decorrelatable correlated CROSS APPLY into a set-based join
+    // BEFORE the physical `optimise`/`nest`, so the emitted `select`-over-
+    // `product` folds to a hash equi-join. The pass reads the compiled body
+    // plans recorded above into the shared subquery box; a non-decorrelatable
+    // apply is left verbatim, so a plan with none is unchanged.
+    let decorrelated = try decorrelate(logical, augmented)
+    let plan = try optimise(decorrelated, augmented)
     return try execute(plan, augmented).map(\.values)
   }
 
@@ -2379,6 +2385,250 @@ extension Catalog where Self: ~Escapable {
     return try filter.gated(over: .product(optimise(left, context),
                                            optimise(right, context)))
   }
+
+  // MARK: - Decorrelation
+
+  /// Rewrites a decorrelatable correlated CROSS APPLY into a set-based inner
+  /// join — a behaviour-preserving LOGICAL pass run AFTER `pushdown` (so each
+  /// `.apply` body is already in `project`/`select`/`scan` canonical form) and
+  /// BEFORE `optimise`/`nest` (so the emitted `.select`-over-`.product` folds
+  /// to a `.join` for free). It recurses the tree structurally, leaving every
+  /// node but a decorrelatable `.apply` untouched, so a plan with none is
+  /// returned unchanged.
+  ///
+  /// At each `.apply(left, key, correlation, ordinals, on, kind: .inner)` it
+  /// consults the pre-compiled body plan (`context.subqueries.plan(key,
+  /// correlation)`, the SAME lookup `executed` uses) and, when the body is a
+  /// simple filter+project over a single base-relation scan with a purely EQUI
+  /// correlation, rewrites the apply to `project(over left ++ taken,
+  /// select(on'', product(left, scan(R))))` — the exact output geometry the
+  /// correlated `applied` produces (each left row multiplied by its match
+  /// count, an unmatched left row DROPPED), which the subsequent `nest` folds
+  /// to a hash equi-join. On ANY doubt (a non-`.inner` kind, a
+  /// non-decorrelatable body, a non-equi/expression correlation, an unsafe body
+  /// term, or a taken-ordinals geometry it cannot map soundly) it leaves the
+  /// `.apply` verbatim, so execution is unchanged — a missed decorrelation is a
+  /// perf loss, a wrong one is silent data corruption.
+  internal borrowing func decorrelate(_ plan: Plan, _ context: Context)
+      throws(SQLError) -> Plan {
+    switch plan {
+    case .single, .scan, .join:
+      return plan
+    case let .derived(name, plan, ordinals, seek):
+      // A view body is compiled and re-executed under its OWN scope; its
+      // correlated applies (if any) decorrelate when it is derived/optimised,
+      // not here. Recurse structurally only.
+      return try .derived(name: name, plan: decorrelate(plan, context),
+                          ordinals: ordinals, seek: seek)
+    case let .select(filter, source):
+      return try .select(filter, decorrelate(source, context))
+    case let .project(terms, source):
+      return try .project(terms, decorrelate(source, context))
+    case let .sort(keys, source):
+      return try .sort(keys: keys, decorrelate(source, context))
+    case let .product(left, right):
+      return try .product(decorrelate(left, context),
+                          decorrelate(right, context))
+    case let .outer(left, right, on, kind):
+      return try .outer(decorrelate(left, context), decorrelate(right, context),
+                        on: on, kind: kind)
+    case let .apply(left, key, correlation, ordinals, on, kind):
+      // Decorrelate the LEFT first (a nested apply inside it still rewrites),
+      // then attempt this apply. `.left` (OUTER APPLY) is deferred to a later
+      // PR; only `.inner` (CROSS APPLY) is a candidate here.
+      let left = try decorrelate(left, context)
+      guard kind == .inner,
+          let body = context.subqueries.plan(key, correlation),
+          let rewritten = decorrelated(apply: left, body, key, correlation,
+                                       ordinals, on, context) else {
+        return .apply(left, key: key, correlation: correlation,
+                      ordinals: ordinals, on: on, kind: kind)
+      }
+      return rewritten
+    case let .setop(kind, left, right, all):
+      return try .setop(kind, decorrelate(left, context),
+                        decorrelate(right, context), all: all)
+    case let .distinct(source):
+      return try .distinct(decorrelate(source, context))
+    case let .aggregate(keys, aggregates, source):
+      return try .aggregate(keys: keys, aggregates: aggregates,
+                            decorrelate(source, context))
+    case let .limit(count, offset, source):
+      return try .limit(count: count, offset: offset,
+                        decorrelate(source, context))
+    }
+  }
+
+  /// The inner-join rewrite of a CROSS APPLY whose `left` is already
+  /// decorrelated, or `nil` when the apply's `body` is not decorrelatable — in
+  /// which case the caller leaves the `.apply` unchanged (conservative
+  /// default).
+  ///
+  /// The body must be `project(projection, select(where, scan(R, _, nil)))`
+  /// with every projection term a bare slot (G3: a filter+project over a single
+  /// base relation, no aggregate/limit/distinct/setop/nested apply — none of
+  /// which wear this exact shape), the correlation must be all `.slot` sources
+  /// (no `.bound` grandparent), and the `where` conjuncts must be EXACTLY one
+  /// equi correlation `innerKey = :param` (or the reversed order) plus safe,
+  /// non-parameterised, single-relation local predicates `p_R` (G4: an unsafe
+  /// or parameterised residual — a non-equi/expression correlation — bails).
+  /// The scan's `seek` must be absent (a seeked body is not the canonical
+  /// shape).
+  ///
+  /// The rewrite lays the body scan's referenced ordinals after the left (a
+  /// `.product`), then stacks TWO selects: an INNER select carrying the WHOLE
+  /// body WHERE (the correlation equality `.match(outerSlot, base + innerKey)`
+  /// AND the local residual `p_R`) and an OUTER select carrying the apply's
+  /// `on` — the apply's `on` mapped from its `left ++ taken` space into this
+  /// `left ++ scan` space. The `on` is kept SEPARATE (not folded into the body
+  /// residual's conjunction) so it is evaluated ONLY on rows the body WHERE
+  /// admitted: nested selects run bottom-up, restoring the correlated order
+  /// (body WHERE → drop an UNKNOWN row → `on`), so an `on` that would throw on
+  /// a row the body WHERE drops never fires — matching the correlated `applied`
+  /// (which never reaches the `on` for a dropped row). It then PROJECTS the
+  /// result back to the apply's `left ++ taken` geometry, so the combined
+  /// record a parent reads is byte-identical to the correlated `applied`'s. The
+  /// equi `.match` lets `nest`/`optimise` fold the product into a hash
+  /// equi-join whose NULL-key drops and match-count multiplicity mirror the
+  /// per-row re-execution.
+  private borrowing func decorrelated(apply left: Plan, _ body: Plan,
+                                      _ key: Subkey,
+                                      _ correlation: Correlation,
+                                      _ ordinals: Array<Int>, _ on: Filter,
+                                      _ context: Context) -> Plan? {
+    guard case let .project(projection, .select(filter, scan)) = body,
+        case let .scan(name, scanOrdinals, nil) = scan,
+        let base = left.slots else { return nil }
+    // The scanned `name` must be a genuine BASE relation, not a BODY-LOCAL
+    // derived alias. When the lateral body declares its OWN derived table(s) —
+    // `SELECT x FROM (SELECT k, x FROM S) AS e WHERE …` — the compiled body
+    // plan scans that alias (`e`), which the correlated `applied` executor
+    // MATERIALISES per execution under the body's revealed overlay. The
+    // caller-level checks below (a CTE/store overlay entry, a view) do not see
+    // `e`, so it would pass as a base relation and the rewrite would relay a
+    // caller-level `scan("e")` that faults `.relation("e")` or, worse, binds a
+    // same-named OUTER base table and returns WRONG rows. Bail whenever the
+    // body query declares any derived tables of its own — the SAME
+    // `collect(derived:)` the augment path uses over the body select — and
+    // leave the apply correlated.
+    var derivations = Array<(String, Query)>()
+    key.query.collect(derived: &derivations)
+    guard derivations.isEmpty else { return nil }
+    // The scan must also name a genuine BASE relation, not a CTE/store overlay
+    // entry or a view. A CTE `.scan` binds under the body's OWN revealed
+    // overlay (a caller derived alias of the same name shadowed) that the
+    // `applied` executor restores per run; relaid into a caller-level join it
+    // would re-resolve the name against the OUTER overlay and bind the wrong
+    // relation. A view `.scan` (a `.derived` after resolution) is likewise out
+    // of the single-base-relation cut. Leave either correlated.
+    guard context.relations[name.lowercased()] == nil,
+        resolve(view: name) == nil else { return nil }
+    // Every projection term must be a bare slot: a projected expression (a
+    // LATERAL-only shape over a preceding column, or any computed column) has a
+    // slot geometry the scan-relaid rewrite cannot reproduce, so bail.
+    var projected = Array<Int>()
+    for term in projection {
+      guard case let .slot(slot) = term else { return nil }
+      projected.append(slot)
+    }
+    // A taken ordinal at or beyond the projection's width is the body's virtual
+    // `Id` — a LATERAL-only per-left-row row number the `applied` executor
+    // derives from THIS left row's output through a `RelationInstance`, which a
+    // set-based join (numbering over the whole relation) cannot reproduce.
+    // Leave it correlated.
+    guard ordinals.allSatisfy({ projection.indices.contains($0) }) else {
+      return nil
+    }
+    // The correlation must be a single `.slot` source (no `.bound` grandparent
+    // this v1 decorrelates). The outer key is that source's ordinal, already in
+    // the left's combined slot space.
+    guard correlation.count == 1,
+        case let (name: parameter, source: .slot(outerKey))? =
+            correlation.first.map({ (name: $0.key, source: $0.value) })
+        else { return nil }
+
+    // Split the body WHERE into the ONE equi correlation conjunct (`innerKey =
+    // :parameter`) and the local residual `p_R`. Any other parameterised
+    // conjunct is a non-equi/expression correlation — bail. Every residual must
+    // be safe (G4: a throwing body term could fire for an inner row no left row
+    // reaches under set-based execution).
+    var innerKey: Int? = nil
+    var residual = Array<Filter>()
+    for conjunct in filter.conjuncts {
+      if innerKey == nil, let slot = equated(conjunct, to: parameter) {
+        innerKey = slot
+        continue
+      }
+      guard conjunct.safe, !conjunct.parameterised else { return nil }
+      residual.append(conjunct)
+    }
+    guard let innerKey else { return nil }
+
+    // The scan is relaid after the left, so the body's 0-based scan slots shift
+    // by `base` into the combined space. The correlation equality becomes a
+    // `.match` `nest` folds to the join key; the residual `p_R` shifts
+    // alongside. This inner gate carries the WHOLE body WHERE (match key +
+    // residual) and NOTHING else — the apply's `on` is kept ABOVE it.
+    let inner = Plan.scan(name: name, ordinals: scanOrdinals, seek: nil)
+    var gate = [Filter.match(outerKey, base + innerKey)]
+    gate.append(contentsOf: residual.map { $0.shifted(by: -base) })
+    let product = Plan.product(left, inner)
+    let filtered = gate.conjunction.map { Plan.select($0, product) } ?? product
+    // The apply's `on` addresses the `left ++ taken` space; map it into this
+    // `left ++ scan` space (taken column `base + j` becomes the scan slot `base
+    // + projected[ordinals[j]]` its projection read). Keep it in a SEPARATE
+    // select ABOVE the body-filtered join rather than folding it into the same
+    // conjunction as the body residual. The correlated `applied` evaluates the
+    // body WHERE FIRST (dropping an UNKNOWN row — a NULL-flag child) and only
+    // THEN the `on`, so an `on` that would throw on a dropped row never fires.
+    // This engine evaluates an `AND`'s RHS even for an UNKNOWN LHS, so folding
+    // `on` into the residual conjunction would evaluate it for a dropped row
+    // and raise a fault the original APPLY never hits. Nested selects evaluate
+    // bottom-up, so an OUTER `on` sees only the rows the body WHERE admitted —
+    // restoring the correlated order (body WHERE → drop → on).
+    let mapped =
+        on.remapped(through: remap(taken: ordinals, over: base, projected))
+    let gated = mapped.constant == true ? filtered : .select(mapped, filtered)
+    // Project back to the apply's exact `left ++ taken` geometry: the left's
+    // slots unchanged, then each taken column at its combined scan slot.
+    var terms = (0 ..< base).map { Term.slot($0) }
+    terms.append(contentsOf: ordinals.map { Term.slot(base + projected[$0]) })
+    return .project(terms, gated)
+  }
+}
+
+/// The inner-key slot of an EQUI correlation conjunct `slot = :parameter` (in
+/// either operand order), or `nil` when `conjunct` is not that shape — a
+/// comparison of a bare slot to the correlation `parameter` under `=`. A
+/// non-`=` comparison (a NON-equi correlation), a compound operand, or a
+/// different parameter is not an equi correlation key and leaves the conjunct
+/// to the residual test (which bails on it as a parameterised non-equi term).
+private func equated(_ conjunct: Filter, to parameter: String) -> Int? {
+  guard case let .compare(lhs, .equal, rhs) = conjunct else { return nil }
+  switch (lhs, rhs) {
+  case let (.slot(slot), .parameter(name)) where name == parameter:
+    return slot
+  case let (.parameter(name), .slot(slot)) where name == parameter:
+    return slot
+  default:
+    return nil
+  }
+}
+
+/// The slot remap from a CROSS APPLY's `left ++ taken` output space into the
+/// decorrelated `left ++ scan` space: a left slot (`< base`) is unchanged, and
+/// the `j`-th taken column (slot `base + j`, reading body-output column
+/// `ordinals[j]`) maps to the scan slot `base + projected[ordinals[j]]` its
+/// projection read. `on` is remapped through this so it addresses the relaid
+/// scan's slots rather than the apply's taken columns.
+private func remap(taken ordinals: Array<Int>, over base: Int,
+                   _ projected: Array<Int>) -> Dictionary<Int, Int> {
+  var map = Dictionary<Int, Int>(minimumCapacity: base + ordinals.count)
+  for slot in 0 ..< base { map[slot] = slot }
+  for taken in ordinals.indices {
+    map[base + taken] = base + projected[ordinals[taken]]
+  }
+  return map
 }
 
 /// The `(outerKey, innerKey)` an equality between slots `lhs` and `rhs`

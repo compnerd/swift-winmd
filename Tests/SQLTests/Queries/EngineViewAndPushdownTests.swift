@@ -289,6 +289,8 @@ func engineDerived(_ plan: Plan) -> Plan? {
     engineDerived(left) ?? engineDerived(right)
   case let .outer(left, right, _, _):
     engineDerived(left) ?? engineDerived(right)
+  case let .semijoin(left, right, _, _):
+    engineDerived(left) ?? engineDerived(right)
   case let .apply(left, _, _, _, _, _):
     engineDerived(left)
   case let .setop(_, left, right, _):
@@ -325,6 +327,8 @@ func engineSeeks(_ plan: Plan) -> Bool {
     engineSeeks(outer)
   case let .outer(left, right, _, _):
     engineSeeks(left) || engineSeeks(right)
+  case let .semijoin(left, right, _, _):
+    engineSeeks(left) || engineSeeks(right)
   case let .apply(left, _, _, _, _, _):
     engineSeeks(left)
   case let .setop(_, left, right, _):
@@ -358,6 +362,8 @@ func engineFilters(_ plan: Plan) -> Bool {
     engineFilters(left) || engineFilters(right)
   case let .outer(left, right, _, _):
     engineFilters(left) || engineFilters(right)
+  case let .semijoin(left, right, _, _):
+    engineFilters(left) || engineFilters(right)
   case let .apply(left, _, _, _, _, _):
     engineFilters(left)
   case let .setop(_, left, right, _):
@@ -387,6 +393,9 @@ func enginePushed(_ plan: Plan) -> Bool {
   case let .outer(left, right, _, _):
     engineSeeks(left) || engineFloats(left) || enginePushed(left) || engineSeeks(right)
         || engineFloats(right) || enginePushed(right)
+  case let .semijoin(left, right, _, _):
+    engineSeeks(left) || engineFloats(left) || enginePushed(left)
+        || engineSeeks(right) || engineFloats(right) || enginePushed(right)
   case let .apply(left, _, _, _, _, _):
     engineSeeks(left) || engineFloats(left) || enginePushed(left)
   case let .select(_, source):
@@ -451,6 +460,8 @@ func engineJoins(_ plan: Plan) -> Bool {
     engineJoins(left) || engineJoins(right)
   case let .outer(left, right, _, _):
     engineJoins(left) || engineJoins(right)
+  case let .semijoin(left, right, _, _):
+    engineJoins(left) || engineJoins(right)
   case let .apply(left, _, _, _, _, _):
     engineJoins(left)
   case let .setop(_, left, right, _):
@@ -486,6 +497,8 @@ func engineResidual(_ plan: Plan) -> Bool {
   case let .join(outer, _, _, _, _, _, _):
     engineResidual(outer)
   case let .outer(left, right, _, _):
+    engineResidual(left) || engineResidual(right)
+  case let .semijoin(left, right, _, _):
     engineResidual(left) || engineResidual(right)
   case let .apply(left, _, _, _, _, _):
     engineResidual(left)
@@ -524,6 +537,8 @@ func engineSeparated(_ plan: Plan) -> Bool {
     engineSeparated(outer)
   case let .outer(left, right, _, _):
     engineSeparated(left) || engineSeparated(right)
+  case let .semijoin(left, right, _, _):
+    engineSeparated(left) || engineSeparated(right)
   case let .apply(left, _, _, _, _, _):
     engineSeparated(left)
   case let .setop(_, left, right, _):
@@ -561,6 +576,8 @@ func engineStacked(_ plan: Plan) -> Bool {
   case let .join(outer, _, _, _, _, _, _):
     engineStacked(outer)
   case let .outer(left, right, _, _):
+    engineStacked(left) || engineStacked(right)
+  case let .semijoin(left, right, _, _):
     engineStacked(left) || engineStacked(right)
   case let .apply(left, _, _, _, _, _):
     engineStacked(left)
@@ -675,6 +692,8 @@ private func injected(_ plan: Plan) -> Bool {
   case let .product(left, right):
     injected(left) || injected(right)
   case let .outer(left, right, _, _):
+    injected(left) || injected(right)
+  case let .semijoin(left, right, _, _):
     injected(left) || injected(right)
   case let .apply(left, _, _, _, _, _):
     injected(left)

@@ -41,7 +41,8 @@
 /// conjunction    := negation (AND negation)*
 /// negation       := NOT negation | [NOT] EXISTS '(' query ')' | primary
 /// primary        := '(' predicate ')' [IS [NOT] truthvalue] | comparison
-/// comparison     := expression (op (quantifier '(' query ')'
+/// comparison     := row (op row | [NOT] IN '(' row (',' row)* ')')
+///                 | expression (op (quantifier '(' query ')'
 ///                                    | expression | param)
 ///                 | IS [NOT] (NULL | truthvalue | DISTINCT FROM expression)
 ///                 | [NOT] IN '(' (expression (',' expression)* | query) ')'
@@ -49,6 +50,8 @@
 ///                     [ESCAPE (expression | param)]
 ///                 | [NOT] BETWEEN (expression | param) AND
 ///                                 (expression | param))
+/// row            := '(' expression (',' expression)+ ')'  // ISO row value;
+///                   // a comma marks it, else '(' expression ')' is a scalar
 /// quantifier     := ANY | SOME | ALL      // SOME is a synonym for ANY
 /// truthvalue     := TRUE | FALSE | UNKNOWN
 /// expression     := additive
@@ -1045,14 +1048,22 @@ internal struct Parser: ~Escapable {
 
   /// Parses a parenthesised predicate or a comparison.
   ///
-  /// A leading `(` is ambiguous: it opens either a parenthesised predicate (`(a
-  /// = 1 AND b = 2)`) or the parenthesised left operand of a comparison (`(Age
-  /// + 1) = 26`, where `factor` consumes the `(expression)`). The comparison is
-  /// tried first; if it fails, the group was a predicate, so the parser rewinds
-  /// to the saved lexer and lookahead token and parses it as one.
+  /// A leading `(` is ambiguous: it opens either an ISO `<row value
+  /// constructor>` heading a row comparison or row `IN` (`(a, b) = (c, d)`), a
+  /// parenthesised predicate (`(a = 1 AND b = 2)`), or the parenthesised left
+  /// operand of a comparison (`(Age + 1) = 26`, where `factor` consumes the
+  /// `(expression)`). A COMMA inside the parentheses marks the row form, which
+  /// `row()` detects and COMMITS to — a row is never a valid predicate, so its
+  /// tail errors (an arity mismatch) must propagate rather than trigger the
+  /// predicate rewind. Otherwise the comparison is tried first; if it fails,
+  /// the group was a predicate, so the parser rewinds to the saved lexer and
+  /// lookahead token and parses it as one.
   private mutating func primary() throws(SQLError) -> Predicate {
     guard current?.kind == .lparen else {
       return try comparison()
+    }
+    if let left = try row() {
+      return try rows(left)
     }
     let lexer = self.lexer
     let token = self.current
@@ -1160,6 +1171,119 @@ internal struct Parser: ~Escapable {
     }
     let right = try expression()
     return .comparison(left: left, op: op, right: right)
+  }
+
+  /// Parses an ISO `<row value constructor>` — `'(' expression (','
+  /// expression)+ ')'`, at least TWO elements — returning its element
+  /// expressions, or `nil` when the current token does not open one so the
+  /// caller falls through to the scalar path.
+  ///
+  /// A leading `(` is ambiguous between a row and a parenthesised scalar
+  /// (`(x)`), or an arithmetic group (`(a + b)`): only a COMMA inside the
+  /// parentheses makes it a row. So this saves the lexer and lookahead, opens
+  /// the `(`, and parses the first element; a following `,` confirms the row —
+  /// it collects the rest and the `)`. Without a comma it is a scalar, so the
+  /// parser rewinds to the saved state and returns `nil`, leaving the `(`
+  /// unconsumed for `expression()` to parse. A `(` not present at all returns
+  /// `nil` without touching the stream.
+  private mutating func row() throws(SQLError) -> Array<Expression>? {
+    guard current?.kind == .lparen else { return nil }
+    let lexer = self.lexer
+    let token = self.current
+    try expect(.lparen)
+    // A `(SELECT …)` opens a scalar subquery, never a row — `factor()` reads it
+    // through the whole `(query)`. Rewind so the scalar path parses it rather
+    // than `expression()` choking on the bare `SELECT` (the `(` already
+    // consumed), the same `SELECT` lookahead `factor()` and `IN` use.
+    if current?.kind == .select {
+      self.lexer = lexer
+      self.current = token
+      return nil
+    }
+    // A token that cannot begin an expression (`NOT`, `EXISTS`, `TABLE`, …) is
+    // not a row element, so a parse failure of the FIRST element means this `(`
+    // opens a parenthesised predicate, not a row: rewind and return `nil` so
+    // the caller's predicate path runs. Only a `,` commits to row syntax, after
+    // which a later element's error is a real error and propagates.
+    guard let first = try? expression() else {
+      self.lexer = lexer
+      self.current = token
+      return nil
+    }
+    guard try match(.comma) else {
+      self.lexer = lexer
+      self.current = token
+      return nil
+    }
+    var elements = [first]
+    repeat {
+      try elements.append(expression())
+    } while try match(.comma)
+    try expect(.rparen)
+    return elements
+  }
+
+  /// Parses the tail of a row comparison or row `IN` whose left `<row value
+  /// constructor>` is already parsed to `left`, building the FIRST-CLASS AST
+  /// node (`Predicate.rows` / `Predicate.among`) rather than desugaring it —
+  /// each component `Expression` is held once so the lowering evaluates it
+  /// exactly once per row, the correctness fix over a desugar that duplicated a
+  /// component across the places a conjunction/cascade names it.
+  ///
+  /// A relational operator (`= <> < <= > >=`) takes a second row constructor of
+  /// EQUAL arity (else `SQLError.arity`), building `Predicate.rows(left, op,
+  /// right)`. An `IN` (or `NOT IN`) takes a parenthesised list of row
+  /// constructors, building `Predicate.among(left, elements, negated:)`. The
+  /// ISO three-valued semantics (the componentwise conjunction for `=`, the
+  /// lexicographic cascade for the ordering operators, the `IN` disjunction)
+  /// live in the lowering and runtime, not this parse.
+  private mutating func rows(_ left: Array<Expression>)
+      throws(SQLError) -> Predicate {
+    if try match(.in) {
+      return try rows(left, in: false)
+    }
+    if try match(.not) {
+      try expect(.in)
+      return try rows(left, in: true)
+    }
+    let op = try op()
+    guard let right = try row() else {
+      let token = try advance(expecting: "a row value constructor")
+      throw .unexpected(token.kind.description,
+                        expected: "a row value constructor",
+                        at: token.location)
+    }
+    guard left.count == right.count else {
+      throw .arity(left.count, right.count)
+    }
+    return .rows(left, op, right)
+  }
+
+  /// Parses the tail of a row `[NOT] IN '(' row (',' row)* ')'` — the `IN` is
+  /// already consumed — building `Predicate.among(left, elements, negated:)`
+  /// over `left` and the parsed element rows, each of EQUAL arity (else
+  /// `SQLError.arity`) and the list non-empty. `negated` marks `NOT IN`.
+  private mutating func rows(_ left: Array<Expression>, in negated: Bool)
+      throws(SQLError) -> Predicate {
+    try expect(.lparen)
+    var elements = Array<Array<Expression>>()
+    repeat {
+      guard let element = try row() else {
+        let token = try advance(expecting: "a row value constructor")
+        throw .unexpected(token.kind.description,
+                          expected: "a row value constructor",
+                          at: token.location)
+      }
+      guard left.count == element.count else {
+        throw .arity(left.count, element.count)
+      }
+      elements.append(element)
+    } while try match(.comma)
+    try expect(.rparen)
+    guard !elements.isEmpty else {
+      throw .state("42601", "IN requires a non-empty value list")
+    }
+    return .among(left, elements, negated: negated)
   }
 
   /// Consumes an `ANY`, `SOME`, or `ALL` quantifier keyword at the head of a

@@ -852,6 +852,29 @@ public indirect enum Predicate: Hashable, Sendable {
   /// lowers it to that disjunction rather than carrying a dedicated `Filter`
   /// case.
   case membership(Expression, Array<Expression>, negated: Bool)
+  /// `(l1, …, ln) <op> (r1, …, rn)` — an ISO `<row value constructor>`
+  /// comparison, both sides a row of scalar `Expression`s of EQUAL arity
+  /// (`SQLError.arity` at compile otherwise), `op` any of the six operators. It
+  /// is a FIRST-CLASS node rather than a parse-time desugar to a
+  /// conjunction/cascade of scalar comparisons so that each component
+  /// `Expression` is evaluated EXACTLY ONCE: the desugar duplicated a component
+  /// across the places it appears (a `<` cascade names an earlier component in
+  /// both a strict step and an equality tie-guard), so a stateful component
+  /// yielded a different value each time. It keeps the ISO three-valued
+  /// semantics — `=` the conjunction of the componentwise equalities, `<>` its
+  /// negation, the ordering operators the lexicographic cascade — lowered to a
+  /// `Filter.comparison` the runtime evaluates once-per-component.
+  case rows(Array<Expression>, Comparison, Array<Expression>)
+  /// `(l1, …, ln) [NOT] IN ((r1, …, rn), …)` — an ISO row-value membership, the
+  /// left a `<row value constructor>` and the right a non-empty list of element
+  /// rows, each of EQUAL arity (`SQLError.arity` otherwise), `negated` marking
+  /// `NOT IN`. As `rows`, it is a FIRST-CLASS node rather than a desugar to an
+  /// OR-chain of row equalities so the left components are evaluated EXACTLY
+  /// ONCE rather than once per element row. It keeps the value-list `IN`'s
+  /// three-valued semantics — a disjunction of row equalities under Kleene
+  /// `OR`, a NULL component making an unmatched test UNKNOWN, `NOT IN` its
+  /// negation — lowered to a `Filter.memberships`.
+  case among(Array<Expression>, Array<Array<Expression>>, negated: Bool)
   /// `operand [NOT] LIKE pattern [ESCAPE escape]` — whether the operand's text
   /// matches the pattern, in which `%` matches any sequence of characters
   /// (including the empty one) and `_` matches exactly one character; every

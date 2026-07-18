@@ -38,6 +38,35 @@ internal indirect enum Filter: Equatable, Sendable {
   /// first TRUE; `NOT IN` negates that three-valued truth (UNKNOWN maps to
   /// itself).
   case membership(Term, Array<Term>, negated: Bool)
+  /// `(l1, …, ln) <op> (r1, …, rn)` — an ISO row-value comparison, both sides a
+  /// row of ordinal-addressed terms of EQUAL arity, `op` any of the six
+  /// operators. The lowered form of the AST's `rows`. Every component term is
+  /// evaluated exactly ONCE per row into a `[Value]` (a parse-time desugar to a
+  /// conjunction/cascade of scalar `compare`s re-evaluated a component once per
+  /// place it appeared, so a stateful component yielded a different value each
+  /// time), then the runtime folds those values with the SAME `matches`
+  /// primitive and Kleene `AND`/`OR` a scalar comparison uses, reproducing the
+  /// ISO three-valued truth: `=` is the Kleene `AND` of the componentwise
+  /// equalities, `<>` its negation, and the four ordering operators the
+  /// lexicographic cascade `l1 <op> r1 OR (l1 = r1 AND (l2 <op> r2 OR …))`
+  /// whose earlier steps use the STRICT operator (`<`/`>`) and whose innermost
+  /// step carries `op` itself (so `<=`/`>=` admit an all-equal row) — a NULL
+  /// component making a componentwise test UNKNOWN, threaded through the fold.
+  case comparison(Array<Term>, Comparison, Array<Term>)
+  /// `(l1, …, ln) [NOT] IN ((r1, …, rn), …)` — an ISO row-value membership, the
+  /// left a row of ordinal-addressed terms and `rows` a non-empty list of
+  /// element rows of EQUAL arity, `negated` marking `NOT IN`. The lowered form
+  /// of the AST's `among`. The left row is evaluated exactly ONCE per row into
+  /// a `[Value]` (as a scalar `Filter.membership` holds its operand once), then
+  /// `(l…) = (r…)` folds over the element rows IN ORDER under Kleene `OR`,
+  /// seeded FALSE, short-circuiting at the first TRUE — each element equality
+  /// the same componentwise Kleene `AND` the `=` comparison uses — so a NULL
+  /// component keeps the ISO three-valued result (an unmatched test is UNKNOWN,
+  /// not FALSE), an empty match FALSE, and `NOT IN` negates that truth (UNKNOWN
+  /// maps to itself). A desugar to an OR-chain of scalar row equalities would
+  /// re-evaluate the left components once per element; holding them once fixes
+  /// that.
+  case memberships(Array<Term>, Array<Array<Term>>, negated: Bool)
   /// `operand [NOT] LIKE pattern [ESCAPE escape]` — the lowered form of the
   /// AST's `like`. The operand is a `Term` evaluated per row; the pattern and
   /// optional one-character escape are each an `Operand` — a `Term` or a
@@ -468,6 +497,13 @@ extension Filter {
       .membership(operand.remapped(through: slot),
                   elements.map { $0.remapped(through: slot) },
                   negated: negated)
+    case let .comparison(lhs, op, rhs):
+      .comparison(lhs.map { $0.remapped(through: slot) }, op,
+                  rhs.map { $0.remapped(through: slot) })
+    case let .memberships(lhs, rows, negated):
+      .memberships(lhs.map { $0.remapped(through: slot) },
+                   rows.map { $0.map { $0.remapped(through: slot) } },
+                   negated: negated)
     case let .like(operand, pattern, escape, negated):
       .like(operand.remapped(through: slot),
             pattern: pattern.remapped(through: slot),
@@ -573,6 +609,10 @@ extension Filter {
     case let .null(term, _): term.safe
     case let .membership(operand, elements, _):
       operand.safe && elements.allSatisfy(\.safe)
+    case let .comparison(lhs, _, rhs):
+      lhs.allSatisfy(\.safe) && rhs.allSatisfy(\.safe)
+    case let .memberships(lhs, rows, _):
+      lhs.allSatisfy(\.safe) && rows.allSatisfy { $0.allSatisfy(\.safe) }
     case let .like(operand, pattern, escape, _):
       // An escape makes the predicate UNSAFE unless it is STATICALLY a valid
       // single-character escape: `Row.like` faults (`SQLError.argument`) on any
@@ -643,8 +683,11 @@ extension Filter {
     // UNKNOWN, slotless yet not definite — so both stay off a pushdown ahead of
     // a later unsafe conjunct the non-short-circuiting `AND` still owes.
     case .within, .quantified: true
-    case .compare, .bound, .match, .null, .membership, .like, .between,
-         .distinct, .exists: false
+    // A row comparison and row `IN` read slots (their components), so they are
+    // never slotless-UNKNOWN; `nullable`'s `slots` term already accounts for
+    // them, exactly as the scalar `.compare`/`.membership` do.
+    case .compare, .bound, .match, .null, .membership, .comparison,
+         .memberships, .like, .between, .distinct, .exists: false
     case let .truth(inner, _, _): inner.contingent
     case let .and(lhs, rhs): lhs.contingent || rhs.contingent
     case let .or(lhs, rhs): lhs.contingent || rhs.contingent
@@ -676,6 +719,12 @@ extension Filter {
     case let .null(term, _): term.parameterised
     case let .membership(operand, elements, _):
       operand.parameterised || elements.contains(where: \.parameterised)
+    case let .comparison(lhs, _, rhs):
+      lhs.contains(where: \.parameterised)
+          || rhs.contains(where: \.parameterised)
+    case let .memberships(lhs, rows, _):
+      lhs.contains(where: \.parameterised)
+          || rows.contains { $0.contains(where: \.parameterised) }
     case let .distinct(lhs, rhs, _): lhs.parameterised || rhs.parameterised
     case .match: false
     // An UNCORRELATED subquery predicate reads no run-time `:parameter` of the
@@ -731,9 +780,11 @@ extension Filter {
       // never folded.
       matches(lhs, op, rhs)
     // A comparison against a non-constant term reads a slot or `:parameter`;
-    // its truth is not statically known.
-    case .compare, .bound, .match, .null, .membership, .like, .between,
-         .distinct, .exists, .within, .quantified:
+    // its truth is not statically known. A row comparison and row `IN` are not
+    // statically folded — CONSERVATIVE, matching `.membership`/`.between`.
+    case .compare, .bound, .match, .null, .membership, .comparison,
+         .memberships, .like, .between, .distinct, .exists, .within,
+         .quantified:
       nil
     case let .and(lhs, rhs):
       // Both operands must be DEFINITE: a compile-time constant is only sound
@@ -1393,6 +1444,53 @@ internal func distinct(_ lhs: Value, _ rhs: Value) -> Bool {
   }
 }
 
+/// The three-valued truth of an ISO row-value comparison `(l…) <op> (r…)` over
+/// two ALREADY-EVALUATED rows of EQUAL, non-empty arity — the shared fold both
+/// the runtime (`Filter.comparison`) and the empty-group pre-fold drive so the
+/// two agree by construction.
+///
+/// `=` is the Kleene `AND` of the componentwise `matches(l[i], =, r[i])` (FALSE
+/// dominating — short-circuited), `<>` its negation (UNKNOWN mapping to
+/// itself), and the four ordering operators the lexicographic cascade `l0 <op>
+/// r0 OR (l0 = r0 AND (l1 <op> r1 OR …))`, right-nested from the last component
+/// inward — the innermost step carrying `op` itself (so `<=`/`>=` admit an
+/// all-equal row), every earlier step the STRICT operator (`<`/`>`) tie-guarded
+/// by the componentwise equality. A NULL component makes a componentwise test
+/// UNKNOWN, propagated through the Kleene fold.
+internal func relate(_ l: Array<Value>, _ op: Comparison,
+                     _ r: Array<Value>) -> Bool? {
+  switch op {
+  case .equal:
+    var truth: Bool? = true
+    for index in l.indices {
+      truth = and(truth, matches(l[index], .equal, r[index]))
+      if truth == false { break }
+    }
+    return truth
+  case .unequal:
+    var truth: Bool? = true
+    for index in l.indices {
+      truth = and(truth, matches(l[index], .equal, r[index]))
+      if truth == false { break }
+    }
+    return truth.map { !$0 }
+  case .lt, .leq, .gt, .geq:
+    let strict: Comparison = op == .lt || op == .leq ? .lt : .gt
+    var cascade: Bool? = nil
+    for index in stride(from: l.count - 1, through: 0, by: -1) {
+      let last = index == l.count - 1
+      let step = matches(l[index], last ? op : strict, r[index])
+      if let tail = cascade {
+        let equal = matches(l[index], .equal, r[index])
+        cascade = or(step, and(equal, tail))
+      } else {
+        cascade = step
+      }
+    }
+    return cascade
+  }
+}
+
 /// Kleene `AND` over two three-valued operands: `false` dominates (a `false`
 /// side makes the whole `false` even against UNKNOWN), both `true` is `true`,
 /// and any other pair is UNKNOWN (`nil`).
@@ -1476,6 +1574,10 @@ extension Catalog where Self: ~Escapable {
       try (evaluate(row, term, context) == .null) != negated
     case let .membership(operand, elements, negated):
       try member(row, operand, elements, negated, context)
+    case let .comparison(lhs, op, rhs):
+      try compare(row, lhs, op, rhs, context)
+    case let .memberships(lhs, rows, negated):
+      try member(row, lhs, rows, negated, context)
     case let .like(operand, pattern, escape, negated):
       try like(row, operand, pattern, escape, negated, context)
     case let .between(test, lower, upper, negated):
@@ -1579,6 +1681,56 @@ extension Catalog where Self: ~Escapable {
     var truth: Bool? = false
     for element in values {
       truth = or(truth, matches(value, .equal, element))
+      if truth == true { break }
+    }
+    return negated ? truth.map { !$0 } : truth
+  }
+
+  /// Evaluates a lowered `(l…) <op> (r…)` row-value comparison against `row`.
+  ///
+  /// Each side is evaluated exactly ONCE per row into a `[Value]` — a desugar
+  /// to a conjunction/cascade of scalar `compare`s re-evaluated a component
+  /// once per place it appeared, so a stateful component yielded a different
+  /// value each time — then the two rows fold through the shared `relate`
+  /// primitive, which reproduces the ISO three-valued truth with the SAME
+  /// `matches`/Kleene logic a scalar comparison uses.
+  private borrowing func compare(_ row: borrowing some Row & ~Escapable,
+                                 _ lhs: Array<Term>, _ op: Comparison,
+                                 _ rhs: Array<Term>, _ context: Context)
+      throws(SQLError) -> Bool? {
+    var l = Array<Value>()
+    l.reserveCapacity(lhs.count)
+    for term in lhs { try l.append(evaluate(row, term, context)) }
+    var r = Array<Value>()
+    r.reserveCapacity(rhs.count)
+    for term in rhs { try r.append(evaluate(row, term, context)) }
+    return relate(l, op, r)
+  }
+
+  /// Evaluates a lowered `(l…) [NOT] IN ((r…), …)` row-value membership against
+  /// `row`.
+  ///
+  /// The left row is evaluated ONCE per row into a `[Value]` — as a scalar
+  /// `member` holds its operand once, so a stateful component is read a single
+  /// time rather than once per element row — then `(l…) = (r…)` folds over the
+  /// element rows IN ORDER under Kleene `OR`, seeded FALSE and short-circuiting
+  /// at the first TRUE. Each element equality is the shared `relate(_, =, _)`
+  /// componentwise Kleene `AND`, so a NULL component keeps the ISO three-valued
+  /// result: an unmatched test is UNKNOWN, not FALSE, an empty match FALSE, and
+  /// `NOT IN` negates that truth, mapping UNKNOWN to itself.
+  private borrowing func member(_ row: borrowing some Row & ~Escapable,
+                                _ lhs: Array<Term>, _ rows: Array<Array<Term>>,
+                                _ negated: Bool, _ context: Context)
+      throws(SQLError) -> Bool? {
+    var l = Array<Value>()
+    l.reserveCapacity(lhs.count)
+    for term in lhs { try l.append(evaluate(row, term, context)) }
+    var truth: Bool? = false
+    for element in rows {
+      var r = Array<Value>()
+      r.reserveCapacity(element.count)
+      for term in element { try r.append(evaluate(row, term, context)) }
+      truth = or(truth, relate(l, .equal, r))
       if truth == true { break }
     }
     return negated ? truth.map { !$0 } : truth

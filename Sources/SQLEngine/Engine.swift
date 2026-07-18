@@ -970,6 +970,11 @@ extension Predicate {
       operand.aggregated
     case let .membership(operand, values, _):
       operand.aggregated || values.contains { $0.aggregated }
+    case let .rows(lhs, _, rhs):
+      lhs.contains { $0.aggregated } || rhs.contains { $0.aggregated }
+    case let .among(lhs, rows, _):
+      lhs.contains { $0.aggregated }
+          || rows.contains { $0.contains { $0.aggregated } }
     case .exists:
       // A subquery is its OWN scope, so an aggregate inside it folds over its
       // group, not the enclosing one — it never makes the OUTER query an
@@ -1013,6 +1018,10 @@ extension Predicate {
       operand.bound
     case let .membership(operand, values, _):
       operand.bound || values.contains { $0.bound }
+    case let .rows(lhs, _, rhs):
+      lhs.contains { $0.bound } || rhs.contains { $0.bound }
+    case let .among(lhs, rows, _):
+      lhs.contains { $0.bound } || rows.contains { $0.contains { $0.bound } }
     case let .exists(query, _):
       // A `:parameter` inside a subquery binds against the SAME run bindings
       // (the subquery runs under the enclosing context), so a defined-function
@@ -1240,6 +1249,14 @@ extension Predicate {
     case let .membership(operand, values, _):
       operand.collect(subqueries: &queries)
       for value in values { value.collect(subqueries: &queries) }
+    case let .rows(lhs, _, rhs):
+      for expression in lhs { expression.collect(subqueries: &queries) }
+      for expression in rhs { expression.collect(subqueries: &queries) }
+    case let .among(lhs, rows, _):
+      for expression in lhs { expression.collect(subqueries: &queries) }
+      for element in rows {
+        for expression in element { expression.collect(subqueries: &queries) }
+      }
     case let .like(operand, pattern, escape, _):
       operand.collect(subqueries: &queries)
       pattern.collect(subqueries: &queries)
@@ -1300,6 +1317,14 @@ extension Predicate {
     case let .membership(operand, values, _):
       operand.collect(valued: &queries)
       for value in values { value.collect(valued: &queries) }
+    case let .rows(lhs, _, rhs):
+      for expression in lhs { expression.collect(valued: &queries) }
+      for expression in rhs { expression.collect(valued: &queries) }
+    case let .among(lhs, rows, _):
+      for expression in lhs { expression.collect(valued: &queries) }
+      for element in rows {
+        for expression in element { expression.collect(valued: &queries) }
+      }
     case let .like(operand, pattern, escape, _):
       operand.collect(valued: &queries)
       pattern.collect(valued: &queries)
@@ -1346,6 +1371,14 @@ extension Predicate {
     case let .membership(operand, values, _):
       operand.collect(scalar: &queries)
       for value in values { value.collect(scalar: &queries) }
+    case let .rows(lhs, _, rhs):
+      for expression in lhs { expression.collect(scalar: &queries) }
+      for expression in rhs { expression.collect(scalar: &queries) }
+    case let .among(lhs, rows, _):
+      for expression in lhs { expression.collect(scalar: &queries) }
+      for element in rows {
+        for expression in element { expression.collect(scalar: &queries) }
+      }
     case let .like(operand, pattern, escape, _):
       operand.collect(scalar: &queries)
       pattern.collect(scalar: &queries)
@@ -1392,6 +1425,16 @@ extension Predicate {
     case let .membership(operand, values, _):
       operand.collect(existential: &queries)
       for value in values { value.collect(existential: &queries) }
+    case let .rows(lhs, _, rhs):
+      for expression in lhs { expression.collect(existential: &queries) }
+      for expression in rhs { expression.collect(existential: &queries) }
+    case let .among(lhs, rows, _):
+      for expression in lhs { expression.collect(existential: &queries) }
+      for element in rows {
+        for expression in element {
+          expression.collect(existential: &queries)
+        }
+      }
     case let .like(operand, pattern, escape, _):
       operand.collect(existential: &queries)
       pattern.collect(existential: &queries)
@@ -1918,6 +1961,14 @@ extension Predicate {
     case let .membership(operand, values, _):
       operand.collect(into: &expressions)
       for value in values { value.collect(into: &expressions) }
+    case let .rows(lhs, _, rhs):
+      for expression in lhs { expression.collect(into: &expressions) }
+      for expression in rhs { expression.collect(into: &expressions) }
+    case let .among(lhs, rows, _):
+      for expression in lhs { expression.collect(into: &expressions) }
+      for element in rows {
+        for expression in element { expression.collect(into: &expressions) }
+      }
     case .exists:
       // A subquery is its own scope — an aggregate inside it folds over its
       // group, not the enclosing one — so it contributes none here.

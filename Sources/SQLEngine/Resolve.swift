@@ -1098,6 +1098,27 @@ private func lower(_ predicate: Predicate,
     // UNKNOWN is UNKNOWN — not FALSE, and `NOT` maps that UNKNOWN to itself, so
     // `NOT IN` a list holding NULL is never TRUE.
     try membership(term(expression), values, negated: negated, term: term)
+  case let .rows(lhs, op, rhs):
+    // `(l…) <op> (r…)` lowers to a first-class `Filter.comparison` — the two
+    // rows of EQUAL arity (`SQLError.arity` otherwise), each component lowered
+    // ONCE through `term`. The runtime evaluates every component exactly once
+    // per row and folds the values with the SAME `matches`/Kleene primitives a
+    // scalar comparison uses (a componentwise Kleene `AND` for `=`, its
+    // negation for `<>`, the lexicographic cascade for the ordering operators),
+    // so a stateful component is read once and the ISO three-valued truth is
+    // preserved. A desugar to a conjunction/cascade of scalar comparisons
+    // duplicated a component across its places, re-evaluating it.
+    try rows(lhs, op, rhs, term: term)
+  case let .among(lhs, rows, negated):
+    // `(l…) [NOT] IN ((r…), …)` lowers to a first-class `Filter.memberships` —
+    // the left row and a non-empty list of element rows, all of EQUAL arity
+    // (`SQLError.arity` otherwise, an empty list rejected), each component
+    // lowered ONCE through `term`. The runtime evaluates the left row once per
+    // row and folds `(l…) = (r…)` over the element rows under Kleene `OR`, so
+    // the left components are read once rather than once per element (an
+    // OR-chain of row equalities would re-read them), keeping the value-list
+    // `IN`'s three-valued semantics.
+    try among(lhs, rows, negated: negated, term: term)
   case let .like(operand, pattern, escape, negated):
     // Lower each operand to a first-class `Filter.like`; the optional escape
     // lowers only when present. The matcher and three-valued handling live in
@@ -1168,6 +1189,72 @@ private func membership(_ left: Term, _ values: Array<Expression>,
     try elements.append(term(value))
   }
   return .membership(left, elements, negated: negated)
+}
+
+/// Lowers `(l…) <op> (r…)` to a first-class `Filter.comparison(l, op, r)`, the
+/// two rows lowered componentwise through `term`.
+///
+/// The two rows must be of EQUAL arity (`SQLError.arity` otherwise) — a
+/// row-value comparison of unequal rows is undefined. Each component is lowered
+/// ONCE rather than duplicated into a desugared conjunction/cascade of scalar
+/// comparisons: that desugar named a component in several places (the `<`
+/// cascade uses each earlier component in both a strict step and an equality
+/// tie-guard), so a non-idempotent component was evaluated more than once. The
+/// `Filter.comparison` runtime evaluates every component exactly once per row,
+/// then folds the values with the same `matches`/Kleene primitives — preserving
+/// the ISO three-valued truth while reading each component a single time.
+private func rows(_ lhs: Array<Expression>, _ op: Comparison,
+                  _ rhs: Array<Expression>,
+                  term: (Expression) throws(SQLError) -> Term)
+    throws(SQLError) -> Filter {
+  guard lhs.count == rhs.count else {
+    throw .arity(lhs.count, rhs.count)
+  }
+  var l = Array<Term>()
+  l.reserveCapacity(lhs.count)
+  for expression in lhs { try l.append(term(expression)) }
+  var r = Array<Term>()
+  r.reserveCapacity(rhs.count)
+  for expression in rhs { try r.append(term(expression)) }
+  return .comparison(l, op, r)
+}
+
+/// Lowers `(l…) [NOT] IN ((r…), …)` to a first-class
+/// `Filter.memberships(l, [[r…], …], negated:)`, the left row and each element
+/// row lowered componentwise through `term`.
+///
+/// The element list must be non-empty and every element row of the SAME arity
+/// as the left row (`SQLError.arity` otherwise) — as with the scalar value-list
+/// `IN`, the parser rejects `IN ()`, but `Predicate.among` is public, so a
+/// caller can bypass the grammar and this lowering rejects it. The left row's
+/// components are lowered ONCE and held rather than copied into an OR-chain of
+/// scalar row equalities: that chain re-evaluated the left components once per
+/// element row, so a non-idempotent component yielded a different value each
+/// element compared against. The `Filter.memberships` runtime evaluates the
+/// left row once per row, then folds `(l…) = (r…)` over the elements under
+/// Kleene `OR` — the same three-valued membership the value-list `IN` uses.
+private func among(_ lhs: Array<Expression>, _ rows: Array<Array<Expression>>,
+                   negated: Bool,
+                   term: (Expression) throws(SQLError) -> Term)
+    throws(SQLError) -> Filter {
+  if rows.isEmpty {
+    throw .state("42601", "IN requires a non-empty value list")
+  }
+  var l = Array<Term>()
+  l.reserveCapacity(lhs.count)
+  for expression in lhs { try l.append(term(expression)) }
+  var elements = Array<Array<Term>>()
+  elements.reserveCapacity(rows.count)
+  for element in rows {
+    guard element.count == lhs.count else {
+      throw .arity(lhs.count, element.count)
+    }
+    var row = Array<Term>()
+    row.reserveCapacity(element.count)
+    for expression in element { try row.append(term(expression)) }
+    elements.append(row)
+  }
+  return .memberships(l, elements, negated: negated)
 }
 
 /// Lowers `operand [NOT] LIKE pattern [ESCAPE escape]` to a first-class
@@ -2407,6 +2494,57 @@ internal struct Scope {
       }, equality: { value throws(SQLError) in
         matched(operand, value, routines)
       })
+    case let .rows(lhs, _, rhs):
+      // `(l…) <op> (r…)` lowers to a componentwise comparison, so type each
+      // component of both rows for real errors (unknown column, bad arity, …),
+      // and enforce the EQUAL-arity rule the lowering does (`SQLError.arity`)
+      // so schema validation matches execution. A cross-kind component is NOT
+      // rejected — the run's `matches` yields FALSE across kinds without
+      // faulting, as an `IN` element does — so the schema accepts what the run
+      // accepts.
+      guard lhs.count == rhs.count else {
+        throw .arity(lhs.count, rhs.count)
+      }
+      for expression in lhs {
+        _ = try validate(expression, routines, subquery: subquery)
+      }
+      for expression in rhs {
+        _ = try validate(expression, routines, subquery: subquery)
+      }
+    case let .among(lhs, rows, _):
+      // `(l…) [NOT] IN ((r…), …)` lowers to a disjunction of row equalities, so
+      // type the left row and each element row for real errors, and enforce the
+      // non-empty list and per-row EQUAL-arity rules the lowering does. A
+      // cross-kind component is NOT rejected, as an `IN` element is not.
+      //
+      // The OR-chain short-circuits exactly as the scalar `.membership` does: a
+      // DEFINITE constant match (both the left row and an element row fold to
+      // ROW-INDEPENDENT constants whose tuple-equality `relate` yields TRUE)
+      // makes the whole `IN` TRUE and leaves every later element unreachable,
+      // so validation stops there — `(1, 2) IN ((1, 2), (Name + 1, 3))`
+      // type-checks (the constant `(1, 2)` matches the first element before
+      // `Name + 1` is reached), while `(1, 2) IN ((3, 4), (Name + 1, 5))` (no
+      // definite match) still validates `Name + 1` and faults. A row-dependent
+      // side leaves the element undecided (`nil`), so no false short-circuit
+      // prunes a reachable element.
+      if rows.isEmpty {
+        throw .state("42601", "IN requires a non-empty value list")
+      }
+      for expression in lhs {
+        _ = try validate(expression, routines, subquery: subquery)
+      }
+      let l = constants(lhs, routines)
+      _ = try membership(of: rows, each: { element throws(SQLError) in
+        guard element.count == lhs.count else {
+          throw .arity(lhs.count, element.count)
+        }
+        for expression in element {
+          _ = try validate(expression, routines, subquery: subquery)
+        }
+      }, equality: { element throws(SQLError) in
+        guard let l, let r = constants(element, routines) else { return nil }
+        return relate(l, .equal, r)
+      })
     case let .like(operand, pattern, escape, _):
       // Validate the operand, pattern, and optional escape for REAL errors
       // (unknown column, bad arity, …); a non-text operand or pattern is NOT
@@ -2633,6 +2771,22 @@ internal struct Scope {
     }
   }
 
+  /// The constant `Value`s a ROW `row` folds to when EVERY component is
+  /// row-independent — else `nil` (any component a row/group/run decides). A
+  /// row comparison and a row `IN` element fold through this so a single row-
+  /// dependent component leaves the whole row undecided, matching the runtime's
+  /// whole-row evaluation.
+  private func constants(_ row: Array<Expression>, _ routines: Routines)
+      -> Array<Value>? {
+    var values = Array<Value>()
+    values.reserveCapacity(row.count)
+    for expression in row {
+      guard let value = constant(expression, routines) else { return nil }
+      values.append(value)
+    }
+    return values
+  }
+
   /// Folds an `IN` value list as its OR-chain of `operand = element`
   /// equalities, honouring the executor's SHORT-CIRCUIT: the elements are
   /// visited in order, each mapped to its three-valued equality truth by
@@ -2648,10 +2802,15 @@ internal struct Scope {
   /// a per-element side effect (validation) applies it to exactly the reachable
   /// prefix. The fold seeds FALSE (an empty match is FALSE), so the returned
   /// truth is the disjunction over the visited prefix.
-  private func membership<E: Error>(
-      of elements: Array<Expression>,
-      each visit: (Expression) throws(E) -> Void = { (_: Expression) in },
-      equality: (Expression) throws(E) -> Bool?)
+  ///
+  /// The element is GENERIC — a scalar value list supplies an `Expression` per
+  /// element, a row `IN` a whole `Array<Expression>` row — so the same
+  /// short-circuit drives the scalar `.membership` and the row `.among` folds,
+  /// the tuple-equality via `relate` standing in for the scalar equality.
+  private func membership<Element, E: Error>(
+      of elements: Array<Element>,
+      each visit: (Element) throws(E) -> Void = { (_: Element) in },
+      equality: (Element) throws(E) -> Bool?)
       throws(E) -> Bool? {
     var truth: Bool? = false
     for element in elements {
@@ -2778,6 +2937,37 @@ internal struct Scope {
       return nil
     case .bound:
       return nil
+    case let .rows(lhs, op, rhs):
+      // Fold `(l…) <op> (r…)` exactly as the scalar `.comparison` folds — each
+      // component of BOTH rows folds through `constant(_ expression:)`, then
+      // the folded values combine through the SHARED `relate` primitive the run
+      // (`Filter.comparison`) and the empty-group pre-fold drive, so the fold
+      // matches the run. A single row-dependent component (`nil`) leaves the
+      // whole comparison per row (`nil`), so both `AND` arms stay reachable; an
+      // all-constant pair settles it, so a constant-false row guard prunes its
+      // right arm as `1 = 0 AND …` does.
+      guard let l = constants(lhs, routines),
+          let r = constants(rhs, routines) else {
+        return nil
+      }
+      return relate(l, op, r)
+    case let .among(lhs, rows, negated):
+      // Fold `(l…) [NOT] IN ((r…), …)` exactly as the scalar `.membership`
+      // folds — the left row folds through `constant(_ expression:)`, then the
+      // element rows OR-fold under the `membership` short-circuit: an element
+      // whose components ALL fold constant contributes its tuple-equality
+      // (`relate(l, =, r)`, the same shared primitive), and once one folds
+      // definitely TRUE the walk stops, so a later row-dependent element is
+      // unreachable and does not spoil it — `(1, 2) IN ((1, 2), (Name + 1, 3))`
+      // folds `true`. Absent a decisive match, a row-dependent element makes it
+      // per row (`nil`); a row-dependent LEFT row leaves the whole `IN` per
+      // row. `NOT IN` negates the folded truth (UNKNOWN maps to itself).
+      guard let l = constants(lhs, routines) else { return nil }
+      let truth = membership(of: rows) { element in
+        guard let r = constants(element, routines) else { return nil }
+        return relate(l, .equal, r)
+      }
+      return negated ? truth.map { !$0 } : truth
     case .exists, .within, .quantified:
       // A subquery predicate is not a ROW-INDEPENDENT constant fold — its truth
       // is decided by the materialised result at lowering time, not by folding
@@ -2822,6 +3012,20 @@ internal struct Scope {
       settled(operand, routines)
     case .bound:
       false
+    case let .rows(lhs, _, rhs):
+      // A row comparison is settled when EVERY component of BOTH rows folds to
+      // a ROW-INDEPENDENT constant — the row analog of `.comparison`, so a
+      // constant-UNKNOWN row comparison (a NULL component) folds a `truth` test
+      // definitely rather than deferring it.
+      lhs.allSatisfy { constant($0, routines) != nil }
+          && rhs.allSatisfy { constant($0, routines) != nil }
+    case let .among(lhs, rows, _):
+      // A row `IN` is settled when the LEFT row and EVERY element row fold to
+      // ROW-INDEPENDENT constants — the row analog of `.membership`.
+      lhs.allSatisfy { constant($0, routines) != nil }
+          && rows.allSatisfy { element in
+            element.allSatisfy { constant($0, routines) != nil }
+          }
     case .exists, .within, .quantified:
       // A subquery predicate's truth comes from a materialised result, not from
       // folding constant operands, so it is never settled at compile time.
@@ -2855,7 +3059,10 @@ internal struct Scope {
       definite(lhs) && definite(rhs)
     case let .not(operand):
       definite(operand)
-    case .comparison, .membership, .like, .between, .bound:
+    // A row-value comparison and row `IN` are three-valued over NULLs — a NULL
+    // component makes a componentwise test UNKNOWN — exactly as the scalar
+    // `.comparison`/`.membership` are, so neither is definite.
+    case .comparison, .membership, .rows, .among, .like, .between, .bound:
       false
     }
   }
@@ -2987,6 +3194,22 @@ internal struct Scope {
       try aggregates(in: operand, routines, subquery: subquery)
       for value in values {
         try aggregates(in: value, routines, subquery: subquery)
+      }
+    case let .rows(lhs, _, rhs):
+      for expression in lhs {
+        try aggregates(in: expression, routines, subquery: subquery)
+      }
+      for expression in rhs {
+        try aggregates(in: expression, routines, subquery: subquery)
+      }
+    case let .among(lhs, rows, _):
+      for expression in lhs {
+        try aggregates(in: expression, routines, subquery: subquery)
+      }
+      for element in rows {
+        for expression in element {
+          try aggregates(in: expression, routines, subquery: subquery)
+        }
       }
     case .exists:
       // A subquery is its OWN scope — any aggregate inside it folds over its
@@ -3189,6 +3412,47 @@ internal struct Scope {
       let lhs = try empty(operand, routines)
       let truth = try membership(of: values) { value throws(SQLError) in
         matches(lhs, .equal, try empty(value, routines))
+      }
+      return negated ? truth.map { !$0 } : truth
+    case let .rows(lhs, op, rhs):
+      // Fold `(l…) <op> (r…)` over the empty group as `Filter.comparison`
+      // evaluates it: each component folds through `empty(_ expression:)`, then
+      // the values combine with the SAME `matches`/Kleene primitives — the
+      // componentwise Kleene `AND` for `=` (its negation for `<>`), the
+      // lexicographic cascade for the ordering operators. Reject an unequal
+      // arity as `lower`/`check` do.
+      guard lhs.count == rhs.count else {
+        throw .arity(lhs.count, rhs.count)
+      }
+      var l = Array<Value>()
+      l.reserveCapacity(lhs.count)
+      for expression in lhs { try l.append(empty(expression, routines)) }
+      var r = Array<Value>()
+      r.reserveCapacity(rhs.count)
+      for expression in rhs { try r.append(empty(expression, routines)) }
+      return relate(l, op, r)
+    case let .among(lhs, rows, negated):
+      // Fold `(l…) [NOT] IN ((r…), …)` over the empty group as
+      // `Filter.memberships` evaluates it: the left row folds once, then
+      // `(l…) = (r…)` folds over the element rows under Kleene `OR`, each
+      // element equality the componentwise Kleene `AND`. Reject an empty list
+      // or unequal arity as `lower`/`check` do.
+      if rows.isEmpty {
+        throw .state("42601", "IN requires a non-empty value list")
+      }
+      var l = Array<Value>()
+      l.reserveCapacity(lhs.count)
+      for expression in lhs { try l.append(empty(expression, routines)) }
+      var truth: Bool? = false
+      for element in rows {
+        guard element.count == lhs.count else {
+          throw .arity(lhs.count, element.count)
+        }
+        var r = Array<Value>()
+        r.reserveCapacity(element.count)
+        for expression in element { try r.append(empty(expression, routines)) }
+        truth = or(truth, relate(l, .equal, r))
+        if truth == true { break }
       }
       return negated ? truth.map { !$0 } : truth
     case let .like(operand, pattern, escape, negated):
@@ -3950,6 +4214,14 @@ extension Filter {
       operand.references(into: &ordinals)
       for element in elements {
         element.references(into: &ordinals)
+      }
+    case let .comparison(lhs, _, rhs):
+      for term in lhs { term.references(into: &ordinals) }
+      for term in rhs { term.references(into: &ordinals) }
+    case let .memberships(lhs, rows, _):
+      for term in lhs { term.references(into: &ordinals) }
+      for element in rows {
+        for term in element { term.references(into: &ordinals) }
       }
     case let .exists(_, correlation, _):
       // A CORRELATED EXISTS reads the enclosing row's cells its inner `WHERE`

@@ -20,13 +20,18 @@
 ///                   AS '(' query ')'
 /// query          := intersection ((UNION | EXCEPT) [ALL] intersection)*
 /// intersection   := term (INTERSECT [ALL] term)*
-/// term           := select | TABLE identifier   // TABLE t = SELECT * FROM t
+/// term           := select | TABLE identifier | values
+///                   // TABLE t = SELECT * FROM t
+/// values         := VALUES tuple (',' tuple)*  // ISO table value constructor;
+///                   // desugars to a UNION ALL of FROM-less constant SELECTs
+/// tuple          := '(' expression (',' expression)* ')'
 /// select         := SELECT [DISTINCT | ALL] projection
 ///                   [FROM relation (join)*
 ///                    [where] [group] [having] [order] [limit]]
 /// relation       := (identifier | [LATERAL] derived) [AS identifier]
 ///                   // LATERAL is legal only on a derived table in a join
-/// derived        := '(' query ')' AS identifier  // a derived table (aliased)
+/// derived        := '(' query ')' AS identifier  // a derived table (aliased);
+///                   // the query may be a SELECT, TABLE t, or VALUES (…)
 /// join           := ([INNER | (LEFT | RIGHT | FULL) [OUTER]] JOIN
 ///                     relation ON predicate)
 ///                  | (CROSS JOIN relation)  // Cartesian product, no ON/USING
@@ -248,8 +253,9 @@ internal struct Parser: ~Escapable {
     return query
   }
 
-  /// Parses a query primary — a `SELECT …` or the ISO `TABLE t` shorthand — the
-  /// leaf both set-operation tiers compose over.
+  /// Parses a query primary — a `SELECT …`, the ISO `TABLE t` shorthand, or the
+  /// ISO `VALUES (…), …` table value constructor — the leaf both set-operation
+  /// tiers compose over.
   ///
   /// `TABLE t` is exactly `SELECT * FROM t` (ISO 9075 `<explicit table>`): it
   /// lowers to the SAME AST a star-projection single-relation select builds — a
@@ -261,12 +267,93 @@ internal struct Parser: ~Escapable {
   /// `TABLE (…)` is not an ISO form. Ordering is a select-internal clause here,
   /// so a `TABLE t ORDER BY …` tail is not accepted at this primary level — the
   /// `SELECT * FROM t ORDER BY …` spelling carries an order.
+  ///
+  /// `VALUES (…), …` desugars to a `UNION ALL` of FROM-less constant selects
+  /// (see `values()`), so it too composes with the set-operation tiers as a
+  /// parenthesised select would and carries no primary-level ordering.
   private mutating func term() throws(SQLError) -> Query {
-    guard try match(.table) else {
-      return try .select(select())
+    if try match(.table) {
+      let name = try identifier()
+      return .select(Select(projection: .all, from: Relation(name: name)))
     }
-    let name = try identifier()
-    return .select(Select(projection: .all, from: Relation(name: name)))
+    if current?.kind == .values {
+      return try values()
+    }
+    return try .select(select())
+  }
+
+  /// Parses the ISO `<table value constructor>` `VALUES (v, …), (v, …), …` (the
+  /// `VALUES` keyword is the next token), desugaring it to a `UNION ALL` of
+  /// FROM-less constant `SELECT`s — no new AST node, so `compile`, execute, the
+  /// per-column type unification, and set-operation composition all apply
+  /// unchanged.
+  ///
+  /// Each parenthesised row is a tuple of scalar expressions (usually literals,
+  /// but any row-independent expression is admitted, since a FROM-less `SELECT`
+  /// evaluates it over the single empty row). Every row must have EQUAL arity —
+  /// a mismatch is `SQLError.arity` — and there is at least one row, each with
+  /// at least one element (the parser rejects an empty `VALUES ()`). The rows
+  /// lower to `SELECT v, … UNION ALL SELECT v, …` in source order, so `UNION
+  /// ALL` preserves both the order and any duplicate rows.
+  ///
+  /// The constructor's DEFAULT column names are the ISO `column1, column2, …`,
+  /// emitted as the FIRST arm's projection aliases (the ISO rule that a set
+  /// operation's result columns come from its first arm) so a `SELECT column1
+  /// FROM (VALUES …) AS t` names them. A per-column `ValueType` unifies across
+  /// the rows through the SAME set-operation schema derivation `UNION` uses (a
+  /// column mixing integer and double widens to double), so this parse only
+  /// shapes the desugar and leaves the typing to resolution.
+  private mutating func values() throws(SQLError) -> Query {
+    try expect(.values)
+
+    var rows = Array<Array<Expression>>()
+    try rows.append(tuple())
+    while try match(.comma) {
+      try rows.append(tuple())
+    }
+
+    // Every row constructs the same number of columns; a later row of a
+    // different arity is an ISO arity error.
+    let arity = rows[0].count
+    for row in rows.dropFirst() where row.count != arity {
+      throw .arity(arity, row.count)
+    }
+
+    // The FIRST arm carries the default `column1, column2, …` output names as
+    // explicit aliases; the ISO first-arm rule propagates them to the result.
+    // Later arms need no aliases — a set operation names its result from the
+    // first arm alone — so they project the bare expressions.
+    var query = Query.select(row(rows[0], named: true))
+    for arm in rows.dropFirst() {
+      query = .setop(.union, query, .select(row(arm, named: false)),
+                     all: true)
+    }
+    return query
+  }
+
+  /// Builds one `VALUES` arm — a FROM-less `SELECT` projecting `row`'s element
+  /// expressions. The FIRST arm (`named`) aliases each column `column1,
+  /// column2, …` (the constructor's default names); a later arm leaves them
+  /// bare, as a set operation names its result from the first arm alone.
+  private func row(_ row: Array<Expression>, named: Bool) -> Select {
+    let items = row.enumerated().map { (index, expression) in
+      Projected(expression: expression,
+                alias: named ? "column\(index + 1)" : nil)
+    }
+    return Select(projection: .expressions(items), from: nil)
+  }
+
+  /// Parses one parenthesised `VALUES` row — `'(' expression (',' expression)*
+  /// ')'` — returning its element expressions, at least one required (an empty
+  /// `()` faults).
+  private mutating func tuple() throws(SQLError) -> Array<Expression> {
+    try expect(.lparen)
+    var elements = try [expression()]
+    while try match(.comma) {
+      try elements.append(expression())
+    }
+    try expect(.rparen)
+    return elements
   }
 
   /// Parses a `CREATE` statement — `CREATE VIEW …` or `CREATE FUNCTION …` (the
@@ -479,8 +566,9 @@ internal struct Parser: ~Escapable {
       guard let token = current else {
         throw .incomplete(expected: "a derived table '(SELECT …)'")
       }
-      // A derived table is any query, so `TABLE t` opens one as `SELECT` does.
-      guard [.select, .table].contains(token.kind) else {
+      // A derived table is any query, so `TABLE t` and `VALUES (…)` each open
+      // one as `SELECT` does.
+      guard [.select, .table, .values].contains(token.kind) else {
         throw .unexpected(token.kind.description,
                           expected: "a derived table '(SELECT …)'",
                           at: token.location)
@@ -699,12 +787,13 @@ internal struct Parser: ~Escapable {
   private mutating func factor() throws(SQLError) -> Expression {
     if try match(.lparen) {
       // ONE token of lookahead after `(` disambiguates a SCALAR SUBQUERY from a
-      // parenthesised expression: a `SELECT` or `TABLE` begins a subquery —
-      // `(query)`, the first-class `Expression.subquery` (the query may itself
-      // be a `UNION`) — and anything else begins a parenthesised expression. No
-      // rewind is needed: neither keyword begins an expression, so the peek is
-      // unambiguous, exactly as the `IN (…)` and `EXISTS (…)` lookaheads are.
-      if [.select, .table].contains(current?.kind) {
+      // parenthesised expression: a `SELECT`, `TABLE`, or `VALUES` begins a
+      // subquery — `(query)`, the first-class `Expression.subquery` (the query
+      // may itself be a `UNION`) — and anything else begins a parenthesised
+      // expression. No rewind is needed: none of these keywords begins an
+      // expression, so the peek is unambiguous, exactly as the `IN (…)` and
+      // `EXISTS (…)` lookaheads are.
+      if [.select, .table, .values].contains(current?.kind) {
         let query = try query()
         try expect(.rparen)
         return .subquery(query)
@@ -1330,7 +1419,7 @@ internal struct Parser: ~Escapable {
   private mutating func membership(_ left: Expression, negated: Bool)
       throws(SQLError) -> Predicate {
     try expect(.lparen)
-    if [.select, .table].contains(current?.kind) {
+    if [.select, .table, .values].contains(current?.kind) {
       let query = try query()
       try expect(.rparen)
       return .within(left, query, negated: negated)

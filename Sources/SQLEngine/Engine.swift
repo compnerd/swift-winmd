@@ -2675,7 +2675,7 @@ extension Catalog where Self: ~Escapable {
     // `.match` (folded to the join key), and the residual `p_R` shifts
     // alongside into this `left ++ scan` space.
     let scan = Plan.scan(name: name, ordinals: scanOrdinals, seek: nil)
-    let matched = Filter.match(correlate.outer, base + correlate.inner)
+    let matched = Filter(match: correlate.outer, base + correlate.inner)
     let shifted = residual.map { $0.shifted(by: -base) }
     // The apply's `on` addresses the `left ++ taken` space; map it into this
     // `left ++ scan` space (taken column `base + j` becomes the scan slot `base
@@ -2923,7 +2923,7 @@ extension Catalog where Self: ~Escapable {
     // straddling `.match` (the executor's hash key), and the residual `p_R`
     // shifts alongside into this `left ++ scan` space.
     let scan = Plan.scan(name: name, ordinals: scanOrdinals, seek: nil)
-    let matched = Filter.match(outer, base + inner)
+    let matched = Filter(match: outer, base + inner)
     let shifted = residual.map { $0.shifted(by: -base) }
     // The IN membership equality `operand = projected` rides `on` AFTER the
     // correlation match (so `equikey` still hashes on the correlation) and
@@ -2933,7 +2933,8 @@ extension Catalog where Self: ~Escapable {
     // plus the residual exactly as before (a `nil` operand ⇒ byte-identical).
     var conjuncts = [matched]
     if let operand, let projected {
-      conjuncts.append(.compare(operand, .equal, .slot(base + projected)))
+      conjuncts.append(Filter(compare: operand, .equal,
+                              .slot(base + projected)))
     }
     conjuncts.append(contentsOf: shifted)
     let on = conjuncts.conjunction ?? matched
@@ -3087,7 +3088,7 @@ extension Catalog where Self: ~Escapable {
     // straddling `.match` (the executor's hash key), and the residual `p_R`
     // shifts alongside into this `left ++ scan` space.
     let scan = Plan.scan(name: name, ordinals: scanOrdinals, seek: nil)
-    let matched = Filter.match(outer, base + inner)
+    let matched = Filter(match: outer, base + inner)
     let shifted = residual.map { $0.shifted(by: -base) }
     let on = ([matched] + shifted).conjunction ?? matched
     // A unique-`Id` key matches AT MOST ONE R row, so a plain LEFT join reads

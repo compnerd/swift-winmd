@@ -166,6 +166,80 @@ internal indirect enum Filter: Equatable, Sendable {
   }
 }
 
+// MARK: - Leaf construction
+
+extension Filter {
+  /// The value-predicate leaf `compare(lhs, op, rhs)` — a labeled convenience
+  /// initializer so an authoring site reads `Filter(compare: lhs, op, rhs)`
+  /// rather than the bare case. A thin forward: no operand normalization.
+  internal init(compare lhs: Term, _ op: Comparison, _ rhs: Term) {
+    self = .compare(lhs, op, rhs)
+  }
+
+  /// The value-predicate leaf `match(left, right)` — a labeled convenience
+  /// initializer so an authoring site reads `Filter(match: left, right)`. A
+  /// thin forward to the case.
+  internal init(match left: Int, _ right: Int) {
+    self = .match(left, right)
+  }
+
+  /// The value-predicate leaf `null(term, negated:)` — a labeled convenience
+  /// initializer so an authoring site reads `Filter(null: term, negated:)`. A
+  /// thin forward to the case.
+  internal init(null term: Term, negated: Bool) {
+    self = .null(term, negated: negated)
+  }
+
+  /// The value-predicate leaf `membership(operand, values, negated:)` — a
+  /// labeled convenience initializer so an authoring site reads
+  /// `Filter(membership: operand, values, negated:)`. The middle value list is
+  /// unlabeled as in the case. A thin forward.
+  internal init(membership operand: Term, _ values: Array<Term>,
+                negated: Bool) {
+    self = .membership(operand, values, negated: negated)
+  }
+
+  /// The value-predicate leaf `between(test, lower, upper, negated:)` — a
+  /// labeled convenience initializer so an authoring site reads
+  /// `Filter(between: test, lower, upper, negated:)`. A thin forward.
+  internal init(between test: Term, _ lower: Operand, _ upper: Operand,
+                negated: Bool) {
+    self = .between(test, lower, upper, negated: negated)
+  }
+
+  /// The value-predicate leaf `like(operand, pattern:, escape:, negated:)` — a
+  /// labeled convenience initializer so an authoring site reads
+  /// `Filter(like: operand, pattern:, escape:, negated:)`. A thin forward.
+  internal init(like operand: Term, pattern: Operand, escape: Operand?,
+                negated: Bool) {
+    self = .like(operand, pattern: pattern, escape: escape, negated: negated)
+  }
+
+  /// The value-predicate leaf `distinct(lhs, rhs, negated:)` — a labeled
+  /// convenience initializer so an authoring site reads
+  /// `Filter(distinct: lhs, rhs, negated:)`. A thin forward.
+  internal init(distinct lhs: Term, _ rhs: Term, negated: Bool) {
+    self = .distinct(lhs, rhs, negated: negated)
+  }
+
+  /// The value-predicate leaf `comparison(lhs, op, rhs)` — a labeled
+  /// convenience initializer so a row-value authoring site reads
+  /// `Filter(comparison: lhs, op, rhs)`. A thin forward.
+  internal init(comparison lhs: Array<Term>, _ op: Comparison,
+                _ rhs: Array<Term>) {
+    self = .comparison(lhs, op, rhs)
+  }
+
+  /// The value-predicate leaf `memberships(lhs, rows, negated:)` — a labeled
+  /// convenience initializer so a row-value authoring site reads
+  /// `Filter(memberships: lhs, rows, negated:)`. The middle row list is
+  /// unlabeled as in the case. A thin forward.
+  internal init(memberships lhs: Array<Term>, _ rows: Array<Array<Term>>,
+                negated: Bool) {
+    self = .memberships(lhs, rows, negated: negated)
+  }
+}
+
 // MARK: - Terms
 
 /// The engine's ordinal-addressed scalar expression.
@@ -486,34 +560,37 @@ extension Filter {
   internal func remapped(through slot: Dictionary<Int, Int>) -> Filter {
     switch self {
     case let .compare(lhs, op, rhs):
-      .compare(lhs.remapped(through: slot), op, rhs.remapped(through: slot))
+      Filter(compare: lhs.remapped(through: slot), op,
+             rhs.remapped(through: slot))
     case let .bound(term, op, parameter):
       .bound(term.remapped(through: slot), op, parameter)
     case let .match(left, right):
-      .match(slot[left]!, slot[right]!)
+      Filter(match: slot[left]!, slot[right]!)
     case let .null(term, negated):
-      .null(term.remapped(through: slot), negated: negated)
+      Filter(null: term.remapped(through: slot), negated: negated)
     case let .membership(operand, elements, negated):
-      .membership(operand.remapped(through: slot),
-                  elements.map { $0.remapped(through: slot) },
-                  negated: negated)
+      Filter(membership: operand.remapped(through: slot),
+             elements.map { $0.remapped(through: slot) },
+             negated: negated)
     case let .comparison(lhs, op, rhs):
-      .comparison(lhs.map { $0.remapped(through: slot) }, op,
-                  rhs.map { $0.remapped(through: slot) })
+      Filter(comparison: lhs.map { $0.remapped(through: slot) }, op,
+             rhs.map { $0.remapped(through: slot) })
     case let .memberships(lhs, rows, negated):
-      .memberships(lhs.map { $0.remapped(through: slot) },
-                   rows.map { $0.map { $0.remapped(through: slot) } },
-                   negated: negated)
+      Filter(memberships: lhs.map { $0.remapped(through: slot) },
+             rows.map { $0.map { $0.remapped(through: slot) } },
+             negated: negated)
     case let .like(operand, pattern, escape, negated):
-      .like(operand.remapped(through: slot),
-            pattern: pattern.remapped(through: slot),
-            escape: escape?.remapped(through: slot), negated: negated)
+      Filter(like: operand.remapped(through: slot),
+             pattern: pattern.remapped(through: slot),
+             escape: escape?.remapped(through: slot), negated: negated)
     case let .between(test, lower, upper, negated):
-      .between(test.remapped(through: slot), lower.remapped(through: slot),
-               upper.remapped(through: slot), negated: negated)
+      Filter(between: test.remapped(through: slot),
+             lower.remapped(through: slot),
+             upper.remapped(through: slot), negated: negated)
     case let .distinct(lhs, rhs, negated):
-      .distinct(lhs.remapped(through: slot), rhs.remapped(through: slot),
-                negated: negated)
+      Filter(distinct: lhs.remapped(through: slot),
+             rhs.remapped(through: slot),
+             negated: negated)
     case let .exists(key, correlation, negated):
       // A CORRELATED EXISTS reads the enclosing row's cells its inner `WHERE`
       // names; remap each `slot` outer ordinal to its packed slot (a `bound`

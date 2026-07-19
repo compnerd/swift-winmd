@@ -1063,11 +1063,11 @@ private func lower(_ predicate: Predicate,
     throws(SQLError) -> Filter {
   switch predicate {
   case let .comparison(left, op, right):
-    try .compare(term(left), op, term(right))
+    try Filter(compare: term(left), op, term(right))
   case let .bound(left, op, parameter):
     try .bound(term(left), op, parameter)
   case let .null(expression, negated):
-    try .null(term(expression), negated: negated)
+    try Filter(null: term(expression), negated: negated)
   case let .exists(query, negated):
     // `[NOT] EXISTS (Q)`. In this first slice `Q` is UNCORRELATED, so the
     // materialiser runs it ONCE (as a CTE body materialises) and the whole
@@ -1132,15 +1132,15 @@ private func lower(_ predicate: Predicate,
     // `b` making a bound UNKNOWN and excluding the row, the ISO range test.
     // Each bound lowers through the same `Operand` form a `LIKE` pattern does,
     // a `.term` or a `:parameter` name resolved from the bindings at eval.
-    try .between(term(test), lower(low, term: term), lower(high, term: term),
-                 negated: negated)
+    try Filter(between: term(test), lower(low, term: term),
+               lower(high, term: term), negated: negated)
   case let .distinct(lhs, rhs, negated):
     // `a IS [NOT] DISTINCT FROM b` lowers to a first-class `Filter.distinct`
     // over the two lowered terms — the null-safe comparison the runtime
     // evaluates TWO-VALUED, treating NULL as a comparable value. No
     // `:parameter` form is defined, so both sides lower straight through
     // `term`.
-    try .distinct(term(lhs), term(rhs), negated: negated)
+    try Filter(distinct: term(lhs), term(rhs), negated: negated)
   case let .truth(inner, value, negated):
     // `p IS [NOT] <truth value>` lowers to a first-class `Filter.truth` over
     // the lowered inner boolean filter; the three-valued-to-definite mapping
@@ -1188,7 +1188,7 @@ private func membership(_ left: Term, _ values: Array<Expression>,
   for value in values {
     try elements.append(term(value))
   }
-  return .membership(left, elements, negated: negated)
+  return Filter(membership: left, elements, negated: negated)
 }
 
 /// Lowers `(l…) <op> (r…)` to a first-class `Filter.comparison(l, op, r)`, the
@@ -1216,7 +1216,7 @@ private func rows(_ lhs: Array<Expression>, _ op: Comparison,
   var r = Array<Term>()
   r.reserveCapacity(rhs.count)
   for expression in rhs { try r.append(term(expression)) }
-  return .comparison(l, op, r)
+  return Filter(comparison: l, op, r)
 }
 
 /// Lowers `(l…) [NOT] IN ((r…), …)` to a first-class
@@ -1254,7 +1254,7 @@ private func among(_ lhs: Array<Expression>, _ rows: Array<Array<Expression>>,
     for expression in element { try row.append(term(expression)) }
     elements.append(row)
   }
-  return .memberships(l, elements, negated: negated)
+  return Filter(memberships: l, elements, negated: negated)
 }
 
 /// Lowers `operand [NOT] LIKE pattern [ESCAPE escape]` to a first-class
@@ -1272,8 +1272,8 @@ private func like(_ operand: Expression, _ pattern: Predicate.Operand,
     throws(SQLError) -> Filter {
   let escape: Filter.Operand? =
       if let escape { try lower(escape, term: term) } else { nil }
-  return try .like(term(operand), pattern: lower(pattern, term: term),
-                   escape: escape, negated: negated)
+  return try Filter(like: term(operand), pattern: lower(pattern, term: term),
+                    escape: escape, negated: negated)
 }
 
 /// Lowers a `LIKE` pattern or escape `operand` to its filter form: an
@@ -3832,7 +3832,7 @@ internal struct Scope {
     // `SQLError.column` on the outer column already lowered correctly.
     let filters = lowered.map { residual -> Filter in
       if case let .compare(.slot(left), .equal, .slot(right)) = residual {
-        return .match(left, right)
+        return Filter(match: left, right)
       }
       return residual
     }

@@ -43,6 +43,32 @@ internal struct Schema {
     self.virtuals = virtuals
   }
 
+  /// This schema with its real column `names` positionally RENAMED to
+  /// `columns` — the ISO `AS t(c, …)` explicit output column list — or
+  /// unchanged when `columns` is empty (no list).
+  ///
+  /// The list renames exactly the REAL columns (the `width` a `SELECT *`
+  /// exposes), leaving `virtuals` (the engine's `Id`) addressable by their own
+  /// names, so `T AS t(c, d)` renames `T`'s columns while `t.Id` still
+  /// resolves. `columns` must name exactly one column per real column
+  /// (`SQLError.columns`, the CTE/view arity fault) and be case-insensitively
+  /// unique (`SQLError.duplicate`, so a shadowed rename is not silently
+  /// unreachable) — the same rules a CTE's/view's column list obeys, applied
+  /// where the relation's resolved width is known.
+  internal func renamed(_ columns: Array<String>)
+      throws(SQLError) -> Schema {
+    guard !columns.isEmpty else { return self }
+    guard columns.count == width else {
+      throw .columns(expected: width, got: columns.count)
+    }
+    var seen = Set<String>()
+    for column in columns where !seen.insert(column.lowercased()).inserted {
+      throw .duplicate(column)
+    }
+    return Schema(width: width, extent: extent, names: columns,
+                  types: types, virtuals: virtuals)
+  }
+
   /// The ordinal of the column named `name`, or `nil` if absent.
   ///
   /// A real column resolves against `names` to an ordinal `< width`; a virtual

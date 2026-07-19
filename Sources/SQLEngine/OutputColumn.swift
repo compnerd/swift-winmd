@@ -955,16 +955,29 @@ extension Catalog where Self: ~Escapable {
       let nested = stack.nested(under: preceding ?? Scope([]))
       let scope = context.revealed().with(outer: nested)
           .lateralizing().validating(false)
-      return try materialise(query, scope, rows: false).schema()
+      return try materialise(query, scope, rows: false,
+                             columns: relation.columns).schema()
+    }
+    // The explicit `AS t(c, …)` list positionally renames a NAMED relation's
+    // output columns; a DERIVED table's list was already applied where it
+    // materialised (its overlay binding below carries the renamed names), so
+    // only a `.named` source renames HERE — never double-renaming a derived
+    // table read back through the overlay. This is the schema-only mirror of
+    // `resolve`'s named-relation rename, kept in parity so the two paths
+    // advertise the SAME column names.
+    let renaming: Array<String> = if case .named = relation.source {
+      relation.columns
+    } else {
+      []
     }
     if let cte = context.relations[name.lowercased()] {
-      return cte.schema()
+      return try cte.schema().renamed(renaming)
     }
     // A reserved store relation types through its SCHEMA-ONLY build (header +
     // types, no rows), so resolving a view over `definition_schema.tables`/
     // `.columns` reads only the schema and never triggers the row builder.
     if let relation = Definition(name) {
-      return store(relation, rows: false).schema()
+      return try store(relation, rows: false).schema().renamed(renaming)
     }
     if let view = resolve(view: name) {
       // A view's declared schema types every column `.integer`, since a view
@@ -979,7 +992,9 @@ extension Catalog where Self: ~Escapable {
       // re-enter this view forever, so break the cycle and fall back to the
       // declared schema (every type the `.integer` default). `try?` cannot
       // catch this — the recursion overflows the stack rather than throwing.
-      if context.visited.contains(name.lowercased()) { return base }
+      if context.visited.contains(name.lowercased()) {
+        return try base.renamed(renaming)
+      }
       // Type-check the body's REACHABLE operands and calls across every arm and
       // clause — `compile` cannot check a routine EXISTS, the first-arm resolve
       // below sees only the first projection, and the outer query's walk does
@@ -1013,14 +1028,17 @@ extension Catalog where Self: ~Escapable {
       // public entry runs it), so on a shortfall fall back to the declared
       // schema rather than re-checking it here.
       let resolved = try columns(of: view.query.first, overlay)
-      guard resolved.count == base.width else { return base }
-      return Schema(width: base.width, extent: base.extent, names: base.names,
-                    types: resolved.map(\.type), virtuals: base.virtuals)
+      guard resolved.count == base.width else {
+        return try base.renamed(renaming)
+      }
+      return try Schema(width: base.width, extent: base.extent,
+                        names: base.names, types: resolved.map(\.type),
+                        virtuals: base.virtuals).renamed(renaming)
     }
     guard let table = table(named: name) else {
       throw .relation(name)
     }
-    return table.schema()
+    return try table.schema().renamed(renaming)
   }
 }
 

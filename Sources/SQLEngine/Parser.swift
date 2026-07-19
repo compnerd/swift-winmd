@@ -463,6 +463,16 @@ internal struct Parser: ~Escapable {
   /// latter is admitted only when the next token is a bare identifier, so a
   /// following keyword (`JOIN`, `WHERE`, …) or the end of input is not mistaken
   /// for an alias.
+  ///
+  /// Either alias may carry an ISO explicit output column list `'(' identifier
+  /// (, identifier)* ')'` (`AS t(c, d)`), positionally RENAMING the relation's
+  /// output columns — admitted on BOTH a derived table and a named relation.
+  /// The list's ARITY and case-insensitive UNIQUENESS are checked where the
+  /// output width is known (the schema-derivation seam), not here, so a list
+  /// over a `SELECT *` derived table (whose width resolves later) parses.
+  ///
+  /// `relation := [LATERAL] ('(' query ')' | identifier) [[AS] alias ['('
+  /// identifier (, identifier)* ')']]`
   private mutating func relation() throws(SQLError) -> Relation {
     let lateral = try match(.lateral)
     if try match(.lparen) {
@@ -487,7 +497,9 @@ internal struct Parser: ~Escapable {
                           expected: "'AS' and an alias for the derived table",
                           at: token.location)
       }
-      return try Relation(derived: query, as: identifier(), lateral: lateral)
+      let alias = try identifier()
+      return try Relation(derived: query, as: alias,
+                          columns: names() ?? [], lateral: lateral)
     }
     // `LATERAL` introduces a derived table; a named relation may not follow it.
     if lateral {
@@ -506,7 +518,12 @@ internal struct Parser: ~Escapable {
     } else {
       nil
     }
-    return Relation(name: name, alias: alias)
+    // An explicit column list requires an alias to key the renamed columns
+    // under (`T(c, d)` with no alias is ISO-invalid); the `names()` peek only
+    // fires when an alias was taken, so a bare `T` never consumes a following
+    // grouping's `(`.
+    let columns = alias == nil ? [] : try names() ?? []
+    return Relation(name: name, alias: alias, columns: columns)
   }
 
   /// Whether `kind` begins an identifier — a bare or a delimited name — the

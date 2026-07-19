@@ -25,6 +25,9 @@ extension Token {
     /// The `TABLE` keyword introducing the `TABLE t` query primary — the ISO
     /// shorthand for `SELECT * FROM t`.
     case table
+    /// The `VALUES` keyword introducing the ISO `<table value constructor>` — a
+    /// query primary listing explicit rows (`VALUES (1, 'a'), (2, 'b')`).
+    case values
     case distinct
     case from
     case `where`
@@ -138,6 +141,7 @@ extension Token.Kind {
     case .returns: "RETURNS"
     case .select: "SELECT"
     case .table: "TABLE"
+    case .values: "VALUES"
     case .distinct: "DISTINCT"
     case .from: "FROM"
     case .where: "WHERE"

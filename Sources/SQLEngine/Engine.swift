@@ -2614,7 +2614,7 @@ extension Catalog where Self: ~Escapable {
     // body query declares any derived tables of its own — the SAME
     // `collect(derived:)` the augment path uses over the body select — and
     // leave the apply correlated.
-    var derivations = Array<(String, Query)>()
+    var derivations = Array<(String, Query, Array<String>)>()
     key.query.collect(derived: &derivations)
     guard derivations.isEmpty else { return nil }
     // The scan must also name a genuine BASE relation, not a CTE/store overlay
@@ -2875,7 +2875,7 @@ extension Catalog where Self: ~Escapable {
         let base = left.slots else { return nil }
     // No body-local derived table: its per-execution alias cannot be relaid as
     // a caller-level scan — the SAME hazard the CROSS APPLY recogniser guards.
-    var derivations = Array<(String, Query)>()
+    var derivations = Array<(String, Query, Array<String>)>()
     key.query.collect(derived: &derivations)
     guard derivations.isEmpty else { return nil }
     // The scan must name a genuine BASE relation, not a CTE/store overlay entry
@@ -3031,7 +3031,7 @@ extension Catalog where Self: ~Escapable {
         left.slots == base else { return nil }
     // No body-local derived table: its per-execution alias cannot be relaid as
     // a caller-level scan — the SAME hazard the semijoin recogniser guards.
-    var derivations = Array<(String, Query)>()
+    var derivations = Array<(String, Query, Array<String>)>()
     key.query.collect(derived: &derivations)
     guard derivations.isEmpty else { return nil }
     // The scan must name a genuine BASE relation, not a CTE/store overlay entry
@@ -3984,6 +3984,7 @@ extension Catalog where Self: ~Escapable {
   /// NOT eagerly type-checked, matching the reachability-gated validation the
   /// rest of the engine applies; a REACHED bad operand still faults at run.
   private borrowing func lateral(_ body: Query, against scope: Scope,
+                                 columns renaming: Array<String>,
                                  _ context: Context)
       throws(SQLError) -> (key: Subkey, correlation: Correlation) {
     let nested = (context.outer ?? Outer()).nested(under: scope)
@@ -4001,8 +4002,14 @@ extension Catalog where Self: ~Escapable {
     // stays barred. The flag rides through the shared derived-body machinery to
     // the projection lowering, where a projected preceding column lowers to a
     // `Term.parameter` rather than faulting `.unsupported`.
+    // Thread the derived table's explicit `AS d(a, b)` column list into the
+    // body's schema derive so this validation checks the same EXPOSED (renamed)
+    // names `schema(of:)` advertises — its arity (`SQLError.columns`) and
+    // uniqueness (`SQLError.duplicate`) run against the renamed list, so a list
+    // hiding a duplicate INNER name (`SELECT T.Id AS x, T.Id AS x) AS d(a, b)`)
+    // passes at BOTH seams rather than faulting only here.
     let revealed = context.revealed().with(outer: nested).lateralizing()
-    _ = try materialise(body, revealed, rows: false)
+    _ = try materialise(body, revealed, rows: false, columns: renaming)
     // Compile the body LENIENTLY for the per-outer-row apply plan (the shape
     // pass a correlated subquery's pre-pass runs), recording it under the
     // occurrence's key composed with the discovered correlation. It compiles
@@ -4045,8 +4052,19 @@ extension Catalog where Self: ~Escapable {
         .scan(name: name, ordinals: ordinals, seek: nil)
       }
     }
+    // The explicit `AS t(c, …)` list positionally renames a NAMED relation's
+    // output columns; a DERIVED table's list was applied where it materialised
+    // (its overlay binding carries the renamed names), so only a `.named`
+    // source renames HERE — the compile-path mirror of `schema(of:)`'s named
+    // rename, kept in parity so compile and the schema-only path resolve the
+    // SAME column names.
+    let columns: Array<String> = if case .named = relation.source {
+      relation.columns
+    } else {
+      []
+    }
     if let cte = context.relations[name.lowercased()] {
-      let schema = cte.schema()
+      let schema = try cte.schema().renamed(columns)
       return Resolved(schema: schema) { ordinals in
         .scan(name: name, ordinals: ordinals, seek: nil)
       }
@@ -4104,7 +4122,7 @@ extension Catalog where Self: ~Escapable {
       guard view.columns.count == projected else {
         throw .columns(expected: projected, got: view.columns.count)
       }
-      let schema = view.schema()
+      let schema = try view.schema().renamed(columns)
       return Resolved(schema: schema) { ordinals in
         .derived(name: name, plan: plan, ordinals: ordinals, seek: nil)
       }
@@ -4113,7 +4131,7 @@ extension Catalog where Self: ~Escapable {
     guard let table = table(named: name) else {
       throw .relation(name)
     }
-    let schema = table.schema()
+    let schema = try table.schema().renamed(columns)
     return Resolved(schema: schema) { ordinals in
       .scan(name: name, ordinals: ordinals, seek: nil)
     }
@@ -4329,7 +4347,8 @@ extension Catalog where Self: ~Escapable {
         throw .state("0A000", "a RIGHT/FULL LATERAL join is not supported")
       }
       let preceding = Scope(Array(relations[0 ... index]))
-      laterals[index] = try lateral(body, against: preceding, context)
+      laterals[index] = try lateral(body, against: preceding,
+                                    columns: join.relation.columns, context)
     }
     // Compile every nested subquery ONCE for arity/type, ahead of lowering,
     // into a map the join ONs, WHERE, projection, and ORDER BY lowering reads —

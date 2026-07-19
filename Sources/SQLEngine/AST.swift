@@ -421,6 +421,16 @@ public struct Relation: Hashable, Sendable {
   /// present for a `derived` one (ISO requires a derived table be aliased).
   public let alias: String?
 
+  /// The relation's explicit output column names — the ISO `AS t(c, …)` list —
+  /// in ordinal order, or empty when the relation carries no list. A supplied
+  /// list positionally RENAMES the relation's real output columns (the same
+  /// mechanism a CTE's `columns` list applies), so `FROM T AS t(c, d)` and
+  /// `(SELECT x, y FROM T) AS d(a, b)` address the relation's columns by the
+  /// new names. ISO admits the list on BOTH a named relation and a derived
+  /// table, so it rides on the shared `Relation` node. Empty matches the CTE
+  /// field's shape (an absent list, columns inferred from the source).
+  public let columns: Array<String>
+
   /// Whether a `LATERAL` derived table — its body may reference the PRECEDING
   /// FROM items, so it re-evaluates per their rows (a correlated apply), rather
   /// than materialising once. Always `false` for a `named` relation and for a
@@ -428,19 +438,25 @@ public struct Relation: Hashable, Sendable {
   /// call site.
   public let lateral: Bool
 
-  /// A named base relation, view, or CTE with an optional alias.
-  public init(name: String, alias: String? = nil) {
+  /// A named base relation, view, or CTE with an optional alias and an optional
+  /// explicit output column list (`FROM T AS t(c, d)`).
+  public init(name: String, alias: String? = nil,
+              columns: Array<String> = []) {
     self.source = .named(name)
     self.alias = alias
+    self.columns = columns
     self.lateral = false
   }
 
-  /// A derived table over `query`, resolved under the mandatory `alias`. A
+  /// A derived table over `query`, resolved under the mandatory `alias`, with
+  /// an optional explicit output column list (`(SELECT …) AS d(a, b)`). A
   /// `lateral` one resolves against the preceding FROM items and re-evaluates
   /// per their rows; a plain one materialises once, independent of the caller.
-  public init(derived query: Query, as alias: String, lateral: Bool = false) {
+  public init(derived query: Query, as alias: String,
+              columns: Array<String> = [], lateral: Bool = false) {
     self.source = .derived(query)
     self.alias = alias
+    self.columns = columns
     self.lateral = lateral
   }
 

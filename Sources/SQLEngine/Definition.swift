@@ -215,7 +215,7 @@ extension Catalog where Self: ~Escapable {
             store(relation, rows: rows, context.routines)
       }
     }
-    var derivations = Array<(String, Query)>()
+    var derivations = Array<(String, Query, Array<String>)>()
     query.collect(derived: &derivations)
     if derivations.isEmpty { return context.scoping(augmented) }
     // A derived table's alias sharing a RANGE NAME with another FROM/JOIN item
@@ -254,7 +254,7 @@ extension Catalog where Self: ~Escapable {
     var counts = Dictionary<String, Int>()
     for range in ranges { counts[range.lowercased(), default: 0] += 1 }
     let sources = Set(identifiers.map { $0.lowercased() })
-    for (alias, _) in derivations {
+    for (alias, _, _) in derivations {
       let name = alias.lowercased()
       // >1 range: the derived alias equals another FROM/JOIN item's exposed
       // range name (a sibling derived alias, or an unaliased named relation).
@@ -298,15 +298,20 @@ extension Catalog where Self: ~Escapable {
                                 == $0.1 }) {
       return context.scoping(augmented)
     }
+    // A derived table's optional `AS d(a, b)` column list renames its output
+    // columns; thread it into `materialise` so the bound `RelationInstance`
+    // carries the RENAMED names — the same overlay both `resolve` and
+    // `schema(of:)` read a derived table's schema back from, so the run and the
+    // schema-only paths see the renamed columns from ONE seam.
     // Materialise each alias's body against the revealed base scope (a
     // same-named CTE visible, the derived aliases being defined not), then push
     // them as one derived layer that SHADOWS an outer CTE or derived alias of
     // the same name in the scope THIS SELECT resolves its OWN references
     // against (projection/WHERE/JOIN-ON/GROUP/HAVING).
     var layer = Dictionary<String, RelationInstance>()
-    for (alias, inner) in derivations {
+    for (alias, inner, columns) in derivations {
       layer[alias.lowercased()] =
-          try materialise(inner, scope, rows: rows)
+          try materialise(inner, scope, rows: rows, columns: columns)
     }
     return context.scoping(augmented.pushing(layer))
   }
@@ -336,7 +341,7 @@ extension Catalog where Self: ~Escapable {
   /// schema and run paths bind the same nested aliases before either reads the
   /// inner query.
   borrowing func materialise(_ query: Query, _ context: Context,
-                             rows: Bool)
+                             rows: Bool, columns renaming: Array<String> = [])
       throws(SQLError) -> RelationInstance {
     // Bind the inner query's OWN derived tables (and store relations) before
     // deriving its schema — a run augments them recursively, so the schema
@@ -370,16 +375,35 @@ extension Catalog where Self: ~Escapable {
     // NOT eager-type-checked before execution, exactly as the non-derived path
     // never evaluates an unreached operand — while the strict schema path
     // (`validate: true`) still faults it.
-    let outputs = try columns(of: query.first, scope)
-    // A derived table's columns are its inner query's OUTPUT names, so two
-    // same-named ones (`SELECT Id AS x, V AS x`) leave the shadowed one
-    // unreachable through the alias — exactly the case the Parser rejects for a
-    // view's or a CTE's inferred column list. Fault it the SAME way here
-    // (`SQLError.duplicate`, the "duplicate view column" fault), so it faults
-    // at BOTH the schema-only path and a run rather than silently exposing the
-    // first `x`. A plain top-level `SELECT Id AS x, V AS x` stays legal — the
-    // duplicate matters only where the relation is named and its columns are
-    // addressed by that name (a view, a CTE, a derived table).
+    let derived = try columns(of: query.first, scope)
+    // An explicit `AS d(a, b)` column list positionally RENAMES the derived
+    // table's inner output names, keeping each column's inferred TYPE (the list
+    // names, the body types), so `(SELECT x, y FROM T) AS d(a, b)` addresses
+    // the columns as `a`, `b`. Its arity must match the inner output width
+    // (`SQLError.columns`, the CTE/view arity fault) — checked HERE, where the
+    // width is resolved, so a list over a `SELECT *` derived body is checked
+    // once its `*` expands. Absent a list, the inner output names stand.
+    let outputs: Array<OutputColumn>
+    if renaming.isEmpty {
+      outputs = derived
+    } else {
+      guard renaming.count == derived.count else {
+        throw .columns(expected: derived.count, got: renaming.count)
+      }
+      outputs = renaming.indices.map {
+        OutputColumn(name: renaming[$0], type: derived[$0].type)
+      }
+    }
+    // A derived table's columns are its inner query's OUTPUT names (or the
+    // explicit list above), so two same-named ones (`SELECT Id AS x, V AS x`,
+    // or a `d(a, a)` list) leave the shadowed one unreachable through the alias
+    // — exactly the case the Parser rejects for a view's or a CTE's inferred
+    // column list. Fault it the SAME way here (`SQLError.duplicate`, the
+    // "duplicate view column" fault), so it faults at BOTH the schema-only path
+    // and a run rather than silently exposing the first `x`. A plain top-level
+    // `SELECT Id AS x, V AS x` stays legal — the duplicate matters only where
+    // the relation is named and its columns are addressed by that name (a view,
+    // a CTE, a derived table).
     var seen = Set<String>()
     for output in outputs
         where !seen.insert(output.name.lowercased()).inserted {
@@ -649,7 +673,8 @@ extension Query {
   /// tables in its own scope (see `Catalog.augment`/`materialise`). Descending
   /// would bind those aliases into one map, where two siblings sharing an alias
   /// `t` collide and an inner `t` cannot shadow an outer.
-  func collect(derived derivations: inout Array<(String, Query)>) {
+  func collect(derived derivations:
+                   inout Array<(String, Query, Array<String>)>) {
     if case let .select(select) = self {
       select.collect(derived: &derivations)
     }
@@ -721,15 +746,16 @@ extension Select {
   /// resolved against the preceding FROM and re-evaluated per its rows (a
   /// correlated apply), so `compile(select)` binds and executes it directly
   /// rather than through the overlay `augment` builds.
-  func collect(derived derivations: inout Array<(String, Query)>) {
+  func collect(derived derivations:
+                   inout Array<(String, Query, Array<String>)>) {
     if case let .derived(query) = from?.source, let alias = from?.alias,
         !(from?.lateral ?? false) {
-      derivations.append((alias, query))
+      derivations.append((alias, query, from?.columns ?? []))
     }
     for join in joins {
       if case let .derived(query) = join.relation.source,
           let alias = join.relation.alias, !join.relation.lateral {
-        derivations.append((alias, query))
+        derivations.append((alias, query, join.relation.columns))
       }
     }
   }

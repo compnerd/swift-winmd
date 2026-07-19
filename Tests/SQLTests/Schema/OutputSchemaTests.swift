@@ -199,6 +199,34 @@ struct OutputSchemaTests {
     #expect(columns[0] == ("Name", .text))
   }
 
+  @Test func `a named relation column list renames the output schema`() throws {
+    // `People AS p(who, years)` renames the real columns positionally; the
+    // result schema advertises the new names, each keeping its source type.
+    let columns = try schema("SELECT * FROM People AS p(who, years)")
+    #expect(columns.count == 2)
+    #expect(columns[0] == ("who", .text))
+    #expect(columns[1] == ("years", .integer))
+  }
+
+  @Test func `a derived table column list renames the output schema`() throws {
+    // `(SELECT Name, Age FROM People) AS d(who, years)` renames the inner
+    // outputs; the result schema reports the list's names, each inner type.
+    let columns = try schema(
+        "SELECT * FROM (SELECT Name, Age FROM People) AS d(who, years)")
+    #expect(columns.count == 2)
+    #expect(columns[0] == ("who", .text))
+    #expect(columns[1] == ("years", .integer))
+  }
+
+  @Test func `a column list arity mismatch faults the schema derivation`()
+      throws {
+    // The schema-only path checks the list's arity exactly as a run does,
+    // faulting `SQLError.columns` before advertising any headers.
+    #expect(throws: SQLError.columns(expected: 2, got: 1)) {
+      _ = try schema("SELECT * FROM People AS p(who)")
+    }
+  }
+
   @Test func `a view resolves against its registered columns`() throws {
     let definition = try View(query: {
       guard case let .select(query) =

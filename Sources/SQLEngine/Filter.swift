@@ -1067,6 +1067,26 @@ extension Catalog where Self: ~Escapable {
       throws(SQLError) -> Array<Record> {
     let bindings = correlated(row, correlation, context.bindings)
     let context = context.binding(bindings)
+    // A REACHED correlated scalar/`IN`/quantified occurrence over a SET
+    // OPERATION strictly re-folds its arms' column types before executing the
+    // SHAPED (placeholder-typed) plan the pre-pass recorded — the pre-pass
+    // compiles under `.shaping()`, so an irreconcilable pair was deferred to a
+    // placeholder there; this seam runs `context` WITHOUT a shape, so the fold
+    // faults `.operand`/42804 exactly as the uncorrelated `run` path does,
+    // firing ONLY for reached occurrences (an unreachable one never calls
+    // `executed`, so its shape deferral stands). Only a SET OPERATION has a
+    // cross-arm fold to check — a plain `SELECT` subquery has no arms to unify,
+    // and resolving its projection here would fault on its own correlated
+    // columns (out of scope in this fold context) — so a non-setop query skips
+    // it. `EXISTS`/`LATERAL` skip it too: `EXISTS` ignores column types and the
+    // recorded probe is already the shape. The fold runs ONCE per occurrence —
+    // memoised on the `Subkey` — so a reached incompatibility faults on the
+    // FIRST reached outer row and later rows skip the redundant (pure) re-fold.
+    if key.role == .scalar || key.role == .valued, case .setop = key.query,
+        !context.subqueries.validated(key) {
+      _ = try types(unifying: key.query, context)
+      context.subqueries.validate(key)
+    }
     guard let plan = context.subqueries.plan(key, correlation) else {
       throw .named("a correlated subquery plan was not compiled")
     }
@@ -1172,10 +1192,13 @@ extension Catalog where Self: ~Escapable {
   /// the run path is.
   private borrowing func arms(_ plan: Plan, _ query: Query, _ context: Context)
       throws(SQLError) -> Array<Record> {
-    if case let .setop(kind, left, right, all) = plan,
+    if case let .setop(kind, left, right, all, types, _) = plan,
         case let .setop(_, leftQuery, rightQuery, _) = query {
+      // The unified column `types` the plan carries (computed at compile) drive
+      // the arm coercion `combine` applies — the SAME types every set-op path
+      // uses, so a mixed-type arm widens identically here.
       return try combine(kind, arms(left, leftQuery, context),
-                         arms(right, rightQuery, context), all)
+                         arms(right, rightQuery, context), all, types: types)
     }
     let augmented =
         try augment(context.validating(false), for: query, rows: true)

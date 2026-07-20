@@ -76,7 +76,7 @@ private func selects(_ plan: Plan) -> Bool {
     selects(source)
   case let .apply(left, _, _, _, _, _):
     selects(left)
-  case let .setop(_, left, right, _):
+  case let .setop(_, left, right, _, _, _):
     selects(left) || selects(right)
   case .single, .scan:
     false

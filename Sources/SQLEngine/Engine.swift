@@ -149,8 +149,14 @@ extension Catalog where Self: ~Escapable {
       // filter never reaches (execution faults only on a REACHED operand),
       // matching the non-derived path.
       _ = try compile(query, context.validating(false))
+      // The result column TYPES are UNIFIED across the arms (ISO), so coerce
+      // each arm's values to them — `SELECT 1 UNION SELECT 2.5` emits a
+      // `double` column. The fold reads the arm queries in hand here; the
+      // Plan-node path carries the same types precomputed at compile.
+      let types = try types(unifying: query, context.validating(false))
       let combined = try combine(kind, run(left, context).map(Record.init),
-                                 run(right, context).map(Record.init), all)
+                                 run(right, context).map(Record.init), all,
+                                 types: types)
       return combined.map(\.values)
     }
     // Thread a fresh LAZY subquery cache — a shared box — through BOTH compile
@@ -299,14 +305,31 @@ extension Catalog where Self: ~Escapable {
       // does not reference itself — runs its query once. Each resolves against
       // the base catalog plus the CTEs done so far. The arity of both routings
       // is already checked by `validate` above.
+      // Bind the CTE under its BODY's derived column carrier, not a `.integer`
+      // placeholder: a caller reading the CTE (a set operation over its column)
+      // unifies against the real types AND the `unconstrained` mask, so `WITH
+      // a(x) AS (SELECT 'b') SELECT x FROM a UNION SELECT 'c'` folds text
+      // against text and runs, and an all-NULL CTE column unifies with any
+      // typed arm. Both routings feed the SAME carrier into `init(from:)`, so
+      // the schema-only self and materialised binding cannot diverge.
       let rows: Array<Array<Value>>
+      let carrier: Array<ResolvedColumn>
       if cte.recursive && cte.recurses {
-        rows = try fixpoint(cte, scope)
+        (rows, carrier) = try fixpoint(cte, scope)
       } else {
         rows = try run(cte.query, scope)
+        // The body already RAN and produced its rows, so re-derive its carrier
+        // TRUSTED — `validating(false)` so the derive does NOT eager-operand-
+        // check a data-dependent expression a filter dropped (`SELECT Label + 1
+        // … WHERE k = 0`, `Label` text), never evaluated, never a run fault.
+        // `kinds` binds the DECLARED names with the body-folded types/mask. A
+        // GENUINE set-operation incompatibility (`SELECT 'b' UNION SELECT 1`)
+        // still faults through the unconditional `merge` fold, matching the run
+        // — a reachable type error already faulted at `run` above.
+        carrier = try kinds(of: cte, scope.validating(false))
       }
       relations[cte.name.lowercased()] =
-          RelationInstance(from: cte.declared, rows: rows)
+          RelationInstance(from: carrier, rows: rows)
     }
     return try run(query, context.body(relations))
   }
@@ -396,7 +419,28 @@ extension Catalog where Self: ~Escapable {
       // run evaluates it in — so a text-arithmetic anchor faults against the
       // base relation, not the CTE's declared (integer) columns.
       if typecheck { try self.typecheck(anchor, scope) }
-      let empty = RelationInstance(from: cte.declared, rows: [])
+      // Bind the CTE self under the UNIFIED (anchor ⊕ recursive) column carrier
+      // — the SAME carrier `fixpoint` binds the iterated self under (the rows
+      // every step reads are coerced to those types). Typing the self here at
+      // the anchor-only types while the run reads the widened unified types
+      // would let schema validation call a query "valid" that the run mistypes
+      // (an integer-anchor self a widening recursive arm reads as `double`).
+      // `kinds` derives those unified types recursive-aware (anchor ⊕
+      // recursive), so a set-operation recursive arm still folds its self
+      // column at the anchor's real type. When `typecheck`, a genuine `kinds`
+      // fault (an irreconcilable arm pair the run's own type fold rejects) is a
+      // legitimate validation fault, so it surfaces here — the same fault the
+      // run raises. When NOT typechecking (the trusted RUN path), a data-
+      // dependent body a filter drops must NOT fault, so its derive falls back
+      // to the placeholder; the recursive-arm typecheck does not run there, so
+      // the self type is unused anyway. Feeding the carrier through
+      // `init(from:)` means this self binding and the run-iteration one cannot
+      // diverge.
+      let gated = context.validating(typecheck)
+      let seeded = typecheck
+          ? try kinds(of: cte, gated)
+          : (try? kinds(of: cte, gated)) ?? cte.declared
+      let empty = RelationInstance(from: seeded, rows: [])
       // Bind the CTE self BEFORE augmenting the recursive arm, so a derived
       // body in the arm that names the CTE (`FROM (SELECT n FROM a) AS d`)
       // resolves it — `augment` materialises derived bodies eagerly, so the
@@ -457,7 +501,8 @@ extension Catalog where Self: ~Escapable {
   /// itself); the recursive arm compiles with the name bound to `cte.columns`,
   /// the schema it reads.
   internal borrowing func fixpoint(_ cte: CTE, _ context: Context)
-      throws(SQLError) -> Array<Array<Value>> {
+      throws(SQLError) -> (rows: Array<Array<Value>>,
+                           carrier: Array<ResolvedColumn>) {
     // Extend the scope with any `definition_schema.` store relation the CTE's
     // body names, so the fixpoint's width-check compiles resolve a reserved
     // relation as the body's own run does. The routines ride in: this store
@@ -482,7 +527,17 @@ extension Catalog where Self: ~Escapable {
       guard width == cte.columns.count else {
         throw .columns(expected: cte.columns.count, got: width)
       }
-      return try run(cte.query, context)
+      // The CTE exposes its body's DERIVED column types/mask under its DECLARED
+      // names (resolved with the self shadowed by the same-named base it seeds
+      // from), not the declared-name placeholder, so a caller reading the CTE
+      // unifies against real types and the `unconstrained` mask while
+      // addressing the CTE by its declared list.
+      let rows = try run(cte.query, context)
+      // TRUSTED re-derive (the body already ran): `validating(false)` so an
+      // unreached data-dependent operand is not eager-checked, while a genuine
+      // set-operation incompatibility still faults through `merge`.
+      let carrier = try kinds(of: cte, context.validating(false))
+      return (rows, carrier)
     }
 
     // A misplaced recursive reference in the anchor (a same-named base/view is
@@ -501,23 +556,72 @@ extension Catalog where Self: ~Escapable {
       throw .columns(expected: cte.columns.count, got: width)
     }
 
-    // The recursive arm compiles with the CTE name bound to `cte.columns` — the
-    // schema every iteration reads it under — so its width resolves too (a
+    // The CTE column CARRIER a recursive reference reads under — the ANCHOR's
+    // own output columns (the base case, resolved with self NOT in scope).
+    // Binding the schema-only self under these — rather than a flat `.integer`
+    // placeholder — types the recursive arm's self-referencing columns
+    // consistently with the anchor, so the anchor/recursive fold below does not
+    // spuriously merge a genuine anchor type (a `text` `column_name`) against
+    // an `.integer` placeholder self column and fault. A NULL-only anchor
+    // column stays UNCONSTRAINED, so the recursive arm's typed column supplies
+    // the type. It defaults to `.integer`, the run's materialised-relation
+    // default.
+    let seeds = try columns(unifying: anchor, context)
+
+    // The recursive arm compiles with the CTE name bound to the anchor's own
+    // carrier under the CTE's DECLARED names (a `SELECT x FROM t` self
+    // reference addresses the declared `x`, not the anchor's projected name) —
+    // the schema every iteration reads it under — so its width resolves too (a
     // `SELECT *` arm spans that schema). Checking it here catches a mismatch
-    // even when the arm is filtered to zero rows in every iteration.
-    let empty = RelationInstance(from: cte.declared, rows: [])
+    // even when the arm is filtered to zero rows in every iteration. It is
+    // typed under the anchor's own `seeds`, so the arm's self columns carry the
+    // base-case types, not a flat `.integer`.
+    let declared = seeds.indices.map {
+      ResolvedColumn(name: cte.columns[$0], type: seeds[$0].type,
+                     unconstrained: seeds[$0].unconstrained)
+    }
+    let empty = RelationInstance(from: declared, rows: [])
     let probe = context.binding(cte.name, to: empty)
     let arm = try compile(recursive, probe).width
     guard arm == cte.columns.count else {
       throw .columns(expected: cte.columns.count, got: arm)
     }
 
+    // The result column CARRIER unifies the ANCHOR — typed under `context`,
+    // where a same-named base/view the anchor SEEDS from resolves to that base
+    // (the CTE self not yet in scope) — with the RECURSIVE arm, typed under
+    // `probe` (self bound). Folding the WHOLE `cte.query` under `probe` would
+    // resolve the anchor's base reference against the empty self, rejecting or
+    // mis-unifying a base-only column (`SELECT Age FROM People` seeding a
+    // recursive `People`). So merge the two arms' own-scope columns
+    // column-wise: an irreconcilable pair (text beside a number) faults
+    // `SQLError.operand`.
+    // `combine` never runs here (the fixpoint is hand-rolled for its `Seen`
+    // dedup), so these types coerce the produced ROWS directly with
+    // `Value.coerced` — the anchored seed and each iteration's output — BEFORE
+    // the dedup and append, leaving the plan tree (and the recursive self-
+    // reference) untouched.
+    let steps = try columns(unifying: recursive, probe)
+    // Merge column-wise, then bind under the CTE's DECLARED names (a CTE is
+    // addressed by its declared list, never the arm's own projected name),
+    // keeping each column's unified type and `unconstrained` mask. The declared
+    // width is proved equal to each arm's above, so the index is in range.
+    let unified = try seeds.indices.map { index throws(SQLError) in
+      try merge(seeds[index], steps[index])
+    }
+    let merged = unified.indices.map {
+      ResolvedColumn(name: cte.columns[$0], type: unified[$0].type,
+                     unconstrained: unified[$0].unconstrained)
+    }
+    let types = merged.map(\.type)
+
     // The anchor seeds the result and the working set, the CTE name not yet in
     // scope (the anchor is the base case, which does not reference itself). A
     // bare `UNION` dedups the seed exactly as it dedups an iteration's rows —
     // duplicate anchor rows collapse to their first occurrence — while `UNION
-    // ALL` keeps every anchor row.
-    let anchored = try run(anchor, context)
+    // ALL` keeps every anchor row. Each seed row is coerced to the unified
+    // column types before it is dedup'd or seeds the working set.
+    let anchored = try run(anchor, context).map { coerce($0, to: types) }
     var seen = Seen()
     var result = all ? anchored
                      : anchored.filter { seen.insert($0) }
@@ -531,9 +635,16 @@ extension Catalog where Self: ~Escapable {
       }
 
       // Bind the CTE name to ONLY the previous step's output and run the
-      // recursive arm against the base catalog plus the earlier CTEs.
-      let step = RelationInstance(from: cte.declared, rows: working)
+      // recursive arm against the base catalog plus the earlier CTEs. The self
+      // relation carries the UNIFIED `merged` carrier — the rows in `working`
+      // are already coerced to those types (the anchored seed and each step
+      // passes through `coerce($0, to: types)`), so the recursive arm must be
+      // TYPED to the values it reads. Typing the self under the anchor-only
+      // `seeds` would type an integer-anchor self while the coerced rows
+      // already hold widened `double` values, mistyping the arm the run reads.
+      let step = RelationInstance(from: merged, rows: working)
       let produced = try run(recursive, context.binding(cte.name, to: step))
+          .map { coerce($0, to: types) }
 
       var next = Array<Array<Value>>()
       for row in produced where all || seen.insert(row) {
@@ -542,8 +653,21 @@ extension Catalog where Self: ~Escapable {
       result += next
       working = next
     }
-    return result
+    return (result, merged)
   }
+}
+
+/// A row's cells COERCED to the unified column `types` — the recursive-CTE
+/// fixpoint's row-level counterpart of `Record.coerced(to:)`, applied to each
+/// materialised `Array<Value>` row (the fixpoint works on raw rows, not the
+/// plan tree) so the anchor and every iteration carry the set-operation's
+/// unified column types. `Value.coerced` widens an `integer` cell to `double`
+/// where the unified column is `double` and passes every other cell through, so
+/// a homogeneous recursive CTE's rows are unchanged. `types` matches the row
+/// width (the arity `fixpoint` proved equal against the declared columns).
+private func coerce(_ row: Array<Value>, to types: Array<ValueType>)
+    -> Array<Value> {
+  row.indices.map { row[$0].coerced(to: types[$0]) }
 }
 
 // MARK: - Compilation
@@ -2095,12 +2219,13 @@ extension Catalog where Self: ~Escapable {
       // never reshapes it.
       try .apply(optimise(left, context), key: key, correlation: correlation,
                  ordinals: ordinals, on: on, kind: kind)
-    case let .setop(kind, left, right, all):
+    case let .setop(kind, left, right, all, types, widened):
       // Optimise each side with the same bindings so a bound predicate inside
       // an arm seeks; the set operation itself merely combines its sides,
-      // preserving this node's own `kind` and `all`.
+      // preserving this node's own `kind`, `all`, unified column `types`, and
+      // `widened` mask.
       try .setop(kind, optimise(left, context), optimise(right, context),
-                 all: all)
+                 all: all, types: types, widened: widened)
     case let .distinct(source):
       // A `distinct` dedups its source without a seek or join of its own;
       // optimise the source below it and rewrap.
@@ -2151,10 +2276,11 @@ extension Catalog where Self: ~Escapable {
   private borrowing func optimise(_ plan: Plan, _ query: Query,
                                   _ overlay: Context)
       throws(SQLError) -> Plan {
-    if case let .setop(kind, left, right, all) = plan,
+    if case let .setop(kind, left, right, all, types, widened) = plan,
         case let .setop(_, leftQuery, rightQuery, _) = query {
       return try .setop(kind, optimise(left, leftQuery, overlay),
-                        optimise(right, rightQuery, overlay), all: all)
+                        optimise(right, rightQuery, overlay), all: all,
+                        types: types, widened: widened)
     }
     // Schema-only (`rows: false`): the optimiser needs the arm's derived alias
     // bound by name/schema so `seek` treats it as an unseekable materialised
@@ -2518,9 +2644,10 @@ extension Catalog where Self: ~Escapable {
                       ordinals: ordinals, on: on, kind: kind)
       }
       return rewritten
-    case let .setop(kind, left, right, all):
+    case let .setop(kind, left, right, all, types, widened):
       return try .setop(kind, decorrelate(left, context),
-                        decorrelate(right, context), all: all)
+                        decorrelate(right, context), all: all, types: types,
+                        widened: widened)
     case let .distinct(source):
       return try .distinct(decorrelate(source, context))
     case let .aggregate(keys, aggregates, source):
@@ -3203,8 +3330,9 @@ extension Plan {
       // was already pushed down at its compile.
       try .apply(left.pushdown(), key: key, correlation: correlation,
                  ordinals: ordinals, on: on, kind: kind)
-    case let .setop(kind, left, right, all):
-      try .setop(kind, left.pushdown(), right.pushdown(), all: all)
+    case let .setop(kind, left, right, all, types, widened):
+      try .setop(kind, left.pushdown(), right.pushdown(), all: all,
+                 types: types, widened: widened)
     case let .distinct(source):
       // A `distinct` sits above the projection, so no `WHERE` conjunct reaches
       // it to push down; it recurses transparently. A filter must never cross a
@@ -3445,8 +3573,14 @@ extension Plan {
   /// of the body — the `rebase` helper produces a mapping; a computed column
   /// (call or arithmetic) has none. A `union` admits it only when EVERY arm
   /// does — the arms are combined, so a conjunct pushable into one but not
-  /// another cannot descend into any and must stay outside. Anything else does
-  /// not admit it.
+  /// another cannot descend into any and must stay outside — AND the conjunct
+  /// references no column the set operation WIDENS: an arm coerces its cells to
+  /// the unified column type only AFTER it runs (in `combine`), so a predicate
+  /// pushed into the arm tests the PRE-coercion value, and over a widened
+  /// column that is the wrong type. Such a conjunct stays ABOVE the derived
+  /// leaf as a `select` on the coerced output, where it tests the unified type
+  /// — the observable result then matches an un-pushed query. A same-typed
+  /// column (an empty `widened`) still pushes. Anything else does not admit it.
   private func pushable(_ conjunct: Filter, _ ordinals: Array<Int>) -> Bool {
     switch self {
     case let .project(terms, _):
@@ -3456,8 +3590,16 @@ extension Plan {
       // not read — would be skipped for the filtered rows, suppressing a raise
       // `derive` owes by evaluating every column of every view row.
       terms.allSatisfy(\.safe) && rebase(conjunct, ordinals) != nil
-    case let .setop(_, left, right, _):
-      left.pushable(conjunct, ordinals) && right.pushable(conjunct, ordinals)
+    case let .setop(_, left, right, _, _, widened):
+      // A conjunct over a column the set operation WIDENS must NOT push into
+      // the arms: an arm evaluates it on the un-coerced value, but `combine`
+      // coerces the arm's rows to the unified type only after the arm runs, so
+      // the pushed predicate tests the wrong type. A slot the conjunct reads is
+      // a view-output slot, `ordinals[slot]` its output column — the same index
+      // `widened` records — so keep the conjunct outer when any is widened.
+      !conjunct.slots.contains { widened.contains(ordinals[$0]) }
+          && left.pushable(conjunct, ordinals)
+          && right.pushable(conjunct, ordinals)
     default:
       false
     }
@@ -3478,9 +3620,10 @@ extension Plan {
     case let .project(terms, body):
       try .project(terms,
                    body.distribute(conjuncts.map { rebase($0, ordinals)! }))
-    case let .setop(kind, left, right, all):
+    case let .setop(kind, left, right, all, types, widened):
       try .setop(kind, left.inject(conjuncts, ordinals),
-                 right.inject(conjuncts, ordinals), all: all)
+                 right.inject(conjuncts, ordinals), all: all, types: types,
+                 widened: widened)
     default:
       // A view sub-plan is always a `project` (or a `union` of them); anything
       // else keeps the conjuncts as an outer `select` rather than dropping
@@ -3573,9 +3716,43 @@ extension Catalog where Self: ~Escapable {
     let count = try arity(right.first, tail)
     guard count == width else { throw .arity(width, count) }
     // Both arms of a set-operation subquery correlate against the SAME
-    // enclosing scope, so each lowers under the shared `context.outer`.
+    // enclosing scope, so each lowers under the shared `context.outer`. The
+    // per-column result TYPES are UNIFIED across the arms (ISO) and CARRIED on
+    // the plan node: the `.setop` executor holds only the sub-plans, not the
+    // arm `Query`s, so it cannot fold them at run — compute them HERE, where
+    // the arm queries and scope are in hand, and coerce each arm's rows at run.
+    // The arms' OWN native column types (each arm's own unified columns —
+    // `types(unifying:)` folds a nested arm — the very rows `combine` coerces
+    // to this node's unified `types`) are derived BEFORE the `types` local
+    // shadows the deriver.
+    //
+    // These three derivations are a schema-only PROBE — they compute types, not
+    // the arms' real plans (those are compiled from `context` below, at
+    // `compile(left/right, context)`). The type derivation lowers any nested
+    // subquery to read its width, which would RECORD a correlated inner plan
+    // into the shared runtime memo; that record is first-writer-wins, so a
+    // later caller with a same-shaped subquery could reuse this view body's
+    // plan (against the view's base) instead of its own CTE. Derive against a
+    // context carrying an ISOLATED throwaway memo — every other field (scope,
+    // subscope, outer correlation, validate) preserved — so the probe's
+    // recordings are discarded and only the real arm compiles below populate
+    // the live memo.
+    let probe = context.resolving(Subqueries())
+    let l = try types(unifying: left, probe)
+    let r = try types(unifying: right, probe)
+    let types = try types(unifying: query, probe)
+    // The columns this node WIDENS — where the unified `types[c]` differs from
+    // an arm's OWN native type — so the pushdown pass (a pure Plan rewrite with
+    // no catalog) can keep a predicate over a widened column ABOVE the arms
+    // rather than pushing it in, where an arm would test the pre-coercion
+    // value. A column differing from EITHER arm is coerced for that arm, so
+    // record it; a homogeneous set operation matches both arms, leaving the
+    // mask empty and the pushdown unchanged.
+    let widened = Set(types.indices.filter {
+      types[$0] != l[$0] || types[$0] != r[$0]
+    })
     return try .setop(kind, compile(left, context), compile(right, context),
-                      all: all)
+                      all: all, types: types, widened: widened)
   }
 
   /// The distinct UNCORRELATED subqueries `select` nests, each COMPILED ONCE
@@ -3670,7 +3847,7 @@ extension Catalog where Self: ~Escapable {
     let context = context.revealed()
     let scope = context.subscope
     var widths = Dictionary<Query, Int>()
-    var types = Dictionary<Query, ValueType>()
+    var types = Dictionary<Query, ResolvedColumn>()
     var correlations = Dictionary<Query, Correlation>()
     for query in queries where widths[query] == nil {
       // A fresh `Outer` per nested query — its enclosing scope is THIS select
@@ -3692,8 +3869,14 @@ extension Catalog where Self: ~Escapable {
       // covers ONLY the lateral body's own projection, NOT a subquery inside
       // it, so an ordinary correlated scalar-subquery projection is barred
       // exactly as it is outside a lateral body.
-      let inner =
-          context.with(outer: nested).validating(false).unlateralized()
+      // `shaping()` DEFERS the set-operation operand-compatibility fold out of
+      // this pre-pass: it records EVERY nested subquery's width, arity, and
+      // single-column type ahead of the reachability walk, so a `SELECT 'x'
+      // UNION SELECT 1` behind a short-circuited `1 = 0 AND …` is not faulted
+      // while merely recording shape. A REACHED scalar/`IN` occurrence is re-
+      // folded strictly on the walk's reached path; arity/resolution eager.
+      let inner = context.with(outer: nested).validating(false)
+          .unlateralized().shaping()
       // A nested subquery's body derivation is SHAPE ONLY, so ALWAYS lenient
       // (`validate: false`) — this pass exists to record the subquery's width,
       // arity, and correlation, never to validate its body. Validation of a
@@ -3708,13 +3891,17 @@ extension Catalog where Self: ~Escapable {
       // of `validate`. The type derivation below is already lenient.
       let plan = try compile(query, inner)
       widths[query] = plan.width
-      // A scalar subquery contributes its single-column output type; a wider or
-      // an `EXISTS`/`IN (Q)` subquery still records the FIRST column's type
-      // (harmless — only a width-1 scalar occurrence reads it, and the lowering
-      // rejects a wider one). It derives cursor-free against the SAME context
-      // the width compile uses, so it matches what the run advertises.
+      // A scalar subquery contributes its single-column output COLUMN — its
+      // type AND `unconstrained` mask together, UNIFIED across its
+      // set-operation arms (a `(SELECT 1 UNION SELECT 2.5)` typing `double`, a
+      // `(SELECT NULLIF('a','a'))` staying unconstrained), not read off the
+      // first arm alone; a wider or an `EXISTS`/`IN (Q)` subquery still records
+      // the FIRST column (harmless — only a width-1 scalar occurrence reads it,
+      // and the lowering rejects a wider one). It derives cursor-free against
+      // the SAME context the width compile uses, so it matches what the run
+      // advertises.
       types[query] =
-          try columns(of: query.first, inner).first?.type
+          try columns(unifying: query, inner).first
       // The correlation the nested compile discovered — the outer columns its
       // inner `WHERE`/`ON` named — carried into the lowered subquery node so
       // the per-outer-row re-execution binds them. Empty for an UNCORRELATED
@@ -3826,7 +4013,15 @@ extension Catalog where Self: ~Escapable {
   /// select list as a run would anyway.
   internal borrowing func probe(_ query: Query, _ context: Context)
       throws(SQLError) -> Bool {
-    return try !run(probed(query), context).isEmpty
+    // An `EXISTS` reads ONLY the probe's cardinality, never a cell, so a set-
+    // operation probe's column TYPES are irrelevant — `combine` coerces the
+    // (discarded) rows, `.isEmpty` reads none. So run the probe under a
+    // `shaping()` context, deferring the set-operation operand-compatibility
+    // fold: `EXISTS (SELECT 'x' UNION SELECT 1)` probes non-emptiness WITHOUT
+    // faulting `SQLError.operand` on the irreconcilable arm types, matching the
+    // invariant that an `EXISTS` does not constrain column type (a bare-select
+    // probe folds nothing, so `shaping()` is inert for it).
+    return try !run(probed(query), context.shaping()).isEmpty
   }
 
   /// The cardinality-only shape of `query` an `EXISTS` tests for non-emptiness:

@@ -293,7 +293,7 @@ func engineDerived(_ plan: Plan) -> Plan? {
     engineDerived(left) ?? engineDerived(right)
   case let .apply(left, _, _, _, _, _):
     engineDerived(left)
-  case let .setop(_, left, right, _):
+  case let .setop(_, left, right, _, _, _):
     engineDerived(left) ?? engineDerived(right)
   case let .limit(_, _, source):
     engineDerived(source)
@@ -331,7 +331,7 @@ func engineSeeks(_ plan: Plan) -> Bool {
     engineSeeks(left) || engineSeeks(right)
   case let .apply(left, _, _, _, _, _):
     engineSeeks(left)
-  case let .setop(_, left, right, _):
+  case let .setop(_, left, right, _, _, _):
     engineSeeks(left) || engineSeeks(right)
   case let .limit(_, _, source):
     engineSeeks(source)
@@ -366,7 +366,7 @@ func engineFilters(_ plan: Plan) -> Bool {
     engineFilters(left) || engineFilters(right)
   case let .apply(left, _, _, _, _, _):
     engineFilters(left)
-  case let .setop(_, left, right, _):
+  case let .setop(_, left, right, _, _, _):
     engineFilters(left) || engineFilters(right)
   case let .limit(_, _, source):
     engineFilters(source)
@@ -406,7 +406,7 @@ func enginePushed(_ plan: Plan) -> Bool {
     enginePushed(source)
   case let .derived(_, sub, _, _):
     enginePushed(sub)
-  case let .setop(_, left, right, _):
+  case let .setop(_, left, right, _, _, _):
     enginePushed(left) || enginePushed(right)
   case let .limit(_, _, source):
     enginePushed(source)
@@ -464,7 +464,7 @@ func engineJoins(_ plan: Plan) -> Bool {
     engineJoins(left) || engineJoins(right)
   case let .apply(left, _, _, _, _, _):
     engineJoins(left)
-  case let .setop(_, left, right, _):
+  case let .setop(_, left, right, _, _, _):
     engineJoins(left) || engineJoins(right)
   case let .aggregate(_, _, source):
     engineJoins(source)
@@ -502,7 +502,7 @@ func engineResidual(_ plan: Plan) -> Bool {
     engineResidual(left) || engineResidual(right)
   case let .apply(left, _, _, _, _, _):
     engineResidual(left)
-  case let .setop(_, left, right, _):
+  case let .setop(_, left, right, _, _, _):
     engineResidual(left) || engineResidual(right)
   case let .aggregate(_, _, source):
     engineResidual(source)
@@ -541,7 +541,7 @@ func engineSeparated(_ plan: Plan) -> Bool {
     engineSeparated(left) || engineSeparated(right)
   case let .apply(left, _, _, _, _, _):
     engineSeparated(left)
-  case let .setop(_, left, right, _):
+  case let .setop(_, left, right, _, _, _):
     engineSeparated(left) || engineSeparated(right)
   case let .aggregate(_, _, source):
     engineSeparated(source)
@@ -581,7 +581,7 @@ func engineStacked(_ plan: Plan) -> Bool {
     engineStacked(left) || engineStacked(right)
   case let .apply(left, _, _, _, _, _):
     engineStacked(left)
-  case let .setop(_, left, right, _):
+  case let .setop(_, left, right, _, _, _):
     engineStacked(left) || engineStacked(right)
   case let .aggregate(_, _, source):
     engineStacked(source)
@@ -675,7 +675,7 @@ private func spanned() throws -> EngineMemory {
 /// arm's body, the per-arm rebase this fix enables.
 private func injected(_ plan: Plan) -> Bool {
   switch plan {
-  case let .setop(_, left, right, _):
+  case let .setop(_, left, right, _, _, _):
     (engineSeeks(left) || engineFloats(left)) && (engineSeeks(right) || engineFloats(right))
   case let .select(_, source):
     injected(source)
@@ -1129,6 +1129,72 @@ struct EnginePushdownTests {
     // The UNKNOWN-ON pair (A.k NULL) is dropped by the match gate before the
     // division runs, so the query returns rows rather than raising.
     #expect(try catalog.run(select) == [])
+  }
+}
+
+// MARK: - Set-op view type probe must not pollute the runtime plan memo
+
+/// The set-op column-type unification `compile` derives for a `UNION`/`EXCEPT`/
+/// `INTERSECT` view body runs a SCHEMA-ONLY projection PROBE (to learn which
+/// columns the set operation widens). That probe lowers any nested correlated
+/// subquery under the `.caller` id space and — before the fix — recorded the
+/// subquery's per-outer-row PLAN into the SHARED runtime memo. Recording is
+/// first-writer-wins, so a later CALLER whose own correlated subquery has the
+/// SAME AST and correlation (`(SELECT Val FROM S WHERE S.Id = T.Id)` over a
+/// same-shaped outer `T`) reused the VIEW body's plan — resolving `S` against
+/// the view's BASE table, not the caller's own CTE `S`. The probe must derive
+/// against an ISOLATED throwaway memo so it records nothing, letting each
+/// caller resolve its subquery against its OWN base.
+private func setopMemo() throws -> EngineMemory {
+  try Catalog {
+    // The shared driver `T`, referenced by the view body AND the caller, so the
+    // correlated subquery's outer `T.Id` binds at the SAME ordinal in both — an
+    // identical `Correlation`, hence an identical plan-memo key.
+    Relation("T", ["Id": .integer]) {
+      Row(1)
+      Row(2)
+    }
+    // The BASE `S` the VIEW body's `(SELECT Val FROM S …)` resolves against —
+    // `Id` at ordinal 0, `Val` at ordinal 1. A caller CTE named `S` shadows it
+    // with the columns in the OPPOSITE order (`Val` at 0, `Id` at 1), so the
+    // view's compiled plan — which projects ordinal 1 and filters ordinal 0 —
+    // reads the WRONG cells if reused against the caller's CTE: it would
+    // project the CTE's `Id` (ordinal 1) rather than its `Val` (ordinal 0).
+    Relation("S", ["Id": .integer, "Val": .integer]) {
+      Row(1, 1000)
+      Row(2, 2000)
+    }
+    // A set-operation view whose LEFT arm holds a correlated scalar subquery
+    // `(SELECT Val FROM S WHERE S.Id = T.Id)` — the SAME AST the caller uses.
+    // Compiling its body runs the `.setop` widened-column type probe, which
+    // lowers that subquery under `.caller`; the probe must NOT record its plan.
+    try View("V", """
+        SELECT (SELECT Val FROM S WHERE S.Id = T.Id) AS c FROM T
+          UNION ALL
+        SELECT 0 AS c FROM T
+        """, as: ["c"])
+  }
+}
+
+struct EngineSetopViewMemoTests {
+  @Test func `a set-op view type probe does not capture a caller's subquery`()
+      throws {
+    // The caller shadows base `S` with a CTE `S` whose columns are in the
+    // OPPOSITE order (`Val, Id`) and runs the IDENTICAL correlated subquery
+    // `(SELECT Val FROM S WHERE S.Id = T.Id)` over `T`. It also references the
+    // set-op view `V`, whose body compile runs the widened-type probe over the
+    // same subquery AST first. With the probe isolated, the caller's subquery
+    // resolves against ITS CTE `S` at ITS ordinals, projecting `Val` ∈ {7, 8};
+    // a probe that polluted the shared memo would make the caller reuse the
+    // view's plan (base `S` ordinals — project ordinal 1, filter ordinal 0),
+    // which over the swapped CTE projects `Id` ∈ {1, 2} (or mis-filters).
+    let rows = try setopMemo().run(Statement(parsing:
+        """
+        WITH S (Val, Id) AS (SELECT 7, 1 UNION ALL SELECT 8, 2)
+          SELECT (SELECT Val FROM S WHERE S.Id = T.Id) AS c
+            FROM T JOIN V ON V.c = 0 GROUP BY T.Id ORDER BY c
+        """))
+    #expect(rows == [[.integer(7)], [.integer(8)]])
   }
 }
 

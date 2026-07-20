@@ -153,6 +153,16 @@ internal struct RelationInstance: Hashable, Sendable {
   /// passes them so `information_schema` columns report their real types.
   internal let types: Array<ValueType>
 
+  /// Whether each real column places NO type constraint — every arm that fed it
+  /// projects a constant NULL, so its concrete `types` entry is a default the
+  /// set-operation fold must NOT constrain against. A later reader unifying a
+  /// reference to such a column treats it as an unconstrained (constant-NULL)
+  /// arm, exactly as `COALESCE` skips a constant-NULL argument, so an all-NULL
+  /// CTE column unifies with any typed arm regardless of arm order. Aligned
+  /// with `types` (one flag per real column); all-`false` for a store relation
+  /// or a derived table, whose columns carry genuine types.
+  internal let unconstrained: Array<Bool>
+
   /// The inner `Query` this binding is the materialised body of, when it is a
   /// DERIVED TABLE's — `nil` for a common table expression's or a store
   /// relation's binding. It is the derivation's IDENTITY, not merely a flag:
@@ -177,22 +187,28 @@ internal struct RelationInstance: Hashable, Sendable {
   internal var derived: Bool { derivation != nil }
 
   internal init(columns: Array<String>, rows: Array<Array<Value>>,
-                types: Array<ValueType>, derivation: Query? = nil) {
+                types: Array<ValueType>, unconstrained: Array<Bool>? = nil,
+                derivation: Query? = nil) {
     self.columns = columns
     self.rows = rows
     self.types = types
+    self.unconstrained =
+        unconstrained ?? Array(repeating: false, count: columns.count)
     self.derivation = derivation
   }
 
-  /// A relation whose columns are RESOLVED from a body — its names and types
-  /// taken TOGETHER from the `carrier`, so the two arrays cannot drift and a
-  /// future per-column attribute on `ResolvedColumn` threads through this ONE
-  /// constructor. `rows` are the captured (or empty, schema-only) rows and
-  /// `derivation` the inner `Query` for a derived table's binding.
+  /// A relation whose columns are RESOLVED from a body — its names, types, AND
+  /// per-column `unconstrained` mask taken TOGETHER from the `carrier`, so the
+  /// arrays cannot drift and the mask threads through this ONE constructor
+  /// rather than a per-site `unconstrained:` argument a binding could drop.
+  /// `rows` are the captured (or empty, schema-only) rows and `derivation` the
+  /// inner `Query` for a derived table's binding.
   internal init(from carrier: Array<ResolvedColumn>,
                 rows: Array<Array<Value>>, derivation: Query? = nil) {
     self.init(columns: carrier.map(\.name), rows: rows,
-              types: carrier.map(\.type), derivation: derivation)
+              types: carrier.map(\.type),
+              unconstrained: carrier.map(\.unconstrained),
+              derivation: derivation)
   }
 
   /// The real column count — the extent of a `SELECT *`.
@@ -206,7 +222,7 @@ internal struct RelationInstance: Hashable, Sendable {
   /// virtual `Id` at `width`.
   internal func schema() -> Schema {
     Schema(width: width, extent: extent, names: columns,
-           types: types, virtuals: ["Id"])
+           types: types, unconstrained: unconstrained, virtuals: ["Id"])
   }
 
   /// The record for the row at `index`, materialising the referenced `ordinals`

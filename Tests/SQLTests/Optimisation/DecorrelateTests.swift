@@ -27,7 +27,7 @@ private func applies(_ plan: Plan) -> Bool {
        let .aggregate(_, _, source):
     return applies(source)
   case let .product(left, right), let .outer(left, right, _, _),
-       let .semijoin(left, right, _, _), let .setop(_, left, right, _):
+       let .semijoin(left, right, _, _), let .setop(_, left, right, _, _, _):
     return applies(left) || applies(right)
   case .single, .scan, .join:
     return false
@@ -47,7 +47,7 @@ private func joins(_ plan: Plan) -> Bool {
        let .aggregate(_, _, source):
     return joins(source)
   case let .product(left, right), let .outer(left, right, _, _),
-       let .semijoin(left, right, _, _), let .setop(_, left, right, _):
+       let .semijoin(left, right, _, _), let .setop(_, left, right, _, _, _):
     return joins(left) || joins(right)
   case .single, .scan, .apply:
     return false
@@ -67,7 +67,7 @@ private func outers(_ plan: Plan) -> Bool {
        let .aggregate(_, _, source):
     return outers(source)
   case let .product(left, right), let .semijoin(left, right, _, _),
-       let .setop(_, left, right, _):
+       let .setop(_, left, right, _, _, _):
     return outers(left) || outers(right)
   case .single, .scan, .join, .apply:
     return false
@@ -89,7 +89,7 @@ private func semijoins(_ plan: Plan) -> Bool {
        let .aggregate(_, _, source):
     return semijoins(source)
   case let .product(left, right), let .outer(left, right, _, _),
-       let .setop(_, left, right, _):
+       let .setop(_, left, right, _, _, _):
     return semijoins(left) || semijoins(right)
   case .single, .scan, .join, .apply:
     return false
@@ -109,7 +109,7 @@ private func semijoins(_ plan: Plan, anti wanted: Bool) -> Bool {
        let .aggregate(_, _, source):
     return semijoins(source, anti: wanted)
   case let .product(left, right), let .outer(left, right, _, _),
-       let .setop(_, left, right, _):
+       let .setop(_, left, right, _, _, _):
     return semijoins(left, anti: wanted) || semijoins(right, anti: wanted)
   case .single, .scan, .join, .apply:
     return false
@@ -130,7 +130,7 @@ private func semijoinCount(_ plan: Plan) -> Int {
        let .aggregate(_, _, source):
     return semijoinCount(source)
   case let .product(left, right), let .outer(left, right, _, _),
-       let .setop(_, left, right, _):
+       let .setop(_, left, right, _, _, _):
     return semijoinCount(left) + semijoinCount(right)
   case .single, .scan, .join, .apply:
     return 0
@@ -154,7 +154,7 @@ private func semijoinCount(_ plan: Plan, anti wanted: Bool) -> Int {
        let .aggregate(_, _, source):
     return semijoinCount(source, anti: wanted)
   case let .product(left, right), let .outer(left, right, _, _),
-       let .setop(_, left, right, _):
+       let .setop(_, left, right, _, _, _):
     return semijoinCount(left, anti: wanted)
         + semijoinCount(right, anti: wanted)
   case .single, .scan, .join, .apply:
@@ -175,7 +175,7 @@ private func exists(in plan: Plan) -> Bool {
        let .aggregate(_, _, source):
     return exists(in: source)
   case let .product(left, right), let .outer(left, right, _, _),
-       let .semijoin(left, right, _, _), let .setop(_, left, right, _):
+       let .semijoin(left, right, _, _), let .setop(_, left, right, _, _, _):
     return exists(in: left) || exists(in: right)
   case .single, .scan, .join, .apply:
     return false
@@ -211,7 +211,7 @@ private func within(in plan: Plan) -> Bool {
        let .aggregate(_, _, source):
     return within(in: source)
   case let .product(left, right), let .outer(left, right, _, _),
-       let .semijoin(left, right, _, _), let .setop(_, left, right, _):
+       let .semijoin(left, right, _, _), let .setop(_, left, right, _, _, _):
     return within(in: left) || within(in: right)
   case .single, .scan, .join, .apply:
     return false
@@ -250,7 +250,7 @@ private func subquery(in plan: Plan) -> Bool {
        let .aggregate(_, _, source):
     return subquery(in: source)
   case let .product(left, right), let .outer(left, right, _, _),
-       let .semijoin(left, right, _, _), let .setop(_, left, right, _):
+       let .semijoin(left, right, _, _), let .setop(_, left, right, _, _, _):
     return subquery(in: left) || subquery(in: right)
   case .single, .scan, .join, .apply:
     return false

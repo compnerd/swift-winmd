@@ -2355,3 +2355,53 @@ struct DerivedTableLenientOutputTests {
     }
   }
 }
+
+// MARK: - All-NULL derived column unification
+
+/// A derived table that projects a constant-NULL column places NO type
+/// constraint on it, exactly as a bare constant-NULL set-operation arm does.
+/// `materialise` carries the fold's per-column unconstrained marker through the
+/// derived-table binding (and through an `AS d(a)` rename), so a transparent
+/// `(SELECT NULLIF('a','a') AS x) AS d` wrapper unifies with a later typed arm
+/// ORDER-INDEPENDENTLY rather than folding as its literal-fix type and
+/// faulting.
+struct DerivedTableNullUnificationTests {
+  @Test func `an all-NULL derived column unifies with an integer arm`()
+      throws {
+    // `x` is a constant NULL, so the enclosing UNION must treat it as
+    // unconstrained and unify it with the `1` arm — the reviewer's case, which
+    // faulted before the marker survived the derived-table binding.
+    try fixture().expect(
+        "SELECT x FROM (SELECT NULLIF('a', 'a') AS x) AS d UNION SELECT 1",
+        yields: [[nil], [1]])
+  }
+
+  @Test func `an all-NULL derived column unifies regardless of arm order`()
+      throws {
+    // The order-independence case: the integer arm leads. Without the marker
+    // the derived column would fold as its literal-fix type and fault; the
+    // marker unifies it either way.
+    try fixture().expect(
+        "SELECT 1 AS n UNION SELECT x FROM (SELECT NULLIF('a', 'a') AS x) AS d",
+        yields: [[1], [nil]])
+  }
+
+  @Test func `an all-NULL derived column unifies through an AS d(a) rename`()
+      throws {
+    // The crux: the unconstrained marker must survive the positional
+    // column-list rename, so `d(a)` over a constant-NULL body still unifies
+    // with the `1` arm rather than taking a concrete literal-fix type.
+    try fixture().expect(
+        "SELECT a FROM (SELECT NULLIF('a', 'a') AS x) AS d(a) UNION SELECT 1",
+        yields: [[nil], [1]])
+  }
+
+  @Test func `a concrete derived column still types normally`() throws {
+    // The regression guard: a genuinely text derived column must NOT be
+    // over-marked as unconstrained, so a UNION with an integer arm still faults
+    // on the irreconcilable text/integer pair.
+    try fixture().expect(
+        "SELECT x FROM (SELECT 'a' AS x) AS d UNION SELECT 1",
+        fails: .operand("UNION arms have irreconcilable types"))
+  }
+}

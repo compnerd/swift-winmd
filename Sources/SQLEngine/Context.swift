@@ -76,6 +76,22 @@ internal struct Context {
   /// barred (`false`).
   internal let lateral: Bool
 
+  /// Whether the query being resolved is a nested-subquery SHAPE pre-pass — the
+  /// cursor-free derive that records a nested subquery's width, arity, and
+  /// single-column type AHEAD of the reachability walk. Set only at the
+  /// pre-pass `inner` constructions (`shaping()`), it DEFERS a set-operation's
+  /// operand-compatibility fold: the pre-pass runs for EVERY nested subquery
+  /// before the walk decides which run, so faulting `SQLError.operand` here
+  /// would reject an unreachable incompatible subquery a short-circuited
+  /// `AND`/`OR` never reaches (`… WHERE 1 = 0 AND EXISTS (SELECT 'x' UNION
+  /// SELECT 1)`). Arity and resolution stay eager regardless; only the operand
+  /// fold defers, substituting a placeholder type (the left arm's) it discards
+  /// for an unreached occurrence and RE-CHECKS strictly for a reached
+  /// scalar/`IN` one. Distinct from `validate` (also `false` on the top-level
+  /// run and CTE trusted paths, which MUST keep faulting), so it gates the
+  /// operand fold ALONE.
+  internal let shape: Bool
+
   /// A context over the maps and resolution scope — an empty overlay, no
   /// bindings, an empty visited guard, eager validation, the caller scope, and
   /// no enclosing correlation by default: the shape a bare top-level query with
@@ -86,7 +102,7 @@ internal struct Context {
                 subqueries: Subqueries = Subqueries(),
                 visited: Set<String> = [], validate: Bool = true,
                 subscope: Subscope = .caller, outer: Outer? = nil,
-                lateral: Bool = false) {
+                lateral: Bool = false, shape: Bool = false) {
     self.relations = relations
     self.routines = routines
     self.bindings = bindings
@@ -96,6 +112,7 @@ internal struct Context {
     self.subscope = subscope
     self.outer = outer
     self.lateral = lateral
+    self.shape = shape
   }
 
   /// A copy of this context with `relations` REPLACING the overlay, the same
@@ -105,7 +122,7 @@ internal struct Context {
   internal func scoping(_ relations: ScopedRelations) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: lateral)
+            subscope: subscope, outer: outer, lateral: lateral, shape: shape)
   }
 
   /// A copy of this context ENTERING a fresh body scope over `relations` — the
@@ -141,7 +158,7 @@ internal struct Context {
   internal func binding(_ bindings: Bindings) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: lateral)
+            subscope: subscope, outer: outer, lateral: lateral, shape: shape)
   }
 
   /// A copy of this context carrying `subqueries` as the executing plan's
@@ -151,7 +168,7 @@ internal struct Context {
   internal func resolving(_ subqueries: Subqueries) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: lateral)
+            subscope: subscope, outer: outer, lateral: lateral, shape: shape)
   }
 
   /// A copy of this context with every enclosing SELECT's derived-table aliases
@@ -185,7 +202,7 @@ internal struct Context {
     return Context(relations: relations, routines: routines,
                    bindings: bindings, subqueries: subqueries,
                    visited: visited, validate: validate, subscope: subscope,
-                   outer: outer, lateral: lateral)
+                   outer: outer, lateral: lateral, shape: shape)
   }
 
   /// A copy of this context with the eager-typecheck gate set to `flag` — a RUN
@@ -194,7 +211,19 @@ internal struct Context {
   internal func validating(_ flag: Bool) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: flag,
-            subscope: subscope, outer: outer, lateral: lateral)
+            subscope: subscope, outer: outer, lateral: lateral, shape: shape)
+  }
+
+  /// A copy of this context marking the query it resolves as a nested-subquery
+  /// SHAPE pre-pass (`shape`) — the seam the two pre-pass `inner` constructions
+  /// route through, so a set operation's operand-compatibility fold defers to
+  /// the reachability walk rather than faulting `SQLError.operand` while merely
+  /// recording an unreached subquery's width and type. Arity and resolution
+  /// stay eager; every OTHER field is preserved.
+  internal func shaping() -> Context {
+    Context(relations: relations, routines: routines, bindings: bindings,
+            subqueries: subqueries, visited: visited, validate: validate,
+            subscope: subscope, outer: outer, lateral: lateral, shape: true)
   }
 
   /// A copy of this context resolving its nested subqueries under `subscope` —
@@ -203,7 +232,7 @@ internal struct Context {
   internal func scoped(as subscope: Subscope) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: lateral)
+            subscope: subscope, outer: outer, lateral: lateral, shape: shape)
   }
 
   /// A copy of this context whose enclosing correlation stack is EXTENDED with
@@ -221,7 +250,7 @@ internal struct Context {
   internal func with(outer: Outer?) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: lateral)
+            subscope: subscope, outer: outer, lateral: lateral, shape: shape)
   }
 
   /// A copy of this context marking the query it resolves as a LATERAL derived
@@ -234,7 +263,7 @@ internal struct Context {
   internal func lateralizing() -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: true)
+            subscope: subscope, outer: outer, lateral: true, shape: shape)
   }
 
   /// A copy of this context with the enclosing correlation stack CLEARED — the
@@ -260,6 +289,6 @@ internal struct Context {
   internal func unlateralized() -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: false)
+            subscope: subscope, outer: outer, lateral: false, shape: shape)
   }
 }

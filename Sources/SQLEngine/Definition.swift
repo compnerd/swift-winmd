@@ -360,13 +360,16 @@ extension Catalog where Self: ~Escapable {
     // run, so a stateful routine in a `FROM (SELECT tick() …)` nested a level
     // down would fire twice for one query.
     let scope = try augment(context, for: query, rows: false)
-    // The derived table's columns are its inner query's OUTPUT columns (the ISO
-    // rule) — the FIRST arm's projection, the same arm the result-schema walk
-    // and a CTE's declared list resolve against — typed against the augmented
-    // `scope` so a derived table over a CTE, a store relation, or a nested
-    // derived table resolves. `columns(of:)` REVEALS the base for the body's
-    // NESTED subqueries: `scope`'s derived layer shadows a CTE this body's own
-    // FROM alias names, and revealing drops that layer, so a nested
+    // The derived table's columns are its inner query's OUTPUT columns (the
+    // ISO rule): the NAMES from the FIRST arm's projection, the TYPES UNIFIED
+    // across every set-operation arm (a mixed integer/double column widening to
+    // `double`, matching the coerced values a run produces), each carrying its
+    // `unconstrained` mask — resolved against the augmented `scope` so a
+    // derived table over a CTE, a store relation, or a nested derived table
+    // resolves.
+    // `resolved(query:in:)` REVEALS the base for the body's NESTED subqueries:
+    // `scope`'s derived layer shadows a CTE this body's own FROM alias names,
+    // and revealing drops that layer, so a nested
     // `EXISTS (… FROM t)` reads the enclosing CTE `t` beneath — the layered
     // overlay never overwrote it, keeping schema/run parity without a
     // pre-augment context. The caller's `validate` threads through, so a RUN's
@@ -377,12 +380,17 @@ extension Catalog where Self: ~Escapable {
     // (`validate: true`) still faults it.
     let derived = try resolved(query: query, in: scope)
     // An explicit `AS d(a, b)` column list positionally RENAMES the derived
-    // table's inner output names, keeping each column's inferred TYPE (the list
-    // names, the body types), so `(SELECT x, y FROM T) AS d(a, b)` addresses
-    // the columns as `a`, `b`. Its arity must match the inner output width
-    // (`SQLError.columns`, the CTE/view arity fault) — checked HERE, where the
-    // width is resolved, so a list over a `SELECT *` derived body is checked
-    // once its `*` expands. Absent a list, the inner output names stand.
+    // table's inner output names, keeping each column's inferred TYPE and its
+    // `unconstrained` mask (the list names, the body types unified across the
+    // arms), so `(SELECT x, y FROM T) AS d(a, b)` addresses them as `a`, `b`.
+    // Its arity must match the inner output width (`SQLError.columns`, the
+    // CTE/view arity fault) — checked HERE, where the width is resolved, so a
+    // list over a `SELECT *` derived body is checked once its `*` expands.
+    // Absent a list, the inner output names stand. Carrying the mask through
+    // the same indexing means an all-NULL derived column (`SELECT
+    // NULLIF('a', 'a') AS x`) stays UNCONSTRAINED and unifies with any later
+    // typed set-operation arm order-independently: a wrapper must not change
+    // set-op typing.
     let outputs: Array<ResolvedColumn>
     if renaming.isEmpty {
       outputs = derived
@@ -391,7 +399,8 @@ extension Catalog where Self: ~Escapable {
         throw .columns(expected: derived.count, got: renaming.count)
       }
       outputs = renaming.indices.map {
-        ResolvedColumn(name: renaming[$0], type: derived[$0].type)
+        ResolvedColumn(name: renaming[$0], type: derived[$0].type,
+                       unconstrained: derived[$0].unconstrained)
       }
     }
     // A derived table's columns are its inner query's OUTPUT names (or the
@@ -608,14 +617,16 @@ extension Catalog where Self: ~Escapable {
       // The type-check and derive resolve the body under the cyclic-view guard
       // seeded with THIS view's name.
       let inner = overlay.visiting(name)
-      // Type the columns from the body's first arm; type-check every arm's
-      // REACHABLE operands and calls too — an unknown call or a bad operand in
-      // a `WHERE`/`HAVING` or a later `UNION` arm faults a run, but the
-      // first-arm resolve would miss it (`compile` cannot check a routine
-      // exists), while an arm a short-circuit proves unreachable is skipped. A
-      // view a `SELECT *` could not evaluate is not advertised.
-      guard (try? typecheck(view.query, inner)) != nil,
-          let resolved = try? columns(of: view.query.first, inner),
+      // Type the columns from the body — NAMES off the first arm, TYPES unified
+      // across every arm (a mixed integer/double column reporting `double`);
+      // type-check every arm's REACHABLE operands and calls too — an unknown
+      // call or a bad operand in a `WHERE`/`HAVING` or a later `UNION` arm
+      // faults a run, but a first-arm resolve would miss it (`compile` cannot
+      // check a routine exists), while an arm a short-circuit proves
+      // unreachable is skipped. A view a `SELECT *` could not evaluate is not
+      // advertised.
+      let resolved = try? columns(unifying: view.query, inner).map(\.column)
+      guard (try? typecheck(view.query, inner)) != nil, let resolved,
           resolved.count == view.columns.count else { continue }
       for ordinal in view.columns.indices {
         rows.append([.text(name), .text(view.columns[ordinal]),

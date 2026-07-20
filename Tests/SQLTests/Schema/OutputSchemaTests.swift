@@ -227,6 +227,72 @@ struct OutputSchemaTests {
     }
   }
 
+  @Test func `a UNION widens a mixed integer/double column to double`() throws {
+    // ISO unifies the result column type across the arms — an `integer` arm and
+    // a `double` arm widen to `double` (the name still the first arm's).
+    let columns = try schema("SELECT 1 UNION SELECT 2.5")
+    #expect(columns.count == 1)
+    #expect(columns[0] == ("column 1", .double))
+  }
+
+  @Test func `a chained UNION widens across every arm`() throws {
+    // A left-associative 3-arm chain folds its types pairwise, so a `double`
+    // tail widens the whole column even where the leading arms are `integer`.
+    let columns = try schema("SELECT 1 UNION SELECT 2 UNION SELECT 3.5")
+    #expect(columns.count == 1)
+    #expect(columns[0] == ("column 1", .double))
+  }
+
+  @Test func `a UNION of irreconcilable column types faults`() throws {
+    // A text arm beside a number has no common type, so the fold faults
+    // `SQLError.operand` (SQLSTATE 42804) rather than typing off the first arm.
+    #expect(throws: SQLError.self) {
+      try catalog().columns(of: parse(query: "SELECT 1 UNION SELECT 'x'"))
+    }
+    #expect(throws: SQLError.self) {
+      try catalog().columns(of: parse(query: "SELECT TRUE UNION SELECT 1"))
+    }
+  }
+
+  @Test func `a constant-NULL arm does not veto the unified type`() throws {
+    // A column that folds to a constant NULL in an arm constrains nothing (a
+    // NULL unifies with any typed arm), mirroring COALESCE's constant-NULL
+    // skip, so the OTHER arm's type wins — a `NULLIF(2, 2)` (constant NULL) arm
+    // beside a `double` arm types the column `double`, not the NULLIF arm's
+    // `integer`.
+    let leading = try schema("SELECT NULLIF(2, 2) UNION SELECT 2.5")
+    #expect(leading.count == 1)
+    #expect(leading[0].1 == .double)
+    // A typed arm beside a trailing constant-NULL arm keeps the typed arm's
+    // type.
+    let trailing = try schema("SELECT 1 UNION SELECT NULLIF(2, 2)")
+    #expect(trailing.count == 1)
+    #expect(trailing[0].1 == .integer)
+  }
+
+  @Test func `a UNION nested in a subquery widens its column`() throws {
+    // The set operation runs through the `.setop` Plan node here (a derived
+    // table), which carries its unified `types` from compile — the outer
+    // `SELECT *` reports the widened `double` column.
+    let columns =
+        try schema("SELECT * FROM (SELECT 1 UNION SELECT 2.5) AS d")
+    #expect(columns.count == 1)
+    #expect(columns[0].1 == .double)
+  }
+
+  @Test func `a column list over a UNION body names and widens the column`()
+      throws {
+    // The crossover of the two ISO features: the `UNION` body's type fold
+    // widens the mixed integer/double column to `double` (set-op unification),
+    // and the `AS d(a)` list positionally renames it `a` (the explicit output
+    // column list). The rename applies AFTER the fold determines the column
+    // count and type, so the column is BOTH named `a` and typed `double`.
+    let columns =
+        try schema("SELECT d.a FROM (SELECT 1 UNION SELECT 2.5) AS d(a)")
+    #expect(columns.count == 1)
+    #expect(columns[0] == ("a", .double))
+  }
+
   @Test func `a view resolves against its registered columns`() throws {
     let definition = try View(query: {
       guard case let .select(query) =
@@ -513,22 +579,26 @@ struct OutputSchemaTests {
     // bodies consistent, so the declared list is TRUSTED without compiling the
     // body. The same arity-mismatched `WITH` that faults when validating
     // reports its one declared column here — the empty/data-dependent header
-    // path a successful run fills in.
+    // path a successful run fills in. The column takes the body's DERIVED type
+    // (`People.Name` is text under the renamed `a`), never the `.integer`
+    // placeholder.
     let statement = try Statement(parsing:
         "WITH t(a) AS (SELECT * FROM People) SELECT * FROM t")
     let columns = try catalog().columns(of: statement, validate: false)
-    #expect(same(columns.map { ($0.name, $0.type) }, [("a", .integer)]))
+    #expect(same(columns.map { ($0.name, $0.type) }, [("a", .text)]))
   }
 
   @Test func `a well-formed WITH validates and derives its trailing schema`() throws {
     // A CTE whose declared arity matches its body validates cleanly and derives
     // the trailing query's schema — the body compiled, its width confirmed
-    // against the declared list, and its reachable operands type-checked.
+    // against the declared list, and its reachable operands type-checked. The
+    // columns take the body's DERIVED types (`People` is text, integer under
+    // the renamed `a`, `b`), never the `.integer` placeholder.
     let statement = try Statement(parsing:
         "WITH t(a, b) AS (SELECT * FROM People) SELECT a, b FROM t")
     let columns = try catalog().columns(of: statement, validate: true)
     #expect(same(columns.map { ($0.name, $0.type) },
-                 [("a", .integer), ("b", .integer)]))
+                 [("a", .text), ("b", .integer)]))
   }
 
   @Test func `a non-recursive CTE body cannot see its own schema-only self`() throws {
@@ -551,12 +621,14 @@ struct OutputSchemaTests {
     // relation (two columns), matching its declared arity; the trailing query
     // then reads the CTE's one declared column `x`. Were the CTE's own self
     // bound in its body, the body would read the CTE (one column) and its arity
-    // would contradict the declared two-column list.
+    // would contradict the declared two-column list. The columns take the
+    // body's DERIVED types (the base `People` is text, integer under the
+    // renamed `a`, `b`), never the `.integer` placeholder.
     let statement = try Statement(parsing:
         "WITH People(a, b) AS (SELECT * FROM People) SELECT a, b FROM People")
     let columns = try catalog().columns(of: statement, validate: true)
     #expect(same(columns.map { ($0.name, $0.type) },
-                 [("a", .integer), ("b", .integer)]))
+                 [("a", .text), ("b", .integer)]))
   }
 
   @Test func `a WITH with a duplicate CTE name faults with redefinition`() throws {

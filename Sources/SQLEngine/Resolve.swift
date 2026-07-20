@@ -333,9 +333,23 @@ internal final class Outer {
   /// `SQLError.ambiguous`, which propagates rather than falling through — so
   /// the schema-derive and the run's lowering AGREE on the ambiguity.
   internal func type(for column: Column) throws(SQLError) -> ValueType? {
+    try resolved(for: column).map(\.type)
+  }
+
+  /// The resolved enclosing column `column` names — its outer `type` AND
+  /// `unconstrained` mask read TOGETHER from the one ordinal a nearest-first
+  /// walk matches — or `nil` when no enclosing scope binds it. It walks
+  /// `scopes` NEAREST-first exactly as the type probe does (a nearer scope
+  /// shadows a farther one), records NO correlation (a pure probe), and lets an
+  /// ambiguous nearer scope's `SQLError.ambiguous` propagate. `type(for:)` and
+  /// any mask reader are THIN accessors over this, so a correlated column's
+  /// type and mask cannot diverge — the fix for a correlated all-NULL column
+  /// losing its mask through the LATERAL correlation surface.
+  internal func resolved(for column: Column) throws(SQLError)
+      -> ResolvedColumn? {
     for scope in scopes.reversed() {
       guard let ordinal = try scope.correlated(column) else { continue }
-      return scope.type(at: ordinal)
+      return scope.resolved(at: ordinal, named: column.name)
     }
     return nil
   }
@@ -419,6 +433,15 @@ internal final class SubqueryMemo {
   internal func record(plan: Plan, for key: PlanKey) {
     if plans[key] == nil { plans[key] = plan }
   }
+
+  /// The occurrence `Subkey`s whose reached correlated set-operation fold has
+  /// already been strictly re-validated — a reached scalar/`IN` occurrence
+  /// folds ONCE (faulting on an irreconcilable pair the first reached outer
+  /// row), then subsequent rows skip the redundant per-row re-fold.
+  private var validated: Set<Subkey> = []
+
+  internal func validated(_ key: Subkey) -> Bool { validated.contains(key) }
+  internal func validate(_ key: Subkey) { validated.insert(key) }
 }
 
 /// The COMPILE-time seam that lowers an `EXISTS`/`IN (Q)` predicate WITHOUT
@@ -451,12 +474,15 @@ internal struct Resolution {
   /// `IN (Q)` and a scalar subquery each require it be 1.
   private let widths: Dictionary<Query, Int>
 
-  /// Each nested `Query` mapped to its single-column output TYPE, derived
-  /// cursor-free in the compile pre-pass — the static type a scalar subquery
-  /// contributes (the executor coerces its collapsed value to it, as a `CASE`
-  /// coerces its arms). Only a width-1 query has one, so an `EXISTS`/`IN (Q)`
-  /// occurrence (whose type is irrelevant) may be absent.
-  private let types: Dictionary<Query, ValueType>
+  /// Each nested `Query` mapped to its single-column output COLUMN, derived
+  /// cursor-free in the compile pre-pass — the resolved column a scalar
+  /// subquery contributes, its TYPE (the executor coerces its collapsed value
+  /// to it, as a `CASE` coerces its arms) AND its `unconstrained` mask
+  /// TOGETHER, so a bare scalar-subquery projection over a constant-NULL body
+  /// carries that mask into an outer set-operation fold rather than dropping
+  /// it. Only a width-1 query has one, so an `EXISTS`/`IN (Q)` occurrence
+  /// (whose type is irrelevant) may be absent.
+  private let types: Dictionary<Query, ResolvedColumn>
 
   /// Each nested `Query` mapped to its CORRELATION — the synthetic bound params
   /// its inner `WHERE`/`ON` names of an enclosing column, discovered by the
@@ -494,7 +520,7 @@ internal struct Resolution {
 
   internal init(_ scope: Subscope = .caller,
                 _ widths: Dictionary<Query, Int> = [:],
-                _ types: Dictionary<Query, ValueType> = [:],
+                _ types: Dictionary<Query, ResolvedColumn> = [:],
                 _ correlations: Dictionary<Query, Correlation> = [:],
                 outer: Outer? = nil, admits: Bool = true,
                 everywhere: Bool = false) {
@@ -550,19 +576,27 @@ internal struct Resolution {
     return name
   }
 
-  /// The outer type a correlated reference to `column` contributes to a SCHEMA
-  /// derive, or `nil` when no enclosing scope binds it — the non-recording,
-  /// non-faulting type probe `derive` reads so a correlated column types as its
-  /// outer column rather than faulting `SQLError.column`. A BARRED surface
-  /// still diagnoses it, so this schema surface and the run's lowering AGREE.
-  internal func correlated(_ column: Column) throws(SQLError) -> ValueType? {
-    guard let type = try outer?.type(for: column) else { return nil }
+  /// The resolved outer column a correlated reference to `column` contributes
+  /// to a SCHEMA derive — its `type` AND `unconstrained` mask TOGETHER — or
+  /// `nil` when no enclosing scope binds it. Every type/mask reader is a THIN
+  /// accessor over this ONE resolver, so a correlated column's type and mask
+  /// cannot diverge (the fix for a correlated all-NULL column losing its mask
+  /// through the LATERAL surface).
+  ///
+  /// A BARRED surface (a projection / `GROUP BY` / `HAVING` of an ORDINARY
+  /// subquery) still DIAGNOSES a bound name `SQLError.unsupported` — the SAME
+  /// fault the run's lowering raises, keeping typecheck↔run parity — so this
+  /// widens nothing: a lateral body's projection (`everywhere`) admits it,
+  /// while an ordinary subquery's projection faults exactly as before.
+  internal func correlated(_ column: Column) throws(SQLError)
+      -> ResolvedColumn? {
+    guard let resolved = try outer?.resolved(for: column) else { return nil }
     guard admits else {
       throw .state("0A000",
                    "a correlated column is only supported in a subquery's " +
                    "WHERE")
     }
-    return type
+    return resolved
   }
 
   /// The correlation of the nested `query` — its synthetic outer bindings —
@@ -580,22 +614,38 @@ internal struct Resolution {
     return width
   }
 
-  /// The single-column output type `query` contributes as a scalar subquery.
-  /// The compile pre-pass records it beside the width for every subquery, so a
-  /// scalar occurrence reads it; a surface with no catalog holds none and
-  /// faults, rejecting the subquery rather than mis-typing it.
-  private func output(_ query: Query) throws(SQLError) -> ValueType {
-    guard let type = types[query] else {
+  /// The single-column output COLUMN `query` contributes as a scalar subquery —
+  /// its type AND `unconstrained` mask together. The compile pre-pass records
+  /// it beside the width for every subquery, so a scalar occurrence reads it; a
+  /// surface with no catalog holds none and faults, rejecting the subquery
+  /// rather than mis-typing it.
+  private func output(_ query: Query) throws(SQLError) -> ResolvedColumn {
+    guard let resolved = types[query] else {
       throw .state("0A000", "a subquery is not supported in this position")
     }
-    return type
+    return resolved
   }
 
   /// The static single-column type a scalar subquery `query` contributes to a
   /// SCHEMA derive — its single-column arity enforced first (else
   /// `SQLError.arity`, matching the lowering), so this schema surface and the
-  /// run's lowering AGREE on both the arity fault and the type.
+  /// run's lowering AGREE on both the arity fault and the type. This is the
+  /// bare-`ValueType` path the run's `Term.subquery` lowering reads; the outer
+  /// set-operation fold reads the whole column through `scalar(resolved:)`.
   internal func scalar(type query: Query) throws(SQLError) -> ValueType {
+    let width = try width(query)
+    guard width == 1 else { throw .arity(1, width) }
+    return try output(query).type
+  }
+
+  /// The single-column resolved COLUMN a scalar subquery `query` contributes to
+  /// a SCHEMA derive — its type AND `unconstrained` mask together, the arity
+  /// guard first (else `SQLError.arity`, exactly as `scalar(type:)`). A bare
+  /// scalar-subquery PROJECTION reads this so a constant-NULL body's mask
+  /// travels into an outer set-operation fold rather than being dropped by the
+  /// bare-type path.
+  internal func scalar(resolved query: Query)
+      throws(SQLError) -> ResolvedColumn {
     let width = try width(query)
     guard width == 1 else { throw .arity(1, width) }
     return try output(query)
@@ -657,7 +707,7 @@ internal struct Resolution {
     guard width == 1 else { throw .arity(1, width) }
     return try .subquery(Subkey(scope, query, .scalar),
                          correlation: correlation(of: query),
-                         type: output(query))
+                         type: output(query).type)
   }
 }
 
@@ -790,6 +840,15 @@ internal struct Subqueries {
     memo.record(plan: plan, for: PlanKey(key, correlation))
   }
 
+  /// Whether the reached correlated set-operation fold of occurrence `key` has
+  /// already been strictly re-validated — so a per-row execution folds ONCE and
+  /// skips the redundant re-fold on subsequent outer rows.
+  internal func validated(_ key: Subkey) -> Bool { memo.validated(key) }
+
+  /// Records that occurrence `key`'s reached set-operation fold has been
+  /// strictly re-validated.
+  internal func validate(_ key: Subkey) { memo.validate(key) }
+
   /// This cache — the memo is a shared box the whole run accretes into, so a
   /// caller cache and a view-body cache share one box, their disjoint
   /// `Subscope` keys never colliding. The prior eager merge collapses to
@@ -883,9 +942,12 @@ internal struct SubqueryCheck {
   /// subquery's single-column arity.
   private let widths: Dictionary<Query, Int>
 
-  /// Each nested `Query` mapped to its single-column output TYPE, derived by
-  /// the `typecheck` pre-pass — the type a scalar subquery reports to the
-  /// result schema (`validate`/`derive`), matching the lowering's `Resolution`.
+  /// Each nested `Query` mapped to its single-column output COLUMN, derived by
+  /// the `typecheck` pre-pass — the type AND `unconstrained` mask a scalar
+  /// subquery reports to the result schema (`validate`/`derive`), matching the
+  /// lowering's `Resolution`. The mask lets a bare scalar-subquery projection
+  /// over a constant-NULL body stay unconstrained in an outer set-operation
+  /// fold.
   private let types: Dictionary<Query, ValueType>
 
   /// The scalar inner queries whose OPERAND validation is DEFERRED through the
@@ -1715,6 +1777,22 @@ internal struct Scope {
     return .integer
   }
 
+  /// Whether the real column at combined `ordinal` is UNCONSTRAINED — an
+  /// all-arms-NULL CTE column that places no type constraint, so a bare
+  /// reference to it in a set-operation arm unifies with any typed arm order-
+  /// independently (`RelationInstance.unconstrained`). A virtual ordinal
+  /// (`Id`, a foreign key) or an out-of-range one carries a genuine type and is
+  /// constrained, so it reports `false` — mirroring `type(at:)`'s dispatch.
+  internal func unconstrained(at ordinal: Int) -> Bool {
+    for member in members {
+      let local = ordinal - member.offset
+      guard local >= 0, local < member.schema.extent else { continue }
+      return local < member.schema.width
+          && member.schema.unconstrained[local]
+    }
+    return false
+  }
+
   /// The value type of a `literal` operand — the domain of the value it stands
   /// for. Shared by both the schema and type-check surfaces.
   private func type(of literal: Literal) -> ValueType {
@@ -1752,8 +1830,8 @@ internal struct Scope {
       // error `find` propagates, never a fall-through to outer correlation.
       if let ordinal = try find(column) {
         type(at: ordinal)
-      } else if let type = try subquery.correlated(column) {
-        type
+      } else if let resolved = try subquery.correlated(column) {
+        resolved.type
       } else {
         try type(at: ordinal(of: column))
       }
@@ -2771,6 +2849,103 @@ internal struct Scope {
     }
   }
 
+  /// Whether `expression` folds to a CONSTANT NULL for EVERY row — a projected
+  /// column that places NO type constraint on a set-operation's unified column,
+  /// so the fold skips its (literal-fix) type exactly as `COALESCE` skips a
+  /// constant-NULL argument. The projection walk (`output(_ item:)`) reads this
+  /// beside its type derive, so a column's type and its `unconstrained` mask
+  /// come from ONE resolution over the SAME expression and cannot diverge.
+  internal func null(_ expression: Expression, _ routines: Routines) -> Bool {
+    if case .some(.null) = constant(expression, routines) { return true }
+    return false
+  }
+
+  /// Whether evaluating `expression` would dispatch an INVALID routine call —
+  /// the tree contains, at ANY depth, a `.call(name, _)` that is UNREGISTERED
+  /// (`routines[name] == nil`) or INVALID for its routine (bad arity or a
+  /// definitively-wrong argument type). Such a call has no genuine return type
+  /// (`derive` fabricates the declared `returns`, or the `.integer` default for
+  /// a missing name), yet the run faults on it (`SQLError.function` for the
+  /// missing name, `SQLError.argument` for the bad arity/type), so a projection
+  /// over it places NO type constraint on a set-operation's unified column:
+  /// mark it UNCONSTRAINED and let the fold defer to the other arm rather than
+  /// fault on the fabricated type. This is SOUND either way — if the arm is
+  /// REACHED the run dispatches it and faults, and if it is NOT reached (a
+  /// zero-row limit, a filtered-out arm) the expression is never evaluated, so
+  /// its fabricated type is irrelevant. Only an invalid call trips it, so a
+  /// VALID call (correct arity and argument types) stays constrained — its
+  /// declared `returns` still shapes the fold — and a genuine type mismatch
+  /// still faults `SQLError.operand` (42804).
+  ///
+  /// It MIRRORS `derive`'s expression arms exactly so no form escapes: a bare
+  /// call is the depth-0 case of the `.call` arm, and every composite arm
+  /// recurses the same sub-expressions `derive` traverses.
+  internal func unresolved(_ expression: Expression,
+                           _ routines: Routines) -> Bool {
+    switch expression {
+    // `.column`/`.literal`: no call, so never unresolved — mirroring
+    // `derive`'s leaf arms, which fabricate no routine type.
+    case .column, .literal:
+      return false
+    // `.call`: the depth-0 case (an unregistered name), OR an unregistered
+    // call nested in an argument — subsuming the former bare-call special case
+    // in `output(_ item:)`. An INVALID call to an EXISTING routine (bad arity
+    // or a definitively-wrong argument type) is treated like a MISSING one:
+    // `derive` fabricates the declared `returns` for it, but the run faults
+    // (`SQLError.argument`), so its type must not constrain the fold. This
+    // mirrors the strict validator `call(_:over:_:)`'s arity/type guards as a
+    // NON-throwing probe.
+    case let .call(name, arguments):
+      guard let routine = routines[name] else { return true }
+      guard (routine.minimum ... routine.parameters.count)
+          .contains(arguments.count) else { return true }
+      if arguments.contains(where: { unresolved($0, routines) }) { return true }
+      for (argument, expected) in zip(arguments, routine.parameters) {
+        guard let type = try? derive(argument, routines) else { return true }
+        if type != expected { return true }
+      }
+      return false
+    // `.binary` (arithmetic AND `||`): both derive arms derive both operands.
+    case let .binary(_, lhs, rhs):
+      return unresolved(lhs, routines) || unresolved(rhs, routines)
+    // `.aggregate`: `derive` recurses only the operand (a `.star` counts
+    // rows, deriving nothing); the `filter` is a `Predicate`, not shaping the
+    // derived type.
+    case let .aggregate(_, operand, _, _):
+      switch operand {
+      case .star: return false
+      case let .expression(argument): return unresolved(argument, routines)
+      }
+    // `.case`: `derive` unifies only the REACHABLE result expressions
+    // (`reachable`), so mirror that reach — an unregistered call in an
+    // unreachable branch never runs and never shapes the type.
+    case let .case(whens, otherwise):
+      return reachable(whens, otherwise, routines)
+          .contains { unresolved($0, routines) }
+    // `.cast`: `derive` recurses the operand for its resolution.
+    case let .cast(operand, _):
+      return unresolved(operand, routines)
+    // `.coalesce`: `derive` (`unified`) scans only the REACHABLE prefix — it
+    // STOPS at the first argument a constant non-NULL value `selects`, so a
+    // later argument never runs nor shapes the type. Mirror that reach, else
+    // `COALESCE(1, missing())` wrongly defers instead of constraining `1`.
+    case let .coalesce(arguments):
+      for argument in arguments {
+        if unresolved(argument, routines) { return true }
+        if selects(argument, routines) { break }
+      }
+      return false
+    // `.nullif`: `derive` (`nullif`) derives both operands.
+    case let .nullif(lhs, rhs):
+      return unresolved(lhs, routines) || unresolved(rhs, routines)
+    // `.subquery`: a nested scalar subquery resolves its OWN columns through
+    // the memo (`scalar(resolved:)`), which already carries the unconstrained
+    // mask for any unregistered call inside it — do NOT double-handle it here.
+    case .subquery:
+      return false
+    }
+  }
+
   /// The constant `Value`s a ROW `row` folds to when EVERY component is
   /// row-independent — else `nil` (any component a row/group/run decides). A
   /// row comparison and a row `IN` element fold through this so a single row-
@@ -3618,6 +3793,33 @@ internal struct Scope {
       if shadows(column) { throw error }
       return nil
     }
+  }
+
+  /// The resolved column a bare `column` LOCALLY names — carrying its output
+  /// name, its `type(at:)` type, and its `unconstrained(at:)` mask TOGETHER
+  /// from ONE `find` — or `nil` when this scope binds it in none of its
+  /// relations (the reference is a candidate correlated one).
+  ///
+  /// INVARIANT: a column reference's type and mask (and any future per-column
+  /// attribute) are obtained from ONE resolution that traverses the SAME paths
+  /// — local (here), correlation (`Outer.resolved(for:)`), schema — so the two
+  /// attributes cannot diverge. The mask reader once consulted a DIFFERENT
+  /// (local-only) path than the type reader, so a correlated all-NULL column
+  /// lost its mask; folding both through the single ordinal closes that gap.
+  internal func resolved(_ column: Column) throws(SQLError) -> ResolvedColumn? {
+    guard let ordinal = try find(column) else { return nil }
+    return ResolvedColumn(name: column.name, type: type(at: ordinal),
+                          unconstrained: unconstrained(at: ordinal))
+  }
+
+  /// The resolved column at combined `ordinal`, named `name` — its `type(at:)`
+  /// type and `unconstrained(at:)` mask read TOGETHER, so an enclosing
+  /// correlation walk (`Outer.resolved(for:)`) carries both up from the one
+  /// ordinal it matched.
+  internal func resolved(at ordinal: Int, named name: String)
+      -> ResolvedColumn {
+    ResolvedColumn(name: name, type: type(at: ordinal),
+                   unconstrained: unconstrained(at: ordinal))
   }
 
   /// The combined-ordinal projected terms: every real column of every relation

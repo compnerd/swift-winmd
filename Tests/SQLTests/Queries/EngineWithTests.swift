@@ -26,6 +26,24 @@ struct EngineWithTests {
     #expect(rows == [[.text("Bee")], [.text("Cid")]])
   }
 
+  @Test func `a UNION over a text CTE column folds the body type`() throws {
+    // The CTE `a` binds its body's DERIVED type (`x` is text), so the set-op
+    // fold unifies text against text and runs — a `.integer` declared-name
+    // placeholder would wrongly fault the all-text UNION as irreconcilable.
+    let text = """
+        WITH a (x) AS (SELECT 'b') SELECT x FROM a UNION SELECT 'c'
+        """
+    // The SCHEMA path folds the CTE column at its BODY-derived type too: it
+    // must report `x` as `.text` and NOT fault, the compile-time mirror of the
+    // run.
+    let columns = try engineFamily().columns(of: Statement(parsing: text))
+    #expect(columns.count == 1)
+    #expect(columns[0].name == "x")
+    #expect(columns[0].type == .text)
+    let rows = try statement(text, engineFamily())
+    #expect(rows == [[.text("b")], [.text("c")]])
+  }
+
   @Test func `a JOIN matches an integer key to an equal double key`() throws {
     // The optimized join paths (hash bucket, seek/final check, CTE nested loop)
     // must use the same mixed-numeric equality a predicate does: `1` and `1.0`
@@ -64,40 +82,47 @@ struct EngineWithTests {
     #expect(rows.isEmpty)
   }
 
-  @Test func `UNION deduplicates numerically-equal rows across kinds`() throws {
-    // `1` and `1.0` are the same numeric value, so UNION keeps one — the first
-    // arm's — not both; the dedup uses the numeric equality, not raw `Value`.
+  @Test func `UNION widens a mixed integer/double column and dedups the equal rows`() throws {
+    // ISO unifies the result column type across the arms — an `integer` arm and
+    // a `double` arm widen to `double`, and each arm's values are COERCED to
+    // it. `1` and `1.0` then compare equal AND emit as the same coerced
+    // `double`, so a bare UNION keeps one `1.0` (not the first arm's raw
+    // `integer`).
     #expect(try statement("SELECT 1 UNION SELECT 1.0", engineFamily())
-            == [[.integer(1)]])
-    // UNION ALL keeps every row.
+            == [[.double(1.0)]])
+    // UNION ALL keeps every row, each coerced to the unified `double`.
     #expect(try statement("SELECT 1 UNION ALL SELECT 1.0", engineFamily())
-            == [[.integer(1)], [.double(1.0)]])
+            == [[.double(1.0)], [.double(1.0)]])
   }
 
-  @Test func `UNION dedup keeps distinct integers a rounded double sits between`() throws {
-    // Dedup is EXACT: `2^53.0` equals the integer `2^53` (folds to it), but NOT
-    // the integer `2^53 + 1`. So an earlier approximate row must not absorb
-    // both distinct integers — the `2^53 + 1` row survives regardless of order.
+  @Test func `UNION coercion collapses integers a rounded double cannot separate`() throws {
+    // The unified column is `double`, so EVERY arm's value coerces to `double`
+    // before the dedup: `2^53 + 1` (the integer `9007199254740993`) rounds to
+    // `2^53.0` on promotion, becoming EQUAL to the double `2^53.0` — so the
+    // three arms collapse to the ONE distinct `double`, the ISO
+    // approximate-numeric result of a mixed-type UNION.
     let rows = try statement("""
         SELECT 9007199254740992.0
           UNION SELECT 9007199254740992
           UNION SELECT 9007199254740993
         """, engineFamily())
-    #expect(rows == [[.double(9007199254740992.0)],
-                     [.integer(9007199254740993)]])
+    #expect(rows == [[.double(9007199254740992.0)]])
   }
 
-  @Test func `ORDER BY orders mixed integer/double keys by magnitude`() throws {
+  @Test func `ORDER BY orders a widened mixed integer/double column by magnitude`() throws {
+    // The CTE column unifies to `double`, so its integer arm coerces — `3`
+    // emits as `3.0` — and the ordering runs over the widened values.
     let rows = try statement("""
         WITH a (x) AS (SELECT 3 UNION ALL SELECT 1.5) SELECT x FROM a ORDER BY x
         """, engineFamily())
-    #expect(rows == [[.double(1.5)], [.integer(3)]])
+    #expect(rows == [[.double(1.5)], [.double(3.0)]])
   }
 
-  @Test func `ORDER BY over mixed keys past 2^53 stays a total order`() throws {
-    // A double ties two distinct integers under promotion; the comparator must
-    // stay a strict weak ordering (transitive), keeping the larger integer last
-    // rather than misordering it ahead of the smaller via the stable tie-break.
+  @Test func `ORDER BY over a widened mixed column past 2^53 stays a total order`() throws {
+    // The column unifies to `double`, so every arm coerces — the two distinct
+    // integers past 2^53 both round to `2^53.0` under the widening, ordering
+    // stays a strict weak ordering, and the greatest value is the coerced
+    // `double`.
     let rows = try statement("""
         WITH a (x) AS (SELECT 9007199254740993
                        UNION ALL SELECT 9007199254740993.0
@@ -105,7 +130,7 @@ struct EngineWithTests {
           SELECT x FROM a ORDER BY x
         """, engineFamily())
     #expect(rows.count == 3)
-    #expect(rows.last == [.integer(9007199254740993)])
+    #expect(rows.last == [.double(9007199254740992.0)])
   }
 
   @Test func `a CTE infers its columns and filters on them`() throws {
@@ -306,6 +331,28 @@ struct EngineWithTests {
         SELECT Id FROM Parent
         """, catalog)
     #expect(rows == [[.integer(1)], [.integer(2)], [.integer(3)]])
+  }
+
+  @Test func `a recursive CTE seeds its anchor from a same-named base column`()
+      throws {
+    // The anchor `SELECT Age FROM Parent` reads the BASE `Parent` — the CTE
+    // self, whose sole column is `n`, is not in scope for the base case — while
+    // only the recursive arm names the self. The set-op type fold must resolve
+    // the anchor under the base scope; folding the whole query under the self
+    // binding rejects the base-only `Age` (absent from the CTE's `(n)`), so a
+    // valid query would trap or fault before running.
+    let catalog = EngineMemory([
+      "Parent": FixtureRelation([EngineField(name: "Age", type: .integer)],
+                         [[.integer(29)]] as Array<Array<Value>>),
+    ])
+    let rows = try statement("""
+        WITH RECURSIVE Parent (n) AS (
+          SELECT Age FROM Parent
+          UNION ALL SELECT n + 1 FROM Parent WHERE n < 31
+        )
+        SELECT n FROM Parent ORDER BY n
+        """, catalog)
+    #expect(rows == [[.integer(29)], [.integer(30)], [.integer(31)]])
   }
 }
 
@@ -594,5 +641,212 @@ struct EngineRecursiveTests {
     #expect(throws: SQLError.recursion("c")) {
       try seed().run(query, counting())
     }
+  }
+
+  @Test func `a recursive arm that is itself a set-op folds the self at the anchor type`() throws {
+    // The recursive arm `SELECT s FROM t INTERSECT SELECT 'b'` is ITSELF a set
+    // operation, so `validate`'s recursive-arm typecheck folds its self column
+    // (`s`) before `fixpoint` rebinds it. Binding the self under the ANCHOR's
+    // derived type (`s` is text, from `SELECT 'b'`) — not a `.integer`
+    // placeholder — lets text INTERSECT text unify rather than faulting a text
+    // arm against an integer self. The SCHEMA path must report `s` as `.text`
+    // without throwing, and the run terminates yielding `b`.
+    let text = """
+        WITH RECURSIVE t (s) AS (
+          SELECT 'b' UNION SELECT s FROM t INTERSECT SELECT 'b'
+        )
+        SELECT s FROM t
+        """
+    let columns = try engineFamily().columns(of: Statement(parsing: text))
+    #expect(columns.count == 1)
+    #expect(columns[0].name == "s")
+    #expect(columns[0].type == .text)
+    let rows = try statement(text, engineFamily())
+    #expect(rows == [[.text("b")]])
+  }
+
+  @Test func `a recursive CTE widening past its anchor types the self as unified`() throws {
+    // The anchor `SELECT 1` is INTEGER but the recursive arm `n + 0.5` yields
+    // a DOUBLE, so the CTE column `n` unifies to `.double` — the type every row
+    // is coerced to. `fixpoint` binds the iterated self under those UNIFIED
+    // types (not the anchor-only integer), so the recursive arm reads `n` at
+    // the type its coerced values carry; the run yields the widened sequence
+    // and the SCHEMA path reports `n` as `.double`, the run's own result type.
+    let text = """
+        WITH RECURSIVE t (n) AS (
+          SELECT 1 AS n FROM Seed
+          UNION ALL
+          SELECT n + 0.5 AS n FROM t WHERE n < 3
+        )
+        SELECT n FROM t
+        """
+    let columns = try seed().columns(of: Statement(parsing: text),
+                                     routines: [:])
+    #expect(columns.count == 1)
+    #expect(columns[0].name == "n")
+    #expect(columns[0].type == .double)
+    let rows = try seed().run(Statement(parsing: text))
+    #expect(rows == [[.double(1.0)], [.double(1.5)], [.double(2.0)],
+                     [.double(2.5)], [.double(3.0)]])
+  }
+
+  @Test func `a widening CTE's schema and run agree on an integer routine self`() throws {
+    // The reviewer's parity case. Column `a` has an INTEGER anchor (`1`) but a
+    // recursive arm `a + 0.5` that widens it to `.double`; the same arm calls
+    // the INTEGER-declared `inc(a)` on that self column. Typing the self at the
+    // UNIFIED `.double` (the type the run coerces its rows to) makes SCHEMA
+    // validation and EXECUTION agree: both FAULT, because `inc` requires an
+    // integer argument and the widened self is a double. Were the self typed at
+    // the anchor-only integer, schema validation would call the query "valid"
+    // while the run faults — the schema-vs-execution break this fix closes. The
+    // fault case differs by path (static `.argument` vs the routine's own
+    // `.argument`), so assert each throws an `SQLError`.
+    let text = """
+        WITH RECURSIVE t (a, b) AS (
+          SELECT 1 AS a, 1 AS b FROM Seed
+          UNION ALL
+          SELECT a + 0.5 AS a, inc(a) AS b FROM t WHERE a < 3
+        )
+        SELECT a, b FROM t
+        """
+    #expect(throws: SQLError.self) {
+      _ = try seed().columns(of: Statement(parsing: text),
+                             routines: counting())
+    }
+    #expect(throws: SQLError.self) {
+      _ = try seed().run(Statement(parsing: text), counting())
+    }
+  }
+
+  @Test func `an all-NULL CTE column unifies with a later text arm`() throws {
+    // The CTE `t`'s column `x` is a constant NULL in BOTH arms, so it places NO
+    // type constraint: an enclosing UNION over `SELECT x FROM t` must unify it
+    // with the `'c'` arm and run, yielding the NULL and the text. The CTE fold
+    // carries the per-column unconstrained marker, so a bare reference to `x`
+    // unifies like a fresh constant-NULL arm.
+    let rows = try statement("""
+        WITH t (x) AS (SELECT NULLIF('b', 'b') UNION SELECT NULLIF(1, 1))
+          SELECT x FROM t UNION SELECT 'c'
+        """, engineFamily())
+    #expect(rows == [[.null], [.text("c")]])
+  }
+
+  @Test func `an all-NULL CTE column unifies regardless of arm order`() throws {
+    // The order-independence case. The arms are REVERSED from the sibling test
+    // — the integer-typed NULLIF leads — so the CTE fold defaults `x`'s
+    // concrete type to `.integer` rather than `.text`. Without the
+    // unconstrained marker the enclosing UNION would fault `.integer` against
+    // the `'c'` text arm (the literal-fix regression); the marker unifies it
+    // either way.
+    let rows = try statement("""
+        WITH t (x) AS (SELECT NULLIF(1, 1) UNION SELECT NULLIF('b', 'b'))
+          SELECT x FROM t UNION SELECT 'c'
+        """, engineFamily())
+    #expect(rows == [[.null], [.text("c")]])
+  }
+
+  @Test func `a three-arm all-NULL CTE column unifies in either order`() throws {
+    // A three-arm all-NULL chain stays unconstrained through every merge, so
+    // the enclosing UNION unifies it with the text arm — both the integer-first
+    // and the text-first orderings yield the same {NULL, 'c'}.
+    let forward = try statement("""
+        WITH t (x) AS (SELECT NULLIF(1, 1) UNION SELECT NULLIF('a', 'a')
+                       UNION SELECT NULLIF('b', 'b'))
+          SELECT x FROM t UNION SELECT 'c'
+        """, engineFamily())
+    #expect(forward == [[.null], [.text("c")]])
+    let reversed = try statement("""
+        WITH t (x) AS (SELECT NULLIF('b', 'b') UNION SELECT NULLIF('a', 'a')
+                       UNION SELECT NULLIF(1, 1))
+          SELECT x FROM t UNION SELECT 'c'
+        """, engineFamily())
+    #expect(reversed == [[.null], [.text("c")]])
+  }
+
+  @Test func `an all-NULL CTE column unifies beside a widening pair`() throws {
+    // Column `a` is all-NULL (unconstrained) while column `b` genuinely widens
+    // an integer arm to a double. The enclosing UNION unifies `a` with the text
+    // arm and `b`'s double with the integer arm — `a` yields NULLs, `b` the
+    // coerced doubles.
+    let rows = try statement("""
+        WITH t (a, b) AS (SELECT NULLIF(1, 1), 1
+                          UNION SELECT NULLIF('x', 'x'), 2.5)
+          SELECT a, b FROM t UNION SELECT 'c', 3
+        """, engineFamily())
+    #expect(Set(rows) == [[.null, .double(1.0)], [.null, .double(2.5)],
+                          [.text("c"), .double(3.0)]])
+  }
+
+  @Test func `an all-NULL CTE column with no outer union yields NULL`() throws {
+    // The marker changes only UNIFICATION, never the reported concrete type: a
+    // top-level select over the all-NULL CTE column runs and yields the NULL,
+    // exactly as before.
+    let rows = try statement("""
+        WITH t (x) AS (SELECT NULLIF(1, 1) UNION SELECT NULLIF('b', 'b'))
+          SELECT x FROM t
+        """, engineFamily())
+    #expect(rows == [[.null]])
+  }
+
+  @Test func `an all-NULL CTE column filters through IS NULL`() throws {
+    // `x` is NULL, so `x IS NULL` is TRUE and keeps the row.
+    let rows = try statement("""
+        WITH t (x) AS (SELECT NULLIF(1, 1) UNION SELECT NULLIF('b', 'b'))
+          SELECT x FROM t WHERE x IS NULL
+        """, engineFamily())
+    #expect(rows == [[.null]])
+  }
+
+  @Test func `an all-NULL CTE column compared to a value drops the row`() throws {
+    // `NULL = 'c'` is UNKNOWN under three-valued logic, so the row is filtered
+    // and the result is empty.
+    let rows = try statement("""
+        WITH t (x) AS (SELECT NULLIF(1, 1) UNION SELECT NULLIF('b', 'b'))
+          SELECT x FROM t WHERE x = 'c'
+        """, engineFamily())
+    #expect(rows.isEmpty)
+  }
+
+  @Test func `a recursive CTE with mismatched arm widths faults cleanly`() throws {
+    // The anchor projects two columns and the recursive arm one, so the fold
+    // that unifies them column-wise must FAULT the column-count mismatch rather
+    // than trap indexing the shorter arm.
+    #expect(throws: SQLError.columns(expected: 2, got: 1)) {
+      _ = try statement("""
+          WITH RECURSIVE t (a, b) AS (SELECT 1, 2 UNION SELECT Id FROM t)
+            SELECT * FROM t
+          """, engineFamily())
+    }
+  }
+
+  @Test func `a CTE whose body is narrower than its declared list faults`() throws {
+    // The declared list names two columns and the body projects one, so the CTE
+    // faults the declared-arity mismatch cleanly — never binding a narrow body
+    // under the wider list to trap a later reader. The width check reports the
+    // compiled body width against the declared list count.
+    #expect(throws: SQLError.columns(expected: 1, got: 2)) {
+      _ = try statement("""
+          WITH t (a, b) AS (SELECT 1) SELECT a FROM t
+          """, engineFamily())
+    }
+  }
+
+  @Test func `a recursive CTE with an all-NULL anchor unifies its recursive arm`()
+      throws {
+    // The reviewer's anchor-NULL case. The anchor `SELECT NULLIF(1, 1)` folds
+    // to a CONSTANT NULL, so the CTE column `x` is UNCONSTRAINED: the recursive
+    // arm — itself a set operation `SELECT x FROM t INTERSECT SELECT 'c'` — must
+    // fold the self column against the text `'c'` WITHOUT faulting integer
+    // against text, exactly as a bare constant-NULL arm unifies with any typed
+    // arm. Because the schema-only self and the run-iteration self bind through
+    // the SAME body-derived carrier, both carry the unconstrained mask and
+    // cannot diverge. The recursive arm intersects the NULL row against `'c'`
+    // (no match), so the fixpoint terminates at the anchor's single NULL row.
+    let rows = try statement("""
+        WITH RECURSIVE t (x) AS (
+          SELECT NULLIF(1, 1) UNION SELECT x FROM t INTERSECT SELECT 'c'
+        ) SELECT x FROM t
+        """, engineFamily())
+    #expect(rows == [[.null]])
   }
 }

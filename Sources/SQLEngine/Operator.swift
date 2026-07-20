@@ -84,6 +84,17 @@ internal struct Record: Row, Hashable {
   internal func merged(with other: Record) -> Record {
     Record(cells + other.cells)
   }
+
+  /// This record with each cell COERCED to the corresponding column `type`
+  /// (`Value.coerced` — the ISO numeric widening a set operation applies to its
+  /// arms' rows, promoting an `integer` cell to `double` where the unified
+  /// column is `double`). A cell whose column type equals its own kind (a
+  /// homogeneous set operation) passes through unchanged, so this is a no-op
+  /// except at a widening column. `types` matches the record's width (the arm
+  /// arity `compile` proved equal).
+  internal func coerced(to types: Array<ValueType>) -> Record {
+    Record(cells.indices.map { cells[$0].coerced(to: types[$0]) })
+  }
 }
 
 // MARK: - Plan
@@ -187,7 +198,31 @@ internal indirect enum Plan {
              ordinals: Array<Int>, on: Filter, kind: Join.Kind)
   /// A set operation of `kind` (`UNION`/`INTERSECT`/`EXCEPT`) over the `left`
   /// and `right` sub-plans, both yielding rows of the same width — the result
-  /// columns of the first arm.
+  /// columns, whose NAMES are the first arm's and whose `types` are UNIFIED
+  /// across the arms.
+  ///
+  /// `types` is the per-column unified result type (`ValueType.unified` folded
+  /// over the arms — a mixed integer/double column widening to `double`), one
+  /// entry per output column. The executor COERCES each arm's cells to these
+  /// types (`Value.coerced`) before applying the operator, so `SELECT 1 UNION
+  /// SELECT 2.5` yields a `double` column `[1.0, 2.5]`. It is computed at
+  /// COMPILE — where the arm queries and the resolution scope are in hand —
+  /// because this node carries only the sub-plans, not the arm `Query`s the
+  /// fold reads. A homogeneous set operation's `types` matches every arm's own
+  /// types, so the coercion is a no-op and the result is byte-identical.
+  ///
+  /// `widened` is the output columns whose unified `types[c]` differs from an
+  /// arm's OWN native projected type — the columns the coercion actually
+  /// changes (a `double` unified over an `integer` arm). It is derived at
+  /// compile from the unified `types` against each arm's native types and
+  /// carried here so the pushdown pass — a pure Plan rewrite with no catalog —
+  /// can tell a widened column from a same-typed one WITHOUT re-typing the
+  /// arms. A predicate over a widened column must NOT push below this node into
+  /// the arms: an arm evaluates it on the PRE-coercion value, but `combine`
+  /// coerces only the arm's emitted rows AFTER the arm runs, so the pushed
+  /// predicate would test the un-widened type. A predicate over a NON-widened
+  /// column still pushes (a same-typed `UNION ALL`). Empty for a homogeneous
+  /// set operation.
   ///
   /// Without `all` the result is the distinct rows the operator selects — the
   /// rows of either (`UNION`), of both (`INTERSECT`), or of the left not in the
@@ -197,7 +232,8 @@ internal indirect enum Plan {
   /// left row beyond the count the right removes. The node is binary and
   /// mirrors the `Query` set-operation tree, so each node honours its OWN
   /// `kind`/`all`.
-  case setop(SetOperation, Plan, Plan, all: Bool)
+  case setop(SetOperation, Plan, Plan, all: Bool, types: Array<ValueType>,
+             widened: Set<Int>)
   /// δ — deduplicates its `source`'s rows, keeping the first occurrence of each
   /// distinct whole row and preserving their order (`SELECT DISTINCT`). It sits
   /// above the projection, so it dedups the projected output rows on the SAME
@@ -237,7 +273,7 @@ extension Plan {
     switch self {
     case let .project(terms, _):
       terms.count
-    case let .setop(_, left, _, _):
+    case let .setop(_, left, _, _, _, _):
       left.width
     case let .distinct(source):
       // A `distinct` dedups rows without reshaping them, so it is as wide as
@@ -303,7 +339,7 @@ extension Plan {
       // An apply lays the lateral body's taken `ordinals` after the left's
       // slots, exactly as a product lays a scan's referenced ordinals.
       left.slots.map { $0 + ordinals.count }
-    case let .setop(_, left, _, _):
+    case let .setop(_, left, _, _, _, _):
       // Both sides yield rows of the same width — the result columns — so the
       // set operation's width is its left side's.
       left.slots
@@ -447,8 +483,8 @@ extension Catalog where Self: ~Escapable {
     case let .apply(left, key, correlation, ordinals, on, kind):
       return try applied(execute(left, context), key, correlation, ordinals,
                          on, kind, context)
-    case let .setop(kind, left, right, all):
-      return try setop(kind, left, right, all, context)
+    case let .setop(kind, left, right, all, types, _):
+      return try setop(kind, left, right, all, types, context)
     case let .distinct(source):
       return deduplicated(try execute(source, context))
     case let .aggregate(keys, aggregates, source):
@@ -915,9 +951,14 @@ private func limited(_ records: Array<Record>, _ count: Int?, _ offset: Int)
 extension Catalog where Self: ~Escapable {
   fileprivate borrowing func setop(_ kind: SetOperation, _ left: Plan,
                                    _ right: Plan, _ all: Bool,
+                                   _ types: Array<ValueType>,
                                    _ context: Context)
       throws(SQLError) -> Array<Record> {
-    try combine(kind, execute(left, context), execute(right, context), all)
+    // `types` is the compile-time unified per-column type — this node carries
+    // no arm `Query`, so it cannot fold them here; `combine` coerces each arm's
+    // rows to them before applying the operator.
+    try combine(kind, execute(left, context), execute(right, context), all,
+                types: types)
   }
 }
 
@@ -925,8 +966,19 @@ extension Catalog where Self: ~Escapable {
 /// keeps the rows of either, `intersect` those of both, `except` the left's not
 /// balanced by the right — the executor's `setop` node and the per-arm run path
 /// share this ONE combiner so the two agree on duplicate handling.
+///
+/// Each arm's cells are first COERCED to the unified column `types` (`Value
+/// .coerced` — the widening ISO type unification requires, so `SELECT 1 UNION
+/// SELECT 2.5` emits a `double` column), the ONE numeric widening `coerced`
+/// performs; a HOMOGENEOUS set operation's `types` matches each arm's own
+/// types, so the coercion is a no-op and the result is byte-identical.
+/// `INTERSECT`/`EXCEPT` equality already canonicalises (`1` equals `1.0`), so
+/// coercion there changes only the EMITTED cells' type, never which rows match.
 internal func combine(_ kind: SetOperation, _ left: Array<Record>,
-                      _ right: Array<Record>, _ all: Bool) -> Array<Record> {
+                      _ right: Array<Record>, _ all: Bool,
+                      types: Array<ValueType>) -> Array<Record> {
+  let left = left.map { $0.coerced(to: types) }
+  let right = right.map { $0.coerced(to: types) }
   switch kind {
   case .union:
     let combined = left + right
@@ -1176,10 +1228,14 @@ extension Catalog where Self: ~Escapable {
   private borrowing func setop(_ plan: Plan, _ query: Query, _ overlay: Context,
                                _ name: String)
       throws(SQLError) -> Array<Record> {
-    if case let .setop(kind, left, right, all) = plan,
+    if case let .setop(kind, left, right, all, types, _) = plan,
         case let .setop(_, leftQuery, rightQuery, _) = query {
+      // This node's arm queries are in hand, so the unified column `types` the
+      // plan carries (computed at compile) drive the arm coercion `combine`
+      // applies — the SAME types the top-level and Plan-node paths use.
       return try combine(kind, setop(left, leftQuery, overlay, name),
-                         setop(right, rightQuery, overlay, name), all)
+                         setop(right, rightQuery, overlay, name), all,
+                         types: types)
     }
     let scope = try augment(overlay.validating(false), for: query, rows: true)
     scope.subqueries.record(overlay: scope.revealed().relations,

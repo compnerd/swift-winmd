@@ -30,30 +30,44 @@ internal struct Schema {
   /// `Engine.outputSchema`); the engine never compares or orders on it.
   internal let types: Array<ValueType>
 
+  /// Whether each real column at its ordinal `0 ..< width` places NO type
+  /// constraint — an all-arms-NULL CTE column whose concrete `types` entry is a
+  /// default the set-operation fold must NOT constrain against, so a reference
+  /// to it unifies with any typed arm order-independently. Aligned with `types`
+  /// (`unconstrained.count == width`); all-`false` for a base table, a view, or
+  /// any relation whose columns carry genuine types.
+  internal let unconstrained: Array<Bool>
+
   /// The virtual column names at their ordinals `width ..< extent` — virtual
   /// `i` sits at ordinal `width + i`. A view supplies none.
   internal let virtuals: Array<String>
 
   internal init(width: Int, extent: Int, names: Array<String>,
-                types: Array<ValueType>, virtuals: Array<String>) {
+                types: Array<ValueType>, unconstrained: Array<Bool>? = nil,
+                virtuals: Array<String>) {
     self.width = width
     self.extent = extent
     self.names = names
     self.types = types
+    self.unconstrained =
+        unconstrained ?? Array(repeating: false, count: width)
     self.virtuals = virtuals
   }
 
-  /// A view's resolution schema, its per-column types RESOLVED from a body
-  /// `carrier` while its `names` stay the view's DECLARED ones (a view stores
-  /// its own column names; only the types come from the resolved body). The
-  /// declared surface's `extent`/`virtuals` carry over unchanged. Taking the
-  /// types from the carrier as a whole means a future per-column attribute on
-  /// `ResolvedColumn` threads through this ONE constructor rather than a loose
-  /// `types.map` at the site.
+  /// A view's resolution schema, its per-column types AND `unconstrained` mask
+  /// RESOLVED from a body `carrier` while its `names` stay the view's DECLARED
+  /// ones (a view stores its own column names; only the types and mask come
+  /// from the resolved body). The declared surface's `extent`/`virtuals` carry
+  /// over unchanged. Taking the types and mask from the carrier as a whole
+  /// threads the per-column `unconstrained` through this ONE constructor rather
+  /// than a loose `types.map` at the site, so an all-NULL view column unifies
+  /// with any later typed set-operation arm.
   internal init(from carrier: Array<ResolvedColumn>, names: Array<String>,
                 extent: Int, virtuals: Array<String>) {
     self.init(width: names.count, extent: extent, names: names,
-              types: carrier.map(\.type), virtuals: virtuals)
+              types: carrier.map(\.type),
+              unconstrained: carrier.map(\.unconstrained),
+              virtuals: virtuals)
   }
 
   /// This schema with its real column `names` positionally RENAMED to
@@ -79,7 +93,8 @@ internal struct Schema {
       throw .duplicate(column)
     }
     return Schema(width: width, extent: extent, names: columns,
-                  types: types, virtuals: virtuals)
+                  types: types, unconstrained: unconstrained,
+                  virtuals: virtuals)
   }
 
   /// The ordinal of the column named `name`, or `nil` if absent.

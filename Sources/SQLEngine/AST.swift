@@ -116,15 +116,18 @@ public struct CTE: Hashable, Sendable {
     self.recursive = recursive
   }
 
-  /// The CTE's DECLARED output columns as the `ResolvedColumn` carrier its self
-  /// binding is built from — each declared name typed `.integer`, the
-  /// placeholder a materialised relation reports (a CTE's rows carry no static
-  /// types). Every self binding (the `with` install, the recursive
-  /// `validate`/`fixpoint` probes, the fixpoint step, the schema-path binding)
-  /// is constructed from THIS, so all bind the same carrier through one
-  /// constructor.
+  /// The CTE's DECLARED output columns as the `ResolvedColumn` carrier — each
+  /// declared name typed `.integer` and marked UNCONSTRAINED, since the type is
+  /// a fabricated PLACEHOLDER (a materialised relation reports `.integer`; a
+  /// CTE's rows carry no static types), NOT a genuine derivation — so a fold
+  /// unifying against it defers to the other arm rather than faulting on the
+  /// placeholder. It is the FALLBACK a trusted derive falls back to when a
+  /// data-dependent body a filter drops faults its type fold; the primary path
+  /// binds a CTE from its BODY-derived carrier (`kinds(of:)`), which unifies
+  /// the arms and carries the real `unconstrained` mask.
   internal var declared: Array<ResolvedColumn> {
-    columns.map { ResolvedColumn(name: $0, type: .integer) }
+    columns.map { ResolvedColumn(name: $0, type: .integer,
+                                 unconstrained: true) }
   }
 }
 
@@ -153,8 +156,10 @@ public enum SetOperation: Hashable, Sendable {
 /// so the arms read in source order, while `a UNION b INTERSECT c` binds as
 /// `a UNION (b INTERSECT c)`. Without `all` a set operation removes duplicate
 /// result rows; with `all` (`ALL`) it keeps them per the operator's
-/// multiplicity rule. Every arm must project the same number of columns, and
-/// the result columns are the FIRST arm's projection (the ISO rule).
+/// multiplicity rule. Every arm must project the same number of columns; the
+/// result column TYPES are unified across the arms (a mixed integer/double
+/// column widening to `double`), while their NAMES come from the first arm (the
+/// ISO rule).
 public indirect enum Query: Hashable, Sendable {
   /// A single `SELECT`.
   case select(Select)
@@ -164,9 +169,9 @@ public indirect enum Query: Hashable, Sendable {
   case setop(SetOperation, Query, Query, all: Bool)
 
   /// The first `SELECT` of the query — the leftmost arm, reached by descending
-  /// the left arm of each set operation. Its projection names the result
-  /// columns (the ISO rule), so a `CREATE VIEW` infers a set operation's
-  /// columns from it.
+  /// the left arm of each set operation. Its projection NAMES the result
+  /// columns (the ISO rule — their TYPES unify across every arm), so a `CREATE
+  /// VIEW` infers a set operation's column names from it.
   public var first: Select {
     switch self {
     case let .select(select): select

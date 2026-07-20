@@ -32,27 +32,35 @@ public struct OutputColumn: Hashable, Sendable {
 /// per-column descriptor a binding is built FROM as a whole, rather than
 /// re-listed field by field at each site.
 ///
-/// It wraps the body's `OutputColumn` (name + type) today. It exists as a
-/// struct so a future per-column attribute (a nullability/unconstrained mask a
-/// set-operation type unification carries) is added HERE, in ONE place, and
-/// threads through every binding via the single `init(from:)` constructor — no
-/// site re-lists the fields, so none can drop the new attribute. Every
-/// relation-body binding derives an `Array<ResolvedColumn>` via
-/// `resolved(query:in:)` and is constructed from it.
+/// It wraps the body's `OutputColumn` (name + type) and carries the per-column
+/// `unconstrained` mask a set-operation type unification threads: whether every
+/// arm folded into this column projects a CONSTANT NULL, so it places NO type
+/// constraint on a unified column (a NULL unifies with any typed arm, exactly
+/// as `COALESCE` skips a constant-NULL argument). It is the ONE per-column
+/// carrier: both `resolved(query:in:)`/`columns(unifying:)` and `merge` operate
+/// on and return it, and every binding is built from it via the single
+/// `init(from:)` constructor — no site re-lists the fields, so none can drop
+/// the mask.
 internal struct ResolvedColumn: Hashable, Sendable {
   /// The column's output name and value type.
   internal let column: OutputColumn
 
-  internal init(_ column: OutputColumn) {
+  /// Whether every arm folded into this column so far projects a constant NULL,
+  /// so it places NO type constraint on the set-operation's unified column.
+  internal let unconstrained: Bool
+
+  internal init(_ column: OutputColumn, unconstrained: Bool = false) {
     self.column = column
+    self.unconstrained = unconstrained
   }
 
   /// A resolved column carrying `name` and `type` directly — the declared
   /// carrier a common table expression's self binding is built from, its name
   /// the declared column and its type the `.integer` placeholder a materialised
   /// relation reports.
-  internal init(name: String, type: ValueType) {
+  internal init(name: String, type: ValueType, unconstrained: Bool = false) {
     self.column = OutputColumn(name: name, type: type)
+    self.unconstrained = unconstrained
   }
 
   /// The column's output name.
@@ -62,14 +70,64 @@ internal struct ResolvedColumn: Hashable, Sendable {
   internal var type: ValueType { column.type }
 }
 
+/// Merges two set-operation arms' resolved columns into the fold's running
+/// column: the name is the LEFT arm's (the ISO first-arm rule), and the type is
+/// the unification of the two — SKIPPING a constant-NULL (unconstrained) arm's
+/// type, which constrains nothing. A column that is constant NULL in BOTH arms
+/// stays unconstrained (its type the left's, defaulting to the `.integer` a
+/// NULL column already carries); a column typed in ONE arm and NULL in the
+/// other takes the typed arm's type and becomes constrained; two typed arms
+/// merge through `ValueType.unified`, faulting `SQLError.operand` (SQLSTATE
+/// 42804) on an irreconcilable pair — a text beside a number, a boolean beside
+/// a number — the same fault a `COALESCE`/`CASE` raises on irreconcilable
+/// result types.
+///
+/// `shape` (default `false`) is the nested-subquery pre-pass mode: on an
+/// irreconcilable pair it does NOT fault but substitutes the LEFT arm's type as
+/// a discardable placeholder, marked `unconstrained` so a further enclosing
+/// fold treats it as placing no constraint. The pre-pass records this width-1
+/// type for a subquery the reachability walk has not yet decided runs; an
+/// UNREACHED occurrence's type is discarded, and a REACHED scalar/`IN` one is
+/// re-folded STRICTLY (`shape: false`) on the reached path, so a genuine
+/// incompatibility still faults there. Arity/resolution stay eager regardless.
+internal func merge(_ left: ResolvedColumn, _ right: ResolvedColumn,
+                    shape: Bool = false)
+    throws(SQLError) -> ResolvedColumn {
+  let name = left.column.name
+  // A constant-NULL arm constrains nothing: carry the OTHER arm's type (and,
+  // when both are NULL, the left's), narrowing the running unconstrained-ness
+  // to whether BOTH remaining arms are NULL.
+  if left.unconstrained {
+    return ResolvedColumn(name: name, type: right.column.type,
+                          unconstrained: right.unconstrained)
+  }
+  if right.unconstrained {
+    return ResolvedColumn(name: name, type: left.column.type)
+  }
+  guard let unified = left.column.type.unified(with: right.column.type) else {
+    // The shape pre-pass defers the operand fault to the reached path: yield a
+    // discardable placeholder (the left arm's type, marked unconstrained)
+    // rather than faulting while merely recording an unreached subquery.
+    if shape {
+      return ResolvedColumn(name: name, type: left.column.type,
+                            unconstrained: true)
+    }
+    throw .operand("UNION arms have irreconcilable types")
+  }
+  return ResolvedColumn(name: name, type: unified)
+}
+
 extension Catalog where Self: ~Escapable {
   /// The result columns `query` would yield, named and typed, resolved WITHOUT
   /// executing it.
   ///
-  /// The result columns are the FIRST arm's projection (the ISO rule a `UNION`
-  /// follows), so a union names its result off its leading `SELECT`. The column
-  /// count matches the compiled plan's `width`; the names and types come from
-  /// re-walking the projection exactly as compilation resolves it:
+  /// A union's result columns take their NAMES from the FIRST arm's projection
+  /// (the ISO rule a `UNION` follows), so a union names its result off its
+  /// leading `SELECT`, while their TYPES are UNIFIED across ALL arms (a mixed
+  /// integer/double column widening to `double`, an irreconcilable pair
+  /// faulting). The column count matches the compiled plan's `width`; the names
+  /// and types come from re-walking the projection exactly as compilation
+  /// resolves it:
   ///
   ///   - `SELECT *` — every real column of every relation in scope, in chain
   ///     order (never a virtual column), named and typed from each relation's
@@ -81,8 +139,9 @@ extension Catalog where Self: ~Escapable {
   ///     source type and a literal its own; every other expression is reported
   ///     `.integer`, the engine's exact-numeric default.
   ///
-  /// The result columns come from the first arm's projection, but ONLY after
-  /// the WHOLE query validates: `compile` resolves every arm (each `WHERE`,
+  /// The result columns' names come from the first arm and their types unify
+  /// across arms, but ONLY after the WHOLE query validates: `compile` resolves
+  /// every arm (each `WHERE`,
   /// join, and projection) and cross-checks a `UNION`'s arm arity, without
   /// opening a cursor. So a query whose first arm names its columns cleanly but
   /// whose `WHERE` references a missing column, or whose second `UNION` arm
@@ -145,13 +204,16 @@ extension Catalog where Self: ~Escapable {
     // operand a data-dependent filter never reached would otherwise fault a
     // query that produced its (empty) result.
     if validate { try typecheck(query, scope) }
-    // The result columns are the first arm's projection (the ISO rule a UNION
-    // follows), resolved against the validated scope; a scalar call types from
-    // its routine's declared return type. `validate` rides through so a
-    // `SELECT *` over a view derives the body's types WITHOUT re-type-checking
-    // it — the view body's own reachable-operand check is gated the same as the
-    // outer query's, so a `validate: false` derive faults nowhere.
-    return try columns(of: query.first, scope)
+    // The result columns' NAMES come from the first arm's projection (the ISO
+    // rule a UNION follows), but their TYPES are UNIFIED across ALL arms — a
+    // column mixing `integer` and `double` arms widens to `double`, an
+    // irreconcilable pair (text beside a number) faults `SQLError.operand` —
+    // resolved against the validated scope; a scalar call types from its
+    // routine's declared return type. `validate` rides through so a `SELECT *`
+    // over a view derives the body's types WITHOUT re-type-checking it — the
+    // view body's own reachable-operand check is gated the same as the outer
+    // query's, so a `validate: false` derive faults nowhere.
+    return try columns(unifying: query, scope).map(\.column)
   }
 
   /// The result columns `statement` would yield, named and typed, resolved
@@ -198,7 +260,8 @@ extension Catalog where Self: ~Escapable {
   ///
   /// Each CTE binds a `RelationInstance` of its DECLARED columns with no rows —
   /// the schema the run's materialised CTE resolves to (columns from the
-  /// declared list, every type `.integer`) — laid into the overlay in source
+  /// declared list, each typed from its BODY fold and carrying its
+  /// `unconstrained` mask, `kinds(of:)`) — laid into the overlay in source
   /// order so a later CTE, and the trailing query, resolve a name the same
   /// precedence a run applies (a CTE shadows a base relation of the same name).
   /// The `definition_schema.` store augment then extends this overlay for the
@@ -244,11 +307,6 @@ extension Catalog where Self: ~Escapable {
       guard overlay[cte.name.lowercased()] == nil else {
         throw .redefinition(cte.name)
       }
-      // The CTE's schema-only self — its declared columns, no rows, every type
-      // `.integer` (the default a materialised relation reports) — bound into
-      // the recursive arm's operand check and, after validation, into the
-      // overlay a later CTE and the trailing query resolve against.
-      let binding = RelationInstance(from: cte.declared, rows: [])
       // Validate the body's SHAPE and ARITY against the scope of the PRIOR CTEs
       // by the SAME code a run uses — `Engine.validate` — so a schema is not
       // advertised for a `WITH` a run would reject, and this path never again
@@ -269,11 +327,21 @@ extension Catalog where Self: ~Escapable {
         try self.validate(cte, against: context.body(overlay),
                           typecheck: true)
       }
+      // The CTE's schema-only self — its declared columns, no rows, and its
+      // BODY-DERIVED column carrier (never the declared-name `.integer`
+      // placeholder), derived under the SAME body scope `validate` uses (the
+      // PRIOR CTEs in `overlay`, self not in scope) so the trailing query's
+      // set-op fold reads a CTE column at its real type rather than spuriously
+      // merging an `.integer` placeholder against a text arm and faulting. The
+      // carrier's `unconstrained` mask threads through `init(from:)`, so an
+      // all-NULL CTE column unifies with any later typed arm.
+      let derived = try kinds(of: cte, context.body(overlay))
       // Bind the CTE's schema-only self into the overlay AFTER its body is
       // validated — the scope a later CTE and the trailing query resolve
       // against — exactly as `Engine.with` binds the materialised relation
       // after running its body.
-      overlay[cte.name.lowercased()] = binding
+      overlay[cte.name.lowercased()] =
+          RelationInstance(from: derived, rows: [])
     }
     // Compile/type-check/derive from the base `context.scoping(overlay)`
     // (idempotently augmented within each, which pushes the trailing query's
@@ -289,7 +357,7 @@ extension Catalog where Self: ~Escapable {
     let base = context.body(overlay)
     _ = try compile(query, base)
     if validate { try typecheck(query, base) }
-    return try columns(of: query.first, base)
+    return try columns(unifying: query, base).map(\.column)
   }
 
   /// The result columns of a single `select`, resolved against this catalog
@@ -307,9 +375,30 @@ extension Catalog where Self: ~Escapable {
   /// re-type-checks a view body a run already proved runnable.
   borrowing func columns(of select: Select, _ context: Context)
       throws(SQLError) -> Array<OutputColumn> {
+    try arms(of: select, context).map(\.column)
+  }
+
+  /// The output columns of a single set-operation `select` arm — each carried
+  /// as a `ResolvedColumn` recording whether its projected expression is a
+  /// constant NULL — the per-arm worker the set-operation fold
+  /// (`columns(unifying:_:)`) drives.
+  ///
+  /// This NAMES AND TYPES the projection and marks its constant-NULL columns;
+  /// it does not re-validate the WHERE, joins, GROUP BY, HAVING, or ORDER BY.
+  /// Whole-query validation belongs to `compile` — the public `columns(of
+  /// query:)` runs it — so this worker never duplicates (and never drifts from)
+  /// that resolution. It runs only after compilation has proved the arm
+  /// resolves. `routines` are the scalar routines a call types from — its
+  /// declared return type — rather than the `.integer` default. The context's
+  /// `validate` rides through to any view this arm's relations resolve, gating
+  /// the view body's reachable-operand check the same as the outer query's — a
+  /// `validate: false` context never re-type-checks a view body a run already
+  /// proved runnable.
+  private borrowing func arms(of select: Select, _ context: Context)
+      throws(SQLError) -> Array<ResolvedColumn> {
     // Bind THIS select's own FROM/JOIN derived tables (and store relations)
     // before deriving either the subquery map or the scope — a set-op ARM
-    // reaches here directly (`columns(of query.first, …)`), and the top-level
+    // reaches here directly (`columns(unifying: query, …)`), and the top-level
     // augment collected NO arm-local aliases (arms are SELECT-scoped), so a
     // subquery naming the arm's own derived alias (`WHERE Id IN (SELECT Id FROM
     // d)`) would else compile against a scope missing `d`. Schema-only, no
@@ -340,23 +429,167 @@ extension Catalog where Self: ~Escapable {
     // scope the incoming context may carry.
     let plans = try subquery(of: select, augmented.scoped(as: .caller),
                              enclosing: scope, prefixes: prefixes)
+    // ONE walk yields each column's name, type, AND `unconstrained` mask
+    // together — a constant-NULL projection or a reference to an unconstrained
+    // (LOCAL or CORRELATED) source column carries the mask through the same
+    // resolution as the type, so the two cannot diverge. The projection walk is
+    // BARRED (a correlated column of THIS query in the projection is diagnosed,
+    // as the run's projection lowering bars it).
     return try scope.columns(of: select.projection, augmented.routines,
                              subquery: plans.rest.barred)
   }
 
+  /// The output columns of `query`, TYPE-UNIFIED across every set-operation arm
+  /// — the ISO rule a `UNION`/`INTERSECT`/`EXCEPT` result columns follow.
+  ///
+  /// A bare `SELECT` types off its own projection. A `setop` node folds its two
+  /// arms column-wise: each result column takes the LEFT (first) arm's NAME
+  /// (the ISO rule — a union names its columns off its leading `SELECT`) and
+  /// the MERGE of the two arms' types (`merge` — like types pass through, a
+  /// mixed integer/double pair widens to `double`, an irreconcilable pair
+  /// faults `SQLError.operand`). A left-associative chain composes
+  /// automatically. A column an arm projects as a CONSTANT NULL places NO type
+  /// constraint (a NULL unifies with any typed arm), so the fold carries the
+  /// OTHER arm's type and unconstrained-ness up unchanged, mirroring
+  /// `COALESCE`'s constant-NULL skip. The arm ARITY is proved equal by
+  /// `compile` before this runs, so the column-wise zip is safe.
+  ///
+  /// Each returned `ResolvedColumn` carries the unified column AND whether it
+  /// is constant NULL in EVERY arm folded so far — the value coercion paths
+  /// read the `type`, and a further enclosing fold reads `unconstrained`.
+  borrowing func columns(unifying query: Query, _ context: Context)
+      throws(SQLError) -> Array<ResolvedColumn> {
+    switch query {
+    case let .select(select):
+      return try arms(of: select, context)
+    case let .setop(_, left, right, _):
+      let l = try columns(unifying: left, context)
+      let r = try columns(unifying: right, context)
+      // A NESTED set operation's arm mismatch is faulted HERE, before the
+      // column-wise merge indexes both arms — `compile` cross-checks the
+      // outer widths but the fold descends into child nodes it has not yet
+      // validated, so an unguarded `r[index]` would trap rather than fault.
+      guard l.count == r.count else { throw .arity(l.count, r.count) }
+      // The operand-compatibility fold DEFERS under the shape pre-pass
+      // (`context.shape`): a nested subquery's set-operation type is recorded
+      // ahead of the reachability walk, so an unreached incompatible pair
+      // yields a discardable placeholder rather than faulting; a reached
+      // scalar/`IN` occurrence is re-folded strictly on the reached path.
+      return try l.indices.map { index throws(SQLError) in
+        try merge(l[index], r[index], shape: context.shape)
+      }
+    }
+  }
+
+  /// The unified column TYPES of `query`, folded across every set-operation arm
+  /// — the types each producer path coerces its arms' values to so a set
+  /// operation's result carries the common column type (`SELECT 1 UNION SELECT
+  /// 2.5` a `double` column). It is the type projection of
+  /// `columns(unifying:_:)`, resolved against `context`.
+  borrowing func types(unifying query: Query, _ context: Context)
+      throws(SQLError) -> Array<ValueType> {
+    try columns(unifying: query, context).map(\.type)
+  }
+
   /// The SINGLE deriver of a relation body's resolved output columns: the
-  /// FIRST arm's projection (the ISO rule a `UNION` follows), named and typed
-  /// against `context`, wrapped as the `ResolvedColumn` carrier every
-  /// body-derived binding is constructed from.
+  /// columns UNIFIED across every set-operation arm (the ISO rule a
+  /// `UNION`/`INTERSECT`/`EXCEPT` follows), named off the first arm and typed
+  /// across all of them, each carrying its `unconstrained` mask — the
+  /// `ResolvedColumn` carrier every body-derived binding is constructed from.
   ///
   /// Every binding site that folds a body into a `RelationInstance`/`Schema` —
   /// a derived table's `materialise`, a view's schema resolution — obtains its
-  /// columns HERE, never by re-deriving the projection inline, so a future
-  /// per-column attribute on `ResolvedColumn` threads through all of them from
-  /// one place.
+  /// columns HERE, never by re-deriving the projection inline, so the
+  /// per-column `unconstrained` mask threads through all of them from one place
+  /// via the single `init(from:)` constructor and no site can drop it.
   borrowing func resolved(query body: Query, in context: Context)
       throws(SQLError) -> Array<ResolvedColumn> {
-    try columns(of: body.first, context).map(ResolvedColumn.init)
+    try columns(unifying: body, context)
+  }
+
+  /// The column CARRIER a CTE binds under — its DECLARED column names (a CTE is
+  /// addressed by its declared list, `WITH t(x) AS …` exposes `x`, never the
+  /// body's own projected name) carrying each column's BODY-folded type (never
+  /// the `.integer` placeholder) and whether every arm feeding it projects a
+  /// constant NULL, so it places no type constraint. A recursive `UNION` CTE
+  /// unifies the anchor's columns (self not in scope) with the recursive arm's
+  /// (self bound to the anchor's types), mirroring `fixpoint`; any other body
+  /// folds its own. A trusted derive (a `validate: false` body a filter drops)
+  /// that faults falls back to the placeholder.
+  ///
+  /// The result is always the CTE's DECLARED width (`cte.columns.count`): a
+  /// body whose fold yields a different count is reconciled to it (padding a
+  /// short fold with the `.integer` default, truncating a long one), so a
+  /// caller building the CTE binding from it indexes a same-length carrier
+  /// whatever the (possibly malformed) body derives.
+  borrowing func kinds(of cte: CTE, _ scope: Context)
+      throws(SQLError) -> Array<ResolvedColumn> {
+    let derived = try contributions(of: cte, scope)
+    let sized = reconcile(derived, to: cte.columns.count, named: cte.columns)
+    // Bind under the CTE's DECLARED names, keeping each column's body-folded
+    // type and `unconstrained` mask, so `WITH t(x) AS (SELECT 1 AS n)` is
+    // addressed as `x` while `x` carries the body's derived type.
+    return sized.indices.map {
+      ResolvedColumn(name: cte.columns[$0], type: sized[$0].type,
+                     unconstrained: sized[$0].unconstrained)
+    }
+  }
+
+  /// The raw column carrier a CTE's body folds to, BEFORE reconciling to the
+  /// declared width — the recursive-aware merge `kinds` wraps.
+  private borrowing func contributions(of cte: CTE, _ scope: Context)
+      throws(SQLError) -> Array<ResolvedColumn> {
+    guard cte.recursive, cte.recurses,
+        case let .setop(.union, anchor, recursive, _) = cte.query else {
+      // A non-recursive body's carrier is its unified fold, PROPAGATING a
+      // genuine incompatibility (`SELECT 'b' UNION SELECT 1`) as `.operand`
+      // rather than swallowing it into the declared `.integer`: with every
+      // placeholder now marked unconstrained, a trusted body that RAN carries
+      // no genuine incompat to fault, so no `try?` fallback is needed.
+      return try columns(unifying: cte.query, scope)
+    }
+    let seeds = try columns(unifying: anchor, scope)
+    // The recursive arm addresses the self by the CTE's DECLARED names (`SELECT
+    // n + 1 FROM t` reads `n`), so bind the schema-only self under those names
+    // carrying the anchor's derived types/mask, not the anchor's own projected
+    // names. The anchor's width is proved against the declared list before this
+    // runs, so the index is in range.
+    let named = seeds.indices.map { index -> ResolvedColumn in
+      guard index < cte.columns.count else { return seeds[index] }
+      return ResolvedColumn(name: cte.columns[index], type: seeds[index].type,
+                            unconstrained: seeds[index].unconstrained)
+    }
+    let empty = RelationInstance(from: named, rows: [])
+    let steps = try columns(unifying: recursive,
+                            scope.binding(cte.name, to: empty))
+    // A malformed recursive CTE whose anchor and recursive arms project
+    // differing widths would trap indexing `steps[index]`; fault cleanly on the
+    // mismatch instead, the same column-count fault a declared-arity mismatch
+    // raises.
+    guard seeds.count == steps.count else {
+      throw .columns(expected: seeds.count, got: steps.count)
+    }
+    return try seeds.indices.map { index throws(SQLError) in
+      try merge(seeds[index], steps[index])
+    }
+  }
+
+  /// `contributions` reconciled to exactly `count` columns — the declared width
+  /// a caller binds the CTE under. A fold that yields fewer columns is padded
+  /// with a fabricated `.integer` placeholder (named from `names` where one
+  /// exists) marked UNCONSTRAINED, since it is not a genuine derivation, a
+  /// longer one truncated, so the built binding's type and unconstrained arrays
+  /// always match the declared column list's length whatever a malformed body
+  /// derives.
+  private borrowing func reconcile(_ carrier: Array<ResolvedColumn>,
+                                   to count: Int, named names: Array<String>)
+      -> Array<ResolvedColumn> {
+    guard carrier.count != count else { return carrier }
+    return (0 ..< count).map { index in
+      if index < carrier.count { return carrier[index] }
+      let name = index < names.count ? names[index] : "column \(index + 1)"
+      return ResolvedColumn(name: name, type: .integer, unconstrained: true)
+    }
   }
 
   /// The name-resolution scope of `select` — its FROM relation and each joined
@@ -415,14 +648,13 @@ extension Catalog where Self: ~Escapable {
   /// Type-checks every operand in `query` — the projection, `WHERE`, and
   /// `HAVING` of EVERY arm — throwing the run-time fault a bad operand would.
   ///
-  /// The result schema types only the FIRST arm's projection (the ISO rule), so
-  /// a later set-operation arm's or a `HAVING`'s operand-type error would
-  /// otherwise go unadvertised — `SELECT Age FROM t UNION SELECT Name + 1 FROM
-  /// t` or `…
-  /// HAVING SUM(Name) > 0` resolves its names but `Arithmetic.apply`/
-  /// `Aggregate.fold` faults `SQLError.operand` at run. `compile` cannot catch
-  /// this (no evaluating term is built), so a schema path type-checks each arm
-  /// before returning metadata. It reads no cursor.
+  /// The result schema DERIVES each arm's projection type (unifying them across
+  /// arms), but that non-faulting derive does not exercise a later arm's or a
+  /// `HAVING`'s REACHABLE-operand check — `SELECT Age FROM t UNION SELECT Name
+  /// + 1 FROM t` or `… HAVING SUM(Name) > 0` resolves its names but
+  /// `Arithmetic.apply`/`Aggregate.fold` faults `SQLError.operand` at run.
+  /// `compile` cannot catch this (no evaluating term is built), so a schema
+  /// path type-checks each arm before returning metadata. It reads no cursor.
   borrowing func typecheck(_ query: Query, _ context: Context)
       throws(SQLError) {
     // Bind the derived tables (and store relations) THIS query names in its own
@@ -617,10 +849,21 @@ extension Catalog where Self: ~Escapable {
     // those resolve regardless of `validate`. Lower under `.caller`, this
     // frame's `nested` outer, and shape-only lenience (`validate: false`) — the
     // schema pre-pass's cursor-free derive.
-    let inner =
-        context.scoped(as: .caller).with(outer: nested).validating(false)
+    // `shaping()` DEFERS the set-operation operand-compatibility fold: this
+    // pre-pass records EVERY nested subquery's width and single-column type
+    // ahead of the reachability walk, so faulting `SQLError.operand` here would
+    // reject an unreachable incompatible set-operation subquery a short-
+    // circuited leg never reaches. The reached scalar/`IN` re-fold below
+    // restores the strict check for an occurrence that DOES run. Arity and
+    // resolution stay eager regardless.
+    let inner = context.scoped(as: .caller).with(outer: nested)
+        .validating(false).shaping()
     let width = try compile(query, inner).width
-    let derived = try columns(of: query.first, inner).first?.type
+    // The single-column output TYPE — UNIFIED across the subquery's set-
+    // operation arms (`(SELECT 1 UNION SELECT 2.5)` typing `double`), not the
+    // first arm alone — for validation's type-check. The run/derive fold reads
+    // the `unconstrained` mask via `Resolution`; validation uses the type.
+    let derived = try columns(unifying: query, inner).first?.type
     if widths[query] == nil {
       widths[query] = width
       types[query] = derived
@@ -702,6 +945,21 @@ extension Catalog where Self: ~Escapable {
     let inner = revealed.with(outer: nested)
     for reach in subquery.visited {
       try typecheck(shape(of: reach), inner)
+      // The nested-subquery shape pre-pass DEFERRED a set-operation's operand-
+      // compatibility fold (`shaping()`), so a genuine incompatibility in a
+      // subquery that ACTUALLY runs would otherwise slip through. Re-fold it
+      // STRICTLY here (`inner` carries no `shape`), so a REACHED scalar or
+      // `IN`/quantified (`.valued`) occurrence with irreconcilable arm types
+      // faults `SQLError.operand` exactly as before the deferral. An
+      // `existential` (`EXISTS`) or `lateral` reach does NOT constrain column
+      // type — its cardinality does not read the arms' unified type — so it is
+      // SKIPPED and never faults on it, reachable or not.
+      switch reach.role {
+      case .scalar, .valued:
+        _ = try columns(unifying: reach.query, inner)
+      case .existential, .lateral:
+        break
+      }
     }
     // Each join `ON` runs through the SAME reachability/short-circuit walk the
     // WHERE does, but PREFIX-scoped: an `ON` predicate short-circuits its
@@ -1069,10 +1327,13 @@ extension Catalog where Self: ~Escapable {
       if context.validate {
         try typecheck(view.query, overlay)
       }
-      // Type off the body's first arm (the ISO rule for a UNION). Arity — the
-      // body's width against the declared columns — is `compile`'s job (the
-      // public entry runs it), so on a shortfall fall back to the declared
-      // schema rather than re-checking it here.
+      // Type the body's columns: their NAMES off the first arm (the ISO rule
+      // for a UNION), their TYPES unified across every arm, each carrying its
+      // `unconstrained` mask so an all-NULL view column unifies with any later
+      // typed arm through `Schema(from:)`. Arity — the body's width against the
+      // declared columns — is `compile`'s job (the public entry runs it), so on
+      // a shortfall fall back to the declared schema rather than re-checking it
+      // here.
       let resolved = try resolved(query: view.query, in: overlay)
       guard resolved.count == base.width else {
         return try base.renamed(renaming)
@@ -1094,7 +1355,7 @@ extension Scope {
   internal func columns(of projection: Projection,
                         _ routines: Routines = [:],
                         subquery: Resolution = .unsupported)
-      throws(SQLError) -> Array<OutputColumn> {
+      throws(SQLError) -> Array<ResolvedColumn> {
     return switch projection {
     case .all:
       outputs()
@@ -1111,33 +1372,41 @@ extension Scope {
 
   /// The output columns of a `SELECT *` over this scope — every real column of
   /// every relation, in chain order, named and typed from each relation's
-  /// schema (never a virtual column) — the terms `terms(.all)` projects.
-  internal func outputs() -> Array<OutputColumn> {
+  /// schema (never a virtual column) and carrying its source column's
+  /// `unconstrained` mask (an all-arms-NULL CTE column stays unconstrained
+  /// through a `*` expansion) — the terms `terms(.all)` projects.
+  internal func outputs() -> Array<ResolvedColumn> {
     schemas.flatMap { schema in
       (0 ..< schema.width).map {
-        OutputColumn(name: schema.names[$0], type: schema.types[$0])
+        ResolvedColumn(OutputColumn(name: schema.names[$0],
+                                    type: schema.types[$0]),
+                       unconstrained: schema.unconstrained[$0])
       }
     }
   }
 
-  /// The output column a bare `column` reference yields: its own name (its
-  /// spelling as written), typed from the relation that resolves it — or, for a
-  /// name no local relation binds, from the correlation `subquery` surface,
-  /// mirroring the expression path's `derive`. Under a LATERAL body's admitting
-  /// (`everywhere`) surface a preceding-FROM column types as its outer column;
-  /// under an ordinary barred surface it faults `.unsupported`. A genuinely
-  /// unknown name re-throws the `.column` fault.
+  /// The resolved output column a bare `column` reference yields — its own name
+  /// (its spelling as written), its type, AND its `unconstrained` mask, read
+  /// TOGETHER from ONE resolution so the two cannot diverge: from the relation
+  /// that LOCALLY resolves it (`resolved(_:)` — one `find`, both fields), or,
+  /// for a name no local relation binds, from the CORRELATION `subquery`
+  /// surface (`resolved(for:)` — carrying the outer column's mask, so a
+  /// correlated all-NULL column stays unconstrained), mirroring the expression
+  /// path's `derive`. Under a LATERAL body's admitting (`everywhere`) surface a
+  /// preceding-FROM column types as its outer column; under an ordinary barred
+  /// surface it faults `.unsupported`. A genuinely unknown name re-throws the
+  /// `.column` fault.
   internal func output(of column: Column,
                        subquery: Resolution = .unsupported)
-      throws(SQLError) -> OutputColumn {
-    if let ordinal = try find(column) {
-      return OutputColumn(name: column.name, type: type(at: ordinal))
+      throws(SQLError) -> ResolvedColumn {
+    if let resolved = try resolved(column) {
+      return resolved
     }
-    if let type = try subquery.correlated(column) {
-      return OutputColumn(name: column.name, type: type)
+    if let resolved = try subquery.correlated(column) {
+      return resolved
     }
-    return try OutputColumn(name: column.name,
-                            type: type(at: ordinal(of: column)))
+    let ordinal = try ordinal(of: column)
+    return resolved(at: ordinal, named: column.name)
   }
 
   /// The output column a projected `item` at 0-based `index` yields: its
@@ -1145,18 +1414,67 @@ extension Scope {
   /// name), else a positional `column N` (1-based). A bare column carries its
   /// source type and a literal its own; a scalar call its routine's declared
   /// return type; every other expression `.integer`.
+  ///
+  /// It also carries the `unconstrained` mask a set-operation fold reads — a
+  /// column that places NO type constraint (a NULL unifies with any typed arm,
+  /// exactly as `COALESCE` skips a constant-NULL argument). Three sources mark
+  /// it so, all read HERE from the same resolution as the type, never a
+  /// separate local-only walk: an expression that folds to a CONSTANT NULL for
+  /// every row (`null(_:)`); an expression that would dispatch an UNREGISTERED
+  /// routine at ANY depth (`unresolved(_:)` — `derive` fabricates the
+  /// `.integer` default for such a call, so the fold must defer rather than
+  /// fault on the placeholder); and a bare-column reference resolving to an
+  /// unconstrained source column (`output(of:)` — LOCAL or CORRELATED, so an
+  /// all-NULL column referenced through a LATERAL body keeps its mask).
   internal func output(_ item: Projected, at index: Int,
                        _ routines: Routines = [:],
                        subquery: Resolution = .unsupported)
-      throws(SQLError) -> OutputColumn {
+      throws(SQLError) -> ResolvedColumn {
     let name = item.name ?? "column \(index + 1)"
+    // A projection places NO type constraint on the unified column when it
+    // folds to a CONSTANT NULL for every row (`null` — its derived literal-fix
+    // type must not shape the fold) OR when it would dispatch an UNREGISTERED
+    // routine at ANY depth (`unresolved` — `derive` fabricates the `.integer`
+    // default for such a call, and the fold must not fault on that
+    // placeholder). Either way mark it UNCONSTRAINED and derive its type only
+    // for the column's advertised type, which the fold then ignores. A
+    // reachable missing call still faults `SQLError.function` at the run
+    // typecheck, so this defers only the FOLD, never hides the call.
+    if null(item.expression, routines)
+        || unresolved(item.expression, routines) {
+      let type = try derive(item.expression, routines, subquery: subquery)
+      return ResolvedColumn(OutputColumn(name: name, type: type),
+                            unconstrained: true)
+    }
+    // A bare-column projection reuses the ONE column resolution — LOCAL or
+    // CORRELATED — so its type and `unconstrained` mask agree, renaming only
+    // its output name when the item carries an alias.
+    if case let .column(column) = item.expression {
+      let resolved = try output(of: column, subquery: subquery)
+      return ResolvedColumn(OutputColumn(name: name, type: resolved.type),
+                            unconstrained: resolved.unconstrained)
+    }
+    // A bare scalar-subquery projection reuses the subquery's OWN resolved
+    // column — its type AND `unconstrained` mask — so a constant-NULL body
+    // (`(SELECT NULLIF('a','a'))`) stays unconstrained in an outer
+    // set-operation fold, mirroring the bare-column branch above. Only a bare
+    // `.subquery` qualifies: a subquery NESTED inside a larger expression
+    // legitimately constrains, so it falls through to the generic (constrained)
+    // else below.
+    if case let .subquery(query) = item.expression {
+      let resolved = try subquery.scalar(resolved: query)
+      return ResolvedColumn(OutputColumn(name: name, type: resolved.type),
+                            unconstrained: resolved.unconstrained)
+    }
     // DERIVE the nominal output type: the schema reports the type a run would
     // produce and never faults on an operand. Run-time operand and call
     // validation is `typecheck`'s job, reachability-aware, so a schema resolves
     // even for an expression a zero-row limit makes unreachable. A scalar
-    // subquery derives its single-column type from the `subquery` map.
-    return try OutputColumn(name: name,
-                            type: derive(item.expression, routines,
-                                         subquery: subquery))
+    // subquery derives its single-column type from the `subquery` map. Any
+    // other expression carries a genuine type, so it is constrained.
+    return try ResolvedColumn(OutputColumn(name: name,
+                                           type: derive(item.expression,
+                                                        routines,
+                                                        subquery: subquery)))
   }
 }

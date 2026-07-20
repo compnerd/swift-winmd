@@ -375,7 +375,7 @@ extension Catalog where Self: ~Escapable {
     // NOT eager-type-checked before execution, exactly as the non-derived path
     // never evaluates an unreached operand — while the strict schema path
     // (`validate: true`) still faults it.
-    let derived = try columns(of: query.first, scope)
+    let derived = try resolved(query: query, in: scope)
     // An explicit `AS d(a, b)` column list positionally RENAMES the derived
     // table's inner output names, keeping each column's inferred TYPE (the list
     // names, the body types), so `(SELECT x, y FROM T) AS d(a, b)` addresses
@@ -383,7 +383,7 @@ extension Catalog where Self: ~Escapable {
     // (`SQLError.columns`, the CTE/view arity fault) — checked HERE, where the
     // width is resolved, so a list over a `SELECT *` derived body is checked
     // once its `*` expands. Absent a list, the inner output names stand.
-    let outputs: Array<OutputColumn>
+    let outputs: Array<ResolvedColumn>
     if renaming.isEmpty {
       outputs = derived
     } else {
@@ -391,7 +391,7 @@ extension Catalog where Self: ~Escapable {
         throw .columns(expected: derived.count, got: renaming.count)
       }
       outputs = renaming.indices.map {
-        OutputColumn(name: renaming[$0], type: derived[$0].type)
+        ResolvedColumn(name: renaming[$0], type: derived[$0].type)
       }
     }
     // A derived table's columns are its inner query's OUTPUT names (or the
@@ -453,8 +453,7 @@ extension Catalog where Self: ~Escapable {
       }
       captured = []
     }
-    return RelationInstance(columns: outputs.map(\.name), rows: captured,
-                            types: outputs.map(\.type), derivation: query)
+    return RelationInstance(from: outputs, rows: captured, derivation: query)
   }
 
   /// `context` rescoped to the `definition_schema.` overlay a view's body

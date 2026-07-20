@@ -306,9 +306,7 @@ extension Catalog where Self: ~Escapable {
         rows = try run(cte.query, scope)
       }
       relations[cte.name.lowercased()] =
-          RelationInstance(columns: cte.columns, rows: rows,
-                           types: Array(repeating: .integer,
-                                        count: cte.columns.count))
+          RelationInstance(from: cte.declared, rows: rows)
     }
     return try run(query, context.body(relations))
   }
@@ -398,9 +396,7 @@ extension Catalog where Self: ~Escapable {
       // run evaluates it in — so a text-arithmetic anchor faults against the
       // base relation, not the CTE's declared (integer) columns.
       if typecheck { try self.typecheck(anchor, scope) }
-      let empty = RelationInstance(columns: cte.columns, rows: [],
-                                   types: Array(repeating: .integer,
-                                                count: cte.columns.count))
+      let empty = RelationInstance(from: cte.declared, rows: [])
       // Bind the CTE self BEFORE augmenting the recursive arm, so a derived
       // body in the arm that names the CTE (`FROM (SELECT n FROM a) AS d`)
       // resolves it — `augment` materialises derived bodies eagerly, so the
@@ -509,9 +505,7 @@ extension Catalog where Self: ~Escapable {
     // schema every iteration reads it under — so its width resolves too (a
     // `SELECT *` arm spans that schema). Checking it here catches a mismatch
     // even when the arm is filtered to zero rows in every iteration.
-    let empty = RelationInstance(columns: cte.columns, rows: [],
-                                 types: Array(repeating: .integer,
-                                              count: cte.columns.count))
+    let empty = RelationInstance(from: cte.declared, rows: [])
     let probe = context.binding(cte.name, to: empty)
     let arm = try compile(recursive, probe).width
     guard arm == cte.columns.count else {
@@ -538,9 +532,7 @@ extension Catalog where Self: ~Escapable {
 
       // Bind the CTE name to ONLY the previous step's output and run the
       // recursive arm against the base catalog plus the earlier CTEs.
-      let step = RelationInstance(columns: cte.columns, rows: working,
-                                  types: Array(repeating: .integer,
-                                               count: cte.columns.count))
+      let step = RelationInstance(from: cte.declared, rows: working)
       let produced = try run(recursive, context.binding(cte.name, to: step))
 
       var next = Array<Array<Value>>()

@@ -184,6 +184,17 @@ internal struct RelationInstance: Hashable, Sendable {
     self.derivation = derivation
   }
 
+  /// A relation whose columns are RESOLVED from a body — its names and types
+  /// taken TOGETHER from the `carrier`, so the two arrays cannot drift and a
+  /// future per-column attribute on `ResolvedColumn` threads through this ONE
+  /// constructor. `rows` are the captured (or empty, schema-only) rows and
+  /// `derivation` the inner `Query` for a derived table's binding.
+  internal init(from carrier: Array<ResolvedColumn>,
+                rows: Array<Array<Value>>, derivation: Query? = nil) {
+    self.init(columns: carrier.map(\.name), rows: rows,
+              types: carrier.map(\.type), derivation: derivation)
+  }
+
   /// The real column count — the extent of a `SELECT *`.
   internal var width: Int { columns.count }
 

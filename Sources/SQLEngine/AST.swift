@@ -115,6 +115,17 @@ public struct CTE: Hashable, Sendable {
     self.query = query
     self.recursive = recursive
   }
+
+  /// The CTE's DECLARED output columns as the `ResolvedColumn` carrier its self
+  /// binding is built from — each declared name typed `.integer`, the
+  /// placeholder a materialised relation reports (a CTE's rows carry no static
+  /// types). Every self binding (the `with` install, the recursive
+  /// `validate`/`fixpoint` probes, the fixpoint step, the schema-path binding)
+  /// is constructed from THIS, so all bind the same carrier through one
+  /// constructor.
+  internal var declared: Array<ResolvedColumn> {
+    columns.map { ResolvedColumn(name: $0, type: .integer) }
+  }
 }
 
 /// One of the ISO set operators combining two query terms.

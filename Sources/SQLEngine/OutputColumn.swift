@@ -28,6 +28,40 @@ public struct OutputColumn: Hashable, Sendable {
   }
 }
 
+/// One column of a relation body's RESOLVED output — the authoritative
+/// per-column descriptor a binding is built FROM as a whole, rather than
+/// re-listed field by field at each site.
+///
+/// It wraps the body's `OutputColumn` (name + type) today. It exists as a
+/// struct so a future per-column attribute (a nullability/unconstrained mask a
+/// set-operation type unification carries) is added HERE, in ONE place, and
+/// threads through every binding via the single `init(from:)` constructor — no
+/// site re-lists the fields, so none can drop the new attribute. Every
+/// relation-body binding derives an `Array<ResolvedColumn>` via
+/// `resolved(query:in:)` and is constructed from it.
+internal struct ResolvedColumn: Hashable, Sendable {
+  /// The column's output name and value type.
+  internal let column: OutputColumn
+
+  internal init(_ column: OutputColumn) {
+    self.column = column
+  }
+
+  /// A resolved column carrying `name` and `type` directly — the declared
+  /// carrier a common table expression's self binding is built from, its name
+  /// the declared column and its type the `.integer` placeholder a materialised
+  /// relation reports.
+  internal init(name: String, type: ValueType) {
+    self.column = OutputColumn(name: name, type: type)
+  }
+
+  /// The column's output name.
+  internal var name: String { column.name }
+
+  /// The column's value type.
+  internal var type: ValueType { column.type }
+}
+
 extension Catalog where Self: ~Escapable {
   /// The result columns `query` would yield, named and typed, resolved WITHOUT
   /// executing it.
@@ -214,10 +248,7 @@ extension Catalog where Self: ~Escapable {
       // `.integer` (the default a materialised relation reports) — bound into
       // the recursive arm's operand check and, after validation, into the
       // overlay a later CTE and the trailing query resolve against.
-      let declared =
-          RelationInstance(columns: cte.columns, rows: [],
-                           types: Array(repeating: .integer,
-                                        count: cte.columns.count))
+      let binding = RelationInstance(from: cte.declared, rows: [])
       // Validate the body's SHAPE and ARITY against the scope of the PRIOR CTEs
       // by the SAME code a run uses — `Engine.validate` — so a schema is not
       // advertised for a `WITH` a run would reject, and this path never again
@@ -242,7 +273,7 @@ extension Catalog where Self: ~Escapable {
       // validated — the scope a later CTE and the trailing query resolve
       // against — exactly as `Engine.with` binds the materialised relation
       // after running its body.
-      overlay[cte.name.lowercased()] = declared
+      overlay[cte.name.lowercased()] = binding
     }
     // Compile/type-check/derive from the base `context.scoping(overlay)`
     // (idempotently augmented within each, which pushes the trailing query's
@@ -311,6 +342,21 @@ extension Catalog where Self: ~Escapable {
                              enclosing: scope, prefixes: prefixes)
     return try scope.columns(of: select.projection, augmented.routines,
                              subquery: plans.rest.barred)
+  }
+
+  /// The SINGLE deriver of a relation body's resolved output columns: the
+  /// FIRST arm's projection (the ISO rule a `UNION` follows), named and typed
+  /// against `context`, wrapped as the `ResolvedColumn` carrier every
+  /// body-derived binding is constructed from.
+  ///
+  /// Every binding site that folds a body into a `RelationInstance`/`Schema` —
+  /// a derived table's `materialise`, a view's schema resolution — obtains its
+  /// columns HERE, never by re-deriving the projection inline, so a future
+  /// per-column attribute on `ResolvedColumn` threads through all of them from
+  /// one place.
+  borrowing func resolved(query body: Query, in context: Context)
+      throws(SQLError) -> Array<ResolvedColumn> {
+    try columns(of: body.first, context).map(ResolvedColumn.init)
   }
 
   /// The name-resolution scope of `select` — its FROM relation and each joined
@@ -1027,12 +1073,12 @@ extension Catalog where Self: ~Escapable {
       // body's width against the declared columns — is `compile`'s job (the
       // public entry runs it), so on a shortfall fall back to the declared
       // schema rather than re-checking it here.
-      let resolved = try columns(of: view.query.first, overlay)
+      let resolved = try resolved(query: view.query, in: overlay)
       guard resolved.count == base.width else {
         return try base.renamed(renaming)
       }
-      return try Schema(width: base.width, extent: base.extent,
-                        names: base.names, types: resolved.map(\.type),
+      return try Schema(from: resolved, names: base.names,
+                        extent: base.extent,
                         virtuals: base.virtuals).renamed(renaming)
     }
     guard let table = table(named: name) else {

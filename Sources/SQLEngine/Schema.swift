@@ -43,6 +43,19 @@ internal struct Schema {
     self.virtuals = virtuals
   }
 
+  /// A view's resolution schema, its per-column types RESOLVED from a body
+  /// `carrier` while its `names` stay the view's DECLARED ones (a view stores
+  /// its own column names; only the types come from the resolved body). The
+  /// declared surface's `extent`/`virtuals` carry over unchanged. Taking the
+  /// types from the carrier as a whole means a future per-column attribute on
+  /// `ResolvedColumn` threads through this ONE constructor rather than a loose
+  /// `types.map` at the site.
+  internal init(from carrier: Array<ResolvedColumn>, names: Array<String>,
+                extent: Int, virtuals: Array<String>) {
+    self.init(width: names.count, extent: extent, names: names,
+              types: carrier.map(\.type), virtuals: virtuals)
+  }
+
   /// This schema with its real column `names` positionally RENAMED to
   /// `columns` — the ISO `AS t(c, …)` explicit output column list — or
   /// unchanged when `columns` is empty (no list).

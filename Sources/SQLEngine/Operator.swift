@@ -445,6 +445,79 @@ extension Plan {
       false
     }
   }
+
+  /// Whether this plan PROVABLY yields no two equal FULL rows — every output
+  /// record distinct across ALL its columns — the uniqueness the optimiser
+  /// needs before it may DROP a `.distinct` over this plan (a redundant dedup).
+  /// This is the deduplication analogue of `safe` and is deliberately
+  /// CONSERVATIVE: a shape whose full-row distinctness is not certain reports
+  /// `false`, so the `.distinct` is merely KEPT — never unsound. Over-claiming
+  /// here would LEAK DUPLICATES (wrong results); under-claiming costs one extra
+  /// dedup, so doubt resolves to `false`.
+  internal var unique: Bool {
+    switch self {
+    case .single, .empty:
+      // A single empty row and the known-empty relation yield 0 or 1 row — at
+      // most one row is trivially distinct from itself.
+      return true
+    case .distinct:
+      // A `distinct` deduplicates its source's whole rows, so its output holds
+      // no duplicate — the DISTINCT-of-DISTINCT collapse.
+      return true
+    case let .setop(_, _, _, all, _, _):
+      // Without `all` the set operator (UNION/INTERSECT/EXCEPT) dedups its
+      // result to distinct rows; `all` (UNION ALL, …) is a MULTISET that keeps
+      // duplicates, so it is NOT unique.
+      return !all
+    case .aggregate:
+      // A grouped aggregate emits ONE row per distinct group-key combination —
+      // the key values are a PREFIX of each output record, so two output rows
+      // differ in those key slots and the full rows are distinct. A no-GROUP-BY
+      // aggregate emits exactly one row (its degenerate group), trivially
+      // distinct. (`grouped` keys each group on its canonical key cells and
+      // appends the aggregates, emitting one record per group.)
+      return true
+    case let .select(_, source):
+      // A selection drops rows (never duplicates one), so it preserves the
+      // source's full-row distinctness.
+      return source.unique
+    case let .limit(_, _, source):
+      // A limit skips/caps rows without duplicating one, so it preserves the
+      // source's distinctness.
+      return source.unique
+    case let .sort(_, source):
+      // A sort reorders rows without duplicating one, so it preserves the
+      // source's distinctness (which ignores row order).
+      return source.unique
+    case let .project(terms, source):
+      // A projection preserves full-row distinctness ONLY when it is an
+      // INJECTIVE map of the source's whole row: two distinct source rows must
+      // stay distinct. That holds when every term is a bare slot read and the
+      // read slots COVER every source slot (`0 ..< source.slots`) — then the
+      // projected row retains all source columns (reordered/renamed, possibly
+      // duplicated), so two source rows differing in ANY column still differ in
+      // its retained copy. Dropping a source column, computing an expression,
+      // or an unknown source width could COLLAPSE distinct rows to an equal
+      // output, so each of those keeps the projection non-unique. (In practice
+      // a `.distinct` always sits over a `.project`, so this arm decides it.)
+      guard let width = source.slots, source.unique else { return false }
+      var covered = Set<Int>()
+      for term in terms {
+        guard case let .slot(slot) = term else { return false }
+        covered.insert(slot)
+      }
+      return covered == Set(0 ..< width)
+    // A base `scan` is an ISO MULTISET (a duplicate row is possible, no unique
+    // key is tracked); a `derived` view body runs an arbitrary sub-plan; a
+    // `product`/`join`/`outer`/`apply` can MULTIPLY rows (a fan-out pairs one
+    // row with many). None PROVABLY yields distinct full rows, so each reports
+    // `false` — the `.distinct` stays, never unsound. A `semijoin` emits each
+    // left row at most once but does not deduplicate the left, so it is only as
+    // unique as its left source and is conservatively `false` here.
+    case .scan, .derived, .product, .join, .outer, .semijoin, .apply:
+      return false
+    }
+  }
 }
 
 // MARK: - Interpreter

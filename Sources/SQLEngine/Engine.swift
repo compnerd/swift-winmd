@@ -413,47 +413,60 @@ extension Catalog where Self: ~Escapable {
                               rows: false)
       let width = try compile(anchor, scope).width
       guard width == cte.columns.count else {
-        throw .columns(expected: cte.columns.count, got: width)
+        throw .columns(expected: width, got: cte.columns.count)
       }
       // The anchor is operand-checked with self NOT in scope — the scope the
       // run evaluates it in — so a text-arithmetic anchor faults against the
       // base relation, not the CTE's declared (integer) columns.
       if typecheck { try self.typecheck(anchor, scope) }
-      // Bind the CTE self under the UNIFIED (anchor ⊕ recursive) column carrier
-      // — the SAME carrier `fixpoint` binds the iterated self under (the rows
-      // every step reads are coerced to those types). Typing the self here at
-      // the anchor-only types while the run reads the widened unified types
-      // would let schema validation call a query "valid" that the run mistypes
-      // (an integer-anchor self a widening recursive arm reads as `double`).
-      // `kinds` derives those unified types recursive-aware (anchor ⊕
-      // recursive), so a set-operation recursive arm still folds its self
-      // column at the anchor's real type. When `typecheck`, a genuine `kinds`
-      // fault (an irreconcilable arm pair the run's own type fold rejects) is a
-      // legitimate validation fault, so it surfaces here — the same fault the
-      // run raises. When NOT typechecking (the trusted RUN path), a data-
-      // dependent body a filter drops must NOT fault, so its derive falls back
-      // to the placeholder; the recursive-arm typecheck does not run there, so
-      // the self type is unused anyway. Feeding the carrier through
+      // Check the recursive arm's WIDTH against the declared list BEFORE any
+      // `kinds` derive — an arm degree differing from the list is the declared-
+      // arity fault, and it must win in the ISO order (`expected: arm, got:
+      // declared`) on BOTH paths. A width check needs only the self's COLUMN
+      // COUNT, not its types, so bind the self under the placeholder-typed
+      // `declared` carrier here: `kinds` would otherwise fold the arms and
+      // raise its OWN inter-arm count fault (`expected: anchor, got: arm`) in
+      // the reverse order first, re-diverging the schema path from the run.
+      // Measure the arm NON-validating even on the schema path: `augment`
+      // materialises a derived body in the arm eagerly, and validating it here
+      // would type-check its operands against the placeholder-typed self (the
+      // `.integer` carrier), spuriously faulting a runnable arm whose self is
+      // really text. Arity is structural, so the width guard still fires; the
+      // genuine recursive-arm operand type-check happens LATER, under the
+      // `kinds`-rebound unified carrier where the self carries its real types.
+      let sized = RelationInstance(from: cte.declared, rows: [])
+      let measured = context.binding(cte.name, to: sized)
+                            .validating(false)
+      let widened = try augment(measured, for: recursive, rows: false)
+      let arm = try compile(recursive, widened).width
+      guard arm == cte.columns.count else {
+        throw .columns(expected: arm, got: cte.columns.count)
+      }
+      // Both widths match, so — ONLY on the schema path — type-check the
+      // recursive arm with the CTE self bound under the UNIFIED (anchor ⊕
+      // recursive) column carrier `kinds` derives: the SAME carrier `fixpoint`
+      // binds the iterated self under (the rows every step reads are coerced to
+      // those types). Typing the self at the anchor-only types while the run
+      // reads the widened unified types would let schema validation call a
+      // query "valid" that the run mistypes (an integer-anchor self a widening
+      // recursive arm reads as `double`); `kinds` folds it recursive-aware, so
+      // a genuine irreconcilable arm pair faults here as the run's own fold
+      // rejects it. The RUN path defers this operand check to execution, so it
+      // needs neither the derive nor the self binding — the width guard above
+      // is the whole of its arity check. Feeding the carrier through
       // `init(from:)` means this self binding and the run-iteration one cannot
       // diverge.
-      let gated = context.validating(typecheck)
-      let seeded = typecheck
-          ? try kinds(of: cte, gated)
-          : (try? kinds(of: cte, gated)) ?? cte.declared
-      let empty = RelationInstance(from: seeded, rows: [])
-      // Bind the CTE self BEFORE augmenting the recursive arm, so a derived
-      // body in the arm that names the CTE (`FROM (SELECT n FROM a) AS d`)
-      // resolves it — `augment` materialises derived bodies eagerly, so the
-      // self must be in scope by then, not bound only afterwards.
-      let bound = context.binding(cte.name, to: empty).validating(typecheck)
-      let probe = try augment(bound, for: recursive, rows: false)
-      let arm = try compile(recursive, probe).width
-      guard arm == cte.columns.count else {
-        throw .columns(expected: cte.columns.count, got: arm)
-      }
-      // The recursive arm is operand-checked with self bound to the declared
-      // columns — the schema every iteration reads the CTE under.
       if typecheck {
+        let seeded = try kinds(of: cte, context.validating(typecheck))
+        let empty = RelationInstance(from: seeded, rows: [])
+        // Bind the CTE self BEFORE augmenting the recursive arm, so a derived
+        // body in the arm naming the CTE (`FROM (SELECT n FROM a) AS d`)
+        // resolves it — `augment` materialises derived bodies eagerly, so the
+        // self must be in scope by then, not bound only afterwards.
+        let bound = context.binding(cte.name, to: empty).validating(typecheck)
+        let probe = try augment(bound, for: recursive, rows: false)
+        // The recursive arm is operand-checked with self bound to the declared
+        // columns — the schema every iteration reads the CTE under.
         try self.typecheck(recursive, probe)
       }
     } else {
@@ -461,7 +474,7 @@ extension Catalog where Self: ~Escapable {
                               rows: false)
       let width = try compile(cte.query, scope).width
       guard width == cte.columns.count else {
-        throw .columns(expected: cte.columns.count, got: width)
+        throw .columns(expected: width, got: cte.columns.count)
       }
       // A non-self-naming body is operand-checked whole with self NOT in scope.
       if typecheck { try self.typecheck(cte.query, scope) }
@@ -525,7 +538,7 @@ extension Catalog where Self: ~Escapable {
       // bind narrow base rows under the wider list and trap on a later read.
       let width = try compile(cte.query, context).width
       guard width == cte.columns.count else {
-        throw .columns(expected: cte.columns.count, got: width)
+        throw .columns(expected: width, got: cte.columns.count)
       }
       // The CTE exposes its body's DERIVED column types/mask under its DECLARED
       // names (resolved with the self shadowed by the same-named base it seeds
@@ -553,7 +566,7 @@ extension Catalog where Self: ~Escapable {
     // resolves with the name not yet in scope.
     let width = try compile(anchor, context).width
     guard width == cte.columns.count else {
-      throw .columns(expected: cte.columns.count, got: width)
+      throw .columns(expected: width, got: cte.columns.count)
     }
 
     // The CTE column CARRIER a recursive reference reads under — the ANCHOR's
@@ -584,7 +597,7 @@ extension Catalog where Self: ~Escapable {
     let probe = context.binding(cte.name, to: empty)
     let arm = try compile(recursive, probe).width
     guard arm == cte.columns.count else {
-      throw .columns(expected: cte.columns.count, got: arm)
+      throw .columns(expected: arm, got: cte.columns.count)
     }
 
     // The result column CARRIER unifies the ANCHOR — typed under `context`,

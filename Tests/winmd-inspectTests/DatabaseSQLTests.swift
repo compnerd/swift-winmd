@@ -1267,7 +1267,7 @@ struct DatabaseSQLTests {
     // the SAME way rather than advertising the one trusted declared column.
     DatabaseSQLTests.with { catalog in
       var shell = Shell(catalog)
-      #expect(throws: SQLError.columns(expected: 1, got: 6)) {
+      #expect(throws: SQLError.columns(expected: 6, got: 1)) {
         try shell.execute(
             ".schema WITH t(a) AS (SELECT * FROM TypeDef) SELECT * FROM t")
       }

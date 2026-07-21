@@ -280,11 +280,57 @@ extension Catalog where Self: ~Escapable {
   internal borrowing func with(_ ctes: Array<CTE>, _ query: Query,
                                _ context: Context)
       throws(SQLError) -> Array<Array<Value>> {
+    // Type AND materialise the CTEs into the overlay through the ONE producer
+    // (`rows: true`) the schema path also drives, then run the trailing query
+    // against it — the CTE walk lives in `typed(ctes:in:rows:)`, so a per-CTE
+    // step cannot be added to a run loop and forgotten on the schema one.
+    let relations = try typed(ctes: ctes, in: context, rows: true)
+    return try run(query, context.body(relations))
+  }
+
+  /// Types the common table expressions `ctes` into a `ScopedRelations` overlay
+  /// — the SINGLE statement-level CTE walk BOTH the run (`with`) and the
+  /// schema-only (`columns(of:with:)`) paths consume, so a per-CTE step lives
+  /// in ONE place and cannot be added to one loop and forgotten on the other.
+  ///
+  /// It walks `ctes` in source order, binding each into the growing overlay the
+  /// next resolves against (so a later CTE names one before it, and a CTE
+  /// shadows a same-named base relation). Per CTE it:
+  ///
+  /// 1. rejects a case-insensitive redefinition — a name repeated in the list
+  ///    would silently shadow the earlier binding, so it faults
+  ///    `SQLError.redefinition` rather than overwrite (a typo in a multi-CTE
+  ///    query must not change the result);
+  /// 2. validates the CTE's SHAPE and ARITY against the CTEs done so far — the
+  ///    compile-time structural check `validate` runs. This gate is the ONE
+  ///    legitimate run-vs-schema difference, and it now lives here: the run
+  ///    (`rows: true`) ALWAYS validates and passes `typecheck: false` — it
+  ///    DEFERS the reachable-operand check to execution — while a schema derive
+  ///    (`rows: false`) validates ONLY when its context's `validate` gate is
+  ///    set (a post-run `validate: false` derive TRUSTS the bodies) and then
+  ///    strictly (`typecheck: true`), faulting an ill-typed body statically;
+  /// 3. computes the column carrier ONCE. On the run path a self-referential
+  ///    CTE iterates a `fixpoint` (which returns both its rows and their
+  ///    unified carrier); every other CTE runs its query once and re-derives
+  ///    the carrier TRUSTED (`validating(false)`, so an unreached data-
+  ///    dependent operand is not eager-checked while a genuine set-operation
+  ///    incompatibility still faults through `kinds`'s `merge` fold). On the
+  ///    schema path `kinds`
+  ///    derives the carrier for either kind WITHOUT iterating — its recursive
+  ///    branch (`contributions`) folds anchor ⊕ recursive the same way
+  ///    `fixpoint` does;
+  /// 4. binds the carrier as `RelationInstance(from:, rows:)`, with the rows
+  ///    on the run path and none on the schema path. Both paths accumulate the
+  ///    overlay IDENTICALLY — same names, types, and
+  ///    `unconstrained` mask — differing ONLY in the captured rows, which is
+  ///    safe because downstream typing reads names/types/mask, never rows. The
+  ///    carrier feeds the SAME `init(from:)`, so the schema-only self and the
+  ///    materialised binding cannot diverge.
+  internal borrowing func typed(ctes: Array<CTE>, in context: Context,
+                                rows: Bool)
+      throws(SQLError) -> ScopedRelations {
     var relations = ScopedRelations()
     for cte in ctes {
-      // A query name repeated in the list (case-insensitively) would silently
-      // shadow the earlier binding in `relations`, so reject it rather than
-      // overwrite — a typo in a multi-CTE query must not change the result.
       guard relations[cte.name.lowercased()] == nil else {
         throw .redefinition(cte.name)
       }
@@ -295,43 +341,44 @@ extension Catalog where Self: ~Escapable {
       // so the stack is already empty here; routing through `body(_:)` keeps
       // the clear intrinsic to entering a body scope rather than incidental).
       let scope = context.body(relations)
-      // Validate the CTE's SHAPE and ARITY against the CTEs done so far — the
-      // compile-time structural check, shared with the dry-run schema path so a
-      // derive rejects exactly the CTEs a run rejects. It faults the recursive
-      // shape and the width mismatch here, BEFORE any rows materialise.
-      try validate(cte, against: scope)
-      // A CTE that names itself iterates a fixpoint; every other one — a
-      // non-recursive CTE, or one a `WITH RECURSIVE` marks recursive but which
-      // does not reference itself — runs its query once. Each resolves against
-      // the base catalog plus the CTEs done so far. The arity of both routings
-      // is already checked by `validate` above.
-      // Bind the CTE under its BODY's derived column carrier, not a `.integer`
-      // placeholder: a caller reading the CTE (a set operation over its column)
-      // unifies against the real types AND the `unconstrained` mask, so `WITH
-      // a(x) AS (SELECT 'b') SELECT x FROM a UNION SELECT 'c'` folds text
-      // against text and runs, and an all-NULL CTE column unifies with any
-      // typed arm. Both routings feed the SAME carrier into `init(from:)`, so
-      // the schema-only self and materialised binding cannot diverge.
-      let rows: Array<Array<Value>>
-      let carrier: Array<ResolvedColumn>
-      if cte.recursive && cte.recurses {
-        (rows, carrier) = try fixpoint(cte, scope)
-      } else {
-        rows = try run(cte.query, scope)
-        // The body already RAN and produced its rows, so re-derive its carrier
-        // TRUSTED — `validating(false)` so the derive does NOT eager-operand-
-        // check a data-dependent expression a filter dropped (`SELECT Label + 1
-        // … WHERE k = 0`, `Label` text), never evaluated, never a run fault.
-        // `kinds` binds the DECLARED names with the body-folded types/mask. A
-        // GENUINE set-operation incompatibility (`SELECT 'b' UNION SELECT 1`)
-        // still faults through the unconditional `merge` fold, matching the run
-        // — a reachable type error already faulted at `run` above.
-        carrier = try kinds(of: cte, scope.validating(false))
+      // The compile-time structural check, shared with the dry-run schema path
+      // so a derive rejects exactly the CTEs a run rejects. It faults the
+      // recursive shape and the width mismatch BEFORE any rows materialise. The
+      // run ALWAYS validates (`typecheck: false` — it defers the operand check
+      // to execution); the schema derive validates ONLY when its context's gate
+      // is set — a `validate: false` derive AFTER a run TRUSTS the bodies (the
+      // run already proved them consistent) — and then STRICTLY (`typecheck:
+      // true`). This gate is the ONE legitimate run-vs-schema difference.
+      if rows || context.validate {
+        try validate(cte, against: scope, typecheck: !rows)
       }
+      let materialised: Array<Array<Value>>
+      let carrier: Array<ResolvedColumn>
+      if rows {
+        // A CTE that names itself iterates a fixpoint; every other one runs its
+        // query once. The arity of both routings is already checked above.
+        if cte.recursive && cte.recurses {
+          (materialised, carrier) = try fixpoint(cte, scope)
+        } else {
+          materialised = try run(cte.query, scope)
+          // The body already RAN, so re-derive its carrier TRUSTED — the same
+          // `kinds` call the fixpoint's non-recursive tail routes through, so
+          // no inline carrier construction diverges from it.
+          carrier = try kinds(of: cte, scope.validating(false))
+        }
+      } else {
+        // The schema derive materialises no row; `kinds` types either CTE kind
+        // WITHOUT iterating (its recursive branch folds anchor ⊕ recursive the
+        // way `fixpoint` does), under the incoming validate gate.
+        materialised = []
+        carrier = try kinds(of: cte, scope)
+      }
+      // Both routings feed the SAME carrier into `init(from:)`, so the
+      // schema-only self and the materialised binding cannot diverge.
       relations[cte.name.lowercased()] =
-          RelationInstance(from: carrier, rows: rows)
+          RelationInstance(from: carrier, rows: materialised)
     }
-    return try run(query, context.body(relations))
+    return relations
   }
 
   /// Validates the SHAPE and declared ARITY of a single common table expression

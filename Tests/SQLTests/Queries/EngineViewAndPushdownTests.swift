@@ -200,7 +200,7 @@ struct EngineViewCorrelationTests {
   /// An outer `Env(k)` a leaking view PROJECTION could bind to, a source `Src`
   /// WITHOUT `k`, and a view `Proj` whose body PROJECTS the unbound `k` — so its
   /// SCHEMA (the projection's type) is what a leak would derive from the caller.
-  private func schemaLeak() throws -> EngineMemory {
+  private func leaked() throws -> EngineMemory {
     let proj = try View(query: engineSelect("SELECT k AS m FROM Src"),
                         columns: ["m"])
     return EngineMemory([
@@ -216,7 +216,7 @@ struct EngineViewCorrelationTests {
   /// `schema(of:)` could bind an unbound view-projection column to `Env.k`. It
   /// nests a scope built from `Env`'s own schema (derived off the catalog),
   /// exactly as `compile`/`columns` thread an enclosing scope into a subquery.
-  private func enclosingEnv(_ catalog: borrowing EngineMemory) throws -> Context {
+  private func enclosing(_ catalog: borrowing EngineMemory) throws -> Context {
     let schema = try catalog.schema(of: Relation(name: "Env"), Context())
     return Context().nesting(under: Scope([(Relation(name: "Env"), schema)]))
   }
@@ -231,9 +231,9 @@ struct EngineViewCorrelationTests {
     // (`Src`). It must fault `k` as unbound, NOT bind it to the enclosing
     // `Env.k`. This is the seam the run/compile path (`resolve`/`overlay`)
     // clears elsewhere but `schema(of:)` did NOT until routed through `body`.
-    let catalog = try schemaLeak()
+    let catalog = try leaked()
     let target = try engineSelect("SELECT m FROM Proj").first
-    let context = try enclosingEnv(catalog)
+    let context = try enclosing(catalog)
     var raised: SQLError?
     do {
       _ = try catalog.scope(of: target, context)
@@ -259,7 +259,7 @@ struct EngineViewCorrelationTests {
                              [[.integer(7)]] as Array<Array<Value>>),
     ], views: ["Fine": fine])
     let target = try engineSelect("SELECT m FROM Fine").first
-    let context = try enclosingEnv(catalog)
+    let context = try enclosing(catalog)
     // Eager rather than `#expect(throws:)` — a borrowed `~Escapable` catalog
     // cannot be captured by the assertion's escaping closure.
     _ = try catalog.scope(of: target, context)
@@ -270,7 +270,7 @@ struct EngineViewCorrelationTests {
     // End-to-end parity control: running `SELECT m FROM Proj` (outside any
     // correlation) faults the unbound projection `k` too, so the schema seam's
     // fault under a correlated scope AGREES with the plain run — schema ↔ run.
-    try schemaLeak().expect("SELECT m FROM Proj", fails: .column("k"))
+    try leaked().expect("SELECT m FROM Proj", fails: .column("k"))
   }
 }
 
@@ -1145,7 +1145,7 @@ struct EnginePushdownTests {
 /// the view's BASE table, not the caller's own CTE `S`. The probe must derive
 /// against an ISOLATED throwaway memo so it records nothing, letting each
 /// caller resolve its subquery against its OWN base.
-private func setopMemo() throws -> EngineMemory {
+private func shadowed() throws -> EngineMemory {
   try Catalog {
     // The shared driver `T`, referenced by the view body AND the caller, so the
     // correlated subquery's outer `T.Id` binds at the SAME ordinal in both — an
@@ -1188,7 +1188,7 @@ struct EngineSetopViewMemoTests {
     // a probe that polluted the shared memo would make the caller reuse the
     // view's plan (base `S` ordinals — project ordinal 1, filter ordinal 0),
     // which over the swapped CTE projects `Id` ∈ {1, 2} (or mis-filters).
-    let rows = try setopMemo().run(Statement(parsing:
+    let rows = try shadowed().run(Statement(parsing:
         """
         WITH S (Val, Id) AS (SELECT 7, 1 UNION ALL SELECT 8, 2)
           SELECT (SELECT Val FROM S WHERE S.Id = T.Id) AS c

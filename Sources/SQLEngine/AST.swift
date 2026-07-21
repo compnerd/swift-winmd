@@ -210,11 +210,14 @@ public struct Select: Hashable, Sendable {
   /// The row filter, if any.
   public let predicate: Predicate?
 
-  /// The `GROUP BY` columns, in source order — empty for a query with no
-  /// explicit grouping. A query that aggregates without a `GROUP BY` (`SELECT
-  /// COUNT(*) FROM T`) leaves this empty and aggregates the whole result as a
-  /// single group.
-  public let grouping: Array<Column>
+  /// The `GROUP BY` keys, in source order — empty for a query with no explicit
+  /// grouping. A query that aggregates without a `GROUP BY` (`SELECT COUNT(*)
+  /// FROM T`) leaves this empty and aggregates the whole result as a single
+  /// group. The parser produces a bare `Expression.column` per key; a general
+  /// key expression is admitted too, so a bare `NATURAL`/`USING` merged column
+  /// lowers through the join scope to its `COALESCE(left, right)` value (with
+  /// no physical ordinal), the executor grouping each key per row.
+  public let grouping: Array<Expression>
 
   /// The `HAVING` filter over the grouped rows, if any — a predicate the engine
   /// applies AFTER aggregation, so it may reference the aggregates and the
@@ -230,7 +233,7 @@ public struct Select: Hashable, Sendable {
 
   public init(distinct: Bool = false, projection: Projection,
               from: Relation?, joins: Array<Join> = [],
-              predicate: Predicate? = nil, grouping: Array<Column> = [],
+              predicate: Predicate? = nil, grouping: Array<Expression> = [],
               having: Predicate? = nil, order: Order? = nil,
               limit: Limit? = nil) {
     self.distinct = distinct
@@ -521,19 +524,50 @@ public struct Join: Hashable, Sendable {
     case full
   }
 
+  /// The ISO named-column join criterion of a `NATURAL` or `JOIN … USING`
+  /// clause — a shorthand whose join columns are resolved by NAME rather than
+  /// spelled as an `ON` predicate, and whose common columns COALESCE into ONE
+  /// unqualified output column (ISO 9075 7.10).
+  ///
+  /// It is mutually exclusive with an `ON` predicate (the parser rejects a
+  /// `NATURAL … ON` / `USING … ON`), and its concrete column set is known only
+  /// after SCHEMA resolution — the two sides' column names — so the engine
+  /// carries the criterion here and resolves it into the equality `on`
+  /// predicate and the coalesced `SELECT *` output during compilation, rather
+  /// than at parse time. A join with no criterion (`nil`) is a plain `ON`/
+  /// `CROSS` join.
+  public enum Using: Hashable, Sendable {
+    /// `NATURAL` — the join columns are EVERY column name the two sides share
+    /// (their case-insensitive intersection, in the left side's column order),
+    /// computed at resolution. No common column degenerates to a `CROSS` join.
+    case natural
+    /// `USING (c, …)` — the join columns are the NAMED ones, each of which must
+    /// name a column present in BOTH sides (else a column fault).
+    case columns(Array<String>)
+  }
+
   /// The relation joined in.
   public let relation: Relation
 
   /// The inner/outer variety of this join.
   public let kind: Kind
 
-  /// The `ON` predicate relating the joined-in relation to those in scope.
+  /// The `ON` predicate relating the joined-in relation to those in scope. A
+  /// `NATURAL`/`USING` join (`using != nil`) carries a placeholder always-true
+  /// predicate here until compilation resolves its named columns into the real
+  /// equality `on`.
   public let on: Predicate
 
-  public init(relation: Relation, kind: Kind = .inner, on: Predicate) {
+  /// The ISO named-column criterion (`NATURAL` or `USING`), or `nil` for a
+  /// plain `ON`/`CROSS` join.
+  public let using: Using?
+
+  public init(relation: Relation, kind: Kind = .inner, on: Predicate,
+              using: Using? = nil) {
     self.relation = relation
     self.kind = kind
     self.on = on
+    self.using = using
   }
 
   /// A `column = column` equi-join over `relation` — the common shape, as the
@@ -543,6 +577,16 @@ public struct Join: Hashable, Sendable {
     self.init(relation: relation, kind: kind,
               on: .comparison(left: .column(left), op: .equal,
                               right: .column(right)))
+  }
+
+  /// A `NATURAL`/`USING` join over `relation` — the named-column criterion its
+  /// `on` predicate stands unresolved until compilation. Its `on` is a
+  /// placeholder always-true predicate the resolution replaces.
+  public init(relation: Relation, kind: Kind = .inner, using: Using) {
+    self.init(relation: relation, kind: kind,
+              on: .comparison(left: .literal(.integer(1)), op: .equal,
+                              right: .literal(.integer(1))),
+              using: using)
   }
 }
 

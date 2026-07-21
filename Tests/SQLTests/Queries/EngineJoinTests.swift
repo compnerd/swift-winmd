@@ -858,3 +858,1302 @@ struct EngineMultiJoinTests {
   }
 }
 
+// MARK: - NATURAL and USING join tests
+
+/// A catalog of relations sharing column NAMES, so a `NATURAL`/`USING` join has
+/// common columns to key on. `Emp(Dept, Name)` and `Team(Dept, Lead)` share
+/// `Dept`; `Lhs(K, G, A)` and `Rhs(K, G, B)` share `K` and `G`; `Solo(x)`
+/// and `Other(y)` share nothing (a `NATURAL` join over them degenerates to a
+/// product). `Team` has a `Dept` (30) no `Emp` names, and `Emp` a `Dept` (10)
+/// no `Team` names, so an outer join has an unmatched row on each side.
+/// `Bonus(Dept, Amt)` names every `Dept` (10, 20, 30), so a THIRD `USING
+/// (Dept)` join after an outer `Emp`/`Team` one keys each surviving row —
+/// including an unmatched left/right one — on the merged `Dept`.
+private func engineNamed() throws -> FixtureCatalog {
+  try Catalog {
+    Relation("Emp", ["Dept": .integer, "Name": .text]) {
+      Row(10, "Ann")
+      Row(20, "Bob")
+      Row(20, "Cid")
+    }
+    Relation("Team", ["Dept": .integer, "Lead": .text]) {
+      Row(20, "Deb")
+      Row(30, "Eve")
+    }
+    Relation("Lhs", ["K": .integer, "G": .text, "A": .text]) {
+      Row(1, "x", "a1")
+      Row(2, "y", "a2")
+    }
+    Relation("Rhs", ["K": .integer, "G": .text, "B": .text]) {
+      Row(1, "x", "b1")
+      Row(2, "z", "b2")
+    }
+    Relation("Solo", ["x": .integer]) {
+      Row(1)
+      Row(2)
+    }
+    Relation("Other", ["y": .text]) {
+      Row("p")
+      Row("q")
+    }
+    Relation("Bonus", ["Dept": .integer, "Amt": .integer]) {
+      Row(10, 50)
+      Row(20, 100)
+      Row(30, 200)
+    }
+  }
+}
+
+struct EngineNaturalUsingTests {
+  @Test func `INNER USING (c) merges the column once, first, then rests`() throws {
+    // Output column list (ISO 7.10): the USING column `Dept` ONCE and FIRST,
+    // then the left's other columns (`Name`), then the right's (`Lead`). Rows
+    // join on `Dept` equality — only Dept 20 matches on both sides.
+    try engineNamed().expect("SELECT * FROM Emp JOIN Team USING (Dept)",
+        yields: [
+          [20, "Bob", "Deb"],
+          [20, "Cid", "Deb"],
+        ])
+  }
+
+  @Test func `USING (c1, c2) keys on both columns`() throws {
+    // The join columns `K, G` come first in order, then `Lhs`'s `A`, then
+    // `Rhs`'s `B`. Only the (1, x) row agrees on BOTH columns.
+    try engineNamed().expect("""
+        SELECT * FROM Lhs JOIN Rhs USING (K, G)
+        """,
+        yields: [[1, "x", "a1", "b1"]])
+  }
+
+  @Test func `NATURAL INNER joins on the one shared column`() throws {
+    // `Emp` and `Team` share only `Dept`, so `NATURAL JOIN` is `USING (Dept)`:
+    // the merged `Dept` first, then `Name`, then `Lead`.
+    try engineNamed().expect("SELECT * FROM Emp NATURAL JOIN Team",
+        yields: [
+          [20, "Bob", "Deb"],
+          [20, "Cid", "Deb"],
+        ])
+  }
+
+  @Test func `NATURAL with two common columns keys on both`() throws {
+    // `Lhs` and `Rhs` share `K` and `G` (in `Lhs`'s order), so the merged
+    // `K, G` come first, then `A`, then `B` — the same as `USING (K, G)`.
+    try engineNamed().expect("SELECT * FROM Lhs NATURAL JOIN Rhs",
+        yields: [[1, "x", "a1", "b1"]])
+  }
+
+  @Test func `NATURAL with no common column is a CROSS product`() throws {
+    // `Solo(x)` and `Other(y)` share nothing, so `NATURAL JOIN` degenerates
+    // to a Cartesian product (ISO), NOT a fault: every left row paired with
+    // every right row, the output being every column of both.
+    try engineNamed().expect("SELECT * FROM Solo NATURAL JOIN Other",
+        yields: [
+          [1, "p"],
+          [1, "q"],
+          [2, "p"],
+          [2, "q"],
+        ])
+  }
+
+  @Test func `LEFT OUTER USING shows the left value in the merged column`() throws {
+    // `Emp` Dept 10 has no `Team` match; a LEFT join keeps it, and the merged
+    // `Dept` = COALESCE(Emp.Dept, Team.Dept) shows the left's 10 while `Lead`
+    // NULL-extends.
+    try engineNamed().expect("""
+        SELECT * FROM Emp LEFT JOIN Team USING (Dept)
+        """,
+        yields: [
+          [10, "Ann", nil],
+          [20, "Bob", "Deb"],
+          [20, "Cid", "Deb"],
+        ])
+  }
+
+  @Test func `RIGHT OUTER USING shows the right value in the merged column`() throws {
+    // `Team` Dept 30 has no `Emp` match; a RIGHT join keeps it, and the merged
+    // `Dept` = COALESCE(Emp.Dept, Team.Dept) shows the right's 30 even though
+    // the left `Emp.Dept` is NULL there. `Name` NULL-extends.
+    try engineNamed().expect("""
+        SELECT * FROM Emp RIGHT JOIN Team USING (Dept)
+        """,
+        yields: [
+          [20, "Bob", "Deb"],
+          [20, "Cid", "Deb"],
+          [30, nil, "Eve"],
+        ])
+  }
+
+  @Test func `FULL OUTER NATURAL merges each side's unmatched value`() throws {
+    // Both unmatched rows survive: `Emp` Dept 10 (left-only, merged `Dept` =
+    // 10, `Lead` NULL) and `Team` Dept 30 (right-only, merged `Dept` = 30 via
+    // COALESCE though `Emp.Dept` is NULL, `Name` NULL).
+    try engineNamed().expect("SELECT * FROM Emp NATURAL FULL OUTER JOIN Team",
+        yields: [
+          [10, "Ann", nil],
+          [20, "Bob", "Deb"],
+          [20, "Cid", "Deb"],
+          [30, nil, "Eve"],
+        ])
+  }
+
+  @Test func `USING a column absent from one side faults`() throws {
+    // `Name` is on `Emp` but not `Team`, so `USING (Name)` names a column the
+    // right side does not resolve — a column fault.
+    try engineNamed().expect("SELECT * FROM Emp JOIN Team USING (Name)",
+        fails: .column("Name"))
+  }
+
+  @Test func `USING is case-insensitive in the column name`() throws {
+    // The join column matches case-insensitively, as the engine's identifier
+    // resolution does, so `USING (dept)` keys on `Dept`.
+    try engineNamed().expect("SELECT * FROM Emp JOIN Team USING (dept)",
+        yields: [
+          [20, "Bob", "Deb"],
+          [20, "Cid", "Deb"],
+        ])
+  }
+
+  @Test func `a qualified reference still reaches each side's own column`() throws {
+    // An explicit projection resolves columns by the ordinary rules over the
+    // synthesized `ON` join, so a qualified `Emp.Dept`/`Team.Dept` still names
+    // each side's own column (both equal on a matched row).
+    try engineNamed().expect("""
+        SELECT Emp.Dept, Team.Dept, Name FROM Emp JOIN Team USING (Dept)
+        """,
+        yields: [
+          [20, 20, "Bob"],
+          [20, 20, "Cid"],
+        ])
+  }
+
+  @Test func `a bare reference to a merged column resolves to the coalesced value`() throws {
+    // ISO 9075 7.10: the USING/NATURAL common column is an exposed name of the
+    // join result belonging to NEITHER side, so a BARE `Dept` resolves to the
+    // ONE coalesced column — UNAMBIGUOUSLY — not to `Emp.Dept` or `Team.Dept`.
+    try engineNamed().expect("SELECT Dept FROM Emp JOIN Team USING (Dept)",
+        yields: [[20], [20]])
+  }
+
+  @Test func `a bare merged reference resolves in WHERE`() throws {
+    // The exposed name resolves in a `WHERE` too — `Dept = 20` filters on the
+    // coalesced value, keeping only the matched rows.
+    try engineNamed().expect("""
+        SELECT Name FROM Emp JOIN Team USING (Dept) WHERE Dept = 20
+        """,
+        yields: [["Bob"], ["Cid"]])
+  }
+
+  @Test func `a bare merged reference resolves in ORDER BY`() throws {
+    // The exposed name resolves in an `ORDER BY` — a FULL join's rows sort by
+    // the coalesced `Dept`, the left-only (10) and right-only (30) unmatched
+    // rows ordered alongside the matched (20) ones.
+    try engineNamed().expect("""
+        SELECT Name FROM Emp NATURAL FULL OUTER JOIN Team ORDER BY Dept
+        """,
+        yields: [["Ann"], ["Bob"], ["Cid"], [nil]])
+  }
+
+  @Test func `a bare merged reference resolves in GROUP BY`() throws {
+    // The exposed name resolves as a `GROUP BY` key — the matched Dept 20 rows
+    // form one group of two.
+    try engineNamed().expect("""
+        SELECT Dept, COUNT(*) FROM Emp JOIN Team USING (Dept) GROUP BY Dept
+        """,
+        yields: [[20, 2]])
+  }
+
+  @Test func `a bare merged reference in a LEFT join yields the coalesced value`() throws {
+    // A LEFT join keeps the left-only Dept 10; the exposed bare `Dept` shows
+    // the coalesced value (the left's 10), matching the `SELECT *` merged
+    // column.
+    try engineNamed().expect("""
+        SELECT Dept FROM Emp LEFT JOIN Team USING (Dept)
+        """,
+        yields: [[10], [20], [20]])
+  }
+
+  @Test func `a bare merged reference in a RIGHT join yields the coalesced value`() throws {
+    // A RIGHT join keeps the right-only Dept 30; the exposed bare `Dept` shows
+    // the coalesced value (the right's 30) even where the left `Emp.Dept` is
+    // NULL.
+    try engineNamed().expect("""
+        SELECT Dept FROM Emp RIGHT JOIN Team USING (Dept)
+        """,
+        yields: [[20], [20], [30]])
+  }
+
+  @Test func `a bare merged reference in a FULL join yields each side's value`() throws {
+    // A FULL join keeps both unmatched rows; the exposed bare `Dept` shows the
+    // coalesced value on each — the left's 10 (right NULL) and the right's 30
+    // (left NULL).
+    try engineNamed().expect("""
+        SELECT Dept FROM Emp NATURAL FULL OUTER JOIN Team
+        """,
+        yields: [[10], [20], [20], [30]])
+  }
+
+  @Test func `a bare reference to each of two merged columns resolves`() throws {
+    // A NATURAL join over two common columns exposes BOTH `K` and `G`; a bare
+    // reference to each resolves to its coalesced value (equal on the one
+    // matched row).
+    try engineNamed().expect("""
+        SELECT K, G FROM Lhs NATURAL JOIN Rhs
+        """,
+        yields: [[1, "x"]])
+  }
+
+  @Test func `a bare reference to a shared but non-join column stays ambiguous`() throws {
+    // The scoping guard (ISO 9075 7.10): ONLY the join columns are exposed.
+    // `Lhs` and `Rhs` share `K` and `G`, but `USING (K)` joins on `K` alone —
+    // so bare `G`, shared yet NOT a join column, stays AMBIGUOUS between the
+    // two sides rather than collapsing to a merged value.
+    try engineNamed().expect("""
+        SELECT G FROM Lhs JOIN Rhs USING (K)
+        """,
+        fails: .ambiguous("G"))
+  }
+
+  @Test func `a qualified reference is not merged when its name is a join column`() throws {
+    // The exposed name is UNqualified; a qualified `Lhs.G`/`Rhs.G` still names
+    // its own side even when the sibling `K` is a join column — merging is
+    // scoped to the bare join-column name alone.
+    try engineNamed().expect("""
+        SELECT Lhs.G, Rhs.G FROM Lhs JOIN Rhs USING (K)
+        """,
+        yields: [["x", "x"], ["y", "z"]])
+  }
+
+  // MARK: - Aliased ranges (finding 1)
+
+  @Test func `an aliased FROM side resolves a USING join`() throws {
+    // The synthesized `ON` and coalesced `SELECT *` qualify by the RANGE name
+    // (the alias `e`), the only name the scope admits, so `Emp AS e JOIN Team
+    // USING (Dept)` resolves rather than faulting on an unqualifiable
+    // `Emp.Dept`.
+    try engineNamed().expect("""
+        SELECT * FROM Emp AS e JOIN Team USING (Dept)
+        """,
+        yields: [
+          [20, "Bob", "Deb"],
+          [20, "Cid", "Deb"],
+        ])
+  }
+
+  @Test func `an aliased JOINED side resolves a USING join`() throws {
+    // The joined side's references qualify by its range name (`t`) too, so
+    // `Emp JOIN Team AS t USING (Dept)` resolves.
+    try engineNamed().expect("""
+        SELECT * FROM Emp JOIN Team AS t USING (Dept)
+        """,
+        yields: [
+          [20, "Bob", "Deb"],
+          [20, "Cid", "Deb"],
+        ])
+  }
+
+  @Test func `a projection qualified by an alias resolves over a USING join`() throws {
+    // Both sides aliased: a qualified `e.Name` resolves to its side and a bare
+    // merged `Dept` to the coalesced value, all over the aliased ranges.
+    try engineNamed().expect("""
+        SELECT e.Name, Dept FROM Emp AS e JOIN Team AS t USING (Dept)
+        """,
+        yields: [
+          ["Bob", 20],
+          ["Cid", 20],
+        ])
+  }
+
+  // MARK: - Set-operation arity over the merged width (finding 2)
+
+  @Test func `a UNION over a USING join measures the merged width`() throws {
+    // The `SELECT *` arm's width is the MERGED count (3 — `Dept` once), so a
+    // 3-column second arm aligns and the UNION succeeds. Before the desugar ran
+    // ahead of the arity check, the `*` measured both physical `Dept`s (4) and
+    // wrongly rejected the valid set operation.
+    try engineNamed().expect("""
+        SELECT * FROM Emp JOIN Team USING (Dept)
+        UNION SELECT Dept, Name, Lead FROM Emp JOIN Team USING (Dept)
+        """,
+        yields: [
+          [20, "Bob", "Deb"],
+          [20, "Cid", "Deb"],
+        ])
+  }
+
+  @Test func `a UNION whose arms differ post-merge still faults arity`() throws {
+    // A genuinely mismatched set operation — a 3-wide merged `*` against a
+    // 2-column arm — still faults, measured at the merged width.
+    try engineNamed().expect("""
+        SELECT * FROM Emp JOIN Team USING (Dept)
+        UNION SELECT Dept, Name FROM Emp JOIN Team USING (Dept)
+        """,
+        fails: .arity(3, 2))
+  }
+
+  // MARK: - Exposed IN and quantified outer operand (finding 3)
+
+  @Test func `a bare merged reference resolves as an IN operand`() throws {
+    // The outer operand of `IN (subquery)` resolves in THIS query's scope, so
+    // a bare merged `Dept` is exposed to the coalesced value — not left
+    // ambiguous between the two physical sides.
+    try engineNamed().expect("""
+        SELECT Name FROM Emp JOIN Team USING (Dept)
+        WHERE Dept IN (SELECT Dept FROM Team)
+        """,
+        yields: [["Bob"], ["Cid"]])
+  }
+
+  @Test func `a bare merged reference resolves as a quantified operand`() throws {
+    // As `IN`, the `= ANY (subquery)` outer operand is exposed to the merged
+    // value.
+    try engineNamed().expect("""
+        SELECT Name FROM Emp JOIN Team USING (Dept)
+        WHERE Dept = ANY (SELECT Dept FROM Team)
+        """,
+        yields: [["Bob"], ["Cid"]])
+  }
+
+  // MARK: - Coalesced key carried into a later join (finding 4)
+
+  @Test func `a chained USING join keys a RIGHT-only row on the merged value`() throws {
+    // `Emp RIGHT JOIN Team USING (Dept)` keeps the right-only Dept 30 (left
+    // `Emp.Dept` NULL); the next `JOIN Bonus USING (Dept)` keys on the MERGED
+    // `Dept`, so that row still joins `Bonus` (Amt 200) rather than being
+    // dropped on a NULL left key.
+    try engineNamed().expect("""
+        SELECT * FROM Emp RIGHT JOIN Team USING (Dept) JOIN Bonus USING (Dept)
+        """,
+        yields: [
+          [20, "Bob", "Deb", 100],
+          [20, "Cid", "Deb", 100],
+          [30, nil, "Eve", 200],
+        ])
+  }
+
+  @Test func `a chained USING join keys a FULL join's unmatched rows on the merged value`() throws {
+    // A FULL first join keeps BOTH unmatched rows — Dept 10 (left-only) and 30
+    // (right-only); the chained `Bonus` join keys each on the merged `Dept`, so
+    // both still join (Amt 50 and 200).
+    try engineNamed().expect("""
+        SELECT * FROM Emp FULL JOIN Team USING (Dept) JOIN Bonus USING (Dept)
+        """,
+        yields: [
+          [10, "Ann", nil, 50],
+          [20, "Bob", "Deb", 100],
+          [20, "Cid", "Deb", 100],
+          [30, nil, "Eve", 200],
+        ])
+  }
+
+  // MARK: - Duplicate USING names (finding 5)
+
+  @Test func `a repeated USING column faults rather than crashing`() throws {
+    // `USING (Dept, Dept)` names one merged column twice; the duplicate is
+    // caught BEFORE the output dictionary the merged names key would trap on,
+    // faulting `.duplicate` rather than aborting the process.
+    try engineNamed().expect("""
+        SELECT * FROM Emp JOIN Team USING (Dept, Dept)
+        """,
+        fails: .duplicate("Dept"))
+  }
+
+  @Test func `a NATURAL join after a plain join with two like-named columns faults`() throws {
+    // `Emp JOIN Team ON …` leaves the left side carrying TWO columns named
+    // `Dept`; a following `NATURAL JOIN Bonus` would merge `Dept` twice — the
+    // duplicate is caught and faults `.duplicate` rather than trapping.
+    try engineNamed().expect("""
+        SELECT * FROM Emp JOIN Team ON Emp.Dept = Team.Dept
+        NATURAL JOIN Bonus
+        """,
+        fails: .duplicate("Dept"))
+  }
+
+  // MARK: - Grouping a RIGHT/FULL merged column by the merged value (finding 6)
+
+  @Test func `a RIGHT join groups a bare merged column by the coalesced value`() throws {
+    // The right-only Dept 30 (left `Emp.Dept` NULL) groups and projects by the
+    // MERGED value 30, not NULL — the `GROUP BY` key is the coalesced value the
+    // projection emits.
+    try engineNamed().expect("""
+        SELECT Dept, COUNT(*) FROM Emp RIGHT JOIN Team USING (Dept)
+        GROUP BY Dept
+        """,
+        yields: [
+          [20, 2],
+          [30, 1],
+        ])
+  }
+
+  @Test func `a FULL join groups a bare merged column by the coalesced value`() throws {
+    // Both unmatched rows group by their merged value — the left-only 10 and
+    // the right-only 30 — each its own group, not collapsed to NULL.
+    try engineNamed().expect("""
+        SELECT Dept, COUNT(*) FROM Emp FULL JOIN Team USING (Dept)
+        GROUP BY Dept
+        """,
+        yields: [
+          [10, 1],
+          [20, 2],
+          [30, 1],
+        ])
+  }
+
+  // MARK: - Accumulated-left ambiguity (finding 1)
+
+  @Test func `a USING column a plain join bound twice on the left faults`() throws {
+    // A plain `ON` join leaves the accumulated left carrying TWO columns named
+    // `Dept` (`Emp.Dept` and `Team.Dept`); a following `JOIN Bonus USING
+    // (Dept)` keys `Dept` on that left — which binds it TWICE — so it faults
+    // `.ambiguous` at construction rather than trapping a downstream build.
+    try engineNamed().expect("""
+        SELECT * FROM Emp JOIN Team ON Emp.Dept = Team.Dept
+        JOIN Bonus USING (Dept)
+        """,
+        fails: .ambiguous("Dept"))
+  }
+
+  // MARK: - A merged name a later plain join re-collides with (finding 2)
+
+  @Test func `a qualified name a later plain join adds over a merged one resolves`() throws {
+    // A `USING (Dept)` merges `Dept`; a later plain `JOIN Bonus AS C ON …`
+    // brings its OWN physical `C.Dept`. A QUALIFIED `C.Dept` names that side
+    // unambiguously and resolves — never a crash — even though a bare `Dept`
+    // would now be ambiguous between the merged column and `C.Dept`.
+    try engineNamed().expect("""
+        SELECT C.Dept FROM Emp JOIN Team USING (Dept)
+        JOIN Bonus AS C ON C.Dept = Emp.Dept
+        """,
+        yields: [[20], [20]])
+  }
+
+  @Test func `a bare name a later plain join re-collides with a merged one faults`() throws {
+    // The bare counterpart: with the merged `Dept` AND the later plain join's
+    // physical `C.Dept` both in scope, a bare `Dept` names two columns and
+    // faults `.ambiguous` — surfacing at lookup, NEVER a crash.
+    try engineNamed().expect("""
+        SELECT Dept FROM Emp JOIN Team USING (Dept)
+        JOIN Bonus AS C ON C.Dept = Emp.Dept
+        """,
+        fails: .ambiguous("Dept"))
+  }
+
+  // MARK: - ORDER BY alias precedence over a merged key (finding 3)
+
+  @Test func `ORDER BY binds a projection alias before the merged key`() throws {
+    // `SELECT Name AS Dept … ORDER BY Dept` sorts by the PROJECTED alias
+    // `Name`, not the coalesced merged `Dept` key — the bare `ORDER BY` key
+    // reaches the resolver's alias-first binding before the scope's merged
+    // column, since there is no pre-rewrite substituting the key for the
+    // coalesce. The names sort opposite to the departments, so the two orders
+    // are distinguishable: alphabetical `Ann, Bob, Cid` (by alias), not `Bob
+    // (10), Cid (20), Ann (30)` (by the merged Dept).
+    let catalog = try Catalog {
+      Relation("Emp", ["Dept": .integer, "Name": .text]) {
+        Row(30, "Ann")
+        Row(10, "Bob")
+        Row(20, "Cid")
+      }
+      Relation("Team", ["Dept": .integer, "Lead": .text]) {
+        Row(10, "L1")
+        Row(20, "L2")
+        Row(30, "L3")
+      }
+    }
+    try catalog.expect("""
+        SELECT Name AS Dept FROM Emp JOIN Team USING (Dept) ORDER BY Dept
+        """,
+        yields: [["Ann"], ["Bob"], ["Cid"]])
+  }
+
+  // MARK: - Merged columns under schema VALIDATION (finding A)
+
+  @Test func `a bare merged reference type-checks under validation`() throws {
+    // The run lowers a bare merged `Dept` in the `WHERE` through `Scope.term`
+    // to the coalesced value; `columns(of:validate:true)` — whose type-check
+    // walk validates the `WHERE` through the SAME merged-aware bare-name
+    // lookup — must resolve it too, not fault `.ambiguous`. The schema names
+    // the projected `Name` (text) and does not throw.
+    let text = """
+        SELECT Name FROM Emp JOIN Team USING (Dept) WHERE Dept = 20
+        """
+    let columns = try engineNamed()
+        .columns(of: Statement(parsing: text), validate: true)
+    #expect(columns.count == 1)
+    #expect(columns[0].name == "Name")
+    #expect(columns[0].type == .text)
+  }
+
+  @Test func `a bare merged reference in the projection type-checks`() throws {
+    // The merged `Dept` PROJECTED and type-checked: the schema resolves it to
+    // the unified coalesce type (`integer`) rather than faulting `.ambiguous`.
+    let text = "SELECT Dept FROM Emp JOIN Team USING (Dept) WHERE Dept = 20"
+    let columns = try engineNamed()
+        .columns(of: Statement(parsing: text), validate: true)
+    #expect(columns.count == 1)
+    #expect(columns[0].name == "Dept")
+    #expect(columns[0].type == .integer)
+  }
+
+  @Test func `a validated merged query agrees with the run`() throws {
+    // run ≡ columns(of:validate:true): the query the validation path accepts
+    // is the query the run executes, producing the two matched rows.
+    try engineNamed().expect("""
+        SELECT Name FROM Emp JOIN Team USING (Dept) WHERE Dept = 20
+        """,
+        yields: [["Bob"], ["Cid"]])
+  }
+
+  @Test func `a genuinely ambiguous bare name still faults under validation`()
+      throws {
+    // The scoping guard holds under validation too: bare `G`, shared by `Lhs`
+    // and `Rhs` yet NOT the `USING (K)` join column, stays `.ambiguous` — the
+    // merged-aware lookup narrows nothing that a plain shared column widens.
+    let text = "SELECT G FROM Lhs JOIN Rhs USING (K)"
+    #expect(throws: SQLError.ambiguous("G")) {
+      _ = try engineNamed()
+          .columns(of: Statement(parsing: text), validate: true)
+    }
+  }
+
+  // MARK: - A later USING over a re-collided merged name (finding B)
+
+  @Test func `a later USING on a name a plain join re-collided with faults`()
+      throws {
+    // `Emp JOIN Team USING (Dept)` merges `Dept`; the plain `JOIN Bonus AS C
+    // ON …` re-introduces a physical `C.Dept`, so the prefix now binds `Dept`
+    // BOTH as the merged column and as `C.Dept`. A later `JOIN X USING (Dept)`
+    // resolves its common `Dept` against that prefix — ambiguous — so it
+    // faults `.ambiguous` rather than silently keying on the merged value and
+    // leaving two output columns named `Dept`.
+    let catalog = try Catalog {
+      Relation("Emp", ["Dept": .integer, "Name": .text]) {
+        Row(20, "Bob")
+      }
+      Relation("Team", ["Dept": .integer, "Lead": .text]) {
+        Row(20, "Deb")
+      }
+      Relation("Bonus", ["Dept": .integer, "Amt": .integer]) {
+        Row(20, 100)
+      }
+      Relation("X", ["Dept": .integer, "Note": .text]) {
+        Row(20, "n")
+      }
+    }
+    catalog.expect("""
+        SELECT * FROM Emp JOIN Team USING (Dept)
+        JOIN Bonus AS C ON C.Dept = Emp.Dept
+        JOIN X USING (Dept)
+        """,
+        fails: .ambiguous("Dept"))
+  }
+
+  // MARK: - Incompatible USING column types (finding C)
+
+  @Test func `a USING join over int and double sides unifies to double`()
+      throws {
+    // `A.k integer`, `B.k double`: the merged `k` type UNIFIES to `double`,
+    // and the coalesce coerces each side to it, so the schema advertises
+    // `double` and the rows carry doubles — not a silent left `integer`.
+    let catalog = try Catalog {
+      Relation("A", ["k": .integer, "a": .text]) {
+        Row(1, "x")
+      }
+      Relation("B", ["k": .double, "b": .text]) {
+        Row(1.0, "y")
+      }
+    }
+    let text = "SELECT k FROM A JOIN B USING (k)"
+    let columns = try catalog.columns(of: Statement(parsing: text),
+                                      validate: true)
+    #expect(columns.count == 1)
+    #expect(columns[0].type == .double)
+    try catalog.expect(text, yields: [[1.0]])
+  }
+
+  @Test func `a RIGHT USING join coerces a right-only row to the unified type`()
+      throws {
+    // `A.k integer`, `B.k double`, RIGHT join: the right-only row's `k` (from
+    // `B`, the left `A.k` NULL) shows as a `double`, coerced to the unified
+    // merged type — not the raw right value under a schema claiming integer.
+    let catalog = try Catalog {
+      Relation("A", ["k": .integer, "a": .text]) {
+        Row(1, "x")
+      }
+      Relation("B", ["k": .double, "b": .text]) {
+        Row(1.0, "y")
+        Row(2.0, "z")
+      }
+    }
+    try catalog.expect("SELECT k FROM A RIGHT JOIN B USING (k) ORDER BY k",
+                       yields: [[1.0], [2.0]])
+  }
+
+  @Test func `a USING join over irreconcilable int and text sides faults`()
+      throws {
+    // `A.k integer`, `B.k text`: no common type, so the merged column is
+    // rejected at resolve with `.operand`/42804 — the same fault a set-op fold
+    // raises — rather than publishing an `integer` schema the coalesced text
+    // value would violate.
+    let catalog = try Catalog {
+      Relation("A", ["k": .integer, "a": .text]) {
+        Row(1, "x")
+      }
+      Relation("B", ["k": .text, "b": .text]) {
+        Row("1", "y")
+      }
+    }
+    catalog.expect("SELECT k FROM A JOIN B USING (k)",
+                   fails: .operand("USING columns have irreconcilable types"))
+  }
+
+  @Test func `a RIGHT USING join over irreconcilable sides faults too`()
+      throws {
+    // The RIGHT variant faults at resolve exactly as the plain one — the
+    // unified-type rejection precedes any row, so no schema-violating row is
+    // produced.
+    let catalog = try Catalog {
+      Relation("A", ["k": .integer, "a": .text]) {
+        Row(1, "x")
+      }
+      Relation("B", ["k": .text, "b": .text]) {
+        Row("2", "y")
+      }
+    }
+    catalog.expect("SELECT k FROM A RIGHT JOIN B USING (k)",
+                   fails: .operand("USING columns have irreconcilable types"))
+  }
+
+  // MARK: - USING type unification honors the unconstrained mask
+
+  @Test func `a USING join defers to the right when the left is unconstrained`()
+      throws {
+    // `(SELECT NULLIF(1, 1) AS k) AS a` — the left `k` is constant NULL, so
+    // UNCONSTRAINED (a placeholder `integer` that places no type constraint) —
+    // RIGHT JOIN `B_text` whose `k` is `text`. The merged `k` types off the
+    // CONSTRAINED right (`text`) through the same mask-aware unification the
+    // set-op fold takes, rather than faulting the placeholder `integer` beside
+    // `text`. A right row's merged `k` is `B_text.k` (the always-NULL left
+    // coalesces away). Run ≡ columns(of:).
+    let catalog = try Catalog {
+      Relation("B_text", ["k": .text, "b": .text]) {
+        Row("p", "b1")
+        Row("q", "b2")
+      }
+    }
+    let text = """
+        SELECT k FROM (SELECT NULLIF(1, 1) AS k) AS a
+          RIGHT JOIN B_text USING (k) ORDER BY k
+        """
+    let columns = try catalog.columns(of: Statement(parsing: text),
+                                      validate: true)
+    #expect(columns.count == 1)
+    #expect(columns[0].type == .text)
+    try catalog.expect(text, yields: [["p"], ["q"]])
+  }
+
+  @Test func `a USING join defers to the left when the right is unconstrained`()
+      throws {
+    // The SYMMETRIC case: the CONSTRAINED left `A_text.k` (`text`) beside an
+    // UNCONSTRAINED right `(SELECT NULLIF(1, 1) AS k)` — the merged `k` types
+    // off the left (`text`), and a LEFT join keeps every left row, its merged
+    // `k` the left value (the always-NULL right coalesces away).
+    let catalog = try Catalog {
+      Relation("A_text", ["k": .text, "a": .text]) {
+        Row("p", "a1")
+        Row("q", "a2")
+      }
+    }
+    let text = """
+        SELECT k FROM A_text
+          LEFT JOIN (SELECT NULLIF(1, 1) AS k) AS b USING (k) ORDER BY k
+        """
+    let columns = try catalog.columns(of: Statement(parsing: text),
+                                      validate: true)
+    #expect(columns.count == 1)
+    #expect(columns[0].type == .text)
+    try catalog.expect(text, yields: [["p"], ["q"]])
+  }
+
+  @Test func `a USING join of two unconstrained sides stays unconstrained`()
+      throws {
+    // BOTH constituents constant NULL (unconstrained): the merged `k` stays a
+    // placeholder that places no constraint, so a further `UNION SELECT 1` over
+    // it UNIFIES to `integer` rather than faulting the placeholder beside the
+    // typed arm — the merged column carries its own `unconstrained` bit into
+    // the enclosing set-operation fold, exactly as a bare unconstrained column
+    // would.
+    let catalog = try Catalog {
+      Relation("Unit", ["only": .integer]) {
+        Row(1)
+      }
+    }
+    let text = """
+        SELECT k FROM (SELECT NULLIF(1, 1) AS k FROM Unit) AS a
+          JOIN (SELECT NULLIF(1, 1) AS k FROM Unit) AS b USING (k)
+        UNION SELECT 1
+        """
+    let columns = try catalog.columns(of: Statement(parsing: text),
+                                      validate: true)
+    #expect(columns.count == 1)
+    #expect(columns[0].type == .integer)
+    // The merged `k` is NULL (both sides NULL, and a NULL key never matches),
+    // so the join yields no row; the UNION's second arm contributes `1`.
+    try catalog.expect(text, yields: [[1]])
+  }
+
+  // MARK: - ISO 7.10 output order over chained USING/NATURAL joins (hole 2)
+
+  @Test func `a chained USING on two different columns orders the outer merge first`()
+      throws {
+    // ISO 9075 7.10: each join's common columns lead, then the rest of the LEFT
+    // output, then the right. `(P JOIN Q USING (k)) JOIN R USING (a)` therefore
+    // exposes `[a, k, p, q, r]` — the OUTER `a` first, then the inner `k` (it
+    // sits within "the rest of the left"), not the flat fold order `[k, a, …]`.
+    let text = "SELECT * FROM P JOIN Q USING (k) JOIN R USING (a)"
+    try engineChained().expect(text, yields: [[7, 1, "p1", "q1", "r1"]])
+    let columns = try engineChained()
+        .columns(of: Statement(parsing: text), validate: true)
+    #expect(columns.map(\.name) == ["a", "k", "p", "q", "r"])
+  }
+
+  @Test func `a chained NATURAL join orders the outer common columns first`()
+      throws {
+    // The NATURAL variant discovers the same common columns (`k` inner, `a`
+    // outer) and lays them in the same ISO order `[a, k, …]` in both the run
+    // and the schema.
+    let text = "SELECT * FROM P NATURAL JOIN Q NATURAL JOIN R"
+    try engineChained().expect(text, yields: [[7, 1, "p1", "q1", "r1"]])
+    let columns = try engineChained()
+        .columns(of: Statement(parsing: text), validate: true)
+    #expect(columns.map(\.name) == ["a", "k", "p", "q", "r"])
+  }
+
+  @Test func `a chained USING on the SAME column keeps it once at the outer position`()
+      throws {
+    // A chained `… USING (Dept)` over an already-merged `Dept` DROPS the inner
+    // entry and keeps the ONE merged `Dept` at the outer join's position — so
+    // `SELECT *` still exposes `Dept` once, then the three sides' rests. Run
+    // and schema agree.
+    let text =
+        "SELECT * FROM Emp JOIN Team USING (Dept) JOIN Bonus USING (Dept)"
+    try engineNamed().expect(text,
+        yields: [
+          [20, "Bob", "Deb", 100],
+          [20, "Cid", "Deb", 100],
+        ])
+    let columns = try engineNamed()
+        .columns(of: Statement(parsing: text), validate: true)
+    #expect(columns.map(\.name) == ["Dept", "Name", "Lead", "Amt"])
+  }
+
+  // MARK: - Merged columns threaded into a LATERAL body (hole 1)
+
+  @Test func `a LATERAL body resolves a bare USING-merged column`() throws {
+    // ISO 9075 7.10: the `USING (Dept)` merged column is an output column of
+    // the join, so a LATERAL body's PRECEDING scope carries it and a bare
+    // `Dept` in the body binds the ONE coalesced column rather than faulting
+    // `.ambiguous` between the two physical `Dept`s. Run and schema agree.
+    let text = """
+        SELECT d.n FROM Emp JOIN Team USING (Dept)
+          JOIN LATERAL (SELECT Dept AS n) AS d ON 1 = 1
+        """
+    try engineNamed().expect(text, yields: [[20], [20]])
+    let columns = try engineNamed()
+        .columns(of: Statement(parsing: text), validate: true)
+    #expect(columns.map(\.name) == ["n"])
+  }
+
+  @Test func `a LATERAL body resolves a bare NATURAL-merged column`() throws {
+    // The NATURAL variant threads the merged column into the LATERAL body the
+    // same way `USING` does.
+    let text = """
+        SELECT d.n FROM Emp NATURAL JOIN Team
+          JOIN LATERAL (SELECT Dept AS n) AS d ON 1 = 1
+        """
+    try engineNamed().expect(text, yields: [[20], [20]])
+  }
+
+  @Test func `a LATERAL body coalesces a merged column of a RIGHT join`() throws {
+    // A RIGHT join's merged `Dept` is `COALESCE(Emp.Dept, Team.Dept)`; the
+    // right-only Dept 30 (left NULL) correlates into the body as the coalesced
+    // value 30 — a physical-left binding would have shown NULL. This exercises
+    // the `.coalesce` correlation source over the outer row's two cells.
+    let text = """
+        SELECT d.n FROM Emp RIGHT JOIN Team USING (Dept)
+          JOIN LATERAL (SELECT Dept AS n) AS d ON 1 = 1
+        """
+    try engineNamed().expect(text, yields: [[20], [20], [30]])
+  }
+
+  @Test func `a LATERAL body still resolves a qualified constituent column`()
+      throws {
+    // A QUALIFIED `Emp.Dept` in the body never matches the merged column and
+    // reaches its own physical side, correlating as an ordinary outer slot.
+    let text = """
+        SELECT d.n FROM Emp JOIN Team USING (Dept)
+          JOIN LATERAL (SELECT Emp.Dept AS n) AS d ON 1 = 1
+        """
+    try engineNamed().expect(text, yields: [[20], [20]])
+  }
+
+  @Test func `a LATERAL body faults an ambiguous non-merged name`() throws {
+    // A plain `JOIN Bonus ON …` re-introduces a physical `Dept` beside the
+    // merged one, so a bare `Dept` in the LATERAL body now names BOTH and stays
+    // `.ambiguous` — the merged axis does not mask a genuine ambiguity.
+    let text = """
+        SELECT d.n FROM Emp JOIN Team USING (Dept)
+          JOIN Bonus ON Bonus.Dept = Emp.Dept
+          JOIN LATERAL (SELECT Dept AS n) AS d ON 1 = 1
+        """
+    try engineNamed().expect(text, fails: .ambiguous("Dept"))
+  }
+
+  @Test func `a merged column and its constituent correlate independently`()
+      throws {
+    // A LATERAL body of `Emp RIGHT JOIN Team USING (Dept)` projects BOTH the
+    // bare merged `Dept` (COALESCE) and the physical `Emp.Dept` constituent. On
+    // the right-only Dept 30 row the merged `Dept` coalesces to 30 while
+    // `Emp.Dept` is NULL — each correlates through its OWN parameter identity,
+    // so neither read overwrites the other regardless of projection order.
+    let forward = """
+        SELECT m, e FROM Emp RIGHT JOIN Team USING (Dept)
+          JOIN LATERAL (SELECT Dept AS m, Emp.Dept AS e) AS d ON 1 = 1
+          ORDER BY m
+        """
+    try engineNamed().expect(forward, yields: [
+      [20, 20],
+      [20, 20],
+      [30, nil],
+    ])
+    // The REVERSE projection order yields the same values — the merged and the
+    // constituent correlation keys do not collide, so lowering order is
+    // irrelevant.
+    let reverse = """
+        SELECT m, e FROM Emp RIGHT JOIN Team USING (Dept)
+          JOIN LATERAL (SELECT Emp.Dept AS e, Dept AS m) AS d ON 1 = 1
+          ORDER BY m
+        """
+    try engineNamed().expect(reverse, yields: [
+      [20, 20],
+      [20, 20],
+      [30, nil],
+    ])
+  }
+
+  @Test func `a SELECT star merged column carries its unconstrained mask`()
+      throws {
+    // Both `USING (k)` constituents are constant-NULL (`NULLIF(1, 1)`), so the
+    // merged `k` is UNCONSTRAINED — it places no type constraint. A `SELECT *`
+    // must carry that mask (exactly as an explicit `SELECT k` does), so the
+    // enclosing UNION unifies the merged `k` with the text arm rather than
+    // faulting the first arm's integer against the text (42804).
+    let star = """
+        SELECT * FROM (SELECT NULLIF(1, 1) AS k FROM Solo) AS a
+          JOIN (SELECT NULLIF(1, 1) AS k FROM Solo) AS b USING (k)
+          UNION SELECT 'x'
+        """
+    let starred = try engineNamed()
+        .columns(of: Statement(parsing: star), validate: true)
+    #expect(starred.map(\.type) == [.text])
+    // The explicit `SELECT k` variant already resolved through `output(of:)`;
+    // it stays resolvable and agrees.
+    let explicit = """
+        SELECT k FROM (SELECT NULLIF(1, 1) AS k FROM Solo) AS a
+          JOIN (SELECT NULLIF(1, 1) AS k FROM Solo) AS b USING (k)
+          UNION SELECT 'x'
+        """
+    let named = try engineNamed()
+        .columns(of: Statement(parsing: explicit), validate: true)
+    #expect(named.map(\.type) == [.text])
+  }
+
+  @Test func `a genuinely constrained USING merge still faults an irreconcilable UNION`()
+      throws {
+    // Both constituents are CONSTRAINED (a bare integer `Dept` and a text
+    // `Lead`… no — both integer here), so the merged `Dept` is a constrained
+    // integer and the text UNION arm is irreconcilable: 42804 still faults,
+    // proving the mask is carried, not hard-coded unconstrained.
+    let text = """
+        SELECT * FROM Emp JOIN Team USING (Dept) UNION SELECT 'x', 'y', 'z'
+        """
+    try engineNamed().expect(text,
+        fails: .operand("UNION arms have irreconcilable types"))
+  }
+
+  // MARK: - USING/NATURAL over a VIRTUAL column (the fixture `Id`)
+
+  @Test func `USING a virtual Id present on both sides resolves and merges it`()
+      throws {
+    // `Id` is a VIRTUAL column (the fixture's 1-based row index) on BOTH `Emp`
+    // and `Team`, not a real one in `names`. `USING (Id)` must resolve it
+    // through the SAME virtual-aware `ordinal(of:)` the predicate path
+    // `Emp.Id = Team.Id` uses, keying on the row index: Emp Ids 1..3, Team
+    // Ids 1..2, so Ids 1 and 2 match. ISO 7.10 order exposes the merged `Id`
+    // once and first, then `Emp`'s real columns, then `Team`'s.
+    try engineNamed().expect("SELECT * FROM Emp JOIN Team USING (Id)",
+        yields: [
+          [1, 10, "Ann", 20, "Deb"],
+          [2, 20, "Bob", 30, "Eve"],
+        ])
+  }
+
+  @Test func `a bare virtual-Id USING column types integral under columns(of:)`()
+      throws {
+    // The merged virtual `Id`'s result type is derived on the schema path the
+    // run agrees with — a fixture virtual `Id` types integral.
+    let text = "SELECT Id FROM Emp JOIN Team USING (Id)"
+    let columns = try engineNamed()
+        .columns(of: Statement(parsing: text), validate: true)
+    let pairs = columns.map { ($0.name, $0.type) }
+    #expect(pairs.elementsEqual([("Id", .integer)], by: ==))
+  }
+
+  @Test func `NATURAL does not key on a shared virtual Id, only real columns`()
+      throws {
+    // The NATURAL DECISION: the common set is the LEFT scope's `names` — the
+    // real, `SELECT *`-visible columns, NO virtual — so a virtual `Id` shared
+    // by both sides is NOT a NATURAL common column even though both sides can
+    // ADDRESS it. This is consistent with ISO, where NATURAL and `SELECT *`
+    // draw on the SAME column-name list (which the engine excludes virtuals
+    // from), while an EXPLICIT `USING (Id)` (like an explicit `A.Id = B.Id`)
+    // resolves the virtual through `ordinal(of:)`. So `Emp NATURAL JOIN Team`
+    // keys on the shared REAL `Dept` alone (Dept 20 matches), NOT on the
+    // virtual `Id` — the round-1 behavior is unchanged.
+    try engineNamed().expect("SELECT * FROM Emp NATURAL JOIN Team",
+        yields: [
+          [20, "Bob", "Deb"],
+          [20, "Cid", "Deb"],
+        ])
+  }
+
+  @Test func `USING mixes a REAL left Id with a VIRTUAL joined Id`() throws {
+    // `Coded` carries a REAL `Id` column (shadowing its own virtual); `Emp`
+    // exposes only a VIRTUAL `Id`. `USING (Id)` must resolve the LEFT through
+    // the real column and the RIGHT through the virtual one, keying REAL 1..3
+    // against the row index 1..3.
+    try engineVirtual().expect("SELECT * FROM Coded JOIN Emp USING (Id)",
+        yields: [
+          [1, "c1", 10, "Ann"],
+          [2, "c2", 20, "Bob"],
+          [3, "c3", 20, "Cid"],
+        ])
+  }
+
+  @Test func `USING mixes a VIRTUAL left Id with a REAL joined Id`() throws {
+    // The reverse: `Emp` (virtual `Id`) as the FROM side, `Coded` (real `Id`)
+    // joined — the LEFT resolves the virtual, the RIGHT the real. The output
+    // exposes the merged `Id`, then `Emp`'s real columns, then `Coded`'s real
+    // ones (its real `Id` is the merged constituent, dropped from the rest).
+    try engineVirtual().expect("SELECT * FROM Emp JOIN Coded USING (Id)",
+        yields: [
+          [1, 10, "Ann", "c1"],
+          [2, 20, "Bob", "c2"],
+          [3, 20, "Cid", "c3"],
+        ])
+  }
+
+  @Test func `NATURAL excludes a JOINED-side virtual Id from the common set`()
+      throws {
+    // `Coded` has a REAL `Id` (in `names`); `Emp` exposes `Id` ONLY as a
+    // VIRTUAL column (the fixture row index), and the two share NO real column
+    // (`Id`/`Tag` vs `Dept`/`Name`). The `NATURAL` common set is the REAL-name
+    // intersection on BOTH sides, so the joined-side VIRTUAL `Id` must NOT
+    // match `Coded`'s real `Id` — the join degenerates to a CROSS product (its
+    // synthesized `on` empty), keeping ALL FOUR real columns unmerged and every
+    // 3x3 pairing. An EXPLICIT `USING (Id)` (the control below) still resolves
+    // the virtual; NATURAL, like `SELECT *`, draws only on real names.
+    try engineVirtual().expect("SELECT * FROM Coded NATURAL JOIN Emp",
+        yields: [
+          [1, "c1", 10, "Ann"],
+          [1, "c1", 20, "Bob"],
+          [1, "c1", 20, "Cid"],
+          [2, "c2", 10, "Ann"],
+          [2, "c2", 20, "Bob"],
+          [2, "c2", 20, "Cid"],
+          [3, "c3", 10, "Ann"],
+          [3, "c3", 20, "Bob"],
+          [3, "c3", 20, "Cid"],
+        ])
+    let text = "SELECT * FROM Coded NATURAL JOIN Emp"
+    let columns = try engineVirtual().columns(of: parse(query: text))
+    #expect(columns.map(\.name) == ["Id", "Tag", "Dept", "Name"])
+  }
+
+  @Test func `NATURAL excludes a LEFT-side virtual Id from the common set`()
+      throws {
+    // The symmetric case: `Emp` (virtual `Id`) is the LEFT/FROM side, `Coded`
+    // (real `Id`) the joined one. The left is already real-only
+    // (`prefix.names` never lists a virtual), so a LEFT virtual `Id` is not
+    // even a candidate — the common set stays the empty real intersection and
+    // the join is a CROSS product over all four real columns.
+    try engineVirtual().expect("SELECT * FROM Emp NATURAL JOIN Coded",
+        yields: [
+          [10, "Ann", 1, "c1"],
+          [10, "Ann", 2, "c2"],
+          [10, "Ann", 3, "c3"],
+          [20, "Bob", 1, "c1"],
+          [20, "Bob", 2, "c2"],
+          [20, "Bob", 3, "c3"],
+          [20, "Cid", 1, "c1"],
+          [20, "Cid", 2, "c2"],
+          [20, "Cid", 3, "c3"],
+        ])
+    let text = "SELECT * FROM Emp NATURAL JOIN Coded"
+    let columns = try engineVirtual().columns(of: parse(query: text))
+    #expect(columns.map(\.name) == ["Dept", "Name", "Id", "Tag"])
+  }
+
+  @Test func `explicit USING over the real-and-virtual Id still merges (round 7)`()
+      throws {
+    // CONTROL: the round-7 behavior is UNCHANGED. `Coded JOIN Emp USING (Id)`
+    // still resolves `Coded`'s REAL `Id` and `Emp`'s VIRTUAL `Id` through the
+    // virtual-aware probe and MERGES them (keys real 1..3 against the row
+    // index 1..3), a single merged `Id` first, then the remaining real columns.
+    // Only NATURAL's common-set derivation changed; the explicit-USING path is
+    // untouched.
+    try engineVirtual().expect("SELECT * FROM Coded JOIN Emp USING (Id)",
+        yields: [
+          [1, "c1", 10, "Ann"],
+          [2, "c2", 20, "Bob"],
+          [3, "c3", 20, "Cid"],
+        ])
+    let text = "SELECT * FROM Coded JOIN Emp USING (Id)"
+    let columns = try engineVirtual().columns(of: parse(query: text))
+    #expect(columns.map(\.name) == ["Id", "Tag", "Dept", "Name"])
+  }
+
+  @Test func `a RIGHT USING over a virtual Id coalesces the right-only value`()
+      throws {
+    // `Few` has ONE row (Id 1); `Many` has three (Ids 1..3). A RIGHT join keeps
+    // every `Many` row: Id 1 matches, and Ids 2 and 3 are right-only with a
+    // NULL-extended left `Id`. The merged `Id` = COALESCE(Few.Id, Many.Id) must
+    // show the JOINED (right) virtual value on those right-only rows, so the
+    // merged column is 1, 2, 3 — not NULL — proving the run coalesces the
+    // virtual slot, not just resolves it.
+    try engineVirtual().expect("""
+        SELECT Id FROM Few RIGHT JOIN Many USING (Id) ORDER BY Id
+        """,
+        yields: [[1], [2], [3]])
+  }
+
+  // MARK: - A merged name a later plain join re-collides with on the VIRTUAL
+  // axis (round 8)
+
+  @Test func `a bare merged Id a later plain join's virtual Id re-collides with faults`()
+      throws {
+    // `Few JOIN Many USING (Id)` merges the VIRTUAL `Id` of both sides; a later
+    // plain `JOIN Emp ON 1 = 1` brings `Emp`'s OWN addressable virtual `Id`. A
+    // bare `Id` now names BOTH the merged column and `Emp.Id`, so it faults
+    // `.ambiguous` — the merged bare lookup scans the FULL addressable surface
+    // (physical AND virtual, `Scope.ordinal(of:)`'s), not a real-only one that
+    // would MISS the virtual `Emp.Id` and wrongly take the merged value. run
+    // and `columns(of:)` agree.
+    let text = "SELECT Id FROM Few JOIN Many USING (Id) JOIN Emp ON 1 = 1"
+    try engineVirtual().expect(text, fails: .ambiguous("Id"))
+    #expect(throws: SQLError.ambiguous("Id")) {
+      _ = try engineVirtual().columns(of: parse(query: text))
+    }
+  }
+
+  @Test func `a bare merged Id ambiguous with a virtual one faults in the WHERE`()
+      throws {
+    // The same conflict feeds a `WHERE` predicate: with the merged `Id` AND the
+    // plain-joined `Emp.Id` (virtual) both addressable, a bare `Id` in the
+    // `WHERE` faults `.ambiguous` rather than silently keying on the merged
+    // value.
+    let text = """
+        SELECT v FROM Few JOIN Many USING (Id) JOIN Emp ON 1 = 1 WHERE Id = 1
+        """
+    try engineVirtual().expect(text, fails: .ambiguous("Id"))
+    #expect(throws: SQLError.ambiguous("Id")) {
+      _ = try engineVirtual().columns(of: parse(query: text))
+    }
+  }
+
+  @Test func `a later USING over a virtual Id a plain join re-collided with faults`()
+      throws {
+    // The conflict feeds a later `USING` key too: `… USING (Id) JOIN Emp ON 1 =
+    // 1 JOIN Coded USING (Id)` accumulates a left carrying BOTH the merged `Id`
+    // and the plain-joined `Emp.Id` (virtual), so keying the final `USING (Id)`
+    // on that left is ambiguous — the left resolution (`Scope.left`) routes
+    // through the SAME full-surface merged bare lookup and faults.
+    try engineVirtual().expect("""
+        SELECT v FROM Few JOIN Many USING (Id) JOIN Emp ON 1 = 1
+        JOIN Coded USING (Id)
+        """,
+        fails: .ambiguous("Id"))
+  }
+
+  @Test func `qualified sides of a virtual-Id merge still resolve past a re-collision`()
+      throws {
+    // With bare `Id` ambiguous, each QUALIFIED reference still reaches its own
+    // side unambiguously: `Few.Id`/`Many.Id` the merge constituents (both the
+    // matched row index 1), `Emp.Id` the later plain join's virtual `Id` (the
+    // three `Emp` rows' indices 1..3) — never a fault.
+    try engineVirtual().expect("""
+        SELECT Few.Id, Many.Id, Emp.Id FROM Few JOIN Many USING (Id)
+        JOIN Emp ON 1 = 1
+        """,
+        yields: [[1, 1, 1], [1, 1, 2], [1, 1, 3]])
+  }
+
+  @Test func `a bare merged name a later plain join lacks stays unambiguous`()
+      throws {
+    // The control: when the later plain join's relation does NOT expose the
+    // merged name, the full-surface scan finds NO non-constituent match and the
+    // bare name resolves to the merged column — no false ambiguity. `Emp JOIN
+    // Team USING (Dept)` merges `Dept`; `Other(y)` carries no `Dept`, so a bare
+    // `Dept` still coalesces (only Dept 20 matches on both sides). run and
+    // `columns(of:)` agree.
+    let catalog = try Catalog {
+      Relation("Emp", ["Dept": .integer, "Name": .text]) {
+        Row(10, "Ann")
+        Row(20, "Bob")
+        Row(20, "Cid")
+      }
+      Relation("Team", ["Dept": .integer, "Lead": .text]) {
+        Row(20, "Deb")
+        Row(30, "Eve")
+      }
+      Relation("Other", ["y": .text]) {
+        Row("p")
+      }
+    }
+    let text = "SELECT Dept FROM Emp JOIN Team USING (Dept) JOIN Other ON 1 = 1"
+    try catalog.expect(text, yields: [[20], [20]])
+    let columns = try catalog.columns(of: parse(query: text))
+    #expect(columns.map(\.name) == ["Dept"])
+  }
+
+  // MARK: - `SELECT *` arity derives from the emitted enumeration (round 9)
+
+  @Test func `a virtual-Id USING SELECT * width equals its emitted arity`()
+      throws {
+    // `SELECT * FROM Emp JOIN Team USING (Id)` merges the VIRTUAL `Id` of both
+    // sides. No REAL column is subsumed (both `Id`s are virtual), so the arm
+    // emits FIVE values (the merged `Id`, then `Emp`'s two real columns, then
+    // `Team`'s two) — and the computed `SELECT *` width must equal that count,
+    // not undercount by subtracting the virtual constituents from a real-only
+    // sum. The width now DERIVES from the same enumeration `columns(of:)`
+    // walks, so the two agree by construction.
+    let catalog = try engineNamed()
+    try catalog.expect("SELECT * FROM Emp JOIN Team USING (Id)",
+        yields: [
+          [1, 10, "Ann", 20, "Deb"],
+          [2, 20, "Bob", 30, "Eve"],
+        ])
+    let text = "SELECT * FROM Emp JOIN Team USING (Id)"
+    let columns = try catalog.columns(of: parse(query: text))
+    #expect(columns.count == 5)
+  }
+
+  @Test func `a set operation over a virtual-Id SELECT * matches arity 5`()
+      throws {
+    // The undercounted width fed the set-operation arity check, so a genuinely
+    // matching UNION was WRONGLY rejected. The left arm's `SELECT *` is arity 5
+    // (merged virtual `Id` + four real columns); a right arm of five columns
+    // now unifies rather than faulting.
+    try engineNamed().expect("""
+        SELECT * FROM Emp JOIN Team USING (Id)
+        UNION ALL SELECT 9, 99, 'z', 88, 'w'
+        """,
+        yields: [
+          [1, 10, "Ann", 20, "Deb"],
+          [2, 20, "Bob", 30, "Eve"],
+          [9, 99, "z", 88, "w"],
+        ])
+  }
+
+  @Test func `a virtual-Id SELECT * set operation still faults a real arity mismatch`()
+      throws {
+    // The floor: a right arm of the WRONG arity (three columns against the
+    // arm's five) still faults `.arity`, so deriving width from the enumeration
+    // did not disable the check.
+    try engineNamed().expect("""
+        SELECT * FROM Emp JOIN Team USING (Id) UNION ALL SELECT 1, 2, 3
+        """,
+        fails: .arity(5, 3))
+  }
+
+  @Test func `an ORDER BY ordinal past the merged width resolves`() throws {
+    // The undercounted width (3) made the `ORDER BY` ordinal bound in the
+    // type-check path (`columns(of:validate:true)`) REJECT a valid ordinal (4
+    // or 5) that names a real output column — the width there feeds the bound.
+    // The width is now 5, so ordinal 5 (`Team`'s `Lead`) type-checks, and the
+    // run resolves and sorts by it.
+    let catalog = try engineNamed()
+    let text = "SELECT * FROM Emp JOIN Team USING (Id) ORDER BY 5"
+    _ = try catalog.columns(of: parse(query: text))
+    try catalog.expect(text,
+        yields: [
+          [1, 10, "Ann", 20, "Deb"],
+          [2, 20, "Bob", 30, "Eve"],
+        ])
+  }
+
+  @Test func `a real-column USING SELECT * width is unchanged`() throws {
+    // The control: when the USING column is a REAL column (`Dept`), one real
+    // constituent per side IS subsumed, so the emitted arity is 3 (merged
+    // `Dept` + `Emp.Name` + `Team.Lead`) — unchanged by deriving width from the
+    // enumeration. `columns(of:)` reports 3 and an `ORDER BY 3` resolves while
+    // an `ORDER BY 4` faults.
+    let catalog = try engineNamed()
+    let text = "SELECT * FROM Emp JOIN Team USING (Dept)"
+    let columns = try catalog.columns(of: parse(query: text))
+    #expect(columns.count == 3)
+    try catalog.expect("\(text) ORDER BY 3",
+        yields: [
+          [20, "Bob", "Deb"],
+          [20, "Cid", "Deb"],
+        ])
+    catalog.expect("\(text) ORDER BY 4", fails: .column("4"))
+  }
+}
+
+/// Fixtures for the VIRTUAL-`Id` named-column join cases. `Coded` carries a
+/// REAL `Id` column (which shadows its own virtual `Id`), so a `USING (Id)`
+/// against `Emp`'s VIRTUAL `Id` mixes a real and a virtual constituent. `Few`
+/// (one row) RIGHT-joined to `Many` (three rows) `USING (Id)` produces two
+/// right-only rows whose merged `Id` must coalesce to `Many`'s row index.
+private func engineVirtual() throws -> FixtureCatalog {
+  try Catalog {
+    Relation("Emp", ["Dept": .integer, "Name": .text]) {
+      Row(10, "Ann")
+      Row(20, "Bob")
+      Row(20, "Cid")
+    }
+    Relation("Coded", ["Id": .integer, "Tag": .text]) {
+      Row(1, "c1")
+      Row(2, "c2")
+      Row(3, "c3")
+    }
+    Relation("Few", ["v": .text]) {
+      Row("f1")
+    }
+    Relation("Many", ["w": .text]) {
+      Row("m1")
+      Row("m2")
+      Row("m3")
+    }
+  }
+}
+
+/// Three relations for a chained named-column join over TWO DISTINCT columns:
+/// `P(k, p)` and `Q(k, a, q)` share `k`, and `Q` and `R(a, r)` share `a`, so
+/// `(P JOIN Q USING (k)) JOIN R USING (a)` merges `k` at the INNER join and `a`
+/// at the OUTER one — the ISO 7.10 output order is `[a, k, p, q, r]`. `P
+/// NATURAL JOIN Q NATURAL JOIN R` discovers the same common columns.
+private func engineChained() throws -> FixtureCatalog {
+  try Catalog {
+    Relation("P", ["k": .integer, "p": .text]) {
+      Row(1, "p1")
+    }
+    Relation("Q", ["k": .integer, "a": .integer, "q": .text]) {
+      Row(1, 7, "q1")
+    }
+    Relation("R", ["a": .integer, "r": .text]) {
+      Row(7, "r1")
+    }
+  }
+}
+

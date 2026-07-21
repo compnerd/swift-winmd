@@ -49,6 +49,12 @@ extension Token {
     case or
     case not
     case join
+    /// The `NATURAL` keyword introducing a `NATURAL` join — its join columns
+    /// the ones common to both sides, resolved by name (ISO 9075 7.7).
+    case natural
+    /// The `USING` keyword introducing a `JOIN … USING (c, …)` named-column
+    /// join criterion.
+    case using
     /// The `LATERAL` keyword introducing a FROM/JOIN derived table whose body
     /// may reference the preceding FROM items (a correlated apply).
     case lateral
@@ -161,6 +167,8 @@ extension Token.Kind {
     case .or: "OR"
     case .not: "NOT"
     case .join: "JOIN"
+    case .natural: "NATURAL"
+    case .using: "USING"
     case .lateral: "LATERAL"
     case .inner: "INNER"
     case .cross: "CROSS"

@@ -568,6 +568,65 @@ struct JoinTests {
       _ = try Statement(parsing: "SELECT * FROM A CROSS B")
     }
   }
+
+  @Test func `parses a NATURAL JOIN as the natural criterion`() throws {
+    // `NATURAL JOIN` carries the `.natural` criterion; its columns resolve by
+    // name at compile, so the parser leaves the placeholder always-true `on`.
+    let select = try parse(select: "SELECT * FROM A NATURAL JOIN B")
+    #expect(select.joins == [
+      Join(relation: Relation(name: "B"), kind: .inner, using: .natural),
+    ])
+  }
+
+  @Test func `parses a NATURAL LEFT OUTER JOIN`() throws {
+    let select = try parse(select: "SELECT * FROM A NATURAL LEFT OUTER JOIN B")
+    #expect(select.joins == [
+      Join(relation: Relation(name: "B"), kind: .left, using: .natural),
+    ])
+  }
+
+  @Test func `parses a JOIN USING column list as the using criterion`() throws {
+    let select = try parse(select: "SELECT * FROM A JOIN B USING (x, y)")
+    #expect(select.joins == [
+      Join(relation: Relation(name: "B"), kind: .inner,
+           using: .columns(["x", "y"])),
+    ])
+  }
+
+  @Test func `parses a FULL OUTER JOIN USING`() throws {
+    let select = try parse(select: """
+        SELECT * FROM A FULL OUTER JOIN B USING (k)
+        """)
+    #expect(select.joins == [
+      Join(relation: Relation(name: "B"), kind: .full,
+           using: .columns(["k"])),
+    ])
+  }
+
+  @Test func `a NATURAL JOIN with a trailing ON faults`() {
+    #expect(throws: SQLError.self) {
+      _ = try Statement(parsing: "SELECT * FROM A NATURAL JOIN B ON a.x = b.x")
+    }
+  }
+
+  @Test func `a JOIN USING with a trailing ON faults`() {
+    #expect(throws: SQLError.self) {
+      _ = try Statement(
+          parsing: "SELECT * FROM A JOIN B USING (x) ON a.x = b.x")
+    }
+  }
+
+  @Test func `a USING without a parenthesised list faults`() {
+    #expect(throws: SQLError.self) {
+      _ = try Statement(parsing: "SELECT * FROM A JOIN B USING x")
+    }
+  }
+
+  @Test func `a NATURAL CROSS JOIN faults`() {
+    #expect(throws: SQLError.self) {
+      _ = try Statement(parsing: "SELECT * FROM A NATURAL CROSS JOIN B")
+    }
+  }
 }
 
 // MARK: - Literals

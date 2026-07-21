@@ -1006,9 +1006,25 @@ extension Catalog where Self: ~Escapable {
     var extended = bindings
     for (name, source) in correlation {
       // A `bound` source is already in `bindings` (threaded by the containing
-      // subquery), so it passes through unchanged; only a `slot` reads this
-      // subquery's immediate enclosing row.
-      if case let .slot(slot) = source { extended[name] = row[slot] }
+      // subquery), so it passes through unchanged; a `slot` reads this
+      // subquery's immediate enclosing row, and a `coalesce` (a correlated
+      // `NATURAL`/`USING` merged column) reads the FIRST non-NULL of its
+      // constituent cells of that row — its ISO 7.10 merged value.
+      switch source {
+      case let .slot(slot):
+        extended[name] = row[slot]
+      case let .coalesce(slots, type):
+        var value = Value.null
+        for slot in slots {
+          let cell = row[slot]
+          if case .null = cell { continue }
+          value = cell.coerced(to: type)
+          break
+        }
+        extended[name] = value
+      case .bound:
+        break
+      }
     }
     return extended
   }

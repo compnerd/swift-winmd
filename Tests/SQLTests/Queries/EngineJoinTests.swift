@@ -752,7 +752,7 @@ private func outers(_ plan: Plan) -> Bool {
     outers(left) || outers(right)
   case let .aggregate(_, _, source):
     outers(source)
-  case .single, .scan:
+  case .single, .empty, .scan:
     false
   }
 }

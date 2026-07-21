@@ -2151,6 +2151,11 @@ extension Catalog where Self: ~Escapable {
     switch plan {
     case .single:
       plan
+    case .empty:
+      // The known-empty relation is already physical — no seek, join, or source
+      // to rewrite below it — so it optimises to itself (and re-optimising a
+      // folded plan is idempotent).
+      plan
     case .scan:
       plan
     case let .derived(name, plan, ordinals, seek):
@@ -2176,11 +2181,16 @@ extension Catalog where Self: ~Escapable {
       // fewer per-row predicate. This composes with the seek and nest cases
       // below: a constant-true filter over a `.scan` or `.product` never
       // reaches them, becoming just the optimised source (a plain scan or
-      // product), not a seek over a true residual or a nest with a true gate. A
-      // constant-FALSE filter is NOT folded — there is no empty-relation Plan
-      // node, so a false filter is left filtering correctly (see the deferred
-      // empty-plan follow-up).
+      // product), not a seek over a true residual or a nest with a true gate.
       try optimise(source, context)
+    case let .select(filter, source) where filter.constant == false:
+      // A PROVABLY-always-false filter admits NO row, so the whole selection is
+      // the known-empty relation of the source's width — WHEN discarding the
+      // source suppresses no observable throw. `emptied(filter:over:)`
+      // optimises the source, then folds to `.empty` only when that source is
+      // throw-free (`Plan.safe`) and its width is known, else leaves the select
+      // filtering.
+      try emptied(filter, over: source, context)
     case let .select(filter, .scan(name, ordinals, nil)):
       try seek(filter, name, ordinals, context)
     case let .select(filter, .product(left, right)):
@@ -2243,6 +2253,33 @@ extension Catalog where Self: ~Escapable {
       // the cap itself has no seek or join to rewrite.
       try .limit(count: count, offset: offset, optimise(source, context))
     }
+  }
+
+  /// The fold of a PROVABLY constant-false `select(filter, source)` into the
+  /// known-empty relation, or the select left intact when the fold would change
+  /// more than the (already-zero) row count.
+  ///
+  /// A constant-false `filter` admits no row, so the selection's result is
+  /// empty — but executing `select(false, source)` today still runs `source`,
+  /// which may RAISE, before it filters every row out. Rewriting to `.empty`
+  /// skips `source` entirely, so it is sound ONLY when `source` raises on NO
+  /// input (`Plan.safe`) — else the fold would SUPPRESS a throw, a correctness
+  /// bug
+  /// rather than an optimisation. The source is optimised first so its safety
+  /// and width reflect the physical shape the executor would actually run (and
+  /// so its own nested folds still apply on the fall-through). `.empty` carries
+  /// the source's slot width so a downstream consumer mis-shapes nothing; a
+  /// source of unknown width (`slots` nil) is left filtering. On EITHER doubt
+  /// the select stays — a constant-false filter neither seeks nor supplies a
+  /// join key (`1 = 0` reads no slot), so no seek or nest rewrite is forgone.
+  private borrowing func emptied(_ filter: Filter, over source: Plan,
+                                 _ context: Context)
+      throws(SQLError) -> Plan {
+    let source = try optimise(source, context)
+    guard source.safe, let slots = source.slots else {
+      return .select(filter, source)
+    }
+    return .empty(slots: slots)
   }
 
   /// Optimises a VIEW body's sub-`plan` for the view named `name`, resolving
@@ -2589,7 +2626,10 @@ extension Catalog where Self: ~Escapable {
   internal borrowing func decorrelate(_ plan: Plan, _ context: Context)
       throws(SQLError) -> Plan {
     switch plan {
-    case .single, .scan, .join:
+    // `.empty` is produced only by `optimise`, which runs AFTER decorrelation,
+    // so a plan reaching here never carries one; the arm is a structural
+    // no-op keeping the switch exhaustive.
+    case .single, .empty, .scan, .join:
       return plan
     case let .derived(name, plan, ordinals, seek):
       // A view body is compiled and re-executed under its OWN scope; its
@@ -3289,7 +3329,9 @@ extension Plan {
   /// `select`s the seek and nest rewrites match.
   internal func pushdown() throws(SQLError) -> Plan {
     switch self {
-    case .single, .scan, .join:
+    // Pushdown runs BEFORE optimise, the only producer of `.empty`, so a plan
+    // reaching here never carries one; the arm keeps the switch exhaustive.
+    case .single, .empty, .scan, .join:
       self
     case let .derived(name, sub, ordinals, seek):
       try .derived(name: name, plan: sub.pushdown(), ordinals: ordinals,

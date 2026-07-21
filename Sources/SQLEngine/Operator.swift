@@ -118,6 +118,15 @@ internal indirect enum Plan {
   /// record (no slots), the row a scalar projection (`SELECT 1 + 1`) computes
   /// its expressions against.
   case single
+  /// The KNOWN-EMPTY relation of `slots` columns: it yields ZERO records over
+  /// exactly that combined slot width, the shape the optimiser rewrites a
+  /// PROVABLY constant-false selection into (a `WHERE 1 = 0` admits no row).
+  /// `slots` is the width of the subtree the empty replaced, so a downstream
+  /// consumer that reads a side's width (`Plan.slots`, the outer/semijoin
+  /// NULL-extension) mis-shapes nothing — the schema is preserved, only the
+  /// rows are gone. An aggregate over it still yields its degenerate one row
+  /// (`COUNT(*)` `0`), since the empty sits BELOW the aggregate as its source.
+  case empty(slots: Int)
   /// A leaf over the relation `name`: its `ordinals` (defining its slots), over
   /// the seek's row range when present (else the whole relation).
   case scan(name: String, ordinals: Array<Int>, seek: Range<Int>?)
@@ -271,6 +280,11 @@ extension Plan {
   /// declared `columns` so the view never claims a width its rows lack.
   internal var width: Int {
     switch self {
+    case let .empty(slots):
+      // The known-empty relation advertises the width of the subtree it
+      // replaced, so a view sub-plan measuring a data-empty body reads its true
+      // column count rather than the `select`'s conservative zero.
+      slots
     case let .project(terms, _):
       terms.count
     case let .setop(_, left, _, _, _, _):
@@ -309,6 +323,11 @@ extension Plan {
       // The single empty row has no slots — a FROM-less projection reads only
       // constants and calls over them, never a slot of this row.
       0
+    case let .empty(slots):
+      // The known-empty relation spans exactly the slots of the subtree it
+      // replaced — it drops the rows, never the schema — so a downstream join's
+      // NULL-extension width and a product's slot boundary stay correct.
+      slots
     case let .scan(_, ordinals, _):
       ordinals.count
     case let .derived(_, _, ordinals, _):
@@ -375,6 +394,57 @@ extension Plan {
     guard let limit else { return self }
     return .limit(count: limit.count, offset: limit.offset, self)
   }
+
+  /// Whether EXECUTING this plan cannot throw — the throw-freedom the optimiser
+  /// needs before it may rewrite a constant-false `select` OVER this plan into
+  /// `.empty`, discarding the plan unexecuted. Executing `select(false, child)`
+  /// today runs `child` (which may raise — a throwing scalar term, a `SUM`
+  /// overflow, a subquery fault) and only then filters every row out; folding
+  /// to `.empty` SKIPS `child`, so it is sound ONLY when `child` raises on NO
+  /// input, i.e. is `safe`. This is the plan-level analogue of
+  /// `Filter.safe`/`Term.safe` and is deliberately CONSERVATIVE: a shape whose
+  /// throw-freedom is not certain (a `derived` view body, any
+  /// join/apply/aggregate) reports `false`, so the fold is merely MISSED —
+  /// never unsound. Under-folding costs a per-row
+  /// predicate; over-folding would suppress a raise, so doubt resolves to
+  /// `false`.
+  internal var safe: Bool {
+    switch self {
+    case .single, .empty:
+      // A single empty row and the known-empty relation both yield their rows
+      // without evaluating anything — neither can raise.
+      true
+    case .scan:
+      // A scan reads cells and never evaluates an expression, so materialising
+      // it cannot raise; a compiled plan's scan name is already resolved.
+      true
+    case let .select(filter, source):
+      // The per-row predicate and everything below it must be throw-free.
+      filter.safe && source.safe
+    case let .project(terms, source):
+      // Every projected term is evaluated per row, so all must be safe.
+      terms.allSatisfy(\.safe) && source.safe
+    case let .sort(keys, source):
+      // Each sort key's term is evaluated per row before the comparison.
+      keys.allSatisfy { $0.term.safe } && source.safe
+    case let .product(left, right):
+      left.safe && right.safe
+    case let .setop(_, left, right, _, _, _):
+      // Combining rows never raises, so it is safe when its arms are.
+      left.safe && right.safe
+    case let .distinct(source):
+      source.safe
+    case let .limit(_, _, source):
+      source.safe
+    // A `derived` view body runs an arbitrary sub-plan (and augments/validates
+    // its schema); a `join`/`outer`/`semijoin`/`apply` evaluates an `on`,
+    // seeks, or re-executes a correlated body; an `aggregate` may overflow a
+    // `SUM` or type-fault a `MIN`/`MAX`. None is PROVABLY throw-free here, so
+    // each reports `false` — the fold is missed, never unsound.
+    case .derived, .join, .outer, .semijoin, .apply, .aggregate:
+      false
+    }
+  }
 }
 
 // MARK: - Interpreter
@@ -402,6 +472,12 @@ extension Catalog where Self: ~Escapable {
       // The FROM-less single row: one record with no cells, the source a scalar
       // projection evaluates its constant/call expressions against.
       return [Record([])]
+    case .empty:
+      // The known-empty relation yields NO records — the optimiser proved its
+      // constant-false guard admits none — so nothing above it (a project, an
+      // aggregate, a join) ever sees a row, and its skipped subtree stays
+      // unrun.
+      return []
     case let .scan(name, ordinals, seek):
       return try materialise(name, ordinals, seek, context.relations)
     case let .derived(name, source, ordinals, seek):

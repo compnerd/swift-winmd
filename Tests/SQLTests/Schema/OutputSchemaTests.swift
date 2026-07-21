@@ -722,3 +722,223 @@ struct OutputSchemaTests {
     #expect(columns[0].name == "n")
   }
 }
+
+// MARK: - CTE producer run/schema parity
+
+/// The outcome of typing or running a `WITH` — either the resolved result
+/// columns' `(name, kind)` pairs, or the `SQLError` a fault raised — so the
+/// three CTE entry points (a RUN, a `columns(validate: false)` derive, and a
+/// `columns(validate: true)` derive) can be compared for AGREEMENT: after the
+/// tier-2 unification they walk their CTEs through the ONE producer, so a shape
+/// must resolve to the same types on all three, or fault the same on all three.
+private enum Outcome: Equatable {
+  case columns(Array<OutputColumn>)
+  case fault(SQLError)
+}
+
+/// Runs `body` and captures its outcome — the resolved columns, or the fault.
+private func outcome(_ body: () throws -> Array<OutputColumn>) -> Outcome {
+  do {
+    return .columns(try body())
+  } catch let error as SQLError {
+    return .fault(error)
+  } catch {
+    return .fault(.state("XX000", "\(error)"))
+  }
+}
+
+/// The three CTE entry points' outcomes on one `WITH` — the regression fence
+/// for the tier-2 producer. `run` is the RUN path (its post-run `validate:
+/// false` schema, or its fault); `lenient` is `columns(validate: false)` — the
+/// TRUSTED post-run derive, which SKIPS the structural `validate` (so a
+/// shape/arity fault does not surface, and a recursive body reads its absent
+/// self); `strict` is `columns(validate: true)` — the full schema check.
+///
+/// The invariant the unification preserves: RUN and STRICT are the two FULLY
+/// validating paths, so they AGREE on every shape — the producer's shared
+/// `validate` (`typecheck` differing only in whether the reachable-operand
+/// check runs at derive or execution) and shared `kinds` carrier make them so.
+/// LENIENT agrees too on any shape whose outcome does NOT depend on the skipped
+/// structural check — the carrier-typing shapes (a `kinds`/`merge` fold runs
+/// regardless of the gate) and redefinition (the producer's guard is
+/// ungated) — but on a structural fault (arity, an unregistered call, a
+/// misplaced recursive arm) it TRUSTS the body and does not fault.
+private struct Triple {
+  let run: Outcome
+  let lenient: Outcome
+  let strict: Outcome
+
+  init(_ text: String) throws {
+    let statement = try Statement(parsing: text)
+    run = outcome {
+      _ = try engineFamily().run(statement)
+      return try engineFamily().columns(of: statement, validate: false)
+    }
+    lenient = outcome {
+      try engineFamily().columns(of: statement, validate: false)
+    }
+    strict = outcome {
+      try engineFamily().columns(of: statement, validate: true)
+    }
+  }
+}
+
+/// The `(name, kind)` pairs of an `Outcome`'s columns, or `nil` for a fault.
+private func pairs(_ outcome: Outcome) -> Array<(String, ValueType)>? {
+  guard case let .columns(columns) = outcome else { return nil }
+  return columns.map { ($0.name, $0.type) }
+}
+
+struct CTEProducerParityTests {
+  @Test func `an all-NULL CTE column agrees across run and both derives`() throws {
+    // A constant-NULL body column is UNCONSTRAINED, typed at the `.integer`
+    // default a materialised relation reports; the run and both derives read
+    // the SAME producer carrier, so all three agree on one `.integer` column.
+    let t = try Triple("WITH a(x) AS (SELECT NULLIF(Id, Id) FROM Parent) " +
+                       "SELECT x FROM a")
+    #expect(pairs(t.run).map { same($0, [("x", .integer)]) } == true)
+    #expect(t.run == t.lenient)
+    #expect(t.lenient == t.strict)
+  }
+
+  @Test func `an unregistered-call CTE body faults on the validating paths`()
+      throws {
+    // A call to an unregistered routine is a resolution fault the producer's
+    // shared `validate` raises the SAME on the two VALIDATING paths (RUN and
+    // STRICT). LENIENT is the trusted post-run derive: it skips `validate`, so
+    // it does NOT fault — the pre-existing gate this test pins, not a
+    // divergence the unification introduces.
+    let t = try Triple("WITH a(x) AS (SELECT nope(Id) FROM Parent) " +
+                       "SELECT x FROM a")
+    #expect(t.run == .fault(.function("nope")))
+    #expect(t.strict == t.run)
+    #expect(pairs(t.lenient).map { same($0, [("x", .integer)]) } == true)
+  }
+
+  @Test func `a recursive self-referencing CTE agrees across all paths`() throws {
+    // A genuine recursive CTE (its final UNION arm names itself) types its
+    // declared column off the anchor ⊕ recursive fold on every path — the
+    // schema derive through `kinds`/`contributions`, the run through
+    // `fixpoint` — so all three agree on one integer column `n`.
+    let t = try Triple("""
+        WITH RECURSIVE t(n) AS (
+          SELECT 1 UNION SELECT n + 1 FROM t WHERE n < 3
+        ) SELECT n FROM t
+        """)
+    #expect(pairs(t.run).map { same($0, [("n", .integer)]) } == true)
+    #expect(t.run == t.lenient)
+    #expect(t.lenient == t.strict)
+  }
+
+  @Test func `a widening recursive CTE agrees on the double column`() throws {
+    // The anchor is `.integer` (`1`) and the recursive arm widens it to
+    // `.double` (`n + 0.5`); the unified carrier the producer binds is
+    // `.double` on every path, so all three agree — the run coerces its rows
+    // to it, the derives type the declared column at it.
+    let t = try Triple("""
+        WITH RECURSIVE t(n) AS (
+          SELECT 1 UNION SELECT n + 0.5 FROM t WHERE n < 3
+        ) SELECT n FROM t
+        """)
+    #expect(pairs(t.run).map { same($0, [("n", .double)]) } == true)
+    #expect(t.run == t.lenient)
+    #expect(t.lenient == t.strict)
+  }
+
+  @Test func `a mixed integer double set-op CTE agrees on the widened column`()
+      throws {
+    // A non-recursive UNION body of an `integer` and a `double` arm folds to a
+    // `.double` column on every path — the producer's `kinds` fold and the
+    // run's `run`-then-`kinds` re-derive read the SAME `merge`.
+    let t = try Triple("WITH a(x) AS (SELECT 1 UNION SELECT 2.5) " +
+                       "SELECT x FROM a")
+    #expect(pairs(t.run).map { same($0, [("x", .double)]) } == true)
+    #expect(t.run == t.lenient)
+    #expect(t.lenient == t.strict)
+  }
+
+  @Test func `an irreconcilable set-op CTE faults identically on all paths`()
+      throws {
+    // A text arm beside a numeric one has no common type, so the body fold
+    // faults `.operand` (42804) — through the producer's shared `kinds`/`merge`
+    // on the derives (a fold that runs regardless of the validate gate) and the
+    // run's own fold — the SAME on all three.
+    let t = try Triple("WITH a(x) AS (SELECT 'b' UNION SELECT 1) " +
+                       "SELECT x FROM a")
+    let fault = Outcome.fault(.operand("UNION arms have irreconcilable types"))
+    #expect(t.run == fault)
+    #expect(t.lenient == fault)
+    #expect(t.strict == fault)
+  }
+
+  @Test func `an over-declared CTE arity faults on the validating paths`()
+      throws {
+    // A three-column declared list over a two-column `SELECT *` body faults
+    // `.columns` in ISO order (the compiled width, then the declared count) on
+    // the two VALIDATING paths. LENIENT trusts and reconciles to the declared
+    // list, so it does NOT fault — the pre-existing structural gate.
+    let t = try Triple("WITH a(x, y, z) AS (SELECT * FROM Parent) " +
+                       "SELECT * FROM a")
+    #expect(t.run == .fault(.columns(expected: 2, got: 3)))
+    #expect(t.strict == t.run)
+    #expect(pairs(t.lenient)?.count == 3)
+  }
+
+  @Test func `an under-declared CTE arity faults on the validating paths`()
+      throws {
+    // The mirror of the over-declared case — a one-column list over a
+    // two-column body — `.columns(expected: 2, got: 1)` on RUN and STRICT,
+    // LENIENT trusting the body to one column.
+    let t = try Triple("WITH a(x) AS (SELECT * FROM Parent) SELECT * FROM a")
+    #expect(t.run == .fault(.columns(expected: 2, got: 1)))
+    #expect(t.strict == t.run)
+    #expect(pairs(t.lenient)?.count == 1)
+  }
+
+  @Test func `a misplaced recursive arm faults on the validating paths`()
+      throws {
+    // A self-reference in the ANCHOR (not the final UNION arm) is the recursive
+    // shape the engine rejects `0A000` on the two VALIDATING paths. LENIENT
+    // trusts — it skips `validate`, so the body reads an absent self and faults
+    // `.relation` instead; the pre-existing gate, pinned so the unification
+    // cannot silently change it.
+    let t = try Triple("""
+        WITH RECURSIVE t(n) AS (
+          SELECT n FROM t UNION SELECT n FROM t
+        ) SELECT n FROM t
+        """)
+    let shape = Outcome.fault(.state("0A000",
+        "recursive WITH references the CTE outside its final UNION arm"))
+    #expect(t.run == shape)
+    #expect(t.strict == shape)
+    #expect(t.lenient == .fault(.relation("t")))
+  }
+
+  @Test func `a redefined CTE name faults identically on all paths`() throws {
+    // A case-insensitive redefinition is rejected by the producer's UNGATED
+    // guard — the SAME `.redefinition` on the run and BOTH derives, lenient
+    // included (the guard runs before any validate gate).
+    let t = try Triple("WITH a(x) AS (SELECT 1), A(y) AS (SELECT 2) " +
+                       "SELECT * FROM a")
+    let fault = Outcome.fault(.redefinition("A"))
+    #expect(t.run == fault)
+    #expect(t.lenient == fault)
+    #expect(t.strict == fault)
+  }
+
+  @Test func `a chained CTE reading a prior widened column agrees`() throws {
+    // The biggest risk: the run overlay grows with each prior CTE's
+    // MATERIALISED rows, the schema overlay with EMPTY rows, but both
+    // accumulate the SAME types/mask. Here `b` reads `a`'s column, widened to
+    // `.double`, so all three paths agree on one `.double` column — proving it
+    // threads the growing overlay identically (types, not rows) on both.
+    let t = try Triple("""
+        WITH a(x) AS (SELECT 1 UNION SELECT 2.5),
+             b(y) AS (SELECT x FROM a)
+          SELECT y FROM b
+        """)
+    #expect(pairs(t.run).map { same($0, [("y", .double)]) } == true)
+    #expect(t.run == t.lenient)
+    #expect(t.lenient == t.strict)
+  }
+}

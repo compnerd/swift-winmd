@@ -951,4 +951,51 @@ struct EngineRecursiveTests {
       _ = try statement(text, engineFamily())
     }
   }
+
+  // MARK: - Producer CTE-shape guards
+
+  // The tier-2 unification routes both the run and the schema paths through ONE
+  // CTE walk (`Engine.typed(ctes:in:rows:)`). These pin the RUN-side shape of
+  // the historically-divergent CTE kinds — the row companions to the R/S/V
+  // parity matrix in `OutputSchemaTests` — so a per-CTE regression surfaces
+  // here as a wrong ROW set, not only a wrong header.
+
+  @Test func `a chained CTE reading a prior widened column materialises doubles`()
+      throws {
+    // `a` is a mixed integer/double UNION widened to `.double`; `b` reads it.
+    // The run overlay carries `a`'s MATERIALISED rows coerced to the unified
+    // type, so `b` reads (and the query returns) `.double` values — the same
+    // widened carrier the schema path threads with EMPTY rows.
+    let rows = try statement("""
+        WITH a(x) AS (SELECT 1 UNION SELECT 2.5),
+             b(y) AS (SELECT x FROM a)
+          SELECT y FROM b ORDER BY y
+        """, engineFamily())
+    #expect(rows == [[.double(1.0)], [.double(2.5)]])
+  }
+
+  @Test func `a widening recursive CTE materialises every step as a double`()
+      throws {
+    // An integer anchor and a `+ 0.5` recursive arm widen the column to
+    // `.double`; the fixpoint coerces the seed AND each iteration's rows to
+    // the unified type, so the whole result is `.double` — the run counterpart
+    // of the schema derive's `.double` header.
+    let rows = try statement("""
+        WITH RECURSIVE t(n) AS (
+          SELECT 1 UNION ALL SELECT n + 0.5 FROM t WHERE n < 2
+        ) SELECT n FROM t ORDER BY n
+        """, engineFamily())
+    #expect(rows == [[.double(1.0)], [.double(1.5)], [.double(2.0)]])
+  }
+
+  @Test func `a mixed integer double non-recursive CTE coerces its rows`()
+      throws {
+    // A non-recursive UNION body widened to `.double`: the run coerces each
+    // arm's values to the unified type before binding, so `1` materialises as
+    // `1.0` — the producer's carrier and the run's rows agree on the type.
+    let rows = try statement("""
+        WITH a(x) AS (SELECT 1 UNION SELECT 2.5) SELECT x FROM a ORDER BY x
+        """, engineFamily())
+    #expect(rows == [[.double(1.0)], [.double(2.5)]])
+  }
 }

@@ -298,51 +298,15 @@ extension Catalog where Self: ~Escapable {
                                  validate: Bool)
       throws(SQLError) -> Array<OutputColumn> {
     let context = Context(routines: routines).validating(validate)
-    var overlay = ScopedRelations()
-    for cte in ctes {
-      // A name repeated in the list (case-insensitively) would silently shadow
-      // the earlier binding in the overlay, so reject it rather than overwrite
-      // — the same fault `Engine.with` raises before materialising, so a schema
-      // is advertised only for a `WITH` that could actually run.
-      guard overlay[cte.name.lowercased()] == nil else {
-        throw .redefinition(cte.name)
-      }
-      // Validate the body's SHAPE and ARITY against the scope of the PRIOR CTEs
-      // by the SAME code a run uses — `Engine.validate` — so a schema is not
-      // advertised for a `WITH` a run would reject, and this path never again
-      // drifts from the engine's recursive-shape and arity rules. It binds the
-      // CTE's self only inside the recursive arm (never the whole body), so a
-      // recursive reference in the final arm resolves while a self-reference in
-      // the anchor faults the recursive shape exactly as the run does. The
-      // schema path adds ONE thing the run defers to execution: a
-      // reachable-operand type-check over the body — passed IN as `typecheck`
-      // so it runs in the SAME per-arm scope the shared helper computes,
-      // checking a recursive CTE's anchor against the base scope the run
-      // evaluates it in (NOT the CTE-self overlay). A `validate: false` derive
-      // skips both — the run already proved the bodies consistent — so
-      // `typecheck: false` there.
-      if validate {
-        // `self.` escapes the shadow the `validate` Bool parameter casts over
-        // the shared `validate(_:against:)` engine helper.
-        try self.validate(cte, against: context.body(overlay),
-                          typecheck: true)
-      }
-      // The CTE's schema-only self — its declared columns, no rows, and its
-      // BODY-DERIVED column carrier (never the declared-name `.integer`
-      // placeholder), derived under the SAME body scope `validate` uses (the
-      // PRIOR CTEs in `overlay`, self not in scope) so the trailing query's
-      // set-op fold reads a CTE column at its real type rather than spuriously
-      // merging an `.integer` placeholder against a text arm and faulting. The
-      // carrier's `unconstrained` mask threads through `init(from:)`, so an
-      // all-NULL CTE column unifies with any later typed arm.
-      let derived = try kinds(of: cte, context.body(overlay))
-      // Bind the CTE's schema-only self into the overlay AFTER its body is
-      // validated — the scope a later CTE and the trailing query resolve
-      // against — exactly as `Engine.with` binds the materialised relation
-      // after running its body.
-      overlay[cte.name.lowercased()] =
-          RelationInstance(from: derived, rows: [])
-    }
+    // Type the CTEs into a SCHEMA-ONLY overlay (`rows: false`) through the ONE
+    // producer the run path also drives — `Engine.typed(ctes:in:rows:)` — so
+    // the redefinition guard, the shared `validate` (its `typecheck: true`
+    // riding this context's `validate` gate — a `validate: false` post-run
+    // derive TRUSTS the bodies and skips it), and the per-CTE `kinds` carrier
+    // derivation all run through the SAME walk a run does. Each CTE binds its
+    // declared columns with no rows, laid in source order, so a later CTE and
+    // the trailing query resolve a name the precedence a run applies.
+    let overlay = try typed(ctes: ctes, in: context, rows: false)
     // Compile/type-check/derive from the base `context.scoping(overlay)`
     // (idempotently augmented within each, which pushes the trailing query's
     // derived layer and reveals the base for a nested subquery), so a nested

@@ -2251,8 +2251,11 @@ extension Catalog where Self: ~Escapable {
                  all: all, types: types, widened: widened)
     case let .distinct(source):
       // A `distinct` dedups its source without a seek or join of its own;
-      // optimise the source below it and rewrap.
-      try .distinct(optimise(source, context))
+      // optimise the source below it, then DROP the dedup when that optimised
+      // source PROVABLY yields distinct full rows already (`Plan.unique`) —
+      // DISTINCT-of-DISTINCT, DISTINCT over a set operation's deduped result,
+      // or over a grouped aggregate — else rewrap and keep deduplicating.
+      try deduplicated(source, context)
     case let .aggregate(keys, aggregates, source):
       // An aggregate reshapes its source and has no seek or join of its own;
       // optimise its source (the WHERE/join chain below it seeks and nests as
@@ -2293,6 +2296,25 @@ extension Catalog where Self: ~Escapable {
       return .select(filter, source)
     }
     return .empty(slots: slots)
+  }
+
+  /// The fold of a `distinct(source)` into its optimised `source` alone when
+  /// that source PROVABLY yields distinct full rows already, or the `distinct`
+  /// left wrapping it otherwise.
+  ///
+  /// `SELECT DISTINCT` compiles to a `distinct` over the projected rows, but
+  /// the dedup is REDUNDANT when the source yields no duplicate full row — a
+  /// DISTINCT over another DISTINCT, over a set operation's already-deduped
+  /// result, or over a grouped aggregate (one row per distinct group key). The
+  /// source is optimised first so its `unique` reflects the physical shape the
+  /// executor runs (and so its own nested folds still apply). Dropping the
+  /// `distinct` is sound ONLY when `source.unique` is PROVABLY true — a
+  /// CONSERVATIVE test resolving every doubt to `false` (keep the dedup), so a
+  /// mis-fold never LEAKS a duplicate; a missed fold costs one extra dedup.
+  private borrowing func deduplicated(_ source: Plan, _ context: Context)
+      throws(SQLError) -> Plan {
+    let source = try optimise(source, context)
+    return source.unique ? source : .distinct(source)
   }
 
   /// Optimises a VIEW body's sub-`plan` for the view named `name`, resolving

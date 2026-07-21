@@ -215,7 +215,7 @@ struct EngineWithTests {
     // the declared arity is checked against the body's compiled width, faulting
     // with `SQLError.columns` rather than trapping when a later read indexes a
     // cell the row does not have.
-    #expect(throws: SQLError.columns(expected: 3, got: 2)) {
+    #expect(throws: SQLError.columns(expected: 2, got: 3)) {
       try statement("""
           WITH a (x, y, z) AS (SELECT * FROM Parent) SELECT x FROM a
           """, engineFamily())
@@ -231,7 +231,7 @@ struct EngineWithTests {
     // declared arity BEFORE materialising, regardless of the row count, so the
     // mismatch faults with `SQLError.columns` rather than silently returning
     // data.
-    #expect(throws: SQLError.columns(expected: 3, got: 2)) {
+    #expect(throws: SQLError.columns(expected: 2, got: 3)) {
       try statement("""
           WITH a (x, y, z) AS (SELECT * FROM Parent WHERE Id < 0)
             SELECT z FROM a
@@ -430,7 +430,7 @@ struct EngineRecursiveTests {
     // list; the non-UNION path validates the compiled width and faults rather
     // than binding narrow rows that trap when the trailing `SELECT z` reads the
     // absent ordinal.
-    #expect(throws: SQLError.columns(expected: 3, got: 2)) {
+    #expect(throws: SQLError.columns(expected: 2, got: 3)) {
       _ = try engineFamily().run(Statement(parsing: """
           WITH RECURSIVE Parent (x, y, z) AS (SELECT * FROM Parent)
             SELECT z FROM Parent
@@ -600,7 +600,7 @@ struct EngineRecursiveTests {
         )
         SELECT a FROM t
         """)
-    #expect(throws: SQLError.columns(expected: 3, got: 2)) {
+    #expect(throws: SQLError.columns(expected: 2, got: 3)) {
       try seed().run(query)
     }
   }
@@ -621,7 +621,7 @@ struct EngineRecursiveTests {
         )
         SELECT a FROM t
         """)
-    #expect(throws: SQLError.columns(expected: 3, got: 2)) {
+    #expect(throws: SQLError.columns(expected: 2, got: 3)) {
       try seed().run(query)
     }
   }
@@ -808,14 +808,65 @@ struct EngineRecursiveTests {
   }
 
   @Test func `a recursive CTE with mismatched arm widths faults cleanly`() throws {
-    // The anchor projects two columns and the recursive arm one, so the fold
-    // that unifies them column-wise must FAULT the column-count mismatch rather
-    // than trap indexing the shorter arm.
-    #expect(throws: SQLError.columns(expected: 2, got: 1)) {
-      _ = try statement("""
-          WITH RECURSIVE t (a, b) AS (SELECT 1, 2 UNION SELECT Id FROM t)
-            SELECT * FROM t
-          """, engineFamily())
+    // The anchor projects two columns (matching the declared list) and the
+    // recursive arm one, so the recursive-arm width check FAULTS the column-
+    // count mismatch — the arm's one-column degree against the two-name list —
+    // rather than trap indexing the shorter arm during the fold. The RUN path
+    // and the SCHEMA (`columns(of:)`) path must report the IDENTICAL ISO-
+    // ordered fault (`expected: arm degree, got: declared count`): the arm-
+    // width guard fires BEFORE the `kinds` derive whose inter-arm fold would
+    // otherwise raise the reverse `(expected: anchor, got: arm)` order first
+    // on the schema path. Assert the shared value so a future reorder cannot
+    // silently re-diverge the two paths.
+    let text = """
+        WITH RECURSIVE t (a, b) AS (SELECT 1, 2 UNION SELECT Id FROM t)
+          SELECT * FROM t
+        """
+    #expect(throws: SQLError.columns(expected: 1, got: 2)) {
+      _ = try statement(text, engineFamily())
+    }
+    #expect(throws: SQLError.columns(expected: 1, got: 2)) {
+      _ = try engineFamily().columns(of: Statement(parsing: text))
+    }
+  }
+
+  @Test func `a recursive CTE anchor mismatch faults alike on both paths`()
+      throws {
+    // The declared list names two columns; the ANCHOR projects one (the
+    // recursive arm two). The anchor-width guard runs before the arm's, so both
+    // the RUN and the SCHEMA path report the anchor's one-column degree against
+    // the two-name list in the SAME ISO order — the sibling of the arm-mismatch
+    // parity, proving the declared-list guard wins whichever arm diverges.
+    let text = """
+        WITH RECURSIVE t (a, b) AS (SELECT 1 UNION SELECT Id, Id FROM t)
+          SELECT * FROM t
+        """
+    #expect(throws: SQLError.columns(expected: 1, got: 2)) {
+      _ = try statement(text, engineFamily())
+    }
+    #expect(throws: SQLError.columns(expected: 1, got: 2)) {
+      _ = try engineFamily().columns(of: Statement(parsing: text))
+    }
+  }
+
+  @Test func `a no-list recursive CTE faults its arm alike on both paths`()
+      throws {
+    // With NO explicit `(a, b)` list the CTE's column names come from the
+    // ANCHOR's aliases (degree 2), so `cte.columns` is populated exactly as a
+    // declared list would be. The recursive arm's single column therefore hits
+    // the SAME arm-width guard, faulting `(expected: 1, got: 2)` on BOTH paths
+    // — never reaching the `kinds`/`contributions` inter-arm throw, which is
+    // consequently unreachable for a recursive CTE (its width is always checked
+    // against the anchor-derived list first).
+    let text = """
+        WITH RECURSIVE t AS (SELECT 1 AS a, 2 AS b UNION SELECT Id AS a FROM t)
+          SELECT * FROM t
+        """
+    #expect(throws: SQLError.columns(expected: 1, got: 2)) {
+      _ = try statement(text, engineFamily())
+    }
+    #expect(throws: SQLError.columns(expected: 1, got: 2)) {
+      _ = try engineFamily().columns(of: Statement(parsing: text))
     }
   }
 
@@ -848,5 +899,56 @@ struct EngineRecursiveTests {
         ) SELECT x FROM t
         """, engineFamily())
     #expect(rows == [[.null]])
+  }
+
+  @Test func `a recursive arm's derived body is not typed at the placeholder self`()
+      throws {
+    // The recursive arm reads the CTE self through a DERIVED body — `FROM
+    // (SELECT s || 'c' AS s FROM t …) AS d` — whose `s || 'c'` is well typed
+    // only when `s` is TEXT, its real (anchor-derived) type. The arm-WIDTH
+    // probe binds the self under the placeholder-typed `declared` carrier
+    // (`.integer`) purely to measure arity, and `augment` materialises that
+    // derived body eagerly; were the probe validating, it would type `s || 'c'`
+    // against the `.integer` placeholder and spuriously fault a runnable query.
+    // The probe is NON-validating, so arity is measured without typing the
+    // operands; the genuine arm operand check runs later under the unified
+    // text carrier and passes. The SCHEMA path must report `s` as `.text`
+    // WITHOUT throwing, agreeing with the run's terminating rows.
+    let text = """
+        WITH RECURSIVE t (s) AS (
+          SELECT 'b'
+          UNION ALL
+          SELECT s FROM (SELECT s || 'c' AS s FROM t WHERE s = 'b') AS d
+        ) SELECT * FROM t
+        """
+    let columns = try engineFamily().columns(of: Statement(parsing: text))
+    #expect(columns.count == 1)
+    #expect(columns[0].name == "s")
+    #expect(columns[0].type == .text)
+    let rows = try statement(text, engineFamily())
+    #expect(rows == [[.text("b")], [.text("bc")]])
+  }
+
+  @Test func `a genuinely mistyped recursive arm still faults on the schema path`()
+      throws {
+    // The fix makes the arm-WIDTH probe non-validating, so a genuine operand
+    // fault in the recursive arm must STILL be caught — by the later `kinds`-
+    // seeded typecheck under the unified carrier, not the width probe. Here the
+    // arm applies `||` (text-only) to the self column `n`, whose anchor is an
+    // INTEGER: the unified self is integer, so `n || 'c'` is genuine text-
+    // arithmetic-on-integer and must fault on BOTH the schema path and the run.
+    let text = """
+        WITH RECURSIVE t (n) AS (
+          SELECT 1
+          UNION ALL
+          SELECT n || 'c' FROM t WHERE n < 3
+        ) SELECT * FROM t
+        """
+    #expect(throws: SQLError.self) {
+      _ = try engineFamily().columns(of: Statement(parsing: text))
+    }
+    #expect(throws: SQLError.self) {
+      _ = try statement(text, engineFamily())
+    }
   }
 }

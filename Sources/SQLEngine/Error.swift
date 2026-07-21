@@ -80,11 +80,14 @@ public enum SQLError: Error, Hashable, Sendable {
   /// `SELECT *`, or an unaliased non-column expression — and no explicit column
   /// list names it; the string describes the offending projection.
   case named(String)
-  /// A `CREATE VIEW`'s explicit column list does not match the view query's
-  /// output width — the list must name exactly one column per projected value —
-  /// carrying the `expected` query arity and the `got` list count. Caught at
-  /// parse when the projection's arity is known, and as an engine backstop when
-  /// a view (a `SELECT *` whose width is known only at resolution) is compiled.
+  /// An explicit column list — a `CREATE VIEW`'s, a `WITH` CTE's, or a derived
+  /// table's `AS t(c, …)` — does not match the query expression's DEGREE, the
+  /// number of columns its body projects; the list must name exactly one column
+  /// per projected value. ISO 9075 makes the degree the reference, so
+  /// `expected` carries the body/query-expression degree and `got` the declared
+  /// list count, uniformly across every kind. Caught at parse when the
+  /// projection's arity is statically known, and as an engine backstop when the
+  /// width is known only at resolution (a `SELECT *` body).
   case columns(expected: Int, got: Int)
   /// A `CREATE VIEW` names two columns that collide — supplied explicitly or
   /// inferred from the projection — under the case-insensitive resolution
@@ -169,7 +172,7 @@ extension SQLError: CustomStringConvertible {
     case let .named(detail):
       "view column cannot be named: \(detail)"
     case let .columns(expected, got):
-      "view column list count does not match the query: "
+      "column list count does not match the query-expression degree: "
           + "expected \(expected), got \(got)"
     case let .duplicate(name):
       "duplicate view column '\(name)'"

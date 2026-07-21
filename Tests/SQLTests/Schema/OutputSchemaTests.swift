@@ -565,11 +565,12 @@ struct OutputSchemaTests {
     // width is known only at resolution), so a run rejects it with
     // `SQLError.columns` when its compiled body width contradicts the declared
     // list. A `validate: true` derive must not advertise a schema for it, so it
-    // faults the SAME way — declared as `expected`, body width as `got`, as
-    // `Engine.with` does — not report the one trusted declared column.
+    // faults the SAME way — body/query-expression degree as `expected`, the
+    // declared list count as `got`, as `Engine.with` does — not report the one
+    // trusted declared column.
     let statement = try Statement(parsing:
         "WITH t(a) AS (SELECT * FROM People) SELECT * FROM t")
-    #expect(throws: SQLError.columns(expected: 1, got: 2)) {
+    #expect(throws: SQLError.columns(expected: 2, got: 1)) {
       let _ = try catalog().columns(of: statement, validate: true)
     }
   }

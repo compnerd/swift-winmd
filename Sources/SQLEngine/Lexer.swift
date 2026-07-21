@@ -429,6 +429,8 @@ internal struct Lexer: ~Escapable {
     case "OR": .or
     case "NOT": .not
     case "JOIN": .join
+    case "NATURAL": .natural
+    case "USING": .using
     case "LATERAL": .lateral
     case "INNER": .inner
     case "CROSS": .cross

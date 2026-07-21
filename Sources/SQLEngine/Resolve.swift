@@ -157,6 +157,15 @@ internal struct PlanKey: Hashable, Sendable {
 internal enum Source: Hashable, Sendable {
   /// The value is the current outer row's cell at this combined ordinal.
   case slot(Int)
+  /// The value is the `COALESCE` (first non-NULL) of the current outer row's
+  /// cells at these combined ordinals, COERCED to the unified `type` — a
+  /// `NATURAL`/`USING` MERGED column of an enclosing join scope (ISO 9075
+  /// 7.10), whose value belongs to NEITHER physical side but to their coalesce,
+  /// correlated into a LATERAL body (or any nested subquery) as its ONE merged
+  /// column. It reads the outer row rather than a threaded binding, exactly as
+  /// `slot`, over MORE than one cell, matching the merged column's own
+  /// `COALESCE(left, right)` value the local scope lowers.
+  case coalesce(Array<Int>, ValueType)
   /// The value is already in `bindings` — threaded down by the containing
   /// subquery — so the eval passes it through unchanged.
   case bound
@@ -194,6 +203,8 @@ extension Dictionary where Key == String, Value == Source {
       switch source {
       case let .slot(ordinal):
         .slot(slot[ordinal]!)
+      case let .coalesce(ordinals, type):
+        .coalesce(ordinals.map { slot[$0]! }, type)
       case .bound:
         .bound
       }
@@ -201,13 +212,20 @@ extension Dictionary where Key == String, Value == Source {
   }
 
   /// The outer ordinals this correlation reads from the immediate enclosing row
-  /// — every `slot` source's ordinal, excluding the `bound` (threaded-binding)
-  /// sources — the cells that must be materialised for a per-outer-row
-  /// re-execution.
+  /// — every `slot` source's ordinal and every `coalesce` source's constituent
+  /// ordinals, excluding the `bound` (threaded-binding) sources — the cells
+  /// that must be materialised for a per-outer-row re-execution.
   internal var slots: Set<Int> {
     var slots = Set<Int>()
     for source in values {
-      if case let .slot(ordinal) = source { slots.insert(ordinal) }
+      switch source {
+      case let .slot(ordinal):
+        slots.insert(ordinal)
+      case let .coalesce(ordinals, _):
+        slots.formUnion(ordinals)
+      case .bound:
+        break
+      }
     }
     return slots
   }
@@ -283,6 +301,23 @@ internal final class Outer {
     ":__correlated_\(depth)_\(ordinal)"
   }
 
+  /// The synthetic `:parameter` name a correlated reference to a
+  /// `NATURAL`/`USING` MERGED column of enclosing scope `depth` lowers to —
+  /// keyed by the merged column's LEFT constituent ordinal but in a DISTINCT
+  /// namespace from `name(for:at:)`, so it cannot collide with the physical
+  /// parameter of ANY constituent slot. A LATERAL body that references BOTH the
+  /// bare merged column (this key) AND a physical constituent `A.k` (the
+  /// physical `name(for:at:)` key) thus gets TWO correlation entries, one per
+  /// reference, so the merged coalesce and the qualified slot each bind their
+  /// own value regardless of lowering order (a shared key let one overwrite the
+  /// other). The left constituent ordinal uniquely identifies the merged column
+  /// within a scope — each merged column stands over its own physical slots —
+  /// so it is a stable, deterministic identity across the run and schema
+  /// lowerings, as `name(for:at:)` is.
+  private func parameter(merging ordinal: Int, at depth: Int) -> String {
+    ":__merged_\(depth)_\(ordinal)"
+  }
+
   /// The synthetic bound-parameter name `column` correlates to, or `nil` when
   /// no enclosing scope binds it (the ordinary unknown-column fault stands).
   ///
@@ -296,31 +331,47 @@ internal final class Outer {
   /// a NOT-FOUND (`nil`) keeps the walk moving outward.
   internal func parameter(for column: Column) throws(SQLError) -> String? {
     for depth in scopes.indices.reversed() {
+      // A bare (unqualified) name a `NATURAL`/`USING` join of this enclosing
+      // scope MERGED (ISO 9075 7.10) correlates to its ONE coalesce value — the
+      // merged entry shadows its two physical constituents, so a LATERAL body's
+      // bare `k` binds the merged column rather than faulting `.ambiguous`
+      // between the two sides. Its source is the `COALESCE` of its constituent
+      // outer cells, coerced to its unified type, matching the merged column's
+      // own `value` the local scope lowers. A qualified `A.k`/`B.k` never
+      // matches a merged column and falls through to the physical probe.
+      if column.qualifier == nil,
+          let merged = try scopes[depth].merged(binding: column.name) {
+        let name = parameter(merging: merged.constituents[0], at: depth)
+        record(name, .coalesce(merged.constituents, merged.type),
+               matching: depth)
+        return name
+      }
       guard let ordinal = try scopes[depth].correlated(column) else { continue }
       let name = name(for: ordinal, at: depth)
-      record(name, ordinal, matching: depth)
+      record(name, .slot(ordinal), matching: depth)
       return name
     }
     return nil
   }
 
-  /// Records the correlation of `name` (the outer combined `ordinal` it reads)
-  /// matched at enclosing-scope `depth`.
+  /// Records the correlation of `name` — the `source` its per-outer-row value
+  /// comes from — matched at enclosing-scope `depth`.
   ///
   /// A match at the LAST scope (this subquery's immediate parent) reads that
-  /// outer row directly, so the source is the parent-row `slot`. A match at an
-  /// EARLIER scope is a correlation of the CONTAINING subquery too: it is
-  /// recorded `bound` here — the eval threads the value through `bindings`
-  /// rather than reading this subquery's own row — and propagated up to
-  /// `parent` (whose last scope is one level nearer), so the containing
-  /// occurrence is itself marked correlated and re-executes per its enclosing
-  /// row. Since a `Scope` lays relations at cumulative offsets from 0, the
-  /// `ordinal` is the same in every level that shares the matched scope, so the
-  /// ancestor that owns it as its IMMEDIATE parent reads the right cell.
-  private func record(_ name: String, _ ordinal: Int, matching depth: Int) {
+  /// outer row directly, so the source is the parent-row `source` as given (a
+  /// `slot` cell or a merged column's `coalesce`). A match at an EARLIER scope
+  /// is a correlation of the CONTAINING subquery too: it is recorded `bound`
+  /// here — the eval threads the value through `bindings` rather than reading
+  /// this subquery's own row — and the SAME `source` propagated up to `parent`
+  /// (whose last scope is one level nearer), so the containing occurrence is
+  /// itself marked correlated and re-executes per its enclosing row. Since a
+  /// `Scope` lays relations at cumulative offsets from 0, the source's ordinals
+  /// are the same in every level that shares the matched scope, so the ancestor
+  /// that owns it as its IMMEDIATE parent reads the right cells.
+  private func record(_ name: String, _ source: Source, matching depth: Int) {
     let immediate = depth == scopes.count - 1
-    correlation[name] = immediate ? .slot(ordinal) : .bound
-    if !immediate { parent?.record(name, ordinal, matching: depth) }
+    correlation[name] = immediate ? source : .bound
+    if !immediate { parent?.record(name, source, matching: depth) }
   }
 
   /// The value type of the enclosing column `column` names, or `nil` when no
@@ -348,6 +399,19 @@ internal final class Outer {
   internal func resolved(for column: Column) throws(SQLError)
       -> ResolvedColumn? {
     for scope in scopes.reversed() {
+      // A bare name an enclosing `NATURAL`/`USING` join MERGED types from the
+      // merged column's unified coalesce type (ISO 9075 7.10) — the SAME entry
+      // `parameter(for:)` binds — so the schema-derive and the run's lowering
+      // agree on a correlated merged reference. It carries the merged column's
+      // OWN `unconstrained` mask (constrained once either constituent did, a
+      // placeholder only when BOTH were unconstrained), so an enclosing
+      // set-operation fold over the correlated merged reference defers or
+      // constrains consistently. A qualified name falls through to the physical
+      // probe.
+      if column.qualifier == nil,
+          let merged = try scope.merged(binding: column.name) {
+        return merged.resolved(named: column.name)
+      }
       guard let ordinal = try scope.correlated(column) else { continue }
       return scope.resolved(at: ordinal, named: column.name)
     }
@@ -1713,12 +1777,64 @@ internal struct Scope {
     let offset: Int
   }
 
+  /// A `NATURAL`/`USING` MERGED column (ISO 9075 7.10) — the ONE common column
+  /// a named-column join exposes, belonging to NEITHER side. It has NO physical
+  /// slot of its own: its `value` is the `COALESCE(left, right)` over the two
+  /// PHYSICAL combined ordinals it merges (each still addressable QUALIFIED),
+  /// and its `type` the unified coalesce type. A bare (unqualified) reference
+  /// to its `name` resolves to `value` — the merged entry SHADOWS its physical
+  /// constituents for bare lookup — while a qualified `A.c`/`B.c` never matches
+  /// it and reaches its own slot.
+  internal struct Merged: Sendable {
+    let name: String
+    let value: Term
+    let type: ValueType
+    /// The two PHYSICAL combined ordinals this merged column coalesces — the
+    /// left constituent and the right one — kept so a `SELECT *` drops them
+    /// (each is exposed ONCE, via the merged `value`, not twice as itself).
+    let constituents: Array<Int>
+    /// Whether the merged column places NO type constraint — TRUE only when
+    /// BOTH constituents were unconstrained (each an all-NULL/placeholder
+    /// column), so a `USING` merge of two constant-NULL sides stays a
+    /// placeholder that a further enclosing set-operation fold unifies with any
+    /// typed arm; FALSE when EITHER side constrained the merged type. The
+    /// `unconstrained` bit the set-operation `merge(_:_:)` computes, carried so
+    /// a downstream `output(of:)`/correlated read reports it rather than
+    /// hard-coding the merged column constrained.
+    let unconstrained: Bool
+
+    /// This merged column as an output `ResolvedColumn` — its `type` AND its
+    /// `unconstrained` mask carried TOGETHER, named `name` (the reference's
+    /// spelling for a bare `output(of:)`, else the merged column's own `name`
+    /// for a `SELECT *`). The SINGLE construction both the `SELECT *`
+    /// (`outputs`) and the explicit bare `output(of:)` merged-output paths
+    /// route through, so neither can drop the mask the other carries.
+    internal func resolved(named name: String) -> ResolvedColumn {
+      ResolvedColumn(OutputColumn(name: name, type: type),
+                     unconstrained: unconstrained)
+    }
+  }
+
   private let members: Array<Member>
+
+  /// The `NATURAL`/`USING` merged columns of the join chain, in ISO 7.10 order
+  /// — a bare reference to one resolves to its coalesce `value`, and a
+  /// `SELECT *` prepends them ahead of the members' remaining physical columns.
+  /// Empty for a chain with no named-column join, so an ordinary scope is
+  /// unchanged.
+  private let merged: Array<Merged>
+
+  /// The physical combined ordinals a merged column subsumes — the union of
+  /// every `Merged.constituents` — so a `SELECT *` skips them (each is exposed
+  /// ONCE via its merged `value`).
+  private let subsumed: Set<Int>
 
   /// Builds a scope over `relations` — the `FROM` relation first, then each
   /// joined relation in source order — laying each past the previous one's
-  /// `extent`.
-  internal init(_ relations: Array<(Relation, Schema)>) {
+  /// `extent`, carrying the `NATURAL`/`USING` `merged` columns (empty for a
+  /// chain with none).
+  internal init(_ relations: Array<(Relation, Schema)>,
+                merged: Array<Merged> = []) {
     var members = Array<Member>()
     members.reserveCapacity(relations.count)
     var offset = 0
@@ -1727,6 +1843,147 @@ internal struct Scope {
       offset += schema.extent
     }
     self.members = members
+    self.merged = merged
+    self.subsumed = Set(merged.flatMap(\.constituents))
+  }
+
+  /// The merged column named `name` (case-insensitively), or `nil` when none —
+  /// the entry a bare reference SHADOWS its two physical constituents with.
+  private func merged(_ name: String) -> Merged? {
+    let folded = name.lowercased()
+    return merged.first { $0.name.lowercased() == folded }
+  }
+
+  /// The `NATURAL`/`USING` merged column a BARE `name` resolves to (ISO 9075
+  /// 7.10), or `nil` when none is merged under that name — the binding
+  /// `term`/`derive`/`output(of:)` shadow the two physical sides with.
+  ///
+  /// The merged column shadows its OWN constituents, but an addressable column
+  /// of the same name a LATER PLAIN join contributed (`… USING (k) JOIN C …`, C
+  /// carrying its own `k`) is NOT a constituent — a bare `k` now names both
+  /// the merged column and that other one, so it faults `SQLError.ambiguous`
+  /// rather than silently taking the merged value. A qualified `A.k`/`C.k`
+  /// never reaches here and stays unambiguous.
+  ///
+  /// The conflict scan is the FULL addressable surface (`addressable` —
+  /// physical AND virtual, the same surface `ordinal(of:)` resolves against),
+  /// EXCLUDING the merged column's own physical constituents. So a merged `Id`
+  /// (a virtual join column) coexisting with a later plain join's own VIRTUAL
+  /// `Id` faults `.ambiguous` just as a real conflict does — the two axes stay
+  /// consistent because neither the merged bare lookup nor the ordinary one
+  /// scans a partial surface.
+  internal func merged(binding name: String) throws(SQLError) -> Merged? {
+    guard let merged = merged(name) else { return nil }
+    for ordinal in addressable(Column(name: name))
+        where !subsumed.contains(ordinal) {
+      throw .ambiguous(name)
+    }
+    return merged
+  }
+
+  /// Whether the real column at `member`'s local `ordinal` is a PHYSICAL
+  /// constituent a merged column subsumes — one a `SELECT *` drops, since the
+  /// merged `value` already exposes it ONCE.
+  private func subsumed(_ member: Member, _ ordinal: Int) -> Bool {
+    subsumed.contains(member.offset + ordinal)
+  }
+
+  /// The `NATURAL`/`USING` merged columns, in ISO 7.10 order — the surface the
+  /// schema-path `SELECT *`/bare-column resolution (`outputs`/`output(of:)`)
+  /// reads to name and type a merged output column, matching the run's `terms`.
+  internal var merges: Array<Merged> { merged }
+
+  /// The merged column named `name` (case-insensitively), or `nil` when none —
+  /// the probe `Grouping` uses to route a bare merged key to term-matching
+  /// rather than the ordinal `keys` map its `find` cannot fill.
+  internal func merges(_ name: String) -> Merged? { merged(name) }
+
+  /// Whether the real column at combined `ordinal` is a PHYSICAL constituent a
+  /// merged column subsumes — the schema-path `SELECT *` (`outputs`) drops it.
+  internal func subsumes(_ ordinal: Int) -> Bool { subsumed.contains(ordinal) }
+
+  /// The combined ordinals of the REAL columns a `SELECT *` emits AFTER the
+  /// merged block — every relation's real column at its combined ordinal, in
+  /// chain order, skipping a physical constituent a merged column subsumes
+  /// (each exposed ONCE via its merged `value`). Never a virtual ordinal.
+  ///
+  /// This is the ONE walk the `SELECT *` surfaces share, so its length and its
+  /// membership cannot drift between them: `terms(.all)` maps each to a
+  /// `.slot`, `outputs`/`names` read each column's name and type, and
+  /// `width(of: .all)` is `merged.count` plus this count — the width DERIVED
+  /// from the same enumeration that emits the columns, not a parallel formula.
+  internal var expansion: Array<Int> {
+    var ordinals = Array<Int>()
+    for member in members {
+      for ordinal in 0 ..< member.schema.width
+          where !subsumed(member, ordinal) {
+        ordinals.append(member.offset + ordinal)
+      }
+    }
+    return ordinals
+  }
+
+  /// The visible (unqualified) column NAMES this scope resolves, in chain order
+  /// — the `NATURAL`/`USING` merged columns first, then each member's real
+  /// column names skipping a physical constituent a merged column subsumes.
+  /// This is the LEFT side's output-name list a `NATURAL` join intersects with
+  /// the joined-in relation to find its common columns. It reads the ONE
+  /// `expansion` enumeration the `SELECT *` surfaces share, resolving each
+  /// combined ordinal back to its owning relation's spelling (`name(at:)`).
+  internal var names: Array<String> {
+    merged.map(\.name) + expansion.map { name(at: $0) }
+  }
+
+  /// The (unqualified) name of the real column at combined `ordinal` — the
+  /// reverse of the chain layout, resolving `ordinal` to its owning relation
+  /// and that relation's spelling. A combined `ordinal` from `expansion` always
+  /// names a real column (`local < width`); the fallback empty string never
+  /// arises for an `expansion` ordinal. Shared by `names` and the schema-path
+  /// `SELECT *` (`outputs`), so both name the columns `expansion` emits.
+  internal func name(at ordinal: Int) -> String {
+    for member in members {
+      let local = ordinal - member.offset
+      if local >= 0, local < member.schema.width {
+        return member.schema.names[local]
+      }
+    }
+    return ""
+  }
+
+  /// The LEFT-side resolution of a bare join column `name` when building a
+  /// `NATURAL`/`USING` merged column: its value `Term`, its `type`, its
+  /// `unconstrained` mask, and the PHYSICAL combined ordinals it stands over.
+  ///
+  /// The `unconstrained` mask is the CONSTITUENT'S — an earlier-merged column's
+  /// own accumulated bit, else the physical column's `unconstrained(at:)` — so
+  /// the `NATURAL`/`USING` type merge honors an all-NULL/placeholder left the
+  /// SAME way the set-operation fold does (a constant-NULL left constrains
+  /// nothing, deferring the merged type to the right).
+  ///
+  /// A name an earlier join already MERGED resolves to that merged column — its
+  /// coalesce `value`, unified `type`, and constituent ordinals — so a chained
+  /// `… USING (k)` keys on the merged value (a `RIGHT`/`FULL` join's left-NULL
+  /// row still joins), THROUGH the FULL ambiguity-aware bare lookup
+  /// (`merged(binding:)`): a merged entry that now COEXISTS with a physical
+  /// column of the same name a LATER PLAIN join re-introduced (`… USING (k) …
+  /// JOIN C ON … JOIN … USING (k)`, C carrying its own `k`) is AMBIGUOUS, so
+  /// keying a later `USING` on it faults `SQLError.ambiguous` here rather than
+  /// silently taking the merged value and leaving two output columns named `k`.
+  /// A name NOT yet merged must resolve to EXACTLY ONE left physical column
+  /// (`ordinal(of:)`); an accumulated-left name bound TWICE (a plain `ON` join
+  /// left two columns of that name) faults `SQLError.ambiguous` here, the
+  /// finding-1 trap now a first-class fault at construction rather than a
+  /// downstream crash.
+  internal func left(_ name: String) throws(SQLError)
+      -> (value: Term, type: ValueType, unconstrained: Bool,
+          constituents: Array<Int>) {
+    if let merged = try merged(binding: name) {
+      return (merged.value, merged.type, merged.unconstrained,
+              merged.constituents)
+    }
+    let ordinal = try ordinal(of: Column(name: name))
+    return (.slot(ordinal), type(at: ordinal), unconstrained(at: ordinal),
+            [ordinal])
   }
 
   /// The combined-space base offset and extent of each relation, in chain order
@@ -1744,14 +2001,20 @@ internal struct Scope {
 
   /// The number of output columns `projection` yields over this scope — the
   /// count the lowered `terms(projection)` array carries, and the range a
-  /// 1-based `ORDER BY` ordinal must fall in. A `*` expands to every relation's
-  /// real `width` in chain order (never a virtual column); a bare-column or an
-  /// expression list is its item count. It reads only schemas, matching the
-  /// compile path's `projection.count` without lowering a term.
+  /// 1-based `ORDER BY` ordinal must fall in. A `*` counts the merged columns
+  /// plus the real columns the shared `expansion` enumeration emits (never a
+  /// virtual column); a bare-column or an expression list is its item count.
   internal func width(of projection: Projection) -> Int {
     switch projection {
     case .all:
-      return schemas.reduce(0) { $0 + $1.width }
+      // DERIVED from the ONE `expansion` walk `terms(.all)`/`outputs` emit —
+      // the merged columns plus the real columns it yields — so the width
+      // cannot drift from the emitted count. A parallel `schemas.reduce(width)
+      // − subsumed.count` arithmetic UNDERCOUNTED when a merged column's
+      // constituent was VIRTUAL (a fixture/adapter `Id`): the virtual ordinal
+      // is in `subsumed` but was never in the real-width sum, so subtracting it
+      // dropped a real column that IS emitted.
+      return merged.count + expansion.count
     case let .columns(columns):
       return columns.count
     case let .expressions(items):
@@ -1824,11 +2087,18 @@ internal struct Scope {
       throws(SQLError) -> ValueType {
     return switch expression {
     case let .column(column):
-      // A column this scope does not bind may be a CORRELATED reference to an
-      // enclosing query (in an inner `WHERE`); type it as the outer column,
-      // else the ordinary column fault. A LOCALLY AMBIGUOUS name is a HARD
-      // error `find` propagates, never a fall-through to outer correlation.
-      if let ordinal = try find(column) {
+      // A BARE name matching a `NATURAL`/`USING` merged column types from the
+      // unified coalesce `type` — the merged column has NO physical ordinal, so
+      // it is typed here rather than via `type(at:)` (a same-named physical
+      // column a later plain join added faults `.ambiguous`).
+      if column.qualifier == nil,
+          let merged = try merged(binding: column.name) {
+        merged.type
+      } else if let ordinal = try find(column) {
+        // A column this scope does not bind may be a CORRELATED reference to an
+        // enclosing query (in an inner `WHERE`); type it as the outer column,
+        // else the ordinary column fault. A LOCALLY AMBIGUOUS name is a HARD
+        // error `find` propagates, never a fall-through to outer correlation.
         type(at: ordinal)
       } else if let resolved = try subquery.correlated(column) {
         resolved.type
@@ -2072,13 +2342,21 @@ internal struct Scope {
       throws(SQLError) -> ValueType {
     switch expression {
     case let .column(column):
-      // A column this scope does not bind may be a CORRELATED reference to an
-      // enclosing query (validated exactly as the run resolves it — a `WHERE`
-      // one types as its outer column, a projection/`HAVING` one faults
-      // unsupported); else the ordinary column fault. A LOCALLY AMBIGUOUS name
-      // is a HARD error `find` propagates, never a fall-through to outer
-      // correlation.
-      if let ordinal = try find(column) {
+      // A BARE name matching a `NATURAL`/`USING` merged column (ISO 9075 7.10)
+      // types from the unified coalesce `type` — the SAME merged-aware bare
+      // lookup `term`/`derive` shadow the two physical sides with, so the
+      // type-check accepts exactly the bare merged reference the run lowers (a
+      // same-named physical column a later plain join added faults `.ambiguous`
+      // in `merged(binding:)`). A column this scope does not bind may be a
+      // CORRELATED reference to an enclosing query (validated as the run
+      // resolves it — a `WHERE` one types as its outer column, a
+      // projection/`HAVING` one faults unsupported); else the ordinary column
+      // fault. A LOCALLY AMBIGUOUS name is a HARD error `find` propagates — not
+      // a fall-through to outer correlation.
+      if column.qualifier == nil,
+          let merged = try merged(binding: column.name) {
+        merged.type
+      } else if let ordinal = try find(column) {
         type(at: ordinal)
       } else if let type = try subquery.correlated(column) {
         type
@@ -3734,21 +4012,37 @@ internal struct Scope {
     return members.contains { admits($0, column) }
   }
 
+  /// Every combined ordinal `column` addresses — the FULL addressable surface
+  /// (each admitted relation's PHYSICAL columns AND its VIRTUAL ones, through
+  /// `Schema.ordinal(of:)`), in chain order. This is the ONE bare-name scan
+  /// every ambiguity/presence determination routes through, so no site can scan
+  /// a PARTIAL surface (real-only) and drift: a name matching more than one
+  /// entry here is ambiguous, one present, none absent — measured over the same
+  /// physical∪virtual surface `ordinal(of:)` resolves against. An unqualified
+  /// `column` admits every relation; a qualified one only a relation its
+  /// qualifier names.
+  private func addressable(_ column: Column) -> Array<Int> {
+    var ordinals = Array<Int>()
+    for member in members where admits(member, column) {
+      guard let local = member.schema.ordinal(of: column.name) else { continue }
+      ordinals.append(member.offset + local)
+    }
+    return ordinals
+  }
+
   /// The combined ordinal `column` resolves to.
   ///
   /// The name resolves against every admitted relation: present in exactly one
   /// it yields that relation's `offset` plus the local ordinal; present in more
   /// than one — an unqualified name in several relations, or a qualified name
   /// two relations share a name for — it is `SQLError.ambiguous`; in none it is
-  /// `SQLError.column`.
+  /// `SQLError.column`. Resolution reads the ONE full-addressable scan
+  /// (`addressable`), so it and every ambiguity/presence check measure the same
+  /// physical∪virtual surface.
   internal func ordinal(of column: Column) throws(SQLError) -> Int {
-    var resolved: Int? = nil
-    for member in members where admits(member, column) {
-      guard let local = member.schema.ordinal(of: column.name) else { continue }
-      if resolved != nil { throw .ambiguous(column.name) }
-      resolved = member.offset + local
-    }
-    guard let resolved else { throw .column(column.name) }
+    let ordinals = addressable(column)
+    if ordinals.count > 1 { throw .ambiguous(column.name) }
+    guard let resolved = ordinals.first else { throw .column(column.name) }
     return resolved
   }
 
@@ -3836,15 +4130,13 @@ internal struct Scope {
     let subquery = subquery.barred
     switch projection {
     case .all:
-      // Every real column of every relation, at its combined ordinal — in chain
-      // order, never a virtual column of any relation.
-      var terms = Array<Term>()
-      for member in members {
-        for ordinal in 0 ..< member.schema.width {
-          terms.append(.slot(member.offset + ordinal))
-        }
-      }
-      return terms
+      // The `NATURAL`/`USING` merged columns FIRST (ISO 9075 7.10), each as its
+      // coalesce `value`, then every real column the shared `expansion`
+      // enumeration yields as a `.slot` at its combined ordinal — in chain
+      // order, never a virtual column, and never a physical constituent a
+      // merged column subsumes. `width(of: .all)` counts this SAME
+      // enumeration, so the emitted arity and the width cannot diverge.
+      return merged.map(\.value) + expansion.map { .slot($0) }
     case let .columns(columns):
       // Lower each bare column through `term`, so a name none of this scope's
       // relations bind consults the `subquery` surface: a correlated reference
@@ -3873,6 +4165,17 @@ internal struct Scope {
       throws(SQLError) -> Term {
     switch expression {
     case let .column(column):
+      // A BARE (unqualified) name matching a `NATURAL`/`USING` merged column
+      // (ISO 9075 7.10) resolves to its ONE coalesced `value` — the merged
+      // entry SHADOWS its two physical constituents, so the name is not
+      // ambiguous between the two sides. A QUALIFIED `A.c`/`B.c` never matches
+      // a (unqualified) merged column and reaches its own side below. A
+      // physical column of the same name a later PLAIN join contributed faults
+      // `.ambiguous` (`merged(binding:)`).
+      if column.qualifier == nil,
+          let merged = try merged(binding: column.name) {
+        return merged.value
+      }
       // Resolve the column against this scope's own relations first; a name
       // none binds is a candidate CORRELATED reference — consult the enclosing
       // scope, lowering to a synthetic `Term.parameter` bound from the outer
@@ -4074,9 +4377,27 @@ internal struct Scope {
 internal struct Grouping {
   private let scope: Scope
 
-  /// Each `GROUP BY` key's combined base ordinal mapped to its grouped slot —
-  /// key `i` sits at grouped slot `i`.
+  /// Each BARE-column `GROUP BY` key's combined base ordinal mapped to its
+  /// grouped slot — key `i` sits at grouped slot `i`. A general (non-column)
+  /// key holds no ordinal entry; it matches by expression through
+  /// `expressions` instead.
   private let keys: Dictionary<Int, Int>
+
+  /// Each `GROUP BY` key's source AST expression, in key order — key `i` sits
+  /// at grouped slot `i`. A projection/`HAVING`/`ORDER BY` expression EQUAL to
+  /// a general (non-column) key resolves to that key's slot. A bare column
+  /// still resolves through the ordinal `keys` map, so a qualification-
+  /// equivalent reference (`Amount` vs `Sales.Amount`) matches.
+  private let expressions: Array<Expression>
+
+  /// Each `GROUP BY` key's LOWERED base-ordinal term, in key order — key `i`
+  /// sits at grouped slot `i`. A projection/`HAVING`/`ORDER BY` expression that
+  /// lowers to a term EQUAL to a key's is that key, so a bare `NATURAL`/`USING`
+  /// merged column — which lowers to a `COALESCE(left, right)` term with NO
+  /// single ordinal, the group key AND every bare reference to it — groups and
+  /// projects as ONE value, matched by the lowered TERM rather than the AST
+  /// expression or an ordinal a merged column lacks.
+  private let terms: Array<Term>
 
   /// The number of `GROUP BY` keys — aggregate `j` sits at grouped slot
   /// `offset + j`, following the key slots.
@@ -4105,36 +4426,47 @@ internal struct Grouping {
   /// (`SQLError.ambiguous`) rather than silently picking the last projection.
   private var ambiguous: Set<String> = []
 
-  /// Builds a grouping over `scope` for the `GROUP BY` `columns` and the
-  /// query's distinct `aggregates` (in first-appearance order — aggregate `j`
-  /// at grouped slot `columns.count + j`). The `aggregates` are already deduped
-  /// by RESOLVED `Aggregation` (see `group`), so a qualification-equivalent
-  /// pair is one entry sharing one slot.
-  internal init(_ scope: Scope, _ columns: Array<Column>,
+  /// Builds a grouping over `scope` for the `GROUP BY` `columns` (with their
+  /// already-LOWERED base-ordinal `terms`, so a merged column's coalesce term
+  /// is matched by term) and the query's distinct `aggregates` (in
+  /// first-appearance order — aggregate `j` at grouped slot `columns.count +
+  /// j`). The `aggregates` are already deduped by RESOLVED `Aggregation` (see
+  /// `group`), so a qualification-equivalent pair is one entry, one slot.
+  internal init(_ scope: Scope, _ grouping: Array<Expression>,
+                _ terms: Array<Term>,
                 _ aggregates: Array<Aggregation>,
                 subquery: Resolution = .unsupported) throws(SQLError) {
     self.scope = scope
-    var keys = Dictionary<Int, Int>(minimumCapacity: columns.count)
-    for index in columns.indices {
-      // A grouping key a local relation binds maps its combined ordinal to its
-      // grouped slot. A key NONE binds is a candidate CORRELATED reference (a
-      // LATERAL body grouping on a preceding column): the correlation surface's
-      // non-recording `correlated` probe distinguishes it from a genuine
-      // unknown column, and it occupies grouped slot `index` as a `.parameter`
-      // key (in `group`'s keys array) with NO ordinal→slot entry — the
-      // projection reads it via the same correlation, never through this key
-      // dict. A genuinely unknown column re-throws the `.column` fault; a
-      // barred surface diagnoses a bound outer column `.unsupported`.
-      // `correlated` records nothing, so it stays idempotent against `group`'s
-      // own correlation of the same key.
-      if let ordinal = try scope.find(columns[index]) {
+    var keys = Dictionary<Int, Int>(minimumCapacity: grouping.count)
+    for index in grouping.indices {
+      // A BARE-column grouping key a local relation binds maps its combined
+      // ordinal to its grouped slot. A bare `NATURAL`/`USING` MERGED column
+      // binds no single ordinal (`find` faults `.ambiguous` over its two
+      // physical sides) — its lowered `terms[index]` is a `COALESCE` matched by
+      // term, so it takes NO ordinal entry, as a general key does. A key NONE
+      // binds is a candidate CORRELATED reference (a LATERAL body grouping
+      // on a preceding column): the correlation surface's non-recording
+      // `correlated` probe distinguishes it from a genuine unknown column, and
+      // it occupies grouped slot `index` as a `.parameter` key (in `group`'s
+      // keys array) with NO ordinal→slot entry — the projection reads it via
+      // the same correlation, never through this key dict. A genuinely unknown
+      // column re-throws the `.column` fault; a barred surface diagnoses a
+      // bound outer column `.unsupported`. `correlated` records nothing, so it
+      // stays idempotent against `group`'s own correlation. A general
+      // (non-column) key takes no ordinal entry; it matches by term in `term`.
+      guard case let .column(column) = grouping[index],
+          column.qualifier == nil ? scope.merges(column.name) == nil : true
+      else { continue }
+      if let ordinal = try scope.find(column) {
         keys[ordinal] = index
-      } else if try subquery.correlated(columns[index]) == nil {
-        _ = try scope.ordinal(of: columns[index])
+      } else if try subquery.correlated(column) == nil {
+        _ = try scope.ordinal(of: column)
       }
     }
     self.keys = keys
-    self.offset = columns.count
+    self.expressions = grouping
+    self.terms = terms
+    self.offset = grouping.count
     self.aggregates = aggregates
   }
 
@@ -4165,6 +4497,27 @@ internal struct Grouping {
     if case .aggregate = expression,
        let slot = try slot(of: expression, routines, subquery: subquery) {
       return .slot(slot)
+    }
+    // A bare `NATURAL`/`USING` MERGED column lowers to its `COALESCE(left,
+    // right)` value — the SAME term the `GROUP BY` key lowered to — so it
+    // matches a key by TERM (it binds no single ordinal), grouping and
+    // projecting as ONE value. A right-only row of a `RIGHT`/`FULL` join groups
+    // by its coalesced value, not a NULL left column.
+    if case let .column(column) = expression, column.qualifier == nil,
+        scope.merges(column.name) != nil {
+      let lowered = try scope.term(expression, routines, subquery: subquery)
+      guard let index = terms.firstIndex(of: lowered) else {
+        throw .grouping(column.name)
+      }
+      return .slot(index)
+    }
+    // A general (non-column) key matches by expression: a projection/`HAVING`/
+    // `ORDER BY` expression EQUAL to a `GROUP BY` key resolves to that key's
+    // grouped slot. A bare column is skipped here and falls through to the
+    // ordinal path below, which matches a qualification-equivalent reference.
+    if case .column = expression {
+    } else if let index = expressions.firstIndex(of: expression) {
+      return .slot(index)
     }
     switch expression {
     case let .column(column):

@@ -89,10 +89,13 @@ public enum SQLError: Error, Hashable, Sendable {
   /// projection's arity is statically known, and as an engine backstop when the
   /// width is known only at resolution (a `SELECT *` body).
   case columns(expected: Int, got: Int)
-  /// A `CREATE VIEW` names two columns that collide — supplied explicitly or
-  /// inferred from the projection — under the case-insensitive resolution
+  /// Two columns collide under the case-insensitive resolution
   /// `Schema.ordinal(of:)` performs, so the shadowed column would be
-  /// unreachable; the string is the offending name.
+  /// unreachable — a `CREATE VIEW`'s two columns (supplied explicitly or
+  /// inferred from the projection), or a `NATURAL`/`USING` join's merged names
+  /// (`USING (k, k)`, or a `NATURAL` join whose left side already carries two
+  /// columns named `k`), which would build two output columns of one name. The
+  /// string is the offending name.
   case duplicate(String)
   /// A `WITH` list binds the same query name twice (case-insensitively), so the
   /// later definition would silently shadow the earlier; the string is the
@@ -175,7 +178,7 @@ extension SQLError: CustomStringConvertible {
       "column list count does not match the query-expression degree: "
           + "expected \(expected), got \(got)"
     case let .duplicate(name):
-      "duplicate view column '\(name)'"
+      "duplicate column '\(name)'"
     case let .redefinition(name):
       "WITH query name '\(name)' specified more than once"
     case let .arity(expected, found):

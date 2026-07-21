@@ -32,8 +32,12 @@
 ///                   // LATERAL is legal only on a derived table in a join
 /// derived        := '(' query ')' AS identifier  // a derived table (aliased);
 ///                   // the query may be a SELECT, TABLE t, or VALUES (…)
-/// join           := ([INNER | (LEFT | RIGHT | FULL) [OUTER]] JOIN
-///                     relation ON predicate)
+/// join           := ([NATURAL] [INNER | (LEFT | RIGHT | FULL) [OUTER]] JOIN
+///                     relation [ON predicate | USING '(' identifier
+///                                (',' identifier)* ')'])
+///                     // ON and USING are mutually exclusive, and NATURAL bars
+///                     // both (its columns are the shared ones); a non-NATURAL
+///                     // non-CROSS join requires exactly one of ON/USING
 ///                  | (CROSS JOIN relation)  // Cartesian product, no ON/USING
 ///                   // INNER JOIN LATERAL = CROSS APPLY, LEFT = OUTER APPLY;
 ///                   // the derived body may reference preceding FROM items
@@ -488,7 +492,8 @@ internal struct Parser: ~Escapable {
 
     var joins = Array<Join>()
     while let kind = try joinKind() {
-      try joins.append(join(kind.kind, cross: kind.cross))
+      try joins.append(join(kind.kind, cross: kind.cross,
+                            natural: kind.natural))
     }
     let predicate: Predicate? = if try match(.where) {
       try predicate()
@@ -514,15 +519,18 @@ internal struct Parser: ~Escapable {
   }
 
   /// Parses `BY column (, column)*` (the `GROUP` keyword is already consumed) —
-  /// the `GROUP BY` grouping columns, in source order.
-  private mutating func grouping() throws(SQLError) -> Array<Column> {
+  /// the `GROUP BY` keys, in source order. Each key parses as a `column` and is
+  /// carried as a bare `Expression.column`; the general `Expression` element
+  /// lets a bare `NATURAL`/`USING` merged key lower to its coalesce value
+  /// through the join scope, never a parsed general expression.
+  private mutating func grouping() throws(SQLError) -> Array<Expression> {
     try expect(.by)
-    var columns = Array<Column>()
-    try columns.append(column())
+    var keys = Array<Expression>()
+    try keys.append(.column(column()))
     while try match(.comma) {
-      try columns.append(column())
+      try keys.append(.column(column()))
     }
-    return columns
+    return keys
   }
 
   // MARK: - Relation
@@ -626,22 +634,29 @@ internal struct Parser: ~Escapable {
 
   /// Parses an optional join `kind` and its `JOIN` keyword at the current
   /// position, or `nil` when no join clause begins here. The `cross` flag marks
-  /// a `CROSS JOIN` — an unqualified Cartesian product taking no `ON`/`USING`.
+  /// a `CROSS JOIN` — an unqualified Cartesian product taking no `ON`/`USING` —
+  /// and `natural` a `NATURAL` join, whose columns are the ones the two sides
+  /// share (resolved by name, so it takes no `ON`/`USING` either).
   ///
   /// A bare `JOIN` (or an explicit `INNER JOIN`) is `.inner`; `LEFT`/`RIGHT`/
   /// `FULL` introduce an outer join, each admitting an optional `OUTER` noise
   /// word before the mandatory `JOIN`; `CROSS` introduces a Cartesian product,
   /// lowered as an `.inner` join over a synthesized always-true predicate. A
-  /// leading `INNER`/`CROSS`/`LEFT`/`RIGHT`/`FULL` commits to a join clause, so
-  /// a missing `JOIN` after it faults rather than silently ending the chain.
+  /// leading `NATURAL` prefixes any of the inner/outer varieties (`NATURAL
+  /// [INNER | LEFT | RIGHT | FULL [OUTER]] JOIN`), but not `CROSS`. A leading
+  /// `NATURAL`/`INNER`/`CROSS`/`LEFT`/`RIGHT`/`FULL` commits to a join clause,
+  /// so a missing `JOIN` after it faults rather than silently ending the chain.
   private mutating func joinKind()
-      throws(SQLError) -> (kind: Join.Kind, cross: Bool)? {
-    if try match(.join) { return (.inner, false) }
-    if try match(.cross) {
+      throws(SQLError) -> (kind: Join.Kind, cross: Bool, natural: Bool)? {
+    let natural = try match(.natural)
+    if try match(.join) { return (.inner, false, natural) }
+    // `CROSS` is a product join taking no criterion, so `NATURAL CROSS` is
+    // ill-formed; reject it rather than silently drop the `NATURAL`.
+    if !natural, try match(.cross) {
       // `CROSS JOIN` is the Cartesian product; it carries no inner/outer word
       // and no `ON`, and lowers as an `.inner` join over an always-true `on`.
       try expect(.join)
-      return (.inner, true)
+      return (.inner, true, false)
     }
     let kind: Join.Kind
     if try match(.inner) {
@@ -652,6 +667,11 @@ internal struct Parser: ~Escapable {
       kind = .right
     } else if try match(.full) {
       kind = .full
+    } else if natural {
+      // A `NATURAL` with no inner/outer word is a `NATURAL [INNER] JOIN`; the
+      // mandatory `JOIN` must follow.
+      try expect(.join)
+      return (.inner, false, true)
     } else {
       return nil
     }
@@ -659,32 +679,55 @@ internal struct Parser: ~Escapable {
     // carries it. Either way `JOIN` must follow.
     if kind != .inner { _ = try match(.outer) }
     try expect(.join)
-    return (kind, false)
+    return (kind, false, natural)
   }
 
   /// Parses the join tail (the `kind` and `JOIN` keyword are already consumed):
-  /// a relation and, unless `cross`, an `ON` and an arbitrary boolean predicate
-  /// — the same grammar a `WHERE` admits, so a join relates its sides by an
-  /// equality, an inequality, an expression equality, or any `AND`/`OR`/`NOT`
-  /// of comparisons. A pure `column = column` conjunct hash-joins; the rest is
-  /// a residual filter.
+  /// a relation and its join criterion. A plain join takes exactly one of `ON
+  /// <predicate>` (an arbitrary boolean expression, the same grammar a `WHERE`
+  /// admits, so a join relates its sides by an equality, an inequality, an
+  /// expression equality, or any `AND`/`OR`/`NOT` of comparisons — a pure
+  /// `column = column` conjunct hash-joins, the rest a residual filter) or
+  /// `USING '(' identifier (, identifier)* ')'` (the named-column shorthand,
+  /// resolved into an equality `on` and a coalesced `SELECT *` at compile). A
+  /// `NATURAL` join (`natural`) takes NEITHER — its columns are the shared ones
+  /// — so a trailing `ON`/`USING` after it faults; a plain non-`CROSS` join
+  /// requires exactly one of them.
   ///
-  /// A `CROSS JOIN` (`cross`) takes NO `ON`/`USING` — a trailing `ON` is a
-  /// syntax error, caught by leaving `on` unconsumed for the caller's `where`/
+  /// A `CROSS JOIN` (`cross`) takes NO criterion — a trailing `ON`/`USING` is a
+  /// syntax error, caught by leaving it unconsumed for the caller's `where`/
   /// end-of-select expectation to reject. Its `on` is a synthesized `1 = 1`,
   /// which lowers to a constant-true filter the optimiser elides, collapsing
   /// the join to a bare `.product` — the Cartesian product, equivalent to an
   /// inner join written `ON 1 = 1`.
-  private mutating func join(_ kind: Join.Kind,
-                             cross: Bool) throws(SQLError) -> Join {
+  private mutating func join(_ kind: Join.Kind, cross: Bool,
+                             natural: Bool) throws(SQLError) -> Join {
     let relation = try relation()
-    guard cross else {
-      try expect(.on)
-      let on = try predicate()
+    if natural {
+      // A `NATURAL` join resolves its columns by name; an `ON`/`USING` after it
+      // is ill-formed (its criterion is fixed), so leave the token for the
+      // caller's clause expectation to reject.
+      return Join(relation: relation, kind: kind, using: .natural)
+    }
+    if cross {
+      let on = Predicate.comparison(left: .literal(.integer(1)), op: .equal,
+                                    right: .literal(.integer(1)))
       return Join(relation: relation, kind: kind, on: on)
     }
-    let on = Predicate.comparison(left: .literal(.integer(1)), op: .equal,
-                                  right: .literal(.integer(1)))
+    if try match(.using) {
+      // `USING` requires a parenthesised, non-empty column list; `names()`
+      // yields `nil` when no `(` follows, which is a syntax error here.
+      guard let columns = try names() else {
+        guard let token = current else {
+          throw .incomplete(expected: "'(' after USING")
+        }
+        throw .unexpected(token.kind.description, expected: "'(' after USING",
+                          at: token.location)
+      }
+      return Join(relation: relation, kind: kind, using: .columns(columns))
+    }
+    try expect(.on)
+    let on = try predicate()
     return Join(relation: relation, kind: kind, on: on)
   }
 

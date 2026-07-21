@@ -1867,17 +1867,22 @@ extension Catalog where Self: ~Escapable {
     }
     let (joined, relations) = try resolve(from: relation, schema: from.schema,
                                           joins: select.joins, context)
-    let scope = Scope(relations)
+    // Model the `NATURAL`/`USING` merged columns in the scope and synthesize
+    // each named-column join's lowered `on` filter, as the non-aggregate join
+    // path does — so a bare merged column groups/projects by the coalesced
+    // value.
+    let (ons, merged, merges) = try merges(over: relations, select.joins)
+    let scope = Scope(relations, merged: merged)
 
     // Each join's ON predicate lowers to a `Filter` at its own chain level,
     // resolved against only the prefix already in scope (as the non-aggregate
     // path does). A `column = column` conjunct becomes a `match` hash-join key;
     // the rest is a residual the join runs as a filter.
     // Each join's PREFIX scope — the relations available AT that join point,
-    // never one joined LATER — the scope its `ON` lowers against and a subquery
-    // in that `ON` correlates against.
+    // never one joined LATER — carries the merged columns accumulated BEFORE
+    // this join, so a chained `USING` `on` keys on the merged value.
     let prefixes = select.joins.indices.map { index in
-      Scope(Array(relations[0 ... index + 1]))
+      Scope(Array(relations[0 ... index + 1]), merged: merges[index])
     }
     // Compile every nested subquery ONCE for arity/type, ahead of lowering, and
     // discover each one's CORRELATION: a join `ON`'s against its PREFIX scope,
@@ -1892,9 +1897,16 @@ extension Catalog where Self: ~Escapable {
     var matches = Array<Filter>()
     matches.reserveCapacity(select.joins.count)
     for index in select.joins.indices {
-      let join = select.joins[index]
-      try matches.append(prefixes[index].on(join.on, context.routines,
-                                            subquery: plans.on(index)))
+      // A `NATURAL`/`USING` join's `on` is the SYNTHESIZED, already-lowered
+      // filter (`ons[index]`, `nil` for a degenerate `NATURAL` join); a plain
+      // join lowers its written `ON` against the prefix scope.
+      if let on = ons[index] {
+        matches.append(on)
+      } else {
+        try matches.append(prefixes[index].on(select.joins[index].on,
+                                              context.routines,
+                                              subquery: plans.on(index)))
+      }
     }
     var predicate: Filter? = nil
     if let clause = select.predicate {
@@ -1906,18 +1918,18 @@ extension Catalog where Self: ~Escapable {
     // base-ordinal terms; the aggregates are collected from the projection, the
     // `HAVING`, and the `ORDER BY` sort keys (deduplicated so the same
     // aggregate computes once).
-    let keys = try select.grouping.map { column throws(SQLError) -> Term in
-      // A grouping key a local relation binds reads its combined slot; one NONE
-      // binds is a candidate CORRELATED reference (a LATERAL body grouping on a
-      // preceding column) — the same `barred` surface the projection/HAVING use
-      // lowers it to a `Term.parameter` the apply binds per outer row (a
-      // per-invocation constant → one group), admitting it only under the
-      // LATERAL `everywhere` seam and faulting `.unsupported` on an ordinary
-      // grouped subquery. The final `ordinal(of:)` re-throws a genuine
-      // unknown-column `.column`.
-      if let ordinal = try scope.find(column) { return .slot(ordinal) }
-      if let name = try barred.correlate(column) { return .parameter(name) }
-      return try .slot(scope.ordinal(of: column))
+    let keys = try select.grouping.map { key throws(SQLError) -> Term in
+      // Each key lowers through `scope.term`: a bare column a local relation
+      // binds reads its combined slot; a bare `NATURAL`/`USING` merged column
+      // lowers to its `COALESCE(left, right)` value (so the aggregate node
+      // groups a `RIGHT`/`FULL` join's unmatched row by the merged value, not a
+      // NULL left column); a name NONE binds is a candidate CORRELATED
+      // reference (a LATERAL body grouping on a preceding column) — the
+      // `barred` surface lowers it to a `Term.parameter` the apply binds per
+      // outer row, admitting it only under the LATERAL `everywhere` seam and
+      // faulting `.unsupported` on an ordinary grouped subquery, else the
+      // genuine unknown-column `.column`. A general key lowers by `term` too.
+      try scope.term(key, context.routines, subquery: barred)
     }
     var expressions = Array<Expression>()
     for expression in select.projection.projected {
@@ -2005,7 +2017,7 @@ extension Catalog where Self: ~Escapable {
     // Lower the projection, HAVING, and ORDER BY against the grouped slot
     // space, enforcing the projection rule (every non-aggregated column must be
     // a GROUP BY key).
-    var grouping = try Grouping(scope, select.grouping, aggregations,
+    var grouping = try Grouping(scope, select.grouping, keys, aggregations,
                                 subquery: barred)
     let projection = try grouping.terms(select.projection, context.routines,
                                         subquery: barred)
@@ -4175,8 +4187,9 @@ extension Catalog where Self: ~Escapable {
   /// space from these. The returned `relations` lays the FROM relation first,
   /// then each joined one, each paired with its schema: `Scope(relations)` is
   /// the full-chain scope, `relations[0 ... index + 1]` a join's prefix scope,
-  /// and `relations.reduce(0) { $0 + $1.1.width }` the `SELECT *` width — every
-  /// downstream derivation reads out of this one resolution.
+  /// and `Scope(…).width(of: .all)` the `SELECT *` width — DERIVED from the
+  /// merged-prepend + real-column `expansion` the scope emits, never a separate
+  /// sum — every downstream derivation reads out of this one resolution.
   ///
   /// `relations` is built INCREMENTALLY, each join resolving against the
   /// PRECEDING FROM (`Scope` of the relations before it): a LATERAL arm's
@@ -4192,11 +4205,19 @@ extension Catalog where Self: ~Escapable {
     var joined = Array<Resolved>()
     joined.reserveCapacity(joins.count)
     var relations = [(relation, schema)]
-    for join in joins {
+    for index in joins.indices {
+      // The PRECEDING scope carries the merged columns the joins before this
+      // one expose (`prefix(through:)`), so a LATERAL body resolves a bare
+      // merged name to its ONE coalesced column rather than seeing the two
+      // physical join columns and faulting `.ambiguous`. A join before this one
+      // is already resolved (its schema is in `relations`), so the merged
+      // prefix is computable here.
+      let preceding =
+          try prefix(through: index, over: relations, joins)
       let resolved =
-          try resolve(join.relation, context, preceding: Scope(relations))
+          try resolve(joins[index].relation, context, preceding: preceding)
       joined.append(resolved)
-      relations.append((join.relation, resolved.schema))
+      relations.append((joins[index].relation, resolved.schema))
     }
     return (joined, relations)
   }
@@ -4222,7 +4243,17 @@ extension Catalog where Self: ~Escapable {
       let schema = try resolve(relation, context).schema
       let (_, relations) = try resolve(from: relation, schema: schema,
                                        joins: select.joins, context)
-      return relations.reduce(0) { $0 + $1.1.width }
+      // A `SELECT *` over a `NATURAL`/`USING` join is measured at its MERGED
+      // width (each join column ONCE) through `Scope.width(of: .all)`, which
+      // DERIVES the count from the merged-prepend + real-column `expansion` the
+      // arm emits — the width the arm actually produces, not the raw sum of
+      // both sides, and not a parallel arithmetic that could drift (a VIRTUAL
+      // `USING` constituent undercounted the old sum). So `A JOIN B USING (k)
+      // UNION SELECT …` compares post-merge widths and a valid set operation is
+      // not wrongly rejected. An arm with no named-column join yields an empty
+      // merged set, so the width is just the real-column count.
+      let merged = try merges(over: relations, select.joins).merged
+      return Scope(relations, merged: merged).width(of: .all)
     case let .columns(columns):
       return columns.count
     case let .expressions(items):
@@ -4448,6 +4479,261 @@ extension Catalog where Self: ~Escapable {
     }
   }
 
+  /// The synthesized joins and the `NATURAL`/`USING` MERGED columns (ISO 9075
+  /// 7.10) of `select`'s join chain, resolved against the already-resolved
+  /// `relations` (the FROM relation first, then each joined one in source
+  /// order). A chain with no named-column join returns the joins verbatim and
+  /// an empty merged list, so an ordinary query is untouched.
+  ///
+  /// Rather than rewrite the AST — an emulation every reference site,
+  /// expression form, and pass ordering had to be taught — this models each
+  /// merged column ONCE as a scope entry, so the ordinary name→`Term` machinery
+  /// (`Scope.term`/`derive`, `Scope.terms(.all)`, `Grouping`) consumes it. The
+  /// merged column has NO physical slot: its value is `COALESCE(left, right)`
+  /// over the two PHYSICAL combined ordinals (each QUALIFIED-addressable),
+  /// and a bare reference to its name resolves to that coalesce (the entry
+  /// SHADOWS its constituents), while a qualified `A.c`/`B.c` reaches its own
+  /// side.
+  ///
+  /// The fold threads a growing PREFIX `Scope` — the relations `0…index` plus
+  /// the merged columns accumulated so far — so it resolves each join's common
+  /// columns THROUGH the scope, not by scanning a left array. For a `USING (c,
+  /// …)` join each `c` must resolve to exactly one left output column
+  /// (`Scope.left` — a name an accumulated plain `ON` join bound TWICE faults
+  /// `SQLError.ambiguous`, the finding-1 trap now a construction fault) and be
+  /// present on the right (else `SQLError.column`); a `NATURAL` join's are the
+  /// right schema's names the prefix's VISIBLE names share, left order (a
+  /// twice-bound left name faults `.ambiguous` when keyed). The join's `on`
+  /// becomes the conjunction of `left.c = right.c` — the LEFT operand a bare
+  /// `.column(c)` the prefix scope lowers to its resolved term (a coalesce when
+  /// `c` was already merged, so chained/outer keying is automatic) — empty for
+  /// a `NATURAL` join with no shared column, an always-true `CROSS`-equivalent
+  /// `on`. A merged column `c` = `COALESCE(leftTerm, right.slot)`, its unified
+  /// type; its constituents stay qualified-addressable. `USING (c, c)` (a
+  /// repeat in the single `common` list) faults `.duplicate` at construction.
+  internal func merges(over relations: Array<(Relation, Schema)>,
+                       _ joins: Array<Join>)
+      throws(SQLError) -> (ons: Array<Filter?>,
+                           merged: Array<Scope.Merged>,
+                           prefixes: Array<Array<Scope.Merged>>) {
+    guard joins.contains(where: { $0.using != nil }) else {
+      let empty = Array(repeating: Array<Scope.Merged>(), count: joins.count)
+      return (Array(repeating: nil, count: joins.count), [], empty)
+    }
+    // The synthesized `on` FILTER of each named-column join (`nil` for a plain
+    // `ON`/`CROSS` join, which lowers its own written `on`, or a degenerate
+    // `NATURAL` join with no shared column, an always-true `CROSS` product).
+    // It is lowered DIRECTLY here rather than re-lowered from a bare-name AST
+    // predicate — a chained merged column has no unambiguous bare spelling
+    // against a scope that also holds the joined-in relation's same-named
+    // column — carrying the resolved LEFT term (a coalesce when `c` was already
+    // merged) `= right.slot`.
+    var ons = Array<Filter?>()
+    ons.reserveCapacity(joins.count)
+    // The merged columns before each join's own relation joins — the surface
+    // that join's common-column resolution (and a LATERAL body's preceding
+    // scope) reads.
+    var prefixes = Array<Array<Scope.Merged>>()
+    prefixes.reserveCapacity(joins.count)
+    var merged = Array<Scope.Merged>()
+    for index in joins.indices {
+      prefixes.append(merged)
+      let (on, next) = try merging(join: joins[index], at: index,
+                                 over: relations, onto: merged)
+      ons.append(on)
+      merged = next
+    }
+    return (ons, merged, prefixes)
+  }
+
+  /// Folds the ONE `NATURAL`/`USING` merge step of the join at `index` onto the
+  /// merged columns `merged` accumulated by the joins to its left, returning
+  /// its synthesized `on` filter (`nil` for a plain `ON`/`CROSS` join or a
+  /// shared-column-less `NATURAL` one) and the extended merged set. This is the
+  /// SINGLE place a join's merged columns are derived — `merges(over:)` folds
+  /// it across the whole chain, and the incremental resolve loops
+  /// (`merged(through:…)`) fold it join-by-join to build a LATERAL body's
+  /// preceding scope — so no site can compute a join's merged columns a second,
+  /// divergent way.
+  ///
+  /// The LEFT scope is the relations `0…index` (the FROM relation and the joins
+  /// before this one) with the prior `merged`; the FULL scope adds the
+  /// joined-in relation, so its `range.c` right constituent resolves to a
+  /// combined ordinal. A `USING (c, …)` join's columns are the named ones (each
+  /// present on both sides, else `SQLError.column`; a repeat faults
+  /// `.duplicate`); a `NATURAL` join's are the prefix's visible names the right
+  /// schema shares, in left order. Each merged column is `COALESCE(leftTerm,
+  /// right.slot)` — a
+  /// coalesce left when `c` was already merged, so chained/outer keying follows
+  /// the merged value — its type the MASK-AWARE unification of the two
+  /// constituents through the set-operation `merge(_:_:)` (a constant-NULL/
+  /// placeholder side is UNCONSTRAINED and defers to the other; two constrained
+  /// sides unify, an irreconcilable pair faulting `.operand`/42804), and its
+  /// `on` conjunct a hash-join `match` key (pure `slot = slot`) or a residual
+  /// equi `compare`.
+  private func merging(join: Join, at index: Int,
+                       over relations: Array<(Relation, Schema)>,
+                       onto merged: Array<Scope.Merged>)
+      throws(SQLError) -> (on: Filter?, merged: Array<Scope.Merged>) {
+    let prefix = Scope(Array(relations[0 ... index]), merged: merged)
+    let scope = Scope(Array(relations[0 ... index + 1]), merged: merged)
+    let joined = relations[index + 1].1
+    let range = join.relation.alias ?? join.relation.name
+    guard let using = join.using else {
+      return (nil, merged)
+    }
+    // The joined-in relation's own spelling (its case) of a shared name, or
+    // `nil` when it exposes none — probed through the joined schema's FULL
+    // addressable surface (`Schema.ordinal(of:)`, virtual-aware), so a VIRTUAL
+    // column (the fixture/adapter `Id`) a `USING (Id)` join NAMES is FOUND the
+    // SAME way the predicate path `A.Id = B.Id` resolves it, not a real-only
+    // `names` membership that would spuriously fault `.column`. This is the
+    // EXPLICIT `USING (c, …)` probe ONLY — a `USING`-named virtual `Id` still
+    // resolves and merges. The spelling is taken from whichever list
+    // (`names`/`virtuals`) holds it.
+    func right(_ name: String) -> String? {
+      let folded = name.lowercased()
+      guard joined.ordinal(of: name) != nil else { return nil }
+      return (joined.names + joined.virtuals)
+          .first { $0.lowercased() == folded }
+    }
+    // The joined-in relation's own spelling of a shared REAL name, or `nil`
+    // when it exposes none as a real column — the `NATURAL` common-set probe. A
+    // `NATURAL` join's common set is the intersection of the two sides' REAL
+    // (`SELECT *`-visible) column names, virtuals EXCLUDED on BOTH sides: the
+    // left is already real-only (`prefix.names` reads the `expansion`, never a
+    // virtual), and this restricts the joined side to `joined.names` not its
+    // full virtual-aware surface. So a fixture/adapter VIRTUAL `Id` NEVER
+    // becomes a `NATURAL` common column — it participates only when EXPLICITLY
+    // named by `USING (Id)`, matching how `*`/`NATURAL` expose the same
+    // real-column set while an explicit reference resolves a virtual.
+    func real(_ name: String) -> String? {
+      let folded = name.lowercased()
+      return joined.names.first { $0.lowercased() == folded }
+    }
+    // The join columns in the LEFT side's order — a `NATURAL` join's the
+    // prefix's visible names the right schema shares (REAL names only, both
+    // sides), a `USING` join's the named ones (each present on both sides,
+    // virtual-aware, else `SQLError.column`).
+    let common: Array<String>
+    switch using {
+    case .natural:
+      common = prefix.names.filter { real($0) != nil }
+    case let .columns(columns):
+      for column in columns where right(column) == nil {
+        throw .column(column)
+      }
+      common = columns
+    }
+    // `USING (k, k)` — a repeat in the single `common` list — faults at
+    // construction (the eager behavior), not by trapping a dictionary init.
+    var seen = Set<String>()
+    for name in common where !seen.insert(name.lowercased()).inserted {
+      throw .duplicate(name)
+    }
+    // Each merged column and its synthesized `on` conjunct: the LEFT the
+    // prefix's resolved term for `c` (a coalesce when `c` was already merged,
+    // so a chained/outer key follows the merged value), the RIGHT the
+    // joined-in slot, the merged value their `COALESCE`, its type unified. A
+    // pure `slot = slot` conjunct lowers to the hash-join `match` key `nest`
+    // folds; a coalesced left is a residual equi `compare`.
+    var conjuncts = Array<Filter>()
+    var block = Array<Scope.Merged>()
+    for name in common {
+      let left = try prefix.left(name)
+      let target = Column(qualifier: range, name: right(name)!)
+      let slot = try scope.ordinal(of: target)
+      if case let .slot(source) = left.value {
+        conjuncts.append(Filter(match: source, slot))
+      } else {
+        conjuncts.append(.compare(left.value, .equal, .slot(slot)))
+      }
+      // The merged column's type is the MASK-AWARE unification of its two
+      // constituents, taken through the SAME `merge(_:_:)` machinery a
+      // set-operation arm fold uses rather than a bare `ValueType.unified` on
+      // the raw slot types: a constant-NULL/placeholder side is UNCONSTRAINED
+      // (it places no type constraint), so the merged type defers to the
+      // CONSTRAINED side — `(SELECT NULLIF(1,1) AS k) RIGHT JOIN B USING (k)`
+      // types `k` off `B.k` rather than the left's placeholder `integer`.
+      // Both constrained unify (`int ⊕ double → double`, an IRRECONCILABLE
+      // `int ⊕ text` FAULTS `.operand`/42804, the same fault the set-op fold
+      // raises); both unconstrained stay a placeholder. The coalesce COERCES
+      // each side to the resolved type, so a `RIGHT`/`FULL` join's
+      // unmatched-side value obeys the advertised type. An irreconcilable pair
+      // re-throws under the USING-specific message (the `.operand`/42804 code
+      // is what the caller matches), so the fault reads for the join criterion
+      // it arose from rather than the set-operation `merge` reports.
+      let unified: ResolvedColumn
+      do {
+        unified =
+            try merge(ResolvedColumn(name: name, type: left.type,
+                                     unconstrained: left.unconstrained),
+                      ResolvedColumn(name: name, type: scope.type(at: slot),
+                                     unconstrained:
+                                         scope.unconstrained(at: slot)))
+      } catch {
+        throw .operand("USING columns have irreconcilable types")
+      }
+      // The merged column's OWN mask: unconstrained ONLY when BOTH sides were
+      // (`merge` narrows to `right.unconstrained` after skipping an
+      // unconstrained left), so a downstream set-operation over the merged
+      // column defers when neither side ever constrained it, and constrains
+      // once either side did.
+      block.append(Scope.Merged(name: name,
+                                value: .coalesce([left.value, .slot(slot)],
+                                                 type: unified.type),
+                                type: unified.type,
+                                constituents: left.constituents + [slot],
+                                unconstrained: unified.unconstrained))
+    }
+    // ISO 9075 7.10 join output order: THIS join's common columns lead, then
+    // the rest of the LEFT output (recursively), then the right's rest. This
+    // join's `block` therefore PREPENDS ahead of the columns accumulated by the
+    // joins to its left — so a chained `(A JOIN B USING (k)) JOIN C USING (a)`
+    // exposes `[a, k, …]` (the outer `a`, then the inner `k`), not the flat
+    // fold order `[k, a, …]`. A chained `… USING (k)` over an ALREADY merged
+    // `k` DROPS the earlier entry (this `block`'s coalesce subsumes its
+    // constituents plus the new right slot), so `SELECT *` still exposes `k`
+    // ONCE and at the OUTER join's position.
+    let names = Set(block.map { $0.name.lowercased() })
+    let next = block + merged.filter { !names.contains($0.name.lowercased()) }
+    return (conjuncts.conjunction, next)
+  }
+
+  /// The `NATURAL`/`USING` merged columns accumulated by the joins `0..<count`
+  /// — the merged prefix a LATERAL body of the join AT `count` sees. Folds the
+  /// SAME per-join `merging` step `merges(over:)` does, over
+  /// `relations[0...count]`
+  /// (the FROM relation and the joins before `count`), so the incremental
+  /// resolve loops build each preceding scope through the ONE merge path rather
+  /// than a second, divergent construction.
+  internal func merged(through count: Int,
+                       over relations: Array<(Relation, Schema)>,
+                       _ joins: Array<Join>)
+      throws(SQLError) -> Array<Scope.Merged> {
+    var merged = Array<Scope.Merged>()
+    for index in 0 ..< count {
+      merged = try merging(join: joins[index], at: index, over: relations,
+                         onto: merged).merged
+    }
+    return merged
+  }
+
+  /// The preceding scope of the join AT `count` — the FROM relation and the
+  /// joins before it (`relations[0..<count + 1]`), carrying the merged columns
+  /// those joins expose (`merged(through:)`). This is the ONE constructor of a
+  /// join-prefix scope: every incremental resolve loop routes through it, so a
+  /// join-prefix scope can never be built without its merged columns (the
+  /// finding-1 class — a LATERAL body seeing the two physical join columns
+  /// rather than the ONE merged one).
+  internal func prefix(through count: Int,
+                       over relations: Array<(Relation, Schema)>,
+                       _ joins: Array<Join>)
+      throws(SQLError) -> Scope {
+    Scope(Array(relations[0 ..< count + 1]),
+          merged: try merged(through: count, over: relations, joins))
+  }
+
   /// Compiles `select` over this catalog into a logical operator tree in slot
   /// space.
   ///
@@ -4620,7 +4906,15 @@ extension Catalog where Self: ~Escapable {
     // arm's schema derives against the relations before it.
     let (joined, relations) = try resolve(from: relation, schema: from.schema,
                                           joins: select.joins, context)
-    let scope = Scope(relations)
+    // Model each `NATURAL`/`USING` join's MERGED columns (ISO 9075 7.10) in the
+    // join SCOPE, and synthesize each named-column join's lowered `left.c =
+    // right.c` `on` filter — a no-op yielding an empty merged set and all-`nil`
+    // `ons` for a chain with none, so an ordinary compile is unchanged. The
+    // scope carries the merged columns so the ordinary `terms`/`term`/order/
+    // `Grouping` machinery consumes them; a named-column join's `ons[index]`
+    // filter replaces its placeholder always-true `on`.
+    let (ons, merged, merges) = try merges(over: relations, select.joins)
+    let scope = Scope(relations, merged: merged)
 
     // Each join's ON predicate lowers to a `Filter` at its own chain level,
     // resolved against only the prefix already in scope plus the relation that
@@ -4635,10 +4929,11 @@ extension Catalog where Self: ~Escapable {
     // The WHERE and ORDER lower against the whole chain, which legitimately
     // sees every relation. Each join's PREFIX scope — the FROM relation and
     // joins `0…index`, the relations available AT that join point, never one
-    // joined LATER — the scope its `ON` lowers against and a subquery in that
-    // `ON` correlates against.
+    // joined LATER — carries the merged columns accumulated BEFORE this join
+    // (`merges[index]`), so a chained `USING` `on` keys on the merged value and
+    // an `ON` subquery's bare merged operand resolves.
     let prefixes = select.joins.indices.map { index in
-      Scope(Array(relations[0 ... index + 1]))
+      Scope(Array(relations[0 ... index + 1]), merged: merges[index])
     }
     // Resolve each LATERAL join's body ONCE against the PRECEDING FROM — the
     // FROM relation and the joins BEFORE this one (`relations[0…index]`, ONE
@@ -4657,7 +4952,8 @@ extension Catalog where Self: ~Escapable {
       guard join.kind == .inner || join.kind == .left else {
         throw .state("0A000", "a RIGHT/FULL LATERAL join is not supported")
       }
-      let preceding = Scope(Array(relations[0 ... index]))
+      let preceding = Scope(Array(relations[0 ... index]),
+                            merged: merges[index])
       laterals[index] = try lateral(body, against: preceding,
                                     columns: join.relation.columns, context)
     }
@@ -4673,9 +4969,17 @@ extension Catalog where Self: ~Escapable {
     var matches = Array<Filter>()
     matches.reserveCapacity(select.joins.count)
     for index in select.joins.indices {
-      let join = select.joins[index]
-      try matches.append(prefixes[index].on(join.on, context.routines,
-                                            subquery: plans.on(index)))
+      // A `NATURAL`/`USING` join's `on` is the SYNTHESIZED, already-lowered
+      // `left.c = right.c` filter (`ons[index]`, `nil` for a degenerate
+      // shared-column-less `NATURAL` join — an always-true `CROSS` product);
+      // a plain join lowers its written `ON` against the prefix scope.
+      if let on = ons[index] {
+        matches.append(on)
+      } else {
+        try matches.append(prefixes[index].on(select.joins[index].on,
+                                              context.routines,
+                                              subquery: plans.on(index)))
+      }
     }
     var predicate: Filter? = nil
     if let clause = select.predicate {

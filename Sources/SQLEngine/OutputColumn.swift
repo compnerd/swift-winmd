@@ -579,12 +579,25 @@ extension Catalog where Self: ~Escapable {
     // column, so its output shape types from that scope. A non-lateral join's
     // schema is correlation-independent, so the preceding scope is harmless.
     var relations = [(relation, try schema(of: relation, context))]
-    for join in select.joins {
-      let joined =
-          try schema(of: join.relation, context, preceding: Scope(relations))
-      relations.append((join.relation, joined))
+    for index in select.joins.indices {
+      // The PRECEDING scope carries the merged columns the joins before this
+      // one expose (`prefix(through:)`) — the SAME one-merge path the run's
+      // resolve loop threads — so a LATERAL body's schema derives its bare
+      // merged references against the ONE coalesced column rather than the two
+      // physical join columns.
+      let preceding =
+          try prefix(through: index, over: relations, select.joins)
+      let joined = try schema(of: select.joins[index].relation, context,
+                              preceding: preceding)
+      relations.append((select.joins[index].relation, joined))
     }
-    return Scope(relations)
+    // Model the `NATURAL`/`USING` merged columns (ISO 9075 7.10) in the scope
+    // so the schema path names and types the SAME output columns the run's
+    // `compile` projects — a bare merged column resolves to the coalesce type,
+    // and a `SELECT *` exposes it ONCE. Empty for a chain with no named-column
+    // join, so an ordinary scope is unchanged.
+    let merged = try merges(over: relations, select.joins).merged
+    return Scope(relations, merged: merged)
   }
 
   /// The PREFIX scope of each join of `select` — join `index`'s prefix is the
@@ -597,15 +610,23 @@ extension Catalog where Self: ~Escapable {
       throws(SQLError) -> Array<Scope> {
     guard let relation = select.from, !select.joins.isEmpty else { return [] }
     // Build the running scope INCREMENTALLY so a LATERAL join's schema derives
-    // against the PRECEDING FROM (the same reason `scope(of:)` does).
+    // against the PRECEDING FROM (the same reason `scope(of:)` does), the
+    // preceding scope carrying the joins-before's merged columns through the
+    // ONE merge path (`prefix(through:)`).
     var relations = [(relation, try schema(of: relation, context))]
-    for join in select.joins {
-      let joined =
-          try schema(of: join.relation, context, preceding: Scope(relations))
-      relations.append((join.relation, joined))
+    for index in select.joins.indices {
+      let preceding =
+          try prefix(through: index, over: relations, select.joins)
+      let joined = try schema(of: select.joins[index].relation, context,
+                              preceding: preceding)
+      relations.append((select.joins[index].relation, joined))
     }
+    // Each join's prefix carries the merged columns accumulated BEFORE it (the
+    // same `merges` the run's `compile` threads), so an `ON` subquery's bare
+    // merged outer operand resolves the same way the run does.
+    let merges = try merges(over: relations, select.joins).prefixes
     return select.joins.indices.map { index in
-      Scope(Array(relations[0 ... index + 1]))
+      Scope(Array(relations[0 ... index + 1]), merged: merges[index])
     }
   }
 
@@ -1066,6 +1087,21 @@ extension Catalog where Self: ~Escapable {
     for expression in select.orderKeys {
       try scope.aggregates(in: expression, routines, subquery: barred)
     }
+    // Each GROUP BY key is EVALUATED over the input rows to form the groups,
+    // BEFORE the HAVING, the projection, and any limit — so validate every key
+    // here, unconditionally in this reachable path (the constant-false WHERE
+    // above already returned, forming no group and evaluating no key). Route
+    // each key through the SAME per-operand type-check the projection and
+    // ORDER BY keys use (`validate`), so a bare `.column` key (the only shape
+    // the parser yields today, a `NATURAL`/`USING` merged column among them)
+    // resolves exactly as it does elsewhere — the merged binding shadowing its
+    // two sides — while an evaluatable key surfaces its fault (a divide,
+    // overflow, bad-type op, or unknown/misapplied call) under `validate`
+    // exactly as the run evaluates it, closing the gap where `group` lowers the
+    // key structurally (no evaluation) so `compile` alone never surfaces it.
+    for expression in select.grouping {
+      _ = try scope.validate(expression, routines, subquery: barred)
+    }
     if let having = select.having {
       try scope.aggregates(in: having, routines, subquery: barred)
       try scope.check(having, routines, subquery: barred)
@@ -1159,12 +1195,18 @@ extension Catalog where Self: ~Escapable {
         aggregations.append(aggregation)
       }
     }
+    // The GROUP BY keys' LOWERED base-ordinal terms, so a bare `NATURAL`/
+    // `USING` merged key (which binds no single ordinal) is matched by term —
+    // the SAME lowering the run's `group` computes.
+    let keys = try select.grouping.map { key throws(SQLError) -> Term in
+      try scope.term(key, routines, subquery: subquery.barred)
+    }
     // Build the grouping and lower the projection through it to record each
     // output name (an alias, else a group column's own name) — the surface an
     // `ORDER BY` output name resolves against — then lower the `ORDER BY`,
     // which faults a non-group column, an out-of-range ordinal, or an ambiguous
     // name.
-    var grouping = try Grouping(scope, select.grouping, aggregations,
+    var grouping = try Grouping(scope, select.grouping, keys, aggregations,
                                 subquery: subquery)
     let projection = try grouping.terms(select.projection, routines,
                                         subquery: subquery)
@@ -1334,19 +1376,25 @@ extension Scope {
     }
   }
 
-  /// The output columns of a `SELECT *` over this scope — every real column of
-  /// every relation, in chain order, named and typed from each relation's
-  /// schema (never a virtual column) and carrying its source column's
-  /// `unconstrained` mask (an all-arms-NULL CTE column stays unconstrained
-  /// through a `*` expansion) — the terms `terms(.all)` projects.
+  /// The output columns of a `SELECT *` over this scope — the merged columns
+  /// first, then the real columns the shared `expansion` enumeration emits, in
+  /// chain order, named and typed from each relation's schema (never a virtual
+  /// column) and carrying its source column's `unconstrained` mask (an
+  /// all-arms-NULL CTE column stays unconstrained through a `*` expansion) —
+  /// the terms `terms(.all)` projects.
   internal func outputs() -> Array<ResolvedColumn> {
-    schemas.flatMap { schema in
-      (0 ..< schema.width).map {
-        ResolvedColumn(OutputColumn(name: schema.names[$0],
-                                    type: schema.types[$0]),
-                       unconstrained: schema.unconstrained[$0])
-      }
-    }
+    // The `NATURAL`/`USING` merged columns FIRST (ISO 9075 7.10) — each named
+    // by its merged name and typed by its unified coalesce type — then every
+    // real column the shared `expansion` enumeration yields, resolved at its
+    // combined ordinal (name/type/mask read TOGETHER, `resolved(at:named:)`),
+    // so the schema names the SAME columns the run's `terms(.all)` projects and
+    // `width(of: .all)` counts. Each merged output is built through the SAME
+    // `resolved(named:)` the explicit `output(of:)` uses, so a `SELECT *`
+    // carries the merged column's `unconstrained` mask (two constant-NULL
+    // constituents leave the merged `k` unconstrained) exactly as a bare
+    // `SELECT k` does.
+    merges.map { $0.resolved(named: $0.name) }
+        + expansion.map { resolved(at: $0, named: name(at: $0)) }
   }
 
   /// The resolved output column a bare `column` reference yields — its own name
@@ -1363,6 +1411,17 @@ extension Scope {
   internal func output(of column: Column,
                        subquery: Resolution = .unsupported)
       throws(SQLError) -> ResolvedColumn {
+    // A BARE name matching a `NATURAL`/`USING` merged column (ISO 9075 7.10)
+    // names and types from the merged column — its unified coalesce type — with
+    // no physical ordinal, matching the run's `term`; a same-named physical
+    // column a later plain join added faults `.ambiguous`. It carries the
+    // merged column's OWN `unconstrained` mask, so a `… USING (k) UNION SELECT
+    // 1` over two constant-NULL constituents defers the unified type to the
+    // typed arm rather than hard-coding the merged column constrained.
+    if column.qualifier == nil,
+        let merged = try merged(binding: column.name) {
+      return merged.resolved(named: column.name)
+    }
     if let resolved = try resolved(column) {
       return resolved
     }

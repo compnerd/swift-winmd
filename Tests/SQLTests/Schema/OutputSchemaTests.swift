@@ -270,6 +270,32 @@ struct OutputSchemaTests {
     #expect(trailing[0].1 == .integer)
   }
 
+  @Test func `a SELECT star USING merge carries its unconstrained mask into a UNION`()
+      throws {
+    // Both `USING (k)` constituents are constant-NULL (`NULLIF(1, 1)`), so the
+    // merged `k` places NO type constraint. A `SELECT *` must carry that mask —
+    // routed through the SAME construction the explicit `SELECT k` uses — so
+    // the enclosing UNION unifies the merged `k` with the text arm rather than
+    // faulting the first arm's integer against text.
+    let star = try schema("""
+        SELECT * FROM (SELECT NULLIF(1, 1) AS k FROM People) AS a
+          JOIN (SELECT NULLIF(1, 1) AS k FROM People) AS b USING (k)
+          UNION SELECT 'x'
+        """)
+    #expect(star.count == 1)
+    #expect(star[0] == ("k", .text))
+    // A genuinely CONSTRAINED merge (two integer `k` sides) still faults an
+    // irreconcilable text UNION arm — the mask is carried, not hard-coded
+    // unconstrained.
+    #expect(throws: SQLError.self) {
+      try catalog().columns(of: parse(query: """
+          SELECT * FROM (SELECT Age AS k FROM People) AS a
+            JOIN (SELECT Age AS k FROM People) AS b USING (k)
+            UNION SELECT 'x'
+          """))
+    }
+  }
+
   @Test func `a UNION nested in a subquery widens its column`() throws {
     // The set operation runs through the `.setop` Plan node here (a derived
     // table), which carries its unified `types` from compile — the outer

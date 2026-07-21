@@ -301,7 +301,7 @@ func engineDerived(_ plan: Plan) -> Plan? {
     engineDerived(source)
   case let .aggregate(_, _, source):
     engineDerived(source)
-  case .single, .scan, .join:
+  case .single, .empty, .scan, .join:
     nil
   }
 }
@@ -339,7 +339,7 @@ func engineSeeks(_ plan: Plan) -> Bool {
     engineSeeks(source)
   case let .aggregate(_, _, source):
     engineSeeks(source)
-  case .single:
+  case .single, .empty:
     false
   }
 }
@@ -374,7 +374,7 @@ func engineFilters(_ plan: Plan) -> Bool {
     engineFilters(source)
   case let .aggregate(_, _, source):
     engineFilters(source)
-  case .single, .scan, .join:
+  case .single, .empty, .scan, .join:
     false
   }
 }
@@ -414,7 +414,7 @@ func enginePushed(_ plan: Plan) -> Bool {
     enginePushed(source)
   case let .aggregate(_, _, source):
     enginePushed(source)
-  case .single, .scan:
+  case .single, .empty, .scan:
     false
   }
 }
@@ -468,7 +468,7 @@ func engineJoins(_ plan: Plan) -> Bool {
     engineJoins(left) || engineJoins(right)
   case let .aggregate(_, _, source):
     engineJoins(source)
-  case .single, .scan:
+  case .single, .empty, .scan:
     false
   }
 }
@@ -506,7 +506,7 @@ func engineResidual(_ plan: Plan) -> Bool {
     engineResidual(left) || engineResidual(right)
   case let .aggregate(_, _, source):
     engineResidual(source)
-  case .single, .scan:
+  case .single, .empty, .scan:
     false
   }
 }
@@ -545,7 +545,7 @@ func engineSeparated(_ plan: Plan) -> Bool {
     engineSeparated(left) || engineSeparated(right)
   case let .aggregate(_, _, source):
     engineSeparated(source)
-  case .single, .scan:
+  case .single, .empty, .scan:
     false
   }
 }
@@ -585,7 +585,7 @@ func engineStacked(_ plan: Plan) -> Bool {
     engineStacked(left) || engineStacked(right)
   case let .aggregate(_, _, source):
     engineStacked(source)
-  case .single, .scan:
+  case .single, .empty, .scan:
     false
   }
 }
@@ -701,7 +701,7 @@ private func injected(_ plan: Plan) -> Bool {
     injected(outer)
   case let .aggregate(_, _, source):
     injected(source)
-  case .single, .scan:
+  case .single, .empty, .scan:
     false
   }
 }

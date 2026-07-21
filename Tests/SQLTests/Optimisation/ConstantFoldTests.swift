@@ -78,6 +78,45 @@ private func selects(_ plan: Plan) -> Bool {
     selects(left)
   case let .setop(_, left, right, _, _, _):
     selects(left) || selects(right)
+  case .single, .empty, .scan:
+    false
+  }
+}
+
+/// Whether `plan` reaches ANY `.empty` node — the known-empty relation the
+/// optimiser folds a PROVABLY constant-false selection into. Mirrors `selects`,
+/// recursing every operator so a fold nested under a project/aggregate/set-op
+/// is still found.
+private func empties(_ plan: Plan) -> Bool {
+  switch plan {
+  case .empty:
+    true
+  case let .project(_, source):
+    empties(source)
+  case let .sort(_, source):
+    empties(source)
+  case let .limit(_, _, source):
+    empties(source)
+  case let .distinct(source):
+    empties(source)
+  case let .derived(_, sub, _, _):
+    empties(sub)
+  case let .aggregate(_, _, source):
+    empties(source)
+  case let .select(_, source):
+    empties(source)
+  case let .product(left, right):
+    empties(left) || empties(right)
+  case let .outer(left, right, _, _):
+    empties(left) || empties(right)
+  case let .semijoin(left, right, _, _):
+    empties(left) || empties(right)
+  case let .join(source, _, _, _, _, _, _):
+    empties(source)
+  case let .apply(left, _, _, _, _, _):
+    empties(left)
+  case let .setop(_, left, right, _, _, _):
+    empties(left) || empties(right)
   case .single, .scan:
     false
   }
@@ -186,9 +225,79 @@ struct ConstantSelectFoldTests {
   }
 
   @Test func `WHERE 1 = 0 still returns no rows`() throws {
-    // A constant-FALSE filter is left filtering (there is no empty-relation
-    // node) and correctly rejects every row — proving false is NOT mis-folded.
+    // A constant-FALSE filter admits no row: whether folded to `.empty` (a safe
+    // scan source) or left filtering (an unsafe one), the result is no rows.
     try numbers().empty("SELECT Id FROM N WHERE 1 = 0")
+  }
+
+  @Test func `WHERE 1 = 0 over a safe scan folds to empty`() throws {
+    // Plan-shape proof: the constant-false select over a throw-free scan is
+    // rewritten to the known-empty relation — no per-row predicate survives.
+    let catalog = try numbers()
+    let plan = try catalog.optimise(
+        catalog.compile(parse(query: "SELECT Id FROM N WHERE 1 = 0")), [:])
+    #expect(empties(plan))
+    #expect(!selects(plan))
+  }
+
+  @Test func `a constant-false selection preserves the output width`() throws {
+    // Schema preservation: the empty relation must advertise the SAME columns
+    // as the subtree it replaced, so a two-column projection still yields
+    // two-wide (zero) rows — a downstream consumer mis-shapes nothing.
+    try numbers().empty("SELECT Id, V FROM N WHERE 1 = 0")
+  }
+
+  @Test func `a constant-false arm of a UNION keeps the other arm`() throws {
+    // One arm folds to `.empty` (its schema preserved so the set-op arity check
+    // holds); the other arm still yields its rows. The UNION is the live arm's
+    // rows alone — the empty arm contributes nothing but its (matching) shape.
+    try numbers().expect(
+        "SELECT Id FROM N WHERE 1 = 0 UNION SELECT Id FROM N ORDER BY Id",
+        equals: "SELECT Id FROM N ORDER BY Id")
+  }
+
+  @Test func `COUNT(*) over a constant-false source still yields one row`()
+      throws {
+    // The bare aggregate sits ABOVE the folded select, so its source is the
+    // `.empty` relation — and `grouped` over an empty input with no GROUP BY
+    // still emits its degenerate one row (`COUNT` `0`), the standard SQL rule.
+    // The fold must NOT collapse the aggregate itself to zero rows.
+    try numbers().expect("SELECT COUNT(*) FROM N WHERE 1 = 0", yields: [[0]])
+  }
+
+  @Test func `COUNT(*) over a constant-false source folds only the source`()
+      throws {
+    // Plan-shape proof of the above: the `.empty` is the aggregate's SOURCE,
+    // the aggregate node survives above it.
+    let catalog = try numbers()
+    let plan = try catalog.optimise(
+        catalog.compile(parse(query: "SELECT COUNT(*) FROM N WHERE 1 = 0"))
+            .pushdown(), [:])
+    #expect(empties(plan))
+  }
+
+  @Test func `a constant-false selection over a THROWING view does not fold`()
+      throws {
+    // The soundness fence. `Bad`'s body evaluates `1 / X` with `X = 0`, so
+    // executing it RAISES `.divide`. Its `.derived` plan node is NOT provably
+    // throw-free (`Plan.safe` is `false`), so the constant-false select is NOT
+    // folded to `.empty` — folding would SKIP the view body and SUPPRESS the
+    // throw. The plan keeps its select over the view, and running it surfaces
+    // the division-by-zero exactly as the un-folded query would.
+    let base = try Catalog {
+      Relation("Z", ["X": .integer]) {
+        Row(0)
+      }
+    }
+    let views = try Catalog {
+      try View("Bad", "SELECT 1 / X AS q FROM Z", as: ["q"])
+    }
+    let catalog = EngineMemory(base.catalog, views: views.registered)
+    let plan = try catalog.optimise(
+        catalog.compile(parse(query: "SELECT q FROM Bad WHERE 1 = 0"))
+            .pushdown(), [:])
+    #expect(!empties(plan))
+    catalog.expect("SELECT q FROM Bad WHERE 1 = 0", fails: .divide)
   }
 
   @Test func `WHERE NULL = 1 returns no rows (UNKNOWN rejects)`() throws {

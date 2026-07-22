@@ -43,7 +43,7 @@
 ///                   // the derived body may reference preceding FROM items
 /// projection     := '*' | column (',' column)*
 /// where          := WHERE predicate
-/// group          := GROUP BY column (',' column)*
+/// group          := GROUP BY expression (',' expression)*
 /// having         := HAVING predicate
 /// predicate      := disjunction
 /// disjunction    := conjunction (OR conjunction)*
@@ -518,17 +518,21 @@ internal struct Parser: ~Escapable {
                   having: having, order: order, limit: limit)
   }
 
-  /// Parses `BY column (, column)*` (the `GROUP` keyword is already consumed) —
-  /// the `GROUP BY` keys, in source order. Each key parses as a `column` and is
-  /// carried as a bare `Expression.column`; the general `Expression` element
-  /// lets a bare `NATURAL`/`USING` merged key lower to its coalesce value
-  /// through the join scope, never a parsed general expression.
+  /// Parses `BY expression (, expression)*` (the `GROUP` keyword is already
+  /// consumed) — the `GROUP BY` keys, in source order. Each key parses as a
+  /// general scalar `expression` (ISO `<ordinary grouping set>` is a value
+  /// expression), so a key may be a column, an arithmetic or `||` expression,
+  /// a function call, a `CASE`/`COALESCE`, and so on — resolved and lowered
+  /// through `scope.term` at run and validated through `scope.validate`. A
+  /// bare identifier is itself an `Expression.column`, so `GROUP BY col` is
+  /// unchanged and a bare `NATURAL`/`USING` merged key still lowers to its
+  /// coalesce value through the join scope.
   private mutating func grouping() throws(SQLError) -> Array<Expression> {
     try expect(.by)
     var keys = Array<Expression>()
-    try keys.append(.column(column()))
+    try keys.append(expression())
     while try match(.comma) {
-      try keys.append(.column(column()))
+      try keys.append(expression())
     }
     return keys
   }

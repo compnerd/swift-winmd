@@ -4383,20 +4383,15 @@ internal struct Grouping {
   /// `expressions` instead.
   private let keys: Dictionary<Int, Int>
 
-  /// Each `GROUP BY` key's source AST expression, in key order — key `i` sits
-  /// at grouped slot `i`. A projection/`HAVING`/`ORDER BY` expression EQUAL to
-  /// a general (non-column) key resolves to that key's slot. A bare column
-  /// still resolves through the ordinal `keys` map, so a qualification-
-  /// equivalent reference (`Amount` vs `Sales.Amount`) matches.
-  private let expressions: Array<Expression>
-
   /// Each `GROUP BY` key's LOWERED base-ordinal term, in key order — key `i`
   /// sits at grouped slot `i`. A projection/`HAVING`/`ORDER BY` expression that
-  /// lowers to a term EQUAL to a key's is that key, so a bare `NATURAL`/`USING`
-  /// merged column — which lowers to a `COALESCE(left, right)` term with NO
-  /// single ordinal, the group key AND every bare reference to it — groups and
-  /// projects as ONE value, matched by the lowered TERM rather than the AST
-  /// expression or an ordinal a merged column lacks.
+  /// lowers to a term EQUAL to a key's is that key, so a general (non-column)
+  /// key matches a semantically-identical reference whose AST differs only by
+  /// qualification or case (`Orders.Amount + 1` vs `Amount + 1`), and a bare
+  /// `NATURAL`/`USING` merged column — which lowers to a `COALESCE(left,
+  /// right)` term with NO single ordinal, the group key AND every bare
+  /// reference to it — groups and projects as ONE value, matched by term
+  /// rather than the raw AST or an ordinal a merged column lacks.
   private let terms: Array<Term>
 
   /// The number of `GROUP BY` keys — aggregate `j` sits at grouped slot
@@ -4464,7 +4459,6 @@ internal struct Grouping {
       }
     }
     self.keys = keys
-    self.expressions = grouping
     self.terms = terms
     self.offset = grouping.count
     self.aggregates = aggregates
@@ -4498,26 +4492,39 @@ internal struct Grouping {
        let slot = try slot(of: expression, routines, subquery: subquery) {
       return .slot(slot)
     }
-    // A bare `NATURAL`/`USING` MERGED column lowers to its `COALESCE(left,
-    // right)` value — the SAME term the `GROUP BY` key lowered to — so it
-    // matches a key by TERM (it binds no single ordinal), grouping and
-    // projecting as ONE value. A right-only row of a `RIGHT`/`FULL` join groups
-    // by its coalesced value, not a NULL left column.
-    if case let .column(column) = expression, column.qualifier == nil,
-        scope.merges(column.name) != nil {
+    // A bare `NATURAL`/`USING` MERGED column and a general (non-column) key
+    // both match a `GROUP BY` key by LOWERED `Term`, not raw AST — the
+    // scope normalizes qualification and case away, so a projection/`HAVING`/
+    // `ORDER BY` expression that is SEMANTICALLY the key matches even when its
+    // spelling differs (`Orders.Amount + 1` vs `Amount + 1`, `AMOUNT + 1` vs
+    // `Amount + 1`). Lower under the SAME scope the key lowered under, so a
+    // merged column's `COALESCE(left, right)` term (which binds no single
+    // ordinal — the group key AND every bare reference are ONE value) still
+    // matches. A right-only row of a `RIGHT`/`FULL` join thus groups by its
+    // coalesced value, not a NULL left column.
+    //
+    // A bare PLAIN column is skipped here and falls to the ordinal path below,
+    // which additionally distinguishes a genuine unknown column, a correlated
+    // reference (a LATERAL body's `everywhere` seam), and a barred grouped
+    // surface — cases a bare merged column and a general expression never
+    // reach. A merged column that matches NO key faults `.grouping`; a general
+    // expression that matches none falls through so its operands are each
+    // checked (`Amount + 2` faults on the bare non-key `Amount`). An
+    // AGGREGATED expression (`SUM(x) + 1`) is skipped too: `scope.term` faults
+    // on an aggregate, so it descends into the switch, which routes each
+    // aggregate to its result slot and each key operand to its grouped slot.
+    let merged = if case let .column(column) = expression {
+      column.qualifier == nil && scope.merges(column.name) != nil
+    } else {
+      false
+    }
+    let plain = if case .column = expression { !merged } else { false }
+    if !plain, !expression.aggregated {
       let lowered = try scope.term(expression, routines, subquery: subquery)
-      guard let index = terms.firstIndex(of: lowered) else {
+      if let index = terms.firstIndex(of: lowered) { return .slot(index) }
+      if case let .column(column) = expression {
         throw .grouping(column.name)
       }
-      return .slot(index)
-    }
-    // A general (non-column) key matches by expression: a projection/`HAVING`/
-    // `ORDER BY` expression EQUAL to a `GROUP BY` key resolves to that key's
-    // grouped slot. A bare column is skipped here and falls through to the
-    // ordinal path below, which matches a qualification-equivalent reference.
-    if case .column = expression {
-    } else if let index = expressions.firstIndex(of: expression) {
-      return .slot(index)
     }
     switch expression {
     case let .column(column):

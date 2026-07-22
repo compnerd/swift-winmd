@@ -780,8 +780,8 @@ extension Catalog where Self: ~Escapable {
         try width(query, scalar, context, nested, &widths, &types)
       }
     }
-    // The WHERE, `HAVING`, projection, and `ORDER BY` are walked by the
-    // reachability phase, so their operand check DEFERS; their width and
+    // The WHERE, `HAVING`, projection, `GROUP BY`, and `ORDER BY` are walked by
+    // the reachability phase, so their operand check DEFERS; their width and
     // single- column type still derive here against the full `enclosing` scope.
     var rest = Array<Query>()
     select.predicate?.collect(subqueries: &rest)
@@ -789,6 +789,7 @@ extension Catalog where Self: ~Escapable {
     if case let .expressions(items) = select.projection {
       for item in items { item.expression.collect(subqueries: &rest) }
     }
+    for key in select.grouping { key.collect(subqueries: &rest) }
     for key in select.order?.keys ?? [] {
       if case let .expression(expression) = key.sort {
         expression.collect(subqueries: &rest)

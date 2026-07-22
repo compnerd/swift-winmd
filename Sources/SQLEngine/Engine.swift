@@ -1299,9 +1299,9 @@ extension Select {
   }
 
   /// The UNCORRELATED subqueries this `SELECT` nests DIRECTLY — those in its
-  /// `WHERE`, each join `ON`, its `HAVING`, its projection, and its `ORDER BY`
-  /// sort-key expressions — in appearance order, for the `compile`/`typecheck`
-  /// pre-pass to materialise ONCE.
+  /// `WHERE`, each join `ON`, its `HAVING`, its projection, its `GROUP BY` key
+  /// expressions, and its `ORDER BY` sort-key expressions — in appearance
+  /// order, for the `compile`/`typecheck` pre-pass to materialise ONCE.
   ///
   /// It descends this select's own predicates and expressions but NOT into a
   /// nested subquery's OWN body: each subquery is compiled/run as a whole
@@ -1316,6 +1316,7 @@ extension Select {
     if case let .expressions(items) = projection {
       for item in items { item.expression.collect(subqueries: &queries) }
     }
+    for key in grouping { key.collect(subqueries: &queries) }
     for key in order?.keys ?? [] {
       if case let .expression(expression) = key.sort {
         expression.collect(subqueries: &queries)
@@ -1336,6 +1337,7 @@ extension Select {
     if case let .expressions(items) = projection {
       for item in items { item.expression.collect(valued: &queries) }
     }
+    for key in grouping { key.collect(valued: &queries) }
     for key in order?.keys ?? [] {
       if case let .expression(expression) = key.sort {
         expression.collect(valued: &queries)
@@ -1357,6 +1359,7 @@ extension Select {
     if case let .expressions(items) = projection {
       for item in items { item.expression.collect(scalar: &queries) }
     }
+    for key in grouping { key.collect(scalar: &queries) }
     for key in order?.keys ?? [] {
       if case let .expression(expression) = key.sort {
         expression.collect(scalar: &queries)
@@ -1378,6 +1381,7 @@ extension Select {
     if case let .expressions(items) = projection {
       for item in items { item.expression.collect(existential: &queries) }
     }
+    for key in grouping { key.collect(existential: &queries) }
     for key in order?.keys ?? [] {
       if case let .expression(expression) = key.sort {
         expression.collect(existential: &queries)
@@ -3957,6 +3961,7 @@ extension Catalog where Self: ~Escapable {
     if case let .expressions(items) = select.projection {
       for item in items { item.expression.collect(subqueries: &rest) }
     }
+    for key in select.grouping { key.collect(subqueries: &rest) }
     for key in select.order?.keys ?? [] {
       if case let .expression(expression) = key.sort {
         expression.collect(subqueries: &rest)

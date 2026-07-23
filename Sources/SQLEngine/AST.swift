@@ -168,14 +168,133 @@ public indirect enum Query: Hashable, Sendable {
   /// same-precedence chain reads left to right.
   case setop(SetOperation, Query, Query, all: Bool)
 
+  /// A query-level `ORDER BY` / `SELECT DISTINCT` / `OFFSET`·`FETCH` carried
+  /// OVER an inner query (always a `setop` — a `select` carries its own on the
+  /// node). A `setop` node has no order/distinct/limit slot, so an ordered,
+  /// deduplicated, or paged set operation rides this outer carrier: the row
+  /// operators (`DISTINCT`, `ORDER BY`, `OFFSET`/`FETCH`) apply to the union's
+  /// combined result, resolved through the setop's OUTPUT scope, and do NOT
+  /// project — the result columns stay the inner setop's arm-0-named, unified
+  /// ones. It is TRANSPARENT to `columns(unifying:)`, which descends to the
+  /// inner setop for the result schema; only `run`/`compile` stack the row
+  /// operators over the compiled setop plan. Produced by the GROUPING SETS
+  /// `expand` and by the parser for a trailing query-level `ORDER BY` /
+  /// `OFFSET`·`FETCH` after a set-operation chain.
+  ///
+  /// `generated` is the number of GENERATED trailing columns the inner union
+  /// carries beyond the real output — the hidden sort columns `expand` appends
+  /// to each arm (aliased `*gsN`) so a genuinely-unprojected aggregate sort key
+  /// survives the `UNION ALL` at equal arity. The carrier's compile TRIMS them
+  /// (`real = width − generated`), and `columns(unifying:)` drops them from the
+  /// result schema. It is a STRUCTURAL count carried out of `expand`, never
+  /// recovered by scanning output names for a synthetic prefix; the parser's
+  /// trailing-`ORDER BY` carrier generates none (`0`).
+  case ordered(Query, distinct: Bool, order: Order?, limit: Limit?,
+               generated: Int)
+
   /// The first `SELECT` of the query — the leftmost arm, reached by descending
   /// the left arm of each set operation. Its projection NAMES the result
   /// columns (the ISO rule — their TYPES unify across every arm), so a `CREATE
-  /// VIEW` infers a set operation's column names from it.
+  /// VIEW` infers a set operation's column names from it. An `ordered` carrier
+  /// is transparent — its first is its inner query's.
   public var first: Select {
     switch self {
     case let .select(select): select
     case let .setop(_, left, _, _): left.first
+    case let .ordered(inner, _, _, _, _): inner.first
+    }
+  }
+
+  /// The query-level row operators an `ordered` carrier applies OVER its inner
+  /// query, peeled off it — the `DISTINCT`/`ORDER BY`/`OFFSET`·`FETCH` and the
+  /// generated hidden-column count. A `select`/`setop` carries no carrier.
+  public struct Carrier: Hashable, Sendable {
+    public let distinct: Bool
+    public let order: Order?
+    public let limit: Limit?
+    public let generated: Int
+  }
+
+  /// This query stripped of its `ordered` carrier — the inner `setop`/`select`
+  /// — paired with the peeled `Carrier`, or `nil` when the query wears none.
+  ///
+  /// A single seam-shared peel: the recursive-CTE seams reach it through
+  /// `CTE.canonical` (which expands FIRST, then unwinds here), and the
+  /// carrier-transparent `core` reads its inner, so every seam descends the
+  /// carrier here rather than repeating a bespoke `.ordered` match, then
+  /// reapplies the peeled carrier to the result.
+  public var unwound: (inner: Query, carrier: Carrier?) {
+    if case let .ordered(inner, distinct, order, limit, generated) = self {
+      return (inner, Carrier(distinct: distinct, order: order, limit: limit,
+                             generated: generated))
+    }
+    return (self, nil)
+  }
+
+  /// This query's carrier-transparent CORE — its inner `setop`/`select`, an
+  /// `ordered` carrier peeled off. A thin read over `unwound.inner` for the
+  /// `if case .setop = query.core` seams that recognise a set operation whether
+  /// or not it rides a carrier, so a carried union is not silently swallowed by
+  /// a bare `.setop` match.
+  public var core: Query {
+    unwound.inner
+  }
+}
+
+/// A `GROUP BY` grouping: the ordinary key list, an explicit `GROUPING SETS`
+/// set list, or one expanded arm of such a set list.
+///
+/// The parser produces `.keys` for an ordinary `GROUP BY e, …` (empty for no
+/// grouping) and `.sets` for `GROUP BY GROUPING SETS (s, …)`. The compile and
+/// schema paths EXPAND a `.sets` into a `UNION ALL` of per-arm groupings, each
+/// arm a `.arm` grouping on ONE set's `keys` while carrying the `superset` (the
+/// union of ALL sets' keys) so an arm's lowering NULLs a projected/HAVING
+/// grouping column absent from THIS arm's set — the super-aggregate NULL —
+/// matched by RESOLVED identity, not raw AST.
+public enum Grouping: Hashable, Sendable {
+  /// `GROUP BY e, …` — the ordinary `<ordinary grouping set>` keys, in source
+  /// order (empty for no explicit grouping).
+  case keys(Array<Expression>)
+
+  /// `GROUP BY GROUPING SETS (s, …)` — one key list per set, in source order;
+  /// an empty inner list is the grand-total set `()`.
+  case sets(Array<Array<Expression>>)
+
+  /// ONE expanded arm of a `.sets` grouping — grouped on `keys` (this set's
+  /// members) while `superset` is the union of every set's keys. A grouping
+  /// column IN `superset` but absent from `keys` lowers to a super-aggregate
+  /// NULL, matched by lowered-`Term` identity in `Grouped.term`. Produced by
+  /// the shared `expand`, never by the parser.
+  case arm(keys: Array<Expression>, superset: Array<Expression>)
+
+  /// The `GROUP BY` keys this grouping evaluates over the input rows — a
+  /// `.keys` its list, a `.sets` the concatenation of all sets' keys, a `.arm`
+  /// its OWN set's keys. The reachability derive reads `isEmpty` here to
+  /// recognise a whole-result aggregate (an empty `GROUP BY`, the `()` arm), so
+  /// this stays the arm's own keys, NOT its superset.
+  public var expressions: Array<Expression> {
+    switch self {
+    case let .keys(keys):
+      keys
+    case let .sets(sets):
+      sets.reduce(into: Array<Expression>()) { $0 += $1 }
+    case let .arm(keys, _):
+      keys
+    }
+  }
+
+  /// The `GROUP BY` key expressions the subquery/aggregate COLLECTORS descend
+  /// to pre-register each nested subquery — like `expressions`, but a `.arm`
+  /// yields its `superset` (the union of every set's keys). An arm LOWERS the
+  /// superset (an absent key NULLs by resolved identity), not merely its own
+  /// set, so a subquery in an OMITTED set's key must be collected here exactly
+  /// as a present set's is; the superset subsumes the arm's own keys.
+  internal var collected: Array<Expression> {
+    switch self {
+    case .keys, .sets:
+      expressions
+    case let .arm(_, superset):
+      superset
     }
   }
 }
@@ -210,14 +329,16 @@ public struct Select: Hashable, Sendable {
   /// The row filter, if any.
   public let predicate: Predicate?
 
-  /// The `GROUP BY` keys, in source order — empty for a query with no explicit
-  /// grouping. A query that aggregates without a `GROUP BY` (`SELECT COUNT(*)
-  /// FROM T`) leaves this empty and aggregates the whole result as a single
-  /// group. The parser produces a bare `Expression.column` per key; a general
-  /// key expression is admitted too, so a bare `NATURAL`/`USING` merged column
-  /// lowers through the join scope to its `COALESCE(left, right)` value (with
-  /// no physical ordinal), the executor grouping each key per row.
-  public let grouping: Array<Expression>
+  /// The `GROUP BY` grouping — the ordinary `<ordinary grouping set>` key list
+  /// (`.keys`, empty for a query with no explicit grouping), or a `GROUPING
+  /// SETS (…)` set list (`.sets`) the compile and schema paths expand into a
+  /// `UNION ALL` of per-arm groupings. A query that aggregates without a `GROUP
+  /// BY` (`SELECT COUNT(*) FROM T`) carries `.keys([])` and aggregates the
+  /// whole result as a single group. Each key is a bare `Expression.column` or
+  /// a general key expression, so a bare `NATURAL`/`USING` merged column lowers
+  /// through the join scope to its `COALESCE(left, right)` value (with no
+  /// physical ordinal), the executor grouping each key per row.
+  public let grouping: Grouping
 
   /// The `HAVING` filter over the grouped rows, if any — a predicate the engine
   /// applies AFTER aggregation, so it may reference the aggregates and the
@@ -233,7 +354,7 @@ public struct Select: Hashable, Sendable {
 
   public init(distinct: Bool = false, projection: Projection,
               from: Relation?, joins: Array<Join> = [],
-              predicate: Predicate? = nil, grouping: Array<Expression> = [],
+              predicate: Predicate? = nil, grouping: Grouping = .keys([]),
               having: Predicate? = nil, order: Order? = nil,
               limit: Limit? = nil) {
     self.distinct = distinct
@@ -358,7 +479,7 @@ public struct Select: Hashable, Sendable {
   ///     `Scope.order`);
   ///   - a GROUPED query resolves an output name from `Projected.name` (an
   ///     alias, else a bare column's name) — the SAME output-name set
-  ///     `Grouping.terms`/`Grouping.order` record and bind, so a grouped
+  ///     `Grouped.terms`/`Grouped.order` record and bind, so a grouped
   ///     `ORDER BY <groupcol>` naming an unaliased projected group column
   ///     resolves to that output here exactly as it does in the run, rather
   ///     than being (mis)validated as an ambiguous input column.

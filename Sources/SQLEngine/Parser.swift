@@ -43,7 +43,12 @@
 ///                   // the derived body may reference preceding FROM items
 /// projection     := '*' | column (',' column)*
 /// where          := WHERE predicate
-/// group          := GROUP BY expression (',' expression)*
+/// group          := GROUP BY (grouping | GROUPING SETS '(' set (',' set)* ')')
+///                   // GROUPING/SETS are context identifiers, not keywords;
+///                   // GROUPING SETS expands to a UNION ALL of per-set arms at
+///                   // compile/schema time (by resolved identity), not here
+/// grouping       := expression (',' expression)*  // ordinary grouping keys
+/// set            := '(' [expression (',' expression)*] ')'  // '()' = total
 /// having         := HAVING predicate
 /// predicate      := disjunction
 /// disjunction    := conjunction (OR conjunction)*
@@ -110,11 +115,13 @@
 internal struct Parser: ~Escapable {
   private var lexer: Lexer
   private var current: Token?
+  private var pending: Token?
 
   @_lifetime(copy lexer)
   internal init(_ lexer: consuming Lexer) throws(SQLError) {
     self.lexer = lexer
     self.current = try self.lexer.next()
+    self.pending = nil
   }
 
   // MARK: - Statement
@@ -236,7 +243,70 @@ internal struct Parser: ~Escapable {
       let all = try match(.all)
       query = try .setop(kind, query, intersection(), all: all)
     }
-    return query
+    // ISO 9075: an `ORDER BY` / `OFFSET`·`FETCH` after a set-operation chain
+    // applies to the WHOLE result, not the trailing arm — an individual arm
+    // needs its own parentheses to carry one. The recursive-descent parse folds
+    // that trailing tail onto the LAST arm's `select` (a `select` greedily
+    // consumes its ORDER BY/limit); LIFT it here to the query-level `ordered`
+    // carrier over the union, where it resolves through the setop's OUTPUT
+    // scope (`Catalog.ordered`) rather than binding the last arm's columns. A
+    // set operation carries no query-level `DISTINCT` in plain SQL (a bare
+    // `UNION` already dedups), so only the ORDER BY and limit are lifted.
+    //
+    // Gate on the top-level `query` being a set operation, NOT on the
+    // `UNION`/`EXCEPT` loop above having run: a top-level chain of only
+    // `INTERSECT` (or `EXCEPT`) is built inside `intersection()` and never
+    // enters this loop, yet its trailing `ORDER BY` must lift onto the combined
+    // output all the same — otherwise it stays on the last arm and binds that
+    // arm's columns rather than the intersect result named by the first arm.
+    guard case .setop = query else { return query }
+    // The trailing tail reaches the query level by two routes. When the last
+    // arm is a `SELECT`, that arm's greedy `select()` already CONSUMED the
+    // `ORDER BY`/limit, so it sits on the rightmost arm and is LIFTED here (and
+    // trimmed off the arm, so it applies once). When the last arm is a `TABLE
+    // t`/`VALUES …` primary — neither carries a primary-level order (see
+    // `term`) — the tail is UNCONSUMED at this point, so parse it HERE. Either
+    // way the tail lands on the `ordered` carrier over the union, resolved
+    // through the setop's OUTPUT scope, not the last arm's columns.
+    let last = trailing(query)
+    if last.order != nil || last.limit != nil {
+      return .ordered(trim(query), distinct: false, order: last.order,
+                      limit: last.limit, generated: 0)
+    }
+    let order: Order? = try match(.order) ? try self.order() : nil
+    let limit = try rowLimit()
+    guard order != nil || limit != nil else { return query }
+    return .ordered(query, distinct: false, order: order, limit: limit,
+                    generated: 0)
+  }
+
+  /// The RIGHTMOST arm's `Select` of a set-operation `query` — the arm the
+  /// recursive-descent parse folds a trailing query-level `ORDER BY`/limit
+  /// onto, reached by descending each set operation's RIGHT term.
+  private func trailing(_ query: Query) -> Select {
+    switch query {
+    case let .select(select): select
+    case let .setop(_, _, right, _): trailing(right)
+    case let .ordered(inner, _, _, _, _): trailing(inner)
+    }
+  }
+
+  /// `query` with its LAST arm's `order`/`limit` cleared — the query-level tail
+  /// a set-operation `query` lifted onto the `ordered` carrier, removed from
+  /// the arm that greedily parsed it so it is applied ONCE, over the union.
+  private func trim(_ query: Query) -> Query {
+    switch query {
+    case let .select(select):
+      .select(Select(distinct: select.distinct, projection: select.projection,
+                     from: select.from, joins: select.joins,
+                     predicate: select.predicate, grouping: select.grouping,
+                     having: select.having, order: nil, limit: nil))
+    case let .setop(kind, left, right, all):
+      .setop(kind, left, trim(right), all: all)
+    case let .ordered(inner, distinct, order, limit, generated):
+      .ordered(trim(inner), distinct: distinct, order: order, limit: limit,
+               generated: generated)
+    }
   }
 
   /// Parses `term (INTERSECT [ALL] term)*`, the inner set-operation tier,
@@ -500,7 +570,7 @@ internal struct Parser: ~Escapable {
     } else {
       nil
     }
-    let grouping = try match(.group) ? try grouping() : []
+    let grouping = try match(.group) ? try grouping() : .keys([])
     let having: Predicate? = if try match(.having) {
       try self.predicate()
     } else {
@@ -513,27 +583,80 @@ internal struct Parser: ~Escapable {
     }
     let limit = try rowLimit()
 
+    // The `GROUP BY` tail is stored as-parsed — a `.keys` ordinary key list (or
+    // none) or a `.sets` `GROUPING SETS (…)` list. A `.sets` is EXPANDED into a
+    // `UNION ALL` of per-arm groupings at compile and schema time (by RESOLVED
+    // identity, so an absent key NULLs correctly), not desugared here.
     return Select(distinct: distinct, projection: projection, from: from,
                   joins: joins, predicate: predicate, grouping: grouping,
                   having: having, order: order, limit: limit)
   }
 
-  /// Parses `BY expression (, expression)*` (the `GROUP` keyword is already
-  /// consumed) — the `GROUP BY` keys, in source order. Each key parses as a
-  /// general scalar `expression` (ISO `<ordinary grouping set>` is a value
-  /// expression), so a key may be a column, an arithmetic or `||` expression,
-  /// a function call, a `CASE`/`COALESCE`, and so on — resolved and lowered
-  /// through `scope.term` at run and validated through `scope.validate`. A
-  /// bare identifier is itself an `Expression.column`, so `GROUP BY col` is
-  /// unchanged and a bare `NATURAL`/`USING` merged key still lowers to its
-  /// coalesce value through the join scope.
-  private mutating func grouping() throws(SQLError) -> Array<Expression> {
+  /// Parses `BY <grouping element>` (the `GROUP` keyword is already consumed) —
+  /// either the ordinary `<ordinary grouping set>` key list `e (, e)*` or the
+  /// ISO `GROUP BY GROUPING SETS (s, …)` construct.
+  ///
+  /// Each ordinary key parses as a general scalar `expression` (ISO `<ordinary
+  /// grouping set>` is a value expression), so a key may be a column, an
+  /// arithmetic or `||` expression, a function call, a `CASE`/`COALESCE`, and
+  /// so on — resolved and lowered through `scope.term` at run and validated
+  /// through `scope.validate`. A bare identifier is itself an
+  /// `Expression.column`, so `GROUP BY col` is unchanged and a bare
+  /// `NATURAL`/`USING` merged key still lowers to its coalesce value through
+  /// the join scope.
+  ///
+  /// `GROUPING`/`SETS` are CONTEXT identifiers (not lexer keywords, mirroring
+  /// `CAST`/`COALESCE`), so a bare `GROUPING` immediately followed by a bare
+  /// `SETS` and a `(` opens the construct; a column named `grouping`
+  /// (delimited, or bare and NOT followed by `SETS`) stays a key. The two-token
+  /// lookahead (`secondary`) resolves the prefix before consuming either token.
+  private mutating func grouping() throws(SQLError) -> Grouping {
     try expect(.by)
+    // The construct opens on a bare `GROUPING` immediately followed by a bare
+    // `SETS` — both context identifiers, resolved by two tokens of lookahead
+    // BEFORE either is consumed, so a delimited `"grouping"` or a bare
+    // `grouping` not followed by `SETS` stays an ordinary key.
+    if case let .identifier(text) = current?.kind,
+        text.uppercased() == "GROUPING",
+        case let .identifier(next) = try secondary()?.kind,
+        next.uppercased() == "SETS" {
+      return try .sets(sets())
+    }
     var keys = Array<Expression>()
     try keys.append(expression())
     while try match(.comma) {
       try keys.append(expression())
     }
+    return .keys(keys)
+  }
+
+  /// Parses the `GROUPING SETS ( set (, set)* )` tail — the `GROUPING` and
+  /// `SETS` context identifiers are the next two tokens (confirmed by
+  /// `grouping`) — into one key list per set, in source order. At least one set
+  /// is required.
+  private mutating func sets() throws(SQLError) -> Array<Array<Expression>> {
+    _ = try advance(expecting: "GROUPING")
+    _ = try advance(expecting: "SETS")
+    try expect(.lparen)
+    var sets = try [set()]
+    while try match(.comma) {
+      try sets.append(set())
+    }
+    try expect(.rparen)
+    return sets
+  }
+
+  /// Parses one grouping set `( e, … )` or `( )` — a parenthesised list of
+  /// general grouping expressions, possibly empty (the grand-total set) — into
+  /// its key list.
+  private mutating func set() throws(SQLError) -> Array<Expression> {
+    try expect(.lparen)
+    guard !(try match(.rparen)) else { return [] }
+    var keys = try [expression()]
+    while try match(.comma) {
+      try keys.append(expression())
+    }
+    try expect(.rparen)
     return keys
   }
 
@@ -1727,20 +1850,46 @@ internal struct Parser: ~Escapable {
 
   // MARK: - Cursor
 
-  /// Consumes and returns the current token, faulting at the end of input.
+  /// The token AFTER `current` without consuming either — a second token of
+  /// lookahead, buffered in `pending` and drained by `advance` before the lexer
+  /// is next pulled. It disambiguates a two-token context prefix a single
+  /// `current` cannot (`GROUP BY GROUPING SETS`, whose `GROUPING`/`SETS` are
+  /// context identifiers, not keywords, so a bare column named `grouping`
+  /// followed by anything but `SETS` must NOT be mistaken for the construct).
+  private mutating func secondary() throws(SQLError) -> Token? {
+    if pending == nil {
+      pending = try lexer.next()
+    }
+    return pending
+  }
+
+  /// Consumes and returns the current token, faulting at the end of input. A
+  /// buffered `pending` lookahead becomes the new `current`; otherwise the
+  /// lexer is pulled.
   private mutating func advance(expecting expectation: String)
       throws(SQLError) -> Token {
     guard let token = current else {
       throw .incomplete(expected: expectation)
     }
-    current = try lexer.next()
+    if let pending {
+      current = pending
+      self.pending = nil
+    } else {
+      current = try lexer.next()
+    }
     return token
   }
 
-  /// Consumes the current token if it has `kind`, reporting whether it did.
+  /// Consumes the current token if it has `kind`, reporting whether it did. A
+  /// buffered `pending` lookahead becomes the new `current` on a match.
   private mutating func match(_ kind: Token.Kind) throws(SQLError) -> Bool {
     guard let token = current, token.kind == kind else { return false }
-    current = try lexer.next()
+    if let pending {
+      current = pending
+      self.pending = nil
+    } else {
+      current = try lexer.next()
+    }
     return true
   }
 

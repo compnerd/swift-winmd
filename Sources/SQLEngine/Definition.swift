@@ -657,6 +657,8 @@ extension Query {
     case let .setop(_, left, right, _):
       left.collect(into: &names)
       right.collect(into: &names)
+    case let .ordered(inner, _, _, _, _):
+      inner.collect(into: &names)
     }
   }
 

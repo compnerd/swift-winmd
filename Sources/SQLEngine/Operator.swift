@@ -574,41 +574,7 @@ extension Catalog where Self: ~Escapable {
       }
       return projected
     case let .sort(keys, source):
-      // Evaluate each key's `Term` against every record UP FRONT — a bare slot
-      // read, but any lowered expression (`a + b`, `UPPER(Name)`, an ordinal's
-      // or alias's select-list item) — so the comparator sorts on precomputed
-      // values. Evaluation may throw (a scalar call, a division), which a
-      // `sorted(by:)` comparator cannot, so it happens here rather than inside
-      // the sort; it also evaluates each key once per row rather than once per
-      // comparison. An explicit loop keeps the borrowed `self` a scalar sort
-      // key materialises against out of a closure capture.
-      let rows = try execute(source, context)
-      var sortable = Array<Array<Value>>()
-      sortable.reserveCapacity(rows.count)
-      for record in rows {
-        var cells = Array<Value>()
-        cells.reserveCapacity(keys.count)
-        for key in keys {
-          try cells.append(evaluate(record, key.term, context))
-        }
-        sortable.append(cells)
-      }
-      return sortable.indices
-        .sorted { lhs, rhs in
-          // Compare the keys major to minor: the first key on which the rows
-          // differ decides the order; a key they are equal on falls through to
-          // the next. A key's direction governs that key alone.
-          for index in keys.indices {
-            let ordered = less(sortable[lhs][index], sortable[rhs][index])
-            let reverse = less(sortable[rhs][index], sortable[lhs][index])
-            if ordered == reverse { continue }
-            return keys[index].ascending ? ordered : reverse
-          }
-          // Equal on every key: keep the source order (a stable sort) by
-          // tie-breaking on the original index.
-          return lhs < rhs
-        }
-        .map { rows[$0] }
+      return try sorted(execute(source, context), keys, context)
     case let .product(outer, inner):
       return try product(execute(outer, context), execute(inner, context))
     case let .join(outer, name, ordinals, base, column, keys, filter):
@@ -641,6 +607,102 @@ extension Catalog where Self: ~Escapable {
     case let .limit(count, offset, source):
       return limited(try execute(source, context), count, offset)
     }
+  }
+
+  /// Executes the query-level `ordered` set-operation carrier `plan` over the
+  /// inner set operation `union`, routing the setop leaf through the SAME
+  /// per-arm augmentation the direct `run(.setop)` and the correlated-subquery
+  /// `arms` use — so a derived table an arm names is MATERIALISED in that arm's
+  /// own scope before its `.scan` reads it.
+  ///
+  /// The carrier plan `ordered` builds is a stack of SINGLE-source row
+  /// operators (`sort`/`distinct`/`limit`/`project`, and the `project`/`sort`
+  /// pair a `materialised` output key emits) OVER the compiled `union` setop.
+  /// The plain `execute(_:_:)` would run the setop under the ONE carrier
+  /// context (`execute(.setop)` shares it across both arms), which never binds
+  /// an arm's arm-local derived alias — arms are SELECT-scoped, so the query-
+  /// level augment misses them. This descends the wrapper stack unchanged,
+  /// applying EACH operator through the SAME helper `execute(_:_:)` uses, and
+  /// at the setop leaf runs `arms(_:_:_:)` — per-arm augment, per arm
+  /// `execute`, shared `combine` — so the carrier's sort/dedup/limit see the
+  /// fully materialised combined rows in the union's output slot space. A
+  /// `union` with only base-relation arms materialises nothing extra, so it
+  /// runs identically.
+  internal borrowing func execute(_ plan: Plan, carrying union: Query,
+                                  _ context: Context)
+      throws(SQLError) -> Array<Record> {
+    switch plan {
+    case .setop:
+      return try arms(plan, union, context)
+    case let .project(terms, source):
+      let source = try execute(source, carrying: union, context)
+      var projected = Array<Record>()
+      projected.reserveCapacity(source.count)
+      for record in source {
+        try projected.append(project(terms, record, context))
+      }
+      return projected
+    case let .sort(keys, source):
+      return try sorted(execute(source, carrying: union, context), keys,
+                        context)
+    case let .distinct(source):
+      return deduplicated(try execute(source, carrying: union, context))
+    case let .limit(count, offset, source):
+      return limited(try execute(source, carrying: union, context), count,
+                     offset)
+    case let .select(filter, source):
+      return try admitted(execute(source, carrying: union, context), filter,
+                          context)
+    default:
+      // The carrier stack holds only the single-source row operators above; any
+      // other node is not one the carrier builds, so execute it as-is (it does
+      // not enclose the setop leaf).
+      return try execute(plan, context)
+    }
+  }
+
+  /// Sorts `rows` by the ordered `keys` — the executor's `.sort` node body,
+  /// shared with the query-level `ordered` set-operation carrier so the two
+  /// sort a combined result IDENTICALLY.
+  ///
+  /// Each key's `Term` is evaluated against every record UP FRONT — a bare slot
+  /// read, but any lowered expression (`a + b`, `UPPER(Name)`, an ordinal's or
+  /// alias's select-list item) — so the comparator sorts on precomputed values.
+  /// Evaluation may throw (a scalar call, a division), which a `sorted(by:)`
+  /// comparator cannot, so it happens here rather than inside the sort; it also
+  /// evaluates each key once per row rather than once per comparison. An
+  /// explicit loop keeps the borrowed `self` a scalar sort key materialises
+  /// against out of a closure capture.
+  internal borrowing func sorted(_ rows: Array<Record>,
+                                 _ keys: Array<(term: Term, ascending: Bool)>,
+                                 _ context: Context)
+      throws(SQLError) -> Array<Record> {
+    var sortable = Array<Array<Value>>()
+    sortable.reserveCapacity(rows.count)
+    for record in rows {
+      var cells = Array<Value>()
+      cells.reserveCapacity(keys.count)
+      for key in keys {
+        try cells.append(evaluate(record, key.term, context))
+      }
+      sortable.append(cells)
+    }
+    return sortable.indices
+      .sorted { lhs, rhs in
+        // Compare the keys major to minor: the first key on which the rows
+        // differ decides the order; a key they are equal on falls through to
+        // the next. A key's direction governs that key alone.
+        for index in keys.indices {
+          let ordered = less(sortable[lhs][index], sortable[rhs][index])
+          let reverse = less(sortable[rhs][index], sortable[lhs][index])
+          if ordered == reverse { continue }
+          return keys[index].ascending ? ordered : reverse
+        }
+        // Equal on every key: keep the source order (a stable sort) by
+        // tie-breaking on the original index.
+        return lhs < rhs
+      }
+      .map { rows[$0] }
   }
 
   /// Evaluates each projected `term` against `record` through `routines` to the
@@ -1318,8 +1380,8 @@ extension Catalog where Self: ~Escapable {
                                 for: .view(name.lowercased()))
     }
     let rows: Array<Record>
-    if let view = resolve(view: name), case .setop = view.query,
-        case .setop = plan {
+    let view = resolve(view: name)
+    if let view, case .setop = view.query, case .setop = plan {
       // A SET-OPERATION view body executes each ARM's sub-plan under an overlay
       // AUGMENTED with THAT arm's own derived aliases. A `setop` collects NO
       // derived aliases at the query level (arms are SELECT-scoped), so the
@@ -1337,6 +1399,18 @@ extension Catalog where Self: ~Escapable {
       // materialise would fault `.relation("d")` before an arm ever ran.
       // Mirrors the per-arm run and `SELECT *` arity paths.
       rows = try setop(plan, view.query, overlay, name.lowercased())
+    } else if let view, case .ordered = view.query,
+        case .setop = view.query.core {
+      // The body is a set operation UNDER an `ordered` carrier (`… UNION …
+      // ORDER BY V`), whose plan is a `.shaped` project/sort/distinct stack
+      // over the `.setop`, NOT a bare setop, so BOTH guards above failed and
+      // the arm-local derived aliases went unmaterialised (`.relation`). Pass
+      // the carrier-transparent core to `setop`, which descends the wrapper —
+      // applying each row operator through the SAME executor helpers
+      // `execute(_:carrying:)` uses — to the setop leaf where it per-arm
+      // augments. GATED on the body actually wearing a carrier, so a bare union
+      // view keeps the exact plan-shape dispatch above.
+      rows = try setop(plan, view.query.core, overlay, name.lowercased())
     } else {
       // A single-arm view body's subqueries run LAZILY into the shared memo box
       // the `overlay` carries (recorded above under `.view(name)`), so the
@@ -1386,6 +1460,42 @@ extension Catalog where Self: ~Escapable {
                          setop(right, rightQuery, overlay, name), all,
                          types: types)
     }
+    // An `ordered` view body compiles to a `.shaped` stack of single-source row
+    // operators (`project`/`sort`/`distinct`/`limit`/`select`) OVER the setop,
+    // so descend the wrapper — the SAME nodes `execute(_:carrying:)` descends —
+    // applying each operator through the shared executor helpers, until the
+    // `.setop` node recurses above and per-arm augments. The carrier wrapper
+    // sits ABOVE the setop, so `query` is STILL the `.setop` core here — gate
+    // on that: once the setop splits into an arm (`query` a `.select`), that
+    // plan is the ARM's own sub-plan and must execute AS A UNIT under its own
+    // augment below, NOT be walked through as a carrier wrapper (which would
+    // apply the arm's projection/filter outside its arm-local scope).
+    if case .setop = query {
+      switch plan {
+      case let .project(terms, source):
+        let source = try setop(source, query, overlay, name)
+        var projected = Array<Record>()
+        projected.reserveCapacity(source.count)
+        for record in source {
+          try projected.append(project(terms, record, overlay))
+        }
+        return projected
+      case let .sort(keys, source):
+        return try sorted(setop(source, query, overlay, name), keys, overlay)
+      case let .distinct(source):
+        return deduplicated(try setop(source, query, overlay, name))
+      case let .limit(count, offset, source):
+        return limited(try setop(source, query, overlay, name), count, offset)
+      case let .select(filter, source):
+        return try admitted(setop(source, query, overlay, name), filter,
+                            overlay)
+      default:
+        break
+      }
+    }
+    // A single-arm leaf (a bare `.setop` body's arm, or a carrier wrapper's
+    // innermost source once the setop above has split): augment THIS arm's own
+    // derived aliases and execute its sub-plan under the arm-local scope.
     let scope = try augment(overlay.validating(false), for: query, rows: true)
     scope.subqueries.record(overlay: scope.revealed().relations,
                             for: .view(name))

@@ -1098,18 +1098,32 @@ extension Catalog where Self: ~Escapable {
     // recorded probe is already the shape. The fold runs ONCE per occurrence —
     // memoised on the `Subkey` — so a reached incompatibility faults on the
     // FIRST reached outer row and later rows skip the redundant (pure) re-fold.
-    if key.role == .scalar || key.role == .valued, case .setop = key.query,
-        !context.subqueries.validated(key) {
+    // A set operation may ride an `ordered` carrier (`ORDER BY`/`DISTINCT`/
+    // `OFFSET`·`FETCH` over the union), so fold on the query's CARRIER-
+    // TRANSPARENT core — a bare `case .setop = key.query` would swallow the
+    // `.ordered` carrier and skip a reached carried union's strict re-fold,
+    // diverging run from the uncorrelated `.operand`/42804 fault.
+    if key.role == .scalar || key.role == .valued,
+        case .setop = key.query.core, !context.subqueries.validated(key) {
       _ = try types(unifying: key.query, context)
       context.subqueries.validate(key)
     }
     guard let plan = context.subqueries.plan(key, correlation) else {
       throw .named("a correlated subquery plan was not compiled")
     }
-    // A SET-OPERATION plan augments PER ARM (arm-local derived aliases the
-    // query-level augment misses); a single plan augments the whole query once.
-    if case .setop = plan {
-      return try arms(plan, key.query, context)
+    // A SET-OPERATION subquery augments PER ARM (arm-local derived aliases the
+    // query-level augment misses); a single query augments the whole query
+    // once. A carried union compiles to a `.shaped` plan (a project/sort/
+    // distinct stack over the `.setop`), NOT a bare `.setop`, so route the
+    // per-arm execution through the SAME carrier descender `run` uses
+    // (`execute(_:carrying:)`) — it descends the wrapper to the setop leaf and
+    // runs `arms` there — keyed on the query's core being a set operation. A
+    // bare `.setop` query/plan (no carrier) descends identically: the core is
+    // the query itself and the descender's `.setop` leaf is `arms(plan, core,
+    // context)` — the prior direct call — so a non-ordered set operation is
+    // unchanged.
+    if case .setop = key.query.core {
+      return try execute(plan, carrying: key.query.core, context)
     }
     let augmented =
         try augment(context.validating(false), for: key.query, rows: true)
@@ -1206,7 +1220,7 @@ extension Catalog where Self: ~Escapable {
   /// (not re-running the arm queries) preserves any pushed conjunct in the arm
   /// plan; `validate: false` keeps a data-dependent-empty arm body lenient, as
   /// the run path is.
-  private borrowing func arms(_ plan: Plan, _ query: Query, _ context: Context)
+  internal borrowing func arms(_ plan: Plan, _ query: Query, _ context: Context)
       throws(SQLError) -> Array<Record> {
     if case let .setop(kind, left, right, all, types, _) = plan,
         case let .setop(_, leftQuery, rightQuery, _) = query {

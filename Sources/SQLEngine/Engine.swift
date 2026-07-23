@@ -1862,13 +1862,10 @@ extension Catalog where Self: ~Escapable {
     // joined relation and lay the FROM relation and each joined one end to end
     // in one combined ordinal space (as the non-aggregate join path does), so
     // the WHERE, keys, and aggregate arguments resolve uniformly. A LATERAL
-    // join under a GROUP BY / aggregate query is a deliberate follow-up — the
-    // grouped path forms a single-relation chain differently from the
-    // correlated apply — so fault it rather than mis-plan.
-    for join in select.joins where join.relation.lateral {
-      throw .state("0A000",
-                   "a LATERAL join under an aggregate is not supported")
-    }
+    // join (CROSS/OUTER APPLY) is supported here too: the front half is shared
+    // with the non-aggregate path, so the apply body's OUTPUT columns land in
+    // scope for the keys, aggregate arguments, HAVING, and ORDER BY, and the
+    // chain carries the correlated `apply` node the aggregate then groups.
     let (joined, relations) = try resolve(from: relation, schema: from.schema,
                                           joins: select.joins, context)
     // Model the `NATURAL`/`USING` merged columns in the scope and synthesize
@@ -1887,6 +1884,28 @@ extension Catalog where Self: ~Escapable {
     // this join, so a chained `USING` `on` keys on the merged value.
     let prefixes = select.joins.indices.map { index in
       Scope(Array(relations[0 ... index + 1]), merged: merges[index])
+    }
+    // Resolve each LATERAL join's body ONCE against the PRECEDING FROM — the
+    // FROM relation and the joins BEFORE this one (`relations[0…index]`, ONE
+    // less than the prefix, which includes the join's own relation) — so a body
+    // column naming a preceding relation correlates outward and the body's plan
+    // is pre-compiled for the per-outer-row apply. A non-lateral join records
+    // nothing here (its `nil` slot). The apply is `.inner` (CROSS APPLY, which
+    // drops an unmatched outer row) or `.left` (OUTER APPLY, which NULL-extends
+    // one); `.right`/`.full` are nonsensical for a correlated body, so fault.
+    let empty: (key: Subkey, correlation: Correlation)? = nil
+    var laterals = Array(repeating: empty, count: select.joins.count)
+    for index in select.joins.indices {
+      let join = select.joins[index]
+      guard join.relation.lateral,
+          case let .derived(body) = join.relation.source else { continue }
+      guard join.kind == .inner || join.kind == .left else {
+        throw .state("0A000", "a RIGHT/FULL LATERAL join is not supported")
+      }
+      let preceding = Scope(Array(relations[0 ... index]),
+                            merged: merges[index])
+      laterals[index] = try lateral(body, against: preceding,
+                                    columns: join.relation.columns, context)
     }
     // Compile every nested subquery ONCE for arity/type, ahead of lowering, and
     // discover each one's CORRELATION: a join `ON`'s against its PREFIX scope,
@@ -1980,6 +1999,14 @@ extension Catalog where Self: ~Escapable {
     for aggregation in aggregations {
       aggregation.references(into: &references)
     }
+    // A LATERAL apply reads its correlation's outer ordinals from the left
+    // chain's record, so those preceding-relation ordinals must be MATERIALISED
+    // (given a packed slot) even when no clause of THIS select references them
+    // — else the correlation's remap through `slot` finds no slot for the outer
+    // column its body names.
+    for lateral in laterals {
+      references.formUnion(lateral?.correlation.slots ?? [])
+    }
     let combined = references.sorted()
 
     var slot = Dictionary<Int, Int>(minimumCapacity: combined.count)
@@ -1998,8 +2025,21 @@ extension Catalog where Self: ~Escapable {
 
     let seed = from.leaf(locals[0])
     var chain = select.joins.indices.reduce(seed) { chain, index in
-      let leaf = joined[index].leaf(locals[index + 1])
       let on = matches[index].remapped(through: slot)
+      // A LATERAL join re-evaluates its pre-compiled body per outer row (a
+      // correlated apply): the apply node carries the body occurrence's `key`
+      // and its correlation (its `slot` outer ordinals remapped to the left
+      // chain's packed slots, so the per-row bind reads the correct cell) plus
+      // the referenced body-output `ordinals` this select takes, laid after the
+      // left's slots. Its `on` filters the concatenated pair; INNER APPLY drops
+      // a left row with no surviving right row.
+      if let lateral = laterals[index] {
+        return .apply(chain, key: lateral.key,
+                      correlation: lateral.correlation.remapped(through: slot),
+                      ordinals: locals[index + 1], on: on,
+                      kind: select.joins[index].kind)
+      }
+      let leaf = joined[index].leaf(locals[index + 1])
       switch select.joins[index].kind {
       case .inner:
         return .select(on, .product(chain, leaf))

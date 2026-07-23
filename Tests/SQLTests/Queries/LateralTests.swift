@@ -550,16 +550,18 @@ struct LateralAggregateCorrelationTests {
             "a correlated column is only supported in a subquery's WHERE"))
   }
 
-  @Test func `a LATERAL join under an aggregate is still unsupported`() throws {
-    // A LATERAL join whose OUTER query aggregates is a DIFFERENT, still-rejected
-    // case: the grouped plan forms its single-relation chain differently from the
-    // correlated apply, so it faults rather than mis-plan. The grouped-body fix
-    // does not touch this guard.
+  @Test func `a LATERAL join under an aggregate is now supported`() throws {
+    // A LATERAL join whose OUTER query aggregates is supported: the grouped
+    // path shares the FROM front half with the non-aggregate path, so the apply
+    // body's output columns are in scope and the aggregate node sits over the
+    // apply-bearing chain. The body re-runs per `T` row — Id 1 → {100, 101},
+    // Id 2 → {200}, Id 3 → {} (the INNER apply drops it) — so `COUNT(*)` over
+    // the three surviving rows is 3, NOT the outer `T`'s row count. (Was the
+    // one existing negative test asserting a `0A000` fault; converted here.)
     try fixture().expect(
         "SELECT COUNT(*) AS n FROM T " +
         "JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1",
-        fails: .state("0A000",
-            "a LATERAL join under an aggregate is not supported"))
+        yields: [[3]])
   }
 }
 
@@ -587,5 +589,162 @@ struct LateralSetOperationStarTests {
         "JOIN LATERAL (SELECT T.Id AS id) AS d ON 1 = 1")
     let columns = try fixture().columns(of: query, validate: true)
     #expect(columns.map(\.name) == ["Id", "id"])
+  }
+}
+
+
+// MARK: - LATERAL join under an aggregate / GROUP BY outer query
+
+/// A LATERAL join (CROSS/OUTER APPLY) in the FROM of an aggregate/`GROUP BY`
+/// outer query. The grouped path shares the FROM front half with the non-
+/// aggregate path, so the apply body's OUTPUT columns land in scope for the
+/// keys, aggregate arguments, `HAVING`, and `ORDER BY`; the aggregate node
+/// then groups the apply-bearing chain. INNER apply DROPS a body-empty outer
+/// row (so it never reaches the aggregate); OUTER apply NULL-EXTENDS it (so
+/// `COUNT(*)` counts the NULL row while `COUNT(col)`/`SUM` skip it).
+struct LateralUnderAggregateTests {
+  @Test func `COUNT star over a CROSS APPLY counts the surviving rows`()
+      throws {
+    // Id 1 → {100, 101}, Id 2 → {200}, Id 3 → {} (INNER apply drops it), so
+    // three rows survive: `COUNT(*)` is 3 — the drop of Id 3 and the two
+    // children of Id 1 net to three surviving apply rows, NOT `T`'s row count.
+    try fixture().expect(
+        "SELECT COUNT(*) AS n FROM T " +
+        "JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1",
+        yields: [[3]])
+  }
+
+  @Test func `SUM over a CROSS APPLY folds the body columns`() throws {
+    // `SUM(d.x)` over the surviving body rows: 100 + 101 + 200 = 401.
+    try fixture().expect(
+        "SELECT SUM(d.x) AS s FROM T " +
+        "JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1",
+        yields: [[401]])
+  }
+
+  @Test func `GROUP BY a lateral output column groups the apply rows`()
+      throws {
+    // Group by the body's OUTPUT column `d.x` — each distinct child value is
+    // its own group of one row. ORDER BY the lateral key: (100, 1), (101, 1),
+    // (200, 1). Id 3 contributes no row (INNER apply), so no group for it.
+    try fixture().expect(
+        "SELECT d.x, COUNT(*) AS n FROM T " +
+        "JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1 " +
+        "GROUP BY d.x ORDER BY d.x",
+        yields: [[100, 1], [101, 1], [200, 1]])
+  }
+
+  @Test func `an OUTER APPLY NULL row separates COUNT star from COUNT col`()
+      throws {
+    // LEFT JOIN LATERAL NULL-extends the body-empty Id 3, so a fourth row (all
+    // `d` columns NULL) reaches the aggregate. `COUNT(*)` counts it (4);
+    // `COUNT(d.x)` and `SUM(d.x)` skip the NULL (3 and 401) — the values
+    // DIFFER, pinning NULL-into-aggregate over the NULL-extended apply row.
+    try fixture().expect(
+        "SELECT COUNT(*) AS n FROM T " +
+        "LEFT JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1",
+        yields: [[4]])
+    try fixture().expect(
+        "SELECT COUNT(d.x) AS n FROM T " +
+        "LEFT JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1",
+        yields: [[3]])
+    try fixture().expect(
+        "SELECT SUM(d.x) AS s FROM T " +
+        "LEFT JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1",
+        yields: [[401]])
+  }
+
+  @Test func `an OUTER APPLY keeps a NULL group for the body-empty row`()
+      throws {
+    // GROUP BY the lateral output over an OUTER apply: the NULL-extended Id 3
+    // forms its own NULL group, so a `(NULL, 1)` group sits beside the three
+    // value groups.
+    try fixture().expect(
+        "SELECT d.x, COUNT(*) AS n FROM T " +
+        "LEFT JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1 " +
+        "GROUP BY d.x ORDER BY d.x",
+        yields: [[nil, 1], [100, 1], [101, 1], [200, 1]])
+  }
+
+  @Test func `a lateral body that itself aggregates folds under the outer`()
+      throws {
+    // The body is a WHOLE-RESULT aggregate (`COUNT(*)` with no GROUP BY), which
+    // emits ONE row per outer row even for an empty match: Id 1 → 2, Id 2 → 1,
+    // Id 3 → 0. The outer `SUM(d.n)` folds them: 2 + 1 + 0 = 3.
+    try fixture().expect(
+        "SELECT SUM(d.n) AS s FROM T " +
+        "JOIN LATERAL (SELECT COUNT(*) AS n FROM S WHERE S.k = T.Id) AS d " +
+        "ON 1 = 1",
+        yields: [[3]])
+  }
+
+  @Test func `HAVING filters groups by an aggregate over the apply`() throws {
+    // GROUP BY the preceding `T.Id`, `COUNT(*)` the body rows per group, and
+    // HAVING keeps only groups with more than one child: only Id 1 (two
+    // children) survives — (1, 2). Id 2 (one child) and Id 3 (dropped) drop.
+    try fixture().expect(
+        "SELECT T.Id, COUNT(*) AS n FROM T " +
+        "JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1 " +
+        "GROUP BY T.Id HAVING COUNT(*) > 1 ORDER BY T.Id",
+        yields: [[1, 2]])
+  }
+
+  @Test func `a lateral column is a bare aggregate argument`() throws {
+    // `AVG(d.x)` reads the body output column directly as the aggregate's
+    // argument: the average of 100, 101, 200 is 401 / 3 = 133.66…
+    try fixture().expect(
+        "SELECT AVG(d.x) AS a FROM T " +
+        "JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1",
+        yields: [[133.66666666666666]])
+  }
+
+  @Test func `a preceding column read ONLY inside the body is materialised`()
+      throws {
+    // CORRELATION-SLOT SENTINEL: the preceding `T.Id` appears in NO outer
+    // clause — not the projection, keys, aggregate args, HAVING, ORDER — it
+    // lives ONLY inside the body's WHERE (`S.k = T.Id`). The apply still reads
+    // `T.Id` from the left record to bind the correlation, so it must be
+    // MATERIALISED (given a packed slot) even though the grouped clauses never
+    // name it; the `laterals` correlation-slot union guarantees it. `COUNT(*)`
+    // is 3.
+    try fixture().expect(
+        "SELECT COUNT(*) AS n FROM T " +
+        "JOIN LATERAL (SELECT S.x AS x FROM S WHERE S.k = T.Id) AS d ON 1 = 1",
+        yields: [[3]])
+  }
+
+  @Test func `a RIGHT LATERAL join under an aggregate still faults`() throws {
+    // A `RIGHT`/`FULL` correlated apply is nonsensical, so the grouped path
+    // rejects it with the same `0A000` the non-aggregate path raises.
+    try fixture().expect(
+        "SELECT COUNT(*) AS n FROM T " +
+        "RIGHT JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1",
+        fails: .state("0A000", "a RIGHT/FULL LATERAL join is not supported"))
+  }
+
+  @Test func `the COUNT star schema shape reports one integer column`()
+      throws {
+    // `columns(of:validate:true)` agrees with the run's shape: a single
+    // `COUNT(*)` output column `n` of integer type.
+    let query = try parse(query:
+        "SELECT COUNT(*) AS n FROM T " +
+        "JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1")
+    let columns = try fixture().columns(of: query, validate: true)
+    #expect(columns.count == 1)
+    #expect(columns[0].name == "n")
+    #expect(columns[0].type == .integer)
+  }
+
+  @Test func `the GROUP BY lateral-key schema reports the key and count`()
+      throws {
+    // The grouped projection over the apply advertises the lateral key `d.x`
+    // (integer, from `S.x`) and the `COUNT(*)` column `n` (integer).
+    let query = try parse(query:
+        "SELECT d.x, COUNT(*) AS n FROM T " +
+        "JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1 " +
+        "GROUP BY d.x")
+    let columns = try fixture().columns(of: query, validate: true)
+    #expect(columns.map(\.name) == ["x", "n"])
+    #expect(columns.map(\.type) == [.integer, .integer])
   }
 }

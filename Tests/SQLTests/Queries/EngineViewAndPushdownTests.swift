@@ -12,7 +12,7 @@ struct EngineViewTests {
   @Test func `a view resolves and queries like a table`() throws {
     // `SELECT * FROM Adults` runs the view's `SELECT Id, Name FROM Parent
     // WHERE Id >= 2`, exposing the columns as `Key`/`Label`.
-    let rows = try engineView("SELECT * FROM Adults")
+    let rows = try view("SELECT * FROM Adults")
     #expect(rows == [
       [.integer(2), .text("Bee")],
       [.integer(3), .text("Cid")],
@@ -20,23 +20,23 @@ struct EngineViewTests {
   }
 
   @Test func `a projection over a view selects the view's columns by name`() throws {
-    try engineViews().expect("SELECT Label FROM Adults", yields: [["Bee"], ["Cid"]])
+    try gallery().expect("SELECT Label FROM Adults", yields: [["Bee"], ["Cid"]])
   }
 
   @Test func `a WHERE over a view filters its rows`() throws {
-    try engineViews().expect("SELECT Label FROM Adults WHERE Key = 3",
+    try gallery().expect("SELECT Label FROM Adults WHERE Key = 3",
                        yields: [["Cid"]])
   }
 
   @Test func `an ORDER BY over a view orders its rows`() throws {
-    try engineViews().expect("SELECT Label FROM Adults ORDER BY Label DESC",
+    try gallery().expect("SELECT Label FROM Adults ORDER BY Label DESC",
                        yields: [["Cid"], ["Bee"]])
   }
 
   @Test func `a view whose definition is a join resolves and queries`() throws {
     // `Pairs` denormalises the `Parent`/`Child` foreign-key join; querying it
     // runs the inner join and exposes its two columns as `Parent`/`Kid`.
-    let rows = try engineView("SELECT * FROM Pairs")
+    let rows = try view("SELECT * FROM Pairs")
     #expect(rows == [
       [.text("Ada"), .text("Ann")],
       [.text("Ada"), .text("Amy")],
@@ -45,13 +45,13 @@ struct EngineViewTests {
   }
 
   @Test func `a projection and filter over a join view selects across its columns`() throws {
-    try engineViews().expect("SELECT Kid FROM Pairs WHERE Parent = 'Ada'",
+    try gallery().expect("SELECT Kid FROM Pairs WHERE Parent = 'Ada'",
                        yields: [["Ann"], ["Amy"]])
   }
 
   @Test func `an unknown column of a view is reported`() throws {
     #expect(throws: SQLError.column("Missing")) {
-      try engineView("SELECT Missing FROM Adults")
+      try view("SELECT Missing FROM Adults")
     }
   }
 
@@ -59,21 +59,21 @@ struct EngineViewTests {
     // `Parent` is two columns wide, but the view declares three. A `SELECT *`
     // has no statically known arity, so the parser admits the list; the engine
     // catches the mismatch at resolution rather than indexing past a row.
-    let star = try View(query: engineSelect("SELECT * FROM Parent"),
+    let star = try View(query: select("SELECT * FROM Parent"),
                         columns: ["a", "b", "c"])
-    let catalog = EngineMemory(try engineFamily().catalog, views: ["Star": star])
+    let catalog = EngineMemory(try family().catalog, views: ["Star": star])
     #expect(throws: SQLError.columns(expected: 2, got: 3)) {
-      try catalog.run(engineParse("SELECT a FROM Star"))
+      try catalog.run(parse("SELECT a FROM Star"))
     }
   }
 
   @Test func `a SELECT * view whose explicit list matches the width resolves`() throws {
     // The same `SELECT *` view declared with the right number of columns
     // resolves and queries — the backstop passes the well-formed view through.
-    let star = try View(query: engineSelect("SELECT * FROM Parent"),
+    let star = try View(query: select("SELECT * FROM Parent"),
                         columns: ["a", "b"])
-    let catalog = EngineMemory(try engineFamily().catalog, views: ["Star": star])
-    let rows = try catalog.run(engineParse("SELECT b FROM Star WHERE a = 1"))
+    let catalog = EngineMemory(try family().catalog, views: ["Star": star])
+    let rows = try catalog.run(parse("SELECT b FROM Star WHERE a = 1"))
     #expect(rows == [[.text("Ada")]])
   }
 
@@ -83,13 +83,13 @@ struct EngineViewTests {
     // scanning under a `Select`. Compile and optimise an outer query over the
     // view and inspect the `.derived` leaf: its sub-plan must reach a seeked
     // `.scan` (a non-nil seek) and carry no `.select` over a raw scan.
-    let catalog = try engineViews()
-    let select = try engineParse("SELECT Key, Label FROM Adults")
+    let catalog = try gallery()
+    let select = try parse("SELECT Key, Label FROM Adults")
     let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled, [:])
-    let sub = try #require(engineDerived(plan))
-    #expect(engineSeeks(sub))
-    #expect(!engineFilters(sub))
+    let sub = try #require(derived(plan))
+    #expect(sought(sub))
+    #expect(!filters(sub))
   }
 }
 
@@ -112,7 +112,7 @@ struct EngineViewCorrelationTests {
   /// a source `Src` WITHOUT `k`, and a view `Bad` whose body references the
   /// unbound `k`.
   private func leaky() throws -> EngineMemory {
-    let bad = try View(query: engineSelect("SELECT n FROM Src WHERE k = 1"),
+    let bad = try View(query: select("SELECT n FROM Src WHERE k = 1"),
                        columns: ["n"])
     return EngineMemory([
       "Env": FixtureRelation([EngineField(name: "k", type: .integer)],
@@ -139,7 +139,7 @@ struct EngineViewCorrelationTests {
     // Schema ↔ run parity: the STRICT schema pass faults the view body's
     // unbound `k` too, rather than binding it to the caller — the leak the fold
     // introduced would have compiled a schema for a view that cannot run.
-    let query = try engineParse(
+    let query = try parse(
         "SELECT k FROM Env WHERE EXISTS (SELECT n FROM Bad)")
     #expect(throws: SQLError.self) {
       _ = try leaky().columns(of: query, validate: true)
@@ -151,7 +151,7 @@ struct EngineViewCorrelationTests {
     // subquery still resolves and runs — clearing the view body's correlation
     // stack does not disturb a well-formed view. `Good` reads `Src` (one row),
     // so the EXISTS holds for every `Env` row.
-    let good = try View(query: engineSelect("SELECT n FROM Src"), columns: ["n"])
+    let good = try View(query: select("SELECT n FROM Src"), columns: ["n"])
     let catalog = EngineMemory([
       "Env": FixtureRelation([EngineField(name: "k", type: .integer)],
                                [[.integer(1)], [.integer(2)]]
@@ -201,7 +201,7 @@ struct EngineViewCorrelationTests {
   /// WITHOUT `k`, and a view `Proj` whose body PROJECTS the unbound `k` — so its
   /// SCHEMA (the projection's type) is what a leak would derive from the caller.
   private func leaked() throws -> EngineMemory {
-    let proj = try View(query: engineSelect("SELECT k AS m FROM Src"),
+    let proj = try View(query: select("SELECT k AS m FROM Src"),
                         columns: ["m"])
     return EngineMemory([
       "Env": FixtureRelation([EngineField(name: "k", type: .integer)],
@@ -232,7 +232,7 @@ struct EngineViewCorrelationTests {
     // `Env.k`. This is the seam the run/compile path (`resolve`/`overlay`)
     // clears elsewhere but `schema(of:)` did NOT until routed through `body`.
     let catalog = try leaked()
-    let target = try engineSelect("SELECT m FROM Proj").first
+    let target = try select("SELECT m FROM Proj").first
     let context = try enclosing(catalog)
     var raised: SQLError?
     do {
@@ -250,7 +250,7 @@ struct EngineViewCorrelationTests {
     // its schema derived under the SAME correlated scope — clearing the schema
     // path's correlation stack does not disturb a legitimate view. `Fine`
     // projects `n` (in its own `Src`), so `scope(of:)` derives cleanly.
-    let fine = try View(query: engineSelect("SELECT n AS m FROM Src"),
+    let fine = try View(query: select("SELECT n AS m FROM Src"),
                         columns: ["m"])
     let catalog = EngineMemory([
       "Env": FixtureRelation([EngineField(name: "k", type: .integer)],
@@ -258,7 +258,7 @@ struct EngineViewCorrelationTests {
       "Src": FixtureRelation([EngineField(name: "n", type: .integer)],
                              [[.integer(7)]] as Array<Array<Value>>),
     ], views: ["Fine": fine])
-    let target = try engineSelect("SELECT m FROM Fine").first
+    let target = try select("SELECT m FROM Fine").first
     let context = try enclosing(catalog)
     // Eager rather than `#expect(throws:)` — a borrowed `~Escapable` catalog
     // cannot be captured by the assertion's escaping closure.
@@ -275,70 +275,70 @@ struct EngineViewCorrelationTests {
 }
 
 /// The sub-plan of the first `.derived` leaf reachable from `plan`, or `nil`.
-func engineDerived(_ plan: Plan) -> Plan? {
+func derived(_ plan: Plan) -> Plan? {
   switch plan {
   case let .derived(_, sub, _, _):
     sub
   case let .select(_, source):
-    engineDerived(source)
+    derived(source)
   case let .project(_, source):
-    engineDerived(source)
+    derived(source)
   case let .sort(_, source):
-    engineDerived(source)
+    derived(source)
   case let .product(left, right):
-    engineDerived(left) ?? engineDerived(right)
+    derived(left) ?? derived(right)
   case let .outer(left, right, _, _):
-    engineDerived(left) ?? engineDerived(right)
+    derived(left) ?? derived(right)
   case let .semijoin(left, right, _, _):
-    engineDerived(left) ?? engineDerived(right)
+    derived(left) ?? derived(right)
   case let .apply(left, _, _, _, _, _):
-    engineDerived(left)
+    derived(left)
   case let .setop(_, left, right, _, _, _):
-    engineDerived(left) ?? engineDerived(right)
+    derived(left) ?? derived(right)
   case let .limit(_, _, source):
-    engineDerived(source)
+    derived(source)
   case let .distinct(source):
-    engineDerived(source)
+    derived(source)
   case let .aggregate(_, _, source):
-    engineDerived(source)
+    derived(source)
   case .single, .empty, .scan, .join:
     nil
   }
 }
 
 /// Whether `plan` reaches a `.scan` carrying a non-nil seek.
-func engineSeeks(_ plan: Plan) -> Bool {
+func sought(_ plan: Plan) -> Bool {
   switch plan {
   case let .scan(_, _, seek):
     seek != nil
   case let .select(_, source):
-    engineSeeks(source)
+    sought(source)
   case let .project(_, source):
-    engineSeeks(source)
+    sought(source)
   case let .sort(_, source):
-    engineSeeks(source)
+    sought(source)
   case let .derived(_, sub, _, _):
-    engineSeeks(sub)
+    sought(sub)
   case let .product(left, right):
-    engineSeeks(left) || engineSeeks(right)
+    sought(left) || sought(right)
   case let .join(outer, _, _, _, _, _, _):
     // A pushed-down key seeks the join's OUTER leaf, so a seek can live inside
     // the join rather than only atop a bare scan.
-    engineSeeks(outer)
+    sought(outer)
   case let .outer(left, right, _, _):
-    engineSeeks(left) || engineSeeks(right)
+    sought(left) || sought(right)
   case let .semijoin(left, right, _, _):
-    engineSeeks(left) || engineSeeks(right)
+    sought(left) || sought(right)
   case let .apply(left, _, _, _, _, _):
-    engineSeeks(left)
+    sought(left)
   case let .setop(_, left, right, _, _, _):
-    engineSeeks(left) || engineSeeks(right)
+    sought(left) || sought(right)
   case let .limit(_, _, source):
-    engineSeeks(source)
+    sought(source)
   case let .distinct(source):
-    engineSeeks(source)
+    sought(source)
   case let .aggregate(_, _, source):
-    engineSeeks(source)
+    sought(source)
   case .single, .empty:
     false
   }
@@ -346,34 +346,34 @@ func engineSeeks(_ plan: Plan) -> Bool {
 
 /// Whether `plan` wraps a raw (unseeked) `.scan` in a `.select` — the
 /// un-optimised shape the fix eliminates from a view's sub-plan.
-func engineFilters(_ plan: Plan) -> Bool {
+func filters(_ plan: Plan) -> Bool {
   switch plan {
   case .select(_, .scan(_, _, nil)):
     true
   case let .select(_, source):
-    engineFilters(source)
+    filters(source)
   case let .project(_, source):
-    engineFilters(source)
+    filters(source)
   case let .sort(_, source):
-    engineFilters(source)
+    filters(source)
   case let .derived(_, sub, _, _):
-    engineFilters(sub)
+    filters(sub)
   case let .product(left, right):
-    engineFilters(left) || engineFilters(right)
+    filters(left) || filters(right)
   case let .outer(left, right, _, _):
-    engineFilters(left) || engineFilters(right)
+    filters(left) || filters(right)
   case let .semijoin(left, right, _, _):
-    engineFilters(left) || engineFilters(right)
+    filters(left) || filters(right)
   case let .apply(left, _, _, _, _, _):
-    engineFilters(left)
+    filters(left)
   case let .setop(_, left, right, _, _, _):
-    engineFilters(left) || engineFilters(right)
+    filters(left) || filters(right)
   case let .limit(_, _, source):
-    engineFilters(source)
+    filters(source)
   case let .distinct(source):
-    engineFilters(source)
+    filters(source)
   case let .aggregate(_, _, source):
-    engineFilters(source)
+    filters(source)
   case .single, .empty, .scan, .join:
     false
   }
@@ -383,37 +383,37 @@ func engineFilters(_ plan: Plan) -> Bool {
 /// the shape selection pushdown produces (a `.select` or a seeked `.scan` inside
 /// a join's outer operand or a product's arm), as opposed to a `WHERE` left
 /// floating atop the whole chain.
-func enginePushed(_ plan: Plan) -> Bool {
+func pushed(_ plan: Plan) -> Bool {
   switch plan {
   case let .join(outer, _, _, _, _, _, _):
-    engineSeeks(outer) || engineFloats(outer) || enginePushed(outer)
+    sought(outer) || floating(outer) || pushed(outer)
   case let .product(left, right):
-    engineSeeks(left) || engineFloats(left) || enginePushed(left) || engineSeeks(right)
-        || engineFloats(right) || enginePushed(right)
+    sought(left) || floating(left) || pushed(left) || sought(right)
+        || floating(right) || pushed(right)
   case let .outer(left, right, _, _):
-    engineSeeks(left) || engineFloats(left) || enginePushed(left) || engineSeeks(right)
-        || engineFloats(right) || enginePushed(right)
+    sought(left) || floating(left) || pushed(left) || sought(right)
+        || floating(right) || pushed(right)
   case let .semijoin(left, right, _, _):
-    engineSeeks(left) || engineFloats(left) || enginePushed(left)
-        || engineSeeks(right) || engineFloats(right) || enginePushed(right)
+    sought(left) || floating(left) || pushed(left)
+        || sought(right) || floating(right) || pushed(right)
   case let .apply(left, _, _, _, _, _):
-    engineSeeks(left) || engineFloats(left) || enginePushed(left)
+    sought(left) || floating(left) || pushed(left)
   case let .select(_, source):
-    enginePushed(source)
+    pushed(source)
   case let .project(_, source):
-    enginePushed(source)
+    pushed(source)
   case let .sort(_, source):
-    enginePushed(source)
+    pushed(source)
   case let .derived(_, sub, _, _):
-    enginePushed(sub)
+    pushed(sub)
   case let .setop(_, left, right, _, _, _):
-    enginePushed(left) || enginePushed(right)
+    pushed(left) || pushed(right)
   case let .limit(_, _, source):
-    enginePushed(source)
+    pushed(source)
   case let .distinct(source):
-    enginePushed(source)
+    pushed(source)
   case let .aggregate(_, _, source):
-    enginePushed(source)
+    pushed(source)
   case .single, .empty, .scan:
     false
   }
@@ -421,18 +421,18 @@ func enginePushed(_ plan: Plan) -> Bool {
 
 /// Whether `plan` is (or reaches through unary operators) a `.select` — a filter
 /// standing over a source.
-func engineFloats(_ plan: Plan) -> Bool {
+func floating(_ plan: Plan) -> Bool {
   switch plan {
   case .select:
     true
   case let .project(_, source):
-    engineFloats(source)
+    floating(source)
   case let .sort(_, source):
-    engineFloats(source)
+    floating(source)
   case let .derived(_, sub, _, _):
-    engineFloats(sub)
+    floating(sub)
   case let .limit(_, _, source):
-    engineFloats(source)
+    floating(source)
   default:
     false
   }
@@ -440,34 +440,34 @@ func engineFloats(_ plan: Plan) -> Bool {
 
 /// Whether `plan` reaches a `.join` node — the index-nested-loop/hash join path,
 /// as opposed to a residual `.product` filtered by the ON predicate.
-func engineJoins(_ plan: Plan) -> Bool {
+func joined(_ plan: Plan) -> Bool {
   switch plan {
   case .join:
     true
   case let .select(_, source):
-    engineJoins(source)
+    joined(source)
   case let .project(_, source):
-    engineJoins(source)
+    joined(source)
   case let .sort(_, source):
-    engineJoins(source)
+    joined(source)
   case let .limit(_, _, source):
-    engineJoins(source)
+    joined(source)
   case let .distinct(source):
-    engineJoins(source)
+    joined(source)
   case let .derived(_, sub, _, _):
-    engineJoins(sub)
+    joined(sub)
   case let .product(left, right):
-    engineJoins(left) || engineJoins(right)
+    joined(left) || joined(right)
   case let .outer(left, right, _, _):
-    engineJoins(left) || engineJoins(right)
+    joined(left) || joined(right)
   case let .semijoin(left, right, _, _):
-    engineJoins(left) || engineJoins(right)
+    joined(left) || joined(right)
   case let .apply(left, _, _, _, _, _):
-    engineJoins(left)
+    joined(left)
   case let .setop(_, left, right, _, _, _):
-    engineJoins(left) || engineJoins(right)
+    joined(left) || joined(right)
   case let .aggregate(_, _, source):
-    engineJoins(source)
+    joined(source)
   case .single, .empty, .scan:
     false
   }
@@ -476,36 +476,36 @@ func engineJoins(_ plan: Plan) -> Bool {
 /// Whether `plan` reaches a `.select` standing directly over a `.product` — the
 /// residual product-under-select the streaming path fuses and filters row by
 /// row rather than materialising whole.
-func engineResidual(_ plan: Plan) -> Bool {
+func residue(_ plan: Plan) -> Bool {
   switch plan {
   case .select(_, .product):
     true
   case let .select(_, source):
-    engineResidual(source)
+    residue(source)
   case let .project(_, source):
-    engineResidual(source)
+    residue(source)
   case let .sort(_, source):
-    engineResidual(source)
+    residue(source)
   case let .limit(_, _, source):
-    engineResidual(source)
+    residue(source)
   case let .distinct(source):
-    engineResidual(source)
+    residue(source)
   case let .derived(_, sub, _, _):
-    engineResidual(sub)
+    residue(sub)
   case let .product(left, right):
-    engineResidual(left) || engineResidual(right)
+    residue(left) || residue(right)
   case let .join(outer, _, _, _, _, _, _):
-    engineResidual(outer)
+    residue(outer)
   case let .outer(left, right, _, _):
-    engineResidual(left) || engineResidual(right)
+    residue(left) || residue(right)
   case let .semijoin(left, right, _, _):
-    engineResidual(left) || engineResidual(right)
+    residue(left) || residue(right)
   case let .apply(left, _, _, _, _, _):
-    engineResidual(left)
+    residue(left)
   case let .setop(_, left, right, _, _, _):
-    engineResidual(left) || engineResidual(right)
+    residue(left) || residue(right)
   case let .aggregate(_, _, source):
-    engineResidual(source)
+    residue(source)
   case .single, .empty, .scan:
     false
   }
@@ -515,36 +515,36 @@ func engineResidual(_ plan: Plan) -> Bool {
 /// over a `.product` — the WHERE-above-a-separate-ON-gate shape the barrier
 /// preserves (the outer `select` the `WHERE`, the inner the residual `ON`
 /// gate), as opposed to one fused `.select(ON AND WHERE, product)`.
-func engineSeparated(_ plan: Plan) -> Bool {
+func separated(_ plan: Plan) -> Bool {
   switch plan {
   case .select(_, .select(_, .product)):
     true
   case let .select(_, source):
-    engineSeparated(source)
+    separated(source)
   case let .project(_, source):
-    engineSeparated(source)
+    separated(source)
   case let .sort(_, source):
-    engineSeparated(source)
+    separated(source)
   case let .limit(_, _, source):
-    engineSeparated(source)
+    separated(source)
   case let .distinct(source):
-    engineSeparated(source)
+    separated(source)
   case let .derived(_, sub, _, _):
-    engineSeparated(sub)
+    separated(sub)
   case let .product(left, right):
-    engineSeparated(left) || engineSeparated(right)
+    separated(left) || separated(right)
   case let .join(outer, _, _, _, _, _, _):
-    engineSeparated(outer)
+    separated(outer)
   case let .outer(left, right, _, _):
-    engineSeparated(left) || engineSeparated(right)
+    separated(left) || separated(right)
   case let .semijoin(left, right, _, _):
-    engineSeparated(left) || engineSeparated(right)
+    separated(left) || separated(right)
   case let .apply(left, _, _, _, _, _):
-    engineSeparated(left)
+    separated(left)
   case let .setop(_, left, right, _, _, _):
-    engineSeparated(left) || engineSeparated(right)
+    separated(left) || separated(right)
   case let .aggregate(_, _, source):
-    engineSeparated(source)
+    separated(source)
   case .single, .empty, .scan:
     false
   }
@@ -555,36 +555,36 @@ func engineSeparated(_ plan: Plan) -> Bool {
 /// preserves for a pure-equi `ON` whose extra equi key `nest` leaves gating
 /// over the hash join (the outer `select` the `WHERE`, the inner the leftover
 /// match), as opposed to one fused `.select(match AND WHERE, join)`.
-func engineStacked(_ plan: Plan) -> Bool {
+func stacked(_ plan: Plan) -> Bool {
   switch plan {
   case .select(_, .select(_, .join)):
     true
   case let .select(_, source):
-    engineStacked(source)
+    stacked(source)
   case let .project(_, source):
-    engineStacked(source)
+    stacked(source)
   case let .sort(_, source):
-    engineStacked(source)
+    stacked(source)
   case let .limit(_, _, source):
-    engineStacked(source)
+    stacked(source)
   case let .distinct(source):
-    engineStacked(source)
+    stacked(source)
   case let .derived(_, sub, _, _):
-    engineStacked(sub)
+    stacked(sub)
   case let .product(left, right):
-    engineStacked(left) || engineStacked(right)
+    stacked(left) || stacked(right)
   case let .join(outer, _, _, _, _, _, _):
-    engineStacked(outer)
+    stacked(outer)
   case let .outer(left, right, _, _):
-    engineStacked(left) || engineStacked(right)
+    stacked(left) || stacked(right)
   case let .semijoin(left, right, _, _):
-    engineStacked(left) || engineStacked(right)
+    stacked(left) || stacked(right)
   case let .apply(left, _, _, _, _, _):
-    engineStacked(left)
+    stacked(left)
   case let .setop(_, left, right, _, _, _):
-    engineStacked(left) || engineStacked(right)
+    stacked(left) || stacked(right)
   case let .aggregate(_, _, source):
-    engineStacked(source)
+    stacked(source)
   case .single, .empty, .scan:
     false
   }
@@ -620,7 +620,7 @@ private func counted() throws -> (catalog: EngineMemory, reads: EngineCounter) {
     [.integer(3), .text("Cody")],
   ] as Array<Array<Value>>
 
-  let kin = try View(query: engineSelect("""
+  let kin = try View(query: select("""
       SELECT Parent.Id, Parent.Name, Child.Kid FROM Parent
         JOIN Child ON Child.Pid = Parent.Id
       """), columns: ["Key", "Name", "Kid"])
@@ -661,7 +661,7 @@ private func spanned() throws -> EngineMemory {
   // Arm 1 projects Alpha.Key (body slot 0, seekable) then Tag; arm 2 projects
   // Beta.Key (body slot 1, unseekable) then Tag — the same output `Key` at
   // differing body slots.
-  let both = try View(query: engineSelect("""
+  let both = try View(query: select("""
       SELECT Key, Tag FROM Alpha UNION ALL SELECT Key, Tag FROM Beta
       """), columns: ["Key", "Tag"])
   return EngineMemory([
@@ -676,7 +676,7 @@ private func spanned() throws -> EngineMemory {
 private func injected(_ plan: Plan) -> Bool {
   switch plan {
   case let .setop(_, left, right, _, _, _):
-    (engineSeeks(left) || engineFloats(left)) && (engineSeeks(right) || engineFloats(right))
+    (sought(left) || floating(left)) && (sought(right) || floating(right))
   case let .select(_, source):
     injected(source)
   case let .project(_, source):
@@ -711,28 +711,28 @@ struct EnginePushdownTests {
     // `WHERE Parent.Name = 'Ada'` references only the outer relation, so it
     // pushes to the Parent leaf inside the join rather than filtering the whole
     // product afterwards — `pushed` sees a filter within the join's outer.
-    let catalog = try engineFamily()
-    let select = try engineParse("""
+    let catalog = try family()
+    let select = try parse("""
         SELECT Child.Name FROM Parent JOIN Child ON Child.Pid = Parent.Id
           WHERE Parent.Name = 'Ada'
         """)
     let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
-    #expect(enginePushed(plan))
+    #expect(pushed(plan))
   }
 
   @Test func `pushdown down a seekable outer key seeks that leaf inside the join`() throws {
     // `WHERE Parent.Id = 2` is seekable; pushed to the Parent leaf it becomes a
     // seek inside the join's outer, not a scan-then-filter atop the product.
-    let catalog = try engineFamily()
-    let select = try engineParse("""
+    let catalog = try family()
+    let select = try parse("""
         SELECT Child.Name FROM Parent JOIN Child ON Child.Pid = Parent.Id
           WHERE Parent.Id = 2
         """)
     let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
-    #expect(engineSeeks(plan))
-    #expect(enginePushed(plan))
+    #expect(sought(plan))
+    #expect(pushed(plan))
   }
 
   @Test func `a trailing seekable conjunct survives a rebuilt three-term AND`() throws {
@@ -752,12 +752,12 @@ struct EnginePushdownTests {
         [.text("b"), .integer(2), .integer(6)],
       ] as Array<Array<Value>>, sorted: 2),
     ])
-    let select = try engineParse("""
+    let select = try parse("""
         SELECT Name FROM T WHERE Name <> 'x' AND Age > 0 AND Id = 5
         """)
     let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
-    #expect(engineSeeks(plan))
+    #expect(sought(plan))
   }
 
   @Test func `a seekable conjunct grouped after an unsafe one does not bypass its throw`() throws {
@@ -777,14 +777,14 @@ struct EnginePushdownTests {
         [.integer(0), .text("a"), .integer(5)],
       ] as Array<Array<Value>>, sorted: 2),
     ])
-    let select = try engineParse("""
+    let select = try parse("""
         SELECT id FROM T WHERE (1 / x) = 0 AND (name <> 'z' AND id < 0)
         """)
 
     // The unsafe `(1 / x) = 0` residual bars the `id < 0` seek — the plan scans.
     let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
-    #expect(!engineSeeks(plan))
+    #expect(!sought(plan))
 
     // …and the scan raises the division rather than seeking past the empty run.
     #expect(throws: SQLError.self) {
@@ -794,7 +794,7 @@ struct EnginePushdownTests {
 
   @Test func `pushdown preserves the join's result`() throws {
     // The pushed plan must return exactly the un-pushed join's rows.
-    try engineFamily().expect("""
+    try family().expect("""
         SELECT Child.Name FROM Parent JOIN Child ON Child.Pid = Parent.Id
           WHERE Parent.Name = 'Ada'
         """,
@@ -807,18 +807,18 @@ struct EnginePushdownTests {
     // join folds it in. `nest` must look through that pushed filter and still
     // form a `Join` — not fall back to a residual product filtered by the ON
     // predicate (O(left × filtered-right)).
-    let catalog = try engineFamily()
-    let select = try engineParse("""
+    let catalog = try family()
+    let select = try parse("""
         SELECT Child.Name, Parent.Name FROM Child
           JOIN Parent ON Parent.Id = Child.Pid WHERE Parent.Name <> 'zz'
         """)
     let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
-    #expect(engineJoins(plan))
+    #expect(joined(plan))
 
     // …and it returns the correct rows: every child with a matching parent,
     // the joined-in predicate keeping all of them (no parent is named 'zz').
-    try engineFamily().expect("""
+    try family().expect("""
         SELECT Child.Name, Parent.Name FROM Child
           JOIN Parent ON Parent.Id = Child.Pid WHERE Parent.Name <> 'zz'
         """,
@@ -832,19 +832,19 @@ struct EnginePushdownTests {
     // conjunct — so `nest` still finds it and forms a `Join`, keeping the
     // spanning predicate as a `Select` ABOVE the join rather than degrading to a
     // filtered Cartesian `product`.
-    let catalog = try engineFamily()
-    let select = try engineParse("""
+    let catalog = try family()
+    let select = try parse("""
         SELECT Child.Name, Parent.Name FROM Parent
           JOIN Child ON Child.Pid = Parent.Id WHERE Parent.Name <> Child.Name
         """)
     let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
-    #expect(engineJoins(plan))
-    #expect(engineFloats(plan))
+    #expect(joined(plan))
+    #expect(floating(plan))
 
     // …and it returns the join's rows filtered by the spanning predicate: every
     // matched pair survives, none sharing a name across the two relations.
-    try engineFamily().expect("""
+    try family().expect("""
         SELECT Child.Name, Parent.Name FROM Parent
           JOIN Child ON Child.Pid = Parent.Id WHERE Parent.Name <> Child.Name
         """,
@@ -856,13 +856,13 @@ struct EnginePushdownTests {
     // view's sub-plan and seek Parent to the single matching row before joining,
     // so only that parent's rows are read — not the whole relation.
     let (culled, pruned) = try counted()
-    let rows = try culled.run(engineParse("SELECT Kid FROM Kin WHERE Key = 2"))
+    let rows = try culled.run(parse("SELECT Kid FROM Kin WHERE Key = 2"))
     #expect(rows == [[.text("Bob")]])
 
     // The un-pushed baseline: the same view with no `WHERE` reads every parent
     // row — three.
     let (whole, full) = try counted()
-    _ = try whole.run(engineParse("SELECT Kid FROM Kin"))
+    _ = try whole.run(parse("SELECT Kid FROM Kin"))
     #expect(full.reads == 3)
 
     // Pushed, the seek reads the one matching parent — a single row.
@@ -872,10 +872,10 @@ struct EnginePushdownTests {
   @Test func `the pushed view result matches the unfiltered view filtered late`() throws {
     // Running the view then filtering must agree with the pushed plan.
     let (catalog, _) = try counted()
-    let all = try catalog.run(engineParse("SELECT Key, Kid FROM Kin"))
+    let all = try catalog.run(parse("SELECT Key, Kid FROM Kin"))
     let culled = all.filter { $0[0] == .integer(2) }.map { [$0[1]] }
     let filtered =
-        try catalog.run(engineParse("SELECT Kid FROM Kin WHERE Key = 2"))
+        try catalog.run(parse("SELECT Kid FROM Kin WHERE Key = 2"))
     #expect(filtered == culled)
   }
 
@@ -891,7 +891,7 @@ struct EnginePushdownTests {
       "B": FixtureRelation([EngineField(name: "y", type: .integer)],
                     [] as Array<Array<Value>>),
     ])
-    let rows = try catalog.run(engineParse("""
+    let rows = try catalog.run(parse("""
         SELECT A.x FROM A JOIN B ON A.x = B.y WHERE (1 / 0) = 0
         """))
     #expect(rows.isEmpty)
@@ -909,7 +909,7 @@ struct EnginePushdownTests {
       "B": FixtureRelation([EngineField(name: "y", type: .integer)],
                     [] as Array<Array<Value>>),
     ])
-    let rows = try catalog.run(engineParse("""
+    let rows = try catalog.run(parse("""
         SELECT A.x FROM A JOIN B ON A.x = B.y WHERE (1 / A.x) = 0
         """))
     #expect(rows.isEmpty)
@@ -928,7 +928,7 @@ struct EnginePushdownTests {
                     [[.integer(0)]] as Array<Array<Value>>),
     ])
     #expect(throws: SQLError.self) {
-      _ = try catalog.run(engineParse("""
+      _ = try catalog.run(parse("""
           SELECT A.x FROM A JOIN B ON A.x = B.y WHERE (1 / A.x) = 0 AND A.x <> 0
           """))
     }
@@ -951,7 +951,7 @@ struct EnginePushdownTests {
                          [[.integer(1), .text("other")]]
                              as Array<Array<Value>>),
     ])
-    let rows = try catalog.run(engineParse("""
+    let rows = try catalog.run(parse("""
         SELECT Child.x FROM Child JOIN Parent ON Parent.Id = Child.Pid
           WHERE Parent.Name = 'nope' AND (1 / Child.x) = 0
         """))
@@ -964,11 +964,11 @@ struct EnginePushdownTests {
     // fails a single pre-rebased filter — pushing below each arm's projection
     // and seeking the sorted `Alpha` arm.
     let catalog = try spanned()
-    let select = try engineParse("SELECT Tag FROM Both WHERE Key = 2")
+    let select = try parse("SELECT Tag FROM Both WHERE Key = 2")
     let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(injected(plan))
-    #expect(engineSeeks(plan))
+    #expect(sought(plan))
 
     // …and the rows are exactly the union filtered late: `a2` from Alpha and
     // `b2` from Beta.
@@ -986,11 +986,11 @@ struct EnginePushdownTests {
     let t = [EngineField(name: "id", type: .integer),
              EngineField(name: "z", type: .integer)]
     let rows = [[.integer(0), .integer(0)]] as Array<Array<Value>>
-    let view = try View(query: engineSelect("SELECT id, 1 / z FROM T"),
+    let view = try View(query: select("SELECT id, 1 / z FROM T"),
                         columns: ["id", "q"])
     let catalog = EngineMemory(["T": FixtureRelation(t, rows)], views: ["V": view])
     #expect(throws: SQLError.self) {
-      _ = try catalog.run(engineParse("SELECT id FROM V WHERE id <> 0"))
+      _ = try catalog.run(parse("SELECT id FROM V WHERE id <> 0"))
     }
   }
 
@@ -1005,11 +1005,11 @@ struct EnginePushdownTests {
     // would.
     let t = [EngineField(name: "x", type: .integer)]
     let rows = [[.integer(0)]] as Array<Array<Value>>
-    let view = try View(query: engineSelect("SELECT x FROM T"), columns: ["x"])
+    let view = try View(query: select("SELECT x FROM T"), columns: ["x"])
     let catalog = EngineMemory(["T": FixtureRelation(t, rows, sorted: 0)],
                          views: ["V": view])
     #expect(throws: SQLError.self) {
-      _ = try catalog.run(engineParse("SELECT x FROM V WHERE (1 / x) = 0 AND x = 1"))
+      _ = try catalog.run(parse("SELECT x FROM V WHERE (1 / x) = 0 AND x = 1"))
     }
   }
 
@@ -1030,7 +1030,7 @@ struct EnginePushdownTests {
                      EngineField(name: "k", type: .integer)],
                     [[.integer(0), .integer(0)]] as Array<Array<Value>>),
     ])
-    let select = try engineParse("""
+    let select = try parse("""
         SELECT A.x FROM A JOIN B ON A.k = B.k
           WHERE A.x = 1 AND (1 / B.y) = 0
         """)
@@ -1039,8 +1039,8 @@ struct EnginePushdownTests {
     // pushed to the `A` leaf — it floats at the product level.
     let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
-    #expect(!enginePushed(plan))
-    #expect(engineFloats(plan))
+    #expect(!pushed(plan))
+    #expect(floating(plan))
 
     // …and the query raises rather than silently dropping the row.
     #expect(throws: SQLError.self) {
@@ -1059,16 +1059,16 @@ struct EnginePushdownTests {
     let t = [EngineField(name: "x", type: .integer),
              EngineField(name: "y", type: .integer)]
     let rows = [[.null, .integer(0)]] as Array<Array<Value>>
-    let view = try View(query: engineSelect("SELECT x, y FROM T"),
+    let view = try View(query: select("SELECT x, y FROM T"),
                         columns: ["x", "y"])
     let catalog = EngineMemory(["T": FixtureRelation(t, rows)], views: ["V": view])
-    let select = try engineParse("SELECT x FROM V WHERE x = 1 AND (1 / y) = 0")
+    let select = try parse("SELECT x FROM V WHERE x = 1 AND (1 / y) = 0")
 
     // `x = 1` is nullable and precedes the unsafe division, so it is NOT
     // injected into the view — it floats above the derived leaf.
     let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
-    #expect(engineFloats(plan))
+    #expect(floating(plan))
 
     // …and the query raises rather than silently dropping the row.
     #expect(throws: SQLError.self) {
@@ -1088,17 +1088,17 @@ struct EnginePushdownTests {
     let t = [EngineField(name: "x", type: .integer),
              EngineField(name: "y", type: .integer)]
     let rows = [[.integer(1), .integer(0)]] as Array<Array<Value>>
-    let view = try View(query: engineSelect("SELECT x, y FROM T"),
+    let view = try View(query: select("SELECT x, y FROM T"),
                         columns: ["x", "y"])
     let catalog = EngineMemory(["T": FixtureRelation(t, rows)], views: ["V": view])
-    let select = try engineParse("SELECT x FROM V WHERE 1 = :missing AND (1 / y) = 0")
+    let select = try parse("SELECT x FROM V WHERE 1 = :missing AND (1 / y) = 0")
 
     // `1 = :missing` is a slotless bound predicate, hence nullable; it precedes
     // the unsafe division, so it is NOT injected into the view — it floats above
     // the derived leaf.
     let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
-    #expect(engineFloats(plan))
+    #expect(floating(plan))
 
     // …and the query raises rather than silently dropping the row.
     #expect(throws: SQLError.self) {
@@ -1121,10 +1121,10 @@ struct EnginePushdownTests {
                         [.integer(0), .null]] as Array<Array<Value>>),
       "T": FixtureRelation([EngineField(name: "k", type: .integer)],
                     [[.integer(1)]] as Array<Array<Value>>),
-    ], views: ["V": try View(query: engineSelect("SELECT k FROM T"),
+    ], views: ["V": try View(query: select("SELECT k FROM T"),
                              columns: ["k"])])
     let select =
-        try engineParse("SELECT A.x FROM A JOIN V ON A.k = V.k WHERE (1 / A.x) = 0")
+        try parse("SELECT A.x FROM A JOIN V ON A.k = V.k WHERE (1 / A.x) = 0")
 
     // The UNKNOWN-ON pair (A.k NULL) is dropped by the match gate before the
     // division runs, so the query returns rows rather than raising.

@@ -24,7 +24,7 @@ typealias EngineMemory = FixtureCatalog
 // MARK: - Fixtures
 
 /// The single-relation catalog: a `People` relation sorted on its `Id` column.
-func enginePeople() throws -> EngineMemory {
+func roster() throws -> EngineMemory {
   try Catalog {
     Relation("People", ["Id": .integer, "Name": .text, "Age": .integer],
              sorted: "Id") {
@@ -42,7 +42,7 @@ func enginePeople() throws -> EngineMemory {
 /// Class, Score, Name` needs the third key to settle rows the first two leave
 /// equal. The rows are stored out of every non-`Id` order, so a sort is never a
 /// no-op.
-func engineGrades() throws -> EngineMemory {
+func grades() throws -> EngineMemory {
   try Catalog {
     Relation("Grade", ["Id": .integer, "Class": .text, "Score": .integer,
                        "Name": .text], sorted: "Id") {
@@ -70,7 +70,7 @@ func engineGrades() throws -> EngineMemory {
 /// The `Parent` column is seekable-but-unordered, so it is built directly as a
 /// `FixtureRelation` with `coded: 0` — the seekable-unordered marker the fluent
 /// `Relation` (whose only marker is `sorted:`) does not spell.
-func engineAttributes() -> EngineMemory {
+func attributes() -> EngineMemory {
   let fields = [
     EngineField(name: "Parent", type: .integer),
     EngineField(name: "Name", type: .text),
@@ -101,7 +101,7 @@ func engineAttributes() -> EngineMemory {
 ///
 /// The ten columns and four rows are generated, so it is built directly as a
 /// `FixtureRelation` rather than a literal-per-row fluent `Relation`.
-func engineWide() -> EngineMemory {
+func wide() -> EngineMemory {
   let fields = (0 ..< 10).map { EngineField(name: "C\($0)", type: .integer) }
   let records = (0 ..< 4).map { row in
     (0 ..< 10).map { Value.integer(row * 10 + $0) }
@@ -113,7 +113,7 @@ func engineWide() -> EngineMemory {
 /// `ParentUnsorted` (same rows, no seekable column), and a `Child` relation
 /// whose `Pid` is a foreign key to a parent `Id`. The `Ordered` relation has no
 /// stored key — a join on it keys off its virtual `Id`.
-func engineFamily() throws -> EngineMemory {
+func family() throws -> EngineMemory {
   try Catalog {
     Relation("Parent", ["Id": .integer, "Name": .text], sorted: "Id") {
       Row(1, "Ada")
@@ -144,7 +144,7 @@ func engineFamily() throws -> EngineMemory {
 /// (a single-relation projection over `Parent`) and `Pairs` (a projection over
 /// the `Parent`/`Child` foreign-key join). A view is queried like a table, and
 /// `Pairs` proves a view whose definition is itself a join.
-func engineViews() throws -> EngineMemory {
+func gallery() throws -> EngineMemory {
   // Registered over the `family` relations, so the view bodies resolve their
   // `Parent`/`Child` against the same base tables the other join tests use.
   let catalog = try Catalog {
@@ -161,12 +161,12 @@ func engineViews() throws -> EngineMemory {
     try View("Picked", "SELECT Id, Name FROM Parent WHERE Id = :id",
              as: ["Key", "Label"])
   }
-  return EngineMemory(try engineFamily().catalog, views: catalog.registered)
+  return EngineMemory(try family().catalog, views: catalog.registered)
 }
 
 /// A catalog with NULL cells: a `Maybe` relation whose `Note` text column is
 /// `NULL` in some rows, to exercise three-valued comparison and `IS [NOT] NULL`.
-func engineNullable() throws -> EngineMemory {
+func sparse() throws -> EngineMemory {
   try Catalog {
     Relation("Maybe", ["Id": .integer, "Note": .text]) {
       Row(1, "alpha")
@@ -179,7 +179,7 @@ func engineNullable() throws -> EngineMemory {
 
 /// The null-key join catalog: a `Parent` sorted on `Id` and a `Child` one of
 /// whose foreign keys is `NULL`, to prove a `NULL` join key matches nothing.
-func engineNullableKeys() throws -> EngineMemory {
+func orphans() throws -> EngineMemory {
   try Catalog {
     Relation("Parent", ["Id": .integer, "Name": .text], sorted: "Id") {
       Row(1, "Ada")
@@ -196,7 +196,7 @@ func engineNullableKeys() throws -> EngineMemory {
 /// A three-level catalog for multi-way joins: `House` → `Room` → `Item`, each
 /// child carrying a foreign key to its parent's `Id`. `House` and `Room` are
 /// sorted on `Id`, so a join keyed on `Id` seeks; `Item` is unsorted and scans.
-func engineLineage() throws -> EngineMemory {
+func lineage() throws -> EngineMemory {
   try Catalog {
     Relation("House", ["Id": .integer, "House": .text], sorted: "Id") {
       Row(1, "Burrow")
@@ -227,7 +227,7 @@ func engineLineage() throws -> EngineMemory {
 /// Resolving the match against the prefix binds `Code` unambiguously; resolving
 /// it against the whole chain would (wrongly) see `Code` in two relations and
 /// report `SQLError.ambiguous`.
-func engineShared() throws -> EngineMemory {
+func shared() throws -> EngineMemory {
   try Catalog {
     Relation("Author", ["Aid": .integer, "Code": .integer], sorted: "Aid") {
       Row(1, 10)
@@ -245,46 +245,46 @@ func engineShared() throws -> EngineMemory {
 }
 
 /// Parses `text` to a query, failing on any other statement.
-func engineSelect(_ text: String) throws -> Query {
-  try engineParse(text)
+func select(_ text: String) throws -> Query {
+  try parse(text)
 }
 
 /// Parses `text` to a query, failing on any other statement.
-func engineParse(_ text: String) throws -> Query {
+func parse(_ text: String) throws -> Query {
   try parse(query: text)
 }
 
 /// Runs `text` against the single-relation `People` catalog.
-func engineRun(_ text: String) throws -> Array<Array<Value>> {
-  try enginePeople().run(engineParse(text))
+func answer(_ text: String) throws -> Array<Array<Value>> {
+  try roster().run(parse(text))
 }
 
 /// Runs `text` against the compound-ordering `Grade` catalog.
-func engineGrades(_ text: String) throws -> Array<Array<Value>> {
-  try engineGrades().run(engineParse(text))
+func grades(_ text: String) throws -> Array<Array<Value>> {
+  try grades().run(parse(text))
 }
 
 /// Runs `text` against the coded-key `Attribute` catalog.
-func engineAttributes(_ text: String) throws -> Array<Array<Value>> {
-  try engineAttributes().run(engineParse(text))
+func attributes(_ text: String) throws -> Array<Array<Value>> {
+  try attributes().run(parse(text))
 }
 
 /// Runs `text` against the join `family` catalog.
-func engineJoin(_ text: String) throws -> Array<Array<Value>> {
-  try engineFamily().run(engineParse(text))
+func join(_ text: String) throws -> Array<Array<Value>> {
+  try family().run(parse(text))
 }
 
 /// Runs `text` against the view catalog.
-func engineView(_ text: String) throws -> Array<Array<Value>> {
-  try engineViews().run(engineParse(text))
+func view(_ text: String) throws -> Array<Array<Value>> {
+  try gallery().run(parse(text))
 }
 
-/// Runs `text` against the nullable `Maybe` catalog.
-func engineNullable(_ text: String) throws -> Array<Array<Value>> {
-  try engineNullable().run(engineParse(text))
+/// Runs `text` against the sparse `Maybe` catalog.
+func sparse(_ text: String) throws -> Array<Array<Value>> {
+  try sparse().run(parse(text))
 }
 
 /// Runs `text` against the three-level `lineage` catalog.
-func engineLineage(_ text: String) throws -> Array<Array<Value>> {
-  try engineLineage().run(engineParse(text))
+func lineage(_ text: String) throws -> Array<Array<Value>> {
+  try lineage().run(parse(text))
 }

@@ -797,14 +797,14 @@ private struct Triple {
   init(_ text: String) throws {
     let statement = try Statement(parsing: text)
     run = outcome {
-      _ = try engineFamily().run(statement)
-      return try engineFamily().columns(of: statement, validate: false)
+      _ = try family().run(statement)
+      return try family().columns(of: statement, validate: false)
     }
     lenient = outcome {
-      try engineFamily().columns(of: statement, validate: false)
+      try family().columns(of: statement, validate: false)
     }
     strict = outcome {
-      try engineFamily().columns(of: statement, validate: true)
+      try family().columns(of: statement, validate: true)
     }
   }
 }

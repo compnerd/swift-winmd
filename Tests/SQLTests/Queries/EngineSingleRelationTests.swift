@@ -10,69 +10,69 @@ import SQLTestSupport
 
 struct EngineProjectionTests {
   @Test func `SELECT * yields every real column and excludes the virtual Id`() throws {
-    let rows = try engineRun("SELECT * FROM People WHERE Id = 1")
+    let rows = try answer("SELECT * FROM People WHERE Id = 1")
     // Three real columns; `Id` is virtual and never in `*`.
     #expect(rows == [[.integer(1), .text("Alice"), .integer(30)]])
   }
 
   @Test func `SELECT names yields the named columns in order`() throws {
-    try enginePeople().expect("SELECT Name, Id FROM People WHERE Id = 2",
+    try roster().expect("SELECT Name, Id FROM People WHERE Id = 2",
                         yields: [["Bob", 2]])
   }
 
   @Test func `a named projection may include the virtual Id column`() throws {
-    let rows = try engineRun("SELECT Id, Name FROM People WHERE Name = 'Carol'")
+    let rows = try answer("SELECT Id, Name FROM People WHERE Name = 'Carol'")
     // Carol is the third row; her 1-based `Id` is 3.
     #expect(rows == [[.integer(3), .text("Carol")]])
   }
 
   @Test func `an unknown column is reported`() throws {
     #expect(throws: SQLError.column("Missing")) {
-      try engineRun("SELECT Missing FROM People")
+      try answer("SELECT Missing FROM People")
     }
   }
 
   @Test func `an unknown relation is reported`() throws {
-    try enginePeople().expect("SELECT * FROM Absent", fails: .relation("Absent"))
+    try roster().expect("SELECT * FROM Absent", fails: .relation("Absent"))
   }
 }
 
 struct EngineFilterTests {
   @Test func `equality on a text column`() throws {
-    try enginePeople().expect("SELECT Id FROM People WHERE Name = 'Carol'",
+    try roster().expect("SELECT Id FROM People WHERE Name = 'Carol'",
                         yields: [[3]])
   }
 
   @Test func `a range on the sorted column`() throws {
-    try enginePeople().expect("SELECT Id FROM People WHERE Id >= 4",
+    try roster().expect("SELECT Id FROM People WHERE Id >= 4",
                         yields: [[4], [5]])
   }
 
   @Test func `an AND of a seekable conjunct and a residual`() throws {
-    let rows = try engineRun("SELECT Name FROM People WHERE Id > 1 AND Age = 30")
+    let rows = try answer("SELECT Name FROM People WHERE Id > 1 AND Age = 30")
     #expect(rows == [[.text("Carol")]])
   }
 
   @Test func `an OR scans and admits either side`() throws {
     let rows =
-        try engineRun("SELECT Id FROM People WHERE Id = 1 OR Name = 'Eve'")
+        try answer("SELECT Id FROM People WHERE Id = 1 OR Name = 'Eve'")
     #expect(rows == [[.integer(1)], [.integer(5)]])
   }
 
   @Test func `a NOT scans and negates`() throws {
-    try enginePeople().expect("SELECT Id FROM People WHERE NOT Age = 30",
+    try roster().expect("SELECT Id FROM People WHERE NOT Age = 30",
                         yields: [[2], [4], [5]])
   }
 
   @Test func `a filter on the virtual Id column`() throws {
-    try enginePeople().expect("SELECT Name FROM People WHERE Id = 4",
+    try roster().expect("SELECT Name FROM People WHERE Id = 4",
                         yields: [["Dave"]])
   }
 }
 
 struct EngineOrderTests {
   @Test func `ORDER BY ascending on an integer column`() throws {
-    let rows = try engineRun("SELECT Id FROM People ORDER BY Age ASC")
+    let rows = try answer("SELECT Id FROM People ORDER BY Age ASC")
     // Ages: Bob 25, Eve 25, Alice 30, Carol 30, Dave 40 — a stable sort keeps
     // the scan order within an equal-key group.
     #expect(rows == [[.integer(2)], [.integer(5)], [.integer(1)],
@@ -80,7 +80,7 @@ struct EngineOrderTests {
   }
 
   @Test func `ORDER BY descending on a text column`() throws {
-    let rows = try engineRun("SELECT Name FROM People ORDER BY Name DESC")
+    let rows = try answer("SELECT Name FROM People ORDER BY Name DESC")
     #expect(rows == [[.text("Eve")], [.text("Dave")], [.text("Carol")],
                      [.text("Bob")], [.text("Alice")]])
   }
@@ -89,7 +89,7 @@ struct EngineOrderTests {
 struct EngineCompoundOrderTests {
   @Test func `a single-key ORDER BY still orders as before`() throws {
     // The one-key case is unchanged: ages ascending, ties kept in scan order.
-    let rows = try engineRun("SELECT Id FROM People ORDER BY Age ASC")
+    let rows = try answer("SELECT Id FROM People ORDER BY Age ASC")
     #expect(rows == [[.integer(2)], [.integer(5)], [.integer(1)],
                      [.integer(3)], [.integer(4)]])
   }
@@ -97,7 +97,7 @@ struct EngineCompoundOrderTests {
   @Test func `two keys order by the first, then the second`() throws {
     // Age ascending, ties by Name ascending: {Bob,Eve} at 25 → Bob, Eve;
     // {Alice,Carol} at 30 → Alice, Carol; then Dave.
-    let rows = try engineRun("SELECT Name FROM People ORDER BY Age, Name")
+    let rows = try answer("SELECT Name FROM People ORDER BY Age, Name")
     #expect(rows == [[.text("Bob")], [.text("Eve")], [.text("Alice")],
                      [.text("Carol")], [.text("Dave")]])
   }
@@ -106,7 +106,7 @@ struct EngineCompoundOrderTests {
     // Age descending, ties by Name ascending: Dave(40); Alice, Carol (30);
     // Bob, Eve (25).
     let rows =
-        try engineRun("SELECT Name FROM People ORDER BY Age DESC, Name ASC")
+        try answer("SELECT Name FROM People ORDER BY Age DESC, Name ASC")
     #expect(rows == [[.text("Dave")], [.text("Alice")], [.text("Carol")],
                      [.text("Bob")], [.text("Eve")]])
   }
@@ -115,7 +115,7 @@ struct EngineCompoundOrderTests {
     // Age ascending leaves {Bob,Eve} and {Alice,Carol} tied; a DESC Name key
     // reorders each pair against the scan order (Eve before Bob, Carol before
     // Alice) — proof the second key, not the input order, settles the ties.
-    let rows = try engineRun("SELECT Name FROM People ORDER BY Age ASC, Name DESC")
+    let rows = try answer("SELECT Name FROM People ORDER BY Age ASC, Name DESC")
     #expect(rows == [[.text("Eve")], [.text("Bob")], [.text("Carol")],
                      [.text("Alice")], [.text("Dave")]])
   }
@@ -124,7 +124,7 @@ struct EngineCompoundOrderTests {
     // Class ascending, Score ascending, Name ascending. Class A: Bob(70), then
     // the 80s by Name — Ada, Mel, Yan. Class B: both 90, by Name — Amy, Zed.
     let rows =
-        try engineGrades("SELECT Id FROM Grade ORDER BY Class, Score, Name")
+        try grades("SELECT Id FROM Grade ORDER BY Class, Score, Name")
     #expect(rows == [[.integer(6)], [.integer(3)], [.integer(5)],
                      [.integer(2)], [.integer(4)], [.integer(1)]])
   }
@@ -132,7 +132,7 @@ struct EngineCompoundOrderTests {
   @Test func `a compound ORDER BY is stable across all keys`() throws {
     // Class and Score alone leave the three Class-A/Score-80 rows tied; with no
     // further key the sort keeps their scan order — Yan(2), Ada(3), Mel(5).
-    let rows = try engineGrades("SELECT Id FROM Grade ORDER BY Class, Score")
+    let rows = try grades("SELECT Id FROM Grade ORDER BY Class, Score")
     #expect(rows == [[.integer(6)], [.integer(2)], [.integer(3)],
                      [.integer(5)], [.integer(1)], [.integer(4)]])
   }
@@ -140,7 +140,7 @@ struct EngineCompoundOrderTests {
   @Test func `FETCH takes the top-N of a compound order`() throws {
     // Age descending, ties by Name ascending, then the first two rows: Dave(40)
     // and the lower-named of the 30s, Alice.
-    try enginePeople().expect("""
+    try roster().expect("""
         SELECT Name FROM People
           ORDER BY Age DESC, Name ASC FETCH FIRST 2 ROWS ONLY
         """,
@@ -149,7 +149,7 @@ struct EngineCompoundOrderTests {
 
   @Test func `OFFSET then FETCH pages into a compound order`() throws {
     // The full compound order is Dave, Alice, Carol, Bob, Eve; skip 1, take 2.
-    try enginePeople().expect("""
+    try roster().expect("""
         SELECT Name FROM People
           ORDER BY Age DESC, Name ASC OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY
         """,
@@ -162,7 +162,7 @@ struct EngineProjectionPushdownTests {
     // The relation has ten columns; the query reads only C0 (filter, project),
     // C5 (project), and C8 (order). The leaf materialises just those, but the
     // result is exactly as if every column were copied.
-    try engineWide().expect("""
+    try wide().expect("""
         SELECT C5, C0 FROM Wide WHERE C0 >= 10 ORDER BY C8 DESC
         """,
         yields: [[35, 30], [25, 20], [15, 10]])
@@ -173,11 +173,11 @@ struct EngineSeekTests {
   @Test func `the seek path and the scan path return identical results`() throws {
     // `Id >= 2` seeks the sorted column; the same selection by `Name` (which
     // `bound` reports unseekable) scans. Both must yield the same rows.
-    let seek = try engineRun("SELECT Id FROM People WHERE Id >= 2 AND Id <= 4")
+    let seek = try answer("SELECT Id FROM People WHERE Id >= 2 AND Id <= 4")
     #expect(seek == [[.integer(2)], [.integer(3)], [.integer(4)]])
 
     let scan =
-        try engineRun("SELECT Id FROM People WHERE Name >= 'Bob' AND Name <= 'Dave'")
+        try answer("SELECT Id FROM People WHERE Name >= 'Bob' AND Name <= 'Dave'")
     #expect(scan == seek)
   }
 }
@@ -205,7 +205,7 @@ struct EngineCodedKeyTests {
     // `Id` is `< 5` (td1, td2, td4) — never the other-tag rows (other-a, -b,
     // -c), which decode to NULL. Before the fix the raw boundary
     // `0 ..< bound(5)` seeked the low raw run, sweeping in the interleaved NULLs.
-    let rows = try engineAttributes("SELECT Name FROM Attribute WHERE Parent < 5")
+    let rows = try attributes("SELECT Name FROM Attribute WHERE Parent < 5")
     #expect(rows == [[.text("td1")], [.text("td2")], [.text("td4")]])
   }
 
@@ -213,8 +213,8 @@ struct EngineCodedKeyTests {
     // The seek path (`Parent < 5`) must equal a filter that cannot seek at all
     // (`Name < 'z'` over the same rows, restricted to the tagged ones) — i.e.
     // the range yields exactly the rows a full scan-and-filter would.
-    let seek = try engineAttributes("SELECT Name FROM Attribute WHERE Parent < 5")
-    let scan = try engineAttributes("""
+    let seek = try attributes("SELECT Name FROM Attribute WHERE Parent < 5")
+    let scan = try attributes("""
         SELECT Name FROM Attribute WHERE Parent < 5 AND Name < 'z'
         """)
     #expect(seek == scan)
@@ -224,7 +224,7 @@ struct EngineCodedKeyTests {
     // Equality is always seekable — the exact coded run brackets exactly the
     // rows that decode to the value, and a join rechecks — so `Parent = 4`
     // returns just td4.
-    let rows = try engineAttributes("SELECT Name FROM Attribute WHERE Parent = 4")
+    let rows = try attributes("SELECT Name FROM Attribute WHERE Parent = 4")
     #expect(rows == [[.text("td4")]])
   }
 
@@ -236,7 +236,7 @@ struct EngineCodedKeyTests {
     // residual recheck, leaking the null-reference row. The fix returns `nil`
     // for a non-positive decoded Id, so the query scans and filters, and the
     // decoded `NULL` correctly fails `= 0`.
-    let rows = try engineAttributes("SELECT Name FROM Attribute WHERE Parent = 0")
+    let rows = try attributes("SELECT Name FROM Attribute WHERE Parent = 0")
     #expect(rows.isEmpty)
   }
 
@@ -252,26 +252,26 @@ struct EngineCodedKeyTests {
     // value — and admits nothing.
     let alias = (1 << 62) + 6
     let rows =
-        try engineAttributes("SELECT Name FROM Attribute WHERE Parent = \(alias)")
+        try attributes("SELECT Name FROM Attribute WHERE Parent = \(alias)")
     #expect(rows.isEmpty)
   }
 
   @Test func `an equality plans a seek, a range plans a scan-and-filter`() throws {
     // The plan shape proves the gate directly: equality reaches a seeked scan
     // with no residual filter; a range reaches a raw scan under a filter.
-    let catalog = engineAttributes()
+    let catalog = attributes()
 
-    let equal = try engineParse("SELECT Name FROM Attribute WHERE Parent = 4")
+    let equal = try parse("SELECT Name FROM Attribute WHERE Parent = 4")
     let equalPlan =
         try catalog.optimise(catalog.compile(equal), [:])
-    #expect(engineSeeks(equalPlan))
-    #expect(!engineFilters(equalPlan))
+    #expect(sought(equalPlan))
+    #expect(!filters(equalPlan))
 
-    let less = try engineParse("SELECT Name FROM Attribute WHERE Parent < 5")
+    let less = try parse("SELECT Name FROM Attribute WHERE Parent < 5")
     let lessPlan =
         try catalog.optimise(catalog.compile(less), [:])
-    #expect(!engineSeeks(lessPlan))
-    #expect(engineFilters(lessPlan))
+    #expect(!sought(lessPlan))
+    #expect(filters(lessPlan))
   }
 
   @Test func `a sorted key with a leading NULL does not seek it into an equality`() throws {
@@ -297,9 +297,9 @@ struct EngineCodedKeyTests {
         Row(2)
       }
     }
-    let query = try engineParse("SELECT * FROM T WHERE Id = 1")
+    let query = try parse("SELECT * FROM T WHERE Id = 1")
     let plan = try catalog.optimise(catalog.compile(query), [:])
-    #expect(engineSeeks(plan))
+    #expect(sought(plan))
   }
 
   @Test func `an empty sorted fixture still plans a seek`() throws {
@@ -308,20 +308,20 @@ struct EngineCodedKeyTests {
     let catalog = try Catalog {
       Relation("T", ["Id": .integer], sorted: "Id")
     }
-    let query = try engineParse("SELECT * FROM T WHERE Id = 1")
+    let query = try parse("SELECT * FROM T WHERE Id = 1")
     let plan = try catalog.optimise(catalog.compile(query), [:])
-    #expect(engineSeeks(plan))
+    #expect(sought(plan))
   }
 }
 
 struct EngineQualifierTests {
   @Test func `a qualifier matching the alias resolves the column`() throws {
-    try enginePeople().expect("SELECT p.Name FROM People AS p WHERE Id = 1",
+    try roster().expect("SELECT p.Name FROM People AS p WHERE Id = 1",
                         yields: [["Alice"]])
   }
 
   @Test func `a qualifier matching the table name resolves the column`() throws {
-    try enginePeople().expect("SELECT People.Name FROM People WHERE Id = 1",
+    try roster().expect("SELECT People.Name FROM People WHERE Id = 1",
                         yields: [["Alice"]])
   }
 
@@ -329,7 +329,7 @@ struct EngineQualifierTests {
     // `x` names neither the alias `p` nor the table `People`; a single-relation
     // query rejects it rather than dropping the qualifier and binding `Name`.
     #expect(throws: SQLError.column("Name")) {
-      try engineRun("SELECT x.Name FROM People AS p")
+      try answer("SELECT x.Name FROM People AS p")
     }
   }
 
@@ -350,7 +350,7 @@ struct EngineQualifierTests {
     // The reviewer's case: `Child.Name` against `FROM Parent` must not resolve
     // to `Parent`'s `Name`; the qualifier names a relation not in scope.
     #expect(throws: SQLError.column("Name")) {
-      try engineJoin("SELECT Child.Name FROM Parent")
+      try join("SELECT Child.Name FROM Parent")
     }
   }
 }

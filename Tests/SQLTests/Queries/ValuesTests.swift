@@ -169,7 +169,7 @@ struct ValuesTests {
   }
 
   @Test func `VALUES mixes with a TABLE arm across a UNION ALL`() throws {
-    try enginePeople().expect(
+    try roster().expect(
         "SELECT Age FROM People WHERE Id = 1 UNION ALL VALUES (99)",
         yields: [[30], [99]])
   }
@@ -205,7 +205,7 @@ struct ValuesTests {
       Issue.record("expected an IN-subquery predicate")
       return
     }
-    try enginePeople().expect(
+    try roster().expect(
         "SELECT Id FROM People WHERE Id IN (VALUES (1), (2))",
         yields: [[1], [2]])
   }
@@ -214,7 +214,7 @@ struct ValuesTests {
     // `= ANY (VALUES (…), (…))` compares against the constructor's rows — the
     // quantified path always parses a parenthesised query, so a `VALUES`
     // primary composes there as `(SELECT …)` does.
-    try enginePeople().expect(
+    try roster().expect(
         "SELECT Id FROM People WHERE Age = ANY (VALUES (30), (40))",
         yields: [[1], [3], [4]])
   }

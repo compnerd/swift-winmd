@@ -22,7 +22,7 @@ struct EngineWithTests {
     let rows = try statement("""
         WITH adults (Key, Label) AS (SELECT Id, Name FROM Parent WHERE Id >= 2)
           SELECT Label FROM adults
-        """, engineFamily())
+        """, family())
     #expect(rows == [[.text("Bee")], [.text("Cid")]])
   }
 
@@ -36,11 +36,11 @@ struct EngineWithTests {
     // The SCHEMA path folds the CTE column at its BODY-derived type too: it
     // must report `x` as `.text` and NOT fault, the compile-time mirror of the
     // run.
-    let columns = try engineFamily().columns(of: Statement(parsing: text))
+    let columns = try family().columns(of: Statement(parsing: text))
     #expect(columns.count == 1)
     #expect(columns[0].name == "x")
     #expect(columns[0].type == .text)
-    let rows = try statement(text, engineFamily())
+    let rows = try statement(text, family())
     #expect(rows == [[.text("b")], [.text("c")]])
   }
 
@@ -52,7 +52,7 @@ struct EngineWithTests {
     let rows = try statement("""
         WITH a (x) AS (SELECT 1), b (x) AS (SELECT 1.0)
           SELECT * FROM a JOIN b ON a.x = b.x
-        """, engineFamily())
+        """, family())
     #expect(rows == [[.integer(1), .double(1.0)]])
   }
 
@@ -65,7 +65,7 @@ struct EngineWithTests {
         WITH a (x) AS (SELECT 9007199254740993),
              b (x) AS (SELECT 9007199254740993.0)
           SELECT a.x FROM a JOIN b ON a.x = b.x
-        """, engineFamily())
+        """, family())
     #expect(rows == [[.integer(9007199254740993)]])
   }
 
@@ -78,7 +78,7 @@ struct EngineWithTests {
         WITH a (x) AS (SELECT 9007199254740992),
              b (x) AS (SELECT 9007199254740993)
           SELECT a.x FROM a JOIN b ON a.x = b.x
-        """, engineFamily())
+        """, family())
     #expect(rows.isEmpty)
   }
 
@@ -88,10 +88,10 @@ struct EngineWithTests {
     // it. `1` and `1.0` then compare equal AND emit as the same coerced
     // `double`, so a bare UNION keeps one `1.0` (not the first arm's raw
     // `integer`).
-    #expect(try statement("SELECT 1 UNION SELECT 1.0", engineFamily())
+    #expect(try statement("SELECT 1 UNION SELECT 1.0", family())
             == [[.double(1.0)]])
     // UNION ALL keeps every row, each coerced to the unified `double`.
-    #expect(try statement("SELECT 1 UNION ALL SELECT 1.0", engineFamily())
+    #expect(try statement("SELECT 1 UNION ALL SELECT 1.0", family())
             == [[.double(1.0)], [.double(1.0)]])
   }
 
@@ -105,7 +105,7 @@ struct EngineWithTests {
         SELECT 9007199254740992.0
           UNION SELECT 9007199254740992
           UNION SELECT 9007199254740993
-        """, engineFamily())
+        """, family())
     #expect(rows == [[.double(9007199254740992.0)]])
   }
 
@@ -114,7 +114,7 @@ struct EngineWithTests {
     // emits as `3.0` — and the ordering runs over the widened values.
     let rows = try statement("""
         WITH a (x) AS (SELECT 3 UNION ALL SELECT 1.5) SELECT x FROM a ORDER BY x
-        """, engineFamily())
+        """, family())
     #expect(rows == [[.double(1.5)], [.double(3.0)]])
   }
 
@@ -128,7 +128,7 @@ struct EngineWithTests {
                        UNION ALL SELECT 9007199254740993.0
                        UNION ALL SELECT 9007199254740992)
           SELECT x FROM a ORDER BY x
-        """, engineFamily())
+        """, family())
     #expect(rows.count == 3)
     #expect(rows.last == [.double(9007199254740992.0)])
   }
@@ -137,7 +137,7 @@ struct EngineWithTests {
     let rows = try statement("""
         WITH grown AS (SELECT Id, Name FROM Parent)
           SELECT Name FROM grown WHERE Id = 3
-        """, engineFamily())
+        """, family())
     #expect(rows == [[.text("Cid")]])
   }
 
@@ -148,7 +148,7 @@ struct EngineWithTests {
         WITH a (Id, Name) AS (SELECT Id, Name FROM Parent WHERE Id >= 2),
              b (Who) AS (SELECT Name FROM a WHERE Id = 3)
           SELECT Who FROM b
-        """, engineFamily())
+        """, family())
     #expect(rows == [[.text("Cid")]])
   }
 
@@ -158,7 +158,7 @@ struct EngineWithTests {
     let rows = try statement("""
         WITH Parent (Id, Name) AS (SELECT Id, Name FROM Parent WHERE Id = 1)
           SELECT Name FROM Parent
-        """, engineFamily())
+        """, family())
     #expect(rows == [[.text("Ada")]])
   }
 
@@ -169,7 +169,7 @@ struct EngineWithTests {
         WITH kids (Pid, Kid) AS (SELECT Pid, Name FROM Child)
           SELECT Parent.Name, kids.Kid FROM Parent
             JOIN kids ON kids.Pid = Parent.Id
-        """, engineFamily())
+        """, family())
     #expect(rows == [
       [.text("Ada"), .text("Ann")],
       [.text("Ada"), .text("Amy")],
@@ -181,7 +181,7 @@ struct EngineWithTests {
     let rows = try statement("""
         WITH a (Tag) AS (SELECT Name FROM Parent)
           SELECT Id, Tag FROM a WHERE Id = 2
-        """, engineFamily())
+        """, family())
     #expect(rows == [[.integer(2), .text("Bee")]])
   }
 
@@ -189,7 +189,7 @@ struct EngineWithTests {
     #expect(throws: SQLError.columns(expected: 2, got: 1)) {
       try statement("""
           WITH a (x) AS (SELECT Id, Name FROM Parent) SELECT x FROM a
-          """, engineFamily())
+          """, family())
     }
   }
 
@@ -197,7 +197,7 @@ struct EngineWithTests {
     #expect(throws: SQLError.column("Missing")) {
       try statement("""
           WITH a (Id) AS (SELECT Id FROM Parent) SELECT Missing FROM a
-          """, engineFamily())
+          """, family())
     }
   }
 
@@ -205,7 +205,7 @@ struct EngineWithTests {
     let rows = try statement("""
         WITH both (Tag) AS (SELECT Tag FROM Lhs UNION SELECT Tag FROM Rhs)
           SELECT Tag FROM both
-        """, engineTags())
+        """, tags())
     #expect(rows == [[.text("a")], [.text("shared")], [.text("b")]])
   }
 
@@ -218,7 +218,7 @@ struct EngineWithTests {
     #expect(throws: SQLError.columns(expected: 2, got: 3)) {
       try statement("""
           WITH a (x, y, z) AS (SELECT * FROM Parent) SELECT x FROM a
-          """, engineFamily())
+          """, family())
     }
   }
 
@@ -236,7 +236,7 @@ struct EngineWithTests {
           WITH a (x, y, z) AS (SELECT * FROM Parent WHERE Id < 0)
             SELECT z FROM a
             UNION SELECT 99 AS z FROM Parent WHERE Id = 1
-          """, engineFamily())
+          """, family())
     }
   }
 
@@ -249,7 +249,7 @@ struct EngineWithTests {
           WITH a (x) AS (SELECT Id FROM Parent),
                A (x) AS (SELECT Id FROM Parent)
             SELECT x FROM a
-          """, engineFamily())
+          """, family())
     }
   }
 
@@ -263,7 +263,7 @@ struct EngineWithTests {
           SELECT Parent.Name, kids.Kid FROM Parent
             JOIN kids ON kids.Pid = Parent.Id
             WHERE kids.Kid = 'Amy'
-        """, engineFamily())
+        """, family())
     #expect(rows == [[.text("Ada"), .text("Amy")]])
   }
 
@@ -275,8 +275,8 @@ struct EngineWithTests {
     // caller's CTEs threaded into the view body, `Adults`'s `FROM Parent` would
     // bind to the CTE and the query would return `99`.
     let adults =
-        try View(query: engineSelect("SELECT Id FROM Parent"), columns: ["Id"])
-    let catalog = EngineMemory(try engineFamily().catalog, views: ["Adults": adults])
+        try View(query: select("SELECT Id FROM Parent"), columns: ["Id"])
+    let catalog = EngineMemory(try family().catalog, views: ["Adults": adults])
     let rows = try statement("""
         WITH Parent (Id) AS (SELECT 99 AS Id FROM Parent WHERE Id = 1)
           SELECT Id FROM Adults
@@ -289,8 +289,8 @@ struct EngineWithTests {
     // base relation still shadows it, so a trailing `FROM Parent` reads the CTE
     // — the scoping fix narrows only a view's body, never the statement query.
     let adults =
-        try View(query: engineSelect("SELECT Id FROM Parent"), columns: ["Id"])
-    let catalog = EngineMemory(try engineFamily().catalog, views: ["Adults": adults])
+        try View(query: select("SELECT Id FROM Parent"), columns: ["Id"])
+    let catalog = EngineMemory(try family().catalog, views: ["Adults": adults])
     let rows = try statement("""
         WITH Parent (Id) AS (SELECT 99 AS Id FROM Parent WHERE Id = 1)
           SELECT Id FROM Parent
@@ -308,7 +308,7 @@ struct EngineWithTests {
           SELECT 1 AS n FROM Extra UNION ALL SELECT 2 AS n FROM Extra
         )
         SELECT n FROM a
-        """, engineTags())
+        """, tags())
     #expect(rows == [[.integer(1)], [.integer(2)]])
   }
 
@@ -431,7 +431,7 @@ struct EngineRecursiveTests {
     // than binding narrow rows that trap when the trailing `SELECT z` reads the
     // absent ordinal.
     #expect(throws: SQLError.columns(expected: 2, got: 3)) {
-      _ = try engineFamily().run(Statement(parsing: """
+      _ = try family().run(Statement(parsing: """
           WITH RECURSIVE Parent (x, y, z) AS (SELECT * FROM Parent)
             SELECT z FROM Parent
           """))
@@ -505,7 +505,7 @@ struct EngineRecursiveTests {
     // not a base table: the anchor `SELECT id FROM v` resolves to the view (the
     // CTE is not in scope for the base case), and the right arm is the true
     // self-reference. The guard must accept a view seed as well as a table.
-    let view = try View(query: engineSelect("SELECT Id FROM Parent"), columns: ["id"])
+    let view = try View(query: select("SELECT Id FROM Parent"), columns: ["id"])
     let catalog = EngineMemory([
       "Parent": FixtureRelation([EngineField(name: "Id", type: .integer)],
                          [[.integer(1)]] as Array<Array<Value>>),
@@ -657,11 +657,11 @@ struct EngineRecursiveTests {
         )
         SELECT s FROM t
         """
-    let columns = try engineFamily().columns(of: Statement(parsing: text))
+    let columns = try family().columns(of: Statement(parsing: text))
     #expect(columns.count == 1)
     #expect(columns[0].name == "s")
     #expect(columns[0].type == .text)
-    let rows = try statement(text, engineFamily())
+    let rows = try statement(text, family())
     #expect(rows == [[.text("b")]])
   }
 
@@ -727,7 +727,7 @@ struct EngineRecursiveTests {
     let rows = try statement("""
         WITH t (x) AS (SELECT NULLIF('b', 'b') UNION SELECT NULLIF(1, 1))
           SELECT x FROM t UNION SELECT 'c'
-        """, engineFamily())
+        """, family())
     #expect(rows == [[.null], [.text("c")]])
   }
 
@@ -741,7 +741,7 @@ struct EngineRecursiveTests {
     let rows = try statement("""
         WITH t (x) AS (SELECT NULLIF(1, 1) UNION SELECT NULLIF('b', 'b'))
           SELECT x FROM t UNION SELECT 'c'
-        """, engineFamily())
+        """, family())
     #expect(rows == [[.null], [.text("c")]])
   }
 
@@ -753,13 +753,13 @@ struct EngineRecursiveTests {
         WITH t (x) AS (SELECT NULLIF(1, 1) UNION SELECT NULLIF('a', 'a')
                        UNION SELECT NULLIF('b', 'b'))
           SELECT x FROM t UNION SELECT 'c'
-        """, engineFamily())
+        """, family())
     #expect(forward == [[.null], [.text("c")]])
     let reversed = try statement("""
         WITH t (x) AS (SELECT NULLIF('b', 'b') UNION SELECT NULLIF('a', 'a')
                        UNION SELECT NULLIF(1, 1))
           SELECT x FROM t UNION SELECT 'c'
-        """, engineFamily())
+        """, family())
     #expect(reversed == [[.null], [.text("c")]])
   }
 
@@ -772,7 +772,7 @@ struct EngineRecursiveTests {
         WITH t (a, b) AS (SELECT NULLIF(1, 1), 1
                           UNION SELECT NULLIF('x', 'x'), 2.5)
           SELECT a, b FROM t UNION SELECT 'c', 3
-        """, engineFamily())
+        """, family())
     #expect(Set(rows) == [[.null, .double(1.0)], [.null, .double(2.5)],
                           [.text("c"), .double(3.0)]])
   }
@@ -784,7 +784,7 @@ struct EngineRecursiveTests {
     let rows = try statement("""
         WITH t (x) AS (SELECT NULLIF(1, 1) UNION SELECT NULLIF('b', 'b'))
           SELECT x FROM t
-        """, engineFamily())
+        """, family())
     #expect(rows == [[.null]])
   }
 
@@ -793,7 +793,7 @@ struct EngineRecursiveTests {
     let rows = try statement("""
         WITH t (x) AS (SELECT NULLIF(1, 1) UNION SELECT NULLIF('b', 'b'))
           SELECT x FROM t WHERE x IS NULL
-        """, engineFamily())
+        """, family())
     #expect(rows == [[.null]])
   }
 
@@ -803,7 +803,7 @@ struct EngineRecursiveTests {
     let rows = try statement("""
         WITH t (x) AS (SELECT NULLIF(1, 1) UNION SELECT NULLIF('b', 'b'))
           SELECT x FROM t WHERE x = 'c'
-        """, engineFamily())
+        """, family())
     #expect(rows.isEmpty)
   }
 
@@ -823,10 +823,10 @@ struct EngineRecursiveTests {
           SELECT * FROM t
         """
     #expect(throws: SQLError.columns(expected: 1, got: 2)) {
-      _ = try statement(text, engineFamily())
+      _ = try statement(text, family())
     }
     #expect(throws: SQLError.columns(expected: 1, got: 2)) {
-      _ = try engineFamily().columns(of: Statement(parsing: text))
+      _ = try family().columns(of: Statement(parsing: text))
     }
   }
 
@@ -842,10 +842,10 @@ struct EngineRecursiveTests {
           SELECT * FROM t
         """
     #expect(throws: SQLError.columns(expected: 1, got: 2)) {
-      _ = try statement(text, engineFamily())
+      _ = try statement(text, family())
     }
     #expect(throws: SQLError.columns(expected: 1, got: 2)) {
-      _ = try engineFamily().columns(of: Statement(parsing: text))
+      _ = try family().columns(of: Statement(parsing: text))
     }
   }
 
@@ -863,10 +863,10 @@ struct EngineRecursiveTests {
           SELECT * FROM t
         """
     #expect(throws: SQLError.columns(expected: 1, got: 2)) {
-      _ = try statement(text, engineFamily())
+      _ = try statement(text, family())
     }
     #expect(throws: SQLError.columns(expected: 1, got: 2)) {
-      _ = try engineFamily().columns(of: Statement(parsing: text))
+      _ = try family().columns(of: Statement(parsing: text))
     }
   }
 
@@ -878,7 +878,7 @@ struct EngineRecursiveTests {
     #expect(throws: SQLError.columns(expected: 1, got: 2)) {
       _ = try statement("""
           WITH t (a, b) AS (SELECT 1) SELECT a FROM t
-          """, engineFamily())
+          """, family())
     }
   }
 
@@ -897,7 +897,7 @@ struct EngineRecursiveTests {
         WITH RECURSIVE t (x) AS (
           SELECT NULLIF(1, 1) UNION SELECT x FROM t INTERSECT SELECT 'c'
         ) SELECT x FROM t
-        """, engineFamily())
+        """, family())
     #expect(rows == [[.null]])
   }
 
@@ -921,11 +921,11 @@ struct EngineRecursiveTests {
           SELECT s FROM (SELECT s || 'c' AS s FROM t WHERE s = 'b') AS d
         ) SELECT * FROM t
         """
-    let columns = try engineFamily().columns(of: Statement(parsing: text))
+    let columns = try family().columns(of: Statement(parsing: text))
     #expect(columns.count == 1)
     #expect(columns[0].name == "s")
     #expect(columns[0].type == .text)
-    let rows = try statement(text, engineFamily())
+    let rows = try statement(text, family())
     #expect(rows == [[.text("b")], [.text("bc")]])
   }
 
@@ -945,10 +945,10 @@ struct EngineRecursiveTests {
         ) SELECT * FROM t
         """
     #expect(throws: SQLError.self) {
-      _ = try engineFamily().columns(of: Statement(parsing: text))
+      _ = try family().columns(of: Statement(parsing: text))
     }
     #expect(throws: SQLError.self) {
-      _ = try statement(text, engineFamily())
+      _ = try statement(text, family())
     }
   }
 
@@ -970,7 +970,7 @@ struct EngineRecursiveTests {
         WITH a(x) AS (SELECT 1 UNION SELECT 2.5),
              b(y) AS (SELECT x FROM a)
           SELECT y FROM b ORDER BY y
-        """, engineFamily())
+        """, family())
     #expect(rows == [[.double(1.0)], [.double(2.5)]])
   }
 
@@ -984,7 +984,7 @@ struct EngineRecursiveTests {
         WITH RECURSIVE t(n) AS (
           SELECT 1 UNION ALL SELECT n + 0.5 FROM t WHERE n < 2
         ) SELECT n FROM t ORDER BY n
-        """, engineFamily())
+        """, family())
     #expect(rows == [[.double(1.0)], [.double(1.5)], [.double(2.0)]])
   }
 
@@ -995,7 +995,7 @@ struct EngineRecursiveTests {
     // `1.0` — the producer's carrier and the run's rows agree on the type.
     let rows = try statement("""
         WITH a(x) AS (SELECT 1 UNION SELECT 2.5) SELECT x FROM a ORDER BY x
-        """, engineFamily())
+        """, family())
     #expect(rows == [[.double(1.0)], [.double(2.5)]])
   }
 }

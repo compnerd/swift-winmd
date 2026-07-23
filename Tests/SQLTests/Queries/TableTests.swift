@@ -38,11 +38,11 @@ struct TableTests {
   }
 
   @Test func `TABLE t yields every row and column of SELECT star FROM t`() throws {
-    try enginePeople().expect("TABLE People", equals: "SELECT * FROM People")
+    try roster().expect("TABLE People", equals: "SELECT * FROM People")
   }
 
   @Test func `TABLE t yields the full row/column set`() throws {
-    try enginePeople().expect("TABLE People", yields: [
+    try roster().expect("TABLE People", yields: [
       [1, "Alice", 30],
       [2, "Bob", 25],
       [3, "Carol", 30],
@@ -54,28 +54,28 @@ struct TableTests {
   @Test func `TABLE over a view resolves as the view relation`() throws {
     // `Adults` is a registered view; `TABLE Adults` resolves it by name exactly
     // as `SELECT * FROM Adults` does, exposing the view's Key/Label columns.
-    try engineViews().expect("TABLE Adults", equals: "SELECT * FROM Adults")
-    try engineViews().expect("TABLE Adults", yields: [[2, "Bee"], [3, "Cid"]])
+    try gallery().expect("TABLE Adults", equals: "SELECT * FROM Adults")
+    try gallery().expect("TABLE Adults", yields: [[2, "Bee"], [3, "Cid"]])
   }
 
   @Test func `TABLE a UNION TABLE b composes with a set operation`() throws {
     // Each arm is a `TABLE` primary; the UNION merges and dedups the shared row
     // exactly as the two-SELECT spelling does.
-    try engineTags().expect("TABLE Lhs UNION TABLE Rhs",
+    try tags().expect("TABLE Lhs UNION TABLE Rhs",
                             equals: "SELECT * FROM Lhs UNION SELECT * FROM Rhs")
-    try engineTags().expect("TABLE Lhs UNION TABLE Rhs",
+    try tags().expect("TABLE Lhs UNION TABLE Rhs",
                             yields: [["a"], ["shared"], ["b"]])
   }
 
   @Test func `a TABLE primary mixes with a SELECT arm across a set operation`() throws {
     // The primary composes on either side of the operator, so one arm may be a
     // `TABLE` and the other a `SELECT`.
-    try engineTags().expect("TABLE Lhs UNION ALL SELECT Tag FROM Rhs",
+    try tags().expect("TABLE Lhs UNION ALL SELECT Tag FROM Rhs",
                             yields: [["a"], ["shared"], ["shared"], ["b"]])
   }
 
   @Test func `TABLE composes at the tighter INTERSECT tier`() throws {
-    try engineTags().expect("TABLE Lhs INTERSECT TABLE Rhs",
+    try tags().expect("TABLE Lhs INTERSECT TABLE Rhs",
                             yields: [["shared"]])
   }
 
@@ -108,10 +108,10 @@ struct TableTests {
     // `FROM (TABLE People) AS d` is a derived table whose body is the `TABLE`
     // primary; it selects the same rows the `(SELECT * FROM People)` body does.
     _ = try parse(query: "SELECT * FROM (TABLE People) AS d")
-    try enginePeople().expect(
+    try roster().expect(
         "SELECT * FROM (TABLE People) AS d",
         equals: "SELECT * FROM (SELECT * FROM People) AS d")
-    try enginePeople().expect("SELECT d.Name FROM (TABLE People) AS d",
+    try roster().expect("SELECT d.Name FROM (TABLE People) AS d",
                               yields: [["Alice"], ["Bob"], ["Carol"],
                                        ["Dave"], ["Eve"]])
   }
@@ -120,19 +120,19 @@ struct TableTests {
     // `One` is one row of one column, so `(TABLE One)` is a valid scalar
     // subquery — it yields that single cell, exactly as `(SELECT * FROM One)`.
     _ = try parse(query: "SELECT (TABLE One) FROM One")
-    try engineScalars().expect("SELECT (TABLE One) FROM One",
+    try scalars().expect("SELECT (TABLE One) FROM One",
                                equals: "SELECT (SELECT * FROM One) FROM One")
-    try engineScalars().expect("SELECT (TABLE One) FROM One", yields: [[42]])
+    try scalars().expect("SELECT (TABLE One) FROM One", yields: [[42]])
   }
 
   @Test func `an x IN (TABLE t) subquery parses and runs as IN (SELECT star FROM t)`() throws {
     // `Ids` is a single column, so `Tag IN (TABLE Ids)` is a valid IN-subquery,
     // membership over that column exactly as `IN (SELECT * FROM Ids)`.
     _ = try parse(query: "SELECT V FROM Vals WHERE V IN (TABLE Ids)")
-    try engineScalars().expect(
+    try scalars().expect(
         "SELECT V FROM Vals WHERE V IN (TABLE Ids)",
         equals: "SELECT V FROM Vals WHERE V IN (SELECT * FROM Ids)")
-    try engineScalars().expect("SELECT V FROM Vals WHERE V IN (TABLE Ids)",
+    try scalars().expect("SELECT V FROM Vals WHERE V IN (TABLE Ids)",
                                yields: [[1], [3]])
   }
 }
@@ -140,7 +140,7 @@ struct TableTests {
 /// A catalog for the scalar-subquery and IN-subquery `(TABLE …)` forms: `One`
 /// is one row of one column (a valid scalar subquery), `Ids` is a single column
 /// (a valid IN-subquery), and `Vals` is the probe relation the IN filters.
-func engineScalars() throws -> EngineMemory {
+func scalars() throws -> EngineMemory {
   try Catalog {
     Relation("One", ["N": .integer]) {
       Row(42)

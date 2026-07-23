@@ -47,7 +47,7 @@ struct EngineHashJoinTests {
     // Four outer children probe the map, but the inner is read only three times
     // — its row count — not twelve (once per outer).
     let (catalog, reads) = hashable()
-    let rows = try catalog.run(engineParse("""
+    let rows = try catalog.run(parse("""
         SELECT Child.Kid, Parent.Name FROM Child
           JOIN Parent ON Parent.Id = Child.Pid
         """))
@@ -86,7 +86,7 @@ struct EngineHashJoinTests {
       "Attribute": FixtureRelation(attribute, attributes, coded: 0,
                                    counter: reads),
     ])
-    let rows = try catalog.run(engineParse("""
+    let rows = try catalog.run(parse("""
         SELECT Attribute.Name FROM Type
           JOIN Attribute ON Attribute.Parent = Type.Id
         """))
@@ -106,7 +106,7 @@ struct EngineHashJoinTests {
     // outer, and a large unseekable inner must not be fully scanned to answer
     // nothing.
     let (catalog, reads) = hashable()
-    let rows = try catalog.run(engineParse("""
+    let rows = try catalog.run(parse("""
         SELECT Child.Kid, Parent.Name FROM Child
           JOIN Parent ON Parent.Id = Child.Pid WHERE Child.Pid < 0
         """))
@@ -143,7 +143,7 @@ struct EngineHashJoinTests {
       "Parent": FixtureRelation(parent, parents, counter: reads),
       "Child": FixtureRelation(child, children),
     ])
-    let rows = try catalog.run(engineParse("""
+    let rows = try catalog.run(parse("""
         SELECT Child.Kid, Parent.Name FROM Child
           JOIN Parent ON Parent.Id = Child.Pid WHERE Child.Pid IS NULL
         """))
@@ -155,11 +155,11 @@ struct EngineHashJoinTests {
     // The sorted `Parent` seeks; its unsorted twin hashes. Both inner orderings
     // must agree — the hash preserves the seek path's outer-major, inner-cursor
     // order.
-    let seek = try engineJoin("""
+    let seek = try join("""
         SELECT Parent.Name, Child.Name FROM Child
           JOIN Parent ON Parent.Id = Child.Pid
         """)
-    let hash = try engineJoin("""
+    let hash = try join("""
         SELECT P.Name, Child.Name FROM Child
           JOIN ParentUnsorted AS P ON P.Id = Child.Pid
         """)
@@ -175,7 +175,7 @@ struct EngineHashJoinTests {
     // The unsorted twin forces the hash path. Without an ORDER BY the result
     // must be outer-major (each child in scan order), and a bucket's inner rows
     // in the inner's cursor order — exactly the nested loop's order.
-    let forced = try engineJoin("""
+    let forced = try join("""
         SELECT Child.Name, P.Name FROM Child
           JOIN ParentUnsorted AS P ON P.Id = Child.Pid
         """)
@@ -211,7 +211,7 @@ struct EngineHashJoinTests {
       "Parent": FixtureRelation(parent, parents),
       "Child": FixtureRelation(child, children),
     ])
-    let rows = try catalog.run(engineParse("""
+    let rows = try catalog.run(parse("""
         SELECT Child.Name, Parent.Name FROM Child
           JOIN Parent ON Parent.Id = Child.Pid
         """))
@@ -254,7 +254,7 @@ struct EngineHashJoinTests {
       "Parent": FixtureRelation(parent, parents, sorted: 0, counter: reads),
       "Child": FixtureRelation(child, children),
     ])
-    let rows = try catalog.run(engineParse("""
+    let rows = try catalog.run(parse("""
         SELECT Child.Kid, Parent.Id FROM Child
           JOIN Parent ON Parent.Code = Child.Code WHERE Parent.Id < 0
         """))
@@ -271,21 +271,21 @@ struct EngineStreamingProductTests {
     // inner here is the `Adults` VIEW (a `derived` leaf), so nest cannot fire
     // and the level stays a `select` over a `product` — the shape the streaming
     // executor fuses.
-    let catalog = try engineViews()
-    let select = try engineParse("""
+    let catalog = try gallery()
+    let select = try parse("""
         SELECT Child.Name, Adults.Label FROM Child
           JOIN Adults ON Adults.Key = Child.Pid
         """)
     let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
-    #expect(engineResidual(plan))
+    #expect(residue(plan))
   }
 
   @Test func `the streamed product filters row by row to the right rows`() throws {
     // `Adults` is Parent rows with Id >= 2 (Key 2 → Bee, 3 → Cid); only the
     // child whose Pid equals a Key survives — Bob (Pid 2) against Bee.
-    let catalog = try engineViews()
-    let rows = try catalog.run(engineParse("""
+    let catalog = try gallery()
+    let rows = try catalog.run(parse("""
         SELECT Child.Name, Adults.Label FROM Child
           JOIN Adults ON Adults.Key = Child.Pid
         """))
@@ -296,9 +296,9 @@ struct EngineStreamingProductTests {
     // Cross the two inputs by hand — every child paired with every adult in
     // outer-major order — and keep the pairs the ON equality admits. The fused
     // streaming operator must yield exactly this, in this order.
-    let catalog = try engineViews()
-    let children = try catalog.run(engineParse("SELECT Name, Pid FROM Child"))
-    let adults = try catalog.run(engineParse("SELECT Label, Key FROM Adults"))
+    let catalog = try gallery()
+    let children = try catalog.run(parse("SELECT Name, Pid FROM Child"))
+    let adults = try catalog.run(parse("SELECT Label, Key FROM Adults"))
 
     var eager = Array<Array<Value>>()
     for child in children {
@@ -307,7 +307,7 @@ struct EngineStreamingProductTests {
       }
     }
 
-    let streamed = try catalog.run(engineParse("""
+    let streamed = try catalog.run(parse("""
         SELECT Child.Name, Adults.Label FROM Child
           JOIN Adults ON Adults.Key = Child.Pid
         """))
@@ -325,7 +325,7 @@ struct EngineStreamingProductTests {
       [.integer(2), .text("Bob")],
       [.null, .text("Nobody")],
     ] as Array<Array<Value>>
-    let adults = try View(query: engineSelect("""
+    let adults = try View(query: select("""
         SELECT Id, Name FROM Base WHERE Id >= 2
         """), columns: ["Key", "Label"])
     let base = [
@@ -340,7 +340,7 @@ struct EngineStreamingProductTests {
       "Child": FixtureRelation(child, children),
       "Base": FixtureRelation(base, bases, sorted: 0),
     ], views: ["Adults": adults])
-    let rows = try catalog.run(engineParse("""
+    let rows = try catalog.run(parse("""
         SELECT Child.Name, Adults.Label FROM Child
           JOIN Adults ON Adults.Key = Child.Pid
         """))

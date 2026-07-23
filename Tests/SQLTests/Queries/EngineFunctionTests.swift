@@ -28,43 +28,43 @@ private func routines() -> Routines {
 }
 
 /// Runs `text` against the `People` catalog through the demonstration routines.
-func engineFunctionRun(_ text: String) throws -> Array<Array<Value>> {
-  try enginePeople().run(engineParse(text), routines())
+func functions(_ text: String) throws -> Array<Array<Value>> {
+  try roster().run(parse(text), routines())
 }
 
 struct EngineFunctionTests {
   @Test func `a registered function projects over a column`() throws {
-    let rows = try engineFunctionRun("SELECT upper(Name) FROM People WHERE Id = 1")
+    let rows = try functions("SELECT upper(Name) FROM People WHERE Id = 1")
     #expect(rows == [[.text("ALICE")]])
   }
 
   @Test func `a function projects beside a bare column`() throws {
     let rows =
-        try engineFunctionRun("SELECT Id, upper(Name) FROM People WHERE Id = 3")
+        try functions("SELECT Id, upper(Name) FROM People WHERE Id = 3")
     #expect(rows == [[.integer(3), .text("CAROL")]])
   }
 
   @Test func `a function takes more than one column argument`() throws {
-    let rows = try engineFunctionRun("SELECT add(Id, Age) FROM People WHERE Id = 2")
+    let rows = try functions("SELECT add(Id, Age) FROM People WHERE Id = 2")
     // Bob: Id 2 + Age 25 = 27.
     #expect(rows == [[.integer(27)]])
   }
 
   @Test func `a function takes a literal argument`() throws {
-    let rows = try engineFunctionRun("SELECT add(Id, 100) FROM People WHERE Id = 4")
+    let rows = try functions("SELECT add(Id, 100) FROM People WHERE Id = 4")
     #expect(rows == [[.integer(104)]])
   }
 
   @Test func `a function call nests another function call`() throws {
     let rows =
-        try engineFunctionRun("SELECT add(add(Id, 1), Age) FROM People WHERE Id = 5")
+        try functions("SELECT add(add(Id, 1), Age) FROM People WHERE Id = 5")
     // Eve: (5 + 1) + 25 = 31.
     #expect(rows == [[.integer(31)]])
   }
 
   @Test func `an unregistered function is reported`() throws {
     #expect(throws: SQLError.function("missing")) {
-      try engineFunctionRun("SELECT missing(Name) FROM People")
+      try functions("SELECT missing(Name) FROM People")
     }
   }
 
@@ -73,14 +73,14 @@ struct EngineFunctionTests {
     // routine, whose own kind check faults an INTEGER passed to the text
     // built-in UPPER.
     #expect(throws: SQLError.argument("UPPER requires a text argument")) {
-      try engineFunctionRun("SELECT upper(Id) FROM People WHERE Id = 1")
+      try functions("SELECT upper(Id) FROM People WHERE Id = 1")
     }
   }
 
   @Test func `a function call resolves its name case-insensitively`() throws {
     // The built-in `UPPER` resolves through the seeded prelude; the natural SQL
     // spelling UPPER resolves to it, as table and column identifiers do.
-    let rows = try engineFunctionRun("SELECT UPPER(Name) FROM People WHERE Id = 1")
+    let rows = try functions("SELECT UPPER(Name) FROM People WHERE Id = 1")
     #expect(rows == [[.text("ALICE")]])
   }
 
@@ -88,9 +88,9 @@ struct EngineFunctionTests {
     // BITAND ships in the prelude (`Routines.standard`): `routines()` never
     // registers it, yet the call resolves through the seeded prelude and folds
     // case-insensitively. 12 & 10 = 8; 6 & 3 = 2.
-    #expect(try engineFunctionRun("SELECT BITAND(12, 10) FROM People WHERE Id = 1")
+    #expect(try functions("SELECT BITAND(12, 10) FROM People WHERE Id = 1")
             == [[.integer(8)]])
-    #expect(try engineFunctionRun("SELECT bitand(6, 3) FROM People WHERE Id = 1")
+    #expect(try functions("SELECT bitand(6, 3) FROM People WHERE Id = 1")
             == [[.integer(2)]])
   }
 
@@ -98,10 +98,10 @@ struct EngineFunctionTests {
     // The wrong argument count is a function-argument fault (`.argument`), not
     // `.arity` — whose message is the UNION column-count mismatch.
     #expect(throws: SQLError.argument("BITAND takes two arguments")) {
-      try engineFunctionRun("SELECT BITAND(1) FROM People WHERE Id = 1")
+      try functions("SELECT BITAND(1) FROM People WHERE Id = 1")
     }
     #expect(throws: SQLError.argument("BITAND requires integer arguments")) {
-      try engineFunctionRun("SELECT BITAND('a', 1) FROM People WHERE Id = 1")
+      try functions("SELECT BITAND('a', 1) FROM People WHERE Id = 1")
     }
   }
 
@@ -129,8 +129,8 @@ struct EngineFunctionTests {
          "TAG": Routine(returns: .text, parameters: [.text]) {
           _ in .text("upper")
         }]
-    let query = try engineParse("SELECT tag(Name) FROM People WHERE Id = 1")
-    let rows = try enginePeople().run(query, routines)
+    let query = try parse("SELECT tag(Name) FROM People WHERE Id = 1")
+    let rows = try roster().run(query, routines)
     #expect(rows == [[.text("lower")]])
   }
 
@@ -138,13 +138,13 @@ struct EngineFunctionTests {
     // The documented contract: a predicate may call a registered function;
     // `upper(Name) = 'ALICE'` decodes the column before comparing.
     let rows =
-        try engineFunctionRun("SELECT Id FROM People WHERE upper(Name) = 'ALICE'")
+        try functions("SELECT Id FROM People WHERE upper(Name) = 'ALICE'")
     #expect(rows == [[.integer(1)]])
   }
 
   @Test func `a predicate compares a function result to an integer`() throws {
     let rows =
-        try engineFunctionRun("SELECT Name FROM People WHERE add(Id, 10) = 12")
+        try functions("SELECT Name FROM People WHERE add(Id, 10) = 12")
     #expect(rows == [[.text("Bob")]])
   }
 }
@@ -172,7 +172,7 @@ struct EngineDefinedFunctionTests {
         try defining("CREATE FUNCTION twice(n INTEGER) RETURNS INTEGER "
                          + "AS n + n")
     let rows =
-        try enginePeople().run(engineParse("SELECT twice(Age) FROM People WHERE Id = 1"),
+        try roster().run(parse("SELECT twice(Age) FROM People WHERE Id = 1"),
                          routines)
     // Alice's Age is 30; twice(30) = 60.
     #expect(rows == [[.integer(60)]])
@@ -183,7 +183,7 @@ struct EngineDefinedFunctionTests {
         try defining("CREATE FUNCTION span(lo INTEGER, hi INTEGER) "
                          + "RETURNS INTEGER AS hi - lo")
     let rows =
-        try enginePeople().run(engineParse("SELECT span(Id, Age) FROM People WHERE Id = 4"),
+        try roster().run(parse("SELECT span(Id, Age) FROM People WHERE Id = 4"),
                          routines)
     // Dave: Id 4, Age 40; span(4, 40) = 36.
     #expect(rows == [[.integer(36)]])
@@ -193,7 +193,7 @@ struct EngineDefinedFunctionTests {
     let routines =
         try defining("CREATE FUNCTION inc(n INTEGER) RETURNS INTEGER AS n + 1")
     let rows =
-        try enginePeople().run(engineParse("SELECT Id, inc(Age) FROM People WHERE Id = 2"),
+        try roster().run(parse("SELECT Id, inc(Age) FROM People WHERE Id = 2"),
                          routines)
     // Bob: Id 2, Age 25; inc(25) = 26.
     #expect(rows == [[.integer(2), .integer(26)]])
@@ -203,7 +203,7 @@ struct EngineDefinedFunctionTests {
     let routines =
         try defining("CREATE FUNCTION inc(n INTEGER) RETURNS INTEGER AS n + 1")
     let rows =
-        try enginePeople().run(engineParse("SELECT Name FROM People WHERE inc(Age) = 31"),
+        try roster().run(parse("SELECT Name FROM People WHERE inc(Age) = 31"),
                          routines)
     // Alice and Carol are 30; inc(30) = 31.
     #expect(rows == [[.text("Alice")], [.text("Carol")]])
@@ -213,7 +213,7 @@ struct EngineDefinedFunctionTests {
     let routines =
         try defining("CREATE FUNCTION answer() RETURNS INTEGER AS 40 + 2")
     let rows =
-        try enginePeople().run(engineParse("SELECT answer() FROM People WHERE Id = 1"),
+        try roster().run(parse("SELECT answer() FROM People WHERE Id = 1"),
                          routines)
     #expect(rows == [[.integer(42)]])
   }
@@ -228,7 +228,7 @@ struct EngineDefinedFunctionTests {
         Row(1, nil)
       }
     }
-    let rows = try catalog.run(engineParse("SELECT inc(V) FROM N WHERE Id = 1"),
+    let rows = try catalog.run(parse("SELECT inc(V) FROM N WHERE Id = 1"),
                                routines)
     #expect(rows == [[.null]])
   }
@@ -242,7 +242,7 @@ struct EngineDefinedFunctionTests {
         try defining("CREATE FUNCTION twice(n INTEGER) RETURNS INTEGER "
                          + "AS n + n")
     #expect(throws: SQLError.argument("twice takes 1 arguments")) {
-      try enginePeople().columns(of: engineParse("SELECT twice(Id, Age) FROM People"),
+      try roster().columns(of: parse("SELECT twice(Id, Age) FROM People"),
                            routines: routines)
     }
   }
@@ -254,7 +254,7 @@ struct EngineDefinedFunctionTests {
         try defining("CREATE FUNCTION twice(n INTEGER) RETURNS INTEGER "
                          + "AS n + n")
     #expect(throws: SQLError.argument("twice requires integer arguments")) {
-      try enginePeople().columns(of: engineParse("SELECT twice(Name) FROM People"),
+      try roster().columns(of: parse("SELECT twice(Name) FROM People"),
                            routines: routines)
     }
   }
@@ -266,7 +266,7 @@ struct EngineDefinedFunctionTests {
     let routines =
         try defining("CREATE FUNCTION label(n INTEGER) RETURNS TEXT AS 'x'")
     let columns =
-        try enginePeople().columns(of: engineParse("SELECT label(Id) AS L FROM People"),
+        try roster().columns(of: parse("SELECT label(Id) AS L FROM People"),
                              routines: routines)
     #expect(columns.count == 1)
     #expect(columns[0] == OutputColumn(name: "L", type: .text))
@@ -300,7 +300,7 @@ struct EngineDefinedFunctionTests {
         "CREATE FUNCTION inc(n INTEGER) RETURNS INTEGER AS n + 1",
         "CREATE FUNCTION inc(n INTEGER) RETURNS INTEGER AS n + 100")
     let rows =
-        try enginePeople().run(engineParse("SELECT inc(Age) FROM People WHERE Id = 1"),
+        try roster().run(parse("SELECT inc(Age) FROM People WHERE Id = 1"),
                          routines)
     // Alice's Age is 30; the shadowing inc adds 100 → 130.
     #expect(rows == [[.integer(130)]])
@@ -325,7 +325,7 @@ struct EngineDefinedFunctionTests {
         "CREATE FUNCTION f() RETURNS INTEGER AS 0",
         "CREATE FUNCTION f() RETURNS INTEGER AS f() + 1")
     let rows =
-        try enginePeople().run(engineParse("SELECT f() FROM People WHERE Id = 1"),
+        try roster().run(parse("SELECT f() FROM People WHERE Id = 1"),
                          routines)
     #expect(rows == [[.integer(1)]])
   }
@@ -337,7 +337,7 @@ struct EngineDefinedFunctionTests {
         "CREATE FUNCTION g(n INTEGER) RETURNS INTEGER AS n + 1",
         "CREATE FUNCTION f(n INTEGER) RETURNS INTEGER AS g(n) + 1")
     let rows =
-        try enginePeople().run(engineParse("SELECT f(Age) FROM People WHERE Id = 1"),
+        try roster().run(parse("SELECT f(Age) FROM People WHERE Id = 1"),
                          routines)
     // Alice's Age is 30; g(30) = 31, f(30) = g(30) + 1 = 32.
     #expect(rows == [[.integer(32)]])
@@ -355,12 +355,12 @@ struct EngineDefinedFunctionTests {
     else { throw SQLError.incomplete(expected: "a CREATE FUNCTION statement") }
     let routines = try Routines().registering(name, function)
     let rows =
-        try enginePeople().run(engineParse("SELECT lowbit(Age) FROM People WHERE Id = 1"),
+        try roster().run(parse("SELECT lowbit(Age) FROM People WHERE Id = 1"),
                          routines)
     // Alice's Age is 30; BITAND(30, 1) = 0 (30 is even).
     #expect(rows == [[.integer(0)]])
     let odd =
-        try enginePeople().run(engineParse("SELECT lowbit(Id) FROM People WHERE Id = 3"),
+        try roster().run(parse("SELECT lowbit(Id) FROM People WHERE Id = 3"),
                          routines)
     // Id 3 is odd; BITAND(3, 1) = 1.
     #expect(odd == [[.integer(1)]])
@@ -387,11 +387,11 @@ struct EngineDefinedFunctionTests {
         "CREATE FUNCTION f() RETURNS INTEGER AS g()",
         "CREATE FUNCTION g() RETURNS TEXT AS 'x'")
     let captured =
-        try enginePeople().run(engineParse("SELECT f() FROM People WHERE Id = 1"),
+        try roster().run(parse("SELECT f() FROM People WHERE Id = 1"),
                          routines)
     #expect(captured == [[.integer(1)]])
     let latest =
-        try enginePeople().run(engineParse("SELECT g() FROM People WHERE Id = 1"),
+        try roster().run(parse("SELECT g() FROM People WHERE Id = 1"),
                          routines)
     #expect(latest == [[.text("x")]])
   }

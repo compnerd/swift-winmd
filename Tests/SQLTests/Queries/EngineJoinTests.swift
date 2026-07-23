@@ -10,7 +10,7 @@ import SQLTestSupport
 
 struct EngineJoinTests {
   @Test func `a join on a foreign key pairs each child with its parent`() throws {
-    let rows = try engineJoin("""
+    let rows = try join("""
         SELECT * FROM Parent JOIN Child ON Child.Pid = Parent.Id
         """)
     // The orphan child (Pid 9) and the childless parent (Cid) drop out.
@@ -22,7 +22,7 @@ struct EngineJoinTests {
   }
 
   @Test func `a qualified projection selects across both relations`() throws {
-    try engineFamily().expect("""
+    try family().expect("""
         SELECT Parent.Name, Child.Name FROM Parent
           JOIN Child ON Child.Pid = Parent.Id
         """,
@@ -32,7 +32,7 @@ struct EngineJoinTests {
   @Test func `a join keys off the inner relation's virtual Id`() throws {
     // `Ordered` has no stored key; its identity is its 1-based `Id`. The
     // child's `Pid` joins to that virtual column.
-    let rows = try engineJoin("""
+    let rows = try join("""
         SELECT Ordered.Label, Child.Name FROM Child
           JOIN Ordered ON Ordered.Id = Child.Pid
         """)
@@ -53,7 +53,7 @@ struct EngineJoinTests {
     // Were the inner laid at the outer's `width` (or at a base collapsed to 0
     // by a `1 << 32` reserve on a 32-bit host), `Child.Pid` would land on the
     // outer `Id`'s ordinal and the join's cells would corrupt one another.
-    let rows = try engineJoin("""
+    let rows = try join("""
         SELECT Ordered.Id, Child.Name FROM Ordered
           JOIN Child ON Child.Pid = Ordered.Id
         """)
@@ -66,7 +66,7 @@ struct EngineJoinTests {
   }
 
   @Test func `a WHERE spans both relations`() throws {
-    try engineFamily().expect("""
+    try family().expect("""
         SELECT Child.Name FROM Parent JOIN Child ON Child.Pid = Parent.Id
           WHERE Parent.Name = 'Ada' AND Child.Name = 'Amy'
         """,
@@ -74,7 +74,7 @@ struct EngineJoinTests {
   }
 
   @Test func `ORDER BY orders across the join`() throws {
-    try engineFamily().expect("""
+    try family().expect("""
         SELECT Child.Name FROM Parent JOIN Child ON Child.Pid = Parent.Id
           ORDER BY Child.Name ASC
         """,
@@ -83,13 +83,13 @@ struct EngineJoinTests {
 
   @Test func `an unqualified name in both relations is ambiguous`() throws {
     #expect(throws: SQLError.ambiguous("Name")) {
-      try engineJoin("SELECT Name FROM Parent JOIN Child ON Child.Pid = Parent.Id")
+      try join("SELECT Name FROM Parent JOIN Child ON Child.Pid = Parent.Id")
     }
   }
 
   @Test func `a self-join's shared table name makes a qualified name ambiguous`() throws {
     #expect(throws: SQLError.ambiguous("Id")) {
-      try engineJoin("""
+      try join("""
           SELECT Parent.Name FROM Parent JOIN Parent ON Parent.Id = Parent.Id
           """)
     }
@@ -99,14 +99,14 @@ struct EngineJoinTests {
     // `x.Pid` resolves by column (the Child side only); `x.Name` is on both,
     // so the shared alias is ambiguous rather than binding silently to outer.
     #expect(throws: SQLError.ambiguous("Name")) {
-      try engineJoin("""
+      try join("""
           SELECT x.Name FROM Parent AS x JOIN Child AS x ON x.Pid = x.Pid
           """)
     }
   }
 
   @Test func `a parent with no matching child contributes no rows`() throws {
-    let rows = try engineJoin("""
+    let rows = try join("""
         SELECT Parent.Name, Child.Name FROM Parent
           JOIN Child ON Child.Pid = Parent.Id
           WHERE Parent.Name = 'Cid'
@@ -118,11 +118,11 @@ struct EngineJoinTests {
     // The join seeks `Child.Pid = Parent.Id` when the inner relation is
     // seekable on the key, and scans it otherwise. Both inner orderings — the
     // sorted `Parent` and its unsorted twin used as the inner — must agree.
-    let seek = try engineJoin("""
+    let seek = try join("""
         SELECT Parent.Name, Child.Name FROM Child
           JOIN Parent ON Parent.Id = Child.Pid ORDER BY Child.Name ASC
         """)
-    let scan = try engineJoin("""
+    let scan = try join("""
         SELECT P.Name, Child.Name FROM Child
           JOIN ParentUnsorted AS P ON P.Id = Child.Pid ORDER BY Child.Name ASC
         """)
@@ -142,7 +142,7 @@ struct EngineNonEquiJoinTests {
     // `ON Parent.Id < Child.Pid` is a pure inequality — no equi conjunct —
     // so it is a nested loop: for each parent, every child whose Pid exceeds
     // its Id, in outer-major order.
-    let rows = try engineJoin("""
+    let rows = try join("""
         SELECT Parent.Name, Child.Name FROM Parent
           JOIN Child ON Parent.Id < Child.Pid
         """)
@@ -157,15 +157,15 @@ struct EngineNonEquiJoinTests {
   @Test func `a pure inequality ON plans a residual product, not a hash join`() throws {
     // No `column = column` conjunct, so `nest` cannot form a `.join`; the level
     // stays a `.select` over a `.product` — the nested-loop shape.
-    let catalog = try engineFamily()
-    let select = try engineParse("""
+    let catalog = try family()
+    let select = try parse("""
         SELECT Parent.Name, Child.Name FROM Parent
           JOIN Child ON Parent.Id < Child.Pid
         """)
     let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
-    #expect(!engineJoins(plan))
-    #expect(engineResidual(plan))
+    #expect(!joined(plan))
+    #expect(residue(plan))
   }
 
   @Test func `a mixed ON hashes the equi conjunct and filters the residual`() throws {
@@ -173,7 +173,7 @@ struct EngineNonEquiJoinTests {
     // each child to its parent; the residual inequality beside the key then
     // keeps only pairs whose child name sorts before 'B' — dropping Bob, the
     // sole B-name.
-    let rows = try engineJoin("""
+    let rows = try join("""
         SELECT Parent.Name, Child.Name FROM Parent
           JOIN Child ON Child.Pid = Parent.Id AND Child.Name < 'B'
         """)
@@ -188,21 +188,21 @@ struct EngineNonEquiJoinTests {
     // The `column = column` conjunct becomes a `.join`; the inequality
     // survives as a residual `.select` over it — the equi fast-path still
     // triggers.
-    let catalog = try engineFamily()
-    let select = try engineParse("""
+    let catalog = try family()
+    let select = try parse("""
         SELECT Parent.Name, Child.Name FROM Parent
           JOIN Child ON Child.Pid = Parent.Id AND Parent.Name < Child.Name
         """)
     let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
-    #expect(engineJoins(plan))
+    #expect(joined(plan))
   }
 
   @Test func `an expression equality ON is a residual, not a hash key`() throws {
     // `ON Child.Pid = Parent.Id + 1` equates a column with an EXPRESSION, so
     // it is not a bare `column = column` key: it lowers to a residual over the
     // product (nested loop), not a hash join.
-    let rows = try engineJoin("""
+    let rows = try join("""
         SELECT Parent.Name, Child.Name FROM Parent
           JOIN Child ON Child.Pid = Parent.Id + 1
         """)
@@ -212,30 +212,30 @@ struct EngineNonEquiJoinTests {
   }
 
   @Test func `an expression equality ON plans a residual product`() throws {
-    let catalog = try engineFamily()
-    let select = try engineParse("""
+    let catalog = try family()
+    let select = try parse("""
         SELECT Parent.Name, Child.Name FROM Parent
           JOIN Child ON Child.Pid = Parent.Id + 1
         """)
     let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
-    #expect(!engineJoins(plan))
-    #expect(engineResidual(plan))
+    #expect(!joined(plan))
+    #expect(residue(plan))
   }
 
   @Test func `a non-equi ON equals the eager product filtered`() throws {
     // The nested-loop join over an inequality must yield exactly the eager
     // cross product filtered by the same predicate, in outer-major order.
-    let catalog = try engineFamily()
-    let parents = try catalog.run(engineParse("SELECT Name, Id FROM Parent"))
-    let children = try catalog.run(engineParse("SELECT Name, Pid FROM Child"))
+    let catalog = try family()
+    let parents = try catalog.run(parse("SELECT Name, Id FROM Parent"))
+    let children = try catalog.run(parse("SELECT Name, Pid FROM Child"))
     var expected = Array<Array<Value>>()
     for parent in parents {
       for child in children where less(parent[1], child[1]) {
         expected.append([parent[0], child[0]])
       }
     }
-    let rows = try catalog.run(engineParse("""
+    let rows = try catalog.run(parse("""
         SELECT Parent.Name, Child.Name FROM Parent
           JOIN Child ON Parent.Id < Child.Pid
         """))
@@ -258,7 +258,7 @@ struct EngineNonEquiJoinTests {
                     [[.integer(2)]] as Array<Array<Value>>),
     ])
     #expect(throws: SQLError.divide) {
-      _ = try catalog.run(engineParse("""
+      _ = try catalog.run(parse("""
           SELECT A.k FROM A JOIN B ON (1 / A.x) = 0 AND A.k = B.k
           """))
     }
@@ -275,13 +275,13 @@ struct EngineNonEquiJoinTests {
       "B": FixtureRelation([EngineField(name: "k", type: .integer)],
                     [[.integer(2)]] as Array<Array<Value>>),
     ])
-    let select = try engineParse("""
+    let select = try parse("""
         SELECT A.k FROM A JOIN B ON (1 / A.x) = 0 AND A.k = B.k
         """)
     let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
-    #expect(!engineJoins(plan))
-    #expect(engineResidual(plan))
+    #expect(!joined(plan))
+    #expect(residue(plan))
   }
 
   @Test func `an equi key before an unsafe residual extracts no key, planning a residual`() throws {
@@ -297,12 +297,12 @@ struct EngineNonEquiJoinTests {
       "B": FixtureRelation([EngineField(name: "k", type: .integer)],
                     [[.integer(2)]] as Array<Array<Value>>),
     ])
-    let compiled = try catalog.compile(engineParse("""
+    let compiled = try catalog.compile(parse("""
         SELECT A.k FROM A JOIN B ON A.k = B.k AND (1 / A.x) = 0
         """))
     let plan = try catalog.optimise(compiled.pushdown(), [:])
-    #expect(!engineJoins(plan))
-    #expect(engineResidual(plan))
+    #expect(!joined(plan))
+    #expect(residue(plan))
   }
 
   @Test func `a nullable ON key before an unsafe residual raises`() throws {
@@ -319,14 +319,14 @@ struct EngineNonEquiJoinTests {
       "B": FixtureRelation([EngineField(name: "k", type: .integer)],
                     [[.integer(2)]] as Array<Array<Value>>),
     ])
-    let compiled = try catalog.compile(engineParse("""
+    let compiled = try catalog.compile(parse("""
         SELECT A.k FROM A JOIN B ON A.k = B.k AND (1 / A.x) = 0
         """))
     let plan = try catalog.optimise(compiled.pushdown(), [:])
-    #expect(!engineJoins(plan))
-    #expect(engineResidual(plan))
+    #expect(!joined(plan))
+    #expect(residue(plan))
     #expect(throws: SQLError.divide) {
-      _ = try catalog.run(engineParse("""
+      _ = try catalog.run(parse("""
           SELECT A.k FROM A JOIN B ON A.k = B.k AND (1 / A.x) = 0
           """))
     }
@@ -345,7 +345,7 @@ struct EngineNonEquiJoinTests {
       "B": FixtureRelation([EngineField(name: "k", type: .integer)],
                     [[.integer(3)]] as Array<Array<Value>>),
     ])
-    let rows = try catalog.run(engineParse("""
+    let rows = try catalog.run(parse("""
         SELECT A.k FROM A JOIN B ON A.k = B.k AND (1 / A.x) = 0
         """))
     #expect(rows.isEmpty)
@@ -369,24 +369,24 @@ struct EngineNonEquiJoinTests {
         SELECT A.k, B.q FROM A JOIN B ON A.p < B.q AND A.k = B.k
         """
     // Key pairs (1,1) with 5 < 8 kept; (2,2) with 10 < 3 dropped.
-    let rows = try catalog.run(engineParse(text))
+    let rows = try catalog.run(parse(text))
     #expect(rows == [[.integer(1), .integer(8)]])
-    let compiled = try catalog.compile(engineParse(text))
+    let compiled = try catalog.compile(parse(text))
     let plan = try catalog.optimise(compiled.pushdown(), [:])
-    #expect(engineJoins(plan))
+    #expect(joined(plan))
   }
 
   @Test func `a pure equi ON still plans a hash join`() throws {
     // The equi fast-path is unchanged: an all-`column = column` ON extracts
     // its key and folds into a `.join`.
-    let catalog = try engineFamily()
-    let select = try engineParse("""
+    let catalog = try family()
+    let select = try parse("""
         SELECT Parent.Name, Child.Name FROM Parent
           JOIN Child ON Child.Pid = Parent.Id
         """)
     let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
-    #expect(engineJoins(plan))
+    #expect(joined(plan))
   }
 
   @Test func `a nullable ON gate drops a pair before an unsafe WHERE`() throws {
@@ -404,11 +404,11 @@ struct EngineNonEquiJoinTests {
                            [[.integer(2)]] as Array<Array<Value>>),
     ])
     let text = "SELECT A.k FROM A JOIN B ON A.k < B.k WHERE (1 / A.x) = 0"
-    let compiled = try catalog.compile(engineParse(text))
+    let compiled = try catalog.compile(parse(text))
     let plan = try catalog.optimise(compiled.pushdown(), [:])
-    #expect(engineSeparated(plan))
-    #expect(engineResidual(plan))
-    #expect(try catalog.run(engineParse(text)).isEmpty)
+    #expect(separated(plan))
+    #expect(residue(plan))
+    #expect(try catalog.run(parse(text)).isEmpty)
   }
 
   @Test func `a surviving ON pair still runs the unsafe WHERE`() throws {
@@ -425,7 +425,7 @@ struct EngineNonEquiJoinTests {
                            [[.integer(2)]] as Array<Array<Value>>),
     ])
     #expect(throws: SQLError.divide) {
-      _ = try catalog.run(engineParse("""
+      _ = try catalog.run(parse("""
           SELECT A.k FROM A JOIN B ON A.k < B.k WHERE (1 / A.x) = 0
           """))
     }
@@ -438,7 +438,7 @@ struct EngineNonEquiJoinTests {
     // `WHERE` fuses with the gate. `ON Parent.Id < Child.Pid WHERE Child.Name
     // <> 'Orphan'` pairs each parent with a later-keyed child, then drops the
     // Orphan child.
-    let rows = try engineJoin("""
+    let rows = try join("""
         SELECT Parent.Name, Child.Name FROM Parent
           JOIN Child ON Parent.Id < Child.Pid WHERE Child.Name <> 'Orphan'
         """)
@@ -470,13 +470,13 @@ struct EngineNonEquiJoinTests {
         SELECT A.k1 FROM A
           JOIN B ON A.k1 = B.k1 AND A.k2 = B.k2 WHERE (1 / A.x) = 0
         """
-    let compiled = try catalog.compile(engineParse(text))
+    let compiled = try catalog.compile(parse(text))
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     // The equi key still hash-joins; the leftover match gates above it, and the
     // `WHERE` is a SEPARATE `select` above that gate, not fused with the match.
-    #expect(engineJoins(plan))
-    #expect(engineStacked(plan))
-    #expect(try catalog.run(engineParse(text)).isEmpty)
+    #expect(joined(plan))
+    #expect(stacked(plan))
+    #expect(try catalog.run(parse(text)).isEmpty)
   }
 
   @Test func `both ON matches passing lets the unsafe WHERE raise`() throws {
@@ -496,7 +496,7 @@ struct EngineNonEquiJoinTests {
                              as Array<Array<Value>>),
     ])
     #expect(throws: SQLError.divide) {
-      _ = try catalog.run(engineParse("""
+      _ = try catalog.run(parse("""
           SELECT A.k1 FROM A
             JOIN B ON A.k1 = B.k1 AND A.k2 = B.k2 WHERE (1 / A.x) = 0
           """))
@@ -528,10 +528,10 @@ struct EngineNonEquiJoinTests {
         SELECT A.tag, B.note FROM A
           JOIN B ON A.k1 = B.k1 AND A.k2 = B.k2 WHERE A.tag = 'keep'
         """
-    let compiled = try catalog.compile(engineParse(text))
+    let compiled = try catalog.compile(parse(text))
     let plan = try catalog.optimise(compiled.pushdown(), [:])
-    #expect(engineJoins(plan))
-    #expect(try catalog.run(engineParse(text)) == [[.text("keep"), .text("bee")]])
+    #expect(joined(plan))
+    #expect(try catalog.run(parse(text)) == [[.text("keep"), .text("bee")]])
   }
 
   @Test func `a single-equality ON still plans a hash join and behaves`() throws {
@@ -551,10 +551,10 @@ struct EngineNonEquiJoinTests {
                            [[.integer(1)]] as Array<Array<Value>>),
     ])
     let text = "SELECT A.k FROM A JOIN B ON A.k = B.k WHERE (1 / A.x) = 1"
-    let compiled = try catalog.compile(engineParse(text))
+    let compiled = try catalog.compile(parse(text))
     let plan = try catalog.optimise(compiled.pushdown(), [:])
-    #expect(engineJoins(plan))
-    #expect(try catalog.run(engineParse(text)) == [[.integer(1)]])
+    #expect(joined(plan))
+    #expect(try catalog.run(parse(text)) == [[.integer(1)]])
   }
 }
 
@@ -564,7 +564,7 @@ struct EngineOuterJoinTests {
   @Test func `a LEFT JOIN preserves an unmatched left row, right NULL`() throws {
     // Every parent survives; Cid, with no child, emits once with the child
     // columns NULL — the NULL-extension. Matched parents emit each pair.
-    let rows = try engineJoin("""
+    let rows = try join("""
         SELECT Parent.Name, Child.Name FROM Parent
           LEFT JOIN Child ON Child.Pid = Parent.Id
         """)
@@ -578,11 +578,11 @@ struct EngineOuterJoinTests {
 
   @Test func `LEFT OUTER JOIN is the same as LEFT JOIN`() throws {
     // The `OUTER` noise word is optional and changes nothing.
-    let terse = try engineJoin("""
+    let terse = try join("""
         SELECT Parent.Name, Child.Name FROM Parent
           LEFT JOIN Child ON Child.Pid = Parent.Id
         """)
-    let verbose = try engineJoin("""
+    let verbose = try join("""
         SELECT Parent.Name, Child.Name FROM Parent
           LEFT OUTER JOIN Child ON Child.Pid = Parent.Id
         """)
@@ -592,7 +592,7 @@ struct EngineOuterJoinTests {
   @Test func `a RIGHT JOIN preserves an unmatched right row, left NULL`() throws {
     // Every child survives, right-major; the Orphan (Pid 9) has no parent and
     // emits once with the parent columns NULL.
-    let rows = try engineJoin("""
+    let rows = try join("""
         SELECT Parent.Name, Child.Name FROM Parent
           RIGHT JOIN Child ON Child.Pid = Parent.Id
         """)
@@ -607,7 +607,7 @@ struct EngineOuterJoinTests {
   @Test func `a FULL JOIN preserves the unmatched rows of both sides`() throws {
     // The left-major pairs and the childless Cid (right NULL), then the
     // parentless Orphan (left NULL) — both sides' unmatched rows survive.
-    let rows = try engineJoin("""
+    let rows = try join("""
         SELECT Parent.Name, Child.Name FROM Parent
           FULL JOIN Child ON Child.Pid = Parent.Id
         """)
@@ -624,7 +624,7 @@ struct EngineOuterJoinTests {
     // ON vs WHERE. Restricting the MATCH with `AND Child.Name = 'Amy'` keeps
     // every parent — the ON governs matching alone, so a parent that now
     // matches no child is still emitted NULL-extended. Only Ada matches Amy.
-    let rows = try engineJoin("""
+    let rows = try join("""
         SELECT Parent.Name, Child.Name FROM Parent
           LEFT JOIN Child ON Child.Pid = Parent.Id AND Child.Name = 'Amy'
         """)
@@ -640,7 +640,7 @@ struct EngineOuterJoinTests {
     // so the NULL-extended rows (whose Child.Name is NULL) fail `= 'Amy'` and
     // drop — turning the LEFT join back to inner-like. This is the ON-vs-WHERE
     // distinction the outer join preserves.
-    let rows = try engineJoin("""
+    let rows = try join("""
         SELECT Parent.Name, Child.Name FROM Parent
           LEFT JOIN Child ON Child.Pid = Parent.Id WHERE Child.Name = 'Amy'
         """)
@@ -650,7 +650,7 @@ struct EngineOuterJoinTests {
   @Test func `a WHERE IS NULL over a LEFT join finds the unmatched rows`() throws {
     // The anti-join idiom: a LEFT join then `WHERE Child.Name IS NULL` keeps
     // only the parents with no child — Cid.
-    let rows = try engineJoin("""
+    let rows = try join("""
         SELECT Parent.Name FROM Parent
           LEFT JOIN Child ON Child.Pid = Parent.Id WHERE Child.Name IS NULL
         """)
@@ -662,7 +662,7 @@ struct EngineOuterJoinTests {
     // pairs each parent with the children below it, and NULL-extends a parent
     // that dominates none. Child Pids are 1,1,2,9. Ada(1) > none; Bee(2) >
     // Pid 1 (Ann, Amy); Cid(3) > Pids 1,1,2 (Ann, Amy, Bob).
-    let rows = try engineJoin("""
+    let rows = try join("""
         SELECT Parent.Name, Child.Name FROM Parent
           LEFT JOIN Child ON Parent.Id > Child.Pid
         """)
@@ -680,22 +680,22 @@ struct EngineOuterJoinTests {
     // The ON must stay on the outer node — never distributed into a product or
     // nested into a hash join — or an unmatched row would be dropped. So the
     // plan reaches an `.outer` node and NOT a `.join`.
-    let catalog = try engineFamily()
-    let select = try engineParse("""
+    let catalog = try family()
+    let select = try parse("""
         SELECT Parent.Name, Child.Name FROM Parent
           LEFT JOIN Child ON Child.Pid = Parent.Id
         """)
     let compiled = try catalog.compile(select)
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     #expect(outers(plan))
-    #expect(!engineJoins(plan))
+    #expect(!joined(plan))
   }
 
   @Test func `an inner join then a LEFT join preserves the middle unmatched`() throws {
     // A mixed chain: House JOIN Room (inner) then LEFT JOIN Item. The empty
     // Attic (no item) survives the LEFT join NULL-extended, while the inner
     // House-Room pairs are formed first.
-    let rows = try engineLineage("""
+    let rows = try lineage("""
         SELECT House.House, Room.Room, Item.Item FROM House
           JOIN Room ON Room.Hid = House.Id
           LEFT JOIN Item ON Item.Rid = Room.Id
@@ -711,7 +711,7 @@ struct EngineOuterJoinTests {
   @Test func `an empty right side NULL-extends every left row`() throws {
     // With no child matching, a LEFT join still emits every parent, right
     // NULL — the width comes from the plan, not from a right row.
-    let rows = try engineJoin("""
+    let rows = try join("""
         SELECT Parent.Name, Child.Name FROM Parent
           LEFT JOIN Child ON Child.Pid = 999
         """)
@@ -761,7 +761,7 @@ private func outers(_ plan: Plan) -> Bool {
 
 struct EngineMultiJoinTests {
   @Test func `a three-relation chain joins across two foreign keys`() throws {
-    let rows = try engineLineage("""
+    let rows = try lineage("""
         SELECT House.House, Room.Room, Item.Item FROM House
           JOIN Room ON Room.Hid = House.Id
           JOIN Item ON Item.Rid = Room.Id
@@ -779,7 +779,7 @@ struct EngineMultiJoinTests {
     // Walking the chain the other way: `Item` is the outer scan, and both inner
     // relations are seeked on their sorted `Id` — the multi-way nest rewrite
     // turning every `Select`-over-`Product` level into an index-nested loop.
-    let rows = try engineLineage("""
+    let rows = try lineage("""
         SELECT Item.Item, Room.Room, House.House FROM Item
           JOIN Room ON Room.Id = Item.Rid
           JOIN House ON House.Id = Room.Hid
@@ -792,7 +792,7 @@ struct EngineMultiJoinTests {
   }
 
   @Test func `a WHERE filters across a three-relation chain`() throws {
-    try engineLineage().expect("""
+    try lineage().expect("""
         SELECT Item.Item FROM House
           JOIN Room ON Room.Hid = House.Id
           JOIN Item ON Item.Rid = Room.Id
@@ -805,7 +805,7 @@ struct EngineMultiJoinTests {
     // `Id` sits in both `House` and `Room`; across the chain it resolves in more
     // than one relation, so an unqualified reference is ambiguous.
     #expect(throws: SQLError.ambiguous("Id")) {
-      try engineLineage("""
+      try lineage("""
           SELECT Id FROM House
             JOIN Room ON Room.Hid = House.Id
             JOIN Item ON Item.Rid = Room.Id
@@ -820,7 +820,7 @@ struct EngineMultiJoinTests {
     // rejected (`SQLError.column`) rather than resolving `Item`'s slot from a
     // product that does not yet contain it and trapping or indexing wrong.
     #expect(throws: SQLError.column("Rid")) {
-      try engineLineage("""
+      try lineage("""
           SELECT House.House FROM House
             JOIN Room ON Item.Rid = House.Id
             JOIN Item ON Item.Rid = Room.Id
@@ -832,7 +832,7 @@ struct EngineMultiJoinTests {
     // Each `ON` references only the prefix it resolves against, so the whole
     // chain compiles and runs — mirroring `chain`, which the prefix-scope fix
     // leaves unchanged.
-    let rows = try engineLineage("""
+    let rows = try lineage("""
         SELECT House.House, Room.Room, Item.Item FROM House
           JOIN Room ON Room.Hid = House.Id
           JOIN Item ON Item.Rid = Room.Id
@@ -849,7 +849,7 @@ struct EngineMultiJoinTests {
     // `{Author, Book}` even though `Sale` — joined only later — also carries a
     // `Code`. Resolving the match against the prefix binds it; resolving against
     // the whole chain would see two `Code`s and report `SQLError.ambiguous`.
-    try engineShared().expect("""
+    try shared().expect("""
         SELECT Author.Aid, Book.Bid, Sale.Code FROM Author
           JOIN Book ON Code = Book.Aid
           JOIN Sale ON Sale.Sid = Book.Bid
@@ -869,7 +869,7 @@ struct EngineMultiJoinTests {
 /// `Bonus(Dept, Amt)` names every `Dept` (10, 20, 30), so a THIRD `USING
 /// (Dept)` join after an outer `Emp`/`Team` one keys each surviving row —
 /// including an unmatched left/right one — on the merged `Dept`.
-private func engineNamed() throws -> FixtureCatalog {
+private func named() throws -> FixtureCatalog {
   try Catalog {
     Relation("Emp", ["Dept": .integer, "Name": .text]) {
       Row(10, "Ann")
@@ -909,7 +909,7 @@ struct EngineNaturalUsingTests {
     // Output column list (ISO 7.10): the USING column `Dept` ONCE and FIRST,
     // then the left's other columns (`Name`), then the right's (`Lead`). Rows
     // join on `Dept` equality — only Dept 20 matches on both sides.
-    try engineNamed().expect("SELECT * FROM Emp JOIN Team USING (Dept)",
+    try named().expect("SELECT * FROM Emp JOIN Team USING (Dept)",
         yields: [
           [20, "Bob", "Deb"],
           [20, "Cid", "Deb"],
@@ -919,7 +919,7 @@ struct EngineNaturalUsingTests {
   @Test func `USING (c1, c2) keys on both columns`() throws {
     // The join columns `K, G` come first in order, then `Lhs`'s `A`, then
     // `Rhs`'s `B`. Only the (1, x) row agrees on BOTH columns.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT * FROM Lhs JOIN Rhs USING (K, G)
         """,
         yields: [[1, "x", "a1", "b1"]])
@@ -928,7 +928,7 @@ struct EngineNaturalUsingTests {
   @Test func `NATURAL INNER joins on the one shared column`() throws {
     // `Emp` and `Team` share only `Dept`, so `NATURAL JOIN` is `USING (Dept)`:
     // the merged `Dept` first, then `Name`, then `Lead`.
-    try engineNamed().expect("SELECT * FROM Emp NATURAL JOIN Team",
+    try named().expect("SELECT * FROM Emp NATURAL JOIN Team",
         yields: [
           [20, "Bob", "Deb"],
           [20, "Cid", "Deb"],
@@ -938,7 +938,7 @@ struct EngineNaturalUsingTests {
   @Test func `NATURAL with two common columns keys on both`() throws {
     // `Lhs` and `Rhs` share `K` and `G` (in `Lhs`'s order), so the merged
     // `K, G` come first, then `A`, then `B` — the same as `USING (K, G)`.
-    try engineNamed().expect("SELECT * FROM Lhs NATURAL JOIN Rhs",
+    try named().expect("SELECT * FROM Lhs NATURAL JOIN Rhs",
         yields: [[1, "x", "a1", "b1"]])
   }
 
@@ -946,7 +946,7 @@ struct EngineNaturalUsingTests {
     // `Solo(x)` and `Other(y)` share nothing, so `NATURAL JOIN` degenerates
     // to a Cartesian product (ISO), NOT a fault: every left row paired with
     // every right row, the output being every column of both.
-    try engineNamed().expect("SELECT * FROM Solo NATURAL JOIN Other",
+    try named().expect("SELECT * FROM Solo NATURAL JOIN Other",
         yields: [
           [1, "p"],
           [1, "q"],
@@ -959,7 +959,7 @@ struct EngineNaturalUsingTests {
     // `Emp` Dept 10 has no `Team` match; a LEFT join keeps it, and the merged
     // `Dept` = COALESCE(Emp.Dept, Team.Dept) shows the left's 10 while `Lead`
     // NULL-extends.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT * FROM Emp LEFT JOIN Team USING (Dept)
         """,
         yields: [
@@ -973,7 +973,7 @@ struct EngineNaturalUsingTests {
     // `Team` Dept 30 has no `Emp` match; a RIGHT join keeps it, and the merged
     // `Dept` = COALESCE(Emp.Dept, Team.Dept) shows the right's 30 even though
     // the left `Emp.Dept` is NULL there. `Name` NULL-extends.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT * FROM Emp RIGHT JOIN Team USING (Dept)
         """,
         yields: [
@@ -987,7 +987,7 @@ struct EngineNaturalUsingTests {
     // Both unmatched rows survive: `Emp` Dept 10 (left-only, merged `Dept` =
     // 10, `Lead` NULL) and `Team` Dept 30 (right-only, merged `Dept` = 30 via
     // COALESCE though `Emp.Dept` is NULL, `Name` NULL).
-    try engineNamed().expect("SELECT * FROM Emp NATURAL FULL OUTER JOIN Team",
+    try named().expect("SELECT * FROM Emp NATURAL FULL OUTER JOIN Team",
         yields: [
           [10, "Ann", nil],
           [20, "Bob", "Deb"],
@@ -999,14 +999,14 @@ struct EngineNaturalUsingTests {
   @Test func `USING a column absent from one side faults`() throws {
     // `Name` is on `Emp` but not `Team`, so `USING (Name)` names a column the
     // right side does not resolve — a column fault.
-    try engineNamed().expect("SELECT * FROM Emp JOIN Team USING (Name)",
+    try named().expect("SELECT * FROM Emp JOIN Team USING (Name)",
         fails: .column("Name"))
   }
 
   @Test func `USING is case-insensitive in the column name`() throws {
     // The join column matches case-insensitively, as the engine's identifier
     // resolution does, so `USING (dept)` keys on `Dept`.
-    try engineNamed().expect("SELECT * FROM Emp JOIN Team USING (dept)",
+    try named().expect("SELECT * FROM Emp JOIN Team USING (dept)",
         yields: [
           [20, "Bob", "Deb"],
           [20, "Cid", "Deb"],
@@ -1017,7 +1017,7 @@ struct EngineNaturalUsingTests {
     // An explicit projection resolves columns by the ordinary rules over the
     // synthesized `ON` join, so a qualified `Emp.Dept`/`Team.Dept` still names
     // each side's own column (both equal on a matched row).
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT Emp.Dept, Team.Dept, Name FROM Emp JOIN Team USING (Dept)
         """,
         yields: [
@@ -1030,14 +1030,14 @@ struct EngineNaturalUsingTests {
     // ISO 9075 7.10: the USING/NATURAL common column is an exposed name of the
     // join result belonging to NEITHER side, so a BARE `Dept` resolves to the
     // ONE coalesced column — UNAMBIGUOUSLY — not to `Emp.Dept` or `Team.Dept`.
-    try engineNamed().expect("SELECT Dept FROM Emp JOIN Team USING (Dept)",
+    try named().expect("SELECT Dept FROM Emp JOIN Team USING (Dept)",
         yields: [[20], [20]])
   }
 
   @Test func `a bare merged reference resolves in WHERE`() throws {
     // The exposed name resolves in a `WHERE` too — `Dept = 20` filters on the
     // coalesced value, keeping only the matched rows.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT Name FROM Emp JOIN Team USING (Dept) WHERE Dept = 20
         """,
         yields: [["Bob"], ["Cid"]])
@@ -1047,7 +1047,7 @@ struct EngineNaturalUsingTests {
     // The exposed name resolves in an `ORDER BY` — a FULL join's rows sort by
     // the coalesced `Dept`, the left-only (10) and right-only (30) unmatched
     // rows ordered alongside the matched (20) ones.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT Name FROM Emp NATURAL FULL OUTER JOIN Team ORDER BY Dept
         """,
         yields: [["Ann"], ["Bob"], ["Cid"], [nil]])
@@ -1056,7 +1056,7 @@ struct EngineNaturalUsingTests {
   @Test func `a bare merged reference resolves in GROUP BY`() throws {
     // The exposed name resolves as a `GROUP BY` key — the matched Dept 20 rows
     // form one group of two.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT Dept, COUNT(*) FROM Emp JOIN Team USING (Dept) GROUP BY Dept
         """,
         yields: [[20, 2]])
@@ -1066,7 +1066,7 @@ struct EngineNaturalUsingTests {
     // A LEFT join keeps the left-only Dept 10; the exposed bare `Dept` shows
     // the coalesced value (the left's 10), matching the `SELECT *` merged
     // column.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT Dept FROM Emp LEFT JOIN Team USING (Dept)
         """,
         yields: [[10], [20], [20]])
@@ -1076,7 +1076,7 @@ struct EngineNaturalUsingTests {
     // A RIGHT join keeps the right-only Dept 30; the exposed bare `Dept` shows
     // the coalesced value (the right's 30) even where the left `Emp.Dept` is
     // NULL.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT Dept FROM Emp RIGHT JOIN Team USING (Dept)
         """,
         yields: [[20], [20], [30]])
@@ -1086,7 +1086,7 @@ struct EngineNaturalUsingTests {
     // A FULL join keeps both unmatched rows; the exposed bare `Dept` shows the
     // coalesced value on each — the left's 10 (right NULL) and the right's 30
     // (left NULL).
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT Dept FROM Emp NATURAL FULL OUTER JOIN Team
         """,
         yields: [[10], [20], [20], [30]])
@@ -1096,7 +1096,7 @@ struct EngineNaturalUsingTests {
     // A NATURAL join over two common columns exposes BOTH `K` and `G`; a bare
     // reference to each resolves to its coalesced value (equal on the one
     // matched row).
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT K, G FROM Lhs NATURAL JOIN Rhs
         """,
         yields: [[1, "x"]])
@@ -1107,7 +1107,7 @@ struct EngineNaturalUsingTests {
     // `Lhs` and `Rhs` share `K` and `G`, but `USING (K)` joins on `K` alone —
     // so bare `G`, shared yet NOT a join column, stays AMBIGUOUS between the
     // two sides rather than collapsing to a merged value.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT G FROM Lhs JOIN Rhs USING (K)
         """,
         fails: .ambiguous("G"))
@@ -1117,7 +1117,7 @@ struct EngineNaturalUsingTests {
     // The exposed name is UNqualified; a qualified `Lhs.G`/`Rhs.G` still names
     // its own side even when the sibling `K` is a join column — merging is
     // scoped to the bare join-column name alone.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT Lhs.G, Rhs.G FROM Lhs JOIN Rhs USING (K)
         """,
         yields: [["x", "x"], ["y", "z"]])
@@ -1130,7 +1130,7 @@ struct EngineNaturalUsingTests {
     // (the alias `e`), the only name the scope admits, so `Emp AS e JOIN Team
     // USING (Dept)` resolves rather than faulting on an unqualifiable
     // `Emp.Dept`.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT * FROM Emp AS e JOIN Team USING (Dept)
         """,
         yields: [
@@ -1142,7 +1142,7 @@ struct EngineNaturalUsingTests {
   @Test func `an aliased JOINED side resolves a USING join`() throws {
     // The joined side's references qualify by its range name (`t`) too, so
     // `Emp JOIN Team AS t USING (Dept)` resolves.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT * FROM Emp JOIN Team AS t USING (Dept)
         """,
         yields: [
@@ -1154,7 +1154,7 @@ struct EngineNaturalUsingTests {
   @Test func `a projection qualified by an alias resolves over a USING join`() throws {
     // Both sides aliased: a qualified `e.Name` resolves to its side and a bare
     // merged `Dept` to the coalesced value, all over the aliased ranges.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT e.Name, Dept FROM Emp AS e JOIN Team AS t USING (Dept)
         """,
         yields: [
@@ -1170,7 +1170,7 @@ struct EngineNaturalUsingTests {
     // 3-column second arm aligns and the UNION succeeds. Before the desugar ran
     // ahead of the arity check, the `*` measured both physical `Dept`s (4) and
     // wrongly rejected the valid set operation.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT * FROM Emp JOIN Team USING (Dept)
         UNION SELECT Dept, Name, Lead FROM Emp JOIN Team USING (Dept)
         """,
@@ -1183,7 +1183,7 @@ struct EngineNaturalUsingTests {
   @Test func `a UNION whose arms differ post-merge still faults arity`() throws {
     // A genuinely mismatched set operation — a 3-wide merged `*` against a
     // 2-column arm — still faults, measured at the merged width.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT * FROM Emp JOIN Team USING (Dept)
         UNION SELECT Dept, Name FROM Emp JOIN Team USING (Dept)
         """,
@@ -1196,7 +1196,7 @@ struct EngineNaturalUsingTests {
     // The outer operand of `IN (subquery)` resolves in THIS query's scope, so
     // a bare merged `Dept` is exposed to the coalesced value — not left
     // ambiguous between the two physical sides.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT Name FROM Emp JOIN Team USING (Dept)
         WHERE Dept IN (SELECT Dept FROM Team)
         """,
@@ -1206,7 +1206,7 @@ struct EngineNaturalUsingTests {
   @Test func `a bare merged reference resolves as a quantified operand`() throws {
     // As `IN`, the `= ANY (subquery)` outer operand is exposed to the merged
     // value.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT Name FROM Emp JOIN Team USING (Dept)
         WHERE Dept = ANY (SELECT Dept FROM Team)
         """,
@@ -1220,7 +1220,7 @@ struct EngineNaturalUsingTests {
     // `Emp.Dept` NULL); the next `JOIN Bonus USING (Dept)` keys on the MERGED
     // `Dept`, so that row still joins `Bonus` (Amt 200) rather than being
     // dropped on a NULL left key.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT * FROM Emp RIGHT JOIN Team USING (Dept) JOIN Bonus USING (Dept)
         """,
         yields: [
@@ -1234,7 +1234,7 @@ struct EngineNaturalUsingTests {
     // A FULL first join keeps BOTH unmatched rows — Dept 10 (left-only) and 30
     // (right-only); the chained `Bonus` join keys each on the merged `Dept`, so
     // both still join (Amt 50 and 200).
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT * FROM Emp FULL JOIN Team USING (Dept) JOIN Bonus USING (Dept)
         """,
         yields: [
@@ -1251,7 +1251,7 @@ struct EngineNaturalUsingTests {
     // `USING (Dept, Dept)` names one merged column twice; the duplicate is
     // caught BEFORE the output dictionary the merged names key would trap on,
     // faulting `.duplicate` rather than aborting the process.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT * FROM Emp JOIN Team USING (Dept, Dept)
         """,
         fails: .duplicate("Dept"))
@@ -1261,7 +1261,7 @@ struct EngineNaturalUsingTests {
     // `Emp JOIN Team ON …` leaves the left side carrying TWO columns named
     // `Dept`; a following `NATURAL JOIN Bonus` would merge `Dept` twice — the
     // duplicate is caught and faults `.duplicate` rather than trapping.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT * FROM Emp JOIN Team ON Emp.Dept = Team.Dept
         NATURAL JOIN Bonus
         """,
@@ -1274,7 +1274,7 @@ struct EngineNaturalUsingTests {
     // The right-only Dept 30 (left `Emp.Dept` NULL) groups and projects by the
     // MERGED value 30, not NULL — the `GROUP BY` key is the coalesced value the
     // projection emits.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT Dept, COUNT(*) FROM Emp RIGHT JOIN Team USING (Dept)
         GROUP BY Dept
         """,
@@ -1287,7 +1287,7 @@ struct EngineNaturalUsingTests {
   @Test func `a FULL join groups a bare merged column by the coalesced value`() throws {
     // Both unmatched rows group by their merged value — the left-only 10 and
     // the right-only 30 — each its own group, not collapsed to NULL.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT Dept, COUNT(*) FROM Emp FULL JOIN Team USING (Dept)
         GROUP BY Dept
         """,
@@ -1305,7 +1305,7 @@ struct EngineNaturalUsingTests {
     // `Dept` (`Emp.Dept` and `Team.Dept`); a following `JOIN Bonus USING
     // (Dept)` keys `Dept` on that left — which binds it TWICE — so it faults
     // `.ambiguous` at construction rather than trapping a downstream build.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT * FROM Emp JOIN Team ON Emp.Dept = Team.Dept
         JOIN Bonus USING (Dept)
         """,
@@ -1319,7 +1319,7 @@ struct EngineNaturalUsingTests {
     // brings its OWN physical `C.Dept`. A QUALIFIED `C.Dept` names that side
     // unambiguously and resolves — never a crash — even though a bare `Dept`
     // would now be ambiguous between the merged column and `C.Dept`.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT C.Dept FROM Emp JOIN Team USING (Dept)
         JOIN Bonus AS C ON C.Dept = Emp.Dept
         """,
@@ -1330,7 +1330,7 @@ struct EngineNaturalUsingTests {
     // The bare counterpart: with the merged `Dept` AND the later plain join's
     // physical `C.Dept` both in scope, a bare `Dept` names two columns and
     // faults `.ambiguous` — surfacing at lookup, NEVER a crash.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT Dept FROM Emp JOIN Team USING (Dept)
         JOIN Bonus AS C ON C.Dept = Emp.Dept
         """,
@@ -1376,7 +1376,7 @@ struct EngineNaturalUsingTests {
     let text = """
         SELECT Name FROM Emp JOIN Team USING (Dept) WHERE Dept = 20
         """
-    let columns = try engineNamed()
+    let columns = try named()
         .columns(of: Statement(parsing: text), validate: true)
     #expect(columns.count == 1)
     #expect(columns[0].name == "Name")
@@ -1387,7 +1387,7 @@ struct EngineNaturalUsingTests {
     // The merged `Dept` PROJECTED and type-checked: the schema resolves it to
     // the unified coalesce type (`integer`) rather than faulting `.ambiguous`.
     let text = "SELECT Dept FROM Emp JOIN Team USING (Dept) WHERE Dept = 20"
-    let columns = try engineNamed()
+    let columns = try named()
         .columns(of: Statement(parsing: text), validate: true)
     #expect(columns.count == 1)
     #expect(columns[0].name == "Dept")
@@ -1397,7 +1397,7 @@ struct EngineNaturalUsingTests {
   @Test func `a validated merged query agrees with the run`() throws {
     // run ≡ columns(of:validate:true): the query the validation path accepts
     // is the query the run executes, producing the two matched rows.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT Name FROM Emp JOIN Team USING (Dept) WHERE Dept = 20
         """,
         yields: [["Bob"], ["Cid"]])
@@ -1410,7 +1410,7 @@ struct EngineNaturalUsingTests {
     // merged-aware lookup narrows nothing that a plain shared column widens.
     let text = "SELECT G FROM Lhs JOIN Rhs USING (K)"
     #expect(throws: SQLError.ambiguous("G")) {
-      _ = try engineNamed()
+      _ = try named()
           .columns(of: Statement(parsing: text), validate: true)
     }
   }
@@ -1610,8 +1610,8 @@ struct EngineNaturalUsingTests {
     // exposes `[a, k, p, q, r]` — the OUTER `a` first, then the inner `k` (it
     // sits within "the rest of the left"), not the flat fold order `[k, a, …]`.
     let text = "SELECT * FROM P JOIN Q USING (k) JOIN R USING (a)"
-    try engineChained().expect(text, yields: [[7, 1, "p1", "q1", "r1"]])
-    let columns = try engineChained()
+    try chained().expect(text, yields: [[7, 1, "p1", "q1", "r1"]])
+    let columns = try chained()
         .columns(of: Statement(parsing: text), validate: true)
     #expect(columns.map(\.name) == ["a", "k", "p", "q", "r"])
   }
@@ -1622,8 +1622,8 @@ struct EngineNaturalUsingTests {
     // outer) and lays them in the same ISO order `[a, k, …]` in both the run
     // and the schema.
     let text = "SELECT * FROM P NATURAL JOIN Q NATURAL JOIN R"
-    try engineChained().expect(text, yields: [[7, 1, "p1", "q1", "r1"]])
-    let columns = try engineChained()
+    try chained().expect(text, yields: [[7, 1, "p1", "q1", "r1"]])
+    let columns = try chained()
         .columns(of: Statement(parsing: text), validate: true)
     #expect(columns.map(\.name) == ["a", "k", "p", "q", "r"])
   }
@@ -1636,12 +1636,12 @@ struct EngineNaturalUsingTests {
     // and schema agree.
     let text =
         "SELECT * FROM Emp JOIN Team USING (Dept) JOIN Bonus USING (Dept)"
-    try engineNamed().expect(text,
+    try named().expect(text,
         yields: [
           [20, "Bob", "Deb", 100],
           [20, "Cid", "Deb", 100],
         ])
-    let columns = try engineNamed()
+    let columns = try named()
         .columns(of: Statement(parsing: text), validate: true)
     #expect(columns.map(\.name) == ["Dept", "Name", "Lead", "Amt"])
   }
@@ -1657,8 +1657,8 @@ struct EngineNaturalUsingTests {
         SELECT d.n FROM Emp JOIN Team USING (Dept)
           JOIN LATERAL (SELECT Dept AS n) AS d ON 1 = 1
         """
-    try engineNamed().expect(text, yields: [[20], [20]])
-    let columns = try engineNamed()
+    try named().expect(text, yields: [[20], [20]])
+    let columns = try named()
         .columns(of: Statement(parsing: text), validate: true)
     #expect(columns.map(\.name) == ["n"])
   }
@@ -1670,7 +1670,7 @@ struct EngineNaturalUsingTests {
         SELECT d.n FROM Emp NATURAL JOIN Team
           JOIN LATERAL (SELECT Dept AS n) AS d ON 1 = 1
         """
-    try engineNamed().expect(text, yields: [[20], [20]])
+    try named().expect(text, yields: [[20], [20]])
   }
 
   @Test func `a LATERAL body coalesces a merged column of a RIGHT join`() throws {
@@ -1682,7 +1682,7 @@ struct EngineNaturalUsingTests {
         SELECT d.n FROM Emp RIGHT JOIN Team USING (Dept)
           JOIN LATERAL (SELECT Dept AS n) AS d ON 1 = 1
         """
-    try engineNamed().expect(text, yields: [[20], [20], [30]])
+    try named().expect(text, yields: [[20], [20], [30]])
   }
 
   @Test func `a LATERAL body still resolves a qualified constituent column`()
@@ -1693,7 +1693,7 @@ struct EngineNaturalUsingTests {
         SELECT d.n FROM Emp JOIN Team USING (Dept)
           JOIN LATERAL (SELECT Emp.Dept AS n) AS d ON 1 = 1
         """
-    try engineNamed().expect(text, yields: [[20], [20]])
+    try named().expect(text, yields: [[20], [20]])
   }
 
   @Test func `a LATERAL body faults an ambiguous non-merged name`() throws {
@@ -1705,7 +1705,7 @@ struct EngineNaturalUsingTests {
           JOIN Bonus ON Bonus.Dept = Emp.Dept
           JOIN LATERAL (SELECT Dept AS n) AS d ON 1 = 1
         """
-    try engineNamed().expect(text, fails: .ambiguous("Dept"))
+    try named().expect(text, fails: .ambiguous("Dept"))
   }
 
   @Test func `a merged column and its constituent correlate independently`()
@@ -1720,7 +1720,7 @@ struct EngineNaturalUsingTests {
           JOIN LATERAL (SELECT Dept AS m, Emp.Dept AS e) AS d ON 1 = 1
           ORDER BY m
         """
-    try engineNamed().expect(forward, yields: [
+    try named().expect(forward, yields: [
       [20, 20],
       [20, 20],
       [30, nil],
@@ -1733,7 +1733,7 @@ struct EngineNaturalUsingTests {
           JOIN LATERAL (SELECT Emp.Dept AS e, Dept AS m) AS d ON 1 = 1
           ORDER BY m
         """
-    try engineNamed().expect(reverse, yields: [
+    try named().expect(reverse, yields: [
       [20, 20],
       [20, 20],
       [30, nil],
@@ -1752,7 +1752,7 @@ struct EngineNaturalUsingTests {
           JOIN (SELECT NULLIF(1, 1) AS k FROM Solo) AS b USING (k)
           UNION SELECT 'x'
         """
-    let starred = try engineNamed()
+    let starred = try named()
         .columns(of: Statement(parsing: star), validate: true)
     #expect(starred.map(\.type) == [.text])
     // The explicit `SELECT k` variant already resolved through `output(of:)`;
@@ -1762,7 +1762,7 @@ struct EngineNaturalUsingTests {
           JOIN (SELECT NULLIF(1, 1) AS k FROM Solo) AS b USING (k)
           UNION SELECT 'x'
         """
-    let named = try engineNamed()
+    let named = try named()
         .columns(of: Statement(parsing: explicit), validate: true)
     #expect(named.map(\.type) == [.text])
   }
@@ -1776,7 +1776,7 @@ struct EngineNaturalUsingTests {
     let text = """
         SELECT * FROM Emp JOIN Team USING (Dept) UNION SELECT 'x', 'y', 'z'
         """
-    try engineNamed().expect(text,
+    try named().expect(text,
         fails: .operand("UNION arms have irreconcilable types"))
   }
 
@@ -1790,7 +1790,7 @@ struct EngineNaturalUsingTests {
     // `Emp.Id = Team.Id` uses, keying on the row index: Emp Ids 1..3, Team
     // Ids 1..2, so Ids 1 and 2 match. ISO 7.10 order exposes the merged `Id`
     // once and first, then `Emp`'s real columns, then `Team`'s.
-    try engineNamed().expect("SELECT * FROM Emp JOIN Team USING (Id)",
+    try named().expect("SELECT * FROM Emp JOIN Team USING (Id)",
         yields: [
           [1, 10, "Ann", 20, "Deb"],
           [2, 20, "Bob", 30, "Eve"],
@@ -1802,7 +1802,7 @@ struct EngineNaturalUsingTests {
     // The merged virtual `Id`'s result type is derived on the schema path the
     // run agrees with — a fixture virtual `Id` types integral.
     let text = "SELECT Id FROM Emp JOIN Team USING (Id)"
-    let columns = try engineNamed()
+    let columns = try named()
         .columns(of: Statement(parsing: text), validate: true)
     let pairs = columns.map { ($0.name, $0.type) }
     #expect(pairs.elementsEqual([("Id", .integer)], by: ==))
@@ -1819,7 +1819,7 @@ struct EngineNaturalUsingTests {
     // resolves the virtual through `ordinal(of:)`. So `Emp NATURAL JOIN Team`
     // keys on the shared REAL `Dept` alone (Dept 20 matches), NOT on the
     // virtual `Id` — the round-1 behavior is unchanged.
-    try engineNamed().expect("SELECT * FROM Emp NATURAL JOIN Team",
+    try named().expect("SELECT * FROM Emp NATURAL JOIN Team",
         yields: [
           [20, "Bob", "Deb"],
           [20, "Cid", "Deb"],
@@ -1831,7 +1831,7 @@ struct EngineNaturalUsingTests {
     // exposes only a VIRTUAL `Id`. `USING (Id)` must resolve the LEFT through
     // the real column and the RIGHT through the virtual one, keying REAL 1..3
     // against the row index 1..3.
-    try engineVirtual().expect("SELECT * FROM Coded JOIN Emp USING (Id)",
+    try virtual().expect("SELECT * FROM Coded JOIN Emp USING (Id)",
         yields: [
           [1, "c1", 10, "Ann"],
           [2, "c2", 20, "Bob"],
@@ -1844,7 +1844,7 @@ struct EngineNaturalUsingTests {
     // joined — the LEFT resolves the virtual, the RIGHT the real. The output
     // exposes the merged `Id`, then `Emp`'s real columns, then `Coded`'s real
     // ones (its real `Id` is the merged constituent, dropped from the rest).
-    try engineVirtual().expect("SELECT * FROM Emp JOIN Coded USING (Id)",
+    try virtual().expect("SELECT * FROM Emp JOIN Coded USING (Id)",
         yields: [
           [1, 10, "Ann", "c1"],
           [2, 20, "Bob", "c2"],
@@ -1862,7 +1862,7 @@ struct EngineNaturalUsingTests {
     // synthesized `on` empty), keeping ALL FOUR real columns unmerged and every
     // 3x3 pairing. An EXPLICIT `USING (Id)` (the control below) still resolves
     // the virtual; NATURAL, like `SELECT *`, draws only on real names.
-    try engineVirtual().expect("SELECT * FROM Coded NATURAL JOIN Emp",
+    try virtual().expect("SELECT * FROM Coded NATURAL JOIN Emp",
         yields: [
           [1, "c1", 10, "Ann"],
           [1, "c1", 20, "Bob"],
@@ -1875,7 +1875,7 @@ struct EngineNaturalUsingTests {
           [3, "c3", 20, "Cid"],
         ])
     let text = "SELECT * FROM Coded NATURAL JOIN Emp"
-    let columns = try engineVirtual().columns(of: parse(query: text))
+    let columns = try virtual().columns(of: parse(query: text))
     #expect(columns.map(\.name) == ["Id", "Tag", "Dept", "Name"])
   }
 
@@ -1886,7 +1886,7 @@ struct EngineNaturalUsingTests {
     // (`prefix.names` never lists a virtual), so a LEFT virtual `Id` is not
     // even a candidate — the common set stays the empty real intersection and
     // the join is a CROSS product over all four real columns.
-    try engineVirtual().expect("SELECT * FROM Emp NATURAL JOIN Coded",
+    try virtual().expect("SELECT * FROM Emp NATURAL JOIN Coded",
         yields: [
           [10, "Ann", 1, "c1"],
           [10, "Ann", 2, "c2"],
@@ -1899,7 +1899,7 @@ struct EngineNaturalUsingTests {
           [20, "Cid", 3, "c3"],
         ])
     let text = "SELECT * FROM Emp NATURAL JOIN Coded"
-    let columns = try engineVirtual().columns(of: parse(query: text))
+    let columns = try virtual().columns(of: parse(query: text))
     #expect(columns.map(\.name) == ["Dept", "Name", "Id", "Tag"])
   }
 
@@ -1911,14 +1911,14 @@ struct EngineNaturalUsingTests {
     // index 1..3), a single merged `Id` first, then the remaining real columns.
     // Only NATURAL's common-set derivation changed; the explicit-USING path is
     // untouched.
-    try engineVirtual().expect("SELECT * FROM Coded JOIN Emp USING (Id)",
+    try virtual().expect("SELECT * FROM Coded JOIN Emp USING (Id)",
         yields: [
           [1, "c1", 10, "Ann"],
           [2, "c2", 20, "Bob"],
           [3, "c3", 20, "Cid"],
         ])
     let text = "SELECT * FROM Coded JOIN Emp USING (Id)"
-    let columns = try engineVirtual().columns(of: parse(query: text))
+    let columns = try virtual().columns(of: parse(query: text))
     #expect(columns.map(\.name) == ["Id", "Tag", "Dept", "Name"])
   }
 
@@ -1930,7 +1930,7 @@ struct EngineNaturalUsingTests {
     // show the JOINED (right) virtual value on those right-only rows, so the
     // merged column is 1, 2, 3 — not NULL — proving the run coalesces the
     // virtual slot, not just resolves it.
-    try engineVirtual().expect("""
+    try virtual().expect("""
         SELECT Id FROM Few RIGHT JOIN Many USING (Id) ORDER BY Id
         """,
         yields: [[1], [2], [3]])
@@ -1949,9 +1949,9 @@ struct EngineNaturalUsingTests {
     // would MISS the virtual `Emp.Id` and wrongly take the merged value. run
     // and `columns(of:)` agree.
     let text = "SELECT Id FROM Few JOIN Many USING (Id) JOIN Emp ON 1 = 1"
-    try engineVirtual().expect(text, fails: .ambiguous("Id"))
+    try virtual().expect(text, fails: .ambiguous("Id"))
     #expect(throws: SQLError.ambiguous("Id")) {
-      _ = try engineVirtual().columns(of: parse(query: text))
+      _ = try virtual().columns(of: parse(query: text))
     }
   }
 
@@ -1964,9 +1964,9 @@ struct EngineNaturalUsingTests {
     let text = """
         SELECT v FROM Few JOIN Many USING (Id) JOIN Emp ON 1 = 1 WHERE Id = 1
         """
-    try engineVirtual().expect(text, fails: .ambiguous("Id"))
+    try virtual().expect(text, fails: .ambiguous("Id"))
     #expect(throws: SQLError.ambiguous("Id")) {
-      _ = try engineVirtual().columns(of: parse(query: text))
+      _ = try virtual().columns(of: parse(query: text))
     }
   }
 
@@ -1977,7 +1977,7 @@ struct EngineNaturalUsingTests {
     // and the plain-joined `Emp.Id` (virtual), so keying the final `USING (Id)`
     // on that left is ambiguous — the left resolution (`Scope.left`) routes
     // through the SAME full-surface merged bare lookup and faults.
-    try engineVirtual().expect("""
+    try virtual().expect("""
         SELECT v FROM Few JOIN Many USING (Id) JOIN Emp ON 1 = 1
         JOIN Coded USING (Id)
         """,
@@ -1990,7 +1990,7 @@ struct EngineNaturalUsingTests {
     // side unambiguously: `Few.Id`/`Many.Id` the merge constituents (both the
     // matched row index 1), `Emp.Id` the later plain join's virtual `Id` (the
     // three `Emp` rows' indices 1..3) — never a fault.
-    try engineVirtual().expect("""
+    try virtual().expect("""
         SELECT Few.Id, Many.Id, Emp.Id FROM Few JOIN Many USING (Id)
         JOIN Emp ON 1 = 1
         """,
@@ -2036,7 +2036,7 @@ struct EngineNaturalUsingTests {
     // not undercount by subtracting the virtual constituents from a real-only
     // sum. The width now DERIVES from the same enumeration `columns(of:)`
     // walks, so the two agree by construction.
-    let catalog = try engineNamed()
+    let catalog = try named()
     try catalog.expect("SELECT * FROM Emp JOIN Team USING (Id)",
         yields: [
           [1, 10, "Ann", 20, "Deb"],
@@ -2053,7 +2053,7 @@ struct EngineNaturalUsingTests {
     // matching UNION was WRONGLY rejected. The left arm's `SELECT *` is arity 5
     // (merged virtual `Id` + four real columns); a right arm of five columns
     // now unifies rather than faulting.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT * FROM Emp JOIN Team USING (Id)
         UNION ALL SELECT 9, 99, 'z', 88, 'w'
         """,
@@ -2069,7 +2069,7 @@ struct EngineNaturalUsingTests {
     // The floor: a right arm of the WRONG arity (three columns against the
     // arm's five) still faults `.arity`, so deriving width from the enumeration
     // did not disable the check.
-    try engineNamed().expect("""
+    try named().expect("""
         SELECT * FROM Emp JOIN Team USING (Id) UNION ALL SELECT 1, 2, 3
         """,
         fails: .arity(5, 3))
@@ -2081,7 +2081,7 @@ struct EngineNaturalUsingTests {
     // or 5) that names a real output column — the width there feeds the bound.
     // The width is now 5, so ordinal 5 (`Team`'s `Lead`) type-checks, and the
     // run resolves and sorts by it.
-    let catalog = try engineNamed()
+    let catalog = try named()
     let text = "SELECT * FROM Emp JOIN Team USING (Id) ORDER BY 5"
     _ = try catalog.columns(of: parse(query: text))
     try catalog.expect(text,
@@ -2097,7 +2097,7 @@ struct EngineNaturalUsingTests {
     // `Dept` + `Emp.Name` + `Team.Lead`) — unchanged by deriving width from the
     // enumeration. `columns(of:)` reports 3 and an `ORDER BY 3` resolves while
     // an `ORDER BY 4` faults.
-    let catalog = try engineNamed()
+    let catalog = try named()
     let text = "SELECT * FROM Emp JOIN Team USING (Dept)"
     let columns = try catalog.columns(of: parse(query: text))
     #expect(columns.count == 3)
@@ -2115,7 +2115,7 @@ struct EngineNaturalUsingTests {
 /// against `Emp`'s VIRTUAL `Id` mixes a real and a virtual constituent. `Few`
 /// (one row) RIGHT-joined to `Many` (three rows) `USING (Id)` produces two
 /// right-only rows whose merged `Id` must coalesce to `Many`'s row index.
-private func engineVirtual() throws -> FixtureCatalog {
+private func virtual() throws -> FixtureCatalog {
   try Catalog {
     Relation("Emp", ["Dept": .integer, "Name": .text]) {
       Row(10, "Ann")
@@ -2143,7 +2143,7 @@ private func engineVirtual() throws -> FixtureCatalog {
 /// `(P JOIN Q USING (k)) JOIN R USING (a)` merges `k` at the INNER join and `a`
 /// at the OUTER one — the ISO 7.10 output order is `[a, k, p, q, r]`. `P
 /// NATURAL JOIN Q NATURAL JOIN R` discovers the same common columns.
-private func engineChained() throws -> FixtureCatalog {
+private func chained() throws -> FixtureCatalog {
   try Catalog {
     Relation("P", ["k": .integer, "p": .text]) {
       Row(1, "p1")

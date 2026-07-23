@@ -1,23 +1,37 @@
 {{! language: swift }}
 {{#generic}}
-// A WinRT parameterised interface has no static IID: its IID is a
-// per-instantiation PIID computed at runtime from the type
-// arguments, so no `@com(interface:)` is emitted on the ABI protocol
-// or the generic wrapper — the runtime projection supplies it.
+// A WinRT parameterised interface projects its generic slots through each
+// element's associated ABI type (the windows-rs `Type::Abi` mechanism): a
+// value slot crosses the vtable as the value itself (`Element.ABI == Element`),
+// a reference slot as the opaque interface pointer (`Element.ABI ==
+// UnsafeMutableRawPointer`). The ABI protocol is therefore generic over the
+// same `ABIProjectable` parameters as the wrapper, and each requirement spells
+// its projected slots as `<Element>.ABI` — size-correct for a value AND a
+// reference instantiation, never a fixed-size raw-pointer cast. It has no
+// static IID: a parameterised interface's IID is a per-instantiation PIID
+// computed at runtime from the type arguments, so no `@com(interface:)` is
+// emitted on the ABI protocol or the wrapper — the runtime projection supplies
+// it.
 internal protocol {{{abi}}}<{{#generics}}{{{name}}}{{^last}}, {{/last}}{{/generics}}>{{#base}}: {{{.}}}{{/base}} {
 {{#generics}}
-    associatedtype {{{name}}}
+    associatedtype {{{name}}}: ABIProjectable
 {{/generics}}
 {{#methods}}
     func {{{name}}}({{#params}}_ {{{name}}}: {{{type}}}{{^last}}, {{/last}}{{/params}}){{#returns}} -> {{{.}}}{{/returns}}
 {{/methods}}
 }
 
-public struct {{{name}}}<{{#generics}}{{{name}}}{{^last}}, {{/last}}{{/generics}}> {
+// The public generic wrapper keeps the typed Swift surface: each method takes
+// and returns the decoded typed parameters, projecting between the typed value
+// and its ABI form through the element's `ABIProjectable` conformance
+// (`toABI()`/`fromABI(_:)`) as it forwards through `base` to the ABI protocol
+// — the size-correct analogue of windows-rs's `transmute_copy` across the
+// vtable. A value slot projects by identity, so it forwards unchanged.
+public struct {{{name}}}<{{#generics}}{{{name}}}: ABIProjectable{{^last}}, {{/last}}{{/generics}}> {
     internal let base: any {{{abi}}}<{{#generics}}{{{name}}}{{^last}}, {{/last}}{{/generics}}>
 {{#methods}}
-    public func {{{name}}}({{#params}}_ {{{local}}}: {{{type}}}{{^last}}, {{/last}}{{/params}}){{#returns}} -> {{{.}}}{{/returns}} {
-        base.{{{name}}}({{#params}}{{{local}}}{{^last}}, {{/last}}{{/params}})
+    public func {{{name}}}({{#params}}_ {{{local}}}: {{{typed}}}{{^last}}, {{/last}}{{/params}}){{#typed}} -> {{{.}}}{{/typed}} {
+        {{{call}}}
     }
 {{/methods}}
 }

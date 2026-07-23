@@ -38,6 +38,7 @@ extension Dialect {
         optional: "?",
         generic: (open: "<", close: ">"),
         variable: (type: "T", method: "M"),
+        projection: ".ABI",
         opaque: "UnsafeMutableRawPointer",
         guid: (iid: "IID", clsid: "CLSID"),
         known: [
@@ -182,6 +183,12 @@ struct DatabaseSQLTests {
                 wide: 0, stride: 6),
     WinMD.Table(Metadata.Tables.CustomAttribute.self, rows: 1, range: 86 ..< 92,
                 wide: 0, stride: 6),
+    // No `TypeSpec` table: this file has no generic bases, so — like a real
+    // WinMD with no `TypeSpec` rows — it omits the table entirely (its `Valid`
+    // bit is clear). The bundled `bases` view's `TypeSpec` arm still resolves:
+    // the SQL adapter surfaces a schema-defined but absent table as an EMPTY
+    // relation (`WinMD.Table.empty`), so the arm yields no rows rather than
+    // faulting an unknown relation.
   ]
 
   private static let valid: UInt64 =
@@ -588,6 +595,24 @@ struct DatabaseSQLTests {
     }
   }
 
+  @Test func `the erased-ABI decode keeps a value slot and reports it a value`() {
+    // The fixture's `void Method(i4, string)` is all values: the erased-ABI
+    // return/parameter spellings (`abi(return:)`/`abi(parameter:)`) coincide
+    // with their typed `decode(…)` — a value crosses the ABI as itself — and
+    // `reference(…)` reports each a value, so the wrapper forwards it uncast.
+    // The reference-slot erasure is exercised by `SignatureType.abi(…)`'s own
+    // tests and the erased-shape golden render; the fixture carries no
+    // reference slot to drive it end-to-end here.
+    DatabaseSQLTests.with { catalog in
+      #expect(catalog.abi(return: 1, in: .swift) == "Void")
+      #expect(catalog.reference(return: 1) == false)
+      #expect(catalog.abi(parameter: 2, for: .swift) == "CInt")
+      #expect(catalog.abi(parameter: 3, for: .swift) == "HSTRING")
+      #expect(catalog.reference(parameter: 2) == false)
+      #expect(catalog.reference(parameter: 3) == false)
+    }
+  }
+
   @Test func `the bundled bases view yields the interface's derived bases`() throws {
     // `IMyInterface` is `TypeDef` Id 1; binding `:parent` to its Id
     // navigates `InterfaceImpl.Class = :parent`, and the view UNIONs both arms
@@ -610,6 +635,58 @@ struct DatabaseSQLTests {
           "SELECT base FROM bases", Session.bundled(), catalog,
           ["parent": .integer(2)])
       #expect(rows.isEmpty)
+    }
+  }
+
+  @Test func `the bundled bases view resolves a TypeSpec-recorded generic base`() throws {
+    // A generic interface inheriting ANOTHER generic interface records the base
+    // through a `TypeSpec` (a GENERICINST signature), NOT a
+    // `TypeRef`/`TypeDef`, so the plain coded-index arms find nothing. The
+    // `TypeSpec` arm joins the spec, decodes its signature to the base token
+    // (`GENERICBASE`), and splits the token's tag/row to resolve the base
+    // `TypeRef` by `Id` — here `IIterable`1`, the raw arity-suffixed name the
+    // render then rewrites to `IIterableABI`.
+    try GenericBaseFixture.with { catalog in
+      let rows = try DatabaseSQLTests.run(
+          "SELECT base FROM bases", Session.bundled(), catalog,
+          ["parent": .integer(1)])
+      #expect(rows == [[.text("IIterable`1")]])
+    }
+  }
+
+  @Test func `a schema-defined but absent table resolves as an empty relation`() throws {
+    // A metadata file omits a table with no rows (its `Valid` bit is clear);
+    // the shared fixture carries no `TypeSpec`, so its mask omits table 27.
+    // The adapter surfaces the absent-but-schema-defined `TypeSpec` as an EMPTY
+    // relation — the six schema columns, zero rows — so a query naming it
+    // resolves to no rows rather than faulting `SQLError.relation`. A name no
+    // CIL schema bears is still an unknown relation.
+    try DatabaseSQLTests.with { catalog in
+      // The absent `TypeSpec` resolves and projects its six schema columns with
+      // zero rows; a `SELECT *` over it yields nothing rather than faulting.
+      let rows = try DatabaseSQLTests.run("SELECT * FROM TypeSpec", catalog)
+      #expect(rows.isEmpty)
+      // A name no CIL schema bears is still an unknown relation.
+      #expect(throws: SQLError.self) {
+        _ = try DatabaseSQLTests.run("SELECT * FROM NotACILTable", catalog)
+      }
+    }
+  }
+
+  @Test func `the bundled bases view resolves over a file with no TypeSpec table`() throws {
+    // The bundled `bases` view's `TypeSpec` arm references the `TypeSpec`
+    // relation UNCONDITIONALLY, and the engine resolves EVERY UNION arm at
+    // compile time. Over the shared fixture — which omits the `TypeSpec` table
+    // (no generic bases, `Valid` bit clear) — resolving a NON-generic
+    // interface's bases must still succeed: the adapter surfaces the absent
+    // `TypeSpec` as an empty relation, so the `TypeSpec` arms yield nothing and
+    // the plain `TypeRef`/`TypeDef` arms yield the real bases. `IMyInterface`
+    // (Id 1) derives `IInspectable` and `INotGuid`; the query does not fault.
+    try DatabaseSQLTests.with { catalog in
+      let rows = try DatabaseSQLTests.run(
+          "SELECT base FROM bases", Session.bundled(), catalog,
+          ["parent": .integer(1)])
+      #expect(rows == [[.text("IInspectable")], [.text("INotGuid")]])
     }
   }
 
@@ -910,17 +987,23 @@ struct DatabaseSQLTests {
     }
   }
 
-  @Test func `the bundled com template renders a generic interface as a wrapper`() throws {
+  @Test func `the bundled com template renders a generic interface projected`() throws {
     // A generic interface renders through the `{{#generic}}` arm of the REAL
-    // bundled `com` template: an internal ABI protocol carrying the ordered
-    // type parameters as its primary associated types (`<Element>` naming an
-    // `associatedtype Element` in the body) — so a requirement mentioning
-    // `Element` resolves — with no static IID (the WinRT PIID is computed at
-    // runtime), plus a public generic `struct` wrapper holding the ABI as a
-    // parameterised existential (`any IVectorABI<Element>`). The context is
-    // built the same way the render loop assembles it for an `IVector`-like
-    // ``1` type (arity suffix stripped, one generic parameter `Element`, one
-    // method whose return decodes to that declared name).
+    // bundled `com` template in the PROJECTED ABI shape: an ABI protocol
+    // generic over the same `ABIProjectable` parameters as the wrapper, whose
+    // requirements spell each projected slot as `Element.ABI` (a value's ABI is
+    // itself, a reference's the opaque pointer) — no static IID (the WinRT PIID
+    // is computed at runtime) — plus a public generic `struct` wrapper
+    // `IVector<Element: ABIProjectable>` keeping the typed surface, its `base` a
+    // parameterised `any IVectorABI<Element>` existential, each method
+    // projecting between the typed value and its ABI form through
+    // `toABI()`/`fromABI(_:)`. Here `GetAt` returns the generic `Element`, so
+    // the ABI protocol returns `Element.ABI` and the wrapper reconstructs the
+    // typed result as `Element.fromABI(…)` — size-correct for a value AND a
+    // reference instantiation, NO fixed-size pointer cast; the `index` parameter
+    // is a value (`CUnsignedInt`), passed through unconverted. The context is
+    // built the way the render loop assembles it for an `IVector`-like ``1`
+    // type.
     let body = try DatabaseSQLTests.template(named: "com")
     let template = try MustacheTemplate(string: body)
     let context: [String: Any] = [
@@ -935,26 +1018,42 @@ struct DatabaseSQLTests {
           "name": "GetAt",
           "params": [
             ["name": "index", "local": "index", "type": "CUnsignedInt",
-             "last": true],
+             "typed": "CUnsignedInt", "argument": "index", "last": true],
           ],
-          "returns": "Element",
+          "returns": "Element.ABI",
+          "typed": "Element",
+          "call": "Element.fromABI(base.GetAt(index))",
         ],
       ],
     ]
     #expect(template.render(context) == """
-      // A WinRT parameterised interface has no static IID: its IID is a
-      // per-instantiation PIID computed at runtime from the type
-      // arguments, so no `@com(interface:)` is emitted on the ABI protocol
-      // or the generic wrapper — the runtime projection supplies it.
+      // A WinRT parameterised interface projects its generic slots through each
+      // element's associated ABI type (the windows-rs `Type::Abi` mechanism): a
+      // value slot crosses the vtable as the value itself (`Element.ABI == Element`),
+      // a reference slot as the opaque interface pointer (`Element.ABI ==
+      // UnsafeMutableRawPointer`). The ABI protocol is therefore generic over the
+      // same `ABIProjectable` parameters as the wrapper, and each requirement spells
+      // its projected slots as `<Element>.ABI` — size-correct for a value AND a
+      // reference instantiation, never a fixed-size raw-pointer cast. It has no
+      // static IID: a parameterised interface's IID is a per-instantiation PIID
+      // computed at runtime from the type arguments, so no `@com(interface:)` is
+      // emitted on the ABI protocol or the wrapper — the runtime projection supplies
+      // it.
       internal protocol IVectorABI<Element> {
-          associatedtype Element
-          func GetAt(_ index: CUnsignedInt) -> Element
+          associatedtype Element: ABIProjectable
+          func GetAt(_ index: CUnsignedInt) -> Element.ABI
       }
 
-      public struct IVector<Element> {
+      // The public generic wrapper keeps the typed Swift surface: each method takes
+      // and returns the decoded typed parameters, projecting between the typed value
+      // and its ABI form through the element's `ABIProjectable` conformance
+      // (`toABI()`/`fromABI(_:)`) as it forwards through `base` to the ABI protocol
+      // — the size-correct analogue of windows-rs's `transmute_copy` across the
+      // vtable. A value slot projects by identity, so it forwards unchanged.
+      public struct IVector<Element: ABIProjectable> {
           internal let base: any IVectorABI<Element>
           public func GetAt(_ index: CUnsignedInt) -> Element {
-              base.GetAt(index)
+              Element.fromABI(base.GetAt(index))
           }
       }
 
@@ -1001,15 +1100,29 @@ struct DatabaseSQLTests {
       }
       let rendered = try shell.render("protocol`1", template: "com")
       #expect(rendered == """
-        // A WinRT parameterised interface has no static IID: its IID is a
-        // per-instantiation PIID computed at runtime from the type
-        // arguments, so no `@com(interface:)` is emitted on the ABI protocol
-        // or the generic wrapper — the runtime projection supplies it.
+        // A WinRT parameterised interface projects its generic slots through each
+        // element's associated ABI type (the windows-rs `Type::Abi` mechanism): a
+        // value slot crosses the vtable as the value itself (`Element.ABI == Element`),
+        // a reference slot as the opaque interface pointer (`Element.ABI ==
+        // UnsafeMutableRawPointer`). The ABI protocol is therefore generic over the
+        // same `ABIProjectable` parameters as the wrapper, and each requirement spells
+        // its projected slots as `<Element>.ABI` — size-correct for a value AND a
+        // reference instantiation, never a fixed-size raw-pointer cast. It has no
+        // static IID: a parameterised interface's IID is a per-instantiation PIID
+        // computed at runtime from the type arguments, so no `@com(interface:)` is
+        // emitted on the ABI protocol or the wrapper — the runtime projection supplies
+        // it.
         internal protocol protocolABI<Element>: IUnknown {
-            associatedtype Element
+            associatedtype Element: ABIProjectable
         }
 
-        public struct `protocol`<Element> {
+        // The public generic wrapper keeps the typed Swift surface: each method takes
+        // and returns the decoded typed parameters, projecting between the typed value
+        // and its ABI form through the element's `ABIProjectable` conformance
+        // (`toABI()`/`fromABI(_:)`) as it forwards through `base` to the ABI protocol
+        // — the size-correct analogue of windows-rs's `transmute_copy` across the
+        // vtable. A value slot projects by identity, so it forwards unchanged.
+        public struct `protocol`<Element: ABIProjectable> {
             internal let base: any protocolABI<Element>
         }
 
@@ -1051,15 +1164,29 @@ struct DatabaseSQLTests {
       }
       let rendered = try shell.render("IVector`1", template: "com")
       #expect(rendered == """
-        // A WinRT parameterised interface has no static IID: its IID is a
-        // per-instantiation PIID computed at runtime from the type
-        // arguments, so no `@com(interface:)` is emitted on the ABI protocol
-        // or the generic wrapper — the runtime projection supplies it.
+        // A WinRT parameterised interface projects its generic slots through each
+        // element's associated ABI type (the windows-rs `Type::Abi` mechanism): a
+        // value slot crosses the vtable as the value itself (`Element.ABI == Element`),
+        // a reference slot as the opaque interface pointer (`Element.ABI ==
+        // UnsafeMutableRawPointer`). The ABI protocol is therefore generic over the
+        // same `ABIProjectable` parameters as the wrapper, and each requirement spells
+        // its projected slots as `<Element>.ABI` — size-correct for a value AND a
+        // reference instantiation, never a fixed-size raw-pointer cast. It has no
+        // static IID: a parameterised interface's IID is a per-instantiation PIID
+        // computed at runtime from the type arguments, so no `@com(interface:)` is
+        // emitted on the ABI protocol or the wrapper — the runtime projection supplies
+        // it.
         internal protocol IVectorABI<Element>: IInspectable {
-            associatedtype Element
+            associatedtype Element: ABIProjectable
         }
 
-        public struct IVector<Element> {
+        // The public generic wrapper keeps the typed Swift surface: each method takes
+        // and returns the decoded typed parameters, projecting between the typed value
+        // and its ABI form through the element's `ABIProjectable` conformance
+        // (`toABI()`/`fromABI(_:)`) as it forwards through `base` to the ABI protocol
+        // — the size-correct analogue of windows-rs's `transmute_copy` across the
+        // vtable. A value slot projects by identity, so it forwards unchanged.
+        public struct IVector<Element: ABIProjectable> {
             internal let base: any IVectorABI<Element>
         }
 
@@ -1067,18 +1194,61 @@ struct DatabaseSQLTests {
     }
   }
 
+  @Test func `a generic interface inheriting a keyword-named base keeps it escaped`() throws {
+    // A generic interface may inherit a NON-generic base whose name is a Swift
+    // keyword (`protocol`). It arrives through `bases` keyword-ESCAPED by
+    // `SANITIZE` as `` `protocol` `` — backticks WRAPPING the identifier, NOT a
+    // CLR arity suffix. The base rewrite must tell those escaping backticks
+    // apart from an arity backtick (a backtick before a DIGIT) and inherit the
+    // escaped name UNCHANGED (`: `protocol``), not mistake it for a generic
+    // base and emit a broken `` `protocolABI` ``. The `bases` override supplies
+    // the raw keyword; the render query's `SANITIZE` escapes it; `methods` are
+    // emptied so the output is the declaration shell.
+    try DatabaseSQLTests.withGenerics { catalog in
+      var shell = Shell(catalog)
+      let interfaces = """
+        CREATE VIEW interfaces AS
+        SELECT Id, TypeNamespace, 'IVector`1' AS TypeName,
+               '00000000-0000-0000-0000-000000000000' AS iid
+        FROM TypeDef WHERE Id = 1
+        """
+      let generics = """
+        CREATE VIEW generics AS
+        SELECT 'Element' AS Name, 0 AS Number FROM TypeDef WHERE Id = :parent
+        """
+      let methods = """
+        CREATE VIEW methods AS
+        SELECT Id, '' AS Name FROM TypeDef WHERE 0 = 1
+        """
+      let bases = """
+        CREATE VIEW bases AS
+        SELECT 'protocol' AS base FROM TypeDef WHERE Id = :parent
+        """
+      for query in [interfaces, generics, methods, bases] {
+        let (name, view) = try DatabaseSQLTests.create(query)
+        shell.session.register(name, view)
+      }
+      let rendered = try shell.render("IVector`1", template: "com")
+      #expect(rendered.contains("internal protocol IVectorABI<Element>: " +
+                                "`protocol` {"))
+      #expect(!rendered.contains("protocolABI"))
+    }
+  }
+
   @Test func `a generic wrapper forwards a blank parameter under a synthesized name`() throws {
     // The non-generic renderer allows a blank parameter name (`func Foo(_ :
-    // T)`), and the generic ABI protocol requirement keeps it blank too, but
-    // the wrapper's forwarding method must PASS every argument BY NAME in the
-    // call (`base.Foo(arg0)`) — a blank name there expands to an empty
-    // argument, dropping the argument or mangling the commas. A blank parameter
-    // therefore synthesizes a stable `arg<N>` local, used in BOTH the
-    // forwarding method's parameter list (`_ arg0: T`) and the call. This
-    // context (built as the render loop assembles one) drives the REAL bundled
-    // `com` template: the first parameter is blank (→ `arg0`), the second named
-    // (`value`, kept). The protocol requirement stays blank; only the wrapper's
-    // forwarding surface takes the synthesized names.
+    // T)`), and the projected ABI protocol requirement keeps it blank too, but the
+    // wrapper's forwarding method must PASS every argument BY NAME in the call
+    // (`base.Foo(arg0)`) — a blank name there expands to an empty argument,
+    // dropping the argument or mangling the commas. A blank parameter therefore
+    // synthesizes a stable `arg<N>` local, used in BOTH the forwarding method's
+    // parameter list (`_ arg0: …`) and the call. This context (built as the
+    // render loop assembles one) drives the REAL bundled `com` template: the
+    // first parameter is blank (→ `arg0`), the second named (`value`, kept).
+    // Both are values here (`CInt`), so their ABI and typed spellings coincide
+    // and the call passes the bare locals uncast; the protocol requirement
+    // leaves the blank parameter blank (`_ : CInt`). The point under test is
+    // the blank-name synthesis, not erasure.
     let body = try DatabaseSQLTests.template(named: "com")
     let template = try MustacheTemplate(string: body)
     let context: [String: Any] = [
@@ -1092,25 +1262,42 @@ struct DatabaseSQLTests {
         [
           "name": "Set",
           "params": [
-            ["name": "", "local": "arg0", "type": "Element", "last": false],
-            ["name": "value", "local": "value", "type": "CInt", "last": true],
+            ["name": "", "local": "arg0", "type": "CInt",
+             "typed": "CInt", "argument": "arg0", "last": false],
+            ["name": "value", "local": "value", "type": "CInt",
+             "typed": "CInt", "argument": "value", "last": true],
           ],
+          "call": "base.Set(arg0, value)",
         ],
       ],
     ]
     #expect(template.render(context) == """
-      // A WinRT parameterised interface has no static IID: its IID is a
-      // per-instantiation PIID computed at runtime from the type
-      // arguments, so no `@com(interface:)` is emitted on the ABI protocol
-      // or the generic wrapper — the runtime projection supplies it.
+      // A WinRT parameterised interface projects its generic slots through each
+      // element's associated ABI type (the windows-rs `Type::Abi` mechanism): a
+      // value slot crosses the vtable as the value itself (`Element.ABI == Element`),
+      // a reference slot as the opaque interface pointer (`Element.ABI ==
+      // UnsafeMutableRawPointer`). The ABI protocol is therefore generic over the
+      // same `ABIProjectable` parameters as the wrapper, and each requirement spells
+      // its projected slots as `<Element>.ABI` — size-correct for a value AND a
+      // reference instantiation, never a fixed-size raw-pointer cast. It has no
+      // static IID: a parameterised interface's IID is a per-instantiation PIID
+      // computed at runtime from the type arguments, so no `@com(interface:)` is
+      // emitted on the ABI protocol or the wrapper — the runtime projection supplies
+      // it.
       internal protocol IPairABI<Element> {
-          associatedtype Element
-          func Set(_ : Element, _ value: CInt)
+          associatedtype Element: ABIProjectable
+          func Set(_ : CInt, _ value: CInt)
       }
 
-      public struct IPair<Element> {
+      // The public generic wrapper keeps the typed Swift surface: each method takes
+      // and returns the decoded typed parameters, projecting between the typed value
+      // and its ABI form through the element's `ABIProjectable` conformance
+      // (`toABI()`/`fromABI(_:)`) as it forwards through `base` to the ABI protocol
+      // — the size-correct analogue of windows-rs's `transmute_copy` across the
+      // vtable. A value slot projects by identity, so it forwards unchanged.
+      public struct IPair<Element: ABIProjectable> {
           internal let base: any IPairABI<Element>
-          public func Set(_ arg0: Element, _ value: CInt) {
+          public func Set(_ arg0: CInt, _ value: CInt) {
               base.Set(arg0, value)
           }
       }
@@ -1857,10 +2044,81 @@ private enum RootInterfaceFixture {
                 wide: 0, stride: 6),
     WinMD.Table(Metadata.Tables.CustomAttribute.self, rows: 1, range: 42 ..< 48,
                 wide: 0, stride: 6),
+    // No `TypeSpec` table: the root implements nothing, so the file omits it
+    // (its `Valid` bit is clear) as a real WinMD does. The bundled `bases`
+    // view's `TypeSpec` arm still resolves — the adapter surfaces the absent
+    // table as an empty relation.
   ]
 
   private static let valid: UInt64 =
       (1 << 1) | (1 << 2) | (1 << 6) | (1 << 9) | (1 << 10) | (1 << 12)
+
+  /// Runs `body` over a `Storage` catalog bound to the assembled metadata.
+  static func with(_ body: (borrowing Storage) throws -> Void) rethrows {
+    let storage = Storage(bytes: bytes.span.bytes, relations: relations.span,
+                          strings: strings.span.bytes, blob: blob.span.bytes,
+                          guid: empty.span.bytes, valid: valid, sorted: 0)
+    try body(storage)
+  }
+}
+
+/// A minimal WinMD whose one generic interface inherits ANOTHER generic
+/// interface, the base recorded through a `TypeSpec` GENERICINST signature —
+/// the shape the bundled `bases` view's `TypeSpec` arm resolves.
+///
+///   TypeRef[0]:  Name="IIterable`1"(1) — the generic base, arity-suffixed.
+///   TypeDef[0]:  Flags=0x21, TypeName="IVector`1"(13) — the generic interface
+///                (Id 1), the `InterfaceImpl.Class` the `bases` view binds.
+///   InterfaceImpl[0]: Class=1; Interface=TypeDefOrRef(TypeSpec row 1)=
+///                (1<<2)|2=6 — the base named through a `TypeSpec`, so neither
+///                the `Interface_TypeRef` nor `Interface_TypeDef` arm sees it.
+///   TypeSpec[0]: Signature=blob[1] — `IIterable`1<T>`, a GENERICINST over the
+///                base `TypeRef` with one type-variable argument.
+private enum GenericBaseFixture {
+  private static let bytes: Array<UInt8> = [
+    // TypeRef[0] — IIterable`1: ResolutionScope=0, Name=1, Namespace=0.
+    0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    // TypeDef[0] — IVector`1: Flags=0x21, Name=13, Namespace=0, Extends=0,
+    // FieldList=1, MethodList=1.
+    0x21, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
+    // InterfaceImpl[0] — Class=1, Interface=6 (TypeSpec row 1).
+    0x01, 0x00, 0x06, 0x00,
+    // TypeSpec[0] — Signature=blob[1].
+    0x01, 0x00,
+  ]
+
+  // "\0IIterable`1\0IVector`1\0": IIterable`1@1, IVector`1@13.
+  private static let strings: Array<UInt8> = [
+    0x00,
+    0x49, 0x49, 0x74, 0x65, 0x72, 0x61, 0x62, 0x6c, 0x65, 0x60, 0x31, 0x00,
+    0x49, 0x56, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x60, 0x31, 0x00,
+  ]
+
+  // A `#Blob` heap: offset 0 the reserved empty blob; offset 1 the 6-byte
+  // `IIterable`1<T>` GENERICINST signature — GENERICINST (0x15), CLASS (0x12),
+  // the base `TypeRef[0]` coded index (0x05), argument count 1, VAR (0x13) 0 —
+  // preceded by its length 0x06.
+  private static let blob: Array<UInt8> = [
+    0x00,
+    0x06, 0x15, 0x12, 0x05, 0x01, 0x13, 0x00,
+  ]
+
+  private static let empty = Array<UInt8>()
+
+  private static let relations: Array<WinMD.Table> = [
+    WinMD.Table(Metadata.Tables.TypeRef.self, rows: 1, range: 0 ..< 6,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 1, range: 6 ..< 20,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.InterfaceImpl.self, rows: 1, range: 20 ..< 24,
+                wide: 0, stride: 4),
+    WinMD.Table(Metadata.Tables.TypeSpec.self, rows: 1, range: 24 ..< 26,
+                wide: 0, stride: 2),
+  ]
+
+  private static let valid: UInt64 =
+      (1 << 1) | (1 << 2) | (1 << 9) | (1 << 27)
 
   /// Runs `body` over a `Storage` catalog bound to the assembled metadata.
   static func with(_ body: (borrowing Storage) throws -> Void) rethrows {

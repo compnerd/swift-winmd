@@ -90,6 +90,21 @@ public struct Table: Sendable {
     self.range = range
   }
 
+  /// An empty (zero-row) open table for `schema` — the form a schema-defined
+  /// but ABSENT table takes.
+  ///
+  /// A metadata file sets a table's `Valid` bit only when the table has rows,
+  /// so a file with no rows for a table omits it entirely (ECMA-335
+  /// §II.24.2.6). A query may still reference such a table — an
+  /// optional-metadata relation a view joins in one arm — so the SQL adapter
+  /// surfaces it as this empty relation rather than an unknown one: its
+  /// `schema` types and names its columns as usual, and its zero `rows` yield
+  /// no records (the `wide`/`stride` record layout is immaterial with no
+  /// records, so both are the narrow zero).
+  package static func empty(_ schema: TableSchema.Type) -> Table {
+    Table(schema, rows: 0, range: 0 ..< 0, wide: 0, stride: 0)
+  }
+
   /// The byte offset of column `i` within a record.
   ///
   /// Each wide index before column `i` shifts it by two bytes beyond its narrow

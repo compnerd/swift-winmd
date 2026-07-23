@@ -105,6 +105,25 @@ package struct Storage: ~Escapable {
     return tuple
   }
 
+  /// The registered CIL table schema whose name matches `name`
+  /// case-insensitively, whether or not the database has rows for it — the
+  /// full ECMA-335 §II.22 table set, not just the present `tables`.
+  ///
+  /// A file omits a table with no rows (its `Valid` bit is clear), so a query
+  /// naming an optional-metadata relation would otherwise find no table. This
+  /// resolves the SCHEMA by name so the SQL adapter can surface an absent one
+  /// as an empty relation (`Table.empty(_:)`), a query referencing it thus
+  /// resolving to zero rows rather than an unknown relation. `nil` when no
+  /// registered schema bears the name. It is `package` so the adapter reaches
+  /// it across the module boundary.
+  package static func schema(named name: String) -> TableSchema.Type? {
+    for schema in kRegisteredTables
+        where "\(schema)".caseInsensitiveCompare(name) == .orderedSame {
+      return schema
+    }
+    return nil
+  }
+
   /// The rows of `schema` whose foreign-key `column` references `target`.
   ///
   /// The runtime (non-generic) sibling of `Database.referencing`: it opens the

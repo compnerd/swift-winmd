@@ -1366,6 +1366,22 @@ extension Catalog where Self: ~Escapable {
 
   /// Resolves `name` in `routines` and applies it to its `arguments` evaluated
   /// against `row`.
+  ///
+  /// This run-path dispatch checks a routine EXISTS — an unregistered `name`
+  /// faults `SQLError.function` — but does NOT validate the call's ARITY or
+  /// its argument TYPES: it evaluates the supplied `arguments` and hands them
+  /// to the routine. That is deliberate. A run assumes the statement was
+  /// already type-checked; `columns(of:validate:)` (via `Scope.call`) is the
+  /// STRICT gate that faults `SQLError.argument` on a wrong argument count or a
+  /// definitively-wrong argument type, so a caller wanting arity/type
+  /// enforcement validates FIRST and a run trusts that check. The engine's own
+  /// routines self-check inside their closures (a native `BITAND` faults on a
+  /// bad count, a `.defined` body enforces its arity/types in
+  /// `callAsFunction`), so a mis-shaped call over them still faults; but a host
+  /// routine that does NOT self-check its count runs regardless at this site.
+  /// See `RoutineArityPostureTests`, which pins the run/validate split. (The
+  /// one value the run DOES enforce here is the finite-double invariant below,
+  /// which no static type-check can see.)
   private borrowing func apply(_ row: borrowing some Row & ~Escapable,
                                _ name: String, _ arguments: Array<Term>,
                                _ context: Context)

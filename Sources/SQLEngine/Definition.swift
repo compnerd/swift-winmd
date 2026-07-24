@@ -625,8 +625,17 @@ extension Catalog where Self: ~Escapable {
       // check a routine exists), while an arm a short-circuit proves
       // unreachable is skipped. A view a `SELECT *` could not evaluate is not
       // advertised.
-      let resolved = try? columns(unifying: view.query, inner).map(\.column)
-      guard (try? typecheck(view.query, inner)) != nil, let resolved,
+      //
+      // EXPAND the body first (the schema path does): a `GROUP BY GROUPING
+      // SETS` body type-checks its `UNION ALL` of per-arm groupings, not the
+      // unexpanded `.sets`. An unexpanded `SELECT 1 / 0 … WHERE 1 = 0 GROUP BY
+      // GROUPING SETS ((Region), ())` reads as non-empty grouping and a
+      // constant-false `WHERE` skips its projection, so it would be advertised
+      // though the expanded `()` arm forms one group and evaluates `1 / 0`,
+      // faulting a run — the metadata must match what selecting from it does.
+      guard let body = try? view.query.expanded else { continue }
+      let resolved = try? columns(unifying: body, inner).map(\.column)
+      guard (try? typecheck(body, inner)) != nil, let resolved,
           resolved.count == view.columns.count else { continue }
       for ordinal in view.columns.indices {
         rows.append([.text(name), .text(view.columns[ordinal]),

@@ -617,7 +617,7 @@ extension Catalog where Self: ~Escapable {
   ///
   /// The carrier plan `ordered` builds is a stack of SINGLE-source row
   /// operators (`sort`/`distinct`/`limit`/`project`, and the `project`/`sort`
-  /// pair a materialised output key emits) OVER the compiled `union` setop.
+  /// pair a `materialised` output key emits) OVER the compiled `union` setop.
   /// The plain `execute(_:_:)` would run the setop under the ONE carrier
   /// context (`execute(.setop)` shares it across both arms), which never binds
   /// an arm's arm-local derived alias — arms are SELECT-scoped, so the query-

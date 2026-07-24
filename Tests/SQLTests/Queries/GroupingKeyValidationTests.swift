@@ -33,7 +33,7 @@ private func grouped(by key: Expression,
   .select(Select(projection: .expressions(
                      [Projected(expression: .aggregate(.count, of: .star))]),
                  from: Relation(name: "Orders"), predicate: predicate,
-                 grouping: [key]))
+                 grouping: .keys([key])))
 }
 
 /// The `SQLError` running `query` against `catalog` raises, or `nil`.

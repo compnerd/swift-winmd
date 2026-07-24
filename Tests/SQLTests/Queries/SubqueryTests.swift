@@ -343,6 +343,103 @@ struct SubqueryTypeCheckingTests {
   }
 }
 
+// MARK: - Reached ordered set-operation subquery sort keys
+
+/// Two single-row relations for an ordered set-operation subquery — `L`/`R`
+/// each of `a` — so a reached scalar/`IN` `(SELECT a FROM L UNION SELECT a FROM
+/// R ORDER BY <key>)` is a genuine ordered union whose carrier ORDER BY is the
+/// surface under test.
+private func ordered() throws -> FixtureCatalog {
+  try Catalog {
+    Relation("L", ["a": .integer]) {
+      Row(1)
+    }
+    Relation("R", ["a": .integer]) {
+      Row(2)
+    }
+  }
+}
+
+// A reached scalar/`IN` subquery whose body is an ordered set operation has its
+// carrier ORDER BY validated ONLY by the carrier compile, which the nested-
+// subquery shape pre-pass runs with `validating(false)`. So the reached
+// re-validation seam must validate the carrier's sort keys too — else
+// `columns(of:)` accepts a bad sort key a run faults, a run-vs-validate
+// divergence. It stays REACHED-only: an unreached ordered subquery's bad key is
+// deferred, matching the dead-scalar/dead-EXISTS posture.
+struct ReachedOrderedSubqueryTests {
+  @Test func `a reached scalar bad sort key faults run and validate alike`()
+      throws {
+    let query = try parse(query: """
+        SELECT (SELECT a FROM L UNION SELECT a FROM R ORDER BY missing(a)) AS x
+          FROM L
+        """)
+    let resolve = { () throws -> Array<OutputColumn> in
+      try ordered().columns(of: query, validate: true)
+    }
+    #expect(throws: SQLError.function("missing")) {
+      try resolve()
+    }
+    try ordered().expect("""
+        SELECT (SELECT a FROM L UNION SELECT a FROM R ORDER BY missing(a)) AS x
+          FROM L
+        """, fails: .function("missing"))
+  }
+
+  @Test func `a reached IN bad sort key faults run and validate alike`() throws {
+    let query = try parse(query: """
+        SELECT a FROM L
+          WHERE a IN (SELECT a FROM L UNION SELECT a FROM R ORDER BY missing(a))
+        """)
+    let resolve = { () throws -> Array<OutputColumn> in
+      try ordered().columns(of: query, validate: true)
+    }
+    #expect(throws: SQLError.function("missing")) {
+      try resolve()
+    }
+    try ordered().expect("""
+        SELECT a FROM L
+          WHERE a IN (SELECT a FROM L UNION SELECT a FROM R ORDER BY missing(a))
+        """, fails: .function("missing"))
+  }
+
+  @Test func `a reached ordered subquery with an in-scope sort key runs`()
+      throws {
+    // A genuinely-in-scope sort key on the reached carrier validates AND runs:
+    // the `IN` set membership is unaffected by the sort, so `a IN (1, 2)` holds
+    // for the one `L` row (`a = 1`).
+    let query = try parse(query: """
+        SELECT a FROM L
+          WHERE a IN (SELECT a FROM L UNION SELECT a FROM R ORDER BY a)
+        """)
+    let columns = try ordered().columns(of: query, validate: true)
+    #expect(columns.count == 1)
+    try ordered().expect("""
+        SELECT a FROM L
+          WHERE a IN (SELECT a FROM L UNION SELECT a FROM R ORDER BY a)
+        """, yields: [[1]])
+  }
+
+  @Test func `an unreached bad sort key faults neither run nor validate`()
+      throws {
+    // The `IN` occurrence sits behind a statically-false `AND`, so the executor
+    // never materialises it and the reachability walk never records it — its
+    // carrier's bad sort key is DEFERRED, matching the dead-subquery posture.
+    let query = try parse(query: """
+        SELECT a FROM L
+          WHERE 1 = 0
+            AND a IN (SELECT a FROM L UNION SELECT a FROM R ORDER BY missing(a))
+        """)
+    let columns = try ordered().columns(of: query, validate: true)
+    #expect(columns.count == 1)
+    try ordered().empty("""
+        SELECT a FROM L
+          WHERE 1 = 0
+            AND a IN (SELECT a FROM L UNION SELECT a FROM R ORDER BY missing(a))
+        """)
+  }
+}
+
 // MARK: - ORDER BY expression subqueries
 
 struct OrderBySubqueryTests {

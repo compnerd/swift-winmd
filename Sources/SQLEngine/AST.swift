@@ -168,15 +168,74 @@ public indirect enum Query: Hashable, Sendable {
   /// same-precedence chain reads left to right.
   case setop(SetOperation, Query, Query, all: Bool)
 
+  /// A query-level `ORDER BY` / `SELECT DISTINCT` / `OFFSET`·`FETCH` carried
+  /// OVER an inner query (always a `setop` — a `select` carries its own on the
+  /// node). A `setop` node has no order/distinct/limit slot, so an ordered,
+  /// deduplicated, or paged set operation rides this outer carrier: the row
+  /// operators (`DISTINCT`, `ORDER BY`, `OFFSET`/`FETCH`) apply to the union's
+  /// combined result, resolved through the setop's OUTPUT scope, and do NOT
+  /// project — the result columns stay the inner setop's arm-0-named, unified
+  /// ones. It is TRANSPARENT to `columns(unifying:)`, which descends to the
+  /// inner setop for the result schema; only `run`/`compile` stack the row
+  /// operators over the compiled setop plan. Produced by the parser for a
+  /// trailing query-level `ORDER BY` / `OFFSET`·`FETCH` after a set-operation
+  /// chain.
+  ///
+  /// `generated` is the number of GENERATED trailing columns the inner union
+  /// carries beyond the real output — hidden sort columns a producer may append
+  /// to each arm so a genuinely-unprojected sort key survives the `UNION ALL`
+  /// at equal arity. The carrier's compile TRIMS them (`real = width −
+  /// generated`), and `columns(unifying:)` drops them from the result schema.
+  /// It is a STRUCTURAL count carried on the node, never recovered by scanning
+  /// output names for a synthetic prefix; the parser's trailing-`ORDER BY`
+  /// carrier generates none (`0`).
+  case ordered(Query, distinct: Bool, order: Order?, limit: Limit?,
+               generated: Int)
+
   /// The first `SELECT` of the query — the leftmost arm, reached by descending
   /// the left arm of each set operation. Its projection NAMES the result
   /// columns (the ISO rule — their TYPES unify across every arm), so a `CREATE
-  /// VIEW` infers a set operation's column names from it.
+  /// VIEW` infers a set operation's column names from it. An `ordered` carrier
+  /// is transparent — its first is its inner query's.
   public var first: Select {
     switch self {
     case let .select(select): select
     case let .setop(_, left, _, _): left.first
+    case let .ordered(inner, _, _, _, _): inner.first
     }
+  }
+
+  /// The query-level row operators an `ordered` carrier applies OVER its inner
+  /// query, peeled off it — the `DISTINCT`/`ORDER BY`/`OFFSET`·`FETCH` and the
+  /// generated hidden-column count. A `select`/`setop` carries no carrier.
+  public struct Carrier: Hashable, Sendable {
+    public let distinct: Bool
+    public let order: Order?
+    public let limit: Limit?
+    public let generated: Int
+  }
+
+  /// This query stripped of its `ordered` carrier — the inner `setop`/`select`
+  /// — paired with the peeled `Carrier`, or `nil` when the query wears none.
+  ///
+  /// A single seam-shared peel: the carrier-transparent `core` reads its inner,
+  /// so every seam descends the carrier here rather than repeating a bespoke
+  /// `.ordered` match, then reapplies the peeled carrier to the result.
+  public var unwound: (inner: Query, carrier: Carrier?) {
+    if case let .ordered(inner, distinct, order, limit, generated) = self {
+      return (inner, Carrier(distinct: distinct, order: order, limit: limit,
+                             generated: generated))
+    }
+    return (self, nil)
+  }
+
+  /// This query's carrier-transparent CORE — its inner `setop`/`select`, an
+  /// `ordered` carrier peeled off. A thin read over `unwound.inner` for the
+  /// `if case .setop = query.core` seams that recognise a set operation whether
+  /// or not it rides a carrier, so a carried union is not silently swallowed by
+  /// a bare `.setop` match.
+  public var core: Query {
+    unwound.inner
   }
 }
 

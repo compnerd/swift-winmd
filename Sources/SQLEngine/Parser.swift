@@ -43,12 +43,24 @@
 ///                   // the derived body may reference preceding FROM items
 /// projection     := '*' | column (',' column)*
 /// where          := WHERE predicate
-/// group          := GROUP BY (grouping | GROUPING SETS '(' set (',' set)* ')')
-///                   // GROUPING/SETS are context identifiers, not keywords;
-///                   // GROUPING SETS expands to a UNION ALL of per-set arms at
-///                   // compile/schema time (by resolved identity), not here
-/// grouping       := expression (',' expression)*  // ordinary grouping keys
-/// set            := '(' [expression (',' expression)*] ')'  // '()' = total
+/// group          := GROUP BY element (',' element)*
+///                   // the elements' grouping-set lists are CROSS-PRODUCTED
+///                   // into one set list; a purely ordinary clause stays plain
+///                   // GROUP BY keys, and any ROLLUP/CUBE/GROUPING SETS makes
+///                   // the whole clause a GROUPING SETS — a UNION ALL of
+///                   // per-set arms expanded at compile/schema time (by
+///                   // resolved identity), not here
+/// element        := set | rollup | cube | sets  // set = an ordinary set
+/// rollup         := ROLLUP '(' [unit (',' unit)*] ')'  // n+1 prefixes
+/// cube           := CUBE '(' [unit (',' unit)*] ')'    // 2ⁿ unit subsets
+/// sets           := GROUPING SETS '(' element (',' element)* ')'  // nests
+/// unit           := set  // a ROLLUP/CUBE unit is an ordinary set
+/// set            := expression | '(' [expression (',' expression)*] ')'
+///                   // '()' is the grand-total set; a top-level ordinary key
+///                   // is a bare scalar expression ('(SELECT 1)' a subquery);
+///                   // ROLLUP/CUBE/GROUPING/SETS are CONTEXT identifiers, not
+///                   // keywords — ROLLUP/CUBE open only before a '(', and
+///                   // GROUPING only before SETS
 /// having         := HAVING predicate
 /// predicate      := disjunction
 /// disjunction    := conjunction (OR conjunction)*
@@ -592,72 +604,337 @@ internal struct Parser: ~Escapable {
                   having: having, order: order, limit: limit)
   }
 
-  /// Parses `BY <grouping element>` (the `GROUP` keyword is already consumed) —
-  /// either the ordinary `<ordinary grouping set>` key list `e (, e)*` or the
-  /// ISO `GROUP BY GROUPING SETS (s, …)` construct.
+  /// Parses `BY <element> (',' <element>)*` (the `GROUP` keyword is already
+  /// consumed) — the ISO comma list of grouping ELEMENTS, cross-producted into
+  /// one grouping-set list.
   ///
-  /// Each ordinary key parses as a general scalar `expression` (ISO `<ordinary
-  /// grouping set>` is a value expression), so a key may be a column, an
-  /// arithmetic or `||` expression, a function call, a `CASE`/`COALESCE`, and
-  /// so on — resolved and lowered through `scope.term` at run and validated
-  /// through `scope.validate`. A bare identifier is itself an
-  /// `Expression.column`, so `GROUP BY col` is unchanged and a bare
-  /// `NATURAL`/`USING` merged key still lowers to its coalesce value through
-  /// the join scope.
+  /// Each element yields a set list (`Array<Array<Expression>>`): an ordinary
+  /// key is the single-set list `[[key]]`; `ROLLUP`/`CUBE`/`GROUPING SETS`
+  /// yield their expanded set lists (see `element`). The whole clause is the
+  /// PRODUCT of the elements' set lists — one result set per combination, the
+  /// concatenation of the chosen sets — so `GROUP BY a, ROLLUP(b, c)` crosses
+  /// `[[a]]` with `[[b, c], [b], []]` into `[[a, b, c], [a, b], [a]]`.
   ///
-  /// `GROUPING`/`SETS` are CONTEXT identifiers (not lexer keywords, mirroring
-  /// `CAST`/`COALESCE`), so a bare `GROUPING` immediately followed by a bare
-  /// `SETS` and a `(` opens the construct; a column named `grouping`
-  /// (delimited, or bare and NOT followed by `SETS`) stays a key. The two-token
-  /// lookahead (`secondary`) resolves the prefix before consuming either token.
+  /// A PURELY ordinary clause (no `ROLLUP`/`CUBE`/`GROUPING SETS`) returns
+  /// `.keys` — the plain path, so `GROUP BY a, b` stays `.keys([a, b])`. Any
+  /// construct makes the whole clause `.sets`, which the shared `expand`
+  /// desugars to a `UNION ALL` of per-set arms (Stage 1), so `ROLLUP`/`CUBE`
+  /// reuse that machinery verbatim.
+  ///
+  /// Each ordinary key parses as a general scalar `expression` (a column, an
+  /// arithmetic/`||` expression, a function call, a `CASE`/`COALESCE`, …),
+  /// resolved and lowered through `scope.term`; a bare identifier is itself an
+  /// `Expression.column`, so `GROUP BY col` is unchanged and a `NATURAL`/
+  /// `USING` merged key still lowers through the join scope.
   private mutating func grouping() throws(SQLError) -> Grouping {
     try expect(.by)
-    // The construct opens on a bare `GROUPING` immediately followed by a bare
-    // `SETS` — both context identifiers, resolved by two tokens of lookahead
-    // BEFORE either is consumed, so a delimited `"grouping"` or a bare
-    // `grouping` not followed by `SETS` stays an ordinary key.
+    // The grouping sets, built left to right from the single empty set (`[[]]`,
+    // the identity), and whether ANY element was a construct — the flag that
+    // chooses `.sets` over the plain `.keys` path.
+    var product: Array<Array<Expression>> = [[]]
+    var construct = false
+    var total = 0
+    repeat {
+      let (sets, opens) = try element()
+      construct = construct || opens
+      if sets.count == 1 {
+        // A SINGLE-set element (an ordinary key, or `()`) APPENDS its keys to
+        // every set so far — O(keys) per element, keeping a purely ordinary
+        // `GROUP BY a, b, …` LINEAR rather than O(n²) via `cross`. Its keys are
+        // copied into every set, so bound the reference growth first.
+        let added = product.count * sets[0].count
+        guard total + added <= Limits.references else { throw overflow }
+        for index in product.indices { product[index] += sets[0] }
+        total += added
+      } else {
+        // A MULTI-set element (a construct) needs the cross product. Bound its
+        // growth BEFORE `cross` allocates it — the set count (`sets / count`
+        // also keeps the multiply from overflowing) and the reference total,
+        // which the cross multiplies to `sets × total + product × expressions`.
+        let expressions = references(of: sets)
+        guard product.count <= Limits.sets / sets.count else {
+          throw .state("54001",
+                       "GROUP BY produces too many grouping sets (max 4096)")
+        }
+        let grown = sets.count * total + product.count * expressions
+        guard grown <= Limits.references else { throw overflow }
+        total = grown
+        product = cross(product, sets)
+      }
+    } while try match(.comma)
+    // A purely ordinary clause is a single set (each element appended its keys
+    // in source order) — the plain `.keys` path. An explicit `GROUP BY ()` is
+    // the exception: it resolves to a single EMPTY set, which must stay the
+    // grand total `.sets([[]])`, NOT collapse to `.keys([])` — the shape an
+    // ABSENT `GROUP BY` carries, which `Select.aggregates` reads as no grouping
+    // (one row per input row rather than one grand-total group).
+    if construct || product == [[]] {
+      return .sets(product)
+    }
+    return .keys(product[0])
+  }
+
+  /// Parses ONE grouping element into its set list, with a flag marking whether
+  /// it is a construct (`ROLLUP`/`CUBE`/`GROUPING SETS`) rather than an
+  /// ordinary set — the flag `grouping` ORs to choose `.keys` over `.sets`.
+  ///
+  /// `ROLLUP`/`CUBE`/`GROUPING`/`SETS` are CONTEXT identifiers, not lexer
+  /// keywords: a bare `GROUPING` immediately followed by a bare `SETS` opens a
+  /// (possibly nested) `GROUPING SETS`; a bare `ROLLUP`/`CUBE` immediately
+  /// followed by `(` opens that construct. A DELIMITED `"rollup"` (a `.quoted`,
+  /// not `.identifier`), or a bare `rollup`/`cube`/`grouping` NOT so followed,
+  /// falls through to an ordinary key — so those words stay usable as column
+  /// names (ISO reserves them; a UDF named `rollup`/`cube` cannot be a BARE
+  /// grouping key, which is acceptable). The two-token lookahead (`secondary`)
+  /// resolves each prefix before consuming any token.
+  ///
+  /// A leading `(` opens a composite ordinary set — a comma list `(a, b, …)` or
+  /// the grand-total `()` — via `composite`, which rewinds a single `(a)`, a
+  /// parenthesised expression `(a + b)` / `(a) + 1`, or a scalar subquery
+  /// `(SELECT 1)` so it reads as one ordinary key `expression`. The same
+  /// disambiguation applies at the top level and inside a `GROUPING SETS` list.
+  private mutating func element() throws(SQLError)
+      -> (sets: Array<Array<Expression>>, construct: Bool) {
     if case let .identifier(text) = current?.kind,
         text.uppercased() == "GROUPING",
         case let .identifier(next) = try secondary()?.kind,
         next.uppercased() == "SETS" {
-      return try .sets(sets())
+      return (try sets(), true)
     }
-    var keys = Array<Expression>()
-    try keys.append(expression())
-    while try match(.comma) {
-      try keys.append(expression())
+    if case let .identifier(text) = current?.kind {
+      switch text.uppercased() {
+      case "ROLLUP":
+        if try secondary()?.kind == .lparen { return (try rollup(), true) }
+      case "CUBE":
+        if try secondary()?.kind == .lparen { return (try cube(), true) }
+      default:
+        break
+      }
     }
-    return .keys(keys)
+    if let keys = try composite() {
+      return ([keys], false)
+    }
+    return ([[try expression()]], false)
   }
 
-  /// Parses the `GROUPING SETS ( set (, set)* )` tail — the `GROUPING` and
-  /// `SETS` context identifiers are the next two tokens (confirmed by
-  /// `grouping`) — into one key list per set, in source order. At least one set
-  /// is required.
+  /// Parses the `GROUPING SETS '(' element (',' element)* ')'` construct — the
+  /// `GROUPING` and `SETS` context identifiers are the next two tokens
+  /// (confirmed by `element`) — into ONE set list: the CONCATENATION of each
+  /// contained element's set list, in source order. Elements NEST — a member
+  /// may be an ordinary set, a `ROLLUP`/`CUBE`, or another `GROUPING SETS`. At
+  /// least one element is required.
   private mutating func sets() throws(SQLError) -> Array<Array<Expression>> {
     _ = try advance(expecting: "GROUPING")
     _ = try advance(expecting: "SETS")
     try expect(.lparen)
-    var sets = try [set()]
+    var result = try element().sets
+    var total = references(of: result)
     while try match(.comma) {
-      try sets.append(set())
+      let more = try element().sets
+      total += references(of: more)
+      result += more
+      // Members may THEMSELVES be constructs (`GROUPING SETS (CUBE(…), …)`);
+      // cap both the set count (4096, the clause-wide ceiling) and the
+      // reference total so a concatenation cannot amass unboundedly before
+      // `grouping`'s guard.
+      guard result.count <= Limits.sets else {
+        throw .state("54001",
+                     "GROUP BY produces too many grouping sets (max 4096)")
+      }
+      guard total <= Limits.references else { throw overflow }
     }
     try expect(.rparen)
-    return sets
+    return result
   }
 
-  /// Parses one grouping set `( e, … )` or `( )` — a parenthesised list of
-  /// general grouping expressions, possibly empty (the grand-total set) — into
-  /// its key list.
-  private mutating func set() throws(SQLError) -> Array<Expression> {
+  /// Parses a `ROLLUP '(' unit (',' unit)* ')'` element (the `ROLLUP` context
+  /// identifier is `current`) into its `n + 1` grouping sets — the descending
+  /// PREFIXES of the `n` units. `ROLLUP(a, b)` yields `[[a, b], [a], []]`;
+  /// `ROLLUP((a, b), c)` yields `[[a, b, c], [a, b], []]`.
+  private mutating func rollup() throws(SQLError) -> Array<Array<Expression>> {
+    let units = try units()
+    // A ROLLUP of n units materialises n + 1 prefixes whose sizes sum to
+    // O(n²) expression references — BEFORE `grouping`'s 4096-set guard runs, so
+    // a large but compact input (a 100,000-unit ROLLUP) would exhaust memory
+    // rather than fault. Reject the arity here first: n + 1 sets must stay
+    // within the 4096 cap, so n ≤ 4095.
+    guard units.count <= 4095 else {
+      throw .state("54001",
+                   "GROUP BY ROLLUP supports at most 4095 grouping elements")
+    }
+    // As with CUBE, a unit is copied into up to n + 1 prefixes, so a large
+    // composite unit multiplies. Bound the projected expansion — at most
+    // (n + 1) × the units' total expressions — before building the prefixes.
+    let budget = Limits.references / (units.count + 1)
+    guard references(of: units) <= budget else { throw overflow }
+    return prefixes(of: units)
+  }
+
+  /// Parses a `CUBE '(' unit (',' unit)* ')'` element (the `CUBE` context
+  /// identifier is `current`) into its `2ⁿ` grouping sets — one per subset of
+  /// the `n` units. `CUBE(a, b)` yields `[[a, b], [b], [a], []]`.
+  private mutating func cube() throws(SQLError) -> Array<Array<Expression>> {
+    let units = try units()
+    // A CUBE of n units enumerates 2ⁿ subsets. Reject a large arity BEFORE the
+    // `1 << n` shift: at n ≥ 63 it overflows `Int` (wrapping negative, then to
+    // zero at 64), silently yielding NO sets — later misreported as "requires
+    // at least one set" — and even a moderate n eagerly allocates
+    // exponentially many arrays. 2¹² = 4096 sets is the cap.
+    guard units.count <= 12 else {
+      throw .state("54001",
+                   "GROUP BY CUBE supports at most 12 grouping elements")
+    }
+    // units.count alone is not enough: each unit is COPIED into 2ⁿ⁻¹ of the 2ⁿ
+    // subsets, so a large COMPOSITE unit `(a, a, …)` multiplies its expressions
+    // across them. Bound the projected expansion — 2ⁿ⁻¹ × the units' total
+    // expressions — before building the subsets.
+    let budget = Limits.references / (1 << max(units.count - 1, 0))
+    guard references(of: units) <= budget else { throw overflow }
+    return subsets(of: units)
+  }
+
+  /// Parses the `'(' [unit (',' unit)*] ')'` unit list shared by `ROLLUP`/
+  /// `CUBE` (the context identifier is consumed here). Each unit is an ordinary
+  /// set — a bare key or a parenthesised `(a, b)` composite that groups as one
+  /// indivisible level. An EMPTY list (`ROLLUP()`/`CUBE()`) is admitted and
+  /// collapses to the single empty grand-total set.
+  private mutating func units() throws(SQLError) -> Array<Array<Expression>> {
+    _ = try advance(expecting: "ROLLUP or CUBE")
     try expect(.lparen)
     guard !(try match(.rparen)) else { return [] }
-    var keys = try [expression()]
+    var units = try [unit()]
     while try match(.comma) {
-      try keys.append(expression())
+      try units.append(unit())
     }
     try expect(.rparen)
-    return keys
+    return units
+  }
+
+  /// Parses one `ROLLUP`/`CUBE` unit — an ordinary set. A leading `(` opens a
+  /// parenthesised `(a, b)` / `()` composite UNLESS it merely STARTS a scalar
+  /// key — `(a) + 1`, `(a + b)`, or a scalar subquery `(SELECT …)`, whose own
+  /// parenthesis `expression` consumes — which `composite` rewinds; otherwise
+  /// the unit is a bare scalar key.
+  private mutating func unit() throws(SQLError) -> Array<Expression> {
+    if let keys = try composite() { return keys }
+    return [try expression()]
+  }
+
+  /// A parenthesised composite grouping set — the grand-total `()` or a comma
+  /// list `(a, b, …)` — returning its keys, or `nil` (having REWOUND the full
+  /// parser state) when the `(` instead begins a single scalar key that merely
+  /// STARTS with a parenthesis: a parenthesised expression `(a + b)` / `(a) +
+  /// 1`, or a scalar subquery `(SELECT …)`.
+  ///
+  /// The committing signal — an empty `()` or a top-level comma — sits an
+  /// UNBOUNDED distance past the `(` (the first key is an arbitrary
+  /// expression), so no fixed lookahead decides it: speculatively read past
+  /// the `(`, commit to a set only on `()` or a top-level comma (the
+  /// row-constructor rule), else rewind the `lexer`, `current`, AND the
+  /// `pending` lookahead so the caller reads one ordinary key `expression`.
+  private mutating func composite() throws(SQLError) -> Array<Expression>? {
+    guard case .lparen = current?.kind else { return nil }
+    let lexer = self.lexer
+    let token = self.current
+    let buffer = self.pending
+    try expect(.lparen)
+    if try match(.rparen) { return [] }
+    if current?.kind != .select, current?.kind != .table,
+        current?.kind != .values,
+        let first = try? expression(), try match(.comma) {
+      var keys = [first]
+      repeat {
+        try keys.append(expression())
+      } while try match(.comma)
+      try expect(.rparen)
+      return keys
+    }
+    self.lexer = lexer
+    self.current = token
+    self.pending = buffer
+    return nil
+  }
+
+  /// The descending PREFIXES of a unit list — the `ROLLUP` set list. For `n`
+  /// units it is `n + 1` sets: units `1..n` concatenated, then `1..n-1`, …,
+  /// down to the empty grand-total set. An empty unit list (`ROLLUP()`) yields
+  /// the single empty set `[[]]`.
+  private func prefixes(of units: Array<Array<Expression>>)
+      -> Array<Array<Expression>> {
+    var result = Array<Array<Expression>>()
+    var index = units.count
+    while index >= 0 {
+      result.append(units.prefix(index)
+                         .reduce(into: Array<Expression>()) { $0 += $1 })
+      index -= 1
+    }
+    return result
+  }
+
+  /// Every SUBSET of a unit list — the `CUBE` set list — enumerated
+  /// FULL-SET-FIRST by descending subset mask (bit `i` selects unit `i`, units
+  /// concatenated in source order). For `n` units it is `2ⁿ` sets, the full set
+  /// first and the empty grand-total set last. An empty unit list (`CUBE()`)
+  /// yields the single empty set `[[]]`.
+  private func subsets(of units: Array<Array<Expression>>)
+      -> Array<Array<Expression>> {
+    var result = Array<Array<Expression>>()
+    var mask = 1 << units.count
+    while mask > 0 {
+      mask -= 1
+      var keys = Array<Expression>()
+      for (index, member) in units.enumerated() where mask & (1 << index) != 0 {
+        keys += member
+      }
+      result.append(keys)
+    }
+    return result
+  }
+
+  /// The CROSS PRODUCT of two set lists — for each set on the left and each on
+  /// the right, their concatenation — the operator that combines the successive
+  /// `GROUP BY` elements. The seed `[[]]` (the single empty set) is its
+  /// identity.
+  private func cross(_ left: Array<Array<Expression>>,
+                     _ right: Array<Array<Expression>>)
+      -> Array<Array<Expression>> {
+    var result = Array<Array<Expression>>()
+    for lhs in left {
+      for rhs in right {
+        result.append(lhs + rhs)
+      }
+    }
+    return result
+  }
+
+  /// The caps bounding `GROUP BY` grouping-set expansion — the SINGLE SOURCE
+  /// OF TRUTH for every artificial limit the desugar enforces, so they are
+  /// tracked and tunable in one place (every guard below cites one of these).
+  /// `sets` is the most grouping sets a clause may expand to; `references` the
+  /// most expression references those sets may hold in total. Both bound a
+  /// COMPACT but heavily-duplicating clause — a wide `CUBE`/`ROLLUP`, a cross
+  /// product, a concatenation — from exhausting memory. The per-construct arity
+  /// guards derive from `sets`: `CUBE ≤ 12` units (2¹² = `sets`) and `ROLLUP ≤
+  /// 4095` units (n + 1 ≤ `sets`) reject before the 2ⁿ / prefix expansion.
+  private enum Limits {
+    static let sets = 4096
+    static let references = 1 << 20
+  }
+
+  /// The total expression references across a grouping-set list — the memory an
+  /// expansion materialises. Bounded by `Limits.references` (with the
+  /// `Limits.sets` count cap) at every producing site so a compact but
+  /// heavily-duplicating construct — a CUBE copying a large composite unit
+  /// across 2ⁿ⁻¹ subsets, a cross product, a concatenation — cannot allocate
+  /// unboundedly.
+  private func references(of sets: Array<Array<Expression>>) -> Int {
+    sets.reduce(0) { $0 + $1.count }
+  }
+
+  /// The program-limit fault raised when a grouping expansion would materialise
+  /// more than the budgeted `Limits.references` expression references.
+  private var overflow: SQLError {
+    .state("54001", "GROUP BY expands too many grouping expressions")
   }
 
   // MARK: - Relation

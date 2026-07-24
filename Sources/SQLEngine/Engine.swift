@@ -26,9 +26,29 @@ private let kRecursionCap = 10_000
 // MARK: - WITH
 
 extension CTE {
-  /// Whether the CTE actually references itself — the test the fixpoint routing
-  /// turns on, distinct from the syntactic `recursive` flag a `WITH RECURSIVE`
-  /// stamps on every member.
+  /// The CTE body's CANONICAL recursive shape — the ONE recogniser every
+  /// recursive-CTE seam peels through, so the run side and the schema side
+  /// inspect the identical AST.
+  ///
+  /// It applies `Query.unwound` (a trailing query-level `ORDER BY`/`OFFSET`·
+  /// `FETCH`/`DISTINCT` carrier peels off the setop), yielding the carrier-free
+  /// inner query paired with the peeled `Carrier`. Routing every seam through
+  /// this one form keeps the run and schema derivations in step.
+  ///
+  /// When `GROUP BY GROUPING SETS` lands, `Query.expanded` (a grouping-sets
+  /// body lowers to its `UNION ALL` arms) is re-inserted ahead of `unwound`, so
+  /// a recursive grouping-sets body canonicalises to the same expanded, unwound
+  /// shape on both sides — a one-token merge follow-up, not needed here.
+  internal var canonical: (inner: Query, carrier: Query.Carrier?) {
+    get throws(SQLError) {
+      query.unwound
+    }
+  }
+
+  /// The CTE body's recursive `UNION` arms — the `(anchor, recursive, all)` of
+  /// its `canonical` inner query when that is a `UNION` whose recursive (right)
+  /// arm names the CTE — else `nil`. The single recogniser the fixpoint router,
+  /// the shape validator, and the schema derive all peel through.
   ///
   /// The parser marks each member of a `WITH RECURSIVE` list recursive whether
   /// or not it names itself, but only a self-referential CTE has a recursive
@@ -42,9 +62,25 @@ extension CTE {
   /// not the CTE. Scanning the anchor too would misroute `WITH RECURSIVE
   /// Parent(Id) AS (SELECT Id FROM Parent UNION ALL SELECT Id FROM Extra)` —
   /// whose anchor merely reads the same-named base — into the fixpoint.
+  internal var recursiveArms:
+      (anchor: Query, recursive: Query, all: Bool)? {
+    get throws(SQLError) {
+      guard case let .setop(.union, anchor, recursive, all) = try canonical
+          .inner, recursive.references(name.lowercased()) else {
+        return nil
+      }
+      return (anchor, recursive, all)
+    }
+  }
+
+  /// Whether the CTE actually references itself through a recursive `UNION` arm
+  /// — the test the fixpoint routing turns on, distinct from the syntactic
+  /// `recursive` flag a `WITH RECURSIVE` stamps on every member. A thin read
+  /// over `recursiveArms`, so it peels the SAME canonical shape.
   internal var recurses: Bool {
-    guard case let .setop(.union, _, arm, _) = query else { return false }
-    return arm.references(name.lowercased())
+    get throws(SQLError) {
+      try recursiveArms != nil
+    }
   }
 }
 
@@ -59,6 +95,8 @@ extension Query {
       select.references(name)
     case let .setop(_, left, right, _):
       left.references(name) || right.references(name)
+    case let .ordered(inner, _, _, _, _):
+      inner.references(name)
     }
   }
 }
@@ -224,7 +262,37 @@ extension Catalog where Self: ~Escapable {
     // plans recorded above into the shared subquery box; a non-decorrelatable
     // apply is left verbatim, so a plan with none is unchanged.
     let decorrelated = try decorrelate(logical, augmented)
-    let plan = try optimise(decorrelated, augmented)
+    // A query-level `ORDER BY`/`DISTINCT`/`OFFSET`·`FETCH` over a set operation
+    // — an `ordered` carrier whose `core` is a `.setop` — optimises PER ARM,
+    // mirroring the view carrier path (`optimise(_:_:_:)` at the `.ordered`
+    // view seam): the generic optimiser would rewrite both arms under the SAME
+    // carrier-level `augmented` context, which does NOT bind an arm-owned
+    // derived alias (arms are SELECT-scoped), so its `seek` rewrite faults
+    // `.relation` on a `FROM (SELECT …) AS d WHERE …` arm before the per-arm
+    // `execute(…carrying:)` below can augment each arm under its own overlay.
+    // Descending the carrier to the setop leaf and augmenting each arm under
+    // its own context resolves the arm-local alias. The `case .setop = core`
+    // guard keeps a plain query (and an ordered carrier over a bare `SELECT`,
+    // not a setop) on the generic optimiser.
+    let plan: Plan
+    if case .ordered = query, case .setop = query.core {
+      plan = try optimise(decorrelated, query.core, augmented)
+    } else {
+      plan = try optimise(decorrelated, augmented)
+    }
+    // A query-level `ORDER BY`/`DISTINCT`/`OFFSET`·`FETCH` over a set operation
+    // — the `ordered` carrier — must run its inner union PER ARM, as the direct
+    // `run(.setop)` above does: each arm augments its OWN arm-local derived
+    // aliases (arms are SELECT-scoped, so the query-level augment misses them)
+    // before its `.scan` reads them, then the arms `combine`. Executing the
+    // compiled carrier plan under the single carrier context instead would
+    // never materialise an arm's derived table, faulting `.relation`. Route the
+    // execute through the carrier descent, which threads the inner union's arm
+    // queries to the setop leaf and runs `arms` there — the SAME per-arm
+    // machinery — leaving the sort/dedup/limit/project stack above unchanged.
+    if case let .ordered(inner, _, _, _, _) = query {
+      return try execute(plan, carrying: inner, augmented).map(\.values)
+    }
     return try execute(plan, augmented).map(\.values)
   }
 
@@ -357,7 +425,7 @@ extension Catalog where Self: ~Escapable {
       if rows {
         // A CTE that names itself iterates a fixpoint; every other one runs its
         // query once. The arity of both routings is already checked above.
-        if cte.recursive && cte.recurses {
+        if cte.recursive, try cte.recurses {
           (materialised, carrier) = try fixpoint(cte, scope)
         } else {
           materialised = try run(cte.query, scope)
@@ -438,13 +506,30 @@ extension Catalog where Self: ~Escapable {
     // Reject a misplaced recursive reference in an EARLIER arm when no
     // same-named base/view can seed it — the shape `with` rejects before
     // routing to the fixpoint.
-    if cte.recursive, case let .setop(.union, anchor, _, _) = cte.query,
+    if cte.recursive,
+        case let .setop(.union, anchor, _, _) = try cte.canonical.inner,
         anchor.references(cte.name.lowercased()),
         case nil = table(named: cte.name),
         case nil = view(named: cte.name) {
       throw .state("0A000",
                    "recursive WITH references the CTE outside its final " +
                    "UNION arm")
+    }
+    // A recursive body that is a NON-UNION set operation (`EXCEPT`/`INTERSECT`)
+    // referencing itself has no recursive arm to iterate: `recurses` matches
+    // only a `.union` core, so this body would take the run-once path and
+    // compile with the CTE self UNBOUND, faulting a generic `SQLError.relation`
+    // on the self reference. ISO 9075 permits recursion only through
+    // `UNION [ALL]`, so fault the precise `0A000` feature diagnostic instead —
+    // unless a same-named base/view seeds it (then the reference reads that
+    // relation and the body runs once, as the misplaced-anchor guard allows).
+    let core = try cte.canonical.inner
+    if cte.recursive,
+        case let .setop(kind, _, _, _) = core, kind != .union,
+        core.references(cte.name.lowercased()),
+        case nil = table(named: cte.name),
+        case nil = view(named: cte.name) {
+      throw .state("0A000", "recursion requires UNION [ALL]")
     }
     // Check the declared arity by compiling the body — never a cursor. A
     // recursive (self-naming) CTE checks its anchor and recursive arm the way
@@ -453,9 +538,11 @@ extension Catalog where Self: ~Escapable {
     // body with self NOT in scope. When `typecheck`, the reachable-operand
     // check runs in the SAME per-arm scope each arity check uses, so the
     // operand check shares the run's arm scoping and never types an anchor
-    // against the CTE-self overlay.
-    if cte.recursive && cte.recurses,
-        case let .setop(.union, anchor, recursive, _) = cte.query {
+    // against the CTE-self overlay. `recursiveArms`/`canonical` peel the SAME
+    // canonical (unwound) shape the run's `fixpoint` and the schema
+    // `contributions` do, so all three inspect the identical AST.
+    if let (anchor, recursive, _) = try cte.recursiveArms {
+      let carrier = try cte.canonical.carrier
       let scope = try augment(context.validating(typecheck), for: anchor,
                               rows: false)
       let width = try compile(anchor, scope).width
@@ -515,6 +602,28 @@ extension Catalog where Self: ~Escapable {
         // The recursive arm is operand-checked with self bound to the declared
         // columns — the schema every iteration reads the CTE under.
         try self.typecheck(recursive, probe)
+        // Validate the peeled carrier's `ORDER BY` keys the SAME way the RUN
+        // path resolves them (`fixpoint`/`apply`): against the body's FIRST-ARM
+        // set-op OUTPUT scope, through the ordinary `SELECT * FROM <temp> ORDER
+        // BY …` machinery over an EMPTY temp of those output columns. A key
+        // naming a missing column or function faults here on the schema path as
+        // it faults the run, closing the run-vs-validate gap where a carrier
+        // `ORDER BY missing(n)` passed `columns(of:validate:true)` yet the run
+        // faulted `.function('missing')` when `apply` resolved it after the
+        // fixpoint. The declared rename rides the CTE binding AFTER the
+        // carrier, so — as the run does — the carrier resolves the body's
+        // output names.
+        if let carrier {
+          // A set operation names its output off its FIRST arm (the ISO rule),
+          // so the carrier's `ORDER BY` resolves against the ANCHOR's output
+          // NAMES — resolved with the CTE self NOT in scope, so the anchor's
+          // own names/types derive without faulting `.relation` on the
+          // recursive arm's self reference. (Unifying the whole `body` would
+          // need the self bound to fold the recursive arm.)
+          let outputs = try columns(unifying: anchor, scope)
+          try validate(carrier: carrier, over: outputs, arm: anchor.first,
+                       context.validating(true))
+        }
       }
     } else {
       let scope = try augment(context.validating(typecheck), for: cte.query,
@@ -577,7 +686,15 @@ extension Catalog where Self: ~Escapable {
     // empty, matching the non-recursive and non-`WITH` paths.
     let context = try augment(context.validating(false), for: cte.query,
                               rows: true)
-    guard case let .setop(.union, anchor, recursive, all) = cte.query else {
+    // Peel the CANONICAL recursive shape — the SAME `canonical` (unwound) form
+    // `recurses`/`recursiveArms`, the shape validator, and the schema derive
+    // peel — off the body: the fixpoint iterates the INNER `UNION` (anchor ∪
+    // recursive) with the CTE self in scope, then the peeled `carrier` applies
+    // its row operators to the materialised RESULT. The carrier is transparent
+    // to the recursive shape (`references` descends it), so `recurses` already
+    // routed an ordered body here.
+    let (body, carrier) = try cte.canonical
+    guard case let .setop(.union, anchor, recursive, all) = body else {
       // A non-`UNION` recursive query runs once, but still binds under
       // `cte.columns`, so validate its compiled width here too — the check the
       // anchor and arm get. A body naming a base relation of the CTE's own name
@@ -713,7 +830,102 @@ extension Catalog where Self: ~Escapable {
       result += next
       working = next
     }
+    // Apply the peeled query-level carrier — a trailing `ORDER BY` / `OFFSET`·
+    // `FETCH` / `DISTINCT` on the body's set operation — to the materialised
+    // fixpoint RESULT, reusing the ordinary `SELECT`-over-a-relation path
+    // rather than re-resolving the row operators here. A trailing carrier's
+    // `generated` is always `0` (the parser materialises no hidden sort column
+    // for it; only `expand` does, which never yields a recursive body), so the
+    // result rows are exactly the CTE's declared columns and need no trim.
+    //
+    // The carrier's `ORDER BY` resolves against the body's FIRST-ARM set-op
+    // OUTPUT names — the SAME scope the non-recursive ordered-CTE body uses
+    // (`WITH t(n) AS (SELECT 1 AS x UNION ALL … ORDER BY x)` orders by the
+    // arm-0 output `x`, not the declared `n`) — so name the temp `apply` binds
+    // under the ANCHOR's output names (a set operation names its output off its
+    // FIRST arm, the ISO rule; the anchor resolves with the CTE self NOT in
+    // scope, so its names derive without the self binding), NOT the CTE's
+    // DECLARED names (`merged`). Each column carries the run-unified `merged`
+    // TYPE the materialised rows hold. The CTE-declared rename rides the
+    // RETURNED `merged` carrier, applied AFTER the carrier at CTE consumption,
+    // so the outer `SELECT n FROM t` still addresses `n`.
+    if let carrier {
+      let outputs = try columns(unifying: anchor, context)
+      let named = merged.indices.map {
+        ResolvedColumn(name: outputs[$0].name, type: merged[$0].type,
+                       unconstrained: merged[$0].unconstrained)
+      }
+      result = try apply(carrier, result, named, arm: anchor.first, context)
+    }
     return (result, merged)
+  }
+
+  /// Applies a peeled query-level `carrier` — `DISTINCT`/`ORDER BY`/`OFFSET`·
+  /// `FETCH` — to the materialised `rows` a recursive-CTE fixpoint produced,
+  /// typed by the fixpoint's unified `carrier` `columns` (the body's arm-0
+  /// output names), `arm` the body's FIRST arm (the anchor).
+  ///
+  /// The rows are bound as a temporary relation under a non-spellable name; a
+  /// bare scan over it seeds the SHARED `carried(over:)` carrier resolver — the
+  /// SAME resolver the ordinary `ordered` set-operation path uses — so the
+  /// carrier's `ORDER BY` resolves a projected-expression / aliased / qualified
+  /// / ordinal key against the arm-0 projection surface IDENTICALLY to the
+  /// ordinary path, never a bare `SELECT * FROM <temp>` that re-evaluates a
+  /// projected key over the column-shy temp. A trailing carrier's `generated`
+  /// is always `0` (only `expand` materialises hidden sort columns, and it
+  /// never yields a recursive body), so the identity projection trims nothing.
+  private borrowing func apply(_ carrier: Query.Carrier,
+                               _ rows: Array<Array<Value>>,
+                               _ columns: Array<ResolvedColumn>,
+                               arm: Select, _ context: Context)
+      throws(SQLError) -> Array<Array<Value>> {
+    let name = "*fixpoint"
+    let temp = RelationInstance(from: columns, rows: rows)
+    // Thread ONE fresh subquery cache — a shared box — through BOTH `carried`
+    // (which resolves the carrier `ORDER BY` and, for a sort key CORRELATED to
+    // the set-op output, records that key's compiled runtime plan here) AND
+    // `execute` (whose row evaluator reads that recorded plan back), mirroring
+    // the top-level `run`. A fresh box (not the incoming context's) isolates
+    // the carrier's subquery cache from the fixpoint iterations' recorded body
+    // plans; what matters is that `carried` writes and `execute` read the SAME
+    // box, so a correlated carrier sort key does not fault "a correlated
+    // subquery plan was not compiled" on execution.
+    let context = context.binding(name, to: temp).resolving(Subqueries())
+    // The base scan over the temp — its output columns ARE `columns`, the
+    // setop-output scope the carrier resolves against. The shared resolver
+    // stacks the row operators over it in that identity slot space.
+    let scan = try compile(.select(Select(projection: .all,
+                                          from: Relation(name: name))),
+                           context)
+    let plan = try carried(over: scan, output: columns, arm: arm,
+                           distinct: carrier.distinct, order: carrier.order,
+                           limit: carrier.limit, generated: carrier.generated,
+                           context)
+    return try execute(plan, context).map(\.values)
+  }
+
+  /// Validates the peeled `carrier`'s `ORDER BY` keys against the body's set-op
+  /// output `columns` — an EMPTY temp of those columns — through the SAME
+  /// shared `carried(over:)` resolver `apply` runs, under a validating context,
+  /// so a schema-path `columns(of:validate:true)` faults a carrier `ORDER BY`
+  /// naming a missing column or function EXACTLY as the run does, closing the
+  /// run-vs-validate gap. `arm` is the body's FIRST arm (the anchor), the
+  /// projection surface an ordinal / projected-expression / aliased key binds
+  /// against. Discards the resolved plan — only its resolution can fault.
+  private borrowing func validate(carrier: Query.Carrier,
+                                  over columns: Array<ResolvedColumn>,
+                                  arm: Select, _ context: Context)
+      throws(SQLError) {
+    let name = "*fixpoint"
+    let temp = RelationInstance(from: columns, rows: [])
+    let context = context.binding(name, to: temp)
+    let scan = try compile(.select(Select(projection: .all,
+                                          from: Relation(name: name))),
+                           context)
+    _ = try carried(over: scan, output: columns, arm: arm,
+                    distinct: carrier.distinct, order: carrier.order,
+                    limit: carrier.limit, generated: carrier.generated,
+                    context)
   }
 }
 
@@ -1015,6 +1227,389 @@ extension Plan {
   }
 }
 
+// MARK: - Ordered set operation
+
+/// A grouped-arm resolver a carrier caller injects: the RESOLVED grouped-space
+/// `Term` of each projected item, and a closure lowering an arbitrary
+/// expression to that same space — the identity surface a query-level `ORDER
+/// BY` key matches against by resolved identity. A plain set-operation carrier
+/// injects none (`nil`).
+internal typealias Resolver =
+    (terms: Array<Term>, resolve: (Expression) throws(SQLError) -> Term)
+
+extension Catalog where Self: ~Escapable {
+  /// Compiles an `ORDER BY` / `SELECT DISTINCT` / `OFFSET`·`FETCH` carried over
+  /// the set-operation `union` — the `Query.ordered` carrier — into the row
+  /// operators STACKED over the union's compiled plan, resolved through the
+  /// setop's OUTPUT scope.
+  ///
+  /// A `setop` node has no order/distinct/limit slot, so the query-level row
+  /// operators ride this outer carrier rather than a text `SELECT * FROM
+  /// (union) AS g ORDER BY …` wrapper. They resolve against a scope over the
+  /// union's OUTPUT columns — the arm-0-named, type-unified result columns —
+  /// the SAME canonical resolution any `SELECT … FROM <derived> ORDER BY
+  /// <alias/ordinal/expr>` uses, so:
+  ///
+  ///   - an ordinal `ORDER BY n`, an output alias, or a bare projected column
+  ///     orders on that output column (its slot in the union output);
+  ///   - a generated `column N` display header is NOT among the scope's
+  ///     bindable output names, so `ORDER BY "column N"` faults `.column` — as
+  ///     it does over any derived union — rather than being wrongly accepted;
+  ///   - a bare name matching TWO output columns faults `SQLError.ambiguous`,
+  ///     as a plain grouped query's `ORDER BY` does;
+  ///   - under `DISTINCT` a key must name an output (`distinct(_:_:_:)` over
+  ///     the identity projection), matching the plain-grouped rule.
+  ///
+  /// The row operators do NOT project — the result schema is the union's — so
+  /// the carrier's projection is the IDENTITY over the real output slots
+  /// (`0 ..< real`), which also trims any hidden materialised column.
+  internal borrowing func ordered(_ union: Query, distinct: Bool,
+                                  order: Order?, limit: Limit?,
+                                  generated: Int,
+                                  _ context: Context) throws(SQLError) -> Plan {
+    // Compile the inner union and derive its OUTPUT columns — the arm-0-named,
+    // type-unified result columns the carrier orders/dedups over. The plan's
+    // output sits at slots `0 ..< width` (a `setop`'s output is its arm-0
+    // projection), so the carrier resolves and stacks in that identity space.
+    // The shared `carried(over:)` resolver then does the whole ORDER BY /
+    // DISTINCT resolution against the setop-output scope and stacks the row
+    // operators.
+    let plan = try compile(union, context)
+    let cols = try columns(unifying: union, context)
+    return try carried(over: plan, output: cols, arm: union.first,
+                       distinct: distinct, order: order, limit: limit,
+                       generated: generated, context)
+  }
+
+  /// The REAL output count of an `ordered` carrier over a `width`-column set
+  /// operation — the trim width `width − generated`, the leading real outputs
+  /// with the trailing `generated` hidden materialised sort columns dropped.
+  ///
+  /// `Query.ordered` is a PUBLIC AST case a caller may build with a `generated`
+  /// count out of step with the inner union's width (the parser only ever emits
+  /// `0`, and `expand` an in-range count). A count PAST the width, or NEGATIVE,
+  /// would make the trim width negative — the carrier's `0 ..< real` range and
+  /// per-column subscripts, and the schema path's `Array.prefix`, would TRAP
+  /// the process. Rejecting the malformed count with ONE typed internal-error
+  /// fault, read by BOTH the compile carrier (`carried`) and the schema path
+  /// (`columns(unifying:)`), keeps `run ≡ columns(of:)` on a malformed carrier.
+  internal func real(trimming generated: Int, of width: Int)
+      throws(SQLError) -> Int {
+    guard generated >= 0, generated <= width else {
+      throw .state("XX000",
+                   "ordered set-operation generated count out of range")
+    }
+    return width - generated
+  }
+
+  /// Stacks the query-level row operators — a carried `ORDER BY` / `DISTINCT` /
+  /// `OFFSET`·`FETCH` — over an already-compiled set-operation `plan`, resolved
+  /// through the setop's OUTPUT scope. `plan`'s output sits at slots
+  /// `0 ..< output.count`, the arm-0-named, type-unified result columns
+  /// (`output`); `arm` is the union's FIRST arm — its projection is the surface
+  /// a projected-expression / aliased / qualified ORDER BY key matches against
+  /// by AST (a plain set-op arm).
+  ///
+  /// `resolver`, when INJECTED, lowers the arm's projected items to a grouped
+  /// slot space and lowers an arbitrary expression to the same space — a
+  /// resolved-identity surface a caller over a grouped arm supplies so a
+  /// query-level `ORDER BY` key matches a projected aggregate by resolved
+  /// identity. A plain set-operation arm has no grouped aggregate space and
+  /// passes `nil`, so the carrier keeps the ordinary AST/output-name
+  /// resolution; `generated` is then `0` and no hidden slot is materialised or
+  /// trimmed.
+  ///
+  /// A `setop` node has no order/distinct/limit slot, so the query-level row
+  /// operators ride this outer carrier rather than a text `SELECT * FROM
+  /// (union) AS g ORDER BY …` wrapper. They resolve against a scope over the
+  /// setop's OUTPUT columns — the arm-0-named, type-unified result columns —
+  /// the SAME canonical resolution any `SELECT … FROM <derived> ORDER BY
+  /// <alias/ordinal/expr>` uses.
+  ///
+  /// The row operators do NOT project — the result schema is the union's — so
+  /// the carrier's projection is the IDENTITY over the real output slots
+  /// (`0 ..< real`), which also trims any hidden materialised column.
+  internal borrowing func carried(over plan: Plan,
+                                  output cols: Array<ResolvedColumn>,
+                                  arm: Select, distinct: Bool, order: Order?,
+                                  limit: Limit?, generated: Int,
+                                  resolver: Resolver? = nil,
+                                  _ context: Context)
+      throws(SQLError) -> Plan {
+    if let limit {
+      // A direct `Limit(count:offset:)` may carry negatives the executor's
+      // skip and take would trap on (the parser yields only non-negatives).
+      // Reject them as a query error, as the `Select` compile path does.
+      guard limit.offset >= 0 else {
+        throw .state("2201X", "OFFSET row count must be non-negative")
+      }
+      guard (limit.count ?? 0) >= 0 else {
+        throw .state("2201W", "FETCH row count must be non-negative")
+      }
+    }
+    let width = cols.count
+    // The union's arm-0 projection carries the real output items followed by
+    // any hidden materialised sort columns (a producer aliases them `*gsN`).
+    // The REAL output count `real` is the carrier's trim width — the STRUCTURAL
+    // `generated` count carried on the node (never a scan of the arm-0 names
+    // for a `*gs` prefix, which would trim a user's delimited `AS "*gs0"`), so
+    // slots `0 ..< real` are the real outputs and `real ..< width` the hidden
+    // ones. The hidden expressions map to their `*gsN` output slots for a
+    // materialised ORDER BY key.
+    let items: Array<Projected> = switch arm.projection {
+    case let .expressions(list):
+      list
+    case let .columns(columns):
+      columns.map { Projected(expression: .column($0)) }
+    case .all:
+      []
+    }
+    // Range-check the `generated` count against the width and derive the trim
+    // width `real` through the shared guard (see `real(trimming:of:)`), which
+    // faults a malformed public-AST count rather than letting the `0 ..< real`
+    // range below or a per-column subscript TRAP. The SAME guard backs the
+    // schema path (`columns(unifying:)`), so `run ≡ columns(of:)`.
+    let real = try real(trimming: generated, of: width)
+    // A `generated` tail must correspond to genuine HIDDEN aliased columns — a
+    // producer's `*gsN` items, each carrying a non-nil alias. A caller may,
+    // though, build `.ordered(<2-col union>, generated: 1)` over an ORDINARY
+    // union whose trailing item is a normal projected column with NO alias, OR
+    // `.ordered(<SELECT * union>, generated: N>0)` whose arm-0 projection is
+    // `.all` so `items` is EMPTY though `width > 0`: the hidden-name mapping's
+    // `items[real + k].alias!` below would TRAP (an unaliased item, or an
+    // absent one when `items` is short). Prove each generated tail slot HAS a
+    // corresponding aliased projected item before force-unwrapping, faulting
+    // the same typed internal-error the range guard raises rather than
+    // crashing. (Not a `where` skip: an absent slot must fault, not pass.)
+    for k in 0 ..< generated {
+      guard real + k < items.count, items[real + k].alias != nil else {
+        throw .state("XX000",
+                     "ordered set-operation generated tail is not aliased")
+      }
+    }
+    // The output NAME of each REAL column — an alias, else a bare column. An
+    // unnamed output (a computed column with no `AS`) has NO bindable name: it
+    // is reachable only by ordinal, so it takes a non-spellable synthetic name
+    // (`*colN`, which a normal or delimited identifier cannot spell) rather
+    // than the positional `column N` DISPLAY header — else `ORDER BY "column
+    // N"` would wrongly bind it, where a plain derived union faults `.column`.
+    //
+    // Whether an output is unnamed is the RESOLVED column's STRUCTURAL
+    // `synthesized` flag — set where the projection had no inferable name
+    // (`Projected.name == nil`) and a positional `column N` was substituted —
+    // NOT a comparison of the resolved name text to `column N`, which would
+    // mistake a user's EXPLICIT delimited `AS "column 1"` for a synthesized
+    // header and strip it. A named output keeps its name; a synthesized one is
+    // `nil` here (not bindable). (A `SELECT *`/`TABLE` first arm names every
+    // output through `cols`, never synthesized, and carries no hidden column,
+    // so `real == width`.)
+    let outputs: Array<String?> = (0 ..< real).map {
+      cols[$0].synthesized ? nil : cols[$0].name
+    }
+    // The scope over the union's output. The schema names EVERY column so
+    // `term` can resolve a materialised key's synthetic column: a named real
+    // output by its name, an UNNAMED real output by a non-spellable `*colN`,
+    // and each hidden materialised column by its `*gsN` alias.
+    let schema = Schema(from: cols,
+                        names: (0 ..< width).map {
+                          $0 < real ? (outputs[$0] ?? "*col\($0)")
+                                    : items[$0].alias!
+                        },
+                        extent: width, virtuals: [])
+    // The derived relation is a scope entry keyed by the empty alias, so bare
+    // ORDER BY / DISTINCT names resolve unqualified over the `schema`; its
+    // inner query is inspected nowhere here, so the arm-0 `SELECT` stands in
+    // for it uniformly.
+    let scope = Scope([(Relation(derived: .select(arm), as: ""), schema)])
+    // COLLECT and RESOLVE the carrier ORDER BY's OWN nested subqueries — the
+    // SAME machinery a plain `SELECT … ORDER BY CASE WHEN EXISTS (…) …` uses
+    // (`subquery(_:_:_:within:)` builds a `Resolution` recording each nested
+    // query's width/type/plan against the setop-output `scope`, AND records a
+    // CORRELATED one's runtime plan into `context.subqueries` per the ROLE it
+    // occupies). A carried `ORDER BY` over a set operation is otherwise lowered
+    // with the DEFAULT `.unsupported` resolution, so `scope.order` REJECTS an
+    // `EXISTS`/`IN`/scalar sort-key subquery a plain `SELECT`'s ORDER BY
+    // accepts. Threading this resolution in makes a set operation's ORDER BY
+    // resolve a subquery sort key identically to a plain select's; an ORDER BY
+    // position bars a NEW correlation (`.barred` inside `scope.order`), so a
+    // genuinely-unsupported case still faults exactly as it does on a SELECT.
+    //
+    // `roles(of:)` classifies a subquery by the CLAUSE it occurs in, so the
+    // recording pass must inspect a select whose ORDER BY IS the carrier's —
+    // NOT the bare `arm`, whose own ORDER BY does not carry the carrier's sort-
+    // key subqueries. Reusing `arm` there records NO runtime plan (empty
+    // roles), so a CORRELATED carrier sort-key subquery lowers to a
+    // `Term.subquery`/`.parameter` yet faults "a correlated subquery plan was
+    // not compiled" at execution — where the SAME ORDER BY on a plain SELECT
+    // records and re-executes it per row. Overlay the carrier's `order` on the
+    // arm (keeping the arm's projection surface a projected-expression key
+    // resolves against) so the recording sees the carrier's sort-key subqueries
+    // in their ORDER BY role. The projected-key resolution itself still runs
+    // over `arm` in `scope.order` below; `subquery(_:_:_:within:)` reads the
+    // passed select ONLY for `roles(of:)`.
+    var subqueries = Array<Query>()
+    for key in order?.keys ?? [] {
+      if case let .expression(expression) = key.sort {
+        expression.collect(subqueries: &subqueries)
+      }
+    }
+    let classifier = Select(distinct: arm.distinct, projection: arm.projection,
+                            from: arm.from, joins: arm.joins,
+                            predicate: arm.predicate, grouping: arm.grouping,
+                            having: arm.having, order: order, limit: arm.limit)
+    let resolution = try subquery(subqueries, classifier, context,
+                                  within: scope)
+    // The identity projection over the REAL output slots, and the REAL output
+    // names a bare ORDER BY name or a DISTINCT key binds against — alias-or-
+    // bare, `nil` for an unnamed output. `scope.order` bounds an ORDINAL key by
+    // this projection's COUNT, so it must be the REAL arity (`real`), NOT the
+    // grown `width`.
+    let projection = (0 ..< real).map(Term.slot)
+    let names: Array<String?> = (0 ..< real).map { outputs[$0] }
+    // Resolve the ORDER BY through the setop-output scope. Rewrite only a key
+    // the scope cannot resolve for itself over the union's output.
+    var keys = Array<SortKey>()
+    if let order {
+      // The REAL projected items an `ORDER BY <expr>` key may match to its
+      // ordinal — the arm-0 projection minus its trailing hidden `*gsN`
+      // columns. EMPTY for a `SELECT *`/`TABLE` first arm (no enumerated
+      // projection to match), so such a key falls to the scope's ordinary
+      // resolution over the `*`-expanded output columns.
+      let reals = Array(items.prefix(real))
+      let folded = Set(outputs.compactMap { $0?.lowercased() })
+      let rewritten = Order(keys: try order.keys.map {
+        key throws(SQLError) -> Order.Key in
+        guard case let .expression(expression) = key.sort else { return key }
+        // A BARE unqualified column NAMING A REAL OUTPUT is left to the
+        // setop-output scope's ordinary resolution, whichever carrier: it binds
+        // an output alias or a bare projected column BY NAME and faults
+        // `.ambiguous` on a name TWO outputs share — the ISO precedence
+        // `scope.order` applies before a term match, which a resolved-identity
+        // rewrite to an ordinal would wrongly bypass. A bare column that is NOT
+        // a real output rides the resolver (when injected) to its hidden slot.
+        let bare = if case let .column(column) = expression {
+          column.qualifier == nil && folded.contains(column.name.lowercased())
+        } else {
+          false
+        }
+        // A grouped-arm caller's injected resolver: match a QUALIFIED column or
+        // a NON-column expression against the arm's projected terms by RESOLVED
+        // identity. A key that lowers cleanly and equals a projected term
+        // orders on that slot's ORDINAL — a REAL slot directly, a HIDDEN slot
+        // through its `*gsN` output name. A key `resolve` faults on is left for
+        // the setop-output scope to bind or fault, as before.
+        if let resolver, !bare {
+          let term = try? resolver.resolve(expression)
+          if let term, let slot = resolver.terms.firstIndex(of: term) {
+            if slot < real {
+              return Order.Key(sort: .ordinal(slot + 1),
+                               ascending: key.ascending)
+            }
+            return Order.Key(
+                sort: .expression(.column(Column(name: items[slot].alias!))),
+                ascending: key.ascending)
+          }
+          return key
+        }
+        if resolver != nil { return key }
+        // Plain set-operation carrier: a materialised key (a hidden `*gsN`
+        // item, matched by AST) orders on that hidden column.
+        if let slot = (real ..< width).first(where: {
+          items[$0].expression == expression
+        }) {
+          return Order.Key(
+              sort: .expression(.column(Column(name: items[slot].alias!))),
+              ascending: key.ascending)
+        }
+        if case let .column(column) = expression {
+          // A qualified column whose bare name is an output drops its
+          // qualifier (the set-operation result carries none), so it binds that
+          // output as a bare name — resolving, or faulting `.ambiguous` on a
+          // duplicate, as the plain form. Every other column rides through.
+          if column.qualifier != nil,
+              folded.contains(column.name.lowercased()) {
+            return Order.Key(sort: .expression(.column(Column(name: column
+                                                                    .name))),
+                             ascending: key.ascending)
+          }
+          return key
+        }
+        if let index = reals.firstIndex(where: {
+          $0.expression == expression
+        }) {
+          return Order.Key(sort: .ordinal(index + 1),
+                           ascending: key.ascending)
+        }
+        return key
+      })
+      keys = try scope.order(rewritten, projection, names, context.routines,
+                             subquery: resolution)
+      // The carrier's ORDER BY is a NEW expression surface: `scope.order`
+      // RESOLVES each key (binds a column, arity), but — like the grouped
+      // path's structural resolve — does NOT type-check a key's operands or its
+      // calls, so an unknown routine (`ORDER BY missing(a)`) or an ill-typed
+      // operand (`ORDER BY a + 'x'`) a run raises on slipped past validate.
+      // Under `validate`, type-check each key EXPRESSION against the SAME
+      // setop-output scope it resolved over — its calls and operands as a
+      // projected expression's — so validate faults IDENTICALLY to a run. An
+      // ordinal/output-name key carries no `.expression` to re-check. The run
+      // path compiles LENIENTLY (`validate: false`), so this never double-
+      // faults there — the run surfaces the fault at execution as it did
+      // before.
+      if context.validate {
+        // A carrier ORDER BY key may nest an `EXISTS`/`IN`/scalar subquery
+        // (`ORDER BY CASE WHEN EXISTS (…) …`), which the `scope.validate`
+        // type-check below rejects under the DEFAULT `.unsupported`
+        // `SubqueryCheck`. Record each nested subquery's width and type — the
+        // SAME cursor-free pre-pass `subqueryCheck(of:)` runs for a plain
+        // SELECT's ORDER BY subqueries — so the type-check validates a subquery
+        // sort key rather than faulting `.unsupported`, keeping the schema path
+        // in step with the run (which resolves the same key through
+        // `resolution` above).
+        //
+        // Derive each subquery's width/type against the SAME setop-output
+        // `scope` the run resolves it through (`subquery(_:_:_:within: scope)`
+        // above): a carrier ORDER BY subquery may reference a set-operation
+        // OUTPUT column — an aliased output living ONLY in this scope, unseen
+        // by `context.outer` — so nesting `scope` under the outer, enclosing-
+        // scope shape `subquery(_:_:_:within:)` builds, resolves it at validate
+        // EXACTLY as it does at run. Threading bare `context.outer` faulted
+        // `.column` on a set-op output column a run resolves, rejecting a query
+        // that executes. A genuinely-unresolvable column (not a set-op output,
+        // absent from the outer) still faults here as it does at run.
+        let nested = (context.outer ?? Outer()).nested(under: scope)
+        var widths = Dictionary<Query, Int>()
+        var types = Dictionary<Query, ValueType>()
+        for query in subqueries {
+          try self.width(query, [], context, nested, &widths, &types)
+        }
+        let check = SubqueryCheck(widths, types).barred
+        for key in rewritten.keys {
+          guard case let .expression(expression) = key.sort else { continue }
+          try scope.aggregates(in: expression, context.routines,
+                               subquery: check)
+          _ = try scope.validate(expression, context.routines, subquery: check)
+        }
+      }
+    }
+    // Under DISTINCT every ORDER BY key must be a select-list value (see
+    // `distinct`); the keys and identity projection are in the union's output
+    // slot space, aligned with the AST keys index-for-index. The DISTINCT check
+    // sees ONLY the REAL outputs (`0 ..< real`), NOT the hidden materialised
+    // sort columns: a hidden `*gsN` slot is not a select-list value.
+    if distinct, let order {
+      keys = try SQLEngine.distinct(order.keys, keys,
+                                    (0 ..< real).map(Term.slot))
+    }
+    // Stack the row operators over the union plan, trimming to the REAL output
+    // columns with the identity projection `0 ..< real` (dropping any hidden
+    // materialised sort column).
+    return plan.shaped(distinct: distinct,
+                       projection: (0 ..< real).map(Term.slot),
+                       filter: nil, order: keys, limit: limit)
+  }
+}
+
 // MARK: - Aggregation
 
 extension Select {
@@ -1232,6 +1827,7 @@ extension Query {
     switch self {
     case let .select(select): select.bound
     case let .setop(_, left, right, _): left.bound || right.bound
+    case let .ordered(inner, _, _, _, _): inner.bound
     }
   }
 
@@ -1245,6 +1841,7 @@ extension Query {
     switch self {
     case let .select(select): select.subqueries
     case let .setop(_, left, right, _): left.subqueries + right.subqueries
+    case let .ordered(inner, _, _, _, _): inner.subqueries
     }
   }
 
@@ -1258,6 +1855,7 @@ extension Query {
     switch self {
     case let .select(select): select.valued
     case let .setop(_, left, right, _): left.valued.union(right.valued)
+    case let .ordered(inner, _, _, _, _): inner.valued
     }
   }
 
@@ -1270,6 +1868,7 @@ extension Query {
     switch self {
     case let .select(select): select.scalar
     case let .setop(_, left, right, _): left.scalar.union(right.scalar)
+    case let .ordered(inner, _, _, _, _): inner.scalar
     }
   }
 
@@ -1284,6 +1883,7 @@ extension Query {
     case let .select(select): select.existential
     case let .setop(_, left, right, _):
       left.existential.union(right.existential)
+    case let .ordered(inner, _, _, _, _): inner.existential
     }
   }
 }
@@ -2438,16 +3038,38 @@ extension Catalog where Self: ~Escapable {
                                   _ context: Context)
       throws(SQLError) -> Plan {
     let overlay = try overlay(name, context)
-    guard let view = resolve(view: name), case .setop = view.query,
-        case .setop = plan else {
+    guard let view = resolve(view: name) else {
       return try optimise(plan, overlay)
     }
-    return try optimise(plan, view.query, overlay)
+    // A BARE set-operation body (`view.query` itself a `.setop`) optimises its
+    // `.setop` plan per arm, EXACTLY as before — but any other plan shape (a
+    // pushed `.select` over the setop, a `.derived`, a leaf) stays on the plain
+    // optimiser, whose pushdown/seek pass rebases a caller `WHERE` into each
+    // arm. Preserved verbatim so a non-ordered union view's seek injection is
+    // unchanged.
+    if case .setop = view.query, case .setop = plan {
+      return try optimise(plan, view.query, overlay)
+    }
+    // A set operation UNDER an `ordered` carrier compiles to a `.shaped` stack
+    // (project/sort/distinct/limit) over the `.setop` — NOT a bare setop — so
+    // its per-arm derived aliases went un-optimised (both `case .setop` guards
+    // failed). Descend the carrier wrapper to the setop leaf, optimising each
+    // arm under its own overlay, exactly as the execute path's carrier-aware
+    // `setop`/`execute(_:carrying:)` do. GATED on the body actually wearing a
+    // carrier (`view.query` an `.ordered`), so a bare union view keeps the
+    // plain path above and this never rewrites its pushed `.select`/seek shape.
+    if case .ordered = view.query, case .setop = view.query.core {
+      return try optimise(plan, view.query.core, overlay)
+    }
+    return try optimise(plan, overlay)
   }
 
   /// Optimises a view body's SET-OPERATION `plan` arm by arm, each arm sub-plan
   /// under `overlay` AUGMENTED with THAT arm's own derived aliases, descending
-  /// the `plan` and `query` trees in lockstep (they mirror each other).
+  /// the `plan` and `query` trees in lockstep (they mirror each other). A body
+  /// riding an `ordered` carrier descends the `.shaped` wrapper stack first,
+  /// reconstructing each row operator over its optimised source, down to the
+  /// `.setop` leaf.
   private borrowing func optimise(_ plan: Plan, _ query: Query,
                                   _ overlay: Context)
       throws(SQLError) -> Plan {
@@ -2456,6 +3078,31 @@ extension Catalog where Self: ~Escapable {
       return try .setop(kind, optimise(left, leftQuery, overlay),
                         optimise(right, rightQuery, overlay), all: all,
                         types: types, widened: widened)
+    }
+    // Descend the `ordered` carrier's single-source row operators, rebuilding
+    // each over its optimised source while the setop `query` core rides through
+    // unchanged until the `.setop` node above splits it. The carrier wrapper
+    // sits ABOVE the setop, so `query` is STILL the `.setop` core here — gate
+    // on that: once the setop has split into an arm (`query` a `.select`), the
+    // plan is that ARM's own sub-plan, whose `.project`/`.select`/… must reach
+    // the plain arm optimiser below (its seek/pushdown rewrite), NOT be walked
+    // through as a carrier wrapper. So these cases fire ONLY above the setop.
+    if case .setop = query {
+      switch plan {
+      case let .project(terms, source):
+        return try .project(terms, optimise(source, query, overlay))
+      case let .sort(keys, source):
+        return try .sort(keys: keys, optimise(source, query, overlay))
+      case let .distinct(source):
+        return try .distinct(optimise(source, query, overlay))
+      case let .limit(count, offset, source):
+        return try .limit(count: count, offset: offset,
+                          optimise(source, query, overlay))
+      case let .select(filter, source):
+        return try .select(filter, optimise(source, query, overlay))
+      default:
+        break
+      }
     }
     // Schema-only (`rows: false`): the optimiser needs the arm's derived alias
     // bound by name/schema so `seek` treats it as an unseekable materialised
@@ -3877,6 +4524,15 @@ extension Catalog where Self: ~Escapable {
     // faults, and a REACHED body operand still faults at run), matching the
     // non-derived path; a schema check passes `true`.
     let context = try augment(context, for: query, rows: false)
+    // A query-level `ORDER BY` / `DISTINCT` / `OFFSET`·`FETCH` over a set
+    // operation rides the `ordered` carrier: compile the inner union, then
+    // STACK the row operators over its plan, resolved through the setop's
+    // OUTPUT scope (`ordered`). The row operators do NOT project, so the result
+    // columns stay the union's — an identity projection over its output slots.
+    if case let .ordered(inner, distinct, order, limit, generated) = query {
+      return try ordered(inner, distinct: distinct, order: order,
+                         limit: limit, generated: generated, context)
+    }
     guard case let .setop(kind, left, right, all) = query else {
       return try compile(query.first, context)
     }

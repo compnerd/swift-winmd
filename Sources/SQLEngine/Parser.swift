@@ -236,7 +236,70 @@ internal struct Parser: ~Escapable {
       let all = try match(.all)
       query = try .setop(kind, query, intersection(), all: all)
     }
-    return query
+    // ISO 9075: an `ORDER BY` / `OFFSET`·`FETCH` after a set-operation chain
+    // applies to the WHOLE result, not the trailing arm — an individual arm
+    // needs its own parentheses to carry one. The recursive-descent parse folds
+    // that trailing tail onto the LAST arm's `select` (a `select` greedily
+    // consumes its ORDER BY/limit); LIFT it here to the query-level `ordered`
+    // carrier over the union, where it resolves through the setop's OUTPUT
+    // scope (`Catalog.ordered`) rather than binding the last arm's columns. A
+    // set operation carries no query-level `DISTINCT` in plain SQL (a bare
+    // `UNION` already dedups), so only the ORDER BY and limit are lifted.
+    //
+    // Gate on the top-level `query` being a set operation, NOT on the
+    // `UNION`/`EXCEPT` loop above having run: a top-level chain of only
+    // `INTERSECT` (or `EXCEPT`) is built inside `intersection()` and never
+    // enters this loop, yet its trailing `ORDER BY` must lift onto the combined
+    // output all the same — otherwise it stays on the last arm and binds that
+    // arm's columns rather than the intersect result named by the first arm.
+    guard case .setop = query else { return query }
+    // The trailing tail reaches the query level by two routes. When the last
+    // arm is a `SELECT`, that arm's greedy `select()` already CONSUMED the
+    // `ORDER BY`/limit, so it sits on the rightmost arm and is LIFTED here (and
+    // trimmed off the arm, so it applies once). When the last arm is a `TABLE
+    // t`/`VALUES …` primary — neither carries a primary-level order (see
+    // `term`) — the tail is UNCONSUMED at this point, so parse it HERE. Either
+    // way the tail lands on the `ordered` carrier over the union, resolved
+    // through the setop's OUTPUT scope, not the last arm's columns.
+    let last = trailing(query)
+    if last.order != nil || last.limit != nil {
+      return .ordered(trim(query), distinct: false, order: last.order,
+                      limit: last.limit, generated: 0)
+    }
+    let order: Order? = try match(.order) ? try self.order() : nil
+    let limit = try rowLimit()
+    guard order != nil || limit != nil else { return query }
+    return .ordered(query, distinct: false, order: order, limit: limit,
+                    generated: 0)
+  }
+
+  /// The RIGHTMOST arm's `Select` of a set-operation `query` — the arm the
+  /// recursive-descent parse folds a trailing query-level `ORDER BY`/limit
+  /// onto, reached by descending each set operation's RIGHT term.
+  private func trailing(_ query: Query) -> Select {
+    switch query {
+    case let .select(select): select
+    case let .setop(_, _, right, _): trailing(right)
+    case let .ordered(inner, _, _, _, _): trailing(inner)
+    }
+  }
+
+  /// `query` with its LAST arm's `order`/`limit` cleared — the query-level tail
+  /// a set-operation `query` lifted onto the `ordered` carrier, removed from
+  /// the arm that greedily parsed it so it is applied ONCE, over the union.
+  private func trim(_ query: Query) -> Query {
+    switch query {
+    case let .select(select):
+      .select(Select(distinct: select.distinct, projection: select.projection,
+                     from: select.from, joins: select.joins,
+                     predicate: select.predicate, grouping: select.grouping,
+                     having: select.having, order: nil, limit: nil))
+    case let .setop(kind, left, right, all):
+      .setop(kind, left, trim(right), all: all)
+    case let .ordered(inner, distinct, order, limit, generated):
+      .ordered(trim(inner), distinct: distinct, order: order, limit: limit,
+               generated: generated)
+    }
   }
 
   /// Parses `term (INTERSECT [ALL] term)*`, the inner set-operation tier,

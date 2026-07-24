@@ -49,18 +49,32 @@ internal struct ResolvedColumn: Hashable, Sendable {
   /// so it places NO type constraint on the set-operation's unified column.
   internal let unconstrained: Bool
 
-  internal init(_ column: OutputColumn, unconstrained: Bool = false) {
+  /// Whether this column's NAME is a SYNTHESIZED positional `column N` header
+  /// rather than an inferable output name — the projection had no alias and no
+  /// bare-column name (`Projected.name == nil`), so a display header stood in.
+  /// It is the STRUCTURAL bare/unnamed fact (set where the name is fabricated),
+  /// carried so a consumer distinguishes a synthesized header from a user's
+  /// EXPLICIT delimited `AS "column 1"` — the two are indistinguishable by NAME
+  /// text but not by provenance. The left arm's flag wins a set-operation fold,
+  /// mirroring the ISO first-arm NAME rule.
+  internal let synthesized: Bool
+
+  internal init(_ column: OutputColumn, unconstrained: Bool = false,
+                synthesized: Bool = false) {
     self.column = column
     self.unconstrained = unconstrained
+    self.synthesized = synthesized
   }
 
   /// A resolved column carrying `name` and `type` directly — the declared
   /// carrier a common table expression's self binding is built from, its name
   /// the declared column and its type the `.integer` placeholder a materialised
   /// relation reports.
-  internal init(name: String, type: ValueType, unconstrained: Bool = false) {
+  internal init(name: String, type: ValueType, unconstrained: Bool = false,
+                synthesized: Bool = false) {
     self.column = OutputColumn(name: name, type: type)
     self.unconstrained = unconstrained
+    self.synthesized = synthesized
   }
 
   /// The column's output name.
@@ -94,15 +108,22 @@ internal func merge(_ left: ResolvedColumn, _ right: ResolvedColumn,
                     shape: Bool = false)
     throws(SQLError) -> ResolvedColumn {
   let name = left.column.name
+  // The NAME (and its synthesized-header provenance) is the LEFT arm's — the
+  // ISO first-arm rule — so a union whose first arm names a column `column N`
+  // by synthesis stays synthesized (not bindable), and one whose first arm
+  // names it explicitly stays a real output, regardless of the right arm.
+  let synthesized = left.synthesized
   // A constant-NULL arm constrains nothing: carry the OTHER arm's type (and,
   // when both are NULL, the left's), narrowing the running unconstrained-ness
   // to whether BOTH remaining arms are NULL.
   if left.unconstrained {
     return ResolvedColumn(name: name, type: right.column.type,
-                          unconstrained: right.unconstrained)
+                          unconstrained: right.unconstrained,
+                          synthesized: synthesized)
   }
   if right.unconstrained {
-    return ResolvedColumn(name: name, type: left.column.type)
+    return ResolvedColumn(name: name, type: left.column.type,
+                          synthesized: synthesized)
   }
   guard let unified = left.column.type.unified(with: right.column.type) else {
     // The shape pre-pass defers the operand fault to the reached path: yield a
@@ -110,11 +131,11 @@ internal func merge(_ left: ResolvedColumn, _ right: ResolvedColumn,
     // rather than faulting while merely recording an unreached subquery.
     if shape {
       return ResolvedColumn(name: name, type: left.column.type,
-                            unconstrained: true)
+                            unconstrained: true, synthesized: synthesized)
     }
     throw .operand("UNION arms have irreconcilable types")
   }
-  return ResolvedColumn(name: name, type: unified)
+  return ResolvedColumn(name: name, type: unified, synthesized: synthesized)
 }
 
 extension Catalog where Self: ~Escapable {
@@ -426,6 +447,29 @@ extension Catalog where Self: ~Escapable {
     switch query {
     case let .select(select):
       return try arms(of: select, context)
+    case let .ordered(inner, _, _, _, generated):
+      // The `ordered` carrier is TRANSPARENT to the result schema: `ORDER BY`,
+      // `DISTINCT`, and `OFFSET`/`FETCH` are row operators — they do NOT
+      // project — so the result columns are the inner setop's arm-0-named,
+      // unified ones whether reached via `run`/`compile` or `columns(of:)`
+      // (`run ≡ columns`). The one exception is a HIDDEN materialised sort
+      // column (a producer appends `generated` of them to every arm so an
+      // unprojected sort key survives the union at equal arity): the carrier's
+      // compile TRIMS them through the identity projection, so drop the
+      // matching trailing columns here too so the schema matches the run. The
+      // count is the STRUCTURAL `generated` the carrier carries, never a scan
+      // of the arm-0 names for a synthetic prefix — a user's delimited `AS
+      // "*gs0"` is a real output, not a generated column.
+      let cols = try columns(unifying: inner, context)
+      // Range-check `generated` against the width and take the trim width
+      // through the SHARED guard the compile carrier uses (`real(trimming:of:)`
+      // on Engine) BEFORE trimming: a public-AST count past the width makes
+      // `cols.count − generated` NEGATIVE and `Array.prefix` PRECONDITION-TRAPS
+      // the process, while a NEGATIVE count returns ALL columns untrimmed —
+      // silently wrong and diverging from `run`, which faults the same XX000.
+      // One guard, one message ⇒ `columns(of:) ≡ run` on a malformed carrier.
+      let real = try real(trimming: generated, of: cols.count)
+      return Array(cols.prefix(real))
     case let .setop(_, left, right, _):
       let l = try columns(unifying: left, context)
       let r = try columns(unifying: right, context)
@@ -503,14 +547,30 @@ extension Catalog where Self: ~Escapable {
   /// declared width — the recursive-aware merge `kinds` wraps.
   private borrowing func contributions(of cte: CTE, _ scope: Context)
       throws(SQLError) -> Array<ResolvedColumn> {
-    guard cte.recursive, cte.recurses,
-        case let .setop(.union, anchor, recursive, _) = cte.query else {
+    // Derive types off the SAME AST a run does. (When `GROUP BY GROUPING SETS`
+    // lands, `Query.expanded` is re-inserted here so a grouping-sets body
+    // lowers to its `UNION ALL` arms FIRST, matching `run`/`compile` — a one-
+    // token merge follow-up, not needed here.)
+    let body = cte.query
+    // Recognise the recursive `UNION` shape through the CANONICAL peel
+    // (`recursiveArms` — unwound), the SAME recogniser the run/validate/
+    // fixpoint recursive-CTE seams take (`CTE.recurses`, `fixpoint`'s
+    // `canonical`), so the schema derive inspects the identical AST the run
+    // does — a trailing `ORDER BY`/`OFFSET`·`FETCH`/`DISTINCT` carrier peeled
+    // off. Otherwise a carried recursive union would fall through to the non-
+    // recursive fold with the self UNBOUND and fault `.relation`, diverging
+    // from the run that iterates the fixpoint. The carrier is transparent to
+    // the derived schema (its row operators do not project), so peeling it
+    // yields the same columns.
+    guard let (anchor, recursive, _) = try cte.recursiveArms else {
       // A non-recursive body's carrier is its unified fold, PROPAGATING a
       // genuine incompatibility (`SELECT 'b' UNION SELECT 1`) as `.operand`
       // rather than swallowing it into the declared `.integer`: with every
       // placeholder now marked unconstrained, a trusted body that RAN carries
-      // no genuine incompat to fault, so no `try?` fallback is needed.
-      return try columns(unifying: cte.query, scope)
+      // no genuine incompat to fault, so no `try?` fallback is needed. The
+      // carrier is transparent to a non-recursive body's fold too — the
+      // `.ordered` case of `columns(unifying:)` peels it identically.
+      return try columns(unifying: body, scope)
     }
     let seeds = try columns(unifying: anchor, scope)
     // The recursive arm addresses the self by the CTE's DECLARED names (`SELECT
@@ -664,6 +724,26 @@ extension Catalog where Self: ~Escapable {
       // enclosing scope, so each type-checks under the shared `context.outer`.
       try typecheck(left, context)
       try typecheck(right, context)
+    case let .ordered(inner, distinct, order, limit, generated):
+      // The `ordered` carrier's row operators add no expression the arms carry
+      // — the inner union type-checks every reachable operand of its own arms.
+      try typecheck(inner, context)
+      // But the carrier's OWN `ORDER BY` keys are a NEW expression surface,
+      // validated ONLY by the carrier compile (`ordered(…)` under `validate`).
+      // A REACHED scalar/`IN` subquery whose body is an ordered set operation
+      // is first compiled in the shape pre-pass with `validating(false)`, which
+      // BYPASSES that check, and is re-validated through THIS seam — so unless
+      // the carrier's keys are validated here too, an outer `columns(of:)`
+      // ACCEPTS a reached `(… UNION … ORDER BY missing(a))` a run FAULTS
+      // (run-vs-validate divergence). Re-run the carrier compile in validate
+      // mode to validate the sort keys against the setop-output scope EXACTLY
+      // as `ordered(…)` does — the plan is discarded, only the keys' fault
+      // matters. It is idempotent with the top-level `compile` (which already
+      // validated the same keys), and REACHED-only: an unreached ordered
+      // subquery never enters this seam, so its bad sort key stays deferred,
+      // matching the dead-scalar/dead-EXISTS posture.
+      _ = try ordered(inner, distinct: distinct, order: order, limit: limit,
+                      generated: generated, context.validating(true))
     }
   }
 
@@ -814,10 +894,10 @@ extension Catalog where Self: ~Escapable {
   /// `widths`/`types` against the `nested` outer scope, and enforces a scalar
   /// occurrence's single-column ARITY EAGERLY (reachability-independent, as the
   /// run's lowering does). Computed ONCE per distinct query at a given site.
-  private borrowing func width(_ query: Query, _ scalar: Set<Query>,
-                               _ context: Context, _ nested: Outer?,
-                               _ widths: inout Dictionary<Query, Int>,
-                               _ types: inout Dictionary<Query, ValueType>)
+  internal borrowing func width(_ query: Query, _ scalar: Set<Query>,
+                                _ context: Context, _ nested: Outer?,
+                                _ widths: inout Dictionary<Query, Int>,
+                                _ types: inout Dictionary<Query, ValueType>)
       throws(SQLError) {
     // The width and single-column type derive for EVERY subquery — cursor-free
     // and TOTAL for a clean-resolving inner query (deriving the type of `1 / 0`
@@ -1454,6 +1534,13 @@ extension Scope {
                        _ routines: Routines = [:],
                        subquery: Resolution = .unsupported)
       throws(SQLError) -> ResolvedColumn {
+    // The item's inferable output NAME (`Projected.name` — an alias, else a
+    // bare column's name), or a SYNTHESIZED positional `column N` header when
+    // it has none. `synthesized` is that STRUCTURAL bare/unnamed fact — carried
+    // on the resolved column so a consumer (the `ordered` set-op carrier)
+    // distinguishes this fabricated header from a user's explicit delimited
+    // `AS "column 1"`, which by NAME text is identical but is a real output.
+    let synthesized = item.name == nil
     let name = item.name ?? "column \(index + 1)"
     // A projection places NO type constraint on the unified column when it
     // folds to a CONSTANT NULL for every row (`null` — its derived literal-fix
@@ -1468,7 +1555,7 @@ extension Scope {
         || unresolved(item.expression, routines) {
       let type = try derive(item.expression, routines, subquery: subquery)
       return ResolvedColumn(OutputColumn(name: name, type: type),
-                            unconstrained: true)
+                            unconstrained: true, synthesized: synthesized)
     }
     // A bare-column projection reuses the ONE column resolution — LOCAL or
     // CORRELATED — so its type and `unconstrained` mask agree, renaming only
@@ -1476,7 +1563,8 @@ extension Scope {
     if case let .column(column) = item.expression {
       let resolved = try output(of: column, subquery: subquery)
       return ResolvedColumn(OutputColumn(name: name, type: resolved.type),
-                            unconstrained: resolved.unconstrained)
+                            unconstrained: resolved.unconstrained,
+                            synthesized: synthesized)
     }
     // A bare scalar-subquery projection reuses the subquery's OWN resolved
     // column — its type AND `unconstrained` mask — so a constant-NULL body
@@ -1488,7 +1576,8 @@ extension Scope {
     if case let .subquery(query) = item.expression {
       let resolved = try subquery.scalar(resolved: query)
       return ResolvedColumn(OutputColumn(name: name, type: resolved.type),
-                            unconstrained: resolved.unconstrained)
+                            unconstrained: resolved.unconstrained,
+                            synthesized: synthesized)
     }
     // DERIVE the nominal output type: the schema reports the type a run would
     // produce and never faults on an operand. Run-time operand and call
@@ -1499,6 +1588,7 @@ extension Scope {
     return try ResolvedColumn(OutputColumn(name: name,
                                            type: derive(item.expression,
                                                         routines,
-                                                        subquery: subquery)))
+                                                        subquery: subquery)),
+                              synthesized: synthesized)
   }
 }

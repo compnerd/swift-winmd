@@ -856,6 +856,26 @@ struct CTEProducerParityTests {
     #expect(t.lenient == t.strict)
   }
 
+  @Test func `an ordered recursive CTE agrees across all paths through the carrier`()
+      throws {
+    // A trailing `ORDER BY` on a recursive body lifts to a `Query.ordered`
+    // carrier over the `UNION` setop; the schema producer's recursive-shape
+    // recogniser (`contributions`) must peel it (`body.core`) the same way the
+    // run's `fixpoint` does, else it falls through to the non-recursive fold
+    // with the self UNBOUND and faults `.relation("t")` — a run-vs-schema
+    // divergence, since the run iterates the fixpoint and yields `1,2,3`. The
+    // carrier is transparent to the derived schema, so all three still agree on
+    // the one integer column `n`.
+    let t = try Triple("""
+        WITH RECURSIVE t(n) AS (
+          SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3 ORDER BY 1
+        ) SELECT n FROM t
+        """)
+    #expect(pairs(t.run).map { same($0, [("n", .integer)]) } == true)
+    #expect(t.run == t.lenient)
+    #expect(t.lenient == t.strict)
+  }
+
   @Test func `a widening recursive CTE agrees on the double column`() throws {
     // The anchor is `.integer` (`1`) and the recursive arm widens it to
     // `.double` (`n + 0.5`); the unified carrier the producer binds is
@@ -877,6 +897,20 @@ struct CTEProducerParityTests {
     // `.double` column on every path — the producer's `kinds` fold and the
     // run's `run`-then-`kinds` re-derive read the SAME `merge`.
     let t = try Triple("WITH a(x) AS (SELECT 1 UNION SELECT 2.5) " +
+                       "SELECT x FROM a")
+    #expect(pairs(t.run).map { same($0, [("x", .double)]) } == true)
+    #expect(t.run == t.lenient)
+    #expect(t.lenient == t.strict)
+  }
+
+  @Test func `a non-recursive ordered set-op CTE derives through the carrier`()
+      throws {
+    // A NON-recursive UNION body under a trailing `ORDER BY` carrier still
+    // derives its one `.double` column on every path: the recursive-shape
+    // recogniser sees a non-recursive CTE and falls through to the unifying
+    // fold, whose `.ordered` case peels the carrier transparently — the
+    // regression guard for the fall-through side of the carrier peel.
+    let t = try Triple("WITH a(x) AS (SELECT 1 UNION SELECT 2.5 ORDER BY 1) " +
                        "SELECT x FROM a")
     #expect(pairs(t.run).map { same($0, [("x", .double)]) } == true)
     #expect(t.run == t.lenient)

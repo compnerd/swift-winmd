@@ -513,7 +513,7 @@ internal final class SubqueryMemo {
 /// violation.
 ///
 /// Predicate lowering happens over escapable resolution surfaces (`Schema`,
-/// `Scope`, `Grouping`) that carry no catalog, and is shared by SCHEMA-ONLY
+/// `Scope`, `Grouped`) that carry no catalog, and is shared by SCHEMA-ONLY
 /// paths (`columns(of:)`, view resolution, arity checks) documented NOT to open
 /// a cursor. So lowering carries the sub-`Query` into the `Filter` as DATA
 /// rather than running it: `exists`/`within` build the lowered node holding the
@@ -1487,7 +1487,7 @@ internal struct SortKey {
 /// a `columns` or an `expressions` list. An alias two items share has no single
 /// term to order on — the two aliases may compute different values, so the
 /// result must not depend on select-list order — and a bare `ORDER BY` name
-/// matching it is `SQLError.ambiguous`, as the grouped `Grouping.order` does.
+/// matching it is `SQLError.ambiguous`, as the grouped `Grouped.order` does.
 private func order(_ order: Order, _ projection: Array<Term>,
                    _ names: Array<String?>,
                    term: (Expression) throws(SQLError) -> Term)
@@ -1894,7 +1894,7 @@ internal struct Scope {
   internal var merges: Array<Merged> { merged }
 
   /// The merged column named `name` (case-insensitively), or `nil` when none —
-  /// the probe `Grouping` uses to route a bare merged key to term-matching
+  /// the probe `Grouped` uses to route a bare merged key to term-matching
   /// rather than the ordinal `keys` map its `find` cannot fill.
   internal func merges(_ name: String) -> Merged? { merged(name) }
 
@@ -4363,7 +4363,7 @@ internal struct Scope {
 ///
 /// An `aggregate` node yields grouped records whose slots are the `GROUP BY`
 /// key values (slots `0 ..< keys.count`, in key order) followed by the
-/// aggregate results (slot `keys.count + j` is aggregate `j`). A `Grouping`
+/// aggregate results (slot `keys.count + j` is aggregate `j`). A `Grouped`
 /// lowers a name-addressed AST expression into that space: an aggregate call
 /// maps to its result slot; a bare column maps to its key slot ONLY when it is
 /// a `GROUP BY` key — the standard rule that a non-aggregated column must
@@ -4374,7 +4374,16 @@ internal struct Scope {
 /// The keys and aggregates resolve against the underlying `Scope`, so the same
 /// combined-ordinal resolution the source uses decides which projection columns
 /// are keys.
-internal struct Grouping {
+///
+/// For ONE arm of an expanded `GROUPING SETS`, `superset` carries the LOWERED
+/// terms of the UNION of every set's keys. A non-key column whose lowered term
+/// is in the superset is a SUPER-AGGREGATE NULL (a grouping column another set
+/// groups on but THIS arm does not) — `term` returns a typeless-NULL slot for
+/// it instead of faulting `.grouping`, so a projected/HAVING/ORDER-BY reference
+/// to it NULLs by RESOLVED identity (`n.A` ≡ `A`, case-insensitively), not raw
+/// AST. It is empty for an ordinary grouped query, whose every non-key column
+/// still faults.
+internal struct Grouped {
   private let scope: Scope
 
   /// Each BARE-column `GROUP BY` key's combined base ordinal mapped to its
@@ -4393,6 +4402,14 @@ internal struct Grouping {
   /// reference to it — groups and projects as ONE value, matched by term
   /// rather than the raw AST or an ordinal a merged column lacks.
   private let terms: Array<Term>
+
+  /// The LOWERED terms of the union of every set's keys, for ONE arm of an
+  /// expanded `GROUPING SETS` — the columns another set groups on. A non-key
+  /// reference whose lowered term is in here is a super-aggregate NULL (this
+  /// arm does not group on it, but another set does), so `term` returns a
+  /// typeless-NULL slot rather than faulting `.grouping`. Empty for an ordinary
+  /// grouped query.
+  private let superset: Array<Term>
 
   /// The number of `GROUP BY` keys — aggregate `j` sits at grouped slot
   /// `offset + j`, following the key slots.
@@ -4430,8 +4447,10 @@ internal struct Grouping {
   internal init(_ scope: Scope, _ grouping: Array<Expression>,
                 _ terms: Array<Term>,
                 _ aggregates: Array<Aggregation>,
+                superset: Array<Term> = [],
                 subquery: Resolution = .unsupported) throws(SQLError) {
     self.scope = scope
+    self.superset = superset
     var keys = Dictionary<Int, Int>(minimumCapacity: grouping.count)
     for index in grouping.indices {
       // A BARE-column grouping key a local relation binds maps its combined
@@ -4478,6 +4497,19 @@ internal struct Grouping {
     return aggregates.firstIndex(of: aggregation).map { offset + $0 }
   }
 
+  /// Lowers an `expression` to its grouped-space `Term` — the module-visible
+  /// entry to the private `term`, so a caller (the `ordered` set-op carrier)
+  /// can match an `ORDER BY` key against the projection by RESOLVED identity,
+  /// exactly as the grouped `ORDER BY` path does: a projected aggregate and a
+  /// qualifier-equivalent sort key (`SUM(Qty)` vs `SUM(s.Qty)`) lower to the
+  /// SAME grouped slot, so the carrier need not compare raw AST.
+  internal func resolve(_ expression: Expression,
+                        _ routines: Routines = [:],
+                        subquery: Resolution = .unsupported)
+      throws(SQLError) -> Term {
+    try term(expression, routines, subquery: subquery)
+  }
+
   /// Lowers a scalar `expression` to a grouped-space `Term`.
   ///
   /// An aggregate call maps to its result slot; a literal to a constant; a
@@ -4522,6 +4554,12 @@ internal struct Grouping {
     if !plain, !expression.aggregated {
       let lowered = try scope.term(expression, routines, subquery: subquery)
       if let index = terms.firstIndex(of: lowered) { return .slot(index) }
+      // A reference to a column ANOTHER set groups on but THIS arm's set omits
+      // is a SUPER-AGGREGATE NULL — matched by lowered term (so `n.A` ≡ `A`,
+      // case-insensitively), not raw AST — so it lowers to a typeless-NULL
+      // constant rather than faulting. This dissolves the qualified/unqualified
+      // and absent-key HAVING findings for a merged/general reference.
+      if superset.contains(lowered) { return .constant(.null) }
       if case let .column(column) = expression {
         throw .grouping(column.name)
       }
@@ -4538,8 +4576,14 @@ internal struct Grouping {
       // `ordinal(of:)` re-throws the genuine unknown-column `.column` fault,
       // exactly as `Scope.term` does.
       if let ordinal = try scope.find(column) {
-        guard let slot = keys[ordinal] else { throw .grouping(column.name) }
-        return .slot(slot)
+        if let slot = keys[ordinal] { return .slot(slot) }
+        // A bare column ANOTHER set groups on but THIS arm's set omits is a
+        // super-aggregate NULL — matched by its LOWERED term against the
+        // superset (so `n.A` ≡ `A`, case-insensitively), not the raw ordinal —
+        // else the standard non-grouped fault.
+        let lowered = try scope.term(expression, routines, subquery: subquery)
+        if superset.contains(lowered) { return .constant(.null) }
+        throw .grouping(column.name)
       }
       if let name = try subquery.correlate(column) { return .parameter(name) }
       return try .slot(scope.ordinal(of: column))

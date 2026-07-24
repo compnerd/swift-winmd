@@ -423,6 +423,27 @@ struct EngineRecursiveTests {
     #expect(rows == [[.integer(1)], [.integer(2)], [.integer(3)]])
   }
 
+  @Test func `an ordered recursive CTE derives its schema and runs the fixpoint`()
+      throws {
+    // A trailing `ORDER BY` on a recursive body lifts to a `Query.ordered`
+    // carrier over the `UNION` setop. `columns(of:)` must peel the carrier at
+    // its recursive-shape recogniser (like the run's `fixpoint`) and derive the
+    // one column `n` WITHOUT faulting `.relation("t")`, while the run iterates
+    // the fixpoint to `1,2,3` — asserted TOGETHER on the SAME query so a
+    // run-vs-schema divergence cannot hide.
+    let statement = try Statement(parsing: """
+        WITH RECURSIVE t (n) AS (
+          SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3 ORDER BY 1
+        ) SELECT n FROM t
+        """)
+    let columns = try engineFamily().columns(of: statement, validate: true)
+    #expect(columns.count == 1)
+    #expect(columns[0].name == "n")
+    #expect(columns[0].type == .integer)
+    let rows = try engineFamily().run(statement)
+    #expect(rows == [[.integer(1)], [.integer(2)], [.integer(3)]])
+  }
+
   @Test func `a non-UNION recursive CTE validates its compiled width`() throws {
     // A `WITH RECURSIVE` member whose body is not a UNION runs once, but must
     // still match its declared arity. Here the body resolves `Parent` against
@@ -997,5 +1018,327 @@ struct EngineRecursiveTests {
         WITH a(x) AS (SELECT 1 UNION SELECT 2.5) SELECT x FROM a ORDER BY x
         """, family())
     #expect(rows == [[.double(1.0)], [.double(2.5)]])
+  }
+
+  @Test func `a trailing ORDER BY on a recursive body still runs the fixpoint`()
+      throws {
+    // The body's set operation wears a query-level `ORDER BY` — an `ordered`
+    // carrier OVER the `UNION`. The recursive-shape recogniser and the fixpoint
+    // router peel the carrier to find the inner setop, so the recursive arm
+    // compiles with the CTE `t` in scope and the fixpoint iterates, rather than
+    // reading as non-recursive and faulting `.relation('t')`.
+    let rows = try seed().run(try Statement(parsing: """
+        WITH RECURSIVE t (n) AS (
+          SELECT 1 AS n FROM Seed
+          UNION ALL
+          SELECT inc(n) AS n FROM t WHERE n < 3
+          ORDER BY 1
+        )
+        SELECT n FROM t
+        """), counting())
+    #expect(rows == [[.integer(1)], [.integer(2)], [.integer(3)]])
+  }
+
+  @Test func `an ordered recursive body equals its unordered form as a set`()
+      throws {
+    // The trailing carrier does not change the fixpoint's MEMBERSHIP — the same
+    // recursive CTE without the ORDER BY yields the same rows (here already in
+    // order), so the ordered body matches the unordered one modulo ordering.
+    let unordered = try seed().run(try Statement(parsing: """
+        WITH RECURSIVE t (n) AS (
+          SELECT 1 AS n FROM Seed
+          UNION ALL
+          SELECT inc(n) AS n FROM t WHERE n < 3
+        )
+        SELECT n FROM t ORDER BY n
+        """), counting())
+    #expect(unordered == [[.integer(1)], [.integer(2)], [.integer(3)]])
+  }
+
+  @Test func `the carrier's ORDER BY applies to the fixpoint result`() throws {
+    // A named descending key on the carrier orders the materialised fixpoint
+    // result — the peeled carrier is reapplied to the result rows through the
+    // ordinary select path, resolving the key `n` against the output columns.
+    let rows = try seed().run(try Statement(parsing: """
+        WITH RECURSIVE t (n) AS (
+          SELECT 1 AS n FROM Seed
+          UNION ALL
+          SELECT inc(n) AS n FROM t WHERE n < 3
+          ORDER BY n DESC
+        )
+        SELECT n FROM t
+        """), counting())
+    #expect(rows == [[.integer(3)], [.integer(2)], [.integer(1)]])
+  }
+
+  @Test func `a non-recursive ordered CTE body still materialises`() throws {
+    // The carrier peel is transparent to a non-recursive CTE: a trailing ORDER
+    // BY on a plain (non-self-naming) UNION body still materialises once.
+    let rows = try seed().run(try Statement(parsing: """
+        WITH t (n) AS (
+          SELECT 1 FROM Seed UNION SELECT 2 FROM Seed ORDER BY 1
+        )
+        SELECT n FROM t ORDER BY n
+        """), counting())
+    #expect(rows == [[.integer(1)], [.integer(2)]])
+  }
+
+  @Test func `a renaming recursive body orders by its first-arm output name`()
+      throws {
+    // The body's set-op output is named off its FIRST arm (`SELECT 1 AS x`), so
+    // the carrier's `ORDER BY x` resolves against that OUTPUT name `x`, not the
+    // CTE's DECLARED name `n` — EXACTLY as the non-recursive analog below does.
+    // The fixpoint temp the carrier applies over is named by the anchor's
+    // output names; the CTE-declared rename rides the returned carrier, so the
+    // outer `SELECT n FROM t` still sees `n`. Assert schema AND run on the SAME
+    // query so a run-vs-validate divergence cannot hide.
+    let statement = try Statement(parsing: """
+        WITH RECURSIVE t (n) AS (
+          SELECT 1 AS x UNION ALL SELECT n + 1 FROM t WHERE n < 3 ORDER BY x
+        ) SELECT n FROM t
+        """)
+    let catalog = EngineMemory([:])
+    let columns = try catalog.columns(of: statement, validate: true)
+    #expect(columns.count == 1)
+    #expect(columns[0].name == "n")
+    let rows = try catalog.run(statement)
+    #expect(rows == [[.integer(1)], [.integer(2)], [.integer(3)]])
+  }
+
+  @Test func `a non-recursive ordered CTE body orders by its output name`()
+      throws {
+    // The non-recursive ANALOG of the renaming recursive body: `ORDER BY x`
+    // resolves against the first arm's output `x`. This is the ORACLE the
+    // recursive form mirrors — the two paths must agree.
+    let statement = try Statement(parsing: """
+        WITH t (n) AS (SELECT 1 AS x UNION ALL SELECT 2 ORDER BY x)
+        SELECT n FROM t
+        """)
+    let catalog = EngineMemory([:])
+    let rows = try catalog.run(statement)
+    #expect(rows == [[.integer(1)], [.integer(2)]])
+  }
+
+  @Test func `a recursive carrier ORDER BY of a non-output name faults`()
+      throws {
+    // `ORDER BY n` names the CTE's DECLARED name, NOT a body output (the first
+    // arm projects `x`), so the carrier — which resolves against the body's
+    // OUTPUT names — faults `.column('n')` on the schema path, exactly as the
+    // RUN does when `apply` reapplies the carrier after the fixpoint (`run ≡
+    // columns(of:)`), and exactly as the non-recursive analog below faults.
+    let statement = try Statement(parsing: """
+        WITH RECURSIVE t (n) AS (
+          SELECT 1 AS x UNION ALL SELECT n + 1 FROM t WHERE n < 3 ORDER BY n
+        ) SELECT n FROM t
+        """)
+    let catalog = EngineMemory([:])
+    #expect(throws: SQLError.column("n")) {
+      _ = try catalog.columns(of: statement, validate: true)
+    }
+    #expect(throws: SQLError.column("n")) {
+      _ = try catalog.run(statement)
+    }
+  }
+
+  @Test func `a non-recursive carrier ORDER BY of a non-output name faults`()
+      throws {
+    // The non-recursive ORACLE: `ORDER BY n` (the declared name, not the first
+    // arm's output `x`) faults `.column('n')`, the behaviour the recursive form
+    // mirrors.
+    let statement = try Statement(parsing: """
+        WITH t (n) AS (SELECT 1 AS x UNION ALL SELECT 2 ORDER BY n)
+        SELECT n FROM t
+        """)
+    let catalog = EngineMemory([:])
+    #expect(throws: SQLError.column("n")) {
+      _ = try catalog.run(statement)
+    }
+  }
+
+  @Test func `a recursive carrier ORDER BY validates its keys like the run`()
+      throws {
+    // The recursive validate path validates the carrier's ORDER BY keys against
+    // the body's output scope, the SAME check an ordinary ordered set operation
+    // gets. A carrier `ORDER BY missing(n)` — where `n` IS a body output
+    // (`SELECT 1 AS n`) — faults `.function('missing')` on BOTH the schema path
+    // (`columns(of:validate:true)`) AND the run (`run ≡ columns(of:)`), closing
+    // the run-vs-validate gap where validate passed yet the run faulted when
+    // `apply` reapplied the carrier after the fixpoint.
+    let statement = try Statement(parsing: """
+        WITH RECURSIVE t (n) AS (
+          SELECT 1 AS n UNION ALL SELECT n + 1 FROM t WHERE n < 3
+          ORDER BY missing(n)
+        ) SELECT n FROM t
+        """)
+    let catalog = EngineMemory([:])
+    #expect(throws: SQLError.function("missing")) {
+      _ = try catalog.columns(of: statement, validate: true)
+    }
+    #expect(throws: SQLError.function("missing")) {
+      _ = try catalog.run(statement)
+    }
+  }
+
+  @Test func `a valid recursive carrier ORDER BY validates and runs`() throws {
+    // The positive companion: a carrier key that IS a body output (`ORDER BY n`
+    // over an anchor `SELECT 1 AS n`) validates AND runs the fixpoint, ordered
+    // by that output — the valid-key half of the run≡validate oracle.
+    let statement = try Statement(parsing: """
+        WITH RECURSIVE t (n) AS (
+          SELECT 1 AS n UNION ALL SELECT n + 1 FROM t WHERE n < 3
+          ORDER BY n DESC
+        ) SELECT n FROM t
+        """)
+    let catalog = EngineMemory([:])
+    let columns = try catalog.columns(of: statement, validate: true)
+    #expect(columns.count == 1)
+    #expect(columns[0].name == "n")
+    let rows = try catalog.run(statement)
+    #expect(rows == [[.integer(3)], [.integer(2)], [.integer(1)]])
+  }
+
+  @Test func `a recursive carrier ORDER BY of a projected expression resolves like the non-recursive analog`()
+      throws {
+    // The recursive carrier now routes through the SAME `carried(over:)`
+    // resolver the ordinary ordered set-operation path uses, so a projected-
+    // EXPRESSION sort key (`Age * 1`) is matched against the first arm's
+    // projected item and orders on the MATERIALISED output column — never a
+    // bare `SELECT * FROM <temp>` that re-evaluates `Age * 1` over a temp
+    // lacking `Age` (which faulted `.column('Age')`). The recursive fixpoint
+    // runs `{1, 2, 3}` ordered ascending; its non-recursive ordered-set-op
+    // analog resolves the identical key against the same projection surface
+    // WITHOUT faulting — the run≡run oracle the shared resolver guarantees.
+    let people = EngineMemory([
+      "People": FixtureRelation([EngineField(name: "Age", type: .integer)],
+                                [[.integer(1)]] as Array<Array<Value>>),
+    ])
+    let recursive = try Statement(parsing: """
+        WITH RECURSIVE t (k) AS (
+          SELECT Age * 1 AS m FROM People WHERE Age = 1
+          UNION ALL SELECT k + 1 FROM t WHERE k < 3 ORDER BY Age * 1
+        ) SELECT k FROM t
+        """)
+    #expect(try people.run(recursive) == [[.integer(1)], [.integer(2)],
+                                          [.integer(3)]])
+    // The non-recursive analog resolves the SAME `Age * 1` projected-expression
+    // key against the same arm-0 surface and runs without faulting.
+    let analog = try Statement(parsing: """
+        SELECT Age * 1 AS m FROM People WHERE Age = 1
+        UNION ALL SELECT 9 ORDER BY Age * 1
+        """)
+    #expect(try people.run(analog) == [[.integer(1)], [.integer(9)]])
+  }
+
+  @Test func `a recursive carrier ORDER BY of an aliased output resolves on the output column`()
+      throws {
+    // The aliased sub-case: the anchor projects `Age * 2 AS m` and the carrier
+    // orders by the ALIAS `m`, which the setop-output scope binds directly to
+    // the output column — the same path the ordinary carrier takes.
+    let people = EngineMemory([
+      "People": FixtureRelation([EngineField(name: "Age", type: .integer)],
+                                [[.integer(1)]] as Array<Array<Value>>),
+    ])
+    let statement = try Statement(parsing: """
+        WITH RECURSIVE t (k) AS (
+          SELECT Age * 2 AS m FROM People WHERE Age = 1
+          UNION ALL SELECT k + 1 FROM t WHERE k < 4 ORDER BY m
+        ) SELECT k FROM t
+        """)
+    #expect(try people.run(statement) == [[.integer(2)], [.integer(3)],
+                                          [.integer(4)]])
+  }
+
+  @Test func `a recursive carrier ORDER BY of a qualified column resolves on the output`()
+      throws {
+    // The qualified sub-case: `p.Age` drops its qualifier (a set-operation
+    // result carries none) and binds the bare output the anchor projects, as
+    // the ordinary carrier's qualifier strip does.
+    let people = EngineMemory([
+      "People": FixtureRelation([EngineField(name: "Age", type: .integer)],
+                                [[.integer(1)]] as Array<Array<Value>>),
+    ])
+    let statement = try Statement(parsing: """
+        WITH RECURSIVE t (Age) AS (
+          SELECT p.Age FROM People p WHERE p.Age = 1
+          UNION ALL SELECT Age + 1 FROM t WHERE Age < 3 ORDER BY p.Age
+        ) SELECT Age FROM t
+        """)
+    #expect(try people.run(statement) == [[.integer(1)], [.integer(2)],
+                                          [.integer(3)]])
+  }
+
+  @Test func `a recursive carrier ORDER BY of an ordinal orders the fixpoint`()
+      throws {
+    // The ordinal sub-case still resolves through the shared resolver: `ORDER
+    // BY 1` binds the first output column, ordering the fixpoint descending.
+    let statement = try Statement(parsing: """
+        WITH RECURSIVE t (n) AS (
+          SELECT 1 AS n UNION ALL SELECT n + 1 FROM t WHERE n < 3 ORDER BY 1 DESC
+        ) SELECT n FROM t
+        """)
+    #expect(try EngineMemory([:]).run(statement) == [[.integer(3)],
+                                                     [.integer(2)],
+                                                     [.integer(1)]])
+  }
+
+  @Test func `a recursive EXCEPT body faults the ISO recursion diagnostic`()
+      throws {
+    // ISO 9075 permits recursion only through `UNION [ALL]`. A recursive body
+    // that is `EXCEPT` (not `UNION`) referencing itself has no recursive arm to
+    // iterate, so it once compiled with the self UNBOUND and faulted a generic
+    // `SQLError.relation('t')`. It now faults the precise `0A000` feature
+    // diagnostic on BOTH the run and the schema path.
+    let statement = try Statement(parsing: """
+        WITH RECURSIVE t (n) AS (SELECT n FROM t EXCEPT SELECT 1) SELECT n FROM t
+        """)
+    let catalog = EngineMemory([:])
+    #expect(throws: SQLError.state("0A000", "recursion requires UNION [ALL]")) {
+      _ = try catalog.run(statement)
+    }
+    #expect(throws: SQLError.state("0A000", "recursion requires UNION [ALL]")) {
+      _ = try catalog.columns(of: statement, validate: true)
+    }
+  }
+
+  @Test func `a recursive INTERSECT body faults the ISO recursion diagnostic`()
+      throws {
+    // The `INTERSECT` sibling faults the same `0A000` — the guard matches any
+    // non-`UNION` self-referencing setop core.
+    let statement = try Statement(parsing: """
+        WITH RECURSIVE t (n) AS (SELECT n FROM t INTERSECT SELECT 1)
+          SELECT n FROM t
+        """)
+    #expect(throws: SQLError.state("0A000", "recursion requires UNION [ALL]")) {
+      _ = try EngineMemory([:]).run(statement)
+    }
+  }
+
+  @Test func `a recursive EXCEPT over a same-named base runs once, not the ISO fault`()
+      throws {
+    // The reference reads a same-named BASE relation, so the body is a valid
+    // run-once query, not a recursion — the `0A000` guard exempts it (as the
+    // misplaced-anchor guard does). `Parent EXCEPT {2}` = {1}.
+    let catalog = EngineMemory([
+      "t": FixtureRelation([EngineField(name: "n", type: .integer)],
+                           [[.integer(1)], [.integer(2)]] as Array<Array<Value>>),
+    ])
+    let statement = try Statement(parsing: """
+        WITH RECURSIVE t (n) AS (SELECT n FROM t EXCEPT SELECT 2) SELECT n FROM t
+        """)
+    #expect(try catalog.run(statement) == [[.integer(1)]])
+  }
+
+  @Test func `a plain recursive UNION is unchanged by the ISO recursion guard`()
+      throws {
+    // The regression guard: a genuine recursive `UNION` still iterates its
+    // fixpoint — the `0A000` non-`UNION` guard fires only on a non-`UNION` core.
+    let statement = try Statement(parsing: """
+        WITH RECURSIVE t (n) AS (
+          SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3
+        ) SELECT n FROM t
+        """)
+    #expect(try EngineMemory([:]).run(statement) == [[.integer(1)],
+                                                     [.integer(2)],
+                                                     [.integer(3)]])
   }
 }

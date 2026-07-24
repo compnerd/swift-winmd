@@ -49,18 +49,32 @@ internal struct ResolvedColumn: Hashable, Sendable {
   /// so it places NO type constraint on the set-operation's unified column.
   internal let unconstrained: Bool
 
-  internal init(_ column: OutputColumn, unconstrained: Bool = false) {
+  /// Whether this column's NAME is a SYNTHESIZED positional `column N` header
+  /// rather than an inferable output name — the projection had no alias and no
+  /// bare-column name (`Projected.name == nil`), so a display header stood in.
+  /// It is the STRUCTURAL bare/unnamed fact (set where the name is fabricated),
+  /// carried so a consumer distinguishes a synthesized header from a user's
+  /// EXPLICIT delimited `AS "column 1"` — the two are indistinguishable by NAME
+  /// text but not by provenance. The left arm's flag wins a set-operation fold,
+  /// mirroring the ISO first-arm NAME rule.
+  internal let synthesized: Bool
+
+  internal init(_ column: OutputColumn, unconstrained: Bool = false,
+                synthesized: Bool = false) {
     self.column = column
     self.unconstrained = unconstrained
+    self.synthesized = synthesized
   }
 
   /// A resolved column carrying `name` and `type` directly — the declared
   /// carrier a common table expression's self binding is built from, its name
   /// the declared column and its type the `.integer` placeholder a materialised
   /// relation reports.
-  internal init(name: String, type: ValueType, unconstrained: Bool = false) {
+  internal init(name: String, type: ValueType, unconstrained: Bool = false,
+                synthesized: Bool = false) {
     self.column = OutputColumn(name: name, type: type)
     self.unconstrained = unconstrained
+    self.synthesized = synthesized
   }
 
   /// The column's output name.
@@ -94,15 +108,22 @@ internal func merge(_ left: ResolvedColumn, _ right: ResolvedColumn,
                     shape: Bool = false)
     throws(SQLError) -> ResolvedColumn {
   let name = left.column.name
+  // The NAME (and its synthesized-header provenance) is the LEFT arm's — the
+  // ISO first-arm rule — so a union whose first arm names a column `column N`
+  // by synthesis stays synthesized (not bindable), and one whose first arm
+  // names it explicitly stays a real output, regardless of the right arm.
+  let synthesized = left.synthesized
   // A constant-NULL arm constrains nothing: carry the OTHER arm's type (and,
   // when both are NULL, the left's), narrowing the running unconstrained-ness
   // to whether BOTH remaining arms are NULL.
   if left.unconstrained {
     return ResolvedColumn(name: name, type: right.column.type,
-                          unconstrained: right.unconstrained)
+                          unconstrained: right.unconstrained,
+                          synthesized: synthesized)
   }
   if right.unconstrained {
-    return ResolvedColumn(name: name, type: left.column.type)
+    return ResolvedColumn(name: name, type: left.column.type,
+                          synthesized: synthesized)
   }
   guard let unified = left.column.type.unified(with: right.column.type) else {
     // The shape pre-pass defers the operand fault to the reached path: yield a
@@ -110,11 +131,11 @@ internal func merge(_ left: ResolvedColumn, _ right: ResolvedColumn,
     // rather than faulting while merely recording an unreached subquery.
     if shape {
       return ResolvedColumn(name: name, type: left.column.type,
-                            unconstrained: true)
+                            unconstrained: true, synthesized: synthesized)
     }
     throw .operand("UNION arms have irreconcilable types")
   }
-  return ResolvedColumn(name: name, type: unified)
+  return ResolvedColumn(name: name, type: unified, synthesized: synthesized)
 }
 
 extension Catalog where Self: ~Escapable {
@@ -173,6 +194,10 @@ extension Catalog where Self: ~Escapable {
   public borrowing func columns(of query: Query, routines: Routines,
                                 validate: Bool = true)
       throws(SQLError) -> Array<OutputColumn> {
+    // Expand any `GROUP BY GROUPING SETS` select to its `UNION ALL` FIRST, so
+    // the compile validation and the `columns(unifying:)` derive below see the
+    // SAME expanded AST a run does (`run ≡ columns(of:)`).
+    let query = try query.expanded
     // Pure engine: it types calls against exactly the `routines` given, seeding
     // no prelude. `import SQLStandard` adds a prelude-defaulting overload
     // (`columns(of:validate:)`). A typing path has no bindings.
@@ -297,6 +322,11 @@ extension Catalog where Self: ~Escapable {
                                  routines: Routines,
                                  validate: Bool)
       throws(SQLError) -> Array<OutputColumn> {
+    // Expand any `GROUP BY GROUPING SETS` in the trailing query to its `UNION
+    // ALL` FIRST, so this schema derive sees the SAME AST the run does: the run
+    // WITH path (`with` then `run(query:)`) normalizes there. The CTE BODIES
+    // expand within `typed`/`validate`/`contributions`.
+    let query = try query.expanded
     let context = Context(routines: routines).validating(validate)
     // Type the CTEs into a SCHEMA-ONLY overlay (`rows: false`) through the ONE
     // producer the run path also drives — `Engine.typed(ctes:in:rows:)` — so
@@ -425,7 +455,29 @@ extension Catalog where Self: ~Escapable {
       throws(SQLError) -> Array<ResolvedColumn> {
     switch query {
     case let .select(select):
+      // A `GROUP BY GROUPING SETS (…)` derives its schema through the SAME
+      // `UNION ALL` expansion the compile path uses, so the run and the derived
+      // columns cannot diverge (`run ≡ columns(of:)`): the arms' NULL-padded
+      // columns type through the set-operation `merge` exactly as the run's do.
+      if case let .sets(sets) = select.grouping {
+        return try columns(unifying: expand(select, sets: sets), context)
+      }
       return try arms(of: select, context)
+    case let .ordered(inner, _, _, _, generated):
+      // The `ordered` carrier is TRANSPARENT to the result schema: `ORDER BY`,
+      // `DISTINCT`, and `OFFSET`/`FETCH` are row operators — they do NOT
+      // project — so the result columns are the inner setop's arm-0-named,
+      // unified ones whether reached via `run`/`compile` or `columns(of:)`
+      // (`run ≡ columns`). The one exception is a HIDDEN materialised sort
+      // column (`expand` appends `generated` of them to every arm so an
+      // unprojected `ORDER BY MAX(x)` survives the union at equal arity): the
+      // carrier's compile TRIMS them through the identity projection, so drop
+      // the matching trailing columns here too so the schema matches the run.
+      // The count is the STRUCTURAL `generated` the carrier carries, never a
+      // scan of the arm-0 names for a synthetic prefix — a user's delimited
+      // `AS "*gs0"` is a real output, not a generated column.
+      let cols = try columns(unifying: inner, context)
+      return Array(cols.prefix(cols.count - generated))
     case let .setop(_, left, right, _):
       let l = try columns(unifying: left, context)
       let r = try columns(unifying: right, context)
@@ -503,14 +555,29 @@ extension Catalog where Self: ~Escapable {
   /// declared width — the recursive-aware merge `kinds` wraps.
   private borrowing func contributions(of cte: CTE, _ scope: Context)
       throws(SQLError) -> Array<ResolvedColumn> {
-    guard cte.recursive, cte.recurses,
-        case let .setop(.union, anchor, recursive, _) = cte.query else {
+    // Derive types off the SAME expanded AST a run does: a `GROUP BY GROUPING
+    // SETS` body expands to its `UNION ALL` arms FIRST, so the schema `kinds`
+    // fold matches `run`/`compile` (run and `columns(of:)` cannot diverge).
+    let body = try cte.query.expanded
+    // Recognise the recursive `UNION` shape through the CANONICAL peel
+    // (`recursiveArms` — expanded then unwound), the SAME recogniser the
+    // run/validate/fixpoint recursive-CTE seams take (`CTE.recurses`,
+    // `fixpoint`'s `canonical`), so the schema derive inspects the identical
+    // AST the run does — a trailing `ORDER BY`/`OFFSET`·`FETCH`/`DISTINCT`
+    // carrier peeled off. Otherwise a carried recursive union would fall
+    // through to the non-recursive fold with the self UNBOUND and fault
+    // `.relation`, diverging from the run that iterates the fixpoint. The
+    // carrier is transparent to the derived schema (its row operators do not
+    // project), so peeling it yields the same columns.
+    guard let (anchor, recursive, _) = try cte.recursiveArms else {
       // A non-recursive body's carrier is its unified fold, PROPAGATING a
       // genuine incompatibility (`SELECT 'b' UNION SELECT 1`) as `.operand`
       // rather than swallowing it into the declared `.integer`: with every
       // placeholder now marked unconstrained, a trusted body that RAN carries
-      // no genuine incompat to fault, so no `try?` fallback is needed.
-      return try columns(unifying: cte.query, scope)
+      // no genuine incompat to fault, so no `try?` fallback is needed. The
+      // carrier is transparent to a non-recursive body's fold too — the
+      // `.ordered` case of `columns(unifying:)` peels it identically.
+      return try columns(unifying: body, scope)
     }
     let seeds = try columns(unifying: anchor, scope)
     // The recursive arm addresses the self by the CTE's DECLARED names (`SELECT
@@ -664,6 +731,26 @@ extension Catalog where Self: ~Escapable {
       // enclosing scope, so each type-checks under the shared `context.outer`.
       try typecheck(left, context)
       try typecheck(right, context)
+    case let .ordered(inner, distinct, order, limit, generated):
+      // The `ordered` carrier's row operators add no expression the arms carry
+      // — the inner union type-checks every reachable operand of its own arms.
+      try typecheck(inner, context)
+      // But the carrier's OWN `ORDER BY` keys are a NEW expression surface,
+      // validated ONLY by the carrier compile (`ordered(…)` under `validate`).
+      // A REACHED scalar/`IN` subquery whose body is an ordered set operation
+      // is first compiled in the shape pre-pass with `validating(false)`, which
+      // BYPASSES that check, and is re-validated through THIS seam — so unless
+      // the carrier's keys are validated here too, an outer `columns(of:)`
+      // ACCEPTS a reached `(… UNION … ORDER BY missing(a))` a run FAULTS
+      // (run-vs-validate divergence). Re-run the carrier compile in validate
+      // mode to validate the sort keys against the setop-output scope EXACTLY
+      // as `ordered(…)` does — the plan is discarded, only the keys' fault
+      // matters. It is idempotent with the top-level `compile` (which already
+      // validated the same keys), and REACHED-only: an unreached ordered
+      // subquery never enters this seam, so its bad sort key stays deferred,
+      // matching the dead-scalar/dead-EXISTS posture.
+      _ = try ordered(inner, distinct: distinct, order: order, limit: limit,
+                      generated: generated, context.validating(true))
     }
   }
 
@@ -789,7 +876,7 @@ extension Catalog where Self: ~Escapable {
     if case let .expressions(items) = select.projection {
       for item in items { item.expression.collect(subqueries: &rest) }
     }
-    for key in select.grouping { key.collect(subqueries: &rest) }
+    for key in select.grouping.collected { key.collect(subqueries: &rest) }
     for key in select.order?.keys ?? [] {
       if case let .expression(expression) = key.sort {
         expression.collect(subqueries: &rest)
@@ -1021,7 +1108,7 @@ extension Catalog where Self: ~Escapable {
       // projection run over the group's results, so EVALUATE them (`empty`) — a
       // divide, overflow, or bad routine call faults as the run would.
       if scope.constant(predicate, routines) == false {
-        if select.aggregates, select.grouping.isEmpty {
+        if select.aggregates, select.grouping.expressions.isEmpty {
           if let having = select.having {
             // HAVING filters the group BEFORE any OFFSET/FETCH limit, so
             // evaluate it UNCONDITIONALLY — a zero `FETCH` or positive `OFFSET`
@@ -1100,7 +1187,7 @@ extension Catalog where Self: ~Escapable {
     // overflow, bad-type op, or unknown/misapplied call) under `validate`
     // exactly as the run evaluates it, closing the gap where `group` lowers the
     // key structurally (no evaluation) so `compile` alone never surfaces it.
-    for expression in select.grouping {
+    for expression in select.grouping.expressions {
       _ = try scope.validate(expression, routines, subquery: barred)
     }
     if let having = select.having {
@@ -1119,7 +1206,7 @@ extension Catalog where Self: ~Escapable {
     // deduplicated result — a zero FETCH or skipping OFFSET does not spare it.
     // A false WHERE still yields no rows to dedup (handled above), so only the
     // limit-based elision is bypassed for DISTINCT.
-    let sole = select.aggregates && select.grouping.isEmpty
+    let sole = select.aggregates && select.grouping.expressions.isEmpty
     var reachable = select.distinct
     if !reachable { reachable = !drops(select.limit, single: sole) }
     if reachable, case let .expressions(items) = select.projection {
@@ -1150,10 +1237,10 @@ extension Catalog where Self: ~Escapable {
   /// out-of-range ordinal `SQLError.column`; a duplicated output name
   /// `SQLError.ambiguous`.
   ///
-  /// It rebuilds the `Grouping` `group` builds — the `GROUP BY` keys and the
+  /// It rebuilds the `Grouped` `group` builds — the `GROUP BY` keys and the
   /// aggregations collected from the projection, `HAVING`, and the `ORDER BY`
   /// sort keys, deduped by resolved `Aggregation` — then lowers the projection
-  /// and the `ORDER BY` through it, reusing `Grouping.terms`/`Grouping.order`
+  /// and the `ORDER BY` through it, reusing `Grouped.terms`/`Grouped.order`
   /// so the two paths cannot drift. It resolves only, reading no cursor; a
   /// run's operand type-check over the (structurally valid) keys stays the
   /// caller's.
@@ -1196,10 +1283,24 @@ extension Catalog where Self: ~Escapable {
         aggregations.append(aggregation)
       }
     }
+    // This select's grouping keys and — for ONE expanded `GROUPING SETS` arm —
+    // its superset, matching the run's `group`. An `.arm` never carries an
+    // `ORDER BY` (it rides the wrapper), so the superset is used here only for
+    // completeness; a `.sets` never reaches this path (it is expanded before
+    // any resolve).
+    let (grouping, superset): (Array<Expression>, Array<Expression>) =
+        switch select.grouping {
+        case let .keys(keys): (keys, [])
+        case let .arm(keys, superset): (keys, superset)
+        case .sets: ([], [])
+        }
     // The GROUP BY keys' LOWERED base-ordinal terms, so a bare `NATURAL`/
     // `USING` merged key (which binds no single ordinal) is matched by term —
     // the SAME lowering the run's `group` computes.
-    let keys = try select.grouping.map { key throws(SQLError) -> Term in
+    let keys = try grouping.map { key throws(SQLError) -> Term in
+      try scope.term(key, routines, subquery: subquery.barred)
+    }
+    let supers = try superset.map { key throws(SQLError) -> Term in
       try scope.term(key, routines, subquery: subquery.barred)
     }
     // Build the grouping and lower the projection through it to record each
@@ -1207,11 +1308,83 @@ extension Catalog where Self: ~Escapable {
     // `ORDER BY` output name resolves against — then lower the `ORDER BY`,
     // which faults a non-group column, an out-of-range ordinal, or an ambiguous
     // name.
-    var grouping = try Grouping(scope, select.grouping, keys, aggregations,
-                                subquery: subquery)
-    let projection = try grouping.terms(select.projection, routines,
-                                        subquery: subquery)
-    _ = try grouping.order(clause, projection, routines, subquery: subquery)
+    var grouped = try Grouped(scope, grouping, keys, aggregations,
+                              superset: supers, subquery: subquery)
+    let projection = try grouped.terms(select.projection, routines,
+                                       subquery: subquery)
+    _ = try grouped.order(clause, projection, routines, subquery: subquery)
+  }
+
+  /// The RESOLVED grouped-space `Term` of each of a GROUPED arm's projected
+  /// items, paired with a resolver lowering an arbitrary expression to the same
+  /// grouped space — the identity surface the `ordered` set-op carrier matches
+  /// a query-level `ORDER BY` key against, so it agrees with the plain grouped
+  /// `ORDER BY` path (both route through this ONE `Grouped`).
+  ///
+  /// The carrier over a `GROUPING SETS` expansion resolves its `ORDER BY` keys
+  /// against the union's OUTPUT scope, which cannot recompute an aggregate. To
+  /// decide whether a key is an ALREADY-PROJECTED value — so it orders on that
+  /// output rather than a synthetic hidden column — it lowers the key HERE and
+  /// matches its `Term` against these projected terms by RESOLVED identity,
+  /// general over every expression shape (a qualifier-equivalent aggregate
+  /// `SUM(s.Qty)` ≡ the projected `SUM(Qty)`), not raw AST + a `.column`-only
+  /// qualifier strip. It rebuilds the SAME `Grouped` the run's `group` and the
+  /// schema `order(grouped:)` build — the keys and the aggregations collected
+  /// from the projection, `HAVING`, and (the arm carries the materialised keys
+  /// as projected items) the sort keys, deduped by resolved `Aggregation` — so
+  /// the identity cannot drift from either. It resolves only, reads no cursor.
+  ///
+  /// `resolve` faults `SQLError.grouping` on a genuinely non-grouped reference,
+  /// which for an unprojected key the carrier catches to mean "not a projected
+  /// value, materialise it"; a projected key lowers cleanly to its output slot.
+  borrowing func projected(arm select: Select, _ context: Context)
+      throws(SQLError)
+      -> (terms: Array<Term>,
+          resolve: (Expression) throws(SQLError) -> Term) {
+    let context = try augment(context, for: .select(select), rows: false)
+    let routines = context.routines
+    let scope = try scope(of: select, context)
+    let prefixes = try prefixes(of: select, context)
+    let subquery = try subquery(of: select, context.scoped(as: .caller),
+                                enclosing: scope, prefixes: prefixes).rest
+    // The distinct aggregates the arm folds — its projection (which for a
+    // carried GROUPING SETS arm includes the materialised sort keys as extra
+    // projected items) and its `HAVING` — deduped by resolved `Aggregation`,
+    // exactly as `group` does, so a projected aggregate and a
+    // qualifier-equivalent sort key fold into ONE slot.
+    var expressions = Array<Expression>()
+    for expression in select.projection.projected {
+      expression.collect(into: &expressions)
+    }
+    if let having = select.having { having.collect(into: &expressions) }
+    var aggregations = Array<Aggregation>()
+    for expression in expressions {
+      let aggregation = try expression.aggregation(scope, routines,
+                                                   subquery: subquery)
+      if !aggregations.contains(aggregation) {
+        aggregations.append(aggregation)
+      }
+    }
+    let (grouping, superset): (Array<Expression>, Array<Expression>) =
+        switch select.grouping {
+        case let .keys(keys): (keys, [])
+        case let .arm(keys, superset): (keys, superset)
+        case .sets: ([], [])
+        }
+    let keys = try grouping.map { key throws(SQLError) -> Term in
+      try scope.term(key, routines, subquery: subquery.barred)
+    }
+    let supers = try superset.map { key throws(SQLError) -> Term in
+      try scope.term(key, routines, subquery: subquery.barred)
+    }
+    var grouped = try Grouped(scope, grouping, keys, aggregations,
+                              superset: supers, subquery: subquery)
+    let terms = try grouped.terms(select.projection, routines,
+                                  subquery: subquery)
+    let barred = subquery.barred
+    return (terms, { expression throws(SQLError) in
+      try grouped.resolve(expression, routines, subquery: barred)
+    })
   }
 
   /// Whether `limit` drops the one row a `single`-row result would yield,
@@ -1454,6 +1627,13 @@ extension Scope {
                        _ routines: Routines = [:],
                        subquery: Resolution = .unsupported)
       throws(SQLError) -> ResolvedColumn {
+    // The item's inferable output NAME (`Projected.name` — an alias, else a
+    // bare column's name), or a SYNTHESIZED positional `column N` header when
+    // it has none. `synthesized` is that STRUCTURAL bare/unnamed fact — carried
+    // on the resolved column so a consumer (the `ordered` set-op carrier)
+    // distinguishes this fabricated header from a user's explicit delimited
+    // `AS "column 1"`, which by NAME text is identical but is a real output.
+    let synthesized = item.name == nil
     let name = item.name ?? "column \(index + 1)"
     // A projection places NO type constraint on the unified column when it
     // folds to a CONSTANT NULL for every row (`null` — its derived literal-fix
@@ -1468,7 +1648,7 @@ extension Scope {
         || unresolved(item.expression, routines) {
       let type = try derive(item.expression, routines, subquery: subquery)
       return ResolvedColumn(OutputColumn(name: name, type: type),
-                            unconstrained: true)
+                            unconstrained: true, synthesized: synthesized)
     }
     // A bare-column projection reuses the ONE column resolution — LOCAL or
     // CORRELATED — so its type and `unconstrained` mask agree, renaming only
@@ -1476,7 +1656,8 @@ extension Scope {
     if case let .column(column) = item.expression {
       let resolved = try output(of: column, subquery: subquery)
       return ResolvedColumn(OutputColumn(name: name, type: resolved.type),
-                            unconstrained: resolved.unconstrained)
+                            unconstrained: resolved.unconstrained,
+                            synthesized: synthesized)
     }
     // A bare scalar-subquery projection reuses the subquery's OWN resolved
     // column — its type AND `unconstrained` mask — so a constant-NULL body
@@ -1488,7 +1669,8 @@ extension Scope {
     if case let .subquery(query) = item.expression {
       let resolved = try subquery.scalar(resolved: query)
       return ResolvedColumn(OutputColumn(name: name, type: resolved.type),
-                            unconstrained: resolved.unconstrained)
+                            unconstrained: resolved.unconstrained,
+                            synthesized: synthesized)
     }
     // DERIVE the nominal output type: the schema reports the type a run would
     // produce and never faults on an operand. Run-time operand and call
@@ -1499,6 +1681,7 @@ extension Scope {
     return try ResolvedColumn(OutputColumn(name: name,
                                            type: derive(item.expression,
                                                         routines,
-                                                        subquery: subquery)))
+                                                        subquery: subquery)),
+                              synthesized: synthesized)
   }
 }

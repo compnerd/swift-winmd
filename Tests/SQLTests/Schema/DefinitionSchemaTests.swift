@@ -63,4 +63,25 @@ import SQLTestSupport
     #expect(names.contains([.text("A")]))
     #expect(names.contains([.text("B")]))
   }
+
+  @Test func `definition_schema.columns skips a faulting grouping-sets view`()
+      throws {
+    // The metadata builder EXPANDS a `GROUPING SETS` view body before
+    // type-checking, as the schema path does. Unexpanded, the constant-false
+    // `WHERE` reads as skipping the `1 / 0` projection; expanded, the `()` arm
+    // forms one group (a grand total) and evaluates it, faulting. The store
+    // must NOT advertise a view that selecting from would fault.
+    let bad = try parse(query: """
+        SELECT 1 / 0 AS x FROM Sales
+         WHERE 1 = 0 GROUP BY GROUPING SETS ((Region), ())
+        """)
+    let catalog = FixtureCatalog(
+        ["Sales": FixtureRelation([FixtureField(name: "Region", type: .text)],
+                                  [])],
+        views: ["v": View(query: bad, columns: ["x"])])
+    try catalog.empty("""
+        SELECT column_name FROM definition_schema.columns
+         WHERE table_name = 'v'
+        """)
+  }
 }

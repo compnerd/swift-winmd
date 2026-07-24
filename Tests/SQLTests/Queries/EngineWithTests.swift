@@ -1326,23 +1326,36 @@ struct EngineRecursiveTests {
                                           [.integer(4)]])
   }
 
-  @Test func `a recursive carrier ORDER BY of a qualified column resolves on the output`()
+  @Test func `a recursive carrier ORDER BY of a qualified column faults`()
       throws {
-    // The qualified sub-case: `p.Age` drops its qualifier (a set-operation
-    // result carries none) and binds the bare output the anchor projects, as
-    // the ordinary carrier's qualifier strip does.
+    // The recursive body is a set operation; its trailing carrier `ORDER BY`
+    // resolves against the fixpoint OUTPUT, which — like any set-operation
+    // result — exposes NO range. A QUALIFIED key `p.Age` (the anchor's `p`)
+    // therefore fails resolution, exactly as the derived-union equivalent and
+    // a plain `… UNION … ORDER BY R.a` do: the carrier lets it through to
+    // `scope.order` rather than silently dropping the qualifier to bind the
+    // bare output. The BARE `ORDER BY Age` orders the fixpoint (below).
     let people = EngineMemory([
       "People": FixtureRelation([EngineField(name: "Age", type: .integer)],
                                 [[.integer(1)]] as Array<Array<Value>>),
     ])
-    let statement = try Statement(parsing: """
+    let qualified = try Statement(parsing: """
         WITH RECURSIVE t (Age) AS (
           SELECT p.Age FROM People p WHERE p.Age = 1
           UNION ALL SELECT Age + 1 FROM t WHERE Age < 3 ORDER BY p.Age
         ) SELECT Age FROM t
         """)
-    #expect(try people.run(statement) == [[.integer(1)], [.integer(2)],
-                                          [.integer(3)]])
+    #expect(throws: SQLError.column("Age")) {
+      _ = try people.run(qualified)
+    }
+    let bare = try Statement(parsing: """
+        WITH RECURSIVE t (Age) AS (
+          SELECT p.Age FROM People p WHERE p.Age = 1
+          UNION ALL SELECT Age + 1 FROM t WHERE Age < 3 ORDER BY Age
+        ) SELECT Age FROM t
+        """)
+    #expect(try people.run(bare) == [[.integer(1)], [.integer(2)],
+                                     [.integer(3)]])
   }
 
   @Test func `a recursive carrier ORDER BY of an ordinal orders the fixpoint`()

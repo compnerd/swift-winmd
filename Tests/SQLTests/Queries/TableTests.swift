@@ -24,7 +24,7 @@ struct TableTests {
     #expect(select.projection == .all)
     #expect(select.table == "People")
     #expect(select.predicate == nil)
-    #expect(select.grouping.isEmpty)
+    #expect(select.grouping == .keys([]))
     #expect(select.having == nil)
     #expect(select.order == nil)
     #expect(select.limit == nil)

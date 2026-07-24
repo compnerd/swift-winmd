@@ -470,4 +470,18 @@ struct CarrierOrderBySubqueryTests {
       try resolve()
     }
   }
+
+  @Test func `a qualified sort key over a set operation faults`() throws {
+    // The set-operation output exposes NO range, so a QUALIFIED sort key
+    // `R.a` fails resolution — the carrier lets it through to `scope.order`
+    // rather than silently dropping the qualifier to bind the bare output
+    // `a`, which hid an invalid `R.a` / `NoSuch.a` range reference. The bare
+    // `ORDER BY a` binds the output as before.
+    try pair().expect(
+        "SELECT a FROM L UNION ALL SELECT b FROM R ORDER BY R.a",
+        fails: SQLError.column("a"))
+    try pair().expect(
+        "SELECT a FROM L UNION ALL SELECT b FROM R ORDER BY a",
+        yields: [[1], [2], [3], [4], [5]])
+  }
 }

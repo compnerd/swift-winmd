@@ -275,7 +275,9 @@ private func subquery(_ term: Term) -> Bool {
   case let .case(branches, otherwise, _):
     return branches.contains { subquery($0.0) || subquery($0.1) }
         || otherwise.map { subquery($0) } ?? false
-  case .slot, .parameter, .constant:
+  case .slot, .parameter, .constant, .grouping:
+    // A GROUPING lowers to a settled per-arm constant; its `over` identity terms
+    // are never evaluated, so it reaches no runtime scalar subquery.
     return false
   }
 }

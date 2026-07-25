@@ -52,6 +52,42 @@ extension Expression {
       arguments.contains { $0.aggregated }
     case let .nullif(lhs, rhs):
       lhs.aggregated || rhs.aggregated
+    case let .grouping(arguments):
+      // GROUPING is not itself an aggregate; like a `call`, it is aggregated
+      // only if an argument is (a GROUP BY expression never is, so this is
+      // false in practice) — mirroring the neighbouring `call` arm.
+      arguments.contains { $0.aggregated }
+    }
+  }
+
+  /// Whether the expression nests a `GROUPING(…)` operator anywhere within it.
+  /// The grouped lowering reads this to route a GROUPING-bearing compound (a
+  /// `CASE WHEN GROUPING(x) = 1 …`, an arithmetic over it) through its
+  /// per-operand descent rather than the whole-expression key match, which
+  /// lowers through `Scope.term` — and `Scope.term` cannot resolve a GROUPING
+  /// (it faults `.state`, the operator having meaning only in the grouped
+  /// space). Mirrors `aggregated`, which carves the same path out for a nested
+  /// aggregate; a GROUPING inside a scalar subquery belongs to that subquery's
+  /// own grouped scope, so a `subquery` is not GROUPING-bearing here.
+  internal var grouping: Bool {
+    switch self {
+    case .column, .literal, .aggregate, .subquery:
+      false
+    case .grouping:
+      true
+    case let .call(_, arguments):
+      arguments.contains { $0.grouping }
+    case let .binary(_, lhs, rhs):
+      lhs.grouping || rhs.grouping
+    case let .case(whens, otherwise):
+      whens.contains { $0.when.grouping || $0.then.grouping }
+          || (otherwise?.grouping ?? false)
+    case let .cast(operand, _):
+      operand.grouping
+    case let .coalesce(arguments):
+      arguments.contains { $0.grouping }
+    case let .nullif(lhs, rhs):
+      lhs.grouping || rhs.grouping
     }
   }
 
@@ -80,6 +116,9 @@ extension Expression {
       arguments.contains { $0.bound }
     case let .nullif(lhs, rhs):
       lhs.bound || rhs.bound
+    case let .grouping(arguments):
+      // As a `call`: bound only if an argument references a query binding.
+      arguments.contains { $0.bound }
     }
   }
 }
@@ -90,6 +129,15 @@ extension Predicate.Operand {
   internal var aggregated: Bool {
     switch self {
     case let .expression(expression): expression.aggregated
+    case .parameter: false
+    }
+  }
+
+  /// Whether this `LIKE` operand nests a `GROUPING(…)` — an expression's own,
+  /// never a `:parameter` (see `Expression.grouping`).
+  internal var grouping: Bool {
+    switch self {
+    case let .expression(expression): expression.grouping
     case .parameter: false
     }
   }
@@ -170,6 +218,49 @@ extension Predicate {
       lhs.aggregated || rhs.aggregated
     case let .not(operand):
       operand.aggregated
+    }
+  }
+
+  /// Whether the predicate nests a `GROUPING(…)` anywhere within it — used to
+  /// spot a GROUPING hiding in a `CASE` guard (`CASE WHEN GROUPING(x) = 1 …`),
+  /// so the grouped lowering descends the guarded compound per operand rather
+  /// than matching it as a whole `GROUP BY` key (see `Expression.grouping`). A
+  /// subquery is its own scope, so a GROUPING inside one never makes the
+  /// enclosing predicate GROUPING-bearing.
+  internal var grouping: Bool {
+    switch self {
+    case let .comparison(left, _, right):
+      left.grouping || right.grouping
+    case let .bound(left, _, _):
+      left.grouping
+    case let .null(operand, _):
+      operand.grouping
+    case let .membership(operand, values, _):
+      operand.grouping || values.contains { $0.grouping }
+    case let .rows(lhs, _, rhs):
+      lhs.contains { $0.grouping } || rhs.contains { $0.grouping }
+    case let .among(lhs, rows, _):
+      lhs.contains { $0.grouping }
+          || rows.contains { $0.contains { $0.grouping } }
+    case .exists:
+      false
+    case let .within(operand, _, _):
+      operand.grouping
+    case let .quantified(operand, _, _, _):
+      operand.grouping
+    case let .like(operand, pattern, escape, _):
+      operand.grouping || pattern.grouping
+          || (escape?.grouping ?? false)
+    case let .between(test, lower, upper, _):
+      test.grouping || lower.grouping || upper.grouping
+    case let .distinct(lhs, rhs, _):
+      lhs.grouping || rhs.grouping
+    case let .truth(inner, _, _):
+      inner.grouping
+    case let .and(lhs, rhs), let .or(lhs, rhs):
+      lhs.grouping || rhs.grouping
+    case let .not(operand):
+      operand.grouping
     }
   }
 
@@ -707,6 +798,10 @@ extension Expression {
     case let .nullif(lhs, rhs):
       lhs.collect(subqueries: &queries)
       rhs.collect(subqueries: &queries)
+    case let .grouping(arguments):
+      // As a `call`: descend the arguments so a subquery nested in one is
+      // collected for the pre-pass.
+      for argument in arguments { argument.collect(subqueries: &queries) }
     }
   }
 
@@ -743,6 +838,9 @@ extension Expression {
     case let .nullif(lhs, rhs):
       lhs.collect(valued: &queries)
       rhs.collect(valued: &queries)
+    case let .grouping(arguments):
+      // As a `call`: descend the arguments for any `IN (Q)`-position subquery.
+      for argument in arguments { argument.collect(valued: &queries) }
     }
   }
 
@@ -781,6 +879,9 @@ extension Expression {
     case let .nullif(lhs, rhs):
       lhs.collect(scalar: &queries)
       rhs.collect(scalar: &queries)
+    case let .grouping(arguments):
+      // As a `call`: descend the arguments for any scalar-subquery position.
+      for argument in arguments { argument.collect(scalar: &queries) }
     }
   }
 
@@ -815,6 +916,10 @@ extension Expression {
     case let .nullif(lhs, rhs):
       lhs.collect(existential: &queries)
       rhs.collect(existential: &queries)
+    case let .grouping(arguments):
+      // As a `call`: descend the arguments for any `EXISTS (Q)`-position
+      // subquery.
+      for argument in arguments { argument.collect(existential: &queries) }
     }
   }
 
@@ -1158,6 +1263,11 @@ extension Expression {
     case let .nullif(lhs, rhs):
       lhs.collect(into: &expressions)
       rhs.collect(into: &expressions)
+    case let .grouping(arguments):
+      // GROUPING is not an aggregate, but — like a `call` — descend its
+      // arguments so any aggregate nested in one is collected (a GROUP BY
+      // expression never nests one, so this gathers nothing in practice).
+      for argument in arguments { argument.collect(into: &expressions) }
     }
   }
 

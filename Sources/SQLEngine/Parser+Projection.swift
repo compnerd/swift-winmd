@@ -209,6 +209,16 @@ extension Parser {
                         filter: filter)
     }
 
+    // `GROUPING(a, …)` is the ISO grouping-sets function — a first-class node,
+    // not a scalar `call` (an unregistered `GROUPING` routine would fault
+    // `.function`), recognised case-insensitively only when written bare (a
+    // delimited `"GROUPING"` is an ordinary scalar name) and followed by `(`
+    // (a bare `grouping` not before `(` stayed an ordinary column above). It
+    // takes the same comma-separated argument list a call does, and needs at
+    // least one argument; it resolves to a per-arm integer bit-vector constant
+    // at grouped lowering, so it never dispatches through the routines.
+    let grouping = !ident.quoted && ident.text.uppercased() == "GROUPING"
+
     var arguments = Array<Expression>()
     if current?.kind != .rparen {
       try arguments.append(expression())
@@ -217,6 +227,21 @@ extension Parser {
       }
     }
     try expect(.rparen)
+    if grouping {
+      guard !arguments.isEmpty else {
+        throw .state("42601", "GROUPING requires at least one argument")
+      }
+      // The result is a signed-integer bit-vector — one bit per argument, the
+      // first the most significant — so more arguments than an `Int` payload
+      // holds cannot be represented without the vector overflowing to a
+      // negative value. Reject the over-wide call at parse (ISO 54023, too many
+      // arguments) rather than lower it to a corrupt constant.
+      guard arguments.count <= Int.bitWidth - 1 else {
+        throw .state("54023",
+                     "GROUPING supports at most \(Int.bitWidth - 1) arguments")
+      }
+      return .grouping(arguments)
+    }
     return .call(name: ident.text, arguments: arguments)
   }
 

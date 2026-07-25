@@ -184,6 +184,12 @@ extension Schema {
       // An aggregate has no per-row meaning — it folds over a group — so it may
       // not appear in a `WHERE`, a join `ON`, or a non-aggregate projection.
       throw .state("42803", "an aggregate is not allowed here")
+    case .grouping:
+      // GROUPING is a grouped-query construct decided by the arm's key
+      // membership; it has no meaning in this NON-grouped resolution (a scalar
+      // projection, WHERE, or join ON), so it faults exactly as an aggregate
+      // does. A grouped query lowers it through `Grouped.term` instead.
+      throw .state("42803", "GROUPING requires a GROUP BY")
     }
   }
 
@@ -649,6 +655,12 @@ internal struct Scope {
       // no catalog holds none and faults, rejecting the subquery rather than
       // mis-typing it, so this derive and the run's lowering AGREE.
       try subquery.scalar(type: query)
+    case .grouping:
+      // `GROUPING(a, …)` yields an integer bit-vector; its arguments are
+      // grouping keys the grouped lowering resolves, so — like a `call` (which
+      // types from its routine's declared return, not its arguments) — it types
+      // as `.integer` here without deriving them.
+      .integer
     }
   }
 
@@ -875,7 +887,28 @@ internal struct Scope {
       // reads that type exactly as the run's lowering does. A surface with no
       // catalog holds none and faults, rejecting the subquery unvalidated.
       try subquery.type(query)
+    case let .grouping(arguments):
+      // `GROUPING(a, …)` yields an integer bit-vector. Validate each argument
+      // RESOLVES as a scalar (the grouped lowering additionally enforces that
+      // each names a `GROUP BY` expression — `SQLError.grouping` otherwise —
+      // which this per-operand type-check does not duplicate), then accept.
+      try grouping(over: arguments, routines, subquery: subquery)
     }
+  }
+
+  /// The type of `GROUPING(a, …)` under `validate` — `.integer`, VALIDATING
+  /// each argument resolves as a run would (an unknown column, a bad operand,
+  /// or an ill-typed call inside an argument faults). The grouped lowering
+  /// enforces that each argument is a `GROUP BY` expression, so this only
+  /// checks resolvability and does not itself fault a valid GROUPING.
+  private func grouping(over arguments: Array<Expression>,
+                        _ routines: Routines,
+                        subquery: SubqueryCheck = .unsupported)
+      throws(SQLError) -> ValueType {
+    for argument in arguments {
+      _ = try validate(argument, routines, subquery: subquery)
+    }
+    return .integer
   }
 
   /// The result type of `COALESCE(v1, v2, …)`, validating each REACHABLE
@@ -1633,10 +1666,12 @@ internal struct Scope {
         return nil
       }
       return matches(va, .equal, vb) == true ? .null : va
-    case .column, .aggregate, .subquery:
+    case .column, .aggregate, .subquery, .grouping:
       // A `subquery` is row-independent but is materialised at RUN (this
       // compile-time fold has no cache), so it is not statically foldable —
-      // `nil`, like a `column` or `aggregate`.
+      // `nil`, like a `column` or `aggregate`. A `grouping` is constant only
+      // relative to a specific grouped ARM (this AST-level fold has no arm
+      // context), so it too is `nil` here — decided later by `Grouped.term`.
       return nil
     }
   }
@@ -1744,6 +1779,11 @@ internal struct Scope {
     // the memo (`scalar(resolved:)`), which already carries the unconstrained
     // mask for any unregistered call inside it — do NOT double-handle it here.
     case .subquery:
+      return false
+    // `.grouping`: `derive` types it `.integer` as a LEAF (it does not derive
+    // the arguments, exactly as a `call` types from its declared return), so it
+    // fabricates no routine type and constrains the fold — never unresolved.
+    case .grouping:
       return false
     }
   }
@@ -2139,6 +2179,13 @@ internal struct Scope {
     case let .nullif(lhs, rhs):
       try aggregates(in: lhs, routines, subquery: subquery)
       try aggregates(in: rhs, routines, subquery: subquery)
+    case let .grouping(arguments):
+      // GROUPING is not itself an aggregate, but — like a `call` — recurse its
+      // arguments so any aggregate they nest is validated (an aggregate is not
+      // a valid GROUPING argument, but the walk mirrors the neighbouring arms).
+      for argument in arguments {
+        try aggregates(in: argument, routines, subquery: subquery)
+      }
     }
   }
 
@@ -2339,6 +2386,20 @@ internal struct Scope {
       // independent — so this pre-run fold treats it as the undecided `.null`,
       // never faulting on a subquery the run would materialise cleanly.
       return .null
+    case let .grouping(arguments):
+      // This fold only ever runs over the single empty group a constant-false
+      // WHERE leaves — the grand total, which forms no grouping key, so every
+      // GROUPING argument is rolled up. GROUPING is therefore the all-ones
+      // bit-vector here, exactly the value the run's grouped lowering yields for
+      // an arm with no keys. Returning a placeholder `0` instead would pick the
+      // wrong `CASE` branch, so a reachability fold could drop the faulting arm
+      // a run keeps (`CASE WHEN GROUPING(x) = 1 THEN 1 / 0 ELSE 0` folds to the
+      // ELSE and misses the divide the grand-total group raises). Build the
+      // vector the same iterative way the grouped lowering does, so a 63-column
+      // GROUPING lands on `Int.max` rather than overflowing.
+      var bits = 0
+      for _ in arguments { bits = (bits << 1) | 1 }
+      return .integer(bits)
     }
   }
 
@@ -2781,6 +2842,12 @@ internal struct Scope {
       // An aggregate has no per-row meaning — it folds over a group — so it may
       // not appear in a `WHERE`, a join `ON`, or a non-aggregate projection.
       throw .state("42803", "an aggregate is not allowed here")
+    case .grouping:
+      // GROUPING is a grouped-query construct decided by the arm's key
+      // membership; it has no meaning in this NON-grouped join resolution, so
+      // it faults as an aggregate does. A grouped query lowers it through
+      // `Grouped.term` instead.
+      throw .state("42803", "GROUPING requires a GROUP BY")
     }
   }
 

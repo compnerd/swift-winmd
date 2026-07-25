@@ -949,6 +949,23 @@ public indirect enum Expression: Hashable, Sendable {
   /// resolves (or faults) as any other column would; correlation is a later
   /// slice.
   case subquery(Query)
+  /// `GROUPING(a, …)` — the ISO grouping-sets function, an integer bit-VECTOR
+  /// reporting per argument whether that expression was ROLLED UP (omitted from
+  /// the current result row's grouping set — bit `1`) or is a grouping key of
+  /// this set (bit `0`). The FIRST argument is the MOST-significant bit, so over
+  /// the `()` arm of `GROUPING SETS ((a, b), ())` `GROUPING(a, b)` is `0b11`
+  /// (`3`), and over the `(a)` arm it is `0b01` (`1`). Each argument must be a
+  /// `GROUP BY` expression of some grouping set (else an error), and GROUPING is
+  /// valid only in a grouped query (a `GROUP BY`, or a whole-result aggregate).
+  ///
+  /// It is a FIRST-CLASS node — NOT a scalar `call(name: "GROUPING", …)`, which
+  /// would fault `SQLError.function` as an unregistered routine — because it
+  /// resolves against the GROUPED scope's key membership rather than through
+  /// the routines: after GROUPING SETS expansion each arm knows its own
+  /// keys and the superset, so GROUPING is a COMPILE-TIME per-arm integer
+  /// CONSTANT (`Grouped.term`) and no executor path ever evaluates a `grouping`
+  /// node — it lowers to a `Term.constant(.integer(bits))`.
+  case grouping(Array<Expression>)
 }
 
 /// An `ORDER BY` clause: an ordered list of sort keys, each a sort value and

@@ -165,6 +165,13 @@ internal struct Grouped {
                     _ routines: Routines = [:],
                     subquery: Resolution = .unsupported)
       throws(SQLError) -> Term {
+    // `GROUPING(a, …)` is a per-arm integer bit-vector decided by this arm's
+    // key membership — handled before the general lowering below (which would
+    // route it through `scope.term`, faulting `.state`), so it lowers to a
+    // `Term.grouping` carrying that value and its cross-arm identity.
+    if case let .grouping(arguments) = expression {
+      return try grouping(over: arguments, routines, subquery: subquery)
+    }
     if case .aggregate = expression,
        let slot = try slot(of: expression, routines, subquery: subquery) {
       return .slot(slot)
@@ -186,17 +193,23 @@ internal struct Grouped {
     // surface — cases a bare merged column and a general expression never
     // reach. A merged column that matches NO key faults `.grouping`; a general
     // expression that matches none falls through so its operands are each
-    // checked (`Amount + 2` faults on the bare non-key `Amount`). An
-    // AGGREGATED expression (`SUM(x) + 1`) is skipped too: `scope.term` faults
-    // on an aggregate, so it descends into the switch, which routes each
-    // aggregate to its result slot and each key operand to its grouped slot.
+    // checked (`Amount + 2` faults on the bare non-key `Amount`). An aggregated
+    // expression (`SUM(x) + 1`) is skipped too: `scope.term` faults on an
+    // aggregate, so it descends into the switch, which routes each aggregate to
+    // its result slot and each key operand to its grouped slot. A
+    // GROUPING-bearing expression (`CASE WHEN GROUPING(x) = 1 …`) is skipped
+    // for the same reason — `scope.term` faults on the GROUPING it cannot
+    // resolve — so it too descends into the switch, where the `.case`/`.binary`
+    // arms recurse through this `term` and lower the nested GROUPING to its
+    // per-arm constant. A GROUPING can never itself be a `GROUP BY` key, so
+    // skipping the key match loses no match.
     let merged = if case let .column(column) = expression {
       column.qualifier == nil && scope.merges(column.name) != nil
     } else {
       false
     }
     let plain = if case .column = expression { !merged } else { false }
-    if !plain, !expression.aggregated {
+    if !plain, !expression.aggregated, !expression.grouping {
       let lowered = try scope.term(expression, routines, subquery: subquery)
       if let index = terms.firstIndex(of: lowered) { return .slot(index) }
       // A reference to a column ANOTHER set groups on but THIS arm's set omits
@@ -299,7 +312,95 @@ internal struct Grouped {
       // inconsistency, since the query gathers every projection/HAVING
       // aggregate.
       throw .state("XX000", "uncollected aggregate")
+    case .grouping:
+      // GROUPING is resolved to a constant at the TOP of `term` (before this
+      // switch), so it never reaches here — an internal inconsistency if it
+      // does.
+      throw .state("XX000", "unlowered GROUPING")
     }
+  }
+
+  /// The `Term.grouping` `GROUPING(a, …)` yields for this arm — the integer
+  /// bit-vector `bits` (one bit per argument, the first the most significant,
+  /// `0` for a `GROUP BY` key of this arm's set and `1` for a super-aggregate a
+  /// grouping column another set groups on but this arm rolls up) paired with
+  /// the `over` identity. It reuses the grouped `term` lowering for the
+  /// membership test: an argument returns a key slot (`< offset`) for a present
+  /// key, a typeless-NULL constant for a rolled-up one (the superset path), or
+  /// faults `SQLError.grouping` for a genuine non-grouping column — which
+  /// propagates, as it must. Any other lowering (an aggregate's result slot
+  /// `>= offset`, a literal) is not a grouping expression, so it faults.
+  ///
+  /// In a plain `GROUP BY` (`superset` empty) a key lowers to a `< offset` slot
+  /// (bit `0`) and a non-key faults `.grouping`, so every GROUPING is `0` — the
+  /// standard result when no column is rolled up.
+  ///
+  /// The result is a dedicated `Term.grouping`, not a bare constant, so a
+  /// carrier can match a query-level `ORDER BY GROUPING(x)` to its projected
+  /// column by identity rather than to an unrelated projection sharing this
+  /// arm's value (see `Term.grouping`).
+  private func grouping(over arguments: Array<Expression>,
+                        _ routines: Routines = [:],
+                        subquery: Resolution = .unsupported)
+      throws(SQLError) -> Term {
+    guard !arguments.isEmpty else {
+      throw .state("42601", "GROUPING requires at least one argument")
+    }
+    // The parser rejects an over-wide GROUPING, but the `Expression.grouping`
+    // AST case is public, so a programmatically built query reaches this lowering
+    // without a parse. Enforce the representable width here too: the bit-vector
+    // is a signed `Int`, one bit per argument, so more than `Int.bitWidth - 1`
+    // arguments would shift a rolled-up vector past the sign bit to a negative
+    // value. Reject it with the same ISO 54023 (too many arguments) the parser
+    // raises, so every public query-construction path agrees.
+    guard arguments.count <= Int.bitWidth - 1 else {
+      throw .state("54023",
+                   "GROUPING supports at most \(Int.bitWidth - 1) arguments")
+    }
+    var bits = 0
+    var identity = Array<Term>()
+    identity.reserveCapacity(arguments.count)
+    for argument in arguments {
+      // Lower through the grouped `term` so a non-grouping COLUMN faults
+      // `.grouping` as it would elsewhere; the returned term is not otherwise
+      // needed — membership below is decided by the arm-stable base `id`.
+      _ = try term(argument, routines, subquery: subquery)
+      // The argument's base-scope term is both its cross-arm identity (carried
+      // into the `over` payload) and the membership key for the roll-up test. It
+      // is the base term, not the grouped lowering: a rolled-up column lowers to
+      // the shared super-aggregate `.constant(.null)` — and a rolled-up
+      // CORRELATED key to a `.parameter` — so the grouped term identifies
+      // neither which column it was nor that it is a key. The base term is the
+      // column's arm-stable slot, so two GROUPINGs match by identity iff they
+      // report on the same expressions.
+      let id = try scope.term(argument, routines, subquery: subquery)
+      let bit: Int
+      if terms.contains(id) {
+        // A `GROUP BY` key present in this arm's set, matched by term against the
+        // arm's keys — so a CORRELATED key (a LATERAL body grouping on a
+        // preceding-FROM column, which lowers to `Term.parameter` rather than a
+        // local key slot) is recognised too, not only a local slot.
+        bit = 0
+      } else if superset.contains(id) {
+        // A super-aggregate: a grouping column another set groups on but this arm
+        // omits, so it is rolled up in this result row. Decided by superset
+        // membership of the arm-stable `id` alone — not the grouped lowering's
+        // `.constant(.null)`, which a rolled-up correlated key never takes (it
+        // stays `.parameter`), so an omitted correlated key reports bit 1 rather
+        // than faulting. A literal NULL's `id` is in no superset, so it still
+        // faults below.
+        bit = 1
+      } else {
+        // A literal (NULL among them), an aggregate's result slot, or any other
+        // non-grouping term — not a valid GROUPING argument. A non-grouping
+        // column already faulted `.grouping` inside `term` above.
+        throw .state("42803",
+                     "GROUPING argument must be a GROUP BY expression")
+      }
+      bits = (bits << 1) | bit
+      identity.append(id)
+    }
+    return .grouping(over: identity, bits: bits)
   }
 
   /// Records a projected item's output `name` at projection `column` → its

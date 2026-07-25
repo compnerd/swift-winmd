@@ -313,6 +313,21 @@ internal indirect enum Term: Equatable, Sendable {
   /// `CASE` coerces its selected arm. A later correlated slice re-runs it per
   /// outer row.
   case subquery(Subkey, correlation: Correlation, type: ValueType)
+  /// `GROUPING(a, …)` — the lowered form of the AST's `Expression.grouping`.
+  /// GROUPING is a per-arm integer bit-vector the grouped lowering already
+  /// decided (`bits`), so the executor simply yields `.integer(bits)` and it
+  /// reads no cell. The lowered argument terms (`over`) carry the operator's
+  /// identity — which grouping expressions it reports on, in the arm-stable
+  /// base scope, so a rolled-up column stays distinct from another rather than
+  /// collapsing to the shared super-aggregate NULL. A carrier resolves a
+  /// query-level `ORDER BY GROUPING(x)` against the first arm's projected terms
+  /// by `Term` identity (`Carrier`); without this dedicated case GROUPING lowered
+  /// to a bare `constant(.integer(bits))`, indistinguishable from an unrelated
+  /// projection that merely shares this arm's constant value, so the sort bound
+  /// to the wrong column. The `over` terms are identity only — never evaluated,
+  /// so `references` reads none of their slots and `remapped` leaves them (and
+  /// the settled `bits`) unchanged.
+  case grouping(over: Array<Term>, bits: Int)
 }
 
 extension Term {
@@ -352,6 +367,8 @@ extension Term {
       ll == rl && lr == rr
     case let (.subquery(lkey, lcorr, ltype), .subquery(rkey, rcorr, rtype)):
       lkey == rkey && lcorr == rcorr && ltype == rtype
+    case let (.grouping(lover, lbits), .grouping(rover, rbits)):
+      lover == rover && lbits == rbits
     default:
       false
     }
@@ -403,6 +420,10 @@ extension Term {
       // so it references none. An UNCORRELATED one (empty correlation)
       // references none — its value is a single cache lookup.
       slots.formUnion(correlation.slots)
+    case .grouping:
+      // A settled per-arm constant read from no cell; its `over` identity terms
+      // are never evaluated, so GROUPING references no slot to materialise.
+      break
     }
   }
 }
@@ -444,6 +465,10 @@ extension Term {
       // unchanged.
       .subquery(key, correlation: correlation.remapped(through: slot),
                 type: type)
+    case .grouping:
+      // A settled constant; its `over` identity terms are never read, so leave
+      // the term — and its now-stale base-scope ordinals — unchanged.
+      self
     }
   }
 
@@ -456,7 +481,9 @@ extension Term {
     switch self {
     // A `:parameter` is a bindings lookup, never a fault — safe, as
     // `Filter.Operand.parameter` is.
-    case .slot, .parameter, .constant: true
+    // GROUPING is a settled per-arm integer constant, so it never faults —
+    // safe, as a bare `constant` is.
+    case .slot, .parameter, .constant, .grouping: true
     case .apply, .binary, .case, .cast, .coalesce, .nullif, .subquery: false
     }
   }
@@ -472,7 +499,8 @@ extension Term {
   internal var parameterised: Bool {
     switch self {
     case .parameter: true
-    case .slot, .constant: false
+    // GROUPING is a settled constant reading no `:parameter`.
+    case .slot, .constant, .grouping: false
     case let .apply(_, arguments): arguments.contains(where: \.parameterised)
     case let .binary(_, lhs, rhs): lhs.parameterised || rhs.parameterised
     case let .case(branches, otherwise, _):
@@ -990,6 +1018,11 @@ extension Catalog where Self: ~Escapable {
       // one memoises; a CORRELATED one re-runs against this row's correlated
       // bindings.
       try scalar(row, key, correlation, type, context)
+    case let .grouping(_, bits):
+      // A settled per-arm bit-vector — the grouped lowering already decided it
+      // from this arm's key membership — so it yields its integer directly,
+      // reading no cell of the row. The `over` terms are identity only.
+      .integer(bits)
     }
   }
 

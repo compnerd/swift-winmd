@@ -932,6 +932,17 @@ extension Catalog where Self: ~Escapable {
   private borrowing func setop(_ plan: Plan, _ query: Query, _ overlay: Context,
                                _ name: String)
       throws(SQLError) -> Array<Record> {
+    // See through an `ordered` carrier over a set operation nested as an arm: a
+    // suffix-bearing parenthesised setop (`… UNION (… UNION … ORDER BY V
+    // FETCH n)`) reaches this recursion as an `.ordered(.setop(…))` arm, whose
+    // plan is a `.shaped` carrier stack over the setop. Peel to the carrier-
+    // transparent `core` so the wrapper descent below fires and reaches the
+    // inner setop's arms — where the per-arm augment binds their derived
+    // aliases — rather than treating the whole carrier as one opaque leaf
+    // (whose whole-query augment binds none, faulting `.relation`). `core`
+    // leaves a bare setop or a leaf select unchanged, so a non-carried body is
+    // untouched.
+    let query = query.core
     if case let .setop(kind, left, right, all, types, _) = plan,
         case let .setop(_, leftQuery, rightQuery, _) = query {
       // This node's arm queries are in hand, so the unified column `types` the

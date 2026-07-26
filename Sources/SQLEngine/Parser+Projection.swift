@@ -139,6 +139,14 @@ extension Parser {
       let token = try advance(expecting: "a literal")
       return .literal(.boolean(token.kind == .true))
     }
+    // The keyword `NULL` in value-expression position is the ISO `<null
+    // specification>` — the absent value. The `IS [NOT] NULL` predicate consumes
+    // its own `NULL` in the predicate parser, so a `.null` reaching here begins
+    // an expression (`SELECT NULL`, `COALESCE(NULL, x)`, `x = NULL`).
+    if current?.kind == .null {
+      _ = try advance(expecting: "a literal")
+      return .literal(.null)
+    }
 
     let ident = try name()
     guard try match(.lparen) else {

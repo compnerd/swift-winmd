@@ -536,6 +536,11 @@ internal struct Scope {
   /// for. Shared by both the schema and type-check surfaces.
   private func type(of literal: Literal) -> ValueType {
     switch literal {
+    // A bare `NULL` has no determinate type; the projection walk marks a
+    // constant-NULL column `unconstrained` (so it unifies with any typed arm),
+    // and this nominal placeholder is only its advertised type where no other
+    // arm constrains it — `.integer`, as a result-less `CASE` defaults.
+    case .null: .integer
     case .string: .text
     case .integer: .integer
     case .double: .double
@@ -765,16 +770,21 @@ internal struct Scope {
                        subquery: Resolution = .unsupported)
       throws(SQLError) -> ValueType {
     let results = reachable(whens, otherwise, routines)
-    if results.isEmpty { return .integer }
-    var type = try derive(results[0], routines, subquery: subquery)
-    for result in results.dropFirst() {
+    // A constant-NULL result places no type constraint (a NULL unifies with any
+    // arm), so it is skipped in the fold — mirroring COALESCE and the faulting
+    // `validate` (`conditional`) — and an all-NULL (or empty) CASE takes the
+    // `.integer` placeholder, which the projection walk marks unconstrained.
+    var type: ValueType?
+    for result in results {
+      if case .some(.null) = constant(result, routines) { continue }
       let next = try derive(result, routines, subquery: subquery)
-      guard let unified = type.unified(with: next) else {
+      guard let running = type else { type = next; continue }
+      guard let unified = running.unified(with: next) else {
         throw .operand("CASE results have irreconcilable types")
       }
       type = unified
     }
-    return type
+    return type ?? .integer
   }
 
   /// The result expressions of a `CASE` the executor's short-circuit can REACH,
@@ -1012,16 +1022,22 @@ internal struct Scope {
       if decided { break }
     }
     if !decided, let otherwise { results.append(otherwise) }
-    if results.isEmpty { return .integer }
-    var type = try validate(results[0], routines, subquery: subquery)
-    for result in results.dropFirst() {
+    // A result that folds to a constant NULL places no type constraint — a NULL
+    // unifies with any arm — so it is validated for its own errors but skipped
+    // in the type fold, exactly as COALESCE skips a constant-NULL argument. With
+    // every reachable result constant NULL (or none), the CASE is unconstrained
+    // and takes the `.integer` placeholder.
+    var type: ValueType?
+    for result in results {
       let next = try validate(result, routines, subquery: subquery)
-      guard let unified = type.unified(with: next) else {
+      if case .some(.null) = constant(result, routines) { continue }
+      guard let running = type else { type = next; continue }
+      guard let unified = running.unified(with: next) else {
         throw .operand("CASE results have irreconcilable types")
       }
       type = unified
     }
-    return type
+    return type ?? .integer
   }
 
   /// The result type of the scalar routine `name` called over `arguments`,
@@ -1054,6 +1070,13 @@ internal struct Scope {
     }
     for (argument, expected) in zip(arguments, routine.parameters) {
       let type = try validate(argument, routines, subquery: subquery)
+      // A statically-NULL argument fits any parameter type: run-time dispatch
+      // accepts NULL for every declared type and returns NULL, so a bare NULL
+      // (whose nominal type is the `.integer` placeholder) must not fault a call
+      // over a non-integer parameter — `UPPER(NULL)` type-checks and runs. A
+      // nullable column is not statically NULL (`constant` is `nil`), so its
+      // declared type is still enforced.
+      if case .some(.null) = constant(argument, routines) { continue }
       guard type == expected else {
         throw .argument("\(name) requires \(expected.domain) arguments")
       }
@@ -1207,6 +1230,17 @@ internal struct Scope {
         throw .operand("|| operands must be text")
       }
       return .text
+    }
+    // A statically-NULL operand makes the whole arithmetic NULL: `Arithmetic.apply`
+    // returns NULL before it inspects EITHER operand's kind, divides, or
+    // overflows, so the expression runs whatever the other operand's kind —
+    // `NULL + 'x'`, `'x' + NULL`, and even `NULL / 0` yield NULL — mirroring the
+    // concatenation path above. Skip the numeric-kind guard and the divide/
+    // overflow folds, and take the numeric result type (the placeholder integer
+    // when the other operand is non-numeric; the column is unconstrained anyway,
+    // since it folds to NULL).
+    if vanishing(lhs, routines) || vanishing(rhs, routines) {
+      return left == .double || right == .double ? .double : .integer
     }
     guard left.numeric, right.numeric else {
       throw .operand("operands must be numeric")
@@ -1613,8 +1647,18 @@ internal struct Scope {
   /// constant-NULL argument. The projection walk (`output(_ item:)`) reads this
   /// beside its type derive, so a column's type and its `unconstrained` mask
   /// come from ONE resolution over the SAME expression and cannot diverge.
+  ///
+  /// A `CASE` every reachable result of which is NULL yields NULL whichever
+  /// branch runs, so it is constant NULL even when a row-dependent guard leaves
+  /// the whole-expression `constant` fold undecided (`nil`) — `CASE WHEN Id = 1
+  /// THEN NULL ELSE NULL END` is unconstrained, so it unifies with a text arm in
+  /// a set operation rather than hard-typing the placeholder integer.
   internal func null(_ expression: Expression, _ routines: Routines) -> Bool {
     if case .some(.null) = constant(expression, routines) { return true }
+    if case let .case(whens, otherwise) = expression {
+      return reachable(whens, otherwise, routines)
+          .allSatisfy { null($0, routines) }
+    }
     return false
   }
 

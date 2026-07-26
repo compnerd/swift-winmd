@@ -82,7 +82,9 @@
 ///                 | [NOT] LIKE (expression | param)
 ///                     [ESCAPE (expression | param)]
 ///                 | [NOT] BETWEEN (expression | param) AND
-///                                 (expression | param))
+///                                 (expression | param)
+///                 | )  // a bare expression is an ISO <boolean predicand>,
+///                      // desugared to `expression = TRUE`
 /// row            := '(' expression (',' expression)+ ')'  // ISO row value;
 ///                   // a comma marks it, else '(' expression ')' is a scalar
 /// quantifier     := ANY | SOME | ALL      // SOME is a synonym for ANY

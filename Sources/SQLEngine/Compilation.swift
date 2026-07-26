@@ -356,11 +356,14 @@ extension Catalog where Self: ~Escapable {
     // stack the row operators over its plan, resolved through the setop's
     // output scope (`ordered`). The row operators do NOT project, so the result
     // columns stay the union's — an identity projection over its output slots.
-    if case let .ordered(inner, distinct, order, limit, generated) = query {
-      return try ordered(inner, distinct: distinct, order: order,
-                         limit: limit, generated: generated, context)
+    if let carrier = query.carriers.last {
+      let inner = Query(body: query.body,
+                        carriers: Array(query.carriers.dropLast()))
+      return try ordered(inner, distinct: carrier.distinct,
+                         order: carrier.order, limit: carrier.limit,
+                         generated: carrier.generated, context)
     }
-    guard case let .setop(kind, left, right, all) = query else {
+    guard case let .setop(kind, left, right, all) = query.body else {
       return try compile(query.first, context)
     }
 
@@ -710,7 +713,9 @@ extension Catalog where Self: ~Escapable {
     // the `ORDER BY` drops; the carrier's `DISTINCT`/`OFFSET`·`FETCH` affect
     // cardinality, so they ride the probed inner (`FETCH FIRST 0 ROWS` probes
     // zero, EXISTS false). Peel, probe the inner, re-wrap without the order.
-    if case let .ordered(inner, distinct, _, limit, _) = query {
+    if let carrier = query.carriers.last {
+      let inner = Query(body: query.body,
+                        carriers: Array(query.carriers.dropLast()))
       // Rewriting the base projection to a constant collapses distinct rows to
       // one (a `DISTINCT` on any carrier in the stack, or on the base select).
       // A positive OFFSET on this carrier applied afterwards would then wrongly
@@ -718,14 +723,14 @@ extension Catalog where Self: ~Escapable {
       // depends on distinct cardinality — its select list and sort evaluate,
       // exactly as a direct `SELECT DISTINCT … OFFSET k` (non-probable) does.
       // `query.dedups` is carrier-transparent, so a `DISTINCT` reached only
-      // through a stacked `ordered` node (`((SELECT DISTINCT …) ORDER BY …)
-      // OFFSET 1`) still suppresses the rewrite. Otherwise probe the inner and
-      // drop this ORDER BY (existence is order-independent).
-      if query.dedups, (limit?.offset ?? 0) >= 1 { return query }
-      return .ordered(probed(inner), distinct: distinct, order: nil,
-                      limit: limit, generated: 0)
+      // through a stacked carrier (`((SELECT DISTINCT …) ORDER BY …) OFFSET 1`)
+      // still suppresses the rewrite. Otherwise probe the inner and drop this
+      // ORDER BY (existence is order-independent).
+      if query.dedups, (carrier.limit?.offset ?? 0) >= 1 { return query }
+      return .ordered(probed(inner), distinct: carrier.distinct, order: nil,
+                      limit: carrier.limit, generated: 0)
     }
-    guard case let .select(select) = query, select.probable else {
+    guard case let .select(select) = query.body, select.probable else {
       return query
     }
     return .select(select.probe)

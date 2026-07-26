@@ -1138,7 +1138,7 @@ extension Catalog where Self: ~Escapable {
     // `.ordered` carrier and skip a reached carried union's strict re-fold,
     // diverging run from the uncorrelated `.operand`/42804 fault.
     if key.role == .scalar || key.role == .valued,
-        case .setop = key.query.core, !context.subqueries.validated(key) {
+        case .setop = key.query.body, !context.subqueries.validated(key) {
       _ = try types(unifying: key.query, context)
       context.subqueries.validate(key)
     }
@@ -1156,7 +1156,7 @@ extension Catalog where Self: ~Escapable {
     // the query itself and the descender's `.setop` leaf is `arms(plan, core,
     // context)` — the prior direct call — so a non-ordered set operation is
     // unchanged.
-    if case .setop = key.query.core {
+    if case .setop = key.query.body {
       return try execute(plan, carrying: key.query.core, context)
     }
     let augmented =
@@ -1257,7 +1257,8 @@ extension Catalog where Self: ~Escapable {
   internal borrowing func arms(_ plan: Plan, _ query: Query, _ context: Context)
       throws(SQLError) -> Array<Record> {
     if case let .setop(kind, left, right, all, types, _) = plan,
-        case let .setop(_, leftQuery, rightQuery, _) = query {
+        query.carriers.isEmpty,
+        case let .setop(_, leftQuery, rightQuery, _) = query.body {
       // The unified column `types` the plan carries (computed at compile) drive
       // the arm coercion `combine` applies — the same types every set-op path
       // uses, so a mixed-type arm widens identically here.
@@ -1273,7 +1274,7 @@ extension Catalog where Self: ~Escapable {
     // arms' derived aliases there. Treating the whole carrier as one leaf would
     // whole-query augment it, binding none of those aliases (arms are
     // SELECT-scoped) — the `.relation` fault this closes.
-    if case .setop = query.core {
+    if case .setop = query.body {
       return try execute(plan, carrying: query.core, context)
     }
     let augmented =

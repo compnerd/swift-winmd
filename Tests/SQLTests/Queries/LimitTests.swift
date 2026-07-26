@@ -152,7 +152,7 @@ struct LimitTests {
     // executor's skip and take would trap on it, so the engine rejects it as a
     // query error instead.
     let query = try parse(query: "SELECT Id FROM People")
-    guard case let .select(base) = query else {
+    guard case let .select(base) = query.body else {
       Issue.record("expected a single SELECT")
       return
     }

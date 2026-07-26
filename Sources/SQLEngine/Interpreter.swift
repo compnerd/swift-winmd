@@ -862,7 +862,8 @@ extension Catalog where Self: ~Escapable {
     }
     let rows: Array<Record>
     let view = resolve(view: name)
-    if let view, case .setop = view.query, case .setop = plan {
+    if let view, view.query.carriers.isEmpty, case .setop = view.query.body,
+        case .setop = plan {
       // A SET-operation view body executes each ARM's sub-plan under an overlay
       // augmented with that arm's own derived aliases. A `setop` collects no
       // derived aliases at the query level (arms are SELECT-scoped), so the
@@ -880,8 +881,8 @@ extension Catalog where Self: ~Escapable {
       // materialise would fault `.relation("d")` before an arm ever ran.
       // Mirrors the per-arm run and `SELECT *` arity paths.
       rows = try setop(plan, view.query, overlay, name.lowercased())
-    } else if let view, case .ordered = view.query,
-        case .setop = view.query.core {
+    } else if let view, !view.query.carriers.isEmpty,
+        case .setop = view.query.body {
       // The body is a set operation under an `ordered` carrier (`… UNION …
       // ORDER BY V`), whose plan is a `.shaped` project/sort/distinct stack
       // over the `.setop`, NOT a bare setop, so both guards above failed and
@@ -944,7 +945,7 @@ extension Catalog where Self: ~Escapable {
     // untouched.
     let query = query.core
     if case let .setop(kind, left, right, all, types, _) = plan,
-        case let .setop(_, leftQuery, rightQuery, _) = query {
+        case let .setop(_, leftQuery, rightQuery, _) = query.body {
       // This node's arm queries are in hand, so the unified column `types` the
       // plan carries (computed at compile) drive the arm coercion `combine`
       // applies — the same types the top-level and Plan-node paths use.
@@ -962,7 +963,7 @@ extension Catalog where Self: ~Escapable {
     // plan is the ARM's own sub-plan and must execute AS A unit under its own
     // augment below, NOT be walked through as a carrier wrapper (which would
     // apply the arm's projection/filter outside its arm-local scope).
-    if case .setop = query {
+    if case .setop = query.body {
       switch plan {
       case let .project(terms, source):
         let source = try setop(source, query, overlay, name)

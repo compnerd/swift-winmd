@@ -9,7 +9,8 @@ import Testing
 public func parse(select text: String,
                   location: Testing.SourceLocation = #_sourceLocation)
     throws(SQLError) -> Select {
-  guard case let .select(.select(select)) = try Statement(parsing: text) else {
+  guard case let .select(query) = try Statement(parsing: text),
+        case let .select(select) = query.body else {
     Issue.record("expected a single SELECT statement",
                  sourceLocation: location)
     throw SQLError.incomplete(expected: "a SELECT statement")

@@ -33,14 +33,14 @@ struct ValuesTests {
     // UNION ALL SELECT 3, 4` — a `.setop(.union, …, all: true)` whose first arm
     // is FROM-less and aliases the default output names.
     let query = try parse(query: "VALUES (1, 2), (3, 4)")
-    guard case let .setop(kind, left, right, all) = query else {
+    guard case let .setop(kind, left, right, all) = query.body else {
       Issue.record("expected a UNION ALL set operation")
       return
     }
     #expect(kind == .union)
     #expect(all)
 
-    guard case let .select(head) = left,
+    guard case let .select(head) = left.body,
           case let .expressions(items) = head.projection else {
       Issue.record("expected a FROM-less expression projection as the head arm")
       return
@@ -52,7 +52,7 @@ struct ValuesTests {
 
     // The trailing arm projects the bare expressions — a set operation names
     // its result from the first arm alone, so a later arm carries no aliases.
-    guard case let .select(tail) = right,
+    guard case let .select(tail) = right.body,
           case let .expressions(later) = tail.projection else {
       Issue.record("expected a FROM-less expression projection as the tail arm")
       return
@@ -64,7 +64,7 @@ struct ValuesTests {
   @Test func `a single-row VALUES is one FROM-less SELECT`() throws {
     // With one row there is no set operation — the desugar is the single arm.
     let query = try parse(query: "VALUES (1, 2)")
-    guard case let .select(select) = query,
+    guard case let .select(select) = query.body,
           case let .expressions(items) = select.projection else {
       Issue.record("expected a single FROM-less SELECT")
       return
@@ -182,7 +182,7 @@ struct ValuesTests {
     // `(SELECT …)` does. The parse must route the parenthesised `VALUES` to the
     // query parser, not the value-expression parser.
     let query = try parse(query: "SELECT (VALUES (1)) AS x")
-    guard case let .select(select) = query,
+    guard case let .select(select) = query.body,
           case let .expressions(items) = select.projection else {
       Issue.record("expected an expression projection")
       return
@@ -200,7 +200,7 @@ struct ValuesTests {
     // route to the query parser so it is one subquery, not two row literals.
     let query = try parse(query:
         "SELECT Id FROM People WHERE Id IN (VALUES (1), (2))")
-    guard case let .select(select) = query,
+    guard case let .select(select) = query.body,
           case .within? = select.predicate else {
       Issue.record("expected an IN-subquery predicate")
       return

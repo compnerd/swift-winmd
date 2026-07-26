@@ -278,7 +278,7 @@ internal struct Parser: ~Escapable {
     // separately scoped tails (the inner picks the operand's rows, the outer
     // orders that primary's result), the ISO nesting boundary — not a `42601`
     // duplicate-clause error.
-    if case let .select(select) = query, !parenthesized {
+    if case let .select(select) = query.body, !parenthesized {
       return .select(Select(distinct: select.distinct,
                             projection: select.projection, from: select.from,
                             joins: select.joins, predicate: select.predicate,

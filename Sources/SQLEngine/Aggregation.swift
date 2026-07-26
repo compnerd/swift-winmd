@@ -313,10 +313,9 @@ extension Query {
   /// nested in a defined-function body is walked through this to reject a
   /// `:parameter` at registration (see `Expression.bound`).
   internal var bound: Bool {
-    switch self {
+    switch body {
     case let .select(select): select.bound
     case let .setop(_, left, right, _): left.bound || right.bound
-    case let .ordered(inner, _, _, _, _): inner.bound
     }
   }
 
@@ -327,10 +326,9 @@ extension Query {
   /// once, keyed by occurrence, so a set operation's every arm reads its own
   /// `EXISTS`/`IN (Q)` result from the same cache.
   internal var subqueries: Array<Query> {
-    switch self {
+    switch body {
     case let .select(select): select.subqueries
     case let .setop(_, left, right, _): left.subqueries + right.subqueries
-    case let .ordered(inner, _, _, _, _): inner.subqueries
     }
   }
 
@@ -341,10 +339,9 @@ extension Query {
   /// an `EXISTS` and an `IN` appears here (its values are needed), so its lone
   /// full materialisation serves both.
   internal var valued: Set<Query> {
-    switch self {
+    switch body {
     case let .select(select): select.valued
     case let .setop(_, left, right, _): left.valued.union(right.valued)
-    case let .ordered(inner, _, _, _, _): inner.valued
     }
   }
 
@@ -354,10 +351,9 @@ extension Query {
   /// occurrence. The materialiser reads this to decide a scalar occurrence's
   /// materialisation.
   internal var scalar: Set<Query> {
-    switch self {
+    switch body {
     case let .select(select): select.scalar
     case let .setop(_, left, right, _): left.scalar.union(right.scalar)
-    case let .ordered(inner, _, _, _, _): inner.scalar
     }
   }
 
@@ -368,11 +364,10 @@ extension Query {
   /// existential probe entry whenever a query occurs here — never reusing a
   /// `valued`/`scalar` entry for an `EXISTS` read.
   internal var existential: Set<Query> {
-    switch self {
+    switch body {
     case let .select(select): select.existential
     case let .setop(_, left, right, _):
       left.existential.union(right.existential)
-    case let .ordered(inner, _, _, _, _): inner.existential
     }
   }
 }

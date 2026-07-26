@@ -214,7 +214,8 @@ extension Catalog where Self: ~Escapable {
     // optimiser, whose pushdown/seek pass rebases a caller `WHERE` into each
     // arm. Preserved verbatim so a non-ordered union view's seek injection is
     // unchanged.
-    if case .setop = view.query, case .setop = plan {
+    if view.query.carriers.isEmpty, case .setop = view.query.body,
+        case .setop = plan {
       return try optimise(plan, view.query, overlay)
     }
     // A set operation under an `ordered` carrier compiles to a `.shaped` stack
@@ -225,7 +226,7 @@ extension Catalog where Self: ~Escapable {
     // `setop`/`execute(_:carrying:)` do. gated on the body actually wearing a
     // carrier (`view.query` an `.ordered`), so a bare union view keeps the
     // plain path above and this never rewrites its pushed `.select`/seek shape.
-    if case .ordered = view.query, case .setop = view.query.core {
+    if !view.query.carriers.isEmpty, case .setop = view.query.body {
       return try optimise(plan, view.query.core, overlay)
     }
     return try optimise(plan, overlay)
@@ -250,7 +251,7 @@ extension Catalog where Self: ~Escapable {
     // a bare setop or a leaf select unchanged.
     let query = query.core
     if case let .setop(kind, left, right, all, types, widened) = plan,
-        case let .setop(_, leftQuery, rightQuery, _) = query {
+        case let .setop(_, leftQuery, rightQuery, _) = query.body {
       return try .setop(kind, optimise(left, leftQuery, overlay),
                         optimise(right, rightQuery, overlay), all: all,
                         types: types, widened: widened)
@@ -263,7 +264,7 @@ extension Catalog where Self: ~Escapable {
     // plan is that ARM's own sub-plan, whose `.project`/`.select`/… must reach
     // the plain arm optimiser below (its seek/pushdown rewrite), NOT be walked
     // through as a carrier wrapper. So these cases fire ONLY above the setop.
-    if case .setop = query {
+    if case .setop = query.body {
       switch plan {
       case let .project(terms, source):
         return try .project(terms, optimise(source, query, overlay))

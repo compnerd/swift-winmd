@@ -17,7 +17,8 @@ struct TableTests {
   @Test func `TABLE t lowers to a star-projection SELECT over the named relation`() throws {
     // The primary builds the same AST `SELECT * FROM People` does: a `.all`
     // projection over one named `Relation`, with no WHERE/GROUP/HAVING/order.
-    guard case let .select(select) = try parse(query: "TABLE People") else {
+    guard case let .select(select) = try parse(query: "TABLE People").body
+    else {
       Issue.record("expected a single-SELECT query")
       return
     }

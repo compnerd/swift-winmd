@@ -17,22 +17,23 @@ extension Query {
   /// shallow pass at each entry covers arbitrary nesting.
   internal var expanded: Query {
     get throws(SQLError) {
-      switch self {
+      // A carrier is transparent to the expansion — its row operators add no
+      // grouping — so expand the body and carry the stack through unchanged. A
+      // grouping-sets body is produced afresh by `expand` (whose own carrier,
+      // if any, sits innermost, beneath this query's carriers); a `setop` body
+      // recurses into its arms.
+      switch body {
       case let .select(select):
         if case let .sets(sets) = select.grouping {
-          return try expand(select, sets: sets)
+          let expanded = try expand(select, sets: sets)
+          return Query(body: expanded.body,
+                       carriers: expanded.carriers + carriers)
         }
         return self
       case let .setop(kind, left, right, all):
-        return .setop(kind, try left.expanded, try right.expanded, all: all)
-      case let .ordered(inner, distinct, order, limit, generated):
-        // An `ordered` carrier is produced by `expand` over an already-
-        // expanded union, so its inner is idempotent under a re-expansion;
-        // recurse for uniformity (a nested `.sets` inside is impossible —
-        // `expand` only ever wraps a `setop` of `.arm` selects). The generated
-        // trailing count rides through unchanged.
-        return .ordered(try inner.expanded, distinct: distinct, order: order,
-                        limit: limit, generated: generated)
+        return Query(body: .setop(kind, try left.expanded,
+                                  try right.expanded, all: all),
+                     carriers: carriers)
       }
     }
   }

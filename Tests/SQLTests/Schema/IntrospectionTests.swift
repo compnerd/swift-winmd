@@ -98,7 +98,7 @@ struct IntrospectionTests {
   @Test func `a base relation shadows a same-named built-in information_schema view`() throws {
     // A base relation named for a built-in view shadows it (`resolve(view:)`
     // yields the base), so the built-in is not listed as a VIEW — the base is
-    // listed as a BASE TABLE. (The name now resolves to the base, so the store
+    // listed as a base TABLE. (The name now resolves to the base, so the store
     // relation is read directly to observe the metadata.)
     let cat = MetaCatalog([
       "information_schema.tables": MetaRelation([("x", .integer)], []),
@@ -146,7 +146,7 @@ struct IntrospectionTests {
 
   @Test func `information_schema.columns types a view defined over the overlay`() throws {
     // `Meta` reads `information_schema.tables`, whose `table_name` is text, so
-    // the builder must seed the view body's OWN introspection overlay for
+    // the builder must seed the view body's own introspection overlay for
     // `Meta`'s column to advertise the text domain, not the integer default.
     let body = try parse(query:
         "SELECT table_name FROM information_schema.tables")
@@ -200,7 +200,7 @@ struct IntrospectionTests {
   }
 
   @Test func `a view over information_schema.columns keeps its columns' kinds`() throws {
-    // A view reading `information_schema.columns` ITSELF must resolve against a
+    // A view reading `information_schema.columns` itself must resolve against a
     // schema-only seed of that relation, so its `column_name` column advertises
     // the text domain rather than falling back to the integer default.
     let body = try parse(query:
@@ -236,7 +236,7 @@ struct IntrospectionTests {
 
   @Test func `information_schema.columns hides a view whose WHERE is invalid`() throws {
     // `v`'s projection resolves, but its WHERE names a missing column, so
-    // `SELECT * FROM v` throws. The overlay validates the WHOLE body — as the
+    // `SELECT * FROM v` throws. The overlay validates the whole body — as the
     // public schema API does — and does not advertise `v` as queryable
     // metadata.
     let body = try parse(query: "SELECT Name FROM People WHERE Missing = 1")
@@ -252,7 +252,7 @@ struct IntrospectionTests {
 
   @Test func `information_schema.columns hides a view whose UNION arm is invalid`() throws {
     // The leading arm resolves, but the second names a missing column, so the
-    // whole view cannot run — the overlay must validate EVERY arm, not just the
+    // whole view cannot run — the overlay must validate every arm, not just the
     // first, and not list `u`.
     let body = try parse(query: """
         SELECT Name FROM People UNION SELECT Missing FROM People
@@ -301,10 +301,10 @@ struct IntrospectionTests {
   }
 
   @Test func `information_schema.columns hides a view whose scalar-call arg is bad`() throws {
-    // `v`'s projection is a scalar call `BITAND(Missing, 1)` whose ARGUMENT
+    // `v`'s projection is a scalar call `BITAND(Missing, 1)` whose argument
     // names a column `People` does not have, so `SELECT * FROM v` fails to
     // compile (`Scope.term` resolves `Missing` and throws `SQLError.column`). A
-    // resolve-only validator that typed a `.call` by its fallback kind WITHOUT
+    // resolve-only validator that typed a `.call` by its fallback kind without
     // visiting its arguments advertised `v` anyway; validating each view via
     // the real `compile` — which lowers a call's arguments — closes that
     // gap, so `v` is not listed. This passes through the compile-based
@@ -393,7 +393,7 @@ struct IntrospectionTests {
     // resolution now faults it `.recursion` (see cyclicViewRuns) rather than
     // hanging, so the overlay validates each view via the real `compile`
     // and does not advertise a view that could never be queried. The cycle must
-    // not hang or corrupt an UNRELATED metadata query either — `People` still
+    // not hang or corrupt an unrelated metadata query either — `People` still
     // reports normally, and the cyclic views are absent.
     let a = try parse(query: "SELECT * FROM B")
     let b = try parse(query: "SELECT * FROM A")
@@ -458,7 +458,7 @@ struct IntrospectionTests {
   }
 
   @Test func `a base relation shadows the built-in information_schema view`() throws {
-    // A catalog vending its OWN `information_schema.tables` base relation must
+    // A catalog vending its own `information_schema.tables` base relation must
     // reach it: a base relation shadows the engine's built-in view (precedence
     // user view > base table > built-in view), so `SELECT *` reads the base
     // rows, not the enumerated metadata.
@@ -514,7 +514,7 @@ struct IntrospectionTests {
 
   @Test func `a view over information_schema.tables yields the inline rows`() throws {
     // A view whose body selects from a reserved introspection relation must
-    // resolve its overlay from ITS OWN query, so selecting from the view yields
+    // resolve its overlay from its own query, so selecting from the view yields
     // exactly what the inline query does.
     let body = try parse(query: """
         SELECT table_name FROM information_schema.tables
@@ -599,7 +599,7 @@ struct IntrospectionTests {
   }
 
   @Test func `columns(of:) types a scalar call by its routine's return type`() throws {
-    // The public schema API takes the SAME routines a run would, so a projected
+    // The public schema API takes the same routines a run would, so a projected
     // `TAG(Name)` reports its declared `.text` return type, not `.integer`.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
     let query = try parse(query: "SELECT TAG(Name) AS t FROM People")
@@ -849,7 +849,7 @@ struct IntrospectionTests {
 
   @Test func `columns(of:) derives a schema for a zero-row-limit projection`() throws {
     // `FETCH FIRST 0 ROWS ONLY` yields no rows and the limit applies before the
-    // projection, so `Name + 1` is never evaluated; the schema DERIVES its
+    // projection, so `Name + 1` is never evaluated; the schema derives its
     // nominal type without faulting on the non-numeric operand.
     let cat = MetaCatalog(["People": MetaRelation([("Name", .text)], [])])
     #expect(try cat.columns(of: parse(query: """
@@ -922,7 +922,7 @@ struct IntrospectionTests {
         SELECT SUM(Name) AS s FROM People WHERE 1 = 0
         """))
     #expect(summed.count == 1)
-    // But a whole-result aggregate still emits ONE empty group, so a scalar
+    // But a whole-result aggregate still emits one empty group, so a scalar
     // call projecting it runs — an unregistered routine faults, as a run does.
     #expect(throws: SQLError.self) {
       let _ = try cat.columns(of: parse(query: """
@@ -995,7 +995,7 @@ struct IntrospectionTests {
         ["BAD": Routine(returns: .double, parameters: []) { _ in
           .double(.infinity)
         }]
-    // The empty group projects BAD(), a non-finite double the run rejects
+    // The empty group projects bad(), a non-finite double the run rejects
     // (SQLError.magnitude), so the schema must reject it too.
     #expect(throws: SQLError.self) {
       let _ = try cat.columns(of: parse(query: """
@@ -1155,7 +1155,7 @@ struct IntrospectionTests {
 
   @Test func `a base relation shadowed by the definition_schema store is hidden`() throws {
     // The store overlay resolves `definition_schema.tables`, so a catalog base
-    // relation of that name is unreachable; it must not be advertised as a BASE
+    // relation of that name is unreachable; it must not be advertised as a base
     // TABLE, or metadata would disagree with resolution for the reserved name.
     let cat = MetaCatalog([
       "People": MetaRelation([("Name", .text)], []),
@@ -1292,7 +1292,7 @@ struct IntrospectionTests {
   }
 
   @Test func `a view over definition_schema.tables yields the inline rows`() throws {
-    // A view whose body names the STORE relation directly — not an
+    // A view whose body names the store relation directly — not an
     // `information_schema.` view over it — resolves and runs the same as the
     // inline query: the store overlay reaches the view body's compile and
     // execution (`resolve`/`derive`), not only the top-level query.

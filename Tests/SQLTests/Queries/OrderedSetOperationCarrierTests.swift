@@ -9,7 +9,7 @@ import SQLTestSupport
 // operators (`ORDER BY`/`DISTINCT`/`OFFSET`·`FETCH`); it compiles to a
 // `.shaped` project/sort/distinct/limit stack over the `.setop`, NOT a bare
 // `.setop`. Several correlated-subquery and view seams matched `if case .setop
-// = <query>`/`if case .setop = <plan>` DIRECTLY, silently swallowing the
+// = <query>`/`if case .setop = <plan>` directly, silently swallowing the
 // carrier — a correlated ordered set-op subquery (its plan a `.shaped` stack)
 // never reached the per-arm augment, so an arm-local derived alias went
 // unmaterialised (`.relation`), and a reached irreconcilable pair skipped its
@@ -17,7 +17,7 @@ import SQLTestSupport
 // carrier-transparent core (`Query.core`) and the shared carrier descender
 // (`execute(_:carrying:)` / the view `setop` and `optimise` per-arm helpers),
 // so carrier transparency is a construction guarantee. Each test pairs the
-// ORDERED shape with its BARE (non-carrier) baseline to show the two agree.
+// ordered shape with its bare (non-carrier) baseline to show the two agree.
 
 // MARK: - Fixtures
 
@@ -38,7 +38,7 @@ private func people() throws -> FixtureCatalog {
 }
 
 /// A catalog whose view bodies are set operations — one riding an `ORDER BY`
-/// carrier, one bare — each arm naming its OWN arm-local derived table `d`, so
+/// carrier, one bare — each arm naming its own arm-local derived table `d`, so
 /// the per-arm augmentation must materialise it before the arm's scan reads it.
 private func views() throws -> FixtureCatalog {
   try Catalog {
@@ -61,9 +61,9 @@ private func views() throws -> FixtureCatalog {
 struct OrderedSetOperationCarrierTests {
   @Test func `a correlated IN over an ordered set op materialises each arm's derived table`()
       throws {
-    // GAP-A2: the correlated `IN (…)` subquery is a set operation UNDER an ORDER
+    // gap-A2: the correlated `IN (…)` subquery is a set operation under an ORDER
     // BY carrier, so its plan is a `.shaped` stack — `if case .setop = plan` was
-    // false, so it fell to the whole-query augment, which binds NO arm-local
+    // false, so it fell to the whole-query augment, which binds no arm-local
     // derived alias (a setop collects none), and arm-0's `.scan("x")` faulted
     // `.relation('x')`. It now routes through `execute(_:carrying:)`, per-arm
     // augmenting `x` before the arm scan. Alice (Age 30) matches the arm value.
@@ -77,7 +77,7 @@ struct OrderedSetOperationCarrierTests {
   @Test func `a bare correlated IN set op materialises each arm's derived table`()
       throws {
     // The non-ordered baseline (a bare `.setop` plan) already worked — the
-    // ordered form now matches it EXACTLY.
+    // ordered form now matches it exactly.
     try people().expect("""
         SELECT Id FROM People p WHERE p.Age IN
           (SELECT V FROM (SELECT 30 AS V) AS x WHERE x.V = p.Age
@@ -87,8 +87,8 @@ struct OrderedSetOperationCarrierTests {
 
   @Test func `an ordered set-op view materialises each arm's derived table`()
       throws {
-    // GAP-A3/A4: a view body that is a set operation UNDER an ORDER BY carrier
-    // compiles to a `.shaped` plan, so BOTH the view execute (`derive`) and the
+    // gap-A3/A4: a view body that is a set operation under an ORDER BY carrier
+    // compiles to a `.shaped` plan, so both the view execute (`derive`) and the
     // view optimiser (`optimise(view:)`) guards (`case .setop = view.query` and
     // `case .setop = plan`) failed and the per-arm augment was skipped —
     // arm-0's `.scan("d")` faulted `.relation('d')`. Both now descend the
@@ -100,14 +100,14 @@ struct OrderedSetOperationCarrierTests {
   @Test func `a bare set-op view materialises each arm's derived table`()
       throws {
     // The non-ordered baseline (a bare `.setop` view body) already worked; it
-    // yields the same MULTISET as the ordered form, but UNSORTED — the two arms
+    // yields the same multiset as the ordered form, but unsorted — the two arms
     // in source order: the derived `d` arm ({7, 8}) then the `S` arm ({7, 8}).
     try views().expect("SELECT * FROM bare", yields: [[7], [8], [7], [8]])
   }
 
   @Test func `a reached correlated scalar ordered set op faults on irreconcilable arms`()
       throws {
-    // GAP-A1: a REACHED correlated scalar subquery over an ordered set operation
+    // gap-A1: a reached correlated scalar subquery over an ordered set operation
     // with irreconcilable arms (text `'x'` beside integer `1`) skipped the
     // strict operand re-fold — `if case .setop = key.query` was false for the
     // `.ordered` carrier — so the run returned rows where the uncorrelated form
@@ -194,9 +194,9 @@ struct OrderedSetOperationCarrierTests {
   @Test func `a carrier ORDER BY with an uncorrelated EXISTS runs like a plain SELECT`()
       throws {
     // A carrier `ORDER BY` may nest an `EXISTS`/`IN`/scalar subquery. An
-    // UNCORRELATED one records no per-outer-row plan (its probe runs
-    // standalone), so it worked already — the set-op carrier matches the SAME
-    // ORDER BY on a PLAIN SELECT over the identical multiset (a derived table
+    // uncorrelated one records no per-outer-row plan (its probe runs
+    // standalone), so it worked already — the set-op carrier matches the same
+    // ORDER BY on a plain SELECT over the identical multiset (a derived table
     // wrapping the union). `S` is non-empty, so the `EXISTS` is TRUE for every
     // row and the sort key is a constant `0`; the secondary ordinal orders the
     // rows.
@@ -213,15 +213,15 @@ struct OrderedSetOperationCarrierTests {
 
   @Test func `a carrier ORDER BY with a correlated scalar subquery runs like a plain SELECT`()
       throws {
-    // FINDING #1: a carrier `ORDER BY` subquery that CORRELATES to the
+    // finding #1: a carrier `ORDER BY` subquery that correlates to the
     // enclosing query (`… WHERE V < p.Id`, a set operation inside an outer
-    // `IN`) resolves the correlation but recorded NO runtime plan — the
+    // `IN`) resolves the correlation but recorded no runtime plan — the
     // recording pass asked `arm.roles(of:)`, and the ARM does not carry the
-    // CARRIER's sort-key subquery, so its correlated `Subkey` lowered yet
+    // carrier's sort-key subquery, so its correlated `Subkey` lowered yet
     // faulted "a correlated subquery plan was not compiled" at execution. The
-    // carrier now records its OWN ORDER BY subqueries' plans (through a
+    // carrier now records its own ORDER BY subqueries' plans (through a
     // classifier select carrying the carrier's ORDER BY), so a correlated sort
-    // key re-executes per outer row EXACTLY as it does on a PLAIN SELECT — the
+    // key re-executes per outer row exactly as it does on a plain SELECT — the
     // inner set operation replaced by a derived table over the same multiset,
     // whose ORDER BY takes the ordinary supported correlated-subquery path.
     // `S` = {7, 8}: for `p.Id` 1 or 2 the ORDER BY count is 0 (a no-op sort),
@@ -280,14 +280,14 @@ struct OrderedSetOperationCarrierTests {
 
   @Test func `a carrier ORDER BY subquery resolves a set-op output column at validate as at run`()
       throws {
-    // FINDING (PR293): the `validate` carrier pre-pass derived each carrier
-    // ORDER BY subquery's width/type against `context.outer`, while the RUN
-    // resolved the SAME subquery against the set-operation OUTPUT scope. A
-    // carrier ORDER BY subquery referencing a set-op OUTPUT column — an aliased
+    // finding (PR293): the `validate` carrier pre-pass derived each carrier
+    // ORDER BY subquery's width/type against `context.outer`, while the run
+    // resolved the same subquery against the set-operation output scope. A
+    // carrier ORDER BY subquery referencing a set-op output column — an aliased
     // output (`Id AS Key`) living ONLY in that scope, absent from the outer —
     // therefore resolved at run yet faulted `SQLError.column("Key")` at
     // validate: a query that executes was rejected by `columns(of:, validate:
-    // true)`. The pre-pass now derives against the SAME set-op output scope
+    // true)`. The pre-pass now derives against the same set-op output scope
     // (nested under the outer), so it resolves at validate exactly as at run.
     // `S` = {7, 8} is non-empty, so the `EXISTS` sort key is a constant.
     let catalog = try people()
@@ -316,7 +316,7 @@ struct OrderedSetOperationCarrierTests {
     // The reviewer's exact shape — an `EXISTS` sort key correlating to a bare
     // set-op output column (`Id`, shared with a base relation) — already ran
     // and validated (`width` derives the projection only, and `Id` binds via
-    // the outer/base), and STILL does after the scope alignment.
+    // the outer/base), and still does after the scope alignment.
     let catalog = try people()
     let sql = """
         SELECT Id FROM People UNION ALL SELECT V FROM S
@@ -335,10 +335,10 @@ struct OrderedSetOperationCarrierTests {
 
   @Test func `a carrier ORDER BY subquery naming an unknown column still faults at run and validate`()
       throws {
-    // GUARD: the scope alignment must not OVER-WIDEN. A carrier ORDER BY
+    // guard: the scope alignment must not OVER-widen. A carrier ORDER BY
     // subquery referencing a genuinely-unresolvable column (`Zzz` — neither a
     // set-op output nor an outer/base column) still faults `SQLError.column` at
-    // BOTH run and validate.
+    // both run and validate.
     let catalog = try people()
     let sql = """
         SELECT Id AS Key FROM People UNION ALL SELECT V FROM S
@@ -359,12 +359,12 @@ struct OrderedSetOperationCarrierTests {
 
   @Test func `an ordered union over arm-local derived tables runs like the bare union`()
       throws {
-    // FINDING #1: an ORDER BY carrier over a set operation whose arms name
-    // their OWN arm-local derived tables (`d`, `e`) faulted `.relation('d')`
-    // though the SAME union WITHOUT the ORDER BY ran fine. The top-level
-    // `run(.setop)` path runs each arm PER ARM — arm-local aliases bind — but
-    // the ordered carrier fell to the GENERIC `optimise`, rewriting both arms
-    // under the ONE carrier-level context that binds no arm-owned alias, so its
+    // finding #1: an ORDER BY carrier over a set operation whose arms name
+    // their own arm-local derived tables (`d`, `e`) faulted `.relation('d')`
+    // though the same union without the ORDER BY ran fine. The top-level
+    // `run(.setop)` path runs each arm per ARM — arm-local aliases bind — but
+    // the ordered carrier fell to the generic `optimise`, rewriting both arms
+    // under the one carrier-level context that binds no arm-owned alias, so its
     // `seek` rewrite faulted `.relation('d')` before the per-arm
     // `execute(…carrying:)` could augment each arm. `run` now routes an
     // ordered-over-setop carrier through the per-arm optimiser (mirroring the
@@ -386,9 +386,9 @@ struct OrderedSetOperationCarrierTests {
 
   @Test func `a DISTINCT paged ordered union over arm-local derived tables runs`()
       throws {
-    // FINDING #1 (other carrier operators): the per-arm descent threads through
+    // finding #1 (other carrier operators): the per-arm descent threads through
     // the DISTINCT dedup and OFFSET·FETCH paging too, not only ORDER BY. Each
-    // arm carries a `WHERE` over its OWN arm-local derived table — the filter
+    // arm carries a `WHERE` over its own arm-local derived table — the filter
     // the generic optimiser's `seek` rewrite would resolve under the wrong
     // (carrier-level) scope, faulting `.relation` pre-fix. A bare `UNION`
     // dedups the two `1` arms with the `2` arm to {1, 2}; ordered, OFFSET 1
@@ -406,10 +406,10 @@ struct OrderedSetOperationCarrierTests {
 
   @Test func `an ordered union arm over a genuinely-missing relation still faults`()
       throws {
-    // FINDING #1 GUARD (no over-masking): the per-arm route must NOT swallow a
+    // finding #1 guard (no over-masking): the per-arm route must NOT swallow a
     // real missing-relation fault. An arm referencing a relation that does NOT
-    // exist (`NoSuchRel`) STILL faults `.relation('NoSuchRel')`, both with and
-    // without the ORDER BY carrier — the fix only per-arm-scopes arm-LOCAL
+    // exist (`NoSuchRel`) still faults `.relation('NoSuchRel')`, both with and
+    // without the ORDER BY carrier — the fix only per-arm-scopes arm-local
     // derived aliases; a genuinely absent relation is still unresolvable.
     let cat = try Catalog {
       Relation("Anchor", ["x": .integer]) { Row(0) }
@@ -424,15 +424,15 @@ struct OrderedSetOperationCarrierTests {
 
   @Test func `a generated count over a SELECT-star union faults not traps`()
       throws {
-    // FINDING #2: a hostile `Query.ordered(<union of two SELECT * arms>,
+    // finding #2: a hostile `Query.ordered(<union of two SELECT * arms>,
     // generated: 1)` — a PUBLIC AST case the parser never emits. A `SELECT *`
-    // arm's projection is `.all`, so the carrier's `items` list is EMPTY though
+    // arm's projection is `.all`, so the carrier's `items` list is empty though
     // the resolved `width` is > 0. The old aliased-tail check `for k in 0 ..<
-    // generated WHERE real + k < items.count` SKIPPED every slot (items empty),
+    // generated WHERE real + k < items.count` skipped every slot (items empty),
     // so the hidden-name mapping's `items[real + k].alias!` force-unwrapped an
-    // ABSENT item and TRAPPED the process. (A trap cannot be caught in-process,
-    // so this asserts the POST-fix typed fault; PRE-fix this crashed.) The
-    // carrier now requires each generated tail slot to HAVE an aliased
+    // absent item and trapped the process. (A trap cannot be caught in-process,
+    // so this asserts the post-fix typed fault; pre-fix this crashed.) The
+    // carrier now requires each generated tail slot to have an aliased
     // projected item, faulting XX000 rather than crashing.
     let cat = try Catalog {
       Relation("P", ["a": .integer, "b": .integer]) { Row(1, 2) }
@@ -454,18 +454,18 @@ struct OrderedSetOperationCarrierTests {
 
   @Test func `columns(of:) faults an out-of-range generated count not traps`()
       throws {
-    // FINDING #3: the SCHEMA path `columns(unifying:)` trimmed a carrier's
-    // hidden tail as `cols.prefix(cols.count - generated)` with NO range guard.
-    // A public-AST `generated` PAST the width makes the argument NEGATIVE and
-    // `Array.prefix` PRECONDITION-TRAPS; a NEGATIVE `generated` returns ALL
-    // columns UNTRIMMED — silently wrong and diverging from `run`, which faults
+    // finding #3: the schema path `columns(unifying:)` trimmed a carrier's
+    // hidden tail as `cols.prefix(cols.count - generated)` with no range guard.
+    // A public-AST `generated` past the width makes the argument negative and
+    // `Array.prefix` precondition-traps; a negative `generated` returns ALL
+    // columns untrimmed — silently wrong and diverging from `run`, which faults
     // XX000. The schema path now mirrors the compile-path range guard (the
-    // SHARED `real(trimming:of:)` helper), so both fault the SAME XX000. A
-    // NESTED ordered carrier (an ordered arm of an outer union) reaches
-    // `columns(unifying:)`'s `.ordered` case DIRECTLY — the whole-query compile
-    // pre-check does not guard it — so its malformed count actually TRAPPED the
+    // shared `real(trimming:of:)` helper), so both fault the same XX000. A
+    // nested ordered carrier (an ordered arm of an outer union) reaches
+    // `columns(unifying:)`'s `.ordered` case directly — the whole-query compile
+    // pre-check does not guard it — so its malformed count actually trapped the
     // schema path (`Can't take a prefix of negative length`). A trap cannot be
-    // caught in-process, so this asserts the POST-fix typed fault; PRE-fix this
+    // caught in-process, so this asserts the post-fix typed fault; pre-fix this
     // crashed the process.
     let cat = try Catalog {
       Relation("P", ["a": .integer]) { Row(1) }
@@ -473,7 +473,7 @@ struct OrderedSetOperationCarrierTests {
     let fault = SQLError.state("XX000",
                                "ordered set-operation generated count out " +
                                "of range")
-    // A nested ordered arm with a count PAST the width (1) — `cols.count −
+    // A nested ordered arm with a count past the width (1) — `cols.count −
     // 999` is negative, the schema-path `prefix` trap.
     let arm = Query.ordered(
         .select(Select(projection: .all, from: Relation(name: "P"))),
@@ -485,10 +485,10 @@ struct OrderedSetOperationCarrierTests {
     #expect(throws: fault) {
       _ = try cat.columns(of: nested, routines: [:], validate: false)
     }
-    // A top-level malformed carrier faults the SAME XX000 on BOTH paths (the
+    // A top-level malformed carrier faults the same XX000 on both paths (the
     // whole-query compile guards it before `columns(unifying:)`, and the run
-    // path's carrier guards it) — run ≡ columns(of:). A count PAST the width
-    // and a NEGATIVE count both fault.
+    // path's carrier guards it) — run ≡ columns(of:). A count past the width
+    // and a negative count both fault.
     let union = Query.setop(
         .union,
         .select(Select(projection: .all, from: Relation(name: "P"))),
@@ -506,7 +506,7 @@ struct OrderedSetOperationCarrierTests {
     }
     #expect(throws: fault) { _ = try cat.run(over) }
     #expect(throws: fault) { _ = try cat.run(under) }
-    // A VALID `generated: 0` returns the correct trimmed schema — one column.
+    // A valid `generated: 0` returns the correct trimmed schema — one column.
     let valid = Query.ordered(union, distinct: false, order: nil, limit: nil,
                               generated: 0)
     #expect(try cat.columns(of: valid, routines: [:],

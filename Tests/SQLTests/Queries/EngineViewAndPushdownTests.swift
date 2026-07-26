@@ -95,21 +95,21 @@ struct EngineViewTests {
 
 // MARK: - A view body must not correlate against the caller's row
 
-/// A view is DEFINED independently of its call site, so its body must NOT bind
+/// A view is defined independently of its call site, so its body must NOT bind
 /// an unbound column to an enclosing query's row — even when the view is used
 /// from inside a (correlated) subquery, whose compile threads its enclosing
 /// scope as the correlation stack.
 ///
 /// Folding the correlation stack into `Context` made the view-body compile path
-/// inherit the caller's `outer`, so an unbound column in the view DEFINITION
+/// inherit the caller's `outer`, so an unbound column in the view definition
 /// (`WHERE k = 1`, where `k` is NOT in the view's own FROM) wrongly bound to a
 /// caller's row when the enclosing relation happened to have a column `k`.
 /// Clearing the correlation stack entering the view-body overlay restores the
-/// fault: the view body cannot see the caller's row, so `k` is unbound at BOTH
+/// fault: the view body cannot see the caller's row, so `k` is unbound at both
 /// compile and run.
 struct EngineViewCorrelationTests {
   /// An outer `Env` carrying a column `k` a leaking view body could bind to,
-  /// a source `Src` WITHOUT `k`, and a view `Bad` whose body references the
+  /// a source `Src` without `k`, and a view `Bad` whose body references the
   /// unbound `k`.
   private func leaky() throws -> EngineMemory {
     let bad = try View(query: select("SELECT n FROM Src WHERE k = 1"),
@@ -136,7 +136,7 @@ struct EngineViewCorrelationTests {
 
   @Test func `the view faults at compile under a subquery, not only at run`()
       throws {
-    // Schema ↔ run parity: the STRICT schema pass faults the view body's
+    // Schema ↔ run parity: the strict schema pass faults the view body's
     // unbound `k` too, rather than binding it to the caller — the leak the fold
     // introduced would have compiled a schema for a view that cannot run.
     let query = try parse(
@@ -147,7 +147,7 @@ struct EngineViewCorrelationTests {
   }
 
   @Test func `a valid view under a subquery still resolves and runs`() throws {
-    // Control: a LEGITIMATE view (its body self-contained) used from a nested
+    // Control: a legitimate view (its body self-contained) used from a nested
     // subquery still resolves and runs — clearing the view body's correlation
     // stack does not disturb a well-formed view. `Good` reads `Src` (one row),
     // so the EXISTS holds for every `Env` row.
@@ -185,21 +185,21 @@ struct EngineViewCorrelationTests {
 
   // MARK: - schema(of:) view-body derivation must not correlate either
 
-  /// The `schema(of:)` seam — the view-body SCHEMA/type derivation `scope(of:)`
+  /// The `schema(of:)` seam — the view-body schema/type derivation `scope(of:)`
   /// drives, resolving a `FROM <view>`'s relations to their types — entered the
-  /// view-body overlay via `scoping([:]).visiting(name)` WITHOUT clearing the
-  /// caller's correlation stack, the ONE view-body body-entry the prior round
-  /// missed. So when a view whose DEFINITION references a column absent from its
+  /// view-body overlay via `scoping([:]).visiting(name)` without clearing the
+  /// caller's correlation stack, the one view-body body-entry the prior round
+  /// missed. So when a view whose definition references a column absent from its
   /// own FROM had its schema derived while under a correlated subquery whose
-  /// outer relation HAS that column, the type-derivation bound the unbound
-  /// column OUTWARD to the caller's row rather than faulting — disagreeing with
+  /// outer relation has that column, the type-derivation bound the unbound
+  /// column outward to the caller's row rather than faulting — disagreeing with
   /// the compile/run path `resolve`/`overlay` now clear. Routing every body-
   /// entry through `Context.body(_:)` (which appends `uncorrelated()`) closes
   /// it: `schema(of:)` faults the unbound column, consistent with compile/run.
 
-  /// An outer `Env(k)` a leaking view PROJECTION could bind to, a source `Src`
-  /// WITHOUT `k`, and a view `Proj` whose body PROJECTS the unbound `k` — so its
-  /// SCHEMA (the projection's type) is what a leak would derive from the caller.
+  /// An outer `Env(k)` a leaking view projection could bind to, a source `Src`
+  /// without `k`, and a view `Proj` whose body projects the unbound `k` — so its
+  /// schema (the projection's type) is what a leak would derive from the caller.
   private func leaked() throws -> EngineMemory {
     let proj = try View(query: select("SELECT k AS m FROM Src"),
                         columns: ["m"])
@@ -211,7 +211,7 @@ struct EngineViewCorrelationTests {
     ], views: ["Proj": proj])
   }
 
-  /// A correlation stack whose NEAREST enclosing scope is `Env(k)` — the
+  /// A correlation stack whose nearest enclosing scope is `Env(k)` — the
   /// context a nested subquery's schema derivation runs under, so a leaking
   /// `schema(of:)` could bind an unbound view-projection column to `Env.k`. It
   /// nests a scope built from `Env`'s own schema (derived off the catalog),
@@ -224,7 +224,7 @@ struct EngineViewCorrelationTests {
   @Test
   func `schema of a view under a correlated scope does not bind the caller`()
       throws {
-    // Directly exercise the `schema(of:)` seam in ISOLATION: derive the scope
+    // Directly exercise the `schema(of:)` seam in isolation: derive the scope
     // of `SELECT m FROM Proj` under a correlation stack whose enclosing scope
     // is `Env(k)`. `scope(of:)` calls `schema(of: Proj)`, which enters the
     // view body to type its projection `k` — absent from `Proj`'s own FROM
@@ -247,7 +247,7 @@ struct EngineViewCorrelationTests {
   func `schema of a valid view under a correlated scope still derives`()
       throws {
     // Control: a well-formed view whose projection is self-contained still has
-    // its schema derived under the SAME correlated scope — clearing the schema
+    // its schema derived under the same correlated scope — clearing the schema
     // path's correlation stack does not disturb a legitimate view. `Fine`
     // projects `n` (in its own `Src`), so `scope(of:)` derives cleanly.
     let fine = try View(query: select("SELECT n AS m FROM Src"),
@@ -269,7 +269,7 @@ struct EngineViewCorrelationTests {
       throws {
     // End-to-end parity control: running `SELECT m FROM Proj` (outside any
     // correlation) faults the unbound projection `k` too, so the schema seam's
-    // fault under a correlated scope AGREES with the plain run — schema ↔ run.
+    // fault under a correlated scope agrees with the plain run — schema ↔ run.
     try leaked().expect("SELECT m FROM Proj", fails: .column("k"))
   }
 }
@@ -511,7 +511,7 @@ func residue(_ plan: Plan) -> Bool {
   }
 }
 
-/// Whether `plan` reaches a `.select` standing directly over ANOTHER `.select`
+/// Whether `plan` reaches a `.select` standing directly over another `.select`
 /// over a `.product` — the WHERE-above-a-separate-ON-gate shape the barrier
 /// preserves (the outer `select` the `WHERE`, the inner the residual `ON`
 /// gate), as opposed to one fused `.select(ON AND WHERE, product)`.
@@ -550,7 +550,7 @@ func separated(_ plan: Plan) -> Bool {
   }
 }
 
-/// Whether `plan` reaches a `.select` standing over ANOTHER `.select` over a
+/// Whether `plan` reaches a `.select` standing over another `.select` over a
 /// `.join` — the WHERE-above-a-leftover-ON-gate shape the always-barrier rule
 /// preserves for a pure-equi `ON` whose extra equi key `nest` leaves gating
 /// over the hash join (the outer `select` the `WHERE`, the inner the leftover
@@ -594,7 +594,7 @@ func stacked(_ plan: Plan) -> Bool {
 
 /// A join catalog whose inner `Child` relation tallies its row reads, plus a
 /// view `Kin` over the `Parent`/`Child` join — to prove a `WHERE` over the view
-/// prunes the join's inputs BEFORE the join runs rather than after. The counter
+/// prunes the join's inputs before the join runs rather than after. The counter
 /// rides the `Parent` relation (sorted on `Id`), so a pushed seekable key reads
 /// fewer of its rows regardless of the inner join strategy.
 private func counted() throws -> (catalog: EngineMemory, reads: EngineCounter) {
@@ -633,9 +633,9 @@ private func counted() throws -> (catalog: EngineMemory, reads: EngineCounter) {
 }
 
 /// A catalog for pushing a filter through a UNION view's arms: two relations
-/// whose shared output column `Key` sits at DIFFERENT body ordinals — `Alpha`
+/// whose shared output column `Key` sits at different body ordinals — `Alpha`
 /// has it first (sorted, so seekable), `Beta` last (unsorted) — exposed by a
-/// `Both` view as one column. A `WHERE Key = ?` over the view must rebase PER
+/// `Both` view as one column. A `WHERE Key = ?` over the view must rebase per
 /// arm (each arm maps `Key` to its own body slot), pushing below every arm's
 /// projection and seeking inside the `Alpha` arm.
 private func spanned() throws -> EngineMemory {
@@ -826,11 +826,11 @@ struct EnginePushdownTests {
   }
 
   @Test func `a spanning WHERE leaves the join path with a residual above it`() throws {
-    // `WHERE Parent.Name <> Child.Name` references BOTH joined relations, so it
+    // `WHERE Parent.Name <> Child.Name` references both joined relations, so it
     // descends no further than the product and stays as a residual. The ON
     // match must remain adjacent to the product — folded in with the spanning
     // conjunct — so `nest` still finds it and forms a `Join`, keeping the
-    // spanning predicate as a `Select` ABOVE the join rather than degrading to a
+    // spanning predicate as a `Select` above the join rather than degrading to a
     // filtered Cartesian `product`.
     let catalog = try family()
     let select = try parse("""
@@ -898,7 +898,7 @@ struct EnginePushdownTests {
   }
 
   @Test func `a throwing single-side predicate stays above the join, skips an empty product`() throws {
-    // `WHERE (1 / A.x) = 0` reads only `A`'s slot but CAN throw (division), so —
+    // `WHERE (1 / A.x) = 0` reads only `A`'s slot but can throw (division), so —
     // like a slotless throwing predicate — it must stay at the product level, not
     // ride down to `A`. `B` is empty, so the product is empty and the division is
     // never evaluated; the query returns no rows. Pushed to `A` (x = 0) it would
@@ -938,7 +938,7 @@ struct EnginePushdownTests {
     // `WHERE Parent.Name = 'nope' AND (1 / Child.x) = 0`: left-to-right, the
     // false `Parent.Name` check short-circuits before the division on the
     // matching pair (Child.x = 0). `Parent.Name = 'nope'` is a single-side inner
-    // filter that nest lifts out of the join — it must stay BEFORE the unsafe
+    // filter that nest lifts out of the join — it must stay before the unsafe
     // division in the residual, not be appended after it, or the division runs
     // first and raises. The matching Parent is named 'other', so the row is
     // excluded with no throw.
@@ -960,7 +960,7 @@ struct EnginePushdownTests {
 
   @Test func `a WHERE over a UNION view pushes into every arm's projection`() throws {
     // `Both` unions `Alpha` and `Beta`, whose shared `Key` output column sits at
-    // DIFFERING body slots. `WHERE Key = 2` must rebase PER ARM — the union root
+    // differing body slots. `WHERE Key = 2` must rebase per ARM — the union root
     // fails a single pre-rebased filter — pushing below each arm's projection
     // and seeking the sorted `Alpha` arm.
     let catalog = try spanned()
@@ -998,7 +998,7 @@ struct EnginePushdownTests {
     // `V` is `SELECT x FROM T` with `T.x` sorted and a single `x = 0` row.
     // `SELECT x FROM V WHERE (1 / x) = 0 AND x = 1`: left-to-right, the division
     // runs on the `x = 0` row and raises. The safe seekable `x = 1` must NOT push
-    // into the view past the earlier unsafe `(1 / x) = 0` — doing so would SEEK
+    // into the view past the earlier unsafe `(1 / x) = 0` — doing so would seek
     // the view (`T.x` sorted) to `x = 1`, dropping the `x = 0` row before the
     // outer division ever runs, silently returning no rows. The unsafe outer
     // conjunct is an ordering barrier, so the query raises as the un-pushed `AND`
@@ -1020,7 +1020,7 @@ struct EnginePushdownTests {
     // references a slot, so a NULL there makes it UNKNOWN — pushing it to `A`'s
     // scan would drop the A.x-NULL row before the join, so the later unsafe
     // `(1 / B.y) = 0` never runs and the throw the `AND` owes is suppressed. A
-    // nullable conjunct must NOT ride past a LATER unsafe conjunct, so `A.x = 1`
+    // nullable conjunct must NOT ride past a later unsafe conjunct, so `A.x = 1`
     // stays a product-level residual and the query raises.
     let catalog = EngineMemory([
       "A": FixtureRelation([EngineField(name: "x", type: .integer),
@@ -1054,7 +1054,7 @@ struct EnginePushdownTests {
     // row the UNKNOWN left still runs the division, which raises. Pushing the
     // nullable `x = 1` into the view would drop the x-NULL row before the outer
     // division runs, suppressing the throw. A nullable conjunct must NOT be
-    // injected past a LATER unsafe outer conjunct, so `x = 1` stays outer and
+    // injected past a later unsafe outer conjunct, so `x = 1` stays outer and
     // the query raises.
     let t = [EngineField(name: "x", type: .integer),
              EngineField(name: "y", type: .integer)]
@@ -1135,37 +1135,37 @@ struct EnginePushdownTests {
 // MARK: - Set-op view type probe must not pollute the runtime plan memo
 
 /// The set-op column-type unification `compile` derives for a `UNION`/`EXCEPT`/
-/// `INTERSECT` view body runs a SCHEMA-ONLY projection PROBE (to learn which
+/// `INTERSECT` view body runs a schema-ONLY projection probe (to learn which
 /// columns the set operation widens). That probe lowers any nested correlated
 /// subquery under the `.caller` id space and — before the fix — recorded the
-/// subquery's per-outer-row PLAN into the SHARED runtime memo. Recording is
-/// first-writer-wins, so a later CALLER whose own correlated subquery has the
-/// SAME AST and correlation (`(SELECT Val FROM S WHERE S.Id = T.Id)` over a
+/// subquery's per-outer-row plan into the shared runtime memo. Recording is
+/// first-writer-wins, so a later caller whose own correlated subquery has the
+/// same AST and correlation (`(SELECT Val FROM S WHERE S.Id = T.Id)` over a
 /// same-shaped outer `T`) reused the VIEW body's plan — resolving `S` against
-/// the view's BASE table, not the caller's own CTE `S`. The probe must derive
-/// against an ISOLATED throwaway memo so it records nothing, letting each
-/// caller resolve its subquery against its OWN base.
+/// the view's base table, not the caller's own CTE `S`. The probe must derive
+/// against an isolated throwaway memo so it records nothing, letting each
+/// caller resolve its subquery against its own base.
 private func shadowed() throws -> EngineMemory {
   try Catalog {
     // The shared driver `T`, referenced by the view body AND the caller, so the
-    // correlated subquery's outer `T.Id` binds at the SAME ordinal in both — an
+    // correlated subquery's outer `T.Id` binds at the same ordinal in both — an
     // identical `Correlation`, hence an identical plan-memo key.
     Relation("T", ["Id": .integer]) {
       Row(1)
       Row(2)
     }
-    // The BASE `S` the VIEW body's `(SELECT Val FROM S …)` resolves against —
+    // The base `S` the VIEW body's `(SELECT Val FROM S …)` resolves against —
     // `Id` at ordinal 0, `Val` at ordinal 1. A caller CTE named `S` shadows it
-    // with the columns in the OPPOSITE order (`Val` at 0, `Id` at 1), so the
+    // with the columns in the opposite order (`Val` at 0, `Id` at 1), so the
     // view's compiled plan — which projects ordinal 1 and filters ordinal 0 —
-    // reads the WRONG cells if reused against the caller's CTE: it would
+    // reads the wrong cells if reused against the caller's CTE: it would
     // project the CTE's `Id` (ordinal 1) rather than its `Val` (ordinal 0).
     Relation("S", ["Id": .integer, "Val": .integer]) {
       Row(1, 1000)
       Row(2, 2000)
     }
     // A set-operation view whose LEFT arm holds a correlated scalar subquery
-    // `(SELECT Val FROM S WHERE S.Id = T.Id)` — the SAME AST the caller uses.
+    // `(SELECT Val FROM S WHERE S.Id = T.Id)` — the same AST the caller uses.
     // Compiling its body runs the `.setop` widened-column type probe, which
     // lowers that subquery under `.caller`; the probe must NOT record its plan.
     try View("V", """
@@ -1180,11 +1180,11 @@ struct EngineSetopViewMemoTests {
   @Test func `a set-op view type probe does not capture a caller's subquery`()
       throws {
     // The caller shadows base `S` with a CTE `S` whose columns are in the
-    // OPPOSITE order (`Val, Id`) and runs the IDENTICAL correlated subquery
+    // opposite order (`Val, Id`) and runs the identical correlated subquery
     // `(SELECT Val FROM S WHERE S.Id = T.Id)` over `T`. It also references the
     // set-op view `V`, whose body compile runs the widened-type probe over the
     // same subquery AST first. With the probe isolated, the caller's subquery
-    // resolves against ITS CTE `S` at ITS ordinals, projecting `Val` ∈ {7, 8};
+    // resolves against its CTE `S` at its ordinals, projecting `Val` ∈ {7, 8};
     // a probe that polluted the shared memo would make the caller reuse the
     // view's plan (base `S` ordinals — project ordinal 1, filter ordinal 0),
     // which over the swapped CTE projects `Id` ∈ {1, 2} (or mis-filters).

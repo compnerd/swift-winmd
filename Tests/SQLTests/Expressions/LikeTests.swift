@@ -318,8 +318,8 @@ private func floats(_ plan: Plan) -> Bool {
 
 /// The `LIKE` escape's effect on `safe`, hence on pushdown/seek/join-reorder
 /// eligibility: a `.like` is `safe` (may ride below a seek or join) only when
-/// its escape is absent OR STATICALLY a single-character text constant, because
-/// `Row.like` faults on any other escape INDEPENDENTLY of whether a pair
+/// its escape is absent OR statically a single-character text constant, because
+/// `Row.like` faults on any other escape independently of whether a pair
 /// matches — so a hash join must not drop a non-matching pair (nor a seek a
 /// narrowed run) before that fault fires.
 struct LikeSafetyTests {
@@ -360,9 +360,9 @@ struct LikeSafetyTests {
     // The same `ON A.K = B.K AND A.Name LIKE 'a%' ESCAPE A.E` run against the
     // single pair (`A.K` NULL, `B.K = 2`). The equi is UNKNOWN, so the Kleene
     // `AND` does not short-circuit and evaluates the LIKE. Because the escaped
-    // LIKE is UNSAFE, no key is hoisted and the residual runs the whole `ON`
+    // LIKE is unsafe, no key is hoisted and the residual runs the whole `ON`
     // per pair, so the invalid escape faults `SQLError.argument` — where
-    // marking it safe would extract the key, drop the NULL-key pair, and HIDE
+    // marking it safe would extract the key, drop the NULL-key pair, and hide
     // the fault (return no rows).
     try mismatched().expect("""
         SELECT A.K FROM A JOIN B ON A.K = B.K AND A.Name LIKE 'a%' ESCAPE A.E
@@ -390,7 +390,7 @@ struct LikeSafetyTests {
   @Test func `a constant single-character escape is safe and may be sought`()
       throws {
     // `WHERE Name LIKE '_%' ESCAPE '\' AND Id = 2` over an Id-sorted relation:
-    // the escape is a STATIC single-character constant, so the LIKE is safe and
+    // the escape is a static single-character constant, so the LIKE is safe and
     // does not bar the seekable `Id = 2` from riding down to the base scan.
     let catalog = try Catalog {
       Relation("S", ["Id": .integer, "Name": .text], sorted: "Id") {
@@ -452,8 +452,8 @@ struct LikeBoundTests {
 
 // MARK: - Evaluation order
 
-/// The operand, pattern, and escape are each evaluated ONCE, IN ORDER, BEFORE
-/// the three-valued NULL result is decided — so a fault in a REACHED operand
+/// The operand, pattern, and escape are each evaluated once, IN ORDER, before
+/// the three-valued NULL result is decided — so a fault in a reached operand
 /// (`1 / K` with `K = 0`) surfaces rather than being swallowed by a NULL escape
 /// that an early return would have turned into a silent UNKNOWN.
 struct LikeEvaluationOrderTests {
@@ -472,9 +472,9 @@ struct LikeEvaluationOrderTests {
       throws {
     // `(1 / K) LIKE 'x' ESCAPE E` with `K = 0, E = NULL`. The operand `1 / K`
     // faults `SQLError.divide`; the executor must evaluate the reached operand
-    // BEFORE deciding the NULL-escape UNKNOWN — an early return on the NULL
+    // before deciding the NULL-escape UNKNOWN — an early return on the NULL
     // escape would silently FILTER the row (UNKNOWN) and hide the divide.
-    // ADVERSARIAL: reverting to early-return-on-NULL-escape stops this throw.
+    // adversarial: reverting to early-return-on-NULL-escape stops this throw.
     try faulting().expect(
         "SELECT Id FROM F WHERE (1 / K) LIKE 'x' ESCAPE E",
         fails: .divide)
@@ -482,7 +482,7 @@ struct LikeEvaluationOrderTests {
 
   @Test func `a NULL escape with a safe operand is a clean UNKNOWN`() throws {
     // A plain safe operand under a NULL escape is UNKNOWN — the row is excluded
-    // WITHOUT a throw, so the eval-order fix does not turn every NULL escape
+    // without a throw, so the eval-order fix does not turn every NULL escape
     // into a fault.
     try Catalog {
       Relation("F", ["Id": .integer, "Name": .text, "E": .text]) {
@@ -495,13 +495,13 @@ struct LikeEvaluationOrderTests {
 // MARK: - Static escape validation
 
 /// A statically-invalid ESCAPE (a constant that is not a single-character text)
-/// is rejected at VALIDATION (`columns(of:validate:)`), not left to fault on
+/// is rejected at validation (`columns(of:validate:)`), not left to fault on
 /// every row — `check` folds a row-independent escape and rejects a bad one.
 struct LikeEscapeValidationTests {
   @Test func `a constant multi-character escape faults validation`() throws {
     // `ESCAPE 'xy'` is a constant text of the wrong length — un-runnable — so
     // `columns(of:validate:)` rejects it at validation with the run's message.
-    // ADVERSARIAL: reverting the check drops this validation throw.
+    // adversarial: reverting the check drops this validation throw.
     let query = try parse(query:
         "SELECT Id FROM T WHERE Name LIKE 'x' ESCAPE 'xy'")
     #expect(throws:
@@ -540,7 +540,7 @@ struct LikeEscapeValidationTests {
 
 // MARK: - Matcher complexity
 
-/// The matcher is LINEAR (a two-pointer scan), not the exponential
+/// The matcher is linear (a two-pointer scan), not the exponential
 /// backtracking recursion — so a pathological pattern against a long run of
 /// its wildcard fill returns promptly rather than pegging the engine.
 struct LikeComplexityTests {
@@ -548,7 +548,7 @@ struct LikeComplexityTests {
     // `%a%a%a%a%a%a%a%b` against a long run of `a`s (no `b`) is the classic
     // ReDoS-style blowup for a per-split recursive matcher — combinatorial in
     // the number of `%` splits over the text length. The linear scan decides
-    // FALSE in O(n·m) and returns at once. ADVERSARIAL: the recursive matcher
+    // FALSE in O(n·m) and returns at once. adversarial: the recursive matcher
     // does not complete in bounded time on this input.
     let text = String(repeating: "a", count: 256)
     #expect(!matches(text, "%a%a%a%a%a%a%a%b", escape: nil))
@@ -571,7 +571,7 @@ struct LikeComplexityTests {
 struct LikeParameterTests {
   @Test func `a bound pattern matches the right rows`() throws {
     // `WHERE Name LIKE :pattern` bound to `'a%'` — rows 1 and 2 begin `a`, row
-    // 3 does not, row 4 (NULL) is UNKNOWN. ADVERSARIAL: reverting the parser
+    // 3 does not, row 4 (NULL) is UNKNOWN. adversarial: reverting the parser
     // `:param` handling makes `LIKE :pattern` fail to parse/bind.
     try names().expect("SELECT Id FROM T WHERE Name LIKE :pattern",
                        yields: [[1], [2]],
@@ -607,7 +607,7 @@ struct LikeParameterTests {
   @Test func `a bound escape is unsafe and bars a seek`() throws {
     // A `:parameter` escape is not a static single-character constant — it may
     // be unbound, NULL, or the wrong length at run time — so the escaped LIKE
-    // is UNSAFE and does not ride below a seek: the seekable `Id = 2` cannot
+    // is unsafe and does not ride below a seek: the seekable `Id = 2` cannot
     // reach the base scan beside it.
     let catalog = try Catalog {
       Relation("S", ["Id": .integer, "Name": .text], sorted: "Id") {
@@ -634,7 +634,7 @@ struct LikeParameterTests {
 /// A parameterised `LIKE` — one whose pattern or escape operand is a run-time
 /// `:parameter` — reads no slot yet can be UNKNOWN (the parameter may be
 /// unbound or bound to NULL), so `nullable` counts it and pushdown must not
-/// ride it below a LATER unsafe conjunct: the non-short-circuiting `AND` still
+/// ride it below a later unsafe conjunct: the non-short-circuiting `AND` still
 /// owes that conjunct's evaluation after an UNKNOWN left.
 struct LikeParameterisedTests {
   /// A view over a single (x = 1, y = 0) row — the derived-leaf shape the
@@ -675,7 +675,7 @@ struct LikeParameterisedTests {
 
   @Test func `a parameterised LIKE is not pushed below a later unsafe conjunct`()
       throws {
-    // `SELECT x FROM V WHERE 'x' LIKE :p AND (1 / y) = 0` with `:p` UNBOUND:
+    // `SELECT x FROM V WHERE 'x' LIKE :p AND (1 / y) = 0` with `:p` unbound:
     // the outer `AND` does not short-circuit, so on the (y = 0) row the UNKNOWN
     // LIKE still runs the division, which raises. Injecting the slotless `'x'
     // LIKE :p` into the view would drop every row first, suppressing the
@@ -696,7 +696,7 @@ struct LikeParameterisedTests {
   }
 
   @Test func `a constant LIKE is pushed below a later unsafe conjunct`() throws {
-    // CONTROL: `'x' LIKE 'y'` names no `:parameter`, so it is definite and
+    // control: `'x' LIKE 'y'` names no `:parameter`, so it is definite and
     // eligible for the normal pushdown — a non-nullable conjunct injects into
     // the view, dropping every row before the outer division runs, so the query
     // returns nothing rather than raising (the ordinary non-parameterised way).

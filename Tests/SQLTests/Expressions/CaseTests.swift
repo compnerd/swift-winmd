@@ -123,7 +123,7 @@ struct CaseEvaluationTests {
 
   @Test func `a mixed CASE coerces the integer branch to double`() throws {
     // The results unify to `.double`, so the schema advertises the column as
-    // double; the executor must COERCE the selected branch's value to match.
+    // double; the executor must coerce the selected branch's value to match.
     // Row 1 takes the integer THEN `1`, which widens to `.double(1.0)` rather
     // than staying `.integer(1)`; rows 2 and 3 take the double ELSE `2.5`.
     try things().expect(
@@ -181,9 +181,9 @@ struct CaseTypeUnificationTests {
     // A row-dependent guard (`Id = 2`, matched by a fixture row) keeps both the
     // text `Name` branch and the integer `0` ELSE reachable — a constant guard
     // would drop an arm and mask the clash. Lowering unifies the reachable
-    // result types just as the type check does, so the RUN faults with the same
+    // result types just as the type check does, so the run faults with the same
     // error rather than leaking a text value at a column typed by the first
-    // branch; `columns(of:)` faults identically, so the two paths AGREE.
+    // branch; `columns(of:)` faults identically, so the two paths agree.
     let text =
         "SELECT CASE WHEN Id = 2 THEN Name ELSE 0 END FROM T"
     try things().expect(text,
@@ -254,10 +254,10 @@ struct CaseReachabilityTests {
 
   @Test func `an earlier branch before a constant-true guard stays reachable`()
       throws {
-    // `WHEN 1 = 1` is constant-TRUE, but it comes AFTER the row-dependent `WHEN
+    // `WHEN 1 = 1` is constant-TRUE, but it comes after the row-dependent `WHEN
     // Id = 1`, which a row with `Id = 1` still matches — so that earlier branch
-    // is REACHABLE and its `Name + 1` (text arithmetic) must still fault. The
-    // constant-TRUE guard drops only the STRICTLY-LATER branches and the ELSE,
+    // is reachable and its `Name + 1` (text arithmetic) must still fault. The
+    // constant-TRUE guard drops only the strictly-later branches and the ELSE,
     // not the branches before it.
     let query = try parse(query: """
         SELECT CASE WHEN Id = 1 THEN Name + 1 WHEN 1 = 1 THEN 0 END AS C FROM T
@@ -292,16 +292,16 @@ struct CaseReachabilityTests {
 
 /// The schema validator folds the projection over the single empty group a
 /// constant-false `WHERE` leaves (`Scope.empty`), exactly as a run does — so a
-/// CASE there must COERCE its selected value to the unified result type, just
+/// CASE there must coerce its selected value to the unified result type, just
 /// as the executor's `Row.conditional` does, or the folded value clashes the
 /// advertised column type and a routine argument the run accepts is rejected.
 struct CaseEmptyGroupTests {
 
   /// `CASE WHEN COUNT(*) = 0 THEN COUNT(*) ELSE 2.5 END` — a mixed CASE whose
-  /// guard is NOT statically decidable (a `COUNT(*)` operand), so BOTH arms are
+  /// guard is NOT statically decidable (a `COUNT(*)` operand), so both arms are
   /// reachable and the result unifies to `.double`. Over the empty group
   /// `COUNT(*)` is `0`, so the guard folds TRUE and the integer `COUNT(*)` arm
-  /// is selected — folding to `0`, which must WIDEN to the unified `.double`.
+  /// is selected — folding to `0`, which must widen to the unified `.double`.
   private func mixed() -> Expression {
     let guard0 = Predicate.comparison(left: .aggregate(.count, of: .star),
                                       op: .equal,
@@ -324,7 +324,7 @@ struct CaseEmptyGroupTests {
     // WHERE leaves one empty group, so `columns(of:)` folds the projection and
     // dispatches the routine over the folded argument. The coerced
     // `.double(0.0)` satisfies the DOUBLE parameter — schema validation
-    // SUCCEEDS, as the run does; a raw `.integer(0)` would fault
+    // succeeds, as the run does; a raw `.integer(0)` would fault
     // `SQLError.argument`.
     let f = Function(parameters: [Function.Parameter(name: "x", type: .double)],
                      returns: .double, body: .column("x"))

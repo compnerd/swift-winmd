@@ -111,7 +111,7 @@ struct AggregateTests {
 
   @Test func `mixed integer/double group keys canonicalize into one group`() throws {
     // A column carrying both 1 and 1.0 — as a CTE/UNION ALL or any source can —
-    // groups them together under the engine's EXACT numeric equality (the same
+    // groups them together under the engine's exact numeric equality (the same
     // `1` = `1.0` UNION dedup uses), yielding one group of two keyed by the
     // first-appearance integer, not two one-row groups.
     let catalog = try Catalog {
@@ -293,7 +293,7 @@ struct AggregateTests {
   }
 
   @Test func `ORDER BY orders on a computed-expression alias`() throws {
-    // `Doubled` aliases a COMPUTED value; the sort now evaluates the alias's
+    // `Doubled` aliases a computed value; the sort now evaluates the alias's
     // grouped term per row — recomputing `COUNT(*) * 2` from the group's
     // aggregate slot — rather than reading a standalone slot, so ordering on a
     // computed alias works. Books 6, Games 6 (a tie, stable by group order),
@@ -428,7 +428,7 @@ struct AggregateTests {
   @Test func `an aggregate argument's CASE guard reads the query bindings`() throws {
     // `SUM(CASE WHEN Region = :target THEN Amount ELSE 0 END)` folds a CASE
     // whose guard names a `:parameter`; the execution bindings must reach the
-    // aggregate ARGUMENT the same as a projection or WHERE, or `:target` is
+    // aggregate argument the same as a projection or WHERE, or `:target` is
     // unbound, the guard is UNKNOWN for every row, the ELSE 0 always wins, and
     // the SUM collapses to 0. Bound to `East`, only the East amounts fold —
     // 10 + 20 + 40 (Toys/East is NULL, skipped) = 70 — neither 0 (the unbound

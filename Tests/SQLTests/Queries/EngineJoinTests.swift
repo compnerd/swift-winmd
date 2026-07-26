@@ -199,7 +199,7 @@ struct EngineNonEquiJoinTests {
   }
 
   @Test func `an expression equality ON is a residual, not a hash key`() throws {
-    // `ON Child.Pid = Parent.Id + 1` equates a column with an EXPRESSION, so
+    // `ON Child.Pid = Parent.Id + 1` equates a column with an expression, so
     // it is not a bare `column = column` key: it lowers to a residual over the
     // product (nested loop), not a hash join.
     let rows = try join("""
@@ -244,10 +244,10 @@ struct EngineNonEquiJoinTests {
 
   @Test func `an unsafe ON conjunct before an equi key is preserved`() throws {
     // `ON (1 / A.x) = 0 AND A.k = B.k` over a product pair where `A.x = 0` and
-    // `A.k <> B.k`. The hash join evaluates its key equality BEFORE any
+    // `A.k <> B.k`. The hash join evaluates its key equality before any
     // residual, so hoisting `A.k = B.k` to a key would drop the non-matching
     // pair and skip the division the earlier unsafe conjunct owes. The unsafe
-    // leading conjunct bars extraction, so the WHOLE ON stays a residual over
+    // leading conjunct bars extraction, so the whole ON stays a residual over
     // the product and the division raises `SQLError.divide` rather than the
     // query returning no rows.
     let catalog = EngineMemory([
@@ -286,10 +286,10 @@ struct EngineNonEquiJoinTests {
 
   @Test func `an equi key before an unsafe residual extracts no key, planning a residual`() throws {
     // `ON A.k = B.k AND (1 / A.x) = 0` (equi FIRST) has an unsafe conjunct, so
-    // NO key is extracted and the WHOLE ON lowers to a residual over the
+    // no key is extracted and the whole ON lowers to a residual over the
     // product. A hash key would skip a NULL-key pair before the unsafe RHS ran,
     // suppressing the divide the left-to-right Kleene AND owes — so the equi
-    // must NOT hoist while an unsafe conjunct FOLLOWS it.
+    // must NOT hoist while an unsafe conjunct follows it.
     let catalog = EngineMemory([
       "A": FixtureRelation([EngineField(name: "x", type: .integer),
                      EngineField(name: "k", type: .integer)],
@@ -311,7 +311,7 @@ struct EngineNonEquiJoinTests {
     // evaluate the unsafe RHS `(1 / A.x) = 0` and raise `SQLError.divide`.
     // Extracting `A.k = B.k` to a hash key would skip the NULL key and DROP the
     // pair before the RHS ran, returning no rows — so no key is hoisted and the
-    // WHOLE ON stays a residual over the product that raises.
+    // whole ON stays a residual over the product that raises.
     let catalog = EngineMemory([
       "A": FixtureRelation([EngineField(name: "x", type: .integer),
                      EngineField(name: "k", type: .integer)],
@@ -334,7 +334,7 @@ struct EngineNonEquiJoinTests {
 
   @Test func `a definite-false ON key before an unsafe residual short-circuits without raising`() throws {
     // `ON A.k = B.k AND (1 / A.x) = 0` with `A.k = 5`, `B.k = 3` (non-NULL,
-    // definitely UNEQUAL) and `A.x = 0`. The equality is definite FALSE, so the
+    // definitely unequal) and `A.x = 0`. The equality is definite FALSE, so the
     // Kleene AND short-circuits (`false` dominates) and never evaluates the
     // unsafe RHS — no rows, no raise. Both the product+select and the residual
     // agree, distinguishing a definite-FALSE key from the UNKNOWN NULL one.
@@ -352,7 +352,7 @@ struct EngineNonEquiJoinTests {
   }
 
   @Test func `a safe non-equi before an equi still extracts the equi key`() throws {
-    // SAFE-prefix — `ON A.p < B.q AND A.k = B.k`. The leading `<` is safe
+    // safe-prefix — `ON A.p < B.q AND A.k = B.k`. The leading `<` is safe
     // (comparing two cells never raises), so it does not bar extraction: the
     // equi `A.k = B.k` still becomes a hash key beside the residual inequality.
     let catalog = EngineMemory([
@@ -392,9 +392,9 @@ struct EngineNonEquiJoinTests {
   @Test func `a nullable ON gate drops a pair before an unsafe WHERE`() throws {
     // `A JOIN B ON A.k < B.k WHERE (1 / A.x) = 0`, `A.k` NULL and `A.x` = 0.
     // The residual `ON` gate `A.k < B.k` is UNKNOWN (a NULL operand), so the
-    // pair is DROPPED at the gate and the `WHERE` never runs on it — no rows,
-    // no raise. The gate is a distribution BARRIER: the `WHERE` stays a
-    // SEPARATE `select` above the residual `ON` gate rather than fused into one
+    // pair is dropped at the gate and the `WHERE` never runs on it — no rows,
+    // no raise. The gate is a distribution barrier: the `WHERE` stays a
+    // separate `select` above the residual `ON` gate rather than fused into one
     // throwing `A.k < B.k AND (1 / A.x) = 0` over the product.
     let catalog = EngineMemory([
       "A": FixtureRelation([EngineField(name: "x", type: .integer),
@@ -412,8 +412,8 @@ struct EngineNonEquiJoinTests {
   }
 
   @Test func `a surviving ON pair still runs the unsafe WHERE`() throws {
-    // CONTROL — the same `A JOIN B ON A.k < B.k WHERE (1 / A.x) = 0`, but now
-    // `A.k` = 1 and `B.k` = 2, so the `ON` gate is TRUE and the pair PASSES it.
+    // control — the same `A JOIN B ON A.k < B.k WHERE (1 / A.x) = 0`, but now
+    // `A.k` = 1 and `B.k` = 2, so the `ON` gate is TRUE and the pair passes it.
     // The `WHERE` then runs on the surviving pair and `(1 / A.x) = 0` with
     // `A.x` = 0 raises `SQLError.divide` — the `WHERE` still applies after the
     // gate.
@@ -433,7 +433,7 @@ struct EngineNonEquiJoinTests {
 
   @Test func `a safe WHERE over a non-equi ON join returns correct rows`()
       throws {
-    // A SAFE `WHERE` over a non-equi `ON` join yields the same rows the eager
+    // A safe `WHERE` over a non-equi `ON` join yields the same rows the eager
     // product filtered by both `ON` and `WHERE` would — whether or not the safe
     // `WHERE` fuses with the gate. `ON Parent.Id < Child.Pid WHERE Child.Name
     // <> 'Orphan'` pairs each parent with a later-keyed child, then drops the
@@ -447,12 +447,12 @@ struct EngineNonEquiJoinTests {
 
   @Test func `a leftover ON match gates a pair before an unsafe WHERE`() throws {
     // `A JOIN B ON A.k1 = B.k1 AND A.k2 = B.k2 WHERE (1 / A.x) = 0`, with
-    // `A.k1` matching, `A.k2` NULL, and `A.x` = 0. `nest` folds ONE equi key
+    // `A.k1` matching, `A.k2` NULL, and `A.x` = 0. `nest` folds one equi key
     // (`A.k1 = B.k1`) into the hash `.join`, leaving `A.k2 = B.k2` as the
     // gate's own residual under the join. The surviving `k1` pair reaches that
-    // leftover match, which is UNKNOWN (a NULL `A.k2`), so the pair is DROPPED
-    // at the gate BEFORE the `WHERE` runs — no rows, no raise. The `ON` gate is
-    // a BARRIER even though it is PURE-equi: the `WHERE` stays a SEPARATE
+    // leftover match, which is UNKNOWN (a NULL `A.k2`), so the pair is dropped
+    // at the gate before the `WHERE` runs — no rows, no raise. The `ON` gate is
+    // a barrier even though it is pure-equi: the `WHERE` stays a separate
     // `select` above the leftover-match gate rather than fused into a throwing
     // `A.k2 = B.k2 AND (1 / A.x) = 0` that would divide by zero on the pair.
     let catalog = EngineMemory([
@@ -473,14 +473,14 @@ struct EngineNonEquiJoinTests {
     let compiled = try catalog.compile(parse(text))
     let plan = try catalog.optimise(compiled.pushdown(), [:])
     // The equi key still hash-joins; the leftover match gates above it, and the
-    // `WHERE` is a SEPARATE `select` above that gate, not fused with the match.
+    // `WHERE` is a separate `select` above that gate, not fused with the match.
     #expect(joined(plan))
     #expect(stacked(plan))
     #expect(try catalog.run(parse(text)).isEmpty)
   }
 
   @Test func `both ON matches passing lets the unsafe WHERE raise`() throws {
-    // CONTROL — the same two-key `ON` and unsafe `WHERE`, but now BOTH keys
+    // control — the same two-key `ON` and unsafe `WHERE`, but now both keys
     // match (`A.k2` = 5 = `B.k2`), so the pair passes the whole `ON` gate. The
     // `WHERE` then runs on the surviving pair and `(1 / A.x) = 0` with `A.x`
     // = 0 raises `SQLError.divide` — the `WHERE` still applies after the gate.
@@ -507,8 +507,8 @@ struct EngineNonEquiJoinTests {
       throws {
     // The equi fast-path is intact under the always-barrier rule: a two-key
     // pure-equi `ON` still hash-joins (one key folded, the other gating over
-    // the join) and a SAFE `WHERE` above returns the expected rows. `A.k1` and
-    // `A.k2` pick out exactly the `B` row whose BOTH keys match; the `WHERE`
+    // the join) and a safe `WHERE` above returns the expected rows. `A.k1` and
+    // `A.k2` pick out exactly the `B` row whose both keys match; the `WHERE`
     // then keeps only the tagged pair.
     let catalog = EngineMemory([
       "A": FixtureRelation([EngineField(name: "k1", type: .integer),
@@ -535,7 +535,7 @@ struct EngineNonEquiJoinTests {
   }
 
   @Test func `a single-equality ON still plans a hash join and behaves`() throws {
-    // A single-equality pure-equi `ON A.k = B.k` folds its ONE key into the
+    // A single-equality pure-equi `ON A.k = B.k` folds its one key into the
     // hash `.join` and carries no leftover conjunct, so the `WHERE` sits
     // above the join. A matching pair runs the `WHERE`; a NULL key drops the
     // pair at the join, so the `WHERE` never runs on it. `A` holds a matching
@@ -621,7 +621,7 @@ struct EngineOuterJoinTests {
   }
 
   @Test func `an ON conjunct keeps an unmatched left row a WHERE would drop`() throws {
-    // ON vs WHERE. Restricting the MATCH with `AND Child.Name = 'Amy'` keeps
+    // ON vs WHERE. Restricting the match with `AND Child.Name = 'Amy'` keeps
     // every parent — the ON governs matching alone, so a parent that now
     // matches no child is still emitted NULL-extended. Only Ada matches Amy.
     let rows = try join("""
@@ -636,7 +636,7 @@ struct EngineOuterJoinTests {
   }
 
   @Test func `the same predicate in WHERE drops the unmatched rows`() throws {
-    // Moving the predicate to a post-join WHERE filters AFTER the outer join,
+    // Moving the predicate to a post-join WHERE filters after the outer join,
     // so the NULL-extended rows (whose Child.Name is NULL) fail `= 'Amy'` and
     // drop — turning the LEFT join back to inner-like. This is the ON-vs-WHERE
     // distinction the outer join preserves.
@@ -815,7 +815,7 @@ struct EngineMultiJoinTests {
 
   @Test func `an early ON referencing a not-yet-joined relation is rejected`() throws {
     // The first join's `ON` qualifies a column with `Item`, a relation joined
-    // only LATER. Resolving the match against just the prefix — `House` and
+    // only later. Resolving the match against just the prefix — `House` and
     // `Room` — the qualifier names no relation in scope, so the query is
     // rejected (`SQLError.column`) rather than resolving `Item`'s slot from a
     // product that does not yet contain it and trapping or indexing wrong.
@@ -860,13 +860,13 @@ struct EngineMultiJoinTests {
 
 // MARK: - NATURAL and USING join tests
 
-/// A catalog of relations sharing column NAMES, so a `NATURAL`/`USING` join has
+/// A catalog of relations sharing column names, so a `NATURAL`/`USING` join has
 /// common columns to key on. `Emp(Dept, Name)` and `Team(Dept, Lead)` share
 /// `Dept`; `Lhs(K, G, A)` and `Rhs(K, G, B)` share `K` and `G`; `Solo(x)`
 /// and `Other(y)` share nothing (a `NATURAL` join over them degenerates to a
 /// product). `Team` has a `Dept` (30) no `Emp` names, and `Emp` a `Dept` (10)
 /// no `Team` names, so an outer join has an unmatched row on each side.
-/// `Bonus(Dept, Amt)` names every `Dept` (10, 20, 30), so a THIRD `USING
+/// `Bonus(Dept, Amt)` names every `Dept` (10, 20, 30), so a third `USING
 /// (Dept)` join after an outer `Emp`/`Team` one keys each surviving row —
 /// including an unmatched left/right one — on the merged `Dept`.
 private func named() throws -> FixtureCatalog {
@@ -906,7 +906,7 @@ private func named() throws -> FixtureCatalog {
 
 struct EngineNaturalUsingTests {
   @Test func `INNER USING (c) merges the column once, first, then rests`() throws {
-    // Output column list (ISO 7.10): the USING column `Dept` ONCE and FIRST,
+    // Output column list (ISO 7.10): the USING column `Dept` once and FIRST,
     // then the left's other columns (`Name`), then the right's (`Lead`). Rows
     // join on `Dept` equality — only Dept 20 matches on both sides.
     try named().expect("SELECT * FROM Emp JOIN Team USING (Dept)",
@@ -918,7 +918,7 @@ struct EngineNaturalUsingTests {
 
   @Test func `USING (c1, c2) keys on both columns`() throws {
     // The join columns `K, G` come first in order, then `Lhs`'s `A`, then
-    // `Rhs`'s `B`. Only the (1, x) row agrees on BOTH columns.
+    // `Rhs`'s `B`. Only the (1, x) row agrees on both columns.
     try named().expect("""
         SELECT * FROM Lhs JOIN Rhs USING (K, G)
         """,
@@ -1028,8 +1028,8 @@ struct EngineNaturalUsingTests {
 
   @Test func `a bare reference to a merged column resolves to the coalesced value`() throws {
     // ISO 9075 7.10: the USING/NATURAL common column is an exposed name of the
-    // join result belonging to NEITHER side, so a BARE `Dept` resolves to the
-    // ONE coalesced column — UNAMBIGUOUSLY — not to `Emp.Dept` or `Team.Dept`.
+    // join result belonging to neither side, so a bare `Dept` resolves to the
+    // one coalesced column — unambiguously — not to `Emp.Dept` or `Team.Dept`.
     try named().expect("SELECT Dept FROM Emp JOIN Team USING (Dept)",
         yields: [[20], [20]])
   }
@@ -1093,7 +1093,7 @@ struct EngineNaturalUsingTests {
   }
 
   @Test func `a bare reference to each of two merged columns resolves`() throws {
-    // A NATURAL join over two common columns exposes BOTH `K` and `G`; a bare
+    // A NATURAL join over two common columns exposes both `K` and `G`; a bare
     // reference to each resolves to its coalesced value (equal on the one
     // matched row).
     try named().expect("""
@@ -1105,7 +1105,7 @@ struct EngineNaturalUsingTests {
   @Test func `a bare reference to a shared but non-join column stays ambiguous`() throws {
     // The scoping guard (ISO 9075 7.10): ONLY the join columns are exposed.
     // `Lhs` and `Rhs` share `K` and `G`, but `USING (K)` joins on `K` alone —
-    // so bare `G`, shared yet NOT a join column, stays AMBIGUOUS between the
+    // so bare `G`, shared yet NOT a join column, stays ambiguous between the
     // two sides rather than collapsing to a merged value.
     try named().expect("""
         SELECT G FROM Lhs JOIN Rhs USING (K)
@@ -1126,7 +1126,7 @@ struct EngineNaturalUsingTests {
   // MARK: - Aliased ranges (finding 1)
 
   @Test func `an aliased FROM side resolves a USING join`() throws {
-    // The synthesized `ON` and coalesced `SELECT *` qualify by the RANGE name
+    // The synthesized `ON` and coalesced `SELECT *` qualify by the range name
     // (the alias `e`), the only name the scope admits, so `Emp AS e JOIN Team
     // USING (Dept)` resolves rather than faulting on an unqualifiable
     // `Emp.Dept`.
@@ -1166,7 +1166,7 @@ struct EngineNaturalUsingTests {
   // MARK: - Set-operation arity over the merged width (finding 2)
 
   @Test func `a UNION over a USING join measures the merged width`() throws {
-    // The `SELECT *` arm's width is the MERGED count (3 — `Dept` once), so a
+    // The `SELECT *` arm's width is the merged count (3 — `Dept` once), so a
     // 3-column second arm aligns and the UNION succeeds. Before the desugar ran
     // ahead of the arity check, the `*` measured both physical `Dept`s (4) and
     // wrongly rejected the valid set operation.
@@ -1193,7 +1193,7 @@ struct EngineNaturalUsingTests {
   // MARK: - Exposed IN and quantified outer operand (finding 3)
 
   @Test func `a bare merged reference resolves as an IN operand`() throws {
-    // The outer operand of `IN (subquery)` resolves in THIS query's scope, so
+    // The outer operand of `IN (subquery)` resolves in this query's scope, so
     // a bare merged `Dept` is exposed to the coalesced value — not left
     // ambiguous between the two physical sides.
     try named().expect("""
@@ -1217,7 +1217,7 @@ struct EngineNaturalUsingTests {
 
   @Test func `a chained USING join keys a RIGHT-only row on the merged value`() throws {
     // `Emp RIGHT JOIN Team USING (Dept)` keeps the right-only Dept 30 (left
-    // `Emp.Dept` NULL); the next `JOIN Bonus USING (Dept)` keys on the MERGED
+    // `Emp.Dept` NULL); the next `JOIN Bonus USING (Dept)` keys on the merged
     // `Dept`, so that row still joins `Bonus` (Amt 200) rather than being
     // dropped on a NULL left key.
     try named().expect("""
@@ -1231,7 +1231,7 @@ struct EngineNaturalUsingTests {
   }
 
   @Test func `a chained USING join keys a FULL join's unmatched rows on the merged value`() throws {
-    // A FULL first join keeps BOTH unmatched rows — Dept 10 (left-only) and 30
+    // A FULL first join keeps both unmatched rows — Dept 10 (left-only) and 30
     // (right-only); the chained `Bonus` join keys each on the merged `Dept`, so
     // both still join (Amt 50 and 200).
     try named().expect("""
@@ -1249,7 +1249,7 @@ struct EngineNaturalUsingTests {
 
   @Test func `a repeated USING column faults rather than crashing`() throws {
     // `USING (Dept, Dept)` names one merged column twice; the duplicate is
-    // caught BEFORE the output dictionary the merged names key would trap on,
+    // caught before the output dictionary the merged names key would trap on,
     // faulting `.duplicate` rather than aborting the process.
     try named().expect("""
         SELECT * FROM Emp JOIN Team USING (Dept, Dept)
@@ -1258,7 +1258,7 @@ struct EngineNaturalUsingTests {
   }
 
   @Test func `a NATURAL join after a plain join with two like-named columns faults`() throws {
-    // `Emp JOIN Team ON …` leaves the left side carrying TWO columns named
+    // `Emp JOIN Team ON …` leaves the left side carrying two columns named
     // `Dept`; a following `NATURAL JOIN Bonus` would merge `Dept` twice — the
     // duplicate is caught and faults `.duplicate` rather than trapping.
     try named().expect("""
@@ -1272,7 +1272,7 @@ struct EngineNaturalUsingTests {
 
   @Test func `a RIGHT join groups a bare merged column by the coalesced value`() throws {
     // The right-only Dept 30 (left `Emp.Dept` NULL) groups and projects by the
-    // MERGED value 30, not NULL — the `GROUP BY` key is the coalesced value the
+    // merged value 30, not NULL — the `GROUP BY` key is the coalesced value the
     // projection emits.
     try named().expect("""
         SELECT Dept, COUNT(*) FROM Emp RIGHT JOIN Team USING (Dept)
@@ -1301,9 +1301,9 @@ struct EngineNaturalUsingTests {
   // MARK: - Accumulated-left ambiguity (finding 1)
 
   @Test func `a USING column a plain join bound twice on the left faults`() throws {
-    // A plain `ON` join leaves the accumulated left carrying TWO columns named
+    // A plain `ON` join leaves the accumulated left carrying two columns named
     // `Dept` (`Emp.Dept` and `Team.Dept`); a following `JOIN Bonus USING
-    // (Dept)` keys `Dept` on that left — which binds it TWICE — so it faults
+    // (Dept)` keys `Dept` on that left — which binds it twice — so it faults
     // `.ambiguous` at construction rather than trapping a downstream build.
     try named().expect("""
         SELECT * FROM Emp JOIN Team ON Emp.Dept = Team.Dept
@@ -1316,7 +1316,7 @@ struct EngineNaturalUsingTests {
 
   @Test func `a qualified name a later plain join adds over a merged one resolves`() throws {
     // A `USING (Dept)` merges `Dept`; a later plain `JOIN Bonus AS C ON …`
-    // brings its OWN physical `C.Dept`. A QUALIFIED `C.Dept` names that side
+    // brings its own physical `C.Dept`. A qualified `C.Dept` names that side
     // unambiguously and resolves — never a crash — even though a bare `Dept`
     // would now be ambiguous between the merged column and `C.Dept`.
     try named().expect("""
@@ -1329,7 +1329,7 @@ struct EngineNaturalUsingTests {
   @Test func `a bare name a later plain join re-collides with a merged one faults`() throws {
     // The bare counterpart: with the merged `Dept` AND the later plain join's
     // physical `C.Dept` both in scope, a bare `Dept` names two columns and
-    // faults `.ambiguous` — surfacing at lookup, NEVER a crash.
+    // faults `.ambiguous` — surfacing at lookup, never a crash.
     try named().expect("""
         SELECT Dept FROM Emp JOIN Team USING (Dept)
         JOIN Bonus AS C ON C.Dept = Emp.Dept
@@ -1340,7 +1340,7 @@ struct EngineNaturalUsingTests {
   // MARK: - ORDER BY alias precedence over a merged key (finding 3)
 
   @Test func `ORDER BY binds a projection alias before the merged key`() throws {
-    // `SELECT Name AS Dept … ORDER BY Dept` sorts by the PROJECTED alias
+    // `SELECT Name AS Dept … ORDER BY Dept` sorts by the projected alias
     // `Name`, not the coalesced merged `Dept` key — the bare `ORDER BY` key
     // reaches the resolver's alias-first binding before the scope's merged
     // column, since there is no pre-rewrite substituting the key for the
@@ -1365,12 +1365,12 @@ struct EngineNaturalUsingTests {
         yields: [["Ann"], ["Bob"], ["Cid"]])
   }
 
-  // MARK: - Merged columns under schema VALIDATION (finding A)
+  // MARK: - Merged columns under schema validation (finding A)
 
   @Test func `a bare merged reference type-checks under validation`() throws {
     // The run lowers a bare merged `Dept` in the `WHERE` through `Scope.term`
     // to the coalesced value; `columns(of:validate:true)` — whose type-check
-    // walk validates the `WHERE` through the SAME merged-aware bare-name
+    // walk validates the `WHERE` through the same merged-aware bare-name
     // lookup — must resolve it too, not fault `.ambiguous`. The schema names
     // the projected `Name` (text) and does not throw.
     let text = """
@@ -1384,7 +1384,7 @@ struct EngineNaturalUsingTests {
   }
 
   @Test func `a bare merged reference in the projection type-checks`() throws {
-    // The merged `Dept` PROJECTED and type-checked: the schema resolves it to
+    // The merged `Dept` projected and type-checked: the schema resolves it to
     // the unified coalesce type (`integer`) rather than faulting `.ambiguous`.
     let text = "SELECT Dept FROM Emp JOIN Team USING (Dept) WHERE Dept = 20"
     let columns = try named()
@@ -1421,7 +1421,7 @@ struct EngineNaturalUsingTests {
       throws {
     // `Emp JOIN Team USING (Dept)` merges `Dept`; the plain `JOIN Bonus AS C
     // ON …` re-introduces a physical `C.Dept`, so the prefix now binds `Dept`
-    // BOTH as the merged column and as `C.Dept`. A later `JOIN X USING (Dept)`
+    // both as the merged column and as `C.Dept`. A later `JOIN X USING (Dept)`
     // resolves its common `Dept` against that prefix — ambiguous — so it
     // faults `.ambiguous` rather than silently keying on the merged value and
     // leaving two output columns named `Dept`.
@@ -1451,7 +1451,7 @@ struct EngineNaturalUsingTests {
 
   @Test func `a USING join over int and double sides unifies to double`()
       throws {
-    // `A.k integer`, `B.k double`: the merged `k` type UNIFIES to `double`,
+    // `A.k integer`, `B.k double`: the merged `k` type unifies to `double`,
     // and the coalesce coerces each side to it, so the schema advertises
     // `double` and the rows carry doubles — not a silent left `integer`.
     let catalog = try Catalog {
@@ -1528,9 +1528,9 @@ struct EngineNaturalUsingTests {
   @Test func `a USING join defers to the right when the left is unconstrained`()
       throws {
     // `(SELECT NULLIF(1, 1) AS k) AS a` — the left `k` is constant NULL, so
-    // UNCONSTRAINED (a placeholder `integer` that places no type constraint) —
+    // unconstrained (a placeholder `integer` that places no type constraint) —
     // RIGHT JOIN `B_text` whose `k` is `text`. The merged `k` types off the
-    // CONSTRAINED right (`text`) through the same mask-aware unification the
+    // constrained right (`text`) through the same mask-aware unification the
     // set-op fold takes, rather than faulting the placeholder `integer` beside
     // `text`. A right row's merged `k` is `B_text.k` (the always-NULL left
     // coalesces away). Run ≡ columns(of:).
@@ -1553,8 +1553,8 @@ struct EngineNaturalUsingTests {
 
   @Test func `a USING join defers to the left when the right is unconstrained`()
       throws {
-    // The SYMMETRIC case: the CONSTRAINED left `A_text.k` (`text`) beside an
-    // UNCONSTRAINED right `(SELECT NULLIF(1, 1) AS k)` — the merged `k` types
+    // The symmetric case: the constrained left `A_text.k` (`text`) beside an
+    // unconstrained right `(SELECT NULLIF(1, 1) AS k)` — the merged `k` types
     // off the left (`text`), and a LEFT join keeps every left row, its merged
     // `k` the left value (the always-NULL right coalesces away).
     let catalog = try Catalog {
@@ -1576,9 +1576,9 @@ struct EngineNaturalUsingTests {
 
   @Test func `a USING join of two unconstrained sides stays unconstrained`()
       throws {
-    // BOTH constituents constant NULL (unconstrained): the merged `k` stays a
+    // both constituents constant NULL (unconstrained): the merged `k` stays a
     // placeholder that places no constraint, so a further `UNION SELECT 1` over
-    // it UNIFIES to `integer` rather than faulting the placeholder beside the
+    // it unifies to `integer` rather than faulting the placeholder beside the
     // typed arm — the merged column carries its own `unconstrained` bit into
     // the enclosing set-operation fold, exactly as a bare unconstrained column
     // would.
@@ -1630,8 +1630,8 @@ struct EngineNaturalUsingTests {
 
   @Test func `a chained USING on the SAME column keeps it once at the outer position`()
       throws {
-    // A chained `… USING (Dept)` over an already-merged `Dept` DROPS the inner
-    // entry and keeps the ONE merged `Dept` at the outer join's position — so
+    // A chained `… USING (Dept)` over an already-merged `Dept` drops the inner
+    // entry and keeps the one merged `Dept` at the outer join's position — so
     // `SELECT *` still exposes `Dept` once, then the three sides' rests. Run
     // and schema agree.
     let text =
@@ -1650,8 +1650,8 @@ struct EngineNaturalUsingTests {
 
   @Test func `a LATERAL body resolves a bare USING-merged column`() throws {
     // ISO 9075 7.10: the `USING (Dept)` merged column is an output column of
-    // the join, so a LATERAL body's PRECEDING scope carries it and a bare
-    // `Dept` in the body binds the ONE coalesced column rather than faulting
+    // the join, so a LATERAL body's preceding scope carries it and a bare
+    // `Dept` in the body binds the one coalesced column rather than faulting
     // `.ambiguous` between the two physical `Dept`s. Run and schema agree.
     let text = """
         SELECT d.n FROM Emp JOIN Team USING (Dept)
@@ -1687,7 +1687,7 @@ struct EngineNaturalUsingTests {
 
   @Test func `a LATERAL body still resolves a qualified constituent column`()
       throws {
-    // A QUALIFIED `Emp.Dept` in the body never matches the merged column and
+    // A qualified `Emp.Dept` in the body never matches the merged column and
     // reaches its own physical side, correlating as an ordinary outer slot.
     let text = """
         SELECT d.n FROM Emp JOIN Team USING (Dept)
@@ -1698,7 +1698,7 @@ struct EngineNaturalUsingTests {
 
   @Test func `a LATERAL body faults an ambiguous non-merged name`() throws {
     // A plain `JOIN Bonus ON …` re-introduces a physical `Dept` beside the
-    // merged one, so a bare `Dept` in the LATERAL body now names BOTH and stays
+    // merged one, so a bare `Dept` in the LATERAL body now names both and stays
     // `.ambiguous` — the merged axis does not mask a genuine ambiguity.
     let text = """
         SELECT d.n FROM Emp JOIN Team USING (Dept)
@@ -1710,10 +1710,10 @@ struct EngineNaturalUsingTests {
 
   @Test func `a merged column and its constituent correlate independently`()
       throws {
-    // A LATERAL body of `Emp RIGHT JOIN Team USING (Dept)` projects BOTH the
+    // A LATERAL body of `Emp RIGHT JOIN Team USING (Dept)` projects both the
     // bare merged `Dept` (COALESCE) and the physical `Emp.Dept` constituent. On
     // the right-only Dept 30 row the merged `Dept` coalesces to 30 while
-    // `Emp.Dept` is NULL — each correlates through its OWN parameter identity,
+    // `Emp.Dept` is NULL — each correlates through its own parameter identity,
     // so neither read overwrites the other regardless of projection order.
     let forward = """
         SELECT m, e FROM Emp RIGHT JOIN Team USING (Dept)
@@ -1725,7 +1725,7 @@ struct EngineNaturalUsingTests {
       [20, 20],
       [30, nil],
     ])
-    // The REVERSE projection order yields the same values — the merged and the
+    // The reverse projection order yields the same values — the merged and the
     // constituent correlation keys do not collide, so lowering order is
     // irrelevant.
     let reverse = """
@@ -1743,7 +1743,7 @@ struct EngineNaturalUsingTests {
   @Test func `a SELECT star merged column carries its unconstrained mask`()
       throws {
     // Both `USING (k)` constituents are constant-NULL (`NULLIF(1, 1)`), so the
-    // merged `k` is UNCONSTRAINED — it places no type constraint. A `SELECT *`
+    // merged `k` is unconstrained — it places no type constraint. A `SELECT *`
     // must carry that mask (exactly as an explicit `SELECT k` does), so the
     // enclosing UNION unifies the merged `k` with the text arm rather than
     // faulting the first arm's integer against the text (42804).
@@ -1769,7 +1769,7 @@ struct EngineNaturalUsingTests {
 
   @Test func `a genuinely constrained USING merge still faults an irreconcilable UNION`()
       throws {
-    // Both constituents are CONSTRAINED (a bare integer `Dept` and a text
+    // Both constituents are constrained (a bare integer `Dept` and a text
     // `Lead`… no — both integer here), so the merged `Dept` is a constrained
     // integer and the text UNION arm is irreconcilable: 42804 still faults,
     // proving the mask is carried, not hard-coded unconstrained.
@@ -1780,13 +1780,13 @@ struct EngineNaturalUsingTests {
         fails: .operand("UNION arms have irreconcilable types"))
   }
 
-  // MARK: - USING/NATURAL over a VIRTUAL column (the fixture `Id`)
+  // MARK: - USING/NATURAL over a virtual column (the fixture `Id`)
 
   @Test func `USING a virtual Id present on both sides resolves and merges it`()
       throws {
-    // `Id` is a VIRTUAL column (the fixture's 1-based row index) on BOTH `Emp`
+    // `Id` is a virtual column (the fixture's 1-based row index) on both `Emp`
     // and `Team`, not a real one in `names`. `USING (Id)` must resolve it
-    // through the SAME virtual-aware `ordinal(of:)` the predicate path
+    // through the same virtual-aware `ordinal(of:)` the predicate path
     // `Emp.Id = Team.Id` uses, keying on the row index: Emp Ids 1..3, Team
     // Ids 1..2, so Ids 1 and 2 match. ISO 7.10 order exposes the merged `Id`
     // once and first, then `Emp`'s real columns, then `Team`'s.
@@ -1810,12 +1810,12 @@ struct EngineNaturalUsingTests {
 
   @Test func `NATURAL does not key on a shared virtual Id, only real columns`()
       throws {
-    // The NATURAL DECISION: the common set is the LEFT scope's `names` — the
-    // real, `SELECT *`-visible columns, NO virtual — so a virtual `Id` shared
+    // The NATURAL decision: the common set is the LEFT scope's `names` — the
+    // real, `SELECT *`-visible columns, no virtual — so a virtual `Id` shared
     // by both sides is NOT a NATURAL common column even though both sides can
-    // ADDRESS it. This is consistent with ISO, where NATURAL and `SELECT *`
-    // draw on the SAME column-name list (which the engine excludes virtuals
-    // from), while an EXPLICIT `USING (Id)` (like an explicit `A.Id = B.Id`)
+    // address it. This is consistent with ISO, where NATURAL and `SELECT *`
+    // draw on the same column-name list (which the engine excludes virtuals
+    // from), while an explicit `USING (Id)` (like an explicit `A.Id = B.Id`)
     // resolves the virtual through `ordinal(of:)`. So `Emp NATURAL JOIN Team`
     // keys on the shared REAL `Dept` alone (Dept 20 matches), NOT on the
     // virtual `Id` — the round-1 behavior is unchanged.
@@ -1828,7 +1828,7 @@ struct EngineNaturalUsingTests {
 
   @Test func `USING mixes a REAL left Id with a VIRTUAL joined Id`() throws {
     // `Coded` carries a REAL `Id` column (shadowing its own virtual); `Emp`
-    // exposes only a VIRTUAL `Id`. `USING (Id)` must resolve the LEFT through
+    // exposes only a virtual `Id`. `USING (Id)` must resolve the LEFT through
     // the real column and the RIGHT through the virtual one, keying REAL 1..3
     // against the row index 1..3.
     try virtual().expect("SELECT * FROM Coded JOIN Emp USING (Id)",
@@ -1855,12 +1855,12 @@ struct EngineNaturalUsingTests {
   @Test func `NATURAL excludes a JOINED-side virtual Id from the common set`()
       throws {
     // `Coded` has a REAL `Id` (in `names`); `Emp` exposes `Id` ONLY as a
-    // VIRTUAL column (the fixture row index), and the two share NO real column
+    // virtual column (the fixture row index), and the two share no real column
     // (`Id`/`Tag` vs `Dept`/`Name`). The `NATURAL` common set is the REAL-name
-    // intersection on BOTH sides, so the joined-side VIRTUAL `Id` must NOT
+    // intersection on both sides, so the joined-side virtual `Id` must NOT
     // match `Coded`'s real `Id` — the join degenerates to a CROSS product (its
-    // synthesized `on` empty), keeping ALL FOUR real columns unmerged and every
-    // 3x3 pairing. An EXPLICIT `USING (Id)` (the control below) still resolves
+    // synthesized `on` empty), keeping ALL four real columns unmerged and every
+    // 3x3 pairing. An explicit `USING (Id)` (the control below) still resolves
     // the virtual; NATURAL, like `SELECT *`, draws only on real names.
     try virtual().expect("SELECT * FROM Coded NATURAL JOIN Emp",
         yields: [
@@ -1905,9 +1905,9 @@ struct EngineNaturalUsingTests {
 
   @Test func `explicit USING over the real-and-virtual Id still merges (round 7)`()
       throws {
-    // CONTROL: the round-7 behavior is UNCHANGED. `Coded JOIN Emp USING (Id)`
-    // still resolves `Coded`'s REAL `Id` and `Emp`'s VIRTUAL `Id` through the
-    // virtual-aware probe and MERGES them (keys real 1..3 against the row
+    // control: the round-7 behavior is unchanged. `Coded JOIN Emp USING (Id)`
+    // still resolves `Coded`'s REAL `Id` and `Emp`'s virtual `Id` through the
+    // virtual-aware probe and merges them (keys real 1..3 against the row
     // index 1..3), a single merged `Id` first, then the remaining real columns.
     // Only NATURAL's common-set derivation changed; the explicit-USING path is
     // untouched.
@@ -1924,10 +1924,10 @@ struct EngineNaturalUsingTests {
 
   @Test func `a RIGHT USING over a virtual Id coalesces the right-only value`()
       throws {
-    // `Few` has ONE row (Id 1); `Many` has three (Ids 1..3). A RIGHT join keeps
+    // `Few` has one row (Id 1); `Many` has three (Ids 1..3). A RIGHT join keeps
     // every `Many` row: Id 1 matches, and Ids 2 and 3 are right-only with a
     // NULL-extended left `Id`. The merged `Id` = COALESCE(Few.Id, Many.Id) must
-    // show the JOINED (right) virtual value on those right-only rows, so the
+    // show the joined (right) virtual value on those right-only rows, so the
     // merged column is 1, 2, 3 — not NULL — proving the run coalesces the
     // virtual slot, not just resolves it.
     try virtual().expect("""
@@ -1936,17 +1936,17 @@ struct EngineNaturalUsingTests {
         yields: [[1], [2], [3]])
   }
 
-  // MARK: - A merged name a later plain join re-collides with on the VIRTUAL
+  // MARK: - A merged name a later plain join re-collides with on the virtual
   // axis (round 8)
 
   @Test func `a bare merged Id a later plain join's virtual Id re-collides with faults`()
       throws {
-    // `Few JOIN Many USING (Id)` merges the VIRTUAL `Id` of both sides; a later
-    // plain `JOIN Emp ON 1 = 1` brings `Emp`'s OWN addressable virtual `Id`. A
-    // bare `Id` now names BOTH the merged column and `Emp.Id`, so it faults
+    // `Few JOIN Many USING (Id)` merges the virtual `Id` of both sides; a later
+    // plain `JOIN Emp ON 1 = 1` brings `Emp`'s own addressable virtual `Id`. A
+    // bare `Id` now names both the merged column and `Emp.Id`, so it faults
     // `.ambiguous` — the merged bare lookup scans the FULL addressable surface
     // (physical AND virtual, `Scope.ordinal(of:)`'s), not a real-only one that
-    // would MISS the virtual `Emp.Id` and wrongly take the merged value. run
+    // would miss the virtual `Emp.Id` and wrongly take the merged value. run
     // and `columns(of:)` agree.
     let text = "SELECT Id FROM Few JOIN Many USING (Id) JOIN Emp ON 1 = 1"
     try virtual().expect(text, fails: .ambiguous("Id"))
@@ -1976,7 +1976,7 @@ struct EngineNaturalUsingTests {
     // 1 JOIN Coded USING (Id)` accumulates a left carrying BOTH the merged `Id`
     // and the plain-joined `Emp.Id` (virtual), so keying the final `USING (Id)`
     // on that left is ambiguous — the left resolution (`Scope.left`) routes
-    // through the SAME full-surface merged bare lookup and faults.
+    // through the same full-surface merged bare lookup and faults.
     try virtual().expect("""
         SELECT v FROM Few JOIN Many USING (Id) JOIN Emp ON 1 = 1
         JOIN Coded USING (Id)
@@ -1986,7 +1986,7 @@ struct EngineNaturalUsingTests {
 
   @Test func `qualified sides of a virtual-Id merge still resolve past a re-collision`()
       throws {
-    // With bare `Id` ambiguous, each QUALIFIED reference still reaches its own
+    // With bare `Id` ambiguous, each qualified reference still reaches its own
     // side unambiguously: `Few.Id`/`Many.Id` the merge constituents (both the
     // matched row index 1), `Emp.Id` the later plain join's virtual `Id` (the
     // three `Emp` rows' indices 1..3) — never a fault.
@@ -2000,7 +2000,7 @@ struct EngineNaturalUsingTests {
   @Test func `a bare merged name a later plain join lacks stays unambiguous`()
       throws {
     // The control: when the later plain join's relation does NOT expose the
-    // merged name, the full-surface scan finds NO non-constituent match and the
+    // merged name, the full-surface scan finds no non-constituent match and the
     // bare name resolves to the merged column — no false ambiguity. `Emp JOIN
     // Team USING (Dept)` merges `Dept`; `Other(y)` carries no `Dept`, so a bare
     // `Dept` still coalesces (only Dept 20 matches on both sides). run and
@@ -2029,12 +2029,12 @@ struct EngineNaturalUsingTests {
 
   @Test func `a virtual-Id USING SELECT * width equals its emitted arity`()
       throws {
-    // `SELECT * FROM Emp JOIN Team USING (Id)` merges the VIRTUAL `Id` of both
+    // `SELECT * FROM Emp JOIN Team USING (Id)` merges the virtual `Id` of both
     // sides. No REAL column is subsumed (both `Id`s are virtual), so the arm
-    // emits FIVE values (the merged `Id`, then `Emp`'s two real columns, then
+    // emits five values (the merged `Id`, then `Emp`'s two real columns, then
     // `Team`'s two) — and the computed `SELECT *` width must equal that count,
     // not undercount by subtracting the virtual constituents from a real-only
-    // sum. The width now DERIVES from the same enumeration `columns(of:)`
+    // sum. The width now derives from the same enumeration `columns(of:)`
     // walks, so the two agree by construction.
     let catalog = try named()
     try catalog.expect("SELECT * FROM Emp JOIN Team USING (Id)",
@@ -2050,7 +2050,7 @@ struct EngineNaturalUsingTests {
   @Test func `a set operation over a virtual-Id SELECT * matches arity 5`()
       throws {
     // The undercounted width fed the set-operation arity check, so a genuinely
-    // matching UNION was WRONGLY rejected. The left arm's `SELECT *` is arity 5
+    // matching UNION was wrongly rejected. The left arm's `SELECT *` is arity 5
     // (merged virtual `Id` + four real columns); a right arm of five columns
     // now unifies rather than faulting.
     try named().expect("""
@@ -2066,7 +2066,7 @@ struct EngineNaturalUsingTests {
 
   @Test func `a virtual-Id SELECT * set operation still faults a real arity mismatch`()
       throws {
-    // The floor: a right arm of the WRONG arity (three columns against the
+    // The floor: a right arm of the wrong arity (three columns against the
     // arm's five) still faults `.arity`, so deriving width from the enumeration
     // did not disable the check.
     try named().expect("""
@@ -2077,7 +2077,7 @@ struct EngineNaturalUsingTests {
 
   @Test func `an ORDER BY ordinal past the merged width resolves`() throws {
     // The undercounted width (3) made the `ORDER BY` ordinal bound in the
-    // type-check path (`columns(of:validate:true)`) REJECT a valid ordinal (4
+    // type-check path (`columns(of:validate:true)`) reject a valid ordinal (4
     // or 5) that names a real output column — the width there feeds the bound.
     // The width is now 5, so ordinal 5 (`Team`'s `Lead`) type-checks, and the
     // run resolves and sorts by it.
@@ -2110,9 +2110,9 @@ struct EngineNaturalUsingTests {
   }
 }
 
-/// Fixtures for the VIRTUAL-`Id` named-column join cases. `Coded` carries a
+/// Fixtures for the virtual-`Id` named-column join cases. `Coded` carries a
 /// REAL `Id` column (which shadows its own virtual `Id`), so a `USING (Id)`
-/// against `Emp`'s VIRTUAL `Id` mixes a real and a virtual constituent. `Few`
+/// against `Emp`'s virtual `Id` mixes a real and a virtual constituent. `Few`
 /// (one row) RIGHT-joined to `Many` (three rows) `USING (Id)` produces two
 /// right-only rows whose merged `Id` must coalesce to `Many`'s row index.
 private func virtual() throws -> FixtureCatalog {
@@ -2138,7 +2138,7 @@ private func virtual() throws -> FixtureCatalog {
   }
 }
 
-/// Three relations for a chained named-column join over TWO DISTINCT columns:
+/// Three relations for a chained named-column join over two DISTINCT columns:
 /// `P(k, p)` and `Q(k, a, q)` share `k`, and `Q` and `R(a, r)` share `a`, so
 /// `(P JOIN Q USING (k)) JOIN R USING (a)` merges `k` at the INNER join and `a`
 /// at the OUTER one — the ISO 7.10 output order is `[a, k, p, q, r]`. `P

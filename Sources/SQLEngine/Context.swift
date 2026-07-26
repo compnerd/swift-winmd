@@ -10,7 +10,7 @@
 ///
 /// - `relations` — the in-scope relation overlay: the materialised common table
 /// expressions a `WITH` binds and any `definition_schema.` store relation the
-/// query names, keyed case-folded. The resolver consults it BEFORE the base
+/// query names, keyed case-folded. The resolver consults it before the base
 /// catalog, so a name it binds shadows a base table or view. - `routines` — the
 /// scalar functions (UDFs) a call resolves through, keyed case-folded; the
 /// engine prelude (`BITAND`) merged under the caller's. - `bindings` — the
@@ -20,7 +20,7 @@
 /// It is plain escapable data, so it needs none of the lifetime machinery the
 /// borrowed catalog does: extending the `relations` overlay for a CTE's scope,
 /// or rebinding it for a recursive step, is an ordinary value copy — the
-/// `deriving`/`scoping` helpers below. The borrowed catalog stays a SEPARATE
+/// `deriving`/`scoping` helpers below. The borrowed catalog stays a separate
 /// parameter; a `Context` never holds it (a stored `~Escapable` member cannot
 /// yield a `~Escapable` table).
 internal struct Context {
@@ -34,8 +34,8 @@ internal struct Context {
   /// The query parameter bindings.
   internal let bindings: Bindings
 
-  /// The RUN-time results of the UNCORRELATED subqueries the executing plan
-  /// nests — each `EXISTS`/`IN (Q)` subquery run ONCE and memoised by its
+  /// The run-time results of the uncorrelated subqueries the executing plan
+  /// nests — each `EXISTS`/`IN (Q)` subquery run once and memoised by its
   /// `Query`, read by the row evaluator. Empty during compilation and every
   /// schema-only path (which never opens a cursor); the `run` path populates it
   /// (see `Catalog.subqueries(of:)`) just before executing the plan.
@@ -46,7 +46,7 @@ internal struct Context {
   /// faults `SQLError.recursion` rather than resolving without end.
   internal let visited: Set<String>
 
-  /// Whether a derived table's body is EAGER type-checked at resolution. A RUN
+  /// Whether a derived table's body is eager type-checked at resolution. A run
   /// preflight, or a schema-only path after a run has proved the statement
   /// runnable, passes `false` so a data-dependent-empty body expression an
   /// execution never evaluates is not rejected; a strict schema check keeps it
@@ -60,36 +60,36 @@ internal struct Context {
   internal let subscope: Subscope
 
   /// The enclosing correlation stack a nested subquery correlates against — the
-  /// `Outer` scopes an inner `WHERE` column that binds none of ITS relations
+  /// `Outer` scopes an inner `WHERE` column that binds none of its relations
   /// resolves outward through, lowering to a synthetic `Term.parameter` and
   /// recording the correlation. `nil` at the top level (no enclosing query).
   internal let outer: Outer?
 
-  /// Whether the query being resolved is a LATERAL derived table's BODY — set
+  /// Whether the query being resolved is a LATERAL derived table's body — set
   /// only by `lateral(_:against:_:)` as it derives/compiles the body. Per ISO
   /// 9075 a `LATERAL` body's preceding-FROM references are in scope throughout
-  /// its query expression, INCLUDING the select list, so the body admits a
-  /// correlated column EVERYWHERE (not only its `WHERE`/`ON`). This flag
+  /// its query expression, including the select list, so the body admits a
+  /// correlated column everywhere (not only its `WHERE`/`ON`). This flag
   /// threads into the `Resolution`/`SubqueryCheck` the body's lowering and
   /// validation build (`everywhere`), lifting the projection-correlation bar
-  /// for the lateral body ALONE — an ordinary subquery's projection stays
+  /// for the lateral body alone — an ordinary subquery's projection stays
   /// barred (`false`).
   internal let lateral: Bool
 
-  /// Whether the query being resolved is a nested-subquery SHAPE pre-pass — the
+  /// Whether the query being resolved is a nested-subquery shape pre-pass — the
   /// cursor-free derive that records a nested subquery's width, arity, and
-  /// single-column type AHEAD of the reachability walk. Set only at the
-  /// pre-pass `inner` constructions (`shaping()`), it DEFERS a set-operation's
-  /// operand-compatibility fold: the pre-pass runs for EVERY nested subquery
+  /// single-column type ahead of the reachability walk. Set only at the
+  /// pre-pass `inner` constructions (`shaping()`), it defers a set-operation's
+  /// operand-compatibility fold: the pre-pass runs for every nested subquery
   /// before the walk decides which run, so faulting `SQLError.operand` here
   /// would reject an unreachable incompatible subquery a short-circuited
   /// `AND`/`OR` never reaches (`… WHERE 1 = 0 AND EXISTS (SELECT 'x' UNION
   /// SELECT 1)`). Arity and resolution stay eager regardless; only the operand
   /// fold defers, substituting a placeholder type (the left arm's) it discards
-  /// for an unreached occurrence and RE-CHECKS strictly for a reached
+  /// for an unreached occurrence and re-checks strictly for a reached
   /// scalar/`IN` one. Distinct from `validate` (also `false` on the top-level
-  /// run and CTE trusted paths, which MUST keep faulting), so it gates the
-  /// operand fold ALONE.
+  /// run and CTE trusted paths, which must keep faulting), so it gates the
+  /// operand fold alone.
   internal let shape: Bool
 
   /// A context over the maps and resolution scope — an empty overlay, no
@@ -115,7 +115,7 @@ internal struct Context {
     self.shape = shape
   }
 
-  /// A copy of this context with `relations` REPLACING the overlay, the same
+  /// A copy of this context with `relations` replacing the overlay, the same
   /// routines, bindings, and subquery results — the scope a phase reads after
   /// `augment` extends the overlay with the store relations a query names, or a
   /// recursive step rebinds a CTE's self.
@@ -125,17 +125,17 @@ internal struct Context {
             subscope: subscope, outer: outer, lateral: lateral, shape: shape)
   }
 
-  /// A copy of this context ENTERING a fresh body scope over `relations` — the
-  /// SINGLE derivation every view/derived-table/CTE body-entry seam routes
-  /// through, `scoping(relations)` with the enclosing correlation stack CLEARED
+  /// A copy of this context entering a fresh body scope over `relations` — the
+  /// single derivation every view/derived-table/CTE body-entry seam routes
+  /// through, `scoping(relations)` with the enclosing correlation stack cleared
   /// (`uncorrelated()`). A body scope — a view definition, a non-LATERAL
-  /// derived table, or a CTE — is resolved INDEPENDENTLY of its call site, so
+  /// derived table, or a CTE — is resolved independently of its call site, so
   /// it must NOT correlate against an enclosing query's row: an unbound column
   /// in the body must fault rather than bind outward to the caller. Folding the
   /// reset INTO body-entry makes the clear intrinsic — a future body seam that
   /// routes through `body(_:)` cannot forget to append `uncorrelated()`. A site
   /// that also guards the cyclic-view chain or gates the eager type-check
-  /// chains `visiting(_:)`/`validating(_:)` AFTER `body(_:)`.
+  /// chains `visiting(_:)`/`validating(_:)` after `body(_:)`.
   internal func body(_ relations: ScopedRelations) -> Context {
     scoping(relations).uncorrelated()
   }
@@ -151,7 +151,7 @@ internal struct Context {
     return scoping(relations)
   }
 
-  /// A copy of this context with `bindings` REPLACING the parameter bindings,
+  /// A copy of this context with `bindings` replacing the parameter bindings,
   /// the same overlay, routines, and subquery results — a correlated subquery's
   /// per-outer-row rebinding, which extends the bindings with the enclosing
   /// row's cells before re-executing its inner plan.
@@ -164,7 +164,7 @@ internal struct Context {
   /// A copy of this context carrying `subqueries` as the executing plan's
   /// materialised subquery results — the run path's extension just before it
   /// executes a compiled plan, so the row evaluator reads each subquery result
-  /// off the SAME context that threads everywhere `execute` descends.
+  /// off the same context that threads everywhere `execute` descends.
   internal func resolving(_ subqueries: Subqueries) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
@@ -172,12 +172,12 @@ internal struct Context {
   }
 
   /// A copy of this context with every enclosing SELECT's derived-table aliases
-  /// REVEALED away — the overlay's derived layers dropped, its common table
+  /// revealed away — the overlay's derived layers dropped, its common table
   /// expressions and `definition_schema.` store relations (the base layer)
-  /// KEPT — the scope a NESTED subquery's FROM resolves against.
+  /// kept — the scope a nested subquery's FROM resolves against.
   ///
   /// A derived-table alias is SELECT-scoped: it names a relation only in its
-  /// OWN SELECT's FROM/JOIN and expressions, invisible to a nested subquery's
+  /// own SELECT's FROM/JOIN and expressions, invisible to a nested subquery's
   /// FROM exactly as a base-table alias in the enclosing FROM is (a subquery
   /// does not see the enclosing query's FROM relations; only base tables and
   /// enclosing CTEs are in its relation scope). A CTE, by contrast, is
@@ -185,14 +185,14 @@ internal struct Context {
   /// The seam that compiles/materialises a nested subquery (`subquery(of:)`,
   /// `subqueries(of:)`, `cell(of:)`, and the type-check counterparts) reveals
   /// the base so a subquery's `FROM d` cannot scan an outer derived alias `d`,
-  /// while a same-named CTE `d` the derived alias SHADOWED is resolved again
-  /// — the layered overlay never deleted it. The subquery re-augments its OWN
+  /// while a same-named CTE `d` the derived alias shadowed is resolved again
+  /// — the layered overlay never deleted it. The subquery re-augments its own
   /// derived tables into a fresh layer.
   internal func revealed() -> Context {
     scoping(relations.revealed())
   }
 
-  /// A copy of this context with `name` (folded to lower case) ADDED to the
+  /// A copy of this context with `name` (folded to lower case) added to the
   /// cyclic-view guard — the scope a view body resolves under, so a nested
   /// reference back to the view faults `SQLError.recursion` rather than
   /// resolving without end.
@@ -205,7 +205,7 @@ internal struct Context {
                    outer: outer, lateral: lateral, shape: shape)
   }
 
-  /// A copy of this context with the eager-typecheck gate set to `flag` — a RUN
+  /// A copy of this context with the eager-typecheck gate set to `flag` — a run
   /// preflight or a post-run schema-only path passes `false` to keep a
   /// data-dependent body lenient.
   internal func validating(_ flag: Bool) -> Context {
@@ -215,11 +215,11 @@ internal struct Context {
   }
 
   /// A copy of this context marking the query it resolves as a nested-subquery
-  /// SHAPE pre-pass (`shape`) — the seam the two pre-pass `inner` constructions
+  /// shape pre-pass (`shape`) — the seam the two pre-pass `inner` constructions
   /// route through, so a set operation's operand-compatibility fold defers to
   /// the reachability walk rather than faulting `SQLError.operand` while merely
   /// recording an unreached subquery's width and type. Arity and resolution
-  /// stay eager; every OTHER field is preserved.
+  /// stay eager; every other field is preserved.
   internal func shaping() -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
@@ -235,7 +235,7 @@ internal struct Context {
             subscope: subscope, outer: outer, lateral: lateral, shape: shape)
   }
 
-  /// A copy of this context whose enclosing correlation stack is EXTENDED with
+  /// A copy of this context whose enclosing correlation stack is extended with
   /// `scope` as the nearest enclosing one (`Outer.nested(under:)`, starting a
   /// fresh stack at the top level) — the scope a nested subquery correlates
   /// against, so an inner column binding none of its own relations resolves
@@ -254,24 +254,24 @@ internal struct Context {
   }
 
   /// A copy of this context marking the query it resolves as a LATERAL derived
-  /// table's BODY (`lateral`) — the SINGLE seam `lateral(_:against:_:)` routes
+  /// table's body (`lateral`) — the single seam `lateral(_:against:_:)` routes
   /// its body's schema derivation and plan compile through, so the body's
   /// `Resolution`/`SubqueryCheck` admit a correlated preceding-FROM column
-  /// EVERYWHERE, including the projection, per ISO. Every OTHER field is
+  /// everywhere, including the projection, per ISO. Every other field is
   /// preserved; the flag is scoped to the body's own lowering (a nested
-  /// NON-lateral body clears it through `body(_:)`).
+  /// non-lateral body clears it through `body(_:)`).
   internal func lateralizing() -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
             subscope: subscope, outer: outer, lateral: true, shape: shape)
   }
 
-  /// A copy of this context with the enclosing correlation stack CLEARED — the
+  /// A copy of this context with the enclosing correlation stack cleared — the
   /// scope a body that must NOT correlate against the caller's row resolves
   /// under: a view body and a non-LATERAL derived table body. Neither may see
   /// an enclosing query's columns (a view is defined independently of its call
   /// site; a derived table is uncorrelated), so an unbound column in either
-  /// must fault rather than bind outward to the caller. Every OTHER field —
+  /// must fault rather than bind outward to the caller. Every other field —
   /// the relation overlay, routines, bindings, subquery results, the visited
   /// guard, the validate gate, and the subscope — is preserved; `outer` resets
   /// to `nil` (restoring the top-level default) and the LATERAL-body flag
@@ -281,7 +281,7 @@ internal struct Context {
     with(outer: nil).unlateralized()
   }
 
-  /// A copy of this context with the LATERAL-body flag CLEARED — the reset
+  /// A copy of this context with the LATERAL-body flag cleared — the reset
   /// `uncorrelated()`/`body(_:)` fold in, and the seam a nested ordinary
   /// subquery within a lateral body compiles under, so a body that must NOT
   /// correlate against the caller (a view or a non-lateral derived table) does

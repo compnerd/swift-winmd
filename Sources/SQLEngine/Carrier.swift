@@ -3,7 +3,7 @@
 
 // MARK: - Ordered set operation
 
-/// A grouped-arm resolver a carrier caller injects: the RESOLVED grouped-space
+/// A grouped-arm resolver a carrier caller injects: the resolved grouped-space
 /// `Term` of each projected item, and a closure lowering an arbitrary
 /// expression to that same space — the identity surface a query-level `ORDER
 /// BY` key matches against by resolved identity. A plain set-operation carrier
@@ -14,14 +14,14 @@ internal typealias Resolver =
 extension Catalog where Self: ~Escapable {
   /// Compiles an `ORDER BY` / `SELECT DISTINCT` / `OFFSET`·`FETCH` carried over
   /// the set-operation `union` — the `Query.ordered` carrier — into the row
-  /// operators STACKED over the union's compiled plan, resolved through the
-  /// setop's OUTPUT scope.
+  /// operators stacked over the union's compiled plan, resolved through the
+  /// setop's output scope.
   ///
   /// A `setop` node has no order/distinct/limit slot, so the query-level row
   /// operators ride this outer carrier rather than a text `SELECT * FROM
   /// (union) AS g ORDER BY …` wrapper. They resolve against a scope over the
-  /// union's OUTPUT columns — the arm-0-named, type-unified result columns —
-  /// the SAME canonical resolution any `SELECT … FROM <derived> ORDER BY
+  /// union's output columns — the arm-0-named, type-unified result columns —
+  /// the same canonical resolution any `SELECT … FROM <derived> ORDER BY
   /// <alias/ordinal/expr>` uses, so:
   ///
   ///   - an ordinal `ORDER BY n`, an output alias, or a bare projected column
@@ -29,7 +29,7 @@ extension Catalog where Self: ~Escapable {
   ///   - a generated `column N` display header is NOT among the scope's
   ///     bindable output names, so `ORDER BY "column N"` faults `.column` — as
   ///     it does over any derived union — rather than being wrongly accepted;
-  ///   - a bare name matching TWO output columns faults `SQLError.ambiguous`,
+  ///   - a bare name matching two output columns faults `SQLError.ambiguous`,
   ///     as a plain grouped query's `ORDER BY` does;
   ///   - under `DISTINCT` a key must name an output (`distinct(_:_:_:)` over
   ///     the identity projection), matching the plain-grouped rule.
@@ -41,7 +41,7 @@ extension Catalog where Self: ~Escapable {
                                   order: Order?, limit: Limit?,
                                   generated: Int,
                                   _ context: Context) throws(SQLError) -> Plan {
-    // Compile the inner union and derive its OUTPUT columns — the arm-0-named,
+    // Compile the inner union and derive its output columns — the arm-0-named,
     // type-unified result columns the carrier orders/dedups over. The plan's
     // output sits at slots `0 ..< width` (a `setop`'s output is its arm-0
     // projection), so the carrier resolves and stacks in that identity space.
@@ -50,11 +50,11 @@ extension Catalog where Self: ~Escapable {
     // operators.
     let plan = try compile(union, context)
     let cols = try columns(unifying: union, context)
-    // A GROUPING SETS expansion's arm-0 is a GROUPED `.arm` select; a plain
+    // A GROUPING SETS expansion's arm-0 is a grouped `.arm` select; a plain
     // set-operation chain's is not. For a GROUPING SETS carrier, inject a
     // resolver that lowers the arm's projection — and any ORDER BY key — to the
     // arm's grouped-space `Term`s, so a query-level `ORDER BY` matches a
-    // projected aggregate by RESOLVED identity (`SUM(s.Qty)` ≡ projected
+    // projected aggregate by resolved identity (`SUM(s.Qty)` ≡ projected
     // `SUM(Qty)`), the plain grouped `ORDER BY` path's rule. A plain arm has no
     // grouped aggregate space and injects none.
     let resolver: Resolver? =
@@ -72,13 +72,13 @@ extension Catalog where Self: ~Escapable {
   /// operation — the trim width `width − generated`, the leading real outputs
   /// with the trailing `generated` hidden materialised sort columns dropped.
   ///
-  /// `Query.ordered` is a PUBLIC AST case a caller may build with a `generated`
+  /// `Query.ordered` is a public AST case a caller may build with a `generated`
   /// count out of step with the inner union's width (the parser only ever emits
-  /// `0`, and `expand` an in-range count). A count PAST the width, or NEGATIVE,
+  /// `0`, and `expand` an in-range count). A count past the width, or negative,
   /// would make the trim width negative — the carrier's `0 ..< real` range and
-  /// per-column subscripts, and the schema path's `Array.prefix`, would TRAP
-  /// the process. Rejecting the malformed count with ONE typed internal-error
-  /// fault, read by BOTH the compile carrier (`carried`) and the schema path
+  /// per-column subscripts, and the schema path's `Array.prefix`, would trap
+  /// the process. Rejecting the malformed count with one typed internal-error
+  /// fault, read by both the compile carrier (`carried`) and the schema path
   /// (`columns(unifying:)`), keeps `run ≡ columns(of:)` on a malformed carrier.
   internal func real(trimming generated: Int, of width: Int)
       throws(SQLError) -> Int {
@@ -91,13 +91,13 @@ extension Catalog where Self: ~Escapable {
 
   /// Stacks the query-level row operators — a carried `ORDER BY` / `DISTINCT` /
   /// `OFFSET`·`FETCH` — over an already-compiled set-operation `plan`, resolved
-  /// through the setop's OUTPUT scope. `plan`'s output sits at slots
+  /// through the setop's output scope. `plan`'s output sits at slots
   /// `0 ..< output.count`, the arm-0-named, type-unified result columns
   /// (`output`); `arm` is the union's FIRST arm — its projection is the surface
   /// a projected-expression / aliased / qualified ORDER BY key matches against
   /// by AST (a plain set-op arm).
   ///
-  /// `resolver`, when INJECTED, lowers the arm's projected items to a grouped
+  /// `resolver`, when injected, lowers the arm's projected items to a grouped
   /// slot space and lowers an arbitrary expression to the same space — a
   /// resolved-identity surface a caller over a grouped arm supplies so a
   /// query-level `ORDER BY` key matches a projected aggregate by resolved
@@ -109,8 +109,8 @@ extension Catalog where Self: ~Escapable {
   /// A `setop` node has no order/distinct/limit slot, so the query-level row
   /// operators ride this outer carrier rather than a text `SELECT * FROM
   /// (union) AS g ORDER BY …` wrapper. They resolve against a scope over the
-  /// setop's OUTPUT columns — the arm-0-named, type-unified result columns —
-  /// the SAME canonical resolution any `SELECT … FROM <derived> ORDER BY
+  /// setop's output columns — the arm-0-named, type-unified result columns —
+  /// the same canonical resolution any `SELECT … FROM <derived> ORDER BY
   /// <alias/ordinal/expr>` uses.
   ///
   /// The row operators do NOT project — the result schema is the union's — so
@@ -137,7 +137,7 @@ extension Catalog where Self: ~Escapable {
     let width = cols.count
     // The union's arm-0 projection carries the real output items followed by
     // any hidden materialised sort columns (a producer aliases them `*gsN`).
-    // The REAL output count `real` is the carrier's trim width — the STRUCTURAL
+    // The REAL output count `real` is the carrier's trim width — the structural
     // `generated` count carried on the node (never a scan of the arm-0 names
     // for a `*gs` prefix, which would trim a user's delimited `AS "*gs0"`), so
     // slots `0 ..< real` are the real outputs and `real ..< width` the hidden
@@ -154,17 +154,17 @@ extension Catalog where Self: ~Escapable {
     // Range-check the `generated` count against the width and derive the trim
     // width `real` through the shared guard (see `real(trimming:of:)`), which
     // faults a malformed public-AST count rather than letting the `0 ..< real`
-    // range below or a per-column subscript TRAP. The SAME guard backs the
+    // range below or a per-column subscript trap. The same guard backs the
     // schema path (`columns(unifying:)`), so `run ≡ columns(of:)`.
     let real = try real(trimming: generated, of: width)
-    // A `generated` tail must correspond to genuine HIDDEN aliased columns — a
+    // A `generated` tail must correspond to genuine hidden aliased columns — a
     // producer's `*gsN` items, each carrying a non-nil alias. A caller may,
-    // though, build `.ordered(<2-col union>, generated: 1)` over an ORDINARY
-    // union whose trailing item is a normal projected column with NO alias, OR
+    // though, build `.ordered(<2-col union>, generated: 1)` over an ordinary
+    // union whose trailing item is a normal projected column with no alias, OR
     // `.ordered(<SELECT * union>, generated: N>0)` whose arm-0 projection is
-    // `.all` so `items` is EMPTY though `width > 0`: the hidden-name mapping's
-    // `items[real + k].alias!` below would TRAP (an unaliased item, or an
-    // absent one when `items` is short). Prove each generated tail slot HAS a
+    // `.all` so `items` is empty though `width > 0`: the hidden-name mapping's
+    // `items[real + k].alias!` below would trap (an unaliased item, or an
+    // absent one when `items` is short). Prove each generated tail slot has a
     // corresponding aliased projected item before force-unwrapping, faulting
     // the same typed internal-error the range guard raises rather than
     // crashing. (Not a `where` skip: an absent slot must fault, not pass.)
@@ -174,18 +174,18 @@ extension Catalog where Self: ~Escapable {
                      "ordered set-operation generated tail is not aliased")
       }
     }
-    // The output NAME of each REAL column — an alias, else a bare column. An
-    // unnamed output (a computed column with no `AS`) has NO bindable name: it
+    // The output name of each REAL column — an alias, else a bare column. An
+    // unnamed output (a computed column with no `AS`) has no bindable name: it
     // is reachable only by ordinal, so it takes a non-spellable synthetic name
     // (`*colN`, which a normal or delimited identifier cannot spell) rather
-    // than the positional `column N` DISPLAY header — else `ORDER BY "column
+    // than the positional `column N` display header — else `ORDER BY "column
     // N"` would wrongly bind it, where a plain derived union faults `.column`.
     //
-    // Whether an output is unnamed is the RESOLVED column's STRUCTURAL
+    // Whether an output is unnamed is the resolved column's structural
     // `synthesized` flag — set where the projection had no inferable name
     // (`Projected.name == nil`) and a positional `column N` was substituted —
     // NOT a comparison of the resolved name text to `column N`, which would
-    // mistake a user's EXPLICIT delimited `AS "column 1"` for a synthesized
+    // mistake a user's explicit delimited `AS "column 1"` for a synthesized
     // header and strip it. A named output keeps its name; a synthesized one is
     // `nil` here (not bindable). (A `SELECT *`/`TABLE` first arm names every
     // output through `cols`, never synthesized, and carries no hidden column,
@@ -193,9 +193,9 @@ extension Catalog where Self: ~Escapable {
     let outputs: Array<String?> = (0 ..< real).map {
       cols[$0].synthesized ? nil : cols[$0].name
     }
-    // The scope over the union's output. The schema names EVERY column so
+    // The scope over the union's output. The schema names every column so
     // `term` can resolve a materialised key's synthetic column: a named real
-    // output by its name, an UNNAMED real output by a non-spellable `*colN`,
+    // output by its name, an unnamed real output by a non-spellable `*colN`,
     // and each hidden materialised column by its `*gsN` alias.
     let schema = Schema(from: cols,
                         names: (0 ..< width).map {
@@ -208,26 +208,26 @@ extension Catalog where Self: ~Escapable {
     // inner query is inspected nowhere here, so the arm-0 `SELECT` stands in
     // for it uniformly.
     let scope = Scope([(Relation(derived: .select(arm), as: ""), schema)])
-    // COLLECT and RESOLVE the carrier ORDER BY's OWN nested subqueries — the
-    // SAME machinery a plain `SELECT … ORDER BY CASE WHEN EXISTS (…) …` uses
+    // collect and resolve the carrier ORDER BY's own nested subqueries — the
+    // same machinery a plain `SELECT … ORDER BY CASE WHEN EXISTS (…) …` uses
     // (`subquery(_:_:_:within:)` builds a `Resolution` recording each nested
     // query's width/type/plan against the setop-output `scope`, AND records a
-    // CORRELATED one's runtime plan into `context.subqueries` per the ROLE it
+    // correlated one's runtime plan into `context.subqueries` per the role it
     // occupies). A carried `ORDER BY` over a set operation is otherwise lowered
-    // with the DEFAULT `.unsupported` resolution, so `scope.order` REJECTS an
+    // with the DEFAULT `.unsupported` resolution, so `scope.order` rejects an
     // `EXISTS`/`IN`/scalar sort-key subquery a plain `SELECT`'s ORDER BY
     // accepts. Threading this resolution in makes a set operation's ORDER BY
     // resolve a subquery sort key identically to a plain select's; an ORDER BY
-    // position bars a NEW correlation (`.barred` inside `scope.order`), so a
+    // position bars a new correlation (`.barred` inside `scope.order`), so a
     // genuinely-unsupported case still faults exactly as it does on a SELECT.
     //
-    // `roles(of:)` classifies a subquery by the CLAUSE it occurs in, so the
+    // `roles(of:)` classifies a subquery by the clause it occurs in, so the
     // recording pass must inspect a select whose ORDER BY IS the carrier's —
     // NOT the bare `arm`, whose own ORDER BY does not carry the carrier's sort-
-    // key subqueries. Reusing `arm` there records NO runtime plan (empty
-    // roles), so a CORRELATED carrier sort-key subquery lowers to a
+    // key subqueries. Reusing `arm` there records no runtime plan (empty
+    // roles), so a correlated carrier sort-key subquery lowers to a
     // `Term.subquery`/`.parameter` yet faults "a correlated subquery plan was
-    // not compiled" at execution — where the SAME ORDER BY on a plain SELECT
+    // not compiled" at execution — where the same ORDER BY on a plain SELECT
     // records and re-executes it per row. Overlay the carrier's `order` on the
     // arm (keeping the arm's projection surface a projected-expression key
     // resolves against) so the recording sees the carrier's sort-key subqueries
@@ -248,7 +248,7 @@ extension Catalog where Self: ~Escapable {
                                   within: scope)
     // The identity projection over the REAL output slots, and the REAL output
     // names a bare ORDER BY name or a DISTINCT key binds against — alias-or-
-    // bare, `nil` for an unnamed output. `scope.order` bounds an ORDINAL key by
+    // bare, `nil` for an unnamed output. `scope.order` bounds an ordinal key by
     // this projection's COUNT, so it must be the REAL arity (`real`), NOT the
     // grown `width`.
     let projection = (0 ..< real).map(Term.slot)
@@ -259,27 +259,27 @@ extension Catalog where Self: ~Escapable {
     if let order {
       // The REAL projected items an `ORDER BY <expr>` key may match to its
       // ordinal — the arm-0 projection minus its trailing hidden `*gsN`
-      // columns. EMPTY for a `SELECT *`/`TABLE` first arm (no enumerated
+      // columns. empty for a `SELECT *`/`TABLE` first arm (no enumerated
       // projection to match), so such a key falls to the scope's ordinary
       // resolution over the `*`-expanded output columns.
       let reals = Array(items.prefix(real))
       let folded = Set(outputs.compactMap { $0?.lowercased() })
-      // A key resolving to a HIDDEN materialised slot (`real ..< width`) is
-      // bound STRUCTURALLY, by KEY INDEX → that slot, NOT by rewriting to the
-      // generated `*gsN` NAME. The hidden alias is a SPELLABLE delimited
+      // A key resolving to a hidden materialised slot (`real ..< width`) is
+      // bound structurally, by KEY index → that slot, NOT by rewriting to the
+      // generated `*gsN` name. The hidden alias is a spellable delimited
       // identifier a user's own output could carry (`SELECT Region AS "*gs0" …
       // ORDER BY MAX(Qty)`), so a name rewrite would let `scope.order`'s
-      // output-alias precedence CAPTURE the hidden key onto the real `*gs0`
-      // output. Recording the slot and OVERWRITING the resolved key's `term`
+      // output-alias precedence capture the hidden key onto the real `*gs0`
+      // output. Recording the slot and overwriting the resolved key's `term`
       // below binds it by position, immune to a colliding alias.
       var materialised = Dictionary<Int, Int>()
       let rewritten = Order(keys: try order.keys.enumerated().map {
         (offset, key) throws(SQLError) -> Order.Key in
         guard case let .expression(expression) = key.sort else { return key }
-        // A BARE unqualified column NAMING A REAL OUTPUT is left to the
+        // A bare unqualified column naming A REAL output is left to the
         // setop-output scope's ordinary resolution, whichever carrier: it binds
-        // an output alias or a bare projected column BY NAME and faults
-        // `.ambiguous` on a name TWO outputs share — the ISO precedence
+        // an output alias or a bare projected column BY name and faults
+        // `.ambiguous` on a name two outputs share — the ISO precedence
         // `scope.order` applies before a term match, which a resolved-identity
         // rewrite to an ordinal would wrongly bypass. A bare column that is NOT
         // a real output rides the resolver (when injected) to its hidden slot.
@@ -288,10 +288,10 @@ extension Catalog where Self: ~Escapable {
         } else {
           false
         }
-        // A grouped-arm caller's injected resolver: match a QUALIFIED column or
-        // a NON-column expression against the arm's projected terms by RESOLVED
+        // A grouped-arm caller's injected resolver: match a qualified column or
+        // a non-column expression against the arm's projected terms by resolved
         // identity. A key that lowers cleanly and equals a projected term
-        // orders on that slot's ORDINAL — a REAL slot directly, a HIDDEN slot
+        // orders on that slot's ordinal — a REAL slot directly, a hidden slot
         // bound structurally below (never through its spellable `*gsN` name). A
         // key `resolve` faults on is left for the setop-output scope to bind or
         // fault, as before.
@@ -303,8 +303,8 @@ extension Catalog where Self: ~Escapable {
                                ascending: key.ascending)
             }
             // The hidden slot: record it against this key's index and stand a
-            // resolvable ORDINAL placeholder (`1`, the first real output) in
-            // its place so `scope.order` yields an aligned SortKey WITHOUT
+            // resolvable ordinal placeholder (`1`, the first real output) in
+            // its place so `scope.order` yields an aligned SortKey without
             // trying to recompute the unprojected aggregate over the
             // output-only scope; its `term` is overwritten to `.slot(slot)`
             // afterward, binding the hidden column by POSITION.
@@ -316,7 +316,7 @@ extension Catalog where Self: ~Escapable {
         if resolver != nil { return key }
         // Plain set-operation carrier: a materialised key (a hidden `*gsN`
         // item, matched by AST) is bound structurally to that hidden slot,
-        // through the same ORDINAL-placeholder-then-overwrite the resolver path
+        // through the same ordinal-placeholder-then-overwrite the resolver path
         // uses, so a colliding `*gsN` alias cannot capture it.
         if let slot = (real ..< width).first(where: {
           items[$0].expression == expression
@@ -327,8 +327,8 @@ extension Catalog where Self: ~Escapable {
         if case .column = expression {
           // A column key — bare or qualified — rides through to `scope.order`.
           // A bare name binds an output by ISO alias precedence (or faults
-          // `.ambiguous` on a name two outputs share). A QUALIFIED key faults
-          // there: the set-operation output carries NO range, so `R.a` /
+          // `.ambiguous` on a name two outputs share). A qualified key faults
+          // there: the set-operation output carries no range, so `R.a` /
           // `NoSuch.a` fails resolution exactly as the derived-union
           // equivalent does — it is NOT silently sorted by a bare output `a`
           // after dropping an invalid qualifier.
@@ -344,26 +344,26 @@ extension Catalog where Self: ~Escapable {
       })
       keys = try scope.order(rewritten, projection, names, context.routines,
                              subquery: resolution)
-      // Bind each materialised key to its HIDDEN slot by POSITION, overwriting
+      // Bind each materialised key to its hidden slot by POSITION, overwriting
       // the ordinal placeholder's resolved key: `.slot(slot)` orders on the
       // hidden `*gsN` column directly, `column` cleared so it is an ordinary
       // input key (NOT a select-list output — DISTINCT then rejects it, and it
       // is trimmed by the identity projection). This never spells the hidden
-      // `*gsN` NAME, so a user output aliased identically cannot capture it.
+      // `*gsN` name, so a user output aliased identically cannot capture it.
       for (offset, slot) in materialised {
         keys[offset] = SortKey(term: .slot(slot),
                                ascending: keys[offset].ascending, column: nil)
       }
-      // The carrier's ORDER BY is a NEW expression surface: `scope.order`
-      // RESOLVES each key (binds a column, arity), but — like the grouped
+      // The carrier's ORDER BY is a new expression surface: `scope.order`
+      // resolves each key (binds a column, arity), but — like the grouped
       // path's structural resolve — does NOT type-check a key's operands or its
       // calls, so an unknown routine (`ORDER BY missing(a)`) or an ill-typed
       // operand (`ORDER BY a + 'x'`) a run raises on slipped past validate.
-      // Under `validate`, type-check each key EXPRESSION against the SAME
+      // Under `validate`, type-check each key expression against the same
       // setop-output scope it resolved over — its calls and operands as a
-      // projected expression's — so validate faults IDENTICALLY to a run. An
+      // projected expression's — so validate faults identically to a run. An
       // ordinal/output-name key carries no `.expression` to re-check. The run
-      // path compiles LENIENTLY (`validate: false`), so this never double-
+      // path compiles leniently (`validate: false`), so this never double-
       // faults there — the run surfaces the fault at execution as it did
       // before.
       if context.validate {
@@ -371,19 +371,19 @@ extension Catalog where Self: ~Escapable {
         // (`ORDER BY CASE WHEN EXISTS (…) …`), which the `scope.validate`
         // type-check below rejects under the DEFAULT `.unsupported`
         // `SubqueryCheck`. Record each nested subquery's width and type — the
-        // SAME cursor-free pre-pass `subqueryCheck(of:)` runs for a plain
+        // same cursor-free pre-pass `subqueryCheck(of:)` runs for a plain
         // SELECT's ORDER BY subqueries — so the type-check validates a subquery
         // sort key rather than faulting `.unsupported`, keeping the schema path
         // in step with the run (which resolves the same key through
         // `resolution` above).
         //
-        // Derive each subquery's width/type against the SAME setop-output
+        // Derive each subquery's width/type against the same setop-output
         // `scope` the run resolves it through (`subquery(_:_:_:within: scope)`
         // above): a carrier ORDER BY subquery may reference a set-operation
-        // OUTPUT column — an aliased output living ONLY in this scope, unseen
+        // output column — an aliased output living ONLY in this scope, unseen
         // by `context.outer` — so nesting `scope` under the outer, enclosing-
         // scope shape `subquery(_:_:_:within:)` builds, resolves it at validate
-        // EXACTLY as it does at run. Threading bare `context.outer` faulted
+        // exactly as it does at run. Threading bare `context.outer` faulted
         // `.column` on a set-op output column a run resolves, rejecting a query
         // that executes. A genuinely-unresolvable column (not a set-op output,
         // absent from the outer) still faults here as it does at run.

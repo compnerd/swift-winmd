@@ -8,7 +8,7 @@ import SQLTestSupport
 
 // MARK: - Routine arity/existence posture
 
-/// PINS the accepted run-vs-validate posture for a routine CALL: the bare
+/// PINS the accepted run-vs-validate posture for a routine call: the bare
 /// `run` path checks a routine EXISTS but defers arity/argument-type validation
 /// to the strict `columns(of:validate:)` gate. A caller wanting strict checks
 /// validates first; a run assumes the statement was already validated. This is
@@ -17,7 +17,7 @@ import SQLTestSupport
 /// validation rejects it — so a regression that started faulting arity at run,
 /// or stopped faulting it under validation, must break these tests.
 ///
-/// The fixture is SELF-CONTAINED: a small local catalog and a locally
+/// The fixture is self-contained: a small local catalog and a locally
 /// registered routine, disjoint from the shared `engine*` fixtures, so this
 /// suite pins the posture independently.
 @Suite struct RoutineArityPostureTests {
@@ -30,8 +30,8 @@ import SQLTestSupport
     }
   }
 
-  /// Routines with a native `tally` declaring ONE integer parameter (arity 1)
-  /// whose closure IGNORES its arguments and returns a constant. Because the
+  /// Routines with a native `tally` declaring one integer parameter (arity 1)
+  /// whose closure ignores its arguments and returns a constant. Because the
   /// closure does not self-check its argument count, a wrong-arity call reaches
   /// it and runs — isolating the run path's arity behaviour from a routine's
   /// own internal check (the standard `POSITION`/`BITAND` closures self-check,
@@ -43,7 +43,7 @@ import SQLTestSupport
   }
 
   @Test func `a wrong-arity call runs without an arity fault`() throws {
-    // `tally` declares arity 1 but is called with ZERO arguments. The run path
+    // `tally` declares arity 1 but is called with zero arguments. The run path
     // checks only that `tally` EXISTS, not its arity, and the closure ignores
     // its arguments, so the call produces its constant rather than faulting.
     let catalog = try table()
@@ -54,9 +54,9 @@ import SQLTestSupport
   }
 
   @Test func `validation faults a wrong-arity call`() throws {
-    // The SAME wrong-arity call is REJECTED by the strict validate gate: the
+    // The same wrong-arity call is rejected by the strict validate gate: the
     // declared arity is checked against the supplied argument count, faulting
-    // `.argument`. This is the gate a caller runs BEFORE a run when it wants
+    // `.argument`. This is the gate a caller runs before a run when it wants
     // arity enforced.
     let catalog = try table()
     let routines = try routines()
@@ -72,7 +72,7 @@ import SQLTestSupport
   }
 
   @Test func `an unknown routine faults on BOTH paths`() throws {
-    // EXISTENCE is checked at run, unlike arity: an unregistered routine faults
+    // existence is checked at run, unlike arity: an unregistered routine faults
     // `.function` at run AND under validation, so the distinction the posture
     // draws — existence checked, arity deferred — is explicit.
     let catalog = try table()

@@ -30,7 +30,7 @@ internal struct Schema {
   /// `Engine.outputSchema`); the engine never compares or orders on it.
   internal let types: Array<ValueType>
 
-  /// Whether each real column at its ordinal `0 ..< width` places NO type
+  /// Whether each real column at its ordinal `0 ..< width` places no type
   /// constraint — an all-arms-NULL CTE column whose concrete `types` entry is a
   /// default the set-operation fold must NOT constrain against, so a reference
   /// to it unifies with any typed arm order-independently. Aligned with `types`
@@ -55,11 +55,11 @@ internal struct Schema {
   }
 
   /// A view's resolution schema, its per-column types AND `unconstrained` mask
-  /// RESOLVED from a body `carrier` while its `names` stay the view's DECLARED
+  /// resolved from a body `carrier` while its `names` stay the view's declared
   /// ones (a view stores its own column names; only the types and mask come
   /// from the resolved body). The declared surface's `extent`/`virtuals` carry
   /// over unchanged. Taking the types and mask from the carrier as a whole
-  /// threads the per-column `unconstrained` through this ONE constructor rather
+  /// threads the per-column `unconstrained` through this one constructor rather
   /// than a loose `types.map` at the site, so an all-NULL view column unifies
   /// with any later typed set-operation arm.
   internal init(from carrier: Array<ResolvedColumn>, names: Array<String>,
@@ -70,7 +70,7 @@ internal struct Schema {
               virtuals: virtuals)
   }
 
-  /// This schema with its real column `names` positionally RENAMED to
+  /// This schema with its real column `names` positionally renamed to
   /// `columns` — the ISO `AS t(c, …)` explicit output column list — or
   /// unchanged when `columns` is empty (no list).
   ///

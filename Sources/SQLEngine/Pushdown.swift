@@ -23,7 +23,7 @@ extension Plan {
   /// `select`s the seek and nest rewrites match.
   internal func pushdown() throws(SQLError) -> Plan {
     switch self {
-    // Pushdown runs BEFORE optimise, the only producer of `.empty`, so a plan
+    // Pushdown runs before optimise, the only producer of `.empty`, so a plan
     // reaching here never carries one; the arm keeps the switch exhaustive.
     case .single, .empty, .scan, .join:
       self
@@ -39,7 +39,7 @@ extension Plan {
     case let .product(left, right):
       try .product(left.pushdown(), right.pushdown())
     case let .outer(left, right, on, kind):
-      // Push down WITHIN each side (its own joins/filters rewrite), but the
+      // Push down within each side (its own joins/filters rewrite), but the
       // outer node is a pushdown barrier: a `WHERE` conjunct above it never
       // rides into a side. Filtering a preserved side's rows before the outer
       // join is equivalent, but filtering the NULL-extended side's rows before
@@ -48,17 +48,17 @@ extension Plan {
       // over this node).
       try .outer(left.pushdown(), right.pushdown(), on: on, kind: kind)
     case let .semijoin(left, right, on, anti):
-      // Push down WITHIN each side (its own joins/filters rewrite), but the
+      // Push down within each side (its own joins/filters rewrite), but the
       // semijoin node is a pushdown barrier: a `WHERE` conjunct above it never
-      // rides into a side. The semijoin DROPS left rows by the existence test,
+      // rides into a side. The semijoin drops left rows by the existence test,
       // so filtering a side's rows before it could change which left rows
       // survive — preferring correctness, the whole `WHERE` stays above
       // (`distribute`'s default keeps it a `select` over this node). Pushdown
-      // runs BEFORE decorrelate, so this arm handles only a semijoin a nested
+      // runs before decorrelate, so this arm handles only a semijoin a nested
       // pass produced; a top-level plan never carries one at this point.
       try .semijoin(left.pushdown(), right.pushdown(), on: on, anti: anti)
     case let .apply(left, key, correlation, ordinals, on, kind):
-      // Push down WITHIN the left side (its own joins/filters rewrite), but the
+      // Push down within the left side (its own joins/filters rewrite), but the
       // apply is a pushdown barrier: its right side is not a static sub-plan
       // but a per-outer-row re-execution, so a `WHERE` conjunct above it never
       // rides into it (mirroring the `.outer` gate — `distribute`'s default
@@ -101,19 +101,19 @@ extension Plan {
   /// belongs to the right child, rebased into that child's own slot space; one
   /// straddling the boundary — or reading no slots, or able to throw when
   /// evaluated (a division or scalar call) — stays here. A `select` is a join's
-  /// `ON` gate, whose two sides straddle every boundary, and is a BARRIER for
-  /// an UNSAFE `WHERE` conjunct: `nest` folds only ONE `match` into the hash
+  /// `ON` gate, whose two sides straddle every boundary, and is a barrier for
+  /// an unsafe `WHERE` conjunct: `nest` folds only one `match` into the hash
   /// `Join`'s key, leaving every other `ON` conjunct (a match beyond that key,
   /// or a non-equi residual) as the gate's residual under the join, and the
   /// gate drops a pair its leftover conjuncts evaluate UNKNOWN or `false`
-  /// BEFORE the `WHERE` runs. So fusing a throwing `WHERE` conjunct into the
+  /// before the `WHERE` runs. So fusing a throwing `WHERE` conjunct into the
   /// gate — the `AND` not short-circuiting, still evaluating it for a pair the
   /// gate already dropped — would raise an error the separate gate suppresses,
   /// whether the leftover is a non-equi residual (`A JOIN B ON A.k < B.k WHERE
   /// (1 / A.x) = 0`, `A.k` NULL) or a second equi key (`… ON A.k1 = B.k1 AND
   /// A.k2 = B.k2 WHERE (1 / A.x) = 0`, `A.k2` NULL). Every UNSAFE `WHERE`
   /// conjunct stays a separate `select` above the gate, preserving the
-  /// `ON`-drops-before-`WHERE` ordering; a SAFE `WHERE` conjunct (which never
+  /// `ON`-drops-before-`WHERE` ordering; a safe `WHERE` conjunct (which never
   /// raises) still descends below the gate — as the product loop's ordering
   /// allows — so a safe single-relation conjunct reaches its base scan. The
   /// match keys fold down so `nest` can join under the gate. At a `derived`
@@ -137,14 +137,14 @@ extension Plan {
         // (`barrier`), when it reads no slots (e.g. `(1 / 0) = 0`, where
         // `allSatisfy` is vacuously true), when evaluating it can throw (a
         // division or scalar call, e.g. `(1 / A.x) = 0`), or when it is
-        // nullable (reads a slot, so a NULL there makes it UNKNOWN) and a LATER
+        // nullable (reads a slot, so a NULL there makes it UNKNOWN) and a later
         // conjunct is unsafe. Riding a throwing conjunct down would raise while
         // scanning a child even when the join's other side is empty; riding a
-        // safe conjunct PAST an earlier unsafe one would filter its rows before
+        // safe conjunct past an earlier unsafe one would filter its rows before
         // the unsafe one runs, suppressing a throw the left-to-right `AND` owes
         // (`(1 / A.x) = 0 AND A.x <> 0`, `A.x = 0`, on a matching pair).
         // Because the evaluator's `AND` does not short-circuit, riding a
-        // nullable conjunct BELOW a later unsafe one likewise suppresses a
+        // nullable conjunct below a later unsafe one likewise suppresses a
         // throw: the un-pushed `AND` runs the later conjunct even for the
         // UNKNOWN row, but the pushed conjunct drops that row first (`A.x = 1
         // AND (1 / B.y) = 0`, `A.x` NULL and `B.y = 0`). Only a safe
@@ -182,36 +182,36 @@ extension Plan {
           residual.append(conjunct)
         }
       }
-      // The `ON` gate is ALWAYS a DISTRIBUTION BARRIER for an UNSAFE outer
+      // The `ON` gate is ALWAYS a distribution barrier for an unsafe outer
       // `WHERE` conjunct, whether the gate is mixed (a non-equi residual) or
-      // PURE-equi (only matches). `nest` folds only ONE `match` into the hash
+      // pure-equi (only matches). `nest` folds only one `match` into the hash
       // `Join`'s key and leaves every other `ON` conjunct — a match beyond that
       // key, plus any non-equi residual — as the gate's own residual `select`
       // under the join, which drops a pair it evaluates UNKNOWN or `false`
-      // BEFORE the `WHERE` runs. Because the evaluator's `AND` does not
-      // short-circuit, FUSING a throwing `WHERE` conjunct into that gate
+      // before the `WHERE` runs. Because the evaluator's `AND` does not
+      // short-circuit, fusing a throwing `WHERE` conjunct into that gate
       // residual would evaluate it for a pair the gate has already dropped.
       // This bites a pure-equi `ON` too: `A JOIN B ON A.k1 = B.k1 AND A.k2 =
       // B.k2 WHERE (1 / A.x) = 0`, `A.k1` matching, `A.k2` NULL, `A.x` = 0 —
       // `nest` keys on `A.k1 = B.k1`, so the surviving pair reaches the
       // leftover `A.k2 = B.k2` (UNKNOWN), which should drop it; a fused `A.k2 =
-      // B.k2 AND (1 / A.x) = 0` would instead divide by zero. So every UNSAFE
-      // `WHERE` conjunct stays a SEPARATE `select` ABOVE the gate — never fused
+      // B.k2 AND (1 / A.x) = 0` would instead divide by zero. So every unsafe
+      // `WHERE` conjunct stays a separate `select` above the gate — never fused
       // with a leftover `ON` conjunct — keeping the `ON`-drops-before-`WHERE`
       // order.
       //
-      // A SAFE `WHERE` conjunct, by contrast, never raises, so pushing it below
+      // A safe `WHERE` conjunct, by contrast, never raises, so pushing it below
       // the gate can only drop rows, not suppress a throw; it still descends
       // (`matches + residual + safe`) so a safe single-relation conjunct
       // reaches its base scan as before. `distribute`'s product loop keeps it
-      // AFTER the `ON` residual, and its own barrier bars it from riding past
+      // after the `ON` residual, and its own barrier bars it from riding past
       // an unsafe `ON` conjunct — a safe `WHERE` pushed to a base scan below
       // the product does not co-locate with, nor reorder around, the gate's
       // leftover conjuncts. A safe conjunct stays above when the loop would
       // keep it at the product level anyway — mirroring that loop's ordering
       // rules so descending it never suppresses a throw the `WHERE`'s
       // non-short-circuiting `AND` owes: after ANY earlier unsafe conjunct
-      // (a `barrier`), or when it is NULLABLE and a LATER conjunct is unsafe
+      // (a `barrier`), or when it is nullable and a later conjunct is unsafe
       // (a `hazard`). The match keys still fold down beside the residual so
       // `nest` can form the join under the gate; a single-equality pure-equi
       // `ON` folds its one key and carries no leftover conjunct, so a safe
@@ -251,22 +251,22 @@ extension Plan {
   /// `union` sub-plan admits a conjunct only when every arm's projection admits
   /// it — the arms are combined, so a conjunct that cannot push into one arm
   /// must stay outside them all. The admitted conjuncts, still in the view's
-  /// OUTPUT slot space, push in through `inject`, which rebases each against
-  /// the projection it lands under — PER ARM for a union, since the arms map
-  /// the same output column to DIFFERENT body slots; the rest wrap the leaf.
+  /// output slot space, push in through `inject`, which rebases each against
+  /// the projection it lands under — per ARM for a union, since the arms map
+  /// the same output column to different body slots; the rest wrap the leaf.
   ///
-  /// The partition carries the SAME ordering barrier `distribute`'s product
+  /// The partition carries the same ordering barrier `distribute`'s product
   /// loop has: a conjunct stays `outer` — on the derived leaf, run in the `AND`
   /// chain's order — when a preceding conjunct was unsafe (`barrier`), when it
   /// is itself unsafe (a division or scalar call), when it is nullable and a
-  /// LATER conjunct is unsafe, or when the view's projection cannot admit it;
+  /// later conjunct is unsafe, or when the view's projection cannot admit it;
   /// only a safe conjunct with no unsafe predecessor — and, if nullable, no
   /// unsafe successor — pushes in. An unsafe conjunct bars every later one from
   /// riding into the view: pushing a later conjunct past it would let the view
   /// seek and drop the row before the unsafe outer conjunct runs, suppressing a
   /// throw the left-to-right `AND` owes (`(1 / x) = 0 AND x = 1` over a view
   /// whose `x` is sorted, the `x = 1` seek dropping the `x = 0` row before the
-  /// outer division raises). Symmetrically a nullable conjunct pushed BELOW a
+  /// outer division raises). Symmetrically a nullable conjunct pushed below a
   /// later unsafe one suppresses a throw: the non-short-circuiting `AND` runs
   /// the later conjunct even for the UNKNOWN row, but the injected conjunct
   /// drops that row first (`x = 1 AND (1 / y) = 0`, `x` NULL and `y = 0`).
@@ -279,7 +279,7 @@ extension Plan {
     var barrier = false
     for (index, conjunct) in conjuncts.enumerated() {
       // A nullable conjunct (reads a slot, so a NULL there makes it UNKNOWN)
-      // must also stay outer when a LATER conjunct is unsafe: the evaluator's
+      // must also stay outer when a later conjunct is unsafe: the evaluator's
       // `AND` does not short-circuit, so the un-pushed query runs the later
       // conjunct even for the UNKNOWN row, but injecting this one into the view
       // would seek or filter that row away first — suppressing a throw the
@@ -302,18 +302,18 @@ extension Plan {
     return leaf.residual(outer)
   }
 
-  /// Whether `conjunct` (in this view's OUTPUT slot space, its slots indices
+  /// Whether `conjunct` (in this view's output slot space, its slots indices
   /// into `ordinals`) can push below this sub-plan's projection.
   ///
   /// A `project` admits it when every slot it reads maps to a bare `.slot` term
   /// of the body — the `rebase` helper produces a mapping; a computed column
-  /// (call or arithmetic) has none. A `union` admits it only when EVERY arm
+  /// (call or arithmetic) has none. A `union` admits it only when every arm
   /// does — the arms are combined, so a conjunct pushable into one but not
   /// another cannot descend into any and must stay outside — AND the conjunct
-  /// references no column the set operation WIDENS: an arm coerces its cells to
-  /// the unified column type only AFTER it runs (in `combine`), so a predicate
-  /// pushed into the arm tests the PRE-coercion value, and over a widened
-  /// column that is the wrong type. Such a conjunct stays ABOVE the derived
+  /// references no column the set operation widens: an arm coerces its cells to
+  /// the unified column type only after it runs (in `combine`), so a predicate
+  /// pushed into the arm tests the pre-coercion value, and over a widened
+  /// column that is the wrong type. Such a conjunct stays above the derived
   /// leaf as a `select` on the coerced output, where it tests the unified type
   /// — the observable result then matches an un-pushed query. A same-typed
   /// column (an empty `widened`) still pushes. Anything else does not admit it.
@@ -327,7 +327,7 @@ extension Plan {
       // `derive` owes by evaluating every column of every view row.
       terms.allSatisfy(\.safe) && rebase(conjunct, ordinals) != nil
     case let .setop(_, left, right, _, _, widened):
-      // A conjunct over a column the set operation WIDENS must NOT push into
+      // A conjunct over a column the set operation widens must NOT push into
       // the arms: an arm evaluates it on the un-coerced value, but `combine`
       // coerces the arm's rows to the unified type only after the arm runs, so
       // the pushed predicate tests the wrong type. A slot the conjunct reads is
@@ -341,11 +341,11 @@ extension Plan {
     }
   }
 
-  /// This view sub-plan with `conjuncts` (in the view's OUTPUT slot space)
+  /// This view sub-plan with `conjuncts` (in the view's output slot space)
   /// pushed below its projection, each rebased into the body slots the
   /// projection it lands under reads.
   ///
-  /// For a `union` each arm rebases the conjuncts against ITS OWN projection —
+  /// For a `union` each arm rebases the conjuncts against its own projection —
   /// the same output column sits at different body slots across arms, so a
   /// single pre-rebased filter cannot serve them all; the rebase must happen
   /// per arm. `pushable` has already vetted every conjunct against every arm,
@@ -368,7 +368,7 @@ extension Plan {
     }
   }
 
-  /// `conjunct` rebased from a `derived` leaf's OUTPUT slot space into this
+  /// `conjunct` rebased from a `derived` leaf's output slot space into this
   /// projection sub-plan's body slot space, or `nil` if any slot it reads is a
   /// computed view column (not a bare `.slot` projection term) and so cannot be
   /// pushed in.

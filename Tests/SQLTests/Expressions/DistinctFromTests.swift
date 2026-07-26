@@ -85,7 +85,7 @@ struct DistinctFromEvaluationTests {
   }
 
   @Test func `both NULL operands are NOT DISTINCT`() throws {
-    // Row 5 has both K and L NULL; two NULLs are the SAME, so `K IS NOT DISTINCT
+    // Row 5 has both K and L NULL; two NULLs are the same, so `K IS NOT DISTINCT
     // FROM L` keeps it — alongside the equal-valued row 1 — where the null-safe
     // equality `K = L` (UNKNOWN on any NULL) could never keep the both-NULL row.
     try things().expect("SELECT Id FROM T WHERE K IS NOT DISTINCT FROM L",
@@ -100,7 +100,7 @@ struct DistinctFromEvaluationTests {
   }
 
   @Test func `column against itself is null-safe`() throws {
-    // `K IS NOT DISTINCT FROM K` is TRUE on EVERY row, NULL rows included — a
+    // `K IS NOT DISTINCT FROM K` is TRUE on every row, NULL rows included — a
     // NULL equals itself under null-safe equality, where `K = K` would be
     // UNKNOWN (and drop) on the NULL-K rows 4 and 5.
     try things().expect("SELECT Id FROM T WHERE K IS NOT DISTINCT FROM K",
@@ -113,7 +113,7 @@ struct DistinctFromEvaluationTests {
 struct DistinctFromCrossKindTests {
   @Test func `a cross-kind pair is DISTINCT`() throws {
     // Integer `K` against the text `'5'` is a cross-kind pair — the engine's
-    // `matches` yields FALSE for cross-kind equality, so the two DIFFER — and
+    // `matches` yields FALSE for cross-kind equality, so the two differ — and
     // `K IS DISTINCT FROM '5'` keeps every non-NULL K (rows 1, 2, 3) and the
     // NULL Ks too (a NULL differs from a non-NULL text).
     try things().expect("SELECT Id FROM T WHERE K IS DISTINCT FROM '5'",
@@ -121,7 +121,7 @@ struct DistinctFromCrossKindTests {
   }
 
   @Test func `a cross-kind pair is never NOT DISTINCT`() throws {
-    // Its complement keeps nothing: no integer K is null-safe EQUAL to the text
+    // Its complement keeps nothing: no integer K is null-safe equal to the text
     // `'5'` (cross-kind is DISTINCT), so `K IS NOT DISTINCT FROM '5'` is FALSE
     // on every row.
     try things().empty("SELECT Id FROM T WHERE K IS NOT DISTINCT FROM '5'")
@@ -133,9 +133,9 @@ struct DistinctFromCrossKindTests {
 struct DistinctFromTwoValuedTests {
   @Test func `IS DISTINCT FROM and IS NOT DISTINCT FROM partition the rows`()
       throws {
-    // The predicate is TWO-VALUED — never UNKNOWN — so on EVERY row exactly one
+    // The predicate is two-valued — never UNKNOWN — so on every row exactly one
     // of the two spellings holds and neither is UNKNOWN. `K IS NOT DISTINCT FROM
-    // 5` keeps rows 1 and 3 (K = 5); `K IS DISTINCT FROM 5` keeps the OTHER
+    // 5` keeps rows 1 and 3 (K = 5); `K IS DISTINCT FROM 5` keeps the other
     // three — rows 2, 4, 5 — including the NULL-K rows a `=` would leave
     // UNKNOWN, so together they cover all five rows disjointly.
     try things().expect("SELECT Id FROM T WHERE K IS NOT DISTINCT FROM 5",
@@ -146,8 +146,8 @@ struct DistinctFromTwoValuedTests {
 
   @Test func `a NULL operand never makes the row UNKNOWN`() throws {
     // Contrast with `=`: `K = 5` is UNKNOWN on the NULL-K rows and drops them,
-    // so it keeps FEWER rows than `K IS NOT DISTINCT FROM 5`. The null-safe form
-    // keeps rows 1 and 3 (K = 5) and, unlike `=`, is DEFINITELY FALSE (not
+    // so it keeps fewer rows than `K IS NOT DISTINCT FROM 5`. The null-safe form
+    // keeps rows 1 and 3 (K = 5) and, unlike `=`, is definitely FALSE (not
     // UNKNOWN) on the NULL-K rows rather than erroring or admitting them.
     try things().expect("SELECT Id FROM T WHERE K = 5", yields: [[1], [3]])
     try things().expect("SELECT Id FROM T WHERE K IS NOT DISTINCT FROM 5",
@@ -186,7 +186,7 @@ struct DistinctFromFoldingTests {
 
   @Test func `a constant both-NULL folds NOT DISTINCT`() throws {
     // `NULLIF(1, 1)` folds to a constant NULL, so both operands fold NULL — the
-    // SAME — and `NULLIF(1, 1) IS DISTINCT FROM NULLIF(1, 1)` folds FALSE
+    // same — and `NULLIF(1, 1) IS DISTINCT FROM NULLIF(1, 1)` folds FALSE
     // (dropping every row) and its negation TRUE.
     try things().empty(
         "SELECT Id FROM T WHERE NULLIF(1, 1) IS DISTINCT FROM NULLIF(1, 1)")

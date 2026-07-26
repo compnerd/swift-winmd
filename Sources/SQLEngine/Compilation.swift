@@ -15,16 +15,16 @@ extension Projection {
   /// The terms hold no slots, so the `single` row's empty record carries every
   /// value the projection needs.
   ///
-  /// `subquery` carries the compile-time width map of the UNCORRELATED
+  /// `subquery` carries the compile-time width map of the uncorrelated
   /// subqueries the projection nests, so an `EXISTS`/`IN (Q)` inside a scalar
   /// term lowers exactly as it does on the FROM'd path — the FROM-less scalar
-  /// select is otherwise the ONE path that would hit the default unsupported
+  /// select is otherwise the one path that would hit the default unsupported
   /// map and reject a subquery a run materialises. The `Resolution` is
   /// threaded, not run, here (see `subquery(of:)`).
   ///
-  /// A projection is a BARRED clause position, so a correlated column of THIS
+  /// A projection is a barred clause position, so a correlated column of this
   /// query has no evaluator here. `Schema.terms` bars the seam intrinsically,
-  /// so this FROM-less projection CANNOT admit correlation even when handed the
+  /// so this FROM-less projection cannot admit correlation even when handed the
   /// admitting `plans.rest` — the same cut `columns(of:)` applies on the schema
   /// path, keeping run and derive in lockstep.
   internal func scalar(_ routines: Routines = [:],
@@ -54,7 +54,7 @@ internal struct Resolved {
 
 /// The sorted, deduplicated ordinals a query references: the union of the
 /// ordinals its `projection` terms read, the columns its `filter` reads, and
-/// EVERY column its `order` keys read. The projection terms hold ordinals at
+/// every column its `order` keys read. The projection terms hold ordinals at
 /// this stage; a scalar call's arguments contribute their read ordinals too.
 private func referenced(_ projection: Array<Term>, _ filter: Filter?,
                         _ order: Array<SortKey>)
@@ -88,16 +88,16 @@ private func invert(_ ordinals: Array<Int>) -> Dictionary<Int, Int> {
 /// grouped path requires for `GROUP BY`. An ordinal or an output-alias key
 /// references a select-list output by construction (`SortKey.output`), so it
 /// satisfies the rule whatever its term computes — its value is constant across
-/// a dedup group. An ordinary INPUT expression key satisfies it when either it
+/// a dedup group. An ordinary input expression key satisfies it when either it
 /// reads a projected column — its resolved `Term` is a bare `.slot` (a plain
-/// column read) that a projected bare-slot term also reads — or it REPEATS a
+/// column read) that a projected bare-slot term also reads — or it repeats a
 /// projected select-list expression: its AST `Expression` is structurally equal
 /// to a projected one (`SELECT DISTINCT A + B AS total … ORDER BY A + B`), so
 /// the key orders on a projected distinct value and is well-defined, exactly as
 /// the alias `ORDER BY total` and the ordinal `ORDER BY 1` naming that same
 /// output are. A key ordering on any other value faults `SQLError.distinct`.
 ///
-/// The satisfying comparison is over the RESOLVED `Term`s, not the AST: a key
+/// The satisfying comparison is over the resolved `Term`s, not the AST: a key
 /// whose lowered `term` equals a projected item's lowered `term` orders on a
 /// projected value. Lowering normalizes column qualification to a slot, so a
 /// key that differs from its projected twin ONLY in qualification — `SELECT
@@ -111,7 +111,7 @@ private func invert(_ ordinals: Array<Int>) -> Dictionary<Int, Int> {
 /// `.slot` the projection reads). `keys` supplies the AST key's spelling for
 /// the fault message; each resolved order key pairs index-for-index with it.
 ///
-/// A matching INPUT key is REBOUND to the projected column it matched: this
+/// A matching input key is rebound to the projected column it matched: this
 /// returns the order keys with each satisfying input key's `column` set to the
 /// index of the projection item whose term it equals, so the DISTINCT
 /// materialisation sorts on that already-materialised projected slot rather
@@ -138,22 +138,22 @@ extension Plan {
   /// omitting each layer when its clause is absent. The `projection`, `filter`,
   /// and `order` keys are in slot space; an empty `order` omits the sort.
   ///
-  /// Without `distinct` and with no `ORDER BY` key naming a select-list OUTPUT
+  /// Without `distinct` and with no `ORDER BY` key naming a select-list output
   /// (an ordinal or an output alias), the shape is `Project(Limit(Sort(_)))`:
-  /// the row `limit` sits BELOW the projection — after `WHERE` and `ORDER BY`
+  /// the row `limit` sits below the projection — after `WHERE` and `ORDER BY`
   /// but before the select list runs. A row outside the requested page is
   /// dropped by the limit before its projection runs, so a projection that
   /// could throw (`SELECT 1 / 0 … FETCH FIRST 0 ROWS ONLY`) never evaluates for
   /// a discarded row and the query returns the documented empty page.
   ///
-  /// When an `ORDER BY` key names a select-list output over a COMPUTED
+  /// When an `ORDER BY` key names a select-list output over a computed
   /// expression (`SELECT next() AS n … ORDER BY n`), reusing the projection
   /// term as the pre-projection sort key would evaluate that expression twice
   /// — once to order, once to project — so a non-deterministic or stateful
   /// routine sorts on one set of values and returns a second, misordering the
-  /// result. `materialised` instead computes the sort-referenced outputs ONCE
+  /// result. `materialised` instead computes the sort-referenced outputs once
   /// below the sort and orders an output key by that column, then a
-  /// final projection reads those SAME values it sorted on (and computes the
+  /// final projection reads those same values it sorted on (and computes the
   /// remaining, unreferenced outputs above the cap). `shaped` takes that shape
   /// exactly when a key names an output; a pure input-key `ORDER BY` keeps the
   /// simpler `Project(Sort(_))` (its keys need input columns the materialised
@@ -175,10 +175,10 @@ extension Plan {
     }
 
     // An output key names a materialised projection column; sorting on the
-    // recomputed projection term instead would double-evaluate it (WRONG for a
+    // recomputed projection term instead would double-evaluate it (wrong for a
     // non-deterministic routine). Materialise the sort-referenced outputs once
     // below the sort, so the order reflects the returned values whenever a key
-    // does — over the FILTERED `plan`, so a HAVING/WHERE above governs.
+    // does — over the filtered `plan`, so a HAVING/WHERE above governs.
     if order.contains(where: { $0.output }) {
       return plan.materialised(distinct: distinct, projection: projection,
                                order: order, limit: limit)
@@ -194,31 +194,31 @@ extension Plan {
     return Plan.distinct(.project(projection, plan)).capped(limit: limit)
   }
 
-  /// This plan (already filtered) shaped so an `ORDER BY` key naming an OUTPUT
+  /// This plan (already filtered) shaped so an `ORDER BY` key naming an output
   /// sorts on exactly the value that output returns, computing each such output
-  /// EXACTLY ONCE — the single-evaluation shape `shaped` picks when a key
+  /// exactly once — the single-evaluation shape `shaped` picks when a key
   /// references the select list.
   ///
-  /// Only the sort-REFERENCED outputs are materialised below the sort. A `map`
+  /// Only the sort-referenced outputs are materialised below the sort. A `map`
   /// projection retains the input columns (slots `0 ..< self.slots`) and
   /// appends one materialised column per output an ORDER BY key names, then one
-  /// per ordinary INPUT sort key (an `ORDER BY a + b` over non-projected
+  /// per ordinary input sort key (an `ORDER BY a + b` over non-projected
   /// columns still needs its input terms). The sort orders by slots into that
   /// row — an output key by its materialised column, an input key by its
   /// appended (or existing input) column — so a computed output key is
   /// evaluated once and its sort value equals the value the row returns.
   ///
   /// The final projection produces each output from that row: a sort-referenced
-  /// output READS its materialised slot (never recomputed, preserving the
-  /// single evaluation), and any OTHER output computes its expression from the
+  /// output reads its materialised slot (never recomputed, preserving the
+  /// single evaluation), and any other output computes its expression from the
   /// retained input columns. Without `distinct` this final projection sits
   /// above the cap, so an unreferenced output (`SELECT x, 1 / 0 … ORDER BY x
   /// FETCH FIRST 0 ROWS`) evaluates only for rows the limit keeps — never for a
   /// dropped row, restoring the lazy `Project(Limit(_))` page the all-outputs
   /// shape regressed.
   ///
-  /// With `distinct` the dedup runs on the WHOLE projected row, so every output
-  /// (not only the sort-referenced ones) is materialised BELOW the distinct —
+  /// With `distinct` the dedup runs on the whole projected row, so every output
+  /// (not only the sort-referenced ones) is materialised below the distinct —
   /// the lazy split would dedup on a partial row. The `distinct` then dedups
   /// the projected rows and `limit` pages the deduplicated result.
   private func materialised(distinct: Bool, projection: Array<Term>,
@@ -305,13 +305,13 @@ extension Catalog where Self: ~Escapable {
                                   _ context: Context = Context())
       throws(SQLError) -> Plan {
     // Expand any `GROUP BY GROUPING SETS` select to its `UNION ALL` FIRST — the
-    // SAME normalization `run` applies — so `compile` and a `columns(of:)`
+    // same normalization `run` applies — so `compile` and a `columns(of:)`
     // derive over the same query cannot diverge. Idempotent for a `.keys`/
     // `.arm` select; a nested body re-enters and expands in turn.
     let query = try query.expanded
-    // Bind the derived tables (and store relations) THIS query names in its own
+    // Bind the derived tables (and store relations) this query names in its own
     // FROM/JOIN before resolving its relations — SELECT-scoped, so a subquery
-    // compiled through here binds its OWN aliases (an outer statement-global
+    // compiled through here binds its own aliases (an outer statement-global
     // pre-collection would leave a sibling subquery's same-named `t` bound to
     // the wrong one). Schema-only (`rows: false`): compilation reads schemas,
     // never a cursor. Idempotent when the caller already augmented (`run`).
@@ -319,20 +319,20 @@ extension Catalog where Self: ~Escapable {
     // view body under resolution that names the view faults `.recursion`.
     // A nested subquery's FROM sees base tables and enclosing CTEs, NOT this
     // query's derived aliases — so the augmented `context` threads onward and
-    // `subquery(of:)` REVEALS the base before lowering a subquery (this query's
+    // `subquery(of:)` reveals the base before lowering a subquery (this query's
     // and every enclosing query's derived aliases dropped, the CTEs and store
     // relations kept, a CTE a same-named derived alias here shadows still
     // visible). The layered overlay never overwrote the CTE, so no pre-augment
     // context is threaded. `validate` gates a derived body's eager type-check:
-    // a RUN preflight passes `false` so a data-dependent body expression an
+    // a run preflight passes `false` so a data-dependent body expression an
     // execution never evaluates is not rejected here (the outer query still
-    // faults, and a REACHED body operand still faults at run), matching the
+    // faults, and a reached body operand still faults at run), matching the
     // non-derived path; a schema check passes `true`.
     let context = try augment(context, for: query, rows: false)
     // A query-level `ORDER BY` / `DISTINCT` / `OFFSET`·`FETCH` over a set
     // operation rides the `ordered` carrier: compile the inner union, then
-    // STACK the row operators over its plan, resolved through the setop's
-    // OUTPUT scope (`ordered`). The row operators do NOT project, so the result
+    // stack the row operators over its plan, resolved through the setop's
+    // output scope (`ordered`). The row operators do NOT project, so the result
     // columns stay the union's — an identity projection over its output slots.
     if case let .ordered(inner, distinct, order, limit, generated) = query {
       return try ordered(inner, distinct: distinct, order: order,
@@ -342,11 +342,11 @@ extension Catalog where Self: ~Escapable {
       return try compile(query.first, context)
     }
 
-    // A set operation collects NO derived aliases at the query level — arms are
-    // SCOPED, so `collect(derived:)` stops at a `SELECT` — leaving the augment
+    // A set operation collects no derived aliases at the query level — arms are
+    // scoped, so `collect(derived:)` stops at a `SELECT` — leaving the augment
     // above with no arm-local bindings. But the `SELECT *` arity check resolves
-    // each arm's `*` BEFORE the recursive per-arm compile augments that arm, so
-    // augment each arm's OWN derived aliases into a PER-ARM scope first, as the
+    // each arm's `*` before the recursive per-arm compile augments that arm, so
+    // augment each arm's own derived aliases into a per-ARM scope first, as the
     // per-arm `compile`/`run` scope them: `SELECT * FROM (SELECT V FROM S) AS
     // d` resolves `d`'s width. It is per arm so the left arm's `d` never
     // leaks to the right (the arm-scoping fix); the width each check computes
@@ -356,25 +356,25 @@ extension Catalog where Self: ~Escapable {
     let width = try arity(query.first, head)
     let count = try arity(right.first, tail)
     guard count == width else { throw .arity(width, count) }
-    // Both arms of a set-operation subquery correlate against the SAME
+    // Both arms of a set-operation subquery correlate against the same
     // enclosing scope, so each lowers under the shared `context.outer`. The
-    // per-column result TYPES are UNIFIED across the arms (ISO) and CARRIED on
+    // per-column result types are unified across the arms (ISO) and carried on
     // the plan node: the `.setop` executor holds only the sub-plans, not the
-    // arm `Query`s, so it cannot fold them at run — compute them HERE, where
+    // arm `Query`s, so it cannot fold them at run — compute them here, where
     // the arm queries and scope are in hand, and coerce each arm's rows at run.
-    // The arms' OWN native column types (each arm's own unified columns —
+    // The arms' own native column types (each arm's own unified columns —
     // `types(unifying:)` folds a nested arm — the very rows `combine` coerces
-    // to this node's unified `types`) are derived BEFORE the `types` local
+    // to this node's unified `types`) are derived before the `types` local
     // shadows the deriver.
     //
-    // These three derivations are a schema-only PROBE — they compute types, not
+    // These three derivations are a schema-only probe — they compute types, not
     // the arms' real plans (those are compiled from `context` below, at
     // `compile(left/right, context)`). The type derivation lowers any nested
-    // subquery to read its width, which would RECORD a correlated inner plan
+    // subquery to read its width, which would record a correlated inner plan
     // into the shared runtime memo; that record is first-writer-wins, so a
     // later caller with a same-shaped subquery could reuse this view body's
     // plan (against the view's base) instead of its own CTE. Derive against a
-    // context carrying an ISOLATED throwaway memo — every other field (scope,
+    // context carrying an isolated throwaway memo — every other field (scope,
     // subscope, outer correlation, validate) preserved — so the probe's
     // recordings are discarded and only the real arm compiles below populate
     // the live memo.
@@ -382,11 +382,11 @@ extension Catalog where Self: ~Escapable {
     let l = try types(unifying: left, probe)
     let r = try types(unifying: right, probe)
     let types = try types(unifying: query, probe)
-    // The columns this node WIDENS — where the unified `types[c]` differs from
-    // an arm's OWN native type — so the pushdown pass (a pure Plan rewrite with
-    // no catalog) can keep a predicate over a widened column ABOVE the arms
+    // The columns this node widens — where the unified `types[c]` differs from
+    // an arm's own native type — so the pushdown pass (a pure Plan rewrite with
+    // no catalog) can keep a predicate over a widened column above the arms
     // rather than pushing it in, where an arm would test the pre-coercion
-    // value. A column differing from EITHER arm is coerced for that arm, so
+    // value. A column differing from either arm is coerced for that arm, so
     // record it; a homogeneous set operation matches both arms, leaving the
     // mask empty and the pushdown unchanged.
     let widened = Set(types.indices.filter {
@@ -396,20 +396,20 @@ extension Catalog where Self: ~Escapable {
                       all: all, types: types, widened: widened)
   }
 
-  /// The distinct UNCORRELATED subqueries `select` nests, each COMPILED ONCE
-  /// against this catalog and `context` for its column count — NEVER run — into
+  /// The distinct uncorrelated subqueries `select` nests, each compiled once
+  /// against this catalog and `context` for its column count — never run — into
   /// a `Resolution` map the predicate/projection lowering reads for arity, the
   /// seam that carries each sub-`Query` into its lowered `Filter` as data.
   ///
-  /// This is CURSOR-FREE: it drives `compile`, which resolves schemas and reads
+  /// This is cursor-free: it drives `compile`, which resolves schemas and reads
   /// the subquery's `Plan.width` without a cursor, so a schema-only path
   /// (`columns(of:)`, view resolution) that shares this lowering opens none and
   /// surfaces no data-dependent error. Every subquery in the `WHERE`, join
   /// `ON`s, `HAVING`, projection, `ORDER BY` expressions, and aggregate
   /// arguments and FILTERs is found by a syntactic walk and keyed by its own
   /// `Query` (which is `Hashable`), so lowering resolves each `EXISTS`/`IN (Q)`
-  /// against the map by identity. A subquery compiles ONCE even if it appears
-  /// twice; it RUNS at execution (see `subqueries(of:)`), UNCORRELATED so once.
+  /// against the map by identity. A subquery compiles once even if it appears
+  /// twice; it runs at execution (see `subqueries(of:)`), uncorrelated so once.
   ///
   /// `context.subscope` is the resolution context these subqueries lower under
   /// — `.caller` for a top-level compile, `.view(name)` for a view body's —
@@ -417,34 +417,34 @@ extension Catalog where Self: ~Escapable {
   /// and a top-level one over the same AST stay distinct entries (see
   /// `Subscope`).
   ///
-  /// `enclosing` is the select's OWN resolution scope — the one its nested
-  /// subqueries CORRELATE against: each nested query compiles under a fresh
+  /// `enclosing` is the select's own resolution scope — the one its nested
+  /// subqueries correlate against: each nested query compiles under a fresh
   /// `Outer` extending `context.outer` (this select's own enclosing scope, when
   /// it is itself a subquery) with `enclosing` the nearest scope, so a nested
-  /// query's inner `WHERE` column binding none of ITS relations resolves
+  /// query's inner `WHERE` column binding none of its relations resolves
   /// against the enclosing select (and outward), lowering to a synthetic
-  /// `Term.parameter` and RECORDING the correlation the lowered node carries.
-  /// The returned `Resolution` also carries `context.outer` so THIS select's
+  /// `Term.parameter` and recording the correlation the lowered node carries.
+  /// The returned `Resolution` also carries `context.outer` so this select's
   /// own columns correlate outward when it is a subquery.
   ///
-  /// `prefixes`, when supplied, gives the PREFIX scope each join `ON` lowers
+  /// `prefixes`, when supplied, gives the prefix scope each join `ON` lowers
   /// against — the FROM relation and joins `0…index`, never a relation joined
-  /// LATER — so a subquery in join `i`'s `ON` correlates against `prefixes[i]`
-  /// (the relations available AT that join point) rather than the full join
+  /// later — so a subquery in join `i`'s `ON` correlates against `prefixes[i]`
+  /// (the relations available at that join point) rather than the full join
   /// `enclosing`. A correlated reference to a later-joined relation then binds
-  /// against NONE of the prefix's relations and faults `SQLError.column`,
-  /// matching the DIRECT `ON` resolver, which already uses the prefix scope. A
+  /// against none of the prefix's relations and faults `SQLError.column`,
+  /// matching the direct `ON` resolver, which already uses the prefix scope. A
   /// non-join surface (WHERE/projection/HAVING/ORDER) correlates against
   /// `enclosing` as before.
   internal borrowing func subquery(of select: Select, _ context: Context,
                                    enclosing: Scope? = nil,
                                    prefixes: Array<Scope> = [])
       throws(SQLError) -> Plans {
-    // Resolve each SITE'S subqueries against THAT site's own scope, keyed PER
-    // OCCURRENCE: a join `i`'s `ON` against its PREFIX scope `prefixes[i]` (the
-    // relations available AT that join point), the
-    // WHERE/HAVING/projection/ORDER against the full join `enclosing`. The SAME
-    // inner SQL in both an `ON` and the WHERE is resolved TWICE — each against
+    // Resolve each site'S subqueries against that site's own scope, keyed per
+    // occurrence: a join `i`'s `ON` against its prefix scope `prefixes[i]` (the
+    // relations available at that join point), the
+    // WHERE/HAVING/projection/ORDER against the full join `enclosing`. The same
+    // inner SQL in both an `ON` and the WHERE is resolved twice — each against
     // its own site's scope — so the WHERE occurrence sees the full scope and
     // reports a genuine ambiguity rather than reusing the first `ON`
     // occurrence's narrower prefix correlation.
@@ -472,18 +472,18 @@ extension Catalog where Self: ~Escapable {
     return Plans(lowerings, remainder)
   }
 
-  /// Builds ONE lowering `Resolution` over the directly-nested `queries` of a
-  /// single SITE, resolving each against `within` — the scope THAT site's
+  /// Builds one lowering `Resolution` over the directly-nested `queries` of a
+  /// single site, resolving each against `within` — the scope that site's
   /// subqueries correlate against (a join `ON`'s prefix, or the full
   /// `enclosing` for the WHERE/HAVING/projection/ORDER). Each distinct `Query`
-  /// is compiled ONCE here; the SAME inner SQL at a DIFFERENT site is resolved
+  /// is compiled once here; the same inner SQL at a different site is resolved
   /// by that site's own call, against its own scope.
   internal borrowing func subquery(_ queries: Array<Query>, _ select: Select,
                                    _ context: Context, within: Scope?)
       throws(SQLError) -> Resolution {
     // A nested subquery's FROM resolves against base tables and enclosing CTEs,
     // NOT the enclosing SELECT's derived-table aliases (SELECT-scoped, unseen
-    // by a subquery's FROM as a base-table alias would be) — so STRIP them, the
+    // by a subquery's FROM as a base-table alias would be) — so strip them, the
     // CTEs/store relations kept, before compiling each subquery. Applied for
     // scalar, `IN`, and `EXISTS` alike (`select.subqueries` covers all three).
     let context = context.revealed()
@@ -492,10 +492,10 @@ extension Catalog where Self: ~Escapable {
     var types = Dictionary<Query, ResolvedColumn>()
     var correlations = Dictionary<Query, Correlation>()
     for query in queries where widths[query] == nil {
-      // A fresh `Outer` per nested query — its enclosing scope is THIS select
+      // A fresh `Outer` per nested query — its enclosing scope is this select
       // (nearest, `within`), stacked past this select's own enclosing scope
-      // `outer`. A FROM-less select adds no relations, but it is STILL a scope
-      // FRAME: it pushes an EMPTY `Scope` so correlation DEPTH counts this
+      // `outer`. A FROM-less select adds no relations, but it is still a scope
+      // frame: it pushes an empty `Scope` so correlation depth counts this
       // level. Its own plan runs over a `single` empty record, so a deeper
       // reference to the true outer must NOT bind as this frame's `.slot` (an
       // empty record has no such cell) — the empty frame makes that reference
@@ -506,27 +506,27 @@ extension Catalog where Self: ~Escapable {
       // The context each nested compile/derive threads: the revealed base with
       // this frame's `nested` as the enclosing correlation stack and the
       // shape-only lenience below. `unlateralized()` clears the LATERAL-body
-      // flag so a nested ORDINARY subquery within a lateral body builds its OWN
+      // flag so a nested ordinary subquery within a lateral body builds its own
       // Resolution with `everywhere: false` — the lateral everywhere-admission
       // covers ONLY the lateral body's own projection, NOT a subquery inside
       // it, so an ordinary correlated scalar-subquery projection is barred
       // exactly as it is outside a lateral body.
-      // `shaping()` DEFERS the set-operation operand-compatibility fold out of
-      // this pre-pass: it records EVERY nested subquery's width, arity, and
+      // `shaping()` defers the set-operation operand-compatibility fold out of
+      // this pre-pass: it records every nested subquery's width, arity, and
       // single-column type ahead of the reachability walk, so a `SELECT 'x'
       // UNION SELECT 1` behind a short-circuited `1 = 0 AND …` is not faulted
-      // while merely recording shape. A REACHED scalar/`IN` occurrence is re-
+      // while merely recording shape. A reached scalar/`IN` occurrence is re-
       // folded strictly on the walk's reached path; arity/resolution eager.
       let inner = context.with(outer: nested).validating(false)
           .unlateralized().shaping()
-      // A nested subquery's body derivation is SHAPE ONLY, so ALWAYS lenient
+      // A nested subquery's body derivation is shape ONLY, so ALWAYS lenient
       // (`validate: false`) — this pass exists to record the subquery's width,
       // arity, and correlation, never to validate its body. Validation of a
       // subquery's body (and the derived tables nested within it, at any depth)
       // is the reachability walk's job: `typecheck(_ select:)` re-derives each
-      // REACHED occurrence's body strictly over `subquery.visited`. Compiling a
-      // derived body THIS subquery nests with `validate: true` here would
-      // eager-type-check it BEFORE the walk decides the subquery is reached —
+      // reached occurrence's body strictly over `subquery.visited`. Compiling a
+      // derived body this subquery nests with `validate: true` here would
+      // eager-type-check it before the walk decides the subquery is reached —
       // faulting `WHERE 1 = 0 AND 1 IN (SELECT x FROM (SELECT 1 / 0 …) AS d)`,
       // whose `IN` a run short-circuits away. Structural faults (a bad inner
       // relation/column, a UNION arity) still surface — they resolve regardless
@@ -534,47 +534,47 @@ extension Catalog where Self: ~Escapable {
       let plan = try compile(query, inner)
       widths[query] = plan.width
       // A scalar subquery contributes its single-column output COLUMN — its
-      // type AND `unconstrained` mask together, UNIFIED across its
+      // type AND `unconstrained` mask together, unified across its
       // set-operation arms (a `(SELECT 1 UNION SELECT 2.5)` typing `double`, a
       // `(SELECT NULLIF('a','a'))` staying unconstrained), not read off the
       // first arm alone; a wider or an `EXISTS`/`IN (Q)` subquery still records
       // the FIRST column (harmless — only a width-1 scalar occurrence reads it,
       // and the lowering rejects a wider one). It derives cursor-free against
-      // the SAME context the width compile uses, so it matches what the run
+      // the same context the width compile uses, so it matches what the run
       // advertises.
       types[query] =
           try columns(unifying: query, inner).first
       // The correlation the nested compile discovered — the outer columns its
       // inner `WHERE`/`ON` named — carried into the lowered subquery node so
-      // the per-outer-row re-execution binds them. Empty for an UNCORRELATED
+      // the per-outer-row re-execution binds them. Empty for an uncorrelated
       // one.
       correlations[query] = nested.correlation
-      // A CORRELATED occurrence's inner PLAN was just compiled with THIS site's
+      // A correlated occurrence's inner plan was just compiled with this site's
       // enclosing scope, so its correlated columns are `Term.parameter`s bound
       // from the outer row. Stash it into the run path's `context.subqueries`
-      // memo (which survives into execution) so the evaluator RE-EXECUTES this
+      // memo (which survives into execution) so the evaluator re-executes this
       // plan per outer row rather than recompiling the inner query fresh —
       // which, with no outer scope in hand at eval, would fault on the outer
       // column. Record it under the occurrence's `PlanKey` — its `Subkey` for
-      // each ROLE this query occupies (scalar / `IN` / `EXISTS`) composed with
+      // each role this query occupies (scalar / `IN` / `EXISTS`) composed with
       // the correlation's parameter names — the same identity the lowered node
-      // looks up. The names distinguish two occurrences of IDENTICAL inner SQL
-      // under DIFFERENT outer layouts (two set-operation arms whose correlated
-      // column sits at different ordinals), so each arm's node finds ITS OWN
+      // looks up. The names distinguish two occurrences of identical inner SQL
+      // under different outer layouts (two set-operation arms whose correlated
+      // column sits at different ordinals), so each arm's node finds its own
       // plan rather than the first arm's. The `existential` role records the
-      // PROBED shape
+      // probed shape
       // (`probed`: the cardinality-only rewrite when `probable`, else the full
       // query) so the per-outer-row EXISTS re-execution tests non-emptiness
-      // WITHOUT evaluating the select list — a `1 / 0` projection never runs —
-      // exactly as the UNCORRELATED EXISTS probes. A schema-only path threads a
+      // without evaluating the select list — a `1 / 0` projection never runs —
+      // exactly as the uncorrelated EXISTS probes. A schema-only path threads a
       // throwaway memo, harmless there.
       if !nested.correlation.isEmpty {
         for role in select.roles(of: query) {
-          // Recompile the EXISTS probe LENIENTLY (`validate: false`), the SAME
+          // Recompile the EXISTS probe leniently (`validate: false`), the same
           // way the `plan` above compiled: this builds the run-time plan a
           // correlated re-execution reuses, so it must not eager-type-check a
           // filtered-out projection the per-outer-row probe never evaluates.
-          // The reachability walk validates a REACHED occurrence's probe shape
+          // The reachability walk validates a reached occurrence's probe shape
           // itself (`typecheck(shape(of: reach), …)`), so validation stays the
           // walk's, never this shape-deriving pass'.
           let recorded = try role == .existential
@@ -584,7 +584,7 @@ extension Catalog where Self: ~Escapable {
           // (line ~134), so a correlated re-execution enjoys the same seeks and
           // join placement. The pushdown's nullability analysis treats a
           // conjunct carrying a correlated `Term.parameter` as nullable, so it
-          // never rides ahead of a LATER unsafe conjunct the inner `AND` still
+          // never rides ahead of a later unsafe conjunct the inner `AND` still
           // owes.
           context.subqueries.record(plan: try recorded.pushdown(),
                                     for: Subkey(scope, query, role),
@@ -593,14 +593,14 @@ extension Catalog where Self: ~Escapable {
       }
     }
     // A LATERAL body's `Resolution` admits a correlated preceding-FROM column
-    // EVERYWHERE (`everywhere`), so its projection lowers such a column to a
+    // everywhere (`everywhere`), so its projection lowers such a column to a
     // `Term.parameter` rather than barring it — the ISO scoping a lateral body
     // gets and an ordinary subquery (`context.lateral == false`) does not.
     return Resolution(scope, widths, types, correlations,
                       outer: context.outer, everywhere: context.lateral)
   }
 
-  /// The single VALUE a SCALAR subquery `query` collapses to against this
+  /// The single value a scalar subquery `query` collapses to against this
   /// catalog and `context`: NULL when it yields no row, its lone cell when it
   /// yields exactly one, and `SQLError.cardinality` when it yields more than
   /// one (the ISO `<scalar subquery>` cardinality rule).
@@ -610,7 +610,7 @@ extension Catalog where Self: ~Escapable {
   /// and the collapse reads the first. A wider subquery never reaches here — it
   /// faulted at compile.
   ///
-  /// The evaluator calls this LAZILY, on the first reach of a scalar
+  /// The evaluator calls this lazily, on the first reach of a scalar
   /// `Term.subquery`, so an occurrence in an unreachable `CASE`/`COALESCE` arm
   /// never runs it — preserving short-circuit semantics — and memoises the
   /// result for the reached occurrence's later reads.
@@ -619,7 +619,7 @@ extension Catalog where Self: ~Escapable {
     // A scalar subquery is a nested subquery: its FROM resolves against base
     // tables and enclosing CTEs, NOT the enclosing SELECT's derived-table
     // aliases (the evaluator threads the owning plan's overlay, which binds
-    // them for the owning scan). STRIP them (CTEs/store kept), matching the
+    // them for the owning scan). strip them (CTEs/store kept), matching the
     // eager `IN`/`EXISTS` strip in `subqueries(of:)`, so a scalar subquery's
     // `FROM d` cannot scan an outer derived alias `d`.
     let context = context.revealed()
@@ -629,9 +629,9 @@ extension Catalog where Self: ~Escapable {
   }
 
   /// Whether `query`'s row source yields ANY row — the `EXISTS` cardinality
-  /// probe — WITHOUT evaluating its select list or sort keys.
+  /// probe — without evaluating its select list or sort keys.
   ///
-  /// For a `probable` `SELECT` (see `Select.probable`), it runs a PROBE query
+  /// For a `probable` `SELECT` (see `Select.probable`), it runs a probe query
   /// that keeps the FROM/`WHERE`/joins, the `DISTINCT` quantifier, the `GROUP
   /// BY`, and the SAME original `OFFSET`/`FETCH` but replaces the projection
   /// with a cardinality-preserving target and drops the `ORDER BY`, so the
@@ -643,7 +643,7 @@ extension Catalog where Self: ~Escapable {
   /// `DISTINCT` select without an `OFFSET` is probable too: `SELECT DISTINCT 1
   /// FROM S` yields exactly one distinct row iff `S` is non-empty, so the
   /// constant projection preserves existence. An aggregate/grouped select
-  /// WITHOUT a `HAVING` is probable via a `COUNT(*)` target (see
+  /// without a `HAVING` is probable via a `COUNT(*)` target (see
   /// `Select.probe`): a whole-result aggregate yields exactly one row (EXISTS
   /// true modulo the limit, even over an empty source) and a grouped one yields
   /// one row per group, so the probe preserves its cardinality without running
@@ -656,10 +656,10 @@ extension Catalog where Self: ~Escapable {
   internal borrowing func probe(_ query: Query, _ context: Context)
       throws(SQLError) -> Bool {
     // An `EXISTS` reads ONLY the probe's cardinality, never a cell, so a set-
-    // operation probe's column TYPES are irrelevant — `combine` coerces the
+    // operation probe's column types are irrelevant — `combine` coerces the
     // (discarded) rows, `.isEmpty` reads none. So run the probe under a
     // `shaping()` context, deferring the set-operation operand-compatibility
-    // fold: `EXISTS (SELECT 'x' UNION SELECT 1)` probes non-emptiness WITHOUT
+    // fold: `EXISTS (SELECT 'x' UNION SELECT 1)` probes non-emptiness without
     // faulting `SQLError.operand` on the irreconcilable arm types, matching the
     // invariant that an `EXISTS` does not constrain column type (a bare-select
     // probe folds nothing, so `shaping()` is inert for it).
@@ -672,7 +672,7 @@ extension Catalog where Self: ~Escapable {
   /// projection never evaluates) and the full `query` otherwise (a `HAVING`
   /// select, a `DISTINCT`-with-`OFFSET` one, or a set operation, whose empty
   /// test is not a source-only fact the rewrite preserves). The `probe(_:)` run
-  /// and the CORRELATED `existential` plan both compile/execute THIS shape, so
+  /// and the correlated `existential` plan both compile/execute this shape, so
   /// a correlated EXISTS probes per outer row as an uncorrelated one does.
   internal borrowing func probed(_ query: Query) -> Query {
     guard case let .select(select) = query, select.probable else {
@@ -693,13 +693,13 @@ extension Catalog where Self: ~Escapable {
   /// space from these. The returned `relations` lays the FROM relation first,
   /// then each joined one, each paired with its schema: `Scope(relations)` is
   /// the full-chain scope, `relations[0 ... index + 1]` a join's prefix scope,
-  /// and `Scope(…).width(of: .all)` the `SELECT *` width — DERIVED from the
+  /// and `Scope(…).width(of: .all)` the `SELECT *` width — derived from the
   /// merged-prepend + real-column `expansion` the scope emits, never a separate
   /// sum — every downstream derivation reads out of this one resolution.
   ///
-  /// `relations` is built INCREMENTALLY, each join resolving against the
-  /// PRECEDING FROM (`Scope` of the relations before it): a LATERAL arm's
-  /// projection may name a preceding column, so its output SHAPE depends on
+  /// `relations` is built incrementally, each join resolving against the
+  /// preceding FROM (`Scope` of the relations before it): a LATERAL arm's
+  /// projection may name a preceding column, so its output shape depends on
   /// that scope. A non-lateral join's schema is correlation-independent, so the
   /// preceding scope is harmless — the incremental order is a no-op for it. The
   /// preceding scope threads through here rather than at each call site, so the
@@ -712,9 +712,9 @@ extension Catalog where Self: ~Escapable {
     joined.reserveCapacity(joins.count)
     var relations = [(relation, schema)]
     for index in joins.indices {
-      // The PRECEDING scope carries the merged columns the joins before this
+      // The preceding scope carries the merged columns the joins before this
       // one expose (`prefix(through:)`), so a LATERAL body resolves a bare
-      // merged name to its ONE coalesced column rather than seeing the two
+      // merged name to its one coalesced column rather than seeing the two
       // physical join columns and faulting `.ambiguous`. A join before this one
       // is already resolved (its schema is in `relations`), so the merged
       // prefix is computable here.
@@ -741,7 +741,7 @@ extension Catalog where Self: ~Escapable {
         throw .named("SELECT * with no FROM")
       }
       // The FROM resolves once here; each join then resolves through the shared
-      // helper, which threads each join's PRECEDING scope into its resolve — so
+      // helper, which threads each join's preceding scope into its resolve — so
       // a LATERAL arm's body derives its projected preceding-FROM column
       // against the relations before it rather than against no scope, which
       // would fault the arity check even though the per-arm compile passes the
@@ -749,11 +749,11 @@ extension Catalog where Self: ~Escapable {
       let schema = try resolve(relation, context).schema
       let (_, relations) = try resolve(from: relation, schema: schema,
                                        joins: select.joins, context)
-      // A `SELECT *` over a `NATURAL`/`USING` join is measured at its MERGED
-      // width (each join column ONCE) through `Scope.width(of: .all)`, which
-      // DERIVES the count from the merged-prepend + real-column `expansion` the
+      // A `SELECT *` over a `NATURAL`/`USING` join is measured at its merged
+      // width (each join column once) through `Scope.width(of: .all)`, which
+      // derives the count from the merged-prepend + real-column `expansion` the
       // arm emits — the width the arm actually produces, not the raw sum of
-      // both sides, and not a parallel arithmetic that could drift (a VIRTUAL
+      // both sides, and not a parallel arithmetic that could drift (a virtual
       // `USING` constituent undercounted the old sum). So `A JOIN B USING (k)
       // UNION SELECT …` compares post-merge widths and a valid set operation is
       // not wrongly rejected. An arm with no named-column join yields an empty
@@ -777,7 +777,7 @@ extension Catalog where Self: ~Escapable {
   /// `derived` leaf — and finally a base table scans. A name none resolves is
   /// `SQLError.relation`.
   ///
-  /// A view's body compiles OUTSIDE the statement's CTE scope — never the
+  /// A view's body compiles outside the statement's CTE scope — never the
   /// caller's `ctes` — so a stored view means exactly what it was registered to
   /// mean regardless of the `WITH` a caller wraps around it. A name that IS a
   /// statement CTE has already resolved above (a CTE shadows a view, as it
@@ -785,7 +785,7 @@ extension Catalog where Self: ~Escapable {
   /// view; letting its body see the caller's CTEs would let an unrelated
   /// statement-local `WITH Parent AS …` reach into a view whose own `FROM
   /// Parent` must mean the base relation. The body's scope is instead the
-  /// `definition_schema.` overlay built from the view's OWN query, so a view
+  /// `definition_schema.` overlay built from the view's own query, so a view
   /// defined over a reserved store relation resolves; its `FROM`/`JOIN` names
   /// otherwise resolve against the base catalog (and other views) alone.
   ///
@@ -803,67 +803,67 @@ extension Catalog where Self: ~Escapable {
   /// `definition_schema.` store's `columns` builder, which compiles every view
   /// to advertise it, relies on this: a cyclic view's `try? compile` catches
   /// the fault and skips it. Compiles a LATERAL derived table's `body` against
-  /// the PRECEDING FROM `scope`, discovering its correlation and stashing the
+  /// the preceding FROM `scope`, discovering its correlation and stashing the
   /// pre-compiled plan for the per-outer-row apply to re-execute — the
   /// FROM-clause analog of a correlated subquery's compile pre-pass
   /// (`subquery(_:_:_:within:)`).
   ///
   /// The body compiles under a fresh `Outer` frame nested under `scope` (the
-  /// FROM relation and the joins BEFORE this one), so a body column naming a
-  /// preceding relation binds none of its OWN relations and resolves outward to
+  /// FROM relation and the joins before this one), so a body column naming a
+  /// preceding relation binds none of its own relations and resolves outward to
   /// a synthetic `Term.parameter`, minting a `Correlation`. The plan compile is
   /// lenient (`validate: false`), as the correlated-subquery pre-pass is — this
-  /// pass discovers the shape, and the run's per-row execution faults a REACHED
+  /// pass discovers the shape, and the run's per-row execution faults a reached
   /// operand. The plan is recorded under the occurrence's `Subkey` (this
   /// select's `subscope`, the body query, the `.lateral` role) composed with
   /// the correlation, the same identity `Plan.apply` looks up through
   /// `executed`. Returns the occurrence `Subkey` and the discovered
   /// correlation.
   ///
-  /// A lateral body's SCHEMA + VALIDATION route through the SAME derived-body
-  /// machinery a NON-LATERAL derived body uses (`materialise`, `rows: false`),
-  /// differing ONLY in the OUTER treatment: a non-lateral body CLEARS the
-  /// correlation stack (`body(_:)`, uncorrelated), while a lateral body THREADS
+  /// A lateral body's schema + validation route through the same derived-body
+  /// machinery a non-LATERAL derived body uses (`materialise`, `rows: false`),
+  /// differing ONLY in the OUTER treatment: a non-lateral body clears the
+  /// correlation stack (`body(_:)`, uncorrelated), while a lateral body threads
   /// the preceding-FROM `nested` outer so its correlated references resolve. So
   /// a lateral body inherits the revealed-base overlay (base + CTEs + store,
   /// its own alias out of scope) — a CTE stays visible in the body — AND the
   /// `validate`-gated operand/function type-check, exactly as a non-lateral
   /// body does. Under `validate: false` (a lenient run/shape pass) the body is
   /// NOT eagerly type-checked, matching the reachability-gated validation the
-  /// rest of the engine applies; a REACHED bad operand still faults at run.
+  /// rest of the engine applies; a reached bad operand still faults at run.
   internal borrowing func lateral(_ body: Query, against scope: Scope,
                                   columns renaming: Array<String>,
                                   _ context: Context)
       throws(SQLError) -> (key: Subkey, correlation: Correlation) {
     let nested = (context.outer ?? Outer()).nested(under: scope)
     // Derive the body's schema and — under `validate` — type-check its operands
-    // and functions through the SHARED derived-body path, over the revealed
-    // base (CTEs visible) with the preceding-FROM outer THREADED so a
+    // and functions through the shared derived-body path, over the revealed
+    // base (CTEs visible) with the preceding-FROM outer threaded so a
     // correlated reference resolves rather than faulting as unknown. The
     // returned schema is discarded here (`resolve`/`schema(of:)` advertises the
     // columns); this call exists to run the same validation a non-lateral body
     // gets.
     // Mark the body a LATERAL body (`lateralizing`) so its `Resolution`/
-    // `SubqueryCheck` admit a correlated preceding-FROM column EVERYWHERE,
+    // `SubqueryCheck` admit a correlated preceding-FROM column everywhere,
     // including its projection — per ISO a LATERAL body's preceding references
     // are in scope throughout, unlike an ordinary subquery whose projection
     // stays barred. The flag rides through the shared derived-body machinery to
     // the projection lowering, where a projected preceding column lowers to a
     // `Term.parameter` rather than faulting `.unsupported`.
     // Thread the derived table's explicit `AS d(a, b)` column list into the
-    // body's schema derive so this validation checks the same EXPOSED (renamed)
+    // body's schema derive so this validation checks the same exposed (renamed)
     // names `schema(of:)` advertises — its arity (`SQLError.columns`) and
     // uniqueness (`SQLError.duplicate`) run against the renamed list, so a list
     // hiding a duplicate INNER name (`SELECT T.Id AS x, T.Id AS x) AS d(a, b)`)
-    // passes at BOTH seams rather than faulting only here.
+    // passes at both seams rather than faulting only here.
     let revealed = context.revealed().with(outer: nested).lateralizing()
     _ = try materialise(body, revealed, rows: false, columns: renaming)
-    // Compile the body LENIENTLY for the per-outer-row apply plan (the shape
+    // Compile the body leniently for the per-outer-row apply plan (the shape
     // pass a correlated subquery's pre-pass runs), recording it under the
     // occurrence's key composed with the discovered correlation. It compiles
-    // over the SAME revealed base the schema/validation pass above used (base +
-    // CTEs + store, this select's derived aliases STRIPPED) with the
-    // preceding-FROM outer threaded, so a body `FROM d` cannot bind a CALLER
+    // over the same revealed base the schema/validation pass above used (base +
+    // CTEs + store, this select's derived aliases stripped) with the
+    // preceding-FROM outer threaded, so a body `FROM d` cannot bind a caller
     // derived alias `d` as a relation — the compile and the schema path resolve
     // the body's FROM identically, faulting an unknown relation consistently
     // rather than the run-only compile scanning a caller alias the schema pass
@@ -874,8 +874,8 @@ extension Catalog where Self: ~Escapable {
     context.subqueries.record(plan: try plan.pushdown(), for: key,
                               nested.correlation)
     // The per-outer-row apply re-runs this plan under the occurrence scope's
-    // RECORDED revealed overlay (`revealed(under:)`), which the run stores as
-    // `revealed().relations` for `key.scope` — the SAME revealed base compiled
+    // recorded revealed overlay (`revealed(under:)`), which the run stores as
+    // `revealed().relations` for `key.scope` — the same revealed base compiled
     // here — so execution resolves the body's `FROM` identically and a shadowed
     // CTE cannot diverge between compile and run.
     return (key, nested.correlation)
@@ -887,12 +887,12 @@ extension Catalog where Self: ~Escapable {
     let name = relation.name
     // A LATERAL derived table is not bound in the overlay — its rows are not a
     // constant relation but a correlated apply's right side, materialised per
-    // outer row. Resolve only its SCHEMA here; the join loop compiles its body
+    // outer row. Resolve only its schema here; the join loop compiles its body
     // against the preceding FROM and emits a `Plan.apply` rather than calling
     // the `leaf`, so the leaf is never reached for a lateral relation. Its
-    // output SHAPE is NOT correlation-independent (per ISO its projection may
+    // output shape is NOT correlation-independent (per ISO its projection may
     // name a preceding column), so thread the `preceding` scope — the FROM
-    // relation and the joins BEFORE this one — so a projected preceding column
+    // relation and the joins before this one — so a projected preceding column
     // types from that outer column exactly as the run lowers it.
     if relation.lateral {
       let schema = try schema(of: relation, context, preceding: preceding)
@@ -900,12 +900,12 @@ extension Catalog where Self: ~Escapable {
         .scan(name: name, ordinals: ordinals, seek: nil)
       }
     }
-    // The explicit `AS t(c, …)` list positionally renames a NAMED relation's
-    // output columns; a DERIVED table's list was applied where it materialised
+    // The explicit `AS t(c, …)` list positionally renames a named relation's
+    // output columns; a derived table's list was applied where it materialised
     // (its overlay binding carries the renamed names), so only a `.named`
-    // source renames HERE — the compile-path mirror of `schema(of:)`'s named
+    // source renames here — the compile-path mirror of `schema(of:)`'s named
     // rename, kept in parity so compile and the schema-only path resolve the
-    // SAME column names.
+    // same column names.
     let columns: Array<String> = if case .named = relation.source {
       relation.columns
     } else {
@@ -927,36 +927,36 @@ extension Catalog where Self: ~Escapable {
       if context.visited.contains(name.lowercased()) {
         throw .recursion(name)
       }
-      // The view body compiles OUTSIDE the caller's statement CTEs, but it may
+      // The view body compiles outside the caller's statement CTEs, but it may
       // still name a reserved `definition_schema.` store relation, so seed its
-      // scope with the overlay built from the view's OWN query — never the
+      // scope with the overlay built from the view's own query — never the
       // caller's `ctes` — so a view defined over a store relation resolves.
       // This covers the built-in `information_schema.` views themselves, whose
       // bodies name `definition_schema.` relations.
       //
-      // Compilation resolves only SCHEMAS (names → ordinals/types), never rows,
-      // so the overlay is built SCHEMA-ONLY: a reserved relation types from its
+      // Compilation resolves only schemas (names → ordinals/types), never rows,
+      // so the overlay is built schema-ONLY: a reserved relation types from its
       // header+types, and the row build is never triggered here. A view over
       // `definition_schema.columns` would otherwise re-enter that row builder
       // (which lists views, whose bodies name the relation again) — an
       // unbounded recursion, and the reason the introspection builder can
       // validate a view via `compile`. The rows a view over a reserved
-      // relation actually returns are supplied at EXECUTE time, where `derive`
+      // relation actually returns are supplied at execute time, where `derive`
       // rebuilds the overlay with rows and runs the sub-plan.
-      // This view name enters `visited` BEFORE its body's derived tables
+      // This view name enters `visited` before its body's derived tables
       // materialise, so a body naming this view through a derived table
       // (`FROM (SELECT * FROM <self>) AS d`) re-enters `augment`/`materialise`
       // with the view already visited and faults `.recursion` here rather than
       // recursing to a stack overflow.
       // `context.validate` threads into the view body's schema-only augment +
-      // compile so a RUN (`validate: false`) resolving `FROM <view>` does NOT
+      // compile so a run (`validate: false`) resolving `FROM <view>` does NOT
       // eager-type-check a data-dependent-empty derived body the view nests —
       // as the lenient inline run does; a schema check keeps it strict.
-      // `uncorrelated()` CLEARS the caller's correlation stack: a view is
+      // `uncorrelated()` clears the caller's correlation stack: a view is
       // defined independently of its call site, so its body must NOT correlate
       // against an enclosing row when the view is queried from inside a
       // correlated subquery. Without it an unbound column in the view
-      // DEFINITION would bind to the caller's row rather than fault.
+      // definition would bind to the caller's row rather than fault.
       let overlay =
           try augment(context.body([:]).visiting(name),
                       for: view.query, rows: false)
@@ -985,7 +985,7 @@ extension Catalog where Self: ~Escapable {
     }
   }
 
-  /// The synthesized joins and the `NATURAL`/`USING` MERGED columns (ISO 9075
+  /// The synthesized joins and the `NATURAL`/`USING` merged columns (ISO 9075
   /// 7.10) of `select`'s join chain, resolved against the already-resolved
   /// `relations` (the FROM relation first, then each joined one in source
   /// order). A chain with no named-column join returns the joins verbatim and
@@ -993,22 +993,22 @@ extension Catalog where Self: ~Escapable {
   ///
   /// Rather than rewrite the AST — an emulation every reference site,
   /// expression form, and pass ordering had to be taught — this models each
-  /// merged column ONCE as a scope entry, so the ordinary name→`Term` machinery
+  /// merged column once as a scope entry, so the ordinary name→`Term` machinery
   /// (`Scope.term`/`derive`, `Scope.terms(.all)`, `Grouping`) consumes it. The
-  /// merged column has NO physical slot: its value is `COALESCE(left, right)`
-  /// over the two PHYSICAL combined ordinals (each QUALIFIED-addressable),
+  /// merged column has no physical slot: its value is `COALESCE(left, right)`
+  /// over the two physical combined ordinals (each qualified-addressable),
   /// and a bare reference to its name resolves to that coalesce (the entry
-  /// SHADOWS its constituents), while a qualified `A.c`/`B.c` reaches its own
+  /// shadows its constituents), while a qualified `A.c`/`B.c` reaches its own
   /// side.
   ///
-  /// The fold threads a growing PREFIX `Scope` — the relations `0…index` plus
+  /// The fold threads a growing prefix `Scope` — the relations `0…index` plus
   /// the merged columns accumulated so far — so it resolves each join's common
-  /// columns THROUGH the scope, not by scanning a left array. For a `USING (c,
+  /// columns through the scope, not by scanning a left array. For a `USING (c,
   /// …)` join each `c` must resolve to exactly one left output column
-  /// (`Scope.left` — a name an accumulated plain `ON` join bound TWICE faults
+  /// (`Scope.left` — a name an accumulated plain `ON` join bound twice faults
   /// `SQLError.ambiguous`, the finding-1 trap now a construction fault) and be
   /// present on the right (else `SQLError.column`); a `NATURAL` join's are the
-  /// right schema's names the prefix's VISIBLE names share, left order (a
+  /// right schema's names the prefix's visible names share, left order (a
   /// twice-bound left name faults `.ambiguous` when keyed). The join's `on`
   /// becomes the conjunction of `left.c = right.c` — the LEFT operand a bare
   /// `.column(c)` the prefix scope lowers to its resolved term (a coalesce when
@@ -1029,7 +1029,7 @@ extension Catalog where Self: ~Escapable {
     // The synthesized `on` FILTER of each named-column join (`nil` for a plain
     // `ON`/`CROSS` join, which lowers its own written `on`, or a degenerate
     // `NATURAL` join with no shared column, an always-true `CROSS` product).
-    // It is lowered DIRECTLY here rather than re-lowered from a bare-name AST
+    // It is lowered directly here rather than re-lowered from a bare-name AST
     // predicate — a chained merged column has no unambiguous bare spelling
     // against a scope that also holds the joined-in relation's same-named
     // column — carrying the resolved LEFT term (a coalesce when `c` was already
@@ -1052,11 +1052,11 @@ extension Catalog where Self: ~Escapable {
     return (ons, merged, prefixes)
   }
 
-  /// Folds the ONE `NATURAL`/`USING` merge step of the join at `index` onto the
+  /// Folds the one `NATURAL`/`USING` merge step of the join at `index` onto the
   /// merged columns `merged` accumulated by the joins to its left, returning
   /// its synthesized `on` filter (`nil` for a plain `ON`/`CROSS` join or a
   /// shared-column-less `NATURAL` one) and the extended merged set. This is the
-  /// SINGLE place a join's merged columns are derived — `merges(over:)` folds
+  /// single place a join's merged columns are derived — `merges(over:)` folds
   /// it across the whole chain, and the incremental resolve loops
   /// (`merged(through:…)`) fold it join-by-join to build a LATERAL body's
   /// preceding scope — so no site can compute a join's merged columns a second,
@@ -1071,9 +1071,9 @@ extension Catalog where Self: ~Escapable {
   /// schema shares, in left order. Each merged column is `COALESCE(leftTerm,
   /// right.slot)` — a
   /// coalesce left when `c` was already merged, so chained/outer keying follows
-  /// the merged value — its type the MASK-AWARE unification of the two
+  /// the merged value — its type the mask-aware unification of the two
   /// constituents through the set-operation `merge(_:_:)` (a constant-NULL/
-  /// placeholder side is UNCONSTRAINED and defers to the other; two constrained
+  /// placeholder side is unconstrained and defers to the other; two constrained
   /// sides unify, an irreconcilable pair faulting `.operand`/42804), and its
   /// `on` conjunct a hash-join `match` key (pure `slot = slot`) or a residual
   /// equi `compare`.
@@ -1090,11 +1090,11 @@ extension Catalog where Self: ~Escapable {
     }
     // The joined-in relation's own spelling (its case) of a shared name, or
     // `nil` when it exposes none — probed through the joined schema's FULL
-    // addressable surface (`Schema.ordinal(of:)`, virtual-aware), so a VIRTUAL
-    // column (the fixture/adapter `Id`) a `USING (Id)` join NAMES is FOUND the
-    // SAME way the predicate path `A.Id = B.Id` resolves it, not a real-only
+    // addressable surface (`Schema.ordinal(of:)`, virtual-aware), so a virtual
+    // column (the fixture/adapter `Id`) a `USING (Id)` join names is found the
+    // same way the predicate path `A.Id = B.Id` resolves it, not a real-only
     // `names` membership that would spuriously fault `.column`. This is the
-    // EXPLICIT `USING (c, …)` probe ONLY — a `USING`-named virtual `Id` still
+    // explicit `USING (c, …)` probe ONLY — a `USING`-named virtual `Id` still
     // resolves and merges. The spelling is taken from whichever list
     // (`names`/`virtuals`) holds it.
     func right(_ name: String) -> String? {
@@ -1106,11 +1106,11 @@ extension Catalog where Self: ~Escapable {
     // The joined-in relation's own spelling of a shared REAL name, or `nil`
     // when it exposes none as a real column — the `NATURAL` common-set probe. A
     // `NATURAL` join's common set is the intersection of the two sides' REAL
-    // (`SELECT *`-visible) column names, virtuals EXCLUDED on BOTH sides: the
+    // (`SELECT *`-visible) column names, virtuals excluded on both sides: the
     // left is already real-only (`prefix.names` reads the `expansion`, never a
     // virtual), and this restricts the joined side to `joined.names` not its
-    // full virtual-aware surface. So a fixture/adapter VIRTUAL `Id` NEVER
-    // becomes a `NATURAL` common column — it participates only when EXPLICITLY
+    // full virtual-aware surface. So a fixture/adapter virtual `Id` never
+    // becomes a `NATURAL` common column — it participates only when explicitly
     // named by `USING (Id)`, matching how `*`/`NATURAL` expose the same
     // real-column set while an explicit reference resolves a virtual.
     func real(_ name: String) -> String? {
@@ -1154,16 +1154,16 @@ extension Catalog where Self: ~Escapable {
       } else {
         conjuncts.append(.compare(left.value, .equal, .slot(slot)))
       }
-      // The merged column's type is the MASK-AWARE unification of its two
-      // constituents, taken through the SAME `merge(_:_:)` machinery a
+      // The merged column's type is the mask-aware unification of its two
+      // constituents, taken through the same `merge(_:_:)` machinery a
       // set-operation arm fold uses rather than a bare `ValueType.unified` on
-      // the raw slot types: a constant-NULL/placeholder side is UNCONSTRAINED
+      // the raw slot types: a constant-NULL/placeholder side is unconstrained
       // (it places no type constraint), so the merged type defers to the
-      // CONSTRAINED side — `(SELECT NULLIF(1,1) AS k) RIGHT JOIN B USING (k)`
+      // constrained side — `(SELECT NULLIF(1,1) AS k) RIGHT JOIN B USING (k)`
       // types `k` off `B.k` rather than the left's placeholder `integer`.
-      // Both constrained unify (`int ⊕ double → double`, an IRRECONCILABLE
-      // `int ⊕ text` FAULTS `.operand`/42804, the same fault the set-op fold
-      // raises); both unconstrained stay a placeholder. The coalesce COERCES
+      // Both constrained unify (`int ⊕ double → double`, an irreconcilable
+      // `int ⊕ text` faults `.operand`/42804, the same fault the set-op fold
+      // raises); both unconstrained stay a placeholder. The coalesce coerces
       // each side to the resolved type, so a `RIGHT`/`FULL` join's
       // unmatched-side value obeys the advertised type. An irreconcilable pair
       // re-throws under the USING-specific message (the `.operand`/42804 code
@@ -1180,7 +1180,7 @@ extension Catalog where Self: ~Escapable {
       } catch {
         throw .operand("USING columns have irreconcilable types")
       }
-      // The merged column's OWN mask: unconstrained ONLY when BOTH sides were
+      // The merged column's own mask: unconstrained ONLY when both sides were
       // (`merge` narrows to `right.unconstrained` after skipping an
       // unconstrained left), so a downstream set-operation over the merged
       // column defers when neither side ever constrained it, and constrains
@@ -1192,26 +1192,26 @@ extension Catalog where Self: ~Escapable {
                                 constituents: left.constituents + [slot],
                                 unconstrained: unified.unconstrained))
     }
-    // ISO 9075 7.10 join output order: THIS join's common columns lead, then
+    // ISO 9075 7.10 join output order: this join's common columns lead, then
     // the rest of the LEFT output (recursively), then the right's rest. This
-    // join's `block` therefore PREPENDS ahead of the columns accumulated by the
+    // join's `block` therefore prepends ahead of the columns accumulated by the
     // joins to its left — so a chained `(A JOIN B USING (k)) JOIN C USING (a)`
     // exposes `[a, k, …]` (the outer `a`, then the inner `k`), not the flat
-    // fold order `[k, a, …]`. A chained `… USING (k)` over an ALREADY merged
-    // `k` DROPS the earlier entry (this `block`'s coalesce subsumes its
+    // fold order `[k, a, …]`. A chained `… USING (k)` over an already merged
+    // `k` drops the earlier entry (this `block`'s coalesce subsumes its
     // constituents plus the new right slot), so `SELECT *` still exposes `k`
-    // ONCE and at the OUTER join's position.
+    // once and at the OUTER join's position.
     let names = Set(block.map { $0.name.lowercased() })
     let next = block + merged.filter { !names.contains($0.name.lowercased()) }
     return (conjuncts.conjunction, next)
   }
 
   /// The `NATURAL`/`USING` merged columns accumulated by the joins `0..<count`
-  /// — the merged prefix a LATERAL body of the join AT `count` sees. Folds the
-  /// SAME per-join `merging` step `merges(over:)` does, over
+  /// — the merged prefix a LATERAL body of the join at `count` sees. Folds the
+  /// same per-join `merging` step `merges(over:)` does, over
   /// `relations[0...count]`
   /// (the FROM relation and the joins before `count`), so the incremental
-  /// resolve loops build each preceding scope through the ONE merge path rather
+  /// resolve loops build each preceding scope through the one merge path rather
   /// than a second, divergent construction.
   internal func merged(through count: Int,
                        over relations: Array<(Relation, Schema)>,
@@ -1225,13 +1225,13 @@ extension Catalog where Self: ~Escapable {
     return merged
   }
 
-  /// The preceding scope of the join AT `count` — the FROM relation and the
+  /// The preceding scope of the join at `count` — the FROM relation and the
   /// joins before it (`relations[0..<count + 1]`), carrying the merged columns
-  /// those joins expose (`merged(through:)`). This is the ONE constructor of a
+  /// those joins expose (`merged(through:)`). This is the one constructor of a
   /// join-prefix scope: every incremental resolve loop routes through it, so a
   /// join-prefix scope can never be built without its merged columns (the
   /// finding-1 class — a LATERAL body seeing the two physical join columns
-  /// rather than the ONE merged one).
+  /// rather than the one merged one).
   internal func prefix(through count: Int,
                        over relations: Array<(Relation, Schema)>,
                        _ joins: Array<Join>)
@@ -1252,7 +1252,7 @@ extension Catalog where Self: ~Escapable {
   /// scan carries the set of ordinals the query references on its side
   /// (projection ∪ every match ∪ filter ∪ order, reals and virtuals) so the
   /// executor materialises exactly those, in a fixed order that defines a dense
-  /// SLOT for each — slot `i` is the scan's `i`th referenced ordinal.
+  /// slot for each — slot `i` is the scan's `i`th referenced ordinal.
   ///
   /// The operators run in slot space: `compile` remaps every ordinal it lowered
   /// (the projection, the `filter`, the order column, and each join's keys)
@@ -1270,10 +1270,10 @@ extension Catalog where Self: ~Escapable {
     // A `GROUP BY GROUPING SETS (…)` never reaches here: `Query.expanded` (run
     // at every pipeline entry) has already rewritten it to a `UNION ALL` of
     // `.arm` selects, so `compile(_ select:)` sees only `.keys`/`.arm`.
-    // Bind THIS select's own FROM/JOIN derived tables (and store relations)
+    // Bind this select's own FROM/JOIN derived tables (and store relations)
     // before resolving its relations — SELECT-scoped, so a select reaching
-    // this entry DIRECTLY (a bare `compile(select)`, not through the `Query`
-    // wrapper) resolves its OWN derived aliases rather than faulting
+    // this entry directly (a bare `compile(select)`, not through the `Query`
+    // wrapper) resolves its own derived aliases rather than faulting
     // `.relation`, the same as its schema siblings `columns(of select:)`/
     // `scope(of select:)`. Schema-only (`rows: false`): compilation reads
     // schemas, never a cursor. Idempotent when the caller already augmented
@@ -1285,7 +1285,7 @@ extension Catalog where Self: ~Escapable {
     // type-check the same as the wrapper's.
     //
     // The augmented `context` threads onward to `subquery(of:)`/`group`, which
-    // REVEAL the base before lowering a nested subquery — this select's (and
+    // reveal the base before lowering a nested subquery — this select's (and
     // every enclosing select's) derived aliases dropped, the CTEs and store
     // relations kept — so a subquery's FROM sees no derived alias while a CTE
     // a same-named derived alias here shadows stays visible. The layered
@@ -1308,8 +1308,8 @@ extension Catalog where Self: ~Escapable {
             "a WHERE, GROUP BY, HAVING, ORDER BY, OFFSET/FETCH, or JOIN " +
             "requires a FROM clause")
       }
-      // A scalar projection may still nest an UNCORRELATED subquery
-      // (`SELECT CASE WHEN EXISTS (Q) …`); compile each ONCE for its width and
+      // A scalar projection may still nest an uncorrelated subquery
+      // (`SELECT CASE WHEN EXISTS (Q) …`); compile each once for its width and
       // thread the map through so the term lowers as it does on the FROM'd path
       // rather than hit the default unsupported map. The run path builds the
       // matching run-time cache from `query.subqueries` (which descends the
@@ -1317,16 +1317,16 @@ extension Catalog where Self: ~Escapable {
       // never.
       // A FROM-less select adds no relations, so its nested subqueries
       // correlate against this select's own enclosing scope `outer` unchanged;
-      // and its OWN columns (none but a projected outer reference) correlate
+      // and its own columns (none but a projected outer reference) correlate
       // outward through `outer` too. The seam is `plans.rest`; `scalar` (via
-      // `Schema.terms`) BARS it — a projection is a barred clause position — so
-      // a correlated column of THIS query is diagnosed, not lowered to a
+      // `Schema.terms`) bars it — a projection is a barred clause position — so
+      // a correlated column of this query is diagnosed, not lowered to a
       // `Term.parameter`, matching `columns(of:)`'s schema-path rejection.
       let plans = try subquery(of: select, context)
       return try select.projection.scalar(context.routines,
                                           subquery: plans.rest)
     }
-    // A LATERAL first FROM item has no PRECEDING relation to correlate against,
+    // A LATERAL first FROM item has no preceding relation to correlate against,
     // so it is meaningless (and ISO forbids it) — fault rather than resolve a
     // lateral body against nothing.
     if relation.lateral {
@@ -1358,10 +1358,10 @@ extension Catalog where Self: ~Escapable {
     }
 
     guard !select.joins.isEmpty else {
-      // Compile every nested subquery ONCE for its arity/type, ahead of
+      // Compile every nested subquery once for its arity/type, ahead of
       // lowering, into a map the WHERE/projection/ORDER BY lowering reads — and
-      // discover each one's CORRELATION against this select's single-relation
-      // scope (`enclosing`). This select's OWN columns correlate outward
+      // discover each one's correlation against this select's single-relation
+      // scope (`enclosing`). This select's own columns correlate outward
       // through `outer`.
       let enclosing = Scope([(relation, from.schema)])
       let plans = try subquery(of: select, context, enclosing: enclosing)
@@ -1370,10 +1370,10 @@ extension Catalog where Self: ~Escapable {
         filter = try from.schema.lower(predicate, in: relation,
                                        context.routines, subquery: plans.rest)
       }
-      // The projection and ORDER BY are BARRED clause positions (only the WHERE
-      // admits a correlated column of THIS query); `terms`/`order` bar the seam
+      // The projection and ORDER BY are barred clause positions (only the WHERE
+      // admits a correlated column of this query); `terms`/`order` bar the seam
       // intrinsically, so passing `plans.rest` cannot admit one. A nested
-      // subquery there still lowers with its OWN inner correlation.
+      // subquery there still lowers with its own inner correlation.
       let projection =
           try from.schema.terms(select.projection, in: relation,
                                 context.routines, subquery: plans.rest)
@@ -1413,13 +1413,13 @@ extension Catalog where Self: ~Escapable {
 
     // Resolve every joined relation and lay all relations — the FROM relation
     // first, then each joined one in source order — end to end in one combined
-    // ordinal space. The helper builds the running `relations` INCREMENTALLY
-    // and threads each join's PRECEDING FROM as its resolve scope, so a LATERAL
+    // ordinal space. The helper builds the running `relations` incrementally
+    // and threads each join's preceding FROM as its resolve scope, so a LATERAL
     // arm's schema derives against the relations before it.
     let (joined, relations) = try resolve(from: relation, schema: from.schema,
                                           joins: select.joins, context)
-    // Model each `NATURAL`/`USING` join's MERGED columns (ISO 9075 7.10) in the
-    // join SCOPE, and synthesize each named-column join's lowered `left.c =
+    // Model each `NATURAL`/`USING` join's merged columns (ISO 9075 7.10) in the
+    // join scope, and synthesize each named-column join's lowered `left.c =
     // right.c` `on` filter — a no-op yielding an empty merged set and all-`nil`
     // `ons` for a chain with none, so an ordinary compile is unchanged. The
     // scope carries the merged columns so the ordinary `terms`/`term`/order/
@@ -1439,16 +1439,16 @@ extension Catalog where Self: ~Escapable {
     // A `column = column` conjunct lowers to a `match` hash-join key; any
     // inequality or expression equality lowers to a residual the join filters.
     // The WHERE and ORDER lower against the whole chain, which legitimately
-    // sees every relation. Each join's PREFIX scope — the FROM relation and
-    // joins `0…index`, the relations available AT that join point, never one
-    // joined LATER — carries the merged columns accumulated BEFORE this join
+    // sees every relation. Each join's prefix scope — the FROM relation and
+    // joins `0…index`, the relations available at that join point, never one
+    // joined later — carries the merged columns accumulated before this join
     // (`merges[index]`), so a chained `USING` `on` keys on the merged value and
     // an `ON` subquery's bare merged operand resolves.
     let prefixes = select.joins.indices.map { index in
       Scope(Array(relations[0 ... index + 1]), merged: merges[index])
     }
-    // Resolve each LATERAL join's body ONCE against the PRECEDING FROM — the
-    // FROM relation and the joins BEFORE this one (`relations[0…index]`, ONE
+    // Resolve each LATERAL join's body once against the preceding FROM — the
+    // FROM relation and the joins before this one (`relations[0…index]`, one
     // less than the prefix, which includes the join's own relation) — so a body
     // column naming a preceding relation correlates outward and the body's plan
     // is pre-compiled for the per-outer-row apply. A non-lateral join records
@@ -1469,11 +1469,11 @@ extension Catalog where Self: ~Escapable {
       laterals[index] = try lateral(body, against: preceding,
                                     columns: join.relation.columns, context)
     }
-    // Compile every nested subquery ONCE for arity/type, ahead of lowering,
+    // Compile every nested subquery once for arity/type, ahead of lowering,
     // into a map the join ONs, WHERE, projection, and ORDER BY lowering reads —
-    // and discover each one's CORRELATION. A join `ON`'s subquery correlates
-    // against its PREFIX scope; the WHERE/projection/ORDER against the whole
-    // join `scope`. This select's OWN columns correlate outward through
+    // and discover each one's correlation. A join `ON`'s subquery correlates
+    // against its prefix scope; the WHERE/projection/ORDER against the whole
+    // join `scope`. This select's own columns correlate outward through
     // `outer`. `validate` gates a nested filtered-out derived body's eager
     // type-check.
     let plans = try subquery(of: select, context, enclosing: scope,
@@ -1481,7 +1481,7 @@ extension Catalog where Self: ~Escapable {
     var matches = Array<Filter>()
     matches.reserveCapacity(select.joins.count)
     for index in select.joins.indices {
-      // A `NATURAL`/`USING` join's `on` is the SYNTHESIZED, already-lowered
+      // A `NATURAL`/`USING` join's `on` is the synthesized, already-lowered
       // `left.c = right.c` filter (`ons[index]`, `nil` for a degenerate
       // shared-column-less `NATURAL` join — an always-true `CROSS` product);
       // a plain join lowers its written `ON` against the prefix scope.
@@ -1498,11 +1498,11 @@ extension Catalog where Self: ~Escapable {
       predicate = try scope.lower(clause, context.routines,
                                   subquery: plans.rest)
     }
-    // The projection and ORDER BY are BARRED clause positions: a correlated
-    // column of THIS query is out of the minimal (b) cut there (only its
+    // The projection and ORDER BY are barred clause positions: a correlated
+    // column of this query is out of the minimal (b) cut there (only its
     // WHERE/ON admits one), so `terms`/`order` bar the seam intrinsically and
     // it is diagnosed rather than mis-resolved. A nested subquery in the
-    // projection still lowers — its OWN inner WHERE correlation was discovered
+    // projection still lowers — its own inner WHERE correlation was discovered
     // in the pre-pass.
     let projection = try scope.terms(select.projection, context.routines,
                                      subquery: plans.rest)
@@ -1539,8 +1539,8 @@ extension Catalog where Self: ~Escapable {
     predicate?.references(into: &references)
     for key in order { key.term.references(into: &references) }
     // A LATERAL apply reads its correlation's outer ordinals from the left
-    // chain's record, so those preceding-relation ordinals must be MATERIALISED
-    // (given a packed slot) even when no clause of THIS select references them
+    // chain's record, so those preceding-relation ordinals must be materialised
+    // (given a packed slot) even when no clause of this select references them
     // — else the correlation's remap through `slot` finds no slot for the outer
     // column its body names.
     for lateral in laterals {

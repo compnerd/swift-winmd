@@ -313,7 +313,7 @@ struct OrderTests {
   }
 
   @Test func `parses an integer sort key as an ordinal`() throws {
-    // A bare integer is the ISO output-column ORDINAL, not the constant.
+    // A bare integer is the ISO output-column ordinal, not the constant.
     let select = try parse(select: "SELECT A, B FROM T ORDER BY 2 DESC")
     #expect(select.order
               == Order(keys: [Order.Key(sort: .ordinal(2), ascending: false)]))
@@ -341,7 +341,7 @@ struct OrderTests {
   }
 
   @Test func `a bare integer sort key is an ordinal`() throws {
-    // Only a LONE integer literal is the output-column ordinal — the key
+    // Only a lone integer literal is the output-column ordinal — the key
     // parses as an expression and classifies to `.ordinal` when it is one.
     let select = try parse(select: "SELECT A, B FROM T ORDER BY 1")
     #expect(select.order
@@ -731,7 +731,7 @@ struct ExpressionTests {
 
   @Test func `an AS on one item flips a bare sibling into an unaliased expression`() throws {
     // Aliasing only the second item forces the whole list into `expressions`,
-    // but the bare first item carries NO alias (`alias: nil`) — so an
+    // but the bare first item carries no alias (`alias: nil`) — so an
     // `ORDER BY` output-name binding, which considers only explicit aliases,
     // treats it exactly as it would in a `columns` list.
     let select = try parse(select: "SELECT Name, Id AS id FROM T")

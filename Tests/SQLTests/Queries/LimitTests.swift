@@ -87,7 +87,7 @@ struct LimitTests {
 
   @Test func `FETCH after ORDER BY takes the top-N in sorted order`() throws {
     // Ordered by Age ascending, ties by source order (a stable sort): Bob(25),
-    // Eve(25), Alice(30), Carol(30), Dave(40). The FETCH caps the ORDERED
+    // Eve(25), Alice(30), Carol(30), Dave(40). The FETCH caps the ordered
     // result, so it takes the two lowest ages rather than the first two rows.
     try people().expect(
         "SELECT Name FROM People ORDER BY Age FETCH FIRST 2 ROWS ONLY",
@@ -141,7 +141,7 @@ struct LimitTests {
     let catalog = try people()
     try catalog.empty("SELECT 1 / 0 FROM People FETCH FIRST 0 ROWS ONLY")
     try catalog.empty("SELECT 1 / 0 FROM People OFFSET 10 ROWS")
-    // A page that DOES admit a row still evaluates the projection (and throws),
+    // A page that does admit a row still evaluates the projection (and throws),
     // confirming the guard is the empty page, not a skipped projection.
     catalog.expect("SELECT 1 / 0 FROM People FETCH FIRST 1 ROW ONLY",
                    fails: .divide)

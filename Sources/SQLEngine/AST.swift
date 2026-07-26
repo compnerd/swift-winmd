@@ -116,14 +116,14 @@ public struct CTE: Hashable, Sendable {
     self.recursive = recursive
   }
 
-  /// The CTE's DECLARED output columns as the `ResolvedColumn` carrier — each
-  /// declared name typed `.integer` and marked UNCONSTRAINED, since the type is
-  /// a fabricated PLACEHOLDER (a materialised relation reports `.integer`; a
+  /// The CTE's declared output columns as the `ResolvedColumn` carrier — each
+  /// declared name typed `.integer` and marked unconstrained, since the type is
+  /// a fabricated placeholder (a materialised relation reports `.integer`; a
   /// CTE's rows carry no static types), NOT a genuine derivation — so a fold
   /// unifying against it defers to the other arm rather than faulting on the
-  /// placeholder. It is the FALLBACK a trusted derive falls back to when a
+  /// placeholder. It is the fallback a trusted derive falls back to when a
   /// data-dependent body a filter drops faults its type fold; the primary path
-  /// binds a CTE from its BODY-derived carrier (`kinds(of:)`), which unifies
+  /// binds a CTE from its body-derived carrier (`kinds(of:)`), which unifies
   /// the arms and carries the real `unconstrained` mask.
   internal var declared: Array<ResolvedColumn> {
     columns.map { ResolvedColumn(name: $0, type: .integer,
@@ -157,8 +157,8 @@ public enum SetOperation: Hashable, Sendable {
 /// `a UNION (b INTERSECT c)`. Without `all` a set operation removes duplicate
 /// result rows; with `all` (`ALL`) it keeps them per the operator's
 /// multiplicity rule. Every arm must project the same number of columns; the
-/// result column TYPES are unified across the arms (a mixed integer/double
-/// column widening to `double`), while their NAMES come from the first arm (the
+/// result column types are unified across the arms (a mixed integer/double
+/// column widening to `double`), while their names come from the first arm (the
 /// ISO rule).
 public indirect enum Query: Hashable, Sendable {
   /// A single `SELECT`.
@@ -173,9 +173,9 @@ public indirect enum Query: Hashable, Sendable {
   /// node). A `setop` node has no order/distinct/limit slot, so an ordered,
   /// deduplicated, or paged set operation rides this outer carrier: the row
   /// operators (`DISTINCT`, `ORDER BY`, `OFFSET`/`FETCH`) apply to the union's
-  /// combined result, resolved through the setop's OUTPUT scope, and do NOT
+  /// combined result, resolved through the setop's output scope, and do NOT
   /// project — the result columns stay the inner setop's arm-0-named, unified
-  /// ones. It is TRANSPARENT to `columns(unifying:)`, which descends to the
+  /// ones. It is transparent to `columns(unifying:)`, which descends to the
   /// inner setop for the result schema; only `run`/`compile` stack the row
   /// operators over the compiled setop plan. Produced by the GROUPING SETS
   /// `expand` and by the parser for a trailing query-level `ORDER BY` /
@@ -184,17 +184,17 @@ public indirect enum Query: Hashable, Sendable {
   /// `generated` is the number of GENERATED trailing columns the inner union
   /// carries beyond the real output — the hidden sort columns `expand` appends
   /// to each arm (aliased `*gsN`) so a genuinely-unprojected aggregate sort key
-  /// survives the `UNION ALL` at equal arity. The carrier's compile TRIMS them
+  /// survives the `UNION ALL` at equal arity. The carrier's compile trims them
   /// (`real = width − generated`), and `columns(unifying:)` drops them from the
-  /// result schema. It is a STRUCTURAL count carried out of `expand`, never
+  /// result schema. It is a structural count carried out of `expand`, never
   /// recovered by scanning output names for a synthetic prefix; the parser's
   /// trailing-`ORDER BY` carrier generates none (`0`).
   case ordered(Query, distinct: Bool, order: Order?, limit: Limit?,
                generated: Int)
 
   /// The first `SELECT` of the query — the leftmost arm, reached by descending
-  /// the left arm of each set operation. Its projection NAMES the result
-  /// columns (the ISO rule — their TYPES unify across every arm), so a `CREATE
+  /// the left arm of each set operation. Its projection names the result
+  /// columns (the ISO rule — their types unify across every arm), so a `CREATE
   /// VIEW` infers a set operation's column names from it. An `ordered` carrier
   /// is transparent — its first is its inner query's.
   public var first: Select {
@@ -229,7 +229,7 @@ public indirect enum Query: Hashable, Sendable {
     return (self, nil)
   }
 
-  /// This query's carrier-transparent CORE — its inner `setop`/`select`, an
+  /// This query's carrier-transparent core — its inner `setop`/`select`, an
   /// `ordered` carrier peeled off. A thin read over `unwound.inner` for the
   /// `if case .setop = query.core` seams that recognise a set operation whether
   /// or not it rides a carrier, so a carried union is not silently swallowed by
@@ -244,11 +244,11 @@ public indirect enum Query: Hashable, Sendable {
 ///
 /// The parser produces `.keys` for an ordinary `GROUP BY e, …` (empty for no
 /// grouping) and `.sets` for `GROUP BY GROUPING SETS (s, …)`. The compile and
-/// schema paths EXPAND a `.sets` into a `UNION ALL` of per-arm groupings, each
-/// arm a `.arm` grouping on ONE set's `keys` while carrying the `superset` (the
+/// schema paths expand a `.sets` into a `UNION ALL` of per-arm groupings, each
+/// arm a `.arm` grouping on one set's `keys` while carrying the `superset` (the
 /// union of ALL sets' keys) so an arm's lowering NULLs a projected/HAVING
-/// grouping column absent from THIS arm's set — the super-aggregate NULL —
-/// matched by RESOLVED identity, not raw AST.
+/// grouping column absent from this arm's set — the super-aggregate NULL —
+/// matched by resolved identity, not raw AST.
 public enum Grouping: Hashable, Sendable {
   /// `GROUP BY e, …` — the ordinary `<ordinary grouping set>` keys, in source
   /// order (empty for no explicit grouping).
@@ -258,7 +258,7 @@ public enum Grouping: Hashable, Sendable {
   /// an empty inner list is the grand-total set `()`.
   case sets(Array<Array<Expression>>)
 
-  /// ONE expanded arm of a `.sets` grouping — grouped on `keys` (this set's
+  /// one expanded arm of a `.sets` grouping — grouped on `keys` (this set's
   /// members) while `superset` is the union of every set's keys. A grouping
   /// column IN `superset` but absent from `keys` lowers to a super-aggregate
   /// NULL, matched by lowered-`Term` identity in `Grouped.term`. Produced by
@@ -267,7 +267,7 @@ public enum Grouping: Hashable, Sendable {
 
   /// The `GROUP BY` keys this grouping evaluates over the input rows — a
   /// `.keys` its list, a `.sets` the concatenation of all sets' keys, a `.arm`
-  /// its OWN set's keys. The reachability derive reads `isEmpty` here to
+  /// its own set's keys. The reachability derive reads `isEmpty` here to
   /// recognise a whole-result aggregate (an empty `GROUP BY`, the `()` arm), so
   /// this stays the arm's own keys, NOT its superset.
   public var expressions: Array<Expression> {
@@ -281,11 +281,11 @@ public enum Grouping: Hashable, Sendable {
     }
   }
 
-  /// The `GROUP BY` key expressions the subquery/aggregate COLLECTORS descend
+  /// The `GROUP BY` key expressions the subquery/aggregate collectors descend
   /// to pre-register each nested subquery — like `expressions`, but a `.arm`
-  /// yields its `superset` (the union of every set's keys). An arm LOWERS the
+  /// yields its `superset` (the union of every set's keys). An arm lowers the
   /// superset (an absent key NULLs by resolved identity), not merely its own
-  /// set, so a subquery in an OMITTED set's key must be collected here exactly
+  /// set, so a subquery in an omitted set's key must be collected here exactly
   /// as a present set's is; the superset subsumes the arm's own keys.
   internal var collected: Array<Expression> {
     switch self {
@@ -339,7 +339,7 @@ public struct Select: Hashable, Sendable {
   public let grouping: Grouping
 
   /// The `HAVING` filter over the grouped rows, if any — a predicate the engine
-  /// applies AFTER aggregation, so it may reference the aggregates and the
+  /// applies after aggregation, so it may reference the aggregates and the
   /// grouping columns. A `HAVING` without a `GROUP BY` filters the single
   /// whole-result group.
   public let having: Predicate?
@@ -378,9 +378,9 @@ public struct Select: Hashable, Sendable {
   /// Whether the EXISTS cardinality `probe` preserves this select's existence —
   /// so an EXISTS-only occurrence may run the probe rather than a full run.
   ///
-  /// It holds for a non-set-operation `SELECT` WITHOUT a `HAVING` that is
-  /// EITHER non-`DISTINCT` (its cardinality is the source's, independent of the
-  /// projected values) OR `DISTINCT` WITHOUT an `OFFSET`. `DISTINCT` collapses
+  /// It holds for a non-set-operation `SELECT` without a `HAVING` that is
+  /// either non-`DISTINCT` (its cardinality is the source's, independent of the
+  /// projected values) OR `DISTINCT` without an `OFFSET`. `DISTINCT` collapses
   /// a non-empty source to at least one distinct row, so `SELECT DISTINCT 1
   /// FROM S` is non-empty iff `S` is — existence is preserved by the constant
   /// projection. An `OFFSET` breaks that: it skips DISTINCT rows, so emptiness
@@ -390,10 +390,10 @@ public struct Select: Hashable, Sendable {
   /// probe-eligible.
   ///
   /// An aggregate/grouped select without a `HAVING` is probe-eligible: its
-  /// cardinality is a source-only fact the probe preserves WITHOUT the original
+  /// cardinality is a source-only fact the probe preserves without the original
   /// target (see `probe`). A whole-result aggregate (no `GROUP BY`) yields
-  /// EXACTLY ONE row regardless of the source — so EXISTS is true modulo the
-  /// limit — and a grouped one yields ONE ROW PER GROUP, so existence is the
+  /// exactly one row regardless of the source — so EXISTS is true modulo the
+  /// limit — and a grouped one yields one ROW per GROUP, so existence is the
   /// source's non-emptiness after `WHERE`. A `HAVING` is NOT eligible: group
   /// survival depends on the aggregate VALUES (which `HAVING` may reference),
   /// so cardinality is not a source-only fact and the target must run.
@@ -404,26 +404,26 @@ public struct Select: Hashable, Sendable {
 
   /// The EXISTS cardinality-probe rewrite of this select — the same
   /// FROM/`WHERE`/joins, the same `DISTINCT` quantifier, the same `GROUP BY`,
-  /// and the SAME original `OFFSET`/`FETCH`, but its projection replaced with a
+  /// and the same original `OFFSET`/`FETCH`, but its projection replaced with a
   /// cardinality-preserving target and its `ORDER BY` dropped — so a probe run
-  /// tests whether the row source yields ANY row WITHOUT evaluating the
+  /// tests whether the row source yields ANY row without evaluating the
   /// original select list or sort keys.
   ///
   /// It preserves the row source (FROM, joins, `WHERE`) and the original row
-  /// limit EXACTLY, so its cardinality matches this select's — enough for an
+  /// limit exactly, so its cardinality matches this select's — enough for an
   /// existence test that honours the original limiting: a `FETCH FIRST 0 ROWS`
   /// probes zero rows (EXISTS false) and an `OFFSET` past the end probes none
   /// (false), neither overridden by a synthetic cap. `ORDER BY` is dropped
   /// because existence is order-independent (the row count after `OFFSET`/
   /// `FETCH` does not depend on order). A FROM-less `SELECT <exprs>` always
   /// yields exactly one row and cannot carry a limit, so its probe is just
-  /// `SELECT <constant>` with NO limit — it compiles and yields one row
+  /// `SELECT <constant>` with no limit — it compiles and yields one row
   /// (EXISTS true). `DISTINCT` is retained (the caller applies the probe to a
   /// `DISTINCT` select only when it has no `OFFSET`, so `SELECT DISTINCT 1 FROM
   /// S` yields exactly one distinct row iff `S` is non-empty).
   ///
   /// The probe target is chosen to preserve cardinality without the original:
-  /// a NON-aggregate select projects the constant `1`, one row per source row;
+  /// a non-aggregate select projects the constant `1`, one row per source row;
   /// an aggregate/grouped one projects `COUNT(*)` (with the `GROUP BY` kept), a
   /// trivial always-computable aggregate whose grouping is the original's — a
   /// whole-result `COUNT(*)` yields exactly one row (even over an empty source)
@@ -441,20 +441,20 @@ public struct Select: Hashable, Sendable {
                   grouping: grouping, having: nil, order: nil, limit: limit)
   }
 
-  /// Every expression the ORDER BY sort EVALUATES over its input rows — the
-  /// direct sort-key expressions AND the projection expressions its OUTPUT
+  /// Every expression the ORDER BY sort evaluates over its input rows — the
+  /// direct sort-key expressions AND the projection expressions its output
   /// shorthands reach — the ones a reachable type-check pass must validate as
   /// it does a projected expression.
   ///
-  /// The compiled shape is `Project(Limit(Sort(input)))`: the sort is BELOW the
-  /// limit and evaluates each key over the input rows BEFORE the cap pages
+  /// The compiled shape is `Project(Limit(Sort(input)))`: the sort is below the
+  /// limit and evaluates each key over the input rows before the cap pages
   /// them, so what the sort forces to evaluate is independent of whether the
   /// projection is reachable. Each ORDER BY key resolves to the expression the
   /// sort runs, mirroring the resolver's lowering:
   ///
   ///   - a direct `.expression(e)` key over the input columns yields `e`;
-  ///   - a bare unqualified column matching a projected explicit-`AS` OUTPUT
-  ///     ALIAS resolves to that projection item's OWN expression (the ISO alias
+  ///   - a bare unqualified column matching a projected explicit-`AS` output
+  ///     alias resolves to that projection item's own expression (the ISO alias
   ///     precedence a `ORDER BY x` follows) — the term the sort recomputes
   ///     below the limit, NOT a fresh input reference;
   ///   - an `ordinal(n)` resolves to the `n`-th projection item's expression
@@ -464,19 +464,19 @@ public struct Select: Hashable, Sendable {
   /// reach (each output is a plain column slot compilation already resolves),
   /// so an ordinal or bare-name key against one contributes nothing to check.
   ///
-  /// A bare unqualified name binds to a projection OUTPUT name by the SAME rule
+  /// A bare unqualified name binds to a projection output name by the same rule
   /// the resolver's `ORDER BY` lowering uses, so the type-check and the run
   /// agree on which keys are outputs and which are input columns:
   ///
-  ///   - a NON-grouped query resolves an output name from an EXPLICIT `AS`
-  ///     ALIAS only (`Projected.alias`) — the representation-independent ISO
+  ///   - a non-grouped query resolves an output name from an explicit `AS`
+  ///     alias only (`Projected.alias`) — the representation-independent ISO
   ///     precedence a `ORDER BY x` follows, so a bare projected column (no
   ///     `AS`) introduces no output and `ORDER BY <bareName>` stays an input
   ///     reference whether the parser emitted the select list as `columns` or,
   ///     forced by a sibling `AS`, as `expressions` (mirrors non-grouped
   ///     `Scope.order`);
-  ///   - a GROUPED query resolves an output name from `Projected.name` (an
-  ///     alias, else a bare column's name) — the SAME output-name set
+  ///   - a grouped query resolves an output name from `Projected.name` (an
+  ///     alias, else a bare column's name) — the same output-name set
   ///     `Grouped.terms`/`Grouped.order` record and bind, so a grouped
   ///     `ORDER BY <groupcol>` naming an unaliased projected group column
   ///     resolves to that output here exactly as it does in the run, rather
@@ -514,7 +514,7 @@ public struct Select: Hashable, Sendable {
           expressions.append(items[position - 1].expression)
         }
       case let .expression(expression):
-        // A bare unqualified name binds a matching projection OUTPUT name
+        // A bare unqualified name binds a matching projection output name
         // before an input column (the ISO precedence), resolving to that
         // item's expression — the output surface (`output`) mirrors the
         // resolver's lowering for this query shape.
@@ -533,13 +533,13 @@ public struct Select: Hashable, Sendable {
 }
 
 /// A relation in a `FROM` or `JOIN`: a base relation named by an identifier, or
-/// a DERIVED TABLE — a parenthesised subquery `(SELECT …)` — each with an
+/// a derived TABLE — a parenthesised subquery `(SELECT …)` — each with an
 /// alias.
 ///
 /// A `named` relation's `name` is its spelling; its `alias`, when present, is
 /// the short name a qualified column reference may use in its place (`FROM
 /// TypeDef AS t`). A `derived` relation wraps a `Query`, materialised once
-/// and resolved under a MANDATORY alias — ISO requires a derived table be named
+/// and resolved under a mandatory alias — ISO requires a derived table be named
 /// (`FROM (SELECT …) AS t`) — so `alias` is always present and `name` is that
 /// alias, the key the resolution scope binds its materialised rows under.
 public struct Relation: Hashable, Sendable {
@@ -561,15 +561,15 @@ public struct Relation: Hashable, Sendable {
 
   /// The relation's explicit output column names — the ISO `AS t(c, …)` list —
   /// in ordinal order, or empty when the relation carries no list. A supplied
-  /// list positionally RENAMES the relation's real output columns (the same
+  /// list positionally renames the relation's real output columns (the same
   /// mechanism a CTE's `columns` list applies), so `FROM T AS t(c, d)` and
   /// `(SELECT x, y FROM T) AS d(a, b)` address the relation's columns by the
-  /// new names. ISO admits the list on BOTH a named relation and a derived
+  /// new names. ISO admits the list on both a named relation and a derived
   /// table, so it rides on the shared `Relation` node. Empty matches the CTE
   /// field's shape (an absent list, columns inferred from the source).
   public let columns: Array<String>
 
-  /// Whether a `LATERAL` derived table — its body may reference the PRECEDING
+  /// Whether a `LATERAL` derived table — its body may reference the preceding
   /// FROM items, so it re-evaluates per their rows (a correlated apply), rather
   /// than materialising once. Always `false` for a `named` relation and for a
   /// plain (non-`LATERAL`) derived table, which resolves independently of its
@@ -628,7 +628,7 @@ public struct Relation: Hashable, Sendable {
 /// `kind` is the inner/outer variety: `inner` (the default) keeps only matched
 /// pairs, while a `left`/`right`/`full` OUTER join additionally preserves the
 /// unmatched rows of the left, right, or both sides, NULL-extending the other
-/// side's columns. The `ON` predicate governs MATCHING alone — an unmatched
+/// side's columns. The `ON` predicate governs matching alone — an unmatched
 /// outer row is still emitted — which is distinct from a post-join `WHERE`.
 public struct Join: Hashable, Sendable {
   /// The inner/outer variety of a join.
@@ -644,24 +644,24 @@ public struct Join: Hashable, Sendable {
   }
 
   /// The ISO named-column join criterion of a `NATURAL` or `JOIN … USING`
-  /// clause — a shorthand whose join columns are resolved by NAME rather than
-  /// spelled as an `ON` predicate, and whose common columns COALESCE into ONE
+  /// clause — a shorthand whose join columns are resolved by name rather than
+  /// spelled as an `ON` predicate, and whose common columns COALESCE into one
   /// unqualified output column (ISO 9075 7.10).
   ///
   /// It is mutually exclusive with an `ON` predicate (the parser rejects a
   /// `NATURAL … ON` / `USING … ON`), and its concrete column set is known only
-  /// after SCHEMA resolution — the two sides' column names — so the engine
+  /// after schema resolution — the two sides' column names — so the engine
   /// carries the criterion here and resolves it into the equality `on`
   /// predicate and the coalesced `SELECT *` output during compilation, rather
   /// than at parse time. A join with no criterion (`nil`) is a plain `ON`/
   /// `CROSS` join.
   public enum Using: Hashable, Sendable {
-    /// `NATURAL` — the join columns are EVERY column name the two sides share
+    /// `NATURAL` — the join columns are every column name the two sides share
     /// (their case-insensitive intersection, in the left side's column order),
     /// computed at resolution. No common column degenerates to a `CROSS` join.
     case natural
-    /// `USING (c, …)` — the join columns are the NAMED ones, each of which must
-    /// name a column present in BOTH sides (else a column fault).
+    /// `USING (c, …)` — the join columns are the named ones, each of which must
+    /// name a column present in both sides (else a column fault).
     case columns(Array<String>)
   }
 
@@ -717,7 +717,7 @@ public struct Join: Hashable, Sendable {
 /// real column or one of the binding's adapter-computed columns (`Id`, an owner
 /// foreign key); the AST does not distinguish them.
 ///
-/// `Column` is `ExpressibleByStringLiteral`, splitting a literal on its LAST
+/// `Column` is `ExpressibleByStringLiteral`, splitting a literal on its last
 /// dot into qualifier and name, so a consumer may write a reference as a plain
 /// string (`"t.Name"`, `"Flags"`).
 public struct Column: Hashable, Sendable, ExpressibleByStringLiteral {
@@ -732,7 +732,7 @@ public struct Column: Hashable, Sendable, ExpressibleByStringLiteral {
     self.name = name
   }
 
-  /// Parses a reference from its dotted spelling: the text before the LAST dot
+  /// Parses a reference from its dotted spelling: the text before the last dot
   /// is the qualifier and the text after it is the name; an undotted spelling
   /// is an unqualified name.
   ///
@@ -778,13 +778,13 @@ public enum Projection: Hashable, Sendable {
   ///
   /// A `columns` projection yields each reference's name (the qualifier
   /// dropped); an `expressions` projection yields each item's inferable `name`
-  /// The per-item explicit-`AS` OUTPUT ALIASES of a projection of `count`
+  /// The per-item explicit-`AS` output aliases of a projection of `count`
   /// columns, aligned index-for-index with the lowered projection terms — an
   /// `expressions` item's `alias` (the explicit `AS`, else `nil`); a `*` or a
   /// bare-column list names none (`nil` throughout).
   ///
   /// It is the alias surface an `ORDER BY` output name resolves against, and it
-  /// is REPRESENTATION-INDEPENDENT: only an explicit `AS` introduces an
+  /// is representation-independent: only an explicit `AS` introduces an
   /// output name an `ORDER BY` may bind, so a bare projected column (`SELECT
   /// a.Name …`) contributes `nil` here whether the parser emitted it as a
   /// `columns` list or, forced by a sibling `AS`, as an `expressions` list —
@@ -845,7 +845,7 @@ public struct Projected: Hashable, Sendable {
 
   /// The output name this item contributes, or `nil` when it has none — its
   /// alias, else a bare column's name; a non-column expression with no alias
-  /// has no inferable name. It is the ONE derivation every output-name site
+  /// has no inferable name. It is the one derivation every output-name site
   /// shares: view/CTE column inference (`Projection.names()`, faulting on
   /// `nil`), the result-schema walk (substituting a positional `column N`),
   /// and an aggregate `ORDER BY`'s alias recording (recording only a `name`).
@@ -891,7 +891,7 @@ public indirect enum Expression: Hashable, Sendable {
   ///
   /// `filter`, when present, is the ISO `FILTER (WHERE <search condition>)` —
   /// the aggregate folds only the rows of the group whose predicate is TRUE (a
-  /// FALSE or UNKNOWN row is skipped), applied as a per-row gate BEFORE the
+  /// FALSE or UNKNOWN row is skipped), applied as a per-row gate before the
   /// value reaches the fold — and before the `DISTINCT` dedup, so the two
   /// compose as "filter, then dedup". It gates even `COUNT(*)`, which counts
   /// only the admitted rows.
@@ -902,7 +902,7 @@ public indirect enum Expression: Hashable, Sendable {
   /// `else` result, or `NULL` when there is no `ELSE`. The `when`s are held in
   /// source order.
   ///
-  /// Both ISO forms reduce to this searched shape: a SEARCHED `CASE WHEN cond
+  /// Both ISO forms reduce to this searched shape: a searched `CASE WHEN cond
   /// THEN r … END` carries its predicates directly, and a SIMPLE `CASE op WHEN
   /// v THEN r … END` is normalised at parse time to `WHEN op = v THEN r …`, so
   /// the engine models one conditional. The result expressions' types must
@@ -910,8 +910,8 @@ public indirect enum Expression: Hashable, Sendable {
   case `case`(Array<When>, else: Expression?)
   /// A `CAST(operand AS type)` — the ISO explicit conversion of the `operand`
   /// expression to the target `ValueType`. Unlike the widening `CASE` unifies
-  /// its arms with, a cast is a NOMINAL conversion whose static type is the
-  /// target, so the engine advertises `type` for the column and CONVERTS the
+  /// its arms with, a cast is a nominal conversion whose static type is the
+  /// target, so the engine advertises `type` for the column and converts the
   /// evaluated value to it per row (see `Value.cast(to:)`). A `NULL` operand
   /// casts to `NULL` for any target; an unconvertible value (an unparseable
   /// text-to-number, an out-of-range double-to-integer, a cross-kind pair with
@@ -919,8 +919,8 @@ public indirect enum Expression: Hashable, Sendable {
   case cast(Expression, ValueType)
   /// `COALESCE(v1, v2, …)` — the first argument whose value is non-NULL, else
   /// NULL. The ISO definition is the searched `CASE WHEN v1 IS NOT NULL THEN v1
-  /// … END`, but it is a FIRST-CLASS node rather than that expansion so each
-  /// argument is evaluated EXACTLY ONCE: the desugar re-referenced each `vi` in
+  /// … END`, but it is a FIRST-class node rather than that expansion so each
+  /// argument is evaluated exactly once: the desugar re-referenced each `vi` in
   /// both its `IS NOT NULL` guard and its `THEN`, evaluating a stateful
   /// argument twice — testing one call's value for NULL and returning a
   /// different one. The result type is the `ValueType.unified` reduction over
@@ -930,40 +930,40 @@ public indirect enum Expression: Hashable, Sendable {
   case coalesce(Array<Expression>)
   /// `NULLIF(v1, v2)` — NULL when `v1` equals `v2`, else `v1`. The ISO
   /// definition is `CASE WHEN v1 = v2 THEN NULL ELSE v1 END`, but it is a
-  /// FIRST-CLASS node rather than that expansion so `v1` is evaluated EXACTLY
-  /// ONCE: the desugar embedded `v1` in both the equality and the `ELSE`,
+  /// FIRST-class node rather than that expansion so `v1` is evaluated exactly
+  /// once: the desugar embedded `v1` in both the equality and the `ELSE`,
   /// evaluating a stateful `v1` twice — comparing one call's value to `v2` and
   /// returning a different one. The result type is `v1`'s.
   case nullif(Expression, Expression)
   /// A scalar subquery `(SELECT …)` — a nested `Query` in expression position,
-  /// yielding ONE value: its lone cell when it returns exactly one row, NULL
+  /// yielding one value: its lone cell when it returns exactly one row, NULL
   /// when it returns none, and `SQLError.cardinality` when it returns more. The
-  /// inner query must project EXACTLY ONE column (checked at compile, cursor-
+  /// inner query must project exactly one column (checked at compile, cursor-
   /// free, from its compiled width); the value's type is that column's. `Query`
   /// is `indirect`, so nesting it here composes the synthesized `Hashable`.
   ///
-  /// In this slice the subquery is UNCORRELATED — it names no column of the
-  /// enclosing query — so it runs ONCE per outer-query execution (memoised in
+  /// In this slice the subquery is uncorrelated — it names no column of the
+  /// enclosing query — so it runs once per outer-query execution (memoised in
   /// the same `Subqueries` cache an `EXISTS`/`IN (Q)` predicate uses) and its
   /// value is the same for every outer row. A reference to an outer column
   /// resolves (or faults) as any other column would; correlation is a later
   /// slice.
   case subquery(Query)
-  /// `GROUPING(a, …)` — the ISO grouping-sets function, an integer bit-VECTOR
-  /// reporting per argument whether that expression was ROLLED UP (omitted from
+  /// `GROUPING(a, …)` — the ISO grouping-sets function, an integer bit-vector
+  /// reporting per argument whether that expression was rolled up (omitted from
   /// the current result row's grouping set — bit `1`) or is a grouping key of
-  /// this set (bit `0`). The FIRST argument is the MOST-significant bit, so over
+  /// this set (bit `0`). The FIRST argument is the most-significant bit, so over
   /// the `()` arm of `GROUPING SETS ((a, b), ())` `GROUPING(a, b)` is `0b11`
   /// (`3`), and over the `(a)` arm it is `0b01` (`1`). Each argument must be a
   /// `GROUP BY` expression of some grouping set (else an error), and GROUPING is
   /// valid only in a grouped query (a `GROUP BY`, or a whole-result aggregate).
   ///
-  /// It is a FIRST-CLASS node — NOT a scalar `call(name: "GROUPING", …)`, which
+  /// It is a FIRST-class node — NOT a scalar `call(name: "GROUPING", …)`, which
   /// would fault `SQLError.function` as an unregistered routine — because it
-  /// resolves against the GROUPED scope's key membership rather than through
+  /// resolves against the grouped scope's key membership rather than through
   /// the routines: after GROUPING SETS expansion each arm knows its own
-  /// keys and the superset, so GROUPING is a COMPILE-TIME per-arm integer
-  /// CONSTANT (`Grouped.term`) and no executor path ever evaluates a `grouping`
+  /// keys and the superset, so GROUPING is a compile-TIME per-arm integer
+  /// constant (`Grouped.term`) and no executor path ever evaluates a `grouping`
   /// node — it lowers to a `Term.constant(.integer(bits))`.
   case grouping(Array<Expression>)
 }
@@ -982,7 +982,7 @@ public struct Order: Hashable, Sendable {
     /// An ISO `<sort key>` — the value a key orders on.
     ///
     /// The standard makes a sort key an arbitrary value expression over the
-    /// query's columns; SQL practice adds two shorthands that name an OUTPUT
+    /// query's columns; SQL practice adds two shorthands that name an output
     /// column of the select list rather than an input value: a 1-based
     /// `ordinal` and an output `alias`. The three cases:
     ///
@@ -993,11 +993,11 @@ public struct Order: Hashable, Sendable {
     ///   a select-list position. An out-of-range `n` faults.
     /// - `expression(e)` — `ORDER BY a + b`, `ORDER BY UPPER(Name)`, or a bare
     ///   column `ORDER BY Name` (the common case) — any value expression over
-    ///   the INPUT columns, evaluated per row.
+    ///   the input columns, evaluated per row.
     ///
-    /// An unqualified name is EITHER an output alias (`SELECT x AS y … ORDER BY
+    /// An unqualified name is either an output alias (`SELECT x AS y … ORDER BY
     /// y`) or an input column; it lowers as an `expression(.column(name))` and
-    /// the resolver prefers a matching OUTPUT alias to an input column of the
+    /// the resolver prefers a matching output alias to an input column of the
     /// same name (the ISO precedence for a bare `ORDER BY` name), falling back
     /// to the input column when no alias claims it.
     public enum Sort: Hashable, Sendable {

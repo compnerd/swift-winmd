@@ -59,7 +59,7 @@ struct AggregateDistinctTests {
   @Test func `DISTINCT is a no-op for MIN and MAX`() throws {
     // The least/greatest value is unchanged by duplicates, so a MIN/MAX honours
     // DISTINCT as a no-op — MIN 10, MAX 30 either way. The DISTINCT form
-    // normalises the quantifier OFF, so it never builds the `seen` dedup set
+    // normalises the quantifier off, so it never builds the `seen` dedup set
     // (an O(1) streaming fold, not O(distinct-values) memory), yet must still
     // agree cell for cell with the plain form.
     try orders().expect("""
@@ -70,7 +70,7 @@ struct AggregateDistinctTests {
   }
 
   @Test func `MIN and MAX DISTINCT agree with the plain form over duplicates`() throws {
-    // A group whose extreme values (10 and 30) are DUPLICATED many times: the
+    // A group whose extreme values (10 and 30) are duplicated many times: the
     // MIN/MAX(DISTINCT) fold does not dedup (it keeps no `seen` set), so its
     // memory does not grow with the group, and its result matches the plain
     // MIN/MAX — the extreme is the same with or without duplicates. Grouped so
@@ -109,14 +109,14 @@ struct AggregateDistinctTests {
   }
 }
 
-/// A pair of one-column relations whose values CANONICALISE across the two
+/// A pair of one-column relations whose values canonicalise across the two
 /// kinds: `Ints` holds the exact integers `Int.max` and `1`, `Reals` the double
 /// `1.0` (equal to the integer `1` under `canonical`). Two views `UNION ALL`
 /// them into a single `V` column mixing integer and double cells — `IntFirst`
 /// with the integers before the double, `RealFirst` the reverse — so a
 /// `SUM(DISTINCT …)` over either dedups `1` and `1.0` to one value while the
 /// distinct integer total (`Int.max + 1`) overflows `Int`. An int-first order
-/// must still WIDEN to the finite double a double-first order gives, the
+/// must still widen to the finite double a double-first order gives, the
 /// order-independence a skipped double duplicate must not defeat.
 private func mixed() throws -> FixtureCatalog {
   try Catalog {
@@ -149,7 +149,7 @@ struct AggregateDistinctWideningTests {
     // duplicate skipped for the sum — but it must still set the widen flag,
     // else the all-integer total Int.max + 1 overflows. Double-first: 1.0 folds
     // and widens, Int.max folds, then 1 is the skipped duplicate. Both must
-    // yield the SAME finite double.
+    // yield the same finite double.
     try mixed().expect("SELECT SUM(DISTINCT V) FROM IntFirst",
                        yields: [[widened]])
     try mixed().expect("SELECT SUM(DISTINCT V) FROM RealFirst",
@@ -232,7 +232,7 @@ struct AggregateFilterUnreachableOperandTests {
   @Test func `a constant-false FILTER makes the operand unreachable`() throws {
     // The executor evaluates the FILTER before the argument, so a definitely-
     // false gate means `1 / 0` never divides: the query validates (no fault on
-    // the dead operand) and RUNS to the empty aggregate result (NULL).
+    // the dead operand) and runs to the empty aggregate result (NULL).
     let sql = "SELECT SUM(1 / 0) FILTER (WHERE 1 = 0) FROM Orders"
     _ = try orders().columns(of: Statement(parsing: sql))
     try orders().expect(sql, yields: [[nil]])
@@ -261,7 +261,7 @@ struct AggregateFilterUnreachableOperandTests {
   }
 
   // A FILTER that folds definitely UNKNOWN — a constant NULL comparison, here
-  // `NULLIF(1, 1) = 1` whose left side folds to NULL — is treated the SAME as a
+  // `NULLIF(1, 1) = 1` whose left side folds to NULL — is treated the same as a
   // constant-false one: the executor's gate admits a row only on a definite
   // TRUE, so an UNKNOWN gate also admits no row and leaves the operand
   // unreachable. Validation matches that, so `SUM(1 / 0)` behind it validates
@@ -274,9 +274,9 @@ struct AggregateFilterUnreachableOperandTests {
     try orders().expect(sql, yields: [[nil]])
   }
 
-  // A settled-non-TRUE CONJUNCT kills the whole conjunction: an AND is TRUE
-  // only if EVERY conjunct is, so a row-independently non-TRUE conjunct means
-  // no row can pass the gate even when a SIBLING conjunct is per row. Here
+  // A settled-non-TRUE conjunct kills the whole conjunction: an AND is TRUE
+  // only if every conjunct is, so a row-independently non-TRUE conjunct means
+  // no row can pass the gate even when a sibling conjunct is per row. Here
   // `NULLIF(1, 1) = 1` folds definitely UNKNOWN (NULLIF(1,1) is NULL, NULL = 1
   // is UNKNOWN) while `Amount > 0` is per row — the filter is still dead, so
   // `SUM(1 / 0)` behind it validates and runs to NULL rather than faulting.
@@ -300,7 +300,7 @@ struct AggregateFilterUnreachableOperandTests {
   }
 
   // The proof is order-independent — the AND spine is flattened, so a
-  // settled-non-TRUE conjunct SECOND kills the filter as one first does.
+  // settled-non-TRUE conjunct second kills the filter as one first does.
   @Test func `a settled-FALSE conjunct kills the FILTER in either order`() throws {
     let sql = """
         SELECT SUM(1 / 0) FILTER (WHERE Amount > 0 AND 1 = 0) FROM Orders

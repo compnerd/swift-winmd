@@ -45,21 +45,21 @@ extension Catalog where Self: ~Escapable {
       // Optimise the view's sub-plan with the bindings so a bound predicate
       // inside the view seeks; the derived leaf itself carries no sort key, so
       // the outer query still scans its result as is. The sub-plan resolves
-      // OUTSIDE the statement's CTE scope — never a caller's `WITH` — so a view
+      // outside the statement's CTE scope — never a caller's `WITH` — so a view
       // means what it was registered to mean; its scope is the
-      // `definition_schema.` overlay its OWN query names (the same one it
+      // `definition_schema.` overlay its own query names (the same one it
       // compiled under), so a view body's store scan re-resolves.
       //
-      // A SET-OPERATION view body's arm scans an arm-local derived alias the
+      // A SET-operation view body's arm scans an arm-local derived alias the
       // whole-view overlay does not bind (arms are SELECT-scoped), so `seek`
-      // would fault `.relation` resolving it. Optimise each arm under THAT
+      // would fault `.relation` resolving it. Optimise each arm under that
       // arm's own augmented overlay — the same per-arm scope `derive`/`setop`
       // execute it under — so the arm's `d` resolves for the seek rewrite.
       try .derived(name: name,
                    plan: optimise(view: name, plan, context),
                    ordinals: ordinals, seek: seek)
     case let .select(filter, source) where filter.constant == true:
-      // A PROVABLY-always-true filter admits every row, so the select is a
+      // A provably-always-true filter admits every row, so the select is a
       // no-op: drop it and optimise the source alone — identical result, one
       // fewer per-row predicate. This composes with the seek and nest cases
       // below: a constant-true filter over a `.scan` or `.product` never
@@ -67,7 +67,7 @@ extension Catalog where Self: ~Escapable {
       // product), not a seek over a true residual or a nest with a true gate.
       try optimise(source, context)
     case let .select(filter, source) where filter.constant == false:
-      // A PROVABLY-always-false filter admits NO row, so the whole selection is
+      // A provably-always-false filter admits no row, so the whole selection is
       // the known-empty relation of the source's width — WHEN discarding the
       // source suppresses no observable throw. `emptied(filter:over:)`
       // optimises the source, then folds to `.empty` only when that source is
@@ -122,7 +122,7 @@ extension Catalog where Self: ~Escapable {
     case let .distinct(source):
       // A `distinct` dedups its source without a seek or join of its own;
       // optimise the source below it, then DROP the dedup when that optimised
-      // source PROVABLY yields distinct full rows already (`Plan.unique`) —
+      // source provably yields distinct full rows already (`Plan.unique`) —
       // DISTINCT-of-DISTINCT, DISTINCT over a set operation's deduped result,
       // or over a grouped aggregate — else rewrap and keep deduplicating.
       try deduplicated(source, context)
@@ -141,21 +141,21 @@ extension Catalog where Self: ~Escapable {
     }
   }
 
-  /// The fold of a PROVABLY constant-false `select(filter, source)` into the
+  /// The fold of a provably constant-false `select(filter, source)` into the
   /// known-empty relation, or the select left intact when the fold would change
   /// more than the (already-zero) row count.
   ///
   /// A constant-false `filter` admits no row, so the selection's result is
   /// empty — but executing `select(false, source)` today still runs `source`,
-  /// which may RAISE, before it filters every row out. Rewriting to `.empty`
-  /// skips `source` entirely, so it is sound ONLY when `source` raises on NO
-  /// input (`Plan.safe`) — else the fold would SUPPRESS a throw, a correctness
+  /// which may raise, before it filters every row out. Rewriting to `.empty`
+  /// skips `source` entirely, so it is sound ONLY when `source` raises on no
+  /// input (`Plan.safe`) — else the fold would suppress a throw, a correctness
   /// bug
   /// rather than an optimisation. The source is optimised first so its safety
   /// and width reflect the physical shape the executor would actually run (and
   /// so its own nested folds still apply on the fall-through). `.empty` carries
   /// the source's slot width so a downstream consumer mis-shapes nothing; a
-  /// source of unknown width (`slots` nil) is left filtering. On EITHER doubt
+  /// source of unknown width (`slots` nil) is left filtering. On either doubt
   /// the select stays — a constant-false filter neither seeks nor supplies a
   /// join key (`1 = 0` reads no slot), so no seek or nest rewrite is forgone.
   private borrowing func emptied(_ filter: Filter, over source: Plan,
@@ -169,18 +169,18 @@ extension Catalog where Self: ~Escapable {
   }
 
   /// The fold of a `distinct(source)` into its optimised `source` alone when
-  /// that source PROVABLY yields distinct full rows already, or the `distinct`
+  /// that source provably yields distinct full rows already, or the `distinct`
   /// left wrapping it otherwise.
   ///
   /// `SELECT DISTINCT` compiles to a `distinct` over the projected rows, but
-  /// the dedup is REDUNDANT when the source yields no duplicate full row — a
+  /// the dedup is redundant when the source yields no duplicate full row — a
   /// DISTINCT over another DISTINCT, over a set operation's already-deduped
   /// result, or over a grouped aggregate (one row per distinct group key). The
   /// source is optimised first so its `unique` reflects the physical shape the
   /// executor runs (and so its own nested folds still apply). Dropping the
-  /// `distinct` is sound ONLY when `source.unique` is PROVABLY true — a
-  /// CONSERVATIVE test resolving every doubt to `false` (keep the dedup), so a
-  /// mis-fold never LEAKS a duplicate; a missed fold costs one extra dedup.
+  /// `distinct` is sound ONLY when `source.unique` is provably true — a
+  /// conservative test resolving every doubt to `false` (keep the dedup), so a
+  /// mis-fold never leaks a duplicate; a missed fold costs one extra dedup.
   private borrowing func deduplicated(_ source: Plan, _ context: Context)
       throws(SQLError) -> Plan {
     let source = try optimise(source, context)
@@ -188,17 +188,17 @@ extension Catalog where Self: ~Escapable {
   }
 
   /// Optimises a VIEW body's sub-`plan` for the view named `name`, resolving
-  /// its scans under the view's OWN overlay rather than a caller's scope.
+  /// its scans under the view's own overlay rather than a caller's scope.
   ///
-  /// A SINGLE-arm body optimises under the whole-view overlay
-  /// (`overlay(name:)`) — the same scope it compiled under. A SET-OPERATION
-  /// body optimises each ARM under THAT arm's own augmented overlay: an arm
+  /// A single-arm body optimises under the whole-view overlay
+  /// (`overlay(name:)`) — the same scope it compiled under. A SET-operation
+  /// body optimises each ARM under that arm's own augmented overlay: an arm
   /// scans its arm-local derived alias, which the whole-view overlay does not
   /// bind (arms are SELECT-scoped), so `seek` would fault `.relation` resolving
   /// it. The `plan` tree mirrors the `query` tree, so this descends the two in
-  /// lockstep — a `.setop` node recurses into both arms, a LEAF arm augments
-  /// the arm's aliases SCHEMA-ONLY (`rows: false`, so `seek` treats them as
-  /// unseekable materialised relations by name/schema WITHOUT executing a
+  /// lockstep — a `.setop` node recurses into both arms, a leaf arm augments
+  /// the arm's aliases schema-ONLY (`rows: false`, so `seek` treats them as
+  /// unseekable materialised relations by name/schema without executing a
   /// derived body) and optimises the arm sub-plan under that arm-local scope —
   /// matching the per-arm scope `derive`/`setop` execute it under.
   private borrowing func optimise(view name: String, _ plan: Plan,
@@ -208,8 +208,8 @@ extension Catalog where Self: ~Escapable {
     guard let view = resolve(view: name) else {
       return try optimise(plan, overlay)
     }
-    // A BARE set-operation body (`view.query` itself a `.setop`) optimises its
-    // `.setop` plan per arm, EXACTLY as before — but any other plan shape (a
+    // A bare set-operation body (`view.query` itself a `.setop`) optimises its
+    // `.setop` plan per arm, exactly as before — but any other plan shape (a
     // pushed `.select` over the setop, a `.derived`, a leaf) stays on the plain
     // optimiser, whose pushdown/seek pass rebases a caller `WHERE` into each
     // arm. Preserved verbatim so a non-ordered union view's seek injection is
@@ -217,12 +217,12 @@ extension Catalog where Self: ~Escapable {
     if case .setop = view.query, case .setop = plan {
       return try optimise(plan, view.query, overlay)
     }
-    // A set operation UNDER an `ordered` carrier compiles to a `.shaped` stack
+    // A set operation under an `ordered` carrier compiles to a `.shaped` stack
     // (project/sort/distinct/limit) over the `.setop` — NOT a bare setop — so
     // its per-arm derived aliases went un-optimised (both `case .setop` guards
     // failed). Descend the carrier wrapper to the setop leaf, optimising each
     // arm under its own overlay, exactly as the execute path's carrier-aware
-    // `setop`/`execute(_:carrying:)` do. GATED on the body actually wearing a
+    // `setop`/`execute(_:carrying:)` do. gated on the body actually wearing a
     // carrier (`view.query` an `.ordered`), so a bare union view keeps the
     // plain path above and this never rewrites its pushed `.select`/seek shape.
     if case .ordered = view.query, case .setop = view.query.core {
@@ -231,8 +231,8 @@ extension Catalog where Self: ~Escapable {
     return try optimise(plan, overlay)
   }
 
-  /// Optimises a view body's SET-OPERATION `plan` arm by arm, each arm sub-plan
-  /// under `overlay` AUGMENTED with THAT arm's own derived aliases, descending
+  /// Optimises a view body's SET-operation `plan` arm by arm, each arm sub-plan
+  /// under `overlay` augmented with that arm's own derived aliases, descending
   /// the `plan` and `query` trees in lockstep (they mirror each other). A body
   /// riding an `ordered` carrier descends the `.shaped` wrapper stack first,
   /// reconstructing each row operator over its optimised source, down to the
@@ -249,7 +249,7 @@ extension Catalog where Self: ~Escapable {
     // Descend the `ordered` carrier's single-source row operators, rebuilding
     // each over its optimised source while the setop `query` core rides through
     // unchanged until the `.setop` node above splits it. The carrier wrapper
-    // sits ABOVE the setop, so `query` is STILL the `.setop` core here — gate
+    // sits above the setop, so `query` is still the `.setop` core here — gate
     // on that: once the setop has split into an arm (`query` a `.select`), the
     // plan is that ARM's own sub-plan, whose `.project`/`.select`/… must reach
     // the plain arm optimiser below (its seek/pushdown rewrite), NOT be walked
@@ -273,12 +273,12 @@ extension Catalog where Self: ~Escapable {
     }
     // Schema-only (`rows: false`): the optimiser needs the arm's derived alias
     // bound by name/schema so `seek` treats it as an unseekable materialised
-    // relation — NOT its rows. Materialising here would EXECUTE the arm's
+    // relation — NOT its rows. Materialising here would execute the arm's
     // derived body during optimisation (a stateful routine would run once here
     // and again at `derive`), so bind schema-only and let the single execution
     // happen at run.
     //
-    // `validate: false` — this is the RUN path's optimiser, matching the
+    // `validate: false` — this is the run path's optimiser, matching the
     // `overlay(name:)` above: `resolve`/`compile` already validated the view
     // body under the caller's `validate`, so an arm's data-dependent-empty
     // derived body must not be re-type-checked here and fault a run that its
@@ -317,7 +317,7 @@ extension Catalog where Self: ~Escapable {
       return .scan(name: name, ordinals: ordinals, seek: range)
     }
 
-    // Seek by one conjunct only when the OTHER — the residual, then run over
+    // Seek by one conjunct only when the other — the residual, then run over
     // just the sought run — is safe. Seeking narrows the scan, so a residual
     // that can throw would raise only on the rows the seek kept, suppressing a
     // throw the un-seeked scan owes on a skipped row: `(1 / x) = 0 AND id < 0`
@@ -360,7 +360,7 @@ private func comparison(_ filter: Filter, _ bindings: Bindings)
 }
 
 /// The seekable `(slot, lower, upper)` of a non-negated `x BETWEEN lower AND
-/// upper` whose test `x` is a `slot` and whose bounds EACH resolve to an
+/// upper` whose test `x` is a `slot` and whose bounds each resolve to an
 /// integer — a `.term` integer literal, or a `:parameter` bound to an integer
 /// in `bindings`, the same resolution `comparison` applies to a `.bound` — a
 /// two-sided run the seek reads directly off the sorted key, exactly the range
@@ -440,7 +440,7 @@ extension Table where Self: ~Escapable {
           let upper = bound(ordinals[slot], high, strict: true) else {
         return nil
       }
-      // An inverted `BETWEEN lower AND upper` (lower > upper) is a valid EMPTY
+      // An inverted `BETWEEN lower AND upper` (lower > upper) is a valid empty
       // range: the `x >= lower` partition starts after the `x <= upper` one
       // ends, so `lower > upper` here and `lower ..< upper` would trap Swift's
       // `Range(lowerBound <= upperBound)` precondition. Seek an empty run.
@@ -494,8 +494,8 @@ extension Catalog where Self: ~Escapable {
   /// table ordinal (`column`) through the inner scan's `ordinals` for the
   /// seek's `bound`. The matching conjunct is consumed; any remaining conjuncts
   /// stay as a residual `Select`. The pushed inner filter rides on the `Join`
-  /// node itself — in the inner's OWN 0-based standalone slot space, the space
-  /// it already lives in on the inner scan — so the executor applies it WHILE
+  /// node itself — in the inner's own 0-based standalone slot space, the space
+  /// it already lives in on the inner scan — so the executor applies it while
   /// materialising inner rows (before bucketing / as part of the inner scan),
   /// rather than lifting it into the residual to run after the join. Applying
   /// it during materialisation means a pair forms only when the filter holds,

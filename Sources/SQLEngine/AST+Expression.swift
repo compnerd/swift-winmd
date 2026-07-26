@@ -98,11 +98,11 @@ public indirect enum Predicate: Hashable, Sendable {
   /// case.
   case membership(Expression, Array<Expression>, negated: Bool)
   /// `(l1, …, ln) <op> (r1, …, rn)` — an ISO `<row value constructor>`
-  /// comparison, both sides a row of scalar `Expression`s of EQUAL arity
+  /// comparison, both sides a row of scalar `Expression`s of equal arity
   /// (`SQLError.arity` at compile otherwise), `op` any of the six operators. It
-  /// is a FIRST-CLASS node rather than a parse-time desugar to a
+  /// is a FIRST-class node rather than a parse-time desugar to a
   /// conjunction/cascade of scalar comparisons so that each component
-  /// `Expression` is evaluated EXACTLY ONCE: the desugar duplicated a component
+  /// `Expression` is evaluated exactly once: the desugar duplicated a component
   /// across the places it appears (a `<` cascade names an earlier component in
   /// both a strict step and an equality tie-guard), so a stateful component
   /// yielded a different value each time. It keeps the ISO three-valued
@@ -112,10 +112,10 @@ public indirect enum Predicate: Hashable, Sendable {
   case rows(Array<Expression>, Comparison, Array<Expression>)
   /// `(l1, …, ln) [NOT] IN ((r1, …, rn), …)` — an ISO row-value membership, the
   /// left a `<row value constructor>` and the right a non-empty list of element
-  /// rows, each of EQUAL arity (`SQLError.arity` otherwise), `negated` marking
-  /// `NOT IN`. As `rows`, it is a FIRST-CLASS node rather than a desugar to an
-  /// OR-chain of row equalities so the left components are evaluated EXACTLY
-  /// ONCE rather than once per element row. It keeps the value-list `IN`'s
+  /// rows, each of equal arity (`SQLError.arity` otherwise), `negated` marking
+  /// `NOT IN`. As `rows`, it is a FIRST-class node rather than a desugar to an
+  /// OR-chain of row equalities so the left components are evaluated exactly
+  /// once rather than once per element row. It keeps the value-list `IN`'s
   /// three-valued semantics — a disjunction of row equalities under Kleene
   /// `OR`, a NULL component making an unmatched test UNKNOWN, `NOT IN` its
   /// negation — lowered to a `Filter.memberships`.
@@ -136,9 +136,9 @@ public indirect enum Predicate: Hashable, Sendable {
   case like(Expression, pattern: Operand, escape: Operand?, negated: Bool)
   /// `x [NOT] BETWEEN a AND b` — whether `x` is within the inclusive range
   /// `[a, b]`, or outside it when `negated`. The ISO definition is `x >= a AND
-  /// x <= b` (and `x < a OR x > b` negated), but it is a FIRST-CLASS node
-  /// rather than that expansion so the test expression `x` is evaluated EXACTLY
-  /// ONCE: the desugar duplicated `x` across both bound comparisons, testing a
+  /// x <= b` (and `x < a OR x > b` negated), but it is a FIRST-class node
+  /// rather than that expansion so the test expression `x` is evaluated exactly
+  /// once: the desugar duplicated `x` across both bound comparisons, testing a
   /// stateful `x`'s lower bound with one call and its upper with another. It
   /// keeps the ISO three-valued semantics — a NULL `x`, `a`, or `b` makes a
   /// bound UNKNOWN, excluding the row. Each bound `a` and `b` is an `Operand` —
@@ -149,7 +149,7 @@ public indirect enum Predicate: Hashable, Sendable {
   case between(Expression, Operand, Operand, negated: Bool)
   /// `a IS [NOT] DISTINCT FROM b` — the ISO null-safe comparison of `a` and
   /// `b`, `negated` marking the `IS NOT DISTINCT FROM` (null-safe equality)
-  /// spelling. It is TWO-VALUED — never UNKNOWN — treating NULL as a comparable
+  /// spelling. It is two-valued — never UNKNOWN — treating NULL as a comparable
   /// value: `a IS DISTINCT FROM b` is FALSE iff both are NULL, or both are
   /// non-NULL and equal, and TRUE otherwise (exactly one NULL, or both non-NULL
   /// and unequal). `IS NOT DISTINCT FROM` is its negation. A cross-kind pair is
@@ -157,50 +157,50 @@ public indirect enum Predicate: Hashable, Sendable {
   /// equality. Unlike `=`, a NULL operand never makes the row UNKNOWN.
   case distinct(Expression, Expression, negated: Bool)
   /// `[NOT] EXISTS (Q)` — whether the subquery `Q` yields at least one row,
-  /// `negated` marking `NOT EXISTS`. It is DEFINITELY two-valued — never
+  /// `negated` marking `NOT EXISTS`. It is definitely two-valued — never
   /// UNKNOWN — even when `Q` produces NULL-valued rows: the presence of a row
   /// is TRUE regardless of its values, so `EXISTS` tests cardinality alone. In
-  /// this first slice `Q` is UNCORRELATED — it names no column of the enclosing
-  /// query — so the engine materialises it ONCE (as a common table expression's
+  /// this first slice `Q` is uncorrelated — it names no column of the enclosing
+  /// query — so the engine materialises it once (as a common table expression's
   /// body is materialised) and the whole predicate is the definite non-empty
   /// test of that result; `negated` flips it. `Predicate` is `indirect`, so it
   /// nests the whole `Query` without boxing.
   case exists(Query, negated: Bool)
   /// `x [NOT] IN (Q)` — whether the operand `x` equals any value the subquery
-  /// `Q` yields, `negated` marking `NOT IN`. `Q` must project exactly ONE
+  /// `Q` yields, `negated` marking `NOT IN`. `Q` must project exactly one
   /// column (else `SQLError.arity`); the predicate is the three-valued
   /// membership of `x` in that column, exactly as the value-list `membership`
   /// is — a NULL `x` or a NULL element makes an otherwise-unmatched test
   /// UNKNOWN rather than FALSE, and `NOT IN` its negation (never TRUE when a
-  /// NULL element is present), while an EMPTY result is FALSE (TRUE negated).
-  /// In this first slice `Q` is UNCORRELATED (it names no enclosing column), so
-  /// the engine materialises it ONCE and folds `x = v` over the materialised
-  /// column under Kleene `OR`, the SAME three-valued core the value-list `IN`
+  /// NULL element is present), while an empty result is FALSE (TRUE negated).
+  /// In this first slice `Q` is uncorrelated (it names no enclosing column), so
+  /// the engine materialises it once and folds `x = v` over the materialised
+  /// column under Kleene `OR`, the same three-valued core the value-list `IN`
   /// uses.
   case within(Expression, Query, negated: Bool)
-  /// `x op {ANY | SOME | ALL} (Q)` — a QUANTIFIED comparison, whether `x op v`
+  /// `x op {ANY | SOME | ALL} (Q)` — a quantified comparison, whether `x op v`
   /// holds for at least one (`ANY`/`SOME`) or every (`ALL`) value `v` the
   /// subquery `Q` yields, `op` any of `= <> < <= > >=`. `Q` must project
-  /// exactly ONE column (else `SQLError.arity`). It is three-valued exactly as
-  /// `within` (`IN`) is — reusing the SAME `matches` comparison and Kleene
+  /// exactly one column (else `SQLError.arity`). It is three-valued exactly as
+  /// `within` (`IN`) is — reusing the same `matches` comparison and Kleene
   /// combine — folding `x op v` over `Q`'s column under Kleene `OR` for `any`
   /// (TRUE at the first TRUE, else UNKNOWN if any comparison is UNKNOWN through
   /// a NULL `x` or element, else FALSE) and under Kleene `AND` for `all` (FALSE
-  /// at the first FALSE, else UNKNOWN if any is UNKNOWN, else TRUE). An EMPTY
+  /// at the first FALSE, else UNKNOWN if any is UNKNOWN, else TRUE). An empty
   /// `Q` takes the fold's identity — `any` FALSE (no witness), `all` TRUE
   /// (vacuous). `= ANY` is `IN` and `<> ALL` is `NOT IN`, but the case is kept
   /// distinct for the general operator. `SOME` is a synonym for `ANY`,
-  /// normalised to `any` at parse time. In this slice `Q` is UNCORRELATED — it
+  /// normalised to `any` at parse time. In this slice `Q` is uncorrelated — it
   /// names no column of the enclosing query — so the engine materialises it
-  /// ONCE (as `within` does) and folds over that single column; correlation is
+  /// once (as `within` does) and folds over that single column; correlation is
   /// a later slice.
   case quantified(Expression, Comparison, Quantifier, Query)
   /// `p IS [NOT] <truth value>` — the ISO `<boolean test>`, whether the inner
-  /// boolean `Predicate` `p`'s THREE-VALUED result equals the `value`
+  /// boolean `Predicate` `p`'s three-valued result equals the `value`
   /// (`TRUE`/`FALSE`/`UNKNOWN`), or does not when `negated`. Unlike the other
-  /// predicates the result is DEFINITE two-valued — never itself UNKNOWN — so
+  /// predicates the result is definite two-valued — never itself UNKNOWN — so
   /// `p IS TRUE` is FALSE (not UNKNOWN) for an UNKNOWN `p`, and `p IS UNKNOWN`
-  /// TESTS for that UNKNOWN. The operand is a `Predicate` rather than an
+  /// tests for that UNKNOWN. The operand is a `Predicate` rather than an
   /// `Expression`: a boolean is a predicate to this engine — a bare boolean
   /// operand `x` bridges as the comparison `x = TRUE`, whose three-valued
   /// truth IS `x`'s boolean value (`NULL` yielding UNKNOWN) — so a boolean
@@ -237,7 +237,7 @@ public indirect enum Predicate: Hashable, Sendable {
 /// A truth value a `<boolean test>` (`Predicate.truth`) tests against — the
 /// three SQL truth values, `UNKNOWN` being the spelling the test uses for a
 /// NULL boolean (SQL spells UNKNOWN as `NULL` in a value position, but names it
-/// `UNKNOWN` in this test). `p IS TRUE`/`FALSE`/`UNKNOWN` yields a DEFINITE
+/// `UNKNOWN` in this test). `p IS TRUE`/`FALSE`/`UNKNOWN` yields a definite
 /// two-valued result, never itself UNKNOWN.
 public enum Truth: Hashable, Sendable {
   /// The truth value `TRUE`.
@@ -251,8 +251,8 @@ public enum Truth: Hashable, Sendable {
 /// The quantifier of a quantified comparison subquery `x op {ANY|ALL} (Q)`.
 ///
 /// `ANY` (and its synonym `SOME`, normalised to `any` at parse time) holds when
-/// `x op v` is TRUE for AT LEAST ONE value `v` the subquery yields; `ALL` holds
-/// when it is TRUE for EVERY value. Both are three-valued over NULLs and take
+/// `x op v` is TRUE for at least one value `v` the subquery yields; `ALL` holds
+/// when it is TRUE for every value. Both are three-valued over NULLs and take
 /// the empty-set identity of their Kleene fold — `ANY` over no rows is FALSE
 /// (OR's identity), `ALL` over no rows is TRUE (AND's identity). `x = ANY (Q)`
 /// is the `IN (Q)` special case and `x <> ALL (Q)` the `NOT IN (Q)` one, but

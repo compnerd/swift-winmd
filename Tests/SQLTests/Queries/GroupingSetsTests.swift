@@ -59,7 +59,7 @@ struct GroupingSetsTests {
 
   @Test func `the result columns type through set-operation unification`()
       throws {
-    // A NULL-padded column takes the SIBLING arm's type via the set-operation
+    // A NULL-padded column takes the sibling arm's type via the set-operation
     // merge (a constant-NULL arm constrains nothing): Region and Product stay
     // `.text` despite the arms that NULL them, and the SUM is `.integer`. The
     // schema derive (run ≡ columns) agrees with the run above.
@@ -135,7 +135,7 @@ struct GroupingSetsTests {
   }
 
   @Test func `ORDER BY may name an aggregate over the combined result`() throws {
-    // An ORDER BY naming a PROJECTED aggregate (`SUM(Qty)`) resolves to that
+    // An ORDER BY naming a projected aggregate (`SUM(Qty)`) resolves to that
     // output column of the union — the setop-output scope orders on the
     // already-computed SUM: ascending 10 (West), 35 (East), 45 (total).
     try sales().expect("""
@@ -172,11 +172,11 @@ struct GroupingSetsTests {
 
   @Test func `the empty set yields ONE grand-total row, not one per input`()
       throws {
-    // Finding 1: the `()` set builds a GENUINE grand-total aggregate — `group`
-    // on `[]` = ONE row over the whole result — rather than an empty `GROUP BY`
+    // Finding 1: the `()` set builds a genuine grand-total aggregate — `group`
+    // on `[]` = one row over the whole result — rather than an empty `GROUP BY`
     // the parser-desugar read as no grouping (`SELECT NULL FROM Sales`, one
-    // NULL row PER input row). Here the per-Region arm yields East/West and the
-    // `()` arm yields EXACTLY ONE `[nil]` grand-total row.
+    // NULL row per input row). Here the per-Region arm yields East/West and the
+    // `()` arm yields exactly one `[nil]` grand-total row.
     let cat = try sales()
     try cat.expect("""
         SELECT Region
@@ -193,7 +193,7 @@ struct GroupingSetsTests {
   }
 
   @Test func `HAVING on an absent key sees the super-aggregate NULL`() throws {
-    // Finding 2: `HAVING Region IS NULL` lowers through the SAME grouped `term`
+    // Finding 2: `HAVING Region IS NULL` lowers through the same grouped `term`
     // the projection does, so in the `()` arm — where Region is absent from the
     // set — it is a super-aggregate NULL rather than a rejected non-grouped
     // column. Only the grand-total row (Region NULL) survives; every per-Region
@@ -218,8 +218,8 @@ struct GroupingSetsTests {
       throws {
     // Finding 3: `ORDER BY MAX(Qty)` names an aggregate the select list does
     // NOT project, so the setop-output scope cannot recompute it. The
-    // expansion MATERIALISES `MAX(Qty)` as a hidden trailing column in EVERY
-    // arm (equal arity for the UNION ALL), the carrier orders on it, and TRIMS
+    // expansion materialises `MAX(Qty)` as a hidden trailing column in every
+    // arm (equal arity for the UNION ALL), the carrier orders on it, and trims
     // it from the output — so the result has exactly the two projected columns.
     // Per-Region MAX(Qty): East 20, West 7; the `()` grand-total MAX is 20.
     // Ascending MAX orders West (7), then East (20) and the total (20) — the
@@ -246,11 +246,11 @@ struct GroupingSetsTests {
 
   @Test func `a qualified key NULLs its unqualified projection in the () arm`()
       throws {
-    // Finding 4: `GROUPING SETS ((n.A), ())` groups on the QUALIFIED `n.A`, but
-    // the select list projects the UNQUALIFIED `A`. The absent-key NULL is
-    // matched by RESOLVED identity (the lowered term treats `n.A` ≡ `A`), so
+    // Finding 4: `GROUPING SETS ((n.A), ())` groups on the qualified `n.A`, but
+    // the select list projects the unqualified `A`. The absent-key NULL is
+    // matched by resolved identity (the lowered term treats `n.A` ≡ `A`), so
     // the `()` arm NULLs `A` rather than rejecting a non-grouped column — the
-    // parser's old qualifier-PRESENCE matcher failed this. Per-A rows then the
+    // parser's old qualifier-presence matcher failed this. Per-A rows then the
     // grand total.
     let cat = try nums()
     try cat.expect("""
@@ -269,7 +269,7 @@ struct GroupingSetsTests {
   @Test func `ORDER BY a projected key over a key-only projection`() throws {
     // A key-only projection (no aggregate) `SELECT Region` parses as a bare
     // `columns` list; the `ordered` carrier resolves the ORDER BY over the
-    // union's output columns. An ORDER BY naming the ALREADY-projected key
+    // union's output columns. An ORDER BY naming the already-projected key
     // orders on that output — it is NOT materialised as a hidden column and the
     // identity projection keeps the one real column. NULLs sort first
     // ascending, so the `()` arm's grand-total NULL leads, then East/West.
@@ -333,7 +333,7 @@ struct GroupingSetsTests {
     // `Region` is a GROUP BY key but is NOT projected (only `SUM(Qty)` is), so
     // the setop-output scope cannot bind it — yet the plain grouped path takes
     // `ORDER BY Region` (a grouped column is orderable). The GROUPING SETS form
-    // must AGREE: `expand` materialises the unprojected grouped column as a
+    // must agree: `expand` materialises the unprojected grouped column as a
     // hidden trailing column in every arm (the aggregate case's machinery), the
     // carrier orders on it, and trims it — so the result is exactly `SUM(Qty)`,
     // ordered by Region. Ascending Region: East 35, West 10.
@@ -374,10 +374,10 @@ struct GroupingSetsTests {
   @Test func `ORDER BY a non-grouped column faults like the plain form`()
       throws {
     // `Product` is neither projected nor a GROUP BY key of the `((Region))`
-    // arm. The plain grouped path REJECTS `ORDER BY Product` (a non-grouped,
-    // non-aggregated column). The GROUPING SETS form must fault IDENTICALLY:
+    // arm. The plain grouped path rejects `ORDER BY Product` (a non-grouped,
+    // non-aggregated column). The GROUPING SETS form must fault identically:
     // `expand` materialises the column into each arm's projection, and the
-    // arm's grouped resolver rejects it with the SAME grouping fault, never the
+    // arm's grouped resolver rejects it with the same grouping fault, never the
     // old carrier's `no such column` over the setop output.
     let cat = try sales()
     let fault = SQLError.grouping("Product")
@@ -394,7 +394,7 @@ struct GroupingSetsTests {
       throws {
     // The regression guard for the fix above: when the grouping column IS
     // projected (`SELECT Region, SUM(Qty)`), `ORDER BY Region` must resolve to
-    // that EXISTING output — NOT materialise a spurious hidden column — so the
+    // that existing output — NOT materialise a spurious hidden column — so the
     // schema stays the two real outputs. Ascending Region: East 35, West 10.
     let cat = try sales()
     try cat.expect("""
@@ -416,7 +416,7 @@ struct GroupingSetsTests {
   @Test func `a grouped SELECT * is rejected the same as a plain GROUP BY`()
       throws {
     // A grouped `SELECT *` is ill-formed (a grouped projection must be
-    // explicit). The GROUPING SETS form must reject it with the IDENTICAL fault
+    // explicit). The GROUPING SETS form must reject it with the identical fault
     // the plain grouped query raises — the arm resolver's grouped `.all`
     // rejection — whether or not a query-level ORDER BY carries it. `expand`
     // keeps the `.all` verbatim in every arm and returns the bare union (never
@@ -427,11 +427,11 @@ struct GroupingSetsTests {
                               "aggregates")
     // The plain grouped `SELECT *` — the baseline fault.
     cat.expect("SELECT * FROM Sales GROUP BY Region", fails: star)
-    // The BARE grouping-sets form (no ORDER BY / DISTINCT / limit).
+    // The bare grouping-sets form (no ORDER BY / DISTINCT / limit).
     cat.expect("""
         SELECT * FROM Sales GROUP BY GROUPING SETS ((Region))
         """, fails: star)
-    // The CARRIED form (a query-level ORDER BY) faults IDENTICALLY.
+    // The carried form (a query-level ORDER BY) faults identically.
     cat.expect("""
         SELECT * FROM Sales GROUP BY GROUPING SETS ((Region)) ORDER BY Region
         """, fails: star)
@@ -447,12 +447,12 @@ struct GroupingSetsTests {
 
   @Test func `a faulting grand-total arm faults validate and a CTE body`()
       throws {
-    // The `()` grand-total arm emits ONE row EVEN under `WHERE 1 = 0` (the
+    // The `()` grand-total arm emits one row even under `WHERE 1 = 0` (the
     // empty group still produces the grand total), so `1 / 0` IS evaluated at
     // run and faults — the un-expanded `.sets` (where `WHERE 1 = 0` spares the
     // projection) hid this from validation. `Query.expanded` now runs at the
     // WITH schema path and the CTE validation entries too, so the validate path
-    // and a CTE body fault IDENTICALLY to the run.
+    // and a CTE body fault identically to the run.
     let cat = try sales()
     let sql = """
         SELECT 1 / 0 AS x
@@ -474,7 +474,7 @@ struct GroupingSetsTests {
     #expect(throws: SQLError.divide) {
       _ = try cat.columns(of: Statement(parsing: cte), validate: true)
     }
-    // The same query as the TRAILING WITH query faults under the schema derive.
+    // The same query as the trailing WITH query faults under the schema derive.
     let trailing = "WITH u AS (SELECT 1 AS x) \(sql)"
     #expect(throws: SQLError.divide) {
       _ = try cat.run(Statement(parsing: trailing))
@@ -487,13 +487,13 @@ struct GroupingSetsTests {
   @Test func `a faulting grand-total arm faults a VIEW body schema derive`()
       throws {
     // The VIEW schema path (`typecheck(view.query, …)`) is the finding #2 gap:
-    // reached with an UNEXPANDED body, its reachability helper sees `GROUPING
+    // reached with an unexpanded body, its reachability helper sees `GROUPING
     // SETS ((Region), ())` as non-empty `grouping.expressions`, so a
-    // constant-false `WHERE` makes it short-circuit WITHOUT validating the
-    // projection — yet the expanded `()` grand-total arm STILL emits one group
-    // at run and evaluates `1 / 0`, faulting. Expanding the body BEFORE the
+    // constant-false `WHERE` makes it short-circuit without validating the
+    // projection — yet the expanded `()` grand-total arm still emits one group
+    // at run and evaluates `1 / 0`, faulting. Expanding the body before the
     // reachability typecheck keeps the VIEW schema derive in step with the run:
-    // `columns(of: SELECT * FROM v)` faults the SAME `.divide` the run does.
+    // `columns(of: SELECT * FROM v)` faults the same `.divide` the run does.
     let cat = try Catalog {
       Relation("Sales", ["Region": .text, "Qty": .integer]) {
         Row("East", 10)
@@ -508,8 +508,8 @@ struct GroupingSetsTests {
     #expect(throws: SQLError.divide) {
       _ = try cat.run(Statement(parsing: "SELECT * FROM v"))
     }
-    // `columns(of: SELECT * FROM v, validate: true)` faults IDENTICALLY —
-    // before the fix it ACCEPTED the view and returned a schema.
+    // `columns(of: SELECT * FROM v, validate: true)` faults identically —
+    // before the fix it accepted the view and returned a schema.
     #expect(throws: SQLError.divide) {
       _ = try cat.columns(of: parse(query: "SELECT * FROM v"), validate: true)
     }
@@ -518,8 +518,8 @@ struct GroupingSetsTests {
   @Test func `a genuinely dead non-GS view body still short-circuits`() throws {
     // The parity guard: expanding the body must NOT over-reject a legitimately
     // dead non-grouping-sets body. A `SELECT 1 / 0 FROM Sales WHERE 1 = 0` with
-    // NO aggregate forms no group under the false `WHERE`, so its projection is
-    // genuinely unreachable — `columns(of: SELECT * FROM v)` types it WITHOUT
+    // no aggregate forms no group under the false `WHERE`, so its projection is
+    // genuinely unreachable — `columns(of: SELECT * FROM v)` types it without
     // faulting, exactly as the run yields no row.
     let cat = try Catalog {
       Relation("Sales", ["Region": .text, "Qty": .integer]) {
@@ -535,7 +535,7 @@ struct GroupingSetsTests {
 
   @Test func `a non-faulting grouping-sets CTE body validates and types`()
       throws {
-    // The parity guard: a NON-faulting grouping-sets CTE body still validates
+    // The parity guard: a non-faulting grouping-sets CTE body still validates
     // and its `columns(of:)` types resolve correctly — expansion at the CTE
     // entry must not over-reject a legal body. The body projects Region and a
     // SUM over the two-set grouping; as a CTE the trailing `SELECT *` reports
@@ -568,9 +568,9 @@ struct GroupingSetsTests {
       throws {
     // The cross case the shared `CTE.canonical = query.expanded.unwound` peel
     // enables: a RECURSIVE CTE whose anchor is a `GROUP BY GROUPING SETS`
-    // shape. `canonical` EXPANDS the anchor's `.sets` node to its `UNION ALL`
+    // shape. `canonical` expands the anchor's `.sets` node to its `UNION ALL`
     // FIRST, so the recursive-shape recogniser peels the resulting inner
-    // `((per-Region ∪ grand-total) ∪ recursive)` union — the SAME AST the
+    // `((per-Region ∪ grand-total) ∪ recursive)` union — the same AST the
     // fixpoint iterates — rather than mis-reading the unexpanded `.sets` body.
     // The recursive arm never fires (`Total < 0` is empty), so the result is
     // the expanded anchor: per-Region East 35 / West 10 and the grand total 45,
@@ -592,7 +592,7 @@ struct GroupingSetsTests {
       [.text("East"), .integer(35)],
       [.null, .integer(45)],
     ])
-    // run ≡ columns(of:): the schema derive peels the SAME expanded, unwound
+    // run ≡ columns(of:): the schema derive peels the same expanded, unwound
     // canonical shape and types the declared columns without faulting.
     let columns = try cat.columns(of: Statement(parsing: sql), validate: true)
     #expect(columns == [
@@ -604,9 +604,9 @@ struct GroupingSetsTests {
   // MARK: - Setop-output scope and ORDER BY resolution
 
   @Test func `ORDER BY a select-list alias orders on that output`() throws {
-    // A query-level `ORDER BY total` names the select-list ALIAS `total` (the
+    // A query-level `ORDER BY total` names the select-list alias `total` (the
     // `SUM(Qty)` output), NOT a base column. The setop-output scope resolves it
-    // the SAME way a plain `SELECT … ORDER BY <alias>` does — over the union's
+    // the same way a plain `SELECT … ORDER BY <alias>` does — over the union's
     // output — rather than materialising a hidden column the grouped lowering
     // cannot resolve. Ascending SUM: West 10, East 35.
     let cat = try sales()
@@ -651,8 +651,8 @@ struct GroupingSetsTests {
   }
 
   @Test func `duplicate output names keep their positional identity`() throws {
-    // Two outputs aliased the SAME name (`Region AS x, Product AS x`) keep
-    // their POSITIONAL identity through the union, so the 2nd output stays
+    // Two outputs aliased the same name (`Region AS x, Product AS x`) keep
+    // their positional identity through the union, so the 2nd output stays
     // Product rather than collapsing onto the first `x` (Region). `ORDER BY 1`
     // sorts on the first output. Region then Product within each Region.
     let cat = try sales()
@@ -681,10 +681,10 @@ struct GroupingSetsTests {
 
   @Test func `ORDER BY a duplicate output name faults ambiguous, as plain GROUP BY`()
       throws {
-    // A bare `ORDER BY x` over TWO outputs aliased `x` (`Region AS x, Product
-    // AS x`) rides the setop-output scope's ORDINARY ORDER BY resolution, which
+    // A bare `ORDER BY x` over two outputs aliased `x` (`Region AS x, Product
+    // AS x`) rides the setop-output scope's ordinary ORDER BY resolution, which
     // faults `SQLError.ambiguous` — NOT a silent order by the first `x`. The
-    // plain grouped `… GROUP BY Region, Product ORDER BY x` is the ORACLE: it
+    // plain grouped `… GROUP BY Region, Product ORDER BY x` is the oracle: it
     // faults the same `.ambiguous("x")`, so the two forms agree.
     let cat = try sales()
     let ambiguous = SQLError.ambiguous("x")
@@ -703,7 +703,7 @@ struct GroupingSetsTests {
            ORDER BY x
           """), validate: true)
     }
-    // The plain grouped ORACLE faults IDENTICALLY.
+    // The plain grouped oracle faults identically.
     cat.expect("""
         SELECT Region AS x, Product AS x
           FROM Sales
@@ -714,7 +714,7 @@ struct GroupingSetsTests {
 
   @Test func `ORDER BY a duplicate BARE projected name faults ambiguous`()
       throws {
-    // Two BARE (unaliased) projections resolving to the same output name — here
+    // Two bare (unaliased) projections resolving to the same output name — here
     // `Region` projected twice — order by that name faults `.ambiguous` the
     // same as the aliased case. The plain grouped form is the oracle.
     let cat = try sales()
@@ -735,7 +735,7 @@ struct GroupingSetsTests {
 
   @Test func `ORDER BY 1 resolves the duplicate-name query by position`()
       throws {
-    // Positional `ORDER BY 1` is the UNAMBIGUOUS way to order the
+    // Positional `ORDER BY 1` is the unambiguous way to order the
     // duplicate-name query: it names the first output by position, so it
     // resolves where the bare name faults. Region then Product ascending.
     try sales().expect("""
@@ -752,8 +752,8 @@ struct GroupingSetsTests {
   @Test func `ORDER BY an unprojected aggregate still materialises after the fix`()
       throws {
     // Regression guard for the shared mechanism: an unprojected `ORDER BY
-    // MAX(Qty)` is neither a projected expression NOR an output name, so it is
-    // still MATERIALISED as a hidden synthetic column and ordered on. Ascending
+    // MAX(Qty)` is neither a projected expression nor an output name, so it is
+    // still materialised as a hidden synthetic column and ordered on. Ascending
     // per-Region MAX(Qty): West 7, East 20.
     try sales().expect("""
         SELECT Region, SUM(Qty)
@@ -767,12 +767,12 @@ struct GroupingSetsTests {
 
   @Test func `ORDER BY a display header column N faults, as over a plain union`()
       throws {
-    // The result-schema DISPLAY header `column N` (an unnamed output's
+    // The result-schema display header `column N` (an unnamed output's
     // positional name) is NOT a bindable output name — the setop-output scope
     // names an unnamed output non-spellably, so `ORDER BY "column 2"` faults
-    // `.column`, EXACTLY as `SELECT * FROM (union) AS g ORDER BY "column N"`
+    // `.column`, exactly as `SELECT * FROM (union) AS g ORDER BY "column N"`
     // does over any derived union. Before, the text wrapper exposed the header
-    // as a derived-table column and WRONGLY accepted it.
+    // as a derived-table column and wrongly accepted it.
     let cat = try sales()
     let fault = SQLError.column("column 2")
     cat.expect("""
@@ -781,7 +781,7 @@ struct GroupingSetsTests {
          GROUP BY GROUPING SETS ((Region), ())
          ORDER BY "column 2"
         """, fails: fault)
-    // The plain-union ORACLE faults the same over its display header.
+    // The plain-union oracle faults the same over its display header.
     cat.expect("""
         SELECT * FROM (
           SELECT Region FROM Sales GROUP BY Region
@@ -791,11 +791,11 @@ struct GroupingSetsTests {
 
   @Test func `ORDER BY a qualified key resolves to its projected output`()
       throws {
-    // A qualified `ORDER BY n.Region` whose BARE name is a projected output
+    // A qualified `ORDER BY n.Region` whose bare name is a projected output
     // resolves to that output through the setop-output scope (a set-operation
-    // result carries no source qualifier), the SAME as the plain grouped
+    // result carries no source qualifier), the same as the plain grouped
     // `ORDER BY n.Region` lowering `n.Region` to the group-key slot ≡ the
-    // projected `Region`. Before, the scope-less matcher MATERIALISED
+    // projected `Region`. Before, the scope-less matcher materialised
     // `n.Region` as a hidden `*gs0` column, and under DISTINCT that hidden
     // column faulted `must appear in the SELECT DISTINCT list`. Now an output.
     // The `()` arm's grand-total NULL leads ascending, then per-Region.
@@ -818,11 +818,11 @@ struct GroupingSetsTests {
   @Test func `ORDER BY a qualified non-grouped name faults like the plain form`()
       throws {
     // The other half of the qualified case: a qualified `ORDER BY n.Product`
-    // whose bare name is NEITHER a projected output NOR a grouping key. The
-    // plain grouped ORACLE (`GROUP BY Region ORDER BY n.Product`) faults
+    // whose bare name is neither a projected output nor a grouping key. The
+    // plain grouped oracle (`GROUP BY Region ORDER BY n.Product`) faults
     // `.grouping` — a non-grouped, non-aggregated column — NOT `.column`. The
-    // GROUPING SETS form must AGREE: `expand` materialises the column into each
-    // arm and the arm's grouped resolver rejects it with the SAME `.grouping`
+    // GROUPING SETS form must agree: `expand` materialises the column into each
+    // arm and the arm's grouped resolver rejects it with the same `.grouping`
     // fault. (This assertion previously expected `.column("Product")` from the
     // old scope-less matcher, which disagreed with the plain form — an existing
     // assertion that encoded that divergence, now corrected to the oracle.)
@@ -842,7 +842,7 @@ struct GroupingSetsTests {
   @Test func `ORDER BY a qualified unprojected grouping column matches plain`()
       throws {
     // A qualified `ORDER BY n.Region` whose bare name is NOT projected but IS a
-    // grouping key: the plain grouped form ACCEPTS it (ordering on the group
+    // grouping key: the plain grouped form accepts it (ordering on the group
     // key). The GROUPING SETS form agrees — `expand` materialises it hidden,
     // the carrier resolves the qualified key through the arm's grouped space to
     // its hidden slot, orders on it, and trims it. Ascending Region: East 35,
@@ -862,11 +862,11 @@ struct GroupingSetsTests {
 
   @Test func `a qualified key does not alias-match a different output by name`()
       throws {
-    // The output named `Region` is `Product AS Region` — its RESOLVED identity
+    // The output named `Region` is `Product AS Region` — its resolved identity
     // is `Product`, NOT `s.Region`. A qualified `ORDER BY s.Region` references
-    // the grouped INPUT column `s.Region`, a grouping key that is NOT
-    // projected. The is-projected check must use RESOLVED IDENTITY, not the
-    // BARE name: matching `s.Region` to the alias `Region` by bare name SKIPS
+    // the grouped input column `s.Region`, a grouping key that is NOT
+    // projected. The is-projected check must use resolved IDENTITY, not the
+    // bare name: matching `s.Region` to the alias `Region` by bare name skips
     // hidden materialisation, and the setop-output scope cannot resolve the
     // qualified `s.Region` — so the carrier faulted (or mis-bound to Product).
     // The qualified key routes through the arm's grouped resolver, materialises
@@ -893,9 +893,9 @@ struct GroupingSetsTests {
 
   @Test func `an unqualified key still binds a select alias per ISO precedence`()
       throws {
-    // The GUARD for the fix above: the bare-name output match still applies to
-    // an UNQUALIFIED key. `ORDER BY Region` where `Region` is the select alias
-    // for `Product` binds the OUTPUT alias (ISO output-alias precedence: a bare
+    // The guard for the fix above: the bare-name output match still applies to
+    // an unqualified key. `ORDER BY Region` where `Region` is the select alias
+    // for `Product` binds the output alias (ISO output-alias precedence: a bare
     // name → a select-list alias), NOT the input column `Region`, so it sorts
     // by the projected Product value — the plain grouped form is the oracle.
     let cat = try sales()
@@ -925,12 +925,12 @@ struct GroupingSetsTests {
   @Test func `DISTINCT rejects a hidden unprojected-aggregate sort key`()
       throws {
     // Under `SELECT DISTINCT`, an ORDER BY expression that is NOT in the select
-    // list is an ERROR (ISO 9075). An unprojected `ORDER BY MAX(Qty)` would be
-    // MATERIALISED as a hidden `*gsN` column, but that slot is NOT a real
+    // list is an error (ISO 9075). An unprojected `ORDER BY MAX(Qty)` would be
+    // materialised as a hidden `*gsN` column, but that slot is NOT a real
     // output — the DISTINCT check sees only the REAL outputs (`0 ..< real`), so
-    // the key is REJECTED with the same `.distinct` fault the plain grouped
+    // the key is rejected with the same `.distinct` fault the plain grouped
     // form raises, rather than passing as if the hidden slot were projected and
-    // rebinding the sort OUTSIDE the real projection (which crashed).
+    // rebinding the sort outside the real projection (which crashed).
     let cat = try sales()
     let fault = SQLError.distinct("an expression")
     cat.expect("""
@@ -939,7 +939,7 @@ struct GroupingSetsTests {
          GROUP BY GROUPING SETS ((Region), ())
          ORDER BY MAX(Qty)
         """, fails: fault)
-    // The plain grouped ORACLE rejects the same non-selected sort key.
+    // The plain grouped oracle rejects the same non-selected sort key.
     cat.expect("""
         SELECT DISTINCT Region FROM Sales GROUP BY Region ORDER BY MAX(Qty)
         """, fails: fault)
@@ -958,11 +958,11 @@ struct GroupingSetsTests {
 
   @Test func `validate faults an unknown routine in a carrier ORDER BY`()
       throws {
-    // The `ordered` carrier's ORDER BY is a NEW expression surface: it must
+    // The `ordered` carrier's ORDER BY is a new expression surface: it must
     // join the validation walk, else a reachable faulting sort key
-    // `columns(of:)` ACCEPTS the run raises on. An unknown routine (`ORDER BY
+    // `columns(of:)` accepts the run raises on. An unknown routine (`ORDER BY
     // missing(Region)`) faults `.function` at run; validate now faults
-    // IDENTICALLY over the same setop-output scope, closing the run-vs-validate
+    // identically over the same setop-output scope, closing the run-vs-validate
     // gap.
     let cat = try sales()
     let sql = """
@@ -981,7 +981,7 @@ struct GroupingSetsTests {
   @Test func `validate faults an ill-typed operand in a carrier ORDER BY`()
       throws {
     // The operand counterpart: `ORDER BY SUM(Qty) + 'x'` mixes a number and a
-    // string, faulting `.operand` at run; validate now faults IDENTICALLY,
+    // string, faulting `.operand` at run; validate now faults identically,
     // rather than returning a schema for a query the run rejects.
     let cat = try sales()
     let sql = """
@@ -998,7 +998,7 @@ struct GroupingSetsTests {
   }
 
   @Test func `a valid carrier ORDER BY still validates and resolves`() throws {
-    // The parity guard: a VALID carrier ORDER BY expression (an already-checked
+    // The parity guard: a valid carrier ORDER BY expression (an already-checked
     // call over an output) still validates and resolves its schema — the walk
     // must not over-reject. `UPPER(Region)` orders the union by the uppercased
     // region; the schema derive agrees with the run.
@@ -1060,9 +1060,9 @@ struct GroupingSetsTests {
   @Test func `a derived table in a grouping-sets arm runs under ORDER BY`()
       throws {
     // The GROUPING SETS expansion is a `UNION ALL` of per-set grouped arms,
-    // each over the SAME `FROM (SELECT …) AS s` — so every arm names the
+    // each over the same `FROM (SELECT …) AS s` — so every arm names the
     // derived alias `s`. Under the query-level ORDER BY carrier, the union must
-    // run PER ARM (each materialising `s` in its own scope); before, the
+    // run per ARM (each materialising `s` in its own scope); before, the
     // single-context carrier execution never bound `s` and faulted
     // `.relation`. Per-Region sums (East 15, West 7) and the grand total (22),
     // ordered by SUM.
@@ -1084,8 +1084,8 @@ struct GroupingSetsTests {
 
   @Test func `a subquery in an omitted set is collected for the () arm`()
       throws {
-    // A scalar subquery in a set's key must be pre-registered for EVERY arm,
-    // not only the arms whose set includes it: an `.arm` lowers the SUPERSET
+    // A scalar subquery in a set's key must be pre-registered for every arm,
+    // not only the arms whose set includes it: an `.arm` lowers the superset
     // (to NULL an absent key), so the `()` grand-total arm lowers `(SELECT 1)`
     // and needs it collected. The present arm groups on the constant subquery
     // value (one group) and projects it (1); the `()` arm NULLs the absent key.
@@ -1108,7 +1108,7 @@ struct GroupingSetsTests {
 
   @Test func `an empty GROUPING SETS set list is a syntax fault, not a crash`()
       throws {
-    // `Grouping.sets` is a public AST case, so a caller may build an EMPTY set
+    // `Grouping.sets` is a public AST case, so a caller may build an empty set
     // list (the parser never emits it). The expansion must reject it with a
     // typed `SQLError` before the `UNION ALL` reduce seed (`arms[0]`) traps the
     // process on the empty arm list.
@@ -1156,11 +1156,11 @@ private func context() throws -> FixtureCatalog {
 struct GroupingSetsCarrierStructureTests {
   @Test func `a DISTINCT qualified-aggregate sort key matches the projected one`()
       throws {
-    // `ORDER BY SUM(s.Qty)` is the SAME projected value as `SUM(Qty)` — it
+    // `ORDER BY SUM(s.Qty)` is the same projected value as `SUM(Qty)` — it
     // differs only by qualification — so the carrier matches it to that
-    // projected output by RESOLVED identity (through the arm's grouped space),
+    // projected output by resolved identity (through the arm's grouped space),
     // never a spurious hidden sort column that DISTINCT would then reject. It
-    // must run IDENTICALLY to the plain grouped form, the oracle.
+    // must run identically to the plain grouped form, the oracle.
     try sales().expect("""
         SELECT DISTINCT SUM(Qty) FROM Sales AS s
          GROUP BY GROUPING SETS ((Region)) ORDER BY SUM(s.Qty)
@@ -1200,10 +1200,10 @@ struct GroupingSetsCarrierStructureTests {
 
   @Test func `a delimited *gs0 alias is a real output, not a generated column`()
       throws {
-    // The generated hidden-column count is STRUCTURAL (carried out of
-    // `expand`), so a user's DELIMITED alias `AS "*gs0"` — which by NAME looks
+    // The generated hidden-column count is structural (carried out of
+    // `expand`), so a user's delimited alias `AS "*gs0"` — which by name looks
     // like a generated `*gsN` sort column — is NOT trimmed: it is the real,
-    // only output (a PLAIN union, no grouping, so no column is ever generated).
+    // only output (a plain union, no grouping, so no column is ever generated).
     try pair().expect("""
         SELECT a AS "*gs0" FROM L UNION ALL SELECT b FROM R ORDER BY 1
         """, yields: [[1], [2], [3], [4], [5]])
@@ -1216,12 +1216,12 @@ struct GroupingSetsCarrierStructureTests {
 
   @Test func `a real output aliased *gs0 does not capture the hidden sort key`()
       throws {
-    // The unprojected `MAX(Qty)` sort key materialises a HIDDEN trailing column
-    // that `expand` aliases `*gs0`. A REAL output ALSO aliased `AS "*gs0"` by
-    // NAME collides with that synthetic alias, so binding the sort key by its
-    // `*gsN` NAME would let the setop-output scope's output-alias precedence
-    // CAPTURE the hidden key onto the real `*gs0` output — ordering by Region,
-    // not `MAX(Qty)`. The carrier binds the hidden slot STRUCTURALLY, by
+    // The unprojected `MAX(Qty)` sort key materialises a hidden trailing column
+    // that `expand` aliases `*gs0`. A REAL output also aliased `AS "*gs0"` by
+    // name collides with that synthetic alias, so binding the sort key by its
+    // `*gsN` name would let the setop-output scope's output-alias precedence
+    // capture the hidden key onto the real `*gs0` output — ordering by Region,
+    // not `MAX(Qty)`. The carrier binds the hidden slot structurally, by
     // position, so the user's colliding alias cannot capture it: the query
     // orders by `MAX(Qty)` exactly as the plain grouped form does. Ascending
     // per-Region MAX(Qty): West 7, East 20 → West row then East row.
@@ -1269,7 +1269,7 @@ struct GroupingSetsCarrierStructureTests {
       throws {
     // An unprojected `MAX(Qty)` sort key materialises a hidden `*gsN` column,
     // so the inner union's width becomes 2 — but the ONLY real output is
-    // `Region`. A trailing ORDINAL must bind the REAL output arity
+    // `Region`. A trailing ordinal must bind the REAL output arity
     // (`0 ..< real`), NOT the grown width, so `ORDER BY MAX(Qty), 2` faults
     // `.column("2")` exactly as the plain grouped `GROUP BY Region ORDER BY
     // MAX(Qty), 2` does — never binding the hidden `MAX(Qty)` slot as if it
@@ -1285,7 +1285,7 @@ struct GroupingSetsCarrierStructureTests {
 
   @Test func `an out-of-range ordinal before a materialised key faults like plain`()
       throws {
-    // The bound is ORDER-INDEPENDENT: whether the materialising `MAX(Qty)` key
+    // The bound is ORDER-independent: whether the materialising `MAX(Qty)` key
     // comes before or after the ordinal, `ORDER BY 2, MAX(Qty)` still faults
     // `.column("2")` over the single real output, matching the plain form.
     try sales().expect("""
@@ -1299,7 +1299,7 @@ struct GroupingSetsCarrierStructureTests {
 
   @Test func `an in-range ordinal after a materialised key binds the real output`()
       throws {
-    // An IN-RANGE ordinal still binds the real output even when an earlier key
+    // An IN-range ordinal still binds the real output even when an earlier key
     // materialised a hidden column: `ORDER BY MAX(Qty), 1` orders by `Region`
     // (ordinal 1, the sole real output), agreeing with the plain grouped form.
     try sales().expect("""
@@ -1312,7 +1312,7 @@ struct GroupingSetsCarrierStructureTests {
 
   @Test func `a pure ordinal ORDER BY over a GROUPING SETS query still binds`()
       throws {
-    // A GROUPING SETS query with NO materialised hidden column (no unprojected
+    // A GROUPING SETS query with no materialised hidden column (no unprojected
     // sort key) still resolves a positional `ORDER BY 1` over its real output —
     // the ordinal bound is the real arity, unchanged when nothing is
     // materialised. The grand-total NULL and the two per-Region rows, by Region
@@ -1327,7 +1327,7 @@ struct GroupingSetsCarrierStructureTests {
       throws {
     // When ordinal 2 IS a real output, the bound admits it: a two-output
     // GROUPING SETS query with an unprojected-aggregate sort key materialises a
-    // hidden THIRD column, but `ORDER BY SUM(Qty), 2` binds the real second
+    // hidden third column, but `ORDER BY SUM(Qty), 2` binds the real second
     // output (`SUM(Qty)`), matching the plain grouped form.
     try sales().expect("""
         SELECT Region, SUM(Qty) FROM Sales GROUP BY GROUPING SETS ((Region))
@@ -1340,8 +1340,8 @@ struct GroupingSetsCarrierStructureTests {
   @Test func `an explicit "column 1" alias is bindable, not a synthesized header`()
       throws {
     // A synthesized display header `column N` is non-bindable by name, but the
-    // carrier distinguishes it from an EXPLICIT delimited `AS "column 1"` by
-    // the STRUCTURAL synthesized flag, not by comparing the name text — so
+    // carrier distinguishes it from an explicit delimited `AS "column 1"` by
+    // the structural synthesized flag, not by comparing the name text — so
     // ordering by the explicit alias works.
     try pair().expect("""
         SELECT a AS "column 1" FROM L UNION ALL SELECT b FROM R
@@ -1392,7 +1392,7 @@ struct GroupingSetsContextTokenTests {
 
   @Test func `a single grouping set with a carrier runs over a derived table`()
       throws {
-    // A ONE-set `GROUPING SETS ((Region))` is an ordinary `GROUP BY Region`:
+    // A one-set `GROUPING SETS ((Region))` is an ordinary `GROUP BY Region`:
     // there is no `UNION` for a sort key to survive, so a query-level `ORDER
     // BY` must NOT wrap the lone grouped arm in an `ordered` carrier. Doing so
     // hid the FROM-clause derived table `s` from the query-level collection

@@ -20,7 +20,7 @@ private func numbers() throws -> FixtureCatalog {
 }
 
 /// A single-row catalog whose `X` is zero — `1 / X` throws `SQLError.divide`
-/// when evaluated, so it is the probe for whether a fold SKIPS a throwing
+/// when evaluated, so it is the probe for whether a fold skips a throwing
 /// operand it must not drop.
 private func zero() throws -> FixtureCatalog {
   try Catalog {
@@ -31,7 +31,7 @@ private func zero() throws -> FixtureCatalog {
 }
 
 /// A parent `T` and child `S` keyed on `T.Id` — the LATERAL fixture whose right
-/// side VARIES per outer row, so the fold's result-equivalence is a real proof.
+/// side varies per outer row, so the fold's result-equivalence is a real proof.
 private func lateral() throws -> FixtureCatalog {
   try Catalog {
     Relation("T", ["Id": .integer]) {
@@ -84,7 +84,7 @@ private func selects(_ plan: Plan) -> Bool {
 }
 
 /// Whether `plan` reaches ANY `.empty` node — the known-empty relation the
-/// optimiser folds a PROVABLY constant-false selection into. Mirrors `selects`,
+/// optimiser folds a provably constant-false selection into. Mirrors `selects`,
 /// recursing every operator so a fold nested under a project/aggregate/set-op
 /// is still found.
 private func empties(_ plan: Plan) -> Bool {
@@ -124,9 +124,9 @@ private func empties(_ plan: Plan) -> Bool {
 
 // MARK: - Filter.constant unit tests
 
-/// `Filter.constant` is the SOUND, CONSERVATIVE constant-truth evaluator the
-/// optimiser folds on: `true` only when PROVABLY always TRUE, `false` only when
-/// PROVABLY always FALSE, and `nil` (do NOT fold) for anything that reads a
+/// `Filter.constant` is the sound, conservative constant-truth evaluator the
+/// optimiser folds on: `true` only when provably always TRUE, `false` only when
+/// provably always FALSE, and `nil` (do NOT fold) for anything that reads a
 /// slot, a `:parameter`, a subquery, or a NULL constant.
 struct FilterConstantTests {
   @Test func `a constant-true compare is provably true`() {
@@ -162,7 +162,7 @@ struct FilterConstantTests {
     let slot = Filter.compare(.slot(0), .equal, .constant(.integer(1)))
     #expect(Filter.and(t, t).constant == true)
     #expect(Filter.and(t, f).constant == false)
-    // An undecidable operand can read row data and THROW, so it must be
+    // An undecidable operand can read row data and throw, so it must be
     // evaluated at runtime — a `false`/`true` sibling cannot license folding
     // the compound away. Either side undecidable ⇒ the compound is undecidable.
     #expect(Filter.and(f, slot).constant == nil)
@@ -196,8 +196,8 @@ struct FilterConstantTests {
 
 // MARK: - Optimiser fold: WHERE result equivalence + plan shape
 
-/// The optimiser drops a PROVABLY-true `WHERE` (identical result, one fewer
-/// per-row predicate) and NEVER folds a false or NULL-bearing one.
+/// The optimiser drops a provably-true `WHERE` (identical result, one fewer
+/// per-row predicate) and never folds a false or NULL-bearing one.
 struct ConstantSelectFoldTests {
   @Test func `WHERE 1 = 1 yields the same rows as no WHERE`() throws {
     // A constant-true filter admits every row: the folded query yields exactly
@@ -207,7 +207,7 @@ struct ConstantSelectFoldTests {
   }
 
   @Test func `WHERE 1 = 1 optimises away the select node`() throws {
-    // Plan-shape proof: the always-true select is GONE after optimisation — the
+    // Plan-shape proof: the always-true select is gone after optimisation — the
     // fold left a plain scan, not a select over a true residual.
     let catalog = try numbers()
     let plan = try catalog.optimise(
@@ -241,7 +241,7 @@ struct ConstantSelectFoldTests {
   }
 
   @Test func `a constant-false selection preserves the output width`() throws {
-    // Schema preservation: the empty relation must advertise the SAME columns
+    // Schema preservation: the empty relation must advertise the same columns
     // as the subtree it replaced, so a two-column projection still yields
     // two-wide (zero) rows — a downstream consumer mis-shapes nothing.
     try numbers().empty("SELECT Id, V FROM N WHERE 1 = 0")
@@ -258,7 +258,7 @@ struct ConstantSelectFoldTests {
 
   @Test func `COUNT(*) over a constant-false source still yields one row`()
       throws {
-    // The bare aggregate sits ABOVE the folded select, so its source is the
+    // The bare aggregate sits above the folded select, so its source is the
     // `.empty` relation — and `grouped` over an empty input with no GROUP BY
     // still emits its degenerate one row (`COUNT` `0`), the standard SQL rule.
     // The fold must NOT collapse the aggregate itself to zero rows.
@@ -267,7 +267,7 @@ struct ConstantSelectFoldTests {
 
   @Test func `COUNT(*) over a constant-false source folds only the source`()
       throws {
-    // Plan-shape proof of the above: the `.empty` is the aggregate's SOURCE,
+    // Plan-shape proof of the above: the `.empty` is the aggregate's source,
     // the aggregate node survives above it.
     let catalog = try numbers()
     let plan = try catalog.optimise(
@@ -279,9 +279,9 @@ struct ConstantSelectFoldTests {
   @Test func `a constant-false selection over a THROWING view does not fold`()
       throws {
     // The soundness fence. `Bad`'s body evaluates `1 / X` with `X = 0`, so
-    // executing it RAISES `.divide`. Its `.derived` plan node is NOT provably
+    // executing it raises `.divide`. Its `.derived` plan node is NOT provably
     // throw-free (`Plan.safe` is `false`), so the constant-false select is NOT
-    // folded to `.empty` — folding would SKIP the view body and SUPPRESS the
+    // folded to `.empty` — folding would skip the view body and suppress the
     // throw. The plan keeps its select over the view, and running it surfaces
     // the division-by-zero exactly as the un-folded query would.
     let base = try Catalog {
@@ -318,7 +318,7 @@ struct ConstantSelectFoldTests {
 
   @Test func `an always-true OR does not drop a throwing operand`() throws {
     // The reviewer case: `(1 / X) = 0` reads a row slot and, with `X = 0`,
-    // THROWS `SQLError.divide` when evaluated. The `OR 1 = 1` disjunct is
+    // throws `SQLError.divide` when evaluated. The `OR 1 = 1` disjunct is
     // constant-true, but the compound OR is NOT a compile-time constant (the
     // left disjunct is undecidable), so the predicate is NOT folded away — it
     // runs per row and the division-by-zero surfaces. Folding it would silently
@@ -346,7 +346,7 @@ struct ConstantSelectFoldTests {
 /// plan/execution, never the rows.
 struct ConstantApplyFoldTests {
   @Test func `a LATERAL ON 1 = 1 yields the known-correct rows`() throws {
-    // The SAME rows the un-folded lateral fixture produces: Id 1 → {100, 101},
+    // The same rows the un-folded lateral fixture produces: Id 1 → {100, 101},
     // Id 2 → {200}, Id 3 → {} (dropped, INNER apply). The constant-true `ON`
     // skip admits every merged row directly — identical result.
     try lateral().expect(

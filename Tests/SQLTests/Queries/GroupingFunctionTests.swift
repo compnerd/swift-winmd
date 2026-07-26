@@ -23,7 +23,7 @@ private func sales() throws -> FixtureCatalog {
   }
 }
 
-/// The `SQLError` running `sql` against `catalog` raises, or `nil` — the RUN
+/// The `SQLError` running `sql` against `catalog` raises, or `nil` — the run
 /// path (`Catalog.run`), for the run ≡ schema fault agreement.
 private func running(_ sql: String,
                      _ catalog: borrowing FixtureCatalog) -> SQLError? {
@@ -35,7 +35,7 @@ private func running(_ sql: String,
   }
 }
 
-/// The `SQLError` type-checking `sql`'s schema raises, or `nil` — the SCHEMA
+/// The `SQLError` type-checking `sql`'s schema raises, or `nil` — the schema
 /// path (`columns(of:validate:true)`), for the run ≡ schema fault agreement.
 private func checking(_ sql: String,
                       _ catalog: borrowing FixtureCatalog) -> SQLError? {
@@ -53,7 +53,7 @@ struct GroupingFunctionTests {
   @Test func `a plain GROUP BY key is never rolled up, so GROUPING is 0`()
       throws {
     // A plain `GROUP BY Region` is one grouping set whose sole member is
-    // `Region`, so `Region` is present in every result row and NEVER rolled up:
+    // `Region`, so `Region` is present in every result row and never rolled up:
     // `GROUPING(Region)` is 0 for every row. Rows in first-appearance order.
     try sales().expect("""
         SELECT Region, GROUPING(Region), SUM(Qty)
@@ -87,7 +87,7 @@ struct GroupingFunctionTests {
       throws {
     // `ROLLUP(Region, Product)` is `[[Region, Product], [Region], []]`. Per
     // level, the scalar `GROUPING(Region)`/`GROUPING(Product)` and the two-arg
-    // VECTOR `GROUPING(Region, Product)` (Region the MOST-significant bit):
+    // vector `GROUPING(Region, Product)` (Region the most-significant bit):
     //   full arm  — both present: (0, 0), vector 0b00 = 0.
     //   (Region)  — Product rolled up: (0, 1), vector 0b01 = 1.
     //   ()        — both rolled up: (1, 1), vector 0b11 = 3.
@@ -113,7 +113,7 @@ struct GroupingFunctionTests {
   @Test func `CUBE(a, b) makes the two-arg vector cover all four bit patterns`()
       throws {
     // `CUBE(Region, Product)` is `[[Region, Product], [Product], [Region], []]`,
-    // so the VECTOR `GROUPING(Region, Product)` (Region the MSB) takes every
+    // so the vector `GROUPING(Region, Product)` (Region the MSB) takes every
     // value 0..3:
     //   full arm   — both present: 0b00 = 0.
     //   (Product)  — Region rolled up: 0b10 = 2.
@@ -155,7 +155,7 @@ struct GroupingFunctionTests {
     // A query-level `ORDER BY GROUPING(Region) DESC` over the `ROLLUP(Region)`
     // union sorts the grand total (GROUPING 1) ahead of the per-Region rows
     // (GROUPING 0), a secondary `Region` breaking the per-Region tie. The
-    // projected `GROUPING(Region)` (column 2) makes the sort key an OUTPUT the
+    // projected `GROUPING(Region)` (column 2) makes the sort key an output the
     // carrier matches by resolved identity.
     try sales().expect("""
         SELECT Region, GROUPING(Region), SUM(Qty)
@@ -170,9 +170,9 @@ struct GroupingFunctionTests {
   }
 
   @Test func `GROUPING of a non-grouping column faults on both paths`() throws {
-    // `Product` is in NO grouping set of `GROUP BY Region`, so `GROUPING(Product)`
+    // `Product` is in no grouping set of `GROUP BY Region`, so `GROUPING(Product)`
     // is invalid — the grouped lowering faults `SQLError.grouping` exactly as a
-    // bare non-grouped `Product` reference would, on BOTH the run and the schema
+    // bare non-grouped `Product` reference would, on both the run and the schema
     // type-check.
     let sql = """
         SELECT Region, GROUPING(Product)
@@ -199,7 +199,7 @@ struct GroupingFunctionTests {
   @Test func `GROUPING outside a grouped query faults on both paths`() throws {
     // `SELECT GROUPING(Region) FROM Sales` has no `GROUP BY` and no aggregate,
     // so it is NOT a grouped query — GROUPING has no grouping set to report
-    // against and faults `.state("42803")` on BOTH the run and the schema
+    // against and faults `.state("42803")` on both the run and the schema
     // type-check.
     let sql = "SELECT GROUPING(Region) FROM Sales"
     let fault = SQLError.state("42803", "GROUPING requires a GROUP BY")
@@ -243,7 +243,7 @@ struct GroupingFunctionTests {
 
   @Test func `a delimited GROUPING is an ordinary column, not the function`()
       throws {
-    // `GROUPING` is a CONTEXT identifier: a DELIMITED `"grouping"` is an
+    // `GROUPING` is a context identifier: a delimited `"grouping"` is an
     // ordinary column name, never the function, so a relation with a `grouping`
     // column groups and projects it plainly.
     let cat = try Catalog {

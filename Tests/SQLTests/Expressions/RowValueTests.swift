@@ -31,7 +31,7 @@ private func pairs() throws -> FixtureCatalog {
 
 struct RowValueParsingTests {
   @Test func `a row equality parses a first-class rows node`() throws {
-    // `(A, B) = (C, Id)` parses to the FIRST-CLASS `Predicate.rows` node
+    // `(A, B) = (C, Id)` parses to the FIRST-class `Predicate.rows` node
     // holding both rows' component expressions once — NOT a desugared
     // conjunction of scalar comparisons (which duplicated a component). The
     // componentwise semantics live in the lowering, not the AST.
@@ -83,7 +83,7 @@ struct RowValueParsingTests {
   }
 
   @Test func `a row IN parses a first-class among node`() throws {
-    // `(A, B) IN ((1, 2), (2, 2))` parses to the FIRST-CLASS `Predicate.among`
+    // `(A, B) IN ((1, 2), (2, 2))` parses to the FIRST-class `Predicate.among`
     // node holding the left row and each element row once — NOT a desugared
     // disjunction of row equalities.
     let select =
@@ -309,14 +309,14 @@ struct RowValueEvaluationTests {
 struct RowValueNullTests {
   @Test func `a NULL component makes an otherwise-equal row UNKNOWN`() throws {
     // `(1, NULL) = (1, 2)` → `1 = 1 AND NULL = 2` → TRUE AND UNKNOWN → UNKNOWN,
-    // so the row is DROPPED, not admitted. Row 4 is (A = 1, B = NULL).
+    // so the row is dropped, not admitted. Row 4 is (A = 1, B = NULL).
     try pairs().empty("SELECT Id FROM T WHERE (A, B) = (1, 2) AND Id = 4")
   }
 
   @Test func `a definite component mismatch dominates a NULL component`()
       throws {
     // `(1, NULL) = (2, 2)` → `1 = 2 AND NULL = 2` → FALSE AND UNKNOWN → FALSE,
-    // a DEFINITE non-match: the row is dropped by `=` (and would be ADMITTED by
+    // a definite non-match: the row is dropped by `=` (and would be admitted by
     // `<>`, since NOT FALSE is TRUE). Row 4 is (1, NULL).
     try pairs().empty("SELECT Id FROM T WHERE (A, B) = (2, 2) AND Id = 4")
     try pairs().expect("SELECT Id FROM T WHERE (A, B) <> (2, 2) AND Id = 4",
@@ -373,7 +373,7 @@ private final class Counter: @unchecked Sendable {
   /// The number of times `next()` has been called.
   private(set) var count = 0
 
-  /// Increments the count and returns the PREVIOUS value — the sequence `0, 1,
+  /// Increments the count and returns the previous value — the sequence `0, 1,
   /// 2, …` across successive calls.
   func next() -> Int {
     defer { count += 1 }
@@ -382,11 +382,11 @@ private final class Counter: @unchecked Sendable {
 }
 
 /// The load-bearing regression for the first-class redesign: a row-value
-/// component holding a STATEFUL call must be evaluated EXACTLY ONCE per row.
+/// component holding a stateful call must be evaluated exactly once per row.
 /// The old parse-time desugar named a component in several places — a `<`
 /// cascade uses an earlier component in both a strict step and an equality
 /// tie-guard, and a row `IN` copies the left row into each element's equality
-/// — so `stepper()` ran twice and the two calls saw DIFFERENT values (0, 1),
+/// — so `stepper()` ran twice and the two calls saw different values (0, 1),
 /// admitting or dropping the wrong rows. The first-class nodes evaluate each
 /// component once into a value the fold reuses, so the counter reads exactly 1
 /// and the truth is computed over the single value (0).
@@ -411,11 +411,11 @@ struct RowValueOnceTests {
   }
 
   @Test func `a row IN evaluates a stateful component once`() throws {
-    // Left row is `(stepper(), 0)` = `(0, 0)`. It matches NEITHER `(99, 0)` nor
+    // Left row is `(stepper(), 0)` = `(0, 0)`. It matches neither `(99, 0)` nor
     // `(1, 0)`, so no row is admitted — but ONLY if `stepper()` yields 0 in the
     // one evaluation the fold reads. The old desugar copied `stepper()` into
     // each element's equality: the first read 0 (no match against 99), the
-    // SECOND read 1, wrongly matching `(1, 0)` and admitting the row. The
+    // second read 1, wrongly matching `(1, 0)` and admitting the row. The
     // first-class node reads it once, so no row is admitted and the counter is
     // exactly 1.
     let counter = Counter()
@@ -429,7 +429,7 @@ struct RowValueOnceTests {
     // 0 < 1)` = FALSE OR (TRUE AND TRUE) = TRUE, so the row is admitted. The
     // old cascade named the first component twice (the strict `stepper() < 0`
     // and the `stepper() = 0` tie-guard): the first read 0, the second read 1,
-    // so the guard `1 = 0` was FALSE and the row was wrongly DROPPED. The
+    // so the guard `1 = 0` was FALSE and the row was wrongly dropped. The
     // first-class node reads it once, admitting the row, counter exactly 1.
     let counter = Counter()
     try one().expect("SELECT Id FROM T WHERE (stepper(), 0) < (0, 1)",
@@ -493,12 +493,12 @@ struct RowValueOnceTests {
 // MARK: - Reachability
 
 /// The type-check reachability of a row comparison and a row `IN` must match
-/// the executor's SHORT-CIRCUIT exactly as the scalar `.comparison`/
+/// the executor's short-circuit exactly as the scalar `.comparison`/
 /// `.membership` do — a constant-false row guard folds an `AND` (leaving its
 /// right arm unreachable and unvalidated), and a definite constant match in a
-/// row `IN`'s element list prunes every later element. Folding TOO MUCH would
-/// accept an invalid query, so only a ROW-INDEPENDENT (all-constant) guard that
-/// DEFINITELY settles a branch prunes it; a row-dependent guard stays reachable
+/// row `IN`'s element list prunes every later element. Folding too much would
+/// accept an invalid query, so only a ROW-independent (all-constant) guard that
+/// definitely settles a branch prunes it; a row-dependent guard stays reachable
 /// and is still validated. A text column `Name` makes `Name + 1` a REAL type
 /// fault (`operands must be numeric`) wherever it is reached.
 struct RowValueReachabilityTests {
@@ -519,7 +519,7 @@ struct RowValueReachabilityTests {
   @Test func `a constant match in a row IN prunes a later bad element`()
       throws {
     // `(1, 2) IN ((1, 2), (Name + 1, 3))`: the constant left `(1, 2)`
-    // DEFINITELY matches the first element, so `Filter.memberships`
+    // definitely matches the first element, so `Filter.memberships`
     // short-circuits and the second element's `Name + 1` (text arithmetic) is
     // unreachable — the type check must not validate it, and the run keeps
     // every row.
@@ -533,7 +533,7 @@ struct RowValueReachabilityTests {
 
   @Test func `a constant-false row guard makes the AND right arm unreachable`()
       throws {
-    // `(1, 2) = (3, 4) AND Name + 1 = 0`: the left conjunct folds DEFINITELY
+    // `(1, 2) = (3, 4) AND Name + 1 = 0`: the left conjunct folds definitely
     // FALSE (a row `=` over constants), so the executor's `AND` short-circuits
     // and `Name + 1` is unreachable — the type check must not validate it, and
     // the run yields no rows.
@@ -546,7 +546,7 @@ struct RowValueReachabilityTests {
   @Test func `a constant-false row inequality guard prunes the AND right arm`()
       throws {
     // `(1, 2) <> (1, 2) AND Name + 1 = 0`: a row `<>` over equal constants
-    // folds DEFINITELY FALSE (the negation of the all-TRUE `=`), so the `AND`
+    // folds definitely FALSE (the negation of the all-TRUE `=`), so the `AND`
     // short-circuits and `Name + 1` is unreachable and unvalidated.
     let query = try parse(query:
         "SELECT Id FROM T WHERE (1, 2) <> (1, 2) AND Name + 1 = 0")
@@ -557,7 +557,7 @@ struct RowValueReachabilityTests {
 
   @Test func `a constant-true row guard makes the OR right arm unreachable`()
       throws {
-    // `(1, 2) = (1, 2) OR Name + 1 = 0`: the left disjunct folds DEFINITELY
+    // `(1, 2) = (1, 2) OR Name + 1 = 0`: the left disjunct folds definitely
     // TRUE, so the executor's `OR` short-circuits and `Name + 1` is
     // unreachable — the type check must not validate it (mirroring the scalar
     // `1 = 1 OR …`), and the run keeps every row.
@@ -572,9 +572,9 @@ struct RowValueReachabilityTests {
   // MARK: Reachable — must still fault
 
   @Test func `no constant match in a row IN leaves a bad element reachable`() {
-    // `(1, 2) IN ((3, 4), (Name + 1, 5))`: no element DEFINITELY matches the
+    // `(1, 2) IN ((3, 4), (Name + 1, 5))`: no element definitely matches the
     // constant left, so the second element stays reachable — the pruning is
-    // PRECISE — and its `Name + 1` must still fault the type check, exactly as
+    // precise — and its `Name + 1` must still fault the type check, exactly as
     // the run would when it evaluates the second row equality.
     let query = try! parse(query:
         "SELECT Id FROM T WHERE (1, 2) IN ((3, 4), (Name + 1, 5))")
@@ -587,7 +587,7 @@ struct RowValueReachabilityTests {
   }
 
   @Test func `a constant-true row guard leaves the AND right arm reachable`() {
-    // `(1, 2) = (1, 2) AND Name + 1 = 0`: the left conjunct folds DEFINITELY
+    // `(1, 2) = (1, 2) AND Name + 1 = 0`: the left conjunct folds definitely
     // TRUE, so the `AND` does NOT short-circuit and `Name + 1` is reachable —
     // it must still fault the type check, matching the run.
     let query = try! parse(query:

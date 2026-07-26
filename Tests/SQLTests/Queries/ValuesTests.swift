@@ -136,10 +136,10 @@ struct ValuesTests {
   // MARK: - Type unification
 
   @Test func `a mixed numeric VALUES column unifies to double`() throws {
-    // VALUES desugars to a `UNION ALL`, so a column's type UNIFIES across every
+    // VALUES desugars to a `UNION ALL`, so a column's type unifies across every
     // arm through the set-operation type fold (the ISO rule a `UNION` follows),
     // NOT the first arm alone. A column mixing integer and double widens to
-    // double, and the integer arm's value is COERCED to that unified type.
+    // double, and the integer arm's value is coerced to that unified type.
     // `VALUES (1), (2.5)`'s column1 is thus a double throughout, `1.0` then
     // `2.5`, regardless of the arm order.
     let columns = try store().columns(of:

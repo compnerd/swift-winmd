@@ -26,7 +26,7 @@ private func things() throws -> FixtureCatalog {
 
 struct BetweenParsingTests {
   @Test func `BETWEEN parses to a first-class node`() throws {
-    // `x BETWEEN a AND b` is a first-class `Predicate.between` holding `x` ONCE
+    // `x BETWEEN a AND b` is a first-class `Predicate.between` holding `x` once
     // — not the re-referencing `AND` of two comparisons its ISO definition
     // names.
     let select = try parse(select: "SELECT * FROM T WHERE K BETWEEN 1 AND 10")
@@ -110,7 +110,7 @@ struct BetweenCrossKindTests {
     // is FALSE — making BETWEEN FALSE and NOT BETWEEN TRUE. `K NOT BETWEEN 'a'
     // AND 10` must therefore equal `NOT (K BETWEEN 'a' AND 10)`, NOT the
     // `K < 'a' OR K > 10` expansion whose two FALSE ordering checks would
-    // wrongly REJECT the row.
+    // wrongly reject the row.
     try things().expect(
         "SELECT Id FROM T WHERE K NOT BETWEEN 'a' AND 10",
         equals: "SELECT Id FROM T WHERE NOT (K BETWEEN 'a' AND 10)")
@@ -209,7 +209,7 @@ private final class Counter: @unchecked Sendable {
   /// The number of times `next()` has been called.
   private(set) var count = 0
 
-  /// Increments the count and returns the PREVIOUS value — the sequence `0, 1,
+  /// Increments the count and returns the previous value — the sequence `0, 1,
   /// 2, …` across successive calls.
   func next() -> Int {
     defer { count += 1 }
@@ -229,11 +229,11 @@ struct BetweenOperandTests {
 
   @Test func `the BETWEEN test expression is evaluated once`() throws {
     // `stepper()` yields 0, then 1, …; non-deterministic, so unfoldable.
-    // `stepper() BETWEEN 0 AND 0` must evaluate `stepper()` EXACTLY ONCE —
-    // yielding 0, which IS in [0, 0], so the row is KEPT. The old desugar
+    // `stepper() BETWEEN 0 AND 0` must evaluate `stepper()` exactly once —
+    // yielding 0, which IS in [0, 0], so the row is kept. The old desugar
     // duplicated the test across `stepper() >= 0 AND stepper() <= 0`, calling
-    // it twice: the lower bound saw 0 (0 >= 0) and the upper saw a DIFFERENT 1
-    // (1 <= 0 is false), wrongly DROPPING the row and calling it twice. The
+    // it twice: the lower bound saw 0 (0 >= 0) and the upper saw a different 1
+    // (1 <= 0 is false), wrongly dropping the row and calling it twice. The
     // first-class node holds the test, so the row is kept and the counter reads
     // exactly 1.
     let counter = Counter()
@@ -262,15 +262,15 @@ struct BetweenShortCircuitTests {
   @Test func `a FALSE lower bound skips the upper bound`() throws {
     // `0 BETWEEN 1 AND (1 / 0)` ≡ `0 >= 1 AND 0 <= (1 / 0)` — the lower
     // `0 >= 1` is FALSE, so Kleene `AND` is FALSE without the upper `1 / 0`.
-    // The eager form evaluated BOTH bounds and faulted `.divide` on the upper;
-    // deferring it keeps the predicate FALSE, dropping the row with NO throw.
+    // The eager form evaluated both bounds and faulted `.divide` on the upper;
+    // deferring it keeps the predicate FALSE, dropping the row with no throw.
     try one().empty("SELECT Id FROM T WHERE 0 BETWEEN 1 AND (1 / 0)")
   }
 
   @Test func `a TRUE lower bound skips the NOT BETWEEN upper`() throws {
     // `0 NOT BETWEEN 1 AND (1 / 0)` ≡ `0 < 1 OR 0 > (1 / 0)` — the lower
     // `0 < 1` is TRUE, so Kleene `OR` is TRUE without the upper `1 / 0`. The
-    // row is kept with NO throw.
+    // row is kept with no throw.
     try one().expect("SELECT Id FROM T WHERE 0 NOT BETWEEN 1 AND (1 / 0)",
                      yields: [[1]])
   }
@@ -278,7 +278,7 @@ struct BetweenShortCircuitTests {
   @Test func `the upper bound is evaluated when the lower does not settle it`()
       throws {
     // `5 BETWEEN 1 AND (1 / 0)` — the lower `5 >= 1` is TRUE, so the result
-    // hinges on the upper: the deferred `1 / 0` MUST evaluate and STILL fault,
+    // hinges on the upper: the deferred `1 / 0` must evaluate and still fault,
     // confirming the upper is not silently dropped when the lower needs it.
     try one().expect("SELECT Id FROM T WHERE 5 BETWEEN 1 AND (1 / 0)",
                      fails: .divide)
@@ -307,11 +307,11 @@ struct BetweenTypeCheckingTests {
   @Test func `a constant FALSE BETWEEN WHERE leaves the projection unreachable`()
       throws {
     // `0 BETWEEN 1 AND (1 / 0)` — the constant lower `0 >= 1` folds definitely
-    // FALSE, settling the whole BETWEEN FALSE WITHOUT folding the upper
+    // FALSE, settling the whole BETWEEN FALSE without folding the upper
     // `1 / 0`. So `constant(_ predicate:)` reports the WHERE always-FALSE, the
     // projection `Name + 1` (a `.operand` fault over the text `Name`, if
-    // reached) is unreachable, and `columns(of:validate:)` SUCCEEDS. The run
-    // drops every row before the projection, yielding no rows and NO throw.
+    // reached) is unreachable, and `columns(of:validate:)` succeeds. The run
+    // drops every row before the projection, yielding no rows and no throw.
     let text = "SELECT Name + 1 FROM T WHERE 0 BETWEEN 1 AND (1 / 0)"
     _ = try named().columns(of: parse(query: text))
     try named().empty(text)
@@ -374,9 +374,9 @@ struct BetweenSeekTests {
   @Test func `the seeked BETWEEN matches the equivalent range comparison`()
       throws {
     // The desugar `Id >= 3 AND Id <= 7` also seeks over the sorted key and
-    // returns the SAME rows — but seeks only ONE conjunct (`Id >= 3`, the run
+    // returns the same rows — but seeks only one conjunct (`Id >= 3`, the run
     // `2 ..< 10`) and residuals the other, so the first-class BETWEEN's
-    // two-sided `2 ..< 7` is the TIGHTER run. Parity is the seeked shape and
+    // two-sided `2 ..< 7` is the tighter run. Parity is the seeked shape and
     // the rows, and the BETWEEN run sits within the comparison's.
     let catalog = try sorted()
     let comparison =
@@ -431,11 +431,11 @@ struct BetweenSeekTests {
 
   @Test func `an inverted BETWEEN seeks an empty run without trapping`()
       throws {
-    // `Id BETWEEN 10 AND 1` is a valid EMPTY range (lower > upper): the
+    // `Id BETWEEN 10 AND 1` is a valid empty range (lower > upper): the
     // `Id >= 10` partition starts at index 9 and the `Id <= 1` partition ends
     // at index 1, so the raw `lower ..< upper` (9 ..< 1) would trap Swift's
     // `Range(lowerBound <= upperBound)` precondition and abort the process. The
-    // guard detects the inversion and seeks the EMPTY run `9 ..< 9` instead, so
+    // guard detects the inversion and seeks the empty run `9 ..< 9` instead, so
     // the query returns no rows and never traps.
     let catalog = try sorted()
     let query = try parse(query: "SELECT Id FROM T WHERE Id BETWEEN 10 AND 1")
@@ -448,7 +448,7 @@ struct BetweenSeekTests {
   @Test func `a parameterised BETWEEN seeks its two-sided run once bound`()
       throws {
     // `Id BETWEEN :lo AND :hi` with lo = 3, hi = 7 resolves both bounds from
-    // the bindings and seeks the SAME `2 ..< 7` run the literal `Id BETWEEN 3
+    // the bindings and seeks the same `2 ..< 7` run the literal `Id BETWEEN 3
     // AND 7` does — not a whole-table scan — so the parameterised range this
     // feature replaces does not regress against the `Id >= :lo AND Id <= :hi`
     // desugar's seek.
@@ -495,10 +495,10 @@ struct BetweenEmptyGroupTests {
       throws {
     // A constant-FALSE `WHERE` leaves a whole-result aggregate its single empty
     // group, over which the `HAVING 0 BETWEEN 1 AND (1 / 0)` folds: the
-    // constant lower `0 >= 1` is FALSE, settling BETWEEN FALSE WITHOUT folding
-    // the upper `1 / 0`. So `empty(_ predicate:)` drops the group WITHOUT a
-    // `.divide` fault, schema/type checking SUCCEEDS, and the run yields no row
-    // with NO throw.
+    // constant lower `0 >= 1` is FALSE, settling BETWEEN FALSE without folding
+    // the upper `1 / 0`. So `empty(_ predicate:)` drops the group without a
+    // `.divide` fault, schema/type checking succeeds, and the run yields no row
+    // with no throw.
     let text = """
         SELECT COUNT(*) FROM T WHERE 1 = 0
         HAVING 0 BETWEEN 1 AND (1 / 0)

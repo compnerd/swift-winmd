@@ -239,7 +239,7 @@ struct EngineUnionTests {
   @Test func `an inner UNION dedups before a trailing UNION ALL appends its arm`() throws {
     // (Lhs UNION Rhs) UNION ALL Extra. The inner UNION dedups `shared`
     // across Lhs and Rhs to one row — `a, shared, b` — and the outer UNION
-    // ALL then appends Extra's `a` WITHOUT deduplicating, so `a` recurs. A
+    // ALL then appends Extra's `a` without deduplicating, so `a` recurs. A
     // chain flattened to the trailing `all` would instead keep both copies of
     // `shared`; honouring each node's own flag keeps exactly one.
     let rows = try tags().run(parse("""
@@ -273,9 +273,9 @@ struct EngineUnionTests {
 
   @Test func `an all-NULL view column unifies with a later text arm`() throws {
     // The reviewer's VIEW all-NULL case. The view `v`'s column `x` is a constant
-    // NULL in BOTH arms, so its resolved schema marks the column UNCONSTRAINED:
+    // NULL in both arms, so its resolved schema marks the column unconstrained:
     // an enclosing `SELECT x FROM v UNION SELECT 'c'` must unify the view column
-    // with the text `'c'` arm and RUN — yielding the NULL and the text — rather
+    // with the text `'c'` arm and run — yielding the NULL and the text — rather
     // than fault integer against text. The view's schema resolution builds its
     // Schema from the body carrier through `Schema(from:)`, so the `Scope`
     // reader reports the column unconstrained and the outer fold skips its type,
@@ -291,13 +291,13 @@ struct EngineUnionTests {
   @Test func `a predicate over a widened UNION view column tests the coerced type`() throws {
     // The reviewer's precision oracle. The view `V(x)` is `SELECT x FROM A
     // UNION ALL SELECT x FROM B`, where `A.x` is the integer 9007199254740993
-    // and `B.x` is the double 9007199254740992.0. The set operation WIDENS `x`
+    // and `B.x` is the double 9007199254740992.0. The set operation widens `x`
     // to `double` (an integer arm beside a double arm), so `combine` coerces
     // the integer arm's row to double — and 9007199254740993 is NOT
     // representable as a double, rounding to 9007199254740992.0. An outer
-    // `SELECT x FROM V WHERE x = 9007199254740992` must test the COERCED value:
+    // `SELECT x FROM V WHERE x = 9007199254740992` must test the coerced value:
     // the integer arm's row becomes 9007199254740992.0, which `== 9007..92`, so
-    // BOTH rows survive. Were the predicate pushed PER ARM below the widening
+    // both rows survive. Were the predicate pushed per ARM below the widening
     // set operation, the integer arm would test 9007199254740993 == ..92
     // exactly (the pre-coercion value) and DROP its row, yielding one — the
     // unsound behaviour the `widened` gate now prevents by keeping the
@@ -825,8 +825,8 @@ private func statement<C: Catalog & ~Escapable>(_ text: String,
   try catalog.run(Statement(parsing: text))
 }
 
-/// The ISO rule that a set operation's result column TYPE is the common type
-/// across ALL arms — not the first arm's — and each arm's values are COERCED to
+/// The ISO rule that a set operation's result column type is the common type
+/// across ALL arms — not the first arm's — and each arm's values are coerced to
 /// it: a mixed `integer`/`double` column widens to `double` and its integer
 /// values promote, an irreconcilable pair faults, and a constant-NULL arm
 /// constrains nothing. Homogeneous set operations are unchanged
@@ -849,7 +849,7 @@ struct EngineSetOperationCoercionTests {
 
   @Test func `INTERSECT and EXCEPT emit the coerced double`() throws {
     // Equality already canonicalises `1` and `1.0`, so both match/subtract; the
-    // coercion makes the EMITTED cell carry the unified `double` type.
+    // coercion makes the emitted cell carry the unified `double` type.
     try roster().expect("SELECT 1 INTERSECT SELECT 1.0", yields: [[1.0]])
     try roster().expect("SELECT 2 EXCEPT SELECT 1.0", yields: [[2.0]])
   }
@@ -901,7 +901,7 @@ struct EngineSetOperationCoercionTests {
     // `types` coerce the mixed integer/double arms to a `double` column (set-op
     // unification), and the `AS d(a)` list renames that column `a` (the
     // explicit output column list). Selecting `d.a` reads the widened, coerced
-    // values under the list's name — the two features COMPOSE.
+    // values under the list's name — the two features compose.
     try roster().expect(
         "SELECT d.a FROM (SELECT 1 UNION SELECT 2.5) AS d(a) ORDER BY d.a",
         yields: [[1.0], [2.5]])
@@ -909,7 +909,7 @@ struct EngineSetOperationCoercionTests {
 
   @Test func `a constant-NULL arm does not veto the widening`() throws {
     // A `NULLIF(2, 2)` arm folds to constant NULL, so it constrains nothing (a
-    // NULL unifies with any typed arm): the OTHER arm's `double` types the
+    // NULL unifies with any typed arm): the other arm's `double` types the
     // column, its NULL row stays NULL and the double row coerces.
     try roster().expect("SELECT NULLIF(2, 2) UNION SELECT 2.5",
                               yields: [[nil], [2.5]])
@@ -952,25 +952,25 @@ struct EngineSetOperationCoercionTests {
 
 // MARK: - Correlated / lateral all-NULL column mask unification
 
-/// A column reference resolves its TYPE and its `unconstrained` mask from ONE
-/// resolution over the SAME paths — local, correlation, schema — so a
+/// A column reference resolves its type and its `unconstrained` mask from one
+/// resolution over the same paths — local, correlation, schema — so a
 /// correlated all-NULL column (referenced through a LATERAL body) keeps its
 /// mask and unifies with a typed set-operation arm, rather than losing the mask
 /// through the correlation surface and folding as a concrete type. The mask
-/// reader once walked a LOCAL-only path while the type reader was
+/// reader once walked a local-only path while the type reader was
 /// correlation-aware, so a correlated all-NULL column dropped its mask; the
-/// read-side unification closes that gap. A GENUINELY-typed correlated column
-/// stays concrete (no over-marking), and a barred ORDINARY subquery projection
+/// read-side unification closes that gap. A genuinely-typed correlated column
+/// stays concrete (no over-marking), and a barred ordinary subquery projection
 /// still faults, so the unification widens nothing.
 struct EngineCorrelatedNullUnificationTests {
   @Test func `a correlated all-NULL column unifies through a LATERAL set-op arm`()
       throws {
-    // The reviewer's case. `t`'s column `x` is a constant NULL in BOTH arms, so
-    // it is UNCONSTRAINED. The lateral body `SELECT x UNION SELECT 'c'`
+    // The reviewer's case. `t`'s column `x` is a constant NULL in both arms, so
+    // it is unconstrained. The lateral body `SELECT x UNION SELECT 'c'`
     // references the correlated `x`, whose mask must survive the correlation
     // surface so the arm is unconstrained and unifies with the text `'c'` — the
     // body yields the NULL row and the `'c'` row. Before the read-side
-    // unification the mask was read LOCAL-only, so the correlated `x` folded as
+    // unification the mask was read local-only, so the correlated `x` folded as
     // a concrete integer and the arm faulted int-vs-text.
     let rows = try statement("""
         WITH t (x) AS (SELECT NULLIF(1, 1) UNION SELECT NULLIF('a', 'a'))
@@ -982,8 +982,8 @@ struct EngineCorrelatedNullUnificationTests {
 
   @Test func `a grandparent all-NULL column unifies through a nested LATERAL arm`()
       throws {
-    // The correlation crosses TWO lateral levels: `x` (from `t`) is read in the
-    // INNERMOST lateral body's set-op arm, which correlates to a scope two
+    // The correlation crosses two lateral levels: `x` (from `t`) is read in the
+    // innermost lateral body's set-op arm, which correlates to a scope two
     // enclosing levels up. The nearest-first `Outer` walk must carry `x`'s
     // unconstrained mask up from that grandparent scope, so the innermost arm
     // still unifies the NULL with the text `'c'`.
@@ -1000,7 +1000,7 @@ struct EngineCorrelatedNullUnificationTests {
 
   @Test func `a genuinely-typed correlated column in a LATERAL arm stays concrete`()
       throws {
-    // The over-marking guard: `t`'s column `x` is a CONCRETE integer (a plain
+    // The over-marking guard: `t`'s column `x` is a concrete integer (a plain
     // `SELECT 1`), so the correlated reference must NOT be marked
     // unconstrained — the lateral arm `SELECT x UNION SELECT 'c'` then folds a
     // genuine integer against text and faults `.operand` (SQLSTATE 42804),
@@ -1017,7 +1017,7 @@ struct EngineCorrelatedNullUnificationTests {
 
   @Test func `a local all-NULL column still unifies with a text arm`() throws {
     // The local (non-correlated) all-NULL regression: `x` resolves through the
-    // LOCAL path, whose resolved lookup carries the same mask, so a bare
+    // local path, whose resolved lookup carries the same mask, so a bare
     // reference in a set-op arm unifies with the text arm and runs.
     let rows = try statement("""
         WITH t (x) AS (SELECT NULLIF(1, 1) UNION SELECT NULLIF('a', 'a'))
@@ -1037,8 +1037,8 @@ struct EngineCorrelatedNullUnificationTests {
 
   @Test func `a barred ordinary subquery projection still faults 0A000`() throws {
     // The parity guard: the read-side resolution keeps the `admits` bar, so an
-    // ORDINARY (non-lateral) correlated subquery in a projection is still
-    // DIAGNOSED `.unsupported` — the unification does not widen acceptance. The
+    // ordinary (non-lateral) correlated subquery in a projection is still
+    // diagnosed `.unsupported` — the unification does not widen acceptance. The
     // barred surface faults the same on the run and schema paths.
     let people = try roster()
     #expect(throws: SQLError.state("0A000",
@@ -1051,14 +1051,14 @@ struct EngineCorrelatedNullUnificationTests {
 // MARK: - Unconstrained-mask channel seal (per-wrapper regression matrix)
 
 /// The class-level seal: a per-column `unconstrained` mask (an all-arms-NULL
-/// column places NO type constraint, so it unifies with any set-operation arm)
-/// must travel with a column's type through EVERY channel that stores or passes
-/// a RESOLVED column's type. Three channels carry a resolved column's type — the
-/// write/bindings carrier, the read/reference lookup, and the SCALAR-SUBQUERY
-/// output memo — and each is exercised here by a matched PAIR per wrapper shape:
-/// an all-NULL driver UNION'd with a typed arm must RUN (unify → the NULL row
-/// and the typed row), while a NON-null counterpart in the SAME shape must still
-/// FAULT `.operand` (SQLSTATE 42804), so the seal marks exactly the
+/// column places no type constraint, so it unifies with any set-operation arm)
+/// must travel with a column's type through every channel that stores or passes
+/// a resolved column's type. Three channels carry a resolved column's type — the
+/// write/bindings carrier, the read/reference lookup, and the scalar-subquery
+/// output memo — and each is exercised here by a matched pair per wrapper shape:
+/// an all-NULL driver UNION'd with a typed arm must run (unify → the NULL row
+/// and the typed row), while a non-null counterpart in the same shape must still
+/// fault `.operand` (SQLSTATE 42804), so the seal marks exactly the
 /// constant-NULL columns and no others. The scalar-subquery pair is the fix for
 /// the last leaking channel: the output memo once stored a bare `ValueType`, so
 /// a scalar wrapper dropped the mask — `SELECT (SELECT NULLIF('a','a')) UNION
@@ -1078,10 +1078,10 @@ struct EngineUnconstrainedMaskSealTests {
 
   @Test func `a scalar-subquery all-NULL wrapper unifies; a typed one faults`()
       throws {
-    // THE FIX. The scalar subquery `(SELECT NULLIF('a','a'))` collapses to a
-    // constant NULL, so its resolved output column is UNCONSTRAINED — the memo
+    // the fix. The scalar subquery `(SELECT NULLIF('a','a'))` collapses to a
+    // constant NULL, so its resolved output column is unconstrained — the memo
     // now carries that mask into the outer fold, which unifies the wrapper with
-    // the integer arm and RUNS (NULL row + `1` row). A genuinely-typed wrapper
+    // the integer arm and runs (NULL row + `1` row). A genuinely-typed wrapper
     // `(SELECT 'a')` stays concrete text and faults int-vs-text.
     try roster().expect(
         "SELECT (SELECT NULLIF('a', 'a')) UNION SELECT 1",
@@ -1093,9 +1093,9 @@ struct EngineUnconstrainedMaskSealTests {
 
   @Test func `a scalar subquery over a both-NULL UNION unifies; a typed one faults`()
       throws {
-    // The scalar subquery's OWN body is a set operation both of whose arms fold
+    // The scalar subquery's own body is a set operation both of whose arms fold
     // to constant NULL, so the inner unification leaves the column
-    // unconstrained — the memo carries THAT mask out, and the outer fold unifies
+    // unconstrained — the memo carries that mask out, and the outer fold unifies
     // the wrapper with the text `'c'` arm. A typed inner UNION (`SELECT 1 UNION
     // SELECT 2`) stays a concrete integer and faults int-vs-text.
     try roster().expect("""
@@ -1124,29 +1124,29 @@ struct EngineUnconstrainedMaskSealTests {
 
 // MARK: - Placeholder-column unconstrained closure (fold defers, not faults)
 
-/// The invariant that closes two feedback classes with ONE rule: a carrier
-/// column whose type is a FABRICATED PLACEHOLDER (not a genuine derivation) is
-/// marked UNCONSTRAINED, so the set-operation `merge` fold DEFERS to the other
+/// The invariant that closes two feedback classes with one rule: a carrier
+/// column whose type is a fabricated placeholder (not a genuine derivation) is
+/// marked unconstrained, so the set-operation `merge` fold defers to the other
 /// arm rather than faulting on the placeholder — faulting ONLY on two
 /// genuinely-known irreconcilable types.
 ///
-/// Two placeholders are closed here. An UNREGISTERED routine call has no
+/// Two placeholders are closed here. An unregistered routine call has no
 /// genuine return type (the derive fabricates the `.integer` default), so its
-/// fold defers — at ANY depth, whether the call is BARE (`missing()`) or
-/// NESTED in a composite (`missing() + 0`, `COALESCE(missing(), 1)`, a `CASE`
-/// result, an argument of a registered call); the SEPARATE reachable typecheck
-/// still raises `SQLError.function` when the arm is REACHED, so a
-/// genuinely-missing routine is never hidden — only the FOLD defers. A CTE's
+/// fold defers — at ANY depth, whether the call is bare (`missing()`) or
+/// nested in a composite (`missing() + 0`, `COALESCE(missing(), 1)`, a `CASE`
+/// result, an argument of a registered call); the separate reachable typecheck
+/// still raises `SQLError.function` when the arm is reached, so a
+/// genuinely-missing routine is never hidden — only the fold defers. A CTE's
 /// declared-name carrier is likewise a placeholder, so a genuine body
-/// incompatibility (`SELECT 'b' UNION SELECT 1`) PROPAGATES `.operand`
+/// incompatibility (`SELECT 'b' UNION SELECT 1`) propagates `.operand`
 /// identically at run and at `columns(of:validate:true)`, rather than being
-/// swallowed into a phantom `.integer`. A REGISTERED-only expression carries a
+/// swallowed into a phantom `.integer`. A registered-only expression carries a
 /// genuine type and still constrains, and a literal mismatch still faults, so
 /// the deferral marks exactly the placeholders and no others.
 struct EnginePlaceholderUnconstrainedClosureTests {
   @Test func `a bare unregistered call in a reached arm still faults function`()
       throws {
-    // The unregistered `missing()` is REACHED (a FROM-less single-row arm), so
+    // The unregistered `missing()` is reached (a FROM-less single-row arm), so
     // the reachable typecheck raises `SQLError.function` — NOT `.operand`. The
     // fold deferring on the placeholder does not hide the missing routine.
     try roster().expect("SELECT missing() UNION SELECT 'x'",
@@ -1175,7 +1175,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
 
   @Test func `an unreached nested unregistered call defers and the union runs`()
       throws {
-    // The reviewer oracle: `NOPE(Name) + 0` NESTS the unregistered call in a
+    // The reviewer oracle: `NOPE(Name) + 0` nests the unregistered call in a
     // `.binary`, which the former shallow bare-call case did not catch. The
     // zero-row arm never evaluates it, so `unresolved` marks the arm
     // unconstrained and the fold defers to the text `'x'` rather than faulting
@@ -1202,7 +1202,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
     // Nested in a `COALESCE`: the FROM-less arm's `COALESCE(missing(), 1)`
     // contains the unregistered call, so `unresolved` marks it unconstrained
     // and the fold defers to the text `'x'` rather than faulting `.operand`. A
-    // FROM-less single-row arm is REACHED, so `missing()` dispatches — hence
+    // FROM-less single-row arm is reached, so `missing()` dispatches — hence
     // the run faults `.function`, proving the deferral touches only the fold.
     try roster().expect("SELECT COALESCE(missing(), 1) UNION SELECT 'x'",
                               fails: .function("missing"))
@@ -1210,7 +1210,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
 
   @Test func `a COALESCE selecting an earlier non-NULL arg constrains the fold`()
       throws {
-    // `COALESCE(1, missing())` SELECTS the constant integer `1` and never
+    // `COALESCE(1, missing())` selects the constant integer `1` and never
     // reaches `missing()` (both `unified` and the executor stop there), so the
     // left arm constrains the set-op as integer — the text `'x'` arm is
     // genuinely irreconcilable and must fault `.operand`, not defer and leave
@@ -1233,7 +1233,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
 
   @Test func `an unregistered call as a registered call argument defers`()
       throws {
-    // Nested as an ARGUMENT of a REGISTERED call: `up(missing())` — `up` is
+    // Nested as an argument of a registered call: `up(missing())` — `up` is
     // registered, but its argument dispatches the unregistered `missing()`, so
     // `unresolved`'s `.call` arm recurses the arguments and marks the arm
     // unconstrained. The FROM-less arm is reached, so the run dispatches the
@@ -1246,7 +1246,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
 
   @Test func `an unreached nested unregistered call under COALESCE runs`()
       throws {
-    // The deferral is observable as a clean RUN when the nesting arm is
+    // The deferral is observable as a clean run when the nesting arm is
     // filtered out: a zero-row `COALESCE(missing(), 1)` arm never evaluates the
     // call, so the union folds and yields only the reached text `'x'`.
     try roster().expect("""
@@ -1257,8 +1257,8 @@ struct EnginePlaceholderUnconstrainedClosureTests {
 
   @Test func `a registered-only arithmetic mismatch still faults 42804`()
       throws {
-    // The nested over-suppression guard: a REGISTERED integer-returning call in
-    // an arithmetic expression carries a GENUINE type — `unresolved` finds no
+    // The nested over-suppression guard: a registered integer-returning call in
+    // an arithmetic expression carries a genuine type — `unresolved` finds no
     // unregistered call, so the arm stays constrained and the integer result
     // beside the text `'x'` still faults `.operand`. The recursion suppresses
     // ONLY unregistered calls, never a genuine mismatch.
@@ -1271,7 +1271,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
   }
 
   @Test func `pure literal arithmetic still faults 42804 beside text`() throws {
-    // The baseline nested guard: `1 + 0` folds to a GENUINE integer with no
+    // The baseline nested guard: `1 + 0` folds to a genuine integer with no
     // call at all, so it stays constrained and faults `.operand` against the
     // text `'x'` — the recursion adds no over-suppression to a call-free tree.
     try roster().expect(
@@ -1281,7 +1281,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
 
   @Test func `a scalar subquery with an unregistered call defers via the memo`()
       throws {
-    // Subquery composition: `(SELECT NOPE())` resolves its OWN single column
+    // Subquery composition: `(SELECT NOPE())` resolves its own single column
     // through the subquery memo (`scalar(resolved:)`), which already carries
     // the unconstrained mask for the unregistered call inside — so `unresolved`
     // returns false for the outer `.subquery` and does NOT double-handle it.
@@ -1294,7 +1294,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
 
   @Test func `a registered text-returning call still constrains and faults`()
       throws {
-    // The over-suppression guard: a REGISTERED routine has a GENUINE return
+    // The over-suppression guard: a registered routine has a genuine return
     // type, so its column is NOT a placeholder and still constrains — a
     // text-returning call beside an integer arm faults `.operand`.
     let routines: Routines = [
@@ -1307,7 +1307,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
   }
 
   @Test func `a registered call unifying with a matching arm runs`() throws {
-    // The counterpart: a registered call whose genuine return type UNIFIES with
+    // The counterpart: a registered call whose genuine return type unifies with
     // the other arm folds cleanly and runs.
     let routines: Routines =
         ["tag": Routine(returns: .text, parameters: [.text]) { row in row[0] }]
@@ -1317,7 +1317,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
   }
 
   @Test func `a literal type mismatch still faults 42804`() throws {
-    // The baseline over-suppression guard: two GENUINE literal types still fold
+    // The baseline over-suppression guard: two genuine literal types still fold
     // to an irreconcilable pair and fault — the closure widens nothing.
     try roster().expect(
         "SELECT 1 UNION SELECT 'x'",
@@ -1325,8 +1325,8 @@ struct EnginePlaceholderUnconstrainedClosureTests {
   }
 
   @Test func `a genuine CTE body incompatibility faults at run`() throws {
-    // The CTE-validate case at RUN: the body `SELECT 'b' UNION SELECT 1` folds
-    // two GENUINE types (text vs integer) — irreconcilable — so the run faults
+    // The CTE-validate case at run: the body `SELECT 'b' UNION SELECT 1` folds
+    // two genuine types (text vs integer) — irreconcilable — so the run faults
     // `.operand` rather than swallowing it into the declared `.integer`
     // placeholder.
     #expect(throws: SQLError.operand("UNION arms have irreconcilable types")) {
@@ -1338,7 +1338,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
 
   @Test func `a genuine CTE body incompatibility faults at columns validate`()
       throws {
-    // The SAME case at the schema path: `columns(of:validate:true)` must ALSO
+    // The same case at the schema path: `columns(of:validate:true)` must also
     // throw `.operand` — no divergence, no phantom integer column advertised
     // for a query that cannot run.
     let statement = try Statement(parsing:
@@ -1353,13 +1353,13 @@ struct EnginePlaceholderUnconstrainedClosureTests {
 
 /// The reachability-aware deferral of a nested subquery's set-operation
 /// operand-compatibility fold. The shape pre-pass (`subquery(of:)`/`width`)
-/// records every nested subquery's width and single-column type AHEAD of the
+/// records every nested subquery's width and single-column type ahead of the
 /// walk that decides which subqueries actually run, so it must NOT fault
 /// `SQLError.operand` (SQLSTATE 42804) on an incompatible set-operation
 /// subquery a short-circuited `AND`/`OR` leg never reaches — a `… WHERE 1 = 0
 /// AND EXISTS (SELECT 'x' UNION SELECT 1)` runs and yields no rows. Deferral
-/// alone would HIDE a genuine incompatibility in a subquery that DOES run, so
-/// a REACHED scalar or `IN`/quantified occurrence is re-folded strictly on the
+/// alone would hide a genuine incompatibility in a subquery that does run, so
+/// a reached scalar or `IN`/quantified occurrence is re-folded strictly on the
 /// reached path and faults exactly as before; an `EXISTS`/`LATERAL` reach does
 /// not constrain column type and never faults on it. The top-level and CTE
 /// folds are outside the pre-pass (`shape` is `false`), so they keep faulting.
@@ -1376,7 +1376,7 @@ struct EngineDeferredSetopShapeTests {
   }
 
   @Test func `a reached EXISTS over an incompatible UNION runs`() throws {
-    // A REACHED `EXISTS` does not read the arms' unified column type — its
+    // A reached `EXISTS` does not read the arms' unified column type — its
     // cardinality probe never evaluates the select list — so it must NOT fault
     // on the incompatible pair (role `.existential`, skipped by the re-fold).
     // People has rows, so the EXISTS is present and every row projects `1`.
@@ -1395,7 +1395,7 @@ struct EngineDeferredSetopShapeTests {
   }
 
   @Test func `a reached IN over an incompatible UNION faults 42804`() throws {
-    // A REACHED `IN` reads its value set's column type (role `.valued`), so the
+    // A reached `IN` reads its value set's column type (role `.valued`), so the
     // re-fold on the reached path restores the strict operand check and the
     // incompatible UNION faults 42804 — the deferral does not hide it.
     try roster().expect("""
@@ -1404,7 +1404,7 @@ struct EngineDeferredSetopShapeTests {
   }
 
   @Test func `a reached scalar-subquery incompatible UNION faults 42804`() throws {
-    // A REACHED scalar subquery collapses to a single cell (role `.scalar`), so
+    // A reached scalar subquery collapses to a single cell (role `.scalar`), so
     // the reached re-fold checks its arms strictly and the incompatible UNION
     // faults 42804 in the comparison.
     try roster().expect("""
@@ -1414,7 +1414,7 @@ struct EngineDeferredSetopShapeTests {
 
   @Test func `a dead-branch scalar-subquery incompatible UNION runs to no rows`()
       throws {
-    // The SAME scalar subquery behind `1 = 0 AND …` is unreachable, so its
+    // The same scalar subquery behind `1 = 0 AND …` is unreachable, so its
     // operand fold defers in the pre-pass and the query runs to no rows.
     try roster().empty("""
         SELECT 1 FROM People
@@ -1444,17 +1444,17 @@ struct EngineDeferredSetopShapeTests {
 
 // MARK: - Reached-correlated set-op fold and invalid-call suppression
 
-/// The two execution-seam refinements of the deferred set-op fold. A REACHED
-/// correlated non-EXISTS subquery re-executes the SHAPED (placeholder-typed)
+/// The two execution-seam refinements of the deferred set-op fold. A reached
+/// correlated non-EXISTS subquery re-executes the shaped (placeholder-typed)
 /// plan the pre-pass recorded under `.shaping()`, so it must strict-fold its
-/// arms' column types at the EXECUTION seam (`Filter.executed`) — not from the
+/// arms' column types at the execution seam (`Filter.executed`) — not from the
 /// shaped plan — faulting `.operand` (42804) exactly as the uncorrelated run
-/// path does, and ONLY for a REACHED occurrence (an unreachable one never runs
+/// path does, and ONLY for a reached occurrence (an unreachable one never runs
 /// `executed`, so its deferral stands); an `EXISTS` reach never reads column
-/// type and does not fault. Separately, an INVALID routine call (bad arity or a
-/// definitively-wrong argument type) to an EXISTING routine is treated like a
-/// MISSING one — its fabricated declared type must NOT constrain the fold — so
-/// an invalid call in an UNREACHED arm folds away, while a VALID call's genuine
+/// type and does not fault. Separately, an invalid routine call (bad arity or a
+/// definitively-wrong argument type) to an existing routine is treated like a
+/// missing one — its fabricated declared type must NOT constrain the fold — so
+/// an invalid call in an unreached arm folds away, while a valid call's genuine
 /// return type still constrains (the over-suppression guard).
 struct EngineReachedCorrelatedSetopTests {
   @Test func `a reached correlated IN over an incompatible UNION faults 42804`()
@@ -1473,7 +1473,7 @@ struct EngineReachedCorrelatedSetopTests {
 
   @Test func `a dead-branch correlated IN over an incompatible UNION runs empty`()
       throws {
-    // The SAME correlated `IN` behind `1 = 0 AND …` is unreachable, so it never
+    // The same correlated `IN` behind `1 = 0 AND …` is unreachable, so it never
     // reaches the execution seam — its shape deferral stands and the query runs
     // to no rows.
     try roster().empty("""
@@ -1497,7 +1497,7 @@ struct EngineReachedCorrelatedSetopTests {
   }
 
   @Test func `an invalid unreached call does not constrain the fold`() throws {
-    // `tag(text) RETURNS text` called with NO argument is invalid (bad arity),
+    // `tag(text) RETURNS text` called with no argument is invalid (bad arity),
     // so it is treated like a missing call — its declared `text` return does
     // NOT constrain the fold. The invalid arm is unreached (`FETCH FIRST 0 ROWS
     // ONLY`), so the fold defers to the integer right arm and the query yields
@@ -1512,7 +1512,7 @@ struct EngineReachedCorrelatedSetopTests {
 
   @Test func `an invalid reachable call faults on its bad arity, not 42804`()
       throws {
-    // The counterpart on a VALIDATING path: `SELECT tag() UNION SELECT 1` calls
+    // The counterpart on a validating path: `SELECT tag() UNION SELECT 1` calls
     // `tag(text)` with no argument. The invalid call does not constrain the
     // fold (so no spurious 42804), but the strict `validate: true` schema path
     // catches the bad arity and faults `.argument` — NOT the operand fold. (The
@@ -1529,7 +1529,7 @@ struct EngineReachedCorrelatedSetopTests {
 
   @Test func `a valid text call still constrains the fold and faults 42804`()
       throws {
-    // The over-suppression guard: `tag('a')` is a VALID call (correct arity and
+    // The over-suppression guard: `tag('a')` is a valid call (correct arity and
     // argument type), so its declared `text` return still constrains the fold —
     // a text column beside an integer arm faults 42804. The invalid-call
     // suppression must not swallow a valid call's genuine type.

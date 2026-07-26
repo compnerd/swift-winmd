@@ -10,7 +10,7 @@ import SQLTestSupport
 
 struct NullifTests {
   @Test func `NULLIF parses to a first-class node`() throws {
-    // `NULLIF(K, 0)` is a first-class `Expression.nullif` holding `K` ONCE —
+    // `NULLIF(K, 0)` is a first-class `Expression.nullif` holding `K` once —
     // not the re-referencing `CASE` its ISO definition names.
     let select = try parse(select: "SELECT NULLIF(K, 0) FROM T")
     let expression = Expression.nullif(.column("K"), .literal(.integer(0)))
@@ -59,14 +59,14 @@ private func derived(_ text: String) throws -> ValueType {
   return try scope.derive(items[0].expression)
 }
 
-/// The `derive` surface RESOLVES column references without `compile`'s
-/// lowering, so `derive` alone must resolve BOTH NULLIF operands: the LHS
+/// The `derive` surface resolves column references without `compile`'s
+/// lowering, so `derive` alone must resolve both NULLIF operands: the LHS
 /// shapes the result type and the RHS resolves for its errors, exactly as the
 /// `||`/arithmetic derive branch derives both sides.
 struct NullifDerivationTests {
   @Test func `deriving NULLIF resolves the second operand`() throws {
     // `derive` — the schema-only surface a `columns(of:validate:false)` and an
-    // unreachable projection take, which RESOLVES column references — must
+    // unreachable projection take, which resolves column references — must
     // derive both `NULLIF` operands, so an unresolved RHS `Missing` faults
     // `SQLError.column` rather than the branch silently returning the LHS type,
     // mirroring the arithmetic `.binary` derive branch.
@@ -93,7 +93,7 @@ private final class Counter: @unchecked Sendable {
   /// The number of times `next()` has been called.
   private(set) var count = 0
 
-  /// Increments the count and returns the PREVIOUS value — the sequence `0, 1,
+  /// Increments the count and returns the previous value — the sequence `0, 1,
   /// 2, …` across successive calls.
   func next() -> Int {
     defer { count += 1 }
@@ -113,11 +113,11 @@ struct NullifOperandTests {
 
   @Test func `the NULLIF operand is evaluated once`() throws {
     // `stepper()` yields 0, then 1, …; non-deterministic, so unfoldable.
-    // `NULLIF(stepper(), 99)` must evaluate `stepper()` EXACTLY ONCE — yielding
-    // 0, which ≠ 99, so it returns that SAME 0. The old CASE desugar embedded
+    // `NULLIF(stepper(), 99)` must evaluate `stepper()` exactly once — yielding
+    // 0, which ≠ 99, so it returns that same 0. The old CASE desugar embedded
     // the operand in both the `= 99` equality and the `ELSE`, calling
     // `stepper()` twice: the equality compared 0 and the ELSE returned a
-    // DIFFERENT 1. The first-class node holds the operand, so the counter reads
+    // different 1. The first-class node holds the operand, so the counter reads
     // exactly 1 and the value returned is the one compared.
     let counter = Counter()
     let routines = try Routines()

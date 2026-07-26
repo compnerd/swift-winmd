@@ -27,7 +27,7 @@ extension Catalog where Self: ~Escapable {
       // projection evaluates its constant/call expressions against.
       return [Record([])]
     case .empty:
-      // The known-empty relation yields NO records — the optimiser proved its
+      // The known-empty relation yields no records — the optimiser proved its
       // constant-false guard admits none — so nothing above it (a project, an
       // aggregate, a join) ever sees a row, and its skipped subtree stays
       // unrun.
@@ -91,19 +91,19 @@ extension Catalog where Self: ~Escapable {
   }
 
   /// Executes the query-level `ordered` set-operation carrier `plan` over the
-  /// inner set operation `union`, routing the setop leaf through the SAME
+  /// inner set operation `union`, routing the setop leaf through the same
   /// per-arm augmentation the direct `run(.setop)` and the correlated-subquery
-  /// `arms` use — so a derived table an arm names is MATERIALISED in that arm's
+  /// `arms` use — so a derived table an arm names is materialised in that arm's
   /// own scope before its `.scan` reads it.
   ///
-  /// The carrier plan `ordered` builds is a stack of SINGLE-source row
+  /// The carrier plan `ordered` builds is a stack of single-source row
   /// operators (`sort`/`distinct`/`limit`/`project`, and the `project`/`sort`
   /// pair a `materialised` output key emits) OVER the compiled `union` setop.
-  /// The plain `execute(_:_:)` would run the setop under the ONE carrier
+  /// The plain `execute(_:_:)` would run the setop under the one carrier
   /// context (`execute(.setop)` shares it across both arms), which never binds
   /// an arm's arm-local derived alias — arms are SELECT-scoped, so the query-
   /// level augment misses them. This descends the wrapper stack unchanged,
-  /// applying EACH operator through the SAME helper `execute(_:_:)` uses, and
+  /// applying each operator through the same helper `execute(_:_:)` uses, and
   /// at the setop leaf runs `arms(_:_:_:)` — per-arm augment, per arm
   /// `execute`, shared `combine` — so the carrier's sort/dedup/limit see the
   /// fully materialised combined rows in the union's output slot space. A
@@ -144,9 +144,9 @@ extension Catalog where Self: ~Escapable {
 
   /// Sorts `rows` by the ordered `keys` — the executor's `.sort` node body,
   /// shared with the query-level `ordered` set-operation carrier so the two
-  /// sort a combined result IDENTICALLY.
+  /// sort a combined result identically.
   ///
-  /// Each key's `Term` is evaluated against every record UP FRONT — a bare slot
+  /// Each key's `Term` is evaluated against every record up front — a bare slot
   /// read, but any lowered expression (`a + b`, `UPPER(Name)`, an ordinal's or
   /// alias's select-list item) — so the comparator sorts on precomputed values.
   /// Evaluation may throw (a scalar call, a division), which a `sorted(by:)`
@@ -252,7 +252,7 @@ extension Catalog where Self: ~Escapable {
   /// slot count (needed to NULL-extend even when a side is empty).
   /// Each candidate pair is merged (left slots then right slots) and tested
   /// against `on` under three-valued logic — TRUE matches, UNKNOWN and FALSE do
-  /// not, exactly as a `WHERE` admits; `on` governs MATCHING alone, so an
+  /// not, exactly as a `WHERE` admits; `on` governs matching alone, so an
   /// unmatched preserved row is still emitted.
   ///
   ///   - `left`: every left row, in left-major order — each matched pair, then
@@ -266,12 +266,12 @@ extension Catalog where Self: ~Escapable {
   /// A `.inner` kind never reaches here — `compile` lowers an inner join
   /// through the product/join path.
   ///
-  /// FAST PATH: when `on` carries an equi `.match` conjunct straddling the two
+  /// fast path: when `on` carries an equi `.match` conjunct straddling the two
   /// sides (a left slot `< widths.left` equal to a right slot `>= widths.left`
   /// — the shape a decorrelated OUTER APPLY emits), a `.left`/`.full` join
-  /// hashes the right side by that key ONCE and probes per left row
+  /// hashes the right side by that key once and probes per left row
   /// (`bucketed`), turning the O(left × right) nested loop into O(left +
-  /// right). The probe re-checks the WHOLE `on` on each bucket candidate — the
+  /// right). The probe re-checks the whole `on` on each bucket candidate — the
   /// bucket over-groups (two large integers can share a `Double` bucket) and
   /// `on` may carry residual conjuncts beyond the key — so the surviving pairs,
   /// the NULL-extension of unmatched left rows, and (for `.full`) the left-NULL
@@ -280,24 +280,24 @@ extension Catalog where Self: ~Escapable {
   /// nested loop's UNKNOWN `.match` leaves it. A non-equi `on` (no straddling
   /// `.match`) takes the nested loop.
   ///
-  /// The fast path fires ONLY when the WHOLE `on` is `safe` (cannot throw): it
-  /// evaluates `on` for the bucket candidates alone, so it SKIPS a non-matching
-  /// or NULL-key right row ENTIRELY — never evaluating `on` for it — whereas
-  /// the nested loop evaluates the whole `on` for EVERY pair. (This is NOT
-  /// about AND short-circuiting: the evaluator IS Kleene and DOES short-circuit
+  /// The fast path fires ONLY when the whole `on` is `safe` (cannot throw): it
+  /// evaluates `on` for the bucket candidates alone, so it skips a non-matching
+  /// or NULL-key right row entirely — never evaluating `on` for it — whereas
+  /// the nested loop evaluates the whole `on` for every pair. (This is NOT
+  /// about AND short-circuiting: the evaluator IS Kleene and does short-circuit
   /// an `AND` on a FALSE left, but only on a FALSE one — an UNKNOWN or TRUE
   /// left still evaluates the right, and either side of the `on` may throw.) An
-  /// UNSAFE `on` — a straddling `.match` AND a throwing conjunct like
-  /// `(1 / B.x) = 0` — could therefore SUPPRESS a throw the nested loop raises
+  /// unsafe `on` — a straddling `.match` AND a throwing conjunct like
+  /// `(1 / B.x) = 0` — could therefore suppress a throw the nested loop raises
   /// on a skipped pair, so it falls to the nested loop below, which evaluates
   /// every pair and throws identically.
-  /// A `safe` `on` throws on NO pair, so skipping the non-bucket/NULL rows
+  /// A `safe` `on` throws on no pair, so skipping the non-bucket/NULL rows
   /// suppresses nothing. A decorrelated OUTER APPLY's `on` is safe by
   /// construction (the recogniser gates the residual and apply predicate
   /// `safe`), so it keeps the fast path.
   ///
-  /// In PRACTICE every `.match`-carrying `on` that reaches here is ALREADY
-  /// safe: the `on()` recogniser (`Resolve.swift`) forms NO `.match` unless the
+  /// In practice every `.match`-carrying `on` that reaches here is already
+  /// safe: the `on()` recogniser (`Resolve.swift`) forms no `.match` unless the
   /// whole ON is `allSatisfy(\.safe)`, and the OUTER APPLY decorrelation only
   /// folds a `.match` when its body residual and apply `on` are `safe`. This
   /// `on.safe` guard is defence-in-depth — it keeps the executor locally sound
@@ -379,14 +379,14 @@ extension Catalog where Self: ~Escapable {
   }
 
   /// The hash fast-path of a `.left`/`.full` OUTER join: the right side hashed
-  /// ONCE by `key.right` into buckets, then each left row probed by `key.left`
+  /// once by `key.right` into buckets, then each left row probed by `key.left`
   /// in O(1). Behaviour-identical to the nested loop `outer` above — same
   /// surviving pairs, same NULL-extension, same order.
   ///
   /// The right side is bucketed by its key's promoted `bucket` (a NULL key
   /// buckets nothing — it can never equi-match, exactly as the nested loop's
   /// UNKNOWN `.match` leaves it unmatched). Each left row probes its own key's
-  /// bucket, and every candidate is CONFIRMED against the WHOLE `on` — the
+  /// bucket, and every candidate is confirmed against the whole `on` — the
   /// bucket over-groups and `on` may carry residual conjuncts beyond the key —
   /// so a bucket collision or a failing residual drops the pair exactly as the
   /// nested loop's per-pair `on` test does. A left row with no confirmed pair
@@ -400,7 +400,7 @@ extension Catalog where Self: ~Escapable {
   /// key is NULL probes nothing and is NULL-extended.
   ///
   /// `key.left` is a combined-space slot (the left side is the record's
-  /// prefix), while `key.right` is the right side's OWN standalone slot — the
+  /// prefix), while `key.right` is the right side's own standalone slot — the
   /// caller maps the combined right slot down by `widths.left` before the call.
   private borrowing func bucketed(_ left: Array<Record>,
                                   _ right: Array<Record>,
@@ -428,7 +428,7 @@ extension Catalog where Self: ~Escapable {
       if case .null = value {} else {
         for index in buckets[bucket(value)] ?? [] {
           let record = lhs.merged(with: right[index])
-          // Confirm the WHOLE `on` — the bucket over-groups and `on` may carry
+          // Confirm the whole `on` — the bucket over-groups and `on` may carry
           // residual conjuncts beyond the equi key, so a collision or a failing
           // residual drops the pair, exactly as the nested loop's `on` test.
           if try evaluate(record, on, context) == true {
@@ -450,8 +450,8 @@ extension Catalog where Self: ~Escapable {
     return records
   }
 
-  /// The SEMIJOIN of `left` against `right` on `on` — an EXISTENCE
-  /// test emitting each surviving LEFT record UNCHANGED, never merged with a
+  /// The semijoin of `left` against `right` on `on` — an existence
+  /// test emitting each surviving LEFT record unchanged, never merged with a
   /// right one and never NULL-extended.
   ///
   /// `left`/`right` are the two materialised sides, `widths` each side's slot
@@ -460,39 +460,39 @@ extension Catalog where Self: ~Escapable {
   /// (left slots then right slots) ONLY to evaluate `on` in the combined space;
   /// the LEFT record alone is what a survivor emits.
   ///
-  ///   - SEMI (`anti == false`): a left row is kept iff SOME right row makes
+  ///   - semi (`anti == false`): a left row is kept iff SOME right row makes
   ///     merged `on` evaluate TRUE under three-valued logic (UNKNOWN and FALSE
-  ///     do not match, exactly as a `WHERE` admits). The scan SHORT-CIRCUITS on
-  ///     the first match, so a left row appears AT MOST ONCE regardless of how
+  ///     do not match, exactly as a `WHERE` admits). The scan short-circuits on
+  ///     the first match, so a left row appears at most once regardless of how
   ///     many right rows it matches — `EXISTS` is a decided per-row test, never
   ///     a multiplication.
-  ///   - ANTI (`anti == true`): a left row is kept iff NO right row makes `on`
+  ///   - anti (`anti == true`): a left row is kept iff no right row makes `on`
   ///     TRUE — the complement, a decorrelated `NOT EXISTS`.
   ///
   /// A NULL correlation key makes the equi `.match` UNKNOWN, so no right row
-  /// matches: SEMI drops such a left row, ANTI keeps it — `EXISTS` two-valued,
-  /// never UNKNOWN. An EMPTY right side matches nothing, so SEMI emits nothing
-  /// and ANTI emits every left row.
+  /// matches: semi drops such a left row, anti keeps it — `EXISTS` two-valued,
+  /// never UNKNOWN. An empty right side matches nothing, so semi emits nothing
+  /// and anti emits every left row.
   ///
-  /// FAST PATH: when `on` carries a straddling equi `.match` conjunct (shape
-  /// a decorrelated `EXISTS` emits, found by `equikey`) AND the WHOLE `on` is
-  /// `safe`, the right side is bucketed by its key ONCE and each left probes
-  /// its own bucket, confirming the WHOLE `on` per candidate (the bucket over-
+  /// fast path: when `on` carries a straddling equi `.match` conjunct (shape
+  /// a decorrelated `EXISTS` emits, found by `equikey`) AND the whole `on` is
+  /// `safe`, the right side is bucketed by its key once and each left probes
+  /// its own bucket, confirming the whole `on` per candidate (the bucket over-
   /// groups and `on` may carry residual conjuncts beyond the key) and short-
   /// circuiting on the first confirmed match — turning the O(left × right)
   /// nested loop into O(left + right). A NULL left key probes no bucket and so
   /// never matches, exactly as the nested loop's UNKNOWN `.match` leaves it.
   ///
-  /// The fast path fires ONLY when `on` is `safe`, for the SAME reason the
+  /// The fast path fires ONLY when `on` is `safe`, for the same reason the
   /// `.outer` executor gates its own hash path: it evaluates `on` for a left
-  /// row's matching-key bucket candidates ALONE, SKIPPING every non-bucket and
-  /// NULL-key right row, whereas the nested loop evaluates `on` for EVERY pair.
-  /// (This is NOT `AND` short-circuiting: the evaluator is Kleene and DOES
+  /// row's matching-key bucket candidates alone, skipping every non-bucket and
+  /// NULL-key right row, whereas the nested loop evaluates `on` for every pair.
+  /// (This is NOT `AND` short-circuiting: the evaluator is Kleene and does
   /// circuit an `AND` on a FALSE left, but an UNKNOWN or TRUE left still
-  /// evaluates the right, and either side may throw.) An UNSAFE `on` could
-  /// therefore SUPPRESS a throw the nested loop raises on a skipped pair, so it
+  /// evaluates the right, and either side may throw.) An unsafe `on` could
+  /// therefore suppress a throw the nested loop raises on a skipped pair, so it
   /// falls to the nested loop, which evaluates every pair and throws
-  /// identically. In PRACTICE the decorrelation only ever builds a `safe` `on`
+  /// identically. In practice the decorrelation only ever builds a `safe` `on`
   /// (its correlation `.match` and residual are gated `safe`), so this gate is
   /// defence-in-depth against a future producer.
   private borrowing func semijoin(_ left: Array<Record>,
@@ -512,22 +512,22 @@ extension Catalog where Self: ~Escapable {
     var records = Array<Record>()
     for lhs in left {
       // Short-circuit on the first right row that confirms `on` — a left row
-      // survives (SEMI) or is excluded (ANTI) by EXISTENCE alone, so it need
-      // never scan past the first match, and is emitted AT MOST ONCE.
+      // survives (semi) or is excluded (anti) by existence alone, so it need
+      // never scan past the first match, and is emitted at most once.
       var found = false
       for rhs in right where try evaluate(lhs.merged(with: rhs), on,
                                           context) == true {
         found = true
         break
       }
-      // SEMI keeps a matched left row, ANTI keeps an unmatched one — and the
+      // semi keeps a matched left row, anti keeps an unmatched one — and the
       // LEFT record alone is emitted, never the merge.
       if found != anti { records.append(lhs) }
     }
     return records
   }
 
-  /// The hash fast-path of a semijoin: the right hashed ONCE by `key.right`
+  /// The hash fast-path of a semijoin: the right hashed once by `key.right`
   /// into buckets, then each left row probed by `key.left` in O(1) and short-
   /// circuited on the first confirmed match. Behaviour-identical to the nested
   /// loop `semijoin` above — same survivors, each emitted at most once.
@@ -535,14 +535,14 @@ extension Catalog where Self: ~Escapable {
   /// The right side is bucketed by its key's promoted `bucket` (a NULL key
   /// buckets nothing — it can never equi-match, exactly as the nested loop's
   /// UNKNOWN `.match` leaves it). Each left row probes its own key's bucket and
-  /// every candidate is CONFIRMED against the WHOLE `on` — the bucket over-
+  /// every candidate is confirmed against the whole `on` — the bucket over-
   /// groups and `on` may carry residual conjuncts beyond the key — the first
   /// confirmed match deciding existence. A left row whose key is NULL probes
-  /// nothing and matches nothing. SEMI emits a matched left row (unchanged, at
-  /// most once); ANTI emits an unmatched one — the complement.
+  /// nothing and matches nothing. semi emits a matched left row (unchanged, at
+  /// most once); anti emits an unmatched one — the complement.
   ///
   /// `key.left` is a combined-space slot (the left is the record's prefix),
-  /// while `key.right` is the right's OWN standalone slot — the caller maps
+  /// while `key.right` is the right's own standalone slot — the caller maps
   /// the combined right slot down by `widths.left` before the call.
   private borrowing func bucketed(_ left: Array<Record>,
                                   _ right: Array<Record>,
@@ -564,10 +564,10 @@ extension Catalog where Self: ~Escapable {
       let value = lhs[key.left]
       var found = false
       // A NULL left key equi-matches nothing, so it probes no bucket and stays
-      // unmatched — SEMI drops it, ANTI keeps it.
+      // unmatched — semi drops it, anti keeps it.
       if case .null = value {} else {
         for index in buckets[bucket(value)] ?? [] {
-          // Confirm the WHOLE `on` — the bucket over-groups and `on` may carry
+          // Confirm the whole `on` — the bucket over-groups and `on` may carry
           // residual conjuncts beyond the equi key, so a collision or a failing
           // residual is not a match, exactly as the nested loop's `on` test.
           // The first confirmed match decides existence, so stop scanning.
@@ -584,7 +584,7 @@ extension Catalog where Self: ~Escapable {
 }
 
 /// The `(left, right)` slot pair of an equi `.match` conjunct in `on` that
-/// STRADDLES the join boundary `boundary` — one slot on the left side
+/// straddles the join boundary `boundary` — one slot on the left side
 /// (`< boundary`), the other on the right (`>= boundary`) — or `nil` when no
 /// such conjunct exists (a non-equi `on`, or a `.match` wholly on one side).
 /// The first straddling `.match` among the top-level `AND` conjuncts is the
@@ -625,17 +625,17 @@ private func limited(_ records: Array<Record>, _ count: Int?, _ offset: Int)
 ///
 /// Each side runs through the same `catalog`, `routines`, and `bindings`, so a
 /// bound parameter threads into every arm alike. A side may itself be a
-/// `setop`, and it executes with its OWN semantics first — a nested operation
+/// `setop`, and it executes with its own semantics first — a nested operation
 /// resolves before the outer node combines its result. A `Record` is `Hashable`
-/// and keys on its `canonical` values (so `1` and `1.0` are one row), the SAME
+/// and keys on its `canonical` values (so `1` and `1.0` are one row), the same
 /// whole-row equality `UNION`'s dedup uses.
 ///
 ///   - `.union`: the rows of either side, `left` followed by `right`. Without
 ///     `all` the whole-row duplicates are removed (first occurrence kept);
 ///     with `all` (`UNION ALL`) every row is kept.
-///   - `.intersect`: the rows present in BOTH sides, in left order. Without
+///   - `.intersect`: the rows present in both sides, in left order. Without
 ///     `all` each common row appears once; with `all` (`INTERSECT ALL`) it
-///     appears the LESSER of its two multiplicities.
+///     appears the lesser of its two multiplicities.
 ///   - `.except`: the rows of `left` NOT balanced by `right`, in left order.
 ///     Without `all` each left row absent from `right` appears once; with
 ///     `all` (`EXCEPT ALL`) each left row appears its left count less its right
@@ -657,15 +657,15 @@ extension Catalog where Self: ~Escapable {
 /// Combines two set-operation arms' records under `kind` and `all` — `union`
 /// keeps the rows of either, `intersect` those of both, `except` the left's not
 /// balanced by the right — the executor's `setop` node and the per-arm run path
-/// share this ONE combiner so the two agree on duplicate handling.
+/// share this one combiner so the two agree on duplicate handling.
 ///
-/// Each arm's cells are first COERCED to the unified column `types` (`Value
+/// Each arm's cells are first coerced to the unified column `types` (`Value
 /// .coerced` — the widening ISO type unification requires, so `SELECT 1 UNION
 /// SELECT 2.5` emits a `double` column), the ONE numeric widening `coerced`
-/// performs; a HOMOGENEOUS set operation's `types` matches each arm's own
+/// performs; a homogeneous set operation's `types` matches each arm's own
 /// types, so the coercion is a no-op and the result is byte-identical.
 /// `INTERSECT`/`EXCEPT` equality already canonicalises (`1` equals `1.0`), so
-/// coercion there changes only the EMITTED cells' type, never which rows match.
+/// coercion there changes only the emitted cells' type, never which rows match.
 internal func combine(_ kind: SetOperation, _ left: Array<Record>,
                       _ right: Array<Record>, _ all: Bool,
                       types: Array<ValueType>) -> Array<Record> {
@@ -719,7 +719,7 @@ private struct Multiset {
 /// The rows present in both `left` and `right` — `INTERSECT`.
 ///
 /// Without `all` each row common to both sides appears once, in left order
-/// (the first occurrence kept); with `all` it appears the LESSER of its left
+/// (the first occurrence kept); with `all` it appears the lesser of its left
 /// and right multiplicities. `right` is tallied into a `Multiset`; a left row
 /// is emitted while an occurrence remains to balance it, so the `all` count is
 /// naturally capped at the right side's — and, absent `all`, an emitted row is
@@ -741,7 +741,7 @@ private func intersected(_ left: Array<Record>, _ right: Array<Record>,
 
 /// The rows of `left` not balanced by `right` — `EXCEPT`.
 ///
-/// Without `all` each `left` row with NO match in `right` appears once, in
+/// Without `all` each `left` row with no match in `right` appears once, in
 /// left order (the first occurrence kept); with `all` each `left` row appears
 /// its left count less its right count, floored at zero. `right` is tallied
 /// into a `Multiset`: for `all` each left row cancels one right occurrence and
@@ -767,7 +767,7 @@ private func subtracted(_ left: Array<Record>, _ right: Array<Record>,
 /// occurrence of each distinct row kept and their order preserved.
 ///
 /// A `Record` is `Hashable`, so the dedup keys on the materialised row's values
-/// through the `Seen` set — the SAME whole-row equality `UNION` uses. It backs
+/// through the `Seen` set — the same whole-row equality `UNION` uses. It backs
 /// both a bare `UNION` and `SELECT DISTINCT`.
 private func deduplicated(_ records: Array<Record>) -> Array<Record> {
   var rows = Array<Record>()
@@ -817,11 +817,11 @@ extension Catalog where Self: ~Escapable {
   /// reads, in the slot order the outer scan expects (slot `i` is
   /// `ordinals[i]`).
   ///
-  /// The sub-plan runs OUTSIDE the statement's CTE scope — never the caller's
+  /// The sub-plan runs outside the statement's CTE scope — never the caller's
   /// `WITH` — so a caller's `WITH` never reaches into a stored view's body: a
   /// view's own `FROM`/`JOIN` names resolve to base relations (and other
   /// views), never to a statement-local CTE that happens to share a name. Its
-  /// scope is instead the `definition_schema.` overlay the view's OWN query
+  /// scope is instead the `definition_schema.` overlay the view's own query
   /// names (empty when it names none), so a view defined over a store relation
   /// materialises exactly as the inline query does — the same overlay the body
   /// compiled and optimised under.
@@ -831,29 +831,29 @@ extension Catalog where Self: ~Escapable {
       throws(SQLError) -> Array<Record> {
     var overlay = context.body([:])
     if let view = resolve(view: name) {
-      // EXECUTION-path materialise (`rows: true`): a nested derived body's
+      // execution-path materialise (`rows: true`): a nested derived body's
       // schema is derived schema-only inside `materialise`, so `validate:
       // false` keeps that lenient — a data-dependent-empty derived body in a
       // view body must not fault at run, matching the top-level run path. Seed
-      // the cyclic-view guard with THIS view's own name, as `resolve(view:)`
+      // the cyclic-view guard with this view's own name, as `resolve(view:)`
       // does, so a body materialising this view through a derived table (`FROM
       // (SELECT * FROM <self>) AS d`) faults `.recursion` in `materialise`
       // rather than re-running the body without end. `body([:])` enters the
-      // view-body scope with the caller's correlation stack CLEARED, so a
+      // view-body scope with the caller's correlation stack cleared, so a
       // nested derived body's schema (derived while `augment`/`materialise`
       // resolves it) cannot bind an unbound column outward to an enclosing row.
       let fresh = context.body([:]).visiting(name).validating(false)
       overlay = try augment(fresh, for: view.query, rows: true)
-      // Record the view body's OWN overlay under `.view(name)` so its LAZY
+      // Record the view body's own overlay under `.view(name)` so its lazy
       // subqueries re-run against the view's base relations, while a caller
-      // conjunct PUSHED into this body keeps its `.caller` overlay and re-runs
+      // conjunct pushed into this body keeps its `.caller` overlay and re-runs
       // against the caller's — each subquery resolving in its own textual scope
       // regardless of the execution site a pushdown lands it at. A view body
       // may nest `EXISTS`/`IN (Q)`/scalar subqueries its own plan carries,
-      // lowered under `.view(name)` — a DISJOINT id space from the `.caller`
+      // lowered under `.view(name)` — a disjoint id space from the `.caller`
       // one (see `Subscope`) — so a view-body `EXISTS (SELECT V FROM S)` over
-      // the view's OWN base and a caller's pushed one over a same-named CTE are
-      // SEPARATE occurrences. The row evaluator runs each LAZILY into the SAME
+      // the view's own base and a caller's pushed one over a same-named CTE are
+      // separate occurrences. The row evaluator runs each lazily into the same
       // shared memo box `context.subqueries` carries (kept in `overlay` via
       // `scoping`, which preserves the subqueries), so a view-body occurrence
       // memoises beside the caller's without either overwriting the other.
@@ -863,17 +863,17 @@ extension Catalog where Self: ~Escapable {
     let rows: Array<Record>
     let view = resolve(view: name)
     if let view, case .setop = view.query, case .setop = plan {
-      // A SET-OPERATION view body executes each ARM's sub-plan under an overlay
-      // AUGMENTED with THAT arm's own derived aliases. A `setop` collects NO
+      // A SET-operation view body executes each ARM's sub-plan under an overlay
+      // augmented with that arm's own derived aliases. A `setop` collects no
       // derived aliases at the query level (arms are SELECT-scoped), so the
       // overlay built above binds none; a `CREATE VIEW v AS SELECT * FROM
       // (SELECT Id FROM T) AS d UNION ALL …` would else execute an arm `.scan`
-      // over an unbound `d`. Executing the arm SUB-PLANS (not re-running the
-      // arm queries) preserves any conjunct the caller PUSHED into the view's
+      // over an unbound `d`. Executing the arm SUB-plans (not re-running the
+      // arm queries) preserves any conjunct the caller pushed into the view's
       // plan — the pushed filter lives in each arm's sub-plan — while the
       // per-arm augment binds the arm-local `d` the whole-body overlay missed.
       //
-      // Its subqueries run PER ARM inside `setop`, not here over the whole-view
+      // Its subqueries run per ARM inside `setop`, not here over the whole-view
       // overlay: an arm's direct `EXISTS`/`IN (Q)` may name that arm's own arm-
       // local derived alias, so running it demands the arm's own augment in
       // scope — the whole-view overlay binds no arm alias, so a whole-view
@@ -882,18 +882,18 @@ extension Catalog where Self: ~Escapable {
       rows = try setop(plan, view.query, overlay, name.lowercased())
     } else if let view, case .ordered = view.query,
         case .setop = view.query.core {
-      // The body is a set operation UNDER an `ordered` carrier (`… UNION …
+      // The body is a set operation under an `ordered` carrier (`… UNION …
       // ORDER BY V`), whose plan is a `.shaped` project/sort/distinct stack
-      // over the `.setop`, NOT a bare setop, so BOTH guards above failed and
+      // over the `.setop`, NOT a bare setop, so both guards above failed and
       // the arm-local derived aliases went unmaterialised (`.relation`). Pass
       // the carrier-transparent core to `setop`, which descends the wrapper —
-      // applying each row operator through the SAME executor helpers
+      // applying each row operator through the same executor helpers
       // `execute(_:carrying:)` uses — to the setop leaf where it per-arm
-      // augments. GATED on the body actually wearing a carrier, so a bare union
+      // augments. gated on the body actually wearing a carrier, so a bare union
       // view keeps the exact plan-shape dispatch above.
       rows = try setop(plan, view.query.core, overlay, name.lowercased())
     } else {
-      // A single-arm view body's subqueries run LAZILY into the shared memo box
+      // A single-arm view body's subqueries run lazily into the shared memo box
       // the `overlay` carries (recorded above under `.view(name)`), so the
       // sub-plan's row evaluator reads each result on first reach.
       rows = try execute(plan, overlay)
@@ -902,14 +902,14 @@ extension Catalog where Self: ~Escapable {
     return range.map { rows[$0].project(ordinals) }
   }
 
-  /// Executes a view body's SET-OPERATION `plan` arm by arm, each arm sub-plan
-  /// under `overlay` AUGMENTED with THAT arm's own derived aliases, combining
+  /// Executes a view body's SET-operation `plan` arm by arm, each arm sub-plan
+  /// under `overlay` augmented with that arm's own derived aliases, combining
   /// the arms under each node's operator.
   ///
   /// The `plan` tree mirrors the `query` tree (compile builds `.setop(kind,
   /// compile(left), compile(right), all)` from `.setop(kind, left, right,
   /// all)`), so this descends the two in lockstep: a `.setop` node recurses
-  /// into both arms and `combine`s the results, and a LEAF arm — a `.select`
+  /// into both arms and `combine`s the results, and a leaf arm — a `.select`
   /// query, its sub-plan any non-`setop` node — augments the arm's derived
   /// aliases into `overlay` (rows, so its `.scan` reads them) and executes the
   /// sub-plan under that arm-local scope. Executing the sub-plan (not
@@ -918,16 +918,16 @@ extension Catalog where Self: ~Escapable {
   /// overlay omitted; and each arm's `d` stays scoped to its arm (two arms may
   /// reuse `d`).
   ///
-  /// A leaf arm's DIRECT `EXISTS`/`IN (Q)`/scalar subqueries run LAZILY into
+  /// A leaf arm's direct `EXISTS`/`IN (Q)`/scalar subqueries run lazily into
   /// the shared memo box `overlay.subqueries` carries, lowered under
   /// `.view(name)` — the same scope the arm sub-plan's lowered `Filter`s
   /// compiled under — so an arm subquery resolves against the arm's own
-  /// overlay. The arm's REVEALED overlay is recorded under `.view(name)` before
+  /// overlay. The arm's revealed overlay is recorded under `.view(name)` before
   /// executing (last arm's binding wins, but arms share the same base relations
   /// a subquery's FROM reveals to; the arm-local derived layer is SELECT-scoped
   /// and invisible to a subquery's FROM, so an arm subquery naming that arm's
   /// arm-local derived alias faults `.relation` as a single arm's does). A
-  /// caller conjunct PUSHED into an arm keeps its `.caller` overlay and re-runs
+  /// caller conjunct pushed into an arm keeps its `.caller` overlay and re-runs
   /// against the caller's relations.
   private borrowing func setop(_ plan: Plan, _ query: Query, _ overlay: Context,
                                _ name: String)
@@ -936,19 +936,19 @@ extension Catalog where Self: ~Escapable {
         case let .setop(_, leftQuery, rightQuery, _) = query {
       // This node's arm queries are in hand, so the unified column `types` the
       // plan carries (computed at compile) drive the arm coercion `combine`
-      // applies — the SAME types the top-level and Plan-node paths use.
+      // applies — the same types the top-level and Plan-node paths use.
       return try combine(kind, setop(left, leftQuery, overlay, name),
                          setop(right, rightQuery, overlay, name), all,
                          types: types)
     }
     // An `ordered` view body compiles to a `.shaped` stack of single-source row
     // operators (`project`/`sort`/`distinct`/`limit`/`select`) OVER the setop,
-    // so descend the wrapper — the SAME nodes `execute(_:carrying:)` descends —
+    // so descend the wrapper — the same nodes `execute(_:carrying:)` descends —
     // applying each operator through the shared executor helpers, until the
     // `.setop` node recurses above and per-arm augments. The carrier wrapper
-    // sits ABOVE the setop, so `query` is STILL the `.setop` core here — gate
+    // sits above the setop, so `query` is still the `.setop` core here — gate
     // on that: once the setop splits into an arm (`query` a `.select`), that
-    // plan is the ARM's own sub-plan and must execute AS A UNIT under its own
+    // plan is the ARM's own sub-plan and must execute AS A unit under its own
     // augment below, NOT be walked through as a carrier wrapper (which would
     // apply the arm's projection/filter outside its arm-local scope).
     if case .setop = query {
@@ -975,7 +975,7 @@ extension Catalog where Self: ~Escapable {
       }
     }
     // A single-arm leaf (a bare `.setop` body's arm, or a carrier wrapper's
-    // innermost source once the setop above has split): augment THIS arm's own
+    // innermost source once the setop above has split): augment this arm's own
     // derived aliases and execute its sub-plan under the arm-local scope.
     let scope = try augment(overlay.validating(false), for: query, rows: true)
     scope.subqueries.record(overlay: scope.revealed().relations,
@@ -1006,25 +1006,25 @@ private func product(_ outer: Array<Record>, _ inner: Array<Record>)
 /// joined by the equality on its `keys.right` slot (`joined`). A base relation
 /// that reports `column` (the inner ordinal `keys.right` reads) seekable is
 /// sought per outer record — an index-nested loop, cheap because the seek
-/// narrows the scan; one that is NOT seekable is scanned ONCE into a hash map
+/// narrows the scan; one that is NOT seekable is scanned once into a hash map
 /// keyed by its join value and each outer record probes it in O(1) (`hashed`),
 /// rather than reading the whole inner once per outer record. Every strategy
 /// materialises a candidate over the referenced `ordinals` into inner slots `0
 /// ..< ordinals.count`, admits it only when the pushed inner `filter` (in the
-/// inner's standalone slot space) also holds — applied WHILE the inner row is
+/// inner's standalone slot space) also holds — applied while the inner row is
 /// materialised, so a filtered inner row is never paired or bucketed — keys on
 /// the inner's `keys.right` slot (`keys.right - base` in the standalone inner
 /// record), and concatenates a match (the inner's slots landing at `base` in
 /// the combined space). A NULL key joins to nothing, and every path preserves
 /// outer-major order, the inner matches in cursor order within each outer.
 ///
-/// The HASH-JOIN bucket a key falls in — a grouping key, NOT the equality. A
+/// The hash-JOIN bucket a key falls in — a grouping key, NOT the equality. A
 /// numeric value buckets by its `Double` magnitude (an `.integer` promoted), so
 /// every value equal to it under `Filter.matches` shares a bucket: `1` and
 /// `1.0`, and an integer and the double it rounds to past 2^53. A non-numeric
 /// value (text, boolean, blob, null) buckets as itself. The bucket may over-
 /// group — two distinct large integers can share a `Double` bucket — so hash
-/// probing pairs it with a RESIDUAL `matches(_,.equal,_)` check, the same exact
+/// probing pairs it with a residual `matches(_,.equal,_)` check, the same exact
 /// equality the predicate uses (integer/integer exact, mixed promoted). The
 /// seek and CTE nested-loop paths compare with `matches` directly.
 private func bucket(_ value: Value) -> Value {
@@ -1032,11 +1032,11 @@ private func bucket(_ value: Value) -> Value {
   return value
 }
 
-/// A value folded to its EXACT canonical form for duplicate elimination: a
+/// A value folded to its exact canonical form for duplicate elimination: a
 /// whole `double` exactly equal to an `Int` (`Int(exactly:)`) becomes that
 /// `.integer`, so `1.0` and `1` are the same value; every other value (a
 /// fractional double, text, boolean, blob, null) is itself. Unlike the join's
-/// promoted `bucket`, this is EXACT and transitive, so two integers stay
+/// promoted `bucket`, this is exact and transitive, so two integers stay
 /// distinct even when they round to the same double — an earlier approximate
 /// row cannot absorb two unequal exact integers. Grouping reuses it to key its
 /// groups so `1` and `1.0` fall in one group, matching UNION's dedup.
@@ -1048,7 +1048,7 @@ internal func canonical(_ value: Value) -> Value {
 }
 
 /// Tracks the rows already emitted for UNION / recursive-CTE duplicate
-/// elimination under the engine's EXACT numeric equality. A plain
+/// elimination under the engine's exact numeric equality. A plain
 /// `Set<Array<Value>>` over raw cells keeps `1` and `1.0` (and would keep both)
 /// apart; keying each row by its cells' `canonical` form — exact and transitive
 /// — dedups `1`/`1.0` while keeping distinct integers separate even when they
@@ -1058,7 +1058,7 @@ internal func canonical(_ value: Value) -> Value {
 internal struct Seen {
   private var keys = Set<Array<Value>>()
 
-  /// Records `row` and reports whether it was NEW (not a duplicate of one
+  /// Records `row` and reports whether it was new (not a duplicate of one
   /// already seen) — the `Set.insert(_:).inserted` shape the dedup sites use.
   internal mutating func insert(_ row: Array<Value>) -> Bool {
     keys.insert(row.map(canonical)).inserted
@@ -1103,7 +1103,7 @@ extension Catalog where Self: ~Escapable {
       // A NULL key equi-joins to nothing — NULL is unequal to every value,
       // itself included — so it contributes no pair and need not probe.
       if case .null = value { continue }
-      // Seek by the RAW value — the sorted key is a single-kind (integer)
+      // Seek by the raw value — the sorted key is a single-kind (integer)
       // column, and a promoted double would defeat the seek; the numeric
       // equality below still admits a mixed-kind match (a whole double past the
       // range is caught by the residual check even if the seek scanned wide).
@@ -1115,7 +1115,7 @@ extension Catalog where Self: ~Escapable {
         // before it can pair — an inner row it rejects joins to nothing.
         if let filter,
             try evaluate(right, filter, context) != true { continue }
-        // Equal by the SAME rule the predicate uses — integer/integer exact,
+        // Equal by the same rule the predicate uses — integer/integer exact,
         // mixed integer/double promoted — so a seek that scanned wide still
         // pairs exactly.
         if matches(value, .equal, right[slot]) == true {
@@ -1138,7 +1138,7 @@ extension Catalog where Self: ~Escapable {
 /// result the seek path does. An outer NULL key probes nothing.
 ///
 /// A pushed inner `filter` (in the inner's standalone slot space) is applied
-/// DURING this scan, before a row is bucketed: the inner is SEEKED by the
+/// during this scan, before a row is bucketed: the inner is seeked by the
 /// filter's seekable conjunct — `boundaries` over each conjunct, the same
 /// boundary logic the scan seek uses, mapping a slot back to its table column
 /// through `ordinals` — so a seekable/contradictory inner filter reads few or
@@ -1243,7 +1243,7 @@ extension Table where Self: ~Escapable {
 /// per outer record — as opposed to needing a hash build.
 ///
 /// A seekable column reports a boundary for a valid key; an unseekable one
-/// reports `nil`. The probe key must be a VALID one: a decoded coded-index join
+/// reports `nil`. The probe key must be a valid one: a decoded coded-index join
 /// key is 1-based and reports `nil` for the null reference `0`, so probing with
 /// `0` would misclassify a seekable coded-index column as unseekable and force
 /// a hash build even for a selective join. `1` — the least valid key — answers
@@ -1287,7 +1287,7 @@ internal func less(_ lhs: Value, _ rhs: Value) -> Bool {
   case let (.integer(lhs), .integer(rhs)): lhs < rhs
   case let (.double(lhs), .double(rhs)): lhs < rhs
   // A mixed integer/double key is numeric and ordered by magnitude — but
-  // EXACTLY, not via a lossy `Double(integer)`. Past 2^53 a promotion ties a
+  // exactly, not via a lossy `Double(integer)`. Past 2^53 a promotion ties a
   // double with two distinct integers that themselves order exactly, which
   // would make this comparator non-transitive (not a strict weak ordering);
   // the exact form breaks the tie by the integer the double denotes.
@@ -1300,7 +1300,7 @@ internal func less(_ lhs: Value, _ rhs: Value) -> Bool {
   }
 }
 
-/// Whether integer `lhs` is strictly less than double `rhs`, compared EXACTLY.
+/// Whether integer `lhs` is strictly less than double `rhs`, compared exactly.
 /// `Double(lhs) < rhs` decides it unless the two tie under promotion — then
 /// `rhs` is a whole double equal to `Double(lhs)`. If it denotes an exact `Int`
 /// the integers compare directly, so a value past 2^53 orders by its true
@@ -1314,7 +1314,7 @@ private func less(integer lhs: Int, double rhs: Double) -> Bool {
   return lhs < exact
 }
 
-/// Whether double `lhs` is strictly less than integer `rhs`, compared EXACTLY —
+/// Whether double `lhs` is strictly less than integer `rhs`, compared exactly —
 /// the mirror of `less(integer:double:)`. An out-of-`Int` tie means `lhs` lies
 /// outside `Int`, so its sign decides: a positive `lhs` (past `Int.max`) is not
 /// less than any `Int`.

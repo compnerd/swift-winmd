@@ -150,7 +150,7 @@ struct MembershipTypeCheckingTests {
 
   @Test func `a constant expression element prunes a later unreachable element`() throws {
     // `1 IN (1 + 0, Name + 1)` lowers to `1 = 1 + 0 OR 1 = Name + 1`; the first
-    // element is a ROW-INDEPENDENT constant expression (not a bare literal)
+    // element is a ROW-independent constant expression (not a bare literal)
     // that folds to `1`, a definite match, so the OR-chain short-circuits and
     // `Name + 1` (text arithmetic) is unreachable — the type check must fold
     // the constant element and stop rather than continuing into it, and the
@@ -164,7 +164,7 @@ struct MembershipTypeCheckingTests {
 
   @Test func `a non-matching constant expression element keeps a later element reachable`() throws {
     // `2 IN (1 + 0, Name + 1)` folds the first element to `1`, which `2` does
-    // NOT match, so `Name + 1` stays reachable — the pruning is PRECISE, not
+    // NOT match, so `Name + 1` stays reachable — the pruning is precise, not
     // over-eager — and its text arithmetic must still fault the type check,
     // matching the run, which would evaluate `2 = Name + 1` and fault.
     let query = try parse(query:
@@ -191,10 +191,10 @@ struct MembershipTypeCheckingTests {
 
   @Test func `a constant routine call element prunes a later unreachable element`() throws {
     // `1 IN (BITAND(1, 1), Name + 1)` lowers to `1 = BITAND(1, 1) OR 1 = Name
-    // + 1`; the first element is a ROW-INDEPENDENT scalar CALL — every argument
+    // + 1`; the first element is a ROW-independent scalar call — every argument
     // folds constant — so it folds to the routine's value `1`, a definite
     // match, and the OR-chain short-circuits before `Name + 1` (text
-    // arithmetic). The type check must fold the call through the SAME routine
+    // arithmetic). The type check must fold the call through the same routine
     // the run invokes and stop, and the run, matching `1 = BITAND(1, 1)` first,
     // keeps every row. (`BITAND` is a standard prelude routine, seeded like the
     // existing constant-expression tests.)
@@ -206,13 +206,13 @@ struct MembershipTypeCheckingTests {
 
   @Test func `a non-deterministic routine call is not folded when pruning`() throws {
     // `1 IN (probe(), Name + 1)` lowers to `1 = probe() OR 1 = Name + 1`.
-    // `probe` is registered NOT DETERMINISTIC (ISO's default for a host
+    // `probe` is registered NOT deterministic (ISO's default for a host
     // closure), so the schema check must NOT execute it to fold the first
     // element — a non-deterministic routine could return one value here and
     // another when the run reaches the call, wrongly pruning a later element.
     // With the call unfolded, `Name + 1` stays reachable and its text
     // arithmetic faults the type check, matching the run's guarantee. (`probe`
-    // returns `1`, which WOULD match `1` and short-circuit had it been folded —
+    // returns `1`, which would match `1` and short-circuit had it been folded —
     // proving the gate keys off the characteristic, not the value.)
     let routines = try Routines()
         .registering("probe", returns: .integer, deterministic: false) { _ in
@@ -229,8 +229,8 @@ struct MembershipTypeCheckingTests {
   }
 
   @Test func `a deterministic routine call is folded when pruning`() throws {
-    // The same query with `probe` declared DETERMINISTIC (ISO
-    // `DETERMINISTIC`): the schema check MAY fold `probe()` to `1`, a definite
+    // The same query with `probe` declared deterministic (ISO
+    // `DETERMINISTIC`): the schema check may fold `probe()` to `1`, a definite
     // match, so the OR-chain short-circuits before `Name + 1` and its text
     // arithmetic is never reached — `columns(of:)` succeeds. The ONLY change
     // from the prior test is the `deterministic` flag, so the gate keys off it.
@@ -248,7 +248,7 @@ struct MembershipTypeCheckingTests {
   @Test func `a non-matching constant routine call element keeps a later element reachable`() throws {
     // `2 IN (BITAND(1, 1), Name + 1)` folds the first element through the
     // routine to `1`, which `2` does NOT match, so `Name + 1` stays reachable
-    // — the routine fold is PRECISE, not over-eager — and its text arithmetic
+    // — the routine fold is precise, not over-eager — and its text arithmetic
     // must still fault the type check, matching the run.
     let text = "SELECT Id FROM T WHERE 2 IN (BITAND(1, 1), Name + 1)"
     let query = try parse(query: text)
@@ -278,7 +278,7 @@ struct MembershipTypeCheckingTests {
   @Test func `a non-matching constant CASE element keeps a later element reachable`() throws {
     // `2 IN (CASE WHEN 1 = 1 THEN 1 ELSE Name + 1 END, Name + 1)` folds the
     // CASE to `1`, which `2` does NOT match, so the trailing `Name + 1` stays
-    // reachable — the CASE fold is PRECISE, not over-eager — and its text
+    // reachable — the CASE fold is precise, not over-eager — and its text
     // arithmetic must still fault the type check, matching the run.
     let text = "SELECT Id FROM T WHERE 2 IN "
         + "(CASE WHEN 1 = 1 THEN 1 ELSE Name + 1 END, Name + 1)"
@@ -293,7 +293,7 @@ struct MembershipTypeCheckingTests {
 
   @Test func `a row-dependent CASE guard leaves a later element reachable`() throws {
     // `1 IN (CASE WHEN Id = 2 THEN 1 ELSE 0 END, Name + 1)` cannot fold the
-    // CASE: its guard `Id = 2` is ROW-DEPENDENT, so `constant` yields `nil` —
+    // CASE: its guard `Id = 2` is ROW-dependent, so `constant` yields `nil` —
     // the CASE is not a definite match (the run cannot guarantee it equals `1`
     // on every row) and the trailing `Name + 1` (text arithmetic) stays
     // reachable, so its text arithmetic must still fault the type check.
@@ -310,7 +310,7 @@ struct MembershipTypeCheckingTests {
 
   @Test func `a constant-expression CASE guard prunes a later unreachable element`() throws {
     // `1 IN (CASE WHEN 1 + 0 = 1 THEN 1 END, Name + 1)` lowers to `1 = <CASE>
-    // OR 1 = Name + 1`; the CASE guard `1 + 0 = 1` is ROW-INDEPENDENT but NOT
+    // OR 1 = Name + 1`; the CASE guard `1 + 0 = 1` is ROW-independent but NOT
     // bare literals — its left operand is arithmetic. Folding the guard through
     // `constant(_ expression:)` decides it TRUE, so the CASE folds to `1`, a
     // definite match, and the OR-chain short-circuits before `Name + 1` (text
@@ -328,7 +328,7 @@ struct MembershipTypeCheckingTests {
     // folds FALSE and the CASE has no ELSE, so it yields NULL — `1 = NULL` is
     // UNKNOWN, NOT a definite match — so the trailing `Name + 1` (text
     // arithmetic) stays reachable and must still fault the type check, matching
-    // the run. The pruning is PRECISE: a folded-FALSE guard prunes nothing.
+    // the run. The pruning is precise: a folded-FALSE guard prunes nothing.
     let text = "SELECT Id FROM T WHERE 1 IN "
         + "(CASE WHEN 1 + 0 = 2 THEN 1 END, Name + 1)"
     let query = try parse(query: text)
@@ -342,7 +342,7 @@ struct MembershipTypeCheckingTests {
 
   @Test func `a non-deterministic CASE guard leaves a later element reachable`() throws {
     // `1 IN (CASE WHEN probe() = 1 THEN 1 END, Name + 1)` with `probe`
-    // registered NOT DETERMINISTIC: the guard's `probe()` operand does not fold
+    // registered NOT deterministic: the guard's `probe()` operand does not fold
     // through `constant(_ expression:)` (the determinism gate), so the guard is
     // `nil`, the CASE is `nil`, and the trailing `Name + 1` (text arithmetic)
     // stays reachable and must still fault the type check. The determinism gate
@@ -365,7 +365,7 @@ struct MembershipTypeCheckingTests {
 
   @Test func `a constant-expression IS NOT NULL CASE guard prunes a later unreachable element`() throws {
     // `1 IN (CASE WHEN 1 + 0 IS NOT NULL THEN 1 END, Name + 1)`: the guard `1 +
-    // 0 IS NOT NULL` is ROW-INDEPENDENT but NOT a bare literal. Folding its
+    // 0 IS NOT NULL` is ROW-independent but NOT a bare literal. Folding its
     // operand through `constant(_ expression:)` yields the concrete value `1`,
     // which is not NULL, so `IS NOT NULL` folds TRUE — the CASE folds to `1`, a
     // definite match, and the OR-chain short-circuits before `Name + 1` (text
@@ -396,7 +396,7 @@ struct MembershipTypeCheckingTests {
     // The whole-result-aggregate empty-group HAVING fold —
     // `empty(_:Predicate)`, the surface `OutputColumn.typecheck` drives over
     // the single empty group a statically-false WHERE leaves — reaches its
-    // `.membership` arm WITHOUT a prior `check`, so it must reject an EMPTY
+    // `.membership` arm without a prior `check`, so it must reject an empty
     // list itself, as `check` and `lower` do. An empty membership otherwise
     // folds FALSE (TRUE under `NOT IN`), silently keeping the group past a list
     // both `check` and `lower` reject. The parser rejects `IN ()`, so build the
@@ -411,7 +411,7 @@ struct MembershipTypeCheckingTests {
   }
 
   /// A `SELECT Id FROM T WHERE <predicate>` built directly, so a
-  /// `Predicate.membership` with an EMPTY value list reaches the engine —
+  /// `Predicate.membership` with an empty value list reaches the engine —
   /// bypassing the parser, which rejects `IN ()`.
   private func select(where predicate: Predicate) -> Query {
     .select(Select(projection: .columns([Column(name: "Id")]),
@@ -419,9 +419,9 @@ struct MembershipTypeCheckingTests {
   }
 
   @Test func `an empty IN list faults the schema check, not a crash`() throws {
-    // `Predicate.membership` is public, so a caller can build an EMPTY list
+    // `Predicate.membership` is public, so a caller can build an empty list
     // directly, bypassing the parser's `IN ()` rejection. The lowering has no
-    // OR-chain seed for an empty list, so it FAULTS the schema check (an
+    // OR-chain seed for an empty list, so it faults the schema check (an
     // unsupported shape) rather than trapping on the force-unwrap.
     let query = select(where: .membership(.column("Id"), [], negated: false))
     let resolve = { () throws -> Array<OutputColumn> in
@@ -434,7 +434,7 @@ struct MembershipTypeCheckingTests {
   }
 
   @Test func `an empty IN list faults the run, not a crash`() throws {
-    // The same direct-AST empty list must FAULT the run's compile/lowering (the
+    // The same direct-AST empty list must fault the run's compile/lowering (the
     // OR-chain reduction) rather than crashing on the force-unwrap.
     let query = select(where: .membership(.column("Id"), [], negated: false))
     #expect(throws:
@@ -456,7 +456,7 @@ private final class Counter: @unchecked Sendable {
   /// The number of times `next()` has been called.
   private(set) var count = 0
 
-  /// Increments the count and returns the PREVIOUS value — the sequence `0, 1,
+  /// Increments the count and returns the previous value — the sequence `0, 1,
   /// 2, …` across successive calls.
   func next() -> Int {
     defer { count += 1 }
@@ -477,11 +477,11 @@ struct MembershipOperandTests {
 
   @Test func `the IN operand is evaluated once per row`() throws {
     // `stepper()` yields 0 on its first call, then 1, 2, …; it is
-    // NON-deterministic so the engine cannot fold it. Over the one row,
-    // `stepper() IN (1, 2)` must evaluate the operand EXACTLY ONCE — yielding
-    // 0 — and 0 ∉ {1, 2}, so the row is EXCLUDED. The old OR-chain lowered this
+    // non-deterministic so the engine cannot fold it. Over the one row,
+    // `stepper() IN (1, 2)` must evaluate the operand exactly once — yielding
+    // 0 — and 0 ∉ {1, 2}, so the row is excluded. The old OR-chain lowered this
     // to `stepper() = 1 OR stepper() = 2`, re-evaluating the operand: the first
-    // call yields 0 (0 ≠ 1) and the SECOND yields 2 (2 = 2), wrongly ADMITTING
+    // call yields 0 (0 ≠ 1) and the second yields 2 (2 = 2), wrongly admitting
     // the row and calling `stepper()` twice. The first-class membership filter
     // caches the operand, so the row is dropped and the counter reads exactly
     // 1.

@@ -10,7 +10,7 @@ import SQLTestSupport
 
 /// A relation exercising `CAST`: an integer `Id`, an approximate `D`, a textual
 /// `T` (both numeric and non-numeric spellings) with a `T` row that is `NULL`
-/// so a cast of a NULL operand is covered, and a boolean `B` so a NON-constant
+/// so a cast of a NULL operand is covered, and a boolean `B` so a non-constant
 /// operand of a structurally-unsupported pair (a boolean column to an integer)
 /// is covered.
 private func things() throws -> FixtureCatalog {
@@ -84,7 +84,7 @@ struct CastNumericTests {
   }
 
   @Test func `text of overflowing magnitude to double faults`() throws {
-    // `'1e999'` PARSES to a finite-syntax spelling but its magnitude is out of
+    // `'1e999'` parses to a finite-syntax spelling but its magnitude is out of
     // range — `Double('1e999')` is `inf` — so the cast raises the numeric
     // value out-of-range fault (`22003`), matching the numeric-literal path,
     // NOT the invalid-character fault (`22018`) reserved for an unparseable
@@ -173,7 +173,7 @@ struct CastSchemaTests {
   @Test func `a structurally impossible cast is rejected at validation`()
       throws {
     // `CAST(TRUE AS INTEGER)` is a reachable projection whose (boolean →
-    // integer) pair `Value.cast(to:)` faults `42846` for EVERY value, so the
+    // integer) pair `Value.cast(to:)` faults `42846` for every value, so the
     // schema type-check rejects it rather than advertising an integer column.
     #expect(throws: SQLError.state("42846",
                                    "cannot cast boolean to integer")) {
@@ -184,14 +184,14 @@ struct CastSchemaTests {
   @Test func `a value-dependent cast passes validation`() throws {
     // A castable-but-value-dependent pair — `integer` → `double` always
     // convertible, `text` → `integer` convertible for a good spelling —
-    // type-checks and reports the target type; only a bad VALUE faults at run.
+    // type-checks and reports the target type; only a bad value faults at run.
     #expect(try things().type(of: "SELECT CAST(1 AS DOUBLE)") == .double)
     #expect(try things().type(of: "SELECT CAST('1' AS INTEGER)") == .integer)
   }
 
   @Test func `a constant cast that always fails is rejected at validation`()
       throws {
-    // `CAST('abc' AS INTEGER)` has a castable pair but a CONSTANT operand that
+    // `CAST('abc' AS INTEGER)` has a castable pair but a constant operand that
     // converts to no value, so a trial cast of the folded constant rejects it
     // at validation, not only at run.
     #expect(throws: SQLError.state("22018",
@@ -202,10 +202,10 @@ struct CastSchemaTests {
   }
 
   @Test func `a statically-NULL operand validates for any target`() throws {
-    // `CASE WHEN 1 = 0 THEN 1 END` folds to NULL, but its DERIVED type is the
+    // `CASE WHEN 1 = 0 THEN 1 END` folds to NULL, but its derived type is the
     // default `.integer`, whose (integer → blob) pair is structurally
     // unsupported. The constant fold runs FIRST, so the folded NULL trial-casts
-    // to `.blob` — a NULL casts to ANY target — and validation SUCCEEDS with a
+    // to `.blob` — a NULL casts to ANY target — and validation succeeds with a
     // blob column rather than rejecting `42846` a query the run would perform.
     let sql = "SELECT CAST(CASE WHEN 1 = 0 THEN 1 END AS BLOB)"
     let columns = try things().columns(of: parse(query: sql), validate: true)
@@ -215,7 +215,7 @@ struct CastSchemaTests {
   }
 
   @Test func `a constant unsupported cast is rejected by the trial`() throws {
-    // `CAST(TRUE AS INTEGER)` has a CONSTANT non-NULL operand, so the trial
+    // `CAST(TRUE AS INTEGER)` has a constant non-NULL operand, so the trial
     // cast of the folded `true` — no boolean-to-integer conversion — rejects it
     // `42846`, the same fault the structural check would raise.
     #expect(throws: SQLError.state("42846",
@@ -258,7 +258,7 @@ struct CastNumericFormatTests {
   }
 
   @Test func `the infinity spelling is not a SQL number`() throws {
-    // `Double('inf')` PARSES to a non-finite magnitude, but `inf` is no SQL
+    // `Double('inf')` parses to a non-finite magnitude, but `inf` is no SQL
     // numeric spelling, so it is an invalid character (`22018`) — NOT the
     // out-of-range fault (`22003`) a valid-format overflow raises.
     try things().expect("SELECT CAST('inf' AS DOUBLE)",
@@ -286,9 +286,9 @@ struct CastNumericFormatTests {
   }
 
   @Test func `a format-valid integer overflow is out of range`() throws {
-    // `'9223372036854775808'` is a VALID integer spelling — `Int.max` plus one
+    // `'9223372036854775808'` is a valid integer spelling — `Int.max` plus one
     // — so it passes the format gate and `Int(_:)` returns `nil` only for
-    // RANGE, faulting out-of-range (`22003`), NOT the invalid-character fault
+    // range, faulting out-of-range (`22003`), NOT the invalid-character fault
     // (`22018`) an unspellable text raises.
     try things().expect(
         "SELECT CAST('9223372036854775808' AS INTEGER)",

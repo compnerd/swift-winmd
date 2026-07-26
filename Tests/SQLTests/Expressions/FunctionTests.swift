@@ -117,7 +117,7 @@ private func library() throws -> FixtureCatalog {
   @Test func `columns(of:) reports a built-in call by its declared type`() throws {
     // The schema walk types a call by its routine's `returns`, so a projected
     // built-in reports the declared header — text for UPPER, integer for
-    // CHAR_LENGTH, double for ROUND — when the standard prelude is in scope.
+    // CHAR_LENGTH, double for round — when the standard prelude is in scope.
     let query = try Statement(parsing:
         "SELECT UPPER(Text), CHAR_LENGTH(Text), ROUND(Real) FROM L")
     let typed = try library().columns(of: query, routines: .standard)
@@ -236,7 +236,7 @@ private func library() throws -> FixtureCatalog {
   @Test func `a built-in faults on a wrong-typed argument`() throws {
     // Likewise the run invokes the routine, whose own kind check faults a
     // numeric column passed to UPPER's text argument and a text column passed
-    // to MOD's integer arguments.
+    // to mod's integer arguments.
     try library().expect("SELECT UPPER(Num) FROM L WHERE Id = 1",
                          fails: .argument("UPPER requires a text argument"),
                          routines: .standard)
@@ -411,7 +411,7 @@ private func id() -> Function {
   }
 
   @Test func `a defined call with a wrong-typed argument faults at the run path`() throws {
-    // Reached through the RUN path (no prior `columns(validate:)`), the defined
+    // Reached through the run path (no prior `columns(validate:)`), the defined
     // dispatch validates each argument's type, not only the arity: `id(Name)`
     // over a TEXT column would otherwise return a `.text` value against the
     // routine's INTEGER contract; the dispatch faults it, the same
@@ -440,7 +440,7 @@ private func id() -> Function {
   }
 
   @Test func `a body naming its own unregistered name faults as unresolved`() {
-    // `f() RETURNS INTEGER AS f() + 1` with NO prior `f` captures a map without
+    // `f() RETURNS INTEGER AS f() + 1` with no prior `f` captures a map without
     // `f`, so the body's own call is unresolved: the returns validation faults
     // `SQLError.function`, the unregistered-callee case — not a self-reference
     // one. Early binding admits no recursion here; there is nothing to bind to.
@@ -453,8 +453,8 @@ private func id() -> Function {
   }
 
   @Test func `a body naming its own name over an existing one captures the old one`() throws {
-    // `f() AS f() + 1` REPLACING a prior `f` is well-defined under early
-    // binding: the new body captures the OLD `f` (the map before this
+    // `f() AS f() + 1` replacing a prior `f` is well-defined under early
+    // binding: the new body captures the old `f` (the map before this
     // registration), so it computes `f_old() + 1` and terminates — no
     // recursion. With `f_old` = 0, `f_new()` = 0 + 1 = 1.
     let existing = Function(parameters: [], returns: .integer,
@@ -470,7 +470,7 @@ private func id() -> Function {
 
   @Test func `a body calling a prelude routine registers and runs`() throws {
     // `lowbit(n INTEGER) AS BITAND(n, 1)` calls the prelude BITAND. The capture
-    // seeds `Routines.standard` under `self` — the SAME precedence the public
+    // seeds `Routines.standard` under `self` — the same precedence the public
     // run/columns compose a query's routines with — so the body resolves BITAND
     // at registration exactly as an ordinary SELECT would, rather than faulting
     // `SQLError.function("BITAND")` for a built-in the query path can reach.
@@ -518,7 +518,7 @@ private func id() -> Function {
 
   @Test func `a defined body binds its callee at definition, not at call time`() throws {
     // The round-5 root case. `g` returns INTEGER 1; `f() AS g()` captures that
-    // INTEGER `g`. Redefining `g` to a TEXT body shadows it for QUERIES, but
+    // INTEGER `g`. Redefining `g` to a TEXT body shadows it for queries, but
     // `f` closed over the old `g`, so `SELECT f()` still returns the INTEGER 1
     // — consistent with f's advertised INTEGER schema — while a top-level
     // `SELECT g()` sees the new TEXT `g` (query-level latest-wins unchanged).
@@ -540,7 +540,7 @@ private func id() -> Function {
     // A body's inputs are its declared parameters, not query bindings. `f() AS
     // CASE WHEN 1 = :p THEN 1 ELSE 0 END` reaches a `:parameter` through a CASE
     // guard, but a routine body is evaluated with only its argument record — the
-    // caller's bindings never reach it — so `:p` would always be UNBOUND and
+    // caller's bindings never reach it — so `:p` would always be unbound and
     // silently pick the ELSE branch. The registration rejects the `.bound`.
     let body =
         Expression.case([When(when: .bound(left: .literal(.integer(1)),
@@ -574,7 +574,7 @@ private func id() -> Function {
 
   @Test func `a RETURNS DOUBLE body of a mixed CASE returns a double`() throws {
     // `f(n INTEGER) RETURNS DOUBLE AS CASE WHEN n = 7 THEN 1 ELSE 2.5 END`: the
-    // body's results unify to `.double`, so it TYPES as double and the RETURNS
+    // body's results unify to `.double`, so it types as double and the returns
     // check passes. Called with N.V = 7 it takes the integer THEN `1`, which
     // the CASE coercion widens to `.double(1.0)` — the value now matches the
     // declared double return, not a bare `.integer(1)`.

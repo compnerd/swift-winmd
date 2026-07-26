@@ -13,16 +13,16 @@
 /// table resolves exactly as before. Threading escapable data sidesteps
 /// wrapping the borrowed `~Escapable` base catalog in a unifying overlay type.
 ///
-/// It is a NON-DESTRUCTIVE LAYERED scope, not a flat map. The overlay is a
+/// It is a non-destructive layered scope, not a flat map. The overlay is a
 /// stack of layers: a `base` layer holds the statement-scoped bindings — every
 /// common table expression a `WITH` materialises and every store relation a
-/// query names — and each `augment` for a SELECT PUSHES a derived layer holding
+/// query names — and each `augment` for a SELECT pushes a derived layer holding
 /// that SELECT's own `FROM (SELECT …) AS t` derived aliases. A name resolves
-/// against the INNERMOST layer that binds it, so a derived alias `t` SHADOWS a
-/// same-named CTE `t` in the base layer WITHOUT deleting it — `reveal` drops
+/// against the innermost layer that binds it, so a derived alias `t` shadows a
+/// same-named CTE `t` in the base layer without deleting it — `reveal` drops
 /// the derived layers and the CTE beneath is resolved again. This makes the
 /// CTE-overwrite class impossible: a nested subquery's FROM, a lazy scalar, and
-/// a set-op arm each resolve against the REVEALED base rather than a
+/// a set-op arm each resolve against the revealed base rather than a
 /// separately-threaded pre-augment context.
 internal struct ScopedRelations: Hashable, Sendable,
                                  ExpressibleByDictionaryLiteral {
@@ -54,7 +54,7 @@ internal struct ScopedRelations: Hashable, Sendable,
 
   /// The binding `name` resolves to — the innermost derived layer that holds
   /// it, else the base layer — or `nil` when no layer binds it. Setting binds
-  /// `name` in the INNERMOST layer (the current derived layer, else the base),
+  /// `name` in the innermost layer (the current derived layer, else the base),
   /// shadowing an outer same-named binding without deleting it; setting `nil`
   /// removes it from that layer only.
   internal subscript(name: String) -> RelationInstance? {
@@ -73,11 +73,11 @@ internal struct ScopedRelations: Hashable, Sendable,
     }
   }
 
-  /// This overlay with `derivations` PUSHED as a new derived layer — the scope
+  /// This overlay with `derivations` pushed as a new derived layer — the scope
   /// a SELECT resolves its own FROM/JOIN and expressions against, each derived
   /// alias shadowing an outer same-named CTE or derived alias without deleting
   /// it. It is idempotent on the layer's IDENTITY: pushing a layer whose
-  /// aliases and derivation queries EQUAL the innermost derived layer's (the
+  /// aliases and derivation queries equal the innermost derived layer's (the
   /// run→compile→typecheck chain re-augments the same query) is a no-op, so
   /// the stack stays bounded and a self-named alias's body still reads the
   /// base.
@@ -90,13 +90,13 @@ internal struct ScopedRelations: Hashable, Sendable,
     return copy
   }
 
-  /// This overlay with every derived layer DROPPED, leaving the base layer —
-  /// the scope a NESTED subquery's FROM resolves against. A derived alias is
-  /// SELECT-scoped: it names a relation only in its OWN SELECT's FROM/JOIN and
+  /// This overlay with every derived layer dropped, leaving the base layer —
+  /// the scope a nested subquery's FROM resolves against. A derived alias is
+  /// SELECT-scoped: it names a relation only in its own SELECT's FROM/JOIN and
   /// expressions, invisible to a nested subquery's FROM exactly as a base-table
   /// alias in the enclosing FROM is. A CTE, by contrast, is statement-scoped
   /// — visible inside a nested subquery's FROM — so the base layer stays,
-  /// REVEALING any CTE a dropped derived alias shadowed.
+  /// revealing any CTE a dropped derived alias shadowed.
   internal func revealed() -> ScopedRelations {
     var copy = self
     copy.layers = []
@@ -105,7 +105,7 @@ internal struct ScopedRelations: Hashable, Sendable,
 
   /// The derivation query bound for `name` in the innermost derived layer that
   /// holds it, else `nil` — the identity `augment` keys its per-alias
-  /// idempotence on (a binding whose `derivation` EQUALS the inner query is
+  /// idempotence on (a binding whose `derivation` equals the inner query is
   /// this SELECT's own prior pass, left rather than re-derived).
   internal func derivation(of name: String) -> Query? {
     for layer in layers.reversed() {
@@ -114,7 +114,7 @@ internal struct ScopedRelations: Hashable, Sendable,
     return nil
   }
 
-  /// Whether NO layer binds any name — an untouched overlay. The lazy-scalar
+  /// Whether no layer binds any name — an untouched overlay. The lazy-scalar
   /// path reads it to tell a cache carrying this occurrence's pre-augment scope
   /// from a bare one (a schema path's `Subqueries`), falling back to the
   /// threaded overlay for the latter.
@@ -153,7 +153,7 @@ internal struct RelationInstance: Hashable, Sendable {
   /// passes them so `information_schema` columns report their real types.
   internal let types: Array<ValueType>
 
-  /// Whether each real column places NO type constraint — every arm that fed it
+  /// Whether each real column places no type constraint — every arm that fed it
   /// projects a constant NULL, so its concrete `types` entry is a default the
   /// set-operation fold must NOT constrain against. A later reader unifying a
   /// reference to such a column treats it as an unconstrained (constant-NULL)
@@ -164,25 +164,25 @@ internal struct RelationInstance: Hashable, Sendable {
   internal let unconstrained: Array<Bool>
 
   /// The inner `Query` this binding is the materialised body of, when it is a
-  /// DERIVED TABLE's — `nil` for a common table expression's or a store
+  /// derived TABLE's — `nil` for a common table expression's or a store
   /// relation's binding. It is the derivation's IDENTITY, not merely a flag:
-  /// `augment` keys idempotence on it, so it can tell THIS query's own prior
+  /// `augment` keys idempotence on it, so it can tell this query's own prior
   /// materialisation of an alias (the run→compile double augment, or a
-  /// self-named `(SELECT … FROM T) AS T`) apart from an ENCLOSING query's
+  /// self-named `(SELECT … FROM T) AS T`) apart from an enclosing query's
   /// same-named derived binding.
   ///
   /// `augment` reads it two ways. Dropping the enclosing scope's derived
   /// bindings (any non-`nil` `derivation`) before resolving a body is what lets
-  /// a self-named `(SELECT … FROM T) AS T` read the base `T` while KEEPING a
+  /// a self-named `(SELECT … FROM T) AS T` read the base `T` while keeping a
   /// same-named CTE in scope (so `WITH t … FROM (SELECT … FROM t) AS t`
-  /// resolves the CTE). And a binding whose `derivation` EQUALS the inner query
+  /// resolves the CTE). And a binding whose `derivation` equals the inner query
   /// being materialised is this query's own prior pass, left as materialised
   /// rather than re-derived (idempotent); a binding whose `derivation` differs
   /// — or is `nil` — is an enclosing query's, and this query's alias
-  /// re-materialises over it, SHADOWING it.
+  /// re-materialises over it, shadowing it.
   internal let derivation: Query?
 
-  /// Whether this binding is a DERIVED TABLE's materialised body — as opposed
+  /// Whether this binding is a derived TABLE's materialised body — as opposed
   /// to a common table expression's or a store relation's.
   internal var derived: Bool { derivation != nil }
 
@@ -197,9 +197,9 @@ internal struct RelationInstance: Hashable, Sendable {
     self.derivation = derivation
   }
 
-  /// A relation whose columns are RESOLVED from a body — its names, types, AND
-  /// per-column `unconstrained` mask taken TOGETHER from the `carrier`, so the
-  /// arrays cannot drift and the mask threads through this ONE constructor
+  /// A relation whose columns are resolved from a body — its names, types, AND
+  /// per-column `unconstrained` mask taken together from the `carrier`, so the
+  /// arrays cannot drift and the mask threads through this one constructor
   /// rather than a per-site `unconstrained:` argument a binding could drop.
   /// `rows` are the captured (or empty, schema-only) rows and `derivation` the
   /// inner `Query` for a derived table's binding.

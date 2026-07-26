@@ -11,7 +11,7 @@ import SQLTestSupport
 struct CoalesceTests {
   @Test func `COALESCE parses to a first-class node`() throws {
     // `COALESCE(K, 0)` is a first-class `Expression.coalesce` holding each
-    // argument ONCE — not the re-referencing `CASE` its ISO definition names.
+    // argument once — not the re-referencing `CASE` its ISO definition names.
     let select = try parse(select: "SELECT COALESCE(K, 0) FROM T")
     let expression = Expression.coalesce([.column("K"),
                                           .literal(.integer(0))])
@@ -93,9 +93,9 @@ struct CoalesceReachabilityTests {
   }
 
   @Test func `a constant NULL prefix does not stop validation`() throws {
-    // COALESCE steps PAST a NULL argument, so a later one is reachable and MUST
+    // COALESCE steps past a NULL argument, so a later one is reachable and must
     // be validated. `NULL` is not an expression literal (it is UNKNOWN, spelled
-    // only in `IS NULL`), so a DETERMINISTIC routine folding to `.null` stands
+    // only in `IS NULL`), so a deterministic routine folding to `.null` stands
     // in for the constant-NULL prefix: `missing_udf()` after it still faults
     // `.function`.
     let routines = try Routines()
@@ -123,9 +123,9 @@ struct CoalesceReachabilityTests {
 
   @Test func `a constant NULL prefix does not shape the type`() throws {
     // A run skips a NULL argument and moves on, so an argument that folds to a
-    // constant `.null` can never be returned — its DECLARED type must not unify
+    // constant `.null` can never be returned — its declared type must not unify
     // into the column, exactly as a `CASE` omits a skipped branch's result
-    // type. `null_text()` is a DETERMINISTIC routine declaring `.text` yet
+    // type. `null_text()` is a deterministic routine declaring `.text` yet
     // folding to `.null`, so `COALESCE(null_text(), 1)` can only ever yield the
     // integer `1`: merging the `.text` would clash with the `.integer` and
     // reject the query, so the constant-NULL arm's type is skipped. It
@@ -163,7 +163,7 @@ struct CoalesceReachabilityTests {
   @Test func `a SUM prefix does not stop validation`() throws {
     // Unlike COUNT, SUM is NULL over an empty group, so it is NOT a definite
     // selection — the run may fall through it — and a later argument stays
-    // reachable and MUST be validated: `missing_udf()` after `SUM(K)` still
+    // reachable and must be validated: `missing_udf()` after `SUM(K)` still
     // faults `.function`.
     #expect(throws: SQLError.function("missing_udf")) {
       _ = try nullable().columns(of:
@@ -172,7 +172,7 @@ struct CoalesceReachabilityTests {
   }
 
   @Test func `a SUM prefix falls back to a reachable later argument`() throws {
-    // The CONTROL for the COUNT stop: `COALESCE(SUM(x), 0)` still validates and
+    // The control for the COUNT stop: `COALESCE(SUM(x), 0)` still validates and
     // derives the later `0` (SUM is nullable, not a stop), unifying to
     // `.integer`, and runs — SUM over the two-row group is the sum of K.
     let text = "SELECT COALESCE(SUM(K), 0) FROM T"
@@ -184,9 +184,9 @@ struct CoalesceReachabilityTests {
 // MARK: - Constant folding
 
 /// A deterministic native routine reporting whether its single argument is a
-/// `.double` — 1 when it is, else 0. It DISTINGUISHES `.double(1.0)` from
+/// `.double` — 1 when it is, else 0. It distinguishes `.double(1.0)` from
 /// `.integer(1)`, so the constant fold's coercion of a COALESCE's selected
-/// value is OBSERVABLE through it. Its declared parameter `type` matches the
+/// value is observable through it. Its declared parameter `type` matches the
 /// COALESCE's derived type so the static arity/type check (which demands an
 /// exact match) passes.
 private func doubling(taking type: ValueType) throws -> Routines {
@@ -205,14 +205,14 @@ private func predicate(over coalesce: Expression) -> Predicate {
               op: .equal, right: .literal(.integer(1)))
 }
 
-/// The schema validator folds a ROW-INDEPENDENT `COALESCE` (via
+/// The schema validator folds a ROW-independent `COALESCE` (via
 /// `constant(_ expression:)`) to decide a `WHERE` arm's reachability, so its
-/// selected value must carry the SAME type the run's `Term.coalesce` supplies —
+/// selected value must carry the same type the run's `Term.coalesce` supplies —
 /// the unified type `derive` advertises — or the fold sees a value the run
 /// never produces. The fold coerces the selected value to that unified type,
 /// mirroring the executor (`Value.coerced`) and the sibling empty-group fold.
 ///
-/// This engine types a COALESCE by its REACHABLE prefix: a constant non-NULL
+/// This engine types a COALESCE by its reachable prefix: a constant non-NULL
 /// argument is the definite selection, so it both sets the unified type and is
 /// the folded value — the coercion is therefore the identity on the constant
 /// path, but it keeps the fold pinned to the advertised type rather than a raw
@@ -243,7 +243,7 @@ struct CoalesceConstantTests {
   }
 
   @Test func `the constant fold matches the run`() throws {
-    // The fold and the run must yield the SAME value for a ROW-INDEPENDENT
+    // The fold and the run must yield the same value for a ROW-independent
     // COALESCE. Selecting a `.double` constant yields `.double`; selecting an
     // integer constant past a NULL-folding double routine yields `.integer`
     // (the reachable prefix types it), each coerced to the derived type the run
@@ -269,7 +269,7 @@ struct CoalesceConstantTests {
 
 // MARK: - Typecheck agrees with the run
 
-/// The `WHERE` reachability fold and the run must AGREE on a ROW-INDEPENDENT
+/// The `WHERE` reachability fold and the run must agree on a ROW-independent
 /// `COALESCE`: an arm the run reaches must be type-checked, so the COALESCE's
 /// coerced fold value cannot let validation skip a projection execution runs —
 /// mirroring the CASE-coercion end-to-end shape.
@@ -290,7 +290,7 @@ struct CoalesceTypeCheckingTests {
   }
 
   @Test func `an unreachable projection is skipped`() throws {
-    // The CONTROL: `COALESCE(1, 2)` folds to the integer `1`, so `is_double`
+    // The control: `COALESCE(1, 2)` folds to the integer `1`, so `is_double`
     // reports 0 and `= 1` folds FALSE — the AND's right arm is unreachable and
     // its `Name + 1` is NOT validated, so the query type-checks. (The run
     // likewise never reaches it.)
@@ -315,7 +315,7 @@ private final class Counter: @unchecked Sendable {
   /// The number of times `next()` has been called.
   private(set) var count = 0
 
-  /// Increments the count and returns the PREVIOUS value — the sequence `0, 1,
+  /// Increments the count and returns the previous value — the sequence `0, 1,
   /// 2, …` across successive calls.
   func next() -> Int {
     defer { count += 1 }
@@ -334,12 +334,12 @@ struct CoalesceOperandTests {
   }
 
   @Test func `each COALESCE argument is evaluated once`() throws {
-    // `stepper()` yields 0, then 1, 2, …; it is NON-deterministic so the engine
+    // `stepper()` yields 0, then 1, 2, …; it is non-deterministic so the engine
     // cannot fold it. `COALESCE(stepper(), 99)` must evaluate `stepper()`
-    // EXACTLY ONCE — yielding 0, a non-NULL value it returns. The old CASE
+    // exactly once — yielding 0, a non-NULL value it returns. The old CASE
     // desugar re-referenced the argument in both its `IS NOT NULL` guard and
     // its `THEN`, calling `stepper()` twice: the guard saw 0 (non-NULL) and the
-    // THEN returned a DIFFERENT 1. The first-class node holds the argument, so
+    // THEN returned a different 1. The first-class node holds the argument, so
     // the counter reads exactly 1 and the value returned is the one tested.
     let counter = Counter()
     let routines = try Routines()

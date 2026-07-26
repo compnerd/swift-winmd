@@ -30,7 +30,7 @@ internal indirect enum Filter: Equatable, Sendable {
   /// AST's `null`, a definite two-valued test (never UNKNOWN).
   case null(Term, negated: Bool)
   /// `operand [NOT] IN (element, …)` — the lowered form of the AST's
-  /// `membership`. The operand term is held ONCE, the value list lowered to
+  /// `membership`. The operand term is held once, the value list lowered to
   /// element terms, and `negated` marks `NOT IN`. Evaluating it reads the
   /// operand exactly once per row (an OR-chain of `compare`s would re-evaluate
   /// a non-idempotent operand, once per element) and folds `operand = element`
@@ -39,24 +39,24 @@ internal indirect enum Filter: Equatable, Sendable {
   /// itself).
   case membership(Term, Array<Term>, negated: Bool)
   /// `(l1, …, ln) <op> (r1, …, rn)` — an ISO row-value comparison, both sides a
-  /// row of ordinal-addressed terms of EQUAL arity, `op` any of the six
+  /// row of ordinal-addressed terms of equal arity, `op` any of the six
   /// operators. The lowered form of the AST's `rows`. Every component term is
-  /// evaluated exactly ONCE per row into a `[Value]` (a parse-time desugar to a
+  /// evaluated exactly once per row into a `[Value]` (a parse-time desugar to a
   /// conjunction/cascade of scalar `compare`s re-evaluated a component once per
   /// place it appeared, so a stateful component yielded a different value each
-  /// time), then the runtime folds those values with the SAME `matches`
+  /// time), then the runtime folds those values with the same `matches`
   /// primitive and Kleene `AND`/`OR` a scalar comparison uses, reproducing the
   /// ISO three-valued truth: `=` is the Kleene `AND` of the componentwise
   /// equalities, `<>` its negation, and the four ordering operators the
   /// lexicographic cascade `l1 <op> r1 OR (l1 = r1 AND (l2 <op> r2 OR …))`
-  /// whose earlier steps use the STRICT operator (`<`/`>`) and whose innermost
+  /// whose earlier steps use the strict operator (`<`/`>`) and whose innermost
   /// step carries `op` itself (so `<=`/`>=` admit an all-equal row) — a NULL
   /// component making a componentwise test UNKNOWN, threaded through the fold.
   case comparison(Array<Term>, Comparison, Array<Term>)
   /// `(l1, …, ln) [NOT] IN ((r1, …, rn), …)` — an ISO row-value membership, the
   /// left a row of ordinal-addressed terms and `rows` a non-empty list of
-  /// element rows of EQUAL arity, `negated` marking `NOT IN`. The lowered form
-  /// of the AST's `among`. The left row is evaluated exactly ONCE per row into
+  /// element rows of equal arity, `negated` marking `NOT IN`. The lowered form
+  /// of the AST's `among`. The left row is evaluated exactly once per row into
   /// a `[Value]` (as a scalar `Filter.membership` holds its operand once), then
   /// `(l…) = (r…)` folds over the element rows IN ORDER under Kleene `OR`,
   /// seeded FALSE, short-circuiting at the first TRUE — each element equality
@@ -79,7 +79,7 @@ internal indirect enum Filter: Equatable, Sendable {
   /// LIKE` negating the three-valued result (UNKNOWN maps to itself).
   case like(Term, pattern: Operand, escape: Operand?, negated: Bool)
   /// `x [NOT] BETWEEN a AND b` — the lowered form of the AST's `between`. The
-  /// test term `x` is held ONCE, the two bounds `a` and `b` beside it — each an
+  /// test term `x` is held once, the two bounds `a` and `b` beside it — each an
   /// `Operand`, a `Term` evaluated per row or a run-time `:parameter` resolved
   /// from the bindings — and `negated` marks `NOT BETWEEN`. Evaluating it reads
   /// `x` once per row (an `AND`/`OR` of two comparisons would re-evaluate a
@@ -91,8 +91,8 @@ internal indirect enum Filter: Equatable, Sendable {
   /// `a IS [NOT] DISTINCT FROM b` — the lowered form of the AST's `distinct`.
   /// Both operands are plain `Term`s (no `:parameter` form is defined for this
   /// predicate) and `negated` marks the `IS NOT DISTINCT FROM` (null-safe
-  /// equality) spelling. Evaluating it is TWO-VALUED — never UNKNOWN — treating
-  /// NULL as a comparable value: the two are the SAME iff both are NULL, or
+  /// equality) spelling. Evaluating it is two-valued — never UNKNOWN — treating
+  /// NULL as a comparable value: the two are the same iff both are NULL, or
   /// both non-NULL and equal (a cross-kind pair is DISTINCT, matching
   /// `matches`'s cross-kind FALSE equality), and `IS DISTINCT FROM` is TRUE
   /// when they differ, `IS NOT DISTINCT FROM` when they are the same.
@@ -100,48 +100,48 @@ internal indirect enum Filter: Equatable, Sendable {
   /// `[NOT] EXISTS (Q)` — the lowered form of the AST's `exists`. The subquery
   /// occurrence is carried as its cache `Subkey` (its resolution scope composed
   /// with `Q`) — never run during `compile`, so a schema-only path
-  /// (`columns(of:)`, view resolution) opens no cursor. At RUN time it runs
-  /// ONCE against the borrowed catalog (memoised in a `Subqueries` cache under
-  /// the `Subkey`, since it is UNCORRELATED — one result for every outer row,
-  /// under its OWN resolution context) and the case is the DEFINITE two-valued
+  /// (`columns(of:)`, view resolution) opens no cursor. At run time it runs
+  /// once against the borrowed catalog (memoised in a `Subqueries` cache under
+  /// the `Subkey`, since it is uncorrelated — one result for every outer row,
+  /// under its own resolution context) and the case is the definite two-valued
   /// non-empty test of that result: TRUE iff `Q` yielded a row, `negated`
   /// flipping it (never UNKNOWN). It reads no cell of the outer row. An
-  /// EXISTS-only occurrence is materialised as a cardinality PROBE — its select
+  /// EXISTS-only occurrence is materialised as a cardinality probe — its select
   /// list never evaluated. A later correlated slice re-runs `Q` per outer row.
   case exists(Subkey, correlation: Correlation, negated: Bool)
   /// `x [NOT] IN (Q)` — the lowered form of the AST's `within`. The subquery
   /// occurrence is carried as its cache `Subkey` — never run during `compile` —
-  /// and its single-column arity is enforced at COMPILE from its compiled width
-  /// (`SQLError.arity`, no cursor). At RUN time `Q` executes ONCE against the
+  /// and its single-column arity is enforced at compile from its compiled width
+  /// (`SQLError.arity`, no cursor). At run time `Q` executes once against the
   /// borrowed catalog (memoised under the `Subkey` in the `Subqueries` cache,
-  /// UNCORRELATED) and the case folds `operand = v` over its lone column under
-  /// the SAME Kleene `OR` three-valued membership the value-list
+  /// uncorrelated) and the case folds `operand = v` over its lone column under
+  /// the same Kleene `OR` three-valued membership the value-list
   /// `Filter.membership` uses — a NULL operand or a NULL element making an
-  /// unmatched test UNKNOWN, an EMPTY result FALSE, and `negated` (`NOT IN`)
+  /// unmatched test UNKNOWN, an empty result FALSE, and `negated` (`NOT IN`)
   /// negating the three-valued result (UNKNOWN maps to itself). The operand
   /// `Term` is evaluated once per row.
   case within(Term, Subkey, correlation: Correlation, negated: Bool)
   /// `x op {ANY | ALL} (Q)` — the lowered form of the AST's `quantified`. The
-  /// operand term `x` is held ONCE, the comparison `op` and the `Quantifier`
+  /// operand term `x` is held once, the comparison `op` and the `Quantifier`
   /// beside it, and the subquery occurrence as its cache `Subkey` (its
   /// `.valued` role, the FULL column materialised as `within`'s is) — never
-  /// run during `compile`, its single-column arity enforced at COMPILE from the
-  /// compiled width (`SQLError.arity`, no cursor). At RUN `Q` executes ONCE
-  /// against the borrowed catalog (memoised under the `Subkey`, UNCORRELATED)
-  /// and the case folds `x op v` over its lone column with the SAME
+  /// run during `compile`, its single-column arity enforced at compile from the
+  /// compiled width (`SQLError.arity`, no cursor). At run `Q` executes once
+  /// against the borrowed catalog (memoised under the `Subkey`, uncorrelated)
+  /// and the case folds `x op v` over its lone column with the same
   /// `matches`/Kleene primitives `within` uses: Kleene `OR` for `any` (seeded
   /// FALSE), Kleene `AND` for `all` (seeded TRUE), so a NULL `x` or element
-  /// makes an otherwise-undecided fold UNKNOWN, and an EMPTY column takes the
+  /// makes an otherwise-undecided fold UNKNOWN, and an empty column takes the
   /// seed — `any` FALSE, `all` TRUE. The operand `Term` is evaluated once per
-  /// row. A CORRELATED occurrence carries the discovered `correlation` (as
-  /// `within` does) and re-runs its inner plan per outer row; an UNCORRELATED
+  /// row. A correlated occurrence carries the discovered `correlation` (as
+  /// `within` does) and re-runs its inner plan per outer row; an uncorrelated
   /// one carries an empty correlation and memoises once.
   case quantified(Term, Comparison, Quantifier, Subkey,
                   correlation: Correlation)
   /// `p IS [NOT] <truth value>` — the lowered form of the AST's `truth`. The
   /// inner boolean `Filter` is held once and evaluated to its three-valued
-  /// result, which is then MAPPED against `value` (`TRUE`/`FALSE`/`UNKNOWN`) to
-  /// a DEFINITE two-valued result — never itself UNKNOWN — and negated for `IS
+  /// result, which is then mapped against `value` (`TRUE`/`FALSE`/`UNKNOWN`) to
+  /// a definite two-valued result — never itself UNKNOWN — and negated for `IS
   /// NOT`. An UNKNOWN inner is FALSE against `TRUE`/`FALSE` but TRUE against
   /// `UNKNOWN`, so the test collapses SQL's third value to a two-valued answer.
   case truth(Filter, Truth, negated: Bool)
@@ -254,7 +254,7 @@ internal indirect enum Term: Equatable, Sendable {
   /// The cell at `slot` of the record.
   case slot(Int)
   /// A run-time `:parameter`, resolved from the engine's bindings — the lowered
-  /// form of a CORRELATED subquery's reference to an ENCLOSING query's column.
+  /// form of a correlated subquery's reference to an enclosing query's column.
   /// An outer column the inner query names binds neither locally nor as an
   /// ordinary parameter; it lowers to this synthetic name, and the
   /// per-outer-row re-execution binds it to that row's cell before running the
@@ -276,40 +276,40 @@ internal indirect enum Term: Equatable, Sendable {
   /// or `NULL` when there is none. `type` is the unification of the branch
   /// result types (the same `ValueType.unified` reduction `derive`/`validate`
   /// compute) — the type the schema advertises for the column — so the executor
-  /// COERCES the selected value to it, widening an `.integer` arm of a
+  /// coerces the selected value to it, widening an `.integer` arm of a
   /// `.double` CASE.
   case `case`(Array<(Filter, Term)>, else: Term?, type: ValueType)
   /// A `CAST(operand AS type)` — the lowered form of the AST's
-  /// `Expression.cast`. The executor evaluates the operand `Term` and CONVERTS
+  /// `Expression.cast`. The executor evaluates the operand `Term` and converts
   /// the value to `type` (`Value.cast(to:)`), so an unconvertible value faults
   /// rather than yielding a wrong one. `type` is also the term's static type —
   /// the type the schema advertises for the column.
   case cast(Term, ValueType)
   /// `COALESCE(v1, v2, …)` — the lowered form of the AST's
   /// `Expression.coalesce`. Each element term is evaluated IN ORDER exactly
-  /// ONCE, and the first whose value is non-NULL is the result, else NULL. A
+  /// once, and the first whose value is non-NULL is the result, else NULL. A
   /// desugar to a `CASE WHEN vi IS NOT NULL THEN vi …` re-evaluated each `vi`,
   /// so a stateful element yielded a different value to its guard and its
-  /// result; holding the element ONCE (as `membership` holds its operand) fixes
+  /// result; holding the element once (as `membership` holds its operand) fixes
   /// that. `type` is the unification of the element types, to which the
-  /// selected value is COERCED — the type the schema advertises.
+  /// selected value is coerced — the type the schema advertises.
   case coalesce(Array<Term>, type: ValueType)
   /// `NULLIF(a, b)` — the lowered form of the AST's `Expression.nullif`. Both
-  /// operand terms are evaluated exactly ONCE (`va`, `vb`); the result is NULL
-  /// when `va = vb` is TRUE, else the SAME `va` that was compared. A desugar to
+  /// operand terms are evaluated exactly once (`va`, `vb`); the result is NULL
+  /// when `va = vb` is TRUE, else the same `va` that was compared. A desugar to
   /// `CASE WHEN a = b THEN NULL ELSE a END` evaluated `a` twice — comparing one
-  /// value and returning another — which holding `a` ONCE fixes.
+  /// value and returning another — which holding `a` once fixes.
   case nullif(Term, Term)
   /// A scalar subquery `(SELECT …)` — the lowered form of the AST's
   /// `Expression.subquery`. The subquery occurrence is carried as its cache
   /// `Subkey` (its resolution scope composed with the inner `Query`) — never
   /// run during `compile`, so a schema-only path opens no cursor — and its
-  /// single-column arity is enforced at COMPILE from its compiled width
-  /// (`SQLError.arity`, no cursor). At RUN it runs ONCE against the borrowed
+  /// single-column arity is enforced at compile from its compiled width
+  /// (`SQLError.arity`, no cursor). At run it runs once against the borrowed
   /// catalog (memoised under the `Subkey` in the `Subqueries` cache,
-  /// UNCORRELATED), collapsing to its lone cell (empty → NULL, one row → the
+  /// uncorrelated), collapsing to its lone cell (empty → NULL, one row → the
   /// cell, more → `SQLError.cardinality`), and the case reads that collapsed
-  /// value, COERCED to `type` — the inner column's single-column type — as a
+  /// value, coerced to `type` — the inner column's single-column type — as a
   /// `CASE` coerces its selected arm. A later correlated slice re-runs it per
   /// outer row.
   case subquery(Subkey, correlation: Correlation, type: ValueType)
@@ -331,7 +331,7 @@ internal indirect enum Term: Equatable, Sendable {
 }
 
 extension Term {
-  /// Structural equality over two lowered terms — the RESOLVED form column
+  /// Structural equality over two lowered terms — the resolved form column
   /// qualification has already normalized to a slot — so a `DISTINCT` ORDER BY
   /// key can be recognised as one of the projected select-list values it must
   /// order on (see `distinct`). The compiler cannot synthesise `Equatable` for
@@ -384,7 +384,7 @@ extension Term {
     case let .slot(slot):
       slots.insert(slot)
     case .parameter:
-      // A correlated `:parameter` reads no cell of THIS row — its value comes
+      // A correlated `:parameter` reads no cell of this row — its value comes
       // from an enclosing row bound into the run's bindings — so it references
       // no slot of the current record.
       break
@@ -413,11 +413,11 @@ extension Term {
       lhs.references(into: &slots)
       rhs.references(into: &slots)
     case let .subquery(_, correlation, _):
-      // A CORRELATED scalar subquery reads the enclosing row's cells its inner
+      // A correlated scalar subquery reads the enclosing row's cells its inner
       // `WHERE` names — the correlation's `slot` outer ordinals — so those must
       // be materialised into the outer record for the per-row re-execution to
       // bind them. A `bound` source is a threaded binding, not an outer cell,
-      // so it references none. An UNCORRELATED one (empty correlation)
+      // so it references none. An uncorrelated one (empty correlation)
       // references none — its value is a single cache lookup.
       slots.formUnion(correlation.slots)
     case .grouping:
@@ -458,10 +458,10 @@ extension Term {
     case let .nullif(lhs, rhs):
       .nullif(lhs.remapped(through: slot), rhs.remapped(through: slot))
     case let .subquery(key, correlation, type):
-      // A CORRELATED scalar subquery's correlation reads OUTER ordinals; remap
+      // A correlated scalar subquery's correlation reads OUTER ordinals; remap
       // each `slot` to its packed slot so the per-row re-execution reads the
       // outer record's cell (a `bound` source is unchanged — it reads a
-      // threaded binding). An UNCORRELATED one has an empty map and is
+      // threaded binding). An uncorrelated one has an empty map and is
       // unchanged.
       .subquery(key, correlation: correlation.remapped(through: slot),
                 type: type)
@@ -488,9 +488,9 @@ extension Term {
     }
   }
 
-  /// Whether this term reads a run-time `:parameter` anywhere — a CORRELATED
+  /// Whether this term reads a run-time `:parameter` anywhere — a correlated
   /// subquery's synthetic outer binding, which may be unbound or bound to NULL,
-  /// so a comparison over it can be UNKNOWN even when it reads NO slot.
+  /// so a comparison over it can be UNKNOWN even when it reads no slot.
   /// Selection pushdown reads this (through `Filter.nullable`) so a
   /// `.compare`/`.null` over a correlated `:parameter` — a slotless `outer_id =
   /// 1` — is not moved ahead of a later unsafe conjunct the
@@ -515,11 +515,11 @@ extension Term {
     }
   }
 
-  /// Whether this term is STATICALLY a valid single-character `LIKE` escape — a
+  /// Whether this term is statically a valid single-character `LIKE` escape — a
   /// constant text value of exactly one character, the only form `Row.like`
   /// accepts without faulting. A slot, a call, or a constant that is NULL,
   /// non-text, or a text of any other length is not: its escape validity is not
-  /// known until the row runs, so it CANNOT ride below a seek or join (see
+  /// known until the row runs, so it cannot ride below a seek or join (see
   /// `Filter.safe`). Reused as the escape-safety gate; it does not decide the
   /// eval result, only the pushdown/seek classification.
   internal var escape: Bool {
@@ -556,7 +556,7 @@ extension Filter.Operand {
     }
   }
 
-  /// Whether this operand is STATICALLY a valid single-character `LIKE`
+  /// Whether this operand is statically a valid single-character `LIKE`
   /// escape — only a constant single-character text term. A `:parameter` is
   /// per-run, not a static constant, so it is NOT statically valid (it may be
   /// unbound, NULL, or the wrong length at run time) and marks the `LIKE`
@@ -620,23 +620,23 @@ extension Filter {
              rhs.remapped(through: slot),
              negated: negated)
     case let .exists(key, correlation, negated):
-      // A CORRELATED EXISTS reads the enclosing row's cells its inner `WHERE`
+      // A correlated EXISTS reads the enclosing row's cells its inner `WHERE`
       // names; remap each `slot` outer ordinal to its packed slot (a `bound`
-      // source is unchanged). An UNCORRELATED one has an empty map and passes
+      // source is unchanged). An uncorrelated one has an empty map and passes
       // its cache key through unchanged.
       .exists(key, correlation: correlation.remapped(through: slot),
               negated: negated)
     case let .within(operand, key, correlation, negated):
-      // The outer operand term reads slots; a CORRELATED subquery ALSO reads
-      // the outer cells its inner `WHERE` names, so remap both. An UNCORRELATED
+      // The outer operand term reads slots; a correlated subquery also reads
+      // the outer cells its inner `WHERE` names, so remap both. An uncorrelated
       // one carries an empty correlation.
       .within(operand.remapped(through: slot), key,
               correlation: correlation.remapped(through: slot),
               negated: negated)
     case let .quantified(operand, op, quantifier, key, correlation):
-      // As `within`: the outer operand term reads slots; a CORRELATED subquery
-      // ALSO reads the outer cells its inner `WHERE` names, so remap both. An
-      // UNCORRELATED one carries an empty correlation.
+      // As `within`: the outer operand term reads slots; a correlated subquery
+      // also reads the outer cells its inner `WHERE` names, so remap both. An
+      // uncorrelated one carries an empty correlation.
       .quantified(operand.remapped(through: slot), op, quantifier, key,
                   correlation: correlation.remapped(through: slot))
     case let .truth(inner, value, negated):
@@ -676,7 +676,7 @@ extension Filter {
   }
 
   /// `product` gated by this filter for a join `nest` that cannot fold into a
-  /// `Join`, keeping the ON `match` conjuncts as a SEPARATE inner gate below
+  /// `Join`, keeping the ON `match` conjuncts as a separate inner gate below
   /// the rest — `Select(rest, Select(match, product))`. Because evaluating
   /// `.and` does not short-circuit, folding the match into one `AND` with WHERE
   /// would, for a pair whose NULL join key makes the match UNKNOWN, still
@@ -719,10 +719,10 @@ extension Filter {
     case let .memberships(lhs, rows, _):
       lhs.allSatisfy(\.safe) && rows.allSatisfy { $0.allSatisfy(\.safe) }
     case let .like(operand, pattern, escape, _):
-      // An escape makes the predicate UNSAFE unless it is STATICALLY a valid
+      // An escape makes the predicate unsafe unless it is statically a valid
       // single-character escape: `Row.like` faults (`SQLError.argument`) on any
       // escape that does not evaluate to a one-character text — a throw
-      // INDEPENDENT of whether a pair matches, so it must not ride below a seek
+      // independent of whether a pair matches, so it must not ride below a seek
       // or join and fire on an empty product (or be dropped by a hash key). A
       // non-constant escape (a slot or call) or a constant that is NULL,
       // non-text, or the wrong length is unsafe; only a `.constant` text of
@@ -735,11 +735,11 @@ extension Filter {
       test.safe && lower.safe && upper.safe
     case let .distinct(lhs, rhs, _): lhs.safe && rhs.safe
     case .exists, .within, .quantified:
-      // A subquery predicate is NEVER safe to push below a seek or short-
-      // circuiting derived/view filter. Under LAZY materialisation the FIRST
-      // evaluation of even an UNCORRELATED occurrence RUNS the inner query,
-      // which may FAULT (`EXISTS (SELECT 1 FROM S WHERE 1 / z = 0)`); a
-      // CORRELATED one re-runs per outer row. Pushed below a short-circuiting
+      // A subquery predicate is never safe to push below a seek or short-
+      // circuiting derived/view filter. Under lazy materialisation the FIRST
+      // evaluation of even an uncorrelated occurrence runs the inner query,
+      // which may fault (`EXISTS (SELECT 1 FROM S WHERE 1 / z = 0)`); a
+      // correlated one re-runs per outer row. Pushed below a short-circuiting
       // filter — a view's `WHERE 1 = 0`, a seek — it would be evaluated for a
       // row the filter drops, raising a throw the unmoved query never reaches,
       // so it stays at the product level, run only where the outer predicate
@@ -760,7 +760,7 @@ extension Filter {
   /// operand — slotless yet not definite). Only a filter over constants alone
   /// whose leaves are all definite is TRUE/FALSE for certain. Selection
   /// pushdown must not ride a nullable conjunct below a join or into a view
-  /// when a LATER conjunct is unsafe: the evaluator's `AND` does not
+  /// when a later conjunct is unsafe: the evaluator's `AND` does not
   /// short-circuit, so the un-pushed query evaluates the later conjunct even
   /// when this one is UNKNOWN — pushing this one down drops the UNKNOWN row
   /// before the later conjunct runs, suppressing a throw the left-to-right
@@ -772,14 +772,14 @@ extension Filter {
     !slots.isEmpty || parameterised || contingent
   }
 
-  /// Whether this filter can be UNKNOWN INDEPENDENT of any slot or
+  /// Whether this filter can be UNKNOWN independent of any slot or
   /// `:parameter` — an `IN (Q)` subquery test (`Filter.within`), which is
   /// three-valued: `x IN (Q)` is UNKNOWN when `Q`'s materialised column holds a
   /// NULL and no element matches, so a slotless `1 IN (Q)` over a constant
   /// operand is still not definite. `nullable` counts it even when `slots` is
   /// empty and nothing is parameterised, keeping an `IN (Q)` conjunct off a
   /// pushdown ahead of a later unsafe conjunct the non-short-circuiting `AND`
-  /// still owes. An `EXISTS (Q)` is genuinely TWO-valued — a decided non-empty
+  /// still owes. An `EXISTS (Q)` is genuinely two-valued — a decided non-empty
   /// test, never UNKNOWN — so it is NOT contingent and stays freely pushable.
   private var contingent: Bool {
     switch self {
@@ -801,8 +801,8 @@ extension Filter {
   }
 
   /// Whether this filter compares against a run-time `:parameter` — a `.bound`
-  /// anywhere in it, a `.compare`/`.null`/`.membership`/`.distinct` whose TERM
-  /// carries a `Term.parameter` (a CORRELATED subquery's synthetic outer
+  /// anywhere in it, a `.compare`/`.null`/`.membership`/`.distinct` whose term
+  /// carries a `Term.parameter` (a correlated subquery's synthetic outer
   /// binding), a `.like` whose pattern or escape operand is a `:parameter`, or
   /// a `.between` whose test or bound carries one. Such a predicate reads no
   /// slot yet can be UNKNOWN, because the parameter may be unbound (or bound to
@@ -816,7 +816,7 @@ extension Filter {
   internal var parameterised: Bool {
     switch self {
     case .bound: true
-    // A term-bearing predicate is parameterised when a TERM carries a
+    // A term-bearing predicate is parameterised when a term carries a
     // correlated `Term.parameter` — a slotless comparison that can be UNKNOWN,
     // so it must not ride ahead of a later unsafe conjunct, the same treatment
     // `.bound` gets.
@@ -832,9 +832,9 @@ extension Filter {
           || rows.contains { $0.contains(where: \.parameterised) }
     case let .distinct(lhs, rhs, _): lhs.parameterised || rhs.parameterised
     case .match: false
-    // An UNCORRELATED subquery predicate reads no run-time `:parameter` of the
+    // An uncorrelated subquery predicate reads no run-time `:parameter` of the
     // OUTER query — the subquery runs once at run start with the same bindings
-    // — so none is parameterised for the outer row. A CORRELATED one is already
+    // — so none is parameterised for the outer row. A correlated one is already
     // NOT `safe` (it re-runs per row), so it never rides a pushdown regardless.
     case .exists, .within, .quantified: false
     case let .like(operand, pattern, escape, _):
@@ -849,15 +849,15 @@ extension Filter {
     }
   }
 
-  /// This filter's PROVABLE two-valued truth INDEPENDENT of any row, binding,
+  /// This filter's provable two-valued truth independent of any row, binding,
   /// or subquery — `true` when it is always TRUE, `false` when always FALSE,
-  /// and `nil` when it is not statically decidable (the CONSERVATIVE default).
+  /// and `nil` when it is not statically decidable (the conservative default).
   /// A `select` treats UNKNOWN as reject, so the optimiser folds only a
   /// definite `true` (drops the select) and never mistakes an undecidable
   /// filter for one.
   ///
-  /// The ONLY provable leaf is a `compare(a, op, b)` over TWO `.constant`
-  /// operands: it evaluates through the SAME `matches` three-valued primitive
+  /// The ONLY provable leaf is a `compare(a, op, b)` over two `.constant`
+  /// operands: it evaluates through the same `matches` three-valued primitive
   /// the executor uses, so a NULL-bearing constant compare is UNKNOWN
   /// (`matches` yields `nil`) and reports `nil` — NOT provably true and NOT
   /// provably false — so a `WHERE NULL = 1` is left filtering (correctly
@@ -866,14 +866,14 @@ extension Filter {
   /// subquery — `bound`, a `compare` with a non-constant term, `match`, `null`,
   /// `membership`, `like`, `between`, `distinct`, `exists`, `within`,
   /// `quantified` — so its truth is not known here and it reports `nil`. The
-  /// connectives require BOTH operands to be DEFINITE: `and`/`or` report a
+  /// connectives require both operands to be definite: `and`/`or` report a
   /// definite result only when neither side is `nil` (an undecidable side makes
   /// the whole compound `nil`), `not` flips a definite operand, and `truth`
-  /// maps a DEFINITE inner through `tested`. This is STRICTER than the Kleene
+  /// maps a definite inner through `tested`. This is stricter than the Kleene
   /// dominance the executor uses (a `false` conjunct or `true` disjunct short-
-  /// circuiting the other side): dominance is sound for COMBINING already-
-  /// evaluated results, but `constant` licenses the optimiser to SKIP a filter
-  /// entirely, and an undecidable operand reads row data and can THROW — so it
+  /// circuiting the other side): dominance is sound for combining already-
+  /// evaluated results, but `constant` licenses the optimiser to skip a filter
+  /// entirely, and an undecidable operand reads row data and can throw — so it
   /// must never be dropped, and its parent can never be a compile-time
   /// constant.
   internal var constant: Bool? {
@@ -886,29 +886,29 @@ extension Filter {
       matches(lhs, op, rhs)
     // A comparison against a non-constant term reads a slot or `:parameter`;
     // its truth is not statically known. A row comparison and row `IN` are not
-    // statically folded — CONSERVATIVE, matching `.membership`/`.between`.
+    // statically folded — conservative, matching `.membership`/`.between`.
     case .compare, .bound, .match, .null, .membership, .comparison,
          .memberships, .like, .between, .distinct, .exists, .within,
          .quantified:
       nil
     case let .and(lhs, rhs):
-      // Both operands must be DEFINITE: a compile-time constant is only sound
-      // for FOLDING when the fold skips no runtime work. An undecidable operand
-      // reads row data and can THROW (e.g. `1 / X`), so it MUST be evaluated —
+      // Both operands must be definite: a compile-time constant is only sound
+      // for folding when the fold skips no runtime work. An undecidable operand
+      // reads row data and can throw (e.g. `1 / X`), so it must be evaluated —
       // even a `false`/`true` sibling cannot license dropping it. The Kleene
       // dominance that lets `matches` short-circuit already-evaluated results
-      // is UNSOUND here, where a definite `constant` authorises skipping the
+      // is unsound here, where a definite `constant` authorises skipping the
       // evaluation.
       if let l = lhs.constant, let r = rhs.constant { l && r } else { nil }
     case let .or(lhs, rhs):
-      // Both operands must be DEFINITE (see `.and`): a `true` disjunct cannot
+      // Both operands must be definite (see `.and`): a `true` disjunct cannot
       // license dropping an undecidable sibling that reads row data and may
       // throw — the parent is a compile-time constant only when both sides are.
       if let l = lhs.constant, let r = rhs.constant { l || r } else { nil }
     case let .not(operand):
       operand.constant.map { !$0 }
     case let .truth(inner, value, negated):
-      // `IS <truth>` is a DEFINITE two-valued test, but only when the inner's
+      // `IS <truth>` is a definite two-valued test, but only when the inner's
       // value is itself statically decided; an undecidable inner leaves `nil`.
       inner.constant == nil ? nil : tested(inner.constant, value, negated)
     }
@@ -950,7 +950,7 @@ internal func value(of literal: Literal) throws(SQLError) -> Value {
 }
 
 extension Row where Self: ~Escapable {
-  /// Evaluates a SUBQUERY-FREE `term` against this row through `routines` — the
+  /// Evaluates a subquery-free `term` against this row through `routines` — the
   /// entry point for a `CREATE FUNCTION` body (which cannot nest a subquery,
   /// see `NoCatalog`) and the unit choke points. It runs against `NoCatalog`,
   /// so a term that reached a scalar `.subquery` would fault; a subquery-free
@@ -969,7 +969,7 @@ extension Catalog where Self: ~Escapable {
   /// A `slot` reads the row's cell; a `constant` is itself; an `apply` looks
   /// the function up in the routines (`SQLError.function` on a miss), evaluates
   /// its arguments, and applies it; a scalar `.subquery` materialises against
-  /// this catalog LAZILY on first reach (memoised, so an unreachable arm never
+  /// this catalog lazily on first reach (memoised, so an unreachable arm never
   /// runs it). The `borrowing` row is non-escaping — a term runs over a
   /// materialised projection record or a predicate's borrowed cursor row.
   internal borrowing func evaluate(_ row: borrowing some Row & ~Escapable,
@@ -996,13 +996,13 @@ extension Catalog where Self: ~Escapable {
       // is none. The guard is a `Filter`, so it evaluates over the same row,
       // routines, bindings, and subquery results a `WHERE` filter does — a
       // `:parameter` guard resolves against the bindings, an UNKNOWN one does
-      // not select its branch. The selected value is COERCED to the CASE's
+      // not select its branch. The selected value is coerced to the CASE's
       // unified result `type` so it matches the column type the schema
-      // advertised. A scalar subquery in an UNREACHED arm is never evaluated,
+      // advertised. A scalar subquery in an unreached arm is never evaluated,
       // so it never runs (never throws) — the lazy `.subquery` case honours it.
       try conditional(row, branches, otherwise, type, context)
     case let .cast(operand, type):
-      // Evaluate the operand and CONVERT it to the target type: NULL casts to
+      // Evaluate the operand and convert it to the target type: NULL casts to
       // NULL, an unconvertible value faults (`Value.cast(to:)`), never yielding
       // a wrong value.
       try evaluate(row, operand, context).cast(to: type)
@@ -1011,11 +1011,11 @@ extension Catalog where Self: ~Escapable {
     case let .nullif(lhs, rhs):
       try nullif(row, lhs, rhs, context)
     case let .subquery(key, correlation, type):
-      // Materialise the scalar subquery LAZILY on this first reach — an
+      // Materialise the scalar subquery lazily on this first reach — an
       // occurrence in a skipped `CASE`/`COALESCE` arm is never reached, so it
-      // never runs (never throws). COERCE the collapsed value to the inner
-      // column's type, as a `CASE` coerces its selected arm. An UNCORRELATED
-      // one memoises; a CORRELATED one re-runs against this row's correlated
+      // never runs (never throws). coerce the collapsed value to the inner
+      // column's type, as a `CASE` coerces its selected arm. An uncorrelated
+      // one memoises; a correlated one re-runs against this row's correlated
       // bindings.
       try scalar(row, key, correlation, type, context)
     case let .grouping(_, bits):
@@ -1027,11 +1027,11 @@ extension Catalog where Self: ~Escapable {
   }
 
   /// The `bindings` extended with `correlation`'s outer cells — a `slot` entry
-  /// bound to the cell at that packed ordinal of the IMMEDIATE enclosing `row`,
-  /// a `bound` entry left as the incoming binding the CONTAINING subquery
-  /// already threaded down (a NESTED correlation to a grandparent column) — the
-  /// per-outer-row binding a CORRELATED subquery re-executes under. An
-  /// UNCORRELATED occurrence has an empty correlation, so this returns the
+  /// bound to the cell at that packed ordinal of the immediate enclosing `row`,
+  /// a `bound` entry left as the incoming binding the containing subquery
+  /// already threaded down (a nested correlation to a grandparent column) — the
+  /// per-outer-row binding a correlated subquery re-executes under. An
+  /// uncorrelated occurrence has an empty correlation, so this returns the
   /// bindings unchanged.
   private borrowing func correlated(_ row: borrowing some Row & ~Escapable,
                                     _ correlation: Correlation,
@@ -1063,19 +1063,19 @@ extension Catalog where Self: ~Escapable {
     return extended
   }
 
-  /// `context` re-scoped to the RECORDED revealed overlay of the occurrence
-  /// `key`'s scope — the SAME revealed base (CTEs plus `definition_schema.`
-  /// store relations, every enclosing SELECT's derived aliases STRIPPED) the
-  /// occurrence's plan was COMPILED against. The run records it under the scope
+  /// `context` re-scoped to the recorded revealed overlay of the occurrence
+  /// `key`'s scope — the same revealed base (CTEs plus `definition_schema.`
+  /// store relations, every enclosing SELECT's derived aliases stripped) the
+  /// occurrence's plan was compiled against. The run records it under the scope
   /// (`.caller` at the top level, `.view(name)` in a view body) as
-  /// `revealed().relations`; scoping the EXECUTION context to it makes a
+  /// `revealed().relations`; scoping the execution context to it makes a
   /// re-executed body resolve its `FROM` identically to compile, so a body
   /// `.scan` binds the CTE compile chose rather than a caller derived alias of
   /// the same name the unrevealed execution overlay would carry. On a miss (no
   /// box recorded) it leaves the overlay unchanged.
   ///
   /// The predicate-subquery paths (`present`/`values`/`scalar`) and the LATERAL
-  /// apply share this ONE seam, so the body plan a `Plan.apply` re-runs
+  /// apply share this one seam, so the body plan a `Plan.apply` re-runs
   /// per left row resolves under the identical revealed overlay `lateral(_:
   /// against:_:)` used at compile — the FROM-clause and predicate correlation
   /// paths cannot diverge from it.
@@ -1084,30 +1084,30 @@ extension Catalog where Self: ~Escapable {
     context.scoping(context.subqueries.overlay(key.scope) ?? context.relations)
   }
 
-  /// The rows a CORRELATED subquery occurrence `key` yields for `row` — the
-  /// SINGLE augment-and-execute path every correlated caller (`present`,
+  /// The rows a correlated subquery occurrence `key` yields for `row` — the
+  /// single augment-and-execute path every correlated caller (`present`,
   /// `values`, `scalar`) routes through, so none can skip the augmentation or
   /// the per-row overlay. It extends `bindings` with this row's correlated
   /// values, builds the execution context from the occurrence's scope overlay
-  /// AUGMENTED with the subquery's OWN `WITH`/derived-table rows, looks up the
-  /// PRE-COMPILED plan, and executes it.
+  /// augmented with the subquery's own `WITH`/derived-table rows, looks up the
+  /// pre-compiled plan, and executes it.
   ///
   /// The precompiled plan resolves a `WITH` item or a derived table `d` — `FROM
-  /// (SELECT …) AS d` — to a `.scan("d")` the executor binds by NAME from
-  /// `context.relations`, so the rows must be MATERIALISED into the overlay
-  /// first, exactly as the UNCORRELATED `run`/`probe`/`cell` path augments the
+  /// (SELECT …) AS d` — to a `.scan("d")` the executor binds by name from
+  /// `context.relations`, so the rows must be materialised into the overlay
+  /// first, exactly as the uncorrelated `run`/`probe`/`cell` path augments the
   /// query before running it. Without this the `.scan("d")` faults
   /// `SQLError.relation("d")` (or mis-binds an outer relation of the same
-  /// name). Augmenting on top of the per-row overlay PRESERVES both the
-  /// correlation bindings and the parent overlay: `augment` only ADDS this
+  /// name). Augmenting on top of the per-row overlay preserves both the
+  /// correlation bindings and the parent overlay: `augment` only adds this
   /// query's own aliases, and `validate: false` matches the lenient run path (a
-  /// REACHED body operand still faults at execution).
+  /// reached body operand still faults at execution).
   ///
-  /// A SET OPERATION binds NO derived alias at the query level — its arms are
+  /// A SET operation binds no derived alias at the query level — its arms are
   /// SELECT-scoped, each `FROM (SELECT …) AS d` local to its own arm — so a
   /// whole-query augment misses them and an arm's `.scan("d")` would fault
   /// `.relation("d")`. When the plan is a set operation this descends the plan
-  /// and query in lockstep and augments EACH ARM's own aliases before executing
+  /// and query in lockstep and augments each ARM's own aliases before executing
   /// that arm's sub-plan, exactly as the run and view setop paths do, while the
   /// correlation bindings and parent overlay ride into every arm through the
   /// shared `context`.
@@ -1117,24 +1117,24 @@ extension Catalog where Self: ~Escapable {
       throws(SQLError) -> Array<Record> {
     let bindings = correlated(row, correlation, context.bindings)
     let context = context.binding(bindings)
-    // A REACHED correlated scalar/`IN`/quantified occurrence over a SET
-    // OPERATION strictly re-folds its arms' column types before executing the
-    // SHAPED (placeholder-typed) plan the pre-pass recorded — the pre-pass
+    // A reached correlated scalar/`IN`/quantified occurrence over a SET
+    // operation strictly re-folds its arms' column types before executing the
+    // shaped (placeholder-typed) plan the pre-pass recorded — the pre-pass
     // compiles under `.shaping()`, so an irreconcilable pair was deferred to a
-    // placeholder there; this seam runs `context` WITHOUT a shape, so the fold
+    // placeholder there; this seam runs `context` without a shape, so the fold
     // faults `.operand`/42804 exactly as the uncorrelated `run` path does,
     // firing ONLY for reached occurrences (an unreachable one never calls
-    // `executed`, so its shape deferral stands). Only a SET OPERATION has a
+    // `executed`, so its shape deferral stands). Only a SET operation has a
     // cross-arm fold to check — a plain `SELECT` subquery has no arms to unify,
     // and resolving its projection here would fault on its own correlated
     // columns (out of scope in this fold context) — so a non-setop query skips
     // it. `EXISTS`/`LATERAL` skip it too: `EXISTS` ignores column types and the
-    // recorded probe is already the shape. The fold runs ONCE per occurrence —
+    // recorded probe is already the shape. The fold runs once per occurrence —
     // memoised on the `Subkey` — so a reached incompatibility faults on the
     // FIRST reached outer row and later rows skip the redundant (pure) re-fold.
     // A set operation may ride an `ordered` carrier (`ORDER BY`/`DISTINCT`/
-    // `OFFSET`·`FETCH` over the union), so fold on the query's CARRIER-
-    // TRANSPARENT core — a bare `case .setop = key.query` would swallow the
+    // `OFFSET`·`FETCH` over the union), so fold on the query's carrier-
+    // transparent core — a bare `case .setop = key.query` would swallow the
     // `.ordered` carrier and skip a reached carried union's strict re-fold,
     // diverging run from the uncorrelated `.operand`/42804 fault.
     if key.role == .scalar || key.role == .valued,
@@ -1145,11 +1145,11 @@ extension Catalog where Self: ~Escapable {
     guard let plan = context.subqueries.plan(key, correlation) else {
       throw .named("a correlated subquery plan was not compiled")
     }
-    // A SET-OPERATION subquery augments PER ARM (arm-local derived aliases the
+    // A SET-operation subquery augments per ARM (arm-local derived aliases the
     // query-level augment misses); a single query augments the whole query
     // once. A carried union compiles to a `.shaped` plan (a project/sort/
     // distinct stack over the `.setop`), NOT a bare `.setop`, so route the
-    // per-arm execution through the SAME carrier descender `run` uses
+    // per-arm execution through the same carrier descender `run` uses
     // (`execute(_:carrying:)`) — it descends the wrapper to the setop leaf and
     // runs `arms` there — keyed on the query's core being a set operation. A
     // bare `.setop` query/plan (no carrier) descends identically: the core is
@@ -1168,15 +1168,15 @@ extension Catalog where Self: ~Escapable {
   /// re-executes the pre-compiled body (`key`/`correlation`) against that
   /// record's correlated cells, takes `ordinals` from each produced right
   /// record, concatenates it onto the left, and keeps the pair the `on`
-  /// predicate admits. `.inner` (CROSS APPLY) DROPS a left record with no
+  /// predicate admits. `.inner` (CROSS APPLY) drops a left record with no
   /// surviving right record; `.left` (OUTER APPLY) preserves it, NULL-extending
   /// the taken width (`ordinals.count` NULL cells) — the same NULL-padding a
   /// regular outer join's `outer(…)` uses for an unmatched row. A `.right` or
   /// `.full` apply makes no sense for a correlated body: rejected at compile.
   ///
-  /// The lateral body runs through the SAME `executed` path a correlated
+  /// The lateral body runs through the same `executed` path a correlated
   /// subquery does — it binds the correlation's `slot` sources from the
-  /// borrowed left `record`, augments the body's OWN aliases, and runs the
+  /// borrowed left `record`, augments the body's own aliases, and runs the
   /// pre-compiled plan — so the borrow is never retained: `executed` returns
   /// owned `Record`s, and the pair merges two owned records. The right record
   /// is the body's FULL output, so `ordinals` select the referenced columns
@@ -1187,10 +1187,10 @@ extension Catalog where Self: ~Escapable {
   /// real `width` — its resolution schema is a `RelationInstance.schema()`, so
   /// a body reference `d.Id` puts the virtual ordinal `width` into `ordinals`.
   /// The `executed` body rows hold only the REAL columns (`0 ..< width`), so
-  /// taking `right.values[width]` would trap. This wraps THIS left row's body
+  /// taking `right.values[width]` would trap. This wraps this left row's body
   /// output as a `RelationInstance` and materialises each right record through
   /// `RelationInstance.record`, so the virtual `Id` ordinal yields the 1-based
-  /// row position within this left row's output — the SAME id derivation a
+  /// row position within this left row's output — the same id derivation a
   /// non-lateral derived table's `record` produces — while a real ordinal reads
   /// its stored cell.
   internal borrowing func applied(_ left: Array<Record>, _ key: Subkey,
@@ -1199,18 +1199,18 @@ extension Catalog where Self: ~Escapable {
                                   _ kind: Join.Kind, _ context: Context)
       throws(SQLError) -> Array<Record> {
     var records = Array<Record>()
-    // Re-run the pre-compiled body under the SAME revealed overlay it was
-    // COMPILED against — the occurrence scope's recorded revealed base — so a
+    // Re-run the pre-compiled body under the same revealed overlay it was
+    // compiled against — the occurrence scope's recorded revealed base — so a
     // body `FROM e` scans the CTE `e` compile chose, not a caller derived alias
-    // `e` that shadows it in the UNREVEALED execution overlay. The `on`
+    // `e` that shadows it in the unrevealed execution overlay. The `on`
     // predicate stays on the caller `context`: it is a caller-level join
     // predicate over the merged record's ordinals, and any subquery in it
-    // scopes to its OWN recorded overlay.
+    // scopes to its own recorded overlay.
     let body = revealed(under: key, context)
     // An unmatched left row under OUTER APPLY (`.left`) is NULL-extended by the
     // taken width, mirroring `outer(…)`'s NULL-padding of an unmatched row.
     let nulls = Record(Array(repeating: .null, count: ordinals.count))
-    // A LATERAL/CROSS/OUTER apply always emits `ON 1 = 1` — a PROVABLY-true
+    // A LATERAL/CROSS/OUTER apply always emits `ON 1 = 1` — a provably-true
     // predicate every merged row passes — so a constant-true `on` skips the
     // redundant per-row `evaluate(paired, on, context)` and admits the pair
     // directly (identical result). A non-trivial `on` still runs per row.
@@ -1240,15 +1240,15 @@ extension Catalog where Self: ~Escapable {
     return records
   }
 
-  /// Executes a correlated subquery's SET-OPERATION `plan` arm by arm — the
+  /// Executes a correlated subquery's SET-operation `plan` arm by arm — the
   /// plan and its `query` descend in lockstep (compile builds `.setop(kind,
   /// compile(left), compile(right), all)` from `.setop(kind, left, right,
   /// all)`), a `.setop` node recursing into both arms and `combine`-ing the
-  /// results and a LEAF arm augmenting THAT arm's own derived aliases into
+  /// results and a leaf arm augmenting that arm's own derived aliases into
   /// `context` (rows, so its `.scan` reads them) before executing its sub-plan.
   ///
   /// `context` already carries the per-row correlation bindings and the parent
-  /// overlay, so each arm's augment ADDS only that arm's aliases and every arm
+  /// overlay, so each arm's augment adds only that arm's aliases and every arm
   /// runs under the same correlated bindings — mirroring the run and view setop
   /// per-arm augmentation for the correlated shape. Executing the arm sub-plans
   /// (not re-running the arm queries) preserves any pushed conjunct in the arm
@@ -1259,7 +1259,7 @@ extension Catalog where Self: ~Escapable {
     if case let .setop(kind, left, right, all, types, _) = plan,
         case let .setop(_, leftQuery, rightQuery, _) = query {
       // The unified column `types` the plan carries (computed at compile) drive
-      // the arm coercion `combine` applies — the SAME types every set-op path
+      // the arm coercion `combine` applies — the same types every set-op path
       // uses, so a mixed-type arm widens identically here.
       return try combine(kind, arms(left, leftQuery, context),
                          arms(right, rightQuery, context), all, types: types)
@@ -1269,24 +1269,24 @@ extension Catalog where Self: ~Escapable {
     return try execute(plan, augmented)
   }
 
-  /// The `EXISTS` non-empty result of the occurrence `key`, run LAZILY: an
-  /// UNCORRELATED one (empty `correlation`) reads the memo and, on a miss,
-  /// probes once and stores it; a CORRELATED one re-probes per outer row
+  /// The `EXISTS` non-empty result of the occurrence `key`, run lazily: an
+  /// uncorrelated one (empty `correlation`) reads the memo and, on a miss,
+  /// probes once and stores it; a correlated one re-probes per outer row
   /// against the correlated bindings, never touching the memo.
   internal borrowing func present(_ row: borrowing some Row & ~Escapable,
                                   _ key: Subkey, _ correlation: Correlation,
                                  _ context: Context)
       throws(SQLError) -> Bool {
-    // Run under the overlay the occurrence's SCOPE was lowered under — the
+    // Run under the overlay the occurrence's scope was lowered under — the
     // caller's or the view body's — not the current execution site a pushdown
     // may have moved this predicate to.
     let context = revealed(under: key, context)
-    // A CORRELATED EXISTS re-executes its PRE-COMPILED PROBE plan (correlated
+    // A correlated EXISTS re-executes its pre-compiled probe plan (correlated
     // columns are bound `Term.parameter`s; the plan is the cardinality-only
     // probed shape, so its select list — a would-fault `1 / 0` — never runs)
     // against this row's correlated bindings, testing non-empty — bypassing the
-    // memo (the result depends on the row). An UNCORRELATED one memoises and
-    // probes cardinality once, the SAME probed shape.
+    // memo (the result depends on the row). An uncorrelated one memoises and
+    // probes cardinality once, the same probed shape.
     guard correlation.isEmpty else {
       return try !executed(row, key, correlation, context).isEmpty
     }
@@ -1296,18 +1296,18 @@ extension Catalog where Self: ~Escapable {
     return present
   }
 
-  /// The `IN (Q)` single column of the occurrence `key`, materialised LAZILY:
-  /// an UNCORRELATED one reads the memo and, on a miss, runs the inner query
-  /// once and stores its lone column; a CORRELATED one re-runs per outer row
+  /// The `IN (Q)` single column of the occurrence `key`, materialised lazily:
+  /// an uncorrelated one reads the memo and, on a miss, runs the inner query
+  /// once and stores its lone column; a correlated one re-runs per outer row
   /// against the correlated bindings, bypassing the memo.
   internal borrowing func values(_ row: borrowing some Row & ~Escapable,
                                  _ key: Subkey, _ correlation: Correlation,
                                 _ context: Context)
       throws(SQLError) -> Array<Value> {
     let context = revealed(under: key, context)
-    // A CORRELATED `IN (Q)` re-executes its PRE-COMPILED inner plan against
+    // A correlated `IN (Q)` re-executes its pre-compiled inner plan against
     // this row's correlated bindings for its lone column, bypassing the memo.
-    // An UNCORRELATED one memoises and re-runs its `Query` (recompiling
+    // An uncorrelated one memoises and re-runs its `Query` (recompiling
     // resolves).
     guard correlation.isEmpty else {
       return try executed(row, key, correlation, context).map { $0.values[0] }
@@ -1318,24 +1318,24 @@ extension Catalog where Self: ~Escapable {
     return values
   }
 
-  /// The value of a scalar subquery occurrence `key`, materialised LAZILY and
-  /// MEMOISED: on the first reach it runs the inner query ONCE (where this
+  /// The value of a scalar subquery occurrence `key`, materialised lazily and
+  /// memoised: on the first reach it runs the inner query once (where this
   /// catalog is in scope) — empty → NULL, one row → its cell, more →
   /// `.cardinality`, plus any inner fault — collapsing to one value and caching
-  /// it under `key`; a later reach returns the cached value WITHOUT re-running.
+  /// it under `key`; a later reach returns the cached value without re-running.
   ///
-  /// The subquery is UNCORRELATED, so its value is row-invariant — one run per
-  /// REACHED occurrence, none for one only in a skipped arm. The value is
-  /// COERCED to the inner column's `type`, as a `CASE` coerces its taken arm.
+  /// The subquery is uncorrelated, so its value is row-invariant — one run per
+  /// reached occurrence, none for one only in a skipped arm. The value is
+  /// coerced to the inner column's `type`, as a `CASE` coerces its taken arm.
   private borrowing func scalar(_ row: borrowing some Row & ~Escapable,
                                 _ key: Subkey, _ correlation: Correlation,
                                 _ type: ValueType, _ context: Context)
       throws(SQLError) -> Value {
     let context = revealed(under: key, context)
-    // A CORRELATED scalar subquery re-executes its PRE-COMPILED inner plan per
+    // A correlated scalar subquery re-executes its pre-compiled inner plan per
     // outer row against the correlated bindings, collapsing to its lone cell
     // (empty → NULL, one row → the cell, more → `.cardinality`), bypassing the
-    // memo (its cell depends on the row). An UNCORRELATED one memoises and
+    // memo (its cell depends on the row). An uncorrelated one memoises and
     // re-runs its `Query`.
     guard correlation.isEmpty else {
       let rows = try executed(row, key, correlation, context)
@@ -1351,10 +1351,10 @@ extension Catalog where Self: ~Escapable {
   }
 
   /// Evaluates a lowered `COALESCE(v1, v2, …)` against `row` — the `elements`
-  /// visited IN ORDER exactly ONCE, returning the first whose value is
+  /// visited IN ORDER exactly once, returning the first whose value is
   /// non-NULL (coerced to the unified `type` the schema advertises), else NULL.
   ///
-  /// Each element is evaluated ONCE: a desugar to `CASE WHEN vi IS NOT NULL
+  /// Each element is evaluated once: a desugar to `CASE WHEN vi IS NOT NULL
   /// THEN vi …` evaluated each `vi` twice — its guard and its result — so a
   /// stateful element tested one value for NULL and returned another.
   /// `Value.coerced` widens the selected value to `type` (a `.integer` element
@@ -1373,7 +1373,7 @@ extension Catalog where Self: ~Escapable {
   }
 
   /// Evaluates a lowered `NULLIF(a, b)` against `row` — `a` and `b` each
-  /// evaluated ONCE — returning NULL when `a = b` is TRUE, else the SAME `va`
+  /// evaluated once — returning NULL when `a = b` is TRUE, else the same `va`
   /// that was compared.
   ///
   /// A desugar to `CASE WHEN a = b THEN NULL ELSE a END` evaluated `a` twice —
@@ -1416,11 +1416,11 @@ extension Catalog where Self: ~Escapable {
   /// against `row`.
   ///
   /// This run-path dispatch checks a routine EXISTS — an unregistered `name`
-  /// faults `SQLError.function` — but does NOT validate the call's ARITY or
-  /// its argument TYPES: it evaluates the supplied `arguments` and hands them
+  /// faults `SQLError.function` — but does NOT validate the call's arity or
+  /// its argument types: it evaluates the supplied `arguments` and hands them
   /// to the routine. That is deliberate. A run assumes the statement was
   /// already type-checked; `columns(of:validate:)` (via `Scope.call`) is the
-  /// STRICT gate that faults `SQLError.argument` on a wrong argument count or a
+  /// strict gate that faults `SQLError.argument` on a wrong argument count or a
   /// definitively-wrong argument type, so a caller wanting arity/type
   /// enforcement validates FIRST and a run trusts that check. The engine's own
   /// routines self-check inside their closures (a native `BITAND` faults on a
@@ -1428,7 +1428,7 @@ extension Catalog where Self: ~Escapable {
   /// `callAsFunction`), so a mis-shaped call over them still faults; but a host
   /// routine that does NOT self-check its count runs regardless at this site.
   /// See `RoutineArityPostureTests`, which pins the run/validate split. (The
-  /// one value the run DOES enforce here is the finite-double invariant below,
+  /// one value the run does enforce here is the finite-double invariant below,
   /// which no static type-check can see.)
   private borrowing func apply(_ row: borrowing some Row & ~Escapable,
                                _ name: String, _ arguments: Array<Term>,

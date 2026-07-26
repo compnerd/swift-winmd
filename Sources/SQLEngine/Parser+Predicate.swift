@@ -169,7 +169,17 @@ extension Parser {
       try expect(.in)
       return try membership(left, negated: true)
     }
-    let op = try op()
+    guard let op = try comparator() else {
+      // No comparison operator or other predicate tail follows, so `left`
+      // stands alone as an ISO `<boolean predicand>`: bridge it as the
+      // comparison `left = TRUE`, whose three-valued truth IS `left`'s
+      // boolean value (a NULL `left` reading UNKNOWN), the same desugar `x IS
+      // TRUE` uses. A non-boolean `left` compares cross-kind against the
+      // boolean literal, which the engine reads as a definite non-match
+      // exactly as the explicit `left = TRUE` does.
+      return .comparison(left: left, op: .equal,
+                         right: .literal(.boolean(true)))
+    }
     if let quantifier = try quantifier() {
       // `left op {ANY | SOME | ALL} (query)` — a quantified comparison. The
       // quantifier follows the operator, so the peek is unambiguous: it is
@@ -438,6 +448,27 @@ extension Parser {
       return .parameter(name)
     }
     return try .expression(expression())
+  }
+
+  /// Peeks a comparison operator at the head of a predicate tail, consuming
+  /// and returning it when one is present, or `nil` when the current token is
+  /// none — leaving the stream untouched so the caller can treat the left
+  /// operand as a bare `<boolean predicand>`. The non-faulting counterpart of
+  /// `op`, which a row comparison requires an operator for.
+  private mutating func comparator() throws(SQLError) -> Comparison? {
+    let comparison: Comparison? = switch current?.kind {
+    case .equal: .equal
+    case .unequal: .unequal
+    case .lt: .lt
+    case .gt: .gt
+    case .leq: .leq
+    case .geq: .geq
+    default: nil
+    }
+    if comparison != nil {
+      _ = try advance(expecting: "a comparison operator")
+    }
+    return comparison
   }
 
   /// Parses a comparison operator.

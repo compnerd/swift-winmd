@@ -134,6 +134,45 @@ struct TableTests {
     try scalars().expect("SELECT V FROM Vals WHERE V IN (TABLE Ids)",
                                yields: [[1], [3]])
   }
+
+  // MARK: - TABLE t with a trailing tail (ORDER BY / OFFSET / FETCH)
+
+  // A trailing tail binds to the enclosing query expression, not to the `TABLE`
+  // primary — the same way it binds after `SELECT * FROM t`. These confirm it
+  // across every position `TABLE` composes in: standalone, a set-operation
+  // operand, a derived table, a scalar subquery, and an IN-subquery.
+
+  @Test func `a standalone TABLE t tail runs as SELECT star with the tail`()
+      throws {
+    try roster().expect("TABLE People ORDER BY Age",
+                              equals: "SELECT * FROM People ORDER BY Age")
+    try roster().expect(
+        "TABLE People ORDER BY Id DESC FETCH FIRST 2 ROWS ONLY",
+        equals: "SELECT * FROM People ORDER BY Id DESC FETCH FIRST 2 ROWS ONLY")
+  }
+
+  @Test func `a parenthesized TABLE operand carries its tail before a union`()
+      throws {
+    // The parentheses bound the operand's own ORDER BY/FETCH so it takes its
+    // top row before the union: the highest Tag of Lhs is `shared`, then Rhs.
+    try tags().expect("""
+        (TABLE Lhs ORDER BY Tag DESC FETCH FIRST 1 ROW ONLY)
+         UNION ALL TABLE Rhs
+        """, yields: [["shared"], ["shared"], ["b"]])
+  }
+
+  @Test func `a TABLE t tail composes in a derived table and subquery`()
+      throws {
+    // A `TABLE` primary with a trailing tail composes as a derived table, a
+    // scalar subquery, and an IN-subquery.
+    try tags().expect("SELECT Tag FROM (TABLE Lhs ORDER BY Tag) AS d",
+                            yields: [["a"], ["shared"]])
+    try scalars().expect("SELECT (TABLE One ORDER BY N) FROM One",
+                               yields: [[42]])
+    try scalars().expect(
+        "SELECT V FROM Vals WHERE V IN (TABLE Ids ORDER BY Key)",
+        yields: [[1], [3]])
+  }
 }
 
 /// A catalog for the scalar-subquery and IN-subquery `(TABLE …)` forms: `One`

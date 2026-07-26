@@ -334,4 +334,40 @@ struct ValuesTests {
     try store().expect("VALUES (1) ORDER BY 2", fails: .column("2"))
     try store().expect("VALUES (1) ORDER BY nope", fails: .column("nope"))
   }
+
+  // MARK: - VALUES with a trailing tail (ORDER BY / OFFSET / FETCH)
+
+  @Test func `a standalone multi-row VALUES takes a query-expression tail`()
+      throws {
+    // A trailing ORDER BY / OFFSET·FETCH after a `VALUES (…), …` binds to the
+    // enclosing query expression (the multi-row constructor is a `UNION ALL`,
+    // so the tail rides an output-scoped carrier) — ordering/paging the rows.
+    try store().expect("VALUES (3), (1), (2) ORDER BY 1",
+                       yields: [[1], [2], [3]])
+    try store().expect("VALUES (3), (1), (2) ORDER BY 1 OFFSET 1 ROWS",
+                       yields: [[2], [3]])
+  }
+
+  @Test func `a parenthesized VALUES operand carries its tail before a union`()
+      throws {
+    // Parenthesised, a VALUES operand takes its own ORDER BY/FETCH before the
+    // union: the smallest of {3, 1} is 1, then the second constructor's 9.
+    try store().expect("""
+        (VALUES (3), (1) ORDER BY 1 FETCH FIRST 1 ROW ONLY)
+         UNION ALL VALUES (9)
+        """, yields: [[1], [9]])
+  }
+
+  @Test func `a VALUES tail composes in a derived table and subquery`()
+      throws {
+    // A `VALUES` primary with a trailing tail composes as a derived table, a
+    // scalar subquery, and an IN-subquery.
+    try store().expect(
+        "SELECT column1 FROM (VALUES (3), (1), (2) ORDER BY 1) AS t",
+        yields: [[1], [2], [3]])
+    try store().expect("SELECT (VALUES (5) ORDER BY 1) AS x", yields: [[5]])
+    try roster().expect(
+        "SELECT Id FROM People WHERE Id IN (VALUES (3), (1) ORDER BY 1)",
+        yields: [[1], [3]])
+  }
 }

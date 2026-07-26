@@ -19,15 +19,22 @@
 /// cte            := identifier ['(' identifier (',' identifier)* ')']
 ///                   AS '(' query ')'
 /// query          := intersection ((UNION | EXCEPT) [ALL] intersection)*
+///                   [order] [limit]
+///                   // the trailing ORDER BY / OFFSET·FETCH binds to the whole
+///                   // query expression, never to a primary: a lone select, a
+///                   // TABLE t, or a VALUES (…) each takes it the same way (a
+///                   // set operation and a parenthesised primary ride an
+///                   // output-scoped carrier, a bare select its full scope)
 /// intersection   := term (INTERSECT [ALL] term)*
 /// term           := select | TABLE identifier | values
-///                   // TABLE t = SELECT * FROM t
+///                   // TABLE t = SELECT * FROM t; none of these primaries
+///                   // consumes a trailing tail — `query` does, above
 /// values         := VALUES tuple (',' tuple)*  // ISO table value constructor;
 ///                   // desugars to a UNION ALL of FROM-less constant SELECTs
 /// tuple          := '(' expression (',' expression)* ')'
 /// select         := SELECT [DISTINCT | ALL] projection
 ///                   [FROM relation (join)*
-///                    [where] [group] [having] [order] [limit]]
+///                    [where] [group] [having]]
 /// relation       := (identifier | [LATERAL] derived) [AS identifier]
 ///                   // LATERAL is legal only on a derived table in a join
 /// derived        := '(' query ')' AS identifier  // a derived table (aliased);

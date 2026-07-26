@@ -205,6 +205,22 @@ public indirect enum Query: Hashable, Sendable {
     }
   }
 
+  /// The count of hidden `generated` sort columns the `ordered` carriers on the
+  /// path to `first` appended to that arm's projection — the amount by which
+  /// `first`'s raw projection width overstates the query's real output width. A
+  /// query-level `ORDER BY` over an unprojected aggregate materialises such a
+  /// column on each arm and trims it back at the carrier; a set-operation
+  /// arity check comparing `first` widths must subtract this so a carrier
+  /// operand's hidden column is not miscounted (`(SELECT n … GROUP BY GROUPING
+  /// SETS (…) ORDER BY SUM(m)) UNION SELECT n` is a valid one-column union).
+  internal var generated: Int {
+    switch self {
+    case .select: 0
+    case let .setop(_, left, _, _): left.generated
+    case let .ordered(inner, _, _, _, count): count + inner.generated
+    }
+  }
+
   /// The query-level row operators an `ordered` carrier applies OVER its inner
   /// query, peeled off it — the `DISTINCT`/`ORDER BY`/`OFFSET`·`FETCH` and the
   /// generated hidden-column count. A `select`/`setop` carries no carrier.
@@ -215,27 +231,46 @@ public indirect enum Query: Hashable, Sendable {
     public let generated: Int
   }
 
-  /// This query stripped of its `ordered` carrier — the inner `setop`/`select`
-  /// — paired with the peeled `Carrier`, or `nil` when the query wears none.
-  ///
-  /// A single seam-shared peel: the carrier-transparent `core` reads its inner,
-  /// so every seam descends the carrier here rather than repeating a bespoke
-  /// `.ordered` match, then reapplies the peeled carrier to the result.
-  public var unwound: (inner: Query, carrier: Carrier?) {
-    if case let .ordered(inner, distinct, order, limit, generated) = self {
-      return (inner, Carrier(distinct: distinct, order: order, limit: limit,
-                             generated: generated))
-    }
-    return (self, nil)
+
+  /// This query's carrier-transparent core — its innermost `setop`/`select`,
+  /// with every `ordered` carrier peeled off. Two carriers stack when an outer
+  /// query-expression tail rides a parenthesised primary that already has its
+  /// own tail (`(SELECT … ORDER BY … FETCH n) ORDER BY …`), so the peel loops
+  /// to the base rather than stopping at one level. For the `if case .setop =
+  /// query.core` seams that recognise a set operation whether or not it rides
+  /// carriers, so a carried (or twice-carried) union is not silently swallowed
+  /// by a bare `.setop` match.
+  public var core: Query {
+    var query = self
+    while case let .ordered(inner, _, _, _, _) = query { query = inner }
+    return query
   }
 
-  /// This query's carrier-transparent core — its inner `setop`/`select`, an
-  /// `ordered` carrier peeled off. A thin read over `unwound.inner` for the
-  /// `if case .setop = query.core` seams that recognise a set operation whether
-  /// or not it rides a carrier, so a carried union is not silently swallowed by
-  /// a bare `.setop` match.
-  public var core: Query {
-    unwound.inner
+  /// This query's carrier-transparent core paired with every `ordered` carrier
+  /// on the path to it, innermost first — the full peel a stacked-carrier seam
+  /// uses to reach the base `setop`/`select` and re-apply each carrier in order
+  /// (`(setop ORDER BY 1) ORDER BY 1` yields the setop and `[inner, outer]`). A
+  /// single carrier yields a one-element list; a bare body an empty one.
+  public var peeled: (core: Query, carriers: Array<Carrier>) {
+    guard case let .ordered(inner, distinct, order, limit, generated) = self
+    else { return (self, []) }
+    let (core, carriers) = inner.peeled
+    return (core, carriers + [Carrier(distinct: distinct, order: order,
+                                      limit: limit, generated: generated)])
+  }
+
+  /// Whether the query applies a set-level dedup that collapses distinct rows —
+  /// a `DISTINCT` on any `ordered` carrier in its stack, or on its base
+  /// `select`. Carrier-transparent (it peels the whole stack), so a seam that
+  /// must not rewrite a projection whose distinct cardinality feeds an OFFSET
+  /// sees the `DISTINCT` through any number of nested carriers. A set-operation
+  /// core is not counted: the probe never rewrites a setop, so its `UNION`
+  /// dedup cannot be collapsed by the rewrite.
+  public var dedups: Bool {
+    let (core, carriers) = peeled
+    if carriers.contains(where: \.distinct) { return true }
+    if case let .select(select) = core { return select.distinct }
+    return false
   }
 }
 

@@ -9,15 +9,18 @@ extension CTE {
   /// inspect the identical AST.
   ///
   /// It applies `Query.expanded` (a `GROUP BY GROUPING SETS` body lowers to its
-  /// `UNION ALL` arms FIRST) then `Query.unwound` (a trailing query-level
-  /// `ORDER BY`/`OFFSET`·`FETCH`/`DISTINCT` carrier peels off the setop),
-  /// yielding the carrier-free inner query paired with the peeled `Carrier`. A
-  /// recursive grouping-sets body thus canonicalises to the same expanded,
-  /// unwound shape on both sides. Routing every seam through this one form
-  /// keeps the run and schema derivations in step.
-  internal var canonical: (inner: Query, carrier: Query.Carrier?) {
+  /// `UNION ALL` arms FIRST) then `Query.peeled` (every trailing query-level
+  /// `ORDER BY`/`OFFSET`·`FETCH`/`DISTINCT` carrier peels off the setop — a
+  /// parenthesised recursive union with its own tail plus an outer tail stacks
+  /// two), yielding the carrier-free inner query paired with the peeled
+  /// carriers, innermost first. A recursive grouping-sets body thus
+  /// canonicalises to the same expanded, peeled shape on both sides. Routing
+  /// every seam through this one form keeps the run and schema derivations in
+  /// step.
+  internal var canonical: (inner: Query, carriers: Array<Query.Carrier>) {
     get throws(SQLError) {
-      try query.expanded.unwound
+      let (core, carriers) = try query.expanded.peeled
+      return (core, carriers)
     }
   }
 

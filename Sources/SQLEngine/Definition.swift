@@ -696,8 +696,18 @@ extension Query {
   /// `t` collide and an inner `t` cannot shadow an outer.
   func collect(derived derivations:
                    inout Array<(String, Query, Array<String>)>) {
-    if case let .select(select) = self {
+    switch self {
+    case let .select(select):
       select.collect(derived: &derivations)
+    case let .ordered(inner, _, _, _, _):
+      // A carrier over a single select (`(SELECT … FROM (…) AS d) ORDER BY …`)
+      // is one arm in this scope, so descend it to the inner select's FROM/JOIN
+      // derived tables. A carrier over a setop descends to that setop, which
+      // (like a bare setop) collects nothing here — its arms augment on their
+      // own. Mirrors `collect(into:)`.
+      inner.collect(derived: &derivations)
+    case .setop:
+      break
     }
   }
 
@@ -709,8 +719,13 @@ extension Query {
   /// `setop` collects nothing, so each arm's ranges stay in its own scope, and
   /// a nested subquery is not descended.
   func collect(ranges: inout Array<String>) {
-    if case let .select(select) = self {
+    switch self {
+    case let .select(select):
       select.collect(ranges: &ranges)
+    case let .ordered(inner, _, _, _, _):
+      inner.collect(ranges: &ranges)
+    case .setop:
+      break
     }
   }
 
@@ -724,8 +739,13 @@ extension Query {
   /// stops at a `SELECT` as `collect(ranges:)` does: a `setop` collects
   /// nothing, and a nested subquery is not descended.
   func collect(sources: inout Array<String>) {
-    if case let .select(select) = self {
+    switch self {
+    case let .select(select):
       select.collect(sources: &sources)
+    case let .ordered(inner, _, _, _, _):
+      inner.collect(sources: &sources)
+    case .setop:
+      break
     }
   }
 }

@@ -833,11 +833,13 @@ extension Catalog where Self: ~Escapable {
   /// `HAVING` or set operation) runs in FULL, so its original is checked even
   /// for an `existential` reach.
   private borrowing func shape(of reach: Reach) -> Query {
-    guard reach.role == .existential, case let .select(select) = reach.query,
-        select.probable else {
-      return reach.query
-    }
-    return .select(select.probe)
+    // The validate side of the EXISTS cardinality probe: an `existential` reach
+    // checks the same probed shape the run compiles, so delegate to the single
+    // `probed(_:)` source of truth (which peels an `ordered` carrier over a
+    // probable primary and rewrites its select list to a constant). A scalar or
+    // valued reach evaluates its select list, so its original is checked.
+    guard reach.role == .existential else { return reach.query }
+    return probed(reach.query)
   }
 
   private borrowing func typecheck(_ select: Select, _ context: Context)
@@ -1069,14 +1071,18 @@ extension Catalog where Self: ~Escapable {
     }
     // The projection runs after any limit: a limit that drops every row it
     // would yield leaves only its aggregate folds (validated above) reachable.
-    // A whole-result aggregate emits exactly one row, so a positive OFFSET
-    // drops it too — not just a zero FETCH. A DISTINCT select is the exception:
-    // its plan is `Limit(Distinct(Project(…)))`, so the projection evaluates
-    // over every candidate row (dedup needs them) before the cap pages the
-    // deduplicated result — a zero FETCH or skipping OFFSET does not spare it.
-    // A false WHERE still yields no rows to dedup (handled above), so only the
-    // limit-based elision is bypassed for DISTINCT.
-    let sole = select.aggregates && select.grouping.expressions.isEmpty
+    // A single-row result — a whole-result aggregate, or any FROM-less select
+    // (one row over the `single` leaf) — emits exactly one row, so a positive
+    // OFFSET drops it too, not just a zero FETCH, and its projection is then
+    // unreachable; this matches the compile path, which caps the `single` plan
+    // below the projection. A DISTINCT select is the exception: its plan is
+    // `Limit(Distinct(Project(…)))`, so the projection evaluates over every
+    // candidate row (dedup needs them) before the cap pages the deduplicated
+    // result — a zero FETCH or skipping OFFSET does not spare it. A false WHERE
+    // still yields no rows to dedup (handled above), so only the limit-based
+    // elision is bypassed for DISTINCT.
+    let sole = select.from == nil
+        || (select.aggregates && select.grouping.expressions.isEmpty)
     var reachable = select.distinct
     if !reachable { reachable = !drops(select.limit, single: sole) }
     if reachable, case let .expressions(items) = select.projection {

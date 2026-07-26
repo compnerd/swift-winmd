@@ -56,6 +56,47 @@ private func views() throws -> FixtureCatalog {
   }
 }
 
+/// A catalog for a suffix-bearing set-operation carrier NESTED as an operand of
+/// an OUTER set operation — the reviewer's shape. `A` {1, 2}, `B` {2, 3}, `C`
+/// {3, 4}. The nested operand `(d UNION ALL C ORDER BY n FETCH FIRST 1 ROW
+/// ONLY)` — `d` being the arm-local derived `SELECT n FROM B` — orders the
+/// four-row union {2, 3, 3, 4} and takes the one smallest, 2. The view body
+/// unions `A` with that, yielding 1, 2, 2.
+private func nested() throws -> FixtureCatalog {
+  try Catalog {
+    Relation("A", ["n": .integer]) { Row(1); Row(2) }
+    Relation("B", ["n": .integer]) { Row(2); Row(3) }
+    Relation("C", ["n": .integer]) { Row(3); Row(4) }
+    try View("nested", """
+        SELECT n FROM A
+         UNION ALL (SELECT n FROM (SELECT n FROM B) AS d
+                     UNION ALL SELECT n FROM C ORDER BY n FETCH FIRST 1 ROW ONLY)
+        """, as: ["n"])
+  }
+}
+
+/// Like `nested()`, but the nested carrier's inner derived-table arm carries a
+/// WHERE over a sorted source column — a filter the optimiser's per-arm seek
+/// pass inspects, so it must resolve `d`'s schema during OPTIMISATION (not only
+/// execution). `B` is sorted on `k`; `d.k = 1` selects the row `n = 20`, then
+/// `{20} UNION ALL C {9}` ordered and paged to one takes 9, so the view unions
+/// `A` {1} with 9.
+private func nestedSeek() throws -> FixtureCatalog {
+  try Catalog {
+    Relation("A", ["n": .integer]) { Row(1) }
+    Relation("B", ["n": .integer, "k": .integer], sorted: "k") {
+      Row(20, 1)
+      Row(30, 2)
+    }
+    Relation("C", ["n": .integer]) { Row(9) }
+    try View("nestedseek", """
+        SELECT n FROM A
+         UNION ALL (SELECT n FROM (SELECT n, k FROM B) AS d WHERE d.k = 1
+                     UNION ALL SELECT n FROM C ORDER BY n FETCH FIRST 1 ROW ONLY)
+        """, as: ["n"])
+  }
+}
+
 // MARK: - Tests
 
 struct OrderedSetOperationCarrierTests {
@@ -103,6 +144,54 @@ struct OrderedSetOperationCarrierTests {
     // yields the same multiset as the ordered form, but unsorted — the two arms
     // in source order: the derived `d` arm ({7, 8}) then the `S` arm ({7, 8}).
     try views().expect("SELECT * FROM bare", yields: [[7], [8], [7], [8]])
+  }
+
+  @Test func `a carrier set op nested as a union arm materialises its inner derived table (view)`()
+      throws {
+    // The real suffix-bearing carrier now reaches a NESTED operand position: the
+    // outer view body is `.setop(SELECT n FROM A, .ordered(.setop(…)))`. The
+    // per-arm recursion (`setop`/`arms`) split the outer union, then hit the
+    // right arm `.ordered(.setop(…))` — a `.shaped` carrier, not a bare `.setop`
+    // — and, before this fix, whole-query augmented it as one opaque leaf,
+    // binding no arm-local `d` so its `.scan("d")` faulted `.relation('d')`. The
+    // recursion now peels the carrier `core` and descends to the inner setop
+    // leaf, per-arm augmenting `d`. Inner: {2,3}∪{3,4} ordered, FETCH 1 → 2;
+    // outer: A {1,2} then that one → 1, 2, 2.
+    try nested().expect("SELECT * FROM nested", yields: [[1], [2], [2]])
+    let catalog = try nested()
+    #expect(throws: Never.self) {
+      _ = try catalog.columns(of: parse(query: "SELECT * FROM nested"))
+    }
+  }
+
+  @Test func `a carrier set op nested as a union arm materialises its inner derived table (correlated)`()
+      throws {
+    // The correlated form drives the same nested-arm recursion through
+    // `Filter.arms`: the correlated `IN (…)` body is `.setop(SELECT V FROM S,
+    // .ordered(.setop(…)))`, whose right arm is a carried setop naming its own
+    // arm-local `d` (and correlating `p.Age`). For Alice (Age 30) the inner
+    // `d.V = p.Age` arm yields {30}, so the paged inner is 30 and the IN set is
+    // {7, 8, 30} — 30 ∈ it, Alice matches; for Bob (25) the inner is {99}, the
+    // set {7, 8, 99}, 25 ∉ it. Before the fix arm-0's `.scan("d")` faulted.
+    try people().expect("""
+        SELECT Id FROM People p WHERE p.Age IN
+          (SELECT V FROM S
+            UNION ALL (SELECT V FROM (SELECT 30 AS V) AS d WHERE d.V = p.Age
+                        UNION ALL SELECT 99 ORDER BY V FETCH FIRST 1 ROW ONLY))
+        """, yields: [[1]])
+  }
+
+  @Test func `a nested carrier arm with a seekable filter peels during view optimization`()
+      throws {
+    // The nested carrier's inner derived arm carries `WHERE d.k = 1` over a
+    // sorted source, so the view OPTIMISER's per-arm seek pass inspects it and
+    // must resolve `d`'s schema. The optimiser recursion (`optimise(_:_:_:)`)
+    // was carrier-transparent only for a direct `.setop`, so the nested
+    // `.ordered(.setop)` arm fell to the generic optimiser, which seek-resolved
+    // `.scan("d")` against an unbound `d` and faulted `.relation`. It now peels
+    // the carrier `core` and optimises each inner arm under its own augment.
+    // `d.k = 1` → n = 20; `{20} ∪ C {9}` ordered, FETCH 1 → 9; A {1} then 9.
+    try nestedSeek().expect("SELECT * FROM nestedseek", yields: [[1], [9]])
   }
 
   @Test func `a reached correlated scalar ordered set op faults on irreconcilable arms`()

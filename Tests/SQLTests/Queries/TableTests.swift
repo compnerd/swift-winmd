@@ -79,14 +79,12 @@ struct TableTests {
                             yields: [["shared"]])
   }
 
-  @Test func `TABLE t admits no trailing ORDER BY at the primary level`() throws {
-    // Ordering is a SELECT-internal clause in this grammar, not a
-    // query-expression clause, so a `TABLE t ORDER BY …` tail is not part of
-    // the primary — the trailing tokens fault. `SELECT * FROM t ORDER BY …`
-    // carries an order.
-    #expect(throws: SQLError.self) {
-      _ = try parse(query: "TABLE People ORDER BY Age")
-    }
+  @Test func `TABLE t takes a query-expression ORDER BY`() throws {
+    // A trailing `ORDER BY` after a `TABLE t` primary binds to the enclosing
+    // query expression (ISO 9075), exactly as after `SELECT * FROM t` — the two
+    // spellings parse to the same ordered query.
+    #expect(try parse(query: "TABLE People ORDER BY Age")
+                == parse(query: "SELECT * FROM People ORDER BY Age"))
   }
 
   @Test func `TABLE requires a relation name, not a derived table`() throws {

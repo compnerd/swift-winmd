@@ -742,13 +742,14 @@ struct EngineScalarSelectTests {
 
   @Test func `a directly-built FROM-less select with clauses is rejected`() throws {
     // The parser never builds a FROM-less select carrying a WHERE, GROUP BY,
-    // HAVING, ORDER BY, OFFSET/FETCH, or JOIN, but a direct `Select(from: nil,
-    // …)` can. The engine rejects it rather than silently drop the clause — a
-    // false predicate or HAVING would otherwise still return the scalar row.
+    // HAVING, or JOIN, but a direct `Select(from: nil, …)` can. The engine
+    // rejects it rather than silently drop the clause — a false predicate or
+    // HAVING would otherwise still return the scalar row. (ORDER BY and
+    // OFFSET/FETCH do apply to the single row and are covered by the VALUES
+    // FROM-less tail tests.)
     let fault =
         SQLError.unsupported(
-            "a WHERE, GROUP BY, HAVING, ORDER BY, OFFSET/FETCH, or JOIN " +
-            "requires a FROM clause")
+            "a WHERE, GROUP BY, HAVING, or JOIN requires a FROM clause")
     let filtered = try EngineScalarSelectTests.select(
         "SELECT 1 FROM People WHERE Id = 99")
     #expect(throws: fault) {
@@ -768,18 +769,6 @@ struct EngineScalarSelectTests {
       try roster().run(.select(Select(projection: filteredGroup.projection,
                                     from: nil,
                                     having: filteredGroup.having)))
-    }
-    let ordered =
-        try EngineScalarSelectTests.select("SELECT Id FROM People ORDER BY Id")
-    #expect(throws: fault) {
-      try roster().run(.select(Select(projection: ordered.projection, from: nil,
-                                    order: ordered.order)))
-    }
-    let limited = try EngineScalarSelectTests.select(
-        "SELECT Id FROM People FETCH FIRST 1 ROW ONLY")
-    #expect(throws: fault) {
-      try roster().run(.select(Select(projection: limited.projection, from: nil,
-                                    limit: limited.limit)))
     }
     let joined = try EngineScalarSelectTests.select(
         "SELECT Id FROM People JOIN Pets ON Pets.Owner = People.Id")
@@ -1168,7 +1157,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
     // rather than faulting `.operand` against the text `'x'`. The union yields
     // only the reached `'x'` row.
     try roster().expect("""
-        SELECT NOPE(Name) FROM People FETCH FIRST 0 ROWS ONLY
+        (SELECT NOPE(Name) FROM People FETCH FIRST 0 ROWS ONLY)
           UNION SELECT 'x'
         """, yields: [["x"]])
   }
@@ -1181,7 +1170,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
     // unconstrained and the fold defers to the text `'x'` rather than faulting
     // `.operand` on the fabricated `.integer`. The union yields only `'x'`.
     try roster().expect("""
-        SELECT NOPE(Name) + 0 FROM People FETCH FIRST 0 ROWS ONLY
+        (SELECT NOPE(Name) + 0 FROM People FETCH FIRST 0 ROWS ONLY)
           UNION SELECT 'x'
         """, yields: [["x"]])
   }
@@ -1250,7 +1239,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
     // filtered out: a zero-row `COALESCE(missing(), 1)` arm never evaluates the
     // call, so the union folds and yields only the reached text `'x'`.
     try roster().expect("""
-        SELECT COALESCE(missing(), 1) FROM People FETCH FIRST 0 ROWS ONLY
+        (SELECT COALESCE(missing(), 1) FROM People FETCH FIRST 0 ROWS ONLY)
           UNION SELECT 'x'
         """, yields: [["x"]])
   }
@@ -1506,7 +1495,7 @@ struct EngineReachedCorrelatedSetopTests {
       "tag": Routine(returns: .text, parameters: [.text]) { _ in .text("t") }
     ]
     try roster().expect("""
-        SELECT tag() FROM People FETCH FIRST 0 ROWS ONLY UNION SELECT 1
+        (SELECT tag() FROM People FETCH FIRST 0 ROWS ONLY) UNION SELECT 1
         """, yields: [[1]], routines: routines)
   }
 

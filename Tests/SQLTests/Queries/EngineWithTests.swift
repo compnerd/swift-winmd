@@ -444,6 +444,25 @@ struct EngineRecursiveTests {
     #expect(rows == [[.integer(1)], [.integer(2)], [.integer(3)]])
   }
 
+  @Test func `a stacked carrier over a recursive union still recurses`() throws {
+    // A parenthesised recursive union with its own ORDER BY, wrapped by an outer
+    // ORDER BY, stacks two `ordered` carriers over the `UNION`. Canonicalisation
+    // must peel BOTH to recognise the recursive setop — else the body is
+    // misclassified non-recursive and `t` compiles unbound (`.relation("t")`).
+    // Schema and run agree: one column `n`, fixpoint 1, 2, 3.
+    let statement = try Statement(parsing: """
+        WITH RECURSIVE t (n) AS (
+          (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3 ORDER BY 1)
+          ORDER BY 1
+        ) SELECT n FROM t
+        """)
+    let columns = try family().columns(of: statement, validate: true)
+    #expect(columns.count == 1)
+    #expect(columns[0].name == "n")
+    let rows = try family().run(statement)
+    #expect(rows == [[.integer(1)], [.integer(2)], [.integer(3)]])
+  }
+
   @Test func `a recursive CTE carrier ORDER BY runs a correlated sort-key subquery`()
       throws {
     // The carrier `ORDER BY` peeled off a recursive-CTE fixpoint is applied to

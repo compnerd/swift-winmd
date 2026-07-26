@@ -34,7 +34,7 @@ extension Expression {
   internal var aggregated: Bool {
     switch self {
     case .column, .literal, .subquery:
-      // An aggregate INSIDE a scalar subquery belongs to that subquery, not the
+      // An aggregate inside a scalar subquery belongs to that subquery, not the
       // enclosing query, so a `subquery` is not an aggregated expression here.
       false
     case .aggregate:
@@ -96,11 +96,11 @@ extension Expression {
   /// expression has no other predicate). A defined-function body is validated
   /// over its parameter schema and evaluated with only its argument record — no
   /// query bindings reach it — so a body naming a `:parameter` is rejected at
-  /// registration rather than silently evaluating that reference as UNBOUND.
+  /// registration rather than silently evaluating that reference as unbound.
   internal var bound: Bool {
     switch self {
     case .column, .literal, .aggregate, .subquery:
-      // An UNCORRELATED scalar subquery references no query binding of the
+      // An uncorrelated scalar subquery references no query binding of the
       // enclosing query (correlation is a later slice), so it is not bound.
       false
     case let .call(_, arguments):
@@ -143,7 +143,7 @@ extension Predicate.Operand {
   }
 
   /// Whether this `LIKE` operand references a query binding — an expression's
-  /// own, or the operand's OWN `:parameter`, so a defined-function body that
+  /// own, or the operand's own `:parameter`, so a defined-function body that
   /// names a `:parameter` in a `LIKE` pattern or escape is rejected at
   /// registration (see `Expression.bound`).
   internal var bound: Bool {
@@ -164,7 +164,7 @@ extension Predicate.Operand {
 }
 
 extension Predicate {
-  /// The flat list of top-level `AND`-conjuncts of this predicate in SOURCE
+  /// The flat list of top-level `AND`-conjuncts of this predicate in source
   /// ORDER (a non-`and` is a singleton). The parser leans `AND` left (`a AND b
   /// AND c` is `.and(.and(a, b), c)`), so a left-first flatten yields the
   /// conjuncts as written — the order `Scope.on` walks to bound its safe
@@ -193,7 +193,7 @@ extension Predicate {
       lhs.contains { $0.aggregated }
           || rows.contains { $0.contains { $0.aggregated } }
     case .exists:
-      // A subquery is its OWN scope, so an aggregate inside it folds over its
+      // A subquery is its own scope, so an aggregate inside it folds over its
       // group, not the enclosing one — it never makes the OUTER query an
       // aggregate one.
       false
@@ -283,7 +283,7 @@ extension Predicate {
     case let .among(lhs, rows, _):
       lhs.contains { $0.bound } || rows.contains { $0.contains { $0.bound } }
     case let .exists(query, _):
-      // A `:parameter` inside a subquery binds against the SAME run bindings
+      // A `:parameter` inside a subquery binds against the same run bindings
       // (the subquery runs under the enclosing context), so a defined-function
       // body that nests one still carries a binding to reject at registration.
       query.bound
@@ -320,12 +320,12 @@ extension Query {
     }
   }
 
-  /// The UNCORRELATED subqueries this query nests DIRECTLY — the union of every
+  /// The uncorrelated subqueries this query nests directly — the union of every
   /// arm's `Select.subqueries`, descending a set operation's arms but NOT a
-  /// nested subquery's OWN body (each subquery is run as a whole, resolving its
+  /// nested subquery's own body (each subquery is run as a whole, resolving its
   /// inner subqueries through its own `run`). The run path materialises these
   /// once, keyed by occurrence, so a set operation's every arm reads its own
-  /// `EXISTS`/`IN (Q)` result from the SAME cache.
+  /// `EXISTS`/`IN (Q)` result from the same cache.
   internal var subqueries: Array<Query> {
     switch self {
     case let .select(select): select.subqueries
@@ -337,7 +337,7 @@ extension Query {
   /// The subqueries this query nests in an `IN (Q)` position — the ones whose
   /// single COLUMN of values a run reads, so the materialiser runs each in FULL
   /// rather than as a cardinality probe. A subquery only ever an `EXISTS`
-  /// operand is absent, so its select list is never evaluated; one used by BOTH
+  /// operand is absent, so its select list is never evaluated; one used by both
   /// an `EXISTS` and an `IN` appears here (its values are needed), so its lone
   /// full materialisation serves both.
   internal var valued: Set<Query> {
@@ -348,8 +348,8 @@ extension Query {
     }
   }
 
-  /// The subqueries this query nests in a SCALAR-subquery position — the ones a
-  /// run collapses to a single VALUE (empty → NULL, one row → the cell, more →
+  /// The subqueries this query nests in a scalar-subquery position — the ones a
+  /// run collapses to a single value (empty → NULL, one row → the cell, more →
   /// `SQLError.cardinality`), distinct from a `valued` (`IN`) or `EXISTS`-probe
   /// occurrence. The materialiser reads this to decide a scalar occurrence's
   /// materialisation.
@@ -362,7 +362,7 @@ extension Query {
   }
 
   /// The subqueries this query nests in an `EXISTS (Q)` position — the ones a
-  /// run materialises as a cardinality PROBE. The SAME query may ALSO occur as
+  /// run materialises as a cardinality probe. The same query may also occur as
   /// a `valued` (`IN`) or `scalar` occurrence over identical SQL; each role is
   /// a DISTINCT cache entry (see `Role`), so the materialiser produces an
   /// existential probe entry whenever a query occurs here — never reusing a
@@ -387,13 +387,13 @@ extension Select {
     return having?.bound ?? false
   }
 
-  /// The UNCORRELATED subqueries this `SELECT` nests DIRECTLY — those in its
+  /// The uncorrelated subqueries this `SELECT` nests directly — those in its
   /// `WHERE`, each join `ON`, its `HAVING`, its projection, its `GROUP BY` key
   /// expressions, and its `ORDER BY` sort-key expressions — in appearance
-  /// order, for the `compile`/`typecheck` pre-pass to materialise ONCE.
+  /// order, for the `compile`/`typecheck` pre-pass to materialise once.
   ///
   /// It descends this select's own predicates and expressions but NOT into a
-  /// nested subquery's OWN body: each subquery is compiled/run as a whole
+  /// nested subquery's own body: each subquery is compiled/run as a whole
   /// (`compile(query)`/`run(query)`), which recurses into its inner subqueries
   /// through its own pre-pass, so gathering only the directly-nested ones keeps
   /// the walk one level and lets each subquery own its inner materialisation.
@@ -435,9 +435,9 @@ extension Select {
     return queries
   }
 
-  /// The subqueries this `SELECT` nests in a SCALAR-subquery position — the
+  /// The subqueries this `SELECT` nests in a scalar-subquery position — the
   /// same clauses `subqueries` walks, keeping only the `Expression.subquery`
-  /// queries, so a run materialises each as its collapsed single VALUE (empty →
+  /// queries, so a run materialises each as its collapsed single value (empty →
   /// NULL, one row → the cell, more → `SQLError.cardinality`), distinct from a
   /// `valued` (`IN`, full column) or `EXISTS`-probe occurrence.
   internal var scalar: Set<Query> {
@@ -459,7 +459,7 @@ extension Select {
 
   /// The subqueries this `SELECT` nests in an `EXISTS (Q)` position — the
   /// same clauses `subqueries` walks, keeping only the `exists` operands'
-  /// queries, so a run materialises each as a cardinality PROBE under its own
+  /// queries, so a run materialises each as a cardinality probe under its own
   /// `existential` key, distinct from any `valued`/`scalar` occurrence over the
   /// same SQL.
   internal var existential: Set<Query> {
@@ -480,7 +480,7 @@ extension Select {
   }
 
   /// The `Role`s `query` occupies within this `SELECT` — `scalar`, `valued`,
-  /// and/or `existential` — the SHAPES the lowered nodes carry in their
+  /// and/or `existential` — the shapes the lowered nodes carry in their
   /// `Subkey`. The same inner SQL used in more than one position occupies more
   /// than one role, so a correlated occurrence's pre-compiled plan is recorded
   /// under each, matching every lowered node that looks it up.
@@ -494,9 +494,9 @@ extension Select {
 }
 
 extension Predicate {
-  /// Collects the subqueries this predicate nests DIRECTLY into `queries` — the
+  /// Collects the subqueries this predicate nests directly into `queries` — the
   /// whole `Query` of an `exists`/`within`, and any in an operand expression,
-  /// a `CASE` guard, or an `AND`/`OR`/`NOT` — WITHOUT descending a collected
+  /// a `CASE` guard, or an `AND`/`OR`/`NOT` — without descending a collected
   /// subquery's own body (`compile`/`run` recurse into it).
   internal func collect(subqueries queries: inout Array<Query>) {
     switch self {
@@ -549,7 +549,7 @@ extension Predicate {
 
   /// Whether this predicate nests any `EXISTS`/`IN (Q)` subquery — the schema
   /// path's reachability check reads this to keep a subquery-bearing `HAVING`
-  /// from being pruned as unreachable, since its truth is decided at RUN by the
+  /// from being pruned as unreachable, since its truth is decided at run by the
   /// subquery, not statically.
   internal var subquery: Bool {
     var queries = Array<Query>()
@@ -615,7 +615,7 @@ extension Predicate {
     }
   }
 
-  /// Collects the SCALAR-subquery-position queries this predicate nests into
+  /// Collects the scalar-subquery-position queries this predicate nests into
   /// `queries` — an operand expression's own `subquery`, a `CASE` guard's, and
   /// those under `AND`/`OR`/`NOT`, mirroring `collect(subqueries:)`. An
   /// `EXISTS`/`IN (Q)`'s own `Query` is NOT a scalar occurrence — it is
@@ -761,11 +761,11 @@ extension Predicate.Operand {
 }
 
 extension Expression {
-  /// Collects the subqueries this expression nests DIRECTLY into `queries` —
+  /// Collects the subqueries this expression nests directly into `queries` —
   /// its own scalar `subquery`, and those reached through a `CASE` guard or an
   /// aggregate's argument/FILTER — recursing its call arguments, arithmetic,
   /// aggregate operand and FILTER, `CASE`, `CAST`, `COALESCE`, and `NULLIF`
-  /// sub-expressions WITHOUT descending a collected subquery's own body
+  /// sub-expressions without descending a collected subquery's own body
   /// (`compile`/`run` recurse into it). A scalar `Expression.subquery` is
   /// collected so the pre-pass compiles it (for its width and type) and the run
   /// materialises its single value.
@@ -808,7 +808,7 @@ extension Expression {
   /// Collects the `IN (Q)`-position subqueries this expression nests — reached
   /// through a `CASE` guard or an aggregate's argument/FILTER, mirroring
   /// `collect(subqueries:)`. An `EXISTS` guard contributes none (it probes),
-  /// and a SCALAR `subquery` contributes none here — its single value is read
+  /// and a scalar `subquery` contributes none here — its single value is read
   /// (`scalar`), not its column (`values`), so it is a `scalar` occurrence, not
   /// a `valued` one.
   internal func collect(valued queries: inout Set<Query>) {
@@ -844,10 +844,10 @@ extension Expression {
     }
   }
 
-  /// Collects the SCALAR-subquery-position queries this expression nests — its
+  /// Collects the scalar-subquery-position queries this expression nests — its
   /// own `subquery`, and those reached through a `CASE` guard or an aggregate's
   /// argument/FILTER, mirroring `collect(subqueries:)`. A scalar occurrence is
-  /// materialised as its collapsed single VALUE (empty → NULL, one row → the
+  /// materialised as its collapsed single value (empty → NULL, one row → the
   /// cell, more → `SQLError.cardinality`), distinct from a `valued` (`IN`) or
   /// `EXISTS`-probe occurrence.
   internal func collect(scalar queries: inout Set<Query>) {
@@ -925,9 +925,9 @@ extension Expression {
 
   /// Whether this expression nests any `EXISTS`/`IN (Q)`/scalar subquery —
   /// reached through a `CASE` guard or an aggregate's argument/FILTER, or its
-  /// own scalar `subquery`. The empty-fold reads this to VALIDATE a
+  /// own scalar `subquery`. The empty-fold reads this to validate a
   /// subquery-guarded projection or sort expression (whose selected branch a
-  /// run decides at RUN by the subquery, not statically) rather than prune it,
+  /// run decides at run by the subquery, not statically) rather than prune it,
   /// so `columns(of:)` surfaces the same fault the run would (`SELECT CASE WHEN
   /// EXISTS (Q) THEN 1 / 0 …` raises `.divide`). A subquery-free expression
   /// keeps the precise empty-fold.
@@ -956,7 +956,7 @@ extension Catalog where Self: ~Escapable {
   internal borrowing func group(_ select: Select, _ relation: Relation,
                                 _ from: Resolved, _ context: Context)
       throws(SQLError) -> Plan {
-    // The augmented `context` threads to `subquery(of:)`, which REVEALS the
+    // The augmented `context` threads to `subquery(of:)`, which reveals the
     // base — this select's and every enclosing select's derived aliases
     // dropped, the CTEs and store relations kept — before lowering a nested
     // subquery, so its FROM sees no derived alias while a CTE a same-named
@@ -966,7 +966,7 @@ extension Catalog where Self: ~Escapable {
     // in one combined ordinal space (as the non-aggregate join path does), so
     // the WHERE, keys, and aggregate arguments resolve uniformly. A LATERAL
     // join (CROSS/OUTER APPLY) is supported here too: the front half is shared
-    // with the non-aggregate path, so the apply body's OUTPUT columns land in
+    // with the non-aggregate path, so the apply body's output columns land in
     // scope for the keys, aggregate arguments, HAVING, and ORDER BY, and the
     // chain carries the correlated `apply` node the aggregate then groups.
     let (joined, relations) = try resolve(from: relation, schema: from.schema,
@@ -982,14 +982,14 @@ extension Catalog where Self: ~Escapable {
     // resolved against only the prefix already in scope (as the non-aggregate
     // path does). A `column = column` conjunct becomes a `match` hash-join key;
     // the rest is a residual the join runs as a filter.
-    // Each join's PREFIX scope — the relations available AT that join point,
-    // never one joined LATER — carries the merged columns accumulated BEFORE
+    // Each join's prefix scope — the relations available at that join point,
+    // never one joined later — carries the merged columns accumulated before
     // this join, so a chained `USING` `on` keys on the merged value.
     let prefixes = select.joins.indices.map { index in
       Scope(Array(relations[0 ... index + 1]), merged: merges[index])
     }
-    // Resolve each LATERAL join's body ONCE against the PRECEDING FROM — the
-    // FROM relation and the joins BEFORE this one (`relations[0…index]`, ONE
+    // Resolve each LATERAL join's body once against the preceding FROM — the
+    // FROM relation and the joins before this one (`relations[0…index]`, one
     // less than the prefix, which includes the join's own relation) — so a body
     // column naming a preceding relation correlates outward and the body's plan
     // is pre-compiled for the per-outer-row apply. A non-lateral join records
@@ -1010,20 +1010,20 @@ extension Catalog where Self: ~Escapable {
       laterals[index] = try lateral(body, against: preceding,
                                     columns: join.relation.columns, context)
     }
-    // Compile every nested subquery ONCE for arity/type, ahead of lowering, and
-    // discover each one's CORRELATION: a join `ON`'s against its PREFIX scope,
+    // Compile every nested subquery once for arity/type, ahead of lowering, and
+    // discover each one's correlation: a join `ON`'s against its prefix scope,
     // the WHERE against the join `scope`. Only the WHERE and join ONs admit a
-    // correlated column of THIS query; the aggregations, projection, `HAVING`,
-    // and `ORDER BY` lower under a BARRED seam. `validate` gates the eager
+    // correlated column of this query; the aggregations, projection, `HAVING`,
+    // and `ORDER BY` lower under a barred seam. `validate` gates the eager
     // type-check of a filtered-out derived body a nested subquery names, off on
-    // the RUN path, on for a schema check.
+    // the run path, on for a schema check.
     let plans = try subquery(of: select, context, enclosing: scope,
                              prefixes: prefixes)
     let barred = plans.rest.barred
     var matches = Array<Filter>()
     matches.reserveCapacity(select.joins.count)
     for index in select.joins.indices {
-      // A `NATURAL`/`USING` join's `on` is the SYNTHESIZED, already-lowered
+      // A `NATURAL`/`USING` join's `on` is the synthesized, already-lowered
       // filter (`ons[index]`, `nil` for a degenerate `NATURAL` join); a plain
       // join lowers its written `ON` against the prefix scope.
       if let on = ons[index] {
@@ -1040,8 +1040,8 @@ extension Catalog where Self: ~Escapable {
                                   subquery: plans.rest)
     }
 
-    // This select's grouping keys and — for ONE arm of an expanded `GROUPING
-    // SETS` — the SUPERSET (the union of every set's keys, so an absent key
+    // This select's grouping keys and — for one arm of an expanded `GROUPING
+    // SETS` — the superset (the union of every set's keys, so an absent key
     // NULLs by resolved identity). A `.sets` never reaches here: `compile`
     // expands it to a union of `.arm` selects before this runs.
     let (grouping, superset): (Array<Expression>, Array<Expression>) =
@@ -1059,7 +1059,7 @@ extension Catalog where Self: ~Escapable {
       // binds reads its combined slot; a bare `NATURAL`/`USING` merged column
       // lowers to its `COALESCE(left, right)` value (so the aggregate node
       // groups a `RIGHT`/`FULL` join's unmatched row by the merged value, not a
-      // NULL left column); a name NONE binds is a candidate CORRELATED
+      // NULL left column); a name none binds is a candidate correlated
       // reference (a LATERAL body grouping on a preceding column) — the
       // `barred` surface lowers it to a `Term.parameter` the apply binds per
       // outer row, admitting it only under the LATERAL `everywhere` seam and
@@ -1084,12 +1084,12 @@ extension Catalog where Self: ~Escapable {
         }
       }
     }
-    // Resolve each collected aggregate and dedup by its RESOLVED
+    // Resolve each collected aggregate and dedup by its resolved
     // `Aggregation` — function plus resolved argument term. `collect` deduped
     // only exact AST spellings, so a qualification-equivalent pair
     // (`SUM(Amount)` projected, `SUM(Sales.Amount)` in the `ORDER BY`) survived
     // as two expressions; both resolve to the same `Aggregation` in a
-    // single-relation scope, so this folds them into ONE grouped slot — the
+    // single-relation scope, so this folds them into one grouped slot — the
     // aggregate computes once and both clauses read/order that slot (which lets
     // the DISTINCT sort-key check accept it).
     var aggregations = Array<Aggregation>()
@@ -1103,7 +1103,7 @@ extension Catalog where Self: ~Escapable {
 
     // The source materialises exactly the ordinals the WHERE, the keys, and the
     // aggregate arguments read — never the projection/HAVING/ORDER, which read
-    // the GROUPED record. Pack them per relation in chain order, building the
+    // the grouped record. Pack them per relation in chain order, building the
     // combined-ordinal → slot map and each relation's leaf ordinals.
     var references = Set<Int>()
     for match in matches { match.references(into: &references) }
@@ -1113,8 +1113,8 @@ extension Catalog where Self: ~Escapable {
       aggregation.references(into: &references)
     }
     // A LATERAL apply reads its correlation's outer ordinals from the left
-    // chain's record, so those preceding-relation ordinals must be MATERIALISED
-    // (given a packed slot) even when no clause of THIS select references them
+    // chain's record, so those preceding-relation ordinals must be materialised
+    // (given a packed slot) even when no clause of this select references them
     // — else the correlation's remap through `slot` finds no slot for the outer
     // column its body names.
     for lateral in laterals {
@@ -1171,8 +1171,8 @@ extension Catalog where Self: ~Escapable {
                                 $0.remapped(through: slot)
                               }, chain)
 
-    // The SUPERSET's LOWERED terms — the columns another set groups on — so an
-    // arm's projection/HAVING reference to a key THIS set omits NULLs by
+    // The superset's lowered terms — the columns another set groups on — so an
+    // arm's projection/HAVING reference to a key this set omits NULLs by
     // resolved identity (empty for an ordinary grouped query).
     let supers = try superset.map { key throws(SQLError) -> Term in
       try scope.term(key, context.routines, subquery: barred)
@@ -1208,7 +1208,7 @@ extension Catalog where Self: ~Escapable {
 
     // The HAVING filters groups below the sort, the slot the WHERE occupies on
     // the non-aggregate path, so the shared `shaped` applies it identically —
-    // an ORDER BY key naming a COMPUTED aggregate output (`COUNT(*) * 2 AS n`)
+    // an ORDER BY key naming a computed aggregate output (`COUNT(*) * 2 AS n`)
     // then materialises once and sorts on the returned value.
     return node.shaped(distinct: select.distinct, projection: projection,
                        filter: having, order: order, limit: select.limit)
@@ -1237,7 +1237,7 @@ extension Expression {
   internal func collect(into expressions: inout Array<Expression>) {
     switch self {
     case .column, .literal, .subquery:
-      // An aggregate inside a scalar `subquery` belongs to THAT subquery's own
+      // An aggregate inside a scalar `subquery` belongs to that subquery's own
       // grouping, not the enclosing query's, so it is not collected here — the
       // subquery is compiled and run as a whole plan.
       break

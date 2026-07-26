@@ -20,35 +20,35 @@
 /// combined-ordinal resolution the source uses decides which projection columns
 /// are keys.
 ///
-/// For ONE arm of an expanded `GROUPING SETS`, `superset` carries the LOWERED
+/// For one arm of an expanded `GROUPING SETS`, `superset` carries the lowered
 /// terms of the UNION of every set's keys. A non-key column whose lowered term
-/// is in the superset is a SUPER-AGGREGATE NULL (a grouping column another set
-/// groups on but THIS arm does not) — `term` returns a typeless-NULL slot for
+/// is in the superset is a super-aggregate NULL (a grouping column another set
+/// groups on but this arm does not) — `term` returns a typeless-NULL slot for
 /// it instead of faulting `.grouping`, so a projected/HAVING/ORDER-BY reference
-/// to it NULLs by RESOLVED identity (`n.A` ≡ `A`, case-insensitively), not raw
+/// to it NULLs by resolved identity (`n.A` ≡ `A`, case-insensitively), not raw
 /// AST. It is empty for an ordinary grouped query, whose every non-key column
 /// still faults.
 internal struct Grouped {
   private let scope: Scope
 
-  /// Each BARE-column `GROUP BY` key's combined base ordinal mapped to its
+  /// Each bare-column `GROUP BY` key's combined base ordinal mapped to its
   /// grouped slot — key `i` sits at grouped slot `i`. A general (non-column)
   /// key holds no ordinal entry; it matches by expression through
   /// `expressions` instead.
   private let keys: Dictionary<Int, Int>
 
-  /// Each `GROUP BY` key's LOWERED base-ordinal term, in key order — key `i`
+  /// Each `GROUP BY` key's lowered base-ordinal term, in key order — key `i`
   /// sits at grouped slot `i`. A projection/`HAVING`/`ORDER BY` expression that
-  /// lowers to a term EQUAL to a key's is that key, so a general (non-column)
+  /// lowers to a term equal to a key's is that key, so a general (non-column)
   /// key matches a semantically-identical reference whose AST differs only by
   /// qualification or case (`Orders.Amount + 1` vs `Amount + 1`), and a bare
   /// `NATURAL`/`USING` merged column — which lowers to a `COALESCE(left,
-  /// right)` term with NO single ordinal, the group key AND every bare
-  /// reference to it — groups and projects as ONE value, matched by term
+  /// right)` term with no single ordinal, the group key AND every bare
+  /// reference to it — groups and projects as one value, matched by term
   /// rather than the raw AST or an ordinal a merged column lacks.
   private let terms: Array<Term>
 
-  /// The LOWERED terms of the union of every set's keys, for ONE arm of an
+  /// The lowered terms of the union of every set's keys, for one arm of an
   /// expanded `GROUPING SETS` — the columns another set groups on. A non-key
   /// reference whose lowered term is in here is a super-aggregate NULL (this
   /// arm does not group on it, but another set does), so `term` returns a
@@ -61,11 +61,11 @@ internal struct Grouped {
   private let offset: Int
 
   /// The query's distinct aggregations, in first-appearance order — aggregate
-  /// `j` sits at grouped slot `offset + j`. Deduped by RESOLVED `Aggregation`
+  /// `j` sits at grouped slot `offset + j`. Deduped by resolved `Aggregation`
   /// (function + resolved argument term), so an aggregate expression's grouped
   /// slot is found by resolving it and matching here — a
   /// qualification-equivalent aggregate (`SUM(Amount)` vs `SUM(Sales.Amount)`)
-  /// maps to the SAME slot.
+  /// maps to the same slot.
   private let aggregates: Array<Aggregation>
 
   /// Each projected item's output name (an alias, else a bare column's name),
@@ -84,7 +84,7 @@ internal struct Grouped {
   private var ambiguous: Set<String> = []
 
   /// Builds a grouping over `scope` for the `GROUP BY` `columns` (with their
-  /// already-LOWERED base-ordinal `terms`, so a merged column's coalesce term
+  /// already-lowered base-ordinal `terms`, so a merged column's coalesce term
   /// is matched by term) and the query's distinct `aggregates` (in
   /// first-appearance order — aggregate `j` at grouped slot `columns.count +
   /// j`). The `aggregates` are already deduped by RESOLVED `Aggregation` (see
@@ -98,16 +98,16 @@ internal struct Grouped {
     self.superset = superset
     var keys = Dictionary<Int, Int>(minimumCapacity: grouping.count)
     for index in grouping.indices {
-      // A BARE-column grouping key a local relation binds maps its combined
-      // ordinal to its grouped slot. A bare `NATURAL`/`USING` MERGED column
+      // A bare-column grouping key a local relation binds maps its combined
+      // ordinal to its grouped slot. A bare `NATURAL`/`USING` merged column
       // binds no single ordinal (`find` faults `.ambiguous` over its two
       // physical sides) — its lowered `terms[index]` is a `COALESCE` matched by
-      // term, so it takes NO ordinal entry, as a general key does. A key NONE
-      // binds is a candidate CORRELATED reference (a LATERAL body grouping
+      // term, so it takes no ordinal entry, as a general key does. A key none
+      // binds is a candidate correlated reference (a LATERAL body grouping
       // on a preceding column): the correlation surface's non-recording
       // `correlated` probe distinguishes it from a genuine unknown column, and
       // it occupies grouped slot `index` as a `.parameter` key (in `group`'s
-      // keys array) with NO ordinal→slot entry — the projection reads it via
+      // keys array) with no ordinal→slot entry — the projection reads it via
       // the same correlation, never through this key dict. A genuinely unknown
       // column re-throws the `.column` fault; a barred surface diagnoses a
       // bound outer column `.unsupported`. `correlated` records nothing, so it
@@ -129,7 +129,7 @@ internal struct Grouped {
   }
 
   /// The grouped slot an aggregate `expression` resolves to (an aggregate the
-  /// query collected), or `nil` if it is not one. The expression is RESOLVED to
+  /// query collected), or `nil` if it is not one. The expression is resolved to
   /// an `Aggregation` — column qualification normalized to a slot — and matched
   /// against the collected aggregations, so `SUM(Amount)` and
   /// `SUM(Sales.Amount)` find the same slot in a single-relation scope.
@@ -144,10 +144,10 @@ internal struct Grouped {
 
   /// Lowers an `expression` to its grouped-space `Term` — the module-visible
   /// entry to the private `term`, so a caller (the `ordered` set-op carrier)
-  /// can match an `ORDER BY` key against the projection by RESOLVED identity,
+  /// can match an `ORDER BY` key against the projection by resolved identity,
   /// exactly as the grouped `ORDER BY` path does: a projected aggregate and a
   /// qualifier-equivalent sort key (`SUM(Qty)` vs `SUM(s.Qty)`) lower to the
-  /// SAME grouped slot, so the carrier need not compare raw AST.
+  /// same grouped slot, so the carrier need not compare raw AST.
   internal func resolve(_ expression: Expression,
                         _ routines: Routines = [:],
                         subquery: Resolution = .unsupported)
@@ -176,22 +176,22 @@ internal struct Grouped {
        let slot = try slot(of: expression, routines, subquery: subquery) {
       return .slot(slot)
     }
-    // A bare `NATURAL`/`USING` MERGED column and a general (non-column) key
-    // both match a `GROUP BY` key by LOWERED `Term`, not raw AST — the
+    // A bare `NATURAL`/`USING` merged column and a general (non-column) key
+    // both match a `GROUP BY` key by lowered `Term`, not raw AST — the
     // scope normalizes qualification and case away, so a projection/`HAVING`/
-    // `ORDER BY` expression that is SEMANTICALLY the key matches even when its
+    // `ORDER BY` expression that is semantically the key matches even when its
     // spelling differs (`Orders.Amount + 1` vs `Amount + 1`, `AMOUNT + 1` vs
-    // `Amount + 1`). Lower under the SAME scope the key lowered under, so a
+    // `Amount + 1`). Lower under the same scope the key lowered under, so a
     // merged column's `COALESCE(left, right)` term (which binds no single
-    // ordinal — the group key AND every bare reference are ONE value) still
+    // ordinal — the group key AND every bare reference are one value) still
     // matches. A right-only row of a `RIGHT`/`FULL` join thus groups by its
     // coalesced value, not a NULL left column.
     //
-    // A bare PLAIN column is skipped here and falls to the ordinal path below,
+    // A bare plain column is skipped here and falls to the ordinal path below,
     // which additionally distinguishes a genuine unknown column, a correlated
     // reference (a LATERAL body's `everywhere` seam), and a barred grouped
     // surface — cases a bare merged column and a general expression never
-    // reach. A merged column that matches NO key faults `.grouping`; a general
+    // reach. A merged column that matches no key faults `.grouping`; a general
     // expression that matches none falls through so its operands are each
     // checked (`Amount + 2` faults on the bare non-key `Amount`). An aggregated
     // expression (`SUM(x) + 1`) is skipped too: `scope.term` faults on an
@@ -212,8 +212,8 @@ internal struct Grouped {
     if !plain, !expression.aggregated, !expression.grouping {
       let lowered = try scope.term(expression, routines, subquery: subquery)
       if let index = terms.firstIndex(of: lowered) { return .slot(index) }
-      // A reference to a column ANOTHER set groups on but THIS arm's set omits
-      // is a SUPER-AGGREGATE NULL — matched by lowered term (so `n.A` ≡ `A`,
+      // A reference to a column another set groups on but this arm's set omits
+      // is a super-aggregate NULL — matched by lowered term (so `n.A` ≡ `A`,
       // case-insensitively), not raw AST — so it lowers to a typeless-NULL
       // constant rather than faulting. This dissolves the qualified/unqualified
       // and absent-key HAVING findings for a merged/general reference.
@@ -227,7 +227,7 @@ internal struct Grouped {
       // Resolve the column against this scope's own relations first, mirroring
       // `Scope.term`'s `.column`: a name a local relation binds must be a
       // `GROUP BY` key (the standard grouping rule), else `SQLError.grouping`.
-      // A name NONE binds is a candidate CORRELATED reference — consult the
+      // A name none binds is a candidate correlated reference — consult the
       // surface, which admits it (a `Term.parameter` the apply binds per outer
       // row) only for a LATERAL body's `everywhere` seam and diagnoses it
       // `.unsupported` on an ordinary barred grouped surface. The final
@@ -235,8 +235,8 @@ internal struct Grouped {
       // exactly as `Scope.term` does.
       if let ordinal = try scope.find(column) {
         if let slot = keys[ordinal] { return .slot(slot) }
-        // A bare column ANOTHER set groups on but THIS arm's set omits is a
-        // super-aggregate NULL — matched by its LOWERED term against the
+        // A bare column another set groups on but this arm's set omits is a
+        // super-aggregate NULL — matched by its lowered term against the
         // superset (so `n.A` ≡ `A`, case-insensitively), not the raw ordinal —
         // else the standard non-grouped fault.
         let lowered = try scope.term(expression, routines, subquery: subquery)
@@ -278,7 +278,7 @@ internal struct Grouped {
       }
       // Attach the unified result type — the same `ValueType.unified` reduction
       // `derive`/`validate` compute — over the grouped scope, so the executor
-      // COERCES the selected branch's value to the advertised column type.
+      // coerces the selected branch's value to the advertised column type.
       let type = try scope.derive(whens, otherwise, routines,
                                   subquery: subquery)
       return .case(branches, else: fallback, type: type)
@@ -288,7 +288,7 @@ internal struct Grouped {
       return try .cast(term(operand, routines, subquery: subquery), type)
     case let .coalesce(arguments):
       // Lower each argument to a grouped-space `Term` and hold them in a
-      // first-class `Term.coalesce` so each is evaluated ONCE; `type` is the
+      // first-class `Term.coalesce` so each is evaluated once; `type` is the
       // unified argument type (over the grouped scope) the value coerces to.
       var elements = Array<Term>()
       elements.reserveCapacity(arguments.count)
@@ -299,11 +299,11 @@ internal struct Grouped {
       return .coalesce(elements, type: type)
     case let .nullif(lhs, rhs):
       // Lower both operands to grouped-space `Term`s and hold them in a
-      // first-class `Term.nullif` so each is evaluated ONCE.
+      // first-class `Term.nullif` so each is evaluated once.
       return try .nullif(term(lhs, routines, subquery: subquery),
                          term(rhs, routines, subquery: subquery))
     case let .subquery(query):
-      // A scalar subquery is UNCORRELATED — row-independent, so it needs no
+      // A scalar subquery is uncorrelated — row-independent, so it needs no
       // `GROUP BY` key — and lowers to a `Term.subquery` reading its collapsed
       // value from the cache, carrying its `Subkey` and single-column type.
       return try subquery.scalar(query)
@@ -313,7 +313,7 @@ internal struct Grouped {
       // aggregate.
       throw .state("XX000", "uncollected aggregate")
     case .grouping:
-      // GROUPING is resolved to a constant at the TOP of `term` (before this
+      // GROUPING is resolved to a constant at the top of `term` (before this
       // switch), so it never reaches here — an internal inconsistency if it
       // does.
       throw .state("XX000", "unlowered GROUPING")
@@ -369,7 +369,7 @@ internal struct Grouped {
       // into the `over` payload) and the membership key for the roll-up test. It
       // is the base term, not the grouped lowering: a rolled-up column lowers to
       // the shared super-aggregate `.constant(.null)` — and a rolled-up
-      // CORRELATED key to a `.parameter` — so the grouped term identifies
+      // correlated key to a `.parameter` — so the grouped term identifies
       // neither which column it was nor that it is a key. The base term is the
       // column's arm-stable slot, so two GROUPINGs match by identity iff they
       // report on the same expressions.
@@ -377,7 +377,7 @@ internal struct Grouped {
       let bit: Int
       if terms.contains(id) {
         // A `GROUP BY` key present in this arm's set, matched by term against the
-        // arm's keys — so a CORRELATED key (a LATERAL body grouping on a
+        // arm's keys — so a correlated key (a LATERAL body grouping on a
         // preceding-FROM column, which lowers to `Term.parameter` rather than a
         // local key slot) is recognised too, not only a local slot.
         bit = 0
@@ -425,8 +425,8 @@ internal struct Grouped {
                                _ routines: Routines = [:],
                                subquery: Resolution = .unsupported)
       throws(SQLError) -> Array<Term> {
-    // A grouped projection is a BARRED clause position (see `Schema.terms`):
-    // the entry bars the seam so it cannot admit a correlated column of THIS
+    // A grouped projection is a barred clause position (see `Schema.terms`):
+    // the entry bars the seam so it cannot admit a correlated column of this
     // query.
     let subquery = subquery.barred
     switch projection {
@@ -475,12 +475,12 @@ internal struct Grouped {
   ///
   /// Each sort key resolves as, in order:
   ///
-  /// - `ordinal(n)` — the query's `n`-th projected OUTPUT column (1-based),
+  /// - `ordinal(n)` — the query's `n`-th projected output column (1-based),
   ///   resolving to that projection item's own grouped-space `Term`
   ///   (`projection[n - 1]`). An `n` outside `1 ... projection.count` faults
   ///   `SQLError.column`.
   /// - `expression(.column(name))` with an unqualified `name` — a projection
-  ///   OUTPUT alias FIRST (the standard alias ordering on an aggregate, `terms`
+  ///   output alias FIRST (the standard alias ordering on an aggregate, `terms`
   ///   recorded these), then a `GROUP BY` key column, both resolving to their
   ///   grouped `Term`. A name two projections share is `SQLError.ambiguous`, as
   ///   the non-grouped `Scope.order` reports for a shared join column.
@@ -490,7 +490,7 @@ internal struct Grouped {
   ///   keys (a bare non-key column faults `SQLError.grouping`).
   ///
   /// Because the `sort` operator now evaluates a `Term` per grouped record
-  /// rather than reading one slot, an alias over a COMPUTED expression
+  /// rather than reading one slot, an alias over a computed expression
   /// (`COUNT(*) * 2 AS Doubled`) orders correctly — its recorded grouped term
   /// recomputes from the group's key and aggregate slots — where the slot-only
   /// sort once rejected it.
@@ -502,7 +502,7 @@ internal struct Grouped {
                       _ routines: Routines = [:],
                       subquery: Resolution = .unsupported)
       throws(SQLError) -> Array<SortKey> {
-    // A grouped ORDER BY is BARRED, as the projection is (see `Schema.order`).
+    // A grouped ORDER BY is barred, as the projection is (see `Schema.order`).
     let subquery = subquery.barred
     var resolved = Array<SortKey>()
     resolved.reserveCapacity(order.keys.count)
@@ -576,20 +576,20 @@ extension Filter {
         for term in element { term.references(into: &ordinals) }
       }
     case let .exists(_, correlation, _):
-      // A CORRELATED EXISTS reads the enclosing row's cells its inner `WHERE`
+      // A correlated EXISTS reads the enclosing row's cells its inner `WHERE`
       // names — the correlation's `slot` outer ordinals — so those must be
       // materialised for the per-row re-execution (a `bound` source reads a
-      // threaded binding, not the outer record). An UNCORRELATED one names
+      // threaded binding, not the outer record). An uncorrelated one names
       // none.
       ordinals.formUnion(correlation.slots)
     case let .within(operand, _, correlation, _):
-      // The outer operand term reads ordinals; a CORRELATED subquery ALSO reads
+      // The outer operand term reads ordinals; a correlated subquery also reads
       // the outer `slot` cells its inner `WHERE` names.
       operand.references(into: &ordinals)
       ordinals.formUnion(correlation.slots)
     case let .quantified(operand, _, _, _, correlation):
-      // As `within`: the outer operand term reads ordinals; a CORRELATED
-      // subquery ALSO reads the outer `slot` cells its inner `WHERE` names.
+      // As `within`: the outer operand term reads ordinals; a correlated
+      // subquery also reads the outer `slot` cells its inner `WHERE` names.
       operand.references(into: &ordinals)
       ordinals.formUnion(correlation.slots)
     case let .like(operand, pattern, escape, _):

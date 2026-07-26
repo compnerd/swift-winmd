@@ -10,7 +10,7 @@ import func SQLTestSupport.parse
 // MARK: - TABLE t
 
 /// The ISO `TABLE t` query primary is exactly `SELECT * FROM t`. These tests
-/// confirm it lowers to the SAME star-projection single-relation `Select`,
+/// confirm it lowers to the same star-projection single-relation `Select`,
 /// resolves a base table AND a view identically, and composes with the
 /// set-operation tiers as a bare `SELECT *` does.
 struct TableTests {

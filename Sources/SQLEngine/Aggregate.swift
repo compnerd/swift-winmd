@@ -23,15 +23,15 @@
 /// The `function` is the standard aggregate; `argument` is the term evaluated
 /// per source record whose non-NULL values the aggregate folds, or `nil` for
 /// `COUNT(*)`, which counts rows without reading any value. The argument is in
-/// the SOURCE's slot space (the WHERE/join chain below the aggregate),
+/// the source's slot space (the WHERE/join chain below the aggregate),
 /// evaluated against each source record before the fold; the result lands in
 /// the grouped record.
 ///
-/// Two aggregations are EQUAL when they fold the same function over the same
-/// resolved argument term — the RESOLVED form column qualification has already
+/// Two aggregations are equal when they fold the same function over the same
+/// resolved argument term — the resolved form column qualification has already
 /// normalized to a slot, so `SUM(Amount)` and `SUM(Sales.Amount)` in a
 /// single-relation scope are one aggregation. Equality (not `Hashable`, since
-/// `Term` is only `Equatable`) is how the grouped path DEDUPS the aggregates
+/// `Term` is only `Equatable`) is how the grouped path dedups the aggregates
 /// collected from the projection, the `HAVING`, and the `ORDER BY` into one
 /// grouped slot each, so a qualification-equivalent aggregate written in two
 /// clauses computes once and both clauses order/read the same slot.
@@ -52,7 +52,7 @@ internal struct Aggregation: Equatable {
   /// The lowered per-row gate of an aggregate's `FILTER (WHERE …)`, or `nil`
   /// when none is written. A source record folds into the aggregate only when
   /// this filter evaluates TRUE (a FALSE or UNKNOWN row is skipped), applied
-  /// BEFORE the `distinct` dedup.
+  /// before the `distinct` dedup.
   internal let filter: Filter?
 
   internal init(function: Aggregate, argument: Term?, distinct: Bool = false,
@@ -95,7 +95,7 @@ extension Aggregation {
 /// the end so the result does not depend on row order — `AVG` then dividing by
 /// the non-NULL count as real division to an approximate-numeric double;
 /// `MIN`/`MAX` keep the least/greatest non-NULL value by the engine's typed
-/// `less`. Every aggregate but `COUNT` IGNORES NULLs — a NULL argument does not
+/// `less`. Every aggregate but `COUNT` ignores NULLs — a NULL argument does not
 /// fold — and an empty or all-NULL group yields `COUNT` `0` and the others
 /// NULL.
 private struct Accumulator {
@@ -103,15 +103,15 @@ private struct Accumulator {
   // Whether to fold each DISTINCT non-NULL value once — the ISO `DISTINCT` set
   // quantifier — tracking the values already folded in `seen`. `MIN`/`MAX`
   // honour it as a no-op (an extreme is unchanged by duplicates), so the flag
-  // is normalised OFF for them in `init`: the dedup — and the `seen` set it
+  // is normalised off for them in `init`: the dedup — and the `seen` set it
   // grows — runs only for `COUNT`/`SUM`/`AVG`, where duplicate multiplicity
-  // matters. This keeps a `MIN`/`MAX(DISTINCT x)` an O(1) STREAMING fold rather
+  // matters. This keeps a `MIN`/`MAX(DISTINCT x)` an O(1) streaming fold rather
   // than one whose memory grows with the group's distinct values for no
   // semantic gain (its result is the same as `MIN`/`MAX(x)` either way).
   private let distinct: Bool
   private var seen = Set<Value>()
   private var count = 0
-  // SUM/AVG numeric state, kept independent of row order: an exact WIDE integer
+  // SUM/AVG numeric state, kept independent of row order: an exact wide integer
   // total (`Int128`, range-checked once at the end) for the all-integer case,
   // and a parallel double total used once any operand is a double. A wide total
   // means a transient prefix overflow cannot latch a fault a later value
@@ -125,7 +125,7 @@ private struct Accumulator {
   internal init(_ function: Aggregate, distinct: Bool = false) {
     self.function = function
     // `DISTINCT` is a no-op for `MIN`/`MAX` (an extreme is unchanged by
-    // duplicates), so normalise it OFF for them: the fold never builds `seen`,
+    // duplicates), so normalise it off for them: the fold never builds `seen`,
     // staying O(1) streaming rather than O(distinct-values) memory.
     self.distinct = distinct && function != .min && function != .max
   }
@@ -144,7 +144,7 @@ private struct Accumulator {
     // fold, so an all-NULL group aggregates as an empty one.
     if case .null = value { return }
     // A double operand widens the SUM/AVG total to an approximate double, and
-    // the widen decision is order-independent: flag it from the CELL'S KIND
+    // the widen decision is order-independent: flag it from the cell'S kind
     // before the DISTINCT dedup, so a double anywhere in the group widens even
     // when it is a duplicate the dedup skips for summation. `1` and `1.0`
     // canonicalise equal, so a group mixing them dedups to one value whose kind
@@ -155,10 +155,10 @@ private struct Accumulator {
       widened = true
     }
     // Under `DISTINCT` a value already folded does not fold again — deduped on
-    // its CANONICAL form (the same normalisation a `GROUP BY` key and the
+    // its canonical form (the same normalisation a `GROUP BY` key and the
     // equality UNION use, so `1` and `1.0` count as one distinct value) — so a
     // repeated value counts, sums, and averages once. `MIN`/`MAX` normalise
-    // `distinct` OFF (an extreme is unchanged by duplicates), so this never
+    // `distinct` off (an extreme is unchanged by duplicates), so this never
     // builds `seen` for them. `COUNT(*)`'s row sentinel never reaches here (a
     // `COUNT(*)` carries no `distinct`), so every counted row still counts.
     if distinct, !seen.insert(canonical(value)).inserted { return }
@@ -246,7 +246,7 @@ private struct Accumulator {
         // AVG is real division of the numeric total over the non-NULL count,
         // yielding an approximate-numeric double — not truncating like the
         // engine's integer `/`. An empty or all-NULL group has no value, so AVG
-        // is NULL. It divides the WIDE total (the exact Int128, or the double
+        // is NULL. It divides the wide total (the exact Int128, or the double
         // total when a double widened it), so an all-integer sum outside Int
         // still averages rather than faulting like SUM's Int-bounded result.
         if count == 0 { return .null }
@@ -286,11 +286,11 @@ private func comparable(_ a: Value, _ b: Value) -> Bool {
 ///
 /// A grouped record's slots are the key values (slots `0 ..< keys.count`, in
 /// key order) followed by the aggregate results (slot `keys.count + j` is
-/// `aggregates[j]`). Groups are keyed on the EXACT canonical form of the
+/// `aggregates[j]`). Groups are keyed on the exact canonical form of the
 /// evaluated key values (`canonical` — so `1` and `1.0` fall in one group, the
 /// equality UNION and predicates use), and each group emits its
 /// FIRST-appearance original key values, in first-appearance order, so a later
-/// `ORDER BY` re-sorts deterministically. With no `keys` the whole input is ONE
+/// `ORDER BY` re-sorts deterministically. With no `keys` the whole input is one
 /// group — the degenerate whole-result aggregation (`SELECT COUNT(*) FROM T`) —
 /// which yields a single grouped record even over an empty input (`COUNT` `0`,
 /// the others NULL), the standard SQL rule.
@@ -299,7 +299,7 @@ private func comparable(_ a: Value, _ b: Value) -> Bool {
 /// same bindings the projection and the `WHERE` filter resolve against — so a
 /// `:parameter` reached from inside an aggregate's argument (a
 /// `COUNT(CASE WHEN K = :k …)`) binds to its query value rather than reading as
-/// UNBOUND. The key evaluation threads them for the same reason and to keep the
+/// unbound. The key evaluation threads them for the same reason and to keep the
 /// two evaluate sites consistent, though a `GROUP BY` key is a bare column
 /// today, so it cannot yet reach one.
 extension Catalog where Self: ~Escapable {
@@ -318,9 +318,9 @@ extension Catalog where Self: ~Escapable {
         try cells.append(evaluate(record, key, context))
       }
       let group = Record(cells)
-      // Key the group on the EXACT canonical form of its cells so `1` and `1.0`
+      // Key the group on the exact canonical form of its cells so `1` and `1.0`
       // fall in one group (the equality UNION and predicates use), while the
-      // emitted group keeps the first-appearance ORIGINAL values.
+      // emitted group keeps the first-appearance original values.
       let identity = Record(cells.map(canonical))
 
       if accumulators[identity] == nil {

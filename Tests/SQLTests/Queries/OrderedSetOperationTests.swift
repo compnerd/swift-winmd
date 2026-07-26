@@ -25,10 +25,10 @@ private func pair() throws -> FixtureCatalog {
 }
 
 // A query-level `ORDER BY` / `OFFSET`·`FETCH` after a set operation applies to
-// the WHOLE combined result — the ISO rule — carried on `Query.ordered` and
-// resolved through the setop's OUTPUT scope, not bound to the trailing arm.
+// the whole combined result — the ISO rule — carried on `Query.ordered` and
+// resolved through the setop's output scope, not bound to the trailing arm.
 // These exercise the general capability the GROUPING SETS expansion also uses,
-// over PLAIN unions.
+// over plain unions.
 struct OrderedSetOperationTests {
   @Test func `a query-level ORDER BY sorts the whole UNION ALL result`()
       throws {
@@ -59,7 +59,7 @@ struct OrderedSetOperationTests {
   }
 
   @Test func `a bare UNION dedups before the query-level ORDER BY`() throws {
-    // A bare `UNION` (no ALL) removes whole-row duplicates BEFORE the carrier's
+    // A bare `UNION` (no ALL) removes whole-row duplicates before the carrier's
     // ORDER BY sorts — `L UNION L` is the distinct rows of `L`, ordered 1, 2, 3.
     try pair().expect("""
         SELECT a FROM L UNION SELECT a FROM L ORDER BY a
@@ -67,7 +67,7 @@ struct OrderedSetOperationTests {
   }
 
   @Test func `an ORDER BY over a UNION types across the arms`() throws {
-    // The result column TYPES unify across the arms (ISO), so the sort runs over
+    // The result column types unify across the arms (ISO), so the sort runs over
     // the coerced values — a mixed integer arm and a double arm widen to double
     // and order numerically.
     let cat = try Catalog {
@@ -127,7 +127,7 @@ struct OrderedSetOperationTests {
     try cat.expect("""
         SELECT a AS x FROM L INTERSECT SELECT b AS y FROM R ORDER BY x
         """, yields: [[1], [2]])
-    // The parenthesised-then-ordered ORACLE: order the intersect result the
+    // The parenthesised-then-ordered oracle: order the intersect result the
     // same way (by the first-arm name over the combined output).
     try cat.expect("""
         SELECT a AS x FROM L INTERSECT SELECT b AS y FROM R ORDER BY x
@@ -213,10 +213,10 @@ struct OrderedSetOperationTests {
   @Test func `a query-level ORDER BY over a TABLE-arm set operation sorts`()
       throws {
     // A `TABLE t` first arm projects `.all` — the arm-0 AST projection is
-    // EMPTY — so deriving the carrier's output NAMES from those AST items
-    // (rather than the RESOLVED columns) TRAPPED on an out-of-range index. And
-    // a `TABLE`/`VALUES` LAST arm carries no primary-level order, so a trailing
-    // query-level ORDER BY was left UNCONSUMED (`unexpected trailing input`).
+    // empty — so deriving the carrier's output names from those AST items
+    // (rather than the resolved columns) trapped on an out-of-range index. And
+    // a `TABLE`/`VALUES` last arm carries no primary-level order, so a trailing
+    // query-level ORDER BY was left unconsumed (`unexpected trailing input`).
     // Both are fixed: the output names come from the resolved columns, and the
     // tail is parsed at the query level. Ordered over the combined output:
     // 1..5.
@@ -228,7 +228,7 @@ struct OrderedSetOperationTests {
   @Test func `a SELECT star first arm set operation orders by a resolved name`()
       throws {
     // The `SELECT *` first arm resolves its output columns (`a`) from the base
-    // relation; the carrier orders by the RESOLVED name `a` over the combined
+    // relation; the carrier orders by the resolved name `a` over the combined
     // union output — the same name a plain derived union would bind.
     try pair().expect("""
         SELECT * FROM L UNION ALL SELECT b FROM R ORDER BY a
@@ -247,7 +247,7 @@ struct OrderedSetOperationTests {
 
   @Test func `an out-of-range ordinal over a plain UNION faults`() throws {
     // A plain ordered set-operation carries no hidden materialised columns
-    // (`generated == 0`), so an ORDINAL past the single output faults `.column`
+    // (`generated == 0`), so an ordinal past the single output faults `.column`
     // over the union's real arity — the non-GROUPING-SETS path is unchanged by
     // the GROUPING SETS ordinal bound fix (the ordinal is bounded by the REAL
     // output width, which here IS the full width).
@@ -258,11 +258,11 @@ struct OrderedSetOperationTests {
 
   @Test func `a set operation of derived-table arms orders the whole result`()
       throws {
-    // Each arm names its OWN derived alias (`d` on the left, `e` on the right).
+    // Each arm names its own derived alias (`d` on the left, `e` on the right).
     // Arms are SELECT-scoped, so the query-level augment the carrier runs under
-    // never binds them — before, the carrier compiled ONE `setop` plan run
+    // never binds them — before, the carrier compiled one `setop` plan run
     // under the single carrier context, so an arm's `.scan d` faulted
-    // `.relation`. The carrier now runs the union PER ARM (the same machinery
+    // `.relation`. The carrier now runs the union per ARM (the same machinery
     // the direct `setop` and a correlated-subquery setop use), materialising
     // each arm's derived table in its own scope: 1 then 2.
     try pair().expect("""
@@ -310,13 +310,13 @@ struct OrderedSetOperationTests {
   }
 
   @Test func `an out-of-range generated count over a union faults`() throws {
-    // `Query.ordered` is a PUBLIC AST case; a caller may build a `generated`
+    // `Query.ordered` is a public AST case; a caller may build a `generated`
     // count out of step with the inner union's width (the parser and `expand`
-    // never do). A count PAST the width, or NEGATIVE, makes `real = width −
+    // never do). A count past the width, or negative, makes `real = width −
     // generated` negative — the carrier's `0 ..< real` range and per-column
-    // subscripts would TRAP the process. The carrier now rejects a malformed
+    // subscripts would trap the process. The carrier now rejects a malformed
     // count with a typed internal-error fault rather than trapping. Build the
-    // malformed AST directly: a ONE-column union with `generated: 2`, then a
+    // malformed AST directly: a one-column union with `generated: 2`, then a
     // negative `generated`.
     let cat = try pair()
     let union = Query.setop(
@@ -335,7 +335,7 @@ struct OrderedSetOperationTests {
     let under = Query.ordered(union, distinct: false, order: nil, limit: nil,
                               generated: -1)
     #expect(throws: fault) { _ = try cat.run(under) }
-    // An IN-RANGE `generated` (0 — no hidden columns) still compiles and runs
+    // An IN-range `generated` (0 — no hidden columns) still compiles and runs
     // the union unchanged: 1..5 over the two arms.
     let valid = Query.ordered(union, distinct: false,
                               order: Order(keys: [
@@ -348,11 +348,11 @@ struct OrderedSetOperationTests {
 
   @Test func `a generated count over an unaliased tail faults not traps`()
       throws {
-    // `Query.ordered` is a PUBLIC AST case. A caller may build a `generated: 1`
-    // over an ORDINARY two-column union whose trailing item is a NORMAL
-    // projected column with NO alias: the range guard `generated <= width`
+    // `Query.ordered` is a public AST case. A caller may build a `generated: 1`
+    // over an ordinary two-column union whose trailing item is a normal
+    // projected column with no alias: the range guard `generated <= width`
     // passes (1 ≤ 2), but the carrier's `items[real + k].alias!` force-unwrap
-    // would TRAP — the tail is not the aliased hidden `*gsN` shape a real
+    // would trap — the tail is not the aliased hidden `*gsN` shape a real
     // producer appends. The carrier now proves the generated tail is aliased
     // hidden columns before unwrapping, faulting a typed internal error rather
     // than crashing.
@@ -374,7 +374,7 @@ struct OrderedSetOperationTests {
                        from: Relation(name: "Q"))),
         all: true)
     // The trailing item (`b`, a bare column) carries no alias, so `generated:
-    // 1` over the width-2 union has an UNALIASED tail.
+    // 1` over the width-2 union has an unaliased tail.
     let over = Query.ordered(union, distinct: false, order: nil, limit: nil,
                              generated: 1)
     #expect(throws: SQLError.state("XX000",
@@ -382,7 +382,7 @@ struct OrderedSetOperationTests {
                                    "is not aliased")) {
       _ = try cat.run(over)
     }
-    // `generated: 0` over the SAME union runs unchanged — both columns of each
+    // `generated: 0` over the same union runs unchanged — both columns of each
     // arm's row, no trim, ordered ascending by the first output column.
     let valid = Query.ordered(union, distinct: false,
                               order: Order(keys: [
@@ -416,7 +416,7 @@ private func subqueried() throws -> FixtureCatalog {
 
 // A query-level `ORDER BY` over a set operation may nest an `EXISTS`/`IN`/
 // scalar subquery in a sort key, exactly as a plain `SELECT`'s ORDER BY does.
-// The carrier must COLLECT and RESOLVE those subqueries — the same machinery a
+// The carrier must collect and resolve those subqueries — the same machinery a
 // plain select's ORDER BY uses — rather than lower them under the default
 // unsupported resolution, which rejected them. These pair the union form with
 // the plain SELECT it must resolve identically to.
@@ -472,7 +472,7 @@ struct CarrierOrderBySubqueryTests {
   }
 
   @Test func `a qualified sort key over a set operation faults`() throws {
-    // The set-operation output exposes NO range, so a QUALIFIED sort key
+    // The set-operation output exposes no range, so a qualified sort key
     // `R.a` fails resolution — the carrier lets it through to `scope.order`
     // rather than silently dropping the qualifier to bind the bare output
     // `a`, which hid an invalid `R.a` / `NoSuch.a` range reference. The bare

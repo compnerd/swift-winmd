@@ -11,7 +11,7 @@
 /// slot-indexed row the adapter's borrowed cells are copied into at a leaf.
 ///
 /// The plan is *escapable and name-holding*: a `Plan` references each relation
-/// by its catalog NAME rather than by a `~Escapable` `Table` (an `indirect
+/// by its catalog name rather than by a `~Escapable` `Table` (an `indirect
 /// enum` cannot box a `~Escapable` payload), and carries the ordinals the query
 /// actually reads from it. The executor re-resolves a name to a transient
 /// table, opens its cursor, and materialises *only the referenced ordinals*
@@ -85,7 +85,7 @@ internal struct Record: Row, Hashable {
     Record(cells + other.cells)
   }
 
-  /// This record with each cell COERCED to the corresponding column `type`
+  /// This record with each cell coerced to the corresponding column `type`
   /// (`Value.coerced` — the ISO numeric widening a set operation applies to its
   /// arms' rows, promoting an `integer` cell to `double` where the unified
   /// column is `double`). A cell whose column type equals its own kind (a
@@ -101,7 +101,7 @@ internal struct Record: Row, Hashable {
 
 /// An escapable, name-holding relational operator tree.
 ///
-/// Every relation a `SELECT` names is held by its catalog NAME, not by a
+/// Every relation a `SELECT` names is held by its catalog name, not by a
 /// `~Escapable` `Table`, so the whole tree is a plain escapable `indirect
 /// enum`. The leaf `scan` carries the relation name, the ordinals the query
 /// reads from it (reals and virtuals, in materialisation order — the order that
@@ -118,14 +118,14 @@ internal indirect enum Plan {
   /// record (no slots), the row a scalar projection (`SELECT 1 + 1`) computes
   /// its expressions against.
   case single
-  /// The KNOWN-EMPTY relation of `slots` columns: it yields ZERO records over
+  /// The known-empty relation of `slots` columns: it yields zero records over
   /// exactly that combined slot width, the shape the optimiser rewrites a
-  /// PROVABLY constant-false selection into (a `WHERE 1 = 0` admits no row).
+  /// provably constant-false selection into (a `WHERE 1 = 0` admits no row).
   /// `slots` is the width of the subtree the empty replaced, so a downstream
   /// consumer that reads a side's width (`Plan.slots`, the outer/semijoin
   /// NULL-extension) mis-shapes nothing — the schema is preserved, only the
   /// rows are gone. An aggregate over it still yields its degenerate one row
-  /// (`COUNT(*)` `0`), since the empty sits BELOW the aggregate as its source.
+  /// (`COUNT(*)` `0`), since the empty sits below the aggregate as its source.
   case empty(slots: Int)
   /// A leaf over the relation `name`: its `ordinals` (defining its slots), over
   /// the seek's row range when present (else the whole relation).
@@ -158,15 +158,15 @@ internal indirect enum Plan {
   /// `keys.right` are combined-space slots, `base` the inner's first slot in
   /// that combined space, and `column` the inner ordinal `keys.right` reads
   /// (for the seek `bound`). `filter` is a single-relation predicate pushed
-  /// onto the inner — in the inner's OWN 0-based standalone slot space —
-  /// applied WHILE each inner row is materialised, so an inner row that fails
+  /// onto the inner — in the inner's own 0-based standalone slot space —
+  /// applied while each inner row is materialised, so an inner row that fails
   /// it is never paired.
   case join(Plan, name: String, ordinals: Array<Int>, base: Int,
             column: Int, keys: (left: Int, right: Int), filter: Filter?)
   /// ⟕/⟖/⟗ — the OUTER join of `left` and `right` on the `on` predicate, in
   /// combined slot space (the left's slots then the right's). Unlike an inner
   /// join, the `on` predicate is NOT distributed into the product or pushed
-  /// onto a leaf — it governs MATCHING alone, so an unmatched outer row is
+  /// onto a leaf — it governs matching alone, so an unmatched outer row is
   /// still emitted with the other side NULL-extended. `kind` selects which
   /// side's unmatched rows survive: `left` every left row, `right` every right
   /// row, `full` both — a `.inner` kind never reaches this node (an inner join
@@ -174,17 +174,17 @@ internal indirect enum Plan {
   /// nested loop that tracks matches, so it composes with an arbitrary
   /// (non-equi) `on`.
   case outer(Plan, Plan, on: Filter, kind: Join.Kind)
-  /// A SEMIJOIN of `left` against `right` on the `on` predicate — an EXISTENCE
-  /// test whose output is the LEFT side's slots ALONE. Unlike an inner or outer
+  /// A semijoin of `left` against `right` on the `on` predicate — an existence
+  /// test whose output is the LEFT side's slots alone. Unlike an inner or outer
   /// join it neither appends the right's columns nor NULL-extends: it merely
-  /// KEEPS or DROPS each left row by whether the right holds a match, so a left
+  /// keeps or drops each left row by whether the right holds a match, so a left
   /// row survives with its own width unchanged and its slot geometry preserved.
   /// `on` addresses the combined `left ++ right` slot space (the left's slots
-  /// then the right's), so a candidate is merged to EVALUATE it — but the LEFT
+  /// then the right's), so a candidate is merged to evaluate it — but the LEFT
   /// record alone is emitted. `anti` selects the sense: `false` keeps a left
   /// row iff SOME right row makes `on` TRUE (a decorrelated `EXISTS`), `true`
-  /// keeps it iff NO right row does (a decorrelated `NOT EXISTS`). A left row
-  /// emitted AT MOST ONCE regardless of its match count — the semijoin short-
+  /// keeps it iff no right row does (a decorrelated `NOT EXISTS`). A left row
+  /// emitted at most once regardless of its match count — the semijoin short-
   /// circuits on the first match, never multiplying a left row by the number of
   /// right rows it matches, exactly as `EXISTS` is a decided per-row test. The
   /// decorrelation pass emits it for a top-level correlated `EXISTS`/`NOT
@@ -196,40 +196,40 @@ internal indirect enum Plan {
   /// record of the left sub-plan it re-executes the pre-compiled body plan
   /// (looked up by `key` composed with `correlation`, whose `slot` sources bind
   /// from that left record), takes `ordinals` from each produced right record
-  /// into the combined space laid AFTER the left's slots, concatenates it onto
+  /// into the combined space laid after the left's slots, concatenates it onto
   /// the left, and keeps the pair the `on` predicate admits. INNER/CROSS APPLY
   /// (`kind` `.inner`, the only kind emitted): a left record with no surviving
-  /// right record is DROPPED. Unlike a `product`/`outer` the right side is not
+  /// right record is dropped. Unlike a `product`/`outer` the right side is not
   /// a static sub-plan — it re-runs per left row against the correlated
-  /// bindings — so the optimiser treats it as an opaque pushdown BARRIER and
+  /// bindings — so the optimiser treats it as an opaque pushdown barrier and
   /// never rebases a conjunct across it.
   case apply(Plan, key: Subkey, correlation: Correlation,
              ordinals: Array<Int>, on: Filter, kind: Join.Kind)
   /// A set operation of `kind` (`UNION`/`INTERSECT`/`EXCEPT`) over the `left`
   /// and `right` sub-plans, both yielding rows of the same width — the result
-  /// columns, whose NAMES are the first arm's and whose `types` are UNIFIED
+  /// columns, whose names are the first arm's and whose `types` are unified
   /// across the arms.
   ///
   /// `types` is the per-column unified result type (`ValueType.unified` folded
   /// over the arms — a mixed integer/double column widening to `double`), one
-  /// entry per output column. The executor COERCES each arm's cells to these
+  /// entry per output column. The executor coerces each arm's cells to these
   /// types (`Value.coerced`) before applying the operator, so `SELECT 1 UNION
   /// SELECT 2.5` yields a `double` column `[1.0, 2.5]`. It is computed at
-  /// COMPILE — where the arm queries and the resolution scope are in hand —
+  /// compile — where the arm queries and the resolution scope are in hand —
   /// because this node carries only the sub-plans, not the arm `Query`s the
   /// fold reads. A homogeneous set operation's `types` matches every arm's own
   /// types, so the coercion is a no-op and the result is byte-identical.
   ///
   /// `widened` is the output columns whose unified `types[c]` differs from an
-  /// arm's OWN native projected type — the columns the coercion actually
+  /// arm's own native projected type — the columns the coercion actually
   /// changes (a `double` unified over an `integer` arm). It is derived at
   /// compile from the unified `types` against each arm's native types and
   /// carried here so the pushdown pass — a pure Plan rewrite with no catalog —
-  /// can tell a widened column from a same-typed one WITHOUT re-typing the
+  /// can tell a widened column from a same-typed one without re-typing the
   /// arms. A predicate over a widened column must NOT push below this node into
-  /// the arms: an arm evaluates it on the PRE-coercion value, but `combine`
-  /// coerces only the arm's emitted rows AFTER the arm runs, so the pushed
-  /// predicate would test the un-widened type. A predicate over a NON-widened
+  /// the arms: an arm evaluates it on the pre-coercion value, but `combine`
+  /// coerces only the arm's emitted rows after the arm runs, so the pushed
+  /// predicate would test the un-widened type. A predicate over a non-widened
   /// column still pushes (a same-typed `UNION ALL`). Empty for a homogeneous
   /// set operation.
   ///
@@ -239,13 +239,13 @@ internal indirect enum Plan {
   /// operator keeps multiplicity: `UNION ALL` every row of both sides,
   /// `INTERSECT ALL` each common row to the lesser count, `EXCEPT ALL` each
   /// left row beyond the count the right removes. The node is binary and
-  /// mirrors the `Query` set-operation tree, so each node honours its OWN
+  /// mirrors the `Query` set-operation tree, so each node honours its own
   /// `kind`/`all`.
   case setop(SetOperation, Plan, Plan, all: Bool, types: Array<ValueType>,
              widened: Set<Int>)
   /// δ — deduplicates its `source`'s rows, keeping the first occurrence of each
   /// distinct whole row and preserving their order (`SELECT DISTINCT`). It sits
-  /// above the projection, so it dedups the projected output rows on the SAME
+  /// above the projection, so it dedups the projected output rows on the same
   /// whole-row key `UNION` uses (`Value` is `Hashable`). The plain `SELECT`
   /// (equivalently `SELECT ALL`) omits it.
   case distinct(Plan)
@@ -263,7 +263,7 @@ internal indirect enum Plan {
   case aggregate(keys: Array<Term>, aggregates: Array<Aggregation>, Plan)
   /// A row cap on its `source`'s output: skips the first `offset` records then
   /// takes at most `count` of the rest, in the source's order. It sits over the
-  /// sort/select but BELOW the projection, so it caps the ordered rows before
+  /// sort/select but below the projection, so it caps the ordered rows before
   /// the select list is evaluated — a row outside the page is never projected
   /// (a projection that could throw does not run for it). It neither reorders
   /// nor reshapes the rows, a transparent wrapper the pushdown and optimise
@@ -395,16 +395,16 @@ extension Plan {
     return .limit(count: limit.count, offset: limit.offset, self)
   }
 
-  /// Whether EXECUTING this plan cannot throw — the throw-freedom the optimiser
+  /// Whether executing this plan cannot throw — the throw-freedom the optimiser
   /// needs before it may rewrite a constant-false `select` OVER this plan into
   /// `.empty`, discarding the plan unexecuted. Executing `select(false, child)`
   /// today runs `child` (which may raise — a throwing scalar term, a `SUM`
   /// overflow, a subquery fault) and only then filters every row out; folding
-  /// to `.empty` SKIPS `child`, so it is sound ONLY when `child` raises on NO
+  /// to `.empty` skips `child`, so it is sound ONLY when `child` raises on no
   /// input, i.e. is `safe`. This is the plan-level analogue of
-  /// `Filter.safe`/`Term.safe` and is deliberately CONSERVATIVE: a shape whose
+  /// `Filter.safe`/`Term.safe` and is deliberately conservative: a shape whose
   /// throw-freedom is not certain (a `derived` view body, any
-  /// join/apply/aggregate) reports `false`, so the fold is merely MISSED —
+  /// join/apply/aggregate) reports `false`, so the fold is merely missed —
   /// never unsound. Under-folding costs a per-row
   /// predicate; over-folding would suppress a raise, so doubt resolves to
   /// `false`.
@@ -439,20 +439,20 @@ extension Plan {
     // A `derived` view body runs an arbitrary sub-plan (and augments/validates
     // its schema); a `join`/`outer`/`semijoin`/`apply` evaluates an `on`,
     // seeks, or re-executes a correlated body; an `aggregate` may overflow a
-    // `SUM` or type-fault a `MIN`/`MAX`. None is PROVABLY throw-free here, so
+    // `SUM` or type-fault a `MIN`/`MAX`. None is provably throw-free here, so
     // each reports `false` — the fold is missed, never unsound.
     case .derived, .join, .outer, .semijoin, .apply, .aggregate:
       false
     }
   }
 
-  /// Whether this plan PROVABLY yields no two equal FULL rows — every output
+  /// Whether this plan provably yields no two equal FULL rows — every output
   /// record distinct across ALL its columns — the uniqueness the optimiser
   /// needs before it may DROP a `.distinct` over this plan (a redundant dedup).
   /// This is the deduplication analogue of `safe` and is deliberately
-  /// CONSERVATIVE: a shape whose full-row distinctness is not certain reports
-  /// `false`, so the `.distinct` is merely KEPT — never unsound. Over-claiming
-  /// here would LEAK DUPLICATES (wrong results); under-claiming costs one extra
+  /// conservative: a shape whose full-row distinctness is not certain reports
+  /// `false`, so the `.distinct` is merely kept — never unsound. Over-claiming
+  /// here would leak duplicates (wrong results); under-claiming costs one extra
   /// dedup, so doubt resolves to `false`.
   internal var unique: Bool {
     switch self {
@@ -466,12 +466,12 @@ extension Plan {
       return true
     case let .setop(_, _, _, all, _, _):
       // Without `all` the set operator (UNION/INTERSECT/EXCEPT) dedups its
-      // result to distinct rows; `all` (UNION ALL, …) is a MULTISET that keeps
+      // result to distinct rows; `all` (UNION ALL, …) is a multiset that keeps
       // duplicates, so it is NOT unique.
       return !all
     case .aggregate:
-      // A grouped aggregate emits ONE row per distinct group-key combination —
-      // the key values are a PREFIX of each output record, so two output rows
+      // A grouped aggregate emits one row per distinct group-key combination —
+      // the key values are a prefix of each output record, so two output rows
       // differ in those key slots and the full rows are distinct. A no-GROUP-BY
       // aggregate emits exactly one row (its degenerate group), trivially
       // distinct. (`grouped` keys each group on its canonical key cells and
@@ -491,13 +491,13 @@ extension Plan {
       return source.unique
     case let .project(terms, source):
       // A projection preserves full-row distinctness ONLY when it is an
-      // INJECTIVE map of the source's whole row: two distinct source rows must
+      // injective map of the source's whole row: two distinct source rows must
       // stay distinct. That holds when every term is a bare slot read and the
-      // read slots COVER every source slot (`0 ..< source.slots`) — then the
+      // read slots cover every source slot (`0 ..< source.slots`) — then the
       // projected row retains all source columns (reordered/renamed, possibly
       // duplicated), so two source rows differing in ANY column still differ in
       // its retained copy. Dropping a source column, computing an expression,
-      // or an unknown source width could COLLAPSE distinct rows to an equal
+      // or an unknown source width could collapse distinct rows to an equal
       // output, so each of those keeps the projection non-unique. (In practice
       // a `.distinct` always sits over a `.project`, so this arm decides it.)
       guard let width = source.slots, source.unique else { return false }
@@ -507,10 +507,10 @@ extension Plan {
         covered.insert(slot)
       }
       return covered == Set(0 ..< width)
-    // A base `scan` is an ISO MULTISET (a duplicate row is possible, no unique
+    // A base `scan` is an ISO multiset (a duplicate row is possible, no unique
     // key is tracked); a `derived` view body runs an arbitrary sub-plan; a
-    // `product`/`join`/`outer`/`apply` can MULTIPLY rows (a fan-out pairs one
-    // row with many). None PROVABLY yields distinct full rows, so each reports
+    // `product`/`join`/`outer`/`apply` can multiply rows (a fan-out pairs one
+    // row with many). None provably yields distinct full rows, so each reports
     // `false` — the `.distinct` stays, never unsound. A `semijoin` emits each
     // left row at most once but does not deduplicate the left, so it is only as
     // unique as its left source and is conservatively `false` here.

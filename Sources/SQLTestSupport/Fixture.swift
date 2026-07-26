@@ -196,7 +196,7 @@ public struct FixtureTable: Table {
     // bracket into its range — and the optimiser drops the residual predicate
     // for an equality seek, returning those NULLs as false matches. Abandon
     // the seek so the engine scans and filters, preserving the predicate. An
-    // EMPTY relation has no such cell and still seeks (an empty 0 ..< 0 range).
+    // empty relation has no such cell and still seeks (an empty 0 ..< 0 range).
     if let first = relation.records.first {
       guard case .integer = first[column] else { return nil }
     }

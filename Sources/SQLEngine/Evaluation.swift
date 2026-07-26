@@ -155,9 +155,9 @@ internal func matches(_ lhs: Value, _ op: Comparison, _ rhs: Value) -> Bool? {
   }
 }
 
-/// Whether two typed values DIFFER under ISO `IS DISTINCT FROM` — the null-safe
+/// Whether two typed values differ under ISO `IS DISTINCT FROM` — the null-safe
 /// comparison, treating NULL as a comparable value. Unlike `matches`, it is
-/// TWO-VALUED (never UNKNOWN): two NULLs are the SAME (not DISTINCT), exactly
+/// two-valued (never UNKNOWN): two NULLs are the same (not DISTINCT), exactly
 /// one NULL is DISTINCT, and two non-NULLs are DISTINCT unless they are equal —
 /// a cross-kind pair being DISTINCT, as `matches` yields FALSE (`== true` is
 /// false) for cross-kind equality. `IS DISTINCT FROM` returns this; `IS NOT
@@ -171,7 +171,7 @@ internal func distinct(_ lhs: Value, _ rhs: Value) -> Bool {
 }
 
 /// The three-valued truth of an ISO row-value comparison `(l…) <op> (r…)` over
-/// two ALREADY-EVALUATED rows of EQUAL, non-empty arity — the shared fold both
+/// two already-evaluated rows of equal, non-empty arity — the shared fold both
 /// the runtime (`Filter.comparison`) and the empty-group pre-fold drive so the
 /// two agree by construction.
 ///
@@ -180,7 +180,7 @@ internal func distinct(_ lhs: Value, _ rhs: Value) -> Bool {
 /// itself), and the four ordering operators the lexicographic cascade `l0 <op>
 /// r0 OR (l0 = r0 AND (l1 <op> r1 OR …))`, right-nested from the last component
 /// inward — the innermost step carrying `op` itself (so `<=`/`>=` admit an
-/// all-equal row), every earlier step the STRICT operator (`<`/`>`) tie-guarded
+/// all-equal row), every earlier step the strict operator (`<`/`>`) tie-guarded
 /// by the componentwise equality. A NULL component makes a componentwise test
 /// UNKNOWN, propagated through the Kleene fold.
 internal func relate(_ l: Array<Value>, _ op: Comparison,
@@ -234,8 +234,8 @@ internal func or(_ lhs: Bool?, _ rhs: Bool?) -> Bool? {
 }
 
 /// The ISO `<boolean test>` mapping — a three-valued `operand` tested against a
-/// `Truth` value, negated for `IS NOT`, yielding a DEFINITE two-valued result
-/// that is NEVER itself UNKNOWN. `p IS TRUE` is `operand == true`, `IS FALSE`
+/// `Truth` value, negated for `IS NOT`, yielding a definite two-valued result
+/// that is never itself UNKNOWN. `p IS TRUE` is `operand == true`, `IS FALSE`
 /// is `operand == false`, and `IS UNKNOWN` is `operand == nil` — so an UNKNOWN
 /// operand is FALSE against `TRUE`/`FALSE` and TRUE against `UNKNOWN`. This is
 /// the shared primitive the run (`Filter.truth`) and the folds
@@ -251,7 +251,7 @@ internal func tested(_ operand: Bool?, _ value: Truth, _ negated: Bool)
 }
 
 extension Row where Self: ~Escapable {
-  /// Evaluates a SUBQUERY-FREE `filter` against this row under three-valued
+  /// Evaluates a subquery-free `filter` against this row under three-valued
   /// logic through `routines` and `bindings` — the choke point a unit test
   /// drives directly. It runs against `NoCatalog`, so a filter that reached an
   /// `EXISTS`/`IN (Q)`/scalar subquery would fault; a subquery-free one never
@@ -311,27 +311,27 @@ extension Catalog where Self: ~Escapable {
     case let .distinct(lhs, rhs, negated):
       try differs(row, lhs, rhs, negated, context)
     case let .exists(key, correlation, negated):
-      // The DEFINITE two-valued `EXISTS` non-empty test — never UNKNOWN,
-      // `negated` flipping it. The subquery runs LAZILY on this first reach (so
+      // The definite two-valued `EXISTS` non-empty test — never UNKNOWN,
+      // `negated` flipping it. The subquery runs lazily on this first reach (so
       // an `EXISTS` a short-circuited `AND`/`OR` or an unreached `CASE` arm
-      // guards never runs): an UNCORRELATED one memoises under its `Subkey`; a
-      // CORRELATED one re-runs against this row's correlated bindings,
+      // guards never runs): an uncorrelated one memoises under its `Subkey`; a
+      // correlated one re-runs against this row's correlated bindings,
       // bypassing the memo.
       try present(row, key, correlation, context) != negated
     case let .within(operand, key, correlation, negated):
-      // Fold `operand = v` over the subquery's single column under the SAME
+      // Fold `operand = v` over the subquery's single column under the same
       // three-valued membership the value-list `IN` uses. The column is
-      // materialised LAZILY on this first reach (an UNCORRELATED one memoised,
-      // a CORRELATED one re-run per row against this row's correlated
+      // materialised lazily on this first reach (an uncorrelated one memoised,
+      // a correlated one re-run per row against this row's correlated
       // bindings).
       try member(row, operand, values(row, key, correlation, context),
                  negated, context)
     case let .quantified(operand, op, quantifier, key, correlation):
-      // Fold `operand op v` over the subquery's single column with the SAME
+      // Fold `operand op v` over the subquery's single column with the same
       // `matches`/Kleene primitives `within` uses — Kleene `OR` (seeded FALSE)
       // for `any`, Kleene `AND` (seeded TRUE) for `all`. It materialises its
-      // lone column LAZILY through the SAME `values` path `within` drives: an
-      // UNCORRELATED one memoises under its `Subkey`, a CORRELATED one re-runs
+      // lone column lazily through the same `values` path `within` drives: an
+      // uncorrelated one memoises under its `Subkey`, a correlated one re-runs
       // its inner plan per outer row against this row's correlated bindings.
       try quantified(row, operand, op, quantifier,
                      values(row, key, correlation, context), context)
@@ -366,7 +366,7 @@ extension Catalog where Self: ~Escapable {
 
   /// Evaluates a lowered `operand [NOT] IN (element, …)` against `row`.
   ///
-  /// The `operand` is evaluated ONCE per row — an OR-chain of `compare`s would
+  /// The `operand` is evaluated once per row — an OR-chain of `compare`s would
   /// re-evaluate a non-idempotent operand once per element — then `operand =
   /// element` folds over the elements IN ORDER under Kleene `OR`, seeded FALSE
   /// and short-circuiting at the first TRUE (the same left-to-right visit the
@@ -389,15 +389,15 @@ extension Catalog where Self: ~Escapable {
   }
 
   /// Evaluates a lowered `operand [NOT] IN (Q)` against `row` over the
-  /// subquery's ALREADY-MATERIALISED single column `values`.
+  /// subquery's already-materialised single column `values`.
   ///
   /// It is the value-list `member` fold over constants: the `operand` is
-  /// evaluated ONCE per row, then `operand = v` folds over the materialised
+  /// evaluated once per row, then `operand = v` folds over the materialised
   /// `values` IN ORDER under Kleene `OR`, seeded FALSE and short-circuiting at
   /// the first TRUE — so a NULL operand or a NULL element keeps the ISO
-  /// three-valued result (an unmatched test is UNKNOWN, not FALSE), an EMPTY
+  /// three-valued result (an unmatched test is UNKNOWN, not FALSE), an empty
   /// `values` folds FALSE (no witness), and `NOT IN` negates that truth,
-  /// mapping UNKNOWN to itself. It reuses the SAME `matches`/`or` primitives
+  /// mapping UNKNOWN to itself. It reuses the same `matches`/`or` primitives
   /// the value-list `IN` does, so the two forms share one three-valued core.
   private borrowing func member(_ row: borrowing some Row & ~Escapable,
                                 _ operand: Term, _ values: Array<Value>,
@@ -414,11 +414,11 @@ extension Catalog where Self: ~Escapable {
 
   /// Evaluates a lowered `(l…) <op> (r…)` row-value comparison against `row`.
   ///
-  /// Each side is evaluated exactly ONCE per row into a `[Value]` — a desugar
+  /// Each side is evaluated exactly once per row into a `[Value]` — a desugar
   /// to a conjunction/cascade of scalar `compare`s re-evaluated a component
   /// once per place it appeared, so a stateful component yielded a different
   /// value each time — then the two rows fold through the shared `relate`
-  /// primitive, which reproduces the ISO three-valued truth with the SAME
+  /// primitive, which reproduces the ISO three-valued truth with the same
   /// `matches`/Kleene logic a scalar comparison uses.
   private borrowing func compare(_ row: borrowing some Row & ~Escapable,
                                  _ lhs: Array<Term>, _ op: Comparison,
@@ -436,7 +436,7 @@ extension Catalog where Self: ~Escapable {
   /// Evaluates a lowered `(l…) [NOT] IN ((r…), …)` row-value membership against
   /// `row`.
   ///
-  /// The left row is evaluated ONCE per row into a `[Value]` — as a scalar
+  /// The left row is evaluated once per row into a `[Value]` — as a scalar
   /// `member` holds its operand once, so a stateful component is read a single
   /// time rather than once per element row — then `(l…) = (r…)` folds over the
   /// element rows IN ORDER under Kleene `OR`, seeded FALSE and short-circuiting
@@ -463,15 +463,15 @@ extension Catalog where Self: ~Escapable {
   }
 
   /// Evaluates a lowered `operand op {ANY | ALL} (Q)` against `row` over the
-  /// subquery's ALREADY-MATERIALISED single column `values`.
+  /// subquery's already-materialised single column `values`.
   ///
-  /// The `operand` is evaluated ONCE per row, then `operand op v` folds over
-  /// the materialised `values` IN ORDER with the SAME `matches`/Kleene
+  /// The `operand` is evaluated once per row, then `operand op v` folds over
+  /// the materialised `values` IN ORDER with the same `matches`/Kleene
   /// primitives the value-list and `IN (Q)` `member` folds use — Kleene `OR`
   /// seeded FALSE for `any` (short-circuiting at the first TRUE), Kleene `AND`
   /// seeded TRUE for `all` (short-circuiting at the first FALSE). So a NULL
   /// `operand` or a NULL element makes an otherwise-undecided fold UNKNOWN (not
-  /// FALSE), an EMPTY `values` takes the seed — `any` FALSE (no witness), `all`
+  /// FALSE), an empty `values` takes the seed — `any` FALSE (no witness), `all`
   /// TRUE (vacuous) — and the identity falls out of the fold rather than a
   /// special case. `= ANY` reduces to the `member` `IN` fold and `<> ALL` to
   /// its negation, sharing one three-valued core with `within`.
@@ -498,12 +498,12 @@ extension Catalog where Self: ~Escapable {
 
   /// Evaluates a lowered `test [NOT] BETWEEN lower AND upper` against this row.
   ///
-  /// The `test` term is evaluated ONCE per row — an `AND`/`OR` of two
+  /// The `test` term is evaluated once per row — an `AND`/`OR` of two
   /// comparisons would re-evaluate a non-idempotent test once per bound — then
-  /// the two bounds fold against that SAME value under Kleene logic as `test >=
-  /// lower AND test <= upper`. `NOT BETWEEN` is the NEGATION of that same
+  /// the two bounds fold against that same value under Kleene logic as `test >=
+  /// lower AND test <= upper`. `NOT BETWEEN` is the negation of that same
   /// truth, NOT the `test < lower OR test > upper` expansion: with a cross-kind
-  /// bound `matches` yields FALSE for EVERY ordering operator (so `test <
+  /// bound `matches` yields FALSE for every ordering operator (so `test <
   /// lower` is not the complement of `test >= lower`), and the expansion would
   /// diverge from `NOT (test BETWEEN lower AND upper)` — e.g. `K NOT BETWEEN
   /// 'a' AND 10` must KEEP the row (the cross-kind `K >= 'a'` is FALSE, so
@@ -539,10 +539,10 @@ extension Catalog where Self: ~Escapable {
 
   /// Evaluates a lowered `lhs IS [NOT] DISTINCT FROM rhs` against this row.
   ///
-  /// It is the ISO null-safe comparison — TWO-VALUED, never UNKNOWN — treating
+  /// It is the ISO null-safe comparison — two-valued, never UNKNOWN — treating
   /// NULL as a comparable value: `distinct` yields whether the two operand
-  /// values DIFFER (both NULL are the SAME, exactly one NULL DIFFERS, two
-  /// non-NULLs DIFFER unless equal, a cross-kind pair DIFFERS). `IS DISTINCT
+  /// values differ (both NULL are the same, exactly one NULL differs, two
+  /// non-NULLs differ unless equal, a cross-kind pair differs). `IS DISTINCT
   /// FROM` reads that; `IS NOT DISTINCT FROM` (`negated`, null-safe equality)
   /// negates it. Unlike a `compare`, a NULL operand never makes the row
   /// UNKNOWN.
@@ -572,8 +572,8 @@ extension Catalog where Self: ~Escapable {
   /// Evaluates a lowered `operand [NOT] LIKE pattern [ESCAPE escape]` against
   /// this row under three-valued logic.
   ///
-  /// The operand, pattern, and optional escape are each evaluated ONCE, IN
-  /// ORDER, BEFORE the three-valued result is decided — so a faulting reached
+  /// The operand, pattern, and optional escape are each evaluated once, IN
+  /// ORDER, before the three-valued result is decided — so a faulting reached
   /// operand (`(1 / K)` with `K = 0`) surfaces its throw rather than being
   /// silently swallowed by a NULL escape. Only once all three have evaluated is
   /// the result decided: a non-NULL escape that is not a single character is
@@ -590,7 +590,7 @@ extension Catalog where Self: ~Escapable {
                               _ context: Context)
       throws(SQLError) -> Bool? {
     // Evaluate all three reached operands once, in order — a fault in any of
-    // them (a divide, an overflow) propagates HERE, before the NULL/escape
+    // them (a divide, an overflow) propagates here, before the NULL/escape
     // result below can turn it into a silent UNKNOWN.
     let subject = try evaluate(row, operand, context)
     let template = try evaluate(row, pattern, context)
@@ -641,7 +641,7 @@ private enum Atom: Equatable {
 }
 
 /// The `pattern` decoded into atoms, its escape resolved, or `nil` when the
-/// pattern is ILL-FORMED — a trailing escape with no character to escape, which
+/// pattern is ill-formed — a trailing escape with no character to escape, which
 /// matches nothing. An escape character makes the next character a `.literal`
 /// (so escaped `%`, `_`, or the escape character are literals); every other
 /// character is `%` → `.any`, `_` → `.single`, else `.literal`.
@@ -677,8 +677,8 @@ private func atoms(of pattern: Array<Character>,
 /// `escape` followed by `%`, `_`, or `escape` matches a literal `%`, `_`, or
 /// the escape character).
 ///
-/// The match is ANCHORED — the whole `text` must be consumed. It is the classic
-/// LINEAR two-pointer `LIKE` scan: a `%` is remembered (the pattern position
+/// The match is anchored — the whole `text` must be consumed. It is the classic
+/// linear two-pointer `LIKE` scan: a `%` is remembered (the pattern position
 /// after it, and the text mark it may extend to) and matching proceeds
 /// greedily; on a later mismatch the TEXT pointer is advanced past the mark and
 /// the scan resumes after the remembered `%`, rather than re-recursing. This is

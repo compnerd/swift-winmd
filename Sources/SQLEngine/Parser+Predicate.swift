@@ -29,8 +29,8 @@ extension Parser {
 
   /// Parses `NOT negation`, `[NOT] EXISTS (query)`, or a primary.
   ///
-  /// `EXISTS` is a complete predicate with NO left operand — `EXISTS (Q)` — so
-  /// it is recognised HERE, ahead of the comparison tier a left expression
+  /// `EXISTS` is a complete predicate with no left operand — `EXISTS (Q)` — so
+  /// it is recognised here, ahead of the comparison tier a left expression
   /// begins in. A prefix `NOT` before it sets the `negated` flag directly
   /// (`NOT EXISTS (Q)`) rather than wrapping it in a `.not`, symmetric with how
   /// `membership`/`between`/`like` carry their `NOT`; a prefix `NOT` before
@@ -66,8 +66,8 @@ extension Parser {
   /// constructor>` heading a row comparison or row `IN` (`(a, b) = (c, d)`), a
   /// parenthesised predicate (`(a = 1 AND b = 2)`), or the parenthesised left
   /// operand of a comparison (`(Age + 1) = 26`, where `factor` consumes the
-  /// `(expression)`). A COMMA inside the parentheses marks the row form, which
-  /// `row()` detects and COMMITS to — a row is never a valid predicate, so its
+  /// `(expression)`). A comma inside the parentheses marks the row form, which
+  /// `row()` detects and commits to — a row is never a valid predicate, so its
   /// tail errors (an arity mismatch) must propagate rather than trigger the
   /// predicate rewind. Otherwise the comparison is tried first; if it fails,
   /// the group was a predicate, so the parser rewinds to the saved lexer and
@@ -188,12 +188,12 @@ extension Parser {
   }
 
   /// Parses an ISO `<row value constructor>` — `'(' expression (','
-  /// expression)+ ')'`, at least TWO elements — returning its element
+  /// expression)+ ')'`, at least two elements — returning its element
   /// expressions, or `nil` when the current token does not open one so the
   /// caller falls through to the scalar path.
   ///
   /// A leading `(` is ambiguous between a row and a parenthesised scalar
-  /// (`(x)`), or an arithmetic group (`(a + b)`): only a COMMA inside the
+  /// (`(x)`), or an arithmetic group (`(a + b)`): only a comma inside the
   /// parentheses makes it a row. So this saves the lexer and lookahead, opens
   /// the `(`, and parses the first element; a following `,` confirms the row —
   /// it collects the rest and the `)`. Without a comma it is a scalar, so the
@@ -238,14 +238,14 @@ extension Parser {
   }
 
   /// Parses the tail of a row comparison or row `IN` whose left `<row value
-  /// constructor>` is already parsed to `left`, building the FIRST-CLASS AST
+  /// constructor>` is already parsed to `left`, building the FIRST-class AST
   /// node (`Predicate.rows` / `Predicate.among`) rather than desugaring it —
   /// each component `Expression` is held once so the lowering evaluates it
   /// exactly once per row, the correctness fix over a desugar that duplicated a
   /// component across the places a conjunction/cascade names it.
   ///
   /// A relational operator (`= <> < <= > >=`) takes a second row constructor of
-  /// EQUAL arity (else `SQLError.arity`), building `Predicate.rows(left, op,
+  /// equal arity (else `SQLError.arity`), building `Predicate.rows(left, op,
   /// right)`. An `IN` (or `NOT IN`) takes a parenthesised list of row
   /// constructors, building `Predicate.among(left, elements, negated:)`. The
   /// ISO three-valued semantics (the componentwise conjunction for `=`, the
@@ -275,7 +275,7 @@ extension Parser {
 
   /// Parses the tail of a row `[NOT] IN '(' row (',' row)* ')'` — the `IN` is
   /// already consumed — building `Predicate.among(left, elements, negated:)`
-  /// over `left` and the parsed element rows, each of EQUAL arity (else
+  /// over `left` and the parsed element rows, each of equal arity (else
   /// `SQLError.arity`) and the list non-empty. `negated` marks `NOT IN`.
   private mutating func rows(_ left: Array<Expression>, in negated: Bool)
       throws(SQLError) -> Predicate {
@@ -318,7 +318,7 @@ extension Parser {
   /// into a `membership` (value-list) or a `within` (subquery) predicate over
   /// `left`.
   ///
-  /// After the opening `(`, ONE token of lookahead disambiguates the two forms:
+  /// After the opening `(`, one token of lookahead disambiguates the two forms:
   /// a `SELECT` begins a subquery — `left [NOT] IN (query)`, the first-class
   /// `Predicate.within` (the query may itself be a `UNION`) — and anything
   /// else begins the value list, a non-empty run of comma-separated
@@ -345,7 +345,7 @@ extension Parser {
   /// `Predicate.distinct`, `negated` carrying the `IS NOT` (null-safe equality)
   /// spelling.
   ///
-  /// It is the ISO null-safe comparison of the two expressions: TWO-VALUED
+  /// It is the ISO null-safe comparison of the two expressions: two-valued
   /// (never UNKNOWN), treating NULL as a comparable value, unlike `=`. The
   /// right operand is an ordinary scalar `expression` — not an `Operand`, as no
   /// `:parameter` form is defined for this predicate.
@@ -363,7 +363,7 @@ extension Parser {
   /// range) and `x NOT BETWEEN a AND b` as its negation `x < a OR x > b`, but
   /// that expansion duplicates `x` across both bound comparisons, evaluating a
   /// stateful `x` twice — so this parses the two bounds around the `AND`
-  /// keyword and builds the first-class node the engine evaluates `x` ONCE for,
+  /// keyword and builds the first-class node the engine evaluates `x` once for,
   /// keeping the same three-valued NULL semantics (a NULL `x`, `a`, or `b`
   /// makes a bound UNKNOWN, and the row is excluded).
   ///

@@ -51,7 +51,7 @@ private func library() throws -> FixtureCatalog {
 
   @Test func `a defined body binds a prelude built-in via the capture seam`()
       throws {
-    // Registered against EMPTY routines, a defined body calling BITAND still
+    // Registered against empty routines, a defined body calling BITAND still
     // resolves it: the two-argument `registering(_:_:)` overload captures
     // `Routines.standard` (the relocated early-binding capture).
     guard case let .function(name, function) =

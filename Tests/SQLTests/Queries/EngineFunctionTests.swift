@@ -151,7 +151,7 @@ struct EngineFunctionTests {
 
 // MARK: - Defined function (CREATE FUNCTION) tests
 
-/// The routines with the DEFINED functions each `CREATE FUNCTION` in `defs`
+/// The routines with the defined functions each `CREATE FUNCTION` in `defs`
 /// registers, seeded from the standard prelude — the consumer's registration
 /// path, folding a parsed `CREATE FUNCTION` into a `Routines`.
 private func defining(_ defs: String...) throws -> Routines {
@@ -261,7 +261,7 @@ struct EngineDefinedFunctionTests {
 
   @Test func `typing reports the declared RETURNS of a defined function`() throws {
     // The result-schema walk types a `f(...)` call by the routine's declared
-    // return type without running it, so a defined function's declared RETURNS
+    // return type without running it, so a defined function's declared returns
     // is what the output column reports.
     let routines =
         try defining("CREATE FUNCTION label(n INTEGER) RETURNS TEXT AS 'x'")
@@ -284,7 +284,7 @@ struct EngineDefinedFunctionTests {
   @Test func `a defined function body referencing a query parameter faults at define`() throws {
     // A body's inputs are its declared parameters, not query bindings: a routine
     // body is evaluated with only its argument record, so a `:parameter` (here
-    // reached through a CASE guard) would always be UNBOUND and silently pick
+    // reached through a CASE guard) would always be unbound and silently pick
     // the ELSE branch. Registration rejects the `.bound`.
     #expect(throws:
         SQLError.argument("the body cannot reference a query parameter")) {
@@ -307,7 +307,7 @@ struct EngineDefinedFunctionTests {
   }
 
   @Test func `a body naming its own unregistered name faults as unresolved`() throws {
-    // `f() RETURNS INTEGER AS f() + 1` with NO prior `f` early-binds against a
+    // `f() RETURNS INTEGER AS f() + 1` with no prior `f` early-binds against a
     // map without `f`, so the body's own call is unresolved: registration
     // faults `SQLError.function` — the unregistered-callee case — not a
     // self-reference one. Early binding admits no recursion; there is nothing
@@ -318,8 +318,8 @@ struct EngineDefinedFunctionTests {
   }
 
   @Test func `a self-referential redefinition captures the prior function`() throws {
-    // `f() AS f() + 1` REPLACING a prior `f` is well-defined under early
-    // binding: the new body captures the OLD `f` and computes `f_old() + 1`,
+    // `f() AS f() + 1` replacing a prior `f` is well-defined under early
+    // binding: the new body captures the old `f` and computes `f_old() + 1`,
     // terminating. With `f_old()` = 0, `SELECT f()` returns 0 + 1 = 1.
     let routines = try defining(
         "CREATE FUNCTION f() RETURNS INTEGER AS 0",
@@ -344,7 +344,7 @@ struct EngineDefinedFunctionTests {
   }
 
   @Test func `a body calling a prelude routine registers against empty routines`() throws {
-    // Registered against EMPTY routines — NOT `defining`, which seeds the
+    // Registered against empty routines — NOT `defining`, which seeds the
     // prelude — a body calling BITAND still resolves it: registration merges
     // `Routines.standard` under the caller's routines (the run/columns
     // precedence), so `lowbit(n) AS BITAND(n, 1)` binds the built-in rather
@@ -379,7 +379,7 @@ struct EngineDefinedFunctionTests {
   @Test func `a body binds its callee at definition, not at call time`() throws {
     // The round-5 root case at the parse level. `g` returns INTEGER 1; `f() AS
     // g()` captures that INTEGER `g`. Redefining `g` to a TEXT body shadows it
-    // for QUERIES, but `f` closed over the old `g`, so `SELECT f()` still
+    // for queries, but `f` closed over the old `g`, so `SELECT f()` still
     // returns the INTEGER 1 — consistent with f's advertised INTEGER schema —
     // while `SELECT g()` sees the new TEXT `g` (query-level latest-wins holds).
     let routines = try defining(

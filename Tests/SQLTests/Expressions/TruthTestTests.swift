@@ -75,7 +75,7 @@ struct TruthTestParsingTests {
   }
 
   @Test func `IS NULL still parses to a null node, not a truth node`() throws {
-    // The truth-value dispatch is ADDITIVE: an `IS NULL` tail is untouched, so
+    // The truth-value dispatch is additive: an `IS NULL` tail is untouched, so
     // it lowers to the existing `null` predicate rather than a `truth`.
     let select = try parse(select: "SELECT * FROM T WHERE Flag IS NULL")
     #expect(select.predicate == .null(.column("Flag"), negated: false))
@@ -117,14 +117,14 @@ struct TruthColumnEvaluationTests {
   }
 
   @Test func `IS UNKNOWN keeps only the NULL row`() throws {
-    // The UNKNOWN Flag (Id 3) is TESTED for — a definite TRUE — while the
+    // The UNKNOWN Flag (Id 3) is tested for — a definite TRUE — while the
     // definite TRUE/FALSE rows are FALSE against `IS UNKNOWN`.
     try flags().expect("SELECT Id FROM T WHERE Flag IS UNKNOWN", yields: [[3]])
   }
 
   @Test func `IS NOT TRUE keeps the FALSE and UNKNOWN rows`() throws {
     // `IS NOT TRUE` is the negation: the FALSE row (Id 2) and the UNKNOWN row
-    // (Id 3) both pass — an UNKNOWN operand is NOT TRUE, so the row is KEPT
+    // (Id 3) both pass — an UNKNOWN operand is NOT TRUE, so the row is kept
     // (the key divergence from a bare `Flag`, which drops the UNKNOWN row).
     try flags().expect("SELECT Id FROM T WHERE Flag IS NOT TRUE",
                        yields: [[2], [3]])
@@ -182,7 +182,7 @@ struct TruthComparisonEvaluationTests {
 
   @Test func `an UNKNOWN comparison IS UNKNOWN tests for that UNKNOWN`()
       throws {
-    // `A > N` is UNKNOWN for EVERY row (the NULL `N` is unordered), so `(A > N)
+    // `A > N` is UNKNOWN for every row (the NULL `N` is unordered), so `(A > N)
     // IS UNKNOWN` is a definite TRUE for every row — keeping them all — and
     // `IS TRUE` drops them all. The truth test collapses the UNKNOWN comparison
     // to a definite two-valued answer, never itself UNKNOWN.
@@ -208,7 +208,7 @@ struct TruthComparisonEvaluationTests {
 struct TruthDefiniteTests {
   @Test func `the test is definite where NOT of the operand is UNKNOWN`()
       throws {
-    // The whole point: a boolean test yields a DEFINITE two-valued result. Over
+    // The whole point: a boolean test yields a definite two-valued result. Over
     // the UNKNOWN Flag row (Id 3), `NOT (Flag = TRUE)` is UNKNOWN (dropped),
     // but `Flag IS NOT TRUE` is a definite TRUE (kept). If the test could be
     // UNKNOWN the two would agree; they diverge exactly because it cannot.
@@ -242,11 +242,11 @@ struct TruthConstantTests {
 
   @Test func `a constant-UNKNOWN IS TRUE folds FALSE and short-circuits`()
       throws {
-    // `CASE WHEN 1 = 0 THEN TRUE END` is a ROW-INDEPENDENT UNKNOWN (no
-    // reachable branch → NULL). `… IS TRUE` folds DEFINITELY FALSE, settling
-    // the `AND` false WITHOUT validating the unreachable `Name + 1 = 0` (a
+    // `CASE WHEN 1 = 0 THEN TRUE END` is a ROW-independent UNKNOWN (no
+    // reachable branch → NULL). `… IS TRUE` folds definitely FALSE, settling
+    // the `AND` false without validating the unreachable `Name + 1 = 0` (a
     // `.operand` fault over the text `Name`, if reached) — so `columns(of:)`
-    // SUCCEEDS and the run drops every row. Before the fold distinguished a
+    // succeeds and the run drops every row. Before the fold distinguished a
     // constant UNKNOWN from a per-row `nil`, the whole `AND` read
     // row-dependent, the RHS was validated, and it faulted.
     let text = "SELECT Id FROM T "
@@ -256,7 +256,7 @@ struct TruthConstantTests {
   }
 
   @Test func `a constant-UNKNOWN IS UNKNOWN folds TRUE`() throws {
-    // The same constant-UNKNOWN operand: `… IS UNKNOWN` is DEFINITELY TRUE, so
+    // The same constant-UNKNOWN operand: `… IS UNKNOWN` is definitely TRUE, so
     // the WHERE keeps every row — the fold decides it rather than deferring.
     try named().expect(
         "SELECT Id FROM T WHERE CASE WHEN 1 = 0 THEN TRUE END IS UNKNOWN",
@@ -265,11 +265,11 @@ struct TruthConstantTests {
 
   @Test func `a two-valued inner IS UNKNOWN folds FALSE though row-dependent`()
       throws {
-    // `Name IS NULL` READS a row yet is DEFINITE — an `IS NULL` test is never
-    // itself UNKNOWN — so `… IS UNKNOWN` folds DEFINITELY FALSE regardless of
-    // the rows (not just when the inner is row-INDEPENDENT), settling the `AND`
-    // false WITHOUT validating the unreachable `Name + 1 = 0`. `columns(of:)`
-    // SUCCEEDS and the run drops every row.
+    // `Name IS NULL` reads a row yet is definite — an `IS NULL` test is never
+    // itself UNKNOWN — so `… IS UNKNOWN` folds definitely FALSE regardless of
+    // the rows (not just when the inner is row-independent), settling the `AND`
+    // false without validating the unreachable `Name + 1 = 0`. `columns(of:)`
+    // succeeds and the run drops every row.
     let text = "SELECT Id FROM T "
         + "WHERE (Name IS NULL) IS UNKNOWN AND Name + 1 = 0"
     _ = try named().columns(of: parse(query: text))
@@ -278,7 +278,7 @@ struct TruthConstantTests {
 
   @Test func `a two-valued inner IS NOT UNKNOWN folds TRUE though row-dependent`()
       throws {
-    // `(Name IS NULL) IS NOT UNKNOWN` is DEFINITELY TRUE — the two-valued inner
+    // `(Name IS NULL) IS NOT UNKNOWN` is definitely TRUE — the two-valued inner
     // never takes the UNKNOWN value — so the WHERE keeps every row.
     try named().expect(
         "SELECT Id FROM T WHERE (Name IS NULL) IS NOT UNKNOWN",

@@ -7,19 +7,19 @@ extension Routines {
   /// The standard-library prelude — the ISO scalar built-ins the `SQLStandard`
   /// layer installs so a query reaches them without a caller registering a
   /// closure (the prelude-defaulting `run`/`columns` overloads seed it). They
-  /// are PROTECTED: a caller cannot shadow one through `registering(_:…)` (the
+  /// are protected: a caller cannot shadow one through `registering(_:…)` (the
   /// prelude marks its names via `protecting(_:)`), so a query naming a
   /// built-in always reaches the shipped one. Every member is a pure,
-  /// side-effect-free mapping and so DETERMINISTIC — a row-independent call
+  /// side-effect-free mapping and so deterministic — a row-independent call
   /// folds at compile time — and returns NULL on any NULL argument (SQL null
   /// propagation), faulting `SQLError.argument` on the wrong argument count or
   /// a value it cannot map, mirroring its declared `[parameters]`/`returns`
   /// contract the static type-check validates a call against.
   ///
-  /// The set covers the ISO scalar built-ins the grammar can already CALL
+  /// The set covers the ISO scalar built-ins the grammar can already call
   /// (`f(…)`), in two families:
   ///
-  /// - STRING: `UPPER`/`LOWER` (case fold), `CHAR_LENGTH` (with its ISO synonym
+  /// - string: `UPPER`/`LOWER` (case fold), `CHAR_LENGTH` (with its ISO synonym
   ///   `CHARACTER_LENGTH`, the same routine under both names), `SUBSTRING` (the
   ///   two-argument `SUBSTRING(text, start)` form, ISO 1-based indexing),
   ///   `TRIM` (the one-argument `TRIM(text)` form, stripping leading and
@@ -38,7 +38,7 @@ extension Routines {
   ///   portable, standards-compliant spelling (Oracle's) of a bitwise AND, an
   ///   operation ISO SQL and this grammar otherwise lack — is kept.
   ///
-  /// FOLLOW-UPS (each needs grammar or overloading this batch does not add, so
+  /// follow-ups (each needs grammar or overloading this batch does not add, so
   /// each ships in its simplest callable form now):
   /// - `SUBSTRING(text FROM start FOR length)` — the full ISO clause with a
   ///   `FROM`/`FOR` keyword syntax and an optional length — and the plain
@@ -58,7 +58,7 @@ extension Routines {
   ///   needs routine overloading, which the single-signature contract lacks.
   public static let standard: Routines = prelude.protecting(prelude.names)
 
-  /// The prelude routines UNPROTECTED — `standard` wraps this with
+  /// The prelude routines unprotected — `standard` wraps this with
   /// `protecting(_:)` so its own names cannot be shadowed. Built through the
   /// dictionary-literal escape hatch, which carries no protected names.
   private static let prelude: Routines = [
@@ -190,9 +190,9 @@ extension Routines {
     return .text(String(string.dropFirst(drop)))
   }
 
-  /// `TRIM(text)` — the string with leading and trailing SPACE characters
+  /// `TRIM(text)` — the string with leading and trailing space characters
   /// removed (the one-argument ISO form, whose implicit trim character is a
-  /// space and whose implicit specification is BOTH). A NULL argument yields
+  /// space and whose implicit specification is both). A NULL argument yields
   /// NULL; the wrong count or a non-text argument is `SQLError.argument`.
   private static func trim(_ arguments: Array<SQLEngine.Value>)
       throws(SQLError) -> SQLEngine.Value {
@@ -293,9 +293,9 @@ extension Routines {
   /// `POSITION(substring, string)` — the parser's desugaring of the ISO
   /// `POSITION(substring IN string)` — the 1-based character position of the
   /// first occurrence of `substring` in `string`, 0 when it does not occur. An
-  /// EMPTY substring occurs at position 1 (ISO): the empty string is a prefix
+  /// empty substring occurs at position 1 (ISO): the empty string is a prefix
   /// of every string, including another empty string. Matching is
-  /// character-wise and case-SENSITIVE (no case fold). A NULL argument yields
+  /// character-wise and case-sensitive (no case fold). A NULL argument yields
   /// NULL; the wrong count or a non-text argument is `SQLError.argument`.
   private static func position(_ arguments: Array<SQLEngine.Value>)
       throws(SQLError) -> SQLEngine.Value {
@@ -329,7 +329,7 @@ extension Routines {
   /// non-text `string`/`replacement`, or a non-integer `start`/`length` is
   /// `SQLError.argument`.
   ///
-  /// The 1-based `start` and the `length` are CLAMPED to the string rather than
+  /// The 1-based `start` and the `length` are clamped to the string rather than
   /// trusted, so no arithmetic traps and no slice runs out of bounds: a `start`
   /// at or before 1 begins at the first character (the `start - 1` conversion
   /// would overflow for `Int.min`, so it is not subtracted below 1), a `start`
@@ -349,10 +349,10 @@ extension Routines {
     }
     // The number of characters to remove: the explicit `FOR length` fourth
     // argument, or — when omitted — the character count of the replacement.
-    // Defaulting HERE, from the single evaluated replacement value, is what
+    // Defaulting here, from the single evaluated replacement value, is what
     // lets the parser pass only three arguments for the omitted-`FOR` form:
-    // the replacement is evaluated ONCE, so a NOT-DETERMINISTIC one
-    // (`stepper_text()`) both inserts and measures the SAME value, rather than
+    // the replacement is evaluated once, so a NOT-deterministic one
+    // (`stepper_text()`) both inserts and measures the same value, rather than
     // the parser re-referencing it as `char_length(replacement)` and
     // evaluating it a second time.
     let length: Int
@@ -373,7 +373,7 @@ extension Routines {
     // The suffix resumes `length` characters after `head`, clamped the same
     // way: a negative or zero length removes nothing (resumes at `head`), and a
     // length past the end resumes at the end. The overshoot is tested against
-    // the REMAINING capacity (`count - head`) rather than forming `head +
+    // the remaining capacity (`count - head`) rather than forming `head +
     // length`, whose sum would overflow for an `Int.max` length.
     let tail = if length <= 0 {
       head

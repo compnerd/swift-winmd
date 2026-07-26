@@ -81,7 +81,7 @@ private struct SchemaTable: Table {
   }
 }
 
-/// A cursor that TRAPS on any row read — `columns(of:)` must never open it.
+/// A cursor that traps on any row read — `columns(of:)` must never open it.
 private struct SchemaCursor: Cursor {
   let relation: SchemaRelation
 
@@ -257,7 +257,7 @@ struct OutputSchemaTests {
   @Test func `a constant-NULL arm does not veto the unified type`() throws {
     // A column that folds to a constant NULL in an arm constrains nothing (a
     // NULL unifies with any typed arm), mirroring COALESCE's constant-NULL
-    // skip, so the OTHER arm's type wins — a `NULLIF(2, 2)` (constant NULL) arm
+    // skip, so the other arm's type wins — a `NULLIF(2, 2)` (constant NULL) arm
     // beside a `double` arm types the column `double`, not the NULLIF arm's
     // `integer`.
     let leading = try schema("SELECT NULLIF(2, 2) UNION SELECT 2.5")
@@ -273,8 +273,8 @@ struct OutputSchemaTests {
   @Test func `a SELECT star USING merge carries its unconstrained mask into a UNION`()
       throws {
     // Both `USING (k)` constituents are constant-NULL (`NULLIF(1, 1)`), so the
-    // merged `k` places NO type constraint. A `SELECT *` must carry that mask —
-    // routed through the SAME construction the explicit `SELECT k` uses — so
+    // merged `k` places no type constraint. A `SELECT *` must carry that mask —
+    // routed through the same construction the explicit `SELECT k` uses — so
     // the enclosing UNION unifies the merged `k` with the text arm rather than
     // faulting the first arm's integer against text.
     let star = try schema("""
@@ -284,7 +284,7 @@ struct OutputSchemaTests {
         """)
     #expect(star.count == 1)
     #expect(star[0] == ("k", .text))
-    // A genuinely CONSTRAINED merge (two integer `k` sides) still faults an
+    // A genuinely constrained merge (two integer `k` sides) still faults an
     // irreconcilable text UNION arm — the mask is carried, not hard-coded
     // unconstrained.
     #expect(throws: SQLError.self) {
@@ -311,8 +311,8 @@ struct OutputSchemaTests {
     // The crossover of the two ISO features: the `UNION` body's type fold
     // widens the mixed integer/double column to `double` (set-op unification),
     // and the `AS d(a)` list positionally renames it `a` (the explicit output
-    // column list). The rename applies AFTER the fold determines the column
-    // count and type, so the column is BOTH named `a` and typed `double`.
+    // column list). The rename applies after the fold determines the column
+    // count and type, so the column is both named `a` and typed `double`.
     let columns =
         try schema("SELECT d.a FROM (SELECT 1 UNION SELECT 2.5) AS d(a)")
     #expect(columns.count == 1)
@@ -341,11 +341,11 @@ struct OutputSchemaTests {
 
   @Test func `a data-dependent-empty view derives headers without re-validating`() throws {
     // A view whose body is a text-arithmetic projection under a filter that
-    // matches no row RUNS to zero rows: the data-dependent WHERE spares the
+    // matches no row runs to zero rows: the data-dependent WHERE spares the
     // `Name + 1` from ever evaluating. Filling in the empty result's headers
     // (`validate: false`) must resolve the view — relations, CTEs, and the
-    // body's own types — WITHOUT re-type-checking the body's reachable
-    // `Name + 1`, which a run never reached; otherwise a query that SUCCEEDED
+    // body's own types — without re-type-checking the body's reachable
+    // `Name + 1`, which a run never reached; otherwise a query that succeeded
     // reports a failure. `validate: true` (the default / `.schema`) still
     // faults, exactly as running the body over rows would.
     let definition = try View(query: {
@@ -463,7 +463,7 @@ struct OutputSchemaTests {
   }
 
   @Test func `a positive OFFSET over a whole-result aggregate spares its projection`() throws {
-    // A whole-result aggregate emits exactly ONE row, so an OFFSET of 1 skips
+    // A whole-result aggregate emits exactly one row, so an OFFSET of 1 skips
     // it — the projection is unreachable and its divide-by-zero never faults,
     // just as a zero FETCH spares it.
     let normal = try schema(
@@ -478,7 +478,7 @@ struct OutputSchemaTests {
 
   @Test func `a zero FETCH does not spare a SELECT DISTINCT projection`() throws {
     // A DISTINCT plan is `Limit(Distinct(Project(…)))`: the projection
-    // evaluates over every candidate row to dedup it BEFORE the cap pages the
+    // evaluates over every candidate row to dedup it before the cap pages the
     // result, so a zero FETCH does NOT make it unreachable. The schema must
     // fault its divide-by-zero exactly as a run would — unlike the non-distinct
     // form, whose `Project(Limit(…))` shape the zero FETCH still spares.
@@ -516,11 +516,11 @@ struct OutputSchemaTests {
   }
 
   @Test func `a zero FETCH does not spare a DISTINCT empty-group projection`() throws {
-    // A constant-false WHERE over a whole-result aggregate emits ONE empty
+    // A constant-false WHERE over a whole-result aggregate emits one empty
     // group. For a non-distinct query a zero FETCH drops that lone row, so its
     // projection is unreachable and the divide-by-zero is spared. A DISTINCT
     // query is the exception: its `Limit(Distinct(Project(…)))` plan evaluates
-    // the projection over the empty group's row (to dedup) BEFORE the cap, so
+    // the projection over the empty group's row (to dedup) before the cap, so
     // the divide-by-zero faults exactly as a run does — the empty-group gate
     // must bypass the limit elision under DISTINCT just as the main path does.
     #expect(throws: SQLError.self) {
@@ -535,8 +535,8 @@ struct OutputSchemaTests {
   }
 
   @Test func `HAVING is evaluated before a zero-FETCH limit, so its faults surface`() throws {
-    // The compiled plan applies HAVING BEFORE the OFFSET/FETCH limit, so a zero
-    // FETCH spares only the PROJECTION — HAVING still evaluates over the empty
+    // The compiled plan applies HAVING before the OFFSET/FETCH limit, so a zero
+    // FETCH spares only the projection — HAVING still evaluates over the empty
     // group. A faulting HAVING must therefore surface even under a zero FETCH.
     #expect(throws: SQLError.self) {
       try schema("SELECT COUNT(*) FROM People WHERE 1 = 0 "
@@ -551,7 +551,7 @@ struct OutputSchemaTests {
 
   @Test func `columns(of statement:) derives a WITH against its CTE scope`() throws {
     // The trailing query resolves against the statement's CTEs, schema-only:
-    // a CTE `People` SHADOWS the two-column base relation, so a `SELECT *` over
+    // a CTE `People` shadows the two-column base relation, so a `SELECT *` over
     // it names the CTE's one declared column `x`, not the base's `Name, Age`.
     let columns = try catalog().columns(of: Statement(parsing:
         "WITH People(x) AS (SELECT 1) SELECT * FROM People"))
@@ -586,12 +586,12 @@ struct OutputSchemaTests {
   }
 
   @Test func `a WITH whose body arity contradicts its list faults when validating`() throws {
-    // The CTE declares ONE column but its body projects TWO — a `SELECT *` over
+    // The CTE declares one column but its body projects two — a `SELECT *` over
     // the two-column `People`. The parser cannot catch this (a `SELECT *`'s
     // width is known only at resolution), so a run rejects it with
     // `SQLError.columns` when its compiled body width contradicts the declared
     // list. A `validate: true` derive must not advertise a schema for it, so it
-    // faults the SAME way — body/query-expression degree as `expected`, the
+    // faults the same way — body/query-expression degree as `expected`, the
     // declared list count as `got`, as `Engine.with` does — not report the one
     // trusted declared column.
     let statement = try Statement(parsing:
@@ -603,10 +603,10 @@ struct OutputSchemaTests {
 
   @Test func `a WITH's body is trusted, not compiled, when not validating`() throws {
     // `validate: false` is the post-run derive: the run already proved the
-    // bodies consistent, so the declared list is TRUSTED without compiling the
+    // bodies consistent, so the declared list is trusted without compiling the
     // body. The same arity-mismatched `WITH` that faults when validating
     // reports its one declared column here — the empty/data-dependent header
-    // path a successful run fills in. The column takes the body's DERIVED type
+    // path a successful run fills in. The column takes the body's derived type
     // (`People.Name` is text under the renamed `a`), never the `.integer`
     // placeholder.
     let statement = try Statement(parsing:
@@ -619,7 +619,7 @@ struct OutputSchemaTests {
     // A CTE whose declared arity matches its body validates cleanly and derives
     // the trailing query's schema — the body compiled, its width confirmed
     // against the declared list, and its reachable operands type-checked. The
-    // columns take the body's DERIVED types (`People` is text, integer under
+    // columns take the body's derived types (`People` is text, integer under
     // the renamed `a`, `b`), never the `.integer` placeholder.
     let statement = try Statement(parsing:
         "WITH t(a, b) AS (SELECT * FROM People) SELECT a, b FROM t")
@@ -629,11 +629,11 @@ struct OutputSchemaTests {
   }
 
   @Test func `a non-recursive CTE body cannot see its own schema-only self`() throws {
-    // A non-recursive CTE is NOT in scope within its own body — only the PRIOR
+    // A non-recursive CTE is NOT in scope within its own body — only the prior
     // CTEs and the base catalog are — so a body that names the CTE with no
     // same-named base resolves against nothing and faults `.relation`, exactly
     // as `Engine.with` does. Binding the CTE's schema-only self into its own
-    // body's scope would WRONGLY resolve it, advertising a schema for a `WITH`
+    // body's scope would wrongly resolve it, advertising a schema for a `WITH`
     // that cannot run.
     let statement = try Statement(parsing:
         "WITH t(x) AS (SELECT * FROM t) SELECT * FROM t")
@@ -644,12 +644,12 @@ struct OutputSchemaTests {
 
   @Test func `a same-named-base non-recursive CTE body resolves the base`() throws {
     // A non-recursive CTE `People` shadowing the two-column base is NOT in its
-    // OWN body's scope, so the body's `SELECT * FROM People` resolves the BASE
+    // own body's scope, so the body's `SELECT * FROM People` resolves the base
     // relation (two columns), matching its declared arity; the trailing query
     // then reads the CTE's one declared column `x`. Were the CTE's own self
     // bound in its body, the body would read the CTE (one column) and its arity
     // would contradict the declared two-column list. The columns take the
-    // body's DERIVED types (the base `People` is text, integer under the
+    // body's derived types (the base `People` is text, integer under the
     // renamed `a`, `b`), never the `.integer` placeholder.
     let statement = try Statement(parsing:
         "WITH People(a, b) AS (SELECT * FROM People) SELECT a, b FROM People")
@@ -671,7 +671,7 @@ struct OutputSchemaTests {
   }
 
   @Test func `a recursive CTE body sees its own schema-only self and resolves`() throws {
-    // A genuinely recursive CTE — its FINAL UNION arm names itself — DOES bind
+    // A genuinely recursive CTE — its final UNION arm names itself — does bind
     // its own schema-only self while its body validates, so the recursive
     // reference resolves. The anchor seeds one column, the recursive arm reads
     // the CTE, and the trailing query names the CTE's declared column `n`.
@@ -686,12 +686,12 @@ struct OutputSchemaTests {
   }
 
   @Test func `a recursive CTE self-referencing its anchor faults as a run does`() throws {
-    // The engine binds a recursive CTE's self ONLY to its FINAL UNION arm: a
-    // self-reference in the ANCHOR arm resolves against the base scope, so with
+    // The engine binds a recursive CTE's self ONLY to its final UNION arm: a
+    // self-reference in the anchor arm resolves against the base scope, so with
     // no same-named base/view it can only be a misplaced recursive arm — a
-    // shape the engine rejects `.unsupported`, BEFORE materialising. The derive
-    // now validates the CTE by the SAME `Engine.validate` a run drives, so it
-    // faults IDENTICALLY rather than advertising a schema for a `WITH` a run
+    // shape the engine rejects `.unsupported`, before materialising. The derive
+    // now validates the CTE by the same `Engine.validate` a run drives, so it
+    // faults identically rather than advertising a schema for a `WITH` a run
     // would reject.
     let statement = try Statement(parsing: """
         WITH RECURSIVE t(n) AS (
@@ -703,7 +703,7 @@ struct OutputSchemaTests {
     #expect(throws: error) {
       let _ = try catalog().columns(of: statement, validate: true)
     }
-    // The derive faults EXACTLY where a run does — the divergence the schema
+    // The derive faults exactly where a run does — the divergence the schema
     // path repeatedly drifted into is closed by reusing the engine's own check.
     #expect(throws: error) {
       let _ = try catalog().run(statement)
@@ -713,7 +713,7 @@ struct OutputSchemaTests {
   @Test func `a recursive CTE anchor is operand-checked against the base scope`() throws {
     // A recursive CTE binds its schema-only self (declared columns, typed
     // `.integer`) ONLY inside its final UNION arm; the anchor resolves against
-    // the BASE scope — the same scope a run evaluates it in. So the anchor's
+    // the base scope — the same scope a run evaluates it in. So the anchor's
     // reachable operands must be type-checked with self NOT in scope: here the
     // base `People.Name` is TEXT (the shared fixture), so the anchor `SELECT
     // Name + 1 FROM People` faults `.operand` exactly as a run's per-row
@@ -753,9 +753,9 @@ struct OutputSchemaTests {
 
 /// The outcome of typing or running a `WITH` — either the resolved result
 /// columns' `(name, kind)` pairs, or the `SQLError` a fault raised — so the
-/// three CTE entry points (a RUN, a `columns(validate: false)` derive, and a
-/// `columns(validate: true)` derive) can be compared for AGREEMENT: after the
-/// tier-2 unification they walk their CTEs through the ONE producer, so a shape
+/// three CTE entry points (a run, a `columns(validate: false)` derive, and a
+/// `columns(validate: true)` derive) can be compared for agreement: after the
+/// tier-2 unification they walk their CTEs through the one producer, so a shape
 /// must resolve to the same types on all three, or fault the same on all three.
 private enum Outcome: Equatable {
   case columns(Array<OutputColumn>)
@@ -774,21 +774,21 @@ private func outcome(_ body: () throws -> Array<OutputColumn>) -> Outcome {
 }
 
 /// The three CTE entry points' outcomes on one `WITH` — the regression fence
-/// for the tier-2 producer. `run` is the RUN path (its post-run `validate:
+/// for the tier-2 producer. `run` is the run path (its post-run `validate:
 /// false` schema, or its fault); `lenient` is `columns(validate: false)` — the
-/// TRUSTED post-run derive, which SKIPS the structural `validate` (so a
+/// trusted post-run derive, which skips the structural `validate` (so a
 /// shape/arity fault does not surface, and a recursive body reads its absent
 /// self); `strict` is `columns(validate: true)` — the full schema check.
 ///
-/// The invariant the unification preserves: RUN and STRICT are the two FULLY
-/// validating paths, so they AGREE on every shape — the producer's shared
+/// The invariant the unification preserves: run and strict are the two fully
+/// validating paths, so they agree on every shape — the producer's shared
 /// `validate` (`typecheck` differing only in whether the reachable-operand
 /// check runs at derive or execution) and shared `kinds` carrier make them so.
-/// LENIENT agrees too on any shape whose outcome does NOT depend on the skipped
+/// lenient agrees too on any shape whose outcome does NOT depend on the skipped
 /// structural check — the carrier-typing shapes (a `kinds`/`merge` fold runs
 /// regardless of the gate) and redefinition (the producer's guard is
 /// ungated) — but on a structural fault (arity, an unregistered call, a
-/// misplaced recursive arm) it TRUSTS the body and does not fault.
+/// misplaced recursive arm) it trusts the body and does not fault.
 private struct Triple {
   let run: Outcome
   let lenient: Outcome
@@ -817,9 +817,9 @@ private func pairs(_ outcome: Outcome) -> Array<(String, ValueType)>? {
 
 struct CTEProducerParityTests {
   @Test func `an all-NULL CTE column agrees across run and both derives`() throws {
-    // A constant-NULL body column is UNCONSTRAINED, typed at the `.integer`
+    // A constant-NULL body column is unconstrained, typed at the `.integer`
     // default a materialised relation reports; the run and both derives read
-    // the SAME producer carrier, so all three agree on one `.integer` column.
+    // the same producer carrier, so all three agree on one `.integer` column.
     let t = try Triple("WITH a(x) AS (SELECT NULLIF(Id, Id) FROM Parent) " +
                        "SELECT x FROM a")
     #expect(pairs(t.run).map { same($0, [("x", .integer)]) } == true)
@@ -830,8 +830,8 @@ struct CTEProducerParityTests {
   @Test func `an unregistered-call CTE body faults on the validating paths`()
       throws {
     // A call to an unregistered routine is a resolution fault the producer's
-    // shared `validate` raises the SAME on the two VALIDATING paths (RUN and
-    // STRICT). LENIENT is the trusted post-run derive: it skips `validate`, so
+    // shared `validate` raises the same on the two validating paths (run and
+    // strict). lenient is the trusted post-run derive: it skips `validate`, so
     // it does NOT fault — the pre-existing gate this test pins, not a
     // divergence the unification introduces.
     let t = try Triple("WITH a(x) AS (SELECT nope(Id) FROM Parent) " +
@@ -862,7 +862,7 @@ struct CTEProducerParityTests {
     // carrier over the `UNION` setop; the schema producer's recursive-shape
     // recogniser (`contributions`) must peel it (`body.core`) the same way the
     // run's `fixpoint` does, else it falls through to the non-recursive fold
-    // with the self UNBOUND and faults `.relation("t")` — a run-vs-schema
+    // with the self unbound and faults `.relation("t")` — a run-vs-schema
     // divergence, since the run iterates the fixpoint and yields `1,2,3`. The
     // carrier is transparent to the derived schema, so all three still agree on
     // the one integer column `n`.
@@ -895,7 +895,7 @@ struct CTEProducerParityTests {
       throws {
     // A non-recursive UNION body of an `integer` and a `double` arm folds to a
     // `.double` column on every path — the producer's `kinds` fold and the
-    // run's `run`-then-`kinds` re-derive read the SAME `merge`.
+    // run's `run`-then-`kinds` re-derive read the same `merge`.
     let t = try Triple("WITH a(x) AS (SELECT 1 UNION SELECT 2.5) " +
                        "SELECT x FROM a")
     #expect(pairs(t.run).map { same($0, [("x", .double)]) } == true)
@@ -905,7 +905,7 @@ struct CTEProducerParityTests {
 
   @Test func `a non-recursive ordered set-op CTE derives through the carrier`()
       throws {
-    // A NON-recursive UNION body under a trailing `ORDER BY` carrier still
+    // A non-recursive UNION body under a trailing `ORDER BY` carrier still
     // derives its one `.double` column on every path: the recursive-shape
     // recogniser sees a non-recursive CTE and falls through to the unifying
     // fold, whose `.ordered` case peels the carrier transparently — the
@@ -922,7 +922,7 @@ struct CTEProducerParityTests {
     // A text arm beside a numeric one has no common type, so the body fold
     // faults `.operand` (42804) — through the producer's shared `kinds`/`merge`
     // on the derives (a fold that runs regardless of the validate gate) and the
-    // run's own fold — the SAME on all three.
+    // run's own fold — the same on all three.
     let t = try Triple("WITH a(x) AS (SELECT 'b' UNION SELECT 1) " +
                        "SELECT x FROM a")
     let fault = Outcome.fault(.operand("UNION arms have irreconcilable types"))
@@ -935,7 +935,7 @@ struct CTEProducerParityTests {
       throws {
     // A three-column declared list over a two-column `SELECT *` body faults
     // `.columns` in ISO order (the compiled width, then the declared count) on
-    // the two VALIDATING paths. LENIENT trusts and reconciles to the declared
+    // the two validating paths. lenient trusts and reconciles to the declared
     // list, so it does NOT fault — the pre-existing structural gate.
     let t = try Triple("WITH a(x, y, z) AS (SELECT * FROM Parent) " +
                        "SELECT * FROM a")
@@ -947,8 +947,8 @@ struct CTEProducerParityTests {
   @Test func `an under-declared CTE arity faults on the validating paths`()
       throws {
     // The mirror of the over-declared case — a one-column list over a
-    // two-column body — `.columns(expected: 2, got: 1)` on RUN and STRICT,
-    // LENIENT trusting the body to one column.
+    // two-column body — `.columns(expected: 2, got: 1)` on run and strict,
+    // lenient trusting the body to one column.
     let t = try Triple("WITH a(x) AS (SELECT * FROM Parent) SELECT * FROM a")
     #expect(t.run == .fault(.columns(expected: 2, got: 1)))
     #expect(t.strict == t.run)
@@ -957,8 +957,8 @@ struct CTEProducerParityTests {
 
   @Test func `a misplaced recursive arm faults on the validating paths`()
       throws {
-    // A self-reference in the ANCHOR (not the final UNION arm) is the recursive
-    // shape the engine rejects `0A000` on the two VALIDATING paths. LENIENT
+    // A self-reference in the anchor (not the final UNION arm) is the recursive
+    // shape the engine rejects `0A000` on the two validating paths. lenient
     // trusts — it skips `validate`, so the body reads an absent self and faults
     // `.relation` instead; the pre-existing gate, pinned so the unification
     // cannot silently change it.
@@ -975,8 +975,8 @@ struct CTEProducerParityTests {
   }
 
   @Test func `a redefined CTE name faults identically on all paths`() throws {
-    // A case-insensitive redefinition is rejected by the producer's UNGATED
-    // guard — the SAME `.redefinition` on the run and BOTH derives, lenient
+    // A case-insensitive redefinition is rejected by the producer's ungated
+    // guard — the same `.redefinition` on the run and both derives, lenient
     // included (the guard runs before any validate gate).
     let t = try Triple("WITH a(x) AS (SELECT 1), A(y) AS (SELECT 2) " +
                        "SELECT * FROM a")
@@ -988,8 +988,8 @@ struct CTEProducerParityTests {
 
   @Test func `a chained CTE reading a prior widened column agrees`() throws {
     // The biggest risk: the run overlay grows with each prior CTE's
-    // MATERIALISED rows, the schema overlay with EMPTY rows, but both
-    // accumulate the SAME types/mask. Here `b` reads `a`'s column, widened to
+    // materialised rows, the schema overlay with empty rows, but both
+    // accumulate the same types/mask. Here `b` reads `a`'s column, widened to
     // `.double`, so all three paths agree on one `.double` column — proving it
     // threads the growing overlay identically (types, not rows) on both.
     let t = try Triple("""

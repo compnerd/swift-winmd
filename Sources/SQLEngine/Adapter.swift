@@ -48,7 +48,7 @@ public enum ValueType: Hashable, Sendable {
     }
   }
 
-  /// The single type a value of this type and one of `other` UNIFY to, or `nil`
+  /// The single type a value of this type and one of `other` unify to, or `nil`
   /// when they are irreconcilable — the rule a `CASE` reconciles its result
   /// types by. Like types unify to themselves; a mixed integer/double pair
   /// widens to `double` (both numeric, the integer promoted, as arithmetic and
@@ -60,22 +60,22 @@ public enum ValueType: Hashable, Sendable {
     return nil
   }
 
-  /// Whether a value of this type can convert to `target` under `CAST` for AT
-  /// LEAST ONE value — the STRUCTURAL half of `Value.cast(to:)`, the one shared
+  /// Whether a value of this type can convert to `target` under `CAST` for at
+  /// least one value — the structural half of `Value.cast(to:)`, the one shared
   /// truth both the runtime cast and the schema type-check consult so they
   /// cannot drift.
   ///
   /// A pair is castable when `Value.cast(to:)` has a conversion arm for it; an
-  /// UNSUPPORTED pair — the one that falls to `Value.cast`'s `42846` arm for
-  /// EVERY value of this kind — is not. A like-kind cast is the identity; a
+  /// unsupported pair — the one that falls to `Value.cast`'s `42846` arm for
+  /// every value of this kind — is not. A like-kind cast is the identity; a
   /// numeric pair converts (`integer` ↔ `double`); `text` bridges every kind
   /// (each type spells to and parses from text) and `blob` bridges `text`
   /// alone. The remaining cross-kind pairs — a boolean against a number or a
   /// blob, a number against a blob — have no ISO conversion.
   ///
-  /// A castable pair may still fault at RUN time on a particular value — a
+  /// A castable pair may still fault at run time on a particular value — a
   /// `text` that is not a number, a `double` past `Int` range, a `blob` that is
-  /// not UTF-8 — so a reachable good value runs; only a NEVER-castable pair is
+  /// not UTF-8 — so a reachable good value runs; only a never-castable pair is
   /// an unconditional fault the schema rejects early.
   internal func castable(to target: ValueType) -> Bool {
     switch (self, target) {
@@ -126,7 +126,7 @@ public enum Value: Hashable, Sendable {
   /// integer promoted to `Double`; a mixed integer/double arithmetic yields a
   /// double, and `/` is real division (no truncation).
   ///
-  /// INVARIANT: a `double` must be FINITE — never `inf` or NaN. NaN is unequal
+  /// invariant: a `double` must be finite — never `inf` or NaN. NaN is unequal
   /// to itself, so it would break UNION/CTE duplicate elimination and ordering;
   /// the engine's producers enforce this (a literal or arithmetic result past
   /// range faults, a routine's non-finite result is rejected), so a `Catalog`,
@@ -160,14 +160,14 @@ extension Value {
     return self
   }
 
-  /// This value CONVERTED to `type` — the ISO `CAST(… AS type)` explicit
+  /// This value converted to `type` — the ISO `CAST(… AS type)` explicit
   /// conversion, wider than the numeric-widening `coerced(to:)`.
   ///
   /// `NULL` converts to `NULL` for every target. A value already of `type`
   /// passes through. The remaining conversions form the supported matrix:
   ///
   /// - `integer` ↔ `double`: an integer widens to a double exactly; a double
-  ///   TRUNCATES toward zero to an integer (`1.9` → `1`, `-1.9` → `-1`), the
+  ///   truncates toward zero to an integer (`1.9` → `1`, `-1.9` → `-1`), the
   ///   ISO exact-numeric-from-approximate rule, faulting when the truncated
   ///   magnitude exceeds `Int` (`22003`).
   /// - number → `text`: its canonical spelling (`42`, `1.5`).
@@ -304,7 +304,7 @@ extension String {
   /// Whether this string is a SQL DECIMAL numeric spelling — an optional
   /// leading sign, a digit run, an optional `.` fraction, and an optional
   /// `e`/`E` exponent (its own optional sign then a digit run) — the same
-  /// grammar the lexer scans a numeric literal by. It admits NO Swift extension
+  /// grammar the lexer scans a numeric literal by. It admits no Swift extension
   /// `Double(_:)` accepts: no hexadecimal (`0x`, a `p` exponent), no
   /// `inf`/`infinity`/`nan`, no underscore digit groups. A CAST of a character
   /// string to a number validates its spelling against this before parsing, so
@@ -336,7 +336,7 @@ extension String {
   }
 
   /// Whether this string is a SQL INTEGER numeric spelling — an optional
-  /// leading sign then a digit run, with NO fraction, exponent, hexadecimal,
+  /// leading sign then a digit run, with no fraction, exponent, hexadecimal,
   /// underscore group, or `inf`/`nan`. A CAST of a character string to an
   /// integer validates its spelling against this before parsing, so a malformed
   /// spelling is an invalid character (`22018`) while a format-valid spelling
@@ -419,7 +419,7 @@ public protocol Catalog: ~Escapable {
 
   /// The names of every base relation the catalog holds, in any order.
   ///
-  /// Where `table(named:)` resolves ONE name, this enumerates them all — the
+  /// Where `table(named:)` resolves one name, this enumerates them all — the
   /// surface the engine's `INFORMATION_SCHEMA` overlay walks to build its
   /// `tables`/`columns` metadata. An `Array<String>` is escapable owned data,
   /// so the enumeration stays `~Escapable`-safe over a borrowed source. Every

@@ -8,7 +8,7 @@ import SQLTestSupport
 
 // MARK: - Hash-join tests
 
-/// A join catalog whose inner `Parent` is UNSORTED (so its join key is not
+/// A join catalog whose inner `Parent` is unsorted (so its join key is not
 /// seekable and the executor hashes it) and tallies its row reads — to prove the
 /// hash build scans the inner exactly once rather than once per outer record.
 private func hashable() -> (catalog: EngineMemory, reads: EngineCounter) {
@@ -101,7 +101,7 @@ struct EngineHashJoinTests {
     // A contradictory outer WHERE prunes every `Child`, so the outer is empty
     // and no probe can match. The inner `Parent` is unsorted (unseekable), so
     // the join would hash it — but with no probes the build is pointless. The
-    // empty-outer short-circuit returns before scanning, so ZERO inner rows are
+    // empty-outer short-circuit returns before scanning, so zero inner rows are
     // read; the nested-loop path this replaced already read none for an empty
     // outer, and a large unseekable inner must not be fully scanned to answer
     // nothing.
@@ -115,11 +115,11 @@ struct EngineHashJoinTests {
   }
 
   @Test func `an all-NULL-key outer skips the hash build of an unseekable inner`() throws {
-    // The outer is NON-empty but every `Child.Pid` is NULL (a `WHERE Pid IS
+    // The outer is non-empty but every `Child.Pid` is NULL (a `WHERE Pid IS
     // NULL` keeps only the null-keyed rows), and a NULL key joins to nothing —
     // so no probe can match. The inner `Parent` is unsorted (unseekable), so the
     // join would hash it; but with no non-null probe the build is pointless. The
-    // no-probe guard returns before scanning, so ZERO inner rows are read — the
+    // no-probe guard returns before scanning, so zero inner rows are read — the
     // nested-loop path this replaced read none for an all-null outer too.
     let reads = EngineCounter()
     let parent = [
@@ -225,10 +225,10 @@ struct EngineHashJoinTests {
     // `Parent.Code` (the join key) is unseekable, so the join hashes the inner;
     // `Parent.Id` is sorted (seekable and ordered). `Child JOIN Parent ON
     // Parent.Code = Child.Code WHERE Parent.Id < 0` pushes `Parent.Id < 0` onto
-    // the inner. Applied DURING inner materialisation, that contradictory
+    // the inner. Applied during inner materialisation, that contradictory
     // seekable filter seeks the inner to an empty run — every `Id` is positive —
-    // so ZERO Parent rows are read and the query returns []. Before the fix the
-    // filter rode the residual ABOVE the join, so the whole inner was scanned and
+    // so zero Parent rows are read and the query returns []. Before the fix the
+    // filter rode the residual above the join, so the whole inner was scanned and
     // bucketed (three reads) before the filter matched none of it.
     let reads = EngineCounter()
     let parent = [

@@ -165,13 +165,13 @@ private final class Talker: @unchecked Sendable {
 
   @Test func `OVERLAY evaluates its replacement once without FOR`() throws {
     // With `FOR` omitted the default length is the replacement's own character
-    // count — computed by the routine from the SINGLE evaluated replacement, so
-    // the replacement is evaluated EXACTLY ONCE. `talker()` is
+    // count — computed by the routine from the single evaluated replacement, so
+    // the replacement is evaluated exactly once. `talker()` is
     // non-deterministic (unfoldable) and returns a longer string on each call;
     // evaluated once it inserts "XX" (2 long) and removes 2 characters of
     // 'abcdef' from position 2 ('bc') → "aXXdef", the counter reading 1. The
     // old desugar to `char_length(replacement)` referenced the replacement a
-    // SECOND time — inserting one value but removing the length of a DIFFERENT
+    // second time — inserting one value but removing the length of a different
     // later one — so this guards that regression.
     let counter = Talker()
     let routines = try Routines.standard
@@ -258,7 +258,7 @@ private func lower(_ text: String) throws -> Expression {
   }
 
   @Test func `OVERLAY without FOR desugars to a three-argument call`() throws {
-    // No FOR ⇒ a THREE-argument call (no synthesized `char_length(replacement)`
+    // No FOR ⇒ a three-argument call (no synthesized `char_length(replacement)`
     // fourth argument): the routine defaults the length from the once-evaluated
     // replacement, so the replacement is not referenced a second time.
     #expect(try lower("OVERLAY(Text PLACING 'ab' FROM 1)")

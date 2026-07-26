@@ -8,10 +8,10 @@ import SQLTestSupport
 
 // MARK: - Fixtures
 
-/// A single-relation catalog whose `a` REPEATS across rows differing only in
+/// A single-relation catalog whose `a` repeats across rows differing only in
 /// `b` — the adversarial fixture: a `SELECT DISTINCT a` projects the whole row
-/// down to `a`, COLLAPSING two distinct rows to one value, so the `.distinct`
-/// MUST be kept or the result would leak the duplicate `a`.
+/// down to `a`, collapsing two distinct rows to one value, so the `.distinct`
+/// must be kept or the result would leak the duplicate `a`.
 private func collapsing() throws -> FixtureCatalog {
   try Catalog {
     Relation("D", ["a": .integer, "b": .integer]) {
@@ -34,7 +34,7 @@ private func numbers() throws -> FixtureCatalog {
 }
 
 /// Whether `plan` reaches ANY `.distinct` node — the dedup the optimiser drops
-/// when its source is PROVABLY distinct. Mirrors `ConstantFoldTests`'s
+/// when its source is provably distinct. Mirrors `ConstantFoldTests`'s
 /// `selects`/`empties`, recursing every operator so a `.distinct` nested under
 /// a project/aggregate/set-op arm is still found.
 private func distincts(_ plan: Plan) -> Bool {
@@ -72,17 +72,17 @@ private func distincts(_ plan: Plan) -> Bool {
 
 // MARK: - Plan.unique unit tests
 
-/// `Plan.unique` is the SOUND, CONSERVATIVE full-row-distinctness property the
-/// optimiser drops a `.distinct` on: `true` only when the plan PROVABLY yields
+/// `Plan.unique` is the sound, conservative full-row-distinctness property the
+/// optimiser drops a `.distinct` on: `true` only when the plan provably yields
 /// no two equal full rows, `false` for anything whose distinctness is not
 /// certain (a `scan` multiset, a fan-out join, an `all` set operation, or a
-/// column-dropping project). An over-claim here would LEAK duplicates.
+/// column-dropping project). An over-claim here would leak duplicates.
 struct PlanUniqueTests {
   /// A width-1 scan of `D.a` — a base relation, so NOT provably unique.
   private let scan = Plan.scan(name: "D", ordinals: [0], seek: nil)
 
   @Test func `a base scan is not unique`() {
-    // A SQL table is a MULTISET — a duplicate row is possible and no unique key
+    // A SQL table is a multiset — a duplicate row is possible and no unique key
     // is tracked — so a scan is conservatively non-unique.
     #expect(!scan.unique)
   }
@@ -129,13 +129,13 @@ struct PlanUniqueTests {
   }
 
   @Test func `a product and a join are not unique`() {
-    // A pairing operator can MULTIPLY rows — one row paired with many — so
+    // A pairing operator can multiply rows — one row paired with many — so
     // it is never provably distinct here.
     #expect(!Plan.product(Plan.distinct(scan), Plan.distinct(scan)).unique)
   }
 
   @Test func `an injective project over a unique source is unique`() {
-    // A permutation/renaming reading EVERY source slot retains all columns, so
+    // A permutation/renaming reading every source slot retains all columns, so
     // two distinct source rows stay distinct — injective. Over a `distinct`
     // source (width 1), a project reading slot 0 covers the whole row.
     let unique = Plan.distinct(scan)
@@ -143,7 +143,7 @@ struct PlanUniqueTests {
   }
 
   @Test func `a column-dropping project is not unique`() {
-    // Dropping a source column can COLLAPSE distinct rows: an aggregate of two
+    // Dropping a source column can collapse distinct rows: an aggregate of two
     // key columns projected down to the first loses the second, so two rows
     // differing only in it become equal. Not covering every source slot ⇒ not
     // unique.
@@ -151,7 +151,7 @@ struct PlanUniqueTests {
         Plan.aggregate(keys: [.slot(0), .slot(1)], aggregates: [], scan)
     #expect(grouped.unique)
     #expect(!Plan.project([.slot(0)], grouped).unique)
-    // Reading BOTH slots (a full permutation) stays unique.
+    // Reading both slots (a full permutation) stays unique.
     #expect(Plan.project([.slot(1), .slot(0)], grouped).unique)
   }
 
@@ -166,8 +166,8 @@ struct PlanUniqueTests {
 
 // MARK: - Optimiser fold: DISTINCT elimination
 
-/// The optimiser DROPS a `.distinct` whose source is PROVABLY distinct
-/// (identical result, one fewer dedup) and KEEPS it over any source that could
+/// The optimiser drops a `.distinct` whose source is provably distinct
+/// (identical result, one fewer dedup) and keeps it over any source that could
 /// hold a duplicate full row.
 struct DistinctFoldTests {
   /// The optimised plan for `sql` against `catalog`, through the full
@@ -202,17 +202,17 @@ struct DistinctFoldTests {
   }
 
   @Test func `DISTINCT over a projecting scan KEEPS the dedup`() throws {
-    // The adversarial must-KEEP case. `SELECT DISTINCT a FROM D` projects the
-    // whole (a, b) row down to `a`, which REPEATS (rows (1,10) and (1,20)), so
-    // the projection COLLAPSES two distinct rows to one value — the `.distinct`
+    // The adversarial must-keep case. `SELECT DISTINCT a FROM D` projects the
+    // whole (a, b) row down to `a`, which repeats (rows (1,10) and (1,20)), so
+    // the projection collapses two distinct rows to one value — the `.distinct`
     // is the only thing removing the duplicate. Its source is a base scan (not
-    // unique), so the fold MUST keep it.
+    // unique), so the fold must keep it.
     let catalog = try collapsing()
     #expect(distincts(try optimised(catalog, "SELECT DISTINCT a FROM D")))
   }
 
   @Test func `DISTINCT over a projecting scan actually deduplicates`() throws {
-    // The result proof behind the must-KEEP shape: `a` is `[1, 1, 2]` in the
+    // The result proof behind the must-keep shape: `a` is `[1, 1, 2]` in the
     // rows, so a correct DISTINCT yields `[1, 2]`. Removing the dedup would
     // leak the duplicate `1`, changing the row multiset.
     try collapsing().expect("SELECT DISTINCT a FROM D ORDER BY a",
@@ -221,7 +221,7 @@ struct DistinctFoldTests {
 
   @Test func `DISTINCT over a full-row scan projection KEEPS the dedup`()
       throws {
-    // Even a project reading BOTH scan columns is injective but its SOURCE (the
+    // Even a project reading both scan columns is injective but its source (the
     // scan) is a multiset — a duplicate whole row is possible — so the fold
     // keeps the dedup. The scan, not the projection, is the non-unique link.
     let catalog = try collapsing()
@@ -239,7 +239,7 @@ struct DistinctFoldTests {
       Issue.record("expected a single distinct, got \(plan)")
       return
     }
-    // Exactly ONE distinct survives: the inner is the bare scan, not a nested
+    // Exactly one distinct survives: the inner is the bare scan, not a nested
     // second distinct.
     #expect(!distincts(inner))
   }
@@ -257,7 +257,7 @@ struct DistinctFoldTests {
   }
 
   @Test func `DISTINCT over a UNION ALL KEEPS the dedup`() throws {
-    // The set-operation must-KEEP case: `UNION ALL` is a MULTISET that keeps
+    // The set-operation must-keep case: `UNION ALL` is a multiset that keeps
     // duplicates, so a `.distinct` over it is NOT redundant — the fold must
     // keep it or the duplicates leak.
     let catalog = try collapsing()

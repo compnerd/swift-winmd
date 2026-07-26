@@ -8,7 +8,7 @@ import SQLTestSupport
 
 // MARK: - Fixture
 
-/// Two relations exercising the uncorrelated DERIVED TABLE: an outer keyed `T`
+/// Two relations exercising the uncorrelated derived TABLE: an outer keyed `T`
 /// and a source `S` whose `V` a derived table projects/aggregates, plus a `K`
 /// keyed on `T` for the JOIN case.
 private func fixture() throws -> FixtureCatalog {
@@ -159,7 +159,7 @@ struct DerivedTableExecutionTests {
   }
 
   @Test func `a derived table equals its inner query renamed`() throws {
-    // The derived table's rows ARE the inner query's rows, so selecting through
+    // The derived table's rows are the inner query's rows, so selecting through
     // the alias equals selecting the inner query directly.
     try fixture().expect(
         "SELECT a FROM (SELECT V AS a FROM S) AS t ORDER BY a",
@@ -262,11 +262,11 @@ struct DerivedTableSchemaTests {
 
 // MARK: - Duplicate derived output columns
 
-/// A derived table's columns are its inner query's OUTPUT names (the ISO rule),
+/// A derived table's columns are its inner query's output names (the ISO rule),
 /// so two same-named ones leave the shadowed column unreachable through the
 /// alias — the same case the Parser rejects for a view's or a CTE's inferred
-/// column list. A derived table faults it the SAME way (`SQLError.duplicate`),
-/// at BOTH `columns(of:)` and a run.
+/// column list. A derived table faults it the same way (`SQLError.duplicate`),
+/// at both `columns(of:)` and a run.
 struct DerivedTableDuplicateColumnTests {
   @Test func `a duplicate derived output column faults the run`() throws {
     // `(SELECT Id AS x, V AS x FROM T) AS d` exposes `x` twice; `d.x` would
@@ -290,7 +290,7 @@ struct DerivedTableDuplicateColumnTests {
   }
 
   @Test func `distinct derived output columns resolve`() throws {
-    // Control: two DIFFERENTLY named output columns resolve fine — the check
+    // Control: two differently named output columns resolve fine — the check
     // fires only on a genuine same-name collision.
     try fixture().expect(
         "SELECT d.x, d.y FROM (SELECT Id AS x, V AS y FROM T) AS d " +
@@ -301,17 +301,17 @@ struct DerivedTableDuplicateColumnTests {
 
 // MARK: - Duplicate same-scope derived aliases
 
-/// Two derived tables sharing an alias in ONE SELECT's own FROM/JOIN collide:
+/// Two derived tables sharing an alias in one SELECT's own FROM/JOIN collide:
 /// the alias-keyed overlay would rebind the earlier under the later, so both
 /// FROM items resolve to the later's rows. This matches the existing duplicate
-/// RELATION alias behavior (`FROM T AS d JOIN S AS d`, which makes a shared
+/// relation alias behavior (`FROM T AS d JOIN S AS d`, which makes a shared
 /// column `SQLError.ambiguous`) rather than silently rebinding — the collision
-/// is caught when augmenting THIS SELECT's own derived tables, so a nested or
-/// sibling subquery's same-named alias (a DIFFERENT SELECT) is unaffected.
+/// is caught when augmenting this SELECT's own derived tables, so a nested or
+/// sibling subquery's same-named alias (a different SELECT) is unaffected.
 struct DerivedTableDuplicateAliasTests {
   @Test func `duplicate derived aliases fault ambiguous at the run`() throws {
     // `(SELECT Id AS a FROM T) AS d JOIN (SELECT V AS b FROM S) AS d` — a
-    // single SELECT with two derived tables aliased `d`. Faults the ALIAS
+    // single SELECT with two derived tables aliased `d`. Faults the alias
     // ambiguous rather than letting the later derived `d(b)` rebind over the
     // earlier `d(a)`.
     try fixture().expect(
@@ -334,7 +334,7 @@ struct DerivedTableDuplicateAliasTests {
   @Test func `a duplicate base-table alias's shared column stays ambiguous`()
       throws {
     // The behavior the derived case matches: two base relations sharing the
-    // alias `d` leave BOTH in scope, so a shared column is `SQLError.ambiguous`
+    // alias `d` leave both in scope, so a shared column is `SQLError.ambiguous`
     // — the same ambiguity family the derived collision now raises.
     try fixture().expect(
         "SELECT d.Id FROM T AS d JOIN S AS d ON 1 = 1",
@@ -342,8 +342,8 @@ struct DerivedTableDuplicateAliasTests {
   }
 
   @Test func `distinct derived aliases in one SELECT both resolve`() throws {
-    // Control: two derived tables with DIFFERENT aliases in one SELECT's
-    // FROM/JOIN each resolve to their OWN columns — no collision.
+    // Control: two derived tables with different aliases in one SELECT's
+    // FROM/JOIN each resolve to their own columns — no collision.
     try fixture().expect(
         "SELECT c.a, d.b FROM (SELECT Id AS a FROM T) AS c " +
         "JOIN (SELECT V AS b FROM S) AS d ON c.a = 1 ORDER BY d.b",
@@ -353,19 +353,19 @@ struct DerivedTableDuplicateAliasTests {
 
 // MARK: - A derived alias colliding with a same-scope base relation
 
-/// A derived table's alias sharing a RANGE NAME with a BASE/named relation in
-/// the SAME SELECT's FROM/JOIN is a duplicate range name: the alias-keyed
-/// overlay binds the derived rows under that name, which would SHADOW the base
+/// A derived table's alias sharing a range name with a base/named relation in
+/// the same SELECT's FROM/JOIN is a duplicate range name: the alias-keyed
+/// overlay binds the derived rows under that name, which would shadow the base
 /// scan — `FROM T JOIN (SELECT V AS a FROM S) AS T` would resolve the base `T`
-/// to the derived rows. This is the same ambiguity family a duplicate RELATION
-/// alias (`FROM T AS d JOIN S AS d`) raises, and it faults at BOTH `columns(of:
-/// )` and a run, BEFORE binding the derived rows, so the base is never
+/// to the derived rows. This is the same ambiguity family a duplicate relation
+/// alias (`FROM T AS d JOIN S AS d`) raises, and it faults at both `columns(of:
+/// )` and a run, before binding the derived rows, so the base is never
 /// shadowed.
 struct DerivedTableBaseAliasCollisionTests {
   @Test func `a derived alias colliding with a base relation faults the run`()
       throws {
     // The reviewer's case: a derived table aliased `T` in a JOIN collides with
-    // the base `FROM T` of the same SELECT. Faults the ALIAS ambiguous rather
+    // the base `FROM T` of the same SELECT. Faults the alias ambiguous rather
     // than binding the derived `T(a)` over the base `T` scan.
     try fixture().expect(
         "SELECT a FROM T JOIN (SELECT V AS a FROM S) AS T ON 1 = 1",
@@ -404,7 +404,7 @@ struct DerivedTableBaseAliasCollisionTests {
   }
 
   @Test func `a derived alias colliding with a named alias faults`() throws {
-    // The collision is on the RANGE NAME a qualified reference uses, so a base
+    // The collision is on the range name a qualified reference uses, so a base
     // relation renamed `d` (`FROM S AS d`) collides with a derived table
     // aliased `d` too — not the base's spelling `S`.
     try fixture().expect(
@@ -414,7 +414,7 @@ struct DerivedTableBaseAliasCollisionTests {
 
   @Test func `a derived alias not colliding with any base resolves`() throws {
     // Control: a derived alias `d` that no FROM/JOIN range name shares resolves
-    // — both its OWN column (`d.a`) and the sibling base relation's (`T.V`).
+    // — both its own column (`d.a`) and the sibling base relation's (`T.V`).
     try fixture().expect(
         "SELECT d.a, T.V FROM T JOIN (SELECT V AS a FROM S) AS d " +
         "ON d.a = T.V ORDER BY T.V",
@@ -424,8 +424,8 @@ struct DerivedTableBaseAliasCollisionTests {
   @Test func `a derived alias equal to an outer relation is not a collision`()
       throws {
     // Scoping, not a same-scope collision: an EXISTS subquery's derived table
-    // aliased `T` sits in its OWN SELECT, whose only FROM range is that derived
-    // `T` — the enclosing `FROM T` is a DIFFERENT SELECT's range. The inner `T`
+    // aliased `T` sits in its own SELECT, whose only FROM range is that derived
+    // `T` — the enclosing `FROM T` is a different SELECT's range. The inner `T`
     // shadows the outer per normal scoping, so `t.a` reads the derived rows and
     // no duplicate-range fault fires.
     try fixture().expect(
@@ -437,12 +437,12 @@ struct DerivedTableBaseAliasCollisionTests {
 
   @Test func `a derived alias colliding with an aliased base's source faults`()
       throws {
-    // The base `T` is ALIASED `x`, so its EXPOSED range name is `x`, not `T` —
-    // yet `resolve` looks the named relation up by its SOURCE name `T` in the
+    // The base `T` is aliased `x`, so its exposed range name is `x`, not `T` —
+    // yet `resolve` looks the named relation up by its source name `T` in the
     // overlay. A derived table aliased `T` would bind under `T` and capture the
     // `T AS x` scan (which keys on `T`), so `x.V` fails or both sides scan the
-    // derived rows. Fault the ALIAS ambiguous on the source-name collision,
-    // BEFORE binding the derived rows.
+    // derived rows. Fault the alias ambiguous on the source-name collision,
+    // before binding the derived rows.
     try fixture().expect(
         "SELECT x.V FROM T AS x JOIN (SELECT V AS a FROM S) AS T ON 1 = 1",
         fails: .ambiguous("T"))
@@ -494,11 +494,11 @@ struct DerivedTableBaseAliasCollisionTests {
 struct DerivedTableScopingTests {
   @Test func `sibling EXISTS subqueries reuse an alias without colliding`()
       throws {
-    // Two INDEPENDENT derived tables share the alias `t` in two separate
-    // `EXISTS` subqueries, each with DIFFERENT columns (`a` from `S`, `b` from
+    // Two independent derived tables share the alias `t` in two separate
+    // `EXISTS` subqueries, each with different columns (`a` from `S`, `b` from
     // `K`). A statement-global overlay bound only the FIRST `t`, so the second
     // `EXISTS`'s `t.b` would mis-resolve to the first `t` (no `b`) and fault.
-    // SELECT-scoped, each `t` resolves to its OWN derived table: both
+    // SELECT-scoped, each `t` resolves to its own derived table: both
     // subqueries are TRUE (S has V=10, K has k=1), so every `T` row is kept.
     try fixture().expect(
         "SELECT Id FROM T " +
@@ -511,7 +511,7 @@ struct DerivedTableScopingTests {
 
   @Test func `sibling derived tables reuse an alias reading their own rows`()
       throws {
-    // Each sibling `t` reads its OWN rows: the first `EXISTS` filters `t.a` to
+    // Each sibling `t` reads its own rows: the first `EXISTS` filters `t.a` to
     // a value only `S` has (30) and the second `t.b` to one only `K` has (2),
     // so both hold and the outer query keeps its row — proof each `t` bound its
     // own materialised relation, not a shared one.
@@ -527,7 +527,7 @@ struct DerivedTableScopingTests {
   @Test func `an inner derived table shadows an outer CTE of the same name`()
       throws {
     // A CTE `t` is in scope statement-wide, but a derived table aliased `t` in
-    // an inner `FROM` SHADOWS it within that SELECT: the derived `t(a)` reads
+    // an inner `FROM` shadows it within that SELECT: the derived `t(a)` reads
     // `S`'s `V` renamed, not the CTE's single row `99`. So `SELECT a` yields
     // the three `S` values, never the CTE's `99` (no column `a`). A `WITH` is
     // a statement, so run it through the statement entry rather than the
@@ -542,17 +542,17 @@ struct DerivedTableScopingTests {
 
 // MARK: - A nested subquery's own derived alias shadows an enclosing one
 
-/// A nested subquery's OWN derived alias must SHADOW an enclosing same-named
-/// derived table, resolving its OWN body's columns rather than the outer one's.
+/// A nested subquery's own derived alias must shadow an enclosing same-named
+/// derived table, resolving its own body's columns rather than the outer one's.
 /// Idempotence keys on the derivation's IDENTITY, not its name: an enclosing
 /// query's derived `t` in scope is re-materialised over by the subquery's own
-/// `t` (a DIFFERENT inner query), while a re-augment of THIS query's SAME
+/// `t` (a different inner query), while a re-augment of this query's same
 /// derivation is left in place — and a same-named CTE stays visible.
 struct DerivedTableNestedShadowTests {
   @Test func `a nested EXISTS subquery derived alias shadows an outer one`()
       throws {
     // The outer `FROM (SELECT Id AS x FROM T) AS t` binds a derived `t` with
-    // column `x`; the `EXISTS` subquery's OWN `FROM (SELECT V AS a FROM S) AS
+    // column `x`; the `EXISTS` subquery's own `FROM (SELECT V AS a FROM S) AS
     // t` binds a derived `t` with column `a`. The subquery's `WHERE t.a = 10`
     // must resolve the INNER `t` (column `a`, a value only `S`'s 10 has), never
     // the outer `t` (column `x`). Keying idempotence on the name skipped the
@@ -568,7 +568,7 @@ struct DerivedTableNestedShadowTests {
 
   @Test func `the nested-shadow query advertises the outer schema`() throws {
     // Schema ↔ run parity: `columns(of:)` resolves the inner `t.a` too (never
-    // faulting on the outer `t`'s missing `a`), and the RESULT columns are the
+    // faulting on the outer `t`'s missing `a`), and the result columns are the
     // OUTER query's projection `x` — the enclosing derived `t`'s column.
     let query = try parse(query:
         "SELECT x FROM (SELECT Id AS x FROM T) AS t " +
@@ -579,7 +579,7 @@ struct DerivedTableNestedShadowTests {
   }
 
   @Test func `a nested EXISTS shadow reads the inner rows`() throws {
-    // The inner `t` reads ITS own rows, not the outer's: `WHERE t.a = 30`
+    // The inner `t` reads its own rows, not the outer's: `WHERE t.a = 30`
     // filters to a value only `S` has (30), so the subquery holds; had it
     // resolved the outer `t` (column `x` = the `Id`s 1, 2, 3), `t.a` would
     // fault. One outer row is kept.
@@ -592,7 +592,7 @@ struct DerivedTableNestedShadowTests {
 
   @Test func `a nested scalar subquery derived alias shadows an outer one`()
       throws {
-    // A SCALAR-subquery variant: the outer `FROM (SELECT Id AS x FROM T) AS t`
+    // A scalar-subquery variant: the outer `FROM (SELECT Id AS x FROM T) AS t`
     // binds derived `t(x)`; the projection's scalar `(SELECT MIN(t.a) FROM
     // (SELECT V AS a FROM S) AS t)` binds its OWN derived `t(a)`. The scalar's
     // `t.a` must resolve the INNER `t` (column `a`), yielding `S`'s minimum 10
@@ -610,7 +610,7 @@ struct DerivedTableNestingTests {
   @Test func `a derived table nested in a derived table resolves and runs`()
       throws {
     // `FROM (SELECT * FROM (SELECT V FROM S) AS x) AS y` — deriving `y`'s
-    // schema must FIRST bind its OWN inner derived table `x`, as the run does,
+    // schema must FIRST bind its own inner derived table `x`, as the run does,
     // or `x` resolves as unknown. Both the schema and the run resolve the
     // projected column `V` and read `S`'s rows through the two levels.
     let query =
@@ -639,8 +639,8 @@ struct DerivedTableNestingTests {
 struct DerivedTableSchemaParityTests {
   @Test func `a bad inner predicate faults the schema-only path`() throws {
     // The inner body's `WHERE Missing = 1` names an unknown column. The
-    // schema-only path (`validate: true`) compiles and type-checks the WHOLE
-    // inner body — not just the first-arm projection — so it FAULTS the unknown
+    // schema-only path (`validate: true`) compiles and type-checks the whole
+    // inner body — not just the first-arm projection — so it faults the unknown
     // column exactly as the run does, keeping schema/run parity.
     #expect(throws: SQLError.self) {
       let query = try parse(query:
@@ -671,7 +671,7 @@ struct DerivedTableSchemaParityTests {
   }
 
   @Test func `a valid inner body still advertises its schema`() throws {
-    // A derived table whose inner body has a WELL-FORMED predicate still
+    // A derived table whose inner body has a well-formed predicate still
     // reports its schema on the schema-only path — the whole-body validation
     // accepts exactly what runs, so a valid body is not rejected.
     let query = try parse(query:
@@ -686,8 +686,8 @@ struct DerivedTableSchemaParityTests {
     // A derived body whose projection `Label + 1` faults ONLY when type-checked
     // (text plus integer), guarded by `WHERE k = 0` so the run empties before
     // it evaluates. With `validate: false` — a derive after a successful run —
-    // the body is TRUSTED, so headers return WITHOUT the operand fault, exactly
-    // as the NON-derived path does (its empty run never evaluates the
+    // the body is trusted, so headers return without the operand fault, exactly
+    // as the non-derived path does (its empty run never evaluates the
     // projection). An earlier round validated the body unconditionally, so this
     // faulted `.operand` before returning headers.
     let query = try parse(query:
@@ -697,7 +697,7 @@ struct DerivedTableSchemaParityTests {
   }
 
   @Test func `validate true still faults a bad derived body`() throws {
-    // Parity with a run: with `validate: true` the SAME body still faults its
+    // Parity with a run: with `validate: true` the same body still faults its
     // ill-typed projection, so the schema path advertises no schema for a
     // derived table a run would fault once it reached the projection.
     #expect(throws: SQLError.self) {
@@ -710,18 +710,18 @@ struct DerivedTableSchemaParityTests {
 
 // MARK: - A run must not eager-type-check a derived body
 
-/// A RUN preflight (`compile`) must NOT eager-type-check a derived body: an
+/// A run preflight (`compile`) must NOT eager-type-check a derived body: an
 /// expression a data-dependent filter never reaches is lenient at run — the
-/// executor faults only on an expression a SURVIVING row evaluates, exactly as
-/// the NON-derived query does. The eager body type-check stays for the EXPLICIT
+/// executor faults only on an expression a surviving row evaluates, exactly as
+/// the non-derived query does. The eager body type-check stays for the explicit
 /// schema path (`columns(of:validate:true)`), which stays strict.
 struct DerivedTableRunLenienceTests {
   @Test func `a filtered-out ill-typed body runs to zero rows`() throws {
     // `FROM (SELECT Label + 1 AS x FROM K WHERE k = 0) AS d` — the body's text
     // arithmetic `Label + 1` faults ONLY when evaluated, but `WHERE k = 0` (no
     // `K` row has `k = 0`) empties the derived table before the projection
-    // runs. The run preflight compiles the OUTER query WITHOUT eager-type-
-    // checking the derived body, so the run returns ZERO rows rather than
+    // runs. The run preflight compiles the OUTER query without eager-type-
+    // checking the derived body, so the run returns zero rows rather than
     // faulting `.operand` — an earlier round rejected it before materialising.
     try fixture().empty(
         "SELECT * FROM (SELECT Label + 1 AS x FROM K WHERE k = 0) AS d")
@@ -736,8 +736,8 @@ struct DerivedTableRunLenienceTests {
 
   @Test func `columns validate true still faults the filtered-out body`()
       throws {
-    // The EXPLICIT schema path stays STRICT: `columns(of:validate:true)` on the
-    // SAME body still faults `.operand`, so a caller asking to validate the
+    // The explicit schema path stays strict: `columns(of:validate:true)` on the
+    // same body still faults `.operand`, so a caller asking to validate the
     // schema gets the ill-typed projection rejected even though a run empties.
     #expect(throws: SQLError.operand("operands must be numeric")) {
       let query = try parse(query:
@@ -747,9 +747,9 @@ struct DerivedTableRunLenienceTests {
   }
 
   @Test func `a reached ill-typed body still faults at run`() throws {
-    // Lenient is NOT never: a body whose `WHERE` KEEPS a row (`k = 1` matches
+    // Lenient is NOT never: a body whose `WHERE` keeps a row (`k = 1` matches
     // `K`'s first row) reaches the ill-typed `Label + 1` at run, so the
-    // executor faults `.operand` — only an UNEVALUATED expression is spared.
+    // executor faults `.operand` — only an unevaluated expression is spared.
     try fixture().expect(
         "SELECT * FROM (SELECT Label + 1 AS x FROM K WHERE k = 1) AS d",
         fails: .operand("operands must be numeric"))
@@ -760,15 +760,15 @@ struct DerivedTableRunLenienceTests {
 
 /// The `WITH` schema path (`columns(of statement:)`) must thread `validate` to
 /// its trailing query's derived tables exactly as the non-`WITH` path does: a
-/// `validate: false` derive after a successful run TRUSTS a derived body a
+/// `validate: false` derive after a successful run trusts a derived body a
 /// filter empties rather than re-type-checking it, while `validate: true` stays
 /// strict.
 struct DerivedTableWithValidateThreadingTests {
   @Test func `validate false trusts a filtered-out body in the trailing query`()
       throws {
-    // The trailing query wraps the SAME filtered-out ill-typed body under a
+    // The trailing query wraps the same filtered-out ill-typed body under a
     // `WITH`. A run empties (the body never evaluates `Label + 1`); a
-    // `validate: false` derive after that run must return the headers WITHOUT
+    // `validate: false` derive after that run must return the headers without
     // the `.operand` fault, matching the non-`WITH` path. The `WITH` path
     // re-augmented the trailing query's derived table with the DEFAULT
     // `validate: true` before this fix, so it still faulted `.operand`.
@@ -782,7 +782,7 @@ struct DerivedTableWithValidateThreadingTests {
   }
 
   @Test func `validate true still faults the trailing query's body`() throws {
-    // The EXPLICIT schema path stays STRICT under `WITH` too: `validate: true`
+    // The explicit schema path stays strict under `WITH` too: `validate: true`
     // on the same trailing-query body still faults its ill-typed projection.
     #expect(throws: SQLError.operand("operands must be numeric")) {
       let statement = try Statement(parsing:
@@ -797,7 +797,7 @@ struct DerivedTableWithValidateThreadingTests {
 
 struct DerivedTableCorrelationTests {
   @Test func `a derived table referencing an outer column faults`() throws {
-    // PR-3 is UNCORRELATED: the inner query resolves against the base catalog,
+    // PR-3 is uncorrelated: the inner query resolves against the base catalog,
     // NOT its sibling/outer FROM items, so a reference to the outer `T.Id`
     // resolves as an unknown column (no LATERAL yet).
     try fixture().expect(
@@ -816,19 +816,19 @@ struct DerivedTableCorrelationTests {
   }
 }
 
-// MARK: - No correlation into an ENCLOSING row (non-LATERAL, under a subquery)
+// MARK: - No correlation into an enclosing row (non-LATERAL, under a subquery)
 
-/// A non-LATERAL derived table nested inside a CORRELATED subquery must NOT see
+/// A non-LATERAL derived table nested inside a correlated subquery must NOT see
 /// the enclosing query's row either — the same no-LATERAL rule a sibling
 /// reference obeys applies outward across the enclosing subquery boundary.
 ///
 /// Folding the correlation stack into `Context` made the derived-body scope
-/// inherit the enclosing subquery's `outer`, so the STRICT schema/typecheck
+/// inherit the enclosing subquery's `outer`, so the strict schema/typecheck
 /// pass bound the derived body's `T.k` to the caller's row while the lenient
-/// run shape pass recorded NO correlation for it and then FAULTED at execution
-/// — a schema/run MISMATCH. Clearing the correlation stack entering derived
+/// run shape pass recorded no correlation for it and then faulted at execution
+/// — a schema/run mismatch. Clearing the correlation stack entering derived
 /// materialisation restores the documented no-LATERAL behaviour: the derived
-/// body cannot see `T.k`, so BOTH passes fault CONSISTENTLY.
+/// body cannot see `T.k`, so both passes fault consistently.
 struct DerivedTableEnclosingCorrelationTests {
   /// An outer `T` and an inner `S`, each with a `k` a derived body would try to
   /// equate — so the leak, had it bound, would have compiled.
@@ -848,7 +848,7 @@ struct DerivedTableEnclosingCorrelationTests {
       throws {
     // `… 1 IN (SELECT x FROM (SELECT 1 AS x FROM S WHERE S.k = T.k) AS d)` —
     // the `IN` subquery correlates against `T`, but the derived body `d` is
-    // non-LATERAL, so its `T.k` is an unknown column at BOTH the schema pass
+    // non-LATERAL, so its `T.k` is an unknown column at both the schema pass
     // and the run, never bound outward to the caller's row.
     let sql =
         "SELECT k FROM T " +
@@ -859,7 +859,7 @@ struct DerivedTableEnclosingCorrelationTests {
 
   @Test func `the schema pass faults the derived body exactly as the run does`()
       throws {
-    // Schema ↔ run parity: the STRICT `columns(of:)` pass faults the derived
+    // Schema ↔ run parity: the strict `columns(of:)` pass faults the derived
     // body's `T.k` too, rather than binding it while the run faults — the
     // mismatch the leak introduced.
     let query = try parse(query:
@@ -873,7 +873,7 @@ struct DerivedTableEnclosingCorrelationTests {
 
   @Test func `a non-correlated derived body under a subquery still runs`()
       throws {
-    // Control: the SAME shape with an UNCORRELATED derived body (`S.k = 1`, no
+    // Control: the same shape with an uncorrelated derived body (`S.k = 1`, no
     // outer reference) resolves and runs — clearing the correlation stack does
     // not disturb a legitimate derived table. `1 IN {1}` keeps every `T` row.
     try keyed().expect(
@@ -894,7 +894,7 @@ struct DerivedTableSetOperationScopingTests {
   @Test func `a set-op arm derived alias does not bind the other arm`()
       throws {
     // The RIGHT arm names a derived table aliased `T`; the LEFT arm's `FROM T`
-    // must resolve the BASE `T` (columns `Id`, `V`), NOT the right arm's
+    // must resolve the base `T` (columns `Id`, `V`), NOT the right arm's
     // `derived T` (whose only column is `a`). Hoisting both arms into one map
     // bound the right `T` query-wide, so `SELECT Id FROM T` faulted on the
     // unknown `Id`. Per-arm scoping keeps the base `T`, so the left arm scans
@@ -925,7 +925,7 @@ struct DerivedTableSetOperationScopingTests {
   @Test func `a set-op arm derived alias is invisible at the schema path too`()
       throws {
     // Schema ↔ run parity: `columns(of:)` derives the first (left) arm's
-    // projection against the BASE `T`, so the result column is `Id`, not the
+    // projection against the base `T`, so the result column is `Id`, not the
     // right arm's `a`.
     let query = try parse(query:
         "SELECT Id FROM T " +
@@ -937,14 +937,14 @@ struct DerivedTableSetOperationScopingTests {
 
 // MARK: - No LATERAL: sibling FROM items are invisible
 
-/// A derived table is UNCORRELATED/no-LATERAL: its inner query resolves against
+/// A derived table is uncorrelated/no-LATERAL: its inner query resolves against
 /// the enclosing OUTER scope only, so a sibling `FROM`/`JOIN` item is invisible
 /// inside it.
 struct DerivedTableSiblingVisibilityTests {
   @Test func `a derived table cannot read an earlier sibling as a relation`()
       throws {
     // `FROM (…) AS a JOIN (SELECT v FROM a) AS b` — `b`'s inner query names the
-    // SIBLING `a` as a relation. Threading the accumulating sibling map let
+    // sibling `a` as a relation. Threading the accumulating sibling map let
     // `b` read `a` as a CTE; the outer-scope-only rule now faults on the
     // unknown relation `a` (no LATERAL).
     try fixture().expect(
@@ -978,16 +978,16 @@ struct DerivedTableSiblingVisibilityTests {
 
 // MARK: - Self-named derived alias resolves the base relation in its body
 
-/// A derived alias may share the name of the BASE relation its own body
+/// A derived alias may share the name of the base relation its own body
 /// references — `(SELECT … FROM T) AS T`. Its body's `FROM T` must resolve the
-/// BASE `T`, never the derived alias itself, on BOTH the schema-only and the
+/// base `T`, never the derived alias itself, on both the schema-only and the
 /// run paths: `augment` materialises the body against the alias-free outer
-/// scope, so the run→compile double augmentation is IDEMPOTENT (the second
+/// scope, so the run→compile double augmentation is idempotent (the second
 /// pass, whose context already binds the derived `T`, still reads the base).
 struct DerivedTableSelfNamedAliasTests {
   @Test func `a derived alias resolves the base relation its body names`()
       throws {
-    // `(SELECT Id AS a FROM T) AS T` — the inner `FROM T` reads the BASE `T`
+    // `(SELECT Id AS a FROM T) AS T` — the inner `FROM T` reads the base `T`
     // (columns `Id`, `V`), projecting `Id AS a`, and the derived alias is also
     // `T`. Before the idempotent fix the schema-only augment re-materialised
     // the body against the already-bound one-column derived `T`, faulting
@@ -1009,7 +1009,7 @@ struct DerivedTableSelfNamedAliasTests {
   }
 
   @Test func `a self-named derived alias under a JOIN reads the base`() throws {
-    // A variant where the inner body references the base relation by the SAME
+    // A variant where the inner body references the base relation by the same
     // name as the alias, joined to another relation: `(SELECT Id AS k FROM T)
     // AS T` joined to `K` on the key. The inner `FROM T` still resolves the
     // base `T`, so the join pairs `K.k` with the base rows (1, 2).
@@ -1022,10 +1022,10 @@ struct DerivedTableSelfNamedAliasTests {
 
 // MARK: - Set-op SELECT * arity resolves an arm's own derived aliases
 
-/// A set operation's `SELECT *` arm resolves its OWN derived aliases for the
-/// cross-arm arity check. The top-level augment collects NO arm-local
+/// A set operation's `SELECT *` arm resolves its own derived aliases for the
+/// cross-arm arity check. The top-level augment collects no arm-local
 /// derivations (arms are scoped), so the star-arity check augments each arm's
-/// own aliases into a PER-ARM scope first — per arm, so a left arm's alias
+/// own aliases into a per-ARM scope first — per arm, so a left arm's alias
 /// never leaks to the right — matching what each arm produces at run.
 struct DerivedTableSetOperationStarTests {
   @Test func `a set-op SELECT * arm resolves its own derived table`() throws {
@@ -1066,7 +1066,7 @@ struct DerivedTableSetOperationStarTests {
   @Test func `a set-op arm star derived alias does not leak to the other arm`()
       throws {
     // No leak: the left arm's derived `d` is scoped to that arm, so the right
-    // arm's own `SELECT * FROM (…) AS d` resolves ITS own `d` — both arms name
+    // arm's own `SELECT * FROM (…) AS d` resolves its own `d` — both arms name
     // `d` for their own derived table without colliding. A one-column output
     // each, so the union runs. (`UNION ALL` keeps arm order; the right arm
     // reads `T`'s `V` values 10, 20, 30.)
@@ -1079,8 +1079,8 @@ struct DerivedTableSetOperationStarTests {
 
 // MARK: - Cyclic-view guard through derived-table materialisation
 
-/// A catalog with a CYCLIC view — `Loop`'s body reaches back to itself through
-/// a derived table — and a NON-cyclic view `Src` over the base `S`. Resolving
+/// A catalog with a cyclic view — `Loop`'s body reaches back to itself through
+/// a derived table — and a non-cyclic view `Src` over the base `S`. Resolving
 /// `Loop` must fault `.recursion`, not recurse to a stack overflow; `Src`
 /// resolves as any other view.
 private func views() throws -> FixtureCatalog {
@@ -1100,7 +1100,7 @@ private func views() throws -> FixtureCatalog {
 // MARK: - A derived alias preserves a same-named CTE (and base tables)
 
 /// Stripping a derived alias from the scope its body resolves against must drop
-/// ONLY the derived binding, KEEPING a same-named CTE (or base table): the
+/// ONLY the derived binding, keeping a same-named CTE (or base table): the
 /// alias being defined is out of scope in its own body, but an enclosing CTE of
 /// that name is visible. A blanket name-drop removed the CTE too, so a
 /// CTE-shadowing derived body faulted.
@@ -1108,7 +1108,7 @@ struct DerivedTableCTEShadowTests {
   @Test func `a derived body resolves an enclosing CTE of its own alias name`()
       throws {
     // `WITH t(x) AS (SELECT 1) SELECT * FROM (SELECT x FROM t) AS t` — the
-    // inner `FROM t` is inside the derived table ALSO aliased `t`; the alias
+    // inner `FROM t` is inside the derived table also aliased `t`; the alias
     // being defined is out of scope in its own body, so `t` resolves the CTE
     // (projecting its `x` = 1), not the derived table itself. A name-blanket
     // drop removed the CTE, faulting `.relation("t")` (or resolving a base).
@@ -1129,7 +1129,7 @@ struct DerivedTableCTEShadowTests {
 
   @Test func `a self-named derived body over a base table reads the base`()
       throws {
-    // Control (no CTE): the SAME shape over the BASE relation `T` resolves the
+    // Control (no CTE): the same shape over the base relation `T` resolves the
     // base — the body's `FROM T` reads columns `Id`, `V`, projecting `Id`, and
     // the derived alias is also `T`. Dropping only the derived binding leaves
     // the base reachable (a base table is not in the overlay), so this is the
@@ -1158,9 +1158,9 @@ struct DerivedTableCTEShadowTests {
 
 // MARK: - A CTE shadowed by a derived alias stays visible to a lazy scalar
 
-/// A LAZY scalar subquery resolves against the PRE-AUGMENT scope, exactly as
+/// A lazy scalar subquery resolves against the pre-augment scope, exactly as
 /// the eager `EXISTS`/`IN (Q)` subqueries do. For `WITH d(x) AS (…) SELECT
-/// (SELECT x FROM d) FROM (SELECT y FROM T) AS d`, the derived `d` OVERWRITES
+/// (SELECT x FROM d) FROM (SELECT y FROM T) AS d`, the derived `d` overwrites
 /// the CTE `d` in the executor's augmented overlay before the lazy scalar runs;
 /// resolving the scalar against that overlay (subscoped) could not restore the
 /// hidden CTE, faulting `.relation("d")`. Threading the pre-augment scope — the
@@ -1214,9 +1214,9 @@ struct DerivedTableCTEShadowScalarTests {
 
   @Test func `a lazy scalar over the shadowing derived alias itself works`()
       throws {
-    // Control: a scalar subquery that DOES name the shadowing derived `d`
+    // Control: a scalar subquery that does name the shadowing derived `d`
     // resolves it where intended. Here the scalar `(SELECT MAX(y) FROM e)`
-    // reads a DIFFERENT derived alias `e`, and the outer derived `d` (aliased
+    // reads a different derived alias `e`, and the outer derived `d` (aliased
     // to avoid the source `T` collision) drives the rows; the scalar collapses
     // to MAX = 3, so each of the three rows carries 3.
     let statement = try Statement(parsing:
@@ -1230,7 +1230,7 @@ struct DerivedTableCTEShadowScalarTests {
 
 // MARK: - A CTE body threads validate to its own derived tables (round 14)
 
-/// A CTE (`WITH`) body's OWN derived tables must be validated with the same
+/// A CTE (`WITH`) body's own derived tables must be validated with the same
 /// leniency the run uses: `with` validates a CTE with `typecheck: false` (defer
 /// operand checks to execution), so the CTE-body's schema-only `augment`/
 /// `compile` must derive a nested derived table with `validate: false` too — a
@@ -1239,7 +1239,7 @@ struct DerivedTableCTEShadowScalarTests {
 /// path (`typecheck: true`) keeps the eager body type-check.
 struct DerivedTableCTEBodyValidateThreadingTests {
   @Test func `a filtered-out body in a CTE runs to zero rows`() throws {
-    // The reviewer's case: the CTE `c(x)`'s body wraps the SAME filtered-out
+    // The reviewer's case: the CTE `c(x)`'s body wraps the same filtered-out
     // ill-typed derived table (`Label + 1` under `WHERE k = 0`, which drops
     // every `K` row). A run must empty rather than fault `.operand` — the CTE
     // validation threaded `typecheck: false`, so the CTE-body's derived table
@@ -1253,7 +1253,7 @@ struct DerivedTableCTEBodyValidateThreadingTests {
   }
 
   @Test func `the CTE form matches the non-derived CTE`() throws {
-    // Parity: the equivalent CTE whose body is NON-derived
+    // Parity: the equivalent CTE whose body is non-derived
     // (`SELECT Label + 1 AS x FROM K WHERE k = 0`) also runs to zero rows — the
     // filter drops every row before the projection. The derived-table wrapper
     // inside the CTE body must behave identically.
@@ -1270,9 +1270,9 @@ struct DerivedTableCTEBodyValidateThreadingTests {
   }
 
   @Test func `columns validate false returns the CTE headers`() throws {
-    // A `validate: false` derive after the run TRUSTS the CTE-body's derived
+    // A `validate: false` derive after the run trusts the CTE-body's derived
     // table rather than eager-type-checking it, so it returns the trailing
-    // query's headers WITHOUT the `.operand` fault.
+    // query's headers without the `.operand` fault.
     let statement = try Statement(parsing:
         "WITH c(x) AS (SELECT x FROM " +
         "(SELECT Label + 1 AS x FROM K WHERE k = 0) AS d) SELECT * FROM c")
@@ -1281,7 +1281,7 @@ struct DerivedTableCTEBodyValidateThreadingTests {
   }
 
   @Test func `columns validate true still faults the CTE body`() throws {
-    // The EXPLICIT schema path stays STRICT: `validate: true` threads
+    // The explicit schema path stays strict: `validate: true` threads
     // `typecheck: true` into the CTE validation, so the CTE-body's derived
     // table is eager-type-checked and its ill-typed `Label + 1` still faults
     // `.operand`.
@@ -1294,9 +1294,9 @@ struct DerivedTableCTEBodyValidateThreadingTests {
   }
 
   @Test func `a reached ill-typed body in a CTE still faults at run`() throws {
-    // Lenient is NOT never: a CTE-body derived table whose `WHERE` KEEPS a row
+    // Lenient is NOT never: a CTE-body derived table whose `WHERE` keeps a row
     // (`k = 1` matches `K`'s first row) reaches the ill-typed `Label + 1` at
-    // run, so the executor faults `.operand` — only an UNEVALUATED body is
+    // run, so the executor faults `.operand` — only an unevaluated body is
     // spared.
     let statement = try Statement(parsing:
         "WITH c(x) AS (SELECT x FROM " +
@@ -1311,15 +1311,15 @@ struct DerivedTableCTEBodyValidateThreadingTests {
 
 /// The unifying sweep found `subquery(of:)` compiled an `EXISTS`/`IN (Q)`/
 /// scalar subquery's body with the DEFAULT `validate: true`, so a filtered-out
-/// derived table NESTED in a subquery body leaked the eager type-check onto the
-/// RUN path. `compile(select)`/`group`/`subquery(of:)` now thread `validate`,
-/// so a run derives a subquery-body derived table LENIENTLY while a schema
+/// derived table nested in a subquery body leaked the eager type-check onto the
+/// run path. `compile(select)`/`group`/`subquery(of:)` now thread `validate`,
+/// so a run derives a subquery-body derived table leniently while a schema
 /// check keeps it strict.
 struct DerivedTableSubqueryBodyValidateThreadingTests {
   @Test func `a filtered-out body in an EXISTS subquery runs`() throws {
-    // The `EXISTS` subquery's body nests the SAME filtered-out ill-typed
+    // The `EXISTS` subquery's body nests the same filtered-out ill-typed
     // derived table. The subquery has no surviving row, so the `EXISTS` is
-    // FALSE and the outer query keeps no row — but it must not FAULT `.operand`
+    // FALSE and the outer query keeps no row — but it must not fault `.operand`
     // during the run preflight. Before the sweep `subquery(of:)` eager-type-
     // checked the derived body and faulted.
     try fixture().empty(
@@ -1328,7 +1328,7 @@ struct DerivedTableSubqueryBodyValidateThreadingTests {
   }
 
   @Test func `columns validate true still faults the subquery body`() throws {
-    // The EXPLICIT schema path stays STRICT: `validate: true` eager-type-checks
+    // The explicit schema path stays strict: `validate: true` eager-type-checks
     // the subquery-body's derived table, so the ill-typed `Label + 1` faults
     // `.operand`.
     #expect(throws: SQLError.operand("operands must be numeric")) {
@@ -1353,10 +1353,10 @@ struct DerivedTableSubqueryBodyValidateThreadingTests {
 
 // MARK: - A short-circuited subquery's nested derived body is not validated
 
-/// The reachability walk is the SOLE validation gate: schema/shape derivation
-/// is ALWAYS lenient (a derived body's columns/types derive WITHOUT evaluating
-/// its projection), and validation applies ONLY to nodes the walk REACHES — so
-/// a derived body nested under a SHORT-CIRCUITED subquery is not validated at
+/// The reachability walk is the sole validation gate: schema/shape derivation
+/// is ALWAYS lenient (a derived body's columns/types derive without evaluating
+/// its projection), and validation applies ONLY to nodes the walk reaches — so
+/// a derived body nested under a short-circuited subquery is not validated at
 /// ANY depth. `WHERE 1 = 0 AND 1 IN (SELECT x FROM (SELECT 1 / 0 …) AS d)`
 /// short-circuits the `IN` away, so its nested derived `d` never materialises;
 /// before the fix the schema pre-pass eager-compiled `d` with `validate: true`
@@ -1366,7 +1366,7 @@ struct DerivedTableSubqueryReachabilityGateTests {
       throws {
     // `1 = 0` short-circuits the AND, so the `IN` never materialises — the
     // nested derived `d`'s ill-typed `1 / 0` projection is unreached. The
-    // STRICT schema path must NOT fault: the walk did not reach the subquery,
+    // strict schema path must NOT fault: the walk did not reach the subquery,
     // so nothing nested under it is validated.
     let query = try parse(query:
         "SELECT V FROM S WHERE 1 = 0 AND 1 IN " +
@@ -1385,7 +1385,7 @@ struct DerivedTableSubqueryReachabilityGateTests {
   }
 
   @Test func `a reached subquery's nested derived body still faults`() throws {
-    // Parity: `1 = 1` does NOT short-circuit, so the walk REACHES the `IN` and
+    // Parity: `1 = 1` does NOT short-circuit, so the walk reaches the `IN` and
     // validates its nested derived body — the ill-typed `1 / 0` faults
     // `.divide` under the strict schema path, exactly as before the fix.
     #expect(throws: SQLError.divide) {
@@ -1409,7 +1409,7 @@ struct DerivedTableSubqueryReachabilityGateTests {
       throws {
     // Depth-independence: the ill-typed derived body is nested a derived table
     // under a subquery under a derived table. `1 = 0` short-circuits the outer
-    // `IN`, so NOTHING nested under it — at any depth — is validated.
+    // `IN`, so nothing nested under it — at any depth — is validated.
     let query = try parse(query:
         "SELECT V FROM S WHERE 1 = 0 AND 1 IN " +
         "(SELECT y FROM (SELECT x AS y FROM " +
@@ -1433,7 +1433,7 @@ struct DerivedTableSubqueryReachabilityGateTests {
 
 // MARK: - A set-operation VIEW body runs each arm with its arm-local aliases
 
-/// A view whose body is a set operation with a DERIVED TABLE in an arm: the
+/// A view whose body is a set operation with a derived TABLE in an arm: the
 /// `derive` path must run each arm with its arm-local derived aliases (as the
 /// top-level `run` does), not execute the precompiled whole-`setop` plan under
 /// an overlay that binds none.
@@ -1450,14 +1450,14 @@ private func setopViews() throws -> FixtureCatalog {
     try View("VR", "SELECT Id FROM T " +
                    "UNION ALL SELECT * FROM (SELECT Id FROM T) AS d",
              as: ["Id"])
-    // A LEFT arm whose IN subquery names the arm's ENCLOSING derived `d`. The
-    // arm's `FROM (…) AS d` is a SELECT-scoped derived alias, INVISIBLE to the
+    // A LEFT arm whose IN subquery names the arm's enclosing derived `d`. The
+    // arm's `FROM (…) AS d` is a SELECT-scoped derived alias, invisible to the
     // arm's own nested `IN` subquery's FROM — so `(SELECT Id FROM d)` faults
     // `.relation("d")` exactly as it would for a base-table alias.
     try View("VI", "SELECT Id FROM (SELECT Id FROM T) AS d " +
                    "WHERE Id IN (SELECT Id FROM d) " +
                    "UNION ALL SELECT Id FROM T", as: ["Id"])
-    // A RIGHT arm whose IN subquery names its ENCLOSING derived `d` — the same
+    // A RIGHT arm whose IN subquery names its enclosing derived `d` — the same
     // SELECT-scoped-alias fault as `VI`, in the right arm.
     try View("VJ", "SELECT Id FROM T " +
                    "UNION ALL SELECT Id FROM (SELECT Id FROM T) AS d " +
@@ -1495,8 +1495,8 @@ struct DerivedTableSetOperationViewTests {
 
   @Test func `a set-op left arm IN subquery cannot see its enclosing derived`()
       throws {
-    // The LEFT arm's `IN (SELECT Id FROM d)` names the arm's ENCLOSING derived
-    // `d`. A derived-table alias is SELECT-scoped, so it is INVISIBLE to a
+    // The LEFT arm's `IN (SELECT Id FROM d)` names the arm's enclosing derived
+    // `d`. A derived-table alias is SELECT-scoped, so it is invisible to a
     // nested subquery's FROM (as a base-table alias would be) — the subquery
     // faults `.relation("d")`, at a run.
     try setopViews().expect("SELECT Id FROM VI ORDER BY Id",
@@ -1526,11 +1526,11 @@ struct DerivedTableSetOperationViewTests {
 // MARK: - A set-op arm's scalar subquery cannot see its enclosing derived
 
 /// A set-op view whose arms carry a scalar subquery `(SELECT MAX(a) FROM d)`
-/// naming the arm's ENCLOSING derived alias `d`. A derived-table alias is
-/// SELECT-scoped, INVISIBLE to a nested scalar subquery's FROM (as a base-table
+/// naming the arm's enclosing derived alias `d`. A derived-table alias is
+/// SELECT-scoped, invisible to a nested scalar subquery's FROM (as a base-table
 /// alias would be), so the scalar faults `.relation("d")` — the same
 /// outer-derived-alias-in-subquery fault the `IN`/`EXISTS` variants raise. A
-/// scalar over a SHARED base relation stays legal.
+/// scalar over a shared base relation stays legal.
 private func setopScalarViews() throws -> FixtureCatalog {
   try Catalog {
     Relation("S", ["V": .integer]) {
@@ -1542,7 +1542,7 @@ private func setopScalarViews() throws -> FixtureCatalog {
       Row(40)
       Row(50)
     }
-    // A scalar subquery `(SELECT MAX(a) FROM d)` naming the arm's ENCLOSING
+    // A scalar subquery `(SELECT MAX(a) FROM d)` naming the arm's enclosing
     // derived `d`: the alias is SELECT-scoped, so the scalar's FROM cannot see
     // it and faults `.relation("d")` at both arms.
     try View("VMax",
@@ -1559,7 +1559,7 @@ private func setopScalarViews() throws -> FixtureCatalog {
              "FROM (SELECT V AS a FROM S) AS d " +
              "WHERE (SELECT MAX(a) FROM d) = 30",
              as: ["m"])
-    // Two arms with IDENTICAL scalar text reading a SHARED base relation `U`
+    // Two arms with identical scalar text reading a shared base relation `U`
     // (no derived alias): legal and the same value in both arms — both yield
     // MAX(U) = 50.
     try View("VShared",
@@ -1574,7 +1574,7 @@ struct DerivedTableSetOperationScalarTests {
   @Test func `a set-op arm scalar subquery cannot see its enclosing derived`()
       throws {
     // A scalar subquery `(SELECT MAX(a) FROM d)` in each arm names the arm's
-    // ENCLOSING derived `d`. The derived alias is SELECT-scoped, invisible to
+    // enclosing derived `d`. The derived alias is SELECT-scoped, invisible to
     // the scalar subquery's FROM, so it faults `.relation("d")` at a run — the
     // scalar variant of the outer-derived-alias-in-subquery fault.
     try setopScalarViews().expect("SELECT m FROM VMax",
@@ -1600,7 +1600,7 @@ struct DerivedTableSetOperationScalarTests {
   }
 
   @Test func `two arms sharing a non-arm-local scalar both yield it`() throws {
-    // Control: two arms with IDENTICAL scalar text over a SHARED relation `U`
+    // Control: two arms with identical scalar text over a shared relation `U`
     // (no arm-local `d`) each correctly yield MAX(U) = 50 — arm isolation does
     // not perturb a scalar that reads no arm-local relation.
     try setopScalarViews().expect("SELECT m FROM VShared",
@@ -1610,11 +1610,11 @@ struct DerivedTableSetOperationScalarTests {
 
 // MARK: - A set-op view's optimiser augment threads validate leniently
 
-/// Selecting from a SET-OPERATION view runs the run-path optimiser, which
+/// Selecting from a SET-operation view runs the run-path optimiser, which
 /// re-augments each leaf arm to bind its arm-local derived aliases. That
 /// per-arm augment defaulted to `validate: true`, so an arm's data-dependent-
 /// empty derived body (`Label + 1 AS x` under `WHERE k = 0`, no surviving row)
-/// was TYPE-CHECKED during optimisation and faulted `.operand` — even though
+/// was type-checked during optimisation and faulted `.operand` — even though
 /// `overlay(name:)` above and the run's materialise paths are lenient. The
 /// per-arm optimiser augment now threads `validate: false` (the optimiser needs
 /// schema/name bindings only), so a set-op view arm runs exactly as its
@@ -1635,13 +1635,13 @@ private func setopValidateViews() throws -> FixtureCatalog {
     try View("VF", "SELECT x FROM " +
                    "(SELECT Label + 1 AS x FROM K WHERE k = 0) AS d " +
                    "UNION ALL SELECT V FROM S", as: ["x"])
-    // The same filtered-out ill-typed derived table in a SINGLE-arm view — no
+    // The same filtered-out ill-typed derived table in a single-arm view — no
     // set operation, so the optimiser takes the whole-view overlay path.
     try View("VS", "SELECT x FROM " +
                    "(SELECT Label + 1 AS x FROM K WHERE k = 0) AS d",
              as: ["x"])
-    // A REACHED ill-typed arm body (`k = 2` keeps a `K` row) still faults at
-    // run — leniency spares only an UNEVALUATED expression.
+    // A reached ill-typed arm body (`k = 2` keeps a `K` row) still faults at
+    // run — leniency spares only an unevaluated expression.
     try View("VB", "SELECT x FROM " +
                    "(SELECT Label + 1 AS x FROM K WHERE k = 2) AS d " +
                    "UNION ALL SELECT V FROM S", as: ["x"])
@@ -1659,15 +1659,15 @@ struct DerivedTableSetOperationValidateTests {
   }
 
   @Test func `the set-op arm matches the single-arm view`() throws {
-    // Parity: the SINGLE-arm view over the SAME filtered-out derived body runs
+    // Parity: the single-arm view over the same filtered-out derived body runs
     // to zero rows — the optimiser's whole-view overlay was already lenient
     // (`overlay(name:)` passes `validate: false`), and the set-op arm now
-    // matches it, both running WITHOUT the `.operand` fault.
+    // matches it, both running without the `.operand` fault.
     try setopValidateViews().empty("SELECT * FROM VS")
   }
 
   @Test func `a reached ill-typed arm body still faults at run`() throws {
-    // Leniency is NOT never: the arm's `WHERE k = 2` KEEPS a `K` row, so the
+    // Leniency is NOT never: the arm's `WHERE k = 2` keeps a `K` row, so the
     // run reaches the ill-typed `Label + 1` and the executor faults `.operand`.
     try setopValidateViews().expect("SELECT * FROM VB",
                                     fails: .operand("operands must be numeric"))
@@ -1676,15 +1676,15 @@ struct DerivedTableSetOperationValidateTests {
 
 // MARK: - A derived alias is not a recursive relation reference
 
-/// The `WITH RECURSIVE` fixpoint detector inspects a relation's SOURCE, not its
+/// The `WITH RECURSIVE` fixpoint detector inspects a relation's source, not its
 /// binding name: a derived table's alias is not a recursive reference, while a
 /// genuine self-reference nested inside a derived body IS.
 struct DerivedTableRecursionReferenceTests {
   @Test func `a shadowing derived alias is not a recursive reference`() throws {
     // `WITH RECURSIVE a(n) AS (SELECT 1 UNION ALL SELECT n FROM (SELECT 2 AS n)
-    // AS a) SELECT n FROM a` — the second arm's `FROM (…) AS a` merely NAMES a
+    // AS a) SELECT n FROM a` — the second arm's `FROM (…) AS a` merely names a
     // derived table `a`; it does not reference the CTE `a`, so the CTE is NOT
-    // recursive and the arm runs ONCE (never to the recursion cap). The
+    // recursive and the arm runs once (never to the recursion cap). The
     // `UNION ALL` keeps both arms: the anchor 1, then the derived table's 2.
     let statement = try Statement(parsing:
         "WITH RECURSIVE a(n) AS " +
@@ -1701,7 +1701,7 @@ struct DerivedTableRecursionReferenceTests {
     // through the fixpoint. Detecting the nested reference is what makes the
     // recursion fire: the frontier climbs 1 → 2 → 3 and stops (`n < 3` empties
     // it), yielding 1, 2, 3. Were the nested `a` NOT seen, the arm would run
-    // ONCE against an unbound `a` and fault.
+    // once against an unbound `a` and fault.
     let statement = try Statement(parsing:
         "WITH RECURSIVE a(n) AS " +
         "(SELECT 1 UNION ALL " +
@@ -1754,10 +1754,10 @@ struct DerivedTableCyclicViewTests {
   }
 }
 
-// MARK: - Cyclic-view guard on a PLAIN FROM (no derived table)
+// MARK: - Cyclic-view guard on a plain FROM (no derived table)
 
 /// A catalog with cyclic views whose bodies name each other (and one that names
-/// itself) through a PLAIN `FROM`, not a derived table. `A` reads `B` and `B`
+/// itself) through a plain `FROM`, not a derived table. `A` reads `B` and `B`
 /// reads `A`; `Self` reads `Self`. The `Loop` fixture above cycles through a
 /// derived table (which re-enters the guard via `augment`/`materialise`); this
 /// fixture cycles through the direct `resolve(relation:)` view path, so it
@@ -1785,7 +1785,7 @@ struct CyclicViewPlainFromTests {
     // `run` compiles `SELECT * FROM A` before it executes; `resolve` enters
     // `A`'s body, whose `FROM B` enters `B`'s body, whose `FROM A` re-enters a
     // visited view and faults `.recursion` — never a stack overflow. The fault
-    // is raised at COMPILE, so no row ever materialises.
+    // is raised at compile, so no row ever materialises.
     try cyclicViews().expect("SELECT * FROM A", fails: .recursion("A"))
   }
 
@@ -1835,12 +1835,12 @@ struct CyclicViewPlainFromTests {
 // MARK: - An enclosing derived alias is invisible to a nested subquery's FROM
 
 /// A derived-table alias in the outer SELECT's FROM is SELECT-scoped: it names
-/// a relation only in the OWNING SELECT's own FROM/JOIN and expressions, NOT
+/// a relation only in the owning SELECT's own FROM/JOIN and expressions, NOT
 /// inside a nested `EXISTS`/`IN`/scalar subquery's FROM — a subquery does not
 /// see the enclosing query's FROM relations, exactly as a base-table alias in
 /// the enclosing FROM is invisible. So `FROM d` inside the subquery faults
 /// `.relation("d")` (the enclosing derived `d` is stripped), while a same-named
-/// CTE stays visible, the subquery's OWN derived table still resolves, and a
+/// CTE stays visible, the subquery's own derived table still resolves, and a
 /// correlated COLUMN reference still works (that is orthogonal to FROM scope).
 struct DerivedTableSubqueryScopeTests {
   @Test func `an EXISTS subquery FROM cannot see the enclosing derived alias`()
@@ -1866,7 +1866,7 @@ struct DerivedTableSubqueryScopeTests {
 
   @Test func `an enclosing base-table alias is invisible to the subquery too`()
       throws {
-    // The SAME fault a base-table alias `d` in the enclosing FROM raises: a
+    // The same fault a base-table alias `d` in the enclosing FROM raises: a
     // nested subquery's `FROM d` sees neither an enclosing base-table alias nor
     // an enclosing derived alias — both are SELECT-scoped range variables.
     try fixture().expect(
@@ -1919,8 +1919,8 @@ struct DerivedTableSubqueryScopeTests {
   }
 
   @Test func `a subquery's own derived table still resolves`() throws {
-    // The subquery augments its OWN derived table `e` — the strip drops only
-    // the ENCLOSING derived aliases, so `EXISTS (SELECT 1 FROM (SELECT 2 AS z)
+    // The subquery augments its own derived table `e` — the strip drops only
+    // the enclosing derived aliases, so `EXISTS (SELECT 1 FROM (SELECT 2 AS z)
     // AS e)` resolves `e` and the subquery is TRUE, keeping the outer row.
     try fixture().expect(
         "SELECT x FROM (SELECT 1 AS x) AS d " +
@@ -1929,9 +1929,9 @@ struct DerivedTableSubqueryScopeTests {
   }
 
   @Test func `an uncorrelated EXISTS over a base table still runs`() throws {
-    // Orthogonal to the derived-alias strip: a nested subquery over a BASE
+    // Orthogonal to the derived-alias strip: a nested subquery over a base
     // relation (`EXISTS (SELECT 1 FROM S)`) resolves and runs exactly as
-    // before — stripping the ENCLOSING derived aliases keeps base tables (and
+    // before — stripping the enclosing derived aliases keeps base tables (and
     // CTEs) in the subquery's FROM scope. `S` is non-empty, so every outer
     // derived row is kept.
     try fixture().expect(
@@ -1941,26 +1941,26 @@ struct DerivedTableSubqueryScopeTests {
   }
 }
 
-// MARK: - A CTE a derived BODY's own FROM shadows stays visible to its subquery
+// MARK: - A CTE a derived body's own FROM shadows stays visible to its subquery
 
 /// The schema-path analog of the round-8 CTE-not-hidden test: a derived
-/// table's BODY whose own FROM alias shadows an enclosing CTE, with a NESTED
+/// table's body whose own FROM alias shadows an enclosing CTE, with a nested
 /// subquery in that body naming the CTE. The body's schema is derived through
 /// `materialise`, which augments the body's own FROM alias OVER the CTE in its
 /// overlay — so subscoping that overlay for the nested subquery would leave the
 /// CTE unbound. The schema walk must resolve the body's nested subqueries
-/// against the PRE-augment context (CTE intact), matching the run path, so
+/// against the pre-augment context (CTE intact), matching the run path, so
 /// `columns(of:)` and a run both read the CTE inside the nested subquery.
 struct DerivedTableBodyCTEShadowSubqueryTests {
   @Test func `a body FROM alias shadows a CTE its nested subquery still reads`()
       throws {
     // `WITH t(x) AS (SELECT 1) SELECT * FROM (SELECT y FROM (SELECT 2 AS y)
     // AS t WHERE EXISTS (SELECT x FROM t)) AS d` — the outer derived body's own
-    // `FROM (SELECT 2 AS y) AS t` SHADOWS the CTE `t`, and the body's nested
+    // `FROM (SELECT 2 AS y) AS t` shadows the CTE `t`, and the body's nested
     // `EXISTS (SELECT x FROM t)` names `t` — which resolves the CTE
     // (statement-scoped, visible in a subquery), reading its `x` = 1. The CTE
     // has one row, so the EXISTS is TRUE and the body yields `y` = 2. Before
-    // the fix the schema walk's overlay OVERWROTE the CTE with the body's
+    // the fix the schema walk's overlay overwrote the CTE with the body's
     // derived `t`, so subscoping dropped it and `SELECT x FROM t` faulted.
     let statement = try Statement(parsing:
         "WITH t(x) AS (SELECT 1) " +
@@ -2002,19 +2002,19 @@ private final class Counter: @unchecked Sendable {
   }
 }
 
-/// The optimiser augments a view body SCHEMA-ONLY (`rows: false`), so it never
+/// The optimiser augments a view body schema-ONLY (`rows: false`), so it never
 /// executes a derived table's body during optimisation. A stateful routine in a
-/// view's `FROM (SELECT tick() …)` runs at `derive`/run alone — exactly ONCE
+/// view's `FROM (SELECT tick() …)` runs at `derive`/run alone — exactly once
 /// for `SELECT * FROM v`, not doubled by an optimise-time materialisation.
 struct DerivedTableViewOptimiseTests {
   @Test func `a view's stateful derived-body routine runs exactly once`()
       throws {
     // `CREATE VIEW v AS SELECT x FROM (SELECT tick() AS x FROM T) AS d` — the
-    // derived body calls the non-deterministic COUNTING routine `tick()` once
+    // derived body calls the non-deterministic counting routine `tick()` once
     // per `T` row. `T` has one row, so a single execution of the view invokes
-    // `tick()` EXACTLY once. When the optimiser materialised the derived body
+    // `tick()` exactly once. When the optimiser materialised the derived body
     // (`rows: true`) it ran the body during optimisation AND again at `derive`,
-    // so the counter read TWICE; `rows: false` binds the alias schema-only, so
+    // so the counter read twice; `rows: false` binds the alias schema-only, so
     // the single execution at run is the only invocation.
     let counter = Counter()
     let routines = try Routines()
@@ -2039,7 +2039,7 @@ struct DerivedTableViewOptimiseTests {
 
 /// A derived table's body is materialised (executed) ONLY after `compile`
 /// validates the whole query, and each level of a nested derived table runs its
-/// body EXACTLY once. A stateful `tick()` in the body records the invocations:
+/// body exactly once. A stateful `tick()` in the body records the invocations:
 /// an invalid query executes it 0×, a valid single-level derived table 1×, and
 /// a nested derived table 1× — never doubled by an output-schema-discovery
 /// materialisation ahead of the single run.
@@ -2061,11 +2061,11 @@ struct DerivedTableExecutionOnceTests {
   }
 
   @Test func `an invalid query never executes the derived body`() throws {
-    // `SELECT missing FROM (SELECT tick() AS x FROM T) AS d` FAILS during
-    // column resolution — `missing` is unknown — so it must NEVER execute the
-    // derived body's stateful `tick()`. `run` compiles/VALIDATES the whole
-    // query (schema-only) BEFORE materialising any derived rows, so the fault
-    // is raised with the body executed ZERO times. Materialising ahead of the
+    // `SELECT missing FROM (SELECT tick() AS x FROM T) AS d` fails during
+    // column resolution — `missing` is unknown — so it must never execute the
+    // derived body's stateful `tick()`. `run` compiles/validates the whole
+    // query (schema-only) before materialising any derived rows, so the fault
+    // is raised with the body executed zero times. Materialising ahead of the
     // compile would have run `tick()` for a query that cannot run.
     let (counter, routines, catalog) = try harness()
     let query =
@@ -2093,9 +2093,9 @@ struct DerivedTableExecutionOnceTests {
     // `SELECT x FROM (SELECT x FROM (SELECT tick() AS x FROM T) AS n) AS d` — a
     // derived table whose own body nests a derived table. The output-schema
     // discovery augment used to materialise (`rows: true`) the nested body once
-    // to derive `d`'s schema, then the single run materialised it AGAIN, so
-    // `tick()` fired TWICE and the query returned the SECOND value. Discovery
-    // is now schema-only (`rows: false`), so the nested body runs EXACTLY once
+    // to derive `d`'s schema, then the single run materialised it again, so
+    // `tick()` fired twice and the query returned the second value. Discovery
+    // is now schema-only (`rows: false`), so the nested body runs exactly once
     // and the query returns the first (only) value.
     let (counter, routines, catalog) = try harness()
     let query = try parse(query:
@@ -2118,8 +2118,8 @@ struct DerivedTableExecutionOnceTests {
 
 // MARK: - A view-body lazy scalar reads the view's scope, not the caller's
 
-/// A base relation `T` and a view `Count` whose body has a lazy SCALAR subquery
-/// `(SELECT COUNT(*) FROM T)` over that BASE `T`. The base has three rows, so
+/// A base relation `T` and a view `Count` whose body has a lazy scalar subquery
+/// `(SELECT COUNT(*) FROM T)` over that base `T`. The base has three rows, so
 /// the view's scalar collapses to three regardless of the caller.
 private func scopedScalarView() throws -> FixtureCatalog {
   try Catalog {
@@ -2133,15 +2133,15 @@ private func scopedScalarView() throws -> FixtureCatalog {
     Relation("One", ["V": .integer]) {
       Row(1)
     }
-    // The scalar `(SELECT COUNT(*) FROM T)` is a LAZY scalar occurrence keyed
-    // under `.view("count")`; it must resolve against the BASE `T` (count 3),
+    // The scalar `(SELECT COUNT(*) FROM T)` is a lazy scalar occurrence keyed
+    // under `.view("count")`; it must resolve against the base `T` (count 3),
     // never a caller CTE `T`.
     try View("Count", "SELECT (SELECT COUNT(*) FROM T) AS n", as: ["n"])
   }
 }
 
-/// The run-time subquery cache tracks the pre-augment relation scope PER
-/// `Subscope`, so a view-body LAZY scalar resolves under the VIEW overlay, not
+/// The run-time subquery cache tracks the pre-augment relation scope per
+/// `Subscope`, so a view-body lazy scalar resolves under the VIEW overlay, not
 /// the caller's. A single left-hand scope let a caller CTE `T` mask the view's
 /// own base `T`: `WITH T AS (…) SELECT * FROM Count` resolved the view scalar's
 /// `(SELECT COUNT(*) FROM T)` against the caller CTE `T` (five rows) instead of
@@ -2149,7 +2149,7 @@ private func scopedScalarView() throws -> FixtureCatalog {
 struct DerivedTableViewScalarScopeTests {
   @Test func `a view scalar reads the view's T not the caller CTE`() throws {
     // `WITH T AS (five distinct rows) SELECT * FROM Count` — the caller binds a
-    // CTE `T` of five rows, shadowing the base `T` in the CALLER's scope. The
+    // CTE `T` of five rows, shadowing the base `T` in the caller's scope. The
     // view `Count`'s body scalar `(SELECT COUNT(*) FROM T)` was compiled over
     // the base `T` (three rows), so it must collapse to 3, NOT the caller CTE's
     // 5. The lazy scalar now resolves under its own `.view("count")` scope (the
@@ -2174,7 +2174,7 @@ struct DerivedTableViewScalarScopeTests {
   }
 
   @Test func `a caller-scope scalar still reads the caller CTE`() throws {
-    // No regression on the `.caller` scope: a TOP-LEVEL scalar
+    // No regression on the `.caller` scope: a top-level scalar
     // `(SELECT COUNT(*) FROM T)` — textually in the caller, keyed `.caller` —
     // reads the caller CTE `T` (five rows), the scope its own occurrence ran
     // against. The per-`Subscope` map keeps the caller scalar on the caller
@@ -2190,8 +2190,8 @@ struct DerivedTableViewScalarScopeTests {
 
 // MARK: - The direct-select compile entry binds derived aliases
 
-/// The `compile(_ select:)` entry — reached DIRECTLY by a caller that already
-/// holds a `Select` (not wrapped in a `Query`) — must bind THIS select's own
+/// The `compile(_ select:)` entry — reached directly by a caller that already
+/// holds a `Select` (not wrapped in a `Query`) — must bind this select's own
 /// FROM derived aliases before resolving its relations, the same as the `Query`
 /// wrapper (`compile(.select(select))`) and `run` do. Compiling the reviewer's
 /// `SELECT a FROM (SELECT V AS a FROM S) AS d` through the bare-select entry
@@ -2229,7 +2229,7 @@ struct DerivedTableDirectCompileTests {
   }
 
   @Test func `the run yields the derived alias's rows`() throws {
-    // Run parity: the SAME SQL succeeds through `run`, projecting `a` (the `S`
+    // Run parity: the same SQL succeeds through `run`, projecting `a` (the `S`
     // values) — the direct-select entry now matches it.
     try fixture().expect(
         "SELECT a FROM (SELECT V AS a FROM S) AS d ORDER BY a",
@@ -2239,7 +2239,7 @@ struct DerivedTableDirectCompileTests {
   @Test func `a self-named direct-select derived alias reads the base`()
       throws {
     // No double-augment regression: a derived alias equal to a base relation
-    // (`(SELECT V AS a FROM S) AS S`) still reads the BASE `S` in its body —
+    // (`(SELECT V AS a FROM S) AS S`) still reads the base `S` in its body —
     // the wrapper's augment and this entry's augment key on the derivation
     // identity, so the wrapped path does not re-derive and the body's own `S`
     // is the base.
@@ -2252,8 +2252,8 @@ struct DerivedTableDirectCompileTests {
 
 // MARK: - A grouped ORDER BY aggregate subquery reads the shadowed CTE
 
-/// The last CTE-overwrite-class path: a GROUPED `ORDER BY` sorting on an
-/// aggregate over a SCALAR subquery that names a CTE a same-named derived alias
+/// The last CTE-overwrite-class path: a grouped `ORDER BY` sorting on an
+/// aggregate over a scalar subquery that names a CTE a same-named derived alias
 /// shadows. The aggregate's argument subquery is lowered through the grouped
 /// path, so its scope must reveal the base — the derived alias `d` shadows
 /// the CTE `d` non-destructively, and the subquery's `FROM d` resolves the CTE
@@ -2291,12 +2291,12 @@ struct DerivedTableGroupedOrderScalarShadowTests {
 
 // MARK: - A derived-table run stays lenient in output discovery
 
-/// The caller's `validate` flag threads through the derived-table OUTPUT
-/// DISCOVERY (the schema walk that names a derived table's columns before a
-/// run), so a derived-table RUN stays LENIENT like the surrounding non-derived
+/// The caller's `validate` flag threads through the derived-table output
+/// discovery (the schema walk that names a derived table's columns before a
+/// run), so a derived-table run stays lenient like the surrounding non-derived
 /// path: a scalar subquery a data-dependent filter drops from the result is
 /// NOT strictly validated before execution. A `WHERE k = 0` over `K` (keyed
-/// 1, 2) filters EVERY row out, so the inner `Label + 1` — a text-plus-integer
+/// 1, 2) filters every row out, so the inner `Label + 1` — a text-plus-integer
 /// operand that would fault if evaluated — never runs, exactly as the
 /// non-derived form runs to zero rows without touching it. The strict
 /// `columns(of:, validate: true)` preflight still faults, so the fix narrows
@@ -2309,7 +2309,7 @@ struct DerivedTableLenientOutputTests {
     // drops every row, so `Label + 1` never evaluates and the outer derived
     // table `d` yields zero rows. The output discovery for the run must thread
     // `validate: false` into the nested derived body, or it eager-type-checks
-    // `Label + 1` and faults BEFORE execution.
+    // `Label + 1` and faults before execution.
     try fixture().empty(
         "SELECT * FROM (SELECT (SELECT x " +
         "                      FROM (SELECT Label + 1 AS x FROM K " +
@@ -2342,7 +2342,7 @@ struct DerivedTableLenientOutputTests {
   }
 
   @Test func `the strict preflight still faults on the inner scalar`() throws {
-    // Parity: `columns(of:, validate: true)` — the EXPLICIT schema path — still
+    // Parity: `columns(of:, validate: true)` — the explicit schema path — still
     // eager-type-checks the inner body and faults on `Label + 1`, proving the
     // fix narrows to the lenient run path and does not disable validation.
     #expect(throws: SQLError.self) {
@@ -2358,12 +2358,12 @@ struct DerivedTableLenientOutputTests {
 
 // MARK: - All-NULL derived column unification
 
-/// A derived table that projects a constant-NULL column places NO type
+/// A derived table that projects a constant-NULL column places no type
 /// constraint on it, exactly as a bare constant-NULL set-operation arm does.
 /// `materialise` carries the fold's per-column unconstrained marker through the
 /// derived-table binding (and through an `AS d(a)` rename), so a transparent
 /// `(SELECT NULLIF('a','a') AS x) AS d` wrapper unifies with a later typed arm
-/// ORDER-INDEPENDENTLY rather than folding as its literal-fix type and
+/// ORDER-independently rather than folding as its literal-fix type and
 /// faulting.
 struct DerivedTableNullUnificationTests {
   @Test func `an all-NULL derived column unifies with an integer arm`()

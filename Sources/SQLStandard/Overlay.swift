@@ -46,8 +46,8 @@ extension Catalog where Self: ~Escapable {
 }
 
 extension Routines {
-  /// A copy of these routines with the DEFINED `function` bound to `name`, its
-  /// body EARLY-BINDING against the standard prelude overlaid with these
+  /// A copy of these routines with the defined `function` bound to `name`, its
+  /// body early-binding against the standard prelude overlaid with these
   /// routines — the prelude-defaulting counterpart of the engine's
   /// `registering(_:_:capturing:)`, so `lowbit(n) AS BITAND(n, 1)` resolves the
   /// built-in at registration exactly as a query would. Registering a protected

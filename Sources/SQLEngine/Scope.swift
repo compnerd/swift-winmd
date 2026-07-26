@@ -21,16 +21,16 @@ extension Schema {
   }
 
   /// The ordinal `column` resolves to in `relation`, or `nil` when it is a
-  /// candidate CORRELATED reference to an enclosing scope — this relation does
+  /// candidate correlated reference to an enclosing scope — this relation does
   /// not name it — the not-found probe the single-relation `.column` lowering
   /// consults before correlating outward.
   ///
   /// The two not-found situations `ordinal(of:in:)` conflates as `.column` are
-  /// DISTINGUISHED here. A qualifier this relation does NOT answer (its alias,
+  /// distinguished here. A qualifier this relation does NOT answer (its alias,
   /// else its name), or an unqualified name it does not carry, is a genuine
   /// not-found → `nil`, so the walk correlates to the outer query. But a
-  /// qualifier this relation DOES answer, naming a column it LACKS, is a hard
-  /// `SQLError.column` that PROPAGATES: the local alias SHADOWS a same-named
+  /// qualifier this relation does answer, naming a column it lacks, is a hard
+  /// `SQLError.column` that propagates: the local alias shadows a same-named
   /// outer relation, so the miss faults against the inner relation rather than
   /// falling through to bind the outer one. This is the single-relation analog
   /// of `Scope.find`.
@@ -55,9 +55,9 @@ extension Schema {
                       _ routines: Routines = [:],
                       subquery: Resolution = .unsupported)
       throws(SQLError) -> Array<Term> {
-    // A projection is a BARRED clause position: a correlated column of THIS
+    // A projection is a barred clause position: a correlated column of this
     // query has no evaluator here (only WHERE/ON/HAVING admit one). The cut is
-    // intrinsic to the entry, so a caller CANNOT pass an admitting seam into a
+    // intrinsic to the entry, so a caller cannot pass an admitting seam into a
     // projection — the FROM-less scalar path included — keeping the run's
     // lowering and the schema `columns(of:)` derive in lockstep.
     let subquery = subquery.barred
@@ -67,7 +67,7 @@ extension Schema {
     case let .columns(columns):
       // Lower each bare column through `term`, so a name this relation does not
       // bind consults the `subquery` surface: a correlated reference on the
-      // BARRED projection surface is diagnosed unsupported (parity with the
+      // barred projection surface is diagnosed unsupported (parity with the
       // schema path) rather than faulting `SQLError.column`.
       var terms = Array<Term>()
       terms.reserveCapacity(columns.count)
@@ -97,12 +97,12 @@ extension Schema {
     switch expression {
     case let .column(column):
       // Resolve against this relation first; a name it does not bind is a
-      // candidate CORRELATED reference to the enclosing scope, lowered to a
+      // candidate correlated reference to the enclosing scope, lowered to a
       // synthetic `Term.parameter` when the outer scope binds it, else the
-      // ordinary unknown-column fault. A QUALIFIED miss on THIS relation (its
-      // alias names it, but the column is absent) is a HARD `.column` `find`
+      // ordinary unknown-column fault. A qualified miss on this relation (its
+      // alias names it, but the column is absent) is a hard `.column` `find`
       // propagates — never a fall-through to correlate a same-qualifier outer
-      // relation, which the local alias SHADOWS.
+      // relation, which the local alias shadows.
       if let ordinal = try find(column, in: relation) { return .slot(ordinal) }
       if let name = try subquery.correlate(column) { return .parameter(name) }
       return try .slot(ordinal(of: column, in: relation))
@@ -117,7 +117,7 @@ extension Schema {
       }
       // Case-fold the routine name to the SQL identifier rule the `Routines`
       // lookup uses (lowercase), so two calls that spell the same routine with
-      // different case — `UPPER(x)` and `upper(x)` — lower to an IDENTICAL
+      // different case — `UPPER(x)` and `upper(x)` — lower to an identical
       // `.apply` term. Term identity then agrees with dispatch (which folds on
       // lookup), so the DISTINCT ORDER BY guard's projected-term match, the
       // aggregate dedup, and every other term comparison stay consistent.
@@ -143,7 +143,7 @@ extension Schema {
         nil
       }
       // Attach the unified result type — the same `ValueType.unified` reduction
-      // `derive`/`validate` compute — so the executor COERCES the selected
+      // `derive`/`validate` compute — so the executor coerces the selected
       // branch's value to the type the schema advertises. Derive it against a
       // one-relation scope, this Schema's own resolution surface.
       let scope = Scope([(relation, self)])
@@ -157,7 +157,7 @@ extension Schema {
                             subquery: subquery), type)
     case let .coalesce(arguments):
       // Lower each argument to a `Term` over this relation and hold them in a
-      // first-class `Term.coalesce` so each is evaluated ONCE. `type` is the
+      // first-class `Term.coalesce` so each is evaluated once. `type` is the
       // unified argument type the selected value coerces to, derived against a
       // one-relation scope.
       var elements = Array<Term>()
@@ -171,14 +171,14 @@ extension Schema {
       return .coalesce(elements, type: type)
     case let .nullif(lhs, rhs):
       // Lower both operands to `Term`s over this relation and hold them in a
-      // first-class `Term.nullif` so each is evaluated ONCE.
+      // first-class `Term.nullif` so each is evaluated once.
       return try .nullif(term(lhs, in: relation, routines, subquery: subquery),
                          term(rhs, in: relation, routines, subquery: subquery))
     case let .subquery(query):
       // A scalar subquery lowers to a `Term.subquery` reading its collapsed
       // value from the run-time cache, carrying its occurrence `Subkey` and
       // single-column type, the single-column arity enforced from the compiled
-      // width (no cursor). The query is UNCORRELATED — it reads no cell here.
+      // width (no cursor). The query is uncorrelated — it reads no cell here.
       return try subquery.scalar(query)
     case .aggregate:
       // An aggregate has no per-row meaning — it folds over a group — so it may
@@ -186,7 +186,7 @@ extension Schema {
       throw .state("42803", "an aggregate is not allowed here")
     case .grouping:
       // GROUPING is a grouped-query construct decided by the arm's key
-      // membership; it has no meaning in this NON-grouped resolution (a scalar
+      // membership; it has no meaning in this non-grouped resolution (a scalar
       // projection, WHERE, or join ON), so it faults exactly as an aggregate
       // does. A grouped query lowers it through `Grouped.term` instead.
       throw .state("42803", "GROUPING requires a GROUP BY")
@@ -206,7 +206,7 @@ extension Schema {
                       _ routines: Routines = [:],
                       subquery: Resolution = .unsupported)
       throws(SQLError) -> Array<SortKey> {
-    // An ORDER BY is BARRED, as the projection is: a correlated column of THIS
+    // An ORDER BY is barred, as the projection is: a correlated column of this
     // query is out of the cut here, so the entry bars the seam by construction.
     let subquery = subquery.barred
     return try SQLEngine.order(order, projection, names) {
@@ -255,36 +255,36 @@ internal struct Scope {
     let offset: Int
   }
 
-  /// A `NATURAL`/`USING` MERGED column (ISO 9075 7.10) — the ONE common column
-  /// a named-column join exposes, belonging to NEITHER side. It has NO physical
+  /// A `NATURAL`/`USING` merged column (ISO 9075 7.10) — the one common column
+  /// a named-column join exposes, belonging to neither side. It has no physical
   /// slot of its own: its `value` is the `COALESCE(left, right)` over the two
-  /// PHYSICAL combined ordinals it merges (each still addressable QUALIFIED),
+  /// physical combined ordinals it merges (each still addressable qualified),
   /// and its `type` the unified coalesce type. A bare (unqualified) reference
-  /// to its `name` resolves to `value` — the merged entry SHADOWS its physical
+  /// to its `name` resolves to `value` — the merged entry shadows its physical
   /// constituents for bare lookup — while a qualified `A.c`/`B.c` never matches
   /// it and reaches its own slot.
   internal struct Merged: Sendable {
     let name: String
     let value: Term
     let type: ValueType
-    /// The two PHYSICAL combined ordinals this merged column coalesces — the
+    /// The two physical combined ordinals this merged column coalesces — the
     /// left constituent and the right one — kept so a `SELECT *` drops them
-    /// (each is exposed ONCE, via the merged `value`, not twice as itself).
+    /// (each is exposed once, via the merged `value`, not twice as itself).
     let constituents: Array<Int>
-    /// Whether the merged column places NO type constraint — TRUE only when
-    /// BOTH constituents were unconstrained (each an all-NULL/placeholder
+    /// Whether the merged column places no type constraint — TRUE only when
+    /// both constituents were unconstrained (each an all-NULL/placeholder
     /// column), so a `USING` merge of two constant-NULL sides stays a
     /// placeholder that a further enclosing set-operation fold unifies with any
-    /// typed arm; FALSE when EITHER side constrained the merged type. The
+    /// typed arm; FALSE when either side constrained the merged type. The
     /// `unconstrained` bit the set-operation `merge(_:_:)` computes, carried so
     /// a downstream `output(of:)`/correlated read reports it rather than
     /// hard-coding the merged column constrained.
     let unconstrained: Bool
 
     /// This merged column as an output `ResolvedColumn` — its `type` AND its
-    /// `unconstrained` mask carried TOGETHER, named `name` (the reference's
+    /// `unconstrained` mask carried together, named `name` (the reference's
     /// spelling for a bare `output(of:)`, else the merged column's own `name`
-    /// for a `SELECT *`). The SINGLE construction both the `SELECT *`
+    /// for a `SELECT *`). The single construction both the `SELECT *`
     /// (`outputs`) and the explicit bare `output(of:)` merged-output paths
     /// route through, so neither can drop the mask the other carries.
     internal func resolved(named name: String) -> ResolvedColumn {
@@ -304,7 +304,7 @@ internal struct Scope {
 
   /// The physical combined ordinals a merged column subsumes — the union of
   /// every `Merged.constituents` — so a `SELECT *` skips them (each is exposed
-  /// ONCE via its merged `value`).
+  /// once via its merged `value`).
   private let subsumed: Set<Int>
 
   /// Builds a scope over `relations` — the `FROM` relation first, then each
@@ -326,18 +326,18 @@ internal struct Scope {
   }
 
   /// The merged column named `name` (case-insensitively), or `nil` when none —
-  /// the entry a bare reference SHADOWS its two physical constituents with.
+  /// the entry a bare reference shadows its two physical constituents with.
   private func merged(_ name: String) -> Merged? {
     let folded = name.lowercased()
     return merged.first { $0.name.lowercased() == folded }
   }
 
-  /// The `NATURAL`/`USING` merged column a BARE `name` resolves to (ISO 9075
+  /// The `NATURAL`/`USING` merged column a bare `name` resolves to (ISO 9075
   /// 7.10), or `nil` when none is merged under that name — the binding
   /// `term`/`derive`/`output(of:)` shadow the two physical sides with.
   ///
-  /// The merged column shadows its OWN constituents, but an addressable column
-  /// of the same name a LATER PLAIN join contributed (`… USING (k) JOIN C …`, C
+  /// The merged column shadows its own constituents, but an addressable column
+  /// of the same name a later plain join contributed (`… USING (k) JOIN C …`, C
   /// carrying its own `k`) is NOT a constituent — a bare `k` now names both
   /// the merged column and that other one, so it faults `SQLError.ambiguous`
   /// rather than silently taking the merged value. A qualified `A.k`/`C.k`
@@ -345,8 +345,8 @@ internal struct Scope {
   ///
   /// The conflict scan is the FULL addressable surface (`addressable` —
   /// physical AND virtual, the same surface `ordinal(of:)` resolves against),
-  /// EXCLUDING the merged column's own physical constituents. So a merged `Id`
-  /// (a virtual join column) coexisting with a later plain join's own VIRTUAL
+  /// excluding the merged column's own physical constituents. So a merged `Id`
+  /// (a virtual join column) coexisting with a later plain join's own virtual
   /// `Id` faults `.ambiguous` just as a real conflict does — the two axes stay
   /// consistent because neither the merged bare lookup nor the ordinary one
   /// scans a partial surface.
@@ -359,9 +359,9 @@ internal struct Scope {
     return merged
   }
 
-  /// Whether the real column at `member`'s local `ordinal` is a PHYSICAL
+  /// Whether the real column at `member`'s local `ordinal` is a physical
   /// constituent a merged column subsumes — one a `SELECT *` drops, since the
-  /// merged `value` already exposes it ONCE.
+  /// merged `value` already exposes it once.
   private func subsumed(_ member: Member, _ ordinal: Int) -> Bool {
     subsumed.contains(member.offset + ordinal)
   }
@@ -376,21 +376,21 @@ internal struct Scope {
   /// rather than the ordinal `keys` map its `find` cannot fill.
   internal func merges(_ name: String) -> Merged? { merged(name) }
 
-  /// Whether the real column at combined `ordinal` is a PHYSICAL constituent a
+  /// Whether the real column at combined `ordinal` is a physical constituent a
   /// merged column subsumes — the schema-path `SELECT *` (`outputs`) drops it.
   internal func subsumes(_ ordinal: Int) -> Bool { subsumed.contains(ordinal) }
 
   // MARK: - Layout and names
 
-  /// The combined ordinals of the REAL columns a `SELECT *` emits AFTER the
+  /// The combined ordinals of the REAL columns a `SELECT *` emits after the
   /// merged block — every relation's real column at its combined ordinal, in
   /// chain order, skipping a physical constituent a merged column subsumes
-  /// (each exposed ONCE via its merged `value`). Never a virtual ordinal.
+  /// (each exposed once via its merged `value`). Never a virtual ordinal.
   ///
-  /// This is the ONE walk the `SELECT *` surfaces share, so its length and its
+  /// This is the one walk the `SELECT *` surfaces share, so its length and its
   /// membership cannot drift between them: `terms(.all)` maps each to a
   /// `.slot`, `outputs`/`names` read each column's name and type, and
-  /// `width(of: .all)` is `merged.count` plus this count — the width DERIVED
+  /// `width(of: .all)` is `merged.count` plus this count — the width derived
   /// from the same enumeration that emits the columns, not a parallel formula.
   internal var expansion: Array<Int> {
     var ordinals = Array<Int>()
@@ -403,11 +403,11 @@ internal struct Scope {
     return ordinals
   }
 
-  /// The visible (unqualified) column NAMES this scope resolves, in chain order
+  /// The visible (unqualified) column names this scope resolves, in chain order
   /// — the `NATURAL`/`USING` merged columns first, then each member's real
   /// column names skipping a physical constituent a merged column subsumes.
   /// This is the LEFT side's output-name list a `NATURAL` join intersects with
-  /// the joined-in relation to find its common columns. It reads the ONE
+  /// the joined-in relation to find its common columns. It reads the one
   /// `expansion` enumeration the `SELECT *` surfaces share, resolving each
   /// combined ordinal back to its owning relation's spelling (`name(at:)`).
   internal var names: Array<String> {
@@ -432,25 +432,25 @@ internal struct Scope {
 
   /// The LEFT-side resolution of a bare join column `name` when building a
   /// `NATURAL`/`USING` merged column: its value `Term`, its `type`, its
-  /// `unconstrained` mask, and the PHYSICAL combined ordinals it stands over.
+  /// `unconstrained` mask, and the physical combined ordinals it stands over.
   ///
-  /// The `unconstrained` mask is the CONSTITUENT'S — an earlier-merged column's
+  /// The `unconstrained` mask is the constituent'S — an earlier-merged column's
   /// own accumulated bit, else the physical column's `unconstrained(at:)` — so
   /// the `NATURAL`/`USING` type merge honors an all-NULL/placeholder left the
-  /// SAME way the set-operation fold does (a constant-NULL left constrains
+  /// same way the set-operation fold does (a constant-NULL left constrains
   /// nothing, deferring the merged type to the right).
   ///
-  /// A name an earlier join already MERGED resolves to that merged column — its
+  /// A name an earlier join already merged resolves to that merged column — its
   /// coalesce `value`, unified `type`, and constituent ordinals — so a chained
   /// `… USING (k)` keys on the merged value (a `RIGHT`/`FULL` join's left-NULL
-  /// row still joins), THROUGH the FULL ambiguity-aware bare lookup
-  /// (`merged(binding:)`): a merged entry that now COEXISTS with a physical
-  /// column of the same name a LATER PLAIN join re-introduced (`… USING (k) …
-  /// JOIN C ON … JOIN … USING (k)`, C carrying its own `k`) is AMBIGUOUS, so
+  /// row still joins), through the FULL ambiguity-aware bare lookup
+  /// (`merged(binding:)`): a merged entry that now coexists with a physical
+  /// column of the same name a later plain join re-introduced (`… USING (k) …
+  /// JOIN C ON … JOIN … USING (k)`, C carrying its own `k`) is ambiguous, so
   /// keying a later `USING` on it faults `SQLError.ambiguous` here rather than
   /// silently taking the merged value and leaving two output columns named `k`.
-  /// A name NOT yet merged must resolve to EXACTLY ONE left physical column
-  /// (`ordinal(of:)`); an accumulated-left name bound TWICE (a plain `ON` join
+  /// A name NOT yet merged must resolve to exactly one left physical column
+  /// (`ordinal(of:)`); an accumulated-left name bound twice (a plain `ON` join
   /// left two columns of that name) faults `SQLError.ambiguous` here, the
   /// finding-1 trap now a first-class fault at construction rather than a
   /// downstream crash.
@@ -487,11 +487,11 @@ internal struct Scope {
   internal func width(of projection: Projection) -> Int {
     switch projection {
     case .all:
-      // DERIVED from the ONE `expansion` walk `terms(.all)`/`outputs` emit —
+      // derived from the one `expansion` walk `terms(.all)`/`outputs` emit —
       // the merged columns plus the real columns it yields — so the width
       // cannot drift from the emitted count. A parallel `schemas.reduce(width)
-      // − subsumed.count` arithmetic UNDERCOUNTED when a merged column's
-      // constituent was VIRTUAL (a fixture/adapter `Id`): the virtual ordinal
+      // − subsumed.count` arithmetic undercounted when a merged column's
+      // constituent was virtual (a fixture/adapter `Id`): the virtual ordinal
       // is in `subsumed` but was never in the real-width sum, so subtracting it
       // dropped a real column that IS emitted.
       return merged.count + expansion.count
@@ -520,7 +520,7 @@ internal struct Scope {
     return .integer
   }
 
-  /// Whether the real column at combined `ordinal` is UNCONSTRAINED — an
+  /// Whether the real column at combined `ordinal` is unconstrained — an
   /// all-arms-NULL CTE column that places no type constraint, so a bare
   /// reference to it in a set-operation arm unifies with any typed arm order-
   /// independently (`RelationInstance.unconstrained`). A virtual ordinal
@@ -555,7 +555,7 @@ internal struct Scope {
     }
   }
 
-  /// DERIVES the nominal value type a scalar `expression` yields WITHOUT
+  /// derives the nominal value type a scalar `expression` yields without
   /// faulting on an operand: a bare column its source type, a literal its own,
   /// a standard aggregate its result domain (`COUNT`/`SUM`/`AVG` numeric,
   /// `MIN`/`MAX` the operand's type), a scalar call its routine's declared
@@ -567,24 +567,24 @@ internal struct Scope {
   /// schema resolves even for an expression a zero-row limit or a short-circuit
   /// makes unreachable (a run never evaluates it, so it cannot fault).
   ///
-  /// This is the SCHEMA surface. `validate(_:_:)` is the type-check surface: it
+  /// This is the schema surface. `validate(_:_:)` is the type-check surface: it
   /// faults exactly as a run would on a bad operand or an unknown/misused call.
   internal func derive(_ expression: Expression, _ routines: Routines = [:],
                        subquery: Resolution = .unsupported)
       throws(SQLError) -> ValueType {
     return switch expression {
     case let .column(column):
-      // A BARE name matching a `NATURAL`/`USING` merged column types from the
-      // unified coalesce `type` — the merged column has NO physical ordinal, so
+      // A bare name matching a `NATURAL`/`USING` merged column types from the
+      // unified coalesce `type` — the merged column has no physical ordinal, so
       // it is typed here rather than via `type(at:)` (a same-named physical
       // column a later plain join added faults `.ambiguous`).
       if column.qualifier == nil,
           let merged = try merged(binding: column.name) {
         merged.type
       } else if let ordinal = try find(column) {
-        // A column this scope does not bind may be a CORRELATED reference to an
+        // A column this scope does not bind may be a correlated reference to an
         // enclosing query (in an inner `WHERE`); type it as the outer column,
-        // else the ordinary column fault. A LOCALLY AMBIGUOUS name is a HARD
+        // else the ordinary column fault. A locally ambiguous name is a hard
         // error `find` propagates, never a fall-through to outer correlation.
         type(at: ordinal)
       } else if let resolved = try subquery.correlated(column) {
@@ -619,13 +619,13 @@ internal struct Scope {
            derive(rhs, routines, subquery: subquery)].contains(.double)
           ? .double : .integer
     case let .case(whens, otherwise):
-      // The result type is the unification of every REACHABLE branch result
+      // The result type is the unification of every reachable branch result
       // (and the `ELSE`) — the executor's short-circuit means an unreachable
       // branch (a constant-false guard, or any branch after a constant-true
       // one) never yields a value, so it cannot shape the column's type. The
-      // reachable result types must UNIFY; a definitively-irreconcilable clash
+      // reachable result types must unify; a definitively-irreconcilable clash
       // (text beside an integer) faults `SQLError.operand` here too, so this
-      // lowering surface and the faulting `validate` AGREE. A `CASE` always has
+      // lowering surface and the faulting `validate` agree. A `CASE` always has
       // at least one `WHEN`; when none is reachable (every guard
       // constant-false, no reachable `ELSE`) the run yields NULL, for which
       // `.integer` is the schema default.
@@ -643,7 +643,7 @@ internal struct Scope {
       try unified(arguments, routines, subquery: subquery)
     case let .nullif(lhs, rhs):
       // NULLIF yields either `v1` or NULL, so the column takes `v1`'s type —
-      // but derive BOTH operands for resolution, returning the LHS type: an
+      // but derive both operands for resolution, returning the LHS type: an
       // unresolved column faults `SQLError.column` (`NULLIF(1, Missing)`) on
       // this derive-only surface too, mirroring the `||`/arithmetic derive
       // branch rather than leaving the RHS unresolved.
@@ -653,7 +653,7 @@ internal struct Scope {
       // compile pre-pass recorded it beside the width for every subquery, so
       // `derive` reads it (enforcing the single-column arity). A surface with
       // no catalog holds none and faults, rejecting the subquery rather than
-      // mis-typing it, so this derive and the run's lowering AGREE.
+      // mis-typing it, so this derive and the run's lowering agree.
       try subquery.scalar(type: query)
     case .grouping:
       // `GROUPING(a, …)` yields an integer bit-vector; its arguments are
@@ -665,7 +665,7 @@ internal struct Scope {
   }
 
   /// The result type of `NULLIF(v1, v2)` under `derive` — `v1`'s type, deriving
-  /// BOTH operands for resolution first: NULLIF yields either `v1` or NULL, so
+  /// both operands for resolution first: NULLIF yields either `v1` or NULL, so
   /// its own RHS type does not shape the column, but an unresolved column still
   /// faults `SQLError.column`, mirroring the `||`/arithmetic derive branch. So
   /// `NULLIF(1, Missing)` faults `.column` on the derive-only paths
@@ -710,14 +710,14 @@ internal struct Scope {
   /// `SQLError.operand`; a mixed integer/double pair widens to `double`. The
   /// list is never empty (the parser requires ≥ 2 COALESCE arguments).
   ///
-  /// Only a SELECTABLE argument shapes the type. A run skips an argument
+  /// Only a selectable argument shapes the type. A run skips an argument
   /// whose value is NULL and moves on, so an argument folding to a constant
-  /// `.null` (`constant(_ expression:)`) can NEVER be the result — its type is
+  /// `.null` (`constant(_ expression:)`) can never be the result — its type is
   /// derived (an unknown column still faults) but is NOT merged, exactly as a
   /// `CASE` omits an unreachable branch's result type. And an argument that is
-  /// the definite selection (`selects(_:)` — a constant NON-NULL value, or a
+  /// the definite selection (`selects(_:)` — a constant non-NULL value, or a
   /// `COUNT` aggregate that is always non-NULL) sets the type and makes every
-  /// LATER argument unreachable — mirroring a `CASE`'s reachable-branch
+  /// later argument unreachable — mirroring a `CASE`'s reachable-branch
   /// unification and the faulting `validate`'s stop.
   private func unified(_ arguments: Array<Expression>,
                        _ routines: Routines,
@@ -742,9 +742,9 @@ internal struct Scope {
   }
 
   /// Whether `argument` is a COALESCE's definite selection — an argument the
-  /// executor's short-circuit is GUARANTEED to return, making every later
+  /// executor's short-circuit is guaranteed to return, making every later
   /// argument unreachable (neither validated nor unified). That holds when it
-  /// folds to a constant NON-NULL value (`constant(_ expression:)`), or when it
+  /// folds to a constant non-NULL value (`constant(_ expression:)`), or when it
   /// is a `COUNT` aggregate: `COUNT` alone among the aggregates always yields a
   /// row count of 0 or more, never NULL, so it always selects — while `SUM` /
   /// `MIN` / `MAX` / `AVG` are NULL over an empty group and so do NOT stop.
@@ -771,10 +771,10 @@ internal struct Scope {
   }
 
   /// The nominal type of a `CASE` under `derive` — the unification of its
-  /// REACHABLE result types, and `.integer` when no branch is reachable (the
-  /// run yields NULL). The reachable result types must UNIFY (`unified`):
+  /// reachable result types, and `.integer` when no branch is reachable (the
+  /// run yields NULL). The reachable result types must unify (`unified`):
   /// a definitively-irreconcilable pair (a text result beside an integer one)
-  /// faults `SQLError.operand`, so this lowering surface AGREES with the
+  /// faults `SQLError.operand`, so this lowering surface agrees with the
   /// faulting `validate` (`conditional`) — a mixed integer/double `CASE` still
   /// widens to `double`.
   internal func derive(_ whens: Array<When>, _ otherwise: Expression?,
@@ -799,12 +799,12 @@ internal struct Scope {
     return type ?? .integer
   }
 
-  /// The result expressions of a `CASE` the executor's short-circuit can REACH,
+  /// The result expressions of a `CASE` the executor's short-circuit can reach,
   /// in branch order: a `WHEN` whose guard is statically constant-FALSE has an
   /// unreachable result and is dropped; a `WHEN` whose guard is statically
-  /// constant-TRUE is itself reachable and keeps every EARLIER reachable branch
+  /// constant-TRUE is itself reachable and keeps every earlier reachable branch
   /// (a row an earlier row-dependent guard matches takes that branch, never
-  /// reaching this one), but makes every STRICTLY-LATER `WHEN` and the `ELSE`
+  /// reaching this one), but makes every strictly-later `WHEN` and the `ELSE`
   /// unreachable; an `ELSE` is reachable only when no guard is constant-TRUE. A
   /// guard that is not statically decidable (`constant` is `nil`) leaves its
   /// result reachable.
@@ -825,7 +825,7 @@ internal struct Scope {
 
   // MARK: - Validation
 
-  /// The value type a scalar `expression` yields, VALIDATING each operand and
+  /// The value type a scalar `expression` yields, validating each operand and
   /// call exactly as a run would fault: an aggregate or arithmetic over a
   /// non-numeric operand (`SQLError.operand`), a call to an unregistered
   /// routine (`SQLError.function`), a bad arity or argument kind
@@ -835,23 +835,23 @@ internal struct Scope {
   /// resolves column ordinals and reads no cursor, so it type-checks a query
   /// without executing it.
   ///
-  /// This is the TYPE-CHECK surface. `derive(_:_:)` is the non-faulting schema
-  /// surface, which only DERIVES the nominal output type.
+  /// This is the type-CHECK surface. `derive(_:_:)` is the non-faulting schema
+  /// surface, which only derives the nominal output type.
   internal func validate(_ expression: Expression, _ routines: Routines = [:],
                          subquery: SubqueryCheck = .unsupported)
       throws(SQLError) -> ValueType {
     switch expression {
     case let .column(column):
-      // A BARE name matching a `NATURAL`/`USING` merged column (ISO 9075 7.10)
-      // types from the unified coalesce `type` — the SAME merged-aware bare
+      // A bare name matching a `NATURAL`/`USING` merged column (ISO 9075 7.10)
+      // types from the unified coalesce `type` — the same merged-aware bare
       // lookup `term`/`derive` shadow the two physical sides with, so the
       // type-check accepts exactly the bare merged reference the run lowers (a
       // same-named physical column a later plain join added faults `.ambiguous`
       // in `merged(binding:)`). A column this scope does not bind may be a
-      // CORRELATED reference to an enclosing query (validated as the run
+      // correlated reference to an enclosing query (validated as the run
       // resolves it — a `WHERE` one types as its outer column, a
       // projection/`HAVING` one faults unsupported); else the ordinary column
-      // fault. A LOCALLY AMBIGUOUS name is a HARD error `find` propagates — not
+      // fault. A locally ambiguous name is a hard error `find` propagates — not
       // a fall-through to outer correlation.
       if column.qualifier == nil,
           let merged = try merged(binding: column.name) {
@@ -889,14 +889,14 @@ internal struct Scope {
       try subquery.type(query)
     case let .grouping(arguments):
       // `GROUPING(a, …)` yields an integer bit-vector. Validate each argument
-      // RESOLVES as a scalar (the grouped lowering additionally enforces that
+      // resolves as a scalar (the grouped lowering additionally enforces that
       // each names a `GROUP BY` expression — `SQLError.grouping` otherwise —
       // which this per-operand type-check does not duplicate), then accept.
       try grouping(over: arguments, routines, subquery: subquery)
     }
   }
 
-  /// The type of `GROUPING(a, …)` under `validate` — `.integer`, VALIDATING
+  /// The type of `GROUPING(a, …)` under `validate` — `.integer`, validating
   /// each argument resolves as a run would (an unknown column, a bad operand,
   /// or an ill-typed call inside an argument faults). The grouped lowering
   /// enforces that each argument is a `GROUP BY` expression, so this only
@@ -911,16 +911,16 @@ internal struct Scope {
     return .integer
   }
 
-  /// The result type of `COALESCE(v1, v2, …)`, validating each REACHABLE
-  /// argument as a run would fault and unifying only the SELECTABLE ones'
+  /// The result type of `COALESCE(v1, v2, …)`, validating each reachable
+  /// argument as a run would fault and unifying only the selectable ones'
   /// types (`merged`). A definitively-irreconcilable pair (a text argument
   /// beside an integer) faults `SQLError.operand`, as the column cannot be two
   /// kinds; a mixed integer/double pair widens to `double`.
   ///
-  /// The executor returns the first NON-NULL argument and never evaluates a
+  /// The executor returns the first non-NULL argument and never evaluates a
   /// later one, so an argument that is the definite selection (`selects(_:)` —
-  /// a constant NON-NULL value, or a `COUNT` aggregate that is always non-NULL)
-  /// makes every LATER argument unreachable — those are NOT validated
+  /// a constant non-NULL value, or a `COUNT` aggregate that is always non-NULL)
+  /// makes every later argument unreachable — those are NOT validated
   /// (`COALESCE(1, missing_udf())` and `COALESCE(COUNT(*), missing_udf())` both
   /// type-check), exactly as a constant-TRUE `CASE` guard makes later branches
   /// unreachable.
@@ -968,31 +968,31 @@ internal struct Scope {
     return type
   }
 
-  /// The target `type` of a `CAST`, VALIDATING `operand` for real errors
-  /// (unknown column, bad call arity, …) as a run would fault, and REJECTING a
+  /// The target `type` of a `CAST`, validating `operand` for real errors
+  /// (unknown column, bad call arity, …) as a run would fault, and rejecting a
   /// cast the runtime could never perform before advertising the target type.
   ///
-  /// A cast whose (operand type → target type) PAIR is structurally
+  /// A cast whose (operand type → target type) pair is structurally
   /// unsupported — a boolean to a number, a number to a blob — faults `42846`
-  /// for EVERY value of the operand's kind, so `SELECT CAST(TRUE AS INTEGER)`
+  /// for every value of the operand's kind, so `SELECT CAST(TRUE AS INTEGER)`
   /// would otherwise advertise an integer column though executing it
   /// unconditionally throws. `ValueType.castable(to:)` — the same structural
   /// truth the runtime cast consults — rejects that pair here, at validation.
   ///
-  /// A castable-but-VALUE-dependent pair still passes: a `text` to a number, or
+  /// A castable-but-value-dependent pair still passes: a `text` to a number, or
   /// a `blob` to `text`, is a supported pair whose fault (`22018`/`22003`)
   /// depends on the value, so a reachable good value runs — `CAST('1' AS
-  /// INTEGER)` type-checks. The exception is a CONSTANT operand that folds and
+  /// INTEGER)` type-checks. The exception is a constant operand that folds and
   /// ALWAYS fails: `CAST('abc' AS INTEGER)` is unparseable for the one value it
   /// can have, so a trial cast of the folded constant rejects it too.
   ///
   /// The constant fold runs FIRST, before the structural pair rejection: a
-  /// constant operand casts to ONE value, so its trial cast decides the cast
-  /// outright — it ALLOWS a statically-NULL operand (`CAST(CASE WHEN 1 = 0
+  /// constant operand casts to one value, so its trial cast decides the cast
+  /// outright — it allows a statically-NULL operand (`CAST(CASE WHEN 1 = 0
   /// THEN 1 END AS BLOB)` folds to `.null`, which casts to ANY target) even
-  /// where the operand's DERIVED type would make the pair structurally
-  /// unsupported, and it still REJECTS a constant that always fails. Only a
-  /// NON-constant operand, whose value is unknown at validation, falls to the
+  /// where the operand's derived type would make the pair structurally
+  /// unsupported, and it still rejects a constant that always fails. Only a
+  /// non-constant operand, whose value is unknown at validation, falls to the
   /// structural pair check.
   private func validate(cast operand: Expression, to type: ValueType,
                         _ routines: Routines,
@@ -1000,7 +1000,7 @@ internal struct Scope {
       throws(SQLError) -> ValueType {
     let source = try validate(operand, routines, subquery: subquery)
     // A constant operand casts to one value only, so its trial cast is the
-    // whole decision: it ALLOWS a folded NULL to any target and REJECTS a
+    // whole decision: it allows a folded NULL to any target and rejects a
     // spelling that always faults (`CAST('abc' AS INTEGER)`). A non-constant
     // operand folds to `nil`, so the structural pair check rejects a kind that
     // could never cast (`CAST(<boolean column> AS INTEGER)` → `42846`).
@@ -1013,11 +1013,11 @@ internal struct Scope {
     return type
   }
 
-  /// The result type of a `CASE`, validating each REACHABLE branch as a run
+  /// The result type of a `CASE`, validating each reachable branch as a run
   /// would fault and honouring the executor's short-circuit: each evaluated
   /// `WHEN` guard is a boolean predicate whose operands are validated
-  /// (`check`); only a REACHABLE result expression is validated; and the
-  /// reachable result types must UNIFY to one type (`ValueType.unified`) — a
+  /// (`check`); only a reachable result expression is validated; and the
+  /// reachable result types must unify to one type (`ValueType.unified`) — a
   /// definitively-irreconcilable pair (a text result beside an integer one)
   /// faults `SQLError.operand`, as a query cannot yield a column of two kinds.
   /// A mixed integer/double `CASE` widens to `double`.
@@ -1026,12 +1026,12 @@ internal struct Scope {
   /// later branch, so a `WHEN` whose guard is statically constant-FALSE has an
   /// unreachable result — its operands are NOT validated (`CASE WHEN 1 = 0 THEN
   /// Name + 1 ELSE 0 END` type-checks). A constant-TRUE guard is itself
-  /// reachable and KEEPS every earlier reachable branch — a row an earlier
+  /// reachable and keeps every earlier reachable branch — a row an earlier
   /// row-dependent guard matches takes that branch, never reaching the
   /// constant-TRUE one — so those earlier results are still validated (`CASE
   /// WHEN Id = 1 THEN Name + 1 WHEN 1 = 1 THEN 0 END` faults on the reachable
-  /// `Id = 1` branch's `Name + 1`); it makes only every STRICTLY-LATER guard,
-  /// result, and the `ELSE` unreachable. A REACHABLE bad operand (`WHEN Id = 1
+  /// `Id = 1` branch's `Name + 1`); it makes only every strictly-later guard,
+  /// result, and the `ELSE` unreachable. A reachable bad operand (`WHEN Id = 1
   /// THEN Name + 1`) still faults. When no branch is reachable the run yields
   /// NULL, typed `.integer` (the schema default), with no result to validate.
   private func conditional(_ whens: Array<When>, _ otherwise: Expression?,
@@ -1043,7 +1043,7 @@ internal struct Scope {
     for branch in whens {
       // The guard up to (and including) the decisive one is evaluated, so
       // validate its operands; a constant-FALSE guard's result is unreachable
-      // (skip it), a constant-TRUE one is reachable but makes every LATER
+      // (skip it), a constant-TRUE one is reachable but makes every later
       // branch unreachable — so keep the earlier results and this one, then
       // stop.
       try check(branch.when, routines, subquery: subquery)
@@ -1079,8 +1079,8 @@ internal struct Scope {
   /// in the routine's `minimum ... parameters.count` arity (a fixed-arity
   /// routine has `minimum == parameters.count`, so this is exact for it, and an
   /// optional-tail routine like `OVERLAY` admits either count); and each
-  /// SUPPLIED argument's static type must equal the declared parameter type. A
-  /// nullable column of the DECLARED
+  /// supplied argument's static type must equal the declared parameter type. A
+  /// nullable column of the declared
   /// type passes — statically it carries its declared type and a run-time NULL
   /// propagates — so only a definitively-wrong type (text where an integer is
   /// required) is rejected, mirroring a routine like `BITAND` throwing
@@ -1120,8 +1120,8 @@ internal struct Scope {
   /// The result type of `function` folded over `operand`, validating the
   /// operand as a run would fault. `COUNT` counts rows (`.integer`);
   /// `MIN`/`MAX` take the operand's own type — they compare, so any comparable
-  /// value folds. `SUM`/`AVG` fold NUMERICALLY: `SUM` yields the operand's
-  /// numeric type, `AVG` a double, so both REQUIRE a numeric operand — over
+  /// value folds. `SUM`/`AVG` fold numerically: `SUM` yields the operand's
+  /// numeric type, `AVG` a double, so both require a numeric operand — over
   /// text, boolean, or blob `Aggregate.fold` faults `SQLError.operand` on the
   /// first non-NULL value, so typing faults the same way rather than
   /// advertising `AVG(Name)` as a double or `SUM(Name)` as text for a query
@@ -1139,16 +1139,16 @@ internal struct Scope {
         throw .state("42803", "an aggregate is not allowed in a FILTER")
       }
       try check(filter, routines, subquery: subquery)
-      // A FILTER that STATICALLY cannot admit a row makes the operand
+      // A FILTER that statically cannot admit a row makes the operand
       // unreachable: the executor gates on a definite TRUE (a FALSE or UNKNOWN
-      // row is skipped, and the argument is evaluated only AFTER the gate), so
+      // row is skipped, and the argument is evaluated only after the gate), so
       // an operand behind a statically non-TRUE filter never folds. `SUM(1 / 0)
       // FILTER (WHERE 1 = 0)` thus runs to the empty result (NULL) — do NOT
       // validate the dead operand, or a fault it could never raise (a divide by
       // zero) would wrongly reject a runnable query. The aggregate is
       // statically empty, so advertise its declared/derived result type without
       // the operand's run-time-fault check (`dead(_:_:)` proves the filter
-      // ROW-INDEPENDENTLY never TRUE); a filter that could be TRUE still
+      // ROW-independently never TRUE); a filter that could be TRUE still
       // validates the operand as a bare aggregate does.
       if dead(filter, routines) {
         return try empty(function, over: operand, routines)
@@ -1181,8 +1181,8 @@ internal struct Scope {
   }
 
   /// The result type of `function` folded over `operand` when a statically
-  /// non-TRUE `FILTER` makes the fold empty — the operand is UNREACHABLE, so it
-  /// is DERIVED for its type (resolving a column) but NOT validated for a
+  /// non-TRUE `FILTER` makes the fold empty — the operand is unreachable, so it
+  /// is derived for its type (resolving a column) but NOT validated for a
   /// run-time fault it can never raise (a divide by zero, a non-numeric SUM).
   /// The empty fold yields `COUNT` `0` and every other aggregate NULL, so the
   /// type is the set-function's declared/derived one, mirroring `aggregate` but
@@ -1203,17 +1203,17 @@ internal struct Scope {
     }
   }
 
-  /// Whether `filter` is ROW-INDEPENDENTLY never TRUE — so a `FILTER`'s gate
+  /// Whether `filter` is ROW-independently never TRUE — so a `FILTER`'s gate
   /// (which admits a row only on a definite TRUE) can never admit one and the
-  /// aggregate operand behind it is UNREACHABLE. An `AND` is TRUE only when
-  /// EVERY conjunct is TRUE, so a single conjunct that is row-independently
+  /// aggregate operand behind it is unreachable. An `AND` is TRUE only when
+  /// every conjunct is TRUE, so a single conjunct that is row-independently
   /// non-TRUE kills the whole conjunction regardless of the others: flatten the
   /// top-level `Predicate.and` spine (`a AND (b AND c)` to `a, b, c` — each
   /// non-AND node one conjunct, not descending into `OR`) and prove it dead
   /// when ANY conjunct folds definitely FALSE (`constant(_:)` `false`), or is
   /// `settled` (row-independent) and folds to UNKNOWN (`constant(_:)` `nil`).
   /// This subsumes the whole-filter case (a settled-non-TRUE filter is a lone
-  /// conjunct). It stays SOUND — only a PROVABLY non-TRUE conjunct kills the
+  /// conjunct). It stays sound — only a provably non-TRUE conjunct kills the
   /// filter: a row-dependent conjunct (could be TRUE per row) or a settled-TRUE
   /// one does NOT, so those still validate the operand.
   private func dead(_ filter: Predicate, _ routines: Routines) -> Bool {
@@ -1251,9 +1251,9 @@ internal struct Scope {
     let left = try validate(lhs, routines, subquery: subquery)
     let right = try validate(rhs, routines, subquery: subquery)
     if case .concatenate = op {
-      // Both operands are validated above for their OWN errors. `||` yields
-      // text and needs two text operands — UNLESS one folds to a static NULL,
-      // in which case `Arithmetic.apply` returns NULL BEFORE it inspects EITHER
+      // Both operands are validated above for their own errors. `||` yields
+      // text and needs two text operands — unless one folds to a static NULL,
+      // in which case `Arithmetic.apply` returns NULL before it inspects either
       // kind, so the whole expression yields NULL and runs whatever the other
       // operand's type (as the CAST path admits a folded NULL to any target):
       // `(CASE WHEN 1 = 0 THEN 1 END) || 1` runs. A non-text, non-NULL pairing
@@ -1265,7 +1265,7 @@ internal struct Scope {
       return .text
     }
     // A statically-NULL operand makes the whole arithmetic NULL: `Arithmetic.apply`
-    // returns NULL before it inspects EITHER operand's kind, divides, or
+    // returns NULL before it inspects either operand's kind, divides, or
     // overflows, so the expression runs whatever the other operand's kind —
     // `NULL + 'x'`, `'x' + NULL`, and even `NULL / 0` yield NULL — mirroring the
     // concatenation path above. Skip the numeric-kind guard and the divide/
@@ -1293,7 +1293,7 @@ internal struct Scope {
 
   /// Whether `expression` folds to a static NULL — a row-independent constant
   /// NULL. A `||` with a vanishing operand yields NULL before its
-  /// `Arithmetic.apply` inspects EITHER operand's kind, so the whole expression
+  /// `Arithmetic.apply` inspects either operand's kind, so the whole expression
   /// is valid whatever the other operand's type, mirroring the CAST validation
   /// path that admits a folded NULL to any target — so a no-match `CASE` typed
   /// `.integer` that yields NULL lets `(CASE WHEN 1 = 0 THEN 1 END) || 1` run.
@@ -1323,7 +1323,7 @@ internal struct Scope {
   ///
   /// It respects the executor's short-circuit: `false AND rhs` and `true OR
   /// rhs` never evaluate `rhs` (`evaluate` returns on the left arm), so a right
-  /// arm a STATICALLY-false `AND` (or true `OR`) guards is unreachable and is
+  /// arm a statically-false `AND` (or true `OR`) guards is unreachable and is
   /// not type-checked — `WHERE 1 = 0 AND Name + 1 = 2` runs, so its schema
   /// resolves rather than faulting on the unreachable `Name + 1`.
   func check(_ predicate: Predicate,
@@ -1335,18 +1335,18 @@ internal struct Scope {
       _ = try validate(left, routines, subquery: subquery)
       _ = try validate(right, routines, subquery: subquery)
     case let .exists(query, _):
-      // Validate the inner UNCORRELATED query as the run's lowering does — it
+      // Validate the inner uncorrelated query as the run's lowering does — it
       // resolves and type-checks against the enclosing catalog, so a bad column
       // or routine inside it faults at validation, matching what a run rejects.
       // Reached in the `existential` role, so the deferred phase validates its
-      // cardinality PROBE (no select list), never the original projection.
+      // cardinality probe (no select list), never the original projection.
       try subquery.validate(query, as: .existential)
     case let .within(operand, query, _):
       // Validate the operand AND the inner query, and enforce the single-column
       // arity the lowering does (`SQLError.arity`), so schema validation
       // matches execution — the recurring lesson that the two must not diverge.
       // Reached in the `valued` role — its value set is read, so the deferred
-      // phase validates the ORIGINAL query.
+      // phase validates the original query.
       _ = try validate(operand, routines, subquery: subquery)
       try subquery.validate(query, as: .valued)
       let width = try subquery.width(query)
@@ -1355,7 +1355,7 @@ internal struct Scope {
       // As `within`: validate the operand and the inner query, and enforce the
       // single-column arity the lowering does (`SQLError.arity`), so schema
       // validation matches execution. Reached `valued` (its values are read),
-      // so the deferred phase validates the ORIGINAL query.
+      // so the deferred phase validates the original query.
       _ = try validate(operand, routines, subquery: subquery)
       try subquery.validate(query, as: .valued)
       let width = try subquery.width(query)
@@ -1376,7 +1376,7 @@ internal struct Scope {
       // may match a like-kind element), and the schema check must accept what
       // the run accepts — rejecting it here would diverge from the run.
       //
-      // The OR-chain short-circuits: a DEFINITE constant match (`x = v` folds
+      // The OR-chain short-circuits: a definite constant match (`x = v` folds
       // TRUE, both row-independent constants) makes the whole `IN` TRUE and
       // leaves every later element unreachable, so validation stops there —
       // `1 IN (1 + 0, Name + 1)` type-checks, the run matching `1 = 1 + 0`
@@ -1400,7 +1400,7 @@ internal struct Scope {
     case let .rows(lhs, _, rhs):
       // `(l…) <op> (r…)` lowers to a componentwise comparison, so type each
       // component of both rows for real errors (unknown column, bad arity, …),
-      // and enforce the EQUAL-arity rule the lowering does (`SQLError.arity`)
+      // and enforce the equal-arity rule the lowering does (`SQLError.arity`)
       // so schema validation matches execution. A cross-kind component is NOT
       // rejected — the run's `matches` yields FALSE across kinds without
       // faulting, as an `IN` element does — so the schema accepts what the run
@@ -1417,12 +1417,12 @@ internal struct Scope {
     case let .among(lhs, rows, _):
       // `(l…) [NOT] IN ((r…), …)` lowers to a disjunction of row equalities, so
       // type the left row and each element row for real errors, and enforce the
-      // non-empty list and per-row EQUAL-arity rules the lowering does. A
+      // non-empty list and per-row equal-arity rules the lowering does. A
       // cross-kind component is NOT rejected, as an `IN` element is not.
       //
       // The OR-chain short-circuits exactly as the scalar `.membership` does: a
-      // DEFINITE constant match (both the left row and an element row fold to
-      // ROW-INDEPENDENT constants whose tuple-equality `relate` yields TRUE)
+      // definite constant match (both the left row and an element row fold to
+      // ROW-independent constants whose tuple-equality `relate` yields TRUE)
       // makes the whole `IN` TRUE and leaves every later element unreachable,
       // so validation stops there — `(1, 2) IN ((1, 2), (Name + 1, 3))`
       // type-checks (the constant `(1, 2)` matches the first element before
@@ -1468,10 +1468,10 @@ internal struct Scope {
       // check accepts what the run accepts.
       //
       // It respects the executor's short-circuit — the same one `ranged`
-      // evaluates with: a DEFINITELY-FALSE lower comparison (`x >= a`) settles
+      // evaluates with: a definitely-FALSE lower comparison (`x >= a`) settles
       // the whole truth (BETWEEN FALSE, NOT BETWEEN TRUE — the latter is the
       // negation of that truth, not the divergent `x < a OR x > b` expansion),
-      // leaving `upper` unreachable for BOTH spellings, so `upper` is NOT
+      // leaving `upper` unreachable for both spellings, so `upper` is NOT
       // validated — `0 BETWEEN 1 AND (1 / 0)` type-checks, the lower `0 >= 1`
       // FALSE settling the row before the `1 / 0` upper is reached, exactly as
       // an `AND`'s constant-false left leaves its right unchecked.
@@ -1487,8 +1487,8 @@ internal struct Scope {
       if !settled { try validate(upper, routines, subquery: subquery) }
     case let .distinct(lhs, rhs, _):
       // `a IS [NOT] DISTINCT FROM b` compares both operands, so validate the
-      // two for real errors (an unknown column, a bad call). BOTH are always
-      // validated — the predicate is TWO-VALUED with no short-circuit: neither
+      // two for real errors (an unknown column, a bad call). both are always
+      // validated — the predicate is two-valued with no short-circuit: neither
       // side settles the truth without the other. A cross-kind pair is NOT
       // rejected: the run's `distinct` treats it as DISTINCT without faulting
       // (as an `IN` element does), so the schema check accepts what the run
@@ -1527,8 +1527,8 @@ internal struct Scope {
     }
   }
 
-  /// Rejects a STATICALLY-invalid `LIKE` `escape` at validation, as `Row.like`
-  /// would fault it on EVERY row: a ROW-INDEPENDENT escape expression that
+  /// Rejects a statically-invalid `LIKE` `escape` at validation, as `Row.like`
+  /// would fault it on every row: a ROW-independent escape expression that
   /// folds (`constant`) to a value that is neither NULL (a valid UNKNOWN) nor a
   /// single-character text (a non-text, or a wrong-length text) makes the query
   /// un-runnable, so reject it here with the same message and condition the run
@@ -1552,7 +1552,7 @@ internal struct Scope {
   }
 
   /// The definite truth of the equality `operand = value` when both fold to
-  /// ROW-INDEPENDENT CONSTANTS (via `constant`) — the OR-chain equality an `IN`
+  /// ROW-independent constants (via `constant`) — the OR-chain equality an `IN`
   /// element folds to — else `nil` (a side reading a row is decided per row).
   /// It folds each side through `constant` — the same `value(of:)`, arithmetic,
   /// and comparison the run evaluates a `left = element` comparison with — so a
@@ -1566,29 +1566,29 @@ internal struct Scope {
     return matches(lhs, .equal, rhs)
   }
 
-  /// The constant `Value` `expression` folds to when it is ROW-INDEPENDENT —
+  /// The constant `Value` `expression` folds to when it is ROW-independent —
   /// else `nil` (an operand a row, group, or run context decides). A literal
-  /// folds to its value; a binary folds its two operands and applies the SAME
+  /// folds to its value; a binary folds its two operands and applies the same
   /// `Arithmetic.apply(Value, Value)` the run's binary evaluation uses, so the
   /// fold matches the run exactly (and a would-be fault — a divide, an overflow
-  /// — collapses to `nil` rather than deciding a match). A ROW-INDEPENDENT call
-  /// to a DETERMINISTIC routine (every argument folds constant) folds to its
-  /// routine's value over those folded arguments — the SAME `Routine` the run
+  /// — collapses to `nil` rather than deciding a match). A ROW-independent call
+  /// to a deterministic routine (every argument folds constant) folds to its
+  /// routine's value over those folded arguments — the same `Routine` the run
   /// invokes over the same constant arguments, so the fold matches the run; an
-  /// unregistered name, a NOT DETERMINISTIC routine, a non-constant argument,
+  /// unregistered name, a NOT deterministic routine, a non-constant argument,
   /// or a throwing routine collapses to `nil`. Only a deterministic routine
   /// folds (ISO): executing a non-deterministic one here could return one value
-  /// while this compile-time walk decides reachability and a DIFFERENT one when
+  /// while this compile-time walk decides reachability and a different one when
   /// the run reaches the same call — pruning an element the run keeps. Every
   /// other expression is not statically foldable: a `column` reads a row and an
-  /// `aggregate` folds a group, so each is `nil`. A ROW-INDEPENDENT `case`
+  /// `aggregate` folds a group, so each is `nil`. A ROW-independent `case`
   /// folds too — walking the `WHEN`s in order over `constant(_ predicate:)`:
   /// the first constant-TRUE guard yields its folded result, a constant-FALSE
   /// guard is skipped, and a guard the fold cannot decide (`nil`) means the
   /// taken branch is per row, so the whole `case` is `nil`; with no
   /// constant-TRUE guard it folds the `ELSE`, or `.null` when there is none (a
-  /// no-match `CASE` yields NULL). This honours the SAME reachability
-  /// `reachable(_:_:_:)` validates with. Returning `nil` is SOUND — a caller
+  /// no-match `CASE` yields NULL). This honours the same reachability
+  /// `reachable(_:_:_:)` validates with. Returning `nil` is sound — a caller
   /// that cannot fold an element keeps considering it, never wrongly pruning a
   /// later one.
   private func constant(_ expression: Expression, _ routines: Routines)
@@ -1630,7 +1630,7 @@ internal struct Scope {
       guard let otherwise else { return .null }
       return constant(otherwise, routines)
     case let .cast(operand, type):
-      // A ROW-INDEPENDENT operand folds to its converted value — the SAME
+      // A ROW-independent operand folds to its converted value — the same
       // `Value.cast(to:)` the run applies, so the fold matches. A would-be
       // fault (an unconvertible value) collapses to `nil`, so the cast stays
       // undecided rather than deciding a match, just as a would-be-faulting
@@ -1639,14 +1639,14 @@ internal struct Scope {
       return try? value.cast(to: type)
     case let .coalesce(arguments):
       // Fold as the run evaluates it — the first argument that folds to a
-      // non-NULL value (COERCED to the unified type, as the executor's
+      // non-NULL value (coerced to the unified type, as the executor's
       // `Term.coalesce` coerces the selected value), else NULL when every
-      // argument folds NULL. An argument the fold cannot decide (`nil`) BEFORE
+      // argument folds NULL. An argument the fold cannot decide (`nil`) before
       // a decisive non-NULL one means the taken value is per row, so the whole
       // `COALESCE` is `nil`. Coercing an `.integer` selected from a COALESCE
       // that unifies to `.double` folds to `.double`, matching the advertised
       // column type — so a `.double`-typed routine over `COALESCE(1, 2.5)`
-      // folds against the SAME value the run supplies. The unified type is the
+      // folds against the same value the run supplies. The unified type is the
       // one `derive`/`unified` already reduces over the selectable arguments;
       // an irreconcilable pair (which `derive` would fault on) leaves the value
       // uncoerced (`try?` → `nil`), a no-op the executor never reaches.
@@ -1667,7 +1667,7 @@ internal struct Scope {
       }
       return matches(va, .equal, vb) == true ? .null : va
     case .column, .aggregate, .subquery, .grouping:
-      // A `subquery` is row-independent but is materialised at RUN (this
+      // A `subquery` is row-independent but is materialised at run (this
       // compile-time fold has no cache), so it is not statically foldable —
       // `nil`, like a `column` or `aggregate`. A `grouping` is constant only
       // relative to a specific grouped ARM (this AST-level fold has no arm
@@ -1676,12 +1676,12 @@ internal struct Scope {
     }
   }
 
-  /// Whether `expression` folds to a CONSTANT NULL for EVERY row — a projected
-  /// column that places NO type constraint on a set-operation's unified column,
+  /// Whether `expression` folds to a constant NULL for every row — a projected
+  /// column that places no type constraint on a set-operation's unified column,
   /// so the fold skips its (literal-fix) type exactly as `COALESCE` skips a
   /// constant-NULL argument. The projection walk (`output(_ item:)`) reads this
   /// beside its type derive, so a column's type and its `unconstrained` mask
-  /// come from ONE resolution over the SAME expression and cannot diverge.
+  /// come from one resolution over the same expression and cannot diverge.
   ///
   /// A `CASE` every reachable result of which is NULL yields NULL whichever
   /// branch runs, so it is constant NULL even when a row-dependent guard leaves
@@ -1697,24 +1697,24 @@ internal struct Scope {
     return false
   }
 
-  /// Whether evaluating `expression` would dispatch an INVALID routine call —
-  /// the tree contains, at ANY depth, a `.call(name, _)` that is UNREGISTERED
-  /// (`routines[name] == nil`) or INVALID for its routine (bad arity or a
+  /// Whether evaluating `expression` would dispatch an invalid routine call —
+  /// the tree contains, at ANY depth, a `.call(name, _)` that is unregistered
+  /// (`routines[name] == nil`) or invalid for its routine (bad arity or a
   /// definitively-wrong argument type). Such a call has no genuine return type
   /// (`derive` fabricates the declared `returns`, or the `.integer` default for
   /// a missing name), yet the run faults on it (`SQLError.function` for the
   /// missing name, `SQLError.argument` for the bad arity/type), so a projection
-  /// over it places NO type constraint on a set-operation's unified column:
-  /// mark it UNCONSTRAINED and let the fold defer to the other arm rather than
-  /// fault on the fabricated type. This is SOUND either way — if the arm is
-  /// REACHED the run dispatches it and faults, and if it is NOT reached (a
+  /// over it places no type constraint on a set-operation's unified column:
+  /// mark it unconstrained and let the fold defer to the other arm rather than
+  /// fault on the fabricated type. This is sound either way — if the arm is
+  /// reached the run dispatches it and faults, and if it is NOT reached (a
   /// zero-row limit, a filtered-out arm) the expression is never evaluated, so
   /// its fabricated type is irrelevant. Only an invalid call trips it, so a
-  /// VALID call (correct arity and argument types) stays constrained — its
+  /// valid call (correct arity and argument types) stays constrained — its
   /// declared `returns` still shapes the fold — and a genuine type mismatch
   /// still faults `SQLError.operand` (42804).
   ///
-  /// It MIRRORS `derive`'s expression arms exactly so no form escapes: a bare
+  /// It mirrors `derive`'s expression arms exactly so no form escapes: a bare
   /// call is the depth-0 case of the `.call` arm, and every composite arm
   /// recurses the same sub-expressions `derive` traverses.
   internal func unresolved(_ expression: Expression,
@@ -1726,12 +1726,12 @@ internal struct Scope {
       return false
     // `.call`: the depth-0 case (an unregistered name), OR an unregistered
     // call nested in an argument — subsuming the former bare-call special case
-    // in `output(_ item:)`. An INVALID call to an EXISTING routine (bad arity
-    // or a definitively-wrong argument type) is treated like a MISSING one:
+    // in `output(_ item:)`. An invalid call to an existing routine (bad arity
+    // or a definitively-wrong argument type) is treated like a missing one:
     // `derive` fabricates the declared `returns` for it, but the run faults
     // (`SQLError.argument`), so its type must not constrain the fold. This
     // mirrors the strict validator `call(_:over:_:)`'s arity/type guards as a
-    // NON-throwing probe.
+    // non-throwing probe.
     case let .call(name, arguments):
       guard let routine = routines[name] else { return true }
       guard (routine.minimum ... routine.parameters.count)
@@ -1753,7 +1753,7 @@ internal struct Scope {
       case .star: return false
       case let .expression(argument): return unresolved(argument, routines)
       }
-    // `.case`: `derive` unifies only the REACHABLE result expressions
+    // `.case`: `derive` unifies only the reachable result expressions
     // (`reachable`), so mirror that reach — an unregistered call in an
     // unreachable branch never runs and never shapes the type.
     case let .case(whens, otherwise):
@@ -1762,8 +1762,8 @@ internal struct Scope {
     // `.cast`: `derive` recurses the operand for its resolution.
     case let .cast(operand, _):
       return unresolved(operand, routines)
-    // `.coalesce`: `derive` (`unified`) scans only the REACHABLE prefix — it
-    // STOPS at the first argument a constant non-NULL value `selects`, so a
+    // `.coalesce`: `derive` (`unified`) scans only the reachable prefix — it
+    // stops at the first argument a constant non-NULL value `selects`, so a
     // later argument never runs nor shapes the type. Mirror that reach, else
     // `COALESCE(1, missing())` wrongly defers instead of constraining `1`.
     case let .coalesce(arguments):
@@ -1775,12 +1775,12 @@ internal struct Scope {
     // `.nullif`: `derive` (`nullif`) derives both operands.
     case let .nullif(lhs, rhs):
       return unresolved(lhs, routines) || unresolved(rhs, routines)
-    // `.subquery`: a nested scalar subquery resolves its OWN columns through
+    // `.subquery`: a nested scalar subquery resolves its own columns through
     // the memo (`scalar(resolved:)`), which already carries the unconstrained
     // mask for any unregistered call inside it — do NOT double-handle it here.
     case .subquery:
       return false
-    // `.grouping`: `derive` types it `.integer` as a LEAF (it does not derive
+    // `.grouping`: `derive` types it `.integer` as a leaf (it does not derive
     // the arguments, exactly as a `call` types from its declared return), so it
     // fabricates no routine type and constrains the fold — never unresolved.
     case .grouping:
@@ -1788,7 +1788,7 @@ internal struct Scope {
     }
   }
 
-  /// The constant `Value`s a ROW `row` folds to when EVERY component is
+  /// The constant `Value`s a ROW `row` folds to when every component is
   /// row-independent — else `nil` (any component a row/group/run decides). A
   /// row comparison and a row `IN` element fold through this so a single row-
   /// dependent component leaves the whole row undecided, matching the runtime's
@@ -1805,22 +1805,22 @@ internal struct Scope {
   }
 
   /// Folds an `IN` value list as its OR-chain of `operand = element`
-  /// equalities, honouring the executor's SHORT-CIRCUIT: the elements are
+  /// equalities, honouring the executor's short-circuit: the elements are
   /// visited in order, each mapped to its three-valued equality truth by
   /// `equality`, and the truths are OR-folded — but a definite `true` stops the
-  /// walk, since the OR-chain matches there and every LATER element is
-  /// unreachable (`Row.matches` returns on the first true arm). This is the ONE
+  /// walk, since the OR-chain matches there and every later element is
+  /// unreachable (`Row.matches` returns on the first true arm). This is the one
   /// short-circuit the `IN` type-check (`check`), constant fold (`constant`),
   /// and empty-group evaluator (`empty`) all share: each supplies the
   /// per-element `equality` its surface computes with, and every surface stops
   /// at the same element the run does.
   ///
-  /// `visit` runs on each element BEFORE its truth is taken, so a surface with
+  /// `visit` runs on each element before its truth is taken, so a surface with
   /// a per-element side effect (validation) applies it to exactly the reachable
   /// prefix. The fold seeds FALSE (an empty match is FALSE), so the returned
   /// truth is the disjunction over the visited prefix.
   ///
-  /// The element is GENERIC — a scalar value list supplies an `Expression` per
+  /// The element is generic — a scalar value list supplies an `Expression` per
   /// element, a row `IN` a whole `Array<Expression>` row — so the same
   /// short-circuit drives the scalar `.membership` and the row `.among` folds,
   /// the tuple-equality via `relate` standing in for the scalar equality.
@@ -1833,7 +1833,7 @@ internal struct Scope {
     for element in elements {
       try visit(element)
       truth = or(truth, try equality(element))
-      // A definite match makes every LATER element unreachable — the OR-chain
+      // A definite match makes every later element unreachable — the OR-chain
       // short-circuits here, exactly as the run does.
       if truth == true { break }
     }
@@ -1842,7 +1842,7 @@ internal struct Scope {
 
   /// The definite constant truth value of `predicate` when it is statically
   /// decidable — a comparison or `IS [NOT] NULL` whose operands fold to
-  /// ROW-INDEPENDENT `Value`s (via `constant(_ expression:)`: literals,
+  /// ROW-independent `Value`s (via `constant(_ expression:)`: literals,
   /// arithmetic, deterministic calls, nested `CASE`s), composed through
   /// `AND`/`OR`/`NOT`/`IN` — else `nil` (a predicate reading a column or a
   /// `:parameter` is decided per row). `check(_:_:)` reads it to skip an arm
@@ -1869,7 +1869,7 @@ internal struct Scope {
       guard let value = constant(operand, routines) else { return nil }
       return !value
     case let .null(operand, negated):
-      // A ROW-INDEPENDENT operand that folds to a concrete value is not NULL;
+      // A ROW-independent operand that folds to a concrete value is not NULL;
       // one that folds to `.null` (a NULL literal, or a deterministic routine
       // returning NULL) is NULL — matching the run. An operand the fold cannot
       // decide (`nil`) is per row, so the truth is too. This mirrors
@@ -1881,7 +1881,7 @@ internal struct Scope {
       // Fold `x IN (…)` exactly as its OR-chain of equalities folds — the same
       // primitives (`matched`/`constant`, `matches`, `membership`'s
       // short-circuit) — honouring the OR-chain's short-circuit: once a
-      // ROW-INDEPENDENT element definitely equals the constant operand the fold
+      // ROW-independent element definitely equals the constant operand the fold
       // is `true`, so a later row-dependent element (which alone would make the
       // fold per-row `nil`) is unreachable and does not spoil it —
       // `1 IN (1 + 0, Name + 1)` folds `true`. Absent a decisive match, any
@@ -1893,8 +1893,8 @@ internal struct Scope {
       return negated ? truth.map { !$0 } : truth
     case let .like(operand, pattern, escape, negated):
       // Fold `x LIKE p` when the operand, pattern, and optional escape all fold
-      // to ROW-INDEPENDENT constants — the same `constant(_ expression:)` the
-      // run's terms evaluate through — running the SAME matcher `Row.like`
+      // to ROW-independent constants — the same `constant(_ expression:)` the
+      // run's terms evaluate through — running the same matcher `Row.like`
       // does; any row-dependent operand leaves it per row (`nil`). `NOT LIKE`
       // negates the folded truth (UNKNOWN maps to itself).
       guard let truth = matched(operand, pattern, escape, routines) else {
@@ -1903,7 +1903,7 @@ internal struct Scope {
       return negated ? !truth : truth
     case let .between(test, lower, upper, negated):
       // Fold `x [NOT] BETWEEN a AND b` as `ranged` evaluates it: BETWEEN is the
-      // Kleene `x >= a AND x <= b`, and NOT BETWEEN its NEGATION (not the
+      // Kleene `x >= a AND x <= b`, and NOT BETWEEN its negation (not the
       // `x < a OR x > b` expansion, which diverges on a cross-kind bound — see
       // `ranged`). The folded `x >= a` short-circuits before the upper: a
       // definitely-FALSE one settles BETWEEN FALSE (and NOT BETWEEN TRUE)
@@ -1922,8 +1922,8 @@ internal struct Scope {
     case let .distinct(lhs, rhs, negated):
       // Fold `a IS [NOT] DISTINCT FROM b` as `differs` evaluates it: the
       // null-safe `distinct` of the two folded values, negated for `IS NOT`.
-      // It is TWO-VALUED, so when BOTH sides fold to ROW-INDEPENDENT constants
-      // the truth is DEFINITE; a row-dependent side leaves it per row (`nil`).
+      // It is two-valued, so when both sides fold to ROW-independent constants
+      // the truth is definite; a row-dependent side leaves it per row (`nil`).
       guard let lhs = constant(lhs, routines),
           let rhs = constant(rhs, routines) else {
         return nil
@@ -1932,9 +1932,9 @@ internal struct Scope {
       return negated ? !differ : differ
     case let .truth(inner, value, negated):
       // Fold `p IS [NOT] <truth value>` whenever the inner boolean is ROW-
-      // INDEPENDENT. `constant` gives its definite truth; and a `nil` from it
+      // independent. `constant` gives its definite truth; and a `nil` from it
       // over a `settled` inner (every operand a constant) is a definite UNKNOWN
-      // — NOT a per-row deferral — which `tested` maps to a DEFINITE result
+      // — NOT a per-row deferral — which `tested` maps to a definite result
       // (`p IS UNKNOWN` TRUE, `p IS TRUE` FALSE), so a constant-UNKNOWN test
       // short-circuits/type-checks as the run does rather than deferring and
       // validating an unreachable conjunct.
@@ -1942,8 +1942,8 @@ internal struct Scope {
       if folded != nil || settled(inner, routines) {
         return tested(folded, value, negated)
       }
-      // An `IS [NOT] UNKNOWN` test folds even over a ROW-DEPENDENT inner when
-      // the inner is DEFINITE (two-valued — `IS NULL`, `IS DISTINCT FROM`,
+      // An `IS [NOT] UNKNOWN` test folds even over a ROW-dependent inner when
+      // the inner is definite (two-valued — `IS NULL`, `IS DISTINCT FROM`,
       // another truth test, and their `AND`/`OR`/`NOT`, never take UNKNOWN):
       // such an inner is never the third value the test checks for, so
       // `p IS UNKNOWN` is definitely FALSE and `p IS NOT UNKNOWN` definitely
@@ -1956,8 +1956,8 @@ internal struct Scope {
       return nil
     case let .rows(lhs, op, rhs):
       // Fold `(l…) <op> (r…)` exactly as the scalar `.comparison` folds — each
-      // component of BOTH rows folds through `constant(_ expression:)`, then
-      // the folded values combine through the SHARED `relate` primitive the run
+      // component of both rows folds through `constant(_ expression:)`, then
+      // the folded values combine through the shared `relate` primitive the run
       // (`Filter.comparison`) and the empty-group pre-fold drive, so the fold
       // matches the run. A single row-dependent component (`nil`) leaves the
       // whole comparison per row (`nil`), so both `AND` arms stay reachable; an
@@ -1986,7 +1986,7 @@ internal struct Scope {
       }
       return negated ? truth.map { !$0 } : truth
     case .exists, .within, .quantified:
-      // A subquery predicate is not a ROW-INDEPENDENT constant fold — its truth
+      // A subquery predicate is not a ROW-independent constant fold — its truth
       // is decided by the materialised result at lowering time, not by folding
       // operands here — so it never folds statically; treat it as undecided
       // (per-row) so a reachability walk neither prunes nor faults on it.
@@ -1994,7 +1994,7 @@ internal struct Scope {
     }
   }
 
-  /// Whether every operand `predicate` reads folds to a ROW-INDEPENDENT
+  /// Whether every operand `predicate` reads folds to a ROW-independent
   /// constant — so its three-valued truth is fully determined at compile time.
   /// When it is and `constant(_ predicate:)` is `nil`, that `nil` is a definite
   /// UNKNOWN (a NULL propagated through constant operands), NOT a per-row
@@ -2030,15 +2030,15 @@ internal struct Scope {
     case .bound:
       false
     case let .rows(lhs, _, rhs):
-      // A row comparison is settled when EVERY component of BOTH rows folds to
-      // a ROW-INDEPENDENT constant — the row analog of `.comparison`, so a
+      // A row comparison is settled when every component of both rows folds to
+      // a ROW-independent constant — the row analog of `.comparison`, so a
       // constant-UNKNOWN row comparison (a NULL component) folds a `truth` test
       // definitely rather than deferring it.
       lhs.allSatisfy { constant($0, routines) != nil }
           && rhs.allSatisfy { constant($0, routines) != nil }
     case let .among(lhs, rows, _):
-      // A row `IN` is settled when the LEFT row and EVERY element row fold to
-      // ROW-INDEPENDENT constants — the row analog of `.membership`.
+      // A row `IN` is settled when the LEFT row and every element row fold to
+      // ROW-independent constants — the row analog of `.membership`.
       lhs.allSatisfy { constant($0, routines) != nil }
           && rows.allSatisfy { element in
             element.allSatisfy { constant($0, routines) != nil }
@@ -2050,7 +2050,7 @@ internal struct Scope {
     }
   }
 
-  /// Whether `predicate` is DEFINITE — two-valued, never evaluating to UNKNOWN,
+  /// Whether `predicate` is definite — two-valued, never evaluating to UNKNOWN,
   /// even when it reads row data. `IS [NOT] NULL`, `IS [NOT] DISTINCT FROM`,
   /// and a boolean test all collapse SQL's third value to a definite result by
   /// construction, and `AND`/`OR`/`NOT` of definite predicates stay definite. A
@@ -2062,7 +2062,7 @@ internal struct Scope {
     switch predicate {
     case .null, .distinct, .truth:
       true
-    // `EXISTS` is DEFINITELY two-valued — a non-empty test never yields UNKNOWN
+    // `EXISTS` is definitely two-valued — a non-empty test never yields UNKNOWN
     // — so it is definite, while `IN (Q)` is three-valued over NULLs (a NULL
     // element or operand makes an unmatched test UNKNOWN), so it is not.
     case .exists:
@@ -2085,9 +2085,9 @@ internal struct Scope {
   }
 
   /// The definite truth of `operand LIKE pattern [ESCAPE escape]` when the
-  /// operand, pattern, and optional escape all fold to ROW-INDEPENDENT
+  /// operand, pattern, and optional escape all fold to ROW-independent
   /// constants (via `constant(_ expression:)`), else `nil`. It folds each side
-  /// and runs the SAME `matches` the run's `Row.like` does — a NULL side is
+  /// and runs the same `matches` the run's `Row.like` does — a NULL side is
   /// UNKNOWN (`nil`), a non-text operand or pattern a definite non-match
   /// (FALSE), a bad escape collapses to `nil` (undecided) rather than faulting
   /// a compile-time reachability walk.
@@ -2123,7 +2123,7 @@ internal struct Scope {
   }
 
   /// The constant `Value` a `LIKE` pattern or escape `operand` folds to when it
-  /// is ROW-INDEPENDENT (`constant(_ expression:)`), else `nil`. A `:parameter`
+  /// is ROW-independent (`constant(_ expression:)`), else `nil`. A `:parameter`
   /// is per run — its value arrives from the bindings — so it never folds
   /// constant, exactly as a column does.
   private func constant(_ operand: Predicate.Operand, _ routines: Routines)
@@ -2137,8 +2137,8 @@ internal struct Scope {
   // MARK: - Aggregate discovery
 
   /// Validates the aggregate sub-expressions of `expression` — an aggregate's
-  /// fold runs over every row (in the aggregate node) BEFORE a `LIMIT`, so it
-  /// is reachable even under a zero-row limit — WITHOUT validating the
+  /// fold runs over every row (in the aggregate node) before a `LIMIT`, so it
+  /// is reachable even under a zero-row limit — without validating the
   /// surrounding per-result expression a run never reaches. It recurses through
   /// a binary's operands and a call's arguments to reach an aggregate, then
   /// validates it (its operand included); a bare column or literal has none.
@@ -2200,9 +2200,9 @@ internal struct Scope {
   }
 
   /// Validates the aggregate sub-expressions of `predicate` — a `HAVING`'s
-  /// aggregates are collected and FOLDED by the group node before the `HAVING`
+  /// aggregates are collected and folded by the group node before the `HAVING`
   /// filter runs, so they are reachable even in an arm the filter's
-  /// short-circuit skips. It walks EVERY arm (unlike `check`), reaching an
+  /// short-circuit skips. It walks every arm (unlike `check`), reaching an
   /// aggregate through a comparison's operands and `AND`/`OR`/`NOT`.
   func aggregates(in predicate: Predicate,
                   _ routines: Routines = [:],
@@ -2238,7 +2238,7 @@ internal struct Scope {
         }
       }
     case .exists:
-      // A subquery is its OWN scope — any aggregate inside it folds over its
+      // A subquery is its own scope — any aggregate inside it folds over its
       // group, not the enclosing one — so an `EXISTS (Q)` contributes no outer
       // aggregate to collect.
       break
@@ -2275,22 +2275,22 @@ internal struct Scope {
 
   // MARK: - Constant folding
 
-  /// Validates a whole-result aggregate's PROJECTION or SORT `expression` over
+  /// Validates a whole-result aggregate's projection or sort `expression` over
   /// the single empty group a constant-false `WHERE` leaves — the empty-fold's
   /// per-expression check, dispatching on whether the expression nests a
   /// subquery.
   ///
-  /// A subquery-FREE expression is precisely EMPTY-FOLDED (`empty`): its value
+  /// A subquery-free expression is precisely empty-folded (`empty`): its value
   /// over the empty group is evaluated exactly as a run does, pruning a
   /// statically-decided `CASE` branch (a constant-false guard's arm never
   /// folds, so it cannot fault) — the precise reachability a false-`WHERE`
   /// whole-result aggregate gives its projection.
   ///
-  /// An expression that NESTS a subquery cannot be folded: the empty group
+  /// An expression that nests a subquery cannot be folded: the empty group
   /// carries no catalog, so a `CASE WHEN EXISTS (Q) …` guard folds UNKNOWN and
   /// its arms would be pruned — but the subquery is row-independent and may be
-  /// TRUE at RUN, RUNNING the guarded arm. So VALIDATE it as a run would
-  /// (`validate`), which validates BOTH arms of a subquery-guarded `CASE` (a
+  /// TRUE at run, running the guarded arm. So validate it as a run would
+  /// (`validate`), which validates both arms of a subquery-guarded `CASE` (a
   /// `nil`-constant guard leaves both reachable), surfacing the fault the run
   /// raises — `SELECT CASE WHEN EXISTS (Q) THEN 1 / 0 … WHERE 1 = 0` faults
   /// `.divide`, matching a run that keeps the empty group and evaluates the
@@ -2310,7 +2310,7 @@ internal struct Scope {
   /// single empty group a constant-false `WHERE` leaves — the fold over zero
   /// rows: `COUNT` is 0, every other aggregate NULL, a literal itself, a binary
   /// the operator applied to its folded operands, a call the routine applied to
-  /// its folded arguments. It EVALUATES the empty group exactly as a run does,
+  /// its folded arguments. It evaluates the empty group exactly as a run does,
   /// so it raises precisely the run's fault — an unregistered routine
   /// (`SQLError.function`), a bad arity or kind (`SQLError.argument`), a divide
   /// by zero (`SQLError.divide`), an overflow (`SQLError.magnitude`) —
@@ -2345,7 +2345,7 @@ internal struct Scope {
       // Evaluate the `CASE` over the empty group exactly as a run does: the
       // first branch whose guard folds TRUE (`empty(predicate)`) yields its
       // result, else the `ELSE`, else `NULL`. A skipped branch's result never
-      // folds, so it cannot fault. The selected value is COERCED to the CASE's
+      // folds, so it cannot fault. The selected value is coerced to the CASE's
       // unified result type (`derive`), just as the executor's
       // `Row.conditional` widens it — an `.integer` arm of a CASE that unifies
       // to `.double` folds to `.double`, so the empty group matches the
@@ -2381,7 +2381,7 @@ internal struct Scope {
       return matches(va, .equal, vb) == true ? .null : va
     case .column, .subquery:
       // A bare column cannot appear over an empty group (a grouping error
-      // `compile` rejected). A scalar `subquery` is materialised at RUN (this
+      // `compile` rejected). A scalar `subquery` is materialised at run (this
       // fold carries no cache), and its value is uncorrelated — group-
       // independent — so this pre-run fold treats it as the undecided `.null`,
       // never faulting on a subquery the run would materialise cleanly.
@@ -2405,7 +2405,7 @@ internal struct Scope {
 
   /// The value a `LIKE` pattern or escape `operand` folds to over the empty
   /// group: an expression folds through `empty(_ expression:)`; a `:parameter`
-  /// is UNBOUND here — the empty-group fold carries no bindings — so it is
+  /// is unbound here — the empty-group fold carries no bindings — so it is
   /// `.null`, reading UNKNOWN exactly as a `Predicate.bound` parameter does.
   func empty(_ operand: Predicate.Operand, _ routines: Routines = [:])
       throws(SQLError) -> Value {
@@ -2443,7 +2443,7 @@ internal struct Scope {
       // without folding `1 / 0` to a `.divide` fault. Negated for `NOT IN`.
       //
       // Reject an empty list, as `check` and `lower` do — a whole-result
-      // aggregate `HAVING` over the empty group reaches this fold WITHOUT a
+      // aggregate `HAVING` over the empty group reaches this fold without a
       // prior `check` (`OutputColumn.typecheck`), so an empty list would
       // otherwise fold `false` (`true` under `NOT IN`) here while both compile
       // (`lower`) and schema (`check`) reject it. The parser rejects `IN ()`,
@@ -2459,7 +2459,7 @@ internal struct Scope {
     case let .rows(lhs, op, rhs):
       // Fold `(l…) <op> (r…)` over the empty group as `Filter.comparison`
       // evaluates it: each component folds through `empty(_ expression:)`, then
-      // the values combine with the SAME `matches`/Kleene primitives — the
+      // the values combine with the same `matches`/Kleene primitives — the
       // componentwise Kleene `AND` for `=` (its negation for `<>`), the
       // lexicographic cascade for the ordering operators. Reject an unequal
       // arity as `lower`/`check` do.
@@ -2499,8 +2499,8 @@ internal struct Scope {
       return negated ? truth.map { !$0 } : truth
     case let .like(operand, pattern, escape, negated):
       // Fold `x LIKE p` over the empty group as `Row.like` evaluates it: the
-      // operand, pattern, and optional escape are each folded ONCE, IN ORDER,
-      // BEFORE the result is decided (so a faulting reached operand surfaces
+      // operand, pattern, and optional escape are each folded once, IN ORDER,
+      // before the result is decided (so a faulting reached operand surfaces
       // its throw rather than being swallowed by a NULL escape). Then a NULL
       // operand, pattern, or escape is UNKNOWN, a non-text operand or pattern a
       // definite non-match, else the `%`/`_` matcher decides; a non-NULL escape
@@ -2530,7 +2530,7 @@ internal struct Scope {
       return negated ? truth.map { !$0 } : truth
     case let .between(test, lower, upper, negated):
       // Fold `x [NOT] BETWEEN a AND b` over the empty group as `ranged` does:
-      // BETWEEN is `x >= a AND x <= b`, and NOT BETWEEN its NEGATION (not the
+      // BETWEEN is `x >= a AND x <= b`, and NOT BETWEEN its negation (not the
       // `x < a OR x > b` expansion, which diverges on a cross-kind bound — see
       // `ranged`). The folded `x >= a` short-circuits before the upper: a
       // definitely-FALSE one settles BETWEEN FALSE (and NOT BETWEEN TRUE)
@@ -2546,7 +2546,7 @@ internal struct Scope {
     case let .distinct(lhs, rhs, negated):
       // Fold `a IS [NOT] DISTINCT FROM b` over the empty group as `differs`
       // does: the null-safe `distinct` of the two folded values, negated for
-      // `IS NOT`. It is TWO-VALUED — both operands fold to definite values, so
+      // `IS NOT`. It is two-valued — both operands fold to definite values, so
       // the truth is definite (never UNKNOWN, unlike a `=` over a NULL).
       let differ = distinct(try empty(lhs, routines), try empty(rhs, routines))
       return negated ? !differ : differ
@@ -2554,7 +2554,7 @@ internal struct Scope {
       // Fold `p IS [NOT] <truth value>` over the empty group as `Filter.truth`
       // evaluates it: `empty` yields the inner's genuine three-valued result
       // (over zero rows every side is constant, so a `nil` here is a real
-      // UNKNOWN, not a per-row deferral), which `tested` maps to a DEFINITE
+      // UNKNOWN, not a per-row deferral), which `tested` maps to a definite
       // result — never itself UNKNOWN.
       return tested(try empty(inner, routines), value, negated)
     case let .and(lhs, rhs):
@@ -2589,13 +2589,13 @@ internal struct Scope {
     return (member.relation.alias ?? member.relation.name) == qualifier
   }
 
-  /// Whether `column` is a QUALIFIED reference whose qualifier a relation of
+  /// Whether `column` is a qualified reference whose qualifier a relation of
   /// this scope answers — a qualified name a present alias (else a table name)
   /// names. An UNqualified name is FALSE (it names no one local relation to
   /// shadow an outer one), as is a qualified name no local relation answers.
   ///
   /// A qualified name a local relation answers but none of this scope binds is
-  /// a QUALIFIED MISS on that relation — the local alias SHADOWS a same-named
+  /// a qualified miss on that relation — the local alias shadows a same-named
   /// enclosing relation, so `find` faults it hard rather than correlating
   /// outward; an unadmitted qualifier is genuinely not local and correlates.
   private func shadows(_ column: Column) -> Bool {
@@ -2604,10 +2604,10 @@ internal struct Scope {
   }
 
   /// Every combined ordinal `column` addresses — the FULL addressable surface
-  /// (each admitted relation's PHYSICAL columns AND its VIRTUAL ones, through
-  /// `Schema.ordinal(of:)`), in chain order. This is the ONE bare-name scan
+  /// (each admitted relation's physical columns AND its virtual ones, through
+  /// `Schema.ordinal(of:)`), in chain order. This is the one bare-name scan
   /// every ambiguity/presence determination routes through, so no site can scan
-  /// a PARTIAL surface (real-only) and drift: a name matching more than one
+  /// a partial surface (real-only) and drift: a name matching more than one
   /// entry here is ambiguous, one present, none absent — measured over the same
   /// physical∪virtual surface `ordinal(of:)` resolves against. An unqualified
   /// `column` admits every relation; a qualified one only a relation its
@@ -2627,7 +2627,7 @@ internal struct Scope {
   /// it yields that relation's `offset` plus the local ordinal; present in more
   /// than one — an unqualified name in several relations, or a qualified name
   /// two relations share a name for — it is `SQLError.ambiguous`; in none it is
-  /// `SQLError.column`. Resolution reads the ONE full-addressable scan
+  /// `SQLError.column`. Resolution reads the one full-addressable scan
   /// (`addressable`), so it and every ambiguity/presence check measure the same
   /// physical∪virtual surface.
   internal func ordinal(of column: Column) throws(SQLError) -> Int {
@@ -2637,37 +2637,37 @@ internal struct Scope {
     return resolved
   }
 
-  /// The combined ordinal `column` resolves to as an ENCLOSING reference, or
-  /// `nil` when this scope binds it in NONE of its relations — the probe a
+  /// The combined ordinal `column` resolves to as an enclosing reference, or
+  /// `nil` when this scope binds it in none of its relations — the probe a
   /// nested subquery's `Outer` consults for a candidate correlated column. The
   /// three outcomes are DISTINCT: a name bound by exactly one relation yields
-  /// its ordinal, a name bound by NONE reports `nil` (the `Outer` walk keeps
-  /// looking outward), and a name bound by MORE than one relation of this scope
-  /// is `SQLError.ambiguous` and PROPAGATES — a nearer ambiguous scope SHADOWS
+  /// its ordinal, a name bound by none reports `nil` (the `Outer` walk keeps
+  /// looking outward), and a name bound by more than one relation of this scope
+  /// is `SQLError.ambiguous` and propagates — a nearer ambiguous scope shadows
   /// farther ones rather than falling through to rebind the name to an outer
   /// column. Only the not-found `SQLError.column` becomes `nil`; every other
   /// fault (an ambiguity or a qualifier fault) propagates. This is the
-  /// enclosing analog of `find`, which the LOCAL lowering consults for the same
+  /// enclosing analog of `find`, which the local lowering consults for the same
   /// reason.
   internal func correlated(_ column: Column) throws(SQLError) -> Int? {
     try find(column)
   }
 
   /// The combined ordinal `column` resolves to, or `nil` when it is a candidate
-  /// CORRELATED reference to an enclosing scope — the not-found probe a
-  /// `.column` lowering consults before correlating outward. FOUR outcomes stay
+  /// correlated reference to an enclosing scope — the not-found probe a
+  /// `.column` lowering consults before correlating outward. four outcomes stay
   /// DISTINCT.
   ///
   /// A name bound by exactly one relation yields its ordinal (found → bind). A
-  /// name bound by MORE than one relation is `SQLError.ambiguous`, PROPAGATED
+  /// name bound by more than one relation is `SQLError.ambiguous`, propagated
   /// (never `nil`): a local ambiguity is a hard error, not a fall-through, so
   /// `try?`-swallowing it would silently rebind an ambiguous local name to an
   /// outer column. The remaining `SQLError.column` — no relation binds the name
-  /// — splits on whether some local relation ADMITTED the qualifier: an
-  /// UNADMITTED qualifier (or an absent unqualified name) is a genuine
+  /// — splits on whether some local relation admitted the qualifier: an
+  /// unadmitted qualifier (or an absent unqualified name) is a genuine
   /// not-found → `nil`, so the walk correlates outward; a qualifier a local
-  /// relation DOES admit, naming a column it LACKS, is a QUALIFIED MISS that
-  /// PROPAGATES as a hard `.column` — the local alias SHADOWS a same-qualifier
+  /// relation does admit, naming a column it lacks, is a qualified miss that
+  /// propagates as a hard `.column` — the local alias shadows a same-qualifier
   /// enclosing relation, so it faults against the inner relation rather than
   /// falling through to bind the outer one.
   internal func find(_ column: Column) throws(SQLError) -> Int? {
@@ -2680,15 +2680,15 @@ internal struct Scope {
     }
   }
 
-  /// The resolved column a bare `column` LOCALLY names — carrying its output
-  /// name, its `type(at:)` type, and its `unconstrained(at:)` mask TOGETHER
-  /// from ONE `find` — or `nil` when this scope binds it in none of its
+  /// The resolved column a bare `column` locally names — carrying its output
+  /// name, its `type(at:)` type, and its `unconstrained(at:)` mask together
+  /// from one `find` — or `nil` when this scope binds it in none of its
   /// relations (the reference is a candidate correlated one).
   ///
-  /// INVARIANT: a column reference's type and mask (and any future per-column
-  /// attribute) are obtained from ONE resolution that traverses the SAME paths
+  /// invariant: a column reference's type and mask (and any future per-column
+  /// attribute) are obtained from one resolution that traverses the same paths
   /// — local (here), correlation (`Outer.resolved(for:)`), schema — so the two
-  /// attributes cannot diverge. The mask reader once consulted a DIFFERENT
+  /// attributes cannot diverge. The mask reader once consulted a different
   /// (local-only) path than the type reader, so a correlated all-NULL column
   /// lost its mask; folding both through the single ordinal closes that gap.
   internal func resolved(_ column: Column) throws(SQLError) -> ResolvedColumn? {
@@ -2698,7 +2698,7 @@ internal struct Scope {
   }
 
   /// The resolved column at combined `ordinal`, named `name` — its `type(at:)`
-  /// type and `unconstrained(at:)` mask read TOGETHER, so an enclosing
+  /// type and `unconstrained(at:)` mask read together, so an enclosing
   /// correlation walk (`Outer.resolved(for:)`) carries both up from the one
   /// ordinal it matched.
   internal func resolved(at ordinal: Int, named name: String)
@@ -2715,9 +2715,9 @@ internal struct Scope {
                       _ routines: Routines = [:],
                       subquery: Resolution = .unsupported) throws(SQLError)
       -> Array<Term> {
-    // A projection is a BARRED clause position (see `Schema.terms`): the entry
+    // A projection is a barred clause position (see `Schema.terms`): the entry
     // bars the seam, so no join-scope projection can admit a correlated column
-    // of THIS query.
+    // of this query.
     let subquery = subquery.barred
     switch projection {
     case .all:
@@ -2725,13 +2725,13 @@ internal struct Scope {
       // coalesce `value`, then every real column the shared `expansion`
       // enumeration yields as a `.slot` at its combined ordinal — in chain
       // order, never a virtual column, and never a physical constituent a
-      // merged column subsumes. `width(of: .all)` counts this SAME
+      // merged column subsumes. `width(of: .all)` counts this same
       // enumeration, so the emitted arity and the width cannot diverge.
       return merged.map(\.value) + expansion.map { .slot($0) }
     case let .columns(columns):
       // Lower each bare column through `term`, so a name none of this scope's
       // relations bind consults the `subquery` surface: a correlated reference
-      // on the BARRED projection surface is diagnosed unsupported (parity with
+      // on the barred projection surface is diagnosed unsupported (parity with
       // the schema path) rather than faulting `SQLError.column`.
       var terms = Array<Term>()
       terms.reserveCapacity(columns.count)
@@ -2756,22 +2756,22 @@ internal struct Scope {
       throws(SQLError) -> Term {
     switch expression {
     case let .column(column):
-      // A BARE (unqualified) name matching a `NATURAL`/`USING` merged column
-      // (ISO 9075 7.10) resolves to its ONE coalesced `value` — the merged
-      // entry SHADOWS its two physical constituents, so the name is not
-      // ambiguous between the two sides. A QUALIFIED `A.c`/`B.c` never matches
+      // A bare (unqualified) name matching a `NATURAL`/`USING` merged column
+      // (ISO 9075 7.10) resolves to its one coalesced `value` — the merged
+      // entry shadows its two physical constituents, so the name is not
+      // ambiguous between the two sides. A qualified `A.c`/`B.c` never matches
       // a (unqualified) merged column and reaches its own side below. A
-      // physical column of the same name a later PLAIN join contributed faults
+      // physical column of the same name a later plain join contributed faults
       // `.ambiguous` (`merged(binding:)`).
       if column.qualifier == nil,
           let merged = try merged(binding: column.name) {
         return merged.value
       }
       // Resolve the column against this scope's own relations first; a name
-      // none binds is a candidate CORRELATED reference — consult the enclosing
+      // none binds is a candidate correlated reference — consult the enclosing
       // scope, lowering to a synthetic `Term.parameter` bound from the outer
       // row when it resolves there, else the ordinary unknown-column fault. A
-      // LOCALLY AMBIGUOUS name (bound by more than one relation) is a HARD
+      // locally ambiguous name (bound by more than one relation) is a hard
       // error `find` propagates — never a fall-through to outer correlation
       // that would rebind it to an outer column.
       if let ordinal = try find(column) { return .slot(ordinal) }
@@ -2807,7 +2807,7 @@ internal struct Scope {
         nil
       }
       // Attach the unified result type — the same `ValueType.unified` reduction
-      // `derive`/`validate` compute — so the executor COERCES the selected
+      // `derive`/`validate` compute — so the executor coerces the selected
       // branch's value to the type the schema advertises.
       let type = try derive(whens, otherwise, routines, subquery: subquery)
       return .case(branches, else: fallback, type: type)
@@ -2817,7 +2817,7 @@ internal struct Scope {
       return try .cast(term(operand, routines, subquery: subquery), type)
     case let .coalesce(arguments):
       // Lower each argument to a combined-ordinal `Term` and hold them in a
-      // first-class `Term.coalesce` so each is evaluated ONCE; `type` is the
+      // first-class `Term.coalesce` so each is evaluated once; `type` is the
       // unified argument type the selected value coerces to.
       var elements = Array<Term>()
       elements.reserveCapacity(arguments.count)
@@ -2828,14 +2828,14 @@ internal struct Scope {
       return .coalesce(elements, type: type)
     case let .nullif(lhs, rhs):
       // Lower both operands to combined-ordinal `Term`s and hold them in a
-      // first-class `Term.nullif` so each is evaluated ONCE.
+      // first-class `Term.nullif` so each is evaluated once.
       return try .nullif(term(lhs, routines, subquery: subquery),
                          term(rhs, routines, subquery: subquery))
     case let .subquery(query):
       // A scalar subquery lowers to a `Term.subquery` reading its collapsed
       // value from the run-time cache, carrying its occurrence `Subkey` and
       // single-column type; the single-column arity is enforced from the
-      // compiled width here (no cursor). The query is UNCORRELATED, so it reads
+      // compiled width here (no cursor). The query is uncorrelated, so it reads
       // no cell of this row.
       return try subquery.scalar(query)
     case .aggregate:
@@ -2844,7 +2844,7 @@ internal struct Scope {
       throw .state("42803", "an aggregate is not allowed here")
     case .grouping:
       // GROUPING is a grouped-query construct decided by the arm's key
-      // membership; it has no meaning in this NON-grouped join resolution, so
+      // membership; it has no meaning in this non-grouped join resolution, so
       // it faults as an aggregate does. A grouped query lowers it through
       // `Grouped.term` instead.
       throw .state("42803", "GROUPING requires a GROUP BY")
@@ -2863,7 +2863,7 @@ internal struct Scope {
                       _ names: Array<String?>, _ routines: Routines = [:],
                       subquery: Resolution = .unsupported)
       throws(SQLError) -> Array<SortKey> {
-    // An ORDER BY is BARRED, as the projection is (see `Schema.order`).
+    // An ORDER BY is barred, as the projection is (see `Schema.order`).
     let subquery = subquery.barred
     return try SQLEngine.order(order, projection, names) {
       expression throws(SQLError) in
@@ -2873,16 +2873,16 @@ internal struct Scope {
 
   /// Lowers a join's `ON predicate` to the engine's `Filter` across the chain,
   /// emitting a `match` for each pure `column = column` equality — the
-  /// hash-join key `nest` folds into a physical `Join` — ONLY WHEN the WHOLE
+  /// hash-join key `nest` folds into a physical `Join` — ONLY WHEN the whole
   /// `ON` is safe, and otherwise lowering the entire conjunction as one
   /// residual.
   ///
-  /// The key is READ OFF the ALREADY-LOWERED conjunct, not by re-resolving the
+  /// The key is read off the already-lowered conjunct, not by re-resolving the
   /// AST: a conjunct whose lowered form is a `compare(.slot, .equal, .slot)` —
   /// both operands columns of the join prefix — IS the hash-join key `nest`
   /// folds into a physical `Join`, so it is rewritten to the `match(left,
   /// right)` node `nest` recognises. A conjunct that lowered to a `.parameter`
-  /// operand is a CORRELATED outer reference (`ON V.x = T.id` under an EXISTS,
+  /// operand is a correlated outer reference (`ON V.x = T.id` under an EXISTS,
   /// lowering to `compare(.slot, .equal, .parameter)`), NOT a column = column
   /// key, so it stays the residual `ON` filter — re-resolving its AST would
   /// consult only the prefix and fault `SQLError.column` on the outer column
@@ -2891,23 +2891,23 @@ internal struct Scope {
   /// an `OR`/`NOT`) lowers through `lower`, becoming a residual the join runs
   /// as a filter over the product — nested-loop semantics, correct if O(n·m).
   ///
-  /// A `match` key is extracted ONLY WHEN EVERY lowered conjunct is `safe`; if
-  /// ANY conjunct is unsafe, the whole `ON` lowers to a single residual and NO
-  /// key is hoisted. The hash join evaluates its key equality BEFORE any
+  /// A `match` key is extracted ONLY WHEN every lowered conjunct is `safe`; if
+  /// ANY conjunct is unsafe, the whole `ON` lowers to a single residual and no
+  /// key is hoisted. The hash join evaluates its key equality before any
   /// residual conjunct AND skips a NULL key (an equi `match` drops a pair whose
   /// key cell is NULL), so an extracted key changes the `ON`'s left-to-right
   /// Kleene error behaviour on two hazards, both suppressing a throw the
   /// residual `select` over the product would raise (the order the WHERE
   /// pushdown barriers preserve):
-  ///   - an UNSAFE conjunct BEFORE the key (`ON (1 / A.x) = 0 AND A.k = B.k`):
+  ///   - an unsafe conjunct before the key (`ON (1 / A.x) = 0 AND A.k = B.k`):
   ///     hoisting the key would let its non-match drop a pair before the
   ///     unsafe conjunct runs (`A.x = 0` ⇒ `SQLError.divide`);
-  ///   - a NULLABLE key BEFORE an UNSAFE conjunct (`ON A.k = B.k AND (1 / A.x)
+  ///   - a nullable key before an unsafe conjunct (`ON A.k = B.k AND (1 / A.x)
   ///     = 0`, `A.k` NULL, `A.x = 0`): the equality is UNKNOWN, so the Kleene
   ///     `AND` must still evaluate the unsafe RHS and raise — but the hash join
   ///     skips the NULL key and drops the pair before the RHS runs.
   /// The engine has no NOT NULL schema (a column surfaces as a `Value` that may
-  /// be `.null`), so it cannot prove a key operand non-nullable; EVERY equi key
+  /// be `.null`), so it cannot prove a key operand non-nullable; every equi key
   /// is treated as nullable, collapsing both hazards to the single whole-`ON`
   /// rule. An equi `column = column` is always `safe` (comparing two cells
   /// never raises), so an all-equi or otherwise all-safe `ON` still hash-joins
@@ -2921,14 +2921,14 @@ internal struct Scope {
       try lower(conjunct, routines, subquery: subquery)
     }
     // An unsafe conjunct anywhere forbids extracting ANY key: a hoisted key
-    // both skips a NULL pair before a LATER unsafe conjunct runs and drops a
-    // non-match before an EARLIER one does — either suppressing the throw the
+    // both skips a NULL pair before a later unsafe conjunct runs and drops a
+    // non-match before an earlier one does — either suppressing the throw the
     // whole-ON residual owes. Lower the entire conjunction as one residual.
     guard lowered.allSatisfy(\.safe) else { return lowered.conjunction! }
-    // Read the equi-join key off the ALREADY-LOWERED term rather than
+    // Read the equi-join key off the already-lowered term rather than
     // re-resolving the AST: a key is a `compare(.slot, .equal, .slot)` whose
-    // BOTH operands are columns of the join prefix. A conjunct that lowered to
-    // a `.parameter` operand is a CORRELATED outer reference (`V.x = :outer`),
+    // both operands are columns of the join prefix. A conjunct that lowered to
+    // a `.parameter` operand is a correlated outer reference (`V.x = :outer`),
     // NOT a column = column key, so it stays the residual `ON` filter — a
     // re-resolution of its AST would consult only the prefix and fault
     // `SQLError.column` on the outer column already lowered correctly.

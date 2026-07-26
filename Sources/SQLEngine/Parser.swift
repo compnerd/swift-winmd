@@ -11,7 +11,7 @@
 /// view           := VIEW identifier
 ///                   ['(' identifier (',' identifier)* ')'] AS query
 /// function       := FUNCTION identifier '(' [param (',' param)*] ')'
-///                   RETURNS type AS expression
+///                   returns type AS expression
 /// param          := identifier type
 /// type           := INTEGER | INT | REAL | FLOAT | DOUBLE | VARCHAR | TEXT
 ///                 | CHAR | BOOLEAN | BOOL | BLOB | BINARY
@@ -44,7 +44,7 @@
 /// projection     := '*' | column (',' column)*
 /// where          := WHERE predicate
 /// group          := GROUP BY element (',' element)*
-///                   // the elements' grouping-set lists are CROSS-PRODUCTED
+///                   // the elements' grouping-set lists are CROSS-producted
 ///                   // into one set list; a purely ordinary clause stays plain
 ///                   // GROUP BY keys, and any ROLLUP/CUBE/GROUPING SETS makes
 ///                   // the whole clause a GROUPING SETS — a UNION ALL of
@@ -58,7 +58,7 @@
 /// set            := expression | '(' [expression (',' expression)*] ')'
 ///                   // '()' is the grand-total set; a top-level ordinary key
 ///                   // is a bare scalar expression ('(SELECT 1)' a subquery);
-///                   // ROLLUP/CUBE/GROUPING/SETS are CONTEXT identifiers, not
+///                   // ROLLUP/CUBE/GROUPING/SETS are context identifiers, not
 ///                   // keywords — ROLLUP/CUBE open only before a '(', and
 ///                   // GROUPING only before SETS
 /// having         := HAVING predicate
@@ -243,7 +243,7 @@ internal struct Parser: ~Escapable {
   /// The leading `intersection` is the seed `Query`; each `UNION`/`EXCEPT`
   /// (optionally `ALL`) folds the next `intersection` onto the right, so a
   /// same-precedence chain (`a UNION b EXCEPT c`) reads left to right.
-  /// `INTERSECT` binds TIGHTER — it lives in the inner `intersection` tier — so
+  /// `INTERSECT` binds tighter — it lives in the inner `intersection` tier — so
   /// `a UNION b INTERSECT c` parses as `a UNION (b INTERSECT c)`, the ISO
   /// precedence. `ALL` keeps duplicate rows per the operator's multiplicity; a
   /// bare operator removes them — the distinction the engine honours.
@@ -256,11 +256,11 @@ internal struct Parser: ~Escapable {
       query = try .setop(kind, query, intersection(), all: all)
     }
     // ISO 9075: an `ORDER BY` / `OFFSET`·`FETCH` after a set-operation chain
-    // applies to the WHOLE result, not the trailing arm — an individual arm
+    // applies to the whole result, not the trailing arm — an individual arm
     // needs its own parentheses to carry one. The recursive-descent parse folds
-    // that trailing tail onto the LAST arm's `select` (a `select` greedily
-    // consumes its ORDER BY/limit); LIFT it here to the query-level `ordered`
-    // carrier over the union, where it resolves through the setop's OUTPUT
+    // that trailing tail onto the last arm's `select` (a `select` greedily
+    // consumes its ORDER BY/limit); lift it here to the query-level `ordered`
+    // carrier over the union, where it resolves through the setop's output
     // scope (`Catalog.ordered`) rather than binding the last arm's columns. A
     // set operation carries no query-level `DISTINCT` in plain SQL (a bare
     // `UNION` already dedups), so only the ORDER BY and limit are lifted.
@@ -273,13 +273,13 @@ internal struct Parser: ~Escapable {
     // arm's columns rather than the intersect result named by the first arm.
     guard case .setop = query else { return query }
     // The trailing tail reaches the query level by two routes. When the last
-    // arm is a `SELECT`, that arm's greedy `select()` already CONSUMED the
-    // `ORDER BY`/limit, so it sits on the rightmost arm and is LIFTED here (and
+    // arm is a `SELECT`, that arm's greedy `select()` already consumed the
+    // `ORDER BY`/limit, so it sits on the rightmost arm and is lifted here (and
     // trimmed off the arm, so it applies once). When the last arm is a `TABLE
     // t`/`VALUES …` primary — neither carries a primary-level order (see
-    // `term`) — the tail is UNCONSUMED at this point, so parse it HERE. Either
+    // `term`) — the tail is unconsumed at this point, so parse it here. Either
     // way the tail lands on the `ordered` carrier over the union, resolved
-    // through the setop's OUTPUT scope, not the last arm's columns.
+    // through the setop's output scope, not the last arm's columns.
     let last = trailing(query)
     if last.order != nil || last.limit != nil {
       return .ordered(trim(query), distinct: false, order: last.order,
@@ -292,7 +292,7 @@ internal struct Parser: ~Escapable {
                     generated: 0)
   }
 
-  /// The RIGHTMOST arm's `Select` of a set-operation `query` — the arm the
+  /// The rightmost arm's `Select` of a set-operation `query` — the arm the
   /// recursive-descent parse folds a trailing query-level `ORDER BY`/limit
   /// onto, reached by descending each set operation's RIGHT term.
   private func trailing(_ query: Query) -> Select {
@@ -303,9 +303,9 @@ internal struct Parser: ~Escapable {
     }
   }
 
-  /// `query` with its LAST arm's `order`/`limit` cleared — the query-level tail
+  /// `query` with its last arm's `order`/`limit` cleared — the query-level tail
   /// a set-operation `query` lifted onto the `ordered` carrier, removed from
-  /// the arm that greedily parsed it so it is applied ONCE, over the union.
+  /// the arm that greedily parsed it so it is applied once, over the union.
   private func trim(_ query: Query) -> Query {
     switch query {
     case let .select(select):
@@ -344,11 +344,11 @@ internal struct Parser: ~Escapable {
   /// tiers compose over.
   ///
   /// `TABLE t` is exactly `SELECT * FROM t` (ISO 9075 `<explicit table>`): it
-  /// lowers to the SAME AST a star-projection single-relation select builds — a
+  /// lowers to the same AST a star-projection single-relation select builds — a
   /// `.all` projection over one named `Relation`, no `WHERE`/`GROUP`/`HAVING`/
   /// order/limit — so compile, execute, and the `SELECT *` column expansion all
   /// apply unchanged and it composes with `UNION`/`INTERSECT`/`EXCEPT` as a
-  /// parenthesised select would. The operand is a bare table or view NAME (the
+  /// parenthesised select would. The operand is a bare table or view name (the
   /// same `identifier` a relation names); a derived table is not admitted, as
   /// `TABLE (…)` is not an ISO form. Ordering is a select-internal clause here,
   /// so a `TABLE t ORDER BY …` tail is not accepted at this primary level — the
@@ -376,7 +376,7 @@ internal struct Parser: ~Escapable {
   ///
   /// Each parenthesised row is a tuple of scalar expressions (usually literals,
   /// but any row-independent expression is admitted, since a FROM-less `SELECT`
-  /// evaluates it over the single empty row). Every row must have EQUAL arity —
+  /// evaluates it over the single empty row). Every row must have equal arity —
   /// a mismatch is `SQLError.arity` — and there is at least one row, each with
   /// at least one element (the parser rejects an empty `VALUES ()`). The rows
   /// lower to `SELECT v, … UNION ALL SELECT v, …` in source order, so `UNION
@@ -386,7 +386,7 @@ internal struct Parser: ~Escapable {
   /// emitted as the FIRST arm's projection aliases (the ISO rule that a set
   /// operation's result columns come from its first arm) so a `SELECT column1
   /// FROM (VALUES …) AS t` names them. A per-column `ValueType` unifies across
-  /// the rows through the SAME set-operation schema derivation `UNION` uses (a
+  /// the rows through the same set-operation schema derivation `UNION` uses (a
   /// column mixing integer and double widens to double), so this parse only
   /// shapes the desugar and leaves the typing to resolution.
   private mutating func values() throws(SQLError) -> Query {
@@ -472,7 +472,7 @@ internal struct Parser: ~Escapable {
   }
 
   /// Parses the `FUNCTION` tail — `identifier '(' [param (, param)*] ')'
-  /// RETURNS type AS expression` (the `CREATE FUNCTION` is already consumed),
+  /// returns type AS expression` (the `CREATE FUNCTION` is already consumed),
   /// each `param` an `identifier type`.
   ///
   /// The parameter list is parenthesised and may be empty (`f() RETURNS …`).
@@ -596,8 +596,8 @@ internal struct Parser: ~Escapable {
     let limit = try rowLimit()
 
     // The `GROUP BY` tail is stored as-parsed — a `.keys` ordinary key list (or
-    // none) or a `.sets` `GROUPING SETS (…)` list. A `.sets` is EXPANDED into a
-    // `UNION ALL` of per-arm groupings at compile and schema time (by RESOLVED
+    // none) or a `.sets` `GROUPING SETS (…)` list. A `.sets` is expanded into a
+    // `UNION ALL` of per-arm groupings at compile and schema time (by resolved
     // identity, so an absent key NULLs correctly), not desugared here.
     return Select(distinct: distinct, projection: projection, from: from,
                   joins: joins, predicate: predicate, grouping: grouping,
@@ -605,17 +605,17 @@ internal struct Parser: ~Escapable {
   }
 
   /// Parses `BY <element> (',' <element>)*` (the `GROUP` keyword is already
-  /// consumed) — the ISO comma list of grouping ELEMENTS, cross-producted into
+  /// consumed) — the ISO comma list of grouping elements, cross-producted into
   /// one grouping-set list.
   ///
   /// Each element yields a set list (`Array<Array<Expression>>`): an ordinary
   /// key is the single-set list `[[key]]`; `ROLLUP`/`CUBE`/`GROUPING SETS`
   /// yield their expanded set lists (see `element`). The whole clause is the
-  /// PRODUCT of the elements' set lists — one result set per combination, the
+  /// product of the elements' set lists — one result set per combination, the
   /// concatenation of the chosen sets — so `GROUP BY a, ROLLUP(b, c)` crosses
   /// `[[a]]` with `[[b, c], [b], []]` into `[[a, b, c], [a, b], [a]]`.
   ///
-  /// A PURELY ordinary clause (no `ROLLUP`/`CUBE`/`GROUPING SETS`) returns
+  /// A purely ordinary clause (no `ROLLUP`/`CUBE`/`GROUPING SETS`) returns
   /// `.keys` — the plain path, so `GROUP BY a, b` stays `.keys([a, b])`. Any
   /// construct makes the whole clause `.sets`, which the shared `expand`
   /// desugars to a `UNION ALL` of per-set arms (Stage 1), so `ROLLUP`/`CUBE`
@@ -638,17 +638,17 @@ internal struct Parser: ~Escapable {
       let (sets, opens) = try element()
       construct = construct || opens
       if sets.count == 1 {
-        // A SINGLE-set element (an ordinary key, or `()`) APPENDS its keys to
+        // A single-set element (an ordinary key, or `()`) appends its keys to
         // every set so far — O(keys) per element, keeping a purely ordinary
-        // `GROUP BY a, b, …` LINEAR rather than O(n²) via `cross`. Its keys are
+        // `GROUP BY a, b, …` linear rather than O(n²) via `cross`. Its keys are
         // copied into every set, so bound the reference growth first.
         let added = product.count * sets[0].count
         guard total + added <= Limits.references else { throw overflow }
         for index in product.indices { product[index] += sets[0] }
         total += added
       } else {
-        // A MULTI-set element (a construct) needs the cross product. Bound its
-        // growth BEFORE `cross` allocates it — the set count (`sets / count`
+        // A multi-set element (a construct) needs the cross product. Bound its
+        // growth before `cross` allocates it — the set count (`sets / count`
         // also keeps the multiply from overflowing) and the reference total,
         // which the cross multiplies to `sets × total + product × expressions`.
         let expressions = references(of: sets)
@@ -664,9 +664,9 @@ internal struct Parser: ~Escapable {
     } while try match(.comma)
     // A purely ordinary clause is a single set (each element appended its keys
     // in source order) — the plain `.keys` path. An explicit `GROUP BY ()` is
-    // the exception: it resolves to a single EMPTY set, which must stay the
+    // the exception: it resolves to a single empty set, which must stay the
     // grand total `.sets([[]])`, NOT collapse to `.keys([])` — the shape an
-    // ABSENT `GROUP BY` carries, which `Select.aggregates` reads as no grouping
+    // absent `GROUP BY` carries, which `Select.aggregates` reads as no grouping
     // (one row per input row rather than one grand-total group).
     if construct || product == [[]] {
       return .sets(product)
@@ -674,17 +674,17 @@ internal struct Parser: ~Escapable {
     return .keys(product[0])
   }
 
-  /// Parses ONE grouping element into its set list, with a flag marking whether
+  /// Parses one grouping element into its set list, with a flag marking whether
   /// it is a construct (`ROLLUP`/`CUBE`/`GROUPING SETS`) rather than an
   /// ordinary set — the flag `grouping` ORs to choose `.keys` over `.sets`.
   ///
-  /// `ROLLUP`/`CUBE`/`GROUPING`/`SETS` are CONTEXT identifiers, not lexer
+  /// `ROLLUP`/`CUBE`/`GROUPING`/`SETS` are context identifiers, not lexer
   /// keywords: a bare `GROUPING` immediately followed by a bare `SETS` opens a
   /// (possibly nested) `GROUPING SETS`; a bare `ROLLUP`/`CUBE` immediately
-  /// followed by `(` opens that construct. A DELIMITED `"rollup"` (a `.quoted`,
+  /// followed by `(` opens that construct. A delimited `"rollup"` (a `.quoted`,
   /// not `.identifier`), or a bare `rollup`/`cube`/`grouping` NOT so followed,
   /// falls through to an ordinary key — so those words stay usable as column
-  /// names (ISO reserves them; a UDF named `rollup`/`cube` cannot be a BARE
+  /// names (ISO reserves them; a UDF named `rollup`/`cube` cannot be a bare
   /// grouping key, which is acceptable). The two-token lookahead (`secondary`)
   /// resolves each prefix before consuming any token.
   ///
@@ -719,8 +719,8 @@ internal struct Parser: ~Escapable {
 
   /// Parses the `GROUPING SETS '(' element (',' element)* ')'` construct — the
   /// `GROUPING` and `SETS` context identifiers are the next two tokens
-  /// (confirmed by `element`) — into ONE set list: the CONCATENATION of each
-  /// contained element's set list, in source order. Elements NEST — a member
+  /// (confirmed by `element`) — into one set list: the concatenation of each
+  /// contained element's set list, in source order. Elements nest — a member
   /// may be an ordinary set, a `ROLLUP`/`CUBE`, or another `GROUPING SETS`. At
   /// least one element is required.
   private mutating func sets() throws(SQLError) -> Array<Array<Expression>> {
@@ -733,7 +733,7 @@ internal struct Parser: ~Escapable {
       let more = try element().sets
       total += references(of: more)
       result += more
-      // Members may THEMSELVES be constructs (`GROUPING SETS (CUBE(…), …)`);
+      // Members may themselves be constructs (`GROUPING SETS (CUBE(…), …)`);
       // cap both the set count (4096, the clause-wide ceiling) and the
       // reference total so a concatenation cannot amass unboundedly before
       // `grouping`'s guard.
@@ -749,12 +749,12 @@ internal struct Parser: ~Escapable {
 
   /// Parses a `ROLLUP '(' unit (',' unit)* ')'` element (the `ROLLUP` context
   /// identifier is `current`) into its `n + 1` grouping sets — the descending
-  /// PREFIXES of the `n` units. `ROLLUP(a, b)` yields `[[a, b], [a], []]`;
+  /// prefixes of the `n` units. `ROLLUP(a, b)` yields `[[a, b], [a], []]`;
   /// `ROLLUP((a, b), c)` yields `[[a, b, c], [a, b], []]`.
   private mutating func rollup() throws(SQLError) -> Array<Array<Expression>> {
     let units = try units()
     // A ROLLUP of n units materialises n + 1 prefixes whose sizes sum to
-    // O(n²) expression references — BEFORE `grouping`'s 4096-set guard runs, so
+    // O(n²) expression references — before `grouping`'s 4096-set guard runs, so
     // a large but compact input (a 100,000-unit ROLLUP) would exhaust memory
     // rather than fault. Reject the arity here first: n + 1 sets must stay
     // within the 4096 cap, so n ≤ 4095.
@@ -775,17 +775,17 @@ internal struct Parser: ~Escapable {
   /// the `n` units. `CUBE(a, b)` yields `[[a, b], [b], [a], []]`.
   private mutating func cube() throws(SQLError) -> Array<Array<Expression>> {
     let units = try units()
-    // A CUBE of n units enumerates 2ⁿ subsets. Reject a large arity BEFORE the
+    // A CUBE of n units enumerates 2ⁿ subsets. Reject a large arity before the
     // `1 << n` shift: at n ≥ 63 it overflows `Int` (wrapping negative, then to
-    // zero at 64), silently yielding NO sets — later misreported as "requires
+    // zero at 64), silently yielding no sets — later misreported as "requires
     // at least one set" — and even a moderate n eagerly allocates
     // exponentially many arrays. 2¹² = 4096 sets is the cap.
     guard units.count <= 12 else {
       throw .state("54001",
                    "GROUP BY CUBE supports at most 12 grouping elements")
     }
-    // units.count alone is not enough: each unit is COPIED into 2ⁿ⁻¹ of the 2ⁿ
-    // subsets, so a large COMPOSITE unit `(a, a, …)` multiplies its expressions
+    // units.count alone is not enough: each unit is copied into 2ⁿ⁻¹ of the 2ⁿ
+    // subsets, so a large composite unit `(a, a, …)` multiplies its expressions
     // across them. Bound the projected expansion — 2ⁿ⁻¹ × the units' total
     // expressions — before building the subsets.
     let budget = Limits.references / (1 << max(units.count - 1, 0))
@@ -796,7 +796,7 @@ internal struct Parser: ~Escapable {
   /// Parses the `'(' [unit (',' unit)*] ')'` unit list shared by `ROLLUP`/
   /// `CUBE` (the context identifier is consumed here). Each unit is an ordinary
   /// set — a bare key or a parenthesised `(a, b)` composite that groups as one
-  /// indivisible level. An EMPTY list (`ROLLUP()`/`CUBE()`) is admitted and
+  /// indivisible level. An empty list (`ROLLUP()`/`CUBE()`) is admitted and
   /// collapses to the single empty grand-total set.
   private mutating func units() throws(SQLError) -> Array<Array<Expression>> {
     _ = try advance(expecting: "ROLLUP or CUBE")
@@ -811,7 +811,7 @@ internal struct Parser: ~Escapable {
   }
 
   /// Parses one `ROLLUP`/`CUBE` unit — an ordinary set. A leading `(` opens a
-  /// parenthesised `(a, b)` / `()` composite UNLESS it merely STARTS a scalar
+  /// parenthesised `(a, b)` / `()` composite unless it merely starts a scalar
   /// key — `(a) + 1`, `(a + b)`, or a scalar subquery `(SELECT …)`, whose own
   /// parenthesis `expression` consumes — which `composite` rewinds; otherwise
   /// the unit is a bare scalar key.
@@ -821,13 +821,13 @@ internal struct Parser: ~Escapable {
   }
 
   /// A parenthesised composite grouping set — the grand-total `()` or a comma
-  /// list `(a, b, …)` — returning its keys, or `nil` (having REWOUND the full
+  /// list `(a, b, …)` — returning its keys, or `nil` (having rewound the full
   /// parser state) when the `(` instead begins a single scalar key that merely
-  /// STARTS with a parenthesis: a parenthesised expression `(a + b)` / `(a) +
+  /// starts with a parenthesis: a parenthesised expression `(a + b)` / `(a) +
   /// 1`, or a scalar subquery `(SELECT …)`.
   ///
   /// The committing signal — an empty `()` or a top-level comma — sits an
-  /// UNBOUNDED distance past the `(` (the first key is an arbitrary
+  /// unbounded distance past the `(` (the first key is an arbitrary
   /// expression), so no fixed lookahead decides it: speculatively read past
   /// the `(`, commit to a set only on `()` or a top-level comma (the
   /// row-constructor rule), else rewind the `lexer`, `current`, AND the
@@ -855,7 +855,7 @@ internal struct Parser: ~Escapable {
     return nil
   }
 
-  /// The descending PREFIXES of a unit list — the `ROLLUP` set list. For `n`
+  /// The descending prefixes of a unit list — the `ROLLUP` set list. For `n`
   /// units it is `n + 1` sets: units `1..n` concatenated, then `1..n-1`, …,
   /// down to the empty grand-total set. An empty unit list (`ROLLUP()`) yields
   /// the single empty set `[[]]`.
@@ -871,7 +871,7 @@ internal struct Parser: ~Escapable {
     return result
   }
 
-  /// Every SUBSET of a unit list — the `CUBE` set list — enumerated
+  /// Every subset of a unit list — the `CUBE` set list — enumerated
   /// FULL-SET-FIRST by descending subset mask (bit `i` selects unit `i`, units
   /// concatenated in source order). For `n` units it is `2ⁿ` sets, the full set
   /// first and the empty grand-total set last. An empty unit list (`CUBE()`)
@@ -891,7 +891,7 @@ internal struct Parser: ~Escapable {
     return result
   }
 
-  /// The CROSS PRODUCT of two set lists — for each set on the left and each on
+  /// The CROSS product of two set lists — for each set on the left and each on
   /// the right, their concatenation — the operator that combines the successive
   /// `GROUP BY` elements. The seed `[[]]` (the single empty set) is its
   /// identity.
@@ -907,12 +907,12 @@ internal struct Parser: ~Escapable {
     return result
   }
 
-  /// The caps bounding `GROUP BY` grouping-set expansion — the SINGLE SOURCE
-  /// OF TRUTH for every artificial limit the desugar enforces, so they are
+  /// The caps bounding `GROUP BY` grouping-set expansion — the single source
+  /// of truth for every artificial limit the desugar enforces, so they are
   /// tracked and tunable in one place (every guard below cites one of these).
   /// `sets` is the most grouping sets a clause may expand to; `references` the
   /// most expression references those sets may hold in total. Both bound a
-  /// COMPACT but heavily-duplicating clause — a wide `CUBE`/`ROLLUP`, a cross
+  /// compact but heavily-duplicating clause — a wide `CUBE`/`ROLLUP`, a cross
   /// product, a concatenation — from exhausting memory. The per-construct arity
   /// guards derive from `sets`: `CUBE ≤ 12` units (2¹² = `sets`) and `ROLLUP ≤
   /// 4095` units (n + 1 ≤ `sets`) reject before the 2ⁿ / prefix expansion.
@@ -939,10 +939,10 @@ internal struct Parser: ~Escapable {
 
   // MARK: - Relation
 
-  /// Parses a relation — a named base relation/view/CTE, or a DERIVED TABLE (a
+  /// Parses a relation — a named base relation/view/CTE, or a derived TABLE (a
   /// parenthesised subquery) — with its alias.
   ///
-  /// A leading `(` is disambiguated by ONE token of lookahead: a `SELECT` after
+  /// A leading `(` is disambiguated by one token of lookahead: a `SELECT` after
   /// it begins a derived table `(SELECT …) AS t` (the query may itself be a
   /// `UNION`), so it parses `query`; anything else is a parenthesised relation
   /// `(a JOIN b)`, which this dialect does not yet accept in a relation
@@ -951,12 +951,12 @@ internal struct Parser: ~Escapable {
   /// no rewind is needed.
   ///
   /// An optional leading `LATERAL` marks the derived table lateral (ISO
-  /// `LATERAL (query)`): its body may reference the PRECEDING FROM items, so it
+  /// `LATERAL (query)`): its body may reference the preceding FROM items, so it
   /// re-evaluates per their rows. `LATERAL` introduces a derived table alone —
   /// a `(SELECT …)` must follow — so a `LATERAL` before a named relation
   /// faults.
   ///
-  /// Derived table's alias is REQUIRED (ISO): `FROM (SELECT …)` with no `AS t`
+  /// Derived table's alias is required (ISO): `FROM (SELECT …)` with no `AS t`
   /// faults. A named relation's alias is optional and may be introduced by `AS`
   /// (`TypeDef AS t`) or written directly after the name (`TypeDef t`); the
   /// latter is admitted only when the next token is a bare identifier, so a
@@ -964,9 +964,9 @@ internal struct Parser: ~Escapable {
   /// for an alias.
   ///
   /// Either alias may carry an ISO explicit output column list `'(' identifier
-  /// (, identifier)* ')'` (`AS t(c, d)`), positionally RENAMING the relation's
-  /// output columns — admitted on BOTH a derived table and a named relation.
-  /// The list's ARITY and case-insensitive UNIQUENESS are checked where the
+  /// (, identifier)* ')'` (`AS t(c, d)`), positionally renaming the relation's
+  /// output columns — admitted on both a derived table and a named relation.
+  /// The list's arity and case-insensitive uniqueness are checked where the
   /// output width is known (the schema-derivation seam), not here, so a list
   /// over a `SELECT *` derived table (whose width resolves later) parses.
   ///
@@ -987,7 +987,7 @@ internal struct Parser: ~Escapable {
       }
       let query = try query()
       try expect(.rparen)
-      // ISO requires a derived table be named, so the alias is MANDATORY — an
+      // ISO requires a derived table be named, so the alias is mandatory — an
       // `AS`-less spelling faults rather than binding an unnamed relation.
       guard try match(.as) || isName(current?.kind) else {
         guard let token = current else {
@@ -1094,11 +1094,11 @@ internal struct Parser: ~Escapable {
   /// `column = column` conjunct hash-joins, the rest a residual filter) or
   /// `USING '(' identifier (, identifier)* ')'` (the named-column shorthand,
   /// resolved into an equality `on` and a coalesced `SELECT *` at compile). A
-  /// `NATURAL` join (`natural`) takes NEITHER — its columns are the shared ones
+  /// `NATURAL` join (`natural`) takes neither — its columns are the shared ones
   /// — so a trailing `ON`/`USING` after it faults; a plain non-`CROSS` join
   /// requires exactly one of them.
   ///
-  /// A `CROSS JOIN` (`cross`) takes NO criterion — a trailing `ON`/`USING` is a
+  /// A `CROSS JOIN` (`cross`) takes no criterion — a trailing `ON`/`USING` is a
   /// syntax error, caught by leaving it unconsumed for the caller's `where`/
   /// end-of-select expectation to reject. Its `on` is a synthesized `1 = 1`,
   /// which lowers to a constant-true filter the optimiser elides, collapsing
@@ -1153,11 +1153,11 @@ internal struct Parser: ~Escapable {
   /// Parses one sort key — `(integer | expression) [ASC | DESC]`, the direction
   /// defaulting to ascending.
   ///
-  /// A BARE integer-literal sort key is an ISO output-column ORDINAL (`ORDER BY
+  /// A bare integer-literal sort key is an ISO output-column ordinal (`ORDER BY
   /// 1` names the first projected column, 1-based), never the integer constant
   /// — ordering by a constant is meaningless, so the standard reads a lone
   /// integer here as a select-list position. The key parses as a full value
-  /// `expression` unconditionally and then CLASSIFIES: an expression that is
+  /// `expression` unconditionally and then classifies: an expression that is
   /// exactly a bare integer literal becomes the ordinal, everything else stays
   /// an `expression`. This keeps `ORDER BY 1 + A` and `ORDER BY 2 * Price` the
   /// arithmetic expressions they are, and subsumes a bare column (`ORDER BY
@@ -1268,7 +1268,7 @@ internal struct Parser: ~Escapable {
 
   // MARK: - Cursor
 
-  /// The token AFTER `current` without consuming either — a second token of
+  /// The token after `current` without consuming either — a second token of
   /// lookahead, buffered in `pending` and drained by `advance` before the lexer
   /// is next pulled. It disambiguates a two-token context prefix a single
   /// `current` cannot (`GROUP BY GROUPING SETS`, whose `GROUPING`/`SETS` are

@@ -200,7 +200,7 @@ struct InQueryNullCornerTests {
 
   @Test func `NOT IN over an empty subquery is TRUE`() throws {
     // `NOT IN (empty)` is the negation of FALSE — TRUE — so every row survives,
-    // including row 3 whose K is NULL (the NULL trap needs a NULL ELEMENT, and
+    // including row 3 whose K is NULL (the NULL trap needs a NULL element, and
     // an empty subquery has none).
     try fixture().expect(
         "SELECT Id FROM T WHERE K NOT IN (SELECT V FROM S WHERE Flag = 9)",
@@ -222,7 +222,7 @@ struct InQueryNullCornerTests {
 struct InQueryArityTests {
   @Test func `IN over a two-column subquery faults with an arity error`()
       throws {
-    // `IN (Q)` requires `Q` project exactly ONE column; a two-column subquery
+    // `IN (Q)` requires `Q` project exactly one column; a two-column subquery
     // is `SQLError.arity`, checked from the compiled width, so it faults even
     // though S has rows.
     try fixture().expect(
@@ -232,7 +232,7 @@ struct InQueryArityTests {
 
   @Test func `IN over a two-column subquery faults the schema check too`()
       throws {
-    // The schema path enforces the SAME single-column arity as the run, so
+    // The schema path enforces the same single-column arity as the run, so
     // validation matches execution.
     let query = try parse(query:
          "SELECT Id FROM T WHERE K IN (SELECT V, Flag FROM S)")
@@ -300,7 +300,7 @@ struct SubqueryTypeCheckingTests {
   @Test func `an EXISTS select-list fault is not validated`() throws {
     // The run of an EXISTS-only occurrence goes through the cardinality probe,
     // whose constant projection never evaluates the original `1 / 0` select
-    // list — so validation type-checks the PROBED shape and does NOT surface a
+    // list — so validation type-checks the probed shape and does NOT surface a
     // `.divide` the run never raises. Validation matches the run: `columns`
     // returns clean headers and the query runs, admitting every `T` row.
     let query =
@@ -314,8 +314,8 @@ struct SubqueryTypeCheckingTests {
 
   @Test func `an IN select-list fault is validated`() throws {
     // An `IN (Q)` reads the select-list column, so the run evaluates it — and
-    // validation type-checks the ORIGINAL shape, surfacing the `.divide` at
-    // BOTH validate and run, unlike the EXISTS probe.
+    // validation type-checks the original shape, surfacing the `.divide` at
+    // both validate and run, unlike the EXISTS probe.
     let query =
         try parse(query: "SELECT Id FROM T WHERE K IN (SELECT 1 / 0 FROM S)")
     let resolve = { () throws -> Array<OutputColumn> in
@@ -329,7 +329,7 @@ struct SubqueryTypeCheckingTests {
   }
 
   @Test func `an EXISTS bad inner relation is still validated`() throws {
-    // The probe RETAINS the subquery's FROM/`WHERE`, so a genuinely-bad inner
+    // The probe retains the subquery's FROM/`WHERE`, so a genuinely-bad inner
     // relation still faults validation for an EXISTS-only occurrence — only the
     // select list and sort keys are spared, not the row source.
     let query =
@@ -365,7 +365,7 @@ private func ordered() throws -> FixtureCatalog {
 // subquery shape pre-pass runs with `validating(false)`. So the reached
 // re-validation seam must validate the carrier's sort keys too — else
 // `columns(of:)` accepts a bad sort key a run faults, a run-vs-validate
-// divergence. It stays REACHED-only: an unreached ordered subquery's bad key is
+// divergence. It stays reached-only: an unreached ordered subquery's bad key is
 // deferred, matching the dead-scalar/dead-EXISTS posture.
 struct ReachedOrderedSubqueryTests {
   @Test func `a reached scalar bad sort key faults run and validate alike`()
@@ -424,7 +424,7 @@ struct ReachedOrderedSubqueryTests {
       throws {
     // The `IN` occurrence sits behind a statically-false `AND`, so the executor
     // never materialises it and the reachability walk never records it — its
-    // carrier's bad sort key is DEFERRED, matching the dead-subquery posture.
+    // carrier's bad sort key is deferred, matching the dead-subquery posture.
     let query = try parse(query: """
         SELECT a FROM L
           WHERE 1 = 0
@@ -506,7 +506,7 @@ struct OrderBySubqueryTests {
 
 struct AggregateSubqueryTests {
   @Test func `an EXISTS in an aggregate argument is materialised`() throws {
-    // The subquery in the aggregate ARGUMENT must be materialised like any
+    // The subquery in the aggregate argument must be materialised like any
     // other projection subquery. S is non-empty, so the CASE folds to K, and
     // SUM over T's non-NULL K ({10, 20, 30}) is 60.
     try fixture().expect(
@@ -601,11 +601,11 @@ struct AggregateSubqueryTests {
   @Test func `columns validates a grouped ORDER BY CORRELATED subquery`()
       throws {
     // Batch 7, Item 1: a grouped query whose ORDER BY aggregate argument nests
-    // a CORRELATED subquery (`S.V = T.K`, the inner `T.K` an outer column of the
+    // a correlated subquery (`S.V = T.K`, the inner `T.K` an outer column of the
     // grouped select). The run path's `group` gives the ORDER BY subquery
-    // lowering the enclosing scope, so it resolves `T.K` and runs; VALIDATION
-    // must thread the SAME enclosing scope, else it compiles the inner query
-    // with NO outer scope and falsely faults `SQLError.column("K")`. It must
+    // lowering the enclosing scope, so it resolves `T.K` and runs; validation
+    // must thread the same enclosing scope, else it compiles the inner query
+    // with no outer scope and falsely faults `SQLError.column("K")`. It must
     // succeed exactly as the run does.
     let query = try parse(query:
         "SELECT K FROM T GROUP BY K "
@@ -645,9 +645,9 @@ private final class Counter: @unchecked Sendable {
   }
 }
 
-/// A subquery executes at RUN time, not during `compile` — so a SCHEMA-ONLY
-/// path (`columns(of:)`) opens NO cursor and runs no inner query, and a run
-/// materialises each UNCORRELATED subquery at most ONCE.
+/// A subquery executes at run time, not during `compile` — so a schema-ONLY
+/// path (`columns(of:)`) opens no cursor and runs no inner query, and a run
+/// materialises each uncorrelated subquery at most once.
 ///
 /// This is the architectural fix: PR-1 materialised subqueries eagerly in
 /// `compile`, so asking for the headers of a query nesting an
@@ -681,11 +681,11 @@ struct SubqueryDeferralTests {
 
   @Test func `columns defers a select-list fault an EXISTS probe skips`()
       throws {
-    // The subquery's select list divides by a NON-constant zero (`Flag - 1`,
+    // The subquery's select list divides by a non-constant zero (`Flag - 1`,
     // which is 0 for S's two `Flag = 1` rows), but it is used ONLY by `EXISTS`,
     // which needs cardinality — not the projected value. `columns(of:)` returns
-    // the headers WITHOUT triggering the divide (the schema path opens no
-    // cursor), and the RUN materialises the occurrence as a cardinality PROBE
+    // the headers without triggering the divide (the schema path opens no
+    // cursor), and the run materialises the occurrence as a cardinality probe
     // that never evaluates the select list, so it does NOT fault either:
     // `EXISTS` over non-empty `S` is TRUE, every row of `T` is admitted.
     let query = try parse(query:
@@ -716,7 +716,7 @@ struct SubqueryDeferralTests {
   @Test func `an EXISTS subquery probes cardinality without its select list`()
       throws {
     // The subquery is used ONLY by `EXISTS`, which needs cardinality — not the
-    // projected value — so it materialises as a PROBE that never evaluates the
+    // projected value — so it materialises as a probe that never evaluates the
     // select list. `tick()` sits in the select list, so the probe never invokes
     // it: the counter stays 0 (not 3, not 12), and
     // `EXISTS` over non-empty `S` is still TRUE, admitting every row of `T`.
@@ -745,10 +745,10 @@ struct SubqueryDeferralTests {
 
   @Test func `a short-circuited subquery still materialises (follow-up)`()
       throws {
-    // KNOWN LIMITATION of this slice: subqueries materialise at the START of a
-    // run, so one in an arm an `AND`/`OR` short-circuit would never reach STILL
+    // known limitation of this slice: subqueries materialise at the start of a
+    // run, so one in an arm an `AND`/`OR` short-circuit would never reach still
     // executes. `1 = 0 AND EXISTS (…)` is statically FALSE, yet the subquery is
-    // materialised up front — here as an EXISTS cardinality PROBE, which never
+    // materialised up front — here as an EXISTS cardinality probe, which never
     // evaluates the select-list `tick()`, so the counter stays 0. Per-arm
     // laziness — threading a runner to the evaluation site so an unreached arm
     // skips its subquery — is a follow-up; the once-per-run materialisation
@@ -766,11 +766,11 @@ struct SubqueryDeferralTests {
 
 // MARK: - EXISTS cardinality probe
 
-/// An `EXISTS (Q)` occurrence is materialised as a cardinality PROBE — the row
-/// source is tested for ANY row WITHOUT evaluating the select list or sort
+/// An `EXISTS (Q)` occurrence is materialised as a cardinality probe — the row
+/// source is tested for ANY row without evaluating the select list or sort
 /// keys, honouring the subquery's original `OFFSET`/`FETCH` — while an `IN (Q)`
 /// occurrence materialises its single column of values. So a fault or a per-row
-/// side effect that lives in an EXISTS subquery's SELECT LIST never fires, but
+/// side effect that lives in an EXISTS subquery's SELECT list never fires, but
 /// an `IN`'s column is still read.
 struct ExistsProbeTests {
   private func fixture() throws -> FixtureCatalog {
@@ -789,10 +789,10 @@ struct ExistsProbeTests {
 
   @Test func `EXISTS over a dividing select list is safe when non-empty`()
       throws {
-    // `SELECT 1 / 0 FROM S` divides by a CONSTANT zero — a run of its select
+    // `SELECT 1 / 0 FROM S` divides by a constant zero — a run of its select
     // list would fault `.divide`. Used by `EXISTS`, it materialises as a probe
     // that never evaluates the select list, so `EXISTS` over the non-empty `S`
-    // is TRUE with NO `.divide` — every row of `T` is admitted.
+    // is TRUE with no `.divide` — every row of `T` is admitted.
     try fixture().expect("SELECT Id FROM T WHERE EXISTS (SELECT 1 / 0 FROM S)",
                          yields: [[1], [2]])
   }
@@ -823,7 +823,7 @@ struct ExistsProbeTests {
   }
 
   @Test func `IN over a dividing select list still faults`() throws {
-    // Because `IN` reads the column, a dividing select list DOES fault — the
+    // Because `IN` reads the column, a dividing select list does fault — the
     // opposite of the `EXISTS` probe — proving the two occurrences materialise
     // differently.
     try fixture().expect("SELECT Id FROM T WHERE K IN (SELECT 1 / 0 FROM S)",
@@ -840,7 +840,7 @@ struct ExistsProbeTests {
   }
 
   @Test func `EXISTS honours a FETCH FIRST 0 ROWS limit as FALSE`() throws {
-    // The probe keeps the subquery's ORIGINAL `FETCH FIRST 0 ROWS ONLY`, so the
+    // The probe keeps the subquery's original `FETCH FIRST 0 ROWS ONLY`, so the
     // row source yields zero rows and `EXISTS` is FALSE — a synthetic one-row
     // cap must NOT override the original limit. Every outer row is dropped, and
     // the dividing select list still never evaluates (no `.divide`).
@@ -875,7 +875,7 @@ struct ExistsProbeTests {
 /// A `DISTINCT` EXISTS-only subquery is probed too, provided it carries no
 /// `OFFSET`: `DISTINCT` collapses a non-empty source to at least one distinct
 /// row, so `SELECT DISTINCT 1 FROM S` is non-empty iff `S` is — the constant
-/// projection preserves existence WITHOUT evaluating the original select list.
+/// projection preserves existence without evaluating the original select list.
 /// A `DISTINCT` EXISTS WITH an `OFFSET` stays a FULL run: an offset skips
 /// distinct rows, so emptiness depends on the REAL distinct count, which the
 /// constant projection would collapse.
@@ -899,7 +899,7 @@ struct DistinctExistsProbeTests {
   @Test func `DISTINCT EXISTS over a dividing select list is safe`() throws {
     // A `DISTINCT` EXISTS without an `OFFSET` is probed — `SELECT DISTINCT 1`
     // yields one distinct row iff `S` is non-empty — so the original `1 / 0`
-    // select list never evaluates and `EXISTS` is TRUE with NO `.divide`.
+    // select list never evaluates and `EXISTS` is TRUE with no `.divide`.
     try fixture().expect(
         "SELECT Id FROM T WHERE EXISTS (SELECT DISTINCT 1 / 0 FROM S)",
         yields: [[1], [2]])
@@ -916,7 +916,7 @@ struct DistinctExistsProbeTests {
 
   @Test func `columns validates a DISTINCT EXISTS dividing select list`()
       throws {
-    // The type-check validates the SAME probed shape the run evaluates, so the
+    // The type-check validates the same probed shape the run evaluates, so the
     // `1 / 0` select list is not checked and validation is clean — matching the
     // run, which does not fault.
     let query = try parse(query:
@@ -974,12 +974,12 @@ struct DistinctExistsProbeTests {
 
 // MARK: - Aggregate EXISTS cardinality probe
 
-/// An aggregate/grouped EXISTS-only subquery WITHOUT a `HAVING` is probed too,
+/// An aggregate/grouped EXISTS-only subquery without a `HAVING` is probed too,
 /// via a cardinality/group-preserving shape whose target is a trivial
-/// `COUNT(*)` (the original target is irrelevant to existence). A WHOLE-RESULT
-/// aggregate (no `GROUP BY`) yields EXACTLY ONE row regardless of the source —
-/// even an empty one — so `EXISTS` is TRUE modulo the limit; a GROUPED one
-/// yields ONE ROW PER GROUP, so existence is the source's non-emptiness after
+/// `COUNT(*)` (the original target is irrelevant to existence). A whole-result
+/// aggregate (no `GROUP BY`) yields exactly one row regardless of the source —
+/// even an empty one — so `EXISTS` is TRUE modulo the limit; a grouped one
+/// yields one ROW per GROUP, so existence is the source's non-emptiness after
 /// `WHERE`. The probe keeps FROM/`WHERE`/`GROUP BY` and the original
 /// `OFFSET`/`FETCH` but never evaluates the original target, so `SUM(1 / 0)`
 /// does not fault. A `HAVING` subquery is NOT probed — group survival depends
@@ -1004,7 +1004,7 @@ struct AggregateExistsProbeTests {
       throws {
     // A whole-result `SUM(1 / 0)` would fault `.divide` if run. Used by an
     // EXISTS-only occurrence, it probes via `COUNT(*)`, which yields exactly
-    // one row over the non-empty `S` — so `EXISTS` is TRUE with NO `.divide`
+    // one row over the non-empty `S` — so `EXISTS` is TRUE with no `.divide`
     // and every outer row is admitted.
     try fixture().expect(
         "SELECT Id FROM T WHERE EXISTS (SELECT SUM(1 / 0) FROM S)",
@@ -1013,7 +1013,7 @@ struct AggregateExistsProbeTests {
 
   @Test func `whole-result aggregate EXISTS over an empty source is TRUE`()
       throws {
-    // A whole-result aggregate yields EXACTLY ONE row even over an empty source
+    // A whole-result aggregate yields exactly one row even over an empty source
     // (`SUM` of no rows is NULL, but it is still one row), so its probe —
     // `COUNT(*)` over the empty `S` — yields one row and `EXISTS` is TRUE. The
     // dividing target still never evaluates.
@@ -1024,7 +1024,7 @@ struct AggregateExistsProbeTests {
   }
 
   @Test func `columns validates a whole-result aggregate EXISTS`() throws {
-    // The type-check validates the SAME probed `COUNT(*)` shape the run uses,
+    // The type-check validates the same probed `COUNT(*)` shape the run uses,
     // so the `1 / 0` target is not checked — clean, matching the run.
     let query = try parse(query:
          "SELECT Id FROM T WHERE EXISTS (SELECT SUM(1 / 0) FROM S)")
@@ -1046,7 +1046,7 @@ struct AggregateExistsProbeTests {
       throws {
     // A grouped `SUM(1 / 0)` probes via `COUNT(*)` keeping the `GROUP BY`,
     // which yields one row per group — the non-empty `S` has groups, so
-    // `EXISTS` is TRUE with NO `.divide` and every outer row is admitted.
+    // `EXISTS` is TRUE with no `.divide` and every outer row is admitted.
     try fixture().expect(
         "SELECT Id FROM T "
         + "WHERE EXISTS (SELECT SUM(1 / 0) FROM S GROUP BY Flag)",
@@ -1055,8 +1055,8 @@ struct AggregateExistsProbeTests {
 
   @Test func `grouped aggregate EXISTS over an empty source is FALSE`()
       throws {
-    // A grouped aggregate yields ONE ROW PER GROUP, so an empty source has NO
-    // groups and NO rows — unlike the whole-result case — so the probe yields
+    // A grouped aggregate yields one ROW per GROUP, so an empty source has no
+    // groups and no rows — unlike the whole-result case — so the probe yields
     // nothing and `EXISTS` is FALSE. Every outer row is dropped.
     try fixture().expect(
         "SELECT Id FROM T WHERE EXISTS "
@@ -1065,7 +1065,7 @@ struct AggregateExistsProbeTests {
   }
 
   @Test func `columns validates a grouped aggregate EXISTS`() throws {
-    // The probed grouped `COUNT(*)` shape validates the SAME way the run does,
+    // The probed grouped `COUNT(*)` shape validates the same way the run does,
     // so the `1 / 0` target is not checked — clean, matching the run.
     let query = try parse(query:
         "SELECT Id FROM T WHERE EXISTS "
@@ -1094,7 +1094,7 @@ struct AggregateExistsProbeTests {
 
   @Test func `HAVING aggregate EXISTS runs a dividing aggregate`() throws {
     // Because a `HAVING` subquery is a full run, an aggregate-in-`HAVING`
-    // `1 / 0` is genuinely NEEDED to decide group survival, so it faults
+    // `1 / 0` is genuinely needed to decide group survival, so it faults
     // `.divide` — the probe was not taken.
     try fixture().expect(
         "SELECT Id FROM T WHERE EXISTS "
@@ -1103,7 +1103,7 @@ struct AggregateExistsProbeTests {
   }
 
   @Test func `aggregate EXISTS still faults a bad inner relation`() throws {
-    // The probe RETAINS the subquery's FROM/`WHERE`/`GROUP BY`, so a
+    // The probe retains the subquery's FROM/`WHERE`/`GROUP BY`, so a
     // genuinely-bad inner relation still faults — only the target is spared.
     try fixture().expect(
         "SELECT Id FROM T WHERE EXISTS (SELECT SUM(V) FROM Nope GROUP BY Flag)",
@@ -1113,7 +1113,7 @@ struct AggregateExistsProbeTests {
   @Test func `IN over an aggregate subquery still evaluates its target`()
       throws {
     // An aggregate IN subquery is unaffected by the EXISTS probe: `IN` reads
-    // the aggregate VALUE, so the target runs and a dividing one faults.
+    // the aggregate value, so the target runs and a dividing one faults.
     try fixture().expect(
         "SELECT Id FROM T WHERE K IN (SELECT SUM(1 / 0) FROM S)",
         fails: .divide)
@@ -1125,7 +1125,7 @@ struct AggregateExistsProbeTests {
 /// A reserved `definition_schema.`/`information_schema.` relation named ONLY
 /// inside a nested `EXISTS`/`IN (subquery)` is augmented into the context — the
 /// relation-name collector descends into subqueries, so the store overlay is
-/// materialised before the subquery's WIDTH compile AND its run, exactly as if
+/// materialised before the subquery's width compile AND its run, exactly as if
 /// the outer query had named it. The outer relation `T` names no reserved
 /// relation, so the coverage comes entirely from the descent.
 struct SubqueryReservedRelationTests {
@@ -1141,7 +1141,7 @@ struct SubqueryReservedRelationTests {
   @Test func `EXISTS over definition_schema.tables compiles and runs`() throws {
     // The reserved store relation is named ONLY inside the subquery. Before the
     // fix its overlay was not materialised (the collector did not descend), so
-    // the WIDTH compile faulted `SQLError.relation`. It now resolves and, since
+    // the width compile faulted `SQLError.relation`. It now resolves and, since
     // `definition_schema.tables` lists `T`, `EXISTS` is TRUE for every row.
     try fixture().expect(
         "SELECT Id FROM T "
@@ -1248,7 +1248,7 @@ struct SubqueryConditionalValidationTests {
 
 /// An outer `WHERE EXISTS/IN (Q)` conjunct that pushes INTO a simple view still
 /// resolves against the result the top-level `run` materialised: the view
-/// sub-plan INHERITS (merges) the caller's subquery cache rather than replacing
+/// sub-plan inherits (merges) the caller's subquery cache rather than replacing
 /// it with a view-body-only one. Without the merge the pushed conjunct's `Q`,
 /// keyed in the caller's cache, would be missing from the view-only cache and
 /// fault "a subquery result was not materialised".
@@ -1272,7 +1272,7 @@ struct ViewPushdownSubqueryTests {
     }
   }
 
-  /// A view whose OWN body nests an `EXISTS`, over `T` filtered by that inner
+  /// A view whose own body nests an `EXISTS`, over `T` filtered by that inner
   /// subquery — its own subquery must still resolve alongside a pushed outer
   /// one.
   private func nested() throws -> FixtureCatalog {
@@ -1289,9 +1289,9 @@ struct ViewPushdownSubqueryTests {
     }
   }
 
-  /// The INVERSE of `nested`: the view `VN`'s body has the SAME
-  /// `EXISTS (SELECT V FROM S)` but over an EMPTY base `S`, so its body filters
-  /// EVERY row out. A caller that binds a NON-empty CTE `S` must NOT leak into
+  /// The inverse of `nested`: the view `VN`'s body has the same
+  /// `EXISTS (SELECT V FROM S)` but over an empty base `S`, so its body filters
+  /// every row out. A caller that binds a non-empty CTE `S` must NOT leak into
   /// the view body — the body reads its own (empty) base.
   private func hollow() throws -> FixtureCatalog {
     try Catalog {
@@ -1299,7 +1299,7 @@ struct ViewPushdownSubqueryTests {
         Row(1, 10)
         Row(2, 20)
       }
-      // An EMPTY base `S`, so the view body's `EXISTS (SELECT V FROM S)` is
+      // An empty base `S`, so the view body's `EXISTS (SELECT V FROM S)` is
       // FALSE and filters every row.
       Relation("S", ["V": .integer, "Flag": .integer]) { }
       try View("VN", "SELECT Id, K FROM T WHERE EXISTS (SELECT V FROM S)",
@@ -1310,7 +1310,7 @@ struct ViewPushdownSubqueryTests {
   @Test func `an outer EXISTS pushed into a view resolves`() throws {
     // The outer `WHERE EXISTS (SELECT V FROM S)` conjunct pushes below `VW`'s
     // projection into its sub-plan; the pushed `Q` resolves against the result
-    // the top-level run materialised (the caller's cache, MERGED into the
+    // the top-level run materialised (the caller's cache, merged into the
     // view's), not a view-only cache that lacks it. S is non-empty, so the
     // EXISTS is TRUE and every view row survives.
     try view().expect("SELECT Id FROM VW WHERE EXISTS (SELECT V FROM S)",
@@ -1342,7 +1342,7 @@ struct ViewPushdownSubqueryTests {
 
   @Test func `a view body subquery and a pushed outer one both resolve`()
       throws {
-    // Both the view body's OWN `EXISTS` and the outer `EXISTS` pushed into it
+    // Both the view body's own `EXISTS` and the outer `EXISTS` pushed into it
     // must resolve — the two caches are layered. S is non-empty, so both are
     // TRUE and every row survives.
     try nested().expect("SELECT Id FROM VN WHERE EXISTS (SELECT V FROM S)",
@@ -1351,24 +1351,24 @@ struct ViewPushdownSubqueryTests {
 
   @Test func `a pushed outer subquery reads the caller CTE not the view base`()
       throws {
-    // Bug 1: the view body's `EXISTS (SELECT V FROM S)` reads BASE `S`
-    // (non-empty), and the caller's AST-IDENTICAL outer `EXISTS (SELECT V FROM
-    // S)` — pushed into the view — must read the caller's CTE `S`, an EMPTY
-    // relation shadowing the base. The two subqueries share a `Query` VALUE
-    // but resolve under DIFFERENT overlays: keying the run-time cache by the
+    // Bug 1: the view body's `EXISTS (SELECT V FROM S)` reads base `S`
+    // (non-empty), and the caller's AST-identical outer `EXISTS (SELECT V FROM
+    // S)` — pushed into the view — must read the caller's CTE `S`, an empty
+    // relation shadowing the base. The two subqueries share a `Query` value
+    // but resolve under different overlays: keying the run-time cache by the
     // `Query` alone (the old merge) collapsed them, so the pushed conjunct read
     // the view body's base-`S` result and wrongly kept every row. Layering the
     // caller's cache OVER the view's keeps the contexts distinct: the pushed
     // EXISTS reads the empty CTE and is FALSE, dropping every row, while the
     // view body's own EXISTS still reads base `S` and keeps them — so the
-    // result is EMPTY, NOT the base-table interpretation's two rows.
+    // result is empty, NOT the base-table interpretation's two rows.
     let statement = try Statement(parsing:
         "WITH S(V) AS (SELECT Id FROM T WHERE 1 = 0) "
         + "SELECT Id FROM VN WHERE EXISTS (SELECT V FROM S)")
     let rows = try nested().run(statement, .standard)
-    // The pushed EXISTS resolves against the EMPTY caller CTE — no rows left.
+    // The pushed EXISTS resolves against the empty caller CTE — no rows left.
     #expect(rows.isEmpty)
-    // And this DIFFERS from the base-table interpretation the collapsed cache
+    // And this differs from the base-table interpretation the collapsed cache
     // gave, proving the caches are kept distinct: reading base `S` (non-empty)
     // for the pushed EXISTS would have kept both view rows.
     let base: Array<Array<Value>> = [[.integer(1)], [.integer(2)]]
@@ -1377,22 +1377,22 @@ struct ViewPushdownSubqueryTests {
 
   @Test func `a view body subquery reads the view base not the caller CTE`()
       throws {
-    // Bug 2, the INVERSE direction: the VIEW BODY's `EXISTS (SELECT V FROM S)`
-    // resolves against the view's OWN base `S` (here EMPTY), and the caller's
-    // AST-IDENTICAL `WITH S AS (SELECT 1)` CTE must NOT leak into that body.
-    // Keying the run-time cache by the `Query` VALUE alone let the caller's
+    // Bug 2, the inverse direction: the VIEW body's `EXISTS (SELECT V FROM S)`
+    // resolves against the view's own base `S` (here empty), and the caller's
+    // AST-identical `WITH S AS (SELECT 1)` CTE must NOT leak into that body.
+    // Keying the run-time cache by the `Query` value alone let the caller's
     // (non-empty) CTE result win the merge, so the view body's own EXISTS
-    // wrongly read the CTE and kept every row. Keying by OCCURRENCE — each
+    // wrongly read the CTE and kept every row. Keying by occurrence — each
     // subquery's resolution `Subscope` composed with its AST — keeps the
     // contexts distinct: the body's `.view(vn)` EXISTS reads the empty base
     // and drops every row, while the caller's `.caller` pushed EXISTS reads the
-    // non-empty CTE and keeps them. The view filters CORRECTLY (its base `S` is
-    // empty), so the result is EMPTY.
+    // non-empty CTE and keeps them. The view filters correctly (its base `S` is
+    // empty), so the result is empty.
     let statement = try Statement(parsing:
         "WITH S(V) AS (SELECT 1) "
         + "SELECT Id FROM VN WHERE EXISTS (SELECT V FROM S)")
     let rows = try hollow().run(statement, .standard)
-    // The view body's EXISTS reads its EMPTY base `S`, filtering every row —
+    // The view body's EXISTS reads its empty base `S`, filtering every row —
     // NOT the caller's non-empty CTE, which would have kept both rows.
     #expect(rows.isEmpty)
     let leaked: Array<Array<Value>> = [[.integer(1)], [.integer(2)]]
@@ -1400,15 +1400,15 @@ struct ViewPushdownSubqueryTests {
   }
 
   @Test func `both subquery directions stay distinct`() throws {
-    // Prove distinctness BOTH ways against ONE catalog: the view body's EXISTS
-    // over base `S` and the caller's pushed EXISTS over CTE `S` read DIFFERENT
-    // results for the same AST. With base `S` NON-empty (view keeps rows) and
-    // the caller CTE EMPTY (pushed EXISTS drops rows), the result is EMPTY —
-    // only correct if each subquery reads its OWN context. A single collapsed
+    // Prove distinctness both ways against one catalog: the view body's EXISTS
+    // over base `S` and the caller's pushed EXISTS over CTE `S` read different
+    // results for the same AST. With base `S` non-empty (view keeps rows) and
+    // the caller CTE empty (pushed EXISTS drops rows), the result is empty —
+    // only correct if each subquery reads its own context. A single collapsed
     // entry (whichever won) could not give this: the caller-CTE value would
     // make the view body drop too (still empty, but for the wrong reason), so
     // this pairs with the base-`S`-empty/CTE-non-empty inverse above — together
-    // they pin BOTH directions.
+    // they pin both directions.
     let empty = try Statement(parsing:
         "WITH S(V) AS (SELECT Id FROM T WHERE 1 = 0) "
         + "SELECT Id FROM VN WHERE EXISTS (SELECT V FROM S)")
@@ -1426,13 +1426,13 @@ struct ViewPushdownSubqueryTests {
 
 // MARK: - IN (subquery) pushdown nullability
 
-/// An `IN (Q)` predicate is THREE-VALUED — UNKNOWN when its materialised
-/// subquery holds a NULL and nothing matches — so it must be treated NULLABLE
+/// An `IN (Q)` predicate is three-valued — UNKNOWN when its materialised
+/// subquery holds a NULL and nothing matches — so it must be treated nullable
 /// for predicate pushdown even when it is slotless (a constant operand): a
-/// conjunct carrying `IN (Q)` must NOT be pushed AHEAD of a later unsafe
+/// conjunct carrying `IN (Q)` must NOT be pushed ahead of a later unsafe
 /// conjunct, or pushdown would drop the UNKNOWN rows before the unsafe one runs
 /// and suppress a throw the non-short-circuiting `AND` owes. An `EXISTS (Q)` is
-/// genuinely TWO-valued (never UNKNOWN), so it stays freely pushable.
+/// genuinely two-valued (never UNKNOWN), so it stays freely pushable.
 struct InPushdownNullabilityTests {
   /// A view over bare `T` columns, and an `S` whose single column `N` holds
   /// only a NULL — so `1 IN (SELECT N FROM S)` is UNKNOWN (no match, a NULL
@@ -1455,18 +1455,18 @@ struct InPushdownNullabilityTests {
     // Bug 2: `1 IN (SELECT N FROM S)` is UNKNOWN (S.N is a lone NULL, no
     // match). Under the un-pushed semantics the non-short-circuiting `AND`
     // still evaluates `(1 / 0) = 0` for every view row, raising `.divide`.
-    // Classifying the slotless `IN (Q)` NON-nullable would let pushdown inject
+    // Classifying the slotless `IN (Q)` non-nullable would let pushdown inject
     // it into the view ahead of the unsafe division: the UNKNOWN rows would be
     // dropped inside the view before the outer `(1 / 0) = 0` ran, suppressing
-    // the throw. Treating `.within` as NULLABLE keeps the `IN` conjunct OUTER
-    // (a later conjunct is unsafe), so the division runs and the query THROWS.
+    // the throw. Treating `.within` as nullable keeps the `IN` conjunct OUTER
+    // (a later conjunct is unsafe), so the division runs and the query throws.
     try view().expect(
         "SELECT Id FROM VW WHERE 1 IN (SELECT N FROM S) AND (1 / 0) = 0",
         fails: .divide)
   }
 
   @Test func `an EXISTS conjunct still pushes into a view`() throws {
-    // `EXISTS (Q)` is TWO-valued — a decided non-empty test, never UNKNOWN —
+    // `EXISTS (Q)` is two-valued — a decided non-empty test, never UNKNOWN —
     // so it stays freely pushable. `S` is non-empty, so the pushed `EXISTS` is
     // TRUE and every view row survives; the pushdown resolves it against the
     // caller's materialised cache exactly as before.
@@ -1477,22 +1477,22 @@ struct InPushdownNullabilityTests {
 
 // MARK: - Lazy subquery pushdown safety
 
-/// A LAZY subquery (`EXISTS`/`IN`/quantified) is NEVER pushdown-`safe`: under
-/// lazy materialisation its FIRST evaluation RUNS the inner query, which may
-/// FAULT. A subquery conjunct beside a SEEKABLE conjunct must therefore NOT be
+/// A lazy subquery (`EXISTS`/`IN`/quantified) is never pushdown-`safe`: under
+/// lazy materialisation its FIRST evaluation runs the inner query, which may
+/// fault. A subquery conjunct beside a seekable conjunct must therefore NOT be
 /// classified safe and left as a residual over a seeked (narrowed) scan: the
 /// non-short-circuiting inner `AND` owes the throw for a row the seek skips, so
-/// riding the subquery below the seek SUPPRESSES that throw.
+/// riding the subquery below the seek suppresses that throw.
 ///
-/// `T` is SORTED on `Id`, so `Id < 0` is a seekable predicate over an EMPTY
-/// run; `S.z` is zero, so `1 / z` FAULTS `.divide` the moment the subquery is
+/// `T` is sorted on `Id`, so `Id < 0` is a seekable predicate over an empty
+/// run; `S.z` is zero, so `1 / z` faults `.divide` the moment the subquery is
 /// evaluated. With the subquery the LEFT conjunct (`subquery AND Id < 0`), the
 /// non-short-circuiting `AND` evaluates the subquery FIRST for every scanned
-/// row, so a correct run FAULTS. Pre-fix the subquery reported `safe`, so the
+/// row, so a correct run faults. Pre-fix the subquery reported `safe`, so the
 /// planner seeked on `Id < 0` (an empty run) and left the subquery a residual
-/// over ZERO rows — never evaluating it, wrongly returning zero rows and hiding
+/// over zero rows — never evaluating it, wrongly returning zero rows and hiding
 /// the throw. Post-fix the subquery is NOT safe, the seek keeps it above the
-/// scan, and the run FAULTS as the left-to-right `AND` owes.
+/// scan, and the run faults as the left-to-right `AND` owes.
 struct LazySubqueryPushdownSafetyTests {
   private func fixture() throws -> FixtureCatalog {
     try Catalog {
@@ -1510,7 +1510,7 @@ struct LazySubqueryPushdownSafetyTests {
   @Test func `an EXISTS conjunct is not seeked past a skipped row`() throws {
     // Pre-fix: the uncorrelated `EXISTS` reported `safe`, so it rode below the
     // `Id < 0` seek as a residual over the empty run and never evaluated —
-    // returning zero rows, SUPPRESSING the `.divide` the leading conjunct owes.
+    // returning zero rows, suppressing the `.divide` the leading conjunct owes.
     // Post-fix it is NOT safe, so the seek keeps it and the run faults.
     try fixture().expect(
         """
@@ -1542,7 +1542,7 @@ struct LazySubqueryPushdownSafetyTests {
 
   @Test func `an EXISTS still drops rows behind a short-circuiting filter`()
       throws {
-    // The safety change does NOT over-fault: with the SEEKABLE `Id < 0` the
+    // The safety change does NOT over-fault: with the seekable `Id < 0` the
     // LEFT conjunct, the non-short-circuiting `AND`'s Kleene evaluation returns
     // FALSE from the leading `Id < 0` for every row without reaching the
     // subquery, so the run yields zero rows rather than faulting — the subquery
@@ -1557,13 +1557,13 @@ struct LazySubqueryPushdownSafetyTests {
 
 // MARK: - Correlated subquery own derived tables
 
-/// A CORRELATED subquery with its OWN `WITH` item or derived table must AUGMENT
+/// A correlated subquery with its own `WITH` item or derived table must augment
 /// that own relation before executing its precompiled plan per outer row — the
 /// same augmentation the uncorrelated `run`/`probe` paths perform — so the
 /// derived/CTE relation binds during per-outer-row execution rather than
 /// faulting `SQLError.relation` (or resolving to an unintended base relation).
 struct CorrelatedOwnDerivationTests {
-  /// An outer `T(Id)` alone — the correlated subqueries below carry their OWN
+  /// An outer `T(Id)` alone — the correlated subqueries below carry their own
   /// inner derivation.
   private func fixture() throws -> FixtureCatalog {
     try Catalog {
@@ -1619,12 +1619,12 @@ struct CorrelatedOwnDerivationTests {
 
   @Test func `a correlated EXISTS setop binds each arm's derived table`()
       throws {
-    // The SET-OPERATION shape: the correlated `EXISTS` subquery is a `UNION
+    // The SET-operation shape: the correlated `EXISTS` subquery is a `UNION
     // ALL` whose LEFT arm derives its own `d` and correlates it `d.k = T.Id`,
     // and whose RIGHT arm is a bare `SELECT 2`. Pre-fix the correlated
-    // augment-and-execute augmented at the QUERY level, binding no arm-local
+    // augment-and-execute augmented at the query level, binding no arm-local
     // `d`, so the left arm's `.scan("d")` faulted `.relation("d")`; post-fix
-    // it augments EACH ARM, so `d` binds per outer row. The right arm always
+    // it augments each ARM, so `d` binds per outer row. The right arm always
     // yields a row, so the EXISTS is TRUE for every outer row.
     try fixture().expect(
         """
@@ -1637,11 +1637,11 @@ struct CorrelatedOwnDerivationTests {
 
   @Test func `a correlated IN setop keeps only the row its arm derives`()
       throws {
-    // A DISCRIMINATING setop: `Id IN (SELECT d.k … WHERE d.k = T.Id UNION ALL
+    // A discriminating setop: `Id IN (SELECT d.k … WHERE d.k = T.Id UNION ALL
     // SELECT 9)`. The right arm contributes the constant 9 (never an `Id`), so
     // the membership turns ONLY on the left arm's per-row correlated
     // derivation — `d.k` (1) is in the column iff `T.Id = 1`. So only the outer
-    // row `Id = 1` is kept, proving each arm augments its OWN `d` under the
+    // row `Id = 1` is kept, proving each arm augments its own `d` under the
     // per-row correlation rather than merely not faulting.
     try fixture().expect(
         """
@@ -1656,7 +1656,7 @@ struct CorrelatedOwnDerivationTests {
 // MARK: - HAVING subquery reachability
 
 /// A whole-result aggregate under a statically-false `WHERE` emits one empty
-/// group; its `HAVING EXISTS/IN (Q)` is evaluated over that group at RUN and
+/// group; its `HAVING EXISTS/IN (Q)` is evaluated over that group at run and
 /// can be TRUE (the subquery is row-independent), so the projection is
 /// potentially reachable. `columns(of:validate:)` must NOT prune it as
 /// unreachable — it validates the projection so the schema agrees with the run.
@@ -1665,7 +1665,7 @@ struct HavingSubqueryReachabilityTests {
   @Test func `a HAVING subquery keeps the projection reachable to validate`()
       throws {
     // `WHERE 1 = 0` empties the group, but `HAVING EXISTS (SELECT 1)` is TRUE
-    // at run, so the projection RUNS and its `1 / 0` raises `.divide`. The
+    // at run, so the projection runs and its `1 / 0` raises `.divide`. The
     // schema path must not falsely advertise clean headers: with the HAVING
     // carrying a subquery it is not-definitely-empty, so validation reaches the
     // projection and surfaces the same `.divide` the run raises.
@@ -1691,7 +1691,7 @@ struct HavingSubqueryReachabilityTests {
       throws {
     // No subquery in the HAVING, so the precise empty-group fold applies: the
     // constant-false `HAVING 1 = 0` drops the lone empty group, leaving the
-    // `1 / 0` projection unreachable — `columns` returns clean headers WITHOUT
+    // `1 / 0` projection unreachable — `columns` returns clean headers without
     // faulting, exactly as before this fix.
     let query = try parse(query:
         "SELECT 1 / 0 FROM T WHERE 1 = 0 HAVING 1 = 0")
@@ -1717,14 +1717,14 @@ struct HavingSubqueryReachabilityTests {
 
 // MARK: - Projection/sort subquery reachability
 
-/// The empty-fold analog of the HAVING carve-out, extended to PROJECTION and
-/// SORT expressions: a whole-result aggregate under a statically-false `WHERE`
+/// The empty-fold analog of the HAVING carve-out, extended to projection and
+/// sort expressions: a whole-result aggregate under a statically-false `WHERE`
 /// emits one empty group, and a projection/sort expression that nests an
 /// `EXISTS`/`IN (Q)` guard is potentially reachable — the subquery is
-/// row-independent and may keep the group at RUN. `columns(of:validate:)` must
-/// VALIDATE its subquery-guarded branches rather than prune them by the empty
+/// row-independent and may keep the group at run. `columns(of:validate:)` must
+/// validate its subquery-guarded branches rather than prune them by the empty
 /// fold (which treats the guard as UNKNOWN), so the schema agrees with the run.
-/// A subquery-FREE guarded expression keeps the precise empty-fold pruning.
+/// A subquery-free guarded expression keeps the precise empty-fold pruning.
 struct ProjectionSubqueryReachabilityTests {
   private func fixture() throws -> FixtureCatalog {
     try Catalog {
@@ -1741,8 +1741,8 @@ struct ProjectionSubqueryReachabilityTests {
   @Test func `columns validates a subquery-guarded projection CASE`() throws {
     // `WHERE 1 = 0` empties the group; the `CASE` guard `EXISTS (SELECT V FROM
     // S)` folds UNKNOWN in the empty fold, which would prune the THEN arm — but
-    // the subquery is TRUE at RUN, so the THEN arm's `1 / 0` runs. The empty
-    // fold must NOT prune a subquery-guarded branch: validation reaches BOTH
+    // the subquery is TRUE at run, so the THEN arm's `1 / 0` runs. The empty
+    // fold must NOT prune a subquery-guarded branch: validation reaches both
     // arms and surfaces the `.divide` the run raises.
     let query = try parse(query:
         "SELECT CASE WHEN EXISTS (SELECT V FROM S) THEN 1 / 0 "
@@ -1764,7 +1764,7 @@ struct ProjectionSubqueryReachabilityTests {
   @Test func `a subquery-free guarded projection CASE still prunes`() throws {
     // No subquery in the guard, so the precise empty-group fold applies: the
     // constant-false guard `1 = 0` selects the ELSE arm, leaving the `1 / 0`
-    // THEN unreachable — `columns` returns clean headers WITHOUT faulting,
+    // THEN unreachable — `columns` returns clean headers without faulting,
     // exactly as before this fix.
     let query = try parse(query:
         "SELECT CASE WHEN 1 = 0 THEN 1 / 0 ELSE COUNT(*) END "
@@ -1774,7 +1774,7 @@ struct ProjectionSubqueryReachabilityTests {
   }
 
   @Test func `columns validates a subquery-guarded sort CASE`() throws {
-    // The ORDER BY sits BELOW the limit and evaluates over the empty group's
+    // The ORDER BY sits below the limit and evaluates over the empty group's
     // row unconditionally, so a subquery-guarded sort expression is validated
     // the same as a projection one: the `EXISTS`-guarded `1 / 0` sort key
     // surfaces `.divide`, not a pruned clean header.
@@ -1790,9 +1790,9 @@ struct ProjectionSubqueryReachabilityTests {
 // MARK: - FROM-less scalar subqueries
 
 /// A FROM-less scalar `SELECT <expr-list>` whose projection nests an
-/// UNCORRELATED `EXISTS`/`IN (subquery)` compiles, validates, and runs exactly
+/// uncorrelated `EXISTS`/`IN (subquery)` compiles, validates, and runs exactly
 /// as the identical projection does with a FROM clause. The scalar lowering
-/// (`projection.scalar`) is the ONE compile path that otherwise threads the
+/// (`projection.scalar`) is the one compile path that otherwise threads the
 /// DEFAULT unsupported subquery map, so a subquery there faulted at compile
 /// before the run-time cache was ever built; the map is now threaded through so
 /// the term lowers, and `run`'s cache (built from `query.subqueries`, which
@@ -1843,7 +1843,7 @@ struct FromlessScalarSubqueryTests {
   @Test func `a scalar IN over a two-column subquery faults with arity`()
       throws {
     // The `IN (Q)` single-column arity is decided from the subquery's compiled
-    // WIDTH at compile — cursor-free — so a two-column subquery faults
+    // width at compile — cursor-free — so a two-column subquery faults
     // `SQLError.arity` on the FROM-less path exactly as on the FROM'd one.
     try fixture().expect(
         "SELECT CASE WHEN 1 IN (SELECT Id, K FROM T) THEN 1 ELSE 0 END",
@@ -1874,7 +1874,7 @@ struct FromlessScalarSubqueryTests {
   }
 
   @Test func `a plain scalar SELECT without a subquery is unaffected`() throws {
-    // A FROM-less scalar select carrying NO subquery lowers exactly as before —
+    // A FROM-less scalar select carrying no subquery lowers exactly as before —
     // the threaded map is empty and the projection is a plain constant.
     try fixture().expect("SELECT 1 + 2", yields: [[3]])
   }
@@ -1922,10 +1922,10 @@ struct FromlessScalarReservedRelationTests {
 
 // MARK: - Per-occurrence correlated plan cache
 
-/// Two outer relations whose correlated key `k` sits at DIFFERENT ordinals —
+/// Two outer relations whose correlated key `k` sits at different ordinals —
 /// `Outer1.k` at ordinal 0, `Outer2.k` at ordinal 1 — and one inner source
-/// `Src`, so the SAME scalar subquery SQL `(SELECT m FROM Src WHERE m = k)` in
-/// each arm of a `UNION ALL` compiles under a DIFFERENT outer layout: the left
+/// `Src`, so the same scalar subquery SQL `(SELECT m FROM Src WHERE m = k)` in
+/// each arm of a `UNION ALL` compiles under a different outer layout: the left
 /// arm binds `:__correlated_0_0`, the right `:__correlated_0_1`.
 private func layouts() throws -> FixtureCatalog {
   try Catalog {
@@ -1946,8 +1946,8 @@ private func layouts() throws -> FixtureCatalog {
   }
 }
 
-/// Batch 7, Item 2: identical CORRELATED inner SQL in two set-operation arms
-/// under DIFFERENT outer layouts must each execute the plan keyed to ITS OWN
+/// Batch 7, Item 2: identical correlated inner SQL in two set-operation arms
+/// under different outer layouts must each execute the plan keyed to its own
 /// correlation. Keying the plan cache by the occurrence `Subkey` alone
 /// (scope + query + role) collapses the two arms — same `.caller` scope, same
 /// AST, same `.scalar` role — so the right arm read the LEFT arm's plan (which
@@ -1971,14 +1971,14 @@ struct CorrelatedPlanOccurrenceTests {
   }
 }
 
-/// A join `ON` in a correlated subquery whose equality references an ENCLOSING
+/// A join `ON` in a correlated subquery whose equality references an enclosing
 /// column: an outer `T`, and a subquery joining `U` and `V` whose `ON`
 /// correlates `V.x` to the outer `T.Id`.
 ///
 /// `V.x` matches `T.Id` ∈ {1, 2}; `U` is a single row, so the correlated
 /// `EXISTS (SELECT 1 FROM U JOIN V ON V.x = T.Id)` is TRUE exactly for those
 /// outer rows. The uncorrelated parity `ON V.x = U.y` is a genuine
-/// column = column equi-join key (`U.y` = 2 matches `V.x` = 2), so it is STILL
+/// column = column equi-join key (`U.y` = 2 matches `V.x` = 2), so it is still
 /// extracted as the hash-join match key and the join runs.
 private func joined() throws -> FixtureCatalog {
   try Catalog {
@@ -2001,10 +2001,10 @@ private func joined() throws -> FixtureCatalog {
 struct CorrelatedJoinOnTests {
   @Test func `a correlated join ON stays the residual filter`() throws {
     // `ON V.x = T.Id` lowers to `compare(.slot, .equal, .parameter)` — a
-    // CORRELATED equality against the outer `T.Id`, not a column = column key.
+    // correlated equality against the outer `T.Id`, not a column = column key.
     // Reading the key off the lowered term leaves it the residual `ON` filter,
     // evaluated per outer `T` row (`V.x = :outer_Id`). Pre-fix the fast path
-    // re-resolved the ORIGINAL AST via `match(V.x, T.Id)`, which consults ONLY
+    // re-resolved the original AST via `match(V.x, T.Id)`, which consults ONLY
     // the join prefix (`U`, `V`) and faulted `SQLError.column("Id")` on the
     // already-lowered outer column. `V.x` ∈ {1, 2} matches `T.Id` ∈ {1, 2}.
     try joined().expect(
@@ -2022,11 +2022,11 @@ struct CorrelatedJoinOnTests {
   }
 
   @Test func `an uncorrelated join ON still extracts its equi key`() throws {
-    // PARITY: `ON V.x = U.y` is a genuine column = column equality lowering to
-    // `compare(.slot, .equal, .slot)`, so it is STILL extracted as the
+    // parity: `ON V.x = U.y` is a genuine column = column equality lowering to
+    // `compare(.slot, .equal, .slot)`, so it is still extracted as the
     // hash-join match key (see `EngineNonEquiJoinTests` for the plan-shape
     // guard). `U.y` = 2 matches `V.x` = 2, so the join is non-empty and the
-    // UNCORRELATED `EXISTS` is TRUE for EVERY outer `T` row.
+    // uncorrelated `EXISTS` is TRUE for every outer `T` row.
     try joined().expect(
         "SELECT Id FROM T WHERE EXISTS (SELECT 1 FROM U JOIN V ON V.x = U.y)",
         yields: [[1], [2], [3], [4]])

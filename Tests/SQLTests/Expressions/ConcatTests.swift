@@ -76,8 +76,8 @@ struct ConcatEvaluationTests {
 
   @Test func `a statically-NULL operand concatenates as NULL`() throws {
     // `CASE WHEN 1 = 0 THEN 1 END` yields NULL yet derives `.integer` (the
-    // no-branch schema default). `||` returns NULL for a NULL operand BEFORE
-    // it inspects kinds, so this VALIDATES — the output-schema text guard
+    // no-branch schema default). `||` returns NULL for a NULL operand before
+    // it inspects kinds, so this validates — the output-schema text guard
     // admits the folded NULL rather than rejecting the `.integer` type — and
     // runs, yielding NULL; the caller need not fall back to a CASE desugar.
     try things().expect("SELECT (CASE WHEN 1 = 0 THEN 1 END) || 'x'",
@@ -85,8 +85,8 @@ struct ConcatEvaluationTests {
   }
 
   @Test func `a folded-NULL side admits a non-text other operand`() throws {
-    // `Arithmetic.apply` returns NULL before inspecting EITHER kind, so a
-    // statically-NULL side makes the whole `||` valid regardless of the OTHER
+    // `Arithmetic.apply` returns NULL before inspecting either kind, so a
+    // statically-NULL side makes the whole `||` valid regardless of the other
     // operand's type: `(CASE WHEN 1 = 0 THEN 1 END) || 1` — a folded NULL
     // beside a bare integer — validates and yields NULL rather than being
     // rejected for the integer right operand.
@@ -114,7 +114,7 @@ private func derived(_ text: String) throws -> ValueType {
 struct ConcatDerivationTests {
   @Test func `deriving a concatenation resolves both operands`() throws {
     // `derive` — the schema-only surface a `columns(of:validate:false)` and an
-    // unreachable projection take, which RESOLVES column references — must
+    // unreachable projection take, which resolves column references — must
     // derive both `||` operands, so an unresolved `Missing` faults
     // `SQLError.column` rather than the branch silently advertising a `text`
     // column, mirroring the arithmetic `.binary` derive branch.

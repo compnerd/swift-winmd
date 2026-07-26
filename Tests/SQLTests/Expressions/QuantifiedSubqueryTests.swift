@@ -53,7 +53,7 @@ struct QuantifiedSubqueryParsingTests {
 
   @Test func `SOME parses identically to ANY`() throws {
     // `SOME` is a synonym for `ANY`, normalised to `.any` at parse time, so the
-    // two spellings produce the SAME AST.
+    // two spellings produce the same AST.
     let some =
         try parse(select: "SELECT Id FROM T WHERE K < SOME (SELECT V FROM S)")
     let any =
@@ -121,7 +121,7 @@ struct QuantifiedOrderingTests {
   }
 
   @Test func `> ALL holds for a value above the maximum`() throws {
-    // `K > ALL {10, 20}` is TRUE only above EVERY value, i.e. above the maximum
+    // `K > ALL {10, 20}` is TRUE only above every value, i.e. above the maximum
     // 20: K = 30 qualifies; K = 10 and 20 do not; K NULL is UNKNOWN.
     try fixture().expect(
         "SELECT Id FROM T WHERE K > ALL (SELECT V FROM S WHERE Flag = 1)",
@@ -210,7 +210,7 @@ struct QuantifiedNullCornerTests {
 
 struct QuantifiedArityTests {
   @Test func `a two-column quantified subquery faults at compile`() throws {
-    // A quantified comparison requires its subquery project exactly ONE column;
+    // A quantified comparison requires its subquery project exactly one column;
     // a two-column subquery is `SQLError.arity`, checked from the compiled
     // width, so it faults even though S has rows — reusing IN's arity check.
     try fixture().expect(
@@ -220,7 +220,7 @@ struct QuantifiedArityTests {
 
   @Test func `a two-column quantified subquery faults the schema check too`()
       throws {
-    // The schema path enforces the SAME single-column arity as the run.
+    // The schema path enforces the same single-column arity as the run.
     let query = try parse(query:
          "SELECT Id FROM T WHERE K < ANY (SELECT V, Flag FROM S)")
     let resolve = { () throws -> Array<OutputColumn> in
@@ -259,7 +259,7 @@ struct QuantifiedTypeCheckingTests {
 // MARK: - Correlated quantified execution
 
 /// An outer relation and an inner relation sharing a key `k`, so a quantified
-/// subquery referencing an outer column is CORRELATED: its lone column depends
+/// subquery referencing an outer column is correlated: its lone column depends
 /// on the enclosing row, forcing the per-outer-row re-execution the discovered
 /// correlation threads (rather than a once-memoised uncorrelated run).
 private func correlated() throws -> FixtureCatalog {
@@ -283,7 +283,7 @@ struct CorrelatedQuantifiedTests {
     // `Toll.k`, so the inner column is re-materialised per outer row: row
     // (10, 1) → {10} (10 = ANY → TRUE), row (20, 2) → {20, 30} (TRUE), row
     // (99, 3) → {} (FALSE). A `[:]`-correlation eval would re-run the inner
-    // query WITHOUT the outer scope and fail to bind `Toll.k`.
+    // query without the outer scope and fail to bind `Toll.k`.
     let sql = """
         SELECT x FROM Toll \
         WHERE x = ANY (SELECT i.x FROM Inn i WHERE i.k = Toll.k) \
@@ -323,8 +323,8 @@ struct CorrelatedQuantifiedTests {
   }
 
   @Test func `an uncorrelated quantified still memoises once`() throws {
-    // With NO outer reference the quantified subquery is uncorrelated — empty
-    // correlation — so it materialises its column ONCE (memoised), folded per
+    // With no outer reference the quantified subquery is uncorrelated — empty
+    // correlation — so it materialises its column once (memoised), folded per
     // outer row: `Inn.x` ∈ {10, 20, 30}, so `Toll.x = ANY {10, 20, 30}` keeps
     // rows 10 and 20 (99 is absent).
     let sql = """

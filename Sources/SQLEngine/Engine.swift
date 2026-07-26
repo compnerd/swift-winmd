@@ -30,7 +30,7 @@ extension Catalog where Self: ~Escapable {
   /// ordered rows as typed values.
   ///
   /// A bare `SELECT` runs as before; a `UNION` runs each arm through the same
-  /// compile/optimise/execute with the SAME `bindings` and `routines`, then
+  /// compile/optimise/execute with the same `bindings` and `routines`, then
   /// concatenates the rows in source order — `UNION ALL` keeps every row, a
   /// bare `UNION` removes whole-row duplicates (first occurrence kept). The
   /// plan is binary and mirrors the left-associative chain, so each
@@ -46,7 +46,7 @@ extension Catalog where Self: ~Escapable {
   public borrowing func run(_ query: Query, _ routines: Routines,
                             bindings: Bindings = [:])
       throws(SQLError) -> Array<Array<Value>> {
-    // The engine is PURE: it resolves calls against exactly the `routines`
+    // The engine is pure: it resolves calls against exactly the `routines`
     // given, seeding no prelude of its own. `import SQLStandard` adds a
     // prelude-defaulting overload (`run(_:bindings:)` — see `SQLStandard`),
     // so a call under that module reaches the built-ins without naming them.
@@ -65,10 +65,10 @@ extension Catalog where Self: ~Escapable {
     // run and a `columns(of:)` derive cannot diverge. Idempotent for a
     // `.keys`/`.arm` select; a nested body re-enters and expands in turn.
     let query = try query.expanded
-    // A set operation runs each ARM against its OWN scope and combines the
+    // A set operation runs each ARM against its own scope and combines the
     // results, rather than materialising both arms' derived tables into one
     // shared overlay the executor scans by name. Both arms bind their aliases
-    // in ONE map, so a right arm's `derived T` would shadow a left arm's base
+    // in one map, so a right arm's `derived T` would shadow a left arm's base
     // (or CTE) `T` at the leaf scan — the executor keys a `.scan` by name and
     // cannot tell the two `T`s apart. Running per arm scopes each arm's derived
     // tables to that arm: the left arm's `FROM T` scans the base relation and
@@ -78,12 +78,12 @@ extension Catalog where Self: ~Escapable {
     if case let .setop(kind, left, right, all) = query {
       // Validate the whole query (per-arm resolution and the cross-arm arity
       // check) exactly as a single select does, then run each arm on its own —
-      // each arm's `run` threads its OWN lazy subquery box. `validate: false` —
+      // each arm's `run` threads its own lazy subquery box. `validate: false` —
       // the preflight must not eager-type-check a derived body a data-dependent
-      // filter never reaches (execution faults only on a REACHED operand),
+      // filter never reaches (execution faults only on a reached operand),
       // matching the non-derived path.
       _ = try compile(query, context.validating(false))
-      // The result column TYPES are UNIFIED across the arms (ISO), so coerce
+      // The result column types are unified across the arms (ISO), so coerce
       // each arm's values to them — `SELECT 1 UNION SELECT 2.5` emits a
       // `double` column. The fold reads the arm queries in hand here; the
       // Plan-node path carries the same types precomputed at compile.
@@ -93,40 +93,40 @@ extension Catalog where Self: ~Escapable {
                                  types: types)
       return combined.map(\.values)
     }
-    // Thread a fresh LAZY subquery cache — a shared box — through BOTH compile
+    // Thread a fresh lazy subquery cache — a shared box — through both compile
     // and execute. The executor's row evaluator runs each nested subquery into
     // it on first reach (where the borrowing catalog IS in scope; a schema-only
-    // path never reaches it, so opens no cursor): an UNCORRELATED occurrence
-    // runs once and memoises, while a CORRELATED one re-executes per outer row
+    // path never reaches it, so opens no cursor): an uncorrelated occurrence
+    // runs once and memoises, while a correlated one re-executes per outer row
     // against the correlated bindings, bypassing the memo. Compile stashes each
-    // CORRELATED occurrence's inner PLAN here (compiled once with its enclosing
+    // correlated occurrence's inner plan here (compiled once with its enclosing
     // scope, so its correlated columns are bound `Term.parameter`s), so the
-    // evaluator re-executes THAT plan rather than recompiling the inner query
+    // evaluator re-executes that plan rather than recompiling the inner query
     // with no outer scope.
     let context = context.resolving(Subqueries())
     // Compile from the un-augmented `context` (idempotently augmented inside
     // `compile`, which reveals the base for a nested subquery) — this query's
     // derived aliases are invisible to a subquery's FROM, and a CTE a
     // same-named derived alias shadows stays visible beneath the revealed base.
-    // Compile VALIDATES the whole query (schema-only, `rows: false`) BEFORE any
+    // Compile validates the whole query (schema-only, `rows: false`) before any
     // row materialises below, so an invalid query — an unknown column resolving
-    // over a `FROM (SELECT tick() …) AS d` — faults WITHOUT ever executing the
+    // over a `FROM (SELECT tick() …) AS d` — faults without ever executing the
     // derived body's stateful routine. A materialise ahead of this compile
     // would run the body for a query that cannot run.
     //
-    // `validate: false` gates the derived-body type-check OFF: the preflight
+    // `validate: false` gates the derived-body type-check off: the preflight
     // proves the OUTER query runnable and resolves its relations, but a data-
     // dependent body expression a filter drops (`FROM (SELECT Label + 1 AS x
     // FROM K WHERE k = 0) AS d`) must NOT be rejected here — execution faults
     // ONLY on an expression a surviving row reaches, exactly as the non-derived
     // `SELECT Label + 1 FROM K WHERE k = 0` runs to zero rows. The eager body
-    // type-check stays for the EXPLICIT schema path (`columns` `validate:
+    // type-check stays for the explicit schema path (`columns` `validate:
     // true`).
     let logical = try compile(query, context.validating(false)).pushdown()
     // Now that `compile` proved the query runnable, extend the overlay with any
     // `definition_schema.` store relation the query names (resolved lazily —
-    // the overlay after the CTEs, before the base catalog) AND MATERIALISE this
-    // query's derived tables (`rows: true`, executing each body ONCE). Every
+    // the overlay after the CTEs, before the base catalog) AND materialise this
+    // query's derived tables (`rows: true`, executing each body once). Every
     // phase reads the extended map, so a reserved store relation resolves,
     // plans, and materialises exactly as a common table expression does; a
     // portable `information_schema.` view over the store resolves through the
@@ -135,16 +135,16 @@ extension Catalog where Self: ~Escapable {
     // type.
     //
     // `validate: false` — this run materialise executes each body's rows, but a
-    // NESTED derived body's schema is still derived schema-only inside
+    // nested derived body's schema is still derived schema-only inside
     // `materialise` (to name the inner alias's columns); `validate: true` there
-    // would eager-type-check a doubly-nested filtered-out body on the RUN path.
+    // would eager-type-check a doubly-nested filtered-out body on the run path.
     // The run stays lenient at every depth (the outer query already compiled,
-    // and a REACHED operand still faults at execution).
+    // and a reached operand still faults at execution).
     let augmented = try augment(context.validating(false), for: query,
                                 rows: true)
     // Record the caller's overlay under `.caller` so a subquery lowered under
     // it (even one a pushdown moved INTO a view) re-runs against the caller's
-    // relations, not the view's base. REVEAL the base first — this query's
+    // relations, not the view's base. reveal the base first — this query's
     // derived-table aliases are SELECT-scoped, invisible to a subquery's FROM,
     // while the CTEs and `definition_schema.` store relations a `.caller`
     // subquery's FROM resolves against are kept, so a subquery `FROM d` reads a
@@ -153,15 +153,15 @@ extension Catalog where Self: ~Escapable {
     augmented.subqueries.record(overlay: augmented.revealed().relations,
                                 for: .caller)
     // Rewrite each decorrelatable correlated CROSS APPLY into a set-based join
-    // BEFORE the physical `optimise`/`nest`, so the emitted `select`-over-
+    // before the physical `optimise`/`nest`, so the emitted `select`-over-
     // `product` folds to a hash equi-join. The pass reads the compiled body
     // plans recorded above into the shared subquery box; a non-decorrelatable
     // apply is left verbatim, so a plan with none is unchanged.
     let decorrelated = try decorrelate(logical, augmented)
     // A query-level `ORDER BY`/`DISTINCT`/`OFFSET`·`FETCH` over a set operation
-    // — an `ordered` carrier whose `core` is a `.setop` — optimises PER ARM,
+    // — an `ordered` carrier whose `core` is a `.setop` — optimises per ARM,
     // mirroring the view carrier path (`optimise(_:_:_:)` at the `.ordered`
-    // view seam): the generic optimiser would rewrite both arms under the SAME
+    // view seam): the generic optimiser would rewrite both arms under the same
     // carrier-level `augmented` context, which does NOT bind an arm-owned
     // derived alias (arms are SELECT-scoped), so its `seek` rewrite faults
     // `.relation` on a `FROM (SELECT …) AS d WHERE …` arm before the per-arm
@@ -177,14 +177,14 @@ extension Catalog where Self: ~Escapable {
       plan = try optimise(decorrelated, augmented)
     }
     // A query-level `ORDER BY`/`DISTINCT`/`OFFSET`·`FETCH` over a set operation
-    // — the `ordered` carrier — must run its inner union PER ARM, as the direct
-    // `run(.setop)` above does: each arm augments its OWN arm-local derived
+    // — the `ordered` carrier — must run its inner union per ARM, as the direct
+    // `run(.setop)` above does: each arm augments its own arm-local derived
     // aliases (arms are SELECT-scoped, so the query-level augment misses them)
     // before its `.scan` reads them, then the arms `combine`. Executing the
     // compiled carrier plan under the single carrier context instead would
     // never materialise an arm's derived table, faulting `.relation`. Route the
     // execute through the carrier descent, which threads the inner union's arm
-    // queries to the setop leaf and runs `arms` there — the SAME per-arm
+    // queries to the setop leaf and runs `arms` there — the same per-arm
     // machinery — leaving the sort/dedup/limit/project stack above unchanged.
     if case let .ordered(inner, _, _, _, _) = query {
       return try execute(plan, carrying: inner, augmented).map(\.values)
@@ -223,7 +223,7 @@ extension Catalog where Self: ~Escapable {
   /// the `ScopedRelations` map and runs the trailing `query` against this
   /// catalog with that map in scope.
   ///
-  /// Each CTE materialises against the base catalog plus every EARLIER CTE,
+  /// Each CTE materialises against the base catalog plus every earlier CTE,
   /// so a CTE may name one defined before it (chained CTEs); a CTE name shadows
   /// a base relation of the same name (the resolver consults the map first). A
   /// recursive CTE — one that names itself in its own query — iterates a
@@ -238,13 +238,13 @@ extension Catalog where Self: ~Escapable {
   /// different width would index out of bounds when a later query reads it. The
   /// body's width is known once it compiles (a `SELECT *` resolves its extent
   /// against the relations in scope), so its compiled `Plan.width` is checked
-  /// against the declared count BEFORE the CTE materialises — regardless of how
+  /// against the declared count before the CTE materialises — regardless of how
   /// many rows the body yields. A body filtered to zero rows still faults with
   /// `SQLError.columns`, where a per-row check would pass it through vacuously.
   internal borrowing func with(_ ctes: Array<CTE>, _ query: Query,
                                _ context: Context)
       throws(SQLError) -> Array<Array<Value>> {
-    // Type AND materialise the CTEs into the overlay through the ONE producer
+    // Type AND materialise the CTEs into the overlay through the one producer
     // (`rows: true`) the schema path also drives, then run the trailing query
     // against it — the CTE walk lives in `typed(ctes:in:rows:)`, so a per-CTE
     // step cannot be added to a run loop and forgotten on the schema one.
@@ -253,9 +253,9 @@ extension Catalog where Self: ~Escapable {
   }
 
   /// Types the common table expressions `ctes` into a `ScopedRelations` overlay
-  /// — the SINGLE statement-level CTE walk BOTH the run (`with`) and the
+  /// — the single statement-level CTE walk both the run (`with`) and the
   /// schema-only (`columns(of:with:)`) paths consume, so a per-CTE step lives
-  /// in ONE place and cannot be added to one loop and forgotten on the other.
+  /// in one place and cannot be added to one loop and forgotten on the other.
   ///
   /// It walks `ctes` in source order, binding each into the growing overlay the
   /// next resolves against (so a later CTE names one before it, and a CTE
@@ -265,30 +265,30 @@ extension Catalog where Self: ~Escapable {
   ///    would silently shadow the earlier binding, so it faults
   ///    `SQLError.redefinition` rather than overwrite (a typo in a multi-CTE
   ///    query must not change the result);
-  /// 2. validates the CTE's SHAPE and ARITY against the CTEs done so far — the
-  ///    compile-time structural check `validate` runs. This gate is the ONE
+  /// 2. validates the CTE's shape and arity against the CTEs done so far — the
+  ///    compile-time structural check `validate` runs. This gate is the one
   ///    legitimate run-vs-schema difference, and it now lives here: the run
   ///    (`rows: true`) ALWAYS validates and passes `typecheck: false` — it
-  ///    DEFERS the reachable-operand check to execution — while a schema derive
+  ///    defers the reachable-operand check to execution — while a schema derive
   ///    (`rows: false`) validates ONLY when its context's `validate` gate is
-  ///    set (a post-run `validate: false` derive TRUSTS the bodies) and then
+  ///    set (a post-run `validate: false` derive trusts the bodies) and then
   ///    strictly (`typecheck: true`), faulting an ill-typed body statically;
-  /// 3. computes the column carrier ONCE. On the run path a self-referential
+  /// 3. computes the column carrier once. On the run path a self-referential
   ///    CTE iterates a `fixpoint` (which returns both its rows and their
   ///    unified carrier); every other CTE runs its query once and re-derives
-  ///    the carrier TRUSTED (`validating(false)`, so an unreached data-
+  ///    the carrier trusted (`validating(false)`, so an unreached data-
   ///    dependent operand is not eager-checked while a genuine set-operation
   ///    incompatibility still faults through `kinds`'s `merge` fold). On the
   ///    schema path `kinds`
-  ///    derives the carrier for either kind WITHOUT iterating — its recursive
+  ///    derives the carrier for either kind without iterating — its recursive
   ///    branch (`contributions`) folds anchor ⊕ recursive the same way
   ///    `fixpoint` does;
   /// 4. binds the carrier as `RelationInstance(from:, rows:)`, with the rows
   ///    on the run path and none on the schema path. Both paths accumulate the
-  ///    overlay IDENTICALLY — same names, types, and
+  ///    overlay identically — same names, types, and
   ///    `unconstrained` mask — differing ONLY in the captured rows, which is
   ///    safe because downstream typing reads names/types/mask, never rows. The
-  ///    carrier feeds the SAME `init(from:)`, so the schema-only self and the
+  ///    carrier feeds the same `init(from:)`, so the schema-only self and the
   ///    materialised binding cannot diverge.
   internal borrowing func typed(ctes: Array<CTE>, in context: Context,
                                 rows: Bool)
@@ -300,19 +300,19 @@ extension Catalog where Self: ~Escapable {
       }
       // The scope for this CTE's body: the base catalog plus every earlier CTE,
       // over the run's routines and bindings. `body(_:)` enters this fresh
-      // statement-scoped body with the correlation stack CLEARED — a CTE is
+      // statement-scoped body with the correlation stack cleared — a CTE is
       // resolved independently of any call site (a `WITH` is statement-level,
       // so the stack is already empty here; routing through `body(_:)` keeps
       // the clear intrinsic to entering a body scope rather than incidental).
       let scope = context.body(relations)
       // The compile-time structural check, shared with the dry-run schema path
       // so a derive rejects exactly the CTEs a run rejects. It faults the
-      // recursive shape and the width mismatch BEFORE any rows materialise. The
+      // recursive shape and the width mismatch before any rows materialise. The
       // run ALWAYS validates (`typecheck: false` — it defers the operand check
       // to execution); the schema derive validates ONLY when its context's gate
-      // is set — a `validate: false` derive AFTER a run TRUSTS the bodies (the
-      // run already proved them consistent) — and then STRICTLY (`typecheck:
-      // true`). This gate is the ONE legitimate run-vs-schema difference.
+      // is set — a `validate: false` derive after a run trusts the bodies (the
+      // run already proved them consistent) — and then strictly (`typecheck:
+      // true`). This gate is the one legitimate run-vs-schema difference.
       if rows || context.validate {
         try validate(cte, against: scope, typecheck: !rows)
       }
@@ -325,19 +325,19 @@ extension Catalog where Self: ~Escapable {
           (materialised, carrier) = try fixpoint(cte, scope)
         } else {
           materialised = try run(cte.query, scope)
-          // The body already RAN, so re-derive its carrier TRUSTED — the same
+          // The body already ran, so re-derive its carrier trusted — the same
           // `kinds` call the fixpoint's non-recursive tail routes through, so
           // no inline carrier construction diverges from it.
           carrier = try kinds(of: cte, scope.validating(false))
         }
       } else {
         // The schema derive materialises no row; `kinds` types either CTE kind
-        // WITHOUT iterating (its recursive branch folds anchor ⊕ recursive the
+        // without iterating (its recursive branch folds anchor ⊕ recursive the
         // way `fixpoint` does), under the incoming validate gate.
         materialised = []
         carrier = try kinds(of: cte, scope)
       }
-      // Both routings feed the SAME carrier into `init(from:)`, so the
+      // Both routings feed the same carrier into `init(from:)`, so the
       // schema-only self and the materialised binding cannot diverge.
       relations[cte.name.lowercased()] =
           RelationInstance(from: carrier, rows: materialised)
@@ -345,31 +345,31 @@ extension Catalog where Self: ~Escapable {
     return relations
   }
 
-  /// Validates the SHAPE and declared ARITY of a single common table expression
-  /// `cte` against the base catalog plus the CTEs done so far (`ctes`), WITHOUT
+  /// Validates the shape and declared arity of a single common table expression
+  /// `cte` against the base catalog plus the CTEs done so far (`ctes`), without
   /// materialising a row — the compile-time structural check `with` runs before
   /// each CTE materialises, factored out so the dry-run result-schema path
-  /// (`columns(of:with:)`) validates a `WITH` by the SAME code a run does,
+  /// (`columns(of:with:)`) validates a `WITH` by the same code a run does,
   /// ending the divergence between the two.
   ///
   /// It reproduces, without executing, the two structural faults `with` and
   /// `fixpoint` raise:
   ///
-  /// - The RECURSIVE SHAPE. A `WITH RECURSIVE` member's recursive reference
-  /// must be its FINAL `UNION` arm — the engine's model is anchor members then
-  /// ONE recursive arm. A reference to the CTE's own name in an EARLIER arm
+  /// - The RECURSIVE shape. A `WITH RECURSIVE` member's recursive reference
+  /// must be its final `UNION` arm — the engine's model is anchor members then
+  /// one recursive arm. A reference to the CTE's own name in an earlier arm
   /// resolves against the base scope (the CTE is not in scope outside the
   /// recursive arm), so a same-named base or view is a valid seed; but with no
   /// such base/view the reference can only be a misplaced recursive arm —
   /// recursion before the final arm, or a second recursive arm — a shape the
   /// engine does not support, faulted `SQLError.unsupported`.
   ///
-  /// - The DECLARED ARITY. Each CTE body must project exactly the arity its
+  /// - The declared arity. Each CTE body must project exactly the arity its
   /// column list declares, or a later reader indexes out of bounds. The body's
-  /// width is known once it COMPILES — never opening a cursor — so the compiled
+  /// width is known once it compiles — never opening a cursor — so the compiled
   /// `Plan.width` is checked against the declared count, faulting
   /// `SQLError.columns` on a mismatch. A recursive (self-naming) CTE checks its
-  /// ANCHOR (self NOT in scope) and its RECURSIVE arm (self bound to the
+  /// anchor (self NOT in scope) and its RECURSIVE arm (self bound to the
   /// declared columns) separately, exactly as `fixpoint` does; every other CTE
   /// checks its whole body with self NOT in scope. This is why the schema path
   /// must NOT bind the CTE's self for the whole body: a `WITH RECURSIVE t(n) AS
@@ -378,28 +378,28 @@ extension Catalog where Self: ~Escapable {
   /// self-reference the run would reject.
   ///
   /// The reachable-operand type-check the schema path also wants is NOT part of
-  /// the shape/arity check the run relies on — the run DEFERS it to execution.
+  /// the shape/arity check the run relies on — the run defers it to execution.
   /// It rides in through `typecheck`: the run path passes `false` (it defers),
   /// the schema path passes `true` (it must fault an ill-typed body
   /// statically). Folding it here rather than layering it in the schema path
-  /// keeps ONE per-arm scoping for BOTH the structural check and the operand
-  /// check — a recursive CTE's ANCHOR is operand-checked against base + prior
+  /// keeps one per-arm scoping for both the structural check and the operand
+  /// check — a recursive CTE's anchor is operand-checked against base + prior
   /// CTEs (self NOT in scope, the scope the run evaluates the anchor in), NOT
   /// the CTE-self overlay, so `SELECT Name + 1 FROM People` in the anchor
-  /// faults `SQLError.operand` against the BASE `People` a run reads it
+  /// faults `SQLError.operand` against the base `People` a run reads it
   /// against, never wrongly types clean against the CTE's declared columns.
   ///
-  /// `typecheck` ALSO gates the eager type-check of a DERIVED body the CTE
+  /// `typecheck` also gates the eager type-check of a derived body the CTE
   /// body nests: the arity `augment`/`compile` below thread `validate:
   /// typecheck` so a run (`typecheck: false`) derives a `FROM (SELECT …) AS d`
-  /// LENIENTLY — a data-dependent body expression a filter drops (`FROM (SELECT
-  /// Label + 1 AS x FROM K WHERE k = 0) AS d`) is TRUSTED, not rejected, as
+  /// leniently — a data-dependent body expression a filter drops (`FROM (SELECT
+  /// Label + 1 AS x FROM K WHERE k = 0) AS d`) is trusted, not rejected, as
   /// the non-`WITH` and `WITH`-trailing paths already do — while the schema
   /// path (`typecheck: true`) keeps the strict body type-check.
   internal borrowing func validate(_ cte: CTE, against context: Context,
                                    typecheck: Bool = false)
       throws(SQLError) {
-    // Reject a misplaced recursive reference in an EARLIER arm when no
+    // Reject a misplaced recursive reference in an earlier arm when no
     // same-named base/view can seed it — the shape `with` rejects before
     // routing to the fixpoint.
     if cte.recursive,
@@ -411,10 +411,10 @@ extension Catalog where Self: ~Escapable {
                    "recursive WITH references the CTE outside its final " +
                    "UNION arm")
     }
-    // A recursive body that is a NON-UNION set operation (`EXCEPT`/`INTERSECT`)
+    // A recursive body that is a non-UNION set operation (`EXCEPT`/`INTERSECT`)
     // referencing itself has no recursive arm to iterate: `recurses` matches
     // only a `.union` core, so this body would take the run-once path and
-    // compile with the CTE self UNBOUND, faulting a generic `SQLError.relation`
+    // compile with the CTE self unbound, faulting a generic `SQLError.relation`
     // on the self reference. ISO 9075 permits recursion only through
     // `UNION [ALL]`, so fault the precise `0A000` feature diagnostic instead —
     // unless a same-named base/view seeds it (then the reference reads that
@@ -432,9 +432,9 @@ extension Catalog where Self: ~Escapable {
     // `fixpoint` does: the anchor with self NOT in scope, the recursive arm
     // with self bound to the declared columns. Every other CTE checks its whole
     // body with self NOT in scope. When `typecheck`, the reachable-operand
-    // check runs in the SAME per-arm scope each arity check uses, so the
+    // check runs in the same per-arm scope each arity check uses, so the
     // operand check shares the run's arm scoping and never types an anchor
-    // against the CTE-self overlay. `recursiveArms`/`canonical` peel the SAME
+    // against the CTE-self overlay. `recursiveArms`/`canonical` peel the same
     // canonical (unwound) shape the run's `fixpoint` and the schema
     // `contributions` do, so all three inspect the identical AST.
     if let (anchor, recursive, _) = try cte.recursiveArms {
@@ -449,20 +449,20 @@ extension Catalog where Self: ~Escapable {
       // run evaluates it in — so a text-arithmetic anchor faults against the
       // base relation, not the CTE's declared (integer) columns.
       if typecheck { try self.typecheck(anchor, scope) }
-      // Check the recursive arm's WIDTH against the declared list BEFORE any
+      // Check the recursive arm's width against the declared list before any
       // `kinds` derive — an arm degree differing from the list is the declared-
       // arity fault, and it must win in the ISO order (`expected: arm, got:
-      // declared`) on BOTH paths. A width check needs only the self's COLUMN
+      // declared`) on both paths. A width check needs only the self's COLUMN
       // COUNT, not its types, so bind the self under the placeholder-typed
       // `declared` carrier here: `kinds` would otherwise fold the arms and
-      // raise its OWN inter-arm count fault (`expected: anchor, got: arm`) in
+      // raise its own inter-arm count fault (`expected: anchor, got: arm`) in
       // the reverse order first, re-diverging the schema path from the run.
-      // Measure the arm NON-validating even on the schema path: `augment`
+      // Measure the arm non-validating even on the schema path: `augment`
       // materialises a derived body in the arm eagerly, and validating it here
       // would type-check its operands against the placeholder-typed self (the
       // `.integer` carrier), spuriously faulting a runnable arm whose self is
       // really text. Arity is structural, so the width guard still fires; the
-      // genuine recursive-arm operand type-check happens LATER, under the
+      // genuine recursive-arm operand type-check happens later, under the
       // `kinds`-rebound unified carrier where the self carries its real types.
       let sized = RelationInstance(from: cte.declared, rows: [])
       let measured = context.binding(cte.name, to: sized)
@@ -473,15 +473,15 @@ extension Catalog where Self: ~Escapable {
         throw .columns(expected: arm, got: cte.columns.count)
       }
       // Both widths match, so — ONLY on the schema path — type-check the
-      // recursive arm with the CTE self bound under the UNIFIED (anchor ⊕
-      // recursive) column carrier `kinds` derives: the SAME carrier `fixpoint`
+      // recursive arm with the CTE self bound under the unified (anchor ⊕
+      // recursive) column carrier `kinds` derives: the same carrier `fixpoint`
       // binds the iterated self under (the rows every step reads are coerced to
       // those types). Typing the self at the anchor-only types while the run
       // reads the widened unified types would let schema validation call a
       // query "valid" that the run mistypes (an integer-anchor self a widening
       // recursive arm reads as `double`); `kinds` folds it recursive-aware, so
       // a genuine irreconcilable arm pair faults here as the run's own fold
-      // rejects it. The RUN path defers this operand check to execution, so it
+      // rejects it. The run path defers this operand check to execution, so it
       // needs neither the derive nor the self binding — the width guard above
       // is the whole of its arity check. Feeding the carrier through
       // `init(from:)` means this self binding and the run-iteration one cannot
@@ -489,7 +489,7 @@ extension Catalog where Self: ~Escapable {
       if typecheck {
         let seeded = try kinds(of: cte, context.validating(typecheck))
         let empty = RelationInstance(from: seeded, rows: [])
-        // Bind the CTE self BEFORE augmenting the recursive arm, so a derived
+        // Bind the CTE self before augmenting the recursive arm, so a derived
         // body in the arm naming the CTE (`FROM (SELECT n FROM a) AS d`)
         // resolves it — `augment` materialises derived bodies eagerly, so the
         // self must be in scope by then, not bound only afterwards.
@@ -498,21 +498,21 @@ extension Catalog where Self: ~Escapable {
         // The recursive arm is operand-checked with self bound to the declared
         // columns — the schema every iteration reads the CTE under.
         try self.typecheck(recursive, probe)
-        // Validate the peeled carrier's `ORDER BY` keys the SAME way the RUN
+        // Validate the peeled carrier's `ORDER BY` keys the same way the run
         // path resolves them (`fixpoint`/`apply`): against the body's FIRST-ARM
-        // set-op OUTPUT scope, through the ordinary `SELECT * FROM <temp> ORDER
-        // BY …` machinery over an EMPTY temp of those output columns. A key
+        // set-op output scope, through the ordinary `SELECT * FROM <temp> ORDER
+        // BY …` machinery over an empty temp of those output columns. A key
         // naming a missing column or function faults here on the schema path as
         // it faults the run, closing the run-vs-validate gap where a carrier
         // `ORDER BY missing(n)` passed `columns(of:validate:true)` yet the run
         // faulted `.function('missing')` when `apply` resolved it after the
-        // fixpoint. The declared rename rides the CTE binding AFTER the
+        // fixpoint. The declared rename rides the CTE binding after the
         // carrier, so — as the run does — the carrier resolves the body's
         // output names.
         if let carrier {
           // A set operation names its output off its FIRST arm (the ISO rule),
-          // so the carrier's `ORDER BY` resolves against the ANCHOR's output
-          // NAMES — resolved with the CTE self NOT in scope, so the anchor's
+          // so the carrier's `ORDER BY` resolves against the anchor's output
+          // names — resolved with the CTE self NOT in scope, so the anchor's
           // own names/types derive without faulting `.relation` on the
           // recursive arm's self reference. (Unifying the whole `body` would
           // need the self bound to fold the recursive arm.)
@@ -522,7 +522,7 @@ extension Catalog where Self: ~Escapable {
         }
       }
     } else {
-      // Validate the SAME expanded AST a run does: a `GROUP BY GROUPING SETS`
+      // Validate the same expanded AST a run does: a `GROUP BY GROUPING SETS`
       // body expands to its `UNION ALL` FIRST, so this schema-path typecheck
       // sees the per-set arms (an empty-set grand-total arm evaluates its
       // projection even under a `WHERE` that spares the unexpanded key list),
@@ -542,7 +542,7 @@ extension Catalog where Self: ~Escapable {
   /// Evaluates a recursive `cte` to a fixpoint over this catalog with the
   /// `ctes` in scope, returning every produced row.
   ///
-  /// A recursive CTE's query is a `UNION` of an ANCHOR (its left arm) and a
+  /// A recursive CTE's query is a `UNION` of an anchor (its left arm) and a
   /// RECURSIVE arm (its right arm, which names the CTE). The
   /// anchor evaluates once — with the CTE name NOT yet bound — to seed `result`
   /// and the `working` set. Each iteration then binds the CTE name to ONLY the
@@ -560,7 +560,7 @@ extension Catalog where Self: ~Escapable {
   /// faults with `SQLError.columns` rather than trapping on a later read.
   ///
   /// The anchor and the recursive arm are each validated against
-  /// `cte.columns.count` by their compiled `Plan.width` BEFORE any rows bind
+  /// `cte.columns.count` by their compiled `Plan.width` before any rows bind
   /// under the declared columns: the loop binds `working` as a
   /// `RelationInstance` of `cte.columns`, so an arm narrower or wider than the
   /// column list — a two-column anchor under a three-column list, or a
@@ -582,22 +582,22 @@ extension Catalog where Self: ~Escapable {
     // column using even a standard routine (`BITAND(...)`) types the same
     // inside the CTE as the identical SELECT does outside it.
     // `validate: false` on every arity `compile` below — `fixpoint` is a pure
-    // RUN path (only `with` routes a self-naming CTE here), so a derived body
-    // the CTE's arm nests must be TRUSTED, not eager-type-checked: a data-
+    // run path (only `with` routes a self-naming CTE here), so a derived body
+    // the CTE's arm nests must be trusted, not eager-type-checked: a data-
     // dependent body expression a filter drops must not fault a CTE that runs
     // empty, matching the non-recursive and non-`WITH` paths.
     // Expand a `GROUP BY GROUPING SETS` body to its `UNION ALL` FIRST — the
-    // SAME normalization `run`/`compile`/the schema `validate` apply — so the
+    // same normalization `run`/`compile`/the schema `validate` apply — so the
     // `augment` and the non-`UNION` run-once branch below see the expanded AST.
     // Idempotent for a plain recursive `UNION` body.
     let query = try cte.query.expanded
     let context = try augment(context.validating(false), for: query,
                               rows: true)
-    // Peel the CANONICAL recursive shape — the SAME `canonical` (expanded,
+    // Peel the canonical recursive shape — the same `canonical` (expanded,
     // unwound) form `recurses`/`recursiveArms`, the shape validator, and the
     // schema derive peel — off the body: the fixpoint iterates the INNER
     // `UNION` (anchor ∪ recursive) with the CTE self in scope, then the peeled
-    // `carrier` applies its row operators to the materialised RESULT. The
+    // `carrier` applies its row operators to the materialised result. The
     // carrier is transparent to the recursive shape (`references` descends it),
     // so `recurses` already routed an ordered body here. `canonical` expands a
     // grouping-sets body FIRST, matching the `query` `augment` sees above.
@@ -612,13 +612,13 @@ extension Catalog where Self: ~Escapable {
       guard width == cte.columns.count else {
         throw .columns(expected: width, got: cte.columns.count)
       }
-      // The CTE exposes its body's DERIVED column types/mask under its DECLARED
+      // The CTE exposes its body's derived column types/mask under its declared
       // names (resolved with the self shadowed by the same-named base it seeds
       // from), not the declared-name placeholder, so a caller reading the CTE
       // unifies against real types and the `unconstrained` mask while
       // addressing the CTE by its declared list.
       let rows = try run(query, context)
-      // TRUSTED re-derive (the body already ran): `validating(false)` so an
+      // trusted re-derive (the body already ran): `validating(false)` so an
       // unreached data-dependent operand is not eager-checked, while a genuine
       // set-operation incompatibility still faults through `merge`.
       let carrier = try kinds(of: cte, context.validating(false))
@@ -629,7 +629,7 @@ extension Catalog where Self: ~Escapable {
     // absent) was already rejected in `with`, before routing here, so the
     // anchor is a genuine base case by this point.
 
-    // Validate the anchor's compiled width against the declared columns BEFORE
+    // Validate the anchor's compiled width against the declared columns before
     // it seeds the working set: the loop binds `working` under `cte.columns` as
     // a `RelationInstance`, so an anchor narrower than the column list — a
     // two-column `Parent` under `t(a, b, c)` — would trap when the recursive
@@ -641,20 +641,20 @@ extension Catalog where Self: ~Escapable {
       throw .columns(expected: width, got: cte.columns.count)
     }
 
-    // The CTE column CARRIER a recursive reference reads under — the ANCHOR's
+    // The CTE column carrier a recursive reference reads under — the anchor's
     // own output columns (the base case, resolved with self NOT in scope).
     // Binding the schema-only self under these — rather than a flat `.integer`
     // placeholder — types the recursive arm's self-referencing columns
     // consistently with the anchor, so the anchor/recursive fold below does not
     // spuriously merge a genuine anchor type (a `text` `column_name`) against
     // an `.integer` placeholder self column and fault. A NULL-only anchor
-    // column stays UNCONSTRAINED, so the recursive arm's typed column supplies
+    // column stays unconstrained, so the recursive arm's typed column supplies
     // the type. It defaults to `.integer`, the run's materialised-relation
     // default.
     let seeds = try columns(unifying: anchor, context)
 
     // The recursive arm compiles with the CTE name bound to the anchor's own
-    // carrier under the CTE's DECLARED names (a `SELECT x FROM t` self
+    // carrier under the CTE's declared names (a `SELECT x FROM t` self
     // reference addresses the declared `x`, not the anchor's projected name) —
     // the schema every iteration reads it under — so its width resolves too (a
     // `SELECT *` arm spans that schema). Checking it here catches a mismatch
@@ -672,10 +672,10 @@ extension Catalog where Self: ~Escapable {
       throw .columns(expected: arm, got: cte.columns.count)
     }
 
-    // The result column CARRIER unifies the ANCHOR — typed under `context`,
-    // where a same-named base/view the anchor SEEDS from resolves to that base
+    // The result column carrier unifies the anchor — typed under `context`,
+    // where a same-named base/view the anchor seeds from resolves to that base
     // (the CTE self not yet in scope) — with the RECURSIVE arm, typed under
-    // `probe` (self bound). Folding the WHOLE `cte.query` under `probe` would
+    // `probe` (self bound). Folding the whole `cte.query` under `probe` would
     // resolve the anchor's base reference against the empty self, rejecting or
     // mis-unifying a base-only column (`SELECT Age FROM People` seeding a
     // recursive `People`). So merge the two arms' own-scope columns
@@ -683,11 +683,11 @@ extension Catalog where Self: ~Escapable {
     // `SQLError.operand`.
     // `combine` never runs here (the fixpoint is hand-rolled for its `Seen`
     // dedup), so these types coerce the produced ROWS directly with
-    // `Value.coerced` — the anchored seed and each iteration's output — BEFORE
+    // `Value.coerced` — the anchored seed and each iteration's output — before
     // the dedup and append, leaving the plan tree (and the recursive self-
     // reference) untouched.
     let steps = try columns(unifying: recursive, probe)
-    // Merge column-wise, then bind under the CTE's DECLARED names (a CTE is
+    // Merge column-wise, then bind under the CTE's declared names (a CTE is
     // addressed by its declared list, never the arm's own projected name),
     // keeping each column's unified type and `unconstrained` mask. The declared
     // width is proved equal to each arm's above, so the index is in range.
@@ -721,10 +721,10 @@ extension Catalog where Self: ~Escapable {
 
       // Bind the CTE name to ONLY the previous step's output and run the
       // recursive arm against the base catalog plus the earlier CTEs. The self
-      // relation carries the UNIFIED `merged` carrier — the rows in `working`
+      // relation carries the unified `merged` carrier — the rows in `working`
       // are already coerced to those types (the anchored seed and each step
       // passes through `coerce($0, to: types)`), so the recursive arm must be
-      // TYPED to the values it reads. Typing the self under the anchor-only
+      // typed to the values it reads. Typing the self under the anchor-only
       // `seeds` would type an integer-anchor self while the coerced rows
       // already hold widened `double` values, mistyping the arm the run reads.
       let step = RelationInstance(from: merged, rows: working)
@@ -740,22 +740,22 @@ extension Catalog where Self: ~Escapable {
     }
     // Apply the peeled query-level carrier — a trailing `ORDER BY` / `OFFSET`·
     // `FETCH` / `DISTINCT` on the body's set operation — to the materialised
-    // fixpoint RESULT, reusing the ordinary `SELECT`-over-a-relation path
+    // fixpoint result, reusing the ordinary `SELECT`-over-a-relation path
     // rather than re-resolving the row operators here. A trailing carrier's
     // `generated` is always `0` (the parser materialises no hidden sort column
     // for it; only `expand` does, which never yields a recursive body), so the
     // result rows are exactly the CTE's declared columns and need no trim.
     //
     // The carrier's `ORDER BY` resolves against the body's FIRST-ARM set-op
-    // OUTPUT names — the SAME scope the non-recursive ordered-CTE body uses
+    // output names — the same scope the non-recursive ordered-CTE body uses
     // (`WITH t(n) AS (SELECT 1 AS x UNION ALL … ORDER BY x)` orders by the
     // arm-0 output `x`, not the declared `n`) — so name the temp `apply` binds
-    // under the ANCHOR's output names (a set operation names its output off its
+    // under the anchor's output names (a set operation names its output off its
     // FIRST arm, the ISO rule; the anchor resolves with the CTE self NOT in
     // scope, so its names derive without the self binding), NOT the CTE's
-    // DECLARED names (`merged`). Each column carries the run-unified `merged`
-    // TYPE the materialised rows hold. The CTE-declared rename rides the
-    // RETURNED `merged` carrier, applied AFTER the carrier at CTE consumption,
+    // declared names (`merged`). Each column carries the run-unified `merged`
+    // type the materialised rows hold. The CTE-declared rename rides the
+    // returned `merged` carrier, applied after the carrier at CTE consumption,
     // so the outer `SELECT n FROM t` still addresses `n`.
     if let carrier {
       let outputs = try columns(unifying: anchor, context)
@@ -774,10 +774,10 @@ extension Catalog where Self: ~Escapable {
   /// output names), `arm` the body's FIRST arm (the anchor).
   ///
   /// The rows are bound as a temporary relation under a non-spellable name; a
-  /// bare scan over it seeds the SHARED `carried(over:)` carrier resolver — the
-  /// SAME resolver the ordinary `ordered` set-operation path uses — so the
+  /// bare scan over it seeds the shared `carried(over:)` carrier resolver — the
+  /// same resolver the ordinary `ordered` set-operation path uses — so the
   /// carrier's `ORDER BY` resolves a projected-expression / aliased / qualified
-  /// / ordinal key against the arm-0 projection surface IDENTICALLY to the
+  /// / ordinal key against the arm-0 projection surface identically to the
   /// ordinary path, never a bare `SELECT * FROM <temp>` that re-evaluates a
   /// projected key over the column-shy temp. A trailing carrier's `generated`
   /// is always `0` (only `expand` materialises hidden sort columns, and it
@@ -789,17 +789,17 @@ extension Catalog where Self: ~Escapable {
       throws(SQLError) -> Array<Array<Value>> {
     let name = "*fixpoint"
     let temp = RelationInstance(from: columns, rows: rows)
-    // Thread ONE fresh subquery cache — a shared box — through BOTH `carried`
-    // (which resolves the carrier `ORDER BY` and, for a sort key CORRELATED to
+    // Thread one fresh subquery cache — a shared box — through both `carried`
+    // (which resolves the carrier `ORDER BY` and, for a sort key correlated to
     // the set-op output, records that key's compiled runtime plan here) AND
     // `execute` (whose row evaluator reads that recorded plan back), mirroring
     // the top-level `run`. A fresh box (not the incoming context's) isolates
     // the carrier's subquery cache from the fixpoint iterations' recorded body
-    // plans; what matters is that `carried` writes and `execute` read the SAME
+    // plans; what matters is that `carried` writes and `execute` read the same
     // box, so a correlated carrier sort key does not fault "a correlated
     // subquery plan was not compiled" on execution.
     let context = context.binding(name, to: temp).resolving(Subqueries())
-    // The base scan over the temp — its output columns ARE `columns`, the
+    // The base scan over the temp — its output columns are `columns`, the
     // setop-output scope the carrier resolves against. The shared resolver
     // stacks the row operators over it in that identity slot space.
     let scan = try compile(.select(Select(projection: .all,
@@ -813,10 +813,10 @@ extension Catalog where Self: ~Escapable {
   }
 
   /// Validates the peeled `carrier`'s `ORDER BY` keys against the body's set-op
-  /// output `columns` — an EMPTY temp of those columns — through the SAME
+  /// output `columns` — an empty temp of those columns — through the same
   /// shared `carried(over:)` resolver `apply` runs, under a validating context,
   /// so a schema-path `columns(of:validate:true)` faults a carrier `ORDER BY`
-  /// naming a missing column or function EXACTLY as the run does, closing the
+  /// naming a missing column or function exactly as the run does, closing the
   /// run-vs-validate gap. `arm` is the body's FIRST arm (the anchor), the
   /// projection surface an ordinal / projected-expression / aliased key binds
   /// against. Discards the resolved plan — only its resolution can fault.
@@ -837,7 +837,7 @@ extension Catalog where Self: ~Escapable {
   }
 }
 
-/// A row's cells COERCED to the unified column `types` — the recursive-CTE
+/// A row's cells coerced to the unified column `types` — the recursive-CTE
 /// fixpoint's row-level counterpart of `Record.coerced(to:)`, applied to each
 /// materialised `Array<Value>` row (the fixpoint works on raw rows, not the
 /// plan tree) so the anchor and every iteration carry the set-operation's

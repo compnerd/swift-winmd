@@ -10,7 +10,7 @@ import SQLTestSupport
 // MARK: - LATERAL execution
 
 /// A parent `T` and a child `S` keyed on `T.Id`, so a LATERAL body's right side
-/// VARIES per outer row — the proof of real correlation a once-materialised
+/// varies per outer row — the proof of real correlation a once-materialised
 /// constant relation could not produce.
 private func fixture() throws -> FixtureCatalog {
   try Catalog {
@@ -28,7 +28,7 @@ private func fixture() throws -> FixtureCatalog {
   }
 }
 
-/// A LATERAL derived table resolves its body against the PRECEDING FROM and
+/// A LATERAL derived table resolves its body against the preceding FROM and
 /// re-evaluates it per that row — a correlated apply. The right side differs per
 /// left row (impossible for a once-materialised constant), and an INNER apply
 /// drops a left row whose body yields nothing.
@@ -36,8 +36,8 @@ struct LateralExecutionTests {
   @Test func `a LATERAL body yields per-outer-row-varying rows`() throws {
     // `… JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1` — the
     // body's `T.Id` correlates to the preceding `T`, so `d` re-runs per `T` row
-    // over the children keyed on THAT `Id`: Id 1 → {100, 101}, Id 2 → {200},
-    // Id 3 → {} (dropped, INNER apply). The right side VARIES per left row.
+    // over the children keyed on that `Id`: Id 1 → {100, 101}, Id 2 → {200},
+    // Id 3 → {} (dropped, INNER apply). The right side varies per left row.
     try fixture().expect(
         "SELECT T.Id, d.x FROM T " +
         "JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1 " +
@@ -80,8 +80,8 @@ struct LateralExecutionTests {
   }
 
   @Test func `a LATERAL body advertises its output schema`() throws {
-    // A lateral body's SHAPE is correlation-independent — its projection names
-    // its OWN relation `S`, so `columns(of:)` reports the body's output column
+    // A lateral body's shape is correlation-independent — its projection names
+    // its own relation `S`, so `columns(of:)` reports the body's output column
     // `x` under `d` even though the body's WHERE correlates against `T`.
     let query = try parse(query:
         "SELECT d.x FROM T " +
@@ -93,7 +93,7 @@ struct LateralExecutionTests {
   }
 
   @Test func `a NON-lateral body still faults the preceding column`() throws {
-    // PARITY: the SAME body WITHOUT `LATERAL` still faults the unknown
+    // parity: the same body without `LATERAL` still faults the unknown
     // preceding column — the no-LATERAL rule is intact (a non-lateral body is
     // resolved independently of its call site).
     try fixture().expect(
@@ -103,7 +103,7 @@ struct LateralExecutionTests {
   }
 
   @Test func `a LATERAL first FROM item faults`() throws {
-    // A lateral derived table needs a PRECEDING FROM item; as the sole FROM
+    // A lateral derived table needs a preceding FROM item; as the sole FROM
     // relation it has nothing to correlate against, so it faults.
     try fixture().expect(
         "SELECT d.x FROM LATERAL (SELECT x FROM S) AS d",
@@ -112,7 +112,7 @@ struct LateralExecutionTests {
   }
 
   @Test func `a CTE is visible inside a LATERAL body`() throws {
-    // The lateral body resolves against the SAME scope its call site sees, so
+    // The lateral body resolves against the same scope its call site sees, so
     // an enclosing CTE `c` is visible inside it — the structural fix unified
     // the lateral body's resolution scope with the outer query's. The schema
     // pass derives the body's output column `x`, and the run correlates it per
@@ -132,7 +132,7 @@ struct LateralExecutionTests {
 
   @Test func `a bad function in a LATERAL body faults the schema check`()
       throws {
-    // PARITY: the schema pass validates the lateral body exactly as the run
+    // parity: the schema pass validates the lateral body exactly as the run
     // executes it, so an unregistered `bad` function in the body faults the
     // strict `columns(of:validate:true)` schema check with the same
     // `SQLError.function` the run raises — the schema is not advertised for a
@@ -148,9 +148,9 @@ struct LateralExecutionTests {
 
   @Test func `validate false does not eagerly fault a bad LATERAL body`()
       throws {
-    // LENIENT PARITY: with `validate: false` — the run-shape pass — the same
+    // lenient parity: with `validate: false` — the run-shape pass — the same
     // bad-function lateral body is NOT eager-checked, so deriving its headers
-    // returns the body's output column `x` WITHOUT the `.function` fault,
+    // returns the body's output column `x` without the `.function` fault,
     // matching the engine's reachability-gated validation (the strict schema
     // path faults it; the lenient one trusts it).
     let query = try parse(query:
@@ -163,7 +163,7 @@ struct LateralExecutionTests {
 
   @Test func `a LATERAL body exposes its virtual Id per left row`() throws {
     // A lateral derived table exposes the universal virtual `Id` at its real
-    // width, so `d.Id` names the 1-based position of the row WITHIN this left
+    // width, so `d.Id` names the 1-based position of the row within this left
     // row's body output — reset per outer row, exactly as a non-lateral derived
     // table's `Id` numbers its own materialised rows. Id 1 → children {100,
     // 101} → d.Id {1, 2}; Id 2 → {200} → d.Id {1}; Id 3 → {} (dropped). The
@@ -178,8 +178,8 @@ struct LateralExecutionTests {
   }
 
   @Test func `a LATERAL virtual Id matches a non-lateral derived Id`() throws {
-    // PARITY: the per-left-row `d.Id` a lateral body advertises numbers its own
-    // output the SAME way a non-lateral derived table numbers its materialised
+    // parity: the per-left-row `d.Id` a lateral body advertises numbers its own
+    // output the same way a non-lateral derived table numbers its materialised
     // rows — the FIRST left row (`T.Id` 1) has two children, so its lateral
     // `d.Id`s are 1 and 2, exactly a non-lateral `(SELECT x FROM S WHERE S.k =
     // 1) AS d`'s Ids over the same two rows.
@@ -217,13 +217,13 @@ struct LateralExecutionTests {
   }
 
   @Test func `a LATERAL body cannot see a caller derived alias`() throws {
-    // STRUCTURAL PARITY: the lateral body's PLAN compile resolves its `FROM`
-    // over the SAME revealed base the schema/validation pass does — base plus
-    // CTEs plus store, this select's derived aliases STRIPPED — so a body
-    // naming a CALLER derived alias `e` faults the unknown relation
-    // CONSISTENTLY at both the schema pass and the run, rather than the
+    // structural parity: the lateral body's plan compile resolves its `FROM`
+    // over the same revealed base the schema/validation pass does — base plus
+    // CTEs plus store, this select's derived aliases stripped — so a body
+    // naming a caller derived alias `e` faults the unknown relation
+    // consistently at both the schema pass and the run, rather than the
     // run-only compile scanning the caller's `e` while the schema pass faults.
-    // The caller reference sits in the set-operation body's LATER arm (`…
+    // The caller reference sits in the set-operation body's later arm (`…
     // UNION ALL SELECT x FROM e`), the arm the run-path shape pass
     // (`materialise`, `rows: false`) does NOT derive — so ONLY the plan compile
     // ever resolved it, the exact path the unified revealed base now closes.
@@ -242,12 +242,12 @@ struct LateralExecutionTests {
 
   @Test func `a shadowed CTE in a LATERAL body resolves the same at compile and run`()
       throws {
-    // EXECUTION/COMPILE PARITY: a CTE `e` SHADOWED by a caller derived alias
+    // execution/compile parity: a CTE `e` shadowed by a caller derived alias
     // `e` is in scope of the lateral body's `FROM e`. Compile resolves the body
-    // over the REVEALED base (CTEs plus store, this select's derived aliases
-    // STRIPPED), so it binds the CTE `e` (x = 1). The per-outer-row apply must
-    // re-run that plan under the SAME revealed overlay — else it scans the
-    // UNREVEALED caller derived alias `e` (x = 2) and yields the WRONG rows.
+    // over the revealed base (CTEs plus store, this select's derived aliases
+    // stripped), so it binds the CTE `e` (x = 1). The per-outer-row apply must
+    // re-run that plan under the same revealed overlay — else it scans the
+    // unrevealed caller derived alias `e` (x = 2) and yields the wrong rows.
     // The CTE matches `T.Id` 1, the derived alias would match `T.Id` 2, so the
     // divergence is a visible wrong row, not merely an empty result. The run
     // yields the CTE's row and `columns(of:validate: true)` agrees — schema,
@@ -274,7 +274,7 @@ struct LateralExecutionTests {
 struct OuterApplyTests {
   @Test func `OUTER APPLY NULL-extends a left row with no right rows`() throws {
     // `T.Id` 3 has no child in `S`, so the OUTER apply (`LEFT JOIN LATERAL`)
-    // PRESERVES it NULL-extended: Id 1 → {100, 101}, Id 2 → {200}, Id 3 →
+    // preserves it NULL-extended: Id 1 → {100, 101}, Id 2 → {200}, Id 3 →
     // (3, NULL) — the left row kept with a NULL right column.
     try fixture().expect(
         "SELECT T.Id, d.x FROM T " +
@@ -284,7 +284,7 @@ struct OuterApplyTests {
   }
 
   @Test func `the INNER CROSS APPLY twin drops the unmatched row`() throws {
-    // CONTRAST: the SAME body under `JOIN LATERAL` (INNER/CROSS APPLY) DROPS
+    // contrast: the same body under `JOIN LATERAL` (INNER/CROSS APPLY) drops
     // `T.Id` 3 — the drop the OUTER apply above replaces with a NULL-extended
     // row. Only 1 and 2 survive.
     try fixture().expect(
@@ -296,9 +296,9 @@ struct OuterApplyTests {
 
   @Test func `OUTER APPLY NULL-extends when the ON filters all right rows`()
       throws {
-    // A body that DOES produce rows but whose every merged pair fails the join
+    // A body that does produce rows but whose every merged pair fails the join
     // `ON` still counts as unmatched: `ON d.x > 1000` rejects every child, so
-    // EACH left row — even Ids 1 and 2 with children — is NULL-extended, just
+    // each left row — even Ids 1 and 2 with children — is NULL-extended, just
     // as Id 3 (no children) is. No pair survives, so all three preserve NULL.
     try fixture().expect(
         "SELECT T.Id, d.x FROM T " +
@@ -329,16 +329,16 @@ struct OuterApplyTests {
 // MARK: - LATERAL body projects a preceding-FROM column (ISO scoping)
 
 /// Per ISO 9075 a LATERAL derived table's preceding-FROM references are in
-/// scope throughout its query expression, INCLUDING the SELECT list — so a
-/// lateral body may PROJECT a preceding column, unlike an ordinary correlated
+/// scope throughout its query expression, including the SELECT list — so a
+/// lateral body may project a preceding column, unlike an ordinary correlated
 /// subquery (whose projection this engine bars). The bar is lifted for the
-/// LATERAL body ALONE: the body's `Resolution`/`SubqueryCheck` admit a
+/// LATERAL body alone: the body's `Resolution`/`SubqueryCheck` admit a
 /// correlated column everywhere, so a projected preceding column lowers to a
 /// `Term.parameter` the apply binds per outer row; the ordinary subquery
 /// projection bar is untouched.
 struct LateralProjectionCorrelationTests {
   @Test func `a LATERAL body projects a preceding column`() throws {
-    // `JOIN LATERAL (SELECT T.Id AS id) AS d ON 1 = 1` — the body's PROJECTION
+    // `JOIN LATERAL (SELECT T.Id AS id) AS d ON 1 = 1` — the body's projection
     // names the preceding `T.Id`, which ISO puts in scope throughout the body.
     // The strict schema path derives `id` typed from `T.Id` (`.integer`), and a
     // run yields `d.id == T.Id` for each left row — the projected preceding
@@ -358,9 +358,9 @@ struct LateralProjectionCorrelationTests {
   }
 
   @Test func `a LATERAL body projects a BARE preceding column`() throws {
-    // The BARE-COLUMN twin of the aliased case above: a LATERAL body projecting
-    // a preceding `T.Id` WITHOUT an alias collapses to `Projection.columns` —
-    // the simpler path. The schema-derive `.columns` case must consult the SAME
+    // The bare-COLUMN twin of the aliased case above: a LATERAL body projecting
+    // a preceding `T.Id` without an alias collapses to `Projection.columns` —
+    // the simpler path. The schema-derive `.columns` case must consult the same
     // lateral correlation surface the aliased expression path does, else a bare
     // preceding column faults `SQLError.column("Id")` at schema/run even though
     // the aliased form works. The strict schema path derives `Id` typed from
@@ -382,9 +382,9 @@ struct LateralProjectionCorrelationTests {
 
   @Test func `an ordinary subquery still cannot project a BARE outer column`()
       throws {
-    // The bare-column exemption is GATED on the lateral surface, not opened for
+    // The bare-column exemption is gated on the lateral surface, not opened for
     // the `.columns` path generally: an ordinary (non-lateral) derived table
-    // whose body projects a bare preceding `T.Id` STILL faults `.unsupported`
+    // whose body projects a bare preceding `T.Id` still faults `.unsupported`
     // at the strict schema check — the barred projection surface of an ordinary
     // subquery diagnoses the correlated bare column exactly as it does the
     // aliased one. This pins the exemption to the LATERAL `everywhere` surface.
@@ -397,10 +397,10 @@ struct LateralProjectionCorrelationTests {
   }
 
   @Test func `a LATERAL body projects a preceding and a body column`() throws {
-    // A MIXED projection — the preceding `T.Id AS a` beside the body's own
+    // A mixed projection — the preceding `T.Id AS a` beside the body's own
     // `x AS b` — proves a projected correlated column and a projected local
     // column coexist. The body re-runs per `T` row over the children keyed on
-    // THAT `Id`: Id 1 → {100, 101}, Id 2 → {200}, Id 3 → {} (dropped, INNER
+    // that `Id`: Id 1 → {100, 101}, Id 2 → {200}, Id 3 → {} (dropped, INNER
     // apply). `a` reads the bound preceding `T.Id`, `b` the body's own `x`.
     try fixture().expect(
         "SELECT d.a, d.b FROM T " +
@@ -412,7 +412,7 @@ struct LateralProjectionCorrelationTests {
 
   @Test func `a LATERAL body advertises a projected preceding column mixed`()
       throws {
-    // The strict schema path derives BOTH output columns of the mixed body —
+    // The strict schema path derives both output columns of the mixed body —
     // `a` typed from the preceding `T.Id`, `b` from the body's own `x` — so
     // `columns(of:validate: true)` reports the correlated projection's shape.
     let query = try parse(query:
@@ -426,8 +426,8 @@ struct LateralProjectionCorrelationTests {
   }
 
   @Test func `an ordinary subquery projection still cannot correlate`() throws {
-    // The bar lift is LATERAL-ONLY: an ordinary correlated SCALAR SUBQUERY in
-    // the projection — `SELECT (SELECT T.Id) FROM T` — STILL faults
+    // The bar lift is LATERAL-ONLY: an ordinary correlated scalar subquery in
+    // the projection — `SELECT (SELECT T.Id) FROM T` — still faults
     // `.unsupported`, since a subquery's projection is a barred clause position
     // (no evaluator for an outer column there). This pins the LATERAL-only
     // scoping — the everywhere-correlation admission is set for a LATERAL body
@@ -441,14 +441,14 @@ struct LateralProjectionCorrelationTests {
   @Test func `an ordinary nested subquery inside a LATERAL body is not lateralised`()
       throws {
     // The LATERAL everywhere-correlation admission covers ONLY the lateral
-    // body's OWN projection, NEVER a nested ordinary subquery WITHIN it. So an
+    // body's own projection, never a nested ordinary subquery within it. So an
     // ordinary correlated scalar subquery in the lateral body's projection —
     // `SELECT (SELECT T.Id) AS x` — is barred `.unsupported` at the strict
-    // schema check EXACTLY as the non-lateral twin `SELECT (SELECT T.Id) FROM T`
-    // is, since the nested subquery builds its OWN Resolution with the lateral
+    // schema check exactly as the non-lateral twin `SELECT (SELECT T.Id) FROM T`
+    // is, since the nested subquery builds its own Resolution with the lateral
     // flag cleared (`everywhere: false`). Threading the lateral flag into the
     // nested subquery instead admitted its `T.Id` everywhere and lowered it to a
-    // correlated parameter the nested subquery never wires — a WRONG, mismatched
+    // correlated parameter the nested subquery never wires — a wrong, mismatched
     // fault (`no such column 'Id'`) rather than the correct barred `.unsupported`
     // — the bug the cleared flag fixes.
     let query = try parse(query:
@@ -463,21 +463,21 @@ struct LateralProjectionCorrelationTests {
 
 // MARK: - LATERAL aggregate body correlates a preceding-FROM column
 
-/// An AGGREGATE lateral body — one that groups, projects a grouped column, or
+/// An aggregate lateral body — one that groups, projects a grouped column, or
 /// filters through `HAVING` — must resolve a preceding-FROM reference through
-/// the SAME correlation surface a non-grouped lateral body does. The grouped
+/// the same correlation surface a non-grouped lateral body does. The grouped
 /// lowering (`Grouping.term`, `Grouping.init`, and `group`'s key computation)
 /// once consulted only the local scope, so a valid apply projecting or grouping
 /// on a preceding column faulted `SQLError.column` at schema/compile instead of
 /// producing one aggregate row per left row. Threading the lateral surface
 /// through the grouped key/projection/HAVING lowering lifts the fault for a
-/// LATERAL body ALONE — the ordinary grouped-subquery bar is untouched (the
+/// LATERAL body alone — the ordinary grouped-subquery bar is untouched (the
 /// negative oracle below pins it).
 struct LateralAggregateCorrelationTests {
   @Test func `a LATERAL aggregate body projects a preceding column`() throws {
     // The reviewer's exact case: `JOIN LATERAL (SELECT T.Id AS id, COUNT(*) AS n
     // FROM S WHERE S.k = T.Id) AS d ON 1 = 1` — a whole-result aggregate body
-    // that also PROJECTS the preceding `T.Id`. The strict schema path derives
+    // that also projects the preceding `T.Id`. The strict schema path derives
     // `id` (typed from `T.Id`) and `n` (`COUNT` → integer), and a run yields one
     // row per `T` with `n` the count of `S` rows keyed on that `Id`: Id 1 → 2,
     // Id 2 → 1, Id 3 → 0 (a `COUNT` over the empty match still emits its row).
@@ -497,12 +497,12 @@ struct LateralAggregateCorrelationTests {
 
   @Test func `a LATERAL aggregate body groups on a preceding column`() throws {
     // A GROUP BY on the preceding `T.Id` — a per-invocation constant, so it forms
-    // ONE group per left row over that invocation's SOURCE rows. The grouping key
+    // one group per left row over that invocation's source rows. The grouping key
     // lowers to a `Term.parameter` the apply binds per outer row (not a slot the
     // body's own scope holds), so the schema derives and the run yields one
     // grouped row per left row WITH source rows: Id 1 → {100, 101} → n 2, Id 2 →
-    // {200} → n 1. Id 3 has NO source rows (its `WHERE` matches nothing), so its
-    // GROUP BY forms NO group — an empty body the INNER apply drops (unlike the
+    // {200} → n 1. Id 3 has no source rows (its `WHERE` matches nothing), so its
+    // GROUP BY forms no group — an empty body the INNER apply drops (unlike the
     // whole-result COUNT above, which emits one empty group per left row).
     let query = try parse(query:
         "SELECT d.id, d.n FROM T " +
@@ -540,7 +540,7 @@ struct LateralAggregateCorrelationTests {
   @Test func `an ordinary grouped subquery projection still cannot correlate`()
       throws {
     // The grouped bar lift is LATERAL-ONLY: an ordinary correlated grouped
-    // SCALAR SUBQUERY that PROJECTS an outer column — `SELECT (SELECT T.Id FROM S
+    // scalar subquery that projects an outer column — `SELECT (SELECT T.Id FROM S
     // GROUP BY S.k) FROM T` — STILL faults `.unsupported`, since a subquery's
     // grouped projection is a barred clause position. This pins the exemption on
     // the LATERAL `everywhere` surface, never opened for every grouped subquery.
@@ -568,18 +568,18 @@ struct LateralAggregateCorrelationTests {
 // MARK: - Set-op SELECT * LATERAL arm arity
 
 /// A set operation whose `SELECT *` arm is a LATERAL join must derive that
-/// arm's star arity against the PRECEDING FROM, exactly as the per-arm
+/// arm's star arity against the preceding FROM, exactly as the per-arm
 /// compile does — the arity check threads the running prefix scope so the
 /// lateral body's preceding-column reference resolves.
 struct LateralSetOperationStarTests {
   @Test func `a set-op SELECT * LATERAL arm resolves its arity with the prefix`()
       throws {
     // A LATERAL arm's star arity must derive the body's projected preceding
-    // column against the PRECEDING FROM, exactly as the per-arm compile does.
+    // column against the preceding FROM, exactly as the per-arm compile does.
     // Each arm is `SELECT * FROM T JOIN LATERAL (SELECT T.Id AS id) AS d` — two
     // columns wide (`T.Id` + `d.id`). The arity check must thread the running
     // prefix scope so `T.Id` resolves; without it the lateral body derived
-    // against NO scope and faulted the arity check even though the per-arm
+    // against no scope and faulted the arity check even though the per-arm
     // compile passes the prefix and runs. Both arms are two columns, so the
     // union's arity matches and it resolves.
     let query = try parse(query:
@@ -597,10 +597,10 @@ struct LateralSetOperationStarTests {
 
 /// A LATERAL join (CROSS/OUTER APPLY) in the FROM of an aggregate/`GROUP BY`
 /// outer query. The grouped path shares the FROM front half with the non-
-/// aggregate path, so the apply body's OUTPUT columns land in scope for the
+/// aggregate path, so the apply body's output columns land in scope for the
 /// keys, aggregate arguments, `HAVING`, and `ORDER BY`; the aggregate node
-/// then groups the apply-bearing chain. INNER apply DROPS a body-empty outer
-/// row (so it never reaches the aggregate); OUTER apply NULL-EXTENDS it (so
+/// then groups the apply-bearing chain. INNER apply drops a body-empty outer
+/// row (so it never reaches the aggregate); OUTER apply NULL-extends it (so
 /// `COUNT(*)` counts the NULL row while `COUNT(col)`/`SUM` skip it).
 struct LateralUnderAggregateTests {
   @Test func `COUNT star over a CROSS APPLY counts the surviving rows`()
@@ -624,7 +624,7 @@ struct LateralUnderAggregateTests {
 
   @Test func `GROUP BY a lateral output column groups the apply rows`()
       throws {
-    // Group by the body's OUTPUT column `d.x` — each distinct child value is
+    // Group by the body's output column `d.x` — each distinct child value is
     // its own group of one row. ORDER BY the lateral key: (100, 1), (101, 1),
     // (200, 1). Id 3 contributes no row (INNER apply), so no group for it.
     try fixture().expect(
@@ -639,7 +639,7 @@ struct LateralUnderAggregateTests {
     // LEFT JOIN LATERAL NULL-extends the body-empty Id 3, so a fourth row (all
     // `d` columns NULL) reaches the aggregate. `COUNT(*)` counts it (4);
     // `COUNT(d.x)` and `SUM(d.x)` skip the NULL (3 and 401) — the values
-    // DIFFER, pinning NULL-into-aggregate over the NULL-extended apply row.
+    // differ, pinning NULL-into-aggregate over the NULL-extended apply row.
     try fixture().expect(
         "SELECT COUNT(*) AS n FROM T " +
         "LEFT JOIN LATERAL (SELECT x FROM S WHERE S.k = T.Id) AS d ON 1 = 1",
@@ -668,8 +668,8 @@ struct LateralUnderAggregateTests {
 
   @Test func `a lateral body that itself aggregates folds under the outer`()
       throws {
-    // The body is a WHOLE-RESULT aggregate (`COUNT(*)` with no GROUP BY), which
-    // emits ONE row per outer row even for an empty match: Id 1 → 2, Id 2 → 1,
+    // The body is a whole-result aggregate (`COUNT(*)` with no GROUP BY), which
+    // emits one row per outer row even for an empty match: Id 1 → 2, Id 2 → 1,
     // Id 3 → 0. The outer `SUM(d.n)` folds them: 2 + 1 + 0 = 3.
     try fixture().expect(
         "SELECT SUM(d.n) AS s FROM T " +
@@ -700,11 +700,11 @@ struct LateralUnderAggregateTests {
 
   @Test func `a preceding column read ONLY inside the body is materialised`()
       throws {
-    // CORRELATION-SLOT SENTINEL: the preceding `T.Id` appears in NO outer
+    // correlation-slot SENTINEL: the preceding `T.Id` appears in no outer
     // clause — not the projection, keys, aggregate args, HAVING, ORDER — it
     // lives ONLY inside the body's WHERE (`S.k = T.Id`). The apply still reads
     // `T.Id` from the left record to bind the correlation, so it must be
-    // MATERIALISED (given a packed slot) even though the grouped clauses never
+    // materialised (given a packed slot) even though the grouped clauses never
     // name it; the `laterals` correlation-slot union guarantees it. `COUNT(*)`
     // is 3.
     try fixture().expect(

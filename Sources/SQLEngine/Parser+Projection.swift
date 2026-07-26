@@ -100,7 +100,7 @@ extension Parser {
   /// expressions, possibly empty.
   private mutating func factor() throws(SQLError) -> Expression {
     if try match(.lparen) {
-      // ONE token of lookahead after `(` disambiguates a SCALAR SUBQUERY from a
+      // one token of lookahead after `(` disambiguates a scalar subquery from a
       // parenthesised expression: a `SELECT`, `TABLE`, or `VALUES` begins a
       // subquery — `(query)`, the first-class `Expression.subquery` (the query
       // may itself be a `UNION`) — and anything else begins a parenthesised
@@ -184,7 +184,7 @@ extension Parser {
     }
 
     // `POSITION` and `OVERLAY` are ISO string functions with a
-    // KEYWORD-separated argument syntax (`IN`; `PLACING`/`FROM`/`FOR`) rather
+    // keyword-separated argument syntax (`IN`; `PLACING`/`FROM`/`FOR`) rather
     // than the comma list an ordinary call takes, recognised case-insensitively
     // only when written bare (a delimited `"POSITION"`/`"OVERLAY"` is a
     // scalar-call name). Each desugars — the `(` already consumed — into the
@@ -307,8 +307,8 @@ extension Parser {
   /// Parses a `CASE` expression (the `CASE` is the next token) into the
   /// searched `Expression.case`, admitting both ISO forms.
   ///
-  /// A `WHEN` directly after `CASE` is the SEARCHED form — each `WHEN` a full
-  /// predicate. An expression after `CASE` is the SIMPLE form's operand — each
+  /// A `WHEN` directly after `CASE` is the searched form — each `WHEN` a full
+  /// predicate. An expression after `CASE` is the simple form's operand — each
   /// `WHEN value` is normalised to the equality `operand = value`, so both
   /// forms share one searched AST. At least one `WHEN` is required; an optional
   /// `ELSE` gives the no-branch result (absent, the result is `NULL`); the
@@ -362,7 +362,7 @@ extension Parser {
   /// v1 WHEN v2 IS NOT NULL THEN v2 … ELSE NULL END`, but that expansion
   /// re-references each `vi` in both its guard and its `THEN`, evaluating a
   /// stateful argument twice — so this builds the first-class node the engine
-  /// evaluates each argument ONCE for, inheriting the same type unification and
+  /// evaluates each argument once for, inheriting the same type unification and
   /// coercion the CASE would. At least two arguments are required — `COALESCE`
   /// of one value is the value itself and carries no meaning — else
   /// `SQLError.argument`.
@@ -384,7 +384,7 @@ extension Parser {
   /// ISO 9075 defines `NULLIF(v1, v2)` as `CASE WHEN v1 = v2 THEN NULL ELSE v1
   /// END`, but that expansion embeds `v1` in both the equality and the `ELSE`,
   /// evaluating a stateful `v1` twice — so this builds the first-class node the
-  /// engine evaluates `v1` ONCE for. It takes exactly two arguments (else
+  /// engine evaluates `v1` once for. It takes exactly two arguments (else
   /// `SQLError.argument`).
   private mutating func nullif() throws(SQLError) -> Expression {
     let left = try expression()
@@ -420,7 +420,7 @@ extension Parser {
   /// The ISO syntax separates the operands with the keywords `PLACING`, `FROM`,
   /// and an optional `FOR`, none of which begins at the expression tier, so
   /// each `expression()` stops at the next keyword. The `FOR length` is
-  /// OPTIONAL; when omitted, the call is left at THREE arguments and the
+  /// optional; when omitted, the call is left at three arguments and the
   /// routine defaults the length to the replacement's character count from the
   /// single evaluated replacement value — NOT desugared to
   /// `char_length(replacement)`, which would reference the replacement twice

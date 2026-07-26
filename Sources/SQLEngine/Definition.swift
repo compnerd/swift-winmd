@@ -7,12 +7,12 @@
 private let kDefinitionNamespace = "definition_schema"
 
 /// A base DEFINITION_SCHEMA relation the store serves — the raw metadata the
-/// engine builds by ENUMERATING a catalog. Each carries its column schema as
-/// (name, type) pairs — the ONE source the row build and the schema-only build
+/// engine builds by enumerating a catalog. Each carries its column schema as
+/// (name, type) pairs — the one source the row build and the schema-only build
 /// (`store(_:rows:)`) share, so name and type cannot drift.
 ///
 /// These are the actual store of metadata: the `INFORMATION_SCHEMA` relations
-/// are ordinary VIEWS over them, resolved by the engine's existing view
+/// are ordinary views over them, resolved by the engine's existing view
 /// machinery. The store holds each relation's portable shape, so a view is a
 /// plain column projection — the reshaping the grammar cannot yet express in
 /// SQL (NULL literals, a `CASE` mapping) lives in the builder here, and the
@@ -40,7 +40,7 @@ internal enum Definition {
   /// The relation's column types, in order.
   internal var types: Array<ValueType> { schema.map(\.type) }
 
-  /// The relation's column schema — its (name, type) pairs, the ONE source
+  /// The relation's column schema — its (name, type) pairs, the one source
   /// `names` and `types` (and the row and schema builders) read, so the two
   /// cannot drift.
   private var schema: Array<(name: String, type: ValueType)> {
@@ -62,9 +62,9 @@ extension View {
   /// their case-folded dotted name.
   ///
   /// Where `Routines.standard` seeds the built-in scalar functions, this seeds
-  /// the built-in VIEWS: the ISO `INFORMATION_SCHEMA` relations, each a stored
+  /// the built-in views: the ISO `INFORMATION_SCHEMA` relations, each a stored
   /// `SELECT` over the `DEFINITION_SCHEMA` store. `resolve(view:)` consults
-  /// these AFTER a catalog's own views and base tables, so a source that itself
+  /// these after a catalog's own views and base tables, so a source that itself
   /// defines `information_schema.tables` shadows the built-in — the same low
   /// precedence the store's overlay held. A built-in view's body names a
   /// `definition_schema.` relation, resolved through the same overlay a user
@@ -77,7 +77,7 @@ extension View {
   /// A view over the query `text`, parsing `text` to its `SELECT` and inferring
   /// the column names from its first arm's projection — the same rule
   /// `CREATE VIEW` applies without an explicit list, so the query alone names
-  /// the columns. It TRAPS if `text` is not a single `SELECT`, or names no
+  /// the columns. It traps if `text` is not a single `SELECT`, or names no
   /// inferable columns — for a caller with a known-good literal (the engine's
   /// built-in views, a test fixture); a consumer parsing untrusted SQL uses
   /// `Statement(parsing:)` and the memberwise initializer.
@@ -117,17 +117,17 @@ extension View {
 }
 
 /// The `DEFINITION_SCHEMA` metadata store — the ISO 9075-11 base relations,
-/// built on demand from any `Catalog` by ENUMERATING it.
+/// built on demand from any `Catalog` by enumerating it.
 ///
 /// A query may name a reserved `definition_schema.` relation
 /// (`definition_schema.tables`, `definition_schema.columns`) wherever it names
-/// a base table, and the engine answers it by ENUMERATING the catalog rather
+/// a base table, and the engine answers it by enumerating the catalog rather
 /// than reading a stored relation: `store(_:rows:)` walks the catalog's
 /// `relations()`/`views()` and each relation's schema and builds the named
 /// relation's rows as an escapable `RelationInstance`. It builds no cached
 /// state, so the engine resolves a `definition_schema.` name lazily, building
 /// only the one a query references. The portable `INFORMATION_SCHEMA`
-/// relations are ordinary VIEWS over these.
+/// relations are ordinary views over these.
 ///
 /// The store is dialect-neutral: it reads only the adapter surface every
 /// `Catalog` shares, so any source gets it for free. It is built in engine core
@@ -135,9 +135,9 @@ extension View {
 /// is internal to the engine.
 extension Catalog where Self: ~Escapable {
   /// The `RelationInstance` for the reserved `definition_schema.` `relation`,
-  /// built over this catalog. When `rows` is `true` the relation is ENUMERATED
+  /// built over this catalog. When `rows` is `true` the relation is enumerated
   /// into its rows — `store` walks the catalog's `relations()`/`views()` and
-  /// each relation's schema; when `false` it vends a SCHEMA-ONLY relation
+  /// each relation's schema; when `false` it vends a schema-ONLY relation
   /// (columns + types, no rows), exactly what a lazy system table's `schema()`
   /// would.
   ///
@@ -168,7 +168,7 @@ extension Catalog where Self: ~Escapable {
   /// consults for a reserved store relation, threaded onward as the working
   /// scope.
   ///
-  /// The store sits AFTER the common table expressions and BEFORE the base
+  /// The store sits after the common table expressions and before the base
   /// catalog: a `definition_schema.` name is added only when the overlay does
   /// not already bind it (a user relation may shadow the store), and the
   /// extended map is consulted first by every resolution phase (compile,
@@ -179,30 +179,30 @@ extension Catalog where Self: ~Escapable {
   /// as an ordinary unknown relation (`SQLError.relation`).
   ///
   /// `rows` selects the build: a run passes `true` for the enumerated rows; a
-  /// typing path passes `false` for the SCHEMA-ONLY sibling, so resolving a
+  /// typing path passes `false` for the schema-ONLY sibling, so resolving a
   /// view body's types never triggers the row build (a view over
   /// `definition_schema.columns` types without the builder re-entering itself).
   /// A store relation's row build types a view's scalar-call column through the
   /// context's `routines`.
   ///
-  /// The overlay also binds every DERIVED TABLE THIS query names in its own
+  /// The overlay also binds every derived TABLE this query names in its own
   /// FROM/JOIN — a `FROM (SELECT …) AS t` — under its alias as a
   /// `RelationInstance` so the FROM/JOIN resolves it exactly as it resolves a
   /// common table expression (the `ScopedRelations` path). It binds ONLY this
   /// query's own aliases, not a nested subquery's: `augment` runs at every
   /// query level (`run`, `compile`, `typecheck`, and `materialise` each
   /// augment the query they receive), so a subquery binds its own aliases in
-  /// its OWN scope. This SELECT-scopes derived tables — unlike a
+  /// its own scope. This SELECT-scopes derived tables — unlike a
   /// statement-scoped, uniquely-named CTE — so two sibling subqueries may reuse
-  /// an alias `t` without colliding, and this query's `t` SHADOWS an outer CTE
-  /// or derived table of the same name. A derived table is UNCORRELATED in this
+  /// an alias `t` without colliding, and this query's `t` shadows an outer CTE
+  /// or derived table of the same name. A derived table is uncorrelated in this
   /// cut: its inner query
-  /// materialises ONCE, against the overlay WITHOUT its own alias (base catalog
+  /// materialises once, against the overlay without its own alias (base catalog
   /// plus the store relations and CTEs in scope, NOT its sibling FROM items),
   /// so a reference to an outer or sibling column resolves as an unknown column
   /// — LATERAL is a later feature. `rows` selects the build the same as for the
   /// store: a run materialises the inner query's rows, a typing path resolves
-  /// its OUTPUT columns to a schema-only relation (no cursor) and validates the
+  /// its output columns to a schema-only relation (no cursor) and validates the
   /// inner body, so a derived table's alias types exactly as a run's would.
   borrowing func augment(_ context: Context, for query: Query, rows: Bool)
       throws(SQLError) -> Context {
@@ -218,33 +218,33 @@ extension Catalog where Self: ~Escapable {
     var derivations = Array<(String, Query, Array<String>)>()
     query.collect(derived: &derivations)
     if derivations.isEmpty { return context.scoping(augmented) }
-    // A derived table's alias sharing a RANGE NAME with another FROM/JOIN item
-    // in THIS SELECT's own scope collides: the alias-keyed overlay holds one
-    // binding under that name, so binding the derived rows would SHADOW the
+    // A derived table's alias sharing a range name with another FROM/JOIN item
+    // in this SELECT's own scope collides: the alias-keyed overlay holds one
+    // binding under that name, so binding the derived rows would shadow the
     // sibling — `FROM T JOIN (…) AS T` resolves the base `T` scan to the
     // derived rows, and `FROM (…) AS d JOIN (…) AS d` resolves both to the
-    // later's. A duplicate RELATION alias (`FROM T AS d JOIN S AS d`) instead
-    // leaves BOTH in scope, so a shared column is `SQLError.ambiguous` — reject
-    // the same way here rather than silently shadow, faulting the ALIAS
-    // ambiguous at BOTH the schema-only path and a run, BEFORE binding the
+    // later's. A duplicate relation alias (`FROM T AS d JOIN S AS d`) instead
+    // leaves both in scope, so a shared column is `SQLError.ambiguous` — reject
+    // the same way here rather than silently shadow, faulting the alias
+    // ambiguous at both the schema-only path and a run, before binding the
     // derived rows below (so the sibling is never shadowed). The collision is a
-    // range name TWO of THIS query's own FROM/JOIN items spell where one is a
+    // range name two of this query's own FROM/JOIN items spell where one is a
     // derived alias; a named-vs-named duplicate (no derived alias) stays the
-    // lazy per-reference ambiguity. This query's own ranges are its OWN scope:
+    // lazy per-reference ambiguity. This query's own ranges are its own scope:
     // `collect(ranges:)`, `collect(sources:)`, and `collect(derived:)` all
     // stop at a `SELECT`, so a nested subquery's, a sibling subquery's, or a
-    // set-operation arm's same-named alias (a DIFFERENT SELECT's ranges) is
-    // unaffected, and a derived alias equal to an ENCLOSING query's relation is
+    // set-operation arm's same-named alias (a different SELECT's ranges) is
+    // unaffected, and a derived alias equal to an enclosing query's relation is
     // not a same-scope collision (it shadows per normal scoping).
     //
-    // The collision is counted against BOTH the EXPOSED range name and each
-    // named relation's SOURCE name. A qualified reference names an item by its
-    // range name (`alias ?? name`), but `resolve` LOOKS THE NAMED RELATION UP
-    // BY ITS SOURCE NAME in the overlay — so a derived alias `T` shadowing an
+    // The collision is counted against both the exposed range name and each
+    // named relation's source name. A qualified reference names an item by its
+    // range name (`alias ?? name`), but `resolve` looks the named relation up
+    // BY its source name in the overlay — so a derived alias `T` shadowing an
     // aliased base `T AS x` (exposed range `x`, source `T`) would bind the
     // derived rows under `T`, and the base scan for `T AS x` — keyed on `T` —
-    // would resolve to the DERIVED rows rather than the base table/CTE.
-    // Counting the source names too faults that alias BEFORE binding the
+    // would resolve to the derived rows rather than the base table/CTE.
+    // Counting the source names too faults that alias before binding the
     // derived rows, so `FROM T AS x JOIN (…) AS T` is rejected exactly as
     // `FROM T JOIN (…) AS T` is.
     var ranges = Array<String>()
@@ -259,7 +259,7 @@ extension Catalog where Self: ~Escapable {
       // >1 range: the derived alias equals another FROM/JOIN item's exposed
       // range name (a sibling derived alias, or an unaliased named relation).
       // A source-name match: the derived alias equals a named relation's
-      // SOURCE name (an aliased base `T AS x` whose exposed range is `x`) —
+      // source name (an aliased base `T AS x` whose exposed range is `x`) —
       // `resolve` keys that relation on `T`, so the derived `T` would capture
       // its scan.
       if counts[name, default: 0] > 1 || sources.contains(name) {
@@ -267,32 +267,32 @@ extension Catalog where Self: ~Escapable {
       }
     }
     // The scope every derived body resolves against: the enclosing scope with
-    // ALL derived layers REVEALED away, leaving the base (every CTE and store
+    // ALL derived layers revealed away, leaving the base (every CTE and store
     // relation). Revealing rather than a name blanket lets a self-named
-    // `(SELECT … FROM T) AS T` read the BASE `T` while a `WITH t … FROM (SELECT
-    // … FROM t) AS t` still reads the CTE `t`: the alias being DEFINED is in
-    // its derived layer this augment is BUILDING (not yet pushed), so it is out
+    // `(SELECT … FROM T) AS T` read the base `T` while a `WITH t … FROM (SELECT
+    // … FROM t) AS t` still reads the CTE `t`: the alias being defined is in
+    // its derived layer this augment is building (not yet pushed), so it is out
     // of scope in its own body, but a same-named CTE in the base is not.
-    // Revealing keeps a derived table UNCORRELATED/no-LATERAL — a sibling
+    // Revealing keeps a derived table uncorrelated/no-LATERAL — a sibling
     // `FROM` item lives in the layer being built, invisible to the revealed
     // base scope, so `FROM (…) AS a JOIN (SELECT v FROM a) AS b` faults `a`.
-    // `uncorrelated()` likewise CLEARS the enclosing correlation stack: a
-    // non-LATERAL derived body must NOT see an ENCLOSING query's row either, so
+    // `uncorrelated()` likewise clears the enclosing correlation stack: a
+    // non-LATERAL derived body must NOT see an enclosing query's row either, so
     // `… IN (SELECT x FROM (SELECT 1 AS x FROM S WHERE S.k = T.k) AS d)` faults
-    // on `T.k` — and CONSISTENTLY at both the strict schema pass and the
+    // on `T.k` — and consistently at both the strict schema pass and the
     // run, rather than the strict pass binding it while the lenient run records
-    // no correlation and then faults at execution (a schema/run MISMATCH).
+    // no correlation and then faults at execution (a schema/run mismatch).
     let scope = context.body(augmented.revealed())
     // The idempotent re-augment keys on the derivation IDENTITY, not the name.
     // The run→compile→typecheck chain each augments the query it receives, so
-    // the innermost derived layer may ALREADY bind THIS select's aliases to
-    // THIS select's derivations — the same query, materialised against the
+    // the innermost derived layer may already bind this select's aliases to
+    // this select's derivations — the same query, materialised against the
     // same revealed base scope. Skip re-materialising then (leave the layer as
     // is), so `augment` stays idempotent without re-resolving — and, on a run,
-    // a stateful body is not re-executed. A binding whose derivation DIFFERS
-    // (an ENCLOSING query's same-named derived table) is not this select's, so
-    // a fresh layer is materialised and pushed, SHADOWING the outer one — a
-    // nested subquery's `FROM t` reads ITS `t`. A self-named alias resolves the
+    // a stateful body is not re-executed. A binding whose derivation differs
+    // (an enclosing query's same-named derived table) is not this select's, so
+    // a fresh layer is materialised and pushed, shadowing the outer one — a
+    // nested subquery's `FROM t` reads its `t`. A self-named alias resolves the
     // base: the layer being pushed is not yet in scope when a body resolves.
     if derivations.allSatisfy({ augmented.derivation(of: $0.0.lowercased())
                                 == $0.1 }) {
@@ -300,13 +300,13 @@ extension Catalog where Self: ~Escapable {
     }
     // A derived table's optional `AS d(a, b)` column list renames its output
     // columns; thread it into `materialise` so the bound `RelationInstance`
-    // carries the RENAMED names — the same overlay both `resolve` and
+    // carries the renamed names — the same overlay both `resolve` and
     // `schema(of:)` read a derived table's schema back from, so the run and the
-    // schema-only paths see the renamed columns from ONE seam.
+    // schema-only paths see the renamed columns from one seam.
     // Materialise each alias's body against the revealed base scope (a
     // same-named CTE visible, the derived aliases being defined not), then push
-    // them as one derived layer that SHADOWS an outer CTE or derived alias of
-    // the same name in the scope THIS SELECT resolves its OWN references
+    // them as one derived layer that shadows an outer CTE or derived alias of
+    // the same name in the scope this SELECT resolves its own references
     // against (projection/WHERE/JOIN-ON/GROUP/HAVING).
     var layer = Dictionary<String, RelationInstance>()
     for (alias, inner, columns) in derivations {
@@ -316,8 +316,8 @@ extension Catalog where Self: ~Escapable {
     return context.scoping(augmented.pushing(layer))
   }
 
-  /// A DERIVED TABLE's `query` materialised into a `RelationInstance` bound
-  /// under its alias: its OUTPUT columns name the relation's columns (the ISO
+  /// A derived TABLE's `query` materialised into a `RelationInstance` bound
+  /// under its alias: its output columns name the relation's columns (the ISO
   /// rule — a derived table's columns are its inner query's output names),
   /// typed from the same output-schema walk a scalar subquery's width and a
   /// CTE's schema use. `rows` selects the build — a run captures the inner
@@ -326,16 +326,16 @@ extension Catalog where Self: ~Escapable {
   ///
   /// The inner query resolves against `context` (the base catalog plus the
   /// store relations and CTEs in scope), NOT its sibling FROM items. The OUTER
-  /// treatment is the CALLER's: a NON-LATERAL derived body's caller
-  /// (`augment`) enters through `context.body(…)`, CLEARING the correlation
+  /// treatment is the caller's: a non-LATERAL derived body's caller
+  /// (`augment`) enters through `context.body(…)`, clearing the correlation
   /// stack — so a reference to an outer or sibling column faults as an unknown
-  /// column (the derived table is UNCORRELATED); a LATERAL body's caller
-  /// (`lateral`) instead THREADS the preceding-FROM scope as `context.outer`,
+  /// column (the derived table is uncorrelated); a LATERAL body's caller
+  /// (`lateral`) instead threads the preceding-FROM scope as `context.outer`,
   /// so a correlated reference to a preceding relation resolves outward. This
-  /// derive is otherwise IDENTICAL for both — the same revealed-base overlay,
+  /// derive is otherwise identical for both — the same revealed-base overlay,
   /// output-schema walk, duplicate-column check, and `validate`-gated body
   /// type-check — so a lateral body inherits the CTE visibility and the
-  /// operand/function validation a non-lateral body gets. Its OWN derived
+  /// operand/function validation a non-lateral body gets. Its own derived
   /// tables (a `FROM (SELECT … FROM (…) AS x) AS y`) are augmented into `scope`
   /// FIRST — the schema derivation resolves `x` exactly as a run would — so the
   /// schema and run paths bind the same nested aliases before either reads the
@@ -343,7 +343,7 @@ extension Catalog where Self: ~Escapable {
   borrowing func materialise(_ query: Query, _ context: Context,
                              rows: Bool, columns renaming: Array<String> = [])
       throws(SQLError) -> RelationInstance {
-    // Bind the inner query's OWN derived tables (and store relations) before
+    // Bind the inner query's own derived tables (and store relations) before
     // deriving its schema — a run augments them recursively, so the schema
     // path must too, or a nested derived table's alias resolves as unknown
     // here while the run resolves it (schema/run parity). `visited` threads the
@@ -351,44 +351,44 @@ extension Catalog where Self: ~Escapable {
     // re-enters `columns`/`compile` with that view already visited, so the
     // resolver faults `.recursion` rather than recursing to a stack overflow.
     //
-    // This augment is SCHEMA-ONLY (`rows: false`), even on a run (`rows`
-    // `true`): it exists only to derive the inner query's OUTPUT schema
+    // This augment is schema-ONLY (`rows: false`), even on a run (`rows`
+    // `true`): it exists only to derive the inner query's output schema
     // (`columns(of:)` below), which reads name/schema bindings — NOT rows. The
     // single row materialisation is `run(query, context)`'s job below, and it
     // re-augments the body itself. Materialising here as well (`rows: true`)
-    // would EXECUTE a nested derived body once for the schema and AGAIN in that
+    // would execute a nested derived body once for the schema and again in that
     // run, so a stateful routine in a `FROM (SELECT tick() …)` nested a level
     // down would fire twice for one query.
     let scope = try augment(context, for: query, rows: false)
-    // The derived table's columns are its inner query's OUTPUT columns (the
-    // ISO rule): the NAMES from the FIRST arm's projection, the TYPES UNIFIED
+    // The derived table's columns are its inner query's output columns (the
+    // ISO rule): the names from the FIRST arm's projection, the types unified
     // across every set-operation arm (a mixed integer/double column widening to
     // `double`, matching the coerced values a run produces), each carrying its
     // `unconstrained` mask — resolved against the augmented `scope` so a
     // derived table over a CTE, a store relation, or a nested derived table
     // resolves.
-    // `resolved(query:in:)` REVEALS the base for the body's NESTED subqueries:
+    // `resolved(query:in:)` reveals the base for the body's nested subqueries:
     // `scope`'s derived layer shadows a CTE this body's own FROM alias names,
     // and revealing drops that layer, so a nested
     // `EXISTS (… FROM t)` reads the enclosing CTE `t` beneath — the layered
     // overlay never overwrote it, keeping schema/run parity without a
-    // pre-augment context. The caller's `validate` threads through, so a RUN's
-    // output discovery (`validate: false`) stays LENIENT — a nested derived
+    // pre-augment context. The caller's `validate` threads through, so a run's
+    // output discovery (`validate: false`) stays lenient — a nested derived
     // body's scalar a filter drops (`(SELECT Label + 1 …) … WHERE k = 0`) is
     // NOT eager-type-checked before execution, exactly as the non-derived path
     // never evaluates an unreached operand — while the strict schema path
     // (`validate: true`) still faults it.
     let derived = try resolved(query: query, in: scope)
-    // An explicit `AS d(a, b)` column list positionally RENAMES the derived
-    // table's inner output names, keeping each column's inferred TYPE and its
+    // An explicit `AS d(a, b)` column list positionally renames the derived
+    // table's inner output names, keeping each column's inferred type and its
     // `unconstrained` mask (the list names, the body types unified across the
     // arms), so `(SELECT x, y FROM T) AS d(a, b)` addresses them as `a`, `b`.
     // Its arity must match the inner output width (`SQLError.columns`, the
-    // CTE/view arity fault) — checked HERE, where the width is resolved, so a
+    // CTE/view arity fault) — checked here, where the width is resolved, so a
     // list over a `SELECT *` derived body is checked once its `*` expands.
     // Absent a list, the inner output names stand. Carrying the mask through
     // the same indexing means an all-NULL derived column (`SELECT
-    // NULLIF('a', 'a') AS x`) stays UNCONSTRAINED and unifies with any later
+    // NULLIF('a', 'a') AS x`) stays unconstrained and unifies with any later
     // typed set-operation arm order-independently: a wrapper must not change
     // set-op typing.
     let outputs: Array<ResolvedColumn>
@@ -403,12 +403,12 @@ extension Catalog where Self: ~Escapable {
                        unconstrained: derived[$0].unconstrained)
       }
     }
-    // A derived table's columns are its inner query's OUTPUT names (or the
+    // A derived table's columns are its inner query's output names (or the
     // explicit list above), so two same-named ones (`SELECT Id AS x, V AS x`,
     // or a `d(a, a)` list) leave the shadowed one unreachable through the alias
     // — exactly the case the Parser rejects for a view's or a CTE's inferred
-    // column list. Fault it the SAME way here (`SQLError.duplicate`, the
-    // "duplicate view column" fault), so it faults at BOTH the schema-only path
+    // column list. Fault it the same way here (`SQLError.duplicate`, the
+    // "duplicate view column" fault), so it faults at both the schema-only path
     // and a run rather than silently exposing the first `x`. A plain top-level
     // `SELECT Id AS x, V AS x` stays legal — the duplicate matters only where
     // the relation is named and its columns are addressed by that name (a view,
@@ -420,11 +420,11 @@ extension Catalog where Self: ~Escapable {
     }
     let captured: Array<Array<Value>>
     if rows {
-      // Resolve the inner body's relations against `visited` BEFORE running it,
+      // Resolve the inner body's relations against `visited` before running it,
       // so a body naming a view under resolution through this derived table
       // (`FROM (SELECT * FROM <self>) AS d`) faults `.recursion` rather than
-      // recursing to a stack overflow. `run` re-compiles the body WITHOUT the
-      // cyclic-view guard, so on the EXECUTE path (`derive` seeds `visited`
+      // recursing to a stack overflow. `run` re-compiles the body without the
+      // cyclic-view guard, so on the execute path (`derive` seeds `visited`
       // with the view under resolution) this guarded resolve fires — the
       // strict output discovery above no longer carries it once `validate` is
       // `false`. `validate: false` keeps it structural: the recursion guard
@@ -435,7 +435,7 @@ extension Catalog where Self: ~Escapable {
       captured = try run(query, context)
     } else {
       // The schema-only path reads no cursor. When `validate`, it still
-      // VALIDATES the whole inner body exactly as a run does — `compile`
+      // validates the whole inner body exactly as a run does — `compile`
       // resolves every arm's WHERE, joins, and projection and cross-checks a
       // UNION's arity; `typecheck` faults an ill-typed or unknown reachable
       // operand/call — so an invalid inner body (a bad column in a WHERE, or a
@@ -443,10 +443,10 @@ extension Catalog where Self: ~Escapable {
       // schema/run parity. The first-arm projection alone (`outputs` above)
       // would miss a fault outside it, advertising a schema for a derived table
       // that cannot run. When `validate` is `false` — a derive after a
-      // successful run — the body is TRUSTED, not compiled/type-checked: the
+      // successful run — the body is trusted, not compiled/type-checked: the
       // outer run already proved it runnable, and re-checking a reachable
       // operand a data-dependent filter never reached would fault a query that
-      // SUCCEEDED (`SELECT Name + 1 … WHERE Id = -1`), unlike the non-derived
+      // succeeded (`SELECT Name + 1 … WHERE Id = -1`), unlike the non-derived
       // path whose empty run never evaluates it.
       //
       // Compile/type-check from the revealed base `context` (idempotently
@@ -467,9 +467,9 @@ extension Catalog where Self: ~Escapable {
 
   /// `context` rescoped to the `definition_schema.` overlay a view's body
   /// resolves against — the reserved store relations the view `name` names in
-  /// its OWN query, each built over this catalog, the caller's CTEs DROPPED (an
+  /// its own query, each built over this catalog, the caller's CTEs dropped (an
   /// empty overlay when `name` is not a view or names none). It seeds the view
-  /// sub-plan's OPTIMISE so a view defined over a store relation resolves; it
+  /// sub-plan's optimise so a view defined over a store relation resolves; it
   /// never carries a caller's statement CTEs, so a view means what it was
   /// registered to mean. The routines and bindings ride through unchanged.
   ///
@@ -477,30 +477,30 @@ extension Catalog where Self: ~Escapable {
   /// view — so a built-in `information_schema.` view over the store re-resolves
   /// its own `definition_schema.` scan exactly as a user view would.
   ///
-  /// The augment is SCHEMA-ONLY (`rows: false`): the optimiser needs only
+  /// The augment is schema-ONLY (`rows: false`): the optimiser needs only
   /// name/schema bindings — it treats a store or derived alias as an unseekable
   /// materialised relation — NOT rows. Materialising here (`rows: true`) would
-  /// EXECUTE the view's derived-table bodies during optimisation, so a stateful
+  /// execute the view's derived-table bodies during optimisation, so a stateful
   /// or non-deterministic routine in a `FROM (SELECT tick() …)` would run once
-  /// at optimise and AGAIN at `derive`, double-consuming it. The single
+  /// at optimise and again at `derive`, double-consuming it. The single
   /// execution happens at `derive`/run.
   borrowing func overlay(_ name: String, _ context: Context)
       throws(SQLError) -> Context {
-    // `uncorrelated()` CLEARS the caller's correlation stack: a view body is
+    // `uncorrelated()` clears the caller's correlation stack: a view body is
     // resolved independently of its call site, so it must NOT correlate against
     // an enclosing row when the view is optimised from inside a correlated
     // subquery.
     let fresh = context.body([:])
     guard let view = resolve(view: name) else { return fresh }
-    // `validate: false` — this overlay is the OPTIMISER's schema-only view-body
-    // scope on the RUN path (`resolve`/`compile` already validated the body
+    // `validate: false` — this overlay is the optimiser's schema-only view-body
+    // scope on the run path (`resolve`/`compile` already validated the body
     // under the caller's `validate`), so a data-dependent-empty derived body
     // the view nests must not be re-type-checked and fault a run.
     return try augment(fresh.validating(false), for: view.query, rows: false)
   }
 
   /// The view named `name`, or `nil`, by the precedence a query name follows.
-  /// A USER view the catalog registers wins; a BASE relation of that name then
+  /// A user view the catalog registers wins; a base relation of that name then
   /// shadows a built-in `information_schema.` view (so a source that vends its
   /// own `information_schema.tables` stays reachable, and `SELECT *` reads its
   /// rows); the engine-provided `View.standard` view answers only when nothing
@@ -515,7 +515,7 @@ extension Catalog where Self: ~Escapable {
   /// the store does not shadow, then each built-in `View.standard` view a user
   /// view or base relation does not shadow (the precedence `resolve(view:)`
   /// applies). The metadata builders enumerate these so a consumer discovers
-  /// EVERY queryable view — the engine-provided `information_schema.` views are
+  /// every queryable view — the engine-provided `information_schema.` views are
   /// resolvable through `resolve(view:)`, so they belong in the catalog
   /// metadata alongside a user's own. A name resolves to its `View` with
   /// `resolve(view:)`.
@@ -592,21 +592,21 @@ extension Catalog where Self: ~Escapable {
     }
     for name in listable() {
       guard let view = resolve(view: name) else { continue }
-      // List a view's columns only if its WHOLE body validates — exactly the
+      // List a view's columns only if its whole body validates — exactly the
       // resolution a run performs, so a view a `SELECT *` could not run is not
       // advertised as queryable metadata. Validate via the REAL `compile`
       // rather than a resolve-only reimplementation of it: a hand-rolled
       // validator drifts from compile (it missed a scalar call's arguments,
       // advertising `SELECT BITAND(Missing, 1)` though the run faults on
       // `Missing`), whereas `compile` resolves every arm's WHERE, joins, GROUP
-      // BY, HAVING, ORDER BY, projection — INCLUDING each scalar call's
-      // arguments — and a UNION's arity. The view body compiles over its OWN
-      // `definition_schema.` overlay, built SCHEMA-ONLY so a view over a store
+      // BY, HAVING, ORDER BY, projection — including each scalar call's
+      // arguments — and a UNION's arity. The view body compiles over its own
+      // `definition_schema.` overlay, built schema-ONLY so a view over a store
       // relation resolves without this row builder re-entering itself.
-      // The body must compile AND its width must equal the view's DECLARED
+      // The body must compile AND its width must equal the view's declared
       // column count: `resolve` rejects a view whose declared arity differs
       // from its body's (`v(x) AS SELECT * FROM People`), so such a view cannot
-      // run and is not advertised here. `uncorrelated()` CLEARS the correlation
+      // run and is not advertised here. `uncorrelated()` clears the correlation
       // stack: a view body is defined independently of any call site, so the
       // schema-only listing must resolve it exactly as the compile path does —
       // never binding an unbound view-definition column to an enclosing row.
@@ -615,18 +615,18 @@ extension Catalog where Self: ~Escapable {
           let plan = try? compile(view.query, overlay),
           plan.width == view.columns.count else { continue }
       // The type-check and derive resolve the body under the cyclic-view guard
-      // seeded with THIS view's name.
+      // seeded with this view's name.
       let inner = overlay.visiting(name)
-      // Type the columns from the body — NAMES off the first arm, TYPES unified
+      // Type the columns from the body — names off the first arm, types unified
       // across every arm (a mixed integer/double column reporting `double`);
-      // type-check every arm's REACHABLE operands and calls too — an unknown
+      // type-check every arm's reachable operands and calls too — an unknown
       // call or a bad operand in a `WHERE`/`HAVING` or a later `UNION` arm
       // faults a run, but a first-arm resolve would miss it (`compile` cannot
       // check a routine exists), while an arm a short-circuit proves
       // unreachable is skipped. A view a `SELECT *` could not evaluate is not
       // advertised.
       //
-      // EXPAND the body first (the schema path does): a `GROUP BY GROUPING
+      // expand the body first (the schema path does): a `GROUP BY GROUPING
       // SETS` body type-checks its `UNION ALL` of per-arm groupings, not the
       // unexpanded `.sets`. An unexpanded `SELECT 1 / 0 … WHERE 1 = 0 GROUP BY
       // GROUPING SETS ((Region), ())` reads as non-empty grouping and a
@@ -649,14 +649,14 @@ extension Catalog where Self: ~Escapable {
 }
 
 extension Query {
-  /// Collects every relation name THIS query names in a `FROM`/`JOIN`, across
+  /// Collects every relation name this query names in a `FROM`/`JOIN`, across
   /// the set-operation tree and each arm, into `names` — the reserved store
   /// names among them are what `Catalog.augment` builds.
   ///
   /// It does NOT descend a nested `EXISTS`/`IN (Q)`/scalar subquery: each
   /// subquery is compiled, type-checked, and run as a whole (`compile`/
   /// `typecheck`/`run` each `augment` the query they receive), so a subquery
-  /// binds its OWN store relations in its OWN scope. Descending here would
+  /// binds its own store relations in its own scope. Descending here would
   /// instead lift a subquery's names into this query's statement-global
   /// overlay, where a sibling subquery could not rebind a same-named entry.
   func collect(into names: inout Set<String>) {
@@ -671,14 +671,14 @@ extension Query {
     }
   }
 
-  /// Collects the DERIVED TABLES a single `SELECT` arm names in its own
+  /// Collects the derived tables a single `SELECT` arm names in its own
   /// `FROM`/`JOIN` — each alias paired with its inner `Query` — into
   /// `derivations`. `Catalog.augment` materialises each once and binds it under
   /// its alias in the scope of the arm that owns it, so the resolution scope
   /// reads a derived table exactly as it reads a common table expression (see
   /// `ScopedRelations`).
   ///
-  /// It stops at a `SELECT`: a `setop` collects NOTHING here, so its two arms'
+  /// It stops at a `SELECT`: a `setop` collects nothing here, so its two arms'
   /// derived aliases never merge into one map. Each arm is augmented on its own
   /// as `compile`/`typecheck`/`scope` descend it (each `augment`s the arm it
   /// receives), so a derived alias binds only in the arm that names it — a
@@ -688,7 +688,7 @@ extension Query {
   /// the left arm.
   ///
   /// It likewise does NOT descend a nested `EXISTS`/`IN (Q)`/scalar subquery,
-  /// or a derived table's OWN inner query: derived aliases are scoped to the
+  /// or a derived table's own inner query: derived aliases are scoped to the
   /// SELECT that owns their FROM/JOIN — not a statement-scoped, uniquely-named
   /// CTE — so each subquery and each inner query `augment`s its own derived
   /// tables in its own scope (see `Catalog.augment`/`materialise`). Descending
@@ -701,9 +701,9 @@ extension Query {
     }
   }
 
-  /// Collects the RANGE NAMES a single `SELECT` arm binds in its own `FROM`/
+  /// Collects the range names a single `SELECT` arm binds in its own `FROM`/
   /// `JOIN` — the alias a qualified reference names each item by (its explicit
-  /// alias, else a named relation's spelling), duplicates KEPT — into `ranges`.
+  /// alias, else a named relation's spelling), duplicates kept — into `ranges`.
   /// `Catalog.augment` counts these to fault a derived alias that shadows a
   /// same-scope sibling. It stops at a `SELECT` as `collect(derived:)` does: a
   /// `setop` collects nothing, so each arm's ranges stay in its own scope, and
@@ -714,9 +714,9 @@ extension Query {
     }
   }
 
-  /// Collects the SOURCE NAMES a single `SELECT` arm's `FROM`/`JOIN` NAMED
+  /// Collects the source names a single `SELECT` arm's `FROM`/`JOIN` named
   /// relations carry — the identifier `resolve` keys each named relation on in
-  /// the overlay (`relation.name` for a `.named` source, IGNORING its alias),
+  /// the overlay (`relation.name` for a `.named` source, ignoring its alias),
   /// not the range name a qualified reference uses — into `sources`.
   /// `Catalog.augment` checks these too so a derived alias `T` shadowing an
   /// aliased base `T AS x` (exposed range `x`, source `T`) collides — `resolve`
@@ -740,7 +740,7 @@ extension Select {
   /// Collects the range name of this select's `FROM` and each `JOIN` item — the
   /// alias a qualified reference names it by (`relation.alias`, else the named
   /// relation's spelling), matching `Scope.admits` — into `ranges`, duplicates
-  /// KEPT so a collision counts.
+  /// kept so a collision counts.
   func collect(ranges: inout Array<String>) {
     if let from { ranges.append(from.alias ?? from.name) }
     for join in joins {
@@ -748,10 +748,10 @@ extension Select {
     }
   }
 
-  /// Collects the SOURCE NAME of this select's `FROM` and each `JOIN` NAMED
+  /// Collects the source name of this select's `FROM` and each `JOIN` named
   /// relation — the `relation.name` (`.named`'s identifier, its alias ignored)
   /// that `resolve` keys the relation on — into `sources`, a derived table's
-  /// source contributing NONE (its rows key on its alias, already a range).
+  /// source contributing none (its rows key on its alias, already a range).
   func collect(sources: inout Array<String>) {
     if let from, case .named = from.source { sources.append(from.name) }
     for join in joins {
@@ -761,9 +761,9 @@ extension Select {
     }
   }
 
-  /// Collects this select's `FROM` and `JOIN` NON-LATERAL derived tables — each
+  /// Collects this select's `FROM` and `JOIN` non-LATERAL derived tables — each
   /// alias with its inner query — into `derivations`. A LATERAL derived table
-  /// is SKIPPED: it is not materialised once as a constant relation but
+  /// is skipped: it is not materialised once as a constant relation but
   /// resolved against the preceding FROM and re-evaluated per its rows (a
   /// correlated apply), so `compile(select)` binds and executes it directly
   /// rather than through the overlay `augment` builds.

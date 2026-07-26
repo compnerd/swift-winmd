@@ -37,7 +37,7 @@ private func nums() throws -> FixtureCatalog {
 }
 
 /// A three-dimensional `G` relation — `A`/`B`/`C` grouping columns and a `V` to
-/// `SUM` — for the COMPOSITE-unit case `ROLLUP((A, B), C)`, where `(A, B)` is
+/// `SUM` — for the composite-unit case `ROLLUP((A, B), C)`, where `(A, B)` is
 /// one indivisible level. Rows are chosen so each level's sums are distinct.
 private func grid() throws -> FixtureCatalog {
   try Catalog {
@@ -56,7 +56,7 @@ private func grid() throws -> FixtureCatalog {
 struct RollupCubeTests {
   @Test func `ROLLUP(a, b) yields the full, per-prefix, and grand-total levels`()
       throws {
-    // `ROLLUP(Region, Product)` desugars to the descending PREFIXES of its two
+    // `ROLLUP(Region, Product)` desugars to the descending prefixes of its two
     // units — `[[Region, Product], [Region], []]` — so three arms: the full
     // grouping, the per-Region grouping (Product a super-aggregate NULL), and
     // the grand total (both NULL). Arm order, then row order within each arm
@@ -72,9 +72,9 @@ struct RollupCubeTests {
           ["East", nil, 35], ["West", nil, 10],
           [nil, nil, 45],
         ])
-    // The desugar's ORACLE: the same query written as the equivalent explicit
+    // The desugar's oracle: the same query written as the equivalent explicit
     // GROUPING SETS (Stage 1) yields identical rows — pinning both the set
-    // CONTENT and the arm ORDER of `ROLLUP`.
+    // content and the arm ORDER of `ROLLUP`.
     try sales().expect("""
         SELECT Region, Product, SUM(Qty)
           FROM Sales
@@ -96,7 +96,7 @@ struct RollupCubeTests {
   }
 
   @Test func `CUBE(a, b) yields all four subset levels, full set first`() throws {
-    // `CUBE(Region, Product)` desugars to every SUBSET of its two units,
+    // `CUBE(Region, Product)` desugars to every subset of its two units,
     // enumerated FULL-SET-FIRST by descending mask:
     // `[[Region, Product], [Product], [Region], []]`. Four arms: the full
     // grouping, the per-Product grouping (Region NULL), the per-Region grouping
@@ -112,7 +112,7 @@ struct RollupCubeTests {
           ["East", nil, 35], ["West", nil, 10],
           [nil, nil, 45],
         ])
-    // The ORACLE pins the subset-enumeration ORDER: the hand-written GROUPING
+    // The oracle pins the subset-enumeration ORDER: the hand-written GROUPING
     // SETS lists the four subsets in exactly the descending-mask order `CUBE`
     // produces (full, {Product}, {Region}, {}).
     try sales().expect("""
@@ -127,10 +127,10 @@ struct RollupCubeTests {
   }
 
   @Test func `GROUP BY a, ROLLUP(b) cross-products the elements`() throws {
-    // The whole clause is the CROSS PRODUCT of its elements: the ordinary
+    // The whole clause is the CROSS product of its elements: the ordinary
     // `Region` (`[[Region]]`) crossed with `ROLLUP(Product)`
     // (`[[Product], []]`) gives `[[Region, Product], [Region]]` — the full
-    // grouping and the per-Region subtotal, with NO grand total (Region is
+    // grouping and the per-Region subtotal, with no grand total (Region is
     // present in every set). Per-(Region, Product) then per-Region.
     try sales().expect("""
         SELECT Region, Product, SUM(Qty)
@@ -178,7 +178,7 @@ struct RollupCubeTests {
   }
 
   @Test func `ROLLUP((a, b), c) treats the composite unit as one level`() throws {
-    // A parenthesised unit `(A, B)` groups its members as ONE indivisible
+    // A parenthesised unit `(A, B)` groups its members as one indivisible
     // level. `ROLLUP((A, B), C)` desugars to `[[A, B, C], [A, B], []]` — no
     // `[A]` level, unlike `ROLLUP(A, B, C)`. Per-(A, B, C): 4 rows; per-(A, B):
     // (1,1) 30, (1,2) 30, (2,1) 40; grand total 100.
@@ -203,7 +203,7 @@ struct RollupCubeTests {
   }
 
   @Test func `an ordinary GROUP BY a, b stays the plain keys path`() throws {
-    // A clause with NO construct is unchanged — it desugars to `.keys`, the
+    // A clause with no construct is unchanged — it desugars to `.keys`, the
     // plain grouped path, so `GROUP BY Region, Product` is one group set (the
     // four per-(Region, Product) rows), NOT a set list with super-aggregate
     // arms.
@@ -252,8 +252,8 @@ struct RollupCubeTests {
 
   @Test func `a column named rollup stays a grouping key, delimited or bare`()
       throws {
-    // `ROLLUP`/`CUBE` are CONTEXT identifiers: a DELIMITED `"rollup"` (a quoted
-    // identifier, never the construct) and a BARE `rollup` NOT followed by `(`
+    // `ROLLUP`/`CUBE` are context identifiers: a delimited `"rollup"` (a quoted
+    // identifier, never the construct) and a bare `rollup` NOT followed by `(`
     // both stay ordinary keys. The construct fires only on a bare `rollup(`.
     let cat = try Catalog {
       Relation("T", ["rollup": .text, "cube": .integer]) {
@@ -303,7 +303,7 @@ struct RollupCubeTests {
 
   @Test func `ROLLUP rides the carrier for an unprojected-aggregate ORDER BY`()
       throws {
-    // A ROLLUP query with a query-level ORDER BY over an UNPROJECTED aggregate
+    // A ROLLUP query with a query-level ORDER BY over an unprojected aggregate
     // (`MAX(Qty)`, not in the select list) rides the `ordered` carrier over the
     // union — `expand` materialises the aggregate as a hidden column in every
     // arm, orders on it, and trims it. `ROLLUP(Region)` is `((Region), ())`;
@@ -326,13 +326,13 @@ struct RollupCubeTests {
   @Test func `an empty ROLLUP() and CUBE() collapse to one grand-total set`()
       throws {
     // Zero units is admitted: the empty product is the single empty grand-total
-    // set (`.sets([[]])`), so `ROLLUP()` and `CUBE()` each yield exactly ONE
+    // set (`.sets([[]])`), so `ROLLUP()` and `CUBE()` each yield exactly one
     // grand-total row — the SUM over the whole relation, 45.
     try sales().expect("SELECT SUM(Qty) FROM Sales GROUP BY ROLLUP()",
                        yields: [[45]])
     try sales().expect("SELECT SUM(Qty) FROM Sales GROUP BY CUBE()",
                        yields: [[45]])
-    // The ORACLE: `GROUPING SETS (())` — a lone grand-total set — is identical.
+    // The oracle: `GROUPING SETS (())` — a lone grand-total set — is identical.
     try sales().expect("SELECT SUM(Qty) FROM Sales GROUP BY ROLLUP()",
                        equals: """
         SELECT SUM(Qty) FROM Sales GROUP BY GROUPING SETS (())
@@ -345,10 +345,10 @@ struct RollupCubeTests {
   }
 
   @Test func `a duplicate grouping set keeps its rows, not deduplicated`() throws {
-    // ISO combines the sets with UNION ALL, so an OVERLAPPING clause keeps
+    // ISO combines the sets with UNION ALL, so an overlapping clause keeps
     // duplicate rows. `GROUP BY ROLLUP(A), A` crosses `[[A], []]` with `[[A]]`
     // into `[[A, A], [A]]` — both sets group by `A` (a repeated key is
-    // harmless), so each per-A group appears TWICE.
+    // harmless), so each per-A group appears twice.
     try nums().expect("""
         SELECT A, SUM(V) FROM N GROUP BY ROLLUP(A), A
         """, yields: [[1, 150], [2, 30], [1, 150], [2, 30]])
@@ -362,10 +362,10 @@ struct RollupCubeTests {
   @Test func `a scalar-subquery unit keeps its own parenthesis`() throws {
     // A `ROLLUP`/`CUBE` unit, or a `GROUPING SETS` member, that IS a scalar
     // subquery `(SELECT …)` must route through `expression` — the leading `(`
-    // is the SUBQUERY's, not a composite-set delimiter, so it is not stolen
+    // is the subquery's, not a composite-set delimiter, so it is not stolen
     // (which produced `expected an identifier but found 'SELECT'`). A scalar
     // subquery is a valid ordinary grouping key, so it is valid as a unit too.
-    // `(SELECT 1)` is a constant, so grouping on it forms ONE group.
+    // `(SELECT 1)` is a constant, so grouping on it forms one group.
     try sales().expect("""
         SELECT SUM(Qty) FROM Sales GROUP BY ROLLUP((SELECT 1))
         """, equals: """
@@ -381,7 +381,7 @@ struct RollupCubeTests {
     try sales().expect("""
         SELECT SUM(Qty) FROM Sales GROUP BY GROUPING SETS ((SELECT 1))
         """, equals: "SELECT SUM(Qty) FROM Sales GROUP BY (SELECT 1)")
-    // A subquery beside an ordinary key in a COMPOSITE unit still parses — the
+    // A subquery beside an ordinary key in a composite unit still parses — the
     // composite `(` is the delimiter, the inner `(SELECT …)` its own key.
     try sales().expect("""
         SELECT Region, SUM(Qty) FROM Sales
@@ -390,7 +390,7 @@ struct RollupCubeTests {
         SELECT Region, SUM(Qty) FROM Sales
           GROUP BY GROUPING SETS (((SELECT 1), Region), ())
         """)
-    // GUARD: a plain composite unit `(a, b)` is unaffected — no subquery, the
+    // guard: a plain composite unit `(a, b)` is unaffected — no subquery, the
     // `(` stays a set delimiter.
     try sales().expect("""
         SELECT Region, Product, SUM(Qty) FROM Sales
@@ -402,7 +402,7 @@ struct RollupCubeTests {
   }
 
   @Test func `a top-level parenthesised ordinary set groups its keys`() throws {
-    // The generalised grammar admits a TOP-LEVEL parenthesised composite set
+    // The generalised grammar admits a top-level parenthesised composite set
     // `(a, b)` and the grand-total `()` — which the flat `expression` path
     // could not consume (a comma list / empty parens faulted). They group
     // exactly as the bare forms.
@@ -420,9 +420,9 @@ struct RollupCubeTests {
         """, equals: """
         SELECT Region, Product, SUM(Qty) FROM Sales GROUP BY Region, Product
         """)
-    // GUARD (no regression): a top-level `(` that begins a LARGER scalar key
+    // guard (no regression): a top-level `(` that begins a larger scalar key
     // — a parenthesised expression `(A + 1)`, or a paren that merely starts an
-    // expression `(A) + 1` — is read as ONE key, NOT truncated at the `)`. The
+    // expression `(A) + 1` — is read as one key, NOT truncated at the `)`. The
     // row backtracking rewinds a single `(…)` with no top-level comma.
     try nums().expect("SELECT A + 1, SUM(V) FROM N GROUP BY (A + 1)",
                       equals: "SELECT A + 1, SUM(V) FROM N GROUP BY A + 1")
@@ -435,8 +435,8 @@ struct RollupCubeTests {
 
   @Test func `GROUP BY () is the grand total, not absent grouping`() throws {
     // `GROUP BY ()` is a single grand-total group — NOT the `.keys([])` shape
-    // an ABSENT `GROUP BY` carries, which is no grouping (one row per input
-    // row). It yields ONE row whatever the input cardinality, matching the
+    // an absent `GROUP BY` carries, which is no grouping (one row per input
+    // row). It yields one row whatever the input cardinality, matching the
     // GROUPING SETS `(())` form.
     try sales().expect("SELECT 1 FROM Sales GROUP BY ()", yields: [[1]])
     try sales().expect("""
@@ -444,7 +444,7 @@ struct RollupCubeTests {
         """, equals: """
         SELECT SUM(Qty) FROM Sales GROUP BY GROUPING SETS (())
         """)
-    // Over an EMPTY input the grand-total group still yields its one row.
+    // Over an empty input the grand-total group still yields its one row.
     let empty = try Catalog { Relation("E", ["x": .integer]) { } }
     try empty.expect("SELECT 1 FROM E GROUP BY ()", yields: [[1]])
     try empty.expect("SELECT COUNT(*) FROM E GROUP BY ()", yields: [[0]])
@@ -453,8 +453,8 @@ struct RollupCubeTests {
   @Test func `an over-large CUBE or cross product faults, not overflows`()
       throws {
     // A CUBE of 63/64 units once overflowed `1 << n` to a negative/zero mask,
-    // yielding NO sets and the misleading "requires at least one set". It now
-    // faults a program-limit error BEFORE the shift, and the whole clause's
+    // yielding no sets and the misleading "requires at least one set". It now
+    // faults a program-limit error before the shift, and the whole clause's
     // cross product is capped the same way.
     let cube = SQLError.state("54001",
                               "GROUP BY CUBE supports at most 12 grouping " +
@@ -483,7 +483,7 @@ struct RollupCubeTests {
         """, fails: SQLError.state("54001", "GROUP BY produces too many " +
                                    "grouping sets (max 4096)"))
     // A ROLLUP of n units expands to n + 1 prefixes summing to O(n²)
-    // expression references; its arity is validated BEFORE the prefixes are
+    // expression references; its arity is validated before the prefixes are
     // built, so an oversized (here 4096-unit) ROLLUP faults immediately rather
     // than materialising the quadratic structure first.
     try sales().expect(
@@ -505,7 +505,7 @@ struct RollupCubeTests {
                       equals: "SELECT SUM(V) FROM N GROUP BY CUBE(A + 1)")
     try nums().expect("SELECT SUM(V) FROM N GROUP BY GROUPING SETS ((A) + 1)",
                       equals: "SELECT SUM(V) FROM N GROUP BY (A) + 1")
-    // GUARD: a genuine composite unit `(A, V)` is still a set, not truncated.
+    // guard: a genuine composite unit `(A, V)` is still a set, not truncated.
     try nums().expect("""
         SELECT SUM(V) FROM N GROUP BY ROLLUP((A, V))
         """, equals: """
@@ -515,7 +515,7 @@ struct RollupCubeTests {
 
   @Test func `a long ordinary clause and repeated keys parse and group`()
       throws {
-    // Ordinary keys accumulate by append (linear), not O(n²) cross. The RESULT
+    // Ordinary keys accumulate by append (linear), not O(n²) cross. The result
     // is unaffected — a repeated key groups as one, key order within the set
     // does not matter, and a repeated literal collapses to one group.
     try nums().expect("SELECT A, SUM(V) FROM N GROUP BY A, A, A",
@@ -525,10 +525,10 @@ struct RollupCubeTests {
   }
 
   @Test func `a wide composite unit is bounded before expansion`() throws {
-    // units.count is capped, but a COMPOSITE unit holds arbitrarily many
+    // units.count is capped, but a composite unit holds arbitrarily many
     // expressions, and CUBE copies each unit across 2ⁿ⁻¹ subsets — so a compact
     // 12-unit CUBE whose first unit is a wide composite would materialise
-    // hundreds of millions of references. The PROJECTED expansion (references,
+    // hundreds of millions of references. The projected expansion (references,
     // not just unit count) is bounded before the subsets are built.
     func cols(_ range: Range<Int>) -> String {
       range.map { "c\($0)" }.joined(separator: ", ")

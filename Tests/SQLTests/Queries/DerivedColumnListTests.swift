@@ -83,7 +83,7 @@ struct DerivedColumnListExecutionTests {
   }
 
   @Test func `a derived table renames columns the inner never named`() throws {
-    // The list names the OUTPUT columns positionally regardless of the inner
+    // The list names the output columns positionally regardless of the inner
     // spelling — here the inner projects bare `x`, `y`, renamed to `a`, `b`.
     try fixture().expect(
         "SELECT b FROM (SELECT x, y FROM S) AS d(a, b) ORDER BY a",
@@ -192,9 +192,9 @@ struct ColumnListFaultTests {
 struct LateralColumnListTests {
   @Test func `a column list renames a lateral body's duplicate inner names`()
       throws {
-    // The reviewer's case: the body projects `T.Id AS x` TWICE — a duplicate
-    // INNER name the `d(a, b)` list renames positionally to the unique EXPOSED
-    // `a`, `b`. The compile-path validation in `lateral` must check the RENAMED
+    // The reviewer's case: the body projects `T.Id AS x` twice — a duplicate
+    // INNER name the `d(a, b)` list renames positionally to the unique exposed
+    // `a`, `b`. The compile-path validation in `lateral` must check the renamed
     // names, so this runs (both columns = `T.Id`) rather than faulting the
     // inner duplicate — parity with the schema pass.
     try fixture().expect(
@@ -226,9 +226,9 @@ struct LateralColumnListTests {
 
   @Test func `a lateral column list with a duplicate exposed name faults`()
       throws {
-    // A duplicate in the EXPOSED list leaves a renamed column unreachable, so
+    // A duplicate in the exposed list leaves a renamed column unreachable, so
     // it still faults `SQLError.duplicate` — the check runs against the renamed
-    // names, and here THEY collide.
+    // names, and here they collide.
     try fixture().expect(
         "SELECT d.a FROM T " +
         "JOIN LATERAL (SELECT T.Id, T.V) AS d(a, a) ON 1 = 1",

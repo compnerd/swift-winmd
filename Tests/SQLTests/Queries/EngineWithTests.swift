@@ -27,13 +27,13 @@ struct EngineWithTests {
   }
 
   @Test func `a UNION over a text CTE column folds the body type`() throws {
-    // The CTE `a` binds its body's DERIVED type (`x` is text), so the set-op
+    // The CTE `a` binds its body's derived type (`x` is text), so the set-op
     // fold unifies text against text and runs — a `.integer` declared-name
     // placeholder would wrongly fault the all-text UNION as irreconcilable.
     let text = """
         WITH a (x) AS (SELECT 'b') SELECT x FROM a UNION SELECT 'c'
         """
-    // The SCHEMA path folds the CTE column at its BODY-derived type too: it
+    // The schema path folds the CTE column at its body-derived type too: it
     // must report `x` as `.text` and NOT fault, the compile-time mirror of the
     // run.
     let columns = try family().columns(of: Statement(parsing: text))
@@ -70,7 +70,7 @@ struct EngineWithTests {
   }
 
   @Test func `a JOIN keeps distinct large integer keys unequal (exact integers)`() throws {
-    // Two integers that round to the SAME Double past 2^53 are still unequal as
+    // Two integers that round to the same Double past 2^53 are still unequal as
     // integers, so an integer/integer join must NOT pair them — the hash bucket
     // may collide, but the residual `matches` check keeps integer equality
     // exact.
@@ -84,7 +84,7 @@ struct EngineWithTests {
 
   @Test func `UNION widens a mixed integer/double column and dedups the equal rows`() throws {
     // ISO unifies the result column type across the arms — an `integer` arm and
-    // a `double` arm widen to `double`, and each arm's values are COERCED to
+    // a `double` arm widen to `double`, and each arm's values are coerced to
     // it. `1` and `1.0` then compare equal AND emit as the same coerced
     // `double`, so a bare UNION keeps one `1.0` (not the first arm's raw
     // `integer`).
@@ -96,10 +96,10 @@ struct EngineWithTests {
   }
 
   @Test func `UNION coercion collapses integers a rounded double cannot separate`() throws {
-    // The unified column is `double`, so EVERY arm's value coerces to `double`
+    // The unified column is `double`, so every arm's value coerces to `double`
     // before the dedup: `2^53 + 1` (the integer `9007199254740993`) rounds to
-    // `2^53.0` on promotion, becoming EQUAL to the double `2^53.0` — so the
-    // three arms collapse to the ONE distinct `double`, the ISO
+    // `2^53.0` on promotion, becoming equal to the double `2^53.0` — so the
+    // three arms collapse to the one distinct `double`, the ISO
     // approximate-numeric result of a mixed-type UNION.
     let rows = try statement("""
         SELECT 9007199254740992.0
@@ -228,7 +228,7 @@ struct EngineWithTests {
     // pass it through vacuously and register `a` with a three-column schema
     // over a two-column body; the trailing `SELECT z` then reads an ordinal the
     // body never projects. The body's compiled width is checked against the
-    // declared arity BEFORE materialising, regardless of the row count, so the
+    // declared arity before materialising, regardless of the row count, so the
     // mismatch faults with `SQLError.columns` rather than silently returning
     // data.
     #expect(throws: SQLError.columns(expected: 2, got: 3)) {
@@ -285,7 +285,7 @@ struct EngineWithTests {
   }
 
   @Test func `a top-level FROM a CTE still resolves to the CTE, not the base relation`() throws {
-    // The complement of `viewScoping`: at the STATEMENT level a CTE that names a
+    // The complement of `viewScoping`: at the statement level a CTE that names a
     // base relation still shadows it, so a trailing `FROM Parent` reads the CTE
     // — the scoping fix narrows only a view's body, never the statement query.
     let adults =
@@ -313,7 +313,7 @@ struct EngineWithTests {
   }
 
   @Test func `a WITH RECURSIVE whose anchor reads a same-named base is not recursive`() throws {
-    // The CTE `Parent` shares a base relation's name; only the ANCHOR reads that
+    // The CTE `Parent` shares a base relation's name; only the anchor reads that
     // base (the CTE is not in scope there), while the recursive arm reads
     // `Extra` and never names the CTE. Self-reference is detected in the arm
     // alone, so this is NOT routed through the fixpoint: the two arms materialise
@@ -335,7 +335,7 @@ struct EngineWithTests {
 
   @Test func `a recursive CTE seeds its anchor from a same-named base column`()
       throws {
-    // The anchor `SELECT Age FROM Parent` reads the BASE `Parent` — the CTE
+    // The anchor `SELECT Age FROM Parent` reads the base `Parent` — the CTE
     // self, whose sole column is `n`, is not in scope for the base case — while
     // only the recursive arm names the self. The set-op type fold must resolve
     // the anchor under the base scope; folding the whole query under the self
@@ -428,8 +428,8 @@ struct EngineRecursiveTests {
     // A trailing `ORDER BY` on a recursive body lifts to a `Query.ordered`
     // carrier over the `UNION` setop. `columns(of:)` must peel the carrier at
     // its recursive-shape recogniser (like the run's `fixpoint`) and derive the
-    // one column `n` WITHOUT faulting `.relation("t")`, while the run iterates
-    // the fixpoint to `1,2,3` — asserted TOGETHER on the SAME query so a
+    // one column `n` without faulting `.relation("t")`, while the run iterates
+    // the fixpoint to `1,2,3` — asserted together on the same query so a
     // run-vs-schema divergence cannot hide.
     let statement = try Statement(parsing: """
         WITH RECURSIVE t (n) AS (
@@ -447,12 +447,12 @@ struct EngineRecursiveTests {
   @Test func `a recursive CTE carrier ORDER BY runs a correlated sort-key subquery`()
       throws {
     // The carrier `ORDER BY` peeled off a recursive-CTE fixpoint is applied to
-    // the materialised rows through `carried(over:)`, which RECORDS a sort key
-    // CORRELATED to the set-op output (`EXISTS (… WHERE V = x)`) into the
-    // context's `Subqueries` box, and then EXECUTED — but `apply` used to
-    // execute against a FRESH empty box, so the executor found no recorded plan
+    // the materialised rows through `carried(over:)`, which records a sort key
+    // correlated to the set-op output (`EXISTS (… WHERE V = x)`) into the
+    // context's `Subqueries` box, and then executed — but `apply` used to
+    // execute against a fresh empty box, so the executor found no recorded plan
     // and faulted `a correlated subquery plan was not compiled` (wrapped as a
-    // view-column fault here). `apply` now threads ONE fresh box through BOTH
+    // view-column fault here). `apply` now threads one fresh box through both
     // `carried` and `execute`, so the recorded plan is read back and re-run.
     //
     // The fixpoint anchors at 1, then n+1 while n < 3, materialising 1,2,3. The
@@ -479,7 +479,7 @@ struct EngineRecursiveTests {
 
   @Test func `a recursive CTE carrier ORDER BY on a plain sort key still runs`()
       throws {
-    // GUARD: the memo fix must not regress a NON-correlated carrier sort key.
+    // guard: the memo fix must not regress a non-correlated carrier sort key.
     // The same fixpoint (1,2,3), ordered by the plain output column `x`
     // descending (the set-op output takes arm-0's projection name), still runs
     // and reorders — the shared fresh box carries no recorded plan here, and
@@ -502,7 +502,7 @@ struct EngineRecursiveTests {
 
   @Test func `a recursive CTE carrier ORDER BY on a missing column still faults`()
       throws {
-    // GUARD: restoring the subquery memo must NOT mask a real resolution error.
+    // guard: restoring the subquery memo must NOT mask a real resolution error.
     // A carrier `ORDER BY` naming a column that is neither the set-op output
     // nor any relation in scope still faults `SQLError.column` at run.
     let catalog = try Catalog {
@@ -538,7 +538,7 @@ struct EngineRecursiveTests {
   }
 
   @Test func `a recursive CTE with more than one recursive arm is rejected`() throws {
-    // The body has TWO self-referential arms; the engine models one anchor plus
+    // The body has two self-referential arms; the engine models one anchor plus
     // one recursive arm, so the earlier recursive arm would land in the anchor
     // (compiled with the CTE not in scope). Reject it with a clear `unsupported`
     // diagnostic rather than failing obscurely as an unresolved relation.
@@ -557,7 +557,7 @@ struct EngineRecursiveTests {
   }
 
   @Test func `a recursive reference before the final UNION arm is rejected`() throws {
-    // The self-reference (`FROM Parent`) is a MIDDLE arm and the final arm is
+    // The self-reference (`FROM Parent`) is a middle arm and the final arm is
     // non-recursive, so the recursive-arm check (which inspects the final arm)
     // sees no recursion and the CTE would take the run-once path — compiling the
     // middle `FROM Parent` against a same-named base (silently wrong) or, with
@@ -579,7 +579,7 @@ struct EngineRecursiveTests {
 
   @Test func `a recursive CTE whose anchor reads a same-named base still evaluates`() throws {
     // `Parent` intentionally shadows a base relation of the same name: the anchor
-    // `SELECT Id FROM Parent` reads the BASE (the CTE is not in scope for the
+    // `SELECT Id FROM Parent` reads the base (the CTE is not in scope for the
     // base case), seeding the recursion, while the right arm's `FROM Parent` is
     // the true self-reference. The multiple-recursive-arm guard must NOT reject
     // this — the anchor's reference resolves to an existing base relation, so it
@@ -688,7 +688,7 @@ struct EngineRecursiveTests {
     // names; the anchor's `SELECT *` compiles to a two-wide plan the fixpoint
     // would bind under the three-column schema, so the recursive arm's read of
     // the absent third ordinal would trap in `RelationInstance.record`. The
-    // anchor's compiled width is checked against the declared arity BEFORE it
+    // anchor's compiled width is checked against the declared arity before it
     // seeds the working set, so the fault surfaces as `SQLError.columns` rather
     // than a trap.
     let query = try Statement(parsing: """
@@ -710,7 +710,7 @@ struct EngineRecursiveTests {
     // would seed nothing to validate and bind the CTE under a three-column
     // schema; the recursive arm's read of the absent third ordinal would then
     // trap. The anchor's compiled width is checked against the declared arity
-    // BEFORE it seeds the working set, regardless of how many rows it produces,
+    // before it seeds the working set, regardless of how many rows it produces,
     // so the fault surfaces as `SQLError.columns`.
     let query = try Statement(parsing: """
         WITH RECURSIVE t (a, b, c) AS (
@@ -743,12 +743,12 @@ struct EngineRecursiveTests {
   }
 
   @Test func `a recursive arm that is itself a set-op folds the self at the anchor type`() throws {
-    // The recursive arm `SELECT s FROM t INTERSECT SELECT 'b'` is ITSELF a set
+    // The recursive arm `SELECT s FROM t INTERSECT SELECT 'b'` is itself a set
     // operation, so `validate`'s recursive-arm typecheck folds its self column
-    // (`s`) before `fixpoint` rebinds it. Binding the self under the ANCHOR's
+    // (`s`) before `fixpoint` rebinds it. Binding the self under the anchor's
     // derived type (`s` is text, from `SELECT 'b'`) — not a `.integer`
     // placeholder — lets text INTERSECT text unify rather than faulting a text
-    // arm against an integer self. The SCHEMA path must report `s` as `.text`
+    // arm against an integer self. The schema path must report `s` as `.text`
     // without throwing, and the run terminates yielding `b`.
     let text = """
         WITH RECURSIVE t (s) AS (
@@ -767,10 +767,10 @@ struct EngineRecursiveTests {
   @Test func `a recursive CTE widening past its anchor types the self as unified`() throws {
     // The anchor `SELECT 1` is INTEGER but the recursive arm `n + 0.5` yields
     // a DOUBLE, so the CTE column `n` unifies to `.double` — the type every row
-    // is coerced to. `fixpoint` binds the iterated self under those UNIFIED
+    // is coerced to. `fixpoint` binds the iterated self under those unified
     // types (not the anchor-only integer), so the recursive arm reads `n` at
     // the type its coerced values carry; the run yields the widened sequence
-    // and the SCHEMA path reports `n` as `.double`, the run's own result type.
+    // and the schema path reports `n` as `.double`, the run's own result type.
     let text = """
         WITH RECURSIVE t (n) AS (
           SELECT 1 AS n FROM Seed
@@ -793,8 +793,8 @@ struct EngineRecursiveTests {
     // The reviewer's parity case. Column `a` has an INTEGER anchor (`1`) but a
     // recursive arm `a + 0.5` that widens it to `.double`; the same arm calls
     // the INTEGER-declared `inc(a)` on that self column. Typing the self at the
-    // UNIFIED `.double` (the type the run coerces its rows to) makes SCHEMA
-    // validation and EXECUTION agree: both FAULT, because `inc` requires an
+    // unified `.double` (the type the run coerces its rows to) makes schema
+    // validation and execution agree: both fault, because `inc` requires an
     // integer argument and the widened self is a double. Were the self typed at
     // the anchor-only integer, schema validation would call the query "valid"
     // while the run faults — the schema-vs-execution break this fix closes. The
@@ -818,7 +818,7 @@ struct EngineRecursiveTests {
   }
 
   @Test func `an all-NULL CTE column unifies with a later text arm`() throws {
-    // The CTE `t`'s column `x` is a constant NULL in BOTH arms, so it places NO
+    // The CTE `t`'s column `x` is a constant NULL in both arms, so it places no
     // type constraint: an enclosing UNION over `SELECT x FROM t` must unify it
     // with the `'c'` arm and run, yielding the NULL and the text. The CTE fold
     // carries the per-column unconstrained marker, so a bare reference to `x`
@@ -831,7 +831,7 @@ struct EngineRecursiveTests {
   }
 
   @Test func `an all-NULL CTE column unifies regardless of arm order`() throws {
-    // The order-independence case. The arms are REVERSED from the sibling test
+    // The order-independence case. The arms are reversed from the sibling test
     // — the integer-typed NULLIF leads — so the CTE fold defaults `x`'s
     // concrete type to `.integer` rather than `.text`. Without the
     // unconstrained marker the enclosing UNION would fault `.integer` against
@@ -877,7 +877,7 @@ struct EngineRecursiveTests {
   }
 
   @Test func `an all-NULL CTE column with no outer union yields NULL`() throws {
-    // The marker changes only UNIFICATION, never the reported concrete type: a
+    // The marker changes only unification, never the reported concrete type: a
     // top-level select over the all-NULL CTE column runs and yields the NULL,
     // exactly as before.
     let rows = try statement("""
@@ -908,12 +908,12 @@ struct EngineRecursiveTests {
 
   @Test func `a recursive CTE with mismatched arm widths faults cleanly`() throws {
     // The anchor projects two columns (matching the declared list) and the
-    // recursive arm one, so the recursive-arm width check FAULTS the column-
+    // recursive arm one, so the recursive-arm width check faults the column-
     // count mismatch — the arm's one-column degree against the two-name list —
-    // rather than trap indexing the shorter arm during the fold. The RUN path
-    // and the SCHEMA (`columns(of:)`) path must report the IDENTICAL ISO-
+    // rather than trap indexing the shorter arm during the fold. The run path
+    // and the schema (`columns(of:)`) path must report the identical ISO-
     // ordered fault (`expected: arm degree, got: declared count`): the arm-
-    // width guard fires BEFORE the `kinds` derive whose inter-arm fold would
+    // width guard fires before the `kinds` derive whose inter-arm fold would
     // otherwise raise the reverse `(expected: anchor, got: arm)` order first
     // on the schema path. Assert the shared value so a future reorder cannot
     // silently re-diverge the two paths.
@@ -931,10 +931,10 @@ struct EngineRecursiveTests {
 
   @Test func `a recursive CTE anchor mismatch faults alike on both paths`()
       throws {
-    // The declared list names two columns; the ANCHOR projects one (the
+    // The declared list names two columns; the anchor projects one (the
     // recursive arm two). The anchor-width guard runs before the arm's, so both
-    // the RUN and the SCHEMA path report the anchor's one-column degree against
-    // the two-name list in the SAME ISO order — the sibling of the arm-mismatch
+    // the run and the schema path report the anchor's one-column degree against
+    // the two-name list in the same ISO order — the sibling of the arm-mismatch
     // parity, proving the declared-list guard wins whichever arm diverges.
     let text = """
         WITH RECURSIVE t (a, b) AS (SELECT 1 UNION SELECT Id, Id FROM t)
@@ -950,10 +950,10 @@ struct EngineRecursiveTests {
 
   @Test func `a no-list recursive CTE faults its arm alike on both paths`()
       throws {
-    // With NO explicit `(a, b)` list the CTE's column names come from the
-    // ANCHOR's aliases (degree 2), so `cte.columns` is populated exactly as a
+    // With no explicit `(a, b)` list the CTE's column names come from the
+    // anchor's aliases (degree 2), so `cte.columns` is populated exactly as a
     // declared list would be. The recursive arm's single column therefore hits
-    // the SAME arm-width guard, faulting `(expected: 1, got: 2)` on BOTH paths
+    // the same arm-width guard, faulting `(expected: 1, got: 2)` on both paths
     // — never reaching the `kinds`/`contributions` inter-arm throw, which is
     // consequently unreachable for a recursive CTE (its width is always checked
     // against the anchor-derived list first).
@@ -984,12 +984,12 @@ struct EngineRecursiveTests {
   @Test func `a recursive CTE with an all-NULL anchor unifies its recursive arm`()
       throws {
     // The reviewer's anchor-NULL case. The anchor `SELECT NULLIF(1, 1)` folds
-    // to a CONSTANT NULL, so the CTE column `x` is UNCONSTRAINED: the recursive
+    // to a constant NULL, so the CTE column `x` is unconstrained: the recursive
     // arm — itself a set operation `SELECT x FROM t INTERSECT SELECT 'c'` — must
-    // fold the self column against the text `'c'` WITHOUT faulting integer
+    // fold the self column against the text `'c'` without faulting integer
     // against text, exactly as a bare constant-NULL arm unifies with any typed
     // arm. Because the schema-only self and the run-iteration self bind through
-    // the SAME body-derived carrier, both carry the unconstrained mask and
+    // the same body-derived carrier, both carry the unconstrained mask and
     // cannot diverge. The recursive arm intersects the NULL row against `'c'`
     // (no match), so the fixpoint terminates at the anchor's single NULL row.
     let rows = try statement("""
@@ -1002,17 +1002,17 @@ struct EngineRecursiveTests {
 
   @Test func `a recursive arm's derived body is not typed at the placeholder self`()
       throws {
-    // The recursive arm reads the CTE self through a DERIVED body — `FROM
+    // The recursive arm reads the CTE self through a derived body — `FROM
     // (SELECT s || 'c' AS s FROM t …) AS d` — whose `s || 'c'` is well typed
-    // only when `s` is TEXT, its real (anchor-derived) type. The arm-WIDTH
+    // only when `s` is TEXT, its real (anchor-derived) type. The arm-width
     // probe binds the self under the placeholder-typed `declared` carrier
     // (`.integer`) purely to measure arity, and `augment` materialises that
     // derived body eagerly; were the probe validating, it would type `s || 'c'`
     // against the `.integer` placeholder and spuriously fault a runnable query.
-    // The probe is NON-validating, so arity is measured without typing the
+    // The probe is non-validating, so arity is measured without typing the
     // operands; the genuine arm operand check runs later under the unified
-    // text carrier and passes. The SCHEMA path must report `s` as `.text`
-    // WITHOUT throwing, agreeing with the run's terminating rows.
+    // text carrier and passes. The schema path must report `s` as `.text`
+    // without throwing, agreeing with the run's terminating rows.
     let text = """
         WITH RECURSIVE t (s) AS (
           SELECT 'b'
@@ -1030,12 +1030,12 @@ struct EngineRecursiveTests {
 
   @Test func `a genuinely mistyped recursive arm still faults on the schema path`()
       throws {
-    // The fix makes the arm-WIDTH probe non-validating, so a genuine operand
-    // fault in the recursive arm must STILL be caught — by the later `kinds`-
+    // The fix makes the arm-width probe non-validating, so a genuine operand
+    // fault in the recursive arm must still be caught — by the later `kinds`-
     // seeded typecheck under the unified carrier, not the width probe. Here the
     // arm applies `||` (text-only) to the self column `n`, whose anchor is an
     // INTEGER: the unified self is integer, so `n || 'c'` is genuine text-
-    // arithmetic-on-integer and must fault on BOTH the schema path and the run.
+    // arithmetic-on-integer and must fault on both the schema path and the run.
     let text = """
         WITH RECURSIVE t (n) AS (
           SELECT 1
@@ -1053,8 +1053,8 @@ struct EngineRecursiveTests {
 
   // MARK: - Producer CTE-shape guards
 
-  // The tier-2 unification routes both the run and the schema paths through ONE
-  // CTE walk (`Engine.typed(ctes:in:rows:)`). These pin the RUN-side shape of
+  // The tier-2 unification routes both the run and the schema paths through one
+  // CTE walk (`Engine.typed(ctes:in:rows:)`). These pin the run-side shape of
   // the historically-divergent CTE kinds — the row companions to the R/S/V
   // parity matrix in `OutputSchemaTests` — so a per-CTE regression surfaces
   // here as a wrong ROW set, not only a wrong header.
@@ -1062,9 +1062,9 @@ struct EngineRecursiveTests {
   @Test func `a chained CTE reading a prior widened column materialises doubles`()
       throws {
     // `a` is a mixed integer/double UNION widened to `.double`; `b` reads it.
-    // The run overlay carries `a`'s MATERIALISED rows coerced to the unified
+    // The run overlay carries `a`'s materialised rows coerced to the unified
     // type, so `b` reads (and the query returns) `.double` values — the same
-    // widened carrier the schema path threads with EMPTY rows.
+    // widened carrier the schema path threads with empty rows.
     let rows = try statement("""
         WITH a(x) AS (SELECT 1 UNION SELECT 2.5),
              b(y) AS (SELECT x FROM a)
@@ -1119,7 +1119,7 @@ struct EngineRecursiveTests {
 
   @Test func `an ordered recursive body equals its unordered form as a set`()
       throws {
-    // The trailing carrier does not change the fixpoint's MEMBERSHIP — the same
+    // The trailing carrier does not change the fixpoint's membership — the same
     // recursive CTE without the ORDER BY yields the same rows (here already in
     // order), so the ordered body matches the unordered one modulo ordering.
     let unordered = try seed().run(try Statement(parsing: """
@@ -1164,11 +1164,11 @@ struct EngineRecursiveTests {
   @Test func `a renaming recursive body orders by its first-arm output name`()
       throws {
     // The body's set-op output is named off its FIRST arm (`SELECT 1 AS x`), so
-    // the carrier's `ORDER BY x` resolves against that OUTPUT name `x`, not the
-    // CTE's DECLARED name `n` — EXACTLY as the non-recursive analog below does.
+    // the carrier's `ORDER BY x` resolves against that output name `x`, not the
+    // CTE's declared name `n` — exactly as the non-recursive analog below does.
     // The fixpoint temp the carrier applies over is named by the anchor's
     // output names; the CTE-declared rename rides the returned carrier, so the
-    // outer `SELECT n FROM t` still sees `n`. Assert schema AND run on the SAME
+    // outer `SELECT n FROM t` still sees `n`. Assert schema AND run on the same
     // query so a run-vs-validate divergence cannot hide.
     let statement = try Statement(parsing: """
         WITH RECURSIVE t (n) AS (
@@ -1185,8 +1185,8 @@ struct EngineRecursiveTests {
 
   @Test func `a non-recursive ordered CTE body orders by its output name`()
       throws {
-    // The non-recursive ANALOG of the renaming recursive body: `ORDER BY x`
-    // resolves against the first arm's output `x`. This is the ORACLE the
+    // The non-recursive analog of the renaming recursive body: `ORDER BY x`
+    // resolves against the first arm's output `x`. This is the oracle the
     // recursive form mirrors — the two paths must agree.
     let statement = try Statement(parsing: """
         WITH t (n) AS (SELECT 1 AS x UNION ALL SELECT 2 ORDER BY x)
@@ -1199,10 +1199,10 @@ struct EngineRecursiveTests {
 
   @Test func `a recursive carrier ORDER BY of a non-output name faults`()
       throws {
-    // `ORDER BY n` names the CTE's DECLARED name, NOT a body output (the first
+    // `ORDER BY n` names the CTE's declared name, NOT a body output (the first
     // arm projects `x`), so the carrier — which resolves against the body's
-    // OUTPUT names — faults `.column('n')` on the schema path, exactly as the
-    // RUN does when `apply` reapplies the carrier after the fixpoint (`run ≡
+    // output names — faults `.column('n')` on the schema path, exactly as the
+    // run does when `apply` reapplies the carrier after the fixpoint (`run ≡
     // columns(of:)`), and exactly as the non-recursive analog below faults.
     let statement = try Statement(parsing: """
         WITH RECURSIVE t (n) AS (
@@ -1220,7 +1220,7 @@ struct EngineRecursiveTests {
 
   @Test func `a non-recursive carrier ORDER BY of a non-output name faults`()
       throws {
-    // The non-recursive ORACLE: `ORDER BY n` (the declared name, not the first
+    // The non-recursive oracle: `ORDER BY n` (the declared name, not the first
     // arm's output `x`) faults `.column('n')`, the behaviour the recursive form
     // mirrors.
     let statement = try Statement(parsing: """
@@ -1236,9 +1236,9 @@ struct EngineRecursiveTests {
   @Test func `a recursive carrier ORDER BY validates its keys like the run`()
       throws {
     // The recursive validate path validates the carrier's ORDER BY keys against
-    // the body's output scope, the SAME check an ordinary ordered set operation
+    // the body's output scope, the same check an ordinary ordered set operation
     // gets. A carrier `ORDER BY missing(n)` — where `n` IS a body output
-    // (`SELECT 1 AS n`) — faults `.function('missing')` on BOTH the schema path
+    // (`SELECT 1 AS n`) — faults `.function('missing')` on both the schema path
     // (`columns(of:validate:true)`) AND the run (`run ≡ columns(of:)`), closing
     // the run-vs-validate gap where validate passed yet the run faulted when
     // `apply` reapplied the carrier after the fixpoint.
@@ -1277,15 +1277,15 @@ struct EngineRecursiveTests {
 
   @Test func `a recursive carrier ORDER BY of a projected expression resolves like the non-recursive analog`()
       throws {
-    // The recursive carrier now routes through the SAME `carried(over:)`
+    // The recursive carrier now routes through the same `carried(over:)`
     // resolver the ordinary ordered set-operation path uses, so a projected-
-    // EXPRESSION sort key (`Age * 1`) is matched against the first arm's
-    // projected item and orders on the MATERIALISED output column — never a
+    // expression sort key (`Age * 1`) is matched against the first arm's
+    // projected item and orders on the materialised output column — never a
     // bare `SELECT * FROM <temp>` that re-evaluates `Age * 1` over a temp
     // lacking `Age` (which faulted `.column('Age')`). The recursive fixpoint
     // runs `{1, 2, 3}` ordered ascending; its non-recursive ordered-set-op
     // analog resolves the identical key against the same projection surface
-    // WITHOUT faulting — the run≡run oracle the shared resolver guarantees.
+    // without faulting — the run≡run oracle the shared resolver guarantees.
     let people = EngineMemory([
       "People": FixtureRelation([EngineField(name: "Age", type: .integer)],
                                 [[.integer(1)]] as Array<Array<Value>>),
@@ -1298,7 +1298,7 @@ struct EngineRecursiveTests {
         """)
     #expect(try people.run(recursive) == [[.integer(1)], [.integer(2)],
                                           [.integer(3)]])
-    // The non-recursive analog resolves the SAME `Age * 1` projected-expression
+    // The non-recursive analog resolves the same `Age * 1` projected-expression
     // key against the same arm-0 surface and runs without faulting.
     let analog = try Statement(parsing: """
         SELECT Age * 1 AS m FROM People WHERE Age = 1
@@ -1310,7 +1310,7 @@ struct EngineRecursiveTests {
   @Test func `a recursive carrier ORDER BY of an aliased output resolves on the output column`()
       throws {
     // The aliased sub-case: the anchor projects `Age * 2 AS m` and the carrier
-    // orders by the ALIAS `m`, which the setop-output scope binds directly to
+    // orders by the alias `m`, which the setop-output scope binds directly to
     // the output column — the same path the ordinary carrier takes.
     let people = EngineMemory([
       "People": FixtureRelation([EngineField(name: "Age", type: .integer)],
@@ -1329,12 +1329,12 @@ struct EngineRecursiveTests {
   @Test func `a recursive carrier ORDER BY of a qualified column faults`()
       throws {
     // The recursive body is a set operation; its trailing carrier `ORDER BY`
-    // resolves against the fixpoint OUTPUT, which — like any set-operation
-    // result — exposes NO range. A QUALIFIED key `p.Age` (the anchor's `p`)
+    // resolves against the fixpoint output, which — like any set-operation
+    // result — exposes no range. A qualified key `p.Age` (the anchor's `p`)
     // therefore fails resolution, exactly as the derived-union equivalent and
     // a plain `… UNION … ORDER BY R.a` do: the carrier lets it through to
     // `scope.order` rather than silently dropping the qualifier to bind the
-    // bare output. The BARE `ORDER BY Age` orders the fixpoint (below).
+    // bare output. The bare `ORDER BY Age` orders the fixpoint (below).
     let people = EngineMemory([
       "People": FixtureRelation([EngineField(name: "Age", type: .integer)],
                                 [[.integer(1)]] as Array<Array<Value>>),
@@ -1377,9 +1377,9 @@ struct EngineRecursiveTests {
       throws {
     // ISO 9075 permits recursion only through `UNION [ALL]`. A recursive body
     // that is `EXCEPT` (not `UNION`) referencing itself has no recursive arm to
-    // iterate, so it once compiled with the self UNBOUND and faulted a generic
+    // iterate, so it once compiled with the self unbound and faulted a generic
     // `SQLError.relation('t')`. It now faults the precise `0A000` feature
-    // diagnostic on BOTH the run and the schema path.
+    // diagnostic on both the run and the schema path.
     let statement = try Statement(parsing: """
         WITH RECURSIVE t (n) AS (SELECT n FROM t EXCEPT SELECT 1)
           SELECT n FROM t
@@ -1408,7 +1408,7 @@ struct EngineRecursiveTests {
 
   @Test func `a recursive EXCEPT over a same-named base runs once, not the ISO fault`()
       throws {
-    // The reference reads a same-named BASE relation, so the body is a valid
+    // The reference reads a same-named base relation, so the body is a valid
     // run-once query, not a recursion — the `0A000` guard exempts it (as the
     // misplaced-anchor guard does). `Parent EXCEPT {2}` = {1}.
     let catalog = EngineMemory([

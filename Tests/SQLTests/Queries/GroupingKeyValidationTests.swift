@@ -25,7 +25,7 @@ private func shipments() throws -> FixtureCatalog {
 
 /// The AST `SELECT COUNT(*) FROM Orders GROUP BY <key>`. The parser now admits
 /// a general scalar expression as a `GROUP BY` key (see the SQL-text tests
-/// below), so an EVALUATABLE key is equally reachable from source; the AST
+/// below), so an evaluatable key is equally reachable from source; the AST
 /// builder is retained here to exercise the validation path directly with a
 /// key of any shape.
 private func grouped(by key: Expression,
@@ -63,9 +63,9 @@ private func checking(_ query: Query,
 struct GroupingKeyValidationTests {
   @Test func `an evaluatable GROUP BY key faults under validate as it does at run`()
       throws {
-    // A `GROUP BY 1 / 0` key is EVALUATED per row to form the groups, so a run
+    // A `GROUP BY 1 / 0` key is evaluated per row to form the groups, so a run
     // faults `SQLError.divide`. The schema/type-check walk must surface the
-    // SAME fault: `group` lowers the key to a term STRUCTURALLY (no
+    // same fault: `group` lowers the key to a term structurally (no
     // evaluation), so `compile` alone never raised it — the walk now routes
     // each key through the same operand type-check the projection and ORDER BY
     // keys use, closing the gap where `columns(of:validate:)` returned a silent
@@ -119,7 +119,7 @@ struct GroupingKeyValidationTests {
 
   @Test func `a constant-false WHERE spares an evaluatable GROUP BY key`()
       throws {
-    // A constant-false WHERE yields no rows, so a GROUP BY forms NO group and
+    // A constant-false WHERE yields no rows, so a GROUP BY forms no group and
     // never evaluates its key — the run does not fault, so validate must not
     // either. This mirrors the projection path's constant-false elision (a
     // false WHERE spares an unreachable `1 / 0`), which the grouping walk
@@ -138,7 +138,7 @@ struct GroupingKeyValidationTests {
   @Test func `GROUP BY groups by an arithmetic expression key`() throws {
     // `Amount + 1` — an arithmetic key over a column — groups the two distinct
     // amounts (10, 20) into their own groups, keyed on 11 and 21. The key is
-    // both PROJECTED (aliased `k`) and grouped, so it names an output column.
+    // both projected (aliased `k`) and grouped, so it names an output column.
     let sql = """
         SELECT Amount + 1 AS k, COUNT(*) FROM Orders
           GROUP BY Amount + 1 ORDER BY k
@@ -182,8 +182,8 @@ struct GroupingKeyValidationTests {
 
   @Test func `a qualified projection matches an unqualified expression key`()
       throws {
-    // `Orders.Amount + 1` (qualified) in the projection is SEMANTICALLY the
-    // unqualified `Amount + 1` grouping key — they lower to ONE term. The
+    // `Orders.Amount + 1` (qualified) in the projection is semantically the
+    // unqualified `Amount + 1` grouping key — they lower to one term. The
     // match is now by lowered term, not raw AST, so the qualified projection is
     // grouped and runs rather than faulting `SQLError.grouping`.
     let sql = """
@@ -216,7 +216,7 @@ struct GroupingKeyValidationTests {
   }
 
   @Test func `a HAVING reference matches an expression key by term`() throws {
-    // A HAVING reference to the grouped expression matches the SAME way a
+    // A HAVING reference to the grouped expression matches the same way a
     // projection does — `Orders.Amount + 1` (qualified) is the `Amount + 1`
     // key. `HAVING Orders.Amount + 1 > 15` keeps only the group keyed on 21.
     let sql = """
@@ -240,7 +240,7 @@ struct GroupingKeyValidationTests {
 
   @Test func `a genuinely different projection expression still faults`()
       throws {
-    // Term matching must NOT over-accept: `Amount + 2` is a DIFFERENT value
+    // Term matching must NOT over-accept: `Amount + 2` is a different value
     // from the `Amount + 1` key — its lowered term differs — so the bare
     // non-key `Amount` in it still faults the standard grouping rule.
     let sql = """
@@ -278,8 +278,8 @@ struct GroupingKeyValidationTests {
   @Test func `GROUP BY 1 / 0 parsed from SQL faults on both run and validate`()
       throws {
     // The round-11 payoff: the evaluatable `1 / 0` grouping key is now
-    // REACHABLE from SQL text (the parser no longer rejects a non-identifier
-    // key). Over a NON-EMPTY input it forms a group per row, evaluating the
+    // reachable from SQL text (the parser no longer rejects a non-identifier
+    // key). Over a non-empty input it forms a group per row, evaluating the
     // key and faulting `SQLError.divide` — surfaced identically by the run and
     // by `columns(of:validate:)`.
     let query = try parse(query: "SELECT COUNT(*) FROM Orders GROUP BY 1 / 0")
@@ -300,7 +300,7 @@ struct GroupingKeyValidationTests {
 
   @Test func `GROUP BY of an aggregate faults as a misplaced aggregate`()
       throws {
-    // An aggregate is not a grouping key. `GROUP BY COUNT(*)` now PARSES (an
+    // An aggregate is not a grouping key. `GROUP BY COUNT(*)` now parses (an
     // aggregate call is an expression) and faults `42803` "an aggregate is not
     // allowed here" — the same fault a nested aggregate raises elsewhere
     // (`HAVING COUNT(COUNT(*)) > 0`), not a parse error.
@@ -336,7 +336,7 @@ struct GroupingKeyValidationTests {
       throws {
     // A correlated grouping subquery keys each row on the per-row scalar it
     // yields — here `Amount` itself (10, 20) via a correlated lookup — so it
-    // forms one group per distinct value, matching the SAME correlated subquery
+    // forms one group per distinct value, matching the same correlated subquery
     // used as a projection.
     let group = """
         SELECT COUNT(*) FROM Orders o
@@ -353,8 +353,8 @@ struct GroupingKeyValidationTests {
   }
 
   @Test func `a subquery grouping key also in the projection works`() throws {
-    // The SAME scalar subquery both projected (aliased `k`) and used as the
-    // grouping key registers ONCE (its role is shared) — no double-register
+    // The same scalar subquery both projected (aliased `k`) and used as the
+    // grouping key registers once (its role is shared) — no double-register
     // or width mismatch — and groups every row into the one constant group.
     let sql = """
         SELECT (SELECT 1) AS k, COUNT(*) FROM Orders GROUP BY (SELECT 1)
@@ -367,7 +367,7 @@ struct GroupingKeyValidationTests {
   @Test func `a cardinality-violating subquery grouping key faults as it does in a projection`()
       throws {
     // A scalar subquery yielding more than one row faults
-    // `SQLError.cardinality` — the SAME fault it raises as a projection, NOT
+    // `SQLError.cardinality` — the same fault it raises as a projection, NOT
     // the generic "not supported in this position" the unregistered key raised.
     let group = try parse(query: """
         SELECT COUNT(*) FROM Orders GROUP BY (SELECT Amount FROM Orders)

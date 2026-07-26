@@ -4,7 +4,7 @@
 // MARK: - WITH
 
 extension CTE {
-  /// The CTE body's CANONICAL recursive shape — the ONE recogniser every
+  /// The CTE body's canonical recursive shape — the one recogniser every
   /// recursive-CTE seam peels through, so the run side and the schema side
   /// inspect the identical AST.
   ///
@@ -52,7 +52,7 @@ extension CTE {
   /// Whether the CTE actually references itself through a recursive `UNION` arm
   /// — the test the fixpoint routing turns on, distinct from the syntactic
   /// `recursive` flag a `WITH RECURSIVE` stamps on every member. A thin read
-  /// over `recursiveArms`, so it peels the SAME canonical shape.
+  /// over `recursiveArms`, so it peels the same canonical shape.
   internal var recurses: Bool {
     get throws(SQLError) {
       try recursiveArms != nil
@@ -81,9 +81,9 @@ extension Select {
   /// Whether the select names the relation `name` (case-folded) in its `FROM`
   /// or any `JOIN`.
   ///
-  /// A relation contributes a reference by its SOURCE, not its binding name: a
+  /// A relation contributes a reference by its source, not its binding name: a
   /// `.named` relation names `name` when its identifier matches; a `.derived`
-  /// one names NOTHING through its alias — a `FROM (SELECT …) AS a` does not
+  /// one names nothing through its alias — a `FROM (SELECT …) AS a` does not
   /// reference a relation `a` — but its inner query is recursed into for the
   /// REAL `.named` references its body holds. So a recursive-CTE fixpoint
   /// detector sees a self-reference nested inside a derived body (`FROM (SELECT
@@ -97,7 +97,7 @@ extension Select {
 
 extension Relation {
   /// Whether this relation references the relation `name` (case-folded): a
-  /// `.named` relation by its identifier, a `.derived` one by RECURSING into
+  /// `.named` relation by its identifier, a `.derived` one by recursing into
   /// its inner query — the derived alias itself is not a reference.
   internal func references(_ name: String) -> Bool {
     switch source {

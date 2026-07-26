@@ -81,7 +81,7 @@ public enum SQLError: Error, Hashable, Sendable {
   /// list names it; the string describes the offending projection.
   case named(String)
   /// An explicit column list — a `CREATE VIEW`'s, a `WITH` CTE's, or a derived
-  /// table's `AS t(c, …)` — does not match the query expression's DEGREE, the
+  /// table's `AS t(c, …)` — does not match the query expression's degree, the
   /// number of columns its body projects; the list must name exactly one column
   /// per projected value. ISO 9075 makes the degree the reference, so
   /// `expected` carries the body/query-expression degree and `got` the declared
@@ -132,7 +132,7 @@ public enum SQLError: Error, Hashable, Sendable {
   /// to be an output column. The string is the offending column's name.
   case distinct(String)
   /// A scalar subquery `(SELECT …)` used where at most one row is admitted
-  /// yielded MORE THAN ONE row — the ISO `<scalar subquery>` requires a
+  /// yielded more than one row — the ISO `<scalar subquery>` requires a
   /// cardinality of at most one, an empty result standing for NULL and a single
   /// row for its lone cell. A wider result cannot collapse to one value, so a
   /// run raises rather than picking one arbitrarily.

@@ -781,7 +781,7 @@ struct EngineScalarSelectTests {
   /// The `Select` of a parsed single-`SELECT` query — for building the FROM-less
   /// shapes the parser will not, by re-homing a clause onto a `from: nil` select.
   private static func select(_ text: String) throws -> Select {
-    guard case let .select(select) = try parse(text) else {
+    guard case let .select(select) = try parse(text).body else {
       throw SQLError.incomplete(expected: "a SELECT")
     }
     return select

@@ -160,117 +160,156 @@ public enum SetOperation: Hashable, Sendable {
 /// result column types are unified across the arms (a mixed integer/double
 /// column widening to `double`), while their names come from the first arm (the
 /// ISO rule).
-public indirect enum Query: Hashable, Sendable {
-  /// A single `SELECT`.
-  case select(Select)
-  /// A set operation of `kind` (`UNION`/`INTERSECT`/`EXCEPT`, `ALL` when `all`)
-  /// over a left and a right query term, the right appended so a
-  /// same-precedence chain reads left to right.
-  case setop(SetOperation, Query, Query, all: Bool)
+/// A query rides an optional stack of query-level row-operator `carriers` over
+/// a `body` that is either a single `SELECT` or a set operation. Structural
+/// code matches `body` — which cannot name or forget a carrier — while only the
+/// compile/execute/schema code that applies row operators reads `carriers`.
+public struct Query: Hashable, Sendable {
+  /// A query's carrier-free shape: one `SELECT`, or two query terms combined
+  /// with a set operator.
+  public indirect enum Body: Hashable, Sendable {
+    /// A single `SELECT`.
+    case select(Select)
+    /// A set operation of `kind` (`UNION`/`INTERSECT`/`EXCEPT`, `ALL` when
+    /// `all`) over a left and a right query term, the right appended so a
+    /// same-precedence chain reads left to right.
+    case setop(SetOperation, Query, Query, all: Bool)
+  }
 
   /// A query-level `ORDER BY` / `SELECT DISTINCT` / `OFFSET`·`FETCH` carried
-  /// OVER an inner query (always a `setop` — a `select` carries its own on the
-  /// node). A `setop` node has no order/distinct/limit slot, so an ordered,
-  /// deduplicated, or paged set operation rides this outer carrier: the row
+  /// OVER a body — the `DISTINCT`/`ORDER BY`/`OFFSET`·`FETCH` and the generated
+  /// hidden-column count.
+  ///
+  /// A `setop` body has no order/distinct/limit slot, so an ordered,
+  /// deduplicated, or paged set operation rides such a carrier: the row
   /// operators (`DISTINCT`, `ORDER BY`, `OFFSET`/`FETCH`) apply to the union's
   /// combined result, resolved through the setop's output scope, and do NOT
   /// project — the result columns stay the inner setop's arm-0-named, unified
-  /// ones. It is transparent to `columns(unifying:)`, which descends to the
-  /// inner setop for the result schema; only `run`/`compile` stack the row
-  /// operators over the compiled setop plan. Produced by the GROUPING SETS
-  /// `expand` and by the parser for a trailing query-level `ORDER BY` /
-  /// `OFFSET`·`FETCH` after a set-operation chain.
+  /// ones. A carrier is transparent to `columns(unifying:)`, which descends to
+  /// the body for the result schema; only `run`/`compile` stack the row
+  /// operators over the compiled body plan. Carriers are produced by the
+  /// GROUPING SETS `expand` and by the parser for a trailing query-level `ORDER
+  /// BY` / `OFFSET`·`FETCH` after a set-operation chain or a parenthesised
+  /// primary.
   ///
-  /// `generated` is the number of GENERATED trailing columns the inner union
-  /// carries beyond the real output — the hidden sort columns `expand` appends
-  /// to each arm (aliased `*gsN`) so a genuinely-unprojected aggregate sort key
+  /// `generated` is the number of generated trailing columns the body carries
+  /// beyond the real output — the hidden sort columns `expand` appends to each
+  /// arm (aliased `*gsN`) so a genuinely-unprojected aggregate sort key
   /// survives the `UNION ALL` at equal arity. The carrier's compile trims them
   /// (`real = width − generated`), and `columns(unifying:)` drops them from the
   /// result schema. It is a structural count carried out of `expand`, never
   /// recovered by scanning output names for a synthetic prefix; the parser's
   /// trailing-`ORDER BY` carrier generates none (`0`).
-  case ordered(Query, distinct: Bool, order: Order?, limit: Limit?,
-               generated: Int)
-
-  /// The first `SELECT` of the query — the leftmost arm, reached by descending
-  /// the left arm of each set operation. Its projection names the result
-  /// columns (the ISO rule — their types unify across every arm), so a `CREATE
-  /// VIEW` infers a set operation's column names from it. An `ordered` carrier
-  /// is transparent — its first is its inner query's.
-  public var first: Select {
-    switch self {
-    case let .select(select): select
-    case let .setop(_, left, _, _): left.first
-    case let .ordered(inner, _, _, _, _): inner.first
-    }
-  }
-
-  /// The count of hidden `generated` sort columns the `ordered` carriers on the
-  /// path to `first` appended to that arm's projection — the amount by which
-  /// `first`'s raw projection width overstates the query's real output width. A
-  /// query-level `ORDER BY` over an unprojected aggregate materialises such a
-  /// column on each arm and trims it back at the carrier; a set-operation
-  /// arity check comparing `first` widths must subtract this so a carrier
-  /// operand's hidden column is not miscounted (`(SELECT n … GROUP BY GROUPING
-  /// SETS (…) ORDER BY SUM(m)) UNION SELECT n` is a valid one-column union).
-  internal var generated: Int {
-    switch self {
-    case .select: 0
-    case let .setop(_, left, _, _): left.generated
-    case let .ordered(inner, _, _, _, count): count + inner.generated
-    }
-  }
-
-  /// The query-level row operators an `ordered` carrier applies OVER its inner
-  /// query, peeled off it — the `DISTINCT`/`ORDER BY`/`OFFSET`·`FETCH` and the
-  /// generated hidden-column count. A `select`/`setop` carries no carrier.
   public struct Carrier: Hashable, Sendable {
     public let distinct: Bool
     public let order: Order?
     public let limit: Limit?
     public let generated: Int
+
+    public init(distinct: Bool, order: Order?, limit: Limit?,
+                generated: Int) {
+      self.distinct = distinct
+      self.order = order
+      self.limit = limit
+      self.generated = generated
+    }
   }
 
+  /// The carrier-free shape of the query.
+  public var body: Body
 
-  /// This query's carrier-transparent core — its innermost `setop`/`select`,
-  /// with every `ordered` carrier peeled off. Two carriers stack when an outer
-  /// query-expression tail rides a parenthesised primary that already has its
-  /// own tail (`(SELECT … ORDER BY … FETCH n) ORDER BY …`), so the peel loops
-  /// to the base rather than stopping at one level. For the `if case .setop =
-  /// query.core` seams that recognise a set operation whether or not it rides
-  /// carriers, so a carried (or twice-carried) union is not silently swallowed
-  /// by a bare `.setop` match.
+  /// The query-level row-operator carriers stacked over `body`, innermost
+  /// first — empty for a bare body. Two carriers stack when an outer query-
+  /// expression tail rides a parenthesised primary that already has its own
+  /// tail (`(SELECT … ORDER BY … FETCH n) ORDER BY …`).
+  public var carriers: Array<Carrier>
+
+  public init(body: Body, carriers: Array<Carrier> = []) {
+    self.body = body
+    self.carriers = carriers
+  }
+
+  /// The first `SELECT` of the query — the leftmost arm, reached by descending
+  /// the left arm of each set operation. Its projection names the result
+  /// columns (the ISO rule — their types unify across every arm), so a `CREATE
+  /// VIEW` infers a set operation's column names from it. Carriers are
+  /// transparent — the first is the body's.
+  public var first: Select {
+    switch body {
+    case let .select(select): select
+    case let .setop(_, left, _, _): left.first
+    }
+  }
+
+  /// The count of hidden `generated` sort columns the carriers on the path to
+  /// `first` appended to that arm's projection — the amount by which `first`'s
+  /// raw projection width overstates the query's real output width. A query-
+  /// level `ORDER BY` over an unprojected aggregate materialises such a column
+  /// on each arm and trims it back at the carrier; a set-operation arity check
+  /// comparing `first` widths must subtract this so a carrier operand's hidden
+  /// column is not miscounted (`(SELECT n … GROUP BY GROUPING SETS (…) ORDER BY
+  /// SUM(m)) UNION SELECT n` is a valid one-column union).
+  internal var generated: Int {
+    let body: Int = switch self.body {
+    case .select: 0
+    case let .setop(_, left, _, _): left.generated
+    }
+    return carriers.reduce(body) { $0 + $1.generated }
+  }
+
+  /// This query's carrier-transparent core — its `body` with every carrier
+  /// stripped off. For the `if case .setop = query.core.body` seams that
+  /// recognise a set operation whether or not it rides carriers, so a carried
+  /// (or twice-carried) union is not silently swallowed by a bare `body` match.
   public var core: Query {
-    var query = self
-    while case let .ordered(inner, _, _, _, _) = query { query = inner }
-    return query
+    Query(body: body, carriers: [])
   }
 
-  /// This query's carrier-transparent core paired with every `ordered` carrier
-  /// on the path to it, innermost first — the full peel a stacked-carrier seam
-  /// uses to reach the base `setop`/`select` and re-apply each carrier in order
-  /// (`(setop ORDER BY 1) ORDER BY 1` yields the setop and `[inner, outer]`). A
-  /// single carrier yields a one-element list; a bare body an empty one.
+  /// This query's carrier-transparent core paired with every carrier on the
+  /// path to it, innermost first — the full peel a stacked-carrier seam uses to
+  /// reach the base body and re-apply each carrier in order. A single carrier
+  /// yields a one-element list; a bare body an empty one.
   public var peeled: (core: Query, carriers: Array<Carrier>) {
-    guard case let .ordered(inner, distinct, order, limit, generated) = self
-    else { return (self, []) }
-    let (core, carriers) = inner.peeled
-    return (core, carriers + [Carrier(distinct: distinct, order: order,
-                                      limit: limit, generated: generated)])
+    (core, carriers)
   }
 
   /// Whether the query applies a set-level dedup that collapses distinct rows —
-  /// a `DISTINCT` on any `ordered` carrier in its stack, or on its base
-  /// `select`. Carrier-transparent (it peels the whole stack), so a seam that
-  /// must not rewrite a projection whose distinct cardinality feeds an OFFSET
-  /// sees the `DISTINCT` through any number of nested carriers. A set-operation
-  /// core is not counted: the probe never rewrites a setop, so its `UNION`
-  /// dedup cannot be collapsed by the rewrite.
+  /// a `DISTINCT` on any carrier in its stack, or on its base `select` body.
+  /// Carrier-transparent (it reads the whole stack), so a seam that must not
+  /// rewrite a projection whose distinct cardinality feeds an OFFSET sees the
+  /// `DISTINCT` through any number of nested carriers. A set-operation body is
+  /// not counted: the probe never rewrites a setop, so its `UNION` dedup cannot
+  /// be collapsed by the rewrite.
   public var dedups: Bool {
-    let (core, carriers) = peeled
     if carriers.contains(where: \.distinct) { return true }
-    if case let .select(select) = core { return select.distinct }
+    if case let .select(select) = body { return select.distinct }
     return false
+  }
+}
+
+extension Query {
+  /// A bare `SELECT` query — no carriers.
+  public static func select(_ select: Select) -> Query {
+    Query(body: .select(select), carriers: [])
+  }
+
+  /// A set operation of `kind` over a left and a right query term — no
+  /// carriers.
+  public static func setop(_ kind: SetOperation, _ left: Query, _ right: Query,
+                           all: Bool) -> Query {
+    Query(body: .setop(kind, left, right, all: all), carriers: [])
+  }
+
+  /// The query `inner` under an additional query-level `ORDER BY` / `SELECT
+  /// DISTINCT` / `OFFSET`·`FETCH` carrier — the carrier appended to `inner`'s
+  /// own stack (outermost last), so a carrier over a carried primary stacks
+  /// rather than replaces. See `Carrier`.
+  public static func ordered(_ inner: Query, distinct: Bool, order: Order?,
+                             limit: Limit?, generated: Int) -> Query {
+    Query(body: inner.body,
+          carriers: inner.carriers + [Carrier(distinct: distinct, order: order,
+                                              limit: limit,
+                                              generated: generated)])
   }
 }
 

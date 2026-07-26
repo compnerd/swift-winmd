@@ -75,7 +75,8 @@ extension Catalog where Self: ~Escapable {
     // the right arm's its own derived one, then `combine` merges them under the
     // operator's duplicate rule. The arity across arms is checked as `compile`
     // resolves the whole query below.
-    if case let .setop(kind, left, right, all) = query {
+    if query.carriers.isEmpty, case let .setop(kind, left, right, all) = query
+        .body {
       // Validate the whole query (per-arm resolution and the cross-arm arity
       // check) exactly as a single select does, then run each arm on its own —
       // each arm's `run` threads its own lazy subquery box. `validate: false` —
@@ -171,7 +172,7 @@ extension Catalog where Self: ~Escapable {
     // guard keeps a plain query (and an ordered carrier over a bare `SELECT`,
     // not a setop) on the generic optimiser.
     let plan: Plan
-    if case .ordered = query, case .setop = query.core {
+    if !query.carriers.isEmpty, case .setop = query.body {
       plan = try optimise(decorrelated, query.core, augmented)
     } else {
       plan = try optimise(decorrelated, augmented)
@@ -186,7 +187,7 @@ extension Catalog where Self: ~Escapable {
     // execute through the carrier descent, which threads the inner union's arm
     // queries to the setop leaf and runs `arms` there — the same per-arm
     // machinery — leaving the sort/dedup/limit/project stack above unchanged.
-    if case .ordered = query, case .setop = query.core {
+    if !query.carriers.isEmpty, case .setop = query.body {
       return try execute(plan, carrying: query.core, augmented).map(\.values)
     }
     // A carrier over a bare `SELECT` (a parenthesised simple query with an
@@ -407,7 +408,7 @@ extension Catalog where Self: ~Escapable {
     // same-named base/view can seed it — the shape `with` rejects before
     // routing to the fixpoint.
     if cte.recursive,
-        case let .setop(.union, anchor, _, _) = try cte.canonical.inner,
+        case let .setop(.union, anchor, _, _) = try cte.canonical.inner.body,
         anchor.references(cte.name.lowercased()),
         case nil = table(named: cte.name),
         case nil = view(named: cte.name) {
@@ -425,7 +426,7 @@ extension Catalog where Self: ~Escapable {
     // relation and the body runs once, as the misplaced-anchor guard allows).
     let core = try cte.canonical.inner
     if cte.recursive,
-        case let .setop(kind, _, _, _) = core, kind != .union,
+        case let .setop(kind, _, _, _) = core.body, kind != .union,
         core.references(cte.name.lowercased()),
         case nil = table(named: cte.name),
         case nil = view(named: cte.name) {
@@ -609,7 +610,7 @@ extension Catalog where Self: ~Escapable {
     // so `recurses` already routed an ordered body here. `canonical` expands a
     // grouping-sets body FIRST, matching the `query` `augment` sees above.
     let (body, carriers) = try cte.canonical
-    guard case let .setop(.union, anchor, recursive, all) = body else {
+    guard case let .setop(.union, anchor, recursive, all) = body.body else {
       // A non-`UNION` recursive query runs once, but still binds under
       // `cte.columns`, so validate its compiled width here too — the check the
       // anchor and arm get. A body naming a base relation of the CTE's own name

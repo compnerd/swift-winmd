@@ -1253,7 +1253,7 @@ struct WithTests {
         """)
     #expect(ctes[0].recursive == true)
     #expect(ctes[0].columns == ["n"])
-    guard case .setop(.union, _, _, _) = ctes[0].query else {
+    guard case .setop(.union, _, _, _) = ctes[0].query.body else {
       Issue.record("expected the recursive CTE's query to be a UNION")
       return
     }

@@ -219,8 +219,9 @@ private final class Talker: @unchecked Sendable {
 /// Parses `text` as a single-projection `SELECT`'s expression, so the special
 /// `POSITION`/`OVERLAY` syntax is checked to lower to the expected call.
 private func lower(_ text: String) throws -> Expression {
-  guard case let .select(.select(select)) =
+  guard case let .select(query) =
       try Statement(parsing: "SELECT \(text) FROM S"),
+      case let .select(select) = query.body,
       case let .expressions(projection) = select.projection,
       let first = projection.first else {
     Issue.record("expected a single projected expression")

@@ -316,39 +316,19 @@ extension Catalog where Self: ~Escapable {
   /// read the `type`, and a further enclosing fold reads `unconstrained`.
   borrowing func columns(unifying query: Query, _ context: Context)
       throws(SQLError) -> Array<ResolvedColumn> {
-    switch query {
+    // The body's carrier-free result columns.
+    var cols: Array<ResolvedColumn>
+    switch query.body {
     case let .select(select):
       // A `GROUP BY GROUPING SETS (…)` derives its schema through the same
       // `UNION ALL` expansion the compile path uses, so the run and the derived
       // columns cannot diverge (`run ≡ columns(of:)`): the arms' NULL-padded
       // columns type through the set-operation `merge` exactly as the run's do.
       if case let .sets(sets) = select.grouping {
-        return try columns(unifying: expand(select, sets: sets), context)
+        cols = try columns(unifying: expand(select, sets: sets), context)
+      } else {
+        cols = try arms(of: select, context)
       }
-      return try arms(of: select, context)
-    case let .ordered(inner, _, _, _, generated):
-      // The `ordered` carrier is transparent to the result schema: `ORDER BY`,
-      // `DISTINCT`, and `OFFSET`/`FETCH` are row operators — they do NOT
-      // project — so the result columns are the inner setop's arm-0-named,
-      // unified ones whether reached via `run`/`compile` or `columns(of:)`
-      // (`run ≡ columns`). The one exception is a hidden materialised sort
-      // column (`expand` appends `generated` of them to every arm so an
-      // unprojected `ORDER BY MAX(x)` survives the union at equal arity): the
-      // carrier's compile trims them through the identity projection, so drop
-      // the matching trailing columns here too so the schema matches the run.
-      // The count is the structural `generated` the carrier carries, never a
-      // scan of the arm-0 names for a synthetic prefix — a user's delimited
-      // `AS "*gs0"` is a real output, not a generated column.
-      let cols = try columns(unifying: inner, context)
-      // Range-check `generated` against the width and take the trim width
-      // through the shared guard the compile carrier uses (`real(trimming:of:)`
-      // on Engine) before trimming: a public-AST count past the width makes
-      // `cols.count − generated` negative and `Array.prefix` precondition-traps
-      // the process, while a negative count returns ALL columns untrimmed —
-      // silently wrong and diverging from `run`, which faults the same XX000.
-      // One guard, one message ⇒ `columns(of:) ≡ run` on a malformed carrier.
-      let real = try real(trimming: generated, of: cols.count)
-      return Array(cols.prefix(real))
     case let .setop(_, left, right, _):
       let l = try columns(unifying: left, context)
       let r = try columns(unifying: right, context)
@@ -362,10 +342,33 @@ extension Catalog where Self: ~Escapable {
       // ahead of the reachability walk, so an unreached incompatible pair
       // yields a discardable placeholder rather than faulting; a reached
       // scalar/`IN` occurrence is re-folded strictly on the reached path.
-      return try l.indices.map { index throws(SQLError) in
+      cols = try l.indices.map { index throws(SQLError) in
         try merge(l[index], r[index], shape: context.shape)
       }
     }
+    // A carrier is transparent to the result schema: `ORDER BY`, `DISTINCT`,
+    // and `OFFSET`/`FETCH` are row operators — they do NOT project — so the
+    // result columns are the body's arm-0-named, unified ones whether reached
+    // via `run`/`compile` or `columns(of:)` (`run ≡ columns`). The one
+    // exception is a hidden materialised sort column (`expand` appends
+    // `generated` of them to every arm so an unprojected `ORDER BY MAX(x)`
+    // survives the union at equal arity): the carrier's compile trims them
+    // through the identity projection, so drop the matching trailing columns
+    // here too so the schema matches the run. The count is the structural
+    // `generated` each carrier carries, never a scan of the arm-0 names for a
+    // synthetic prefix — a user's delimited `AS "*gs0"` is a real output, not a
+    // generated column. Range-check `generated` against the width through the
+    // shared guard the compile carrier uses (`real(trimming:of:)` on Engine)
+    // before trimming: a public-AST count past the width makes `cols.count −
+    // generated` negative and `Array.prefix` precondition-traps the process,
+    // while a negative count returns ALL columns untrimmed — silently wrong and
+    // diverging from `run`, which faults the same XX000. One guard, one message
+    // ⇒ `columns(of:) ≡ run` on a malformed carrier.
+    for carrier in query.carriers {
+      let real = try real(trimming: carrier.generated, of: cols.count)
+      cols = Array(cols.prefix(real))
+    }
+    return cols
   }
 
   /// The unified column types of `query`, folded across every set-operation arm
@@ -593,7 +596,9 @@ extension Catalog where Self: ~Escapable {
     // on regardless of the incoming context's gate (a caller reaches here only
     // when validating).
     let context = try augment(context.validating(true), for: query, rows: false)
-    switch query {
+    // A carrier's row operators add no expression the arms carry — the body
+    // type-checks every reachable operand of its own arms.
+    switch query.body {
     case let .select(select):
       try typecheck(select, context)
     case let .setop(_, left, right, _):
@@ -601,26 +606,30 @@ extension Catalog where Self: ~Escapable {
       // enclosing scope, so each type-checks under the shared `context.outer`.
       try typecheck(left, context)
       try typecheck(right, context)
-    case let .ordered(inner, distinct, order, limit, generated):
-      // The `ordered` carrier's row operators add no expression the arms carry
-      // — the inner union type-checks every reachable operand of its own arms.
-      try typecheck(inner, context)
-      // But the carrier's own `ORDER BY` keys are a new expression surface,
-      // validated ONLY by the carrier compile (`ordered(…)` under `validate`).
-      // A reached scalar/`IN` subquery whose body is an ordered set operation
-      // is first compiled in the shape pre-pass with `validating(false)`, which
-      // bypasses that check, and is re-validated through this seam — so unless
-      // the carrier's keys are validated here too, an outer `columns(of:)`
-      // accepts a reached `(… UNION … ORDER BY missing(a))` a run faults
-      // (run-vs-validate divergence). Re-run the carrier compile in validate
-      // mode to validate the sort keys against the setop-output scope exactly
-      // as `ordered(…)` does — the plan is discarded, only the keys' fault
-      // matters. It is idempotent with the top-level `compile` (which already
-      // validated the same keys), and reached-only: an unreached ordered
-      // subquery never enters this seam, so its bad sort key stays deferred,
-      // matching the dead-scalar/dead-EXISTS posture.
-      _ = try ordered(inner, distinct: distinct, order: order, limit: limit,
-                      generated: generated, context.validating(true))
+    }
+    // Each carrier's own `ORDER BY` keys are a new expression surface,
+    // validated ONLY by the carrier compile (`ordered(…)` under `validate`). A
+    // reached scalar/`IN` subquery whose body is an ordered set operation is
+    // first compiled in the shape pre-pass with `validating(false)`, which
+    // bypasses that check, and is re-validated through this seam — so unless
+    // the carrier's keys are validated here too, an outer `columns(of:)`
+    // accepts a reached `(… UNION … ORDER BY missing(a))` a run faults (a
+    // run-vs-validate divergence). Re-run each carrier compile in validate mode
+    // over the query up to (not including) that carrier — the same inner it
+    // stacks over — to validate its sort keys against the body-output scope
+    // exactly as `ordered(…)` does — the plan is discarded, only the keys'
+    // fault matters. It is idempotent with the top-level `compile` (which
+    // already validated the same keys), and reached-only: an unreached ordered
+    // subquery never enters this seam, so its bad sort key stays deferred,
+    // matching the dead-scalar/dead-EXISTS posture. The augment above depends
+    // only on the body (carriers collect no derived table), so it is the scope
+    // each carrier resolves over.
+    for (index, carrier) in query.carriers.enumerated() {
+      let inner = Query(body: query.body,
+                        carriers: Array(query.carriers.prefix(index)))
+      _ = try ordered(inner, distinct: carrier.distinct, order: carrier.order,
+                      limit: carrier.limit, generated: carrier.generated,
+                      context.validating(true))
     }
   }
 

@@ -45,7 +45,7 @@ extension CTE {
       (anchor: Query, recursive: Query, all: Bool)? {
     get throws(SQLError) {
       guard case let .setop(.union, anchor, recursive, all) = try canonical
-          .inner, recursive.references(name.lowercased()) else {
+          .inner.body, recursive.references(name.lowercased()) else {
         return nil
       }
       return (anchor, recursive, all)
@@ -69,13 +69,13 @@ extension Query {
   /// a self-reference lurking in a recursive body's anchor; `CTE.recurses`
   /// itself inspects only the recursive arm.
   internal func references(_ name: String) -> Bool {
-    switch self {
+    // A carrier is transparent to a relation reference — its row operators name
+    // no relation — so descend the body.
+    switch body {
     case let .select(select):
       select.references(name)
     case let .setop(_, left, right, _):
       left.references(name) || right.references(name)
-    case let .ordered(inner, _, _, _, _):
-      inner.references(name)
     }
   }
 }

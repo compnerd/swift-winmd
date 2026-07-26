@@ -908,6 +908,7 @@ extension Array where Element == Filter {
 /// The literal `literal` as a typed `Value`.
 internal func value(of literal: Literal) throws(SQLError) -> Value {
   return switch literal {
+  case .null: .null
   case let .integer(integer): .integer(integer)
   case let .string(string): .text(string)
   case let .boolean(boolean): .boolean(boolean)

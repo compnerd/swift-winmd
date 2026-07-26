@@ -282,6 +282,13 @@ public enum Comparison: Hashable, Sendable {
 
 /// A literal operand of a comparison.
 public enum Literal: Hashable, Sendable {
+  /// The keyword `NULL` written as a value expression — SQL's absent value, of
+  /// no determinate type (ISO `<null specification>`). It lowers to a constant
+  /// NULL, so a projection of it places no type constraint on a set-operation's
+  /// unified column (it unifies with any typed arm, as `COALESCE` skips a
+  /// constant-NULL argument), and its comparisons are UNKNOWN under three-valued
+  /// logic. Distinct from the `IS NULL` predicate, which tests a value.
+  case null
   /// A single-quoted string literal, with its escapes resolved.
   case string(String)
   /// An integer literal — a bare run of digits, exact numeric.

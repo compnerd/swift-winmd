@@ -186,9 +186,13 @@ extension Catalog where Self: ~Escapable {
     // execute through the carrier descent, which threads the inner union's arm
     // queries to the setop leaf and runs `arms` there — the same per-arm
     // machinery — leaving the sort/dedup/limit/project stack above unchanged.
-    if case let .ordered(inner, _, _, _, _) = query {
-      return try execute(plan, carrying: inner, augmented).map(\.values)
+    if case .ordered = query, case .setop = query.core {
+      return try execute(plan, carrying: query.core, augmented).map(\.values)
     }
+    // A carrier over a bare `SELECT` (a parenthesised simple query with an
+    // outer tail — `(SELECT …) ORDER BY …`) has no set-operation arms to
+    // augment, so its `.shaped` plan runs through the plain executor; only a
+    // carrier over a `.setop` needs the per-arm carrier descent above.
     return try execute(plan, augmented).map(\.values)
   }
 
@@ -438,7 +442,7 @@ extension Catalog where Self: ~Escapable {
     // canonical (unwound) shape the run's `fixpoint` and the schema
     // `contributions` do, so all three inspect the identical AST.
     if let (anchor, recursive, _) = try cte.recursiveArms {
-      let carrier = try cte.canonical.carrier
+      let carriers = try cte.canonical.carriers
       let scope = try augment(context.validating(typecheck), for: anchor,
                               rows: false)
       let width = try compile(anchor, scope).width
@@ -509,16 +513,19 @@ extension Catalog where Self: ~Escapable {
         // fixpoint. The declared rename rides the CTE binding after the
         // carrier, so — as the run does — the carrier resolves the body's
         // output names.
-        if let carrier {
+        if !carriers.isEmpty {
           // A set operation names its output off its FIRST arm (the ISO rule),
-          // so the carrier's `ORDER BY` resolves against the anchor's output
+          // so each carrier's `ORDER BY` resolves against the anchor's output
           // names — resolved with the CTE self NOT in scope, so the anchor's
           // own names/types derive without faulting `.relation` on the
           // recursive arm's self reference. (Unifying the whole `body` would
-          // need the self bound to fold the recursive arm.)
+          // need the self bound to fold the recursive arm.) Stacked carriers
+          // all page and order the same set-op output, so each validates it.
           let outputs = try columns(unifying: anchor, scope)
-          try validate(carrier: carrier, over: outputs, arm: anchor.first,
-                       context.validating(true))
+          for carrier in carriers {
+            try validate(carrier: carrier, over: outputs, arm: anchor.first,
+                         context.validating(true))
+          }
         }
       }
     } else {
@@ -601,7 +608,7 @@ extension Catalog where Self: ~Escapable {
     // carrier is transparent to the recursive shape (`references` descends it),
     // so `recurses` already routed an ordered body here. `canonical` expands a
     // grouping-sets body FIRST, matching the `query` `augment` sees above.
-    let (body, carrier) = try cte.canonical
+    let (body, carriers) = try cte.canonical
     guard case let .setop(.union, anchor, recursive, all) = body else {
       // A non-`UNION` recursive query runs once, but still binds under
       // `cte.columns`, so validate its compiled width here too — the check the
@@ -757,13 +764,18 @@ extension Catalog where Self: ~Escapable {
     // type the materialised rows hold. The CTE-declared rename rides the
     // returned `merged` carrier, applied after the carrier at CTE consumption,
     // so the outer `SELECT n FROM t` still addresses `n`.
-    if let carrier {
+    if !carriers.isEmpty {
       let outputs = try columns(unifying: anchor, context)
       let named = merged.indices.map {
         ResolvedColumn(name: outputs[$0].name, type: merged[$0].type,
                        unconstrained: merged[$0].unconstrained)
       }
-      result = try apply(carrier, result, named, arm: anchor.first, context)
+      // Stacked carriers (`(recursive-union ORDER BY 1) ORDER BY 1`) apply
+      // innermost first — the peel order — each over the prior result, so the
+      // outer tail pages/orders what the inner already produced.
+      for carrier in carriers {
+        result = try apply(carrier, result, named, arm: anchor.first, context)
+      }
     }
     return (result, merged)
   }

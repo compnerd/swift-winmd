@@ -127,7 +127,10 @@
 internal struct Parser: ~Escapable {
   internal var lexer: Lexer
   internal var current: Token?
-  private var pending: Token?
+  // `internal`, not `private`: a speculative parse in another parser extension
+  // (`membership`'s `IN ((query))` disambiguation) must save and restore the
+  // full cursor — lexer, current, AND this lookahead buffer — on rewind.
+  internal var pending: Token?
 
   @_lifetime(copy lexer)
   internal init(_ lexer: consuming Lexer) throws(SQLError) {
@@ -248,77 +251,42 @@ internal struct Parser: ~Escapable {
   /// precedence. `ALL` keeps duplicate rows per the operator's multiplicity; a
   /// bare operator removes them — the distinction the engine honours.
   internal mutating func query() throws(SQLError) -> Query {
-    var query = try intersection()
+    var (query, parenthesized) = try intersection()
     while let kind: SetOperation = if try match(.union) { .union }
                                    else if try match(.except) { .except }
                                    else { nil } {
       let all = try match(.all)
-      query = try .setop(kind, query, intersection(), all: all)
+      query = try .setop(kind, query, intersection().query, all: all)
+      parenthesized = false
     }
-    // ISO 9075: an `ORDER BY` / `OFFSET`·`FETCH` after a set-operation chain
-    // applies to the whole result, not the trailing arm — an individual arm
-    // needs its own parentheses to carry one. The recursive-descent parse folds
-    // that trailing tail onto the last arm's `select` (a `select` greedily
-    // consumes its ORDER BY/limit); lift it here to the query-level `ordered`
-    // carrier over the union, where it resolves through the setop's output
-    // scope (`Catalog.ordered`) rather than binding the last arm's columns. A
-    // set operation carries no query-level `DISTINCT` in plain SQL (a bare
-    // `UNION` already dedups), so only the ORDER BY and limit are lifted.
-    //
-    // Gate on the top-level `query` being a set operation, NOT on the
-    // `UNION`/`EXCEPT` loop above having run: a top-level chain of only
-    // `INTERSECT` (or `EXCEPT`) is built inside `intersection()` and never
-    // enters this loop, yet its trailing `ORDER BY` must lift onto the combined
-    // output all the same — otherwise it stays on the last arm and binds that
-    // arm's columns rather than the intersect result named by the first arm.
-    guard case .setop = query else { return query }
-    // The trailing tail reaches the query level by two routes. When the last
-    // arm is a `SELECT`, that arm's greedy `select()` already consumed the
-    // `ORDER BY`/limit, so it sits on the rightmost arm and is lifted here (and
-    // trimmed off the arm, so it applies once). When the last arm is a `TABLE
-    // t`/`VALUES …` primary — neither carries a primary-level order (see
-    // `term`) — the tail is unconsumed at this point, so parse it here. Either
-    // way the tail lands on the `ordered` carrier over the union, resolved
-    // through the setop's output scope, not the last arm's columns.
-    let last = trailing(query)
-    if last.order != nil || last.limit != nil {
-      return .ordered(trim(query), distinct: false, order: last.order,
-                      limit: last.limit, generated: 0)
-    }
+    // ISO 9075: an `ORDER BY` / `OFFSET`·`FETCH` binds to the whole `<query
+    // expression body>` — a set operation, or a single primary — never to an
+    // arm. `select()` does not consume it, so no arm eats a query-level tail;
+    // parse it once here and apply it by scope.
     let order: Order? = try match(.order) ? try self.order() : nil
     let limit = try rowLimit()
     guard order != nil || limit != nil else { return query }
+    // A bare simple select (not parenthesised) carries the tail on itself,
+    // resolved under its own full scope — an `ORDER BY` over a non-projected
+    // column resolves, as a derived table's does; `select()` consumes no tail,
+    // so such a select has none of its own yet. Everything else — a set
+    // operation, or a parenthesised primary — carries the outer tail on an
+    // output-scoped `ordered` carrier, so `(SELECT n FROM B) ORDER BY m` faults
+    // on the non-output `m` rather than sorting by a hidden column. A
+    // parenthesised primary that already has its own inner tail rides a second
+    // carrier — `(SELECT … ORDER BY … FETCH 1) ORDER BY …` has two independent,
+    // separately scoped tails (the inner picks the operand's rows, the outer
+    // orders that primary's result), the ISO nesting boundary — not a `42601`
+    // duplicate-clause error.
+    if case let .select(select) = query, !parenthesized {
+      return .select(Select(distinct: select.distinct,
+                            projection: select.projection, from: select.from,
+                            joins: select.joins, predicate: select.predicate,
+                            grouping: select.grouping, having: select.having,
+                            order: order, limit: limit))
+    }
     return .ordered(query, distinct: false, order: order, limit: limit,
                     generated: 0)
-  }
-
-  /// The rightmost arm's `Select` of a set-operation `query` — the arm the
-  /// recursive-descent parse folds a trailing query-level `ORDER BY`/limit
-  /// onto, reached by descending each set operation's RIGHT term.
-  private func trailing(_ query: Query) -> Select {
-    switch query {
-    case let .select(select): select
-    case let .setop(_, _, right, _): trailing(right)
-    case let .ordered(inner, _, _, _, _): trailing(inner)
-    }
-  }
-
-  /// `query` with its last arm's `order`/`limit` cleared — the query-level tail
-  /// a set-operation `query` lifted onto the `ordered` carrier, removed from
-  /// the arm that greedily parsed it so it is applied once, over the union.
-  private func trim(_ query: Query) -> Query {
-    switch query {
-    case let .select(select):
-      .select(Select(distinct: select.distinct, projection: select.projection,
-                     from: select.from, joins: select.joins,
-                     predicate: select.predicate, grouping: select.grouping,
-                     having: select.having, order: nil, limit: nil))
-    case let .setop(kind, left, right, all):
-      .setop(kind, left, trim(right), all: all)
-    case let .ordered(inner, distinct, order, limit, generated):
-      .ordered(trim(inner), distinct: distinct, order: order, limit: limit,
-               generated: generated)
-    }
   }
 
   /// Parses `term (INTERSECT [ALL] term)*`, the inner set-operation tier,
@@ -330,42 +298,73 @@ internal struct Parser: ~Escapable {
   /// `query` tier folds a `UNION`/`EXCEPT` around it. `INTERSECT ALL` keeps
   /// duplicate rows to the lesser multiplicity; a bare `INTERSECT` removes
   /// them.
-  private mutating func intersection() throws(SQLError) -> Query {
-    var query = try term()
+  private mutating func intersection()
+      throws(SQLError) -> (query: Query, parenthesized: Bool) {
+    var (query, parenthesized) = try term()
     while try match(.intersect) {
       let all = try match(.all)
-      query = try .setop(.intersect, query, term(), all: all)
+      query = try .setop(.intersect, query, term().query, all: all)
+      // A set operation is no longer a single parenthesised primary, so an
+      // outer tail is output-scoped through the `.setop` carrier path anyway.
+      parenthesized = false
     }
-    return query
+    return (query, parenthesized)
   }
 
-  /// Parses a query primary — a `SELECT …`, the ISO `TABLE t` shorthand, or the
-  /// ISO `VALUES (…), …` table value constructor — the leaf both set-operation
-  /// tiers compose over.
+  /// Parses a query primary — a `SELECT …`, a parenthesised query expression
+  /// `( … )`, the ISO `TABLE t` shorthand, or the ISO `VALUES (…), …` table
+  /// value constructor — the leaf both set-operation tiers compose over.
+  ///
+  /// A parenthesised `( <query expression> )` is the ISO `<query primary>` that
+  /// groups a set operation explicitly and carries a per-operand `ORDER BY`/
+  /// `OFFSET`·`FETCH`: `(A UNION B) INTERSECT C` overrides the default
+  /// INTERSECT-binds-tighter precedence, and `(SELECT … ORDER BY … FETCH n)
+  /// UNION …` takes the top `n` of one operand before the union. A `(` in this
+  /// query-primary position always begins a parenthesised query — no other form
+  /// starts with one here — so it is consumed without lookahead. The inner
+  /// `query()` parses that operand's own tail inside the parentheses and binds
+  /// it (on the operand's select, or an `ordered` carrier over its union), a
+  /// plain `select`/`setop`/`ordered` `Query` the enclosing tier composes.
   ///
   /// `TABLE t` is exactly `SELECT * FROM t` (ISO 9075 `<explicit table>`): it
   /// lowers to the same AST a star-projection single-relation select builds — a
-  /// `.all` projection over one named `Relation`, no `WHERE`/`GROUP`/`HAVING`/
-  /// order/limit — so compile, execute, and the `SELECT *` column expansion all
-  /// apply unchanged and it composes with `UNION`/`INTERSECT`/`EXCEPT` as a
-  /// parenthesised select would. The operand is a bare table or view name (the
-  /// same `identifier` a relation names); a derived table is not admitted, as
-  /// `TABLE (…)` is not an ISO form. Ordering is a select-internal clause here,
-  /// so a `TABLE t ORDER BY …` tail is not accepted at this primary level — the
-  /// `SELECT * FROM t ORDER BY …` spelling carries an order.
+  /// `.all` projection over one named `Relation` — so compile, execute, and
+  /// the `SELECT *` column expansion all apply unchanged and it composes with
+  /// `UNION`/`INTERSECT`/`EXCEPT`. The operand is a bare table or view name
+  /// (the same `identifier` a relation names); a derived table is not admitted,
+  /// as `TABLE (…)` is not an ISO form. A trailing `TABLE t ORDER BY …` binds
+  /// to the enclosing query expression (`query()` takes it), as after any
+  /// primary — the primary itself carries no order.
   ///
   /// `VALUES (…), …` desugars to a `UNION ALL` of FROM-less constant selects
-  /// (see `values()`), so it too composes with the set-operation tiers as a
-  /// parenthesised select would and carries no primary-level ordering.
-  private mutating func term() throws(SQLError) -> Query {
+  /// (see `values()`); a trailing `ORDER BY`/limit binds to the enclosing
+  /// query expression, as after any primary.
+  private mutating func term()
+      throws(SQLError) -> (query: Query, parenthesized: Bool) {
+    if try match(.lparen) {
+      // A parenthesised `<query expression>` — the inner `query()` parses its
+      // own `ORDER BY`/limit inside the parentheses and binds it to this
+      // operand (a lone select carries it on itself, a set operation on an
+      // `ordered` carrier). The operand's tail is bounded by the parentheses;
+      // a trailing tail after the `)` is the enclosing query expression's,
+      // taken by that `query()`. A `(` in query-primary position always begins
+      // a parenthesised query — no other primary starts with one — so it is
+      // consumed without lookahead. The `parenthesized` flag rides back so the
+      // enclosing `query()` resolves any outer tail against this primary's
+      // output columns, not the from-clause scope hidden inside it.
+      let query = try query()
+      try expect(.rparen)
+      return (query, true)
+    }
     if try match(.table) {
       let name = try identifier()
-      return .select(Select(projection: .all, from: Relation(name: name)))
+      return (.select(Select(projection: .all, from: Relation(name: name))),
+              false)
     }
     if current?.kind == .values {
-      return try values()
+      return (try values(), false)
     }
-    return try .select(select())
+    return (.select(try select()), false)
   }
 
   /// Parses the ISO `<table value constructor>` `VALUES (v, …), (v, …), …` (the
@@ -588,20 +587,18 @@ internal struct Parser: ~Escapable {
     } else {
       nil
     }
-    let order: Order? = if try match(.order) {
-      try order()
-    } else {
-      nil
-    }
-    let limit = try rowLimit()
 
-    // The `GROUP BY` tail is stored as-parsed — a `.keys` ordinary key list (or
-    // none) or a `.sets` `GROUPING SETS (…)` list. A `.sets` is expanded into a
-    // `UNION ALL` of per-arm groupings at compile and schema time (by resolved
-    // identity, so an absent key NULLs correctly), not desugared here.
+    // ORDER BY / OFFSET·FETCH are not consumed here: they belong to the
+    // enclosing `<query expression>`, not this `<query specification>`, so
+    // `query()` parses the tail once over the whole body — no set-operation arm
+    // eats a query-level tail — and applies it (on a lone select, or an
+    // `ordered` carrier over a union). The `GROUP BY` tail is stored as-parsed:
+    // a `.keys` ordinary key list (or none) or a `.sets` `GROUPING SETS (…)`
+    // list expanded into a `UNION ALL` of per-arm groupings at compile and
+    // schema time (by resolved identity), not desugared here.
     return Select(distinct: distinct, projection: projection, from: from,
                   joins: joins, predicate: predicate, grouping: grouping,
-                  having: having, order: order, limit: limit)
+                  having: having, order: nil, limit: nil)
   }
 
   /// Parses `BY <element> (',' <element>)*` (the `GROUP` keyword is already
@@ -978,9 +975,11 @@ internal struct Parser: ~Escapable {
       guard let token = current else {
         throw .incomplete(expected: "a derived table '(SELECT …)'")
       }
-      // A derived table is any query, so `TABLE t` and `VALUES (…)` each open
-      // one as `SELECT` does.
-      guard [.select, .table, .values].contains(token.kind) else {
+      // A derived table is any query, so `TABLE t`, `VALUES (…)`, and a nested
+      // parenthesised query primary `((SELECT …))` each open one as `SELECT`
+      // does. There is no value-list alternative in a FROM position, so a
+      // leading `(` is unambiguously a nested query primary.
+      guard [.select, .table, .values, .lparen].contains(token.kind) else {
         throw .unexpected(token.kind.description,
                           expected: "a derived table '(SELECT …)'",
                           at: token.location)

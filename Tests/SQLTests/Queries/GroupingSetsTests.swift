@@ -566,8 +566,8 @@ struct GroupingSetsTests {
 
   @Test func `a recursive CTE whose anchor is a grouping-sets shape expands`()
       throws {
-    // The cross case the shared `CTE.canonical = query.expanded.unwound` peel
-    // enables: a RECURSIVE CTE whose anchor is a `GROUP BY GROUPING SETS`
+    // The cross case the shared `CTE.canonical = query.expanded.peeled` peel
+    // enables: a recursive CTE whose anchor is a `GROUP BY GROUPING SETS`
     // shape. `canonical` expands the anchor's `.sets` node to its `UNION ALL`
     // FIRST, so the recursive-shape recogniser peels the resulting inner
     // `((per-Region ∪ grand-total) ∪ recursive)` union — the same AST the

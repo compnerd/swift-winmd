@@ -6,7 +6,7 @@
 extension Projection {
   /// Compiles this scalar (FROM-less) `SELECT <expr-list>` projection into
   /// `Project(single)` — the projection evaluated against the one empty row the
-  /// `single` leaf yields.
+  /// `single` leaf yields — ordered and paged by any `order`/`limit` tail.
   ///
   /// The projection resolves against an empty schema (no columns), so only
   /// literals, scalar calls, and arithmetic over them lower; a `SELECT *` has
@@ -27,15 +27,37 @@ extension Projection {
   /// so this FROM-less projection cannot admit correlation even when handed the
   /// admitting `plans.rest` — the same cut `columns(of:)` applies on the schema
   /// path, keeping run and derive in lockstep.
+  ///
+  /// A trailing `ORDER BY`/`OFFSET`·`FETCH` (`order`/`limit`) orders and pages
+  /// that single row through the shared `shaped` plan shape, so a FROM-less
+  /// query expression's tail runs (`VALUES (1) ORDER BY 1`) rather than
+  /// faulting. An empty schema binds only an ordinal or an output-alias key —
+  /// the sole ISO keys over a FROM-less select, which has no source column to
+  /// order on — so an ordinary column key faults (`SQLError.column`) as it does
+  /// on the projection.
   internal func scalar(_ routines: Routines = [:],
-                       subquery: Resolution = .unsupported)
+                       subquery: Resolution = .unsupported,
+                       distinct: Bool = false,
+                       order: Order? = nil, limit: Limit? = nil)
       throws(SQLError) -> Plan {
     guard case .all = self else {
       let schema = Schema(width: 0, extent: 0, names: [], types: [],
                           virtuals: [])
-      let terms = try schema.terms(self, in: Relation(name: ""), routines,
+      let relation = Relation(name: "")
+      let terms = try schema.terms(self, in: relation, routines,
                                    subquery: subquery)
-      return .project(terms, .single)
+      var keys = Array<SortKey>()
+      if let order {
+        let names = self.outputs(count: terms.count)
+        keys = try schema.order(order, in: relation, terms, names, routines,
+                                subquery: subquery)
+        // Every FROM-less ORDER BY key is a select-list output already, so the
+        // DISTINCT rule (a key must be a projected value) rebinds none; the
+        // call still enforces it against a direct `Select`.
+        if distinct { keys = try SQLEngine.distinct(order.keys, keys, terms) }
+      }
+      return Plan.single.shaped(distinct: distinct, projection: terms,
+                                filter: nil, order: keys, limit: limit)
     }
     // `SELECT *` names every column of the relations in scope; a FROM-less
     // query has none, so there is nothing to expand.
@@ -351,10 +373,17 @@ extension Catalog where Self: ~Escapable {
     // d` resolves `d`'s width. It is per arm so the left arm's `d` never
     // leaks to the right (the arm-scoping fix); the width each check computes
     // matches what the arm actually produces at run.
+    // Compare each operand's real output width — its first arm's projection
+    // width less the hidden `generated` sort columns the carriers on the path
+    // appended (a parenthesised operand with an unprojected-aggregate ORDER BY
+    // carries one, trimmed at its carrier), so a valid one-column union of such
+    // an operand is not rejected on the leaked hidden column.
     let head = try augment(context, for: .select(query.first), rows: false)
     let tail = try augment(context, for: .select(right.first), rows: false)
-    let width = try arity(query.first, head)
-    let count = try arity(right.first, tail)
+    let width = try real(trimming: query.generated,
+                         of: arity(query.first, head))
+    let count = try real(trimming: right.generated,
+                         of: arity(right.first, tail))
     guard count == width else { throw .arity(width, count) }
     // Both arms of a set-operation subquery correlate against the same
     // enclosing scope, so each lowers under the shared `context.outer`. The
@@ -675,6 +704,27 @@ extension Catalog where Self: ~Escapable {
   /// and the correlated `existential` plan both compile/execute this shape, so
   /// a correlated EXISTS probes per outer row as an uncorrelated one does.
   internal borrowing func probed(_ query: Query) -> Query {
+    // An `ordered` carrier over a probable primary — a parenthesised
+    // `(SELECT …) ORDER BY … FETCH n` in EXISTS position — must probe its inner
+    // primary, not evaluate it as a leaf. Existence is order-independent, so
+    // the `ORDER BY` drops; the carrier's `DISTINCT`/`OFFSET`·`FETCH` affect
+    // cardinality, so they ride the probed inner (`FETCH FIRST 0 ROWS` probes
+    // zero, EXISTS false). Peel, probe the inner, re-wrap without the order.
+    if case let .ordered(inner, distinct, _, limit, _) = query {
+      // Rewriting the base projection to a constant collapses distinct rows to
+      // one (a `DISTINCT` on any carrier in the stack, or on the base select).
+      // A positive OFFSET on this carrier applied afterwards would then wrongly
+      // drop that lone row, so keep the whole query unrewritten when the offset
+      // depends on distinct cardinality — its select list and sort evaluate,
+      // exactly as a direct `SELECT DISTINCT … OFFSET k` (non-probable) does.
+      // `query.dedups` is carrier-transparent, so a `DISTINCT` reached only
+      // through a stacked `ordered` node (`((SELECT DISTINCT …) ORDER BY …)
+      // OFFSET 1`) still suppresses the rewrite. Otherwise probe the inner and
+      // drop this ORDER BY (existence is order-independent).
+      if query.dedups, (limit?.offset ?? 0) >= 1 { return query }
+      return .ordered(probed(inner), distinct: distinct, order: nil,
+                      limit: limit, generated: 0)
+    }
     guard case let .select(select) = query, select.probable else {
       return query
     }
@@ -1292,21 +1342,32 @@ extension Catalog where Self: ~Escapable {
     // overlay never overwrote the CTE, so no separate pre-augment context runs.
     let context = try augment(context, for: .select(select), rows: false)
     guard let relation = select.from else {
-      // A FROM-less select projects expressions over a single row; a `WHERE`,
-      // `GROUP BY`, `HAVING`, `ORDER BY`, `OFFSET`/`FETCH`, or `JOIN` has no
-      // relation to apply to. The parser never produces that shape, but a
-      // direct `Select(from: nil, …)` can, so reject it rather than silently
-      // ignore the clause — a scalar projection would drop a `GROUP
-      // BY`/`HAVING` otherwise.
+      // A FROM-less select projects expressions over a single row. A `WHERE`,
+      // `GROUP BY`, `HAVING`, or `JOIN` has no relation to apply to, so reject
+      // it rather than silently ignore the clause — a scalar projection would
+      // drop a `GROUP BY`/`HAVING` otherwise. `ORDER BY` and `OFFSET`/`FETCH`
+      // do apply: they order and page that single-row result (ISO), so the
+      // enclosing query expression's trailing tail on a FROM-less primary —
+      // `VALUES (1) ORDER BY 1`, `(SELECT 1 FETCH FIRST 0 ROWS ONLY) UNION …` —
+      // runs rather than faulting. The parser never produces a WHERE/GROUP/
+      // HAVING/JOIN here, but a direct `Select(from: nil, …)` can.
       let ungrouped = if case .keys([]) = select.grouping { true } else {
         false
       }
       guard select.joins.isEmpty, select.predicate == nil,
-          ungrouped, select.having == nil,
-          select.order == nil, select.limit == nil else {
+          ungrouped, select.having == nil else {
         throw .unsupported(
-            "a WHERE, GROUP BY, HAVING, ORDER BY, OFFSET/FETCH, or JOIN " +
-            "requires a FROM clause")
+            "a WHERE, GROUP BY, HAVING, or JOIN requires a FROM clause")
+      }
+      if let limit = select.limit {
+        // As on the FROM'd path, a direct `Limit` may carry negatives the
+        // executor would trap on (the parser yields only non-negative counts).
+        guard limit.offset >= 0 else {
+          throw .state("2201X", "OFFSET row count must be non-negative")
+        }
+        guard (limit.count ?? 0) >= 0 else {
+          throw .state("2201W", "FETCH row count must be non-negative")
+        }
       }
       // A scalar projection may still nest an uncorrelated subquery
       // (`SELECT CASE WHEN EXISTS (Q) …`); compile each once for its width and
@@ -1324,7 +1385,10 @@ extension Catalog where Self: ~Escapable {
       // `Term.parameter`, matching `columns(of:)`'s schema-path rejection.
       let plans = try subquery(of: select, context)
       return try select.projection.scalar(context.routines,
-                                          subquery: plans.rest)
+                                          subquery: plans.rest,
+                                          distinct: select.distinct,
+                                          order: select.order,
+                                          limit: select.limit)
     }
     // A LATERAL first FROM item has no preceding relation to correlate against,
     // so it is meaningless (and ISO forbids it) — fault rather than resolve a

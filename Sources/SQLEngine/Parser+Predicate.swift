@@ -318,12 +318,18 @@ extension Parser {
   /// into a `membership` (value-list) or a `within` (subquery) predicate over
   /// `left`.
   ///
-  /// After the opening `(`, one token of lookahead disambiguates the two forms:
-  /// a `SELECT` begins a subquery — `left [NOT] IN (query)`, the first-class
-  /// `Predicate.within` (the query may itself be a `UNION`) — and anything
-  /// else begins the value list, a non-empty run of comma-separated
-  /// expressions, the `Predicate.membership`. No rewind is needed: `SELECT`
-  /// never begins an expression, so the peek is unambiguous.
+  /// After the opening `(`, a `SELECT`/`TABLE`/`VALUES` begins a subquery —
+  /// `left [NOT] IN (query)`, the first-class `Predicate.within` (the query may
+  /// itself be a `UNION`) — the peek is unambiguous, as those keywords never
+  /// begin an expression. A leading `(` is genuinely ambiguous: it may begin a
+  /// nested query primary `IN ((SELECT …))` — a table subquery (membership) —
+  /// or a parenthesised value in a list `IN ((1), 2)` / `IN ((SELECT a),
+  /// (SELECT b))`. ISO tells them apart by whether the parenthesised content is
+  /// a single `<query expression>`: a `)` then closes the subquery, a `,`
+  /// continues a value list. That signal sits an unbounded distance past the
+  /// `(`, so speculatively parse a query and keep it only when a `)` follows
+  /// immediately; otherwise rewind the full cursor (lexer, current, and the
+  /// `pending` lookahead) and read the value list, as `composite()` rewinds.
   private mutating func membership(_ left: Expression, negated: Bool)
       throws(SQLError) -> Predicate {
     try expect(.lparen)
@@ -331,6 +337,18 @@ extension Parser {
       let query = try query()
       try expect(.rparen)
       return .within(left, query, negated: negated)
+    }
+    if current?.kind == .lparen {
+      let lexer = self.lexer
+      let token = self.current
+      let buffer = self.pending
+      if let query = try? query(), current?.kind == .rparen {
+        try expect(.rparen)
+        return .within(left, query, negated: negated)
+      }
+      self.lexer = lexer
+      self.current = token
+      self.pending = buffer
     }
     var values = [try expression()]
     while try match(.comma) {

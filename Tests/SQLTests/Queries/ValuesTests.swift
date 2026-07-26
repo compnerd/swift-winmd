@@ -254,4 +254,84 @@ struct ValuesTests {
       _ = try parse(query: "VALUES ()")
     }
   }
+
+  // MARK: - FROM-less query-expression tails
+
+  @Test func `a single-row VALUES takes a query-expression ORDER BY`() throws {
+    // A FROM-less primary is a single-row query, and the enclosing query
+    // expression's trailing ORDER BY orders that result — a no-op on one row,
+    // but the key still resolves. With no source column to order on, the key
+    // binds an ordinal or an output alias (the only ISO keys here): `ORDER BY 1`
+    // and `ORDER BY column1` both name the sole output. The schema derive agrees
+    // — the run compiles and validates the tail identically (run ≡ columns(of:)).
+    try store().expect("VALUES (1) ORDER BY 1", yields: [[1]])
+    try store().expect("VALUES (1) ORDER BY column1", yields: [[1]])
+    let columns = try store().columns(of:
+        parse(query: "VALUES (1) ORDER BY 1"), routines: .standard,
+        validate: true)
+    #expect(columns.map(\.name) == ["column1"])
+  }
+
+  @Test func `a FROM-less OFFSET or FETCH pages the single row`() throws {
+    // OFFSET/FETCH slices the one-row result exactly as it slices a FROM'd one:
+    // skipping the row or fetching zero rows yields the empty result.
+    try store().empty("VALUES (1) OFFSET 1 ROWS")
+    try store().empty("VALUES (1) FETCH FIRST 0 ROWS ONLY")
+    try store().expect("VALUES (1) FETCH FIRST 1 ROWS ONLY", yields: [[1]])
+  }
+
+  @Test func `a parenthesized FROM-less operand pages before a union`() throws {
+    // A parenthesised FROM-less operand carries its own FETCH, applied before
+    // the union: `FETCH FIRST 0 ROWS ONLY` drops its single row, leaving only
+    // the other arm. The cap sits below the projection, so a throwing select
+    // list on the dropped row never runs.
+    try store().expect(
+        "(SELECT 1 FETCH FIRST 0 ROWS ONLY) UNION ALL SELECT 2",
+        yields: [[2]])
+    try store().expect(
+        "(SELECT 1 / 0 FETCH FIRST 0 ROWS ONLY) UNION ALL SELECT 2",
+        yields: [[2]])
+  }
+
+  @Test func `a FROM-less OFFSET spares an unreachable throwing projection`()
+      throws {
+    // A positive OFFSET (with no ORDER BY, non-DISTINCT) pages out the single
+    // row below the projection, so a throwing select list never evaluates: the
+    // run yields no rows AND the schema derive treats the FROM-less result as
+    // single-row, so it marks the projection unreachable and does not validate
+    // it — neither faults (run ≡ columns(of:)).
+    try store().empty("SELECT 1 / 0 OFFSET 1 ROWS")
+    let columns = try store().columns(of:
+        parse(query: "SELECT 1 / 0 OFFSET 1 ROWS"), routines: .standard,
+        validate: true)
+    #expect(columns.count == 1)
+  }
+
+  @Test func `a FROM-less DISTINCT projects below the OFFSET so it still runs`()
+      throws {
+    // DISTINCT is the exception: its plan is `Limit(Distinct(Project(single)))`,
+    // so the projection evaluates over the single row (dedup needs it) before
+    // the OFFSET pages the result. A throwing select list therefore faults at
+    // run, and the derive validates the reachable projection alike — both raise
+    // `SQLError.divide`.
+    try store().expect("SELECT DISTINCT 1 / 0 OFFSET 1 ROWS", fails: .divide)
+    var raised: SQLError? = nil
+    do {
+      _ = try store().columns(of:
+          parse(query: "SELECT DISTINCT 1 / 0 OFFSET 1 ROWS"),
+          routines: .standard, validate: true)
+    } catch let error as SQLError {
+      raised = error
+    }
+    #expect(raised == .divide)
+  }
+
+  @Test func `a FROM-less ORDER BY faults on an unresolvable key`() throws {
+    // With no source relation an ORDER BY key that is neither an ordinal in
+    // range nor an output alias has nothing to bind, so it faults — the same
+    // `SQLError.column` the projection raises — and the run and schema derive
+    // fault alike.
+    try store().expect("VALUES (1) ORDER BY 2", fails: .column("2"))
+    try store().expect("VALUES (1) ORDER BY nope", fails: .column("nope"))
+  }
 }

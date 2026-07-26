@@ -100,17 +100,33 @@ extension Parser {
   /// expressions, possibly empty.
   private mutating func factor() throws(SQLError) -> Expression {
     if try match(.lparen) {
-      // one token of lookahead after `(` disambiguates a scalar subquery from a
-      // parenthesised expression: a `SELECT`, `TABLE`, or `VALUES` begins a
-      // subquery — `(query)`, the first-class `Expression.subquery` (the query
-      // may itself be a `UNION`) — and anything else begins a parenthesised
-      // expression. No rewind is needed: none of these keywords begins an
-      // expression, so the peek is unambiguous, exactly as the `IN (…)` and
-      // `EXISTS (…)` lookaheads are.
+      // A `SELECT`, `TABLE`, or `VALUES` after `(` unambiguously begins a
+      // scalar subquery — `(query)`, the first-class `Expression.subquery` (the
+      // query may itself be a `UNION`) — as none of those keywords begins an
+      // expression. A leading `(` is ambiguous: it may open a nested query
+      // primary `((SELECT …) UNION …)` (a subquery) or a parenthesised
+      // expression `((1) + 2)`. They are told apart only by what follows the
+      // parenthesised content — a `)` closes a query expression, an operator
+      // continues an expression — so speculatively parse a query and keep it
+      // only when a `)` follows immediately, else rewind the full cursor
+      // (lexer, current, and the `pending` lookahead) and read the expression,
+      // as the `IN (…)` lookahead and `composite()` rewind.
       if [.select, .table, .values].contains(current?.kind) {
         let query = try query()
         try expect(.rparen)
         return .subquery(query)
+      }
+      if current?.kind == .lparen {
+        let lexer = self.lexer
+        let token = self.current
+        let buffer = self.pending
+        if let query = try? query(), current?.kind == .rparen {
+          try expect(.rparen)
+          return .subquery(query)
+        }
+        self.lexer = lexer
+        self.current = token
+        self.pending = buffer
       }
       let expression = try expression()
       try expect(.rparen)

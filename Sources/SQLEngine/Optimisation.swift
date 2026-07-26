@@ -240,6 +240,15 @@ extension Catalog where Self: ~Escapable {
   internal borrowing func optimise(_ plan: Plan, _ query: Query,
                                    _ overlay: Context)
       throws(SQLError) -> Plan {
+    // See through an `ordered` carrier over a set operation nested as an arm,
+    // as the execute-side `setop`/`arms` do: a suffix-bearing parenthesised
+    // set operation reaches this recursion as an `.ordered(.setop(…))` arm
+    // whose plan is a `.shaped` carrier stack. Peel to the carrier-transparent
+    // `core` so the wrapper descent below fires and each inner arm optimises
+    // under its own augment — otherwise a filtered `.scan("d")` arm would
+    // seek-optimise against an unbound `d` and fault `.relation`. `core` leaves
+    // a bare setop or a leaf select unchanged.
+    let query = query.core
     if case let .setop(kind, left, right, all, types, widened) = plan,
         case let .setop(_, leftQuery, rightQuery, _) = query {
       return try .setop(kind, optimise(left, leftQuery, overlay),

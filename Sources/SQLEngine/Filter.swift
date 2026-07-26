@@ -1264,6 +1264,18 @@ extension Catalog where Self: ~Escapable {
       return try combine(kind, arms(left, leftQuery, context),
                          arms(right, rightQuery, context), all, types: types)
     }
+    // An arm that is itself a suffix-bearing parenthesised set operation
+    // (`… UNION (… UNION … ORDER BY V FETCH n)`) reaches here as an
+    // `.ordered(.setop(…))` whose plan is a `.shaped` carrier stack over the
+    // setop, NOT the bare `.setop` this recursion splits — so descend the
+    // carrier to that setop leaf through the same descender the entry and view
+    // paths use (`execute(_:carrying:)`), which per-arm augments the inner
+    // arms' derived aliases there. Treating the whole carrier as one leaf would
+    // whole-query augment it, binding none of those aliases (arms are
+    // SELECT-scoped) — the `.relation` fault this closes.
+    if case .setop = query.core {
+      return try execute(plan, carrying: query.core, context)
+    }
     let augmented =
         try augment(context.validating(false), for: query, rows: true)
     return try execute(plan, augmented)

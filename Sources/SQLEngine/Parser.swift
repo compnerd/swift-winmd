@@ -132,11 +132,31 @@ internal struct Parser: ~Escapable {
   // full cursor — lexer, current, AND this lookahead buffer — on rewind.
   internal var pending: Token?
 
+  /// The current query/predicate/expression nesting depth, bounded by
+  /// `Limits.nesting` so pathologically nested input faults `54001` (`overrun`)
+  /// rather than overrunning the native stack. Only nesting counts: `query`,
+  /// `predicate`, and `expression` each raise it on entry (paired with a
+  /// `defer` that lowers it), and every construct that recurses on nesting — a
+  /// parenthesised query/predicate/expression, a subquery, a `CASE`, a nested
+  /// `GROUPING SETS` — descends through one of those (or the grouping
+  /// `element`). A bare chain (`a OR b …`, `a UNION b …`) iterates rather than
+  /// recurses, so it adds no depth. `internal`, not `private`: the `predicate`
+  /// and `expression` heads live in other parser extension files.
+  internal var depth = 0
+
   @_lifetime(copy lexer)
   internal init(_ lexer: consuming Lexer) throws(SQLError) {
     self.lexer = lexer
     self.current = try self.lexer.next()
     self.pending = nil
+  }
+
+  /// The `54001` (statement too complex) fault raised when `depth` passes
+  /// `Limits.nesting`. Each nesting head registers its `defer` to lower `depth`
+  /// before guarding, so the fault unwinds with the counter balanced — a
+  /// speculative parse (`try? query()`) that hits it leaves `depth` intact.
+  internal var overrun: SQLError {
+    .state("54001", "query nesting is too deep (limit \(Limits.nesting))")
   }
 
   // MARK: - Statement
@@ -251,6 +271,9 @@ internal struct Parser: ~Escapable {
   /// precedence. `ALL` keeps duplicate rows per the operator's multiplicity; a
   /// bare operator removes them — the distinction the engine honours.
   internal mutating func query() throws(SQLError) -> Query {
+    depth += 1
+    defer { depth -= 1 }
+    guard depth <= Limits.nesting else { throw overrun }
     var (query, parenthesized) = try intersection()
     while let kind: SetOperation = if try match(.union) { .union }
                                    else if try match(.except) { .except }
@@ -692,6 +715,12 @@ internal struct Parser: ~Escapable {
   /// disambiguation applies at the top level and inside a `GROUPING SETS` list.
   private mutating func element() throws(SQLError)
       -> (sets: Array<Array<Expression>>, construct: Bool) {
+    // A nested `GROUPING SETS (GROUPING SETS (…))` recurses `element`→`sets`→
+    // `element` without passing through query/predicate/expression, so it needs
+    // its own depth guard against a stack overrun.
+    depth += 1
+    defer { depth -= 1 }
+    guard depth <= Limits.nesting else { throw overrun }
     if case let .identifier(text) = current?.kind,
         text.uppercased() == "GROUPING",
         case let .identifier(next) = try secondary()?.kind,
@@ -904,18 +933,22 @@ internal struct Parser: ~Escapable {
     return result
   }
 
-  /// The caps bounding `GROUP BY` grouping-set expansion — the single source
-  /// of truth for every artificial limit the desugar enforces, so they are
-  /// tracked and tunable in one place (every guard below cites one of these).
-  /// `sets` is the most grouping sets a clause may expand to; `references` the
-  /// most expression references those sets may hold in total. Both bound a
-  /// compact but heavily-duplicating clause — a wide `CUBE`/`ROLLUP`, a cross
-  /// product, a concatenation — from exhausting memory. The per-construct arity
-  /// guards derive from `sets`: `CUBE ≤ 12` units (2¹² = `sets`) and `ROLLUP ≤
-  /// 4095` units (n + 1 ≤ `sets`) reject before the 2ⁿ / prefix expansion.
-  private enum Limits {
+  /// The parser's artificial caps — the single source of truth for every
+  /// tunable limit, tracked in one place (every guard cites one). `sets` is the
+  /// most grouping sets a `GROUP BY` may expand to; `references` the most
+  /// expression references those sets may hold in total: both bound a compact
+  /// but heavily-duplicating clause — a wide `CUBE`/`ROLLUP`, a cross product,
+  /// a concatenation — from exhausting memory, and the per-construct arity
+  /// guards derive from `sets` (`CUBE ≤ 12` units, 2¹² = `sets`; `ROLLUP ≤
+  /// 4095` units, n + 1 ≤ `sets`). `nesting` is the deepest
+  /// query/predicate/expression nesting the parser accepts before an `overrun`
+  /// (`54001`) fault, set well below the depth at which native recursion
+  /// overruns a conventional thread stack (~10 KB of frames per level in a
+  /// debug build) yet far above any real query.
+  internal enum Limits {
     static let sets = 4096
     static let references = 1 << 20
+    static let nesting = 32
   }
 
   /// The total expression references across a grouping-set list — the memory an

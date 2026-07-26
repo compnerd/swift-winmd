@@ -45,7 +45,10 @@ extension Parser {
 
   /// Parses a scalar expression at the lowest arithmetic precedence (`+` `-`).
   internal mutating func expression() throws(SQLError) -> Expression {
-    try additive()
+    depth += 1
+    defer { depth -= 1 }
+    guard depth <= Limits.nesting else { throw overrun }
+    return try additive()
   }
 
   /// Parses `multiplicative (('+' | '-' | '||') multiplicative)*`,

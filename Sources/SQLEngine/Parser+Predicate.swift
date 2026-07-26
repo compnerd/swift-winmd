@@ -6,7 +6,10 @@ extension Parser {
 
   /// Parses a predicate at the lowest precedence (`OR`).
   internal mutating func predicate() throws(SQLError) -> Predicate {
-    try disjunction()
+    depth += 1
+    defer { depth -= 1 }
+    guard depth <= Limits.nesting else { throw overrun }
+    return try disjunction()
   }
 
   /// Parses `conjunction (OR conjunction)*`, left-associative.
@@ -36,16 +39,35 @@ extension Parser {
   /// `membership`/`between`/`like` carry their `NOT`; a prefix `NOT` before
   /// anything else is the ordinary boolean negation.
   private mutating func negation() throws(SQLError) -> Predicate {
-    if try match(.not) {
+    // Consume a prefix `NOT` run iteratively rather than recursing per `NOT`,
+    // so an attacker-controlled `NOT NOT … x` cannot overrun the native stack.
+    // The run is bounded by `Limits.nesting` — each `NOT` also stacks a `.not`
+    // AST node that compile/execute later recurse over, so an unbounded run
+    // would just move the overrun downstream — faulting `overrun` (54001) past
+    // the limit. The `NOT` adjacent to an `EXISTS` folds into its `negated`
+    // flag (as before); the remaining run wraps the operand in that many
+    // `.not`s.
+    var nots = 0
+    while try match(.not) {
       if try match(.exists) {
-        return try exists(negated: true)
+        return negate(try exists(negated: true), nots)
       }
-      return try .not(negation())
+      nots += 1
+      guard nots <= Limits.nesting else { throw overrun }
     }
     if try match(.exists) {
-      return try exists(negated: false)
+      return negate(try exists(negated: false), nots)
     }
-    return try primary()
+    return negate(try primary(), nots)
+  }
+
+  /// `base` wrapped in `count` boolean negations — the `.not` chain a prefix
+  /// `NOT` run builds, applied without recursion so its length is bounded by
+  /// the caller's `Limits.nesting` guard, not the native stack.
+  private func negate(_ base: Predicate, _ count: Int) -> Predicate {
+    var result = base
+    for _ in 0 ..< count { result = .not(result) }
+    return result
   }
 
   /// Parses the `(query)` tail of `[NOT] EXISTS (query)` — the `EXISTS` is

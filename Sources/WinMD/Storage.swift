@@ -10,10 +10,12 @@
 /// trivial view: a `Span<Table>` into the relations plus the read spans. The
 /// existing `~Escapable` lifetime dependency keeps it sound.
 ///
-/// It is `package`-scoped (along with the members the query scan reads) so the
-/// SQL-engine adapter, which conforms it to the engine's `Catalog`, reaches it
-/// across the module boundary.
-package struct Storage: ~Escapable {
+/// The type is `public` — it is the readable handle a caller opens a
+/// `SQLEngineWinMD.WinMDDatabase` over — while the byte-level members the query
+/// scan reads stay `package`, reached by the SQL-engine adapter that conforms
+/// it to the engine's `Catalog` across the module boundary. A caller obtains
+/// one from a mapped file through `Database.storage`, not by assembling it.
+public struct Storage: ~Escapable {
   /// The backing buffer.
   internal let bytes: RawSpan
 

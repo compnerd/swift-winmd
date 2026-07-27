@@ -92,10 +92,11 @@ public struct Database: ~Escapable {
   ///
   /// The row cursors only read out of the backing buffer and the open tables,
   /// so they carry this trivial view rather than the whole `Database` and avoid
-  /// retaining the relations buffer on every copy. `package` so the SQL-engine
-  /// adapter, which conforms `Storage` to the engine's `Catalog`, opens it from
-  /// the database.
-  package var storage: Storage {
+  /// retaining the relations buffer on every copy. `public` so a caller opens a
+  /// `SQLEngineWinMD.WinMDDatabase` — and the SQL-engine adapter conforms
+  /// `Storage` to the engine's `Catalog` — over the mapped file's readable
+  /// state.
+  public var storage: Storage {
     @_lifetime(borrow self)
     get {
       Storage(bytes: bytes, relations: relations.span, strings: string,

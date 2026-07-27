@@ -1,10 +1,10 @@
 // Copyright © 2026 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-internal import SQLEngine
+package import SQLEngine
 internal import SQLStandard
-internal import WinMDSynthesis
-internal import WinMD
+package import WinMDSynthesis
+package import WinMD
 
 /// The WinMD → SQL-engine adapter.
 ///
@@ -61,7 +61,7 @@ extension WinMD.Storage: SQLEngine.Catalog {
   /// the database has no table for yields `nil`, which the engine reports as
   /// `SQLError.relation`.
   @_lifetime(borrow self)
-  internal borrowing func table(named name: String) -> WinMDRelation? {
+  package borrowing func table(named name: String) -> WinMDRelation? {
     for index in 0 ..< tables.count {
       if tables[index].description.caseInsensitiveCompare(name)
           == .orderedSame {
@@ -73,7 +73,7 @@ extension WinMD.Storage: SQLEngine.Catalog {
 
   /// The schema names of every open table — the `INFORMATION_SCHEMA` overlay's
   /// base-relation enumeration, mapped from the database's open relations.
-  internal borrowing func relations() -> Array<String> {
+  package borrowing func relations() -> Array<String> {
     var names = Array<String>()
     names.reserveCapacity(tables.count)
     for index in 0 ..< tables.count {
@@ -98,24 +98,24 @@ extension WinMD.Storage: SQLEngine.Catalog {
 /// no console I/O; `Shell` drives it. It mirrors the `~Escapable`/`@_lifetime(
 /// borrow …)` + `copy storage` pattern of `WinMDRelation`, vending the storage's
 /// own `WinMDRelation` so the engine plans over the same source.
-internal struct Session: SQLEngine.Catalog, ~Escapable {
+package struct Session: SQLEngine.Catalog, ~Escapable {
   /// The borrowed base storage the session's tables read from.
-  internal let storage: WinMD.Storage
+  package let storage: WinMD.Storage
 
   /// The views the session has registered, keyed case-folded.
-  internal var registered: Dictionary<String, View>
+  package var registered: Dictionary<String, View>
 
   /// The routines the session resolves a call against — the WinMD-domain UDFs
   /// and the standard prelude (`Session.routines`), plus every scalar function a
   /// `CREATE FUNCTION` has defined this session. A `SELECT` and the schema
   /// derive resolve calls through it, so a session-defined function is reachable
   /// from a later query exactly as a registered view is.
-  internal var functions: Routines
+  package var functions: Routines
 
   /// Opens a session over `storage`, seeding the bundled COM-interface views —
   /// or, where a `-I` `search` directory shadows or adds one, its view.
   @_lifetime(borrow storage)
-  internal init(_ storage: borrowing WinMD.Storage,
+  package init(_ storage: borrowing WinMD.Storage,
                 search: Array<String> = []) {
     self.storage = copy storage
     self.registered = Session.bundled(search: search)
@@ -126,7 +126,7 @@ internal struct Session: SQLEngine.Catalog, ~Escapable {
   /// test drives to register a custom or overriding view set without the
   /// bundled seed.
   @_lifetime(borrow storage)
-  internal init(_ storage: borrowing WinMD.Storage,
+  package init(_ storage: borrowing WinMD.Storage,
                 _ views: Dictionary<String, View>) {
     self.storage = copy storage
     self.registered = views
@@ -135,7 +135,7 @@ internal struct Session: SQLEngine.Catalog, ~Escapable {
 
   /// Registers `view` under `name` (case-folded, the way `view(named:)`
   /// resolves it) — the `CREATE VIEW` path.
-  internal mutating func register(_ name: String, _ view: View) {
+  package mutating func register(_ name: String, _ view: View) {
     registered[name.lowercased()] = view
   }
 
@@ -143,23 +143,23 @@ internal struct Session: SQLEngine.Catalog, ~Escapable {
   /// session's routines — the `CREATE FUNCTION` path, mirroring `register` for a
   /// view. The body is lowered against its parameters here, so a body naming an
   /// undeclared parameter faults at definition.
-  internal mutating func register(_ name: String, _ function: Function)
+  package mutating func register(_ name: String, _ function: Function)
       throws(SQLError) {
     functions = try functions.registering(name, function)
   }
 
   @_lifetime(borrow self)
-  internal borrowing func table(named name: String) -> WinMDRelation? {
+  package borrowing func table(named name: String) -> WinMDRelation? {
     storage.table(named: name)
   }
 
-  internal borrowing func view(named name: String) -> View? {
+  package borrowing func view(named name: String) -> View? {
     registered[name.lowercased()]
   }
 
   /// The base relations the session exposes — the storage's open tables, the
   /// same set `table(named:)` resolves against.
-  internal borrowing func relations() -> Array<String> {
+  package borrowing func relations() -> Array<String> {
     storage.relations()
   }
 
@@ -168,7 +168,7 @@ internal struct Session: SQLEngine.Catalog, ~Escapable {
   /// them with a `'VIEW'` table type beside the base `relations()`. The stored
   /// map is keyed case-folded; a view's own declared name is not retained, so
   /// the folded keys are the names the overlay reports.
-  internal borrowing func views() -> Array<String> {
+  package borrowing func views() -> Array<String> {
     Array(registered.keys)
   }
 }
@@ -188,7 +188,7 @@ extension Session {
   /// (`Routines.standard`, e.g. `BITAND`) is folded in here so it reaches the
   /// session and render paths, which pass these routines EXPLICITLY rather than
   /// relying on the engine's default seeding.
-  internal static var routines: Routines {
+  package static var routines: Routines {
     // `GUID` returns the UUID as text over one blob argument, so it declares
     // both its `.text` return type — the result type the schema walk and the
     // `INFORMATION_SCHEMA` `data_type` a view's `GUID(...)` column reports read
@@ -290,7 +290,7 @@ extension Session {
 /// 1-based index, trivially monotonic), on the owner foreign key over a
 /// list-child (whose owning run is monotonic in row order), and on the table's
 /// intrinsic sort key when the database physically sorts the table.
-internal struct WinMDRelation: SQLEngine.Table, ~Escapable {
+package struct WinMDRelation: SQLEngine.Table, ~Escapable {
   /// The borrowed storage the relation reads from.
   private let storage: WinMD.Storage
 
@@ -298,19 +298,19 @@ internal struct WinMDRelation: SQLEngine.Table, ~Escapable {
   private let table: WinMD.Table
 
   @_lifetime(borrow storage)
-  internal init(_ storage: borrowing WinMD.Storage, _ table: WinMD.Table) {
+  package init(_ storage: borrowing WinMD.Storage, _ table: WinMD.Table) {
     self.storage = copy storage
     self.table = table
   }
 
   /// The number of real columns — the extent of a `SELECT *` projection. The
   /// `Id` and owner-foreign-key virtual columns sit past it.
-  internal var width: Int {
+  package var width: Int {
     table.schema.fields.count
   }
 
   /// The real column names, in ordinal order — the schema's field names.
-  internal var names: Array<String> {
+  package var names: Array<String> {
     var names = Array<String>()
     names.reserveCapacity(table.schema.fields.count)
     for index in 0 ..< table.schema.fields.count {
@@ -324,7 +324,7 @@ internal struct WinMDRelation: SQLEngine.Table, ~Escapable {
   /// `#Blob` heap index a `.blob`, every other column (a constant, a
   /// foreign-key index, another heap) an `.integer`. The virtual columns are
   /// not typed here.
-  internal var types: Array<ValueType> {
+  package var types: Array<ValueType> {
     var types = Array<ValueType>()
     types.reserveCapacity(table.schema.fields.count)
     for index in 0 ..< table.schema.fields.count {
@@ -343,7 +343,7 @@ internal struct WinMDRelation: SQLEngine.Table, ~Escapable {
   /// The virtual column names, in ordinal order — `Id` at `width`, then its
   /// join keys: the owner foreign key (on a list-owned table only) leading the
   /// coded-index join keys.
-  internal var virtuals: Array<String> {
+  package var virtuals: Array<String> {
     let owner = self.owner.map { [$0] } ?? [] // the list-ownership key
     return ["Id"] // the universal identity, at `width`
         + owner // present only on a list-owned table
@@ -353,7 +353,7 @@ internal struct WinMDRelation: SQLEngine.Table, ~Escapable {
   /// One past the highest ordinal this relation can address — its real `width`
   /// plus the universal `Id` and its join keys (the owner foreign key when
   /// list-owned, then the coded-index join keys).
-  internal var extent: Int {
+  package var extent: Int {
     width // real fields
         + 1 // `Id`
         + (owner == nil ? 0 : 1) // the owner foreign key
@@ -385,7 +385,7 @@ internal struct WinMDRelation: SQLEngine.Table, ~Escapable {
     owner == nil ? nil : width + 1
   }
 
-  internal func ordinal(of name: String) -> Int? {
+  package func ordinal(of name: String) -> Int? {
     for column in 0 ..< table.schema.fields.count
         where "\(table.schema.fields[column].name)"
                   .caseInsensitiveCompare(name) == .orderedSame {
@@ -411,7 +411,7 @@ internal struct WinMDRelation: SQLEngine.Table, ~Escapable {
     return nil
   }
 
-  internal func bound(_ column: Int, _ value: Int, strict: Bool) -> Int? {
+  package func bound(_ column: Int, _ value: Int, strict: Bool) -> Int? {
     let count = Int(table.rows)
 
     // `Id` is a dense 1-based index, so the rows are stored in `Id` order
@@ -477,7 +477,7 @@ internal struct WinMDRelation: SQLEngine.Table, ~Escapable {
   /// is not monotonic. A range must not consume its boundary — the engine seeks
   /// its equality (the join re-tests per row) and scans a range. Every other
   /// column is ordered where it is seekable.
-  internal func ordered(_ column: Int) -> Bool {
+  package func ordered(_ column: Int) -> Bool {
     key(for: column) == nil
   }
 
@@ -521,7 +521,7 @@ internal struct WinMDRelation: SQLEngine.Table, ~Escapable {
   }
 
   @_lifetime(borrow self)
-  internal borrowing func cursor() -> WinMDCursor {
+  package borrowing func cursor() -> WinMDCursor {
     WinMDCursor(storage, table, WinMDRelation.Link(storage, table))
   }
 }
@@ -538,24 +538,24 @@ extension WinMDRelation {
   /// `<ColumnName>_<TargetSchemaName>` the join key is exposed under. A cell
   /// whose decoded tag is `tag` and whose row is non-null yields that row's
   /// 1-based `Id` in `target`; any other cell yields SQL `NULL`.
-  internal struct Key {
+  package struct Key {
     /// The ordinal of the real coded-index column.
-    internal let column: Int
+    package let column: Int
     /// The coded index the column encodes.
-    internal let kind: CodedIndex.Type
+    package let kind: CodedIndex.Type
     /// The tag selecting `target` among the coded index's tables.
-    internal let tag: Int
+    package let tag: Int
     /// The candidate target table the key navigates to.
-    internal let target: TableSchema.Type
+    package let target: TableSchema.Type
     /// The join key's exposed name, `<ColumnName>_<TargetSchemaName>`.
-    internal let name: String
+    package let name: String
 
     /// The join keys a single coded-index `column` named `name` of kind `kind`
     /// admits — one per non-nil candidate target table, tagged by its position
     /// in `kind.tables` and named `<name>_<TargetSchemaName>`. The shared
     /// per-column expansion `WinMDRelation.keys` and `WinMDRow.keys` both build
     /// their list from.
-    internal static func all(column: Int, named name: String,
+    package static func all(column: Int, named name: String,
                              kind: CodedIndex.Type) -> Array<Key> {
       var keys = Array<Key>()
       for tag in 0 ..< kind.tables.count {
@@ -577,7 +577,7 @@ extension WinMDRelation {
   /// ordinal then by the target's tag within `kind.tables`. The naming is
   /// `<ColumnName>_<TargetSchemaName>`. Schema-driven: no table or column is
   /// special-cased.
-  internal var keys: Array<Key> {
+  package var keys: Array<Key> {
     let fields = table.schema.fields
     var keys = Array<Key>()
     for column in 0 ..< fields.count {
@@ -597,11 +597,11 @@ extension WinMDRelation {
   /// A list-child's link to its owning parent: the parent's open table and the
   /// ordinal of the parent's list column (the column whose run names this
   /// child's rows).
-  internal struct Link {
+  package struct Link {
     /// The parent's open table.
-    internal let parent: WinMD.Table
+    package let parent: WinMD.Table
     /// The ordinal of the parent's list column.
-    internal let column: Int
+    package let column: Int
 
     /// The list link for `child`, or `nil` if `child` is not a list-child of
     /// any of the schema's list relationships.
@@ -612,7 +612,7 @@ extension WinMDRelation {
     /// EventDef, `PropertyMap.PropertyList`(1)→PropertyDef. The parent's open
     /// table is looked up by name among the database's relations; an absent
     /// parent (a database without the owning table) is no link.
-    internal init?(_ storage: borrowing WinMD.Storage,
+    package init?(_ storage: borrowing WinMD.Storage,
                    _ child: borrowing WinMD.Table) {
       for index in Self.lists.indices
           where Self.lists[index].child
@@ -649,7 +649,7 @@ extension WinMD.Storage {
   /// the runs partitioning the child rows in parent order. Binary-search the
   /// parent rows for the one whose run contains `row`: the last parent whose
   /// 0-based run start is `<= row`. The parent's 1-based `Id` is `p + 1`.
-  internal func owner(of row: Int, _ link: WinMDRelation.Link) -> Int {
+  package func owner(of row: Int, _ link: WinMDRelation.Link) -> Int {
     let cursor = WinMD.Cursor(copy self, link.parent)
     var lo = 0
     var hi = cursor.count
@@ -674,7 +674,7 @@ extension WinMD.Storage {
 ///
 /// It wraps WinMD's own `~Escapable` `Cursor` and carries the relation's list
 /// link, so the rows it vends can compute the owner foreign-key column.
-internal struct WinMDCursor: SQLEngine.Cursor, ~Escapable {
+package struct WinMDCursor: SQLEngine.Cursor, ~Escapable {
   /// The borrowed storage the cursor reads from.
   private let storage: WinMD.Storage
 
@@ -685,19 +685,19 @@ internal struct WinMDCursor: SQLEngine.Cursor, ~Escapable {
   private let link: WinMDRelation.Link?
 
   @_lifetime(borrow storage)
-  internal init(_ storage: borrowing WinMD.Storage, _ table: WinMD.Table,
+  package init(_ storage: borrowing WinMD.Storage, _ table: WinMD.Table,
                _ link: WinMDRelation.Link?) {
     self.storage = copy storage
     self.cursor = WinMD.Cursor(copy storage, table)
     self.link = link
   }
 
-  internal var count: Int {
+  package var count: Int {
     cursor.count
   }
 
   @_lifetime(copy self)
-  internal borrowing func row(_ index: Int) -> WinMDRow? {
+  package borrowing func row(_ index: Int) -> WinMDRow? {
     guard let tuple = cursor[index] else { return nil }
     return WinMDRow(tuple, storage, link)
   }
@@ -718,7 +718,7 @@ internal struct WinMDCursor: SQLEngine.Cursor, ~Escapable {
 /// directly. A coded-index join-key ordinal decodes a coded-index cell to the
 /// target's 1-based `Id`, or SQL `NULL` when the cell points elsewhere or is
 /// null.
-internal struct WinMDRow: SQLEngine.Row, ~Escapable {
+package struct WinMDRow: SQLEngine.Row, ~Escapable {
   /// The WinMD row this view reads.
   private let tuple: WinMD.Tuple
 
@@ -729,7 +729,7 @@ internal struct WinMDRow: SQLEngine.Row, ~Escapable {
   private let link: WinMDRelation.Link?
 
   @_lifetime(copy tuple, copy storage)
-  internal init(_ tuple: borrowing WinMD.Tuple,
+  package init(_ tuple: borrowing WinMD.Tuple,
                 _ storage: borrowing WinMD.Storage,
                 _ link: WinMDRelation.Link?) {
     self.tuple = copy tuple
@@ -737,7 +737,7 @@ internal struct WinMDRow: SQLEngine.Row, ~Escapable {
     self.link = link
   }
 
-  internal subscript(_ column: Int) -> Value {
+  package subscript(_ column: Int) -> Value {
     borrowing get {
       // The real fields are `[0, count)`; `Id` is `count`, then the join
       // keys follow it.
@@ -811,7 +811,7 @@ extension WinMD.Storage {
   /// The open table whose schema name is `schema`, resolved case-insensitively
   /// against the database's relations — the signature decode's table lookup, the
   /// same keying `WinMDRelation.Link` uses to find a list parent.
-  internal borrowing func opened(_ schema: String) -> WinMD.Table? {
+  package borrowing func opened(_ schema: String) -> WinMD.Table? {
     for index in 0 ..< tables.count
         where tables[index].description
                   .caseInsensitiveCompare(schema) == .orderedSame {
@@ -830,7 +830,7 @@ extension WinMD.Storage {
   /// its `prototype` signature, builds a `Resolver` over the storage, and
   /// decodes the return. `nil` mirrors the old NULL — an absent row, an
   /// undecodable signature, or an unresolvable one.
-  internal borrowing func decode(return method: Int,
+  package borrowing func decode(return method: Int,
                                  generics: Array<String>? = nil,
                                  in dialect: Dialect) -> String? {
     guard let table = opened("MethodDef") else { return nil }
@@ -859,7 +859,7 @@ extension WinMD.Storage {
   /// rather than indexing a negative row. The parameter's own `Name` is the
   /// `System.Guid` `IID`/`CLSID` hint; for any other type the decoder ignores
   /// it, so threading it is always safe.
-  internal borrowing func decode(parameter: Int,
+  package borrowing func decode(parameter: Int,
                                  generics: Array<String>? = nil,
                                  for dialect: Dialect) -> String? {
     guard let table = opened("Param") else { return nil }

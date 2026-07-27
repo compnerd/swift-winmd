@@ -12,6 +12,7 @@ let _ =
               .library(name: "SQLEngine", targets: ["SQLEngine"]),
               .library(name: "SQLStandard", targets: ["SQLStandard"]),
               .library(name: "WinMDSynthesis", targets: ["WinMDSynthesis"]),
+              .library(name: "SQLEngineWinMD", targets: ["SQLEngineWinMD"]),
               .library(name: "Decant", targets: ["Decant"]),
             ],
             dependencies: [
@@ -80,9 +81,39 @@ let _ =
               .testTarget(name: "WinMDSynthesisTests",
                           dependencies: ["WinMDSynthesis"]),
 
+              // SQLEngineWinMD
+              .target(name: "SQLEngineWinMD",
+                      dependencies: [
+                        "WinMD",
+                        "WinMDSynthesis",
+                        "SQLEngine",
+                        "SQLStandard",
+                      ],
+                      resources: [
+                        .copy("Resources"),
+                      ],
+                      swiftSettings: [
+                        .enableExperimentalFeature("Lifetimes"),
+                        .enableUpcomingFeature("InternalImportsByDefault"),
+                      ]),
+              .testTarget(name: "SQLEngineWinMDTests",
+                          dependencies: [
+                            "SQLEngineWinMD",
+                            "SQLEngine",
+                            "SQLStandard",
+                            "WinMD",
+                            "WinMDSynthesis",
+                            .product(name: "Mustache",
+                                     package: "swift-mustache"),
+                          ],
+                          swiftSettings: [
+                            .enableExperimentalFeature("Lifetimes"),
+                          ]),
+
               // winmd-inspect
               .executableTarget(name: "winmd-inspect",
                                 dependencies: [
+                                  "SQLEngineWinMD",
                                   "SQLEngine",
                                   "SQLStandard",
                                   "WinMD",
@@ -103,6 +134,7 @@ let _ =
               .testTarget(name: "winmd-inspectTests",
                           dependencies: [
                             "winmd-inspect",
+                            "SQLEngineWinMD",
                             "SQLEngine",
                             "SQLStandard",
                             "WinMD",

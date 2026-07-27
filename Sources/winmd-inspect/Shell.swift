@@ -509,17 +509,20 @@ internal struct Shell: ~Escapable {
       let methods = try self.methods(of: id, routines, search: search,
                                      generics: generics, in: dialect,
                                      language: language)
-      // The interface's named base, via the `bases` view bound by its `Id` (a
-      // `TypeRef`/`TypeDef` simple name). A rootless interface defaults to the
-      // spec's COM root, except the root interface itself — which inherits
-      // nothing, so it never becomes its own base; an empty `root` applies no
-      // default.
+      // The interface's named base, via the `bases` view bound by its `Id`. The
+      // render query projects only the plain (`TypeRef`/`TypeDef`) bases, whose
+      // simple `TypeName` is keyword-escaped here the way the interface's own
+      // name is; a generic (`TypeSpec`) base is resolved by the `bases` view
+      // but omitted from the render, pending the WinRT generic-inheritance
+      // projection redesign. A rootless interface defaults to the spec's COM
+      // root, except the root interface itself — which inherits nothing, so it
+      // never becomes its own base; an empty `root` applies no default.
       let lineage =
           try Shell.select(Shell.query(named: "bases", search: search))
       let bases = try session.run(lineage, routines,
                                   bindings: ["parent": id])
       let base: String? = if let inherited = bases.first {
-        inherited[0].text
+        language.escape(inherited[0].text)
       } else if language.root.isEmpty || found[2].text == language.root {
         nil
       } else {

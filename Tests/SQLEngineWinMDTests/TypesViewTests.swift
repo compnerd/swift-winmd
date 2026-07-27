@@ -107,7 +107,9 @@ struct TypesViewTests {
                 wide: 0, stride: 14),
   ]
 
-  // Only `TypeRef` (table 1) and `TypeDef` (table 2) are present.
+  // Only `TypeRef` (table 1) and `TypeDef` (table 2) are present — this
+  // database declares no `TypeSpec`, which the adapter resolves to an empty
+  // relation so the `identities` `TypeSpec` arm reads no rows, not a fault.
   private static let valid: UInt64 = (1 << 1) | (1 << 2)
 
   /// Runs `body` over a `Storage` catalog bound to the assembled metadata.
@@ -219,6 +221,56 @@ struct TypesViewTests {
           "SELECT TypeName FROM identities WHERE TypeName = '<Module>'",
           catalog)
       #expect(identities == [[.text("<Module>")]])
+    }
+  }
+
+  @Test func `relations enumerates the synthetic absent TypeSpec`() throws {
+    // This database declares no `TypeSpec`, yet `table(named:)` resolves it to
+    // an empty relation so the bundled `identities`/`bases` views do not fault.
+    // The catalog contract requires `relations()` to enumerate every base
+    // relation `table(named:)` resolves, so it must name the synthetic
+    // `TypeSpec` too — exactly once, and under the same schema name a direct
+    // `SELECT … FROM TypeSpec` uses.
+    TypesViewTests.with { catalog in
+      let relations = catalog.relations()
+      let spec = relations.filter { $0.caseInsensitiveCompare("TypeSpec")
+                                        == .orderedSame }
+      #expect(spec == ["TypeSpec"])
+      // `table(named:)` resolves the synthetic relation — the enumeration above
+      // must match it. Its result is `~Escapable`, so bind it in a `guard`
+      // rather than compare it inside a macro.
+      guard catalog.table(named: "TypeSpec") != nil else {
+        Issue.record("table(named: \"TypeSpec\") did not resolve")
+        return
+      }
+    }
+  }
+
+  @Test func `information_schema lists the synthetic TypeSpec's columns`() throws {
+    // The `INFORMATION_SCHEMA` overlay iterates `relations()`, so listing the
+    // synthetic `TypeSpec` makes it a first-class base table there: it appears
+    // in `information_schema.tables` and its real column (`Signature`) appears
+    // in `information_schema.columns`, deriving that column from the same
+    // synthetic relation `table(named:)` resolves.
+    try TypesViewTests.with { catalog in
+      let tables = try TypesViewTests.run(
+          "SELECT table_name FROM information_schema.tables "
+          + "WHERE table_name = 'TypeSpec'", catalog)
+      #expect(tables == [[.text("TypeSpec")]])
+      let columns = try TypesViewTests.run(
+          "SELECT column_name FROM information_schema.columns "
+          + "WHERE table_name = 'TypeSpec' ORDER BY ordinal_position", catalog)
+      #expect(columns == [[.text("Signature")]])
+    }
+  }
+
+  @Test func `a direct query over the absent TypeSpec reads no rows`() throws {
+    // The synthetic relation `table(named:)` vends is empty, so a direct
+    // `SELECT … FROM TypeSpec` succeeds and yields no rows rather than faulting
+    // on a missing relation — the behaviour `relations()` now advertises.
+    try TypesViewTests.with { catalog in
+      let rows = try TypesViewTests.run("SELECT Id FROM TypeSpec", catalog)
+      #expect(rows == [])
     }
   }
 

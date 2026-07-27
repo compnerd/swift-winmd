@@ -77,15 +77,17 @@ extension Session {
   ///
   /// The `bases` view navigates the interface's single `InterfaceImpl` row
   /// (whose simple `Class` index is the interface's 1-based `Id`) to its
-  /// base type's simple name, projecting `TypeRef.TypeName` as `base`. The
+  /// base type's simple name, projecting the resolved `TypeName` as `base`. The
   /// `Class` column is a *simple* `TypeDef` index — it stores the `Id`
   /// directly, so the predicate is `i.Class = :parent` (there is no decoded
   /// `Class_TypeDef` join key — `WinMDRelation.keys` derives keys only for
-  /// *coded* indices). `Interface` is the coded `TypeDefOrRef`, so its decoded
-  /// `Interface_TypeRef` key equi-joins the base `TypeRef`. Both arms of the
-  /// coded index resolve, `UNION`ed: a cross-file base through
-  /// `Interface_TypeRef` (a `TypeRef`) and a same-file base through
-  /// `Interface_TypeDef` (a `TypeDef` in this module).
+  /// *coded* indices). `Interface` is the coded `TypeDefOrRef`, so its three
+  /// decoded arms resolve, `UNION`ed: a cross-file base through
+  /// `Interface_TypeRef` (a `TypeRef`), a same-file base through
+  /// `Interface_TypeDef` (a `TypeDef` in this module), and a *generic* base
+  /// through `Interface_TypeSpec` — a `TypeSpec` has no `TypeName`, so that arm
+  /// resolves it through `identities`, whose `TypeSpec` arm names the
+  /// constructed type by its generic base's identity.
   ///
   /// A query resource is static, well-formed SQL, so a parse failure is a
   /// programming error rather than user input; it is silently skipped here (the

@@ -145,14 +145,16 @@ struct BareBooleanPredicandEvaluationTests {
     try flags().empty("SELECT Id FROM T GROUP BY Id HAVING NULL")
   }
 
-  @Test func `a non-boolean bare predicand does not fault, matching = TRUE`()
-      throws {
-    // A non-boolean operand does not fault: the engine compares it cross-kind
-    // against the boolean literal, a definite non-match, exactly as the
-    // explicit `Age = TRUE` does — so both select no rows and agree.
-    try flags().empty("SELECT Id FROM T WHERE Age")
-    try flags().expect("SELECT Id FROM T WHERE Age",
-                       equals: "SELECT Id FROM T WHERE Age = TRUE")
+  @Test func `a non-boolean bare predicand faults run and validate`() throws {
+    // `Age` is an integer, so the bare predicand desugars to `Age = TRUE` — an
+    // incomparable integer/boolean comparison (42804), not a silent non-match —
+    // so both the run and the schema check fault, exactly as an explicit `Age =
+    // TRUE` does. A genuine boolean predicand (`WHERE Flag`) still passes.
+    let error = SQLError.state("42804", "cannot compare integer with boolean")
+    let query = try parse(query: "SELECT Id FROM T WHERE Age")
+    #expect(throws: error) { try flags().columns(of: query) }
+    try flags().expect("SELECT Id FROM T WHERE Age", fails: error)
+    try flags().expect("SELECT Id FROM T WHERE Age = TRUE", fails: error)
   }
 
   @Test func `the run and schema paths agree on a bare predicand`() throws {

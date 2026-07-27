@@ -113,19 +113,18 @@ struct MembershipEvaluationTests {
 // MARK: - Type checking
 
 struct MembershipTypeCheckingTests {
-  @Test func `a cross-kind element does not fault the schema check`() throws {
-    // `K` is an integer column and `'x'` is a text element, but the schema
-    // check does NOT reject it: the lowered `K = 'x'` comparison yields FALSE
-    // at runtime via `Row.matches` without faulting, so the row still runs and
-    // may match the like-kind `10` element. The check must accept what the run
-    // accepts — so `K IN (10, 'x')` types exactly as `K IN (10)`.
+  @Test func `a cross-kind element faults the schema check and the run`()
+      throws {
+    // `K` is an integer column and `'x'` a text element: the lowered `K = 'x'`
+    // comparison is a data-type mismatch (42804), not a silent FALSE — the ISO
+    // comparability rule — so both the schema check and the run fault. The
+    // like-kind `10` does not settle the truth for a column operand, so the
+    // cross-kind `'x'` element is reached (run ≡ validate).
+    let error = SQLError.state("42804",
+                               "cannot compare integer with character varying")
     let mixed = try parse(query: "SELECT Id FROM T WHERE K IN (10, 'x')")
-    let plain = try parse(query: "SELECT Id FROM T WHERE K IN (10)")
-    let columns = try members().columns(of: mixed)
-    #expect(columns == (try members().columns(of: plain)))
-    // The run keeps the `K = 10` row: the text arm silently non-matches.
-    try members().expect("SELECT Id FROM T WHERE K IN (10, 'x')",
-                         yields: [[1]])
+    #expect(throws: error) { try members().columns(of: mixed) }
+    try members().expect("SELECT Id FROM T WHERE K IN (10, 'x')", fails: error)
   }
 
   @Test func `a numeric element of the other numeric kind is admitted`() throws {

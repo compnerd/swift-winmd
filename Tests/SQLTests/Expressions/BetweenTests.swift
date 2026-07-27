@@ -100,37 +100,36 @@ struct BetweenEvaluationTests {
   }
 }
 
-// MARK: - Cross-kind negation
+// MARK: - Cross-kind comparability
+
+/// The incomparable-type fault an integer/text bound raises.
+private let mismatch =
+    SQLError.state("42804", "cannot compare integer with character varying")
 
 struct BetweenCrossKindTests {
-  @Test func `NOT BETWEEN is the negation of BETWEEN across kinds`() throws {
-    // The parser and validator accept a cross-kind bound, so both spellings
-    // are reachable and must agree. With integer `K` and the text lower bound
-    // `'a'`, `matches` yields FALSE for every ordering operator, so `K >= 'a'`
-    // is FALSE — making BETWEEN FALSE and NOT BETWEEN TRUE. `K NOT BETWEEN 'a'
-    // AND 10` must therefore equal `NOT (K BETWEEN 'a' AND 10)`, NOT the
-    // `K < 'a' OR K > 10` expansion whose two FALSE ordering checks would
-    // wrongly reject the row.
-    try things().expect(
-        "SELECT Id FROM T WHERE K NOT BETWEEN 'a' AND 10",
-        equals: "SELECT Id FROM T WHERE NOT (K BETWEEN 'a' AND 10)")
-  }
-
-  @Test func `a cross-kind NOT BETWEEN keeps every non-NULL row`() throws {
-    // BETWEEN is FALSE for every non-NULL `K` (the cross-kind `K >= 'a'` is
-    // FALSE), so its negation keeps rows 1, 2, 3, 5; row 4's NULL `K` is
-    // UNKNOWN and stays excluded, as NOT of UNKNOWN is UNKNOWN.
+  @Test func `a cross-kind lower bound faults run and validate`() throws {
+    // `K` is integer and the lower bound `'a'` text: `K >= 'a'` is a data-type
+    // mismatch (42804), not a silent FALSE — the ISO comparability rule — so
+    // both the run (`ranged`) and the schema check fault, rather than the old
+    // FALSE that kept the row under NOT BETWEEN.
+    let query = try parse(query: "SELECT Id FROM T WHERE K BETWEEN 'a' AND 10")
+    #expect(throws: mismatch) { try things().columns(of: query) }
+    try things().expect("SELECT Id FROM T WHERE K BETWEEN 'a' AND 10",
+                        fails: mismatch)
+    // `NOT BETWEEN` reaches the same lower comparison, so it faults the same.
     try things().expect("SELECT Id FROM T WHERE K NOT BETWEEN 'a' AND 10",
-                        yields: [[1], [2], [3], [5]])
+                        fails: mismatch)
   }
 
-  @Test func `a cross-kind upper bound negates equivalently`() throws {
-    // The divergence is not lower-bound-specific: with the text upper bound
-    // `'z'`, `K <= 'z'` is FALSE, so BETWEEN is FALSE and the two spellings
-    // still agree.
-    try things().expect(
-        "SELECT Id FROM T WHERE K NOT BETWEEN 1 AND 'z'",
-        equals: "SELECT Id FROM T WHERE NOT (K BETWEEN 1 AND 'z')")
+  @Test func `a cross-kind upper bound faults when the lower does not settle`()
+      throws {
+    // With a comparable lower `1` and a text upper `'z'`, the lower does not
+    // settle the truth (a row with `K >= 1` reaches the upper), so `K <= 'z'`
+    // faults 42804 at run and validate — the upper bound is reached, not cut.
+    let query = try parse(query: "SELECT Id FROM T WHERE K BETWEEN 1 AND 'z'")
+    #expect(throws: mismatch) { try things().columns(of: query) }
+    try things().expect("SELECT Id FROM T WHERE K BETWEEN 1 AND 'z'",
+                        fails: mismatch)
   }
 }
 

@@ -231,6 +231,14 @@ extension Catalog where Self: ~Escapable {
     // combined slot space), `inner` the equi conjunct's body slot.
     let correlate = (outer: outer, inner: inner)
 
+    // The correlation equality is hoisted to a straddling `.match` — the hash
+    // key the physical join buckets each side by — so decorrelate only when its
+    // two columns' declared types unify; a cross-kind pair would hash into
+    // disjoint buckets and silently match nothing. Bail otherwise, leaving the
+    // apply correlated so the equality routes through `matches` and faults.
+    guard comparable(correlating: correlate.outer, in: left,
+                     to: correlate.inner, scanning: name, scanOrdinals,
+                     context) else { return nil }
     // The scan is relaid after the left, so the body's 0-based scan slots shift
     // by `base` into the combined space. The correlation equality becomes a
     // `.match` (folded to the join key), and the residual `p_R` shifts
@@ -482,6 +490,13 @@ extension Catalog where Self: ~Escapable {
     }
     guard let inner else { return nil }
 
+    // The correlation equality becomes the semijoin's straddling `.match` hash
+    // key, so decorrelate only when its two columns' declared types unify; a
+    // cross-kind pair would hash into disjoint buckets and match nothing,
+    // dropping every left row silently. Bail otherwise, leaving the correlated
+    // `EXISTS`/`IN` select so its equality routes through `matches` and faults.
+    guard comparable(correlating: outer, in: left, to: inner, scanning: name,
+                     scanOrdinals, context) else { return nil }
     // The scan is relaid after the left, so the body's 0-based scan slots shift
     // by `base` into the combined space. The correlation equality becomes a
     // straddling `.match` (the executor's hash key), and the residual `p_R`
@@ -647,6 +662,14 @@ extension Catalog where Self: ~Escapable {
         scanOrdinals[inner] == table.width,
         table.virtuals.first?.lowercased() == "id" else { return nil }
 
+    // The correlation equality becomes the join's straddling `.match` hash key
+    // (its inner side the unique `Id`, an integer row index), so decorrelate
+    // only when the outer column's declared type unifies with the inner's; a
+    // cross-kind pair would hash into disjoint buckets and match nothing. Bail
+    // otherwise, leaving the correlated scalar so its equality routes through
+    // `matches` and faults.
+    guard comparable(correlating: outer, in: left, to: inner, scanning: name,
+                     scanOrdinals, context) else { return nil }
     // The scan is relaid after the left, so the body's 0-based scan slots shift
     // by `base` into the combined space. The correlation equality becomes a
     // straddling `.match` (the executor's hash key), and the residual `p_R`
@@ -661,6 +684,104 @@ extension Catalog where Self: ~Escapable {
     // lands at `base + vSlot` in the combined `left ++ scan` space.
     return (.outer(left, scan, on: on, kind: .left), base + vSlot)
   }
+
+  /// Whether the correlation key `outer = inner` is a comparable pair — the
+  /// straddling `.match` this pass hoists is the physical join key `nest`, the
+  /// bucketed outer join, and the semijoin fast path all hash on, so a
+  /// cross-kind pair (an integer outer against a text inner) hashes the two
+  /// sides into disjoint buckets, compares no candidate row, and would silently
+  /// return no matches — the same silent non-match `Scope.on` guards for a
+  /// `column = column` join key. The inner-body lowering cannot fault it (the
+  /// outer column is an untyped `:parameter` in the body scope), so gate the
+  /// hoist here: decorrelate only when the outer slot's declared type unifies
+  /// with the inner column's (`ValueType.unified`, the notion `Scope.on`, the
+  /// run's `matches`, and `check`'s `comparable` all share). When it does not
+  /// unify — or either type cannot be resolved from the plans — bail: the
+  /// correlated `.apply`/`.select` is left in place, routing the equality
+  /// through the nested-loop `matches`, which faults 42804 on the cross-kind
+  /// pair. A missed decorrelation is a perf loss; a wrong one is data
+  /// corruption, so an unresolved type bails.
+  ///
+  /// `outer` addresses `left`'s combined slot space; `inner` is the body scan's
+  /// slot, reading the base relation `name`'s column `scanOrdinals[inner]`.
+  private borrowing func comparable(correlating outer: Int, in left: Plan,
+                                    to inner: Int, scanning name: String,
+                                    _ scanOrdinals: Array<Int>,
+                                    _ context: Context) -> Bool {
+    guard let l = type(of: left, at: outer, context),
+        let r = type(of: .scan(name: name, ordinals: scanOrdinals,
+                                     seek: nil), at: inner, context),
+        l.unified(with: r) != nil else { return false }
+    return true
+  }
+
+  /// The declared type of the base-relation column the combined `slot` of
+  /// `plan` reads, or `nil` when it traces to none — a computed column, a
+  /// grouped/set-operation/apply slot, or a shape this resolver does not walk.
+  /// It mirrors `Plan.slots`' combined-space arithmetic to descend to the leaf
+  /// scan the slot belongs to, then reads that column's type exactly as
+  /// `Scope.type(at:)` does: a real column's `types` entry (a CTE/store
+  /// overlay binding's, else the base table's), and a virtual ordinal (`Id`,
+  /// an owner foreign key) or an out-of-range one `.integer`, the index type.
+  /// A `nil` result bails the decorrelation gate above (conservatively, never a
+  /// wrong rewrite).
+  private borrowing func type(of plan: Plan, at slot: Int,
+                                    _ context: Context) -> ValueType? {
+    switch plan {
+    case let .scan(name, ordinals, _):
+      guard slot >= 0, slot < ordinals.count else { return nil }
+      return type(of: name, at: ordinals[slot], context)
+    case let .select(_, source):
+      return type(of: source, at: slot, context)
+    case let .distinct(source):
+      return type(of: source, at: slot, context)
+    case let .limit(_, _, source):
+      return type(of: source, at: slot, context)
+    case let .sort(_, source):
+      return type(of: source, at: slot, context)
+    case let .semijoin(left, _, _, _):
+      return type(of: left, at: slot, context)
+    case let .project(terms, source):
+      guard slot >= 0, slot < terms.count,
+          case let .slot(inner) = terms[slot] else { return nil }
+      return type(of: source, at: inner, context)
+    case let .product(left, right):
+      guard let boundary = left.slots else { return nil }
+      return slot < boundary
+          ? type(of: left, at: slot, context)
+          : type(of: right, at: slot - boundary, context)
+    case let .outer(left, right, _, _):
+      guard let boundary = left.slots else { return nil }
+      return slot < boundary
+          ? type(of: left, at: slot, context)
+          : type(of: right, at: slot - boundary, context)
+    case let .join(outer, name, ordinals, base, _, _, _):
+      if slot < base { return type(of: outer, at: slot, context) }
+      let inner = slot - base
+      guard inner >= 0, inner < ordinals.count else { return nil }
+      return type(of: name, at: ordinals[inner], context)
+    default:
+      // A `.derived` view leaf, a `.apply`, an `.aggregate`, a `.setop`, or a
+      // `.single`/`.empty` slot has no single base column this resolver reads —
+      // bail (the gate leaves the apply correlated, a perf loss, never wrong).
+      return nil
+    }
+  }
+
+  /// The declared type of relation `name`'s column at `ordinal` — the CTE/store
+  /// overlay binding's `types` entry when the name binds one, else the base
+  /// table's — mirroring `Scope.type(at:)`: a real column carries its type, a
+  /// virtual (`Id`, owner) or out-of-range ordinal is `.integer`. `nil` only
+  /// when the name resolves to no base relation at all (the caller then bails).
+  private borrowing func type(of name: String, at ordinal: Int,
+                                    _ context: Context) -> ValueType? {
+    if let instance = context.relations[name.lowercased()] {
+      return ordinal < instance.types.count ? instance.types[ordinal]
+                                            : .integer
+    }
+    guard let table = table(named: name) else { return nil }
+    return ordinal < table.types.count ? table.types[ordinal] : .integer
+  }
 }
 
 /// The inner-key slot of an equi correlation conjunct `slot = :parameter` (in
@@ -669,7 +790,16 @@ extension Catalog where Self: ~Escapable {
 /// non-`=` comparison (a non-equi correlation), a compound operand, or a
 /// different parameter is not an equi correlation key and leaves the conjunct
 /// to the residual test (which bails on it as a parameterised non-equi term).
+///
+/// The equi correlation compares a slot to the opaque-kind `:parameter`, so it
+/// is stamped `Filter.incomparable` at lowering; unwrap that stamp to read the
+/// underlying equi shape. The stamp keeps the correlation predicate an
+/// always-evaluated residual on the un-decorrelated path (the run its authority
+/// for the per-run kind); recognising the equi shape here lets the decorrelator
+/// hoist it to the straddling `.match`, where its comparability is decided.
 private func equated(_ conjunct: Filter, to parameter: String) -> Int? {
+  var conjunct = conjunct
+  if case let .incomparable(inner) = conjunct { conjunct = inner }
   guard case let .compare(lhs, .equal, rhs) = conjunct else { return nil }
   switch (lhs, rhs) {
   case let (.slot(slot), .parameter(name)) where name == parameter:

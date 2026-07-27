@@ -1099,7 +1099,7 @@ extension Catalog where Self: ~Escapable {
             try evaluate(right, filter, context) != true { continue }
         inner.append(right)
       }
-      return joined(outer, inner, base, keys)
+      return try joined(outer, inner, base, keys)
     }
     guard let inner = table(named: name) else { throw .relation(name) }
     guard inner.seekable(column) else {
@@ -1130,7 +1130,7 @@ extension Catalog where Self: ~Escapable {
         // Equal by the same rule the predicate uses — integer/integer exact,
         // mixed integer/double promoted — so a seek that scanned wide still
         // pairs exactly.
-        if matches(value, .equal, right[slot]) == true {
+        if try matches(value, .equal, right[slot]) == true {
           records.append(left.merged(with: right))
         }
       }
@@ -1204,7 +1204,7 @@ extension Table where Self: ~Escapable {
       // share a `Double` bucket), so the residual check keeps integer/integer
       // exact.
       for right in buckets[bucket(value)] ?? []
-          where matches(value, .equal, right[slot]) == true {
+          where try matches(value, .equal, right[slot]) == true {
         records.append(left.merged(with: right))
       }
     }
@@ -1218,15 +1218,16 @@ extension Table where Self: ~Escapable {
 /// equals it, the pair concatenated. The plain nested-loop a CTE inner takes.
 private func joined(_ outer: Array<Record>, _ inner: Array<Record>,
                     _ base: Int, _ keys: (left: Int, right: Int))
-    -> Array<Record> {
+    throws(SQLError) -> Array<Record> {
   let slot = keys.right - base
   var records = Array<Record>()
   for left in outer {
     let value = left[keys.left]
     if case .null = value { continue }
     // The same exact/promoted equality the predicate and the other join paths
-    // use — integer/integer exact, mixed integer/double promoted.
-    for right in inner where matches(value, .equal, right[slot]) == true {
+    // use — integer/integer exact, mixed integer/double promoted, an
+    // incomparable cross-kind key faulting `42804` (the comparability rule).
+    for right in inner where try matches(value, .equal, right[slot]) == true {
       records.append(left.merged(with: right))
     }
   }

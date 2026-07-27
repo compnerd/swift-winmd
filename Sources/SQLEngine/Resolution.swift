@@ -1299,6 +1299,333 @@ internal func lower(_ predicate: Predicate,
   }
 }
 
+/// Stamps `filter` with the ISO 9075 comparability classification the typed
+/// resolution surface can see, wrapping each throwable leaf a run can fault
+/// `42804` on in `Filter.incomparable`.
+///
+/// This is the single locus of the comparability rule for the physical plan:
+/// the classification is computed once here, at lowering, from the static
+/// operand kinds `typeAt` resolves (a slot's declared type in the caller's own
+/// slot space — a base relation's ordinal, a join chain's combined ordinal),
+/// and carried by the wrapper into the untyped physical layer, where `seek`,
+/// pushdown, and decorrelation read it through `Filter.safe` without
+/// recomputing type information they do not have. `Scope.on` reads the same
+/// carried bit (its conjuncts are lowered through here), so the join-key hoist
+/// and the physical-plan reorderings cannot drift.
+///
+/// The rule mirrors the run's throwability, `matches`/`relate`/`like` faulting
+/// `42804` exactly when a reachable operand pair is a non-NULL cross-kind one:
+/// a leaf is wrapped when some reachable operand pair can be non-NULL and
+/// incomparable. `reconcile` classifies a pair from the three-way
+/// `Comparability` of its operands — a constant NULL (`.null`: a NULL
+/// comparison is UNKNOWN, never `42804`, so it is safe against anything), a
+/// statically-known non-NULL kind (`.known`: two known kinds are safe iff they
+/// unify), and a run-time value of undecidable kind (`.opaque`: a `:parameter`
+/// or a computed/subquery term, which may carry a non-NULL incomparable value,
+/// so the run can fault). This is the fix for the two soundness holes and the
+/// one over-strictness the earlier `ValueType?`-based classifier carried:
+///
+///   - An `.opaque` operand is unsafe, not deferred. The old `nil` kind
+///     conflated a constant NULL (genuinely safe) with a `:parameter`/computed
+///     term (which the run can fault on), and `reconcile(nil, _)` admitted
+///     both. A `left op :parameter` (`.bound`) and a `BETWEEN`/`LIKE`/`IN` with
+///     a `:parameter` bound therefore hoisted a sibling equi-key that discarded
+///     rows before the throwing residual ran, silently returning empty where
+///     the run must fault. `.bound` is classified here beside the others rather
+///     than passing through unconditionally: its parameter side is `.opaque`,
+///     so it is safe only when the term side is a constant NULL.
+///
+///   - A `membership`/`memberships` honours the run's reachable prefix rather
+///     than checking every element. The run's Kleene-OR `member` fold stops at
+///     the first definite match, so an element after one is never compared and
+///     cannot fault — `1 IN (1, 'x')` never reaches `'x'`. The walk stops at
+///     the same prefix `Scope.check`/the finder use: a reflexive element equal
+///     to a stable operand (`K IN (K, …)`) or a constant match (`operand =
+///     element` folds TRUE through the shared `Filter.constant`/`relate`), so
+///     only a reachable cross-kind element makes it unsafe. A row `IN`
+///     (`memberships`) takes only the constant-match stop, not the reflexive
+///     one — a partially-NULL left row can still reach a later element's
+///     non-null component and fault it.
+///
+///   - A `between` honours the run's lower-bound short-circuit. `ranged`
+///     evaluates `test >= lower` first, and a statically-FALSE lower settles
+///     the whole truth (BETWEEN FALSE), leaving the upper bound unreachable and
+///     unable to fault. So the lower is always reconciled, but the upper only
+///     when the lower does not `settled`-short-circuit — the same `settled`
+///     gate `Scope.check`'s `.between` reads, off the one shared
+///     `Filter.constant` fold. `0 BETWEEN 1 AND 'x'` therefore stays safe.
+///
+///   - A `like` honours the run's NULL-first ordering. `like` reads a NULL
+///     pattern, escape, or subject as UNKNOWN before its non-character
+///     fallback, so a NULL-determined operand makes the whole predicate
+///     UNKNOWN and unable to fault, whatever the subject's type. So a
+///     constant-NULL pattern or escape (`vanishes`), or a constant-NULL
+///     subject, is safe without the character check — the same ordering
+///     `Scope.check`'s `.like` reads through its `vanishes`/constant-NULL gate
+///     — while a non-NULL pattern over a non-character subject still faults.
+///     `A.n LIKE NULL` therefore stays safe. A `:parameter` pattern/escape
+///     stays unsafe (it is not NULL-determined — it may bind a non-character
+///     value the run faults on).
+///
+/// `match`/`null`/`distinct` and the subquery predicates never fault `42804`,
+/// so each passes through (a subquery predicate is already `unsafe` through
+/// `Filter.safe`); the connectives recurse.
+internal func stamped(_ filter: Filter,
+                      _ typeAt: (Int) -> ValueType) -> Filter {
+  switch filter {
+  case let .compare(lhs, _, rhs):
+    return reconcile(kind(of: lhs, typeAt), kind(of: rhs, typeAt))
+        ? filter : .incomparable(filter)
+  case let .comparison(lhs, _, rhs):
+    return zip(lhs, rhs).allSatisfy { reconcile(kind(of: $0, typeAt),
+                                                 kind(of: $1, typeAt)) }
+        ? filter : .incomparable(filter)
+  case let .bound(term, _, _):
+    // `term op :parameter`: the parameter side is a per-run `.opaque` value, so
+    // the comparison is safe only when the term side is a constant NULL — else
+    // the run can fault `42804` on a non-NULL incomparable binding.
+    return reconcile(kind(of: term, typeAt), .opaque)
+        ? filter : .incomparable(filter)
+  case let .membership(operand, elements, _):
+    let operandKind = kind(of: operand, typeAt)
+    var comparable = true
+    for element in elements {
+      if !reconcile(operandKind, kind(of: element, typeAt)) {
+        comparable = false
+        break
+      }
+      // Stop where the run's Kleene-OR fold does — a reflexive element equal to
+      // a stable operand, or a constant match — so a later element is
+      // unreachable and cannot fault.
+      if element == operand && stable(operand) { break }
+      if Filter(compare: operand, .equal, element).constant == true { break }
+    }
+    return comparable ? filter : .incomparable(filter)
+  case let .memberships(lhs, rows, _):
+    let left = constants(lhs)
+    var comparable = true
+    search: for row in rows {
+      for (l, r) in zip(lhs, row) {
+        if !reconcile(kind(of: l, typeAt), kind(of: r, typeAt)) {
+          comparable = false
+          break search
+        }
+      }
+      // The row `IN` fold stops at a row-independent constant match, as the
+      // scalar `.membership` does; it takes no reflexive shortcut.
+      if let left, let right = constants(row), left.count == right.count,
+          (try? relate(left, .equal, right)) == true {
+        break
+      }
+    }
+    return comparable ? filter : .incomparable(filter)
+  case let .between(test, lower, upper, _):
+    // `x BETWEEN a AND b` compares `x` against both bounds, honouring the run's
+    // short-circuit exactly as `Scope.check`'s `.between` does: `ranged`
+    // evaluates `x >= a` first, and a statically-FALSE lower settles the whole
+    // truth (BETWEEN FALSE), leaving `upper` unreachable and unable to fault.
+    // So the lower is always reconciled, but the upper only when the lower does
+    // not `settled`-short-circuit — mirroring the `settled` gate `check` reads,
+    // off the one shared `Filter.constant` fold. `0 BETWEEN 1 AND 'x'` thus
+    // stays safe (the `0 >= 1` lower is FALSE, the `'x'` upper unreachable),
+    // while `5 BETWEEN 1 AND 'x'` (lower does not settle) reconciles the upper
+    // and is stamped incomparable.
+    let testKind = kind(of: test, typeAt)
+    guard reconcile(testKind, kind(of: lower, typeAt)) else {
+      return .incomparable(filter)
+    }
+    if settled(test, lower) { return filter }
+    return reconcile(testKind, kind(of: upper, typeAt))
+        ? filter : .incomparable(filter)
+  case let .like(operand, pattern, escape, _):
+    // `x LIKE p ESCAPE e` reads a NULL — pattern, escape, or subject — as
+    // UNKNOWN before its non-character fallback, so a NULL-determined operand
+    // makes the whole predicate UNKNOWN and it can never fault, exactly as
+    // `Scope.check`'s `.like` orders `vanishes`/constant-NULL-subject ahead of
+    // the character check. Mirror that NULL-first ordering off the same
+    // constant-fold notion: a constant-NULL pattern or escape (`vanishes`), or
+    // a constant-NULL subject, is safe without enforcing the subject's or
+    // pattern's character type. Only a non-NULL pattern/escape reaches the
+    // character check — and there a `:parameter` (a per-run value that is not
+    // NULL-determined, may bind non-character) stays unsafe through
+    // `character`, the prior round's parameter rule. The escape was previously
+    // ignored here.
+    if vanishes(pattern, typeAt) || vanishes(escape, typeAt) { return filter }
+    if case .null = kind(of: operand, typeAt) { return filter }
+    return character(kind(of: operand, typeAt))
+        && character(kind(of: pattern, typeAt))
+        ? filter : .incomparable(filter)
+  case .match, .null, .distinct, .exists, .within, .quantified:
+    return filter
+  case let .truth(inner, value, negated):
+    return .truth(stamped(inner, typeAt), value, negated: negated)
+  case let .and(lhs, rhs):
+    return .and(stamped(lhs, typeAt), stamped(rhs, typeAt))
+  case let .or(lhs, rhs):
+    return .or(stamped(lhs, typeAt), stamped(rhs, typeAt))
+  case let .not(operand):
+    return .not(stamped(operand, typeAt))
+  case .incomparable:
+    // Idempotent: a filter already stamped is not re-classified.
+    return filter
+  }
+}
+
+/// The static comparability class of a lowered comparison operand — the input
+/// `reconcile` folds into a per-pair verdict. It refines the former
+/// `ValueType?`, whose `nil` conflated two opposite cases: a constant NULL
+/// (safe) and a run-time value of undecidable kind (unsafe).
+private enum Comparability {
+  /// A statically-known non-NULL value kind — a slot's declared type, a
+  /// non-NULL constant, a `GROUPING` integer. Two known kinds are comparable
+  /// iff they unify (`ValueType.unified`).
+  case known(ValueType)
+  /// A constant NULL. A comparison with a NULL operand is UNKNOWN, never a
+  /// `42804` fault, so it is comparable against anything.
+  case null
+  /// A value whose kind is not decidable at compile — a `:parameter`, or a
+  /// computed term (`apply`/`binary`/`case`/`cast`/`coalesce`/`nullif`/
+  /// `subquery`). It may carry a non-NULL incomparable value, so the run can
+  /// fault `42804`; the optimiser must not reorder past it.
+  case opaque
+}
+
+/// The `Comparability` of a lowered `term` — its declared kind when known, a
+/// constant NULL as `.null`, and a `:parameter` or any computed/subquery term
+/// as `.opaque` (a per-run value the run stays the authority for). A slot's
+/// kind is its declared type in `typeAt`'s slot space (always known).
+private func kind(of term: Term,
+                  _ typeAt: (Int) -> ValueType) -> Comparability {
+  switch term {
+  case let .slot(ordinal): .known(typeAt(ordinal))
+  case let .constant(value): value.kind.map(Comparability.known) ?? .null
+  case .grouping: .known(.integer)
+  case .parameter, .apply, .binary, .case, .cast, .coalesce, .nullif,
+       .subquery:
+    .opaque
+  }
+}
+
+/// The `Comparability` of a lowered `LIKE`/`BETWEEN` operand — a `.term`'s
+/// `kind(of:)`, and `.opaque` for a run-time `:parameter`.
+private func kind(of operand: Filter.Operand,
+                  _ typeAt: (Int) -> ValueType) -> Comparability {
+  switch operand {
+  case let .term(term): kind(of: term, typeAt)
+  case .parameter: .opaque
+  }
+}
+
+/// Whether a comparison of operands of these classes cannot fault `42804` — the
+/// throwability rule `stamped` shares with the run's `matches`/`relate` and
+/// `Scope.check`. A NULL-involved pair is UNKNOWN, never a fault (safe); two
+/// known kinds are safe iff they unify; an `.opaque` operand against a non-NULL
+/// operand may be a non-NULL incomparable pair the run faults on (unsafe).
+private func reconcile(_ lhs: Comparability, _ rhs: Comparability) -> Bool {
+  switch (lhs, rhs) {
+  case (.null, _), (_, .null):
+    true
+  case let (.known(l), .known(r)):
+    l.unified(with: r) != nil
+  case (.known, .opaque), (.opaque, .known), (.opaque, .opaque):
+    false
+  }
+}
+
+/// Whether a `LIKE` character operand of this class cannot fault `42804` — a
+/// constant NULL is UNKNOWN (safe), a known `text` is a valid character
+/// operand, and any other known kind or an `.opaque` operand (a `:parameter` or
+/// computed term that may be a non-NULL non-character value) can fault.
+private func character(_ kind: Comparability) -> Bool {
+  switch kind {
+  case .null: true
+  case let .known(type): type == .text
+  case .opaque: false
+  }
+}
+
+/// Whether a `BETWEEN`'s lower comparison `test >= lower` folds statically
+/// FALSE — the short-circuit the run's `ranged` makes and `Scope.check`'s
+/// `.between` follows through its own `settled`: a definitely-FALSE lower
+/// settles the whole truth (BETWEEN FALSE), leaving the upper bound
+/// unreachable and unable to fault, so `stamped` must not reconcile it. It
+/// reads the very `Filter.constant` fold `stamped`'s `.membership` already uses
+/// for a reflexive or constant match — `Filter(compare: test, .geq,
+/// low).constant` runs the same `matches` `ranged` evaluates, so the two paths
+/// cannot drift. A non-constant `test` or `lower` (a slot, a `:parameter`, a
+/// computed term) does not fold, so it is not settled and the upper is
+/// reconciled, matching `check`.
+private func settled(_ test: Term, _ lower: Filter.Operand) -> Bool {
+  guard case let .term(low) = lower else { return false }
+  return Filter(compare: test, .geq, low).constant == false
+}
+
+/// Whether a `LIKE` pattern or escape `operand` is NULL-determined — a constant
+/// NULL the run reads as UNKNOWN before its non-character fallback, so the
+/// whole predicate is UNKNOWN and cannot fault `42804` regardless of the
+/// subject's type. The Filter/Term analogue of the constant-NULL arm of
+/// `Scope.check`'s `vanishes`, off the same `kind(of:)` NULL classification the
+/// rest of `stamped` reads. Unlike `check`'s `vanishes` it does not admit a
+/// `:parameter`: `check` defers a parameter to the run because the run is the
+/// authority on its per-run kind, but `stamped` governs the physical-plan
+/// reorderings, and a parameter can bind a non-NULL non-character value the run
+/// faults on — so a parameter pattern/escape is not NULL-determined and stays
+/// unsafe through `character`, the prior round's parameter rule. The two
+/// functions therefore agree on the run's verdict (a non-NULL cross-kind
+/// parameter faults) while answering their two different questions.
+private func vanishes(_ operand: Filter.Operand?,
+                      _ typeAt: (Int) -> ValueType) -> Bool {
+  switch operand {
+  case .none, .some(.parameter):
+    return false
+  case let .some(.term(term)):
+    if case .null = kind(of: term, typeAt) { return true }
+    return false
+  }
+}
+
+/// Whether a lowered `term` yields the same value at every occurrence within a
+/// single row's evaluation — the stability the reflexive membership shortcut in
+/// `stamped`'s `.membership` walk relies on, the `Term` analogue of
+/// `Scope.stable(_ expression:)`. A slot reads the same cell, a constant and a
+/// `GROUPING` are fixed, and a `:parameter` is fixed per run; arithmetic, a
+/// `CAST`, a `COALESCE`, or a `NULLIF` over stable sub-terms stays stable. A
+/// scalar call is stable only over a deterministic routine — which `stamped`
+/// has no `Routines` to check — and a `CASE` guards on `Filter`s this walk does
+/// not test, so both, and a subquery, are conservatively unstable: no reflexive
+/// prune, which is safe (the walk keeps checking later elements).
+private func stable(_ term: Term) -> Bool {
+  switch term {
+  case .slot, .parameter, .constant, .grouping:
+    true
+  case let .binary(_, lhs, rhs):
+    stable(lhs) && stable(rhs)
+  case let .cast(operand, _):
+    stable(operand)
+  case let .coalesce(elements, _):
+    elements.allSatisfy { stable($0) }
+  case let .nullif(lhs, rhs):
+    stable(lhs) && stable(rhs)
+  case .apply, .case, .subquery:
+    false
+  }
+}
+
+/// The constant values of `terms` when every one is a compile-time `.constant`,
+/// else `nil` — the row-independent fold the row `IN` constant-match shortcut
+/// reads. Conservative: a term that is not a bare constant (arithmetic over
+/// constants, a slot) leaves the row undecided, so no false short-circuit
+/// prunes a reachable element.
+private func constants(_ terms: Array<Term>) -> Array<Value>? {
+  var values = Array<Value>()
+  values.reserveCapacity(terms.count)
+  for term in terms {
+    guard case let .constant(value) = term else { return nil }
+    values.append(value)
+  }
+  return values
+}
+
 /// Lowers `x [NOT] IN (v, …)` — the operand already lowered to `left` — to a
 /// first-class `Filter.membership(left, [v0, v1, …], negated:)`, each value
 /// lowered through `term`.

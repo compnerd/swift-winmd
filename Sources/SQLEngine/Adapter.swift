@@ -144,6 +144,21 @@ public enum Value: Hashable, Sendable {
 }
 
 extension Value {
+  /// The value kind of a non-NULL value, or `nil` for NULL — the kind the
+  /// comparability classifier reads off a lowered constant. NULL has no kind of
+  /// its own (a NULL comparison is UNKNOWN, never an incomparability fault), so
+  /// it is `nil` rather than a nominal placeholder.
+  internal var kind: ValueType? {
+    switch self {
+    case .null: nil
+    case .integer: .integer
+    case .double: .double
+    case .text: .text
+    case .boolean: .boolean
+    case .blob: .blob
+    }
+  }
+
   /// This value coerced to `type` — the widening a `CASE` (or a defined
   /// function body) applies so a selected branch's raw value matches the
   /// unified result type the schema advertises.

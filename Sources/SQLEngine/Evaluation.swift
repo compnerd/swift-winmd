@@ -132,9 +132,17 @@ extension Comparison {
 /// strings, two booleans (`false < true`), or two blobs (byte equality,
 /// lexicographic order). An integer against a double is numeric too — both
 /// sides are numbers — so the integer promotes to `Double` and they compare by
-/// magnitude (`1 = 1.0` is true); only a cross-*kind* pair (a number against a
-/// string) never matches.
-internal func matches(_ lhs: Value, _ op: Comparison, _ rhs: Value) -> Bool? {
+/// magnitude (`1 = 1.0` is true).
+///
+/// Every remaining pair is cross-*kind* (a number against a string, a boolean
+/// against a blob): ISO 9075 requires a comparison's operands to be of
+/// comparable types, so an incomparable pair is a data-type mismatch
+/// (`SQLError.state` `42804`), not a definite FALSE row. The fault matches the
+/// type-check `Scope.check` raises statically, so the run and `columns(of:
+/// validate:)` agree — an ill-typed comparison faults either way rather than
+/// silently dropping every row.
+internal func matches(_ lhs: Value, _ op: Comparison, _ rhs: Value)
+    throws(SQLError) -> Bool? {
   switch (lhs, rhs) {
   case (.null, _), (_, .null): nil
   case let (.integer(lhs), .integer(rhs)): op.apply(lhs, rhs)
@@ -151,22 +159,57 @@ internal func matches(_ lhs: Value, _ op: Comparison, _ rhs: Value) -> Bool? {
   // `Array` is not `Comparable`, so `=`/`<>` is byte equality and the ordering
   // relations are lexicographic (memcmp) order over the bytes.
   case let (.blob(lhs), .blob(rhs)): op.apply(lhs, rhs)
-  default: false
+  default:
+    throw .state("42804",
+                 "cannot compare \(domain(of: lhs)) with \(domain(of: rhs))")
+  }
+}
+
+/// The ISO domain spelling of a value's type, for a comparability fault
+/// message. NULL never reaches here (`matches` handles it as UNKNOWN before the
+/// incomparable arm).
+private func domain(of value: Value) -> String {
+  switch value {
+  case .null: "null"
+  case .integer: ValueType.integer.domain
+  case .double: ValueType.double.domain
+  case .text: ValueType.text.domain
+  case .boolean: ValueType.boolean.domain
+  case .blob: ValueType.blob.domain
   }
 }
 
 /// Whether two typed values differ under ISO `IS DISTINCT FROM` — the null-safe
 /// comparison, treating NULL as a comparable value. Unlike `matches`, it is
-/// two-valued (never UNKNOWN): two NULLs are the same (not DISTINCT), exactly
-/// one NULL is DISTINCT, and two non-NULLs are DISTINCT unless they are equal —
-/// a cross-kind pair being DISTINCT, as `matches` yields FALSE (`== true` is
-/// false) for cross-kind equality. `IS DISTINCT FROM` returns this; `IS NOT
-/// DISTINCT FROM` (null-safe equality) negates it.
+/// two-valued (never UNKNOWN) AND total (never a fault): two NULLs are the same
+/// (not DISTINCT), exactly one NULL is DISTINCT, and two non-NULLs are DISTINCT
+/// unless they are equal — a cross-kind pair being DISTINCT, where a bare
+/// comparison faults `42804`. `IS DISTINCT FROM` returns this; `IS NOT DISTINCT
+/// FROM` (null-safe equality) negates it.
 internal func distinct(_ lhs: Value, _ rhs: Value) -> Bool {
   switch (lhs, rhs) {
   case (.null, .null): false
   case (.null, _), (_, .null): true
-  case let (lhs, rhs): matches(lhs, .equal, rhs) != true
+  case let (lhs, rhs): !identical(lhs, rhs)
+  }
+}
+
+/// Whether two non-NULL values compare equal, a cross-kind pair reading as
+/// unequal (never a fault) — the equality kernel `IS DISTINCT FROM` folds. It
+/// is kept separate from `matches` so the null-safe comparison stays total
+/// where a bare comparison faults an incomparable pair; the numeric
+/// integer/double promotion still equates by magnitude (`1` is not distinct
+/// from `1.0`).
+private func identical(_ lhs: Value, _ rhs: Value) -> Bool {
+  switch (lhs, rhs) {
+  case let (.integer(lhs), .integer(rhs)): lhs == rhs
+  case let (.double(lhs), .double(rhs)): lhs == rhs
+  case let (.integer(lhs), .double(rhs)): Double(lhs) == rhs
+  case let (.double(lhs), .integer(rhs)): lhs == Double(rhs)
+  case let (.text(lhs), .text(rhs)): lhs == rhs
+  case let (.boolean(lhs), .boolean(rhs)): lhs == rhs
+  case let (.blob(lhs), .blob(rhs)): lhs == rhs
+  default: false
   }
 }
 
@@ -184,19 +227,30 @@ internal func distinct(_ lhs: Value, _ rhs: Value) -> Bool {
 /// by the componentwise equality. A NULL component makes a componentwise test
 /// UNKNOWN, propagated through the Kleene fold.
 internal func relate(_ l: Array<Value>, _ op: Comparison,
-                     _ r: Array<Value>) -> Bool? {
+                     _ r: Array<Value>) throws(SQLError) -> Bool? {
+  // A row comparison is ill-typed — and `Scope.check` rejects it — when any
+  // component pair is of incomparable types, regardless of the values, so the
+  // run must fault the same way rather than let an earlier decisive (or NULL)
+  // component short-circuit the fold past a later incomparable pair: `(N, S) =
+  // (999, N)` over `N != 999` is FALSE at the first component, but the
+  // incomparable `S`/`N` pair still makes the whole comparison a data-type
+  // mismatch. Preflight every component's comparability through `matches` (the
+  // same notion the fold uses — same-kind or numeric integer/double, a NULL
+  // pair exempt) before the short-circuiting Boolean fold; a comparable row
+  // then folds byte-for-byte as before, same result and same short-circuit.
+  for index in l.indices { _ = try matches(l[index], .equal, r[index]) }
   switch op {
   case .equal:
     var truth: Bool? = true
     for index in l.indices {
-      truth = and(truth, matches(l[index], .equal, r[index]))
+      truth = try and(truth, matches(l[index], .equal, r[index]))
       if truth == false { break }
     }
     return truth
   case .unequal:
     var truth: Bool? = true
     for index in l.indices {
-      truth = and(truth, matches(l[index], .equal, r[index]))
+      truth = try and(truth, matches(l[index], .equal, r[index]))
       if truth == false { break }
     }
     return truth.map { !$0 }
@@ -205,9 +259,9 @@ internal func relate(_ l: Array<Value>, _ op: Comparison,
     var cascade: Bool? = nil
     for index in stride(from: l.count - 1, through: 0, by: -1) {
       let last = index == l.count - 1
-      let step = matches(l[index], last ? op : strict, r[index])
+      let step = try matches(l[index], last ? op : strict, r[index])
       if let tail = cascade {
-        let equal = matches(l[index], .equal, r[index])
+        let equal = try matches(l[index], .equal, r[index])
         cascade = or(step, and(equal, tail))
       } else {
         cascade = step
@@ -295,7 +349,7 @@ extension Catalog where Self: ~Escapable {
         nil
       }
     case let .match(left, right):
-      matches(row[left], .equal, row[right])
+      try matches(row[left], .equal, row[right])
     case let .null(term, negated):
       try (evaluate(row, term, context) == .null) != negated
     case let .membership(operand, elements, negated):
@@ -361,6 +415,13 @@ extension Catalog where Self: ~Escapable {
       }
     case let .not(operand):
       try evaluate(row, operand, context).map { !$0 }
+    case let .incomparable(inner):
+      // The stamp is a compile-time reordering barrier only; evaluating it is
+      // evaluating the comparison it wraps, which faults `42804` at run through
+      // `matches`/`relate`/`like` for a non-NULL cross-kind pair (a NULL
+      // operand is UNKNOWN, as any comparison is). The wrapper never changes
+      // the three-valued result — it kept the leaf here to be evaluated at all.
+      try evaluate(row, inner, context)
     }
   }
 
@@ -382,7 +443,7 @@ extension Catalog where Self: ~Escapable {
     var truth: Bool? = false
     for element in elements {
       let element = try evaluate(row, element, context)
-      truth = or(truth, matches(value, .equal, element))
+      truth = try or(truth, matches(value, .equal, element))
       if truth == true { break }
     }
     return negated ? truth.map { !$0 } : truth
@@ -406,7 +467,7 @@ extension Catalog where Self: ~Escapable {
     var r = Array<Value>()
     r.reserveCapacity(rhs.count)
     for term in rhs { try r.append(evaluate(row, term, context)) }
-    return relate(l, op, r)
+    return try relate(l, op, r)
   }
 
   /// Evaluates a lowered `(l…) [NOT] IN ((r…), …)` row-value membership against
@@ -432,7 +493,7 @@ extension Catalog where Self: ~Escapable {
       var r = Array<Value>()
       r.reserveCapacity(element.count)
       for term in element { try r.append(evaluate(row, term, context)) }
-      truth = or(truth, relate(l, .equal, r))
+      truth = try or(truth, relate(l, .equal, r))
       if truth == true { break }
     }
     return negated ? truth.map { !$0 } : truth
@@ -461,7 +522,7 @@ extension Catalog where Self: ~Escapable {
     for term in lhs { try l.append(evaluate(row, term, context)) }
     var truth: Bool? = false
     for element in tuples {
-      truth = or(truth, relate(l, .equal, element))
+      truth = try or(truth, relate(l, .equal, element))
       if truth == true { break }
     }
     return negated ? truth.map { !$0 } : truth
@@ -491,7 +552,7 @@ extension Catalog where Self: ~Escapable {
     for term in lhs { try l.append(evaluate(row, term, context)) }
     var truth: Bool? = quantifier == .any ? false : true
     for element in tuples {
-      let matched = relate(l, op, element)
+      let matched = try relate(l, op, element)
       switch quantifier {
       case .any:
         truth = or(truth, matched)
@@ -509,16 +570,16 @@ extension Catalog where Self: ~Escapable {
   /// The `test` term is evaluated once per row — an `AND`/`OR` of two
   /// comparisons would re-evaluate a non-idempotent test once per bound — then
   /// the two bounds fold against that same value under Kleene logic as `test >=
-  /// lower AND test <= upper`. `NOT BETWEEN` is the negation of that same
-  /// truth, NOT the `test < lower OR test > upper` expansion: with a cross-kind
-  /// bound `matches` yields FALSE for every ordering operator (so `test <
-  /// lower` is not the complement of `test >= lower`), and the expansion would
-  /// diverge from `NOT (test BETWEEN lower AND upper)` — e.g. `K NOT BETWEEN
-  /// 'a' AND 10` must KEEP the row (the cross-kind `K >= 'a'` is FALSE, so
-  /// BETWEEN is FALSE and its negation TRUE), which the expansion's two FALSE
-  /// ordering checks would wrongly reject. A NULL `test`, `lower`, or `upper`
-  /// makes a bound UNKNOWN (`matches` yields `nil`), so the row is excluded —
-  /// the ISO three-valued range semantics.
+  /// lower AND test <= upper`. `NOT BETWEEN` is the negation of that truth, not
+  /// the `test < lower OR test > upper` expansion: the two spellings diverge on
+  /// a NULL bound (`test >= lower` UNKNOWN is not the complement of `test <
+  /// lower`), so `NOT BETWEEN` negates the single `BETWEEN` truth to stay
+  /// consistent. A cross-kind bound (`test >= 'a'` against a numeric `test`) is
+  /// a data-type mismatch that `matches` faults `42804`, not a FALSE — the ISO
+  /// comparability rule — so `K BETWEEN 'a' AND 10` faults rather than dropping
+  /// the row. A NULL `test`, `lower`, or `upper` makes a bound UNKNOWN
+  /// (`matches` yields `nil`), so the row is excluded — the ISO three-valued
+  /// range semantics.
   ///
   /// The `upper` bound is evaluated ONLY when the lower does not already settle
   /// the truth: a definitely-FALSE `test >= lower` makes BETWEEN FALSE (and NOT
@@ -538,10 +599,10 @@ extension Catalog where Self: ~Escapable {
       throws(SQLError) -> Bool? {
     let value = try evaluate(row, test, context)
     let low = try evaluate(row, lower, context)
-    let above = matches(value, .geq, low)
+    let above = try matches(value, .geq, low)
     if above == false { return negated }
     let high = try evaluate(row, upper, context)
-    let within = and(above, matches(value, .leq, high))
+    let within = try and(above, matches(value, .leq, high))
     return negated ? within.map { !$0 } : within
   }
 
@@ -586,10 +647,11 @@ extension Catalog where Self: ~Escapable {
   /// silently swallowed by a NULL escape. Only once all three have evaluated is
   /// the result decided: a non-NULL escape that is not a single character is
   /// `SQLError.argument` (the ISO rule); a NULL operand, pattern, or escape is
-  /// UNKNOWN (`nil`), the row excluded; a non-text operand or pattern is a
-  /// definite non-match (FALSE), mirroring the engine's cross-kind comparison
-  /// rule (`Row.matches`) rather than faulting. Otherwise the pattern runs
-  /// against the operand through the `%`/`_` matcher. The pattern and escape
+  /// UNKNOWN (`nil`), the row excluded; a non-NULL non-character operand or
+  /// pattern is a data-type mismatch — ISO `LIKE` requires character operands —
+  /// so it faults `SQLError.state` `42804`, mirroring the engine's cross-kind
+  /// rule (`matches`) and the type-check `Scope.check`. Otherwise the pattern
+  /// runs against the operand through the `%`/`_` matcher. The escape
   /// may be a `:parameter` resolved from the bindings. `NOT LIKE` negates the
   /// result (UNKNOWN maps to itself).
   private borrowing func like(_ row: borrowing some Row & ~Escapable,
@@ -621,16 +683,19 @@ extension Catalog where Self: ~Escapable {
       throw .argument("LIKE ESCAPE must be a single character")
     }
 
-    let truth: Bool? = switch (subject, template, separator) {
+    let truth: Bool?
+    switch (subject, template, separator) {
     // A NULL operand, pattern, or escape is UNKNOWN.
     case (.null, _, _), (_, .null, _), (_, _, .some(.null)):
-      nil
+      truth = nil
     case let (.text(subject), .text(template), _):
-      matches(subject, template, escape: character)
-    // A non-text operand or pattern never matches — the engine's cross-kind
-    // comparison rule — so the run is a definite non-match, not a fault.
+      truth = matches(subject, template, escape: character)
+    // A non-NULL, non-character operand or pattern is a data-type mismatch: ISO
+    // `LIKE` requires character operands, so the run faults `42804` (matching
+    // the engine's cross-kind comparison rule and `Scope.check`), not a silent
+    // FALSE row.
     default:
-      false
+      throw .state("42804", "LIKE requires character operands")
     }
     return negated ? truth.map { !$0 } : truth
   }

@@ -219,9 +219,23 @@ extension Schema {
                       _ routines: Routines = [:],
                       subquery: Resolution = .unsupported)
       throws(SQLError) -> Filter {
-    try SQLEngine.lower(predicate, term: { expression throws(SQLError) in
-      try term(expression, in: relation, routines, subquery: subquery)
-    }, subquery: subquery)
+    let filter =
+        try SQLEngine.lower(predicate, term: { expression throws(SQLError) in
+          try term(expression, in: relation, routines, subquery: subquery)
+        }, subquery: subquery)
+    // Stamp the comparability classification onto every throwable leaf from
+    // this single relation's own ordinal space, so a single-table WHERE's
+    // cross-kind conjunct is carried as unsafe into the physical plan and its
+    // seek/pushdown cannot bypass the `42804` fault (see `stamped`).
+    return stamped(filter) { type(at: $0) }
+  }
+
+  /// The declared value type of the column at `ordinal` in this schema — a real
+  /// column its own `types` entry, a virtual ordinal (`Id`, a foreign key) the
+  /// integral `.integer`, mirroring `Scope.type(at:)` for a single relation so
+  /// the comparability stamp reads the same kinds either resolution path does.
+  private func type(at ordinal: Int) -> ValueType {
+    ordinal < width ? types[ordinal] : .integer
   }
 }
 
@@ -954,17 +968,17 @@ internal struct Scope {
   }
 
   /// The result type of `NULLIF(v1, v2)`, validating both operands as a run
-  /// would fault. The result is either `v1` or NULL, so the column takes `v1`'s
-  /// type; `v2` need not unify with it (a run compares them under `matches`,
-  /// which yields FALSE across kinds without faulting), so it is validated for
-  /// its own errors (an unknown column, a bad call) but does not shape the
-  /// type.
+  /// would fault. `NULLIF(v1, v2)` is `CASE WHEN v1 = v2 THEN NULL ELSE v1`, so
+  /// the two must be comparable — an incomparable pair faults 42804, the fault
+  /// the run's `nullif` raises through `matches`. The result is either `v1` or
+  /// NULL, so the column takes `v1`'s type; `v2` does not shape it.
   private func nullif(validate lhs: Expression, _ rhs: Expression,
                       _ routines: Routines,
                       subquery: SubqueryCheck = .unsupported)
       throws(SQLError) -> ValueType {
     let type = try validate(lhs, routines, subquery: subquery)
-    _ = try validate(rhs, routines, subquery: subquery)
+    let other = try validate(rhs, routines, subquery: subquery)
+    try comparable(lhs, type, rhs, other, routines)
     return type
   }
 
@@ -1332,8 +1346,14 @@ internal struct Scope {
       throws(SQLError) {
     switch predicate {
     case let .comparison(left, _, right):
-      _ = try validate(left, routines, subquery: subquery)
-      _ = try validate(right, routines, subquery: subquery)
+      let l = try validate(left, routines, subquery: subquery)
+      let r = try validate(right, routines, subquery: subquery)
+      // The ISO comparability rule: an incomparable operand pair (a number
+      // against a string) is a data-type mismatch (42804), not a FALSE row —
+      // the fault the run's `matches` raises, so the two agree. A bare boolean
+      // predicand (`WHERE Age`) reaches here as its `Age = TRUE` desugar, so a
+      // non-boolean one faults exactly as an explicit `Age = TRUE` does.
+      try comparable(left, l, right, r, routines)
     case let .exists(query, _):
       // Validate the inner uncorrelated query as the run's lowering does — it
       // resolves and type-checks against the enclosing catalog, so a bad column
@@ -1348,10 +1368,13 @@ internal struct Scope {
       // schema validation matches execution — the recurring lesson that the
       // two must not diverge. Reached in the `valued` role (its rows are read),
       // so the deferred phase validates the original query. A cross-kind
-      // component is NOT rejected — the run's `relate`/`matches` yields FALSE
-      // across kinds without faulting, as an `IN` element does — so the schema
-      // accepts what the run accepts; an irreconcilable set-operation subquery
-      // still faults through its own union type fold.
+      // component now faults at run through `relate` (the ISO comparability
+      // rule), but the static comparability check is not applied against a
+      // subquery operand here: its single-column type may be a nominal-NULL
+      // placeholder (a `SELECT NULL` body types `.integer`), which would
+      // mis-reject a query the run keeps — so the run stays the authority for a
+      // subquery operand, while an irreconcilable set-operation subquery still
+      // faults through its own union type fold.
       for expression in lhs {
         _ = try validate(expression, routines, subquery: subquery)
       }
@@ -1363,7 +1386,9 @@ internal struct Scope {
       // enforce the row-arity-equals-subquery-width rule the lowering does
       // (`SQLError.arity`), so schema validation matches execution. Reached
       // `valued` (its rows are read), so the deferred phase validates the
-      // original query.
+      // original query. A cross-kind operand faults at run through `relate`;
+      // the static comparability check defers to the run for a subquery
+      // operand, as `within` does.
       for expression in lhs {
         _ = try validate(expression, routines, subquery: subquery)
       }
@@ -1380,19 +1405,46 @@ internal struct Scope {
     case let .membership(operand, values, _):
       // `x IN (v, …)` lowers to `x = v OR …`, so type it as those comparisons:
       // validate the operand and each value for real errors (unknown column,
-      // bad arity, …). A cross-kind element (text in an integer list) is NOT
-      // rejected: the lowered `operand = element` comparison yields FALSE at
-      // runtime via `Row.matches` without faulting, so a row still runs (and
-      // may match a like-kind element), and the schema check must accept what
-      // the run accepts — rejecting it here would diverge from the run.
+      // bad arity, …) AND check each reached element is comparable to the
+      // operand — an incomparable element (text in an integer list) is a
+      // data-type mismatch (42804), the fault the run's `member` raises, so the
+      // schema check faults exactly where the run does.
       //
-      // The OR-chain short-circuits: a definite constant match (`x = v` folds
-      // TRUE, both row-independent constants) makes the whole `IN` TRUE and
-      // leaves every later element unreachable, so validation stops there —
-      // `1 IN (1 + 0, Name + 1)` type-checks, the run matching `1 = 1 + 0`
-      // before ever reaching `Name + 1`, while `2 IN (1 + 0, Name + 1)` (no
-      // definite match) still validates `Name + 1` and faults.
-      // `matched(operand, value, routines)` is the fold's own primitive.
+      // The OR-chain short-circuits: a definite match makes the whole `IN` TRUE
+      // and leaves later elements unreachable, so validation stops there. Two
+      // element shapes are a definite match:
+      //   - A row-independent constant match (`x = v` folds TRUE, both
+      //     constants) — `1 IN (1 + 0, Name + 1)` type-checks, the run matching
+      //     `1 = 1 + 0` before ever reaching `Name + 1`, while `2 IN (1 + 0,
+      //     Name + 1)` (no definite match) still validates `Name + 1` and
+      //     faults. `matched(operand, value, routines)` is that primitive. A
+      //     constant match folds only over a non-NULL operand (a NULL folds
+      //     UNKNOWN), so the run genuinely short-circuits.
+      //   - A reflexive element structurally equal to a stable operand (`K IN
+      //     (K, …)`) is a per-row match — but a short-circuit only over
+      //     a provably non-NULL operand (`defined`): `operand = operand` is
+      //     TRUE, so the run's membership Kleene-OR stops there and every later
+      //     element is unreachable, none validated or compared. A nullable
+      //     operand makes it UNKNOWN, so a NULL row runs on and evaluates every
+      //     later element: its comparison to the NULL operand is UNKNOWN (never
+      //     42804), so the comparability check still stops here, but its own
+      //     evaluation is reached — a `1 / 0` faults — so the evaluation check
+      //     continues. So `K IN (K, 'x')` type-checks whether or not `K` is
+      //     provably non-NULL (the reached `'x'` is compared to a NULL `K`,
+      //     UNKNOWN), while `K IN (K, 1 / 0)` type-checks only when `K` is
+      //     provably non-NULL — a nullable `K` reaches and faults the `1 / 0`.
+      //     `K IN ('x', K)` still faults (the reached `'x'` is compared to a
+      //     non-NULL `K` before the reflexive one) and `K IN (1, 'x')` still
+      //     faults (`1` is comparable but not a match). The stability gate
+      //     (`stable`) is load-bearing: it fires only for an operand whose two
+      //     evaluations always agree, since the run evaluates the operand and
+      //     the element independently — a deterministic `K + 1` is stable, a
+      //     non-deterministic `tick()` is not, so `tick() IN (tick(), 'x')`
+      //     reaches the `'x'`. The reflexive recognition is scoped to
+      //     the comparability walk: it must not leak into the `matched`
+      //     reachability fold `constant(_ predicate:)` shares, since `K IN
+      //     (K, …)` is UNKNOWN (not constant-TRUE) for a NULL operand and the
+      //     optimiser must not fold it away.
       //
       // An empty list has no OR-chain and cannot be lowered (`lower` would have
       // no seed), so reject it here too — the parser rejects `IN ()`, but a
@@ -1401,34 +1453,77 @@ internal struct Scope {
       if values.isEmpty {
         throw .state("42601", "IN requires a non-empty value list")
       }
-      _ = try validate(operand, routines, subquery: subquery)
-      _ = try membership(of: values, each: { value throws(SQLError) in
-        _ = try validate(value, routines, subquery: subquery)
-      }, equality: { value throws(SQLError) in
-        matched(operand, value, routines)
-      })
+      let type = try validate(operand, routines, subquery: subquery)
+      // `x IN (…)` lowers to `x = v OR …`. Every element the run reaches is
+      // validated for its own evaluation errors (a `1 / 0`); and until the
+      // OR-chain short-circuits it is also checked comparable to the operand —
+      // an incomparable element faults 42804, the fault the run's `member`
+      // raises. A constant-TRUE element, or a reflexive element equal to a
+      // stable operand (`operand IN (operand, …)`), short-circuits the chain.
+      // `1 IN (1, 'a')` type-checks while `1 IN ('a', 1)` faults.
+      //
+      // A reflexive element short-circuits definitely only over a provably
+      // non-NULL operand (`defined`): `operand = operand` is TRUE, so every
+      // later element is unreachable and neither validated nor compared. A
+      // nullable operand makes it UNKNOWN, so a NULL row runs on and evaluates
+      // every later element — those still fault on their own evaluation, though
+      // their comparison to the NULL operand is UNKNOWN, never 42804 — so the
+      // comparability check stops at the reflexive element while the evaluation
+      // check continues. A non-deterministic operand is not stable, so it
+      // never short-circuits (`tick() IN (tick(), 'x')` reaches the `'x'`).
+      var comparing = true
+      for value in values {
+        let element = try validate(value, routines, subquery: subquery)
+        guard comparing else { continue }
+        try comparable(operand, type, value, element, routines)
+        if value == operand && stable(operand, routines) {
+          if defined(operand) { break }
+          comparing = false
+        } else if matched(operand, value, routines) == true {
+          break
+        }
+      }
     case let .rows(lhs, _, rhs):
       // `(l…) <op> (r…)` lowers to a componentwise comparison, so type each
       // component of both rows for real errors (unknown column, bad arity, …),
       // and enforce the equal-arity rule the lowering does (`SQLError.arity`)
-      // so schema validation matches execution. A cross-kind component is NOT
-      // rejected — the run's `matches` yields FALSE across kinds without
-      // faulting, as an `IN` element does — so the schema accepts what the run
-      // accepts.
+      // so schema validation matches execution.
       guard lhs.count == rhs.count else {
         throw .arity(lhs.count, rhs.count)
       }
+      // Validate both rows in the run's evaluation order — every left, then
+      // every right component — before the componentwise comparability pass,
+      // because that is the order `Filter.comparison` runs: it evaluates the
+      // whole left row into a `[Value]`, then the whole right, and only then
+      // does `relate` preflight every component pair's comparability. A
+      // component's own evaluation fault the run raises while building a row
+      // therefore surfaces ahead of any 42804 — `(1, 1 / 0) = ('x', 2)` divides
+      // by zero building the left row before the incomparable `1`/`'x'` pair is
+      // compared, so the type-check must fault the divide, not the 42804, to
+      // match the run. Interleaving the comparability check per component would
+      // fault the first pair's 42804 before the later faulting left component.
+      var l = Array<ValueType>()
+      l.reserveCapacity(lhs.count)
       for expression in lhs {
-        _ = try validate(expression, routines, subquery: subquery)
+        try l.append(validate(expression, routines, subquery: subquery))
       }
+      var r = Array<ValueType>()
+      r.reserveCapacity(rhs.count)
       for expression in rhs {
-        _ = try validate(expression, routines, subquery: subquery)
+        try r.append(validate(expression, routines, subquery: subquery))
+      }
+      // Each component pair must be comparable — `(l…) <op> (r…)` folds through
+      // the componentwise `relate`, which faults 42804 on an incomparable pair
+      // (`(1, 'a') = (1, 2)`), so the type-check faults the same pair.
+      for index in lhs.indices {
+        try comparable(lhs[index], l[index], rhs[index], r[index], routines)
       }
     case let .among(lhs, rows, _):
       // `(l…) [NOT] IN ((r…), …)` lowers to a disjunction of row equalities, so
-      // type the left row and each element row for real errors, and enforce the
-      // non-empty list and per-row equal-arity rules the lowering does. A
-      // cross-kind component is NOT rejected, as an `IN` element is not.
+      // type the left row and each reached element row for real errors, enforce
+      // the non-empty list and per-row equal-arity rules the lowering does, and
+      // check each reached component pair is comparable — an incomparable one
+      // faults 42804, the fault the run's row `member` fold raises.
       //
       // The OR-chain short-circuits exactly as the scalar `.membership` does: a
       // definite constant match (both the left row and an element row fold to
@@ -1443,39 +1538,87 @@ internal struct Scope {
       if rows.isEmpty {
         throw .state("42601", "IN requires a non-empty value list")
       }
+      var types = Array<ValueType>()
+      types.reserveCapacity(lhs.count)
       for expression in lhs {
-        _ = try validate(expression, routines, subquery: subquery)
+        try types.append(validate(expression, routines, subquery: subquery))
       }
       let l = constants(lhs, routines)
       _ = try membership(of: rows, each: { element throws(SQLError) in
         guard element.count == lhs.count else {
           throw .arity(lhs.count, element.count)
         }
+        // Each element row folds through the componentwise `relate`, which
+        // faults 42804 on an incomparable component — so type-check each
+        // component pair. Short-circuit aware: a prior constant-TRUE element
+        // row leaves a later one unvisited, matching the run's `member` fold.
+        //
+        // Validate the whole element row in the run's evaluation order —
+        // `member` builds every component into a `[Value]` before `relate`
+        // preflights their comparability — then the comparability pass, so a
+        // component's own evaluation fault surfaces ahead of a later pair's
+        // 42804: `(N) IN ((1 / 0))` over integer `N` divides before comparing,
+        // and `(N, M) IN (('x', 1 / 0))` divides building the element row, not
+        // faulting the incomparable `N`/`'x'` pair, matching the run.
+        var r = Array<ValueType>()
+        r.reserveCapacity(element.count)
         for expression in element {
-          _ = try validate(expression, routines, subquery: subquery)
+          try r.append(validate(expression, routines, subquery: subquery))
+        }
+        for index in element.indices {
+          try comparable(lhs[index], types[index], element[index], r[index],
+                         routines)
         }
       }, equality: { element throws(SQLError) in
         guard let l, let r = constants(element, routines) else { return nil }
-        return relate(l, .equal, r)
+        // The short-circuit fold is a pure reachability decision — an
+        // incomparable pair is undecided here (`nil`), its 42804 fault raised
+        // by the comparability check in the `each` walk above, not this fold.
+        return (try? relate(l, .equal, r)) ?? nil
       })
     case let .like(operand, pattern, escape, _):
-      // Validate the operand, pattern, and optional escape for REAL errors
-      // (unknown column, bad arity, …); a non-text operand or pattern is NOT
-      // rejected — the run yields a definite FALSE via `Row.like` without
-      // faulting (the cross-kind rule), and the schema check must accept what
-      // the run accepts, as the `IN` cross-kind element does.
-      _ = try validate(operand, routines, subquery: subquery)
+      // Validate the operand, pattern, and optional escape for real errors
+      // (unknown column, bad arity, …). The operand and pattern must be
+      // character strings (ISO): a non-text, non-NULL operand or pattern faults
+      // 42804, the same non-character fault the run's `like` raises, so the
+      // type-check and the run agree.
+      let type = try validate(operand, routines, subquery: subquery)
       try validate(pattern, routines, subquery: subquery)
       if let escape {
         try validate(escape, routines, subquery: subquery)
         try reject(escape, routines)
       }
+      // The run reads a NULL — or a possibly-NULL, per-run — pattern or escape
+      // as UNKNOWN before its non-character fallback, so the whole predicate is
+      // UNKNOWN regardless of the subject's type. A constant-NULL pattern or
+      // escape (`K LIKE NULL`, `K LIKE 'x' ESCAPE NULL`, integer `K`) and a
+      // `:parameter` one (`K LIKE :p`, its value arriving from the bindings)
+      // both run and select nothing — they do not fault 42804 — so `vanishes`
+      // defers each. Mirror that NULL-first ordering: when the pattern or the
+      // escape vanishes, admit the predicate without enforcing the character
+      // type of the subject (or the pattern), matching the run; only a
+      // non-NULL, non-parameter pattern/escape reaches the character check the
+      // run's non-character fallback faults.
+      guard !vanishes(pattern, routines), !vanishes(escape, routines) else {
+        break
+      }
+      // A constant-NULL subject makes the run's `like` return UNKNOWN from its
+      // `(.null, _, _)` arm before it inspects the pattern's type, so neither
+      // the subject nor the pattern character type is enforced — `NULL LIKE 1`
+      // runs and selects nothing, it does not fault. The pattern is already
+      // validated above for the faults it can raise; only its character type is
+      // skipped. Symmetric to the constant-NULL pattern `vanishes` exemption.
+      if constant(operand, routines) == .null { break }
+      try character(operand, type, routines)
+      if case let .expression(pattern) = pattern {
+        try character(pattern, try validate(pattern, routines,
+                                            subquery: subquery), routines)
+      }
     case let .between(test, lower, upper, _):
       // `x [NOT] BETWEEN a AND b` compares `x` against both bounds, so validate
-      // the three operands for real errors (an unknown column, a bad call). A
-      // cross-kind bound is NOT rejected: the run's `matches` yields FALSE
-      // across kinds without faulting (as an `IN` element does), so the schema
-      // check accepts what the run accepts.
+      // the three operands for real errors (an unknown column, a bad call) and
+      // check each reached bound is comparable to `x` — an incomparable bound
+      // faults 42804, the fault the run's `ranged` raises.
       //
       // It respects the executor's short-circuit — the same one `ranged`
       // evaluates with: a definitely-FALSE lower comparison (`x >= a`) settles
@@ -1485,16 +1628,32 @@ internal struct Scope {
       // validated — `0 BETWEEN 1 AND (1 / 0)` type-checks, the lower `0 >= 1`
       // FALSE settling the row before the `1 / 0` upper is reached, exactly as
       // an `AND`'s constant-false left leaves its right unchecked.
-      _ = try validate(test, routines, subquery: subquery)
+      let type = try validate(test, routines, subquery: subquery)
       try validate(lower, routines, subquery: subquery)
+      // `x BETWEEN a AND b` compares `x` against both bounds, so each bound
+      // must be comparable to `x` — an incomparable one faults 42804, the fault
+      // the run's `ranged` raises. The lower is always compared; the upper only
+      // when the lower does not settle the truth (the same short-circuit
+      // `ranged` makes), so `0 BETWEEN 1 AND 'z'` faults only if `0 >= 1` does
+      // not settle it first.
+      if case let .expression(low) = lower {
+        let bound = try validate(low, routines, subquery: subquery)
+        try comparable(test, type, low, bound, routines)
+      }
       let settled = {
         guard let value = constant(test, routines),
             let low = constant(lower, routines) else {
           return false
         }
-        return matches(value, .geq, low) == false
+        return ((try? matches(value, .geq, low)) ?? nil) == false
       }()
-      if !settled { try validate(upper, routines, subquery: subquery) }
+      if !settled {
+        try validate(upper, routines, subquery: subquery)
+        if case let .expression(high) = upper {
+          let bound = try validate(high, routines, subquery: subquery)
+          try comparable(test, type, high, bound, routines)
+        }
+      }
     case let .distinct(lhs, rhs, _):
       // `a IS [NOT] DISTINCT FROM b` compares both operands, so validate the
       // two for real errors (an unknown column, a bad call). both are always
@@ -1523,6 +1682,75 @@ internal struct Scope {
     case let .not(operand):
       try check(operand, routines, subquery: subquery)
     }
+  }
+
+  /// Faults `SQLError.state` `42804` when the two comparison operands have
+  /// incomparable declared types — the ISO 9075 comparability rule a
+  /// `<comparison predicate>` (and `BETWEEN`, `IN`, quantified, and row
+  /// comparison) requires of its operands. A numeric integer/double pair and
+  /// any like-kind pair unify and are comparable; every other cross-kind pair
+  /// (a number against a string, a boolean against a blob) is a data-type
+  /// mismatch, faulted here exactly where the run's `matches`/`relate` faults
+  /// it, so `run ≡ columns(of: validate:)`.
+  ///
+  /// An operand that folds to a constant NULL, or is a subquery, is exempt: the
+  /// run reads a NULL comparison as UNKNOWN (never a fault, so a `text = NULL`
+  /// must not be rejected here even though a bare `NULL` types nominally
+  /// `.integer`), and a subquery operand's static single-column type may itself
+  /// be a nominal-NULL placeholder — so the run, which faults per cross-kind
+  /// row through `relate`, stays the authority for a subquery operand.
+  private func comparable(_ lhs: Expression, _ l: ValueType,
+                          _ rhs: Expression, _ r: ValueType,
+                          _ routines: Routines) throws(SQLError) {
+    guard !exempt(lhs, routines), !exempt(rhs, routines) else { return }
+    guard l.unified(with: r) != nil else {
+      throw .state("42804", "cannot compare \(l.domain) with \(r.domain)")
+    }
+  }
+
+  /// Faults `SQLError.state` `42804` when `expression` (of derived type `type`)
+  /// is not a character operand — the ISO rule a `LIKE` operand and pattern are
+  /// character strings, the same non-text fault the run's `like` raises. A
+  /// constant-NULL or subquery operand is exempt (the run reads NULL as UNKNOWN
+  /// and defers a subquery to `relate`), matching `comparable`.
+  private func character(_ expression: Expression, _ type: ValueType,
+                         _ routines: Routines) throws(SQLError) {
+    guard !exempt(expression, routines), type != .text else { return }
+    throw .state("42804", "LIKE requires character operands")
+  }
+
+  /// Whether a `LIKE` pattern or escape `operand` reads as NULL — or may read
+  /// as NULL, or be unbound — at run, so the whole predicate is UNKNOWN before
+  /// the run's non-character fallback and neither the subject's nor the
+  /// pattern's character type is enforced. It is `true` for a constant-NULL
+  /// `.expression` (`K LIKE NULL`, `K LIKE 'x' ESCAPE NULL`, integer `K`, run
+  /// and select nothing) and for a `.parameter` (its value arrives from the
+  /// bindings, possibly NULL or unbound, so the run stays the authority for its
+  /// per-run kind — an unbound or NULL one selects nothing, a non-character
+  /// bound one faults 42804 at run, exactly as `Predicate.bound` defers a
+  /// comparison to the run). A `nil` escape, or any non-NULL, non-parameter
+  /// expression is not NULL, so the character check still applies. It is the
+  /// same deferral `exempt` reads for a comparison operand, widened by the
+  /// per-run `.parameter` kind LIKE carries.
+  private func vanishes(_ operand: Predicate.Operand?,
+                        _ routines: Routines) -> Bool {
+    switch operand {
+    case .none:
+      return false
+    case .some(.parameter):
+      return true
+    case let .some(.expression(expression)):
+      return constant(expression, routines) == .null
+    }
+  }
+
+  /// Whether `expression` is exempt from the comparability check — a subquery
+  /// (whose static single-column type may be a nominal-NULL placeholder) or an
+  /// expression that folds to a constant NULL (read as UNKNOWN by the run,
+  /// never a fault).
+  private func exempt(_ expression: Expression, _ routines: Routines) -> Bool {
+    if case .subquery = expression { return true }
+    return constant(expression, routines) == .null
   }
 
   /// Type-checks a `LIKE` pattern or escape `operand` for the side effect of
@@ -1573,7 +1801,159 @@ internal struct Scope {
         let rhs = constant(value, routines) else {
       return nil
     }
-    return matches(lhs, .equal, rhs)
+    // A pure reachability fold: an incomparable constant pair is undecided
+    // (`nil`) here, its 42804 fault raised by the comparability `check`.
+    return (try? matches(lhs, .equal, rhs)) ?? nil
+  }
+
+  /// Whether `expression` yields the same value at every one of its textual
+  /// occurrences within a single row's (or group's) evaluation — the stability
+  /// the reflexive membership shortcut in `check`'s `.membership` walk relies
+  /// on. That walk treats an element structurally equal to the `IN` operand
+  /// (`K IN (K, …)`) as a definite per-row match that stops the walk, but the
+  /// run evaluates the operand and that element independently, so the shortcut
+  /// is sound only when both evaluations always agree. This differs from
+  /// `constant(_ expression:)`: a column is not row-independent (it does not
+  /// fold to a `Value`) yet it is stable — reading the same cell twice — so a
+  /// stability test, not constancy, is what the shortcut needs.
+  ///
+  /// A column reads the same cell, a literal is fixed, and GROUPING lowers to a
+  /// per-arm compile-time integer constant, so each is stable. Arithmetic, a
+  /// `CAST`, a `COALESCE`, a `NULLIF`, and a `CASE` over stable sub-expressions
+  /// stay stable, so `K + 1 IN (K + 1, 'x')` still short-circuits. A scalar
+  /// `call` is re-evaluated per occurrence, so it is stable only when the
+  /// routine is deterministic and every argument is stable — a non-
+  /// deterministic (or unregistered) routine, or a non-stable argument, lets
+  /// two calls disagree, so `tick() IN (tick(), 'x')` must reach the cross-kind
+  /// `'x'`. An aggregate is stable when its aggregand and `FILTER` are (a non-
+  /// deterministic aggregand two occurrences fold over the group to values that
+  /// can disagree). A subquery is conservatively not stable — no reflexive
+  /// shortcut over a subquery operand, which is safe: the walk keeps
+  /// considering later elements, never wrongly pruning one.
+  private func stable(_ expression: Expression, _ routines: Routines) -> Bool {
+    switch expression {
+    case .column, .literal, .grouping:
+      true
+    case let .call(name, arguments):
+      routines[name]?.deterministic == true
+          && arguments.allSatisfy { stable($0, routines) }
+    case let .binary(_, lhs, rhs):
+      stable(lhs, routines) && stable(rhs, routines)
+    case let .aggregate(_, aggregand, _, filter):
+      stable(aggregand, routines)
+          && (filter.map { stable($0, routines) } ?? true)
+    case let .case(whens, otherwise):
+      whens.allSatisfy {
+        stable($0.when, routines) && stable($0.then, routines)
+      } && (otherwise.map { stable($0, routines) } ?? true)
+    case let .cast(operand, _):
+      stable(operand, routines)
+    case let .coalesce(arguments):
+      arguments.allSatisfy { stable($0, routines) }
+    case let .nullif(lhs, rhs):
+      stable(lhs, routines) && stable(rhs, routines)
+    case .subquery:
+      false
+    }
+  }
+
+  /// An aggregand is stable when its expression is (`COUNT(*)` names no
+  /// expression, so it is trivially stable).
+  private func stable(_ aggregand: Aggregand, _ routines: Routines) -> Bool {
+    switch aggregand {
+    case .star:
+      true
+    case let .expression(expression):
+      stable(expression, routines)
+    }
+  }
+
+  /// Whether `operand` (a `LIKE`/`BETWEEN` operand) is stable: an expression
+  /// defers to the expression rule, a `:parameter` is fixed for the whole run.
+  private func stable(_ operand: Predicate.Operand, _ routines: Routines)
+      -> Bool {
+    switch operand {
+    case let .expression(expression):
+      stable(expression, routines)
+    case .parameter:
+      true
+    }
+  }
+
+  /// Whether `predicate` yields the same truth at every occurrence within one
+  /// evaluation — the stability rule extended to a `CASE` guard or an aggregate
+  /// `FILTER`. A `:parameter` is fixed per run; a subquery predicate
+  /// (`EXISTS`/`IN (Q)`/quantified) is conservatively not stable.
+  private func stable(_ predicate: Predicate, _ routines: Routines) -> Bool {
+    switch predicate {
+    case let .comparison(left, _, right):
+      stable(left, routines) && stable(right, routines)
+    case let .bound(left, _, _):
+      stable(left, routines)
+    case let .null(operand, _):
+      stable(operand, routines)
+    case let .membership(operand, values, _):
+      stable(operand, routines) && values.allSatisfy { stable($0, routines) }
+    case let .rows(lhs, _, rhs):
+      lhs.allSatisfy { stable($0, routines) }
+          && rhs.allSatisfy { stable($0, routines) }
+    case let .among(lhs, rows, _):
+      lhs.allSatisfy { stable($0, routines) }
+          && rows.allSatisfy { row in row.allSatisfy { stable($0, routines) } }
+    case let .like(operand, pattern, escape, _):
+      stable(operand, routines) && stable(pattern, routines)
+          && (escape.map { stable($0, routines) } ?? true)
+    case let .between(test, lower, upper, _):
+      stable(test, routines) && stable(lower, routines)
+          && stable(upper, routines)
+    case let .distinct(lhs, rhs, _):
+      stable(lhs, routines) && stable(rhs, routines)
+    case let .truth(inner, _, _):
+      stable(inner, routines)
+    case let .and(lhs, rhs), let .or(lhs, rhs):
+      stable(lhs, routines) && stable(rhs, routines)
+    case let .not(operand):
+      stable(operand, routines)
+    case .exists, .within, .quantified:
+      false
+    }
+  }
+
+  /// Whether `expression` is provably non-NULL — it yields a value on every
+  /// row, never NULL. Conservative: an undecidable case is treated as nullable
+  /// (`false`), so a caller pruning on non-nullness never prunes a row a NULL
+  /// could reach. The reflexive membership shortcut reads it: `operand IN
+  /// (operand, …)` short-circuits at `operand = operand` only when the operand
+  /// is non-NULL (a NULL makes it UNKNOWN, so the run reaches the later
+  /// elements), so only a provably non-NULL operand may prune them.
+  ///
+  /// A non-NULL literal is non-NULL, and a `GROUPING` is a settled non-NULL
+  /// integer. Arithmetic and a `CAST` over non-NULL operands stay non-NULL — a
+  /// fault throws rather than yielding NULL. A `COALESCE` is non-NULL when any
+  /// argument is, since it returns the first non-NULL one. A `CASE` is non-NULL
+  /// when it has an `ELSE` and every result arm (each `THEN` and the `ELSE`) is
+  /// non-NULL — a no-match `CASE` without `ELSE` yields NULL. Everything else
+  /// is treated as nullable: a `column` carries no NOT NULL schema flag (the
+  /// engine does not track column nullability), a `NULLIF` yields NULL on an
+  /// equal pair, and a `call`, `aggregate`, or `subquery` can yield NULL.
+  private func defined(_ expression: Expression) -> Bool {
+    switch expression {
+    case let .literal(literal):
+      if case .null = literal { false } else { true }
+    case .grouping:
+      true
+    case let .binary(_, lhs, rhs):
+      defined(lhs) && defined(rhs)
+    case let .cast(operand, _):
+      defined(operand)
+    case let .coalesce(arguments):
+      arguments.contains { defined($0) }
+    case let .case(whens, otherwise):
+      (otherwise.map { defined($0) } ?? false)
+          && whens.allSatisfy { defined($0.then) }
+    case .column, .call, .aggregate, .nullif, .subquery:
+      false
+    }
   }
 
   /// The constant `Value` `expression` folds to when it is ROW-independent —
@@ -1675,7 +2055,12 @@ internal struct Scope {
           let vb = constant(rhs, routines) else {
         return nil
       }
-      return matches(va, .equal, vb) == true ? .null : va
+      // An incomparable `v1 = v2` is a would-be `42804` fault, so leave the
+      // fold undecided (`nil`) rather than deciding it is `va` — a soundness
+      // guard matching the divide/overflow collapse, so the reachability walk
+      // never prunes a branch the run would fault.
+      guard let equal = try? matches(va, .equal, vb) else { return nil }
+      return equal == true ? .null : va
     case .column, .aggregate, .subquery, .grouping:
       // A `subquery` is row-independent but is materialised at run (this
       // compile-time fold has no cache), so it is not statically foldable —
@@ -1869,7 +2254,9 @@ internal struct Scope {
           let rhs = constant(right, routines) else {
         return nil
       }
-      return matches(lhs, op, rhs)
+      // A pure reachability fold: an incomparable pair is undecided (`nil`)
+      // here, its 42804 fault raised by the comparability check in `check`.
+      return (try? matches(lhs, op, rhs)) ?? nil
     case let .and(lhs, rhs):
       // `constant` is a pure fold with no side effect, so both arms evaluate.
       return and(constant(lhs, routines), constant(rhs, routines))
@@ -1924,10 +2311,10 @@ internal struct Scope {
           let low = constant(lower, routines) else {
         return nil
       }
-      let above = matches(value, .geq, low)
+      let above = (try? matches(value, .geq, low)) ?? nil
       if above == false { return negated }
       guard let high = constant(upper, routines) else { return nil }
-      let within = and(above, matches(value, .leq, high))
+      let within = and(above, (try? matches(value, .leq, high)) ?? nil)
       return negated ? within.map { !$0 } : within
     case let .distinct(lhs, rhs, negated):
       // Fold `a IS [NOT] DISTINCT FROM b` as `differs` evaluates it: the
@@ -1977,7 +2364,7 @@ internal struct Scope {
           let r = constants(rhs, routines) else {
         return nil
       }
-      return relate(l, op, r)
+      return (try? relate(l, op, r)) ?? nil
     case let .among(lhs, rows, negated):
       // Fold `(l…) [NOT] IN ((r…), …)` exactly as the scalar `.membership`
       // folds — the left row folds through `constant(_ expression:)`, then the
@@ -1992,7 +2379,7 @@ internal struct Scope {
       guard let l = constants(lhs, routines) else { return nil }
       let truth = membership(of: rows) { element in
         guard let r = constants(element, routines) else { return nil }
-        return relate(l, .equal, r)
+        return (try? relate(l, .equal, r)) ?? nil
       }
       return negated ? truth.map { !$0 } : truth
     case .exists, .within, .quantified:
@@ -2386,7 +2773,7 @@ internal struct Scope {
       // else the folded `v1`.
       let va = try empty(lhs, routines)
       let vb = try empty(rhs, routines)
-      return matches(va, .equal, vb) == true ? .null : va
+      return try matches(va, .equal, vb) == true ? .null : va
     case .column, .subquery:
       // A bare column cannot appear over an empty group (a grouping error
       // `compile` rejected). A scalar `subquery` is materialised at run (this
@@ -2435,7 +2822,7 @@ internal struct Scope {
       throws(SQLError) -> Bool? {
     switch predicate {
     case let .comparison(left, op, right):
-      return matches(try empty(left, routines), op, try empty(right, routines))
+      return try matches(empty(left, routines), op, empty(right, routines))
     case .bound:
       return nil
     case let .null(operand, negated):
@@ -2461,7 +2848,7 @@ internal struct Scope {
       }
       let lhs = try empty(operand, routines)
       let truth = try membership(of: values) { value throws(SQLError) in
-        matches(lhs, .equal, try empty(value, routines))
+        try matches(lhs, .equal, empty(value, routines))
       }
       return negated ? truth.map { !$0 } : truth
     case let .rows(lhs, op, rhs):
@@ -2480,7 +2867,7 @@ internal struct Scope {
       var r = Array<Value>()
       r.reserveCapacity(rhs.count)
       for expression in rhs { try r.append(empty(expression, routines)) }
-      return relate(l, op, r)
+      return try relate(l, op, r)
     case let .among(lhs, rows, negated):
       // Fold `(l…) [NOT] IN ((r…), …)` over the empty group as
       // `Filter.memberships` evaluates it: the left row folds once, then
@@ -2501,7 +2888,7 @@ internal struct Scope {
         var r = Array<Value>()
         r.reserveCapacity(element.count)
         for expression in element { try r.append(empty(expression, routines)) }
-        truth = or(truth, relate(l, .equal, r))
+        truth = try or(truth, relate(l, .equal, r))
         if truth == true { break }
       }
       return negated ? truth.map { !$0 } : truth
@@ -2510,10 +2897,11 @@ internal struct Scope {
       // operand, pattern, and optional escape are each folded once, IN ORDER,
       // before the result is decided (so a faulting reached operand surfaces
       // its throw rather than being swallowed by a NULL escape). Then a NULL
-      // operand, pattern, or escape is UNKNOWN, a non-text operand or pattern a
-      // definite non-match, else the `%`/`_` matcher decides; a non-NULL escape
-      // that is not a single character faults `SQLError.argument`, as the run
-      // does. `NOT LIKE` negates.
+      // operand, pattern, or escape is UNKNOWN, a non-NULL non-character
+      // operand or pattern a `42804` data-type mismatch (ISO `LIKE` requires
+      // character operands), else the `%`/`_` matcher decides; a non-NULL
+      // escape that is not a single character faults `SQLError.argument`, as
+      // the run does. `NOT LIKE` negates.
       let subject = try empty(operand, routines)
       let template = try empty(pattern, routines)
       let separator: Value? =
@@ -2527,13 +2915,14 @@ internal struct Scope {
       default:
         throw .argument("LIKE ESCAPE must be a single character")
       }
-      let truth: Bool? = switch (subject, template, separator) {
+      let truth: Bool?
+      switch (subject, template, separator) {
       case (.null, _, _), (_, .null, _), (_, _, .some(.null)):
-        nil
+        truth = nil
       case let (.text(subject), .text(template), _):
-        matches(subject, template, escape: character)
+        truth = matches(subject, template, escape: character)
       default:
-        false
+        throw .state("42804", "LIKE requires character operands")
       }
       return negated ? truth.map { !$0 } : truth
     case let .between(test, lower, upper, negated):
@@ -2547,9 +2936,10 @@ internal struct Scope {
       // fault, exactly as the run does.
       let value = try empty(test, routines)
       let low = try empty(lower, routines)
-      let above = matches(value, .geq, low)
+      let above = try matches(value, .geq, low)
       if above == false { return negated }
-      let within = and(above, matches(value, .leq, try empty(upper, routines)))
+      let within =
+          try and(above, matches(value, .leq, empty(upper, routines)))
       return negated ? within.map { !$0 } : within
     case let .distinct(lhs, rhs, negated):
       // Fold `a IS [NOT] DISTINCT FROM b` over the empty group as `differs`
@@ -2932,7 +3322,26 @@ internal struct Scope {
     // both skips a NULL pair before a later unsafe conjunct runs and drops a
     // non-match before an earlier one does — either suppressing the throw the
     // whole-ON residual owes. Lower the entire conjunction as one residual.
-    guard lowered.allSatisfy(\.safe) else { return lowered.conjunction! }
+    //
+    // A comparison whose operands' declared types do not reconcile now faults
+    // 42804 through the nested-loop `matches`/`relate`/`like`, so it is as
+    // throwing as a divide — and equally unsafe to bypass. A hoisted key drops
+    // every non-matching pair before that residual is reached, so a `ON L.n =
+    // R.t AND L.n = R.m` (`n`/`m` integer, `t` text) that hashes the comparable
+    // `n = m` key would let a run with no `n = m` pair silently return no rows
+    // rather than fault the cross-kind `n = t` residual — a run the validate
+    // path (`check`) already faults 42804. `lower` stamps a provably-cross-kind
+    // conjunct `Filter.incomparable`, so `safe` already reports it unsafe (the
+    // same carried classification `seek`/pushdown read — computed once, no
+    // separate recompute here): the whole `ON` stays one always-evaluated
+    // residual `nest` runs nested-loop, faulting the cross-kind pair exactly as
+    // validation does. A conjunct whose comparability the static types cannot
+    // decide — a `:parameter`/subquery operand, a constant NULL — was left
+    // unstamped (the run stays the authority for its per-run kind, as `check`
+    // defers those too), so a plain equi `ON` still hash-joins.
+    guard lowered.allSatisfy(\.safe) else {
+      return lowered.conjunction!
+    }
     // Read the equi-join key off the already-lowered term rather than
     // re-resolving the AST: a key is a `compare(.slot, .equal, .slot)` whose
     // both operands are columns of the join prefix. A conjunct that lowered to
@@ -2940,8 +3349,24 @@ internal struct Scope {
     // NOT a column = column key, so it stays the residual `ON` filter — a
     // re-resolution of its AST would consult only the prefix and fault
     // `SQLError.column` on the outer column already lowered correctly.
+    //
+    // Hoist the key only when the two columns' declared types are comparable
+    // (`ValueType.unified`, the same notion `check`'s `comparable` and the
+    // run's `matches` share) — a like-kind or numeric integer/double pair. A
+    // `.match` is the sole shape every physical join keys on (`nest`'s hash
+    // seek, the `.outer`/semijoin bucketed fast paths through `equikey`), and
+    // it never funnels through `matches`: `nest` buckets each side by its own
+    // key value, so an incomparable `A.n = B.s` (an integer against a string)
+    // hashes the two sides to disjoint buckets and no pair is ever compared —
+    // the join would silently drop every row rather than fault, whereas the
+    // validate path (`check`) already faults it 42804. Leaving an incomparable
+    // equality as the residual `compare(.slot, .equal, .slot)` routes it
+    // through the nested-loop `matches`, which faults 42804 on the cross-kind
+    // pair, so run ≡ validate. A comparable key still hoists and hashes exactly
+    // as before.
     let filters = lowered.map { residual -> Filter in
-      if case let .compare(.slot(left), .equal, .slot(right)) = residual {
+      if case let .compare(.slot(left), .equal, .slot(right)) = residual,
+          type(at: left).unified(with: type(at: right)) != nil {
         return Filter(match: left, right)
       }
       return residual
@@ -2950,13 +3375,19 @@ internal struct Scope {
   }
 
   /// Lowers the name-addressed AST `predicate` to the engine's `Filter`, each
-  /// column reference resolved to a combined ordinal across the chain.
+  /// column reference resolved to a combined ordinal across the chain, then
+  /// stamps the comparability classification onto every throwable leaf (see
+  /// `stamped`) from this scope's combined-space `type(at:)` — so the untyped
+  /// physical layer reads a cross-kind comparison's `42804` hazard through
+  /// `Filter.safe` and cannot seek/push past it.
   internal func lower(_ predicate: Predicate,
                       _ routines: Routines = [:],
                       subquery: Resolution = .unsupported)
       throws(SQLError) -> Filter {
-    try SQLEngine.lower(predicate, term: { expression throws(SQLError) in
-      try term(expression, routines, subquery: subquery)
-    }, subquery: subquery)
+    let filter =
+        try SQLEngine.lower(predicate, term: { expression throws(SQLError) in
+          try term(expression, routines, subquery: subquery)
+        }, subquery: subquery)
+    return stamped(filter) { type(at: $0) }
   }
 }

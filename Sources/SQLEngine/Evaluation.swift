@@ -318,23 +318,23 @@ extension Catalog where Self: ~Escapable {
       // correlated one re-runs against this row's correlated bindings,
       // bypassing the memo.
       try present(row, key, correlation, context) != negated
-    case let .within(operand, key, correlation, negated):
-      // Fold `operand = v` over the subquery's single column under the same
-      // three-valued membership the value-list `IN` uses. The column is
-      // materialised lazily on this first reach (an uncorrelated one memoised,
-      // a correlated one re-run per row against this row's correlated
-      // bindings).
-      try member(row, operand, values(row, key, correlation, context),
-                 negated, context)
-    case let .quantified(operand, op, quantifier, key, correlation):
-      // Fold `operand op v` over the subquery's single column with the same
-      // `matches`/Kleene primitives `within` uses — Kleene `OR` (seeded FALSE)
-      // for `any`, Kleene `AND` (seeded TRUE) for `all`. It materialises its
-      // lone column lazily through the same `values` path `within` drives: an
-      // uncorrelated one memoises under its `Subkey`, a correlated one re-runs
-      // its inner plan per outer row against this row's correlated bindings.
-      try quantified(row, operand, op, quantifier,
-                     values(row, key, correlation, context), context)
+    case let .within(lhs, key, correlation, negated):
+      // Fold the row equality `(l…) = (r…)` over the subquery's rows under the
+      // same Kleene `OR` three-valued membership the value-list row `IN`
+      // (`memberships`) uses — degenerating to the scalar `x = v` at arity one.
+      // The rows are materialised lazily on this first reach (an uncorrelated
+      // one memoised, a correlated one re-run per row against this row's
+      // correlated bindings).
+      try member(row, lhs, tuples(row, key, correlation, context), negated,
+                 context)
+    case let .quantified(lhs, op, quantifier, key, correlation):
+      // Fold the row comparison `(l…) op r` over the subquery's rows with the
+      // same `relate`/Kleene primitives `within` uses — Kleene `OR` (seeded
+      // FALSE) for `any`, Kleene `AND` (seeded TRUE) for `all` — degenerating
+      // to the scalar `x op v` at arity one. The rows are materialised lazily
+      // through the same `tuples` path `within` drives.
+      try quantified(row, lhs, op, quantifier,
+                     tuples(row, key, correlation, context), context)
     case let .truth(inner, value, negated):
       try tested(evaluate(row, inner, context), value, negated)
     case let .and(lhs, rhs):
@@ -382,30 +382,6 @@ extension Catalog where Self: ~Escapable {
     var truth: Bool? = false
     for element in elements {
       let element = try evaluate(row, element, context)
-      truth = or(truth, matches(value, .equal, element))
-      if truth == true { break }
-    }
-    return negated ? truth.map { !$0 } : truth
-  }
-
-  /// Evaluates a lowered `operand [NOT] IN (Q)` against `row` over the
-  /// subquery's already-materialised single column `values`.
-  ///
-  /// It is the value-list `member` fold over constants: the `operand` is
-  /// evaluated once per row, then `operand = v` folds over the materialised
-  /// `values` IN ORDER under Kleene `OR`, seeded FALSE and short-circuiting at
-  /// the first TRUE — so a NULL operand or a NULL element keeps the ISO
-  /// three-valued result (an unmatched test is UNKNOWN, not FALSE), an empty
-  /// `values` folds FALSE (no witness), and `NOT IN` negates that truth,
-  /// mapping UNKNOWN to itself. It reuses the same `matches`/`or` primitives
-  /// the value-list `IN` does, so the two forms share one three-valued core.
-  private borrowing func member(_ row: borrowing some Row & ~Escapable,
-                                _ operand: Term, _ values: Array<Value>,
-                                _ negated: Bool, _ context: Context)
-      throws(SQLError) -> Bool? {
-    let value = try evaluate(row, operand, context)
-    var truth: Bool? = false
-    for element in values {
       truth = or(truth, matches(value, .equal, element))
       if truth == true { break }
     }
@@ -462,28 +438,60 @@ extension Catalog where Self: ~Escapable {
     return negated ? truth.map { !$0 } : truth
   }
 
-  /// Evaluates a lowered `operand op {ANY | ALL} (Q)` against `row` over the
-  /// subquery's already-materialised single column `values`.
+  /// Evaluates a lowered `(l…) [NOT] IN (Q)` against `row` over the subquery's
+  /// already-materialised full rows `tuples`.
   ///
-  /// The `operand` is evaluated once per row, then `operand op v` folds over
-  /// the materialised `values` IN ORDER with the same `matches`/Kleene
-  /// primitives the value-list and `IN (Q)` `member` folds use — Kleene `OR`
-  /// seeded FALSE for `any` (short-circuiting at the first TRUE), Kleene `AND`
-  /// seeded TRUE for `all` (short-circuiting at the first FALSE). So a NULL
-  /// `operand` or a NULL element makes an otherwise-undecided fold UNKNOWN (not
-  /// FALSE), an empty `values` takes the seed — `any` FALSE (no witness), `all`
-  /// TRUE (vacuous) — and the identity falls out of the fold rather than a
-  /// special case. `= ANY` reduces to the `member` `IN` fold and `<> ALL` to
-  /// its negation, sharing one three-valued core with `within`.
-  private borrowing func quantified(_ row: borrowing some Row & ~Escapable,
-                                    _ operand: Term, _ op: Comparison,
-                                    _ quantifier: Quantifier,
-                                    _ values: Array<Value>, _ context: Context)
+  /// It is the value-list row `member` fold over the subquery's rows: the left
+  /// row is evaluated once per row into a `[Value]` (as `memberships` holds it
+  /// once), then the row equality `(l…) = (r…)` — the shared componentwise
+  /// `relate(_, =, _)` Kleene `AND` — folds over `tuples` IN ORDER under Kleene
+  /// `OR`, seeded FALSE and short-circuiting at the first TRUE. So a NULL left
+  /// component or subquery component keeps the ISO three-valued result (an
+  /// unmatched test is UNKNOWN, not FALSE), an empty `tuples` folds FALSE (no
+  /// witness), and `NOT IN` negates that truth, mapping UNKNOWN to itself — the
+  /// row NULL trap. It reuses the same `relate`/`or` primitives the value-list
+  /// row `IN` does, so the two forms share one three-valued core.
+  private borrowing func member(_ row: borrowing some Row & ~Escapable,
+                                _ lhs: Array<Term>,
+                                _ tuples: Array<Array<Value>>,
+                                _ negated: Bool, _ context: Context)
       throws(SQLError) -> Bool? {
-    let value = try evaluate(row, operand, context)
+    var l = Array<Value>()
+    l.reserveCapacity(lhs.count)
+    for term in lhs { try l.append(evaluate(row, term, context)) }
+    var truth: Bool? = false
+    for element in tuples {
+      truth = or(truth, relate(l, .equal, element))
+      if truth == true { break }
+    }
+    return negated ? truth.map { !$0 } : truth
+  }
+
+  /// Evaluates a lowered `(l…) op {ANY | ALL} (Q)` against `row` over the
+  /// subquery's already-materialised full rows `tuples`.
+  ///
+  /// The left row is evaluated once per row into a `[Value]`, then the row
+  /// comparison `(l…) op r` — the shared `relate` three-valued relation
+  /// (componentwise Kleene `AND` for `=`, its negation for `<>`, the
+  /// lexicographic cascade for the ordering operators) — folds over `tuples` IN
+  /// ORDER with the same Kleene primitives the `member` `IN` fold uses: Kleene
+  /// `OR` seeded FALSE for `any` (short-circuiting at the first TRUE), Kleene
+  /// `AND` seeded TRUE for `all` (short-circuiting at the first FALSE). So a
+  /// NULL component makes an otherwise-undecided fold UNKNOWN, and an empty
+  /// `tuples` takes the seed — `any` FALSE (no witness), `all` TRUE (vacuous).
+  /// `= ANY` reduces to the `member` row `IN` fold and `<> ALL` to its inverse.
+  private borrowing func quantified(_ row: borrowing some Row & ~Escapable,
+                                    _ lhs: Array<Term>, _ op: Comparison,
+                                    _ quantifier: Quantifier,
+                                    _ tuples: Array<Array<Value>>,
+                                    _ context: Context)
+      throws(SQLError) -> Bool? {
+    var l = Array<Value>()
+    l.reserveCapacity(lhs.count)
+    for term in lhs { try l.append(evaluate(row, term, context)) }
     var truth: Bool? = quantifier == .any ? false : true
-    for element in values {
-      let matched = matches(value, op, element)
+    for element in tuples {
+      let matched = relate(l, op, element)
       switch quantifier {
       case .any:
         truth = or(truth, matched)

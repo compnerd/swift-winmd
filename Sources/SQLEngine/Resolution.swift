@@ -441,8 +441,10 @@ internal final class SubqueryMemo {
   private var scalars: Dictionary<Subkey, Value> = [:]
   /// The `EXISTS` non-empty result memoised per existential occurrence.
   private var probes: Dictionary<Subkey, Bool> = [:]
-  /// The `IN (Q)` single-column value set memoised per valued occurrence.
-  private var columns: Dictionary<Subkey, Array<Value>> = [:]
+  /// The `IN (Q)`/quantified subquery's FULL rows memoised per valued
+  /// occurrence — every column, so a scalar `x IN (Q)` (one column) and a row
+  /// `(a, b) IN (Q)` share the one materialisation.
+  private var tuples: Dictionary<Subkey, Array<Array<Value>>> = [:]
 
   /// The resolution OVERLAY each `Subscope`'s subqueries run under — the
   /// caller's `WITH`/store overlay under `.caller`, a view body's own overlay
@@ -465,9 +467,9 @@ internal final class SubqueryMemo {
     probes[key] = value
   }
 
-  internal func values(_ key: Subkey) -> Array<Value>? { columns[key] }
-  internal func store(values: Array<Value>, for key: Subkey) {
-    columns[key] = values
+  internal func tuples(_ key: Subkey) -> Array<Array<Value>>? { tuples[key] }
+  internal func store(tuples: Array<Array<Value>>, for key: Subkey) {
+    self.tuples[key] = tuples
   }
 
   /// The compiled inner plan of each correlated occurrence, keyed by its
@@ -727,34 +729,42 @@ internal struct Resolution {
                    correlation: correlation(of: query), negated: negated)
   }
 
-  /// Lowers `operand [NOT] IN (query)` — `operand` already lowered to a `Term`
-  /// — requiring `query` project exactly one column (else `SQLError.arity`,
-  /// checked from the compiled width, so a two-column subquery faults here
-  /// without running), then carrying the query into the `Filter` to run at
-  /// execution.
-  internal func within(_ operand: Term, _ query: Query, negated: Bool)
+  /// Lowers `(l…) [NOT] IN (query)` — the left row already lowered to
+  /// `operands` (a bare `x IN (query)` lowering to `[x]`) — requiring
+  /// `query` project exactly as many columns as the row has degree (else
+  /// `SQLError.arity`, checked from the compiled width, so a mis-arity subquery
+  /// faults here without running), then carrying the query into the `Filter`
+  /// under the `.valued` role (its full rows materialised and folded per outer
+  /// row) with the discovered `correlation` threaded so a correlated occurrence
+  /// re-runs its inner plan per outer row.
+  internal func within(_ operands: Array<Term>, _ query: Query, negated: Bool)
       throws(SQLError) -> Filter {
     let width = try width(query)
-    guard width == 1 else { throw .arity(1, width) }
-    return .within(operand, Subkey(scope, query, .valued),
+    guard width == operands.count else {
+      throw .arity(operands.count, width)
+    }
+    return .within(operands, Subkey(scope, query, .valued),
                    correlation: correlation(of: query), negated: negated)
   }
 
-  /// Lowers `operand op {ANY | ALL} (query)` — `operand` already lowered to a
-  /// `Term` — requiring `query` project exactly one column (else
-  /// `SQLError.arity`, from the compiled width, so a two-column subquery faults
-  /// here without running), then carrying the query into the `Filter` under the
-  /// same `.valued` role `within` uses — the full column is materialised and
-  /// folded per outer row — with the discovered `correlation` threaded exactly
-  /// as `within` threads it, so a correlated quantified re-runs its inner plan
-  /// per outer row (an uncorrelated one carries an empty correlation and
-  /// memoises once), to run at execution.
-  internal func quantified(_ operand: Term, _ op: Comparison,
+  /// Lowers `(l…) op {ANY | ALL} (query)` — the left row already lowered to
+  /// `operands` (a bare `x op ANY (query)` lowering to `[x]`) — requiring
+  /// `query` project exactly as many columns as the row has degree (else
+  /// `SQLError.arity`, from the compiled width), then carrying the query into
+  /// the `Filter` under the same `.valued` role `within` uses (its full rows
+  /// materialised and folded per outer row) with the discovered `correlation`
+  /// threaded as `within` threads it, so a correlated quantified re-runs its
+  /// inner plan per outer row (an uncorrelated one carries an empty correlation
+  /// and memoises once).
+  internal func quantified(_ operands: Array<Term>, _ op: Comparison,
                            _ quantifier: Quantifier, _ query: Query)
       throws(SQLError) -> Filter {
     let width = try width(query)
-    guard width == 1 else { throw .arity(1, width) }
-    return .quantified(operand, op, quantifier, Subkey(scope, query, .valued),
+    guard width == operands.count else {
+      throw .arity(operands.count, width)
+    }
+    return .quantified(operands, op, quantifier,
+                       Subkey(scope, query, .valued),
                        correlation: correlation(of: query))
   }
 
@@ -845,17 +855,17 @@ internal struct Subqueries {
     memo.store(present: value, for: key)
   }
 
-  /// The memoised `IN (Q)` single column for the uncorrelated occurrence `key`,
-  /// or `nil` when it has not yet run — the evaluator materialises on a miss
-  /// and `store`s it.
-  internal func values(cached key: Subkey) -> Array<Value>? {
-    memo.values(key)
+  /// The memoised FULL rows of the `IN (Q)`/quantified subquery uncorrelated
+  /// occurrence `key`, or `nil` when it has not yet run — the evaluator
+  /// materialises on a miss and `store`s them.
+  internal func tuples(cached key: Subkey) -> Array<Array<Value>>? {
+    memo.tuples(key)
   }
 
-  /// Records the `IN (Q)` single-column value set of the uncorrelated
+  /// Records the FULL rows of the `IN (Q)`/quantified subquery uncorrelated
   /// occurrence `key`.
-  internal func store(values: Array<Value>, for key: Subkey) {
-    memo.store(values: values, for: key)
+  internal func store(tuples: Array<Array<Value>>, for key: Subkey) {
+    memo.store(tuples: tuples, for: key)
   }
 
   /// The already-collapsed value memoised for the scalar uncorrelated
@@ -1201,19 +1211,24 @@ internal func lower(_ predicate: Predicate,
     // `negated` flipping it. A missing materialiser (a lowering surface with no
     // catalog in scope) rejects the subquery rather than mis-lower it.
     try subquery.exists(query, negated: negated)
-  case let .within(expression, query, negated):
-    // `x [NOT] IN (Q)`. `Q` is uncorrelated here, so the materialiser runs it
-    // once, checks it projects exactly one column (else `SQLError.arity`), and
-    // lowers to a `Filter.within` folding `x = v` over that column under the
-    // value-list `IN`'s three-valued Kleene `OR`.
-    try subquery.within(term(expression), query, negated: negated)
-  case let .quantified(expression, op, quantifier, query):
-    // `x op {ANY | ALL} (Q)`. `Q` is uncorrelated here, so the materialiser
-    // runs it once, checks it projects exactly one column (else
-    // `SQLError.arity`), and lowers to a `Filter.quantified` folding `x op v`
-    // over that column with the same `matches`/Kleene primitives `within` uses
-    // — Kleene `OR` for `any`, Kleene `AND` for `all`.
-    try subquery.quantified(term(expression), op, quantifier, query)
+  case let .within(expressions, query, negated):
+    // `(l…) [NOT] IN (Q)` (a bare `x IN (Q)` its one-arity case). `Q` is
+    // uncorrelated here, so the materialiser runs it once, checks it projects
+    // as many columns as the row has degree (else `SQLError.arity`), and lowers
+    // to a `Filter.within` folding the row equality `(l…) = (r…)` over `Q`'s
+    // rows under the value-list row `IN`'s three-valued Kleene `OR`. Each left
+    // component is lowered once through `term`.
+    try subquery.within(terms(of: expressions, lowering: term), query,
+                        negated: negated)
+  case let .quantified(expressions, op, quantifier, query):
+    // `(l…) op {ANY | ALL} (Q)` (a bare `x op ANY (Q)` its one-arity case). `Q`
+    // is uncorrelated here, so the materialiser runs it once, checks it
+    // projects as many columns as the row has degree (else `SQLError.arity`),
+    // and lowers to a `Filter.quantified` folding the row comparison `(l…) op
+    // r` over `Q`'s rows with the same `relate`/Kleene primitives — Kleene `OR`
+    // for `any`, Kleene `AND` for `all`. Each left component lowers via `term`.
+    try subquery.quantified(terms(of: expressions, lowering: term),
+                            op, quantifier, query)
   case let .membership(expression, values, negated):
     // `x IN (a, b, …)` is the disjunction `x = a OR x = b OR …` and `NOT IN`
     // its negation, lowered to a first-class `Filter.membership` that evaluates
@@ -1309,12 +1324,22 @@ private func membership(_ left: Term, _ values: Array<Expression>,
   if values.isEmpty {
     throw .state("42601", "IN requires a non-empty value list")
   }
-  var elements = Array<Term>()
-  elements.reserveCapacity(values.count)
-  for value in values {
-    try elements.append(term(value))
-  }
-  return Filter(membership: left, elements, negated: negated)
+  return try Filter(membership: left, terms(of: values, lowering: term),
+                    negated: negated)
+}
+
+/// Lowers a list of `expressions` componentwise through `term` into an array of
+/// `Term`s, each lowered exactly once — the shared component lowering the
+/// value-list `IN`, the row-value comparison, row `IN`, and the row-valued
+/// subquery predicates all draw on, so a component resolves the same way and
+/// once wherever it appears.
+private func terms(of expressions: Array<Expression>,
+                   lowering term: (Expression) throws(SQLError) -> Term)
+    throws(SQLError) -> Array<Term> {
+  var lowered = Array<Term>()
+  lowered.reserveCapacity(expressions.count)
+  for expression in expressions { try lowered.append(term(expression)) }
+  return lowered
 }
 
 /// Lowers `(l…) <op> (r…)` to a first-class `Filter.comparison(l, op, r)`, the
@@ -1336,13 +1361,8 @@ private func rows(_ lhs: Array<Expression>, _ op: Comparison,
   guard lhs.count == rhs.count else {
     throw .arity(lhs.count, rhs.count)
   }
-  var l = Array<Term>()
-  l.reserveCapacity(lhs.count)
-  for expression in lhs { try l.append(term(expression)) }
-  var r = Array<Term>()
-  r.reserveCapacity(rhs.count)
-  for expression in rhs { try r.append(term(expression)) }
-  return Filter(comparison: l, op, r)
+  return try Filter(comparison: terms(of: lhs, lowering: term), op,
+                    terms(of: rhs, lowering: term))
 }
 
 /// Lowers `(l…) [NOT] IN ((r…), …)` to a first-class
@@ -1366,19 +1386,14 @@ private func among(_ lhs: Array<Expression>, _ rows: Array<Array<Expression>>,
   if rows.isEmpty {
     throw .state("42601", "IN requires a non-empty value list")
   }
-  var l = Array<Term>()
-  l.reserveCapacity(lhs.count)
-  for expression in lhs { try l.append(term(expression)) }
+  let l = try terms(of: lhs, lowering: term)
   var elements = Array<Array<Term>>()
   elements.reserveCapacity(rows.count)
   for element in rows {
     guard element.count == lhs.count else {
       throw .arity(lhs.count, element.count)
     }
-    var row = Array<Term>()
-    row.reserveCapacity(element.count)
-    for expression in element { try row.append(term(expression)) }
-    elements.append(row)
+    try elements.append(terms(of: element, lowering: term))
   }
   return Filter(memberships: l, elements, negated: negated)
 }

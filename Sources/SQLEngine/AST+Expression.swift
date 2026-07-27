@@ -166,35 +166,40 @@ public indirect enum Predicate: Hashable, Sendable {
   /// test of that result; `negated` flips it. `Predicate` is `indirect`, so it
   /// nests the whole `Query` without boxing.
   case exists(Query, negated: Bool)
-  /// `x [NOT] IN (Q)` — whether the operand `x` equals any value the subquery
-  /// `Q` yields, `negated` marking `NOT IN`. `Q` must project exactly one
-  /// column (else `SQLError.arity`); the predicate is the three-valued
-  /// membership of `x` in that column, exactly as the value-list `membership`
-  /// is — a NULL `x` or a NULL element makes an otherwise-unmatched test
-  /// UNKNOWN rather than FALSE, and `NOT IN` its negation (never TRUE when a
-  /// NULL element is present), while an empty result is FALSE (TRUE negated).
-  /// In this first slice `Q` is uncorrelated (it names no enclosing column), so
-  /// the engine materialises it once and folds `x = v` over the materialised
-  /// column under Kleene `OR`, the same three-valued core the value-list `IN`
-  /// uses.
-  case within(Expression, Query, negated: Bool)
-  /// `x op {ANY | SOME | ALL} (Q)` — a quantified comparison, whether `x op v`
-  /// holds for at least one (`ANY`/`SOME`) or every (`ALL`) value `v` the
-  /// subquery `Q` yields, `op` any of `= <> < <= > >=`. `Q` must project
-  /// exactly one column (else `SQLError.arity`). It is three-valued exactly as
-  /// `within` (`IN`) is — reusing the same `matches` comparison and Kleene
-  /// combine — folding `x op v` over `Q`'s column under Kleene `OR` for `any`
-  /// (TRUE at the first TRUE, else UNKNOWN if any comparison is UNKNOWN through
-  /// a NULL `x` or element, else FALSE) and under Kleene `AND` for `all` (FALSE
-  /// at the first FALSE, else UNKNOWN if any is UNKNOWN, else TRUE). An empty
-  /// `Q` takes the fold's identity — `any` FALSE (no witness), `all` TRUE
-  /// (vacuous). `= ANY` is `IN` and `<> ALL` is `NOT IN`, but the case is kept
-  /// distinct for the general operator. `SOME` is a synonym for `ANY`,
-  /// normalised to `any` at parse time. In this slice `Q` is uncorrelated — it
-  /// names no column of the enclosing query — so the engine materialises it
-  /// once (as `within` does) and folds over that single column; correlation is
-  /// a later slice.
-  case quantified(Expression, Comparison, Quantifier, Query)
+  /// `(l1, …, ln) [NOT] IN (Q)` — whether the left `<row value constructor>`
+  /// equals any row the subquery `Q` yields, `negated` marking `NOT IN`. The
+  /// left is a row of one or more `Expression`s (a bare `x IN (Q)` is the
+  /// one-arity case, its left `[x]`); `Q` must project exactly as many columns
+  /// as the row has degree (else `SQLError.arity`, checked from the compiled
+  /// width). The predicate is the three-valued disjunction of row equalities
+  /// `(l…) = (r…)` over `Q`'s rows under Kleene `OR` — each row equality the
+  /// componentwise Kleene `AND` the row comparison `rows` uses, degenerating to
+  /// the scalar `x = v` at arity one, exactly as the value-list `membership`/
+  /// `among` do. So a NULL component makes an otherwise-unmatched test UNKNOWN
+  /// rather than FALSE, an empty `Q` folds FALSE (no witness), and `NOT IN`
+  /// negates that truth — never TRUE when a candidate comparison is UNKNOWN and
+  /// none is TRUE (the NULL trap). In this slice `Q` is uncorrelated (it names
+  /// no enclosing column), so the engine materialises its rows once and folds
+  /// over them.
+  case within(Array<Expression>, Query, negated: Bool)
+  /// `(l1, …, ln) op {ANY | SOME | ALL} (Q)` — a quantified comparison, whether
+  /// `(l…) op r` holds for at least one (`ANY`/`SOME`) or every (`ALL`) row `r`
+  /// the subquery `Q` yields, `op` any of `= <> < <= > >=`. The left is a row
+  /// of one or more `Expression`s (a bare `x op ANY (Q)` is the one-arity case,
+  /// its left `[x]`); `Q` must project exactly as many columns as the row has
+  /// degree (else `SQLError.arity`). It folds the row comparison `(l…) op r`
+  /// — the same componentwise-`=`/lexicographic-ordering three-valued relation
+  /// `rows` uses, degenerating to the scalar `x op v` at arity one — over `Q`'s
+  /// rows under Kleene `OR` for `any` (TRUE at the first TRUE, else UNKNOWN if
+  /// any comparison is UNKNOWN through a NULL component, else FALSE) and under
+  /// Kleene `AND` for `all` (FALSE at the first FALSE, else UNKNOWN if any is
+  /// UNKNOWN, else TRUE). An empty `Q` takes the fold's identity — `any` FALSE
+  /// (no witness), `all` TRUE (vacuous). `= ANY` is `within` and `<> ALL` its
+  /// `NOT IN`, but the case is kept distinct for the operator. `SOME` is
+  /// a synonym for `ANY`, normalised to `any` at parse time. In this slice `Q`
+  /// is uncorrelated — the engine materialises its rows once and folds over
+  /// them; correlation is a later slice.
+  case quantified(Array<Expression>, Comparison, Quantifier, Query)
   /// `p IS [NOT] <truth value>` — the ISO `<boolean test>`, whether the inner
   /// boolean `Predicate` `p`'s three-valued result equals the `value`
   /// (`TRUE`/`FALSE`/`UNKNOWN`), or does not when `negated`. Unlike the other

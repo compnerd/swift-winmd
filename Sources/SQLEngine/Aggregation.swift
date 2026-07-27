@@ -197,14 +197,10 @@ extension Predicate {
       // group, not the enclosing one — it never makes the OUTER query an
       // aggregate one.
       false
-    case let .within(operand, _, _):
-      // Only the OUTER operand can hold an enclosing-group aggregate; the
-      // subquery is its own scope.
-      operand.aggregated
-    case let .quantified(operand, _, _, _):
-      // As `within`: only the OUTER operand can hold an enclosing-group
+    case let .within(lhs, _, _), let .quantified(lhs, _, _, _):
+      // Only the OUTER left-row components can hold an enclosing-group
       // aggregate; the subquery is its own scope.
-      operand.aggregated
+      lhs.contains { $0.aggregated }
     case let .like(operand, pattern, escape, _):
       operand.aggregated || pattern.aggregated
           || (escape?.aggregated ?? false)
@@ -244,10 +240,8 @@ extension Predicate {
           || rows.contains { $0.contains { $0.grouping } }
     case .exists:
       false
-    case let .within(operand, _, _):
-      operand.grouping
-    case let .quantified(operand, _, _, _):
-      operand.grouping
+    case let .within(lhs, _, _), let .quantified(lhs, _, _, _):
+      lhs.contains { $0.grouping }
     case let .like(operand, pattern, escape, _):
       operand.grouping || pattern.grouping
           || (escape?.grouping ?? false)
@@ -287,10 +281,10 @@ extension Predicate {
       // (the subquery runs under the enclosing context), so a defined-function
       // body that nests one still carries a binding to reject at registration.
       query.bound
-    case let .within(operand, query, _):
-      operand.bound || query.bound
-    case let .quantified(operand, _, _, query):
-      operand.bound || query.bound
+    case let .within(lhs, query, _):
+      lhs.contains { $0.bound } || query.bound
+    case let .quantified(lhs, _, _, query):
+      lhs.contains { $0.bound } || query.bound
     case let .like(operand, pattern, escape, _):
       operand.bound || pattern.bound || (escape?.bound ?? false)
     case let .between(test, lower, upper, _):
@@ -497,11 +491,11 @@ extension Predicate {
     switch self {
     case let .exists(query, _):
       queries.append(query)
-    case let .within(operand, query, _):
-      operand.collect(subqueries: &queries)
+    case let .within(lhs, query, _):
+      for expression in lhs { expression.collect(subqueries: &queries) }
       queries.append(query)
-    case let .quantified(operand, _, _, query):
-      operand.collect(subqueries: &queries)
+    case let .quantified(lhs, _, _, query):
+      for expression in lhs { expression.collect(subqueries: &queries) }
       queries.append(query)
     case let .comparison(left, _, right):
       left.collect(subqueries: &queries)
@@ -562,14 +556,18 @@ extension Predicate {
       // An `EXISTS` operand's values are never read — it materialises as a
       // cardinality probe — so it is NOT a valued occurrence.
       break
-    case let .within(operand, query, _):
-      operand.collect(valued: &queries)
+    case let .within(lhs, query, _):
+      // A row-valued `IN (Q)` (the scalar `x IN (Q)` its one-arity case) reads
+      // the subquery's full ROWS — folding the row equality over every one — so
+      // it materialises FULL under the `.valued` role, never a cardinality
+      // probe.
+      for expression in lhs { expression.collect(valued: &queries) }
       queries.insert(query)
-    case let .quantified(operand, _, _, query):
-      // A quantified comparison reads the subquery's full COLUMN — folding `x
-      // op v` over every value — so it materialises FULL under the `.valued`
-      // role, exactly as `IN (Q)` does, never a cardinality probe.
-      operand.collect(valued: &queries)
+    case let .quantified(lhs, _, _, query):
+      // A quantified comparison reads the subquery's full ROWS too, folding the
+      // row comparison over every one, so it is a `.valued` occurrence as
+      // `within` is.
+      for expression in lhs { expression.collect(valued: &queries) }
       queries.insert(query)
     case let .comparison(left, _, right):
       left.collect(valued: &queries)
@@ -619,12 +617,10 @@ extension Predicate {
     switch self {
     case .exists:
       break
-    case let .within(operand, _, _):
-      operand.collect(scalar: &queries)
-    case let .quantified(operand, _, _, _):
-      // As `within`: the quantified subquery is `valued`, not scalar; only the
-      // outer operand's own subqueries are descended.
-      operand.collect(scalar: &queries)
+    case let .within(lhs, _, _), let .quantified(lhs, _, _, _):
+      // The `IN`/quantified subquery is `valued`, not scalar; only the outer
+      // left-row components' own subqueries are descended.
+      for expression in lhs { expression.collect(scalar: &queries) }
     case let .comparison(left, _, right):
       left.collect(scalar: &queries)
       right.collect(scalar: &queries)
@@ -673,12 +669,10 @@ extension Predicate {
     switch self {
     case let .exists(query, _):
       queries.insert(query)
-    case let .within(operand, _, _):
-      operand.collect(existential: &queries)
-    case let .quantified(operand, _, _, _):
-      // A quantified subquery is `valued` (its full column is read), not an
-      // existential probe; only the outer operand is descended here.
-      operand.collect(existential: &queries)
+    case let .within(lhs, _, _), let .quantified(lhs, _, _, _):
+      // The `IN`/quantified subquery is `valued` (its full rows are read), not
+      // an existential probe; only the outer left-row components are descended.
+      for expression in lhs { expression.collect(existential: &queries) }
     case let .comparison(left, _, right):
       left.collect(existential: &queries)
       right.collect(existential: &queries)
@@ -1324,13 +1318,10 @@ extension Predicate {
       // A subquery is its own scope — an aggregate inside it folds over its
       // group, not the enclosing one — so it contributes none here.
       break
-    case let .within(operand, _, _):
-      // Only the OUTER operand may hold an enclosing-group aggregate.
-      operand.collect(into: &expressions)
-    case let .quantified(operand, _, _, _):
-      // As `within`: only the OUTER operand may hold an enclosing-group
+    case let .within(lhs, _, _), let .quantified(lhs, _, _, _):
+      // Only the OUTER left-row components may hold an enclosing-group
       // aggregate.
-      operand.collect(into: &expressions)
+      for expression in lhs { expression.collect(into: &expressions) }
     case let .like(operand, pattern, escape, _):
       operand.collect(into: &expressions)
       pattern.collect(into: &expressions)

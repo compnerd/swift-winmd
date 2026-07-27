@@ -1341,25 +1341,35 @@ internal struct Scope {
       // Reached in the `existential` role, so the deferred phase validates its
       // cardinality probe (no select list), never the original projection.
       try subquery.validate(query, as: .existential)
-    case let .within(operand, query, _):
-      // Validate the operand AND the inner query, and enforce the single-column
-      // arity the lowering does (`SQLError.arity`), so schema validation
-      // matches execution — the recurring lesson that the two must not diverge.
-      // Reached in the `valued` role — its value set is read, so the deferred
-      // phase validates the original query.
-      _ = try validate(operand, routines, subquery: subquery)
+    case let .within(lhs, query, _):
+      // `(l…) [NOT] IN (Q)` (a bare `x IN (Q)` its one-arity case): validate
+      // each left component AND the inner query, and enforce the
+      // row-arity-equals-width rule the lowering does (`SQLError.arity`), so
+      // schema validation matches execution — the recurring lesson that the
+      // two must not diverge. Reached in the `valued` role (its rows are read),
+      // so the deferred phase validates the original query. A cross-kind
+      // component is NOT rejected — the run's `relate`/`matches` yields FALSE
+      // across kinds without faulting, as an `IN` element does — so the schema
+      // accepts what the run accepts; an irreconcilable set-operation subquery
+      // still faults through its own union type fold.
+      for expression in lhs {
+        _ = try validate(expression, routines, subquery: subquery)
+      }
       try subquery.validate(query, as: .valued)
       let width = try subquery.width(query)
-      guard width == 1 else { throw .arity(1, width) }
-    case let .quantified(operand, _, _, query):
-      // As `within`: validate the operand and the inner query, and enforce the
-      // single-column arity the lowering does (`SQLError.arity`), so schema
-      // validation matches execution. Reached `valued` (its values are read),
-      // so the deferred phase validates the original query.
-      _ = try validate(operand, routines, subquery: subquery)
+      guard width == lhs.count else { throw .arity(lhs.count, width) }
+    case let .quantified(lhs, _, _, query):
+      // As `within`: validate each left component and the inner query, and
+      // enforce the row-arity-equals-subquery-width rule the lowering does
+      // (`SQLError.arity`), so schema validation matches execution. Reached
+      // `valued` (its rows are read), so the deferred phase validates the
+      // original query.
+      for expression in lhs {
+        _ = try validate(expression, routines, subquery: subquery)
+      }
       try subquery.validate(query, as: .valued)
       let width = try subquery.width(query)
-      guard width == 1 else { throw .arity(1, width) }
+      guard width == lhs.count else { throw .arity(lhs.count, width) }
     case .bound:
       // `left op :parameter` with no binding — the schema default `[:]` —
       // yields UNKNOWN without evaluating the left term, so a run just produces
@@ -2068,8 +2078,8 @@ internal struct Scope {
     case .exists:
       true
     // A quantified comparison is three-valued over NULLs exactly as `IN (Q)` —
-    // a NULL element or operand makes an undecided fold UNKNOWN — so it is not
-    // definite either.
+    // a NULL component makes an undecided fold UNKNOWN — so it is not definite
+    // either.
     case .within, .quantified:
       false
     case let .and(lhs, rhs), let .or(lhs, rhs):
@@ -2242,14 +2252,12 @@ internal struct Scope {
       // group, not the enclosing one — so an `EXISTS (Q)` contributes no outer
       // aggregate to collect.
       break
-    case let .within(operand, _, _):
-      // Only the OUTER operand may hold an enclosing-group aggregate; the
-      // subquery is its own scope, so it is not walked here.
-      try aggregates(in: operand, routines, subquery: subquery)
-    case let .quantified(operand, _, _, _):
-      // As `within`: only the OUTER operand may hold an enclosing-group
-      // aggregate; the subquery is its own scope.
-      try aggregates(in: operand, routines, subquery: subquery)
+    case let .within(lhs, _, _), let .quantified(lhs, _, _, _):
+      // Only the OUTER left-row components may hold an enclosing-group
+      // aggregate; the subquery is its own scope, so it is not walked here.
+      for expression in lhs {
+        try aggregates(in: expression, routines, subquery: subquery)
+      }
     case let .like(operand, pattern, escape, _):
       try aggregates(in: operand, routines, subquery: subquery)
       try aggregates(in: pattern, routines, subquery: subquery)

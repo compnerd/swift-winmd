@@ -109,34 +109,40 @@ internal indirect enum Filter: Equatable, Sendable {
   /// EXISTS-only occurrence is materialised as a cardinality probe — its select
   /// list never evaluated. A later correlated slice re-runs `Q` per outer row.
   case exists(Subkey, correlation: Correlation, negated: Bool)
-  /// `x [NOT] IN (Q)` — the lowered form of the AST's `within`. The subquery
-  /// occurrence is carried as its cache `Subkey` — never run during `compile` —
-  /// and its single-column arity is enforced at compile from its compiled width
-  /// (`SQLError.arity`, no cursor). At run time `Q` executes once against the
-  /// borrowed catalog (memoised under the `Subkey` in the `Subqueries` cache,
-  /// uncorrelated) and the case folds `operand = v` over its lone column under
-  /// the same Kleene `OR` three-valued membership the value-list
-  /// `Filter.membership` uses — a NULL operand or a NULL element making an
-  /// unmatched test UNKNOWN, an empty result FALSE, and `negated` (`NOT IN`)
-  /// negating the three-valued result (UNKNOWN maps to itself). The operand
-  /// `Term` is evaluated once per row.
-  case within(Term, Subkey, correlation: Correlation, negated: Bool)
-  /// `x op {ANY | ALL} (Q)` — the lowered form of the AST's `quantified`. The
-  /// operand term `x` is held once, the comparison `op` and the `Quantifier`
-  /// beside it, and the subquery occurrence as its cache `Subkey` (its
-  /// `.valued` role, the FULL column materialised as `within`'s is) — never
-  /// run during `compile`, its single-column arity enforced at compile from the
-  /// compiled width (`SQLError.arity`, no cursor). At run `Q` executes once
-  /// against the borrowed catalog (memoised under the `Subkey`, uncorrelated)
-  /// and the case folds `x op v` over its lone column with the same
-  /// `matches`/Kleene primitives `within` uses: Kleene `OR` for `any` (seeded
-  /// FALSE), Kleene `AND` for `all` (seeded TRUE), so a NULL `x` or element
-  /// makes an otherwise-undecided fold UNKNOWN, and an empty column takes the
-  /// seed — `any` FALSE, `all` TRUE. The operand `Term` is evaluated once per
-  /// row. A correlated occurrence carries the discovered `correlation` (as
-  /// `within` does) and re-runs its inner plan per outer row; an uncorrelated
+  /// `(l1, …, ln) [NOT] IN (Q)` — the lowered form of the AST's `within`. The
+  /// left row is a list of ordinal-addressed terms (a bare `x IN (Q)` lowering
+  /// to the one-element `[x]`) and the subquery occurrence is carried as its
+  /// cache `Subkey` under the `.valued` role (its FULL rows materialised) —
+  /// never run during `compile`, its row-arity-equals-width rule enforced at
+  /// compile from the compiled width (`SQLError.arity`, no cursor). At run time
+  /// `Q` executes once against the borrowed catalog (its rows memoised under
+  /// the `Subkey` in the `Subqueries` cache, uncorrelated) and the case folds
+  /// the row equality `(l…) = (r…)` over its rows under the same Kleene `OR`
+  /// three-valued membership the value-list `Filter.memberships` uses — each
+  /// row equality the shared componentwise `relate(_, =, _)`, degenerating to
+  /// the scalar `x = v` at arity one — so a NULL component makes an unmatched
+  /// test UNKNOWN, an empty result FALSE, and `negated` (`NOT IN`) negates that
+  /// truth (UNKNOWN maps to itself — the NULL trap). The left row's terms are
+  /// evaluated once per row. A correlated occurrence carries the discovered
+  /// `correlation` and re-runs its inner plan per outer row; an uncorrelated
   /// one carries an empty correlation and memoises once.
-  case quantified(Term, Comparison, Quantifier, Subkey,
+  case within(Array<Term>, Subkey, correlation: Correlation, negated: Bool)
+  /// `(l1, …, ln) op {ANY | ALL} (Q)` — the lowered form of the AST's
+  /// `quantified`. The left row of terms (a bare `x op ANY (Q)` lowering to
+  /// `[x]`), the comparison `op`, and the `Quantifier` are held beside the
+  /// subquery occurrence's cache `Subkey` (its `.valued` role, the FULL rows
+  /// materialised as `within`'s are) — never run during `compile`, its
+  /// row-arity-equals-width rule enforced at compile (`SQLError.arity`, no
+  /// cursor). At run `Q` executes once against the borrowed catalog (memoised
+  /// under the `Subkey`, uncorrelated) and the case folds the row comparison
+  /// `(l…) op r` — the shared `relate` three-valued relation, degenerating to
+  /// the scalar `x op v` at arity one — over its rows: Kleene `OR` for `any`
+  /// (seeded FALSE), Kleene `AND` for `all` (seeded TRUE), so a NULL component
+  /// makes an otherwise-undecided fold UNKNOWN, and an empty result takes the
+  /// seed — `any` FALSE, `all` TRUE. The left row's terms are evaluated once
+  /// per row. A correlated occurrence carries the discovered `correlation` and
+  /// re-runs its inner plan per outer row; an uncorrelated one memoises once.
+  case quantified(Array<Term>, Comparison, Quantifier, Subkey,
                   correlation: Correlation)
   /// `p IS [NOT] <truth value>` — the lowered form of the AST's `truth`. The
   /// inner boolean `Filter` is held once and evaluated to its three-valued
@@ -626,18 +632,18 @@ extension Filter {
       // its cache key through unchanged.
       .exists(key, correlation: correlation.remapped(through: slot),
               negated: negated)
-    case let .within(operand, key, correlation, negated):
-      // The outer operand term reads slots; a correlated subquery also reads
-      // the outer cells its inner `WHERE` names, so remap both. An uncorrelated
-      // one carries an empty correlation.
-      .within(operand.remapped(through: slot), key,
+    case let .within(lhs, key, correlation, negated):
+      // The left row's terms read slots; a correlated subquery also reads the
+      // outer cells its inner `WHERE` names, so remap both. An uncorrelated one
+      // carries an empty correlation.
+      .within(lhs.map { $0.remapped(through: slot) }, key,
               correlation: correlation.remapped(through: slot),
               negated: negated)
-    case let .quantified(operand, op, quantifier, key, correlation):
-      // As `within`: the outer operand term reads slots; a correlated subquery
-      // also reads the outer cells its inner `WHERE` names, so remap both. An
+    case let .quantified(lhs, op, quantifier, key, correlation):
+      // As `within`: the left row's terms read slots and a correlated subquery
+      // reads the outer cells its inner `WHERE` names, so remap both. An
       // uncorrelated one carries an empty correlation.
-      .quantified(operand.remapped(through: slot), op, quantifier, key,
+      .quantified(lhs.map { $0.remapped(through: slot) }, op, quantifier, key,
                   correlation: correlation.remapped(through: slot))
     case let .truth(inner, value, negated):
       .truth(inner.remapped(through: slot), value, negated: negated)
@@ -1309,26 +1315,29 @@ extension Catalog where Self: ~Escapable {
     return present
   }
 
-  /// The `IN (Q)` single column of the occurrence `key`, materialised lazily:
-  /// an uncorrelated one reads the memo and, on a miss, runs the inner query
-  /// once and stores its lone column; a correlated one re-runs per outer row
-  /// against the correlated bindings, bypassing the memo.
-  internal borrowing func values(_ row: borrowing some Row & ~Escapable,
+  /// The full rows of the `IN (Q)`/quantified subquery occurrence `key`,
+  /// materialised lazily: an uncorrelated one reads the memo and, on a miss,
+  /// runs the inner query once and stores all its rows; a correlated one
+  /// re-runs per outer row against the correlated bindings, bypassing the memo.
+  /// `run` already yields `Array<Value>` rows, so this keeps every column — the
+  /// scalar `x IN (Q)` is the one-column case folded the same way
+  /// (`relate([x], =, [v])` is `matches(x, =, v)`), so one materialiser serves
+  /// both.
+  internal borrowing func tuples(_ row: borrowing some Row & ~Escapable,
                                  _ key: Subkey, _ correlation: Correlation,
                                 _ context: Context)
-      throws(SQLError) -> Array<Value> {
+      throws(SQLError) -> Array<Array<Value>> {
     let context = revealed(under: key, context)
-    // A correlated `IN (Q)` re-executes its pre-compiled inner plan against
-    // this row's correlated bindings for its lone column, bypassing the memo.
-    // An uncorrelated one memoises and re-runs its `Query` (recompiling
-    // resolves).
+    // A correlated row-valued subquery re-executes its pre-compiled inner plan
+    // against this row's correlated bindings for its full rows, bypassing the
+    // memo. An uncorrelated one memoises and re-runs its `Query`.
     guard correlation.isEmpty else {
-      return try executed(row, key, correlation, context).map { $0.values[0] }
+      return try executed(row, key, correlation, context).map { $0.values }
     }
-    if let cached = context.subqueries.values(cached: key) { return cached }
-    let values = try run(key.query, context).map { $0[0] }
-    context.subqueries.store(values: values, for: key)
-    return values
+    if let cached = context.subqueries.tuples(cached: key) { return cached }
+    let tuples = try run(key.query, context)
+    context.subqueries.store(tuples: tuples, for: key)
+    return tuples
   }
 
   /// The value of a scalar subquery occurrence `key`, materialised lazily and

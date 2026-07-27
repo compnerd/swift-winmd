@@ -168,6 +168,7 @@ internal struct Language: Sendable {
                   close: conventions["generic-close"] ?? ""),
         variable: (type: conventions["var-type"] ?? "",
                    method: conventions["var-method"] ?? ""),
+        projection: conventions["projection"] ?? ".ABI",
         opaque: conventions["opaque"] ?? "",
         guid: (iid: conventions["guid-iid"] ?? "",
                clsid: conventions["guid-clsid"] ?? ""),

@@ -32,8 +32,10 @@ type object UnsafeMutableRawPointer
 type typedref UnsafeMutableRawPointer
 
 # The type-composition conventions: the pointer family, the generic delimiters,
-# the optional marker, the generic-variable scope prefixes, the opaque spelling
-# an unresolvable type degrades to, and the `System.Guid` classification names.
+# the optional marker, the generic-variable scope prefixes, the associated-ABI-
+# type projection an unbound generic slot crosses the ABI through
+# (`Element.ABI`, the `.ABI` member), the opaque spelling an unresolvable type
+# degrades to, and the `System.Guid` classification names.
 pointer-mutable UnsafeMutablePointer
 pointer-const UnsafePointer
 rawpointer-mutable UnsafeMutableRawPointer
@@ -43,6 +45,7 @@ generic-open <
 generic-close >
 var-type T
 var-method M
+projection .ABI
 opaque UnsafeMutableRawPointer
 guid-iid IID
 guid-clsid CLSID

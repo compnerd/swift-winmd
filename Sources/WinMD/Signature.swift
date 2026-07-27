@@ -549,3 +549,30 @@ extension Row where Schema == Metadata.Tables.PropertyDef {
     }
   }
 }
+
+// MARK: - TypeSpec generic base
+
+/// The `TypeDefOrRef` coded-index token naming the GENERIC BASE a `TypeSpec`
+/// GENERICINST signature instantiates — the row-linkable value the raw `bytes`
+/// of a `TypeSpec.Signature` `#Blob` carry — or `nil` when the signature is not
+/// a generic instantiation (its base is not a named type).
+///
+/// This is the escapable, value → value form the SQL adapter's `GENERICBASE`
+/// scalar function reads: a caller that has copied a `TypeSpec.Signature` blob
+/// out of the borrowed scan decodes it here, returning the base's `rawValue` so
+/// SQL can split its tag/row and join to the base `TypeRef`/`TypeDef` by `Id`.
+/// A WinRT generic interface inheriting another (`IVector`1 : IIterable`1`)
+/// records the base through a `TypeSpec`, so its `bases` row is otherwise
+/// empty; this recovers the base name.
+///
+/// A `TypeSpec` whose signature is not a `GENERICINST` over a named base — a
+/// bare array/pointer spec, or a malformed blob — yields `nil` rather than
+/// throwing, so the SQL join simply produces no base row for it.
+public func base(decoding bytes: Array<UInt8>) -> TypeDefOrRef? {
+  var decoder = SignatureDecoder(bytes.span.bytes)
+  guard let type = try? decoder.type(),
+      case let .instance(.named(_, reference), _) = type else {
+    return nil
+  }
+  return reference
+}

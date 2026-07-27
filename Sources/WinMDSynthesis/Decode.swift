@@ -35,6 +35,14 @@ public struct Dialect: Sendable {
   /// The `VAR`/`MVAR` generic-parameter scope prefixes (`T`/`M`).
   public let variable: (type: String, method: String)
 
+  /// The associated-ABI-type projection an unbound generic slot crosses the ABI
+  /// through — the member spelling appended to a `VAR`'s declared name so the
+  /// slot reads `Element.ABI` (the `.ABI` suffix), the windows-rs `Type::Abi`
+  /// mechanism. It is size-correct for BOTH a value and a reference argument,
+  /// unlike a fixed-size raw-pointer erasure, so an unbound type variable
+  /// projects through it rather than collapsing to `opaque`.
+  public let projection: String
+
   /// The spelling an unresolvable named type (and a function pointer) degrades
   /// to (`UnsafeMutableRawPointer`).
   public let opaque: String
@@ -59,6 +67,7 @@ public struct Dialect: Sendable {
               optional: String,
               generic: (open: String, close: String),
               variable: (type: String, method: String),
+              projection: String,
               opaque: String,
               guid: (iid: String, clsid: String),
               known: Dictionary<Identity, String>,
@@ -68,6 +77,7 @@ public struct Dialect: Sendable {
     self.optional = optional
     self.generic = generic
     self.variable = variable
+    self.projection = projection
     self.opaque = opaque
     self.guid = guid
     self.known = known
@@ -194,28 +204,85 @@ extension SignatureType {
   /// A modifier is transparent, and so is indirection: a BYREF, pointer, array,
   /// or matrix classifies as its (recursively unwrapped) ELEMENT, so a byref or
   /// array of a class reference is itself a reference (its element erases),
-  /// while a pointer or array of a value stays a value. A `VAR`/`MVAR` generic
-  /// variable stands for an as-yet-unknown argument and is conservatively a
-  /// value (its erased spelling falls through to `decode`).
+  /// while a pointer or array of a value stays a value.
+  ///
+  /// A `VAR`/`MVAR` generic type variable is ARGUMENT-DEPENDENT. WinRT erases a
+  /// generic parameter's ABI by its concrete argument's kind — `IVector<Int32>`
+  /// carries an `Int32` value (4 bytes), `IVector<IFoo>` an interface pointer
+  /// (8 bytes) — so a type variable cannot be classified in isolation. When the
+  /// binding `arguments` of the enclosing instantiation are supplied and a
+  /// type-level `VAR`'s operand indexes them, the variable classifies as its
+  /// BOUND argument (a value argument keeps its value ABI, a reference argument
+  /// erases). Absent a binding — the generic DEFINITION render, whose wrapper
+  /// is itself Swift-generic over the unknown parameter — the variable is a
+  /// reference for a fixed classification; `abi(…)` PROJECTS such an unbound
+  /// type-level slot through its element's associated ABI type
+  /// (`Element.ABI`, size-correct for a value AND a reference argument) rather
+  /// than collapsing it to the opaque pointer, and `projects` reports it so the
+  /// wrapper forwards through `ABIProjectable` rather than a fixed-size cast. A
+  /// method-level `MVAR` is never substituted (only type-level bindings thread
+  /// here) and so stays a reference.
   ///
   /// This is the classification half of the ABI-erasure keystone; `abi(…)`
   /// produces the matching erased spelling.
-  public var classification: ABI {
+  public func classification(substituting arguments: Array<SignatureType>?
+                               = nil) -> ABI {
     switch self {
     case .named(kind: .class, _), .primitive(.object):
       .reference
     case .named(kind: .value, _), .primitive, .function:
       .value
-    case .variable:
-      .value
-    case let .instance(base, _):
-      base.classification
+    case let .variable(scope, index):
+      // A bound type-level variable classifies as its concrete argument; an
+      // unbound one (the definition render) or a method-level `MVAR` erases.
+      if case .type = scope, let arguments, arguments.indices.contains(index) {
+        arguments[index].classification()
+      } else {
+        .reference
+      }
+    case let .instance(base, arguments):
+      // A GENERICINST's own kind follows its base, and its arguments become the
+      // bindings a variable in the base's slots substitutes against.
+      base.classification(substituting: arguments)
     case let .modified(inner, _),
          let .pointer(inner),
          let .reference(inner),
          let .array(inner),
          let .matrix(inner, _):
-      inner.classification
+      inner.classification(substituting: arguments)
+    }
+  }
+
+  /// The ABI classification of `self` with no binding — the generic-definition
+  /// spelling, where a type variable erases as a reference. Argument-dependent
+  /// callers use `classification(substituting:)`.
+  public var classification: ABI {
+    classification()
+  }
+
+  /// Whether `self` is an unbound generic slot that crosses the ABI through its
+  /// element's ASSOCIATED ABI type (`Element.ABI`) rather than a fixed erasure
+  /// — an unbound type-level `VAR` (recursively, under indirection or a
+  /// modifier). The generic-definition wrapper projects such a slot through the
+  /// `ABIProjectable` conformance (`toABI()`/`fromABI(_:)`), not a fixed-size
+  /// `unsafeBitCast`, so it is size-correct for a value AND a reference
+  /// instantiation. A concrete reference (a `CLASS` named type) is NOT
+  /// projected — its erased pointer is a pointer either way, so its cast is
+  /// size-safe — and a value is not projected either. A bound variable (the
+  /// specialisation path) resolves to its concrete argument, so it never
+  /// projects.
+  public var projects: Bool {
+    switch self {
+    case let .variable(scope, _):
+      if case .type = scope { true } else { false }
+    case let .modified(inner, _),
+         let .pointer(inner),
+         let .reference(inner),
+         let .array(inner),
+         let .matrix(inner, _):
+      inner.projects
+    case .named, .primitive, .instance, .function:
+      false
     }
   }
 
@@ -256,18 +323,49 @@ extension SignatureType {
   ///   value is unchanged (`pointer(int)` → `UnsafeMutablePointer<CInt>`), its
   ///   erased element being its own `decode(…)`. A `.modified` type is
   ///   transparent to its inner type, exactly as `classification` treats it.
+  /// When the binding `substituting` arguments of the enclosing instantiation
+  /// are supplied, a type-level `VAR` slot erases by its BOUND argument: a
+  /// value argument keeps its own value ABI (`IVector<Int32>.GetAt -> Int32`
+  /// spells `CInt`, no pointer erasure), a reference argument erases to the
+  /// opaque pointer. Absent a binding — the generic DEFINITION render — an
+  /// unbound type-level `VAR` PROJECTS through its declared name's associated
+  /// ABI type (`Element.ABI`, the `projection` suffix), which is `Element`
+  /// itself for a value instantiation and the opaque pointer for a reference
+  /// one, so the slot is size-correct either way and the wrapper projects
+  /// through `ABIProjectable` rather than a fixed-size cast.
   public func abi(parameter: String? = nil, generics: Array<String>? = nil,
+                  substituting arguments: Array<SignatureType>? = nil,
                   with resolver: Resolver, dialect: Dialect) -> String {
     switch self {
     case let .pointer(element), let .reference(element),
          let .array(element), let .matrix(element, _):
-      element.spelling(parameter: parameter, generics: generics, const: false,
-                       erase: true, with: resolver, dialect: dialect)
+      element.spelling(parameter: parameter, generics: generics,
+                       substituting: arguments, const: false, erase: true,
+                       with: resolver, dialect: dialect)
     case let .modified(inner, _):
-      inner.abi(parameter: parameter, generics: generics, with: resolver,
-                dialect: dialect)
-    case .primitive, .named, .instance, .variable, .function:
-      switch classification {
+      inner.abi(parameter: parameter, generics: generics,
+                substituting: arguments, with: resolver, dialect: dialect)
+    case let .variable(scope, index):
+      // A bound type-level variable erases as its concrete argument (a value
+      // keeps its own ABI, a reference erases). An UNBOUND type-level variable
+      // — the generic DEFINITION render — projects through its declared name's
+      // associated ABI type (`Element.ABI`, the windows-rs `Type::Abi`
+      // mechanism): size-correct for a value AND a reference instantiation,
+      // unlike a fixed-size raw-pointer erasure. A method-level `MVAR` (never
+      // substituted here) and an out-of-range operand have no declared name to
+      // project, so they still collapse to the opaque pointer.
+      if case .type = scope, let arguments, arguments.indices.contains(index) {
+        arguments[index].abi(parameter: parameter, with: resolver,
+                             dialect: dialect)
+      } else if case .type = scope, let generics,
+                generics.indices.contains(index) {
+        scope.spelling(index, generics: generics, dialect: dialect)
+            + dialect.projection
+      } else {
+        dialect.opaque
+      }
+    case .primitive, .named, .instance, .function:
+      switch classification(substituting: arguments) {
       case .reference:
         dialect.opaque
       case .value:
@@ -337,6 +435,7 @@ extension SignatureType {
   /// pointer, not the named type. The `void` collapses are already raw ABI
   /// forms, so `erase` leaves them untouched; only the wrapped leaf differs.
   fileprivate func spelling(parameter: String?, generics: Array<String>?,
+                            substituting arguments: Array<SignatureType>? = nil,
                             const: Bool, erase: Bool, with resolver: Resolver,
                             dialect: Dialect) -> String {
     switch self {
@@ -353,16 +452,19 @@ extension SignatureType {
     case .pointer:
       // A non-`void` pointer-to-pointer: the inner pointer slot is itself
       // nullable, so mark the leaf element optional (as the `void**` cases).
-      wrap(leaf(parameter: parameter, generics: generics, erase: erase,
-                with: resolver, dialect: dialect) + dialect.optional,
+      wrap(leaf(parameter: parameter, generics: generics,
+                substituting: arguments, erase: erase, with: resolver,
+                dialect: dialect) + dialect.optional,
            const: const, dialect: dialect)
     case let .modified(inner, modifiers):
       inner.spelling(parameter: parameter, generics: generics,
+                     substituting: arguments,
                      const: modifiers.constant(with: resolver), erase: erase,
                      with: resolver, dialect: dialect)
     default:
-      wrap(leaf(parameter: parameter, generics: generics, erase: erase,
-                with: resolver, dialect: dialect),
+      wrap(leaf(parameter: parameter, generics: generics,
+                substituting: arguments, erase: erase, with: resolver,
+                dialect: dialect),
            const: const, dialect: dialect)
     }
   }
@@ -371,10 +473,14 @@ extension SignatureType {
   /// `abi(…)` when `erase` is set, otherwise its plain `decode(…)`. A wrapped
   /// class reference thus erases to the opaque pointer under `erase`, while a
   /// value is spelled identically either way (its `abi(…)` is its `decode(…)`).
-  private func leaf(parameter: String?, generics: Array<String>?, erase: Bool,
+  /// Under `erase` the binding `arguments` thread on so a wrapped type variable
+  /// erases by its bound argument (a byref of a value-bound `VAR` wraps the
+  /// value ABI, not the opaque pointer).
+  private func leaf(parameter: String?, generics: Array<String>?,
+                    substituting arguments: Array<SignatureType>?, erase: Bool,
                     with resolver: Resolver, dialect: Dialect) -> String {
-    erase ? abi(parameter: parameter, generics: generics, with: resolver,
-                dialect: dialect)
+    erase ? abi(parameter: parameter, generics: generics,
+                substituting: arguments, with: resolver, dialect: dialect)
           : decode(parameter: parameter, generics: generics, with: resolver,
                    dialect: dialect)
   }

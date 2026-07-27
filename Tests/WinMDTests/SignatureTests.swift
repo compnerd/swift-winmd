@@ -22,6 +22,8 @@ private let CLASS: UInt8 = 0x12
 private let ARRAY: UInt8 = 0x14
 private let SZARRAY: UInt8 = 0x1d
 private let CMOD_OPT: UInt8 = 0x20
+private let VAR: UInt8 = 0x13
+private let GENERICINST: UInt8 = 0x15
 
 // A `TypeDefOrRefOrSpec` coded index, compressed: low two bits the tag, the
 // rest the 1-based row. `TypeRef[0]` is `(1 << 2) | 1 == 5`.
@@ -115,6 +117,27 @@ struct SignatureTests {
     guard case .named(.value, _) = base else {
       Issue.record("modified base not a value type"); return
     }
+  }
+
+  @Test func `base decodes a generic instantiation's base coded index`() {
+    // A `TypeSpec` GENERICINST signature — `IIterable`1<T>`, its base a
+    // `TypeRef` and its one argument a type variable — decodes to its base's
+    // `TypeDefOrRef` token, the value the SQL `bases` view splits (tag/row) to
+    // join the base's name. GENERICINST CLASS TypeRef[0] 1 VAR 0.
+    let bytes = [GENERICINST, CLASS, typeref0, 0x01, VAR, 0x00]
+    guard let base = WinMD.base(decoding: bytes) else {
+      Issue.record("signature not a generic instantiation"); return
+    }
+    #expect(base.tag == 1)
+    #expect(base.row == 1)
+    #expect(base.rawValue == Int(typeref0))
+  }
+
+  @Test func `base is nil for a non-generic-instantiation signature`() throws {
+    // A bare (non-GENERICINST) type spec — an SZARRAY of I4 — is not a generic
+    // instantiation over a named base, so `base` yields nil and the SQL join
+    // produces no base row for it.
+    #expect(WinMD.base(decoding: [SZARRAY, I4]) == nil)
   }
 
   @Test func `decodes a field signature`() throws {

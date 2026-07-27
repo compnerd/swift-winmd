@@ -501,13 +501,16 @@ internal struct Shell: ~Escapable {
       // The names supplied to decode when the interface is generic; `nil`
       // otherwise, so a non-generic interface decodes exactly as before.
       let generics: Array<String>? = names.isEmpty ? nil : names
-      // The interface's own methods, decoded with its generic names so a `VAR`
-      // spells its declared name. A generic interface that HAS a base renders
-      // only its own surface here; forwarding a base's inherited methods onto
-      // the wrapper is a follow-up.
+      // The interface's own methods. A generic interface emits the ERASED ABI
+      // shape (a non-generic ABI protocol requirement + a typed casting
+      // wrapper); a non-generic one the plain `@com` shape. Each is decoded
+      // with the generic names so a `VAR` spells its declared name. A generic
+      // interface with a base renders only its own surface here; forwarding a
+      // base's inherited methods onto the wrapper is a follow-up.
       let methods = try self.methods(of: id, routines, search: search,
                                      generics: generics, in: dialect,
-                                     language: language)
+                                     language: language,
+                                     generic: generics != nil)
       // The interface's named base, via the `bases` view bound by its `Id` (a
       // `TypeRef`/`TypeDef` simple name). A rootless interface defaults to the
       // spec's COM root, except the root interface itself — which inherits
@@ -517,12 +520,42 @@ internal struct Shell: ~Escapable {
           try Shell.select(Shell.query(named: "bases", search: search))
       let bases = try session.run(lineage, routines,
                                   bindings: ["parent": id])
-      let base: String? = if let inherited = bases.first {
+      // The named base's SIMPLE name (a `TypeRef`/`TypeDef` TypeName), or the
+      // spec's COM-root default for a rootless interface (save the root).
+      let named: String? = if let inherited = bases.first {
         inherited[0].text
       } else if language.root.isEmpty || found[2].text == language.root {
         nil
       } else {
         language.root
+      }
+      // The base clause the template inherits. A generic interface's ABI
+      // protocol inherits its base's ABI protocol by protocol inheritance: a
+      // generic base (its TypeName carries a CLR arity suffix) inherits its
+      // `<stripped>ABI` PARAMETERISED by the interface's own generic arguments
+      // (`IVectorABI<Element>: IIterableABI<Element>` — a WinRT generic
+      // interface passes its own type parameters to its generic base), and a
+      // non-generic base (`IInspectable`, no suffix) is inherited unchanged (it
+      // is already a plain protocol with no wrapper/ABI split). The escape
+      // order matches the interface's own `abi` name: strip THEN suffix `ABI`
+      // THEN escape, so a keyword base spells its plain `protocolABI`. A
+      // non-generic interface inherits the plain named base unchanged.
+      //
+      // A CLR arity suffix is a backtick FOLLOWED BY A DIGIT (`IVector``1`); it
+      // marks a generic base to rewrite. It must be told apart from a Swift
+      // KEYWORD-ESCAPING backtick, which `bases` (through `SANITIZE`) wraps
+      // around a keyword base name (a base named `protocol` arrives as
+      // `` `protocol` ``): those backticks WRAP the identifier and are not
+      // followed by a digit, so the base is non-generic and inherited as-is.
+      // A bare `name.contains("`")` cannot tell them apart and would rewrite an
+      // escaped keyword base to a broken `` `protocolABI` ``.
+      let arguments = (generics?.map(language.escape)
+          .joined(separator: ", ")).map { "<\($0)>" } ?? ""
+      let base = named.map { name in
+        generics != nil && Shell.arity(name)
+            ? language.escape(String(name.prefix { $0 != "`" }) + "ABI")
+                + arguments
+            : name
       }
       // A generic interface's own `TypeName` carries the CLR arity suffix
       // (`IVector``1`); strip it — the decode tier strips it only for a
@@ -571,19 +604,32 @@ internal struct Shell: ~Escapable {
   }
 
   /// The template method entries for the interface at `id`, in declaration
-  /// order — each a `name`, a `params` list, and (for a value-returning method)
-  /// a `returns` clause — decoded with the owner's `generics` names threaded so
-  /// a `VAR` spells its declared name.
+  /// order, decoded with the owner's `generics` names threaded so a `VAR`
+  /// spells its declared name.
+  ///
+  /// A NON-generic interface (`generic` false) emits the plain `@com` protocol
+  /// shape: each entry a `name`, a `params` list (each `name`/`local`/`type`,
+  /// the `type` the parameter's own decoded spelling), and — for a
+  /// value-returning method — a `returns` clause.
+  ///
+  /// A GENERIC interface (`generic` true) emits the ERASED ABI shape: the ABI
+  /// protocol's requirement reads each parameter/return through its ABI-erased
+  /// spelling (`abi(parameter:)`/`abi(return:)`), where a reference slot is the
+  /// opaque interface pointer; the wrapper's typed surface reads the same slot
+  /// through its typed `decode(…)`, and the forwarding `call` casts the typed
+  /// value to the erased pointer (and the erased result back) at each reference
+  /// slot. So each entry additionally carries every parameter's `typed`
+  /// spelling and `argument` (the forwarding expression), the return's `typed`
+  /// spelling, and the whole `call` — `Shell.forwarding(…)` composes them.
   ///
   /// Each method's parameters, bound by the method's `Id`, drop the return
-  /// pseudo-parameter (`Sequence == 0`); the rest decode their type from their
-  /// own signature position. The return decodes to `returns` unless it is the
-  /// spec's `void` spelling or undecodable, when `{{#returns}}` renders
-  /// nothing.
+  /// pseudo-parameter (`Sequence == 0`). The return's clause is omitted when it
+  /// is the spec's `void` spelling or undecodable, when `{{#returns}}`/
+  /// `{{#typed}}` renders nothing.
   private borrowing func methods(of id: Value, _ routines: Routines,
                                  search: Array<String>,
                                  generics: Array<String>?, in dialect: Dialect,
-                                 language: Language) throws
+                                 language: Language, generic: Bool) throws
       -> Array<Dictionary<String, Any>> {
     let plan = try Shell.select(Shell.query(named: "methods", search: search))
     let rows = try session.run(plan, routines, bindings: ["parent": id])
@@ -595,19 +641,69 @@ internal struct Shell: ~Escapable {
       let params = try session.run(selection, routines,
                                    bindings: ["parent": method[0]])
       let kept = params.filter { $0[2] != .integer(0) }
-      let types = kept.map {
-        session.storage.decode(parameter: $0[0].integer, generics: generics,
-                               for: dialect) ?? ""
+      // The erased-ABI parameter spellings the ABI protocol's requirement uses:
+      // a reference slot is the opaque interface pointer, a value slot its own
+      // decoded spelling. A non-generic interface renders the requirement off
+      // the same (unerased-because-monomorphic) `abi(…)` — for a non-generic
+      // interface a reference argument has a concrete named type whose `abi(…)`
+      // is that named type, matching today's `decode(…)` output — so this is
+      // byte-identical there.
+      let types = kept.map { param in
+        (generic ? session.storage.abi(parameter: param[0].integer,
+                                       generics: generics, for: dialect)
+                 : session.storage.decode(parameter: param[0].integer,
+                                          generics: generics, for: dialect))
+            ?? ""
       }
-      let parameters = Shell.parameters(kept.map(\.[1].text), types: types)
-      var entry: Dictionary<String, Any> = [
-        "name": method[1].text,
-        "params": parameters,
-      ]
-      let returned = session.storage.decode(return: method[0].integer,
-                                            generics: generics, in: dialect)
-      if let returned, let clause = language.returned(returned) {
-        entry["returns"] = clause
+      let names = kept.map(\.[1].text)
+      var entry: Dictionary<String, Any>
+      let clause = session.storage.decode(return: method[0].integer,
+                                          generics: generics, in: dialect)
+          .flatMap(language.returned)
+      if generic {
+        // The wrapper's typed parameter spellings and the per-slot reference
+        // and projection flags that decide the forwarding conversion.
+        let typed = kept.map {
+          session.storage.decode(parameter: $0[0].integer, generics: generics,
+                                 for: dialect) ?? ""
+        }
+        let references = kept.map {
+          session.storage.reference(parameter: $0[0].integer) ?? false
+        }
+        // Whether each parameter is a projected generic slot (an unbound
+        // type-level `VAR`): it forwards through `ABIProjectable`
+        // (`local.toABI()`), not a fixed-size cast, so it is size-correct for a
+        // value AND a reference instantiation.
+        let projects = kept.map {
+          session.storage.projects(parameter: $0[0].integer) ?? false
+        }
+        let parameters =
+            Shell.parameters(names, types: types, typed: typed,
+                             references: references, projects: projects)
+        entry = ["name": method[1].text, "params": parameters]
+        // The ABI return the protocol requirement uses; the typed return the
+        // wrapper uses; whether the return erases as a concrete pointer (so the
+        // call casts it back) or projects through `ABIProjectable` (so the call
+        // reconstructs it as `<typed>.fromABI(…)`). The value-void/undecodable
+        // return omits BOTH clauses.
+        let erased = session.storage.abi(return: method[0].integer,
+                                         generics: generics, in: dialect)
+            .flatMap(language.returned)
+        let reference =
+            session.storage.reference(return: method[0].integer) ?? false
+        let projected =
+            session.storage.projects(return: method[0].integer) ?? false
+        if let erased { entry["returns"] = erased }
+        if let clause { entry["typed"] = clause }
+        entry["call"] = Shell.forwarding(method[1].text, parameters,
+                                         typed: clause, reference: reference,
+                                         projects: projected)
+      } else {
+        entry = [
+          "name": method[1].text,
+          "params": Shell.parameters(names, types: types),
+        ]
+        if let clause { entry["returns"] = clause }
       }
       methods.append(entry)
     }
@@ -631,25 +727,13 @@ internal struct Shell: ~Escapable {
   internal static func parameters(_ names: Array<String>,
                                   types: Array<String>)
       -> Array<Dictionary<String, Any>> {
-    // The names in play — the real ones plus each synthetic as it is minted —
-    // so a synthetic never duplicates a real name or a sibling synthetic.
-    var used = Set(names.filter { !$0.isEmpty })
-    var next = 0
+    let locals = Shell.locals(names)
     var parameters = Array<Dictionary<String, Any>>()
     parameters.reserveCapacity(names.count)
-    for (name, type) in zip(names, types) {
-      let local: String
-      if name.isEmpty {
-        while used.contains("arg\(next)") { next += 1 }
-        local = "arg\(next)"
-        used.insert(local)
-        next += 1
-      } else {
-        local = name
-      }
+    for (index, type) in types.enumerated() {
       parameters.append([
-        "name": name,
-        "local": local,
+        "name": names[index],
+        "local": locals[index],
         "type": type,
         "last": false,
       ])
@@ -660,6 +744,110 @@ internal struct Shell: ~Escapable {
       parameters[parameters.count - 1]["last"] = true
     }
     return parameters
+  }
+
+  /// The template parameter dictionaries for a GENERIC wrapper's kept
+  /// parameters — the projected ABI shape.
+  ///
+  /// Each entry carries the same `name`/`local`/`last` (the blank-name `local`
+  /// synthesis is shared with the plain builder) plus the split the projected
+  /// shape needs: `type` is the parameter's ABI spelling (the ABI protocol
+  /// requirement's parameter — a value its own ABI, a concrete reference the
+  /// `opaque` interface pointer, a projected generic slot `<typed>.ABI`),
+  /// `typed` its typed spelling (the wrapper method's parameter), and
+  /// `argument` the forwarding expression the wrapper passes through `base`:
+  ///
+  /// - a PROJECTED generic slot projects the typed `local` through its
+  ///   element's `ABIProjectable` conformance (`local.toABI()`) — size-correct
+  ///   for a value AND a reference instantiation, the windows-rs `Param::abi()`
+  ///   analogue — never a fixed-size cast;
+  /// - a CONCRETE reference casts the typed `local` to the erased pointer
+  ///   `type` (`unsafeBitCast(local, to: <type>.self)`) — a pointer either
+  ///   way, so the cast is size-safe;
+  /// - a VALUE passes the `local` unchanged (its typed and ABI spellings
+  ///   coincide, so no conversion is needed).
+  internal static func parameters(_ names: Array<String>,
+                                  types: Array<String>, typed: Array<String>,
+                                  references: Array<Bool>,
+                                  projects: Array<Bool>)
+      -> Array<Dictionary<String, Any>> {
+    let locals = Shell.locals(names)
+    var parameters = Array<Dictionary<String, Any>>()
+    parameters.reserveCapacity(names.count)
+    for index in names.indices {
+      let local = locals[index]
+      let argument = if projects[index] {
+        "\(local).toABI()"
+      } else if references[index] {
+        "unsafeBitCast(\(local), to: \(types[index]).self)"
+      } else {
+        local
+      }
+      parameters.append([
+        "name": names[index],
+        "local": local,
+        "type": types[index],
+        "typed": typed[index],
+        "argument": argument,
+        "last": false,
+      ])
+    }
+    if !parameters.isEmpty {
+      parameters[parameters.count - 1]["last"] = true
+    }
+    return parameters
+  }
+
+  /// The forwarding-method locals for `names` — a named parameter keeps its own
+  /// name; a blank one (`func Foo(_ : T)`, allowed in a protocol requirement's
+  /// decl) synthesizes a stable, collision-free `arg<N>` the wrapper passes by
+  /// name in the call.
+  ///
+  /// The synthetic is chosen AFTER the method's real names are known: the first
+  /// `arg<N>` (from `N == 0`) not used by a real parameter or an earlier
+  /// synthetic, so `Foo(_ : T, _ arg0: T)` gives the blank a local of `arg1`
+  /// rather than colliding with the real `arg0`.
+  private static func locals(_ names: Array<String>) -> Array<String> {
+    // The names in play — the real ones plus each synthetic as it is minted —
+    // so a synthetic never duplicates a real name or a sibling synthetic.
+    var used = Set(names.filter { !$0.isEmpty })
+    var next = 0
+    return names.map { name in
+      guard name.isEmpty else { return name }
+      while used.contains("arg\(next)") { next += 1 }
+      let local = "arg\(next)"
+      used.insert(local)
+      next += 1
+      return local
+    }
+  }
+
+  /// The GENERIC wrapper method's forwarding body — the single expression that
+  /// calls the ABI protocol through `base`, converting across the boundary at
+  /// the return.
+  ///
+  /// The call passes each parameter's forwarding `argument` (a projected slot
+  /// through `local.toABI()`, a concrete reference cast to the erased pointer,
+  /// a value the bare local). A value-void method (`typed` nil) forwards the
+  /// bare call; a returning method whose return PROJECTS reconstructs the typed
+  /// value through the element's `ABIProjectable` conformance
+  /// (`<typed>.fromABI(base.M(…))`) — size-correct for a value AND a reference
+  /// instantiation; a return that erases as a CONCRETE reference casts the
+  /// erased result back (`unsafeBitCast(base.M(…), to: <typed>.self)`, a
+  /// pointer either way); a value return passes the call result through
+  /// unchanged. Swift's single-expression body implicitly returns the
+  /// expression, so no `return` is spelled.
+  internal static func forwarding(_ name: String,
+                                  _ parameters: Array<Dictionary<String, Any>>,
+                                  typed: String?, reference: Bool,
+                                  projects: Bool) -> String {
+    let arguments = parameters.map { $0["argument"] as? String ?? "" }
+                              .joined(separator: ", ")
+    let call = "base.\(name)(\(arguments))"
+    guard let typed else { return call }
+    if projects { return "\(typed).fromABI(\(call))" }
+    guard reference else { return call }
+    return "unsafeBitCast(\(call), to: \(typed).self)"
   }
 
   /// The ordered declared generic-parameter names of the interface at `id`,
@@ -722,6 +910,25 @@ internal struct Shell: ~Escapable {
   /// name (a `-I` directory's copy shadowing the bundle's), the same way the
   /// template is. A name no search directory and no bundle resolves is a
   /// packaging error, raised as `RenderError.query`.
+  /// Whether `name` carries a CLR generic-arity suffix — a backtick FOLLOWED BY
+  /// A DIGIT (`IVector``1`), the metadata spelling of a generic definition's
+  /// name — marking it a GENERIC base to rewrite to its `<stripped>ABI`.
+  ///
+  /// This is deliberately narrower than `contains("`")`: a Swift keyword base
+  /// name arrives keyword-ESCAPED from `bases` (through `SANITIZE`), its
+  /// backticks WRAPPING the whole identifier (`` `protocol` ``) rather than
+  /// prefixing a digit. Those escaping backticks must NOT be read as an arity
+  /// suffix — the base is non-generic and inherited unchanged.
+  private static func arity(_ name: String) -> Bool {
+    var characters = name.makeIterator()
+    while let character = characters.next() {
+      if character == "`", let next = characters.next(), next.isNumber {
+        return true
+      }
+    }
+    return false
+  }
+
   private static func query(named name: String,
                             search: Array<String>) throws -> String {
     guard let url = resource(name, "sql", kind: "Render", search: search)

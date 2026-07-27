@@ -194,11 +194,11 @@ extension Parser {
     guard let op = try comparator() else {
       // No comparison operator or other predicate tail follows, so `left`
       // stands alone as an ISO `<boolean predicand>`: bridge it as the
-      // comparison `left = TRUE`, whose three-valued truth IS `left`'s
-      // boolean value (a NULL `left` reading UNKNOWN), the same desugar `x IS
-      // TRUE` uses. A non-boolean `left` compares cross-kind against the
-      // boolean literal, which the engine reads as a definite non-match
-      // exactly as the explicit `left = TRUE` does.
+      // comparison `left = TRUE`, whose three-valued truth IS `left`'s boolean
+      // value (a NULL `left` reading UNKNOWN), the same desugar `x IS TRUE`
+      // uses. A non-boolean `left` compares incomparably against the boolean
+      // literal, so — like the explicit `left = TRUE` — it faults `42804` (the
+      // ISO comparability rule), a genuine BOOLEAN predicand alone passing.
       return .comparison(left: left, op: .equal,
                          right: .literal(.boolean(true)))
     }

@@ -300,6 +300,10 @@ private func subquery(_ filter: Filter) -> Bool {
     return subquery(lhs) || subquery(rhs)
   case let .not(operand):
     return subquery(operand)
+  case let .incomparable(inner):
+    // A comparison whose subquery operand makes it provably throwable is
+    // wrapped, so see through the wrapper to the underlying operands.
+    return subquery(inner)
   default:
     return false
   }
@@ -2509,5 +2513,133 @@ struct DecorrelateScalarVirtualTests {
     #expect(outers(plan))                         // decorrelated
     #expect(!subquery(in: plan))                  // no residual scalar
     try catalog.expect(sql + " ORDER BY v", yields: [[100], [300]])
+  }
+}
+
+// MARK: - Correlated cross-kind comparability gate
+
+/// The soundness oracles for the decorrelation comparability gate. A correlated
+/// equi key `inner = :outer` is hoisted to a straddling hash `.match`, which
+/// buckets the two sides by the physical join key — so a cross-kind key (an
+/// integer inner against a text outer) hashes into disjoint buckets, compares
+/// no candidate row, and would silently return no rows. That is a run ≠
+/// validate break: the strict `columns(of: validate: true)` path faults 42804
+/// on the same key. The gate leaves such an apply/select/scalar correlated so
+/// the equality routes through the nested-loop `matches`, which faults, while a
+/// comparable key still decorrelates. Each case pins both the fault (a 42804,
+/// not a silent empty) and the plan shape (a cross-kind key is not lifted; a
+/// comparable one is), across the three `equated` users.
+///
+/// `T` carries an integer `int_key` and a text `text_key`; `S` carries an
+/// integer real column `n` and a text `label`, plus its 1-based virtual `Id`
+/// (at ordinal `== width`). Correlating `S.n`/`S.Id` against `T.text_key`
+/// crosses integer with text; against `T.int_key` stays like-kind.
+private func crossKindFixture() throws -> FixtureCatalog {
+  try Catalog {
+    Relation("T", ["int_key": .integer, "text_key": .text]) {
+      Row(1, "x")
+      Row(2, "y")
+    }
+    Relation("S", ["n": .integer, "label": .text]) {
+      Row(1, "a")            // Id 1
+      Row(2, "c")            // Id 2
+    }
+  }
+}
+
+/// The incomparable-type fault the integer inner key against the text outer key
+/// raises through `matches` — the left operand is the integer inner column, the
+/// right the text outer value the correlation binds.
+private let intVsTextKey =
+    SQLError.state("42804", "cannot compare integer with character varying")
+
+/// A correlated `EXISTS` whose equi correlation key is cross-kind must NOT lift
+/// to a `.semijoin` (its hash `.match` would bucket the two sides apart); it
+/// stays a correlated `.exists` that faults 42804 through `matches`, matching
+/// the validate path. A like-kind key still lifts.
+struct DecorrelateExistsComparabilityTests {
+  @Test func `a cross-kind EXISTS key is not lifted and faults`() throws {
+    let sql =
+        "SELECT T.int_key FROM T WHERE EXISTS " +
+        "(SELECT 1 FROM S WHERE S.n = T.text_key)"
+    let plan = try crossKindFixture().optimised(sql)
+    #expect(!semijoins(plan))                     // NOT decorrelated
+    #expect(exists(in: plan))                     // stays a correlated EXISTS
+    try crossKindFixture().expect(sql, fails: intVsTextKey)
+    let query = try parse(query: sql)
+    #expect(throws: intVsTextKey) { try crossKindFixture().columns(of: query) }
+  }
+
+  @Test func `a like-kind EXISTS key still decorrelates and matches`() throws {
+    let sql =
+        "SELECT T.int_key FROM T WHERE EXISTS " +
+        "(SELECT 1 FROM S WHERE S.n = T.int_key)"
+    let plan = try crossKindFixture().optimised(sql)
+    #expect(semijoins(plan))                      // decorrelated to a semijoin
+    #expect(!exists(in: plan))                    // no residual EXISTS
+    // int_key 1 finds S.n 1, int_key 2 finds S.n 2 — both match.
+    try crossKindFixture().expect(sql + " ORDER BY T.int_key",
+                                  yields: [[1], [2]])
+  }
+}
+
+/// A correlated CROSS APPLY whose equi correlation key is cross-kind must NOT
+/// fold to a `.join`; it stays an `.apply` that faults 42804 through `matches`.
+/// A like-kind key still folds.
+struct DecorrelateApplyComparabilityTests {
+  @Test func `a cross-kind CROSS APPLY key stays an apply and faults`()
+      throws {
+    let sql =
+        "SELECT T.int_key, d.n FROM T " +
+        "JOIN LATERAL (SELECT S.n FROM S WHERE S.n = T.text_key) AS d ON 1 = 1"
+    let plan = try crossKindFixture().optimised(sql)
+    #expect(applies(plan))                        // NOT decorrelated
+    #expect(!joins(plan))
+    try crossKindFixture().expect(sql, fails: intVsTextKey)
+    let query = try parse(query: sql)
+    #expect(throws: intVsTextKey) { try crossKindFixture().columns(of: query) }
+  }
+
+  @Test func `a like-kind CROSS APPLY key still decorrelates and matches`()
+      throws {
+    let sql =
+        "SELECT T.int_key, d.n FROM T " +
+        "JOIN LATERAL (SELECT S.n FROM S WHERE S.n = T.int_key) AS d ON 1 = 1"
+    let plan = try crossKindFixture().optimised(sql)
+    #expect(!applies(plan))                       // decorrelated
+    #expect(joins(plan))
+    // int_key 1 matches S.n 1, int_key 2 matches S.n 2.
+    try crossKindFixture().expect(sql + " ORDER BY T.int_key",
+                                  yields: [[1, 1], [2, 2]])
+  }
+}
+
+/// A correlated scalar subquery whose equi correlation key is the unique
+/// virtual `Id` but cross-kind must not fold to a LEFT `.outer` join; it stays
+/// a residual `.subquery` that faults 42804 through `matches`. A like-kind key
+/// still folds.
+struct DecorrelateScalarComparabilityTests {
+  @Test func `a cross-kind scalar Id key stays correlated and faults`()
+      throws {
+    let sql =
+        "SELECT (SELECT S.label FROM S WHERE S.Id = T.text_key) FROM T"
+    let plan = try crossKindFixture().optimised(sql)
+    #expect(subquery(in: plan))                   // NOT decorrelated
+    #expect(!outers(plan))
+    try crossKindFixture().expect(sql, fails: intVsTextKey)
+    let query = try parse(query: sql)
+    #expect(throws: intVsTextKey) { try crossKindFixture().columns(of: query) }
+  }
+
+  @Test func `a like-kind scalar Id key still decorrelates and matches`()
+      throws {
+    let sql =
+        "SELECT (SELECT S.label FROM S WHERE S.Id = T.int_key) AS v FROM T"
+    let plan = try crossKindFixture().optimised(sql)
+    #expect(outers(plan))                         // decorrelated
+    #expect(!subquery(in: plan))
+    // int_key 1 reads S row 1 (label "a"), int_key 2 reads S row 2 (label "c").
+    try crossKindFixture().expect(sql + " ORDER BY v",
+                                  yields: [["a"], ["c"]])
   }
 }

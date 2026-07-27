@@ -199,26 +199,28 @@ struct LikeThreeValuedTests {
                        yields: [[3]])
   }
 
-  @Test func `a non-text operand is a definite non-match`() throws {
-    // `K` is an integer column, so `K LIKE '10'` is a cross-kind comparison —
-    // FALSE for every row via the engine's cross-kind rule, NOT a fault — so no
-    // row qualifies and NOT LIKE admits every row (a definite non-match, not
-    // UNKNOWN).
-    try names().empty("SELECT Id FROM T WHERE K LIKE '10'")
-    try names().expect("SELECT Id FROM T WHERE K NOT LIKE '10'",
-                       yields: [[1], [2], [3], [4]])
+  @Test func `a non-character operand faults the run`() throws {
+    // `K` is an integer column, so `K LIKE '10'` has a non-character operand:
+    // ISO `LIKE` requires character operands, so the run faults 42804 rather
+    // than the old silent FALSE (which admitted every row under `NOT LIKE`).
+    try names().expect("SELECT Id FROM T WHERE K LIKE '10'",
+                       fails: .state("42804",
+                                     "LIKE requires character operands"))
   }
 }
 
 // MARK: - Type checking
 
 struct LikeTypeCheckingTests {
-  @Test func `a non-text operand does not fault the schema check`() throws {
-    // `K` is an integer column, but `K LIKE '10'` does NOT fault the schema
-    // check: the run yields a definite FALSE without faulting (the cross-kind
-    // rule), so the check must accept what the run accepts.
+  @Test func `a non-character operand faults the schema check`() throws {
+    // `K` is an integer column: `K LIKE '10'` has a non-character operand, so
+    // the schema check faults 42804 (ISO `LIKE` requires character operands),
+    // matching the run — run ≡ validate.
     let query = try parse(query: "SELECT Id FROM T WHERE K LIKE '10'")
-    _ = try names().columns(of: query, validate: true)
+    #expect(throws: SQLError.state("42804",
+                                   "LIKE requires character operands")) {
+      try names().columns(of: query, validate: true)
+    }
   }
 
   @Test func `a bad operand expression faults the schema check`() throws {
@@ -231,6 +233,153 @@ struct LikeTypeCheckingTests {
     #expect(throws: SQLError.operand("operands must be numeric")) {
       try resolve()
     }
+  }
+}
+
+// MARK: - NULL pattern/escape parity
+
+/// A constant-NULL `LIKE` pattern or escape makes the run UNKNOWN before its
+/// non-character fallback, so validation must admit it without enforcing the
+/// subject's character type — `K LIKE NULL` (integer `K`) runs and selects
+/// nothing, it does not fault 42804. Only a non-NULL pattern over a
+/// non-character subject faults, on both paths.
+struct LikeNullOperandTests {
+  @Test func `a NULL pattern admits a non-character subject on both paths`()
+      throws {
+    // `K` is integer; a constant-NULL pattern reads UNKNOWN regardless of `K`,
+    // so the run selects nothing and validation admits it — no 42804, matching
+    // the run. adversarial: enforcing the subject type first faults validation.
+    let query = try parse(query: "SELECT Id FROM T WHERE K LIKE NULL")
+    _ = try names().columns(of: query, validate: true)
+    try names().empty("SELECT Id FROM T WHERE K LIKE NULL")
+  }
+
+  @Test func `a NULL escape admits a non-character subject on both paths`()
+      throws {
+    // A constant-NULL escape is UNKNOWN before the non-character fallback, so
+    // `K LIKE 'x' ESCAPE NULL` (integer `K`) admits at validation and selects
+    // no rows at run — the run ≡ validate parity the NULL-first ordering keeps.
+    let query =
+        try parse(query: "SELECT Id FROM T WHERE K LIKE 'x' ESCAPE NULL")
+    _ = try names().columns(of: query, validate: true)
+    try names().empty("SELECT Id FROM T WHERE K LIKE 'x' ESCAPE NULL")
+  }
+
+  @Test func `a non-NULL pattern still faults a non-character subject`()
+      throws {
+    // With a non-NULL pattern the run reaches its non-character fallback, so
+    // `K LIKE 'x'` (integer `K`) faults 42804 at run and validation — the NULL
+    // exemption does not weaken the ordinary character-type enforcement.
+    let fault = SQLError.state("42804", "LIKE requires character operands")
+    let query = try parse(query: "SELECT Id FROM T WHERE K LIKE 'x'")
+    #expect(throws: fault) { try names().columns(of: query, validate: true) }
+    try names().expect("SELECT Id FROM T WHERE K LIKE 'x'", fails: fault)
+  }
+
+  @Test func `a character subject with a NULL pattern stays UNKNOWN`() throws {
+    // A genuine character subject `Name LIKE NULL` admits at validation and is
+    // UNKNOWN for every row at run — the NULL-pattern short-circuit is not
+    // limited to a non-character subject.
+    let query = try parse(query: "SELECT Id FROM T WHERE Name LIKE NULL")
+    _ = try names().columns(of: query, validate: true)
+    try names().empty("SELECT Id FROM T WHERE Name LIKE NULL")
+  }
+}
+
+// MARK: - NULL subject parity
+
+/// A constant-NULL `LIKE` subject makes the run's `like` return UNKNOWN from
+/// its `(.null, _, _)` arm before it inspects the pattern's type, so neither
+/// the subject nor the pattern character type is enforced — `NULL LIKE 1` runs
+/// and selects nothing, it does not fault 42804. Symmetric to the constant-NULL
+/// pattern exemption `LikeNullOperandTests` covers; only a non-NULL
+/// non-character subject reaches the character check the run's non-character
+/// fallback faults.
+struct LikeNullSubjectTests {
+  @Test func `a NULL subject with a non-character pattern does not fault`()
+      throws {
+    // `NULL LIKE 1`: the NULL subject short-circuits the run to UNKNOWN before
+    // the integer pattern's type is inspected, so it selects nothing and does
+    // not fault — the strict validate path must agree. adversarial: enforcing
+    // the pattern's character type first faults validation.
+    let query = try parse(query: "SELECT Id FROM T WHERE NULL LIKE 1")
+    _ = try names().columns(of: query, validate: true)
+    try names().empty("SELECT Id FROM T WHERE NULL LIKE 1")
+  }
+
+  @Test func `a non-NULL non-character subject still faults`() throws {
+    // The skip is scoped to a NULL subject; a non-null integer subject `K` is a
+    // non-character operand the run's `like` faults, so `K LIKE 1` still faults
+    // 42804 on both paths — the exemption does not over-suppress.
+    let fault = SQLError.state("42804", "LIKE requires character operands")
+    let query = try parse(query: "SELECT Id FROM T WHERE K LIKE 1")
+    #expect(throws: fault) { try names().columns(of: query, validate: true) }
+    try names().expect("SELECT Id FROM T WHERE K LIKE 1", fails: fault)
+  }
+}
+
+// MARK: - Parameter pattern/escape parity
+
+/// A `:parameter` `LIKE` pattern or escape carries a per-run value from the
+/// bindings — possibly NULL or unbound — so the run reads it as UNKNOWN before
+/// its non-character fallback unless a non-NULL non-character value is bound.
+/// Validation cannot know the binding, so it defers the subject's (and
+/// pattern's) character type to the run exactly as it defers a constant-NULL
+/// pattern: `K LIKE :p` (integer `K`) does not fault at validation, and at run
+/// an unbound or NULL `:p` selects nothing while a non-character-bound one
+/// faults 42804 — the run is the authority for the per-run kind. The strict
+/// validator (commit 1) must agree without the comparison-finder.
+struct LikeParameterOperandTests {
+  @Test func `a parameter pattern admits a non-character subject at validate`()
+      throws {
+    // `K` is integer; a `:pattern` operand has no binding at validate time, so
+    // enforcing the subject's character type would reject `K LIKE :pattern` a
+    // run keeps. Validation admits it, deferring to the run — no 42804.
+    let query = try parse(query: "SELECT Id FROM T WHERE K LIKE :pattern")
+    _ = try names().columns(of: query, validate: true)
+  }
+
+  @Test func `an unbound parameter pattern selects nothing at run`() throws {
+    // An unbound `:pattern` resolves to NULL, so `K LIKE :pattern` is UNKNOWN
+    // for every row before the integer subject's type is inspected — the run
+    // selects nothing and does not fault, matching the admitting validation.
+    try names().empty("SELECT Id FROM T WHERE K LIKE :pattern")
+  }
+
+  @Test func `a parameter escape admits a non-character subject at validate`()
+      throws {
+    // A `:escape` operand likewise has no binding at validate time, so
+    // `K LIKE 'x' ESCAPE :escape` (integer `K`) admits without enforcing the
+    // subject's character type — deferred to the run.
+    let query =
+        try parse(query: "SELECT Id FROM T WHERE K LIKE 'x' ESCAPE :escape")
+    _ = try names().columns(of: query, validate: true)
+  }
+
+  @Test func `an unbound parameter escape selects nothing at run`() throws {
+    // An unbound `:escape` resolves to NULL, an UNKNOWN escape, so
+    // `K LIKE 'x' ESCAPE :escape` selects nothing at run before the integer
+    // subject's type is reached — no 42804, matching validation.
+    try names().empty("SELECT Id FROM T WHERE K LIKE 'x' ESCAPE :escape")
+  }
+
+  @Test func `a non-character bound parameter pattern faults the run`() throws {
+    // The run is the authority for the per-run kind: a `:pattern` bound to a
+    // non-null integer makes `K LIKE :pattern` reach the non-character fallback
+    // on the first row, faulting 42804 exactly as `K LIKE 1` does. Validation
+    // deferred it (the binding is unknown at compile), so the run decides.
+    let fault = SQLError.state("42804", "LIKE requires character operands")
+    try names().expect("SELECT Id FROM T WHERE K LIKE :pattern",
+                       fails: fault, bindings: ["pattern": .integer(1)])
+  }
+
+  @Test func `a text bound parameter pattern still matches`() throws {
+    // A `:pattern` bound to text runs as an ordinary pattern: `Name LIKE :p`
+    // with `:p` = `'ab%'` matches the two `ab`-prefixed rows — the deferral
+    // does not disturb a well-typed bound pattern.
+    try names().expect("SELECT Id FROM T WHERE Name LIKE :pattern",
+                       yields: [[1], [2]],
+                       bindings: ["pattern": .text("ab%")])
   }
 }
 

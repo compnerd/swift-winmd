@@ -355,17 +355,26 @@ extension Catalog where Self: ~Escapable {
 /// non-comparison does not qualify, and the relation scans.
 private func comparison(_ filter: Filter, _ bindings: Bindings)
     -> (Int, Comparison, Int)? {
+  // A `slot op :parameter` (`bound`) is stamped `Filter.incomparable` at
+  // lowering — its parameter side is opaque — so unwrap that stamp to read the
+  // seekable shape. The seek stays comparability-safe on its own: a parameter
+  // seeks only when it resolves to an integer against the sort key here, so a
+  // cross-kind binding never seeks (it scans, and the residual — carrying the
+  // stamp — faults `42804` at run), while the stamp still bars a sibling from
+  // seeking past this conjunct through `Filter.safe`.
+  var filter = filter
+  if case let .incomparable(inner) = filter { filter = inner }
   switch filter {
   case let .compare(.slot(slot), op, .constant(.integer(value))):
-    (slot, op, value)
+    return (slot, op, value)
   case let .bound(.slot(slot), op, parameter):
     if case let .integer(value)? = bindings[parameter] {
-      (slot, op, value)
+      return (slot, op, value)
     } else {
-      nil
+      return nil
     }
   default:
-    nil
+    return nil
   }
 }
 
@@ -381,6 +390,13 @@ private func comparison(_ filter: Filter, _ bindings: Bindings)
 /// unbound or non-integer parameter) does not qualify, and the relation scans
 /// under the residual `between`.
 private func range(_ filter: Filter, _ bindings: Bindings) -> (Int, Int, Int)? {
+  // A parameterised `x BETWEEN :lo AND :hi` is stamped `Filter.incomparable` at
+  // lowering (an opaque `:parameter` bound); unwrap to read the seekable range.
+  // The seek is binding-guarded — a bound seeks only when it resolves to an
+  // integer against the sort key — so a cross-kind binding scans and the
+  // stamped residual faults `42804`, as `comparison` does for a `bound`.
+  var filter = filter
+  if case let .incomparable(inner) = filter { filter = inner }
   guard case let .between(.slot(slot), lower, upper, negated: false) = filter,
       let low = integer(lower, bindings),
       let high = integer(upper, bindings) else {

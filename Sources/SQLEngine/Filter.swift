@@ -74,9 +74,9 @@ internal indirect enum Filter: Equatable, Sendable {
   /// LIKE`. The runtime reads the operand and pattern text and runs the `%`/`_`
   /// matcher (a linear two-pointer match, `%` matching any run and `_` exactly
   /// one character, an escape character taking the next character literally); a
-  /// NULL operand, pattern, or escape is UNKNOWN and a non-text operand or
-  /// pattern is a definite non-match (the engine's cross-kind rule), with `NOT
-  /// LIKE` negating the three-valued result (UNKNOWN maps to itself).
+  /// NULL operand, pattern, or escape is UNKNOWN and a non-NULL non-character
+  /// operand or pattern faults `42804` (ISO `LIKE` wants character operands),
+  /// with `NOT LIKE` negating the three-valued result (UNKNOWN maps to itself).
   case like(Term, pattern: Operand, escape: Operand?, negated: Bool)
   /// `x [NOT] BETWEEN a AND b` — the lowered form of the AST's `between`. The
   /// test term `x` is held once, the two bounds `a` and `b` beside it — each an
@@ -93,9 +93,9 @@ internal indirect enum Filter: Equatable, Sendable {
   /// predicate) and `negated` marks the `IS NOT DISTINCT FROM` (null-safe
   /// equality) spelling. Evaluating it is two-valued — never UNKNOWN — treating
   /// NULL as a comparable value: the two are the same iff both are NULL, or
-  /// both non-NULL and equal (a cross-kind pair is DISTINCT, matching
-  /// `matches`'s cross-kind FALSE equality), and `IS DISTINCT FROM` is TRUE
-  /// when they differ, `IS NOT DISTINCT FROM` when they are the same.
+  /// both non-NULL and equal (a cross-kind pair is DISTINCT, never a fault —
+  /// the null-safe comparison is total where a bare comparison faults), and `IS
+  /// DISTINCT FROM` is TRUE when they differ, `IS NOT DISTINCT FROM` when same.
   case distinct(Term, Term, negated: Bool)
   /// `[NOT] EXISTS (Q)` — the lowered form of the AST's `exists`. The subquery
   /// occurrence is carried as its cache `Subkey` (its resolution scope composed
@@ -157,6 +157,22 @@ internal indirect enum Filter: Equatable, Sendable {
   case or(Filter, Filter)
   /// `NOT operand`.
   case not(Filter)
+  /// A throwable comparison leaf the typed scope proved incomparable under the
+  /// ISO 9075 comparability rule — a cross-kind `compare`/`comparison`/
+  /// `membership`/`memberships`/`between`, or a non-character `LIKE` — wrapping
+  /// the same leaf it classifies (never a connective). The classification is
+  /// computed once at lowering (`stamped`, where `Scope`/`Schema` know the
+  /// operand types) and carried into the untyped physical layer, so `safe`
+  /// reports the leaf throws `42804` (as an ill-typed divide does) without the
+  /// optimiser recomputing type information it does not have. Because the
+  /// wrapper sits below the `and` above the leaf, `conjuncts` still splits into
+  /// individual conjuncts and the optimiser reads one unsafe conjunct;
+  /// `remapped` re-wraps the remapped inner (slot renumbering does not change
+  /// comparability), and every other traversal recurses into the inner.
+  /// Evaluating it evaluates the inner, which faults `42804` at run exactly as
+  /// the un-optimised plan does — never dropped over an emptied seek, never
+  /// pushed past a row-dropping operator.
+  case incomparable(Filter)
 
   /// The lowered pattern or escape operand of a `Filter.like`: a `Term`
   /// evaluated per row, or a run-time `:parameter` resolved from the engine's
@@ -574,6 +590,19 @@ extension Filter.Operand {
     }
   }
 
+  /// Whether this `LIKE` pattern or escape operand is a constant NULL — the run
+  /// reads it as UNKNOWN (`Row.like`'s `(_, _, .some(.null))` / NULL-pattern
+  /// arm) before any character-type or single-character check, so it never
+  /// faults, and the whole `LIKE` is UNKNOWN. The NULL-first rule the
+  /// comparability stamp (`vanishes`) and `Scope.check` follow, lifted here for
+  /// `Filter.safe`. A `:parameter` is per-run and not NULL-determined (it may
+  /// bind a non-NULL cross-kind value, or a bad-length escape, the run faults
+  /// on), so it does not vanish — matching the stamp's parameter rule.
+  internal var vanishes: Bool {
+    if case .term(.constant(.null)) = self { return true }
+    return false
+  }
+
   /// Whether this operand reads a run-time `:parameter` — a `.parameter` is one
   /// (it may be unbound or bound to NULL, so a `LIKE` over it is UNKNOWN), and
   /// a `.term` is one when its `Term` itself carries a correlated
@@ -653,6 +682,11 @@ extension Filter {
       .or(lhs.remapped(through: slot), rhs.remapped(through: slot))
     case let .not(operand):
       .not(operand.remapped(through: slot))
+    case let .incomparable(inner):
+      // Slot renumbering never changes comparability, so re-wrap the remapped
+      // inner rather than reclassifying — the carried bit travels verbatim
+      // through the combined-space remap the optimiser applies.
+      .incomparable(inner.remapped(through: slot))
     }
   }
 
@@ -726,17 +760,24 @@ extension Filter {
       lhs.allSatisfy(\.safe) && rows.allSatisfy { $0.allSatisfy(\.safe) }
     case let .like(operand, pattern, escape, _):
       // An escape makes the predicate unsafe unless it is statically a valid
-      // single-character escape: `Row.like` faults (`SQLError.argument`) on any
-      // escape that does not evaluate to a one-character text — a throw
-      // independent of whether a pair matches, so it must not ride below a seek
-      // or join and fire on an empty product (or be dropped by a hash key). A
-      // non-constant escape (a slot or call) or a constant that is NULL,
-      // non-text, or the wrong length is unsafe; only a `.constant` text of
-      // exactly one character (`escape.escape`) is safe. Plain LIKE (no escape)
-      // stays safe — the matcher itself never throws, a non-text operand or
-      // pattern being a definite non-match and a NULL UNKNOWN.
+      // single-character escape, or a constant NULL: `Row.like` faults
+      // (`SQLError.argument`) on any non-NULL escape that does not evaluate to
+      // a one-character text — a throw independent of whether a pair matches,
+      // so it must not ride below a seek or join and fire on an empty product
+      // (or be dropped by a hash key). A non-constant escape (a slot or call)
+      // or a constant that is non-text or the wrong length is unsafe; a
+      // `.constant` text of exactly one character (`escape.escape`) is safe. A
+      // constant-NULL escape is the one non-single-character escape also safe
+      // (`vanishes`):
+      // `Row.like` reads it as UNKNOWN before the single-character check, so it
+      // never faults — the NULL-first rule the comparability stamp follows, and
+      // why a `K LIKE 'x' ESCAPE NULL` hoists its sibling equi key. A
+      // `:parameter` escape stays unsafe (it may bind a bad length at run).
+      // Plain LIKE (no escape) stays safe — the matcher itself never throws, a
+      // non-text operand or pattern being a definite non-match and a NULL
+      // UNKNOWN.
       operand.safe && pattern.safe
-          && (escape.map(\.escape) ?? true)
+          && (escape.map { $0.escape || $0.vanishes } ?? true)
     case let .between(test, lower, upper, _):
       test.safe && lower.safe && upper.safe
     case let .distinct(lhs, rhs, _): lhs.safe && rhs.safe
@@ -755,6 +796,13 @@ extension Filter {
     case let .and(lhs, rhs): lhs.safe && rhs.safe
     case let .or(lhs, rhs): lhs.safe && rhs.safe
     case let .not(operand): operand.safe
+    // A leaf the typed scope proved cross-kind faults `42804` at run through
+    // `matches`/`relate`/`like` — as throwing as a divide — so it is not safe
+    // to bypass: `seek` must keep it an always-evaluated residual rather than
+    // drop it over an emptied range, and pushdown must not ride it past a
+    // row-dropping operator. This carried classification is the one place the
+    // physical layer learns a comparison's type-derived hazard.
+    case .incomparable: false
     }
   }
 
@@ -803,6 +851,10 @@ extension Filter {
     case let .and(lhs, rhs): lhs.contingent || rhs.contingent
     case let .or(lhs, rhs): lhs.contingent || rhs.contingent
     case let .not(operand): operand.contingent
+    // A stamped leaf wraps a scalar/row comparison that reads its components'
+    // slots, so it is never slotless-UNKNOWN — derive from the inner, which is
+    // false for every case `incomparable` wraps.
+    case let .incomparable(inner): inner.contingent
     }
   }
 
@@ -852,6 +904,8 @@ extension Filter {
     case let .and(lhs, rhs): lhs.parameterised || rhs.parameterised
     case let .or(lhs, rhs): lhs.parameterised || rhs.parameterised
     case let .not(operand): operand.parameterised
+    // A stamped leaf is parameterised exactly when the comparison it wraps is.
+    case let .incomparable(inner): inner.parameterised
     }
   }
 
@@ -888,8 +942,10 @@ extension Filter {
       // Both operands are constants: evaluate through the engine's own
       // three-valued `matches`. A NULL on either side is UNKNOWN (`nil`) — not
       // provably true and not provably false — so a NULL-bearing compare is
-      // never folded.
-      matches(lhs, op, rhs)
+      // never folded. An incomparable cross-kind pair is left unfolded (`nil`)
+      // too, so the optimiser keeps the compare and its `42804` fault surfaces
+      // at run rather than folding to a constant.
+      (try? matches(lhs, op, rhs)) ?? nil
     // A comparison against a non-constant term reads a slot or `:parameter`;
     // its truth is not statically known. A row comparison and row `IN` are not
     // statically folded — conservative, matching `.membership`/`.between`.
@@ -917,6 +973,11 @@ extension Filter {
       // `IS <truth>` is a definite two-valued test, but only when the inner's
       // value is itself statically decided; an undecidable inner leaves `nil`.
       inner.constant == nil ? nil : tested(inner.constant, value, negated)
+    case let .incomparable(inner):
+      // A provably cross-kind comparison is undecidable (`nil`, from the inner)
+      // — never folded to a constant, so the optimiser keeps it and its `42804`
+      // fault surfaces at run rather than folding to true/false.
+      inner.constant
     }
   }
 }
@@ -1408,7 +1469,7 @@ extension Catalog where Self: ~Escapable {
       throws(SQLError) -> Value {
     let va = try evaluate(row, lhs, context)
     let vb = try evaluate(row, rhs, context)
-    return matches(va, .equal, vb) == true ? .null : va
+    return try matches(va, .equal, vb) == true ? .null : va
   }
 
   /// Evaluates a lowered `CASE` — its `branches` and optional `otherwise`

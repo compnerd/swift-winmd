@@ -646,7 +646,8 @@ struct DatabaseSQLTests {
     try DatabaseSQLTests.with { catalog in
       var shell = Shell(catalog)
       let query = """
-        CREATE VIEW bases AS SELECT b.TypeName AS base FROM InterfaceImpl i
+        CREATE VIEW bases AS
+        SELECT b.TypeName AS base, NULL AS spec FROM InterfaceImpl i
         JOIN TypeRef b ON i.Interface_TypeRef = b.Id
         WHERE i.Class = :parent AND i.Class = 0
         """
@@ -681,7 +682,7 @@ struct DatabaseSQLTests {
       var shell = Shell(catalog)
       let query = """
         CREATE VIEW bases AS
-        SELECT 'protocol' AS base FROM TypeDef WHERE Id = :parent
+        SELECT 'protocol' AS base, NULL AS spec FROM TypeDef WHERE Id = :parent
         """
       let (name, view) = try DatabaseSQLTests.create(query)
       shell.session.register(name, view)
@@ -994,7 +995,8 @@ struct DatabaseSQLTests {
         SELECT Id, '' AS Name FROM TypeDef WHERE 0 = 1
         """
       let bases = """
-        CREATE VIEW bases AS SELECT '' AS base FROM TypeDef WHERE 0 = 1
+        CREATE VIEW bases AS
+        SELECT '' AS base, NULL AS spec FROM TypeDef WHERE 0 = 1
         """
       for query in [interfaces, generics, methods, bases] {
         let (name, view) = try DatabaseSQLTests.create(query)
@@ -1044,7 +1046,8 @@ struct DatabaseSQLTests {
         """
       let bases = """
         CREATE VIEW bases AS
-        SELECT 'IInspectable' AS base FROM TypeDef WHERE Id = :parent
+        SELECT 'IInspectable' AS base, NULL AS spec
+        FROM TypeDef WHERE Id = :parent
         """
       for query in [interfaces, generics, methods, bases] {
         let (name, view) = try DatabaseSQLTests.create(query)
@@ -1065,6 +1068,51 @@ struct DatabaseSQLTests {
         }
 
         """)
+    }
+  }
+
+  @Test func `a generic base interface omits the generic base from the rendered inheritance`() throws {
+    // An interface whose base is a generic instantiation names that base
+    // through a `TypeSpec` (`InterfaceImpl.Interface` tags TypeSpec), whose
+    // signature is `GENERICINST IVector``1 <String>`. Correctly projecting a
+    // WinRT generic-interface inheritance into Swift is a deferred redesign:
+    // the generic definition's `TypeName` `IVector``1` is an invalid identifier
+    // that drops the argument, and a Swift protocol cannot refine the wrapper
+    // struct `IVector<HSTRING>` the signature decodes to nor an internal ABI
+    // protocol. So the render omits a generic base entirely — the render query
+    // filters `spec IS NULL` — and the interface renders as valid Swift without
+    // it. The `bases` view still resolves the generic base for queries and
+    // tooling; only the render omits it. `Widget`'s sole declared base is the
+    // generic one, so with it omitted the interface falls to the COM root
+    // default (`IUnknown`).
+    // `interfaces`/`methods` are overridden to name `Widget` without a
+    // `GuidAttribute` chain and to emit no requirements.
+    try GenericBaseFixture.with { catalog in
+      var shell = Shell(catalog)
+      let interfaces = """
+        CREATE VIEW interfaces AS
+        SELECT Id, TypeNamespace, TypeName,
+               '00000000-0000-0000-0000-000000000000' AS iid
+        FROM TypeDef WHERE Id = 1
+        """
+      let methods = """
+        CREATE VIEW methods AS SELECT Id, '' AS Name FROM TypeDef WHERE 0 = 1
+        """
+      for query in [interfaces, methods] {
+        let (name, view) = try DatabaseSQLTests.create(query)
+        shell.session.register(name, view)
+      }
+      let rendered = try shell.render("Widget", template: "com")
+      // Valid Swift: the generic base is gone, so `Widget` takes the COM root
+      // default rather than an uncompilable generic base clause.
+      #expect(rendered.contains("public protocol Widget: IUnknown {"))
+      // None of the invalid generic-base spellings reach the output: not the
+      // wrapper struct (a protocol cannot refine a struct), not an internal ABI
+      // protocol (a public protocol cannot refine it), and not the invalid
+      // arity-suffixed definition name.
+      #expect(!rendered.contains(": IVector<"))
+      #expect(!rendered.contains("IVectorABI"))
+      #expect(!rendered.contains("IVector`1"))
     }
   }
 
@@ -1162,7 +1210,8 @@ struct DatabaseSQLTests {
         FROM MethodDef WHERE Id = 1
         """
       let bases = """
-        CREATE VIEW bases AS SELECT '' AS base FROM TypeDef WHERE 0 = 1
+        CREATE VIEW bases AS
+        SELECT '' AS base, NULL AS spec FROM TypeDef WHERE 0 = 1
         """
       for query in [interfaces, generics, methods, params, bases] {
         let (name, view) = try DatabaseSQLTests.create(query)
@@ -1862,6 +1911,78 @@ private enum RootInterfaceFixture {
 
   private static let valid: UInt64 =
       (1 << 1) | (1 << 2) | (1 << 6) | (1 << 9) | (1 << 10) | (1 << 12)
+
+  /// Runs `body` over a `Storage` catalog bound to the assembled metadata.
+  static func with(_ body: (borrowing Storage) throws -> Void) rethrows {
+    let storage = Storage(bytes: bytes.span.bytes, relations: relations.span,
+                          strings: strings.span.bytes, blob: blob.span.bytes,
+                          guid: empty.span.bytes, valid: valid, sorted: 0)
+    try body(storage)
+  }
+}
+
+/// A metadata fixture whose interface inherits a generic base — the render's
+/// generic-base decode. Four narrow (all-index 2-byte) tables packed back to
+/// back in table-number order; a stored index `N` names the 0-based row
+/// `N - 1`, and a `TypeDefOrRef` coded token is `(row << 2) | tag`, tag 1
+/// selecting `TypeRef` and tag 2 selecting `TypeSpec`.
+///
+///   TypeRef[0]:  ResolutionScope=0, TypeName="IVector`1"(4),
+///                TypeNamespace="NS"(1) — the generic base interface, its name
+///                carrying the CLR arity suffix the decode strips.
+///   TypeDef[0]:  Flags=0, TypeName="Widget"(14), TypeNamespace="NS"(1),
+///                null Extends/Field/Method — the interface implementing the
+///                generic base.
+///   InterfaceImpl[0]: Class=1 (TypeDef row 1, Widget),
+///                Interface=6 ((1 << 2) | 2 — TypeSpec row 1).
+///   TypeSpec[0]: Signature=1 (blob offset 1 — GENERICINST of TypeRef row 1
+///                over one STRING argument, i.e. `IVector<String>`).
+private enum GenericBaseFixture {
+  private static let bytes: Array<UInt8> = [
+    // TypeRef[0]: ResolutionScope, TypeName=4, TypeNamespace=1.
+    0x00, 0x00, 0x04, 0x00, 0x01, 0x00,
+    // TypeDef[0]: Flags, TypeName=14, TypeNamespace=1, Extends, FieldList,
+    // MethodList.
+    0x00, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x01, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // InterfaceImpl[0]: Class=1, Interface=6.
+    0x01, 0x00, 0x06, 0x00,
+    // TypeSpec[0]: Signature=1.
+    0x01, 0x00,
+  ]
+
+  // "\0NS\0IVector`1\0Widget\0": NS@1, IVector`1@4, Widget@14.
+  private static let strings: Array<UInt8> = [
+    0x00,
+    0x4e, 0x53, 0x00,
+    0x49, 0x56, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x60, 0x31, 0x00,
+    0x57, 0x69, 0x64, 0x67, 0x65, 0x74, 0x00,
+  ]
+
+  // The blob heap: the empty blob at 0, then one length-prefixed signature.
+  //   @1: [0x05] GENERICINST(0x15) CLASS(0x12) TypeRef#1(token 0x05) 1 arg
+  //       STRING(0x0e) — `IVector<String>`, its base TypeRef row 1.
+  private static let blob: Array<UInt8> = [
+    0x00,
+    0x05, 0x15, 0x12, 0x05, 0x01, 0x0e,
+  ]
+
+  private static let empty = Array<UInt8>()
+
+  private static let relations: Array<WinMD.Table> = [
+    WinMD.Table(Metadata.Tables.TypeRef.self, rows: 1, range: 0 ..< 6,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 1, range: 6 ..< 20,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.InterfaceImpl.self, rows: 1, range: 20 ..< 24,
+                wide: 0, stride: 4),
+    WinMD.Table(Metadata.Tables.TypeSpec.self, rows: 1, range: 24 ..< 26,
+                wide: 0, stride: 2),
+  ]
+
+  // TypeRef (#1), TypeDef (#2), InterfaceImpl (#9), TypeSpec (#27).
+  private static let valid: UInt64 =
+      (1 << 1) | (1 << 2) | (1 << 9) | (1 << 27)
 
   /// Runs `body` over a `Storage` catalog bound to the assembled metadata.
   static func with(_ body: (borrowing Storage) throws -> Void) rethrows {

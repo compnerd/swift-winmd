@@ -109,8 +109,13 @@ struct WinMDDatabaseTests {
   }
 
   @Test func `enumerates its base relations`() {
+    // The store physically holds only `TypeDef`, yet `table(named:)` also
+    // resolves the optional `TypeSpec` (ECMA-335 §II.22.39) to an empty
+    // relation when it is absent, so `relations()` enumerates it too — the
+    // catalog contract that `relations()` names every base relation
+    // `table(named:)` resolves. It is appended once, past the physical tables.
     WinMDDatabaseTests.with { database in
-      #expect(database.relations() == ["TypeDef"])
+      #expect(database.relations() == ["TypeDef", "TypeSpec"])
     }
   }
 }

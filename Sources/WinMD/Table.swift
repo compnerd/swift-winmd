@@ -90,6 +90,19 @@ public struct Table: Sendable {
     self.range = range
   }
 
+  /// An empty open table for `schema` — zero records over an empty range.
+  ///
+  /// ECMA-335 §II.22 defines the full set of metadata tables; a database that
+  /// declares no row of an optional table (a `TypeSpec` with no generic
+  /// instantiation) simply omits it from the tables stream. This presents such
+  /// an absent table as an empty relation, so a consumer that references it by
+  /// name — the SQL adapter resolving a `TypeSpec` a view unions in — reads no
+  /// rows rather than faulting. No record is ever read, so the record `stride`
+  /// is irrelevant and left zero.
+  package static func empty(_ schema: TableSchema.Type) -> Table {
+    Table(schema, rows: 0, range: 0 ..< 0, wide: 0, stride: 0)
+  }
+
   /// The byte offset of column `i` within a record.
   ///
   /// Each wide index before column `i` shifts it by two bytes beyond its narrow

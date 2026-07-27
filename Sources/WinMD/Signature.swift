@@ -498,6 +498,24 @@ public func decode(method bytes: Array<UInt8>) throws(WinMDError)
   return signature
 }
 
+/// The `SignatureType` a raw standalone-`Type` `#Blob` payload decodes to
+/// (ECMA-335 §II.23.2.14) — a `TypeSpec.Signature`.
+///
+/// The escapable, bytes → value form of a single top-level `Type`: a caller
+/// that has copied a `TypeSpec.Signature` `#Blob` out of the borrowed scan (the
+/// adapter's `.blob` cell) decodes it here, without a `Row`. It mirrors
+/// `decode(method:)`, the analogous decode over a whole `MethodDef.Signature`
+/// blob — a `TypeSpec`'s signature is one `Type`, most often a `GENERICINST`
+/// naming the generic base. `bytes` must be the whole signature — the decode
+/// consumes every byte (`end()`).
+public func decode(type bytes: Array<UInt8>) throws(WinMDError)
+    -> SignatureType {
+  var decoder = SignatureDecoder(bytes.span.bytes)
+  let type = try decoder.type()
+  try decoder.end()
+  return type
+}
+
 // MARK: - Accessors
 
 extension Row where Schema == Metadata.Tables.MethodDef {

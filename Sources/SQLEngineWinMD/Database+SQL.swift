@@ -68,16 +68,41 @@ extension WinMD.Storage: SQLEngine.Catalog {
         return WinMDRelation(self, tables[index])
       }
     }
+    // `TypeSpec` (ECMA-335 §II.22.39) is an optional table — a database with no
+    // generic instantiation omits it from the tables stream — yet the bundled
+    // `identities`/`bases` views union a `TypeSpec` arm. Resolve an absent
+    // `TypeSpec` to an empty relation so such a view reads no rows rather than
+    // faulting on a missing relation.
+    if name.caseInsensitiveCompare("TypeSpec") == .orderedSame {
+      return WinMDRelation(self, .empty(Metadata.Tables.TypeSpec.self))
+    }
     return nil
   }
 
-  /// The schema names of every open table — the `INFORMATION_SCHEMA` overlay's
-  /// base-relation enumeration, mapped from the database's open relations.
+  /// The schema names of every base relation — the `INFORMATION_SCHEMA`
+  /// overlay's base-relation enumeration, mapped from the database's open
+  /// tables, plus the synthetic `TypeSpec` when the physical table is absent.
+  ///
+  /// `table(named:)` resolves an absent `TypeSpec` (ECMA-335 §II.22.39, an
+  /// optional table) to an empty relation, so the enumeration must name it too:
+  /// `relations()` must list every base relation `table(named:)` resolves, or
+  /// `INFORMATION_SCHEMA` would omit a `TypeSpec` a `SELECT … FROM TypeSpec`
+  /// still reads. A database with a generic instantiation has the table
+  /// physically and needs no synthetic entry — appended only when absent, so
+  /// the name is never duplicated.
   public borrowing func relations() -> Array<String> {
     var names = Array<String>()
-    names.reserveCapacity(tables.count)
+    names.reserveCapacity(tables.count + 1)
+    var spec = false
     for index in 0 ..< tables.count {
       names.append("\(tables[index].description)")
+      if tables[index].description.caseInsensitiveCompare("TypeSpec")
+          == .orderedSame {
+        spec = true
+      }
+    }
+    if !spec {
+      names.append("TypeSpec")
     }
     return names
   }
@@ -342,22 +367,24 @@ public struct WinMDRelation: SQLEngine.Table, ~Escapable {
 
   /// The virtual column names, in ordinal order — `Id` at `width`, then its
   /// join keys: the owner foreign key (on a list-owned table only) leading the
-  /// coded-index join keys.
+  /// coded-index join keys, then the generic-base keys (on a `TypeSpec` only).
   public var virtuals: Array<String> {
     let owner = self.owner.map { [$0] } ?? [] // the list-ownership key
     return ["Id"] // the universal identity, at `width`
         + owner // present only on a list-owned table
         + keys.map(\.name) // coded-index join keys
+        + bases.map(\.name) // generic-base keys, present only on a `TypeSpec`
   }
 
   /// One past the highest ordinal this relation can address — its real `width`
   /// plus the universal `Id` and its join keys (the owner foreign key when
-  /// list-owned, then the coded-index join keys).
+  /// list-owned, then the coded-index join keys, then the generic-base keys).
   public var extent: Int {
     width // real fields
         + 1 // `Id`
         + (owner == nil ? 0 : 1) // the owner foreign key
         + keys.count // coded-index join keys
+        + bases.count // generic-base keys (a `TypeSpec` only)
   }
 
   /// The ordinal of the `Id` virtual column — the first ordinal past the
@@ -407,6 +434,12 @@ public struct WinMDRelation: SQLEngine.Table, ~Escapable {
     for index in keys.indices
         where keys[index].name.caseInsensitiveCompare(name) == .orderedSame {
       return lead + index
+    }
+    // The generic-base keys (a `TypeSpec` only) follow the coded-index keys.
+    let bases = self.bases
+    for index in bases.indices
+        where bases[index].name.caseInsensitiveCompare(name) == .orderedSame {
+      return lead + keys.count + index
     }
     return nil
   }
@@ -522,7 +555,7 @@ public struct WinMDRelation: SQLEngine.Table, ~Escapable {
 
   @_lifetime(borrow self)
   public borrowing func cursor() -> WinMDCursor {
-    WinMDCursor(storage, table, WinMDRelation.Link(storage, table))
+    WinMDCursor(storage, table, WinMDRelation.Link(storage, table), bases)
   }
 }
 
@@ -588,6 +621,75 @@ extension WinMDRelation {
           Key.all(column: column, named: "\(fields[column].name)", kind: kind))
     }
     return keys
+  }
+}
+
+// MARK: - Generic-base virtual columns
+
+extension WinMDRelation {
+  /// A decoded generic-base virtual column on the `TypeSpec` relation: the
+  /// 1-based `Id`, in one candidate base table, of the type a `TypeSpec`'s
+  /// `GENERICINST` signature instantiates.
+  ///
+  /// A `TypeSpec` (ECMA-335 §II.22.39) is a single `Signature` `#Blob` — for a
+  /// generic instantiation, `GENERICINST <base TypeDefOrRef> <args…>`. The base
+  /// names a `TypeDef`/`TypeRef` through a `TypeDefOrRef` coded token, so —
+  /// like the coded-index join keys — one `Base_<TargetSchemaName>` column is
+  /// exposed per candidate base table, whose value is the base's row when the
+  /// token tags that target and its row is non-null, else SQL `NULL`. Resolving
+  /// the base to a namespace/name would need the borrowed `~Escapable`
+  /// `Storage`, so it cannot be a scalar UDF (the reason the `SIGNATURE` UDF
+  /// degrades named types to `opaque`); exposed as a join key, a view resolves
+  /// the base against `identities` uniformly, the way `types` resolves
+  /// `Extends`.
+  package struct Base {
+    /// The ordinal of the `TypeSpec.Signature` `#Blob` column.
+    package let column: Int
+    /// The `TypeDefOrRef` tag selecting `target`.
+    package let tag: Int
+    /// The candidate base table the key navigates to.
+    package let target: TableSchema.Type
+    /// The key's exposed name, `Base_<TargetSchemaName>`.
+    package let name: String
+  }
+
+  /// The generic-base virtual columns of this relation, in ordinal order — one
+  /// `Base_<TargetSchemaName>` per `TypeDefOrRef` base table (`TypeDef`,
+  /// `TypeRef`) a `GENERICINST` can name, and empty on every relation but
+  /// `TypeSpec`.
+  ///
+  /// A `GENERICINST`'s base is a `TypeDef`/`TypeRef` (never a nested
+  /// `TypeSpec`), so the self `TypeSpec` target is omitted; the two keys let a
+  /// view equi-join the base into `identities` across its `TypeDef`/`TypeRef`
+  /// arms, exactly as the coded-index join keys resolve a coded index.
+  package var bases: Array<Base> {
+    guard table.schema.number == Metadata.Tables.TypeSpec.number,
+        let signature = column(named: "Signature") else {
+      return []
+    }
+    var bases = Array<Base>()
+    for tag in 0 ..< TypeDefOrRef.tables.count {
+      guard let target = TypeDefOrRef.tables[tag],
+          target.number != Metadata.Tables.TypeSpec.number else {
+        continue
+      }
+      bases.append(Base(column: signature, tag: tag, target: target,
+                        name: "Base_\(target)"))
+    }
+    return bases
+  }
+
+  /// The ordinal of the real field named `name`, or `nil` when the relation has
+  /// no such field — the schema-only lookup `bases` locates the `Signature`
+  /// `#Blob` column with, independent of the virtual-column layout
+  /// `ordinal(of:)` weaves.
+  private func column(named name: String) -> Int? {
+    for column in 0 ..< table.schema.fields.count
+        where "\(table.schema.fields[column].name)"
+                  .caseInsensitiveCompare(name) == .orderedSame {
+      return column
+    }
+    return nil
   }
 }
 
@@ -684,12 +786,17 @@ public struct WinMDCursor: SQLEngine.Cursor, ~Escapable {
   /// The relation's list link, when it is a list-child.
   private let link: WinMDRelation.Link?
 
+  /// The relation's generic-base keys, present only on a `TypeSpec`.
+  private let bases: Array<WinMDRelation.Base>
+
   @_lifetime(borrow storage)
   package init(_ storage: borrowing WinMD.Storage, _ table: WinMD.Table,
-               _ link: WinMDRelation.Link?) {
+               _ link: WinMDRelation.Link?,
+               _ bases: Array<WinMDRelation.Base>) {
     self.storage = copy storage
     self.cursor = WinMD.Cursor(copy storage, table)
     self.link = link
+    self.bases = bases
   }
 
   public var count: Int {
@@ -699,7 +806,7 @@ public struct WinMDCursor: SQLEngine.Cursor, ~Escapable {
   @_lifetime(copy self)
   public borrowing func row(_ index: Int) -> WinMDRow? {
     guard let tuple = cursor[index] else { return nil }
-    return WinMDRow(tuple, storage, link)
+    return WinMDRow(tuple, storage, link, bases)
   }
 }
 
@@ -728,13 +835,18 @@ public struct WinMDRow: SQLEngine.Row, ~Escapable {
   /// The relation's list link, when it is a list-child.
   private let link: WinMDRelation.Link?
 
+  /// The relation's generic-base keys, present only on a `TypeSpec`.
+  private let bases: Array<WinMDRelation.Base>
+
   @_lifetime(copy tuple, copy storage)
   package init(_ tuple: borrowing WinMD.Tuple,
                 _ storage: borrowing WinMD.Storage,
-                _ link: WinMDRelation.Link?) {
+                _ link: WinMDRelation.Link?,
+                _ bases: Array<WinMDRelation.Base>) {
     self.tuple = copy tuple
     self.storage = copy storage
     self.link = link
+    self.bases = bases
   }
 
   public subscript(_ column: Int) -> Value {
@@ -747,28 +859,40 @@ public struct WinMDRow: SQLEngine.Row, ~Escapable {
       if column > tuple.count {
         // Past `Id`: the join keys. On a list-owned table the owner foreign key
         // leads them (the owning parent's 1-based `Id`, zero for a row no owner
-        // claims) and the coded-index join keys follow it; on a non-list table
-        // the coded-index join keys follow `Id` directly.
+        // claims); the coded-index join keys and — on a `TypeSpec` — the
+        // generic-base keys follow it. On a non-list table those keys follow
+        // `Id` directly.
         let virtual = column - (tuple.count + 1)
-        guard let link else { return self.key(virtual) }
+        guard let link else { return self.join(virtual) }
         return virtual == 0
             ? .integer(storage.owner(of: tuple.index, link))
-            : self.key(virtual - 1)
+            : self.join(virtual - 1)
       }
       if case .index(.heap(.string)) = tuple.type(of: column) {
         return .text((try? tuple.string(column)) ?? "")
       }
       if case .index(.heap(.blob)) = tuple.type(of: column) {
-        guard let blob = try? tuple.blob(column) else { return .null }
-        var bytes = Array<UInt8>()
-        bytes.reserveCapacity(blob.count)
-        for i in 0 ..< blob.count {
-          bytes.append(blob.load(at: i, as: UInt8.self))
-        }
+        guard let bytes = try? self.blob(of: column) else { return .null }
         return .blob(bytes)
       }
       return .integer(tuple[column])
     }
+  }
+
+  /// The `column`th `#Blob` cell's raw heap payload, copied out of the borrowed
+  /// scan — the bytes a scalar UDF (`GUID`, `SIGNATURE`) decodes, and the
+  /// `TypeSpec.Signature` a generic-base key decodes.
+  private func blob(of column: Int) throws(WinMDError) -> Array<UInt8> {
+    try tuple.bytes(of: column)
+  }
+
+  /// The `index`th join key past the owner foreign key: the coded-index join
+  /// keys first, then — on a `TypeSpec` — the generic-base keys, in the order
+  /// `WinMDRelation.virtuals` exposes them.
+  private func join(_ index: Int) -> Value {
+    let keys = self.keys
+    return index < keys.count ? self.key(index)
+                              : self.base(index - keys.count)
   }
 
   /// The coded-index join keys of this row's tuple, in ordinal order — the
@@ -802,6 +926,64 @@ public struct WinMDRow: SQLEngine.Row, ~Escapable {
     let value = key.kind.init(rawValue: tuple[key.column])
     guard value.tag == key.tag, value.row != 0 else { return .null }
     return .integer(value.row)
+  }
+
+  /// The decoded value of this row's `index`th generic-base key.
+  ///
+  /// The base keys are the `TypeSpec` relation's, in the order `bases` exposes
+  /// them. The `TypeSpec.Signature` `#Blob` is decoded to its `SignatureType`;
+  /// when it is a `GENERICINST` whose base `TypeDefOrRef` tags the key's target
+  /// table and its row is non-null, the value is that 1-based row (the target
+  /// relation's `Id`), so a view can equi-join it into `identities`. A
+  /// signature that is not a `GENERICINST`, a base tagging another target, a
+  /// null base reference, or an undecodable blob is SQL `NULL`.
+  private func base(_ index: Int) -> Value {
+    guard index >= 0, index < bases.count else { return .null }
+    let base = bases[index]
+    guard let bytes = try? self.blob(of: base.column),
+        let type = try? WinMD.decode(type: bytes),
+        let reference = WinMDRow.reference(of: type),
+        reference.tag == base.tag, reference.row != 0 else {
+      return .null
+    }
+    return .integer(reference.row)
+  }
+
+  /// The base `TypeDefOrRef` a `GENERICINST` signature instantiates, or `nil`
+  /// for any other `SignatureType` (a pointer, array, bare named type, …, which
+  /// names no generic base).
+  ///
+  /// A valid `TypeSpec` may decorate its `GENERICINST` with leading custom
+  /// modifiers (`CMOD_REQD`/`CMOD_OPT`), which decode to an outer `.modified`
+  /// layer wrapping the instantiation, so peel any `.modified` layer to reach
+  /// the type it decorates before matching the instantiation. A modifier over a
+  /// non-instantiation (a modified pointer, array, …) still names no generic
+  /// base and yields `nil`.
+  private static func reference(of type: SignatureType) -> TypeDefOrRef? {
+    if case let .modified(inner, _) = type {
+      return reference(of: inner)
+    }
+    guard case let .instance(base, _) = type,
+        case let .named(_, reference) = base else {
+      return nil
+    }
+    return reference
+  }
+}
+
+extension WinMD.Tuple {
+  /// The `column`th `#Blob` cell's raw heap payload, copied out of the borrowed
+  /// scan as owned bytes — the payload a scalar UDF (`GUID`, `SIGNATURE`) or a
+  /// signature decode reads without holding the scan open. The shared copy a
+  /// `WinMDRow` `.blob` cell and the `TypeSpec.Signature` decode both take.
+  package func bytes(of column: Int) throws(WinMDError) -> Array<UInt8> {
+    let blob = try blob(column)
+    var bytes = Array<UInt8>()
+    bytes.reserveCapacity(blob.count)
+    for i in 0 ..< blob.count {
+      bytes.append(blob.load(at: i, as: UInt8.self))
+    }
+    return bytes
   }
 }
 

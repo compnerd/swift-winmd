@@ -3,7 +3,7 @@
 
 import Testing
 
-@testable import winmd_inspect
+@testable import SQLEngineWinMD
 
 import SQLEngine
 @testable import WinMD

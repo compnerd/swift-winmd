@@ -1,8 +1,8 @@
 // Copyright © 2026 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-internal import SQLEngine
-internal import WinMDSynthesis
+package import SQLEngine
+package import WinMDSynthesis
 
 /// A target-language spec — the language- and convention-specific knowledge the
 /// render pipeline needs, kept OUT of the binary.
@@ -34,7 +34,7 @@ internal import WinMDSynthesis
 /// `rawpointer-const`/`optional`/`generic-open`/`generic-close`/`var-type`/
 /// `var-method`/`opaque`), the `System.Guid` names (`guid-iid`/`guid-clsid`), and
 /// `wellknown <namespace.name> <spelling>`. An unknown key is ignored.
-internal struct Language: Sendable {
+package struct Language: Sendable {
   /// The delimiters wrapped around a keyword identifier — Swift's backticks, or
   /// (say) an empty prefix with a `_` suffix.
   private let prefix: String
@@ -47,7 +47,7 @@ internal struct Language: Sendable {
   /// The base a COM root defaults to when it implements no interface (`IUnknown`
   /// in COM); an interface whose own name is `root` inherits nothing, so the COM
   /// root itself does not inherit itself.
-  internal let root: String
+  package let root: String
 
   /// The reserved words `escape(_:)` wraps.
   private let keywords: Set<String>
@@ -69,7 +69,7 @@ internal struct Language: Sendable {
   /// — so a template with no accompanying `.lang` renders every identifier and
   /// return verbatim, applies no root default, and (through `dialect`) decodes a
   /// primitive to its neutral name.
-  internal init() {
+  package init() {
     prefix = ""
     suffix = ""
     void = ""
@@ -82,7 +82,7 @@ internal struct Language: Sendable {
 
   /// Parses a `.lang` resource, ignoring blank lines and `#`-comments and
   /// reading each remaining line as a `key value` pair.
-  internal init(parsing text: String) {
+  package init(parsing text: String) {
     var prefix = "", suffix = "", void = "", root = ""
     var keywords = Set<String>()
     var types = Dictionary<String, String>()
@@ -126,14 +126,14 @@ internal struct Language: Sendable {
 
   /// The target-source spelling of `identifier`: itself, or wrapped in the
   /// escape delimiters when it collides with a reserved keyword.
-  internal func escape(_ identifier: String) -> String {
+  package func escape(_ identifier: String) -> String {
     keywords.contains(identifier) ? "\(prefix)\(identifier)\(suffix)" : identifier
   }
 
   /// The value-carrying return type a method spells, or `nil` for a no-value
   /// return — the `void` spelling, or an undecoded (empty) return. The render
   /// omits the return clause when it is absent.
-  internal func returned(_ type: String) -> String? {
+  package func returned(_ type: String) -> String? {
     type.isEmpty || type == void ? nil : type
   }
 
@@ -145,7 +145,7 @@ internal struct Language: Sendable {
   /// yields a usable, non-trapping dialect. The well-known table parses each
   /// `namespace.name` key into an `Identity` by splitting off the last `.`-
   /// segment as the simple name.
-  internal var dialect: Dialect {
+  package var dialect: Dialect {
     var known = Dictionary<Identity, String>()
     for (identity, spelling) in wellKnown {
       guard let dot = identity.lastIndex(of: ".") else {
@@ -183,7 +183,7 @@ internal struct Language: Sendable {
   /// The UDF is spelled `SANITIZE`, not `ESCAPE`, to steer clear of the ISO-SQL
   /// reserved word `ESCAPE` (§8.5, the escape-character clause of a `LIKE`
   /// predicate) should `LIKE` ever be added to the engine.
-  internal var routines: Routines {
+  package var routines: Routines {
     let language = self
     let sanitize:
         @Sendable (Array<Value>) throws(SQLError) -> Value = { arguments in

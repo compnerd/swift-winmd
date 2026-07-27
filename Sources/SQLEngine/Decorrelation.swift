@@ -370,15 +370,18 @@ extension Catalog where Self: ~Escapable {
         lifted = true
         continue
       }
-      // A positive correlated `IN (Q)`: the operand rides the semijoin `on` as
-      // the membership equality. `NOT IN` (`negated`) is deferred (its NULL
-      // trap is not a plain anti-join) and an uncorrelated IN (an empty
+      // A positive correlated scalar `IN (Q)`: the operand rides the semijoin
+      // `on` as the membership equality. `NOT IN` (`negated`) is deferred (its
+      // NULL trap is not a plain anti-join) and an uncorrelated IN (an empty
       // correlation) stays as is — both fall through to `remaining`. The
       // operand must be `safe`: a per-outer-row `operand` throw fires even when
-      // the inner is empty, but a semijoin never evaluates `on` for a left row
-      // with no right rows, so an unsafe operand would be suppressed — leave it
-      // correlated.
-      if case let .within(operand, key, correlation, false) = conjunct,
+      // inner is empty, but a semijoin never evaluates `on` for a left row with
+      // no right rows, so an unsafe operand would be suppressed — leave it
+      // correlated. Only the one-arity (scalar) row decorrelates through the
+      // single membership equality; a wider row `(a, b) IN (Q)` is left
+      // correlated in this slice.
+      if case let .within(operands, key, correlation, false) = conjunct,
+          operands.count == 1, let operand = operands.first,
           !correlation.isEmpty, operand.safe,
           let body = context.subqueries.plan(key, correlation),
           let next = semijoin(node, body, key, correlation, false,

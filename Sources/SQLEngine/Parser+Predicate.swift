@@ -209,7 +209,9 @@ extension Parser {
       try expect(.lparen)
       let query = try query()
       try expect(.rparen)
-      return .quantified(left, op, quantifier, query)
+      // A bare scalar left is the one-arity row `[left]` —
+      // `within`/`quantified` carry a row of one or more components.
+      return .quantified([left], op, quantifier, query)
     }
     if case let .parameter(name) = current?.kind {
       _ = try advance(expecting: "a parameter")
@@ -276,13 +278,17 @@ extension Parser {
   /// exactly once per row, the correctness fix over a desugar that duplicated a
   /// component across the places a conjunction/cascade names it.
   ///
-  /// A relational operator (`= <> < <= > >=`) takes a second row constructor of
+  /// A relational operator (`= <> < <= > >=`) takes either a `{ANY|SOME|ALL}
+  /// (query)` quantifier tail — building `Predicate.quantified(left, op,
+  /// quantifier, query)` over the row left — or a second row constructor of
   /// equal arity (else `SQLError.arity`), building `Predicate.rows(left, op,
   /// right)`. An `IN` (or `NOT IN`) takes a parenthesised list of row
-  /// constructors, building `Predicate.among(left, elements, negated:)`. The
-  /// ISO three-valued semantics (the componentwise conjunction for `=`, the
-  /// lexicographic cascade for the ordering operators, the `IN` disjunction)
-  /// live in the lowering and runtime, not this parse.
+  /// constructors — building `Predicate.among(left, elements, negated:)` — or,
+  /// when a subquery follows the `(`, a table subquery, building
+  /// `Predicate.within(left, query, negated:)` over the row left. The ISO
+  /// three-valued semantics (the componentwise conjunction for `=`, the
+  /// lexicographic cascade for the ordering operators, the `IN` disjunction,
+  /// the quantified fold) live in the lowering and runtime, not this parse.
   private mutating func rows(_ left: Array<Expression>)
       throws(SQLError) -> Predicate {
     if try match(.in) {
@@ -293,6 +299,16 @@ extension Parser {
       return try rows(left, in: true)
     }
     let op = try op()
+    if let quantifier = try quantifier() {
+      // `(l…) op {ANY | SOME | ALL} (query)` — a row-valued quantified
+      // comparison. The quantifier follows the operator, so the peek is
+      // unambiguous — it is never a right row. The subquery is parenthesised as
+      // the scalar quantified comparison and `IN (Q)` are.
+      try expect(.lparen)
+      let query = try query()
+      try expect(.rparen)
+      return .quantified(left, op, quantifier, query)
+    }
     guard let right = try row() else {
       let token = try advance(expecting: "a row value constructor")
       throw .unexpected(token.kind.description,
@@ -305,13 +321,43 @@ extension Parser {
     return .rows(left, op, right)
   }
 
-  /// Parses the tail of a row `[NOT] IN '(' row (',' row)* ')'` — the `IN` is
-  /// already consumed — building `Predicate.among(left, elements, negated:)`
-  /// over `left` and the parsed element rows, each of equal arity (else
-  /// `SQLError.arity`) and the list non-empty. `negated` marks `NOT IN`.
+  /// Parses the tail of a row `[NOT] IN '(' … ')'` — the `IN` is already
+  /// consumed — as either a table subquery (`Predicate.within` over the row
+  /// left) or a value list of row constructors (`Predicate.among`), `negated`
+  /// marking `NOT IN`.
+  ///
+  /// After the opening `(`, a `SELECT`/`TABLE`/`VALUES` begins a subquery — the
+  /// peek is unambiguous, as those keywords never begin a row element. A
+  /// leading `(` is genuinely ambiguous: it may begin a nested query primary
+  /// `IN ((SELECT …))` — a table subquery — or the first row of a value list
+  /// `IN ((1, 2), (3, 4))`. ISO tells them apart by whether the parenthesised
+  /// content is a single `<query expression>`: a `)` then closes the subquery,
+  /// a `,` continues a value list. That signal sits an unbounded distance past
+  /// the `(`, so speculatively parse a query and keep it only when a `)`
+  /// follows immediately; otherwise rewind the full cursor (lexer, current, and
+  /// the `pending` lookahead) and read the value list, exactly as the scalar
+  /// `membership` disambiguates. Each value-list element is a row constructor
+  /// of equal arity (else `SQLError.arity`) and the list is non-empty.
   private mutating func rows(_ left: Array<Expression>, in negated: Bool)
       throws(SQLError) -> Predicate {
     try expect(.lparen)
+    if [.select, .table, .values].contains(current?.kind) {
+      let query = try query()
+      try expect(.rparen)
+      return .within(left, query, negated: negated)
+    }
+    if current?.kind == .lparen {
+      let lexer = self.lexer
+      let token = self.current
+      let buffer = self.pending
+      if let query = try? query(), current?.kind == .rparen {
+        try expect(.rparen)
+        return .within(left, query, negated: negated)
+      }
+      self.lexer = lexer
+      self.current = token
+      self.pending = buffer
+    }
     var elements = Array<Array<Expression>>()
     repeat {
       guard let element = try row() else {
@@ -368,7 +414,7 @@ extension Parser {
     if [.select, .table, .values].contains(current?.kind) {
       let query = try query()
       try expect(.rparen)
-      return .within(left, query, negated: negated)
+      return .within([left], query, negated: negated)
     }
     if current?.kind == .lparen {
       let lexer = self.lexer
@@ -376,7 +422,7 @@ extension Parser {
       let buffer = self.pending
       if let query = try? query(), current?.kind == .rparen {
         try expect(.rparen)
-        return .within(left, query, negated: negated)
+        return .within([left], query, negated: negated)
       }
       self.lexer = lexer
       self.current = token

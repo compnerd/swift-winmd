@@ -74,7 +74,8 @@
 /// conjunction    := negation (AND negation)*
 /// negation       := NOT negation | [NOT] EXISTS '(' query ')' | primary
 /// primary        := '(' predicate ')' [IS [NOT] truthvalue] | comparison
-/// comparison     := row (op row | [NOT] IN '(' row (',' row)* ')')
+/// comparison     := row (op (quantifier '(' query ')' | row)
+///                        | [NOT] IN '(' (row (',' row)* | query) ')')
 ///                 | expression (op (quantifier '(' query ')'
 ///                                    | expression | param)
 ///                 | IS [NOT] (NULL | truthvalue | DISTINCT FROM expression)

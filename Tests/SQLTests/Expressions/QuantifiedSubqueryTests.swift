@@ -28,7 +28,7 @@ struct QuantifiedSubqueryParsingTests {
         try parse(select: "SELECT Id FROM T WHERE K = ANY (SELECT V FROM S)")
     let inner = try parse(query: "SELECT V FROM S")
     #expect(select.predicate
-                == .quantified(.column("K"), .equal, .any, inner))
+                == .quantified([.column("K")], .equal, .any, inner))
   }
 
   @Test func `parses <> ALL over a subquery`() throws {
@@ -36,7 +36,7 @@ struct QuantifiedSubqueryParsingTests {
         try parse(select: "SELECT Id FROM T WHERE K <> ALL (SELECT V FROM S)")
     let inner = try parse(query: "SELECT V FROM S")
     #expect(select.predicate
-                == .quantified(.column("K"), .unequal, .all, inner))
+                == .quantified([.column("K")], .unequal, .all, inner))
   }
 
   @Test func `parses each comparison operator with a quantifier`() throws {
@@ -47,7 +47,7 @@ struct QuantifiedSubqueryParsingTests {
     for (spelling, op) in cases {
       let select = try parse(select:
           "SELECT Id FROM T WHERE K \(spelling) ANY (SELECT V FROM S)")
-      #expect(select.predicate == .quantified(.column("K"), op, .any, inner))
+      #expect(select.predicate == .quantified([.column("K")], op, .any, inner))
     }
   }
 
@@ -60,7 +60,7 @@ struct QuantifiedSubqueryParsingTests {
         try parse(select: "SELECT Id FROM T WHERE K < ANY (SELECT V FROM S)")
     #expect(some.predicate == any.predicate)
     let inner = try parse(query: "SELECT V FROM S")
-    #expect(some.predicate == .quantified(.column("K"), .lt, .any, inner))
+    #expect(some.predicate == .quantified([.column("K")], .lt, .any, inner))
   }
 
   @Test func `parses a quantified comparison over a UNION subquery`() throws {
@@ -70,7 +70,7 @@ struct QuantifiedSubqueryParsingTests {
     let select = try parse(select: text)
     let inner = try parse(query: "SELECT V FROM S UNION SELECT V FROM N")
     #expect(select.predicate
-                == .quantified(.column("K"), .gt, .all, inner))
+                == .quantified([.column("K")], .gt, .all, inner))
   }
 }
 

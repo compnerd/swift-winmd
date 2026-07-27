@@ -582,15 +582,15 @@ extension Filter {
       // threaded binding, not the outer record). An uncorrelated one names
       // none.
       ordinals.formUnion(correlation.slots)
-    case let .within(operand, _, correlation, _):
-      // The outer operand term reads ordinals; a correlated subquery also reads
+    case let .within(lhs, _, correlation, _):
+      // The left row's terms read ordinals; a correlated subquery also reads
       // the outer `slot` cells its inner `WHERE` names.
-      operand.references(into: &ordinals)
+      for term in lhs { term.references(into: &ordinals) }
       ordinals.formUnion(correlation.slots)
-    case let .quantified(operand, _, _, _, correlation):
-      // As `within`: the outer operand term reads ordinals; a correlated
-      // subquery also reads the outer `slot` cells its inner `WHERE` names.
-      operand.references(into: &ordinals)
+    case let .quantified(lhs, _, _, _, correlation):
+      // As `within`: the left row's terms read ordinals and a correlated
+      // subquery reads the outer `slot` cells its inner `WHERE` names.
+      for term in lhs { term.references(into: &ordinals) }
       ordinals.formUnion(correlation.slots)
     case let .like(operand, pattern, escape, _):
       operand.references(into: &ordinals)

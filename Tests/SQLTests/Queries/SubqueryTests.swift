@@ -42,14 +42,14 @@ struct SubqueryParsingTests {
     let select =
         try parse(select: "SELECT Id FROM T WHERE K IN (SELECT V FROM S)")
     let inner = try parse(query: "SELECT V FROM S")
-    #expect(select.predicate == .within(.column("K"), inner, negated: false))
+    #expect(select.predicate == .within([.column("K")], inner, negated: false))
   }
 
   @Test func `parses NOT IN over a subquery`() throws {
     let select =
         try parse(select: "SELECT Id FROM T WHERE K NOT IN (SELECT V FROM S)")
     let inner = try parse(query: "SELECT V FROM S")
-    #expect(select.predicate == .within(.column("K"), inner, negated: true))
+    #expect(select.predicate == .within([.column("K")], inner, negated: true))
   }
 
   @Test func `IN over a value list still parses as membership`() throws {
@@ -66,7 +66,7 @@ struct SubqueryParsingTests {
     let text = "SELECT Id FROM T WHERE K IN (SELECT V FROM S WHERE Flag = 1)"
     let select = try parse(select: text)
     let inner = try parse(query: "SELECT V FROM S WHERE Flag = 1")
-    #expect(select.predicate == .within(.column("K"), inner, negated: false))
+    #expect(select.predicate == .within([.column("K")], inner, negated: false))
   }
 
   @Test func `parses EXISTS over a UNION subquery`() throws {

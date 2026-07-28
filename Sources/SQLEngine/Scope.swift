@@ -1670,6 +1670,8 @@ internal struct Scope {
       // further check.
       try check(inner, routines, subquery: subquery)
     case let .and(lhs, rhs):
+      // A connective recurses reachability-aware — the `constant` short-circuit
+      // is the run's own, so an unreached operand is not checked.
       try check(lhs, routines, subquery: subquery)
       if constant(lhs, routines) != false {
         try check(rhs, routines, subquery: subquery)
@@ -3389,5 +3391,487 @@ internal struct Scope {
           try term(expression, routines, subquery: subquery)
         }, subquery: subquery)
     return stamped(filter) { type(at: $0) }
+  }
+}
+
+// MARK: - Comparability finder
+
+/// The comparison-finder: a dedicated traversal that faults a statically-typed
+/// incomparable comparison (ISO `SQLSTATE 42804`) anywhere a query reaches one,
+/// and cannot leak a non-comparability fault by construction.
+///
+/// Unlike the strict validator (`validate`/`check`), which resolves and
+/// type-checks every operand and aborts on the first fault of any kind, the
+/// finder walks a resolved predicate or expression looking only for
+/// comparison-bearing constructs. At each comparison it invokes the same leaf
+/// `comparable`/`character` check the validator uses, resolving the operand
+/// types through `validate` but deferring that resolution's own fault locally
+/// (`deferred`): an ill-typed arithmetic operand, an unknown routine, a bad
+/// arity — every fault the run defers to execution — is swallowed at the
+/// comparison it decorates, so the traversal continues to the sibling and later
+/// comparisons rather than aborting. Only a 42804 escapes. Because each
+/// comparison's own resolution fault is caught there, no expression
+/// (a `COALESCE` arg, a `NULLIF` operand, a `CASE` result) can hide a later
+/// sibling's incomparable comparison behind an earlier one's deferred fault —
+/// the leak the walk-reuse mechanism it replaces suffered at every recursive
+/// site.
+///
+/// The traversal is reachability-aware, reusing the same short-circuit and
+/// const-fold primitives the run evaluates with (`constant`, `selects`,
+/// `stable`, `matched`, `membership`, `dead`), so a comparison an unreachable
+/// `CASE`/`COALESCE` arm or a short-circuited `AND`/`OR` leg holds is never
+/// visited — the finder faults exactly the reachable static 42804 the strict
+/// validate path faults, and no others (`run ≡ validate`).
+extension Scope {
+  /// Runs `body`, deferring every fault but the ISO comparability fault
+  /// (`SQLSTATE 42804`): resolving a comparison operand's own type may raise a
+  /// fault the run defers to execution (an ill-typed arithmetic operand, an
+  /// unknown routine, a bad cast), so swallow it and let the search continue,
+  /// while a 42804 from the leaf check propagates. Applied at each comparison,
+  /// never around a whole expression, so a deferred fault never hides a later
+  /// reachable incomparable comparison.
+  private func deferred(_ body: () throws(SQLError) -> Void)
+      throws(SQLError) {
+    do {
+      try body()
+    } catch let error {
+      guard case let .state(code, _) = error, code == "42804" else { return }
+      throw error
+    }
+  }
+
+  /// Comparability-checks a single comparison `lhs <op> rhs` — the finder's
+  /// leaf. It resolves each operand's type through `validate` (deferring that
+  /// resolution's own non-comparability fault locally) and runs the leaf
+  /// `comparable` check, so a cross-kind non-exempt pair faults 42804 while a
+  /// constant-NULL, subquery, or unresolvable-typed operand defers. The nested
+  /// comparisons of the operands themselves are found by the callers' recursion
+  /// before this runs, so a 42804 buried in an operand never rides `validate`
+  /// here — that operand's own reachable 42804 already escaped.
+  private func compare(_ lhs: Expression, _ rhs: Expression,
+                       _ routines: Routines, subquery: SubqueryCheck)
+      throws(SQLError) {
+    try deferred { () throws(SQLError) in
+      let l = try validate(lhs, routines, subquery: subquery)
+      let r = try validate(rhs, routines, subquery: subquery)
+      try comparable(lhs, l, rhs, r, routines)
+    }
+  }
+
+  /// Comparability-checks a `LIKE`'s character rule — the ISO rule its operand
+  /// and pattern are character strings. A pattern or escape that `vanishes` —
+  /// a constant-NULL one, or a `:parameter` whose value arrives from the
+  /// bindings — makes the whole predicate defer to the run: the run reads an
+  /// unbound/NULL pattern as UNKNOWN and never reaches the character fault, so
+  /// faulting the operand at compile would reject `K LIKE :p` a run keeps. A
+  /// non-NULL, non-parameter pattern reaches the character check, faulting a
+  /// non-character operand or pattern (`K LIKE 'x'` over an integer `K`) 42804
+  /// as the run's `like` does. It reads the same `vanishes` the strict
+  /// validator's `.like` does, so the finder and the validator cannot drift.
+  private func like(_ operand: Expression, _ pattern: Predicate.Operand,
+                    _ escape: Predicate.Operand?, _ routines: Routines,
+                    subquery: SubqueryCheck) throws(SQLError) {
+    guard !vanishes(pattern, routines), !vanishes(escape, routines) else {
+      return
+    }
+    try deferred { () throws(SQLError) in
+      let type = try validate(operand, routines, subquery: subquery)
+      // A constant-NULL subject short-circuits the run's `like` to UNKNOWN
+      // before its pattern-type check, so enforce no character type here —
+      // matching the run and the strict validator's subject-NULL skip. Nested
+      // comparisons in the pattern are still found by the `.like` case's own
+      // recursion above.
+      if constant(operand, routines) == .null { return }
+      try character(operand, type, routines)
+      if case let .expression(pattern) = pattern {
+        let type = try validate(pattern, routines, subquery: subquery)
+        try character(pattern, type, routines)
+      }
+    }
+  }
+
+  /// Finds every reachable comparison in a `LIKE` pattern or escape `operand`.
+  private func comparisons(in operand: Predicate.Operand,
+                           _ routines: Routines, subquery: SubqueryCheck)
+      throws(SQLError) {
+    if case let .expression(expression) = operand {
+      try comparisons(in: expression, routines, subquery: subquery)
+    }
+  }
+
+  /// Finds and comparability-checks every reachable comparison in `predicate`,
+  /// short-circuit aware — the predicate arm of the finder. Each comparison-
+  /// bearing construct (`comparison`, `membership`, `between`, `rows`, `among`,
+  /// `like`, and the implicit equality a `NULLIF` inside an operand carries) is
+  /// leaf-checked with its own resolution fault deferred; a total predicate
+  /// (`IS [NOT] NULL`, `IS [NOT] DISTINCT FROM`, `bound`) faults never but has
+  /// its operands recursed for a nested one. `EXISTS`/`IN (Q)`/quantified
+  /// record the reached subquery for the driver to recurse its body, then
+  /// their left row's operands; the subquery operand itself is exempt (its
+  /// cross-kind rows fault at run through `relate`).
+  func comparisons(in predicate: Predicate, _ routines: Routines,
+                   subquery: SubqueryCheck = .unsupported) throws(SQLError) {
+    switch predicate {
+    case let .comparison(left, _, right):
+      try comparisons(in: left, routines, subquery: subquery)
+      try comparisons(in: right, routines, subquery: subquery)
+      try compare(left, right, routines, subquery: subquery)
+    case let .bound(left, _, _):
+      // `left op :parameter` — the parameter operand is deferred to the run, so
+      // the comparison itself never faults at compile; recurse the left for a
+      // nested comparison.
+      try comparisons(in: left, routines, subquery: subquery)
+    case let .null(operand, _):
+      // `IS [NOT] NULL` is total, so recurse the operand for a nested
+      // comparison but leaf-check nothing.
+      try comparisons(in: operand, routines, subquery: subquery)
+    case let .membership(operand, values, _):
+      // `x IN (v, …)` is the OR-chain `x = v OR …`. Every element the run
+      // reaches is recursed for a nested comparison it evaluates (a `CASE`
+      // guard that self-faults); and until the OR-chain short-circuits it is
+      // also compared to the operand — the comparability the run's `member`
+      // faults 42804 on. A constant match, or a reflexive element equal to a
+      // stable operand, stops the comparison as the run's Kleene-OR does. But a
+      // reflexive match fully prunes the tail (neither recursed nor compared)
+      // only over a provably non-NULL operand (`defined`): a nullable operand
+      // makes `operand = operand` UNKNOWN, so a NULL row runs on and evaluates
+      // every later element — its comparison to the NULL operand is UNKNOWN
+      // (never 42804), but a nested comparison it carries self-faults — so
+      // the comparability stops at the reflexive element while the recursion of
+      // the later elements continues.
+      try comparisons(in: operand, routines, subquery: subquery)
+      var comparing = true
+      for value in values {
+        try comparisons(in: value, routines, subquery: subquery)
+        guard comparing else { continue }
+        try compare(operand, value, routines, subquery: subquery)
+        if value == operand && stable(operand, routines) {
+          if defined(operand) { break }
+          comparing = false
+        } else if matched(operand, value, routines) == true {
+          break
+        }
+      }
+    case let .rows(lhs, _, rhs):
+      for expression in lhs {
+        try comparisons(in: expression, routines, subquery: subquery)
+      }
+      for expression in rhs {
+        try comparisons(in: expression, routines, subquery: subquery)
+      }
+      // A componentwise comparison; an arity mismatch is a structural fault the
+      // run defers, so a mismatched pair is not leaf-checked here.
+      guard lhs.count == rhs.count else { return }
+      // The run evaluates every left component, then every right, into a
+      // `[Value]` before `relate` preflights any pair's comparability — so a
+      // component's own evaluation fault (a `1 / 0`) it raises building a row
+      // preempts every pair's 42804 (`(1, 1 / 0) = ('x', 2)` divides, it does
+      // not fault the incomparable first pair). Defer the whole componentwise
+      // pass around the operand resolution in that order, so such a fault stops
+      // it (deferred to the run) before any pair faults 42804, then compare the
+      // resolved pairs — matching the run and the strict validator's `.rows`.
+      try deferred { () throws(SQLError) in
+        let l = try lhs.map { expression throws(SQLError) in
+          try validate(expression, routines, subquery: subquery)
+        }
+        let r = try rhs.map { expression throws(SQLError) in
+          try validate(expression, routines, subquery: subquery)
+        }
+        for index in lhs.indices {
+          try comparable(lhs[index], l[index], rhs[index], r[index], routines)
+        }
+      }
+    case let .among(lhs, rows, _):
+      // `(l…) [NOT] IN ((r…), …)` is the OR-chain of row equalities, short-
+      // circuit aware exactly as the scalar `.membership`.
+      for expression in lhs {
+        try comparisons(in: expression, routines, subquery: subquery)
+      }
+      // The run's `member` evaluates the whole left row once, then each element
+      // row, before `relate` preflights any pair — so a component's own
+      // evaluation fault preempts the 42804, and an element-row fault stops the
+      // fold there (the run raises it, never reaching a later element). Defer
+      // the whole componentwise pass so a left-row fault stops it before any
+      // element is checked, and an element-row fault (thrown out of the fold)
+      // stops it before a later element faults 42804 — each deferred to the
+      // run — while a comparability 42804 propagates. The nested-comparison
+      // recursion above stays eager (a comparison a component itself carries is
+      // found regardless), matching the run's per-component evaluation.
+      try deferred { () throws(SQLError) in
+        let types = try lhs.map { expression throws(SQLError) in
+          try validate(expression, routines, subquery: subquery)
+        }
+        let l = constants(lhs, routines)
+        _ = try membership(of: rows, each: { element throws(SQLError) in
+          for expression in element {
+            try comparisons(in: expression, routines, subquery: subquery)
+          }
+          guard element.count == lhs.count else { return }
+          let r = try element.map { expression throws(SQLError) in
+            try validate(expression, routines, subquery: subquery)
+          }
+          for index in element.indices {
+            try comparable(lhs[index], types[index], element[index], r[index],
+                           routines)
+          }
+        }, equality: { element throws(SQLError) in
+          guard let l, let r = constants(element, routines) else { return nil }
+          return (try? relate(l, .equal, r)) ?? nil
+        })
+      }
+    case let .like(operand, pattern, escape, _):
+      try comparisons(in: operand, routines, subquery: subquery)
+      try comparisons(in: pattern, routines, subquery: subquery)
+      if let escape {
+        try comparisons(in: escape, routines, subquery: subquery)
+      }
+      try like(operand, pattern, escape, routines, subquery: subquery)
+    case let .between(test, lower, upper, _):
+      // `x BETWEEN a AND b` compares `x` to each bound, short-circuit aware: a
+      // definitely-FALSE lower comparison settles the truth, leaving the upper
+      // unreachable, exactly as `ranged` evaluates it.
+      try comparisons(in: test, routines, subquery: subquery)
+      try comparisons(in: lower, routines, subquery: subquery)
+      if case let .expression(low) = lower {
+        try compare(test, low, routines, subquery: subquery)
+      }
+      let settled = {
+        guard let value = constant(test, routines),
+            let low = constant(lower, routines) else {
+          return false
+        }
+        return ((try? matches(value, .geq, low)) ?? nil) == false
+      }()
+      if !settled {
+        try comparisons(in: upper, routines, subquery: subquery)
+        if case let .expression(high) = upper {
+          try compare(test, high, routines, subquery: subquery)
+        }
+      }
+    case let .distinct(lhs, rhs, _):
+      // `IS [NOT] DISTINCT FROM` is total — a cross-kind pair is DISTINCT,
+      // a fault — so recurse both operands but leaf-check nothing.
+      try comparisons(in: lhs, routines, subquery: subquery)
+      try comparisons(in: rhs, routines, subquery: subquery)
+    case let .truth(inner, _, _):
+      try comparisons(in: inner, routines, subquery: subquery)
+    case let .exists(query, _):
+      // Record the reached occurrence so the driver recurses its body; its own
+      // resolution fault (an unsupported position) defers.
+      try deferred { () throws(SQLError) in
+        try subquery.validate(query, as: .existential)
+      }
+    case let .within(lhs, query, _):
+      for expression in lhs {
+        try comparisons(in: expression, routines, subquery: subquery)
+      }
+      try deferred { () throws(SQLError) in
+        try subquery.validate(query, as: .valued)
+      }
+    case let .quantified(lhs, _, _, query):
+      for expression in lhs {
+        try comparisons(in: expression, routines, subquery: subquery)
+      }
+      try deferred { () throws(SQLError) in
+        try subquery.validate(query, as: .valued)
+      }
+    case let .and(lhs, rhs):
+      // A connective recurses reachability-aware: the `constant` short-circuit
+      // is the run's, so an unreached operand's comparisons are not visited.
+      try comparisons(in: lhs, routines, subquery: subquery)
+      if constant(lhs, routines) != false {
+        try comparisons(in: rhs, routines, subquery: subquery)
+      }
+    case let .or(lhs, rhs):
+      try comparisons(in: lhs, routines, subquery: subquery)
+      if constant(lhs, routines) != true {
+        try comparisons(in: rhs, routines, subquery: subquery)
+      }
+    case let .not(operand):
+      try comparisons(in: operand, routines, subquery: subquery)
+    }
+  }
+
+  /// Finds and comparability-checks every reachable comparison in `expression`,
+  /// short-circuit aware — the expression arm of the finder. It recurses every
+  /// sub-expression that can hold a comparison (a `binary`/`cast` operand, a
+  /// call argument, a `COALESCE`/`CASE`/aggregate sub-expression) and leaf-
+  /// checks the implicit `v1 = v2` a `NULLIF` carries. A scalar subquery
+  /// its reached occurrence for the driver to recurse its body.
+  func comparisons(in expression: Expression, _ routines: Routines,
+                   subquery: SubqueryCheck = .unsupported) throws(SQLError) {
+    switch expression {
+    case .column, .literal:
+      break
+    case let .call(_, arguments):
+      for argument in arguments {
+        try comparisons(in: argument, routines, subquery: subquery)
+      }
+    case let .binary(_, lhs, rhs):
+      try comparisons(in: lhs, routines, subquery: subquery)
+      try comparisons(in: rhs, routines, subquery: subquery)
+    case let .aggregate(_, operand, _, filter):
+      // The `FILTER` is a per-row gate evaluated over every row, so its
+      // comparisons are always reachable; the aggregand folds only when the
+      // filter can admit a row (`dead`), matching the run's gate.
+      if let filter {
+        try comparisons(in: filter, routines, subquery: subquery)
+      }
+      if case let .expression(argument) = operand,
+          !(filter.map { dead($0, routines) } ?? false) {
+        try comparisons(in: argument, routines, subquery: subquery)
+      }
+    case let .case(whens, otherwise):
+      // Reachability mirrors `conditional`/`reachable`: each guard up to (and
+      // including) a constant-TRUE one is evaluated; a constant-FALSE guard's
+      // result is unreachable; a constant-TRUE guard makes every later branch
+      // and the `ELSE` unreachable.
+      for branch in whens {
+        try comparisons(in: branch.when, routines, subquery: subquery)
+        switch constant(branch.when, routines) {
+        case false:
+          continue
+        case true:
+          try comparisons(in: branch.then, routines, subquery: subquery)
+          return
+        case nil:
+          try comparisons(in: branch.then, routines, subquery: subquery)
+        }
+      }
+      if let otherwise {
+        try comparisons(in: otherwise, routines, subquery: subquery)
+      }
+    case let .cast(operand, _):
+      try comparisons(in: operand, routines, subquery: subquery)
+    case let .coalesce(arguments):
+      // Reachability mirrors `coalesce`: a definite selection makes every later
+      // argument unreachable, so stop the walk there.
+      for argument in arguments {
+        try comparisons(in: argument, routines, subquery: subquery)
+        if selects(argument, routines) { break }
+      }
+    case let .nullif(lhs, rhs):
+      // `NULLIF(v1, v2)` is `CASE WHEN v1 = v2 THEN NULL ELSE v1`, so v1 and v2
+      // must be comparable — recurse both, then check the implicit equality.
+      try comparisons(in: lhs, routines, subquery: subquery)
+      try comparisons(in: rhs, routines, subquery: subquery)
+      try compare(lhs, rhs, routines, subquery: subquery)
+    case let .subquery(query):
+      // Record the reached scalar occurrence so the driver recurses its body;
+      // its own arity fault defers.
+      try deferred { () throws(SQLError) in
+        _ = try subquery.type(query)
+      }
+    case let .grouping(arguments):
+      for argument in arguments {
+        try comparisons(in: argument, routines, subquery: subquery)
+      }
+    }
+  }
+
+  /// Finds every reachable comparison inside the aggregate sub-expressions of
+  /// `expression`, ignoring its non-aggregate structure — mirroring
+  /// `aggregates(in:)`. An aggregate folds over the group's rows before any
+  /// `LIMIT`, so its operand and `FILTER` comparisons are reachable even when a
+  /// row-dropping limit that leaves the surrounding projection unreachable, so
+  /// the driver runs this unconditionally over the projection.
+  func comparisons(aggregatesIn expression: Expression, _ routines: Routines,
+                   subquery: SubqueryCheck = .unsupported) throws(SQLError) {
+    switch expression {
+    case .column, .literal, .subquery:
+      break
+    case .aggregate:
+      // Found an aggregate — check its own operand and FILTER comparisons.
+      try comparisons(in: expression, routines, subquery: subquery)
+    case let .call(_, arguments), let .grouping(arguments):
+      for argument in arguments {
+        try comparisons(aggregatesIn: argument, routines, subquery: subquery)
+      }
+    case let .binary(_, lhs, rhs), let .nullif(lhs, rhs):
+      try comparisons(aggregatesIn: lhs, routines, subquery: subquery)
+      try comparisons(aggregatesIn: rhs, routines, subquery: subquery)
+    case let .case(whens, otherwise):
+      for branch in whens {
+        try comparisons(aggregatesIn: branch.when, routines, subquery: subquery)
+        try comparisons(aggregatesIn: branch.then, routines, subquery: subquery)
+      }
+      if let otherwise {
+        try comparisons(aggregatesIn: otherwise, routines, subquery: subquery)
+      }
+    case let .cast(operand, _):
+      try comparisons(aggregatesIn: operand, routines, subquery: subquery)
+    case let .coalesce(arguments):
+      for argument in arguments {
+        try comparisons(aggregatesIn: argument, routines, subquery: subquery)
+      }
+    }
+  }
+
+  /// Finds every reachable comparison inside the aggregate sub-expressions of
+  /// `predicate` — a `HAVING` or `CASE` guard's aggregates fold before the
+  /// filter runs, so they are reachable whatever the filter's short-circuit
+  /// — mirroring `aggregates(in predicate:)`.
+  func comparisons(aggregatesIn predicate: Predicate, _ routines: Routines,
+                   subquery: SubqueryCheck = .unsupported) throws(SQLError) {
+    switch predicate {
+    case let .comparison(left, _, right):
+      try comparisons(aggregatesIn: left, routines, subquery: subquery)
+      try comparisons(aggregatesIn: right, routines, subquery: subquery)
+    case let .bound(left, _, _):
+      try comparisons(aggregatesIn: left, routines, subquery: subquery)
+    case let .null(operand, _):
+      try comparisons(aggregatesIn: operand, routines, subquery: subquery)
+    case let .membership(operand, values, _):
+      try comparisons(aggregatesIn: operand, routines, subquery: subquery)
+      for value in values {
+        try comparisons(aggregatesIn: value, routines, subquery: subquery)
+      }
+    case let .rows(lhs, _, rhs):
+      for expression in lhs + rhs {
+        try comparisons(aggregatesIn: expression, routines, subquery: subquery)
+      }
+    case let .among(lhs, rows, _):
+      for expression in lhs {
+        try comparisons(aggregatesIn: expression, routines, subquery: subquery)
+      }
+      for element in rows {
+        for expression in element {
+          try comparisons(aggregatesIn: expression, routines,
+                          subquery: subquery)
+        }
+      }
+    case .exists:
+      break
+    case let .within(lhs, _, _), let .quantified(lhs, _, _, _):
+      for expression in lhs {
+        try comparisons(aggregatesIn: expression, routines, subquery: subquery)
+      }
+    case let .like(operand, pattern, escape, _):
+      try comparisons(aggregatesIn: operand, routines, subquery: subquery)
+      if case let .expression(pattern) = pattern {
+        try comparisons(aggregatesIn: pattern, routines, subquery: subquery)
+      }
+      if case let .expression(escape) = escape {
+        try comparisons(aggregatesIn: escape, routines, subquery: subquery)
+      }
+    case let .between(test, lower, upper, _):
+      try comparisons(aggregatesIn: test, routines, subquery: subquery)
+      if case let .expression(lower) = lower {
+        try comparisons(aggregatesIn: lower, routines, subquery: subquery)
+      }
+      if case let .expression(upper) = upper {
+        try comparisons(aggregatesIn: upper, routines, subquery: subquery)
+      }
+    case let .distinct(lhs, rhs, _):
+      try comparisons(aggregatesIn: lhs, routines, subquery: subquery)
+      try comparisons(aggregatesIn: rhs, routines, subquery: subquery)
+    case let .truth(inner, _, _):
+      try comparisons(aggregatesIn: inner, routines, subquery: subquery)
+    case let .and(lhs, rhs), let .or(lhs, rhs):
+      try comparisons(aggregatesIn: lhs, routines, subquery: subquery)
+      try comparisons(aggregatesIn: rhs, routines, subquery: subquery)
+    case let .not(operand):
+      try comparisons(aggregatesIn: operand, routines, subquery: subquery)
+    }
   }
 }

@@ -84,6 +84,13 @@ extension Catalog where Self: ~Escapable {
       // filter never reaches (execution faults only on a reached operand),
       // matching the non-derived path.
       _ = try compile(query, context.validating(false))
+      // Fault a statically-typed incomparable comparison at compile — in either
+      // arm — so the run agrees with the validate walk regardless of arm
+      // cardinality, and the optimiser never hashes, reorders, or drops a
+      // comparison that would throw at run. It runs only the comparability
+      // portion of the type-check (`Scope.comparability`), leaving every other
+      // operand fault to the arms' execution.
+      try typecheck(query, context.validating(false).comparing())
       // The result column types are unified across the arms (ISO), so coerce
       // each arm's values to them — `SELECT 1 UNION SELECT 2.5` emits a
       // `double` column. The fold reads the arm queries in hand here; the
@@ -124,6 +131,22 @@ extension Catalog where Self: ~Escapable {
     // type-check stays for the explicit schema path (`columns` `validate:
     // true`).
     let logical = try compile(query, context.validating(false)).pushdown()
+    // The compile proved the query runnable but deferred every operand fault to
+    // execution (`validate: false`), including the ISO comparability rule — a
+    // number against a string is a data-type mismatch, not a FALSE row. The run
+    // enforces that rule per reachable row through `matches`, but a comparison
+    // the optimiser hashes into disjoint buckets, pushes below an empty
+    // product, or drops with a constant-false fold is never evaluated, so its
+    // fault would silently vanish; and a comparison over an empty input is
+    // never reached at all. Walk the query now for the comparability rule alone
+    // — reachability-, NULL-, and subquery-aware, so a short-circuited leg or a
+    // NULL/subquery operand still defers — so a statically-typed cross-kind
+    // comparison faults at compile regardless of cardinality, before the
+    // optimiser (or an empty scan) can hide it, while every other operand fault
+    // stays deferred to execution. Its derived-table bodies and set-operation
+    // arms are walked through the same gate the `augment` and `typecheck`
+    // recursion carry.
+    try typecheck(query, context.validating(false).comparing())
     // Now that `compile` proved the query runnable, extend the overlay with any
     // `definition_schema.` store relation the query names (resolved lazily —
     // the overlay after the CTEs, before the base catalog) AND materialise this
@@ -818,6 +841,26 @@ extension Catalog where Self: ~Escapable {
     let scan = try compile(.select(Select(projection: .all,
                                           from: Relation(name: name))),
                            context)
+    // The fixpoint peels this carrier and runs it here under a normal (non-
+    // comparing) context, so — unlike the non-recursive run carrier the top-
+    // level `typecheck(_:comparing())` re-runs through `ordered` — its `ORDER
+    // BY` keys never reached the compile-time comparability walk: a cross-kind
+    // sort key (`ORDER BY NULLIF(n, 'x')`) over an empty fixpoint sorted no
+    // rows and returned empty rather than faulting 42804, while the schema
+    // path's `validate(carrier:)` faulted the same key — a run ≠ validate
+    // break. Preflight the carrier through the same `carried` resolver in
+    // `comparing()` mode before the materialised rows are ordered, so the
+    // finder (the carrier's `context.comparability` branch) faults a cross-kind
+    // key here as it does on the non-recursive run and the validate path. The
+    // plan is discarded — only the keys' fault matters; a fresh subquery box
+    // isolates the preflight's carrier-subquery cache from the real run below.
+    // The walk is comparability-only (`validate` stays `false`), so an
+    // arithmetic sort key (`ORDER BY n + 1`) still defers to the run — only a
+    // statically incomparable comparison faults.
+    _ = try carried(over: scan, output: columns, arm: arm,
+                    distinct: carrier.distinct, order: carrier.order,
+                    limit: carrier.limit, generated: carrier.generated,
+                    context.resolving(Subqueries()).comparing())
     let plan = try carried(over: scan, output: columns, arm: arm,
                            distinct: carrier.distinct, order: carrier.order,
                            limit: carrier.limit, generated: carrier.generated,

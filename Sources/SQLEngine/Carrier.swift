@@ -366,39 +366,110 @@ extension Catalog where Self: ~Escapable {
       // path compiles leniently (`validate: false`), so this never double-
       // faults there — the run surfaces the fault at execution as it did
       // before.
+      // A carrier sort key may nest a predicate or scalar subquery (`ORDER BY
+      // CASE WHEN EXISTS (…) …`). Both the validate and the comparability pass
+      // reach a scalar one through the `.subquery` case, which records it only
+      // when it is a `deferred` (scalar-position) query, so seed `deferred`
+      // with the sort keys' scalar subqueries; an `EXISTS`/`IN`/quantified
+      // reach records unconditionally. Each nested subquery's width and single-
+      // column type derive against the same setop-output `scope` the run
+      // resolves it through, nested under the outer (`nested`): a carrier ORDER
+      // BY subquery may reference a set-operation output column — an aliased
+      // output living solely in this scope, unseen by `context.outer` — so it
+      // resolves at validate exactly as it does at run.
+      let nested = (context.outer ?? Outer()).nested(under: scope)
+      var scalars = Set<Query>()
+      for key in order.keys {
+        if case let .expression(expression) = key.sort {
+          expression.collect(scalar: &scalars)
+        }
+      }
       if context.validate {
-        // A carrier ORDER BY key may nest an `EXISTS`/`IN`/scalar subquery
-        // (`ORDER BY CASE WHEN EXISTS (…) …`), which the `scope.validate`
-        // type-check below rejects under the DEFAULT `.unsupported`
-        // `SubqueryCheck`. Record each nested subquery's width and type — the
-        // same cursor-free pre-pass `subqueryCheck(of:)` runs for a plain
-        // SELECT's ORDER BY subqueries — so the type-check validates a subquery
-        // sort key rather than faulting `.unsupported`, keeping the schema path
-        // in step with the run (which resolves the same key through
-        // `resolution` above).
-        //
-        // Derive each subquery's width/type against the same setop-output
-        // `scope` the run resolves it through (`subquery(_:_:_:within: scope)`
-        // above): a carrier ORDER BY subquery may reference a set-operation
-        // output column — an aliased output living ONLY in this scope, unseen
-        // by `context.outer` — so nesting `scope` under the outer, enclosing-
-        // scope shape `subquery(_:_:_:within:)` builds, resolves it at validate
-        // exactly as it does at run. Threading bare `context.outer` faulted
-        // `.column` on a set-op output column a run resolves, rejecting a query
-        // that executes. A genuinely-unresolvable column (not a set-op output,
-        // absent from the outer) still faults here as it does at run.
-        let nested = (context.outer ?? Outer()).nested(under: scope)
+        // Record each nested subquery's width and type — the same cursor-free
+        // pre-pass `subqueryCheck(of:)` runs for a plain SELECT's ORDER BY
+        // subqueries — so the `scope.validate` type-check validates a subquery
+        // sort key rather than faulting `.unsupported`, keeping the schema
+        // path in step with the run (which resolves the same key through the
+        // `resolution` above). A genuinely-unresolvable column (not a set-op
+        // output, absent from the outer) still faults here as it does at run.
         var widths = Dictionary<Query, Int>()
         var types = Dictionary<Query, ValueType>()
         for query in subqueries {
           try self.width(query, [], context, nested, &widths, &types)
         }
-        let check = SubqueryCheck(widths, types).barred
+        let check = SubqueryCheck(widths, types, deferred: scalars).barred
         for key in rewritten.keys {
           guard case let .expression(expression) = key.sort else { continue }
           try scope.aggregates(in: expression, context.routines,
                                subquery: check)
           _ = try scope.validate(expression, context.routines, subquery: check)
+        }
+        // Type-check each reached subquery body in the carrier's nested
+        // validate scope, exactly as the plain-select validate walk does — so
+        // a carrier ORDER BY subquery whose uncorrelated body a run never
+        // materialises over an empty carrier is still type-checked, and a
+        // static incomparable comparison inside it (`EXISTS (… WHERE a.num =
+        // a.txt)`) faults 42804 here as on the plain-select equivalent. An
+        // unreached body (a short-circuited leg's subquery) was never recorded,
+        // so it is not recursed. The set-operation operand-compatibility fold
+        // the shape pre-pass deferred is re-folded strictly for a scalar/valued
+        // reach.
+        let inner = context.revealed().with(outer: nested)
+        for reach in check.visited {
+          try typecheck(shape(of: reach), inner)
+          switch reach.role {
+          case .scalar, .valued:
+            _ = try columns(unifying: reach.query, inner)
+          case .existential, .lateral:
+            break
+          }
+        }
+      } else if context.comparability {
+        // The run's comparability walk over the carrier's `ORDER BY`: hand each
+        // sort-key expression to the finder alone, so a cross-kind comparison
+        // in a key (`ORDER BY NULLIF(num, txt)`) faults 42804 while an
+        // arithmetic key (`ORDER BY txt + 1`) does not — the run never
+        // re-validates the carrier's operands. The subquery widths derive
+        // best-effort (a structural fault defers, matching the finder's own
+        // discipline) so a subquery sort key resolves rather than faulting
+        // `.unsupported`.
+        var widths = Dictionary<Query, Int>()
+        var types = Dictionary<Query, ValueType>()
+        for query in subqueries {
+          do {
+            try self.width(query, [], context, nested, &widths, &types)
+          } catch let error {
+            guard case let .state(code, _) = error,
+                code == "42804" else { continue }
+            throw error
+          }
+        }
+        let check = SubqueryCheck(widths, types, deferred: scalars).barred
+        for key in rewritten.keys {
+          guard case let .expression(expression) = key.sort else { continue }
+          try scope.comparisons(in: expression, context.routines,
+                                subquery: check)
+        }
+        // Recurse the finder into each reached predicate or scalar subquery
+        // body (`comparing()`) — the run counterpart of the validate recursion
+        // above, matching `comparability(of select:)`. An uncorrelated body a
+        // run never materialises over an empty carrier is still comparability-
+        // checked, so a cross-kind comparison inside it faults 42804 on the run
+        // as on validate. Recurse under the carrier's nested comparing scope —
+        // the sort-key subqueries correlate against the setop-output `scope`
+        // beneath the outer, the same `nested` the width pre-pass used —
+        // rethrowing only 42804 and deferring any other fault, the finder's own
+        // discipline.
+        let inner = context.revealed().with(outer: nested).comparing()
+        for reach in check.visited {
+          do {
+            try typecheck(shape(of: reach), inner)
+          } catch let error {
+            guard case let .state(code, _) = error, code == "42804" else {
+              continue
+            }
+            throw error
+          }
         }
       }
     }

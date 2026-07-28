@@ -92,6 +92,21 @@ internal struct Context {
   /// operand fold alone.
   internal let shape: Bool
 
+  /// Whether the query being resolved is walked for comparability alone — the
+  /// run-path check that faults a statically-typed incomparable comparison
+  /// (`SQLSTATE` 42804) at compile, so the optimiser never receives a throwing
+  /// comparison to hash, reorder, or drop. Set only by `comparing()`, at the
+  /// run's post-compile comparability walk (`typecheck` in this mode), it runs
+  /// exactly the `comparable`/`character` operand checks the validate walk runs
+  /// while deferring every other operand fault to execution (an ill-typed
+  /// arithmetic operand, an unknown routine) — so a run is not rejected for a
+  /// non-comparability operand a data-dependent filter never reaches, matching
+  /// the run's lenient posture. Distinct from `validate` (a run preflight keeps
+  /// it `false`): the comparability determination is a static data-type rule
+  /// the run must honour regardless of table cardinality, so it fires even over
+  /// an empty input the run would otherwise return empty for.
+  internal let comparability: Bool
+
   /// A context over the maps and resolution scope — an empty overlay, no
   /// bindings, an empty visited guard, eager validation, the caller scope, and
   /// no enclosing correlation by default: the shape a bare top-level query with
@@ -102,7 +117,8 @@ internal struct Context {
                 subqueries: Subqueries = Subqueries(),
                 visited: Set<String> = [], validate: Bool = true,
                 subscope: Subscope = .caller, outer: Outer? = nil,
-                lateral: Bool = false, shape: Bool = false) {
+                lateral: Bool = false, shape: Bool = false,
+                comparability: Bool = false) {
     self.relations = relations
     self.routines = routines
     self.bindings = bindings
@@ -113,6 +129,7 @@ internal struct Context {
     self.outer = outer
     self.lateral = lateral
     self.shape = shape
+    self.comparability = comparability
   }
 
   /// A copy of this context with `relations` replacing the overlay, the same
@@ -122,7 +139,8 @@ internal struct Context {
   internal func scoping(_ relations: ScopedRelations) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: lateral, shape: shape)
+            subscope: subscope, outer: outer, lateral: lateral, shape: shape,
+            comparability: comparability)
   }
 
   /// A copy of this context entering a fresh body scope over `relations` — the
@@ -158,7 +176,8 @@ internal struct Context {
   internal func binding(_ bindings: Bindings) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: lateral, shape: shape)
+            subscope: subscope, outer: outer, lateral: lateral, shape: shape,
+            comparability: comparability)
   }
 
   /// A copy of this context carrying `subqueries` as the executing plan's
@@ -168,7 +187,8 @@ internal struct Context {
   internal func resolving(_ subqueries: Subqueries) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: lateral, shape: shape)
+            subscope: subscope, outer: outer, lateral: lateral, shape: shape,
+            comparability: comparability)
   }
 
   /// A copy of this context with every enclosing SELECT's derived-table aliases
@@ -202,7 +222,8 @@ internal struct Context {
     return Context(relations: relations, routines: routines,
                    bindings: bindings, subqueries: subqueries,
                    visited: visited, validate: validate, subscope: subscope,
-                   outer: outer, lateral: lateral, shape: shape)
+                   outer: outer, lateral: lateral, shape: shape,
+                   comparability: comparability)
   }
 
   /// A copy of this context with the eager-typecheck gate set to `flag` — a run
@@ -211,7 +232,8 @@ internal struct Context {
   internal func validating(_ flag: Bool) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: flag,
-            subscope: subscope, outer: outer, lateral: lateral, shape: shape)
+            subscope: subscope, outer: outer, lateral: lateral, shape: shape,
+            comparability: comparability)
   }
 
   /// A copy of this context marking the query it resolves as a nested-subquery
@@ -223,7 +245,21 @@ internal struct Context {
   internal func shaping() -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: lateral, shape: true)
+            subscope: subscope, outer: outer, lateral: lateral, shape: true,
+            comparability: comparability)
+  }
+
+  /// A copy of this context marking the query it resolves as the run's
+  /// comparability walk (`comparability`) — the post-compile pass that faults a
+  /// statically-typed incomparable comparison at compile so the optimiser never
+  /// hashes, reorders, or drops a comparison that would throw. Every other
+  /// field is preserved; the walk runs schema-only (`validate` stays as set —
+  /// the run keeps it `false`) and touches no cursor.
+  internal func comparing() -> Context {
+    Context(relations: relations, routines: routines, bindings: bindings,
+            subqueries: subqueries, visited: visited, validate: validate,
+            subscope: subscope, outer: outer, lateral: lateral, shape: shape,
+            comparability: true)
   }
 
   /// A copy of this context resolving its nested subqueries under `subscope` —
@@ -232,7 +268,8 @@ internal struct Context {
   internal func scoped(as subscope: Subscope) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: lateral, shape: shape)
+            subscope: subscope, outer: outer, lateral: lateral, shape: shape,
+            comparability: comparability)
   }
 
   /// A copy of this context whose enclosing correlation stack is extended with
@@ -250,7 +287,8 @@ internal struct Context {
   internal func with(outer: Outer?) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: lateral, shape: shape)
+            subscope: subscope, outer: outer, lateral: lateral, shape: shape,
+            comparability: comparability)
   }
 
   /// A copy of this context marking the query it resolves as a LATERAL derived
@@ -263,7 +301,8 @@ internal struct Context {
   internal func lateralizing() -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: true, shape: shape)
+            subscope: subscope, outer: outer, lateral: true, shape: shape,
+            comparability: comparability)
   }
 
   /// A copy of this context with the enclosing correlation stack cleared — the
@@ -289,6 +328,7 @@ internal struct Context {
   internal func unlateralized() -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: false, shape: shape)
+            subscope: subscope, outer: outer, lateral: false, shape: shape,
+            comparability: comparability)
   }
 }

@@ -594,8 +594,15 @@ extension Catalog where Self: ~Escapable {
     // The type-check subtree resolves its scopes strictly (`validate: true`),
     // as its internal `scope`/`prefixes`/`schema` calls always did — force it
     // on regardless of the incoming context's gate (a caller reaches here only
-    // when validating).
-    let context = try augment(context.validating(true), for: query, rows: false)
+    // when validating). The comparability walk is the exception: it runs on the
+    // run path, where a derived body resolves lenient (`validate: false`) so
+    // a data-dependent operand a filter drops is not rejected, yet its own
+    // reachable comparisons are still comparability-checked — so keep the gate
+    // off there while `augment` carries `comparability` into each derived
+    // body's resolve (`materialise`), which runs this same walk over it.
+    let context = try augment(
+        context.validating(context.comparability ? false : true),
+        for: query, rows: false)
     // A carrier's row operators add no expression the arms carry — the body
     // type-checks every reachable operand of its own arms.
     switch query.body {
@@ -607,29 +614,28 @@ extension Catalog where Self: ~Escapable {
       try typecheck(left, context)
       try typecheck(right, context)
     }
-    // Each carrier's own `ORDER BY` keys are a new expression surface,
-    // validated ONLY by the carrier compile (`ordered(…)` under `validate`). A
-    // reached scalar/`IN` subquery whose body is an ordered set operation is
-    // first compiled in the shape pre-pass with `validating(false)`, which
-    // bypasses that check, and is re-validated through this seam — so unless
-    // the carrier's keys are validated here too, an outer `columns(of:)`
-    // accepts a reached `(… UNION … ORDER BY missing(a))` a run faults (a
-    // run-vs-validate divergence). Re-run each carrier compile in validate mode
-    // over the query up to (not including) that carrier — the same inner it
-    // stacks over — to validate its sort keys against the body-output scope
-    // exactly as `ordered(…)` does — the plan is discarded, only the keys'
-    // fault matters. It is idempotent with the top-level `compile` (which
-    // already validated the same keys), and reached-only: an unreached ordered
-    // subquery never enters this seam, so its bad sort key stays deferred,
-    // matching the dead-scalar/dead-EXISTS posture. The augment above depends
-    // only on the body (carriers collect no derived table), so it is the scope
-    // each carrier resolves over.
+    // Each carrier's own `ORDER BY` keys are a new expression surface, handled
+    // only by the carrier compile (`ordered(…)`). A reached scalar/`IN`
+    // subquery whose body is an ordered set operation is first compiled in the
+    // shape pre-pass with `validating(false)`, which bypasses that surface, and
+    // is re-checked through this seam — so unless the carrier's keys are
+    // checked here too, an outer `columns(of:)` accepts a reached `(… UNION …
+    // ORDER BY missing(a))` a run faults (a run-vs-validate divergence). Re-run
+    // each carrier compile over the query up to (not including) that carrier —
+    // the same inner it stacks over — carrying this context's mode: a validate
+    // `columns(of:)` type-checks the sort keys' operands, while the run's
+    // comparability walk (this `context.comparability`) hands them to the
+    // finder alone, so a carrier `ORDER BY <cross-kind key>` faults 42804 while
+    // `ORDER BY <arithmetic>` does not. The plan is discarded, only the keys'
+    // fault matters; it is idempotent with the top-level `compile`, and
+    // reached-only. The augment above depends only on the body (carriers
+    // collect no derived table), so it is the scope each carrier resolves over.
     for (index, carrier) in query.carriers.enumerated() {
       let inner = Query(body: query.body,
                         carriers: Array(query.carriers.prefix(index)))
       _ = try ordered(inner, distinct: carrier.distinct, order: carrier.order,
                       limit: carrier.limit, generated: carrier.generated,
-                      context.validating(true))
+                      context)
     }
   }
 
@@ -841,7 +847,7 @@ extension Catalog where Self: ~Escapable {
   /// an unreached arm has it as a scalar. A query the probe does not rewrite (a
   /// `HAVING` or set operation) runs in FULL, so its original is checked even
   /// for an `existential` reach.
-  private borrowing func shape(of reach: Reach) -> Query {
+  internal borrowing func shape(of reach: Reach) -> Query {
     // The validate side of the EXISTS cardinality probe: an `existential` reach
     // checks the same probed shape the run compiles, so delegate to the single
     // `probed(_:)` source of truth (which peels an `ordered` carrier over a
@@ -853,6 +859,20 @@ extension Catalog where Self: ~Escapable {
 
   private borrowing func typecheck(_ select: Select, _ context: Context)
       throws(SQLError) {
+    // The run's comparability walk visits every reachable comparison surface of
+    // this select for the ISO comparability rule — its WHERE, join `ON`s,
+    // HAVING, projection, `GROUP BY` and `ORDER BY` keys, aggregate `FILTER`s,
+    // and the body of every reached predicate or scalar subquery — and leaves
+    // every other validate-only concern to the strict schema path. Its FROM's
+    // derived-table bodies are walked by the `augment` that resolved them
+    // (`materialise` recurses this same walk under the carried `comparability`
+    // gate), and its set-operation arms by the `typecheck(_ query:)` above, so
+    // a cross-kind comparison anywhere in the query faults at compile without
+    // the full walk's operand type-check.
+    if context.comparability {
+      try comparability(of: select, context)
+      return
+    }
     // This select's own resolution scope — the one its nested subqueries
     // correlate against (`nil` for a FROM-less select, which adds no relations
     // and correlates through `outer` unchanged). Built from the unrevealed
@@ -936,6 +956,300 @@ extension Catalog where Self: ~Escapable {
       for reach in on.visited {
         try typecheck(shape(of: reach), revealed.with(outer: scope))
       }
+    }
+  }
+
+  /// The comparison-finder over a single arm — the comparability-only
+  /// counterpart of `typecheck(_ select:)`, faulting a statically-typed
+  /// incomparable comparison (`42804`) anywhere the arm reaches one: its WHERE,
+  /// join `ON`s, HAVING, projection, `GROUP BY` keys, `ORDER BY` sort keys,
+  /// aggregate `FILTER`s, and the body of every reached predicate or scalar
+  /// subquery. So the run agrees with the validate walk regardless of table
+  /// cardinality, and the optimiser never receives a comparison that would
+  /// throw at run to hash into disjoint buckets, push below an empty product,
+  /// or drop with a constant-false fold.
+  ///
+  /// It builds the same scopes the validate `typecheck(_ select:)` builds — the
+  /// same `scope`/`prefixes`/`subqueryCheck` pre-pass, so the reachable
+  /// comparison surfaces and the reached-subquery set match — then hands
+  /// each surface to the dedicated finder (`Scope.comparisons(in:)`), which
+  /// looks only for comparison-bearing constructs and defers each one's own
+  /// resolution fault locally. Unlike the retired walk-reuse, the finder never
+  /// runs full type validation, so it cannot abort on a non-comparability fault
+  /// and skip a later reachable incomparable comparison — the leak class
+  /// (a `COALESCE` argument's arithmetic error hiding a sibling `NULLIF`'s
+  /// cross-kind equality) is closed by construction. Only a `42804` escapes; a
+  /// subquery-operand-typed placeholder, a NULL comparison, an `IS DISTINCT
+  /// FROM`, a `:parameter` operand, and an unreachable short-circuited leg each
+  /// defer, since the leaf check (`comparable`/`character`) deciding them is
+  /// the validate path's own.
+  ///
+  /// A reached subquery body recurses through this same finder (`comparing()`),
+  /// so an `EXISTS`/`IN (Q)`/quantified or scalar subquery whose uncorrelated
+  /// body a run never materialises over an empty outer — its per-row `matches`
+  /// never firing — is still comparability-checked. A correlated body's outer
+  /// column types against the enclosing scope carried here as the subquery's
+  /// `outer`, so a correlated cross-kind key faults here too; the `decorrelate`
+  /// gate stays the backstop for the residual a physical rewrite would bucket
+  /// apart.
+  private borrowing func comparability(of select: Select, _ context: Context)
+      throws(SQLError) {
+    // Resolve the same scopes the validate `typecheck(_ select:)` builds. A
+    // resolution fault here is one the preceding `compile` already surfaced, so
+    // it does not re-raise on this post-compile walk (only a 42804 escapes); it
+    // does abandon this select's walk, there being nothing left to resolve
+    // against.
+    let scope: Scope
+    let enclosing: Scope?
+    let prefixes: Array<Scope>
+    let subquery: SubqueryCheck
+    do {
+      scope = try self.scope(of: select, context)
+      enclosing = select.from == nil ? nil : scope
+      prefixes = try self.prefixes(of: select, context)
+      subquery = try subqueryCheck(of: select, context, enclosing: enclosing,
+                                   prefixes: prefixes)
+    } catch let error {
+      guard case let .state(code, _) = error, code == "42804" else { return }
+      throw error
+    }
+    // A stored VIEW this select names in its FROM or a JOIN is executed on the
+    // run path as an already-compiled plan (`validate: false`), so its body's
+    // comparisons were never comparability-checked and this outer walk treats
+    // the view as an opaque relation. Descend the finder into each reached
+    // view's body — the same recursion a derived-table body gets through
+    // `augment`/`materialise`.
+    try comparability(ofViewsIn: select, context)
+    // Find every reachable comparison in this arm's own surfaces (WHERE,
+    // HAVING, projection, GROUP BY, ORDER BY, aggregate FILTERs),
+    // reachability-aware, recording each reached predicate/scalar subquery into
+    // `subquery` for the recursion below.
+    try find(comparisonsOf: select, scope, context, subquery: subquery)
+    // Recurse the finder into each reached predicate or scalar subquery body
+    // (`comparing()`). An unreached body (a short-circuited leg's subquery) was
+    // never recorded, so it is not recursed, matching the run. Each reach is
+    // handled on its own, so a deferred fault in one body never hides a later
+    // body's incomparable comparison.
+    let revealed = context.revealed()
+    let base = context.outer ?? Outer()
+    let nested = enclosing.map { base.nested(under: $0) } ?? context.outer
+    let inner = revealed.with(outer: nested).comparing()
+    for reach in subquery.visited {
+      do {
+        try typecheck(shape(of: reach), inner)
+      } catch let error {
+        guard case let .state(code, _) = error, code == "42804" else {
+          continue
+        }
+        throw error
+      }
+    }
+    // Each join `ON` is a comparison surface, scoped to the join's prefix — a
+    // cross-kind `ON L.n = R.s` key faults here rather than hashing the two
+    // sides into disjoint buckets — and its reached subqueries recurse the same
+    // way, correlated against that prefix.
+    for index in select.joins.indices where index < prefixes.count {
+      let prefix = prefixes[index]
+      let outer = (context.outer ?? Outer()).nested(under: prefix)
+      let on = subquery.scoped(context.outer)
+      try prefix.comparisons(in: select.joins[index].on, context.routines,
+                             subquery: on)
+      for reach in on.visited {
+        do {
+          try typecheck(shape(of: reach),
+                        revealed.with(outer: outer).comparing())
+        } catch let error {
+          guard case let .state(code, _) = error, code == "42804" else {
+            continue
+          }
+          throw error
+        }
+      }
+    }
+  }
+
+  /// Hands each of `select`'s own reachable comparison surfaces to the finder,
+  /// reachability-aware — the comparability counterpart of `walk`, mirroring
+  /// exactly the surfaces `walk` reaches, so the finder faults the reachable
+  /// static 42804 the validate path faults, and no others.
+  ///
+  /// The clauses run `WHERE` → group/fold → `HAVING` → limit → projection, so a
+  /// constant-false `WHERE` (or `HAVING`) prunes everything after it, a
+  /// whole-result aggregate emits one empty group whose HAVING/projection/sort
+  /// are value-folded (`fold`/`empty`, NULL-aware — an aggregate over the empty
+  /// group is NULL, so a comparison against it is UNKNOWN, not a fault), and a
+  /// row-dropping limit leaves the projection unreachable while the aggregate
+  /// folds (checked unconditionally, `aggregatesIn`) and the below-limit sort
+  /// still run.
+  private borrowing func find(comparisonsOf select: Select, _ scope: Scope,
+                              _ context: Context, subquery: SubqueryCheck)
+      throws(SQLError) {
+    let routines = context.routines
+    // The WHERE admits a correlated column of this query; the projection,
+    // `HAVING`, GROUP BY, and `ORDER BY` bar it (`barred`).
+    let barred = subquery.barred
+    if let predicate = select.predicate {
+      try scope.comparisons(in: predicate, routines, subquery: subquery)
+      // A false WHERE filters every row, so a GROUP BY forms no group and a
+      // non-aggregate query yields no row — nothing after is reachable. A
+      // whole-result aggregate still emits one empty group: the HAVING and
+      // projection run over it, value-folded.
+      if scope.constant(predicate, routines) == false {
+        if select.aggregates, select.grouping.expressions.isEmpty {
+          if let having = select.having, !having.subquery {
+            // A subquery-free HAVING over the empty group both surfaces its own
+            // cross-kind fault (`empty`, 42804) and decides the group's fate: a
+            // group passes only when it is TRUE, so FALSE/UNKNOWN drops it and
+            // the projection is unreachable. A non-comparability fault defers,
+            // keeping the projection reachable (the run's `or: true` posture).
+            var passes: Bool? = true
+            do {
+              passes = try scope.empty(having, routines)
+            } catch let error {
+              if case let .state(code, _) = error, code == "42804" {
+                throw error
+              }
+              passes = true
+            }
+            if passes != true { return }
+          }
+          // The lone empty group's projection is unreachable when a limit drops
+          // its one row (a zero FETCH or any positive OFFSET), unless DISTINCT.
+          var reachable = select.distinct
+          if !reachable { reachable = !drops(select.limit, single: true) }
+          if reachable, case let .expressions(items) = select.projection {
+            for item in items {
+              try fold(comparisonsIn: item.expression, scope, routines,
+                                subquery: barred)
+            }
+          }
+          // The sort sits below the limit, so its keys fold over the empty
+          // group unconditionally.
+          for expression in select.orderKeys {
+            try fold(comparisonsIn: expression, scope, routines,
+                        subquery: barred)
+          }
+        }
+        return
+      }
+    }
+    // Aggregate folds run before HAVING and any limit, so their operand and
+    // FILTER comparisons are reachable unconditionally — even under a
+    // row-dropping limit that leaves the surrounding projection unreachable.
+    if case let .expressions(items) = select.projection {
+      for item in items {
+        try scope.comparisons(aggregatesIn: item.expression, routines,
+                              subquery: barred)
+      }
+    }
+    for expression in select.orderKeys {
+      try scope.comparisons(aggregatesIn: expression, routines,
+                            subquery: barred)
+    }
+    // Each GROUP BY key is evaluated over the input rows to form the groups,
+    // before HAVING, projection, and any limit — so find its comparisons
+    // unconditionally in this reachable path.
+    for expression in select.grouping.expressions {
+      try scope.comparisons(in: expression, routines, subquery: barred)
+    }
+    if let having = select.having {
+      // A HAVING aggregate is collected and folded by the group node before the
+      // filter runs, so its operand and FILTER comparisons are reachable
+      // whatever the enclosing predicate's short-circuit — a `1 = 0 AND
+      // SUM(…)`/`1 = 1 OR SUM(…)` leg the reachability walk prunes still folds.
+      // Check them unconditionally, ahead of the reachability-aware scalar
+      // walk, exactly as the projection and sort aggregates above and as the
+      // validate walk's `aggregates(in:)` does.
+      try scope.comparisons(aggregatesIn: having, routines, subquery: barred)
+      try scope.comparisons(in: having, routines, subquery: barred)
+      // A false HAVING filters every group before the projection, so the
+      // projection's non-aggregate work is unreachable.
+      if scope.constant(having, routines) == false { return }
+    }
+    // The projection runs after any limit: a limit that drops every row it
+    // would yield leaves only its aggregate folds (checked above) reachable. A
+    // single-row result (a whole-result aggregate, or a FROM-less select) is
+    // dropped by a positive OFFSET too. DISTINCT is the exception (its plan
+    // evaluates the projection before the cap pages the deduplicated result).
+    let sole = select.from == nil
+        || (select.aggregates && select.grouping.expressions.isEmpty)
+    var reachable = select.distinct
+    if !reachable { reachable = !drops(select.limit, single: sole) }
+    if reachable, case let .expressions(items) = select.projection {
+      for item in items {
+        try scope.comparisons(in: item.expression, routines, subquery: barred)
+      }
+    }
+    // The sort sits below the limit, so every ORDER BY key runs over the input
+    // rows before the cap pages them — its comparisons are checked
+    // unconditionally.
+    for expression in select.orderKeys {
+      try scope.comparisons(in: expression, routines, subquery: barred)
+    }
+  }
+
+  /// Finds the reachable comparisons in a whole-result aggregate's projection
+  /// or sort `expression` over the single empty group a constant-false `WHERE`
+  /// leaves, through the empty-group fold (`fold`/`empty`) — value-based, so an
+  /// aggregate that folds to NULL/0 reads a comparison against it as UNKNOWN
+  /// rather than a static type fault, matching the run exactly. It faults 42804
+  /// on a cross-kind non-NULL pair the fold reaches; every other fault the fold
+  /// would raise is the run's to raise at execution, so it is deferred.
+  private borrowing func fold(comparisonsIn expression: Expression,
+                              _ scope: Scope, _ routines: Routines,
+                              subquery: SubqueryCheck)
+      throws(SQLError) {
+    do {
+      try scope.fold(expression, routines, subquery: subquery)
+    } catch let error {
+      guard case let .state(code, _) = error, code == "42804" else { return }
+      throw error
+    }
+  }
+
+  /// Descends the comparability walk into each stored VIEW `select` names in
+  /// its FROM or a JOIN. A named relation resolving through `resolve(view:)` to
+  /// a registered view is executed on the run path as an already-compiled plan
+  /// (compiled `validate: false`), so its body's comparisons were never
+  /// comparability-checked and the enclosing walk treats it as an opaque
+  /// relation — the same silent hole an empty derived-table body left before it
+  /// was walked. Recursing the walk into the view's body `Query` (`typecheck`
+  /// in `comparing()` mode) faults a cross-kind comparison in the body exactly
+  /// as the derived-table recursion does, and — the body resolving through this
+  /// same walk — transitively into a view whose body names another view, a
+  /// derived table, or a subquery.
+  ///
+  /// The body resolves over its own `definition_schema.` overlay with the
+  /// caller's correlation and CTEs cleared (`body([:])`), so a view means what
+  /// it was registered to mean, independent of its call site — the same scope
+  /// `schema(of:)` derives a view's types under. A CTE, a derived alias, or a
+  /// reserved store relation of the same name resolves ahead of a view (the
+  /// `schema(of:)` precedence), so it is not treated as one here; a cyclic view
+  /// already under resolution down this chain (`visited`) is not re-entered —
+  /// the recursion would not terminate, and the cycle itself faults
+  /// `.recursion` on the compile path ahead of this walk. Only a `42804`
+  /// escapes: every other body fault stays deferred to the view's own run,
+  /// matching the derived-table and subquery-body recursions.
+  private borrowing func comparability(ofViewsIn select: Select,
+                                       _ context: Context)
+      throws(SQLError) {
+    var relations = [select.from].compactMap { $0 }
+    relations.append(contentsOf: select.joins.map(\.relation))
+    for relation in relations {
+      guard case let .named(name) = relation.source else { continue }
+      let key = name.lowercased()
+      // A CTE or derived alias in scope, or a reserved store relation, resolves
+      // ahead of a view, so it is not a stored-view reference to descend into.
+      if context.relations[key] != nil { continue }
+      if Definition(name) != nil { continue }
+      guard let view = resolve(view: name) else { continue }
+      if context.visited.contains(key) { continue }
+      // Expand a `GROUP BY GROUPING SETS` body to its `UNION ALL` arms first —
+      // the same expansion the run and `schema(of:)` walk — then recurse the
+      // comparability walk over the view body under its own uncorrelated scope,
+      // the view marked visited so a nested self-reference terminates.
+      let body = try view.query.expanded
+      try typecheck(body, context.body([:]).visiting(name))
     }
   }
 
@@ -1114,6 +1428,7 @@ extension Catalog where Self: ~Escapable {
       _ = try scope.validate(expression, routines, subquery: barred)
     }
   }
+
 
   /// Resolves a grouped `select`'s `ORDER BY` through the same grouped lowering
   /// the compile path applies, so the type-check enforces the GROUP BY rules on

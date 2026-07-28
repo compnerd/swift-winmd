@@ -619,13 +619,19 @@ struct LikeEvaluationOrderTests {
 
   @Test func `a faulting operand surfaces before a NULL escape UNKNOWN`()
       throws {
-    // `(1 / K) LIKE 'x' ESCAPE E` with `K = 0, E = NULL`. The operand `1 / K`
-    // faults `SQLError.divide`; the executor must evaluate the reached operand
-    // before deciding the NULL-escape UNKNOWN — an early return on the NULL
-    // escape would silently FILTER the row (UNKNOWN) and hide the divide.
-    // adversarial: reverting to early-return-on-NULL-escape stops this throw.
+    // `SUBSTRING('abc', 1 / K) LIKE 'x' ESCAPE E` with `K = 0, E = NULL`. The
+    // operand is character (`SUBSTRING` returns text, so it passes the LIKE
+    // comparability check the compile now runs on the run path), but evaluating
+    // it faults `SQLError.divide` on its `1 / K` argument; the executor must
+    // evaluate the reached operand before deciding the NULL-escape UNKNOWN — an
+    // early return on the NULL escape would silently FILTER the row (UNKNOWN)
+    // and hide the divide. adversarial: reverting to early-return-on-a-NULL
+    // escape stops this throw. (The operand must be character-typed: a non-text
+    // one — `(1 / K) LIKE …` — is now the ISO 42804 data-type mismatch the
+    // compile-time comparability check faults on both paths, before the run
+    // ever divides, so it no longer exercises the run's evaluation order.)
     try faulting().expect(
-        "SELECT Id FROM F WHERE (1 / K) LIKE 'x' ESCAPE E",
+        "SELECT Id FROM F WHERE SUBSTRING('abc', 1 / K) LIKE 'x' ESCAPE E",
         fails: .divide)
   }
 

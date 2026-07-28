@@ -459,6 +459,15 @@ extension Catalog where Self: ~Escapable {
       if context.validate {
         _ = try compile(query, context.validating(true))
         try typecheck(query, context)
+      } else if context.comparability {
+        // The run's comparability walk: a derived body's own reachable
+        // comparisons are comparability-checked (`typecheck` in this mode)
+        // exactly as the top-level query's, so a cross-kind comparison in a
+        // body a constant-false outer fold drops — or one over an empty input
+        // materialise runs to no rows — faults at compile rather than silently
+        // returning nothing. It stays lenient (`validate: false`), so a
+        // data-dependent operand a body filter drops is still not rejected.
+        try typecheck(query, context)
       }
       captured = []
     }

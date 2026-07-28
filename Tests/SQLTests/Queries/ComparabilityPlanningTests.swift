@@ -275,3 +275,132 @@ struct LikeNullDeterminedPlanningTests {
     try joinable().expect(sql, fails: notText, bindings: ["p": .integer(1)])
   }
 }
+
+// MARK: - A carrier sort-key subquery is comparability-checked on both paths
+
+/// A nonempty relation with an integer `num` beside a text `txt`, enough to
+/// write a cross-kind `num = txt` comparison inside a query-level carrier sort
+/// key's subquery whose uncorrelated body a run over an empty carrier never
+/// evaluates.
+private func crossable() throws -> FixtureCatalog {
+  try Catalog {
+    Relation("A", ["num": .integer, "txt": .text]) {
+      Row(1, "x")
+      Row(2, "y")
+    }
+  }
+}
+
+/// A `Query.ordered` carrier's `ORDER BY` may nest an `EXISTS`/`IN`/scalar
+/// subquery. Its uncorrelated body a run never materialises over an empty
+/// carrier — the sort evaluates no key — so a cross-kind comparison inside that
+/// body escaped the comparison-finder (the run returned empty) and the carrier
+/// validate branch (which type-checked the keys but not the subquery bodies):
+/// both accepted a query the equivalent plain `SELECT … ORDER BY` faults 42804.
+/// The finder and the validator now recurse each reached carrier sort-key
+/// subquery body — over the set-operation carrier and the recursive-CTE
+/// fixpoint's peeled `ORDER BY` alike — so the fault surfaces on both paths, in
+/// lockstep with the plain-select form, while an unreached or comparable body
+/// still does not fault.
+struct CarrierSubqueryComparabilityTests {
+  @Test func `a cross-kind set-op carrier sort-key subquery faults on both paths`()
+      throws {
+    // The `EXISTS` body's `a.num = a.txt` is cross-kind. Over the empty carrier
+    // the run evaluated no key, so it returned rows without faulting while the
+    // carrier validate branch never checked the body — both lenient where the
+    // plain `SELECT num FROM A ORDER BY CASE WHEN EXISTS (…) …` faults. The
+    // recursion closes it: run and validate now fault 42804.
+    let sql = """
+        SELECT num FROM A UNION ALL SELECT num FROM A
+          ORDER BY CASE WHEN EXISTS (SELECT 1 FROM A a WHERE a.num = a.txt)
+                        THEN 1 ELSE 0 END
+        """
+    let query = try parse(query: sql)
+    #expect(throws: intVsText) { try crossable().columns(of: query) }
+    try crossable().expect(sql, fails: intVsText)
+  }
+
+  @Test func `a cross-kind scalar carrier sort-key subquery faults on both paths`()
+      throws {
+    // A scalar (not `EXISTS`) sort-key subquery reaches the finder through the
+    // `.subquery` case, recorded only because `deferred` is seeded with the
+    // sort keys' scalar subqueries. Its body's `a.num = a.txt` faults 42804 on
+    // both paths too.
+    let sql = """
+        SELECT num FROM A UNION ALL SELECT num FROM A
+          ORDER BY (SELECT COUNT(*) FROM A a WHERE a.num = a.txt)
+        """
+    let query = try parse(query: sql)
+    #expect(throws: intVsText) { try crossable().columns(of: query) }
+    try crossable().expect(sql, fails: intVsText)
+  }
+
+  @Test func `a cross-kind recursive-CTE carrier sort-key subquery faults on both paths`()
+      throws {
+    // The recursive-CTE fixpoint peels its trailing `ORDER BY` and applies it
+    // through the same `carried` resolver, preflighting the keys in comparing
+    // mode (`Engine.apply`) and validating them (`Engine.validate(carrier:)`).
+    // A cross-kind `EXISTS` body inside that carrier ORDER BY faults 42804 on
+    // both — the run no longer sorts the materialised rows past it.
+    let catalog = try crossable()
+    let sql = """
+        WITH RECURSIVE t(n) AS (
+          SELECT 1 AS x
+          UNION ALL
+          SELECT n + 1 FROM t WHERE n < 3
+          ORDER BY CASE WHEN EXISTS (SELECT 1 FROM A a WHERE a.num = a.txt)
+                        THEN 0 ELSE 1 END
+        ) SELECT n FROM t
+        """
+    let statement = try Statement(parsing: sql)
+    let raised: SQLError?
+    do {
+      _ = try catalog.run(statement)
+      raised = nil
+    } catch let fault {
+      raised = fault
+    }
+    #expect(raised == intVsText)
+    #expect(throws: intVsText) {
+      _ = try catalog.columns(of: try Statement(parsing: sql), validate: true)
+    }
+  }
+
+  @Test func `a comparable carrier sort-key subquery does not fault`() throws {
+    // No over-reach: the `EXISTS` body's `a.num = a.num` is like-kind, so
+    // neither path faults and the run yields all four rows.
+    let sql = """
+        SELECT num FROM A UNION ALL SELECT num FROM A
+          ORDER BY CASE WHEN EXISTS (SELECT 1 FROM A a WHERE a.num = a.num)
+                        THEN 1 ELSE 0 END
+        """
+    _ = try crossable().columns(of: parse(query: sql))
+    try crossable().expect(sql, yields: [[1], [2], [1], [2]])
+  }
+
+  @Test func `an unreached carrier sort-key subquery does not fault`() throws {
+    // No over-reach: a constant-FALSE `AND` short-circuits before the
+    // cross-kind `EXISTS`, so the subquery is never recorded and never
+    // recursed — matching the run, which never materialises it. Neither path
+    // faults.
+    let sql = """
+        SELECT num FROM A UNION ALL SELECT num FROM A
+          ORDER BY CASE WHEN 1 = 0
+                            AND EXISTS (SELECT 1 FROM A a WHERE a.num = a.txt)
+                        THEN 1 ELSE 0 END
+        """
+    _ = try crossable().columns(of: parse(query: sql))
+    try crossable().expect(sql, yields: [[1], [2], [1], [2]])
+  }
+
+  @Test func `a bare arithmetic carrier key does not fault the finder`() throws {
+    // No over-reach: a carrier key that is a bare arithmetic expression carries
+    // no comparison and no subquery, so the finder faults nothing and the run
+    // orders the rows.
+    let sql = """
+        SELECT num FROM A UNION ALL SELECT num FROM A ORDER BY num + 1
+        """
+    _ = try crossable().columns(of: parse(query: sql))
+    try crossable().expect(sql, yields: [[1], [1], [2], [2]])
+  }
+}

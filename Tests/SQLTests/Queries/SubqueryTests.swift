@@ -830,15 +830,6 @@ struct ExistsProbeTests {
                          fails: .divide)
   }
 
-  @Test func `EXISTS over a FROM-less SELECT is TRUE`() throws {
-    // A FROM-less `SELECT 1` yields exactly one row and cannot carry a limit,
-    // so its probe is a limit-free `SELECT <constant>` — it compiles (a
-    // FROM-less select with a limit would be rejected) and yields one row, so
-    // `EXISTS` is TRUE and every outer row is admitted.
-    try fixture().expect("SELECT Id FROM T WHERE EXISTS (SELECT 1)",
-                         yields: [[1], [2]])
-  }
-
   @Test func `EXISTS honours a FETCH FIRST 0 ROWS limit as FALSE`() throws {
     // The probe keeps the subquery's original `FETCH FIRST 0 ROWS ONLY`, so the
     // row source yields zero rows and `EXISTS` is FALSE — a synthetic one-row

@@ -763,7 +763,7 @@ extension Query {
 extension Select {
   /// Collects this select's `FROM` and `JOIN` relation names into `names`.
   func collect(into names: inout Set<String>) {
-    if let from { names.insert(from.name) }
+    names.insert(from.name)
     for join in joins { names.insert(join.relation.name) }
   }
 
@@ -772,7 +772,7 @@ extension Select {
   /// relation's spelling), matching `Scope.admits` — into `ranges`, duplicates
   /// kept so a collision counts.
   func collect(ranges: inout Array<String>) {
-    if let from { ranges.append(from.alias ?? from.name) }
+    ranges.append(from.alias ?? from.name)
     for join in joins {
       ranges.append(join.relation.alias ?? join.relation.name)
     }
@@ -783,7 +783,7 @@ extension Select {
   /// that `resolve` keys the relation on — into `sources`, a derived table's
   /// source contributing none (its rows key on its alias, already a range).
   func collect(sources: inout Array<String>) {
-    if let from, case .named = from.source { sources.append(from.name) }
+    if case .named = from.source { sources.append(from.name) }
     for join in joins {
       if case .named = join.relation.source {
         sources.append(join.relation.name)
@@ -799,9 +799,9 @@ extension Select {
   /// rather than through the overlay `augment` builds.
   func collect(derived derivations:
                    inout Array<(String, Query, Array<String>)>) {
-    if case let .derived(query) = from?.source, let alias = from?.alias,
-        !(from?.lateral ?? false) {
-      derivations.append((alias, query, from?.columns ?? []))
+    if case let .derived(query) = from.source, let alias = from.alias,
+        !from.lateral {
+      derivations.append((alias, query, from.columns))
     }
     for join in joins {
       if case let .derived(query) = join.relation.source,

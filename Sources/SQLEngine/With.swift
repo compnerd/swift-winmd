@@ -98,7 +98,7 @@ extension Select {
   /// n FROM a) AS d` names `a`) yet is NOT fooled by a shadowing derived alias
   /// (`FROM (SELECT … ) AS a` does not name the CTE `a`).
   internal func references(_ name: String) -> Bool {
-    from?.references(name) ?? false
+    from.references(name)
         || joins.contains { $0.relation.references(name) }
   }
 }

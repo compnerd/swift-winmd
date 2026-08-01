@@ -104,7 +104,7 @@ struct DerivedTableParsingTests {
     // The default is non-lateral — a plain `(SELECT …)` never sets `lateral`.
     let select = try parse(select:
         "SELECT t.a FROM (SELECT V AS a FROM S) AS t")
-    #expect(!(select.from?.lateral ?? true))
+    #expect(!select.from.lateral)
   }
 
   @Test func `LATERAL before a named relation faults`() throws {

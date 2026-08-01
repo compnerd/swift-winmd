@@ -335,25 +335,6 @@ struct ScalarSubqueryCorrelationTests {
             "a correlated column is only supported in a subquery's WHERE"))
   }
 
-  @Test func `a FROM-less correlated projection subquery is unsupported`()
-      throws {
-    // A FROM-less scalar subquery in the projection that names an outer column
-    // (`SELECT (SELECT T.Id) FROM T`) is a correlated reference in a barred
-    // clause position. The cut is intrinsic to the projection entry
-    // (`Schema.terms` bars its seam), so this FROM-less projection cannot admit
-    // the correlation — run and `columns(of:)` reject it with the same fault,
-    // never lowering `T.Id` to a run-time `Term.parameter` that would (wrongly)
-    // execute.
-    let query = try parse(query: "SELECT (SELECT T.Id) FROM T")
-    #expect(throws: SQLError.self) {
-      try fixture().columns(of: query, validate: true)
-    }
-    try fixture().expect(
-        "SELECT (SELECT T.Id) FROM T",
-        fails: .state("0A000",
-            "a correlated column is only supported in a subquery's WHERE"))
-  }
-
   @Test func `a correlated WHERE subquery still admits and runs`() throws {
     // The parity case: a correlated column in the inner subquery's WHERE — an
     // admitting clause position, unchanged by the projection barring — still
@@ -1703,17 +1684,12 @@ struct CorrelatedExistsProbeLenienceTests {
   }
 }
 
-// MARK: - FROM-less scope frame (correlation across an empty frame)
+// MARK: - Immediate correlation
 
-/// A FROM-less SELECT is still a scope frame. The example
-/// `SELECT id FROM T WHERE (SELECT CASE WHEN EXISTS (SELECT 1 FROM S WHERE
-/// S.x = T.id) THEN 1 END) = 1` nests a FROM-less middle scalar subquery whose
-/// own body holds an `EXISTS` correlating to the OUTER `T` — a scope past the
-/// empty FROM-less frame. The middle plan runs over a single empty record, so
-/// `T.id` must thread through the empty frame as `.bound`, NOT bind from a
-/// `.slot` of that empty record. `S.x` ∈ {2, 3}, so the CASE is 1 exactly for
-/// `T` rows 2 and 3, which the equality `= 1` keeps.
-private func fromless() throws -> FixtureCatalog {
+/// A `T` (ids 1, 2, 3) and an `S` (x ∈ {2, 3}) for the correlation test: an
+/// inner `EXISTS (SELECT 1 FROM S WHERE S.x = T.id)` correlates to the
+/// enclosing `T`, so it holds for `T` rows 2 and 3.
+private func correlation() throws -> FixtureCatalog {
   try Catalog {
     Relation("T", ["id": .integer]) {
       Row(1)
@@ -1727,50 +1703,14 @@ private func fromless() throws -> FixtureCatalog {
   }
 }
 
-struct FromlessScopeFrameTests {
-  @Test func `a correlation across a FROM-less frame runs per outer row`()
-      throws {
-    // The middle `(SELECT CASE WHEN EXISTS (...) THEN 1 END)` is FROM-less, so
-    // its plan runs over a single empty record. The inner `EXISTS`'s `T.id`
-    // names the OUTER `T`, one frame out past the empty FROM-less frame — so it
-    // resolves `.bound` and threads through per outer `T` row, rather than
-    // binding a `.slot` of the empty record (which would trap or read wrong).
-    // `S.x` ∈ {2, 3}, so the CASE is 1 for `T` rows 2 and 3.
-    try fromless().expect(
-        """
-        SELECT id FROM T \
-        WHERE (SELECT CASE WHEN EXISTS \
-                          (SELECT 1 FROM S WHERE S.x = T.id) THEN 1 END) = 1 \
-        ORDER BY id
-        """,
-        yields: [[2], [3]])
-  }
-
-  @Test func `a correlation across a FROM-less frame validates`() throws {
-    // The schema path resolves the correlation threaded through the FROM-less
-    // frame the same as the run — no `SQLError.column` on the enclosing `T.id`.
-    let query = try parse(query:
-        """
-        SELECT id FROM T \
-        WHERE (SELECT CASE WHEN EXISTS \
-                          (SELECT 1 FROM S WHERE S.x = T.id) THEN 1 END) = 1
-        """)
-    let columns = try fromless().columns(of: query, validate: true)
-    #expect(columns.count == 1)
-  }
-}
-
-// MARK: - Immediate correlation parity (no FROM-less frame)
-
-struct ImmediateCorrelationParityTests {
+struct ImmediateCorrelationTests {
   @Test func `a directly correlated EXISTS with a real FROM stays a slot`()
       throws {
-    // parity: the same inner `EXISTS (SELECT 1 FROM S WHERE S.x = T.id)` with
-    // no FROM-less middle correlates to the immediate enclosing `T` — one real
-    // frame out — so it resolves `.slot` and reads the outer row directly. The
-    // FROM-less empty-frame rule must not over-thread this immediate case.
-    // `S.x` ∈ {2, 3}, so only `T` rows 2 and 3 satisfy the EXISTS.
-    try fromless().expect(
+    // A directly correlated `EXISTS (SELECT 1 FROM S WHERE S.x = T.id)`
+    // correlates to the immediate enclosing `T` — one frame out — so it
+    // resolves `.slot` and reads the outer row directly. `S.x` ∈ {2, 3}, so
+    // only `T` rows 2 and 3 satisfy the EXISTS.
+    try correlation().expect(
         """
         SELECT id FROM T \
         WHERE EXISTS (SELECT 1 FROM S WHERE S.x = T.id) \

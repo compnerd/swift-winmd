@@ -59,7 +59,7 @@ struct DerivedColumnListParsingTests {
     let select = try parse(select: "SELECT d.a FROM (SELECT x AS a FROM S) AS d")
     let inner = try parse(query: "SELECT x AS a FROM S")
     #expect(select.from == Relation(derived: inner, as: "d"))
-    #expect(select.from?.columns == [])
+    #expect(select.from.columns == [])
   }
 
   @Test func `a column list is optional on a named relation`() throws {
@@ -67,7 +67,7 @@ struct DerivedColumnListParsingTests {
     // fires only after an alias, so a plain named relation stays list-free.
     let select = try parse(select: "SELECT V FROM T")
     #expect(select.from == Relation(name: "T"))
-    #expect(select.from?.columns == [])
+    #expect(select.from.columns == [])
   }
 }
 

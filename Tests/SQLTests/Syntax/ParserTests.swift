@@ -36,24 +36,21 @@ private struct Quantifier: Sendable, CustomTestStringConvertible {
   internal let text: String
   internal let distinct: Bool
   internal let columns: Array<Column>?
-  internal let fromless: Bool
 
   internal var testDescription: String { name }
 }
 
 private let kQuantifiers: Array<Quantifier> = [
   Quantifier(name: "plain SELECT", text: "SELECT TypeName FROM TypeDef",
-             distinct: false, columns: nil, fromless: false),
+             distinct: false, columns: nil),
   Quantifier(name: "SELECT DISTINCT",
              text: "SELECT DISTINCT TypeName FROM TypeDef", distinct: true,
-             columns: ["TypeName"], fromless: false),
+             columns: ["TypeName"]),
   Quantifier(name: "SELECT ALL", text: "SELECT ALL TypeName FROM TypeDef",
-             distinct: false, columns: ["TypeName"], fromless: false),
+             distinct: false, columns: ["TypeName"]),
   Quantifier(name: "case-insensitive DISTINCT",
              text: "select distinct TypeName from TypeDef", distinct: true,
-             columns: nil, fromless: false),
-  Quantifier(name: "FROM-less DISTINCT", text: "SELECT DISTINCT 1",
-             distinct: true, columns: nil, fromless: true),
+             columns: nil),
 ]
 
 private struct Direction: Sendable, CustomTestStringConvertible {
@@ -164,9 +161,6 @@ struct SetQuantifierTests {
     #expect(select.distinct == test.distinct)
     if let columns = test.columns {
       #expect(select.projection == .columns(columns))
-    }
-    if test.fromless {
-      #expect(select.from == nil)
     }
   }
 }
@@ -833,50 +827,43 @@ struct ArithmeticTests {
   }
 }
 
-// MARK: - Scalar (FROM-less) SELECT
+// MARK: - SELECT requires a FROM clause
 
-struct ScalarSelectTests {
-  @Test func `parses a FROM-less SELECT with no relation`() throws {
-    let select = try parse(select: "SELECT 1")
-    #expect(select.from == nil)
-    #expect(select.joins.isEmpty)
-    #expect(select.predicate == nil)
-    #expect(select.order == nil)
-    #expect(select.projection
-                == .expressions([Projected(expression: .literal(.integer(1)))]))
-  }
+struct SelectRequiresFromTests {
+  /// The FROM-required diagnostic — a bare `SELECT` with no `FROM` is not in
+  /// the dialect; `VALUES` projects a computed row instead.
+  private static let fromRequired = SQLError.state("42601",
+      "a SELECT requires a FROM clause; use VALUES to project a computed row")
 
-  @Test func `parses a FROM-less arithmetic projection`() throws {
-    let select = try parse(select: "SELECT 1 + 1")
-    let sum = Expression.binary(.add, .literal(.integer(1)),
-                                .literal(.integer(1)))
-    #expect(select.from == nil)
-    #expect(select.projection == .expressions([Projected(expression: sum)]))
-  }
-
-  @Test func `parses a FROM-less multi-column projection`() throws {
-    let select = try parse(select: "SELECT 1, 2")
-    #expect(select.from == nil)
-    #expect(select.projection == .expressions([
-      Projected(expression: .literal(.integer(1))),
-      Projected(expression: .literal(.integer(2))),
-    ]))
-  }
-
-  @Test func `a FROM-less alias names the projected column`() throws {
-    let select = try parse(select: "SELECT 1 + 1 AS two")
-    let sum = Expression.binary(.add, .literal(.integer(1)),
-                                .literal(.integer(1)))
-    #expect(select.projection
-                == .expressions([Projected(expression: sum, alias: "two")]))
-  }
-
-  @Test func `a FROM-less query admits no trailing WHERE`() {
-    // With FROM absent there is no relation to filter, so a WHERE that follows
-    // is trailing input rather than a clause.
-    #expect(throws: SQLError.self) {
-      _ = try Statement(parsing: "SELECT 1 WHERE 1 = 1")
+  @Test func `a bare SELECT with no FROM faults FROM-required`() throws {
+    #expect(throws: SelectRequiresFromTests.fromRequired) {
+      _ = try Statement(parsing: "SELECT 1")
     }
+  }
+
+  @Test func `a SELECT star with no FROM faults FROM-required`() throws {
+    #expect(throws: SelectRequiresFromTests.fromRequired) {
+      _ = try Statement(parsing: "SELECT *")
+    }
+  }
+
+  @Test func `a multi-column SELECT with no FROM faults FROM-required`()
+      throws {
+    #expect(throws: SelectRequiresFromTests.fromRequired) {
+      _ = try Statement(parsing: "SELECT 1, 2")
+    }
+  }
+
+  @Test func `VALUES projects a computed row instead`() throws {
+    // The ISO replacement parses to a values body carrying the row's elements.
+    let query = try parse(query: "VALUES (1 + 1, 2)")
+    guard case let .values(rows) = query.body else {
+      Issue.record("expected a values body")
+      return
+    }
+    let sum = Expression.binary(.add, .literal(.integer(1)),
+                                .literal(.integer(1)))
+    #expect(rows == [[sum, .literal(.integer(2))]])
   }
 }
 

@@ -786,7 +786,7 @@ internal struct Shell: ~Escapable {
     case let .with(_, query): query
     case let .create(_, view): view.query
     case .function:
-      .select(Select(projection: .all, from: nil))
+      SQLEngine.Query(body: .values([]))
     }
   }
 

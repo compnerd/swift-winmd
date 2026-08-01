@@ -568,7 +568,7 @@ extension Catalog where Self: ~Escapable {
     // `validate` gates that body's own reachable-operand check the same as the
     // outer query's — a `validate: false` derive trusts a run-proven body.
     let context = try augment(context, for: .select(select), rows: false)
-    guard let relation = select.from else { return Scope([]) }
+    let relation = select.from
     // Build the running scope incrementally so a LATERAL join's schema derives
     // against the preceding FROM — per ISO its projection may name a preceding
     // column, so its output shape types from that scope. A non-lateral join's
@@ -599,11 +599,11 @@ extension Catalog where Self: ~Escapable {
   /// FROM relation and joins `0…index`, the relations available at that join
   /// point, never one joined later. A join `ON`'s subquery correlates against
   /// its prefix (so a reference to a later-joined relation faults), matching
-  /// the compile path's `subquery(of:)`. Empty for a FROM-less or join-less
-  /// select.
+  /// the compile path's `subquery(of:)`. Empty for a join-less select.
   private borrowing func prefixes(of select: Select, _ context: Context)
       throws(SQLError) -> Array<Scope> {
-    guard let relation = select.from, !select.joins.isEmpty else { return [] }
+    guard !select.joins.isEmpty else { return [] }
+    let relation = select.from
     // Build the running scope incrementally so a LATERAL join's schema derives
     // against the preceding FROM (the same reason `scope(of:)` does), the
     // preceding scope carrying the joins-before's merged columns through the
@@ -935,13 +935,11 @@ extension Catalog where Self: ~Escapable {
       return
     }
     // This select's own resolution scope — the one its nested subqueries
-    // correlate against (`nil` for a FROM-less select, which adds no relations
-    // and correlates through `outer` unchanged). Built from the unrevealed
-    // `context` — correlation resolves against the enclosing scope's relations
-    // (its derived aliases among them), unlike an inner subquery's own FROM,
-    // which resolves against the revealed base below.
-    let enclosing = select.from == nil
-        ? nil : try scope(of: select, context)
+    // correlate against. Built from the unrevealed `context` — correlation
+    // resolves against the enclosing scope's relations (its derived aliases
+    // among them), unlike an inner subquery's own FROM, which resolves against
+    // the revealed base below.
+    let enclosing = try scope(of: select, context)
     // The prefix scope of each join, the surface its `ON`'s subquery correlates
     // against — matching the run's `subquery(of:)`.
     let prefixes = try prefixes(of: select, context)
@@ -976,7 +974,7 @@ extension Catalog where Self: ~Escapable {
     // enclosing scope's ordinals.
     let revealed = context.revealed()
     let base = context.outer ?? Outer()
-    let nested = enclosing.map { base.nested(under: $0) } ?? context.outer
+    let nested = base.nested(under: enclosing)
     let inner = revealed.with(outer: nested)
     for reach in subquery.visited {
       try typecheck(shape(of: reach), inner)
@@ -1204,7 +1202,7 @@ extension Catalog where Self: ~Escapable {
     let subquery: SubqueryCheck
     do {
       scope = try self.scope(of: select, context)
-      enclosing = select.from == nil ? nil : scope
+      enclosing = scope
       prefixes = try self.prefixes(of: select, context)
       subquery = try subqueryCheck(of: select, context, enclosing: enclosing,
                                    prefixes: prefixes)
@@ -1367,11 +1365,10 @@ extension Catalog where Self: ~Escapable {
     }
     // The projection runs after any limit: a limit that drops every row it
     // would yield leaves only its aggregate folds (checked above) reachable. A
-    // single-row result (a whole-result aggregate, or a FROM-less select) is
-    // dropped by a positive OFFSET too. DISTINCT is the exception (its plan
-    // evaluates the projection before the cap pages the deduplicated result).
-    let sole = select.from == nil
-        || (select.aggregates && select.grouping.expressions.isEmpty)
+    // single-row result (a whole-result aggregate) is dropped by a positive
+    // OFFSET too. DISTINCT is the exception (its plan evaluates the projection
+    // before the cap pages the deduplicated result).
+    let sole = select.aggregates && select.grouping.expressions.isEmpty
     var reachable = select.distinct
     if !reachable { reachable = !drops(select.limit, single: sole) }
     if reachable, case let .expressions(items) = select.projection {
@@ -1432,7 +1429,7 @@ extension Catalog where Self: ~Escapable {
   private borrowing func comparability(ofViewsIn select: Select,
                                        _ context: Context)
       throws(SQLError) {
-    var relations = [select.from].compactMap { $0 }
+    var relations = [select.from]
     relations.append(contentsOf: select.joins.map(\.relation))
     for relation in relations {
       guard case let .named(name) = relation.source else { continue }
@@ -1603,8 +1600,7 @@ extension Catalog where Self: ~Escapable {
     // result — a zero FETCH or skipping OFFSET does not spare it. A false WHERE
     // still yields no rows to dedup (handled above), so only the limit-based
     // elision is bypassed for DISTINCT.
-    let sole = select.from == nil
-        || (select.aggregates && select.grouping.expressions.isEmpty)
+    let sole = select.aggregates && select.grouping.expressions.isEmpty
     var reachable = select.distinct
     if !reachable { reachable = !drops(select.limit, single: sole) }
     if reachable, case let .expressions(items) = select.projection {

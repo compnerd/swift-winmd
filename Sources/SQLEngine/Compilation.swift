@@ -3,68 +3,6 @@
 
 // MARK: - Compilation
 
-extension Projection {
-  /// Compiles this scalar (FROM-less) `SELECT <expr-list>` projection into
-  /// `Project(single)` — the projection evaluated against the one empty row the
-  /// `single` leaf yields — ordered and paged by any `order`/`limit` tail.
-  ///
-  /// The projection resolves against an empty schema (no columns), so only
-  /// literals, scalar calls, and arithmetic over them lower; a `SELECT *` has
-  /// no relation to expand and a bare-column reference no column to bind, each
-  /// faulting (`SQLError.column` for a column, `SQLError.unsupported` for `*`).
-  /// The terms hold no slots, so the `single` row's empty record carries every
-  /// value the projection needs.
-  ///
-  /// `subquery` carries the compile-time width map of the uncorrelated
-  /// subqueries the projection nests, so an `EXISTS`/`IN (Q)` inside a scalar
-  /// term lowers exactly as it does on the FROM'd path — the FROM-less scalar
-  /// select is otherwise the one path that would hit the default unsupported
-  /// map and reject a subquery a run materialises. The `Resolution` is
-  /// threaded, not run, here (see `subquery(of:)`).
-  ///
-  /// A projection is a barred clause position, so a correlated column of this
-  /// query has no evaluator here. `Schema.terms` bars the seam intrinsically,
-  /// so this FROM-less projection cannot admit correlation even when handed the
-  /// admitting `plans.rest` — the same cut `columns(of:)` applies on the schema
-  /// path, keeping run and derive in lockstep.
-  ///
-  /// A trailing `ORDER BY`/`OFFSET`·`FETCH` (`order`/`limit`) orders and pages
-  /// that single row through the shared `shaped` plan shape, so a FROM-less
-  /// query expression's tail runs (`VALUES (1) ORDER BY 1`) rather than
-  /// faulting. An empty schema binds only an ordinal or an output-alias key —
-  /// the sole ISO keys over a FROM-less select, which has no source column to
-  /// order on — so an ordinary column key faults (`SQLError.column`) as it does
-  /// on the projection.
-  internal func scalar(_ routines: Routines = [:],
-                       subquery: Resolution = .unsupported,
-                       distinct: Bool = false,
-                       order: Order? = nil, limit: Limit? = nil)
-      throws(SQLError) -> Plan {
-    guard case .all = self else {
-      let schema = Schema(width: 0, extent: 0, names: [], types: [],
-                          virtuals: [])
-      let relation = Relation(name: "")
-      let terms = try schema.terms(self, in: relation, routines,
-                                   subquery: subquery)
-      var keys = Array<SortKey>()
-      if let order {
-        let names = self.outputs(count: terms.count)
-        keys = try schema.order(order, in: relation, terms, names, routines,
-                                subquery: subquery)
-        // Every FROM-less ORDER BY key is a select-list output already, so the
-        // DISTINCT rule (a key must be a projected value) rebinds none; the
-        // call still enforces it against a direct `Select`.
-        if distinct { keys = try SQLEngine.distinct(order.keys, keys, terms) }
-      }
-      return Plan.single.shaped(distinct: distinct, projection: terms,
-                                filter: nil, order: keys, limit: limit)
-    }
-    // `SELECT *` names every column of the relations in scope; a FROM-less
-    // query has none, so there is nothing to expand.
-    throw .unsupported("SELECT * requires a FROM clause")
-  }
-}
-
 /// A relation resolved for compilation: its name-resolution `schema` and a
 /// `leaf` factory that, given the ordinals the query references on its side,
 /// builds the leaf `Plan` — a `scan` for a base table, a `derived` over the
@@ -897,10 +835,8 @@ extension Catalog where Self: ~Escapable {
       throws(SQLError) -> Int {
     switch select.projection {
     case .all:
-      // `SELECT *` spans the relations in scope; a FROM-less arm has none.
-      guard let relation = select.from else {
-        throw .named("SELECT * with no FROM")
-      }
+      // `SELECT *` spans the relations in scope.
+      let relation = select.from
       // The FROM resolves once here; each join then resolves through the shared
       // helper, which threads each join's preceding scope into its resolve — so
       // a LATERAL arm's body derives its projected preceding-FROM column
@@ -1452,55 +1388,7 @@ extension Catalog where Self: ~Escapable {
     // a same-named derived alias here shadows stays visible. The layered
     // overlay never overwrote the CTE, so no separate pre-augment context runs.
     let context = try augment(context, for: .select(select), rows: false)
-    guard let relation = select.from else {
-      // A FROM-less select projects expressions over a single row. A `WHERE`,
-      // `GROUP BY`, `HAVING`, or `JOIN` has no relation to apply to, so reject
-      // it rather than silently ignore the clause — a scalar projection would
-      // drop a `GROUP BY`/`HAVING` otherwise. `ORDER BY` and `OFFSET`/`FETCH`
-      // do apply: they order and page that single-row result (ISO), so the
-      // enclosing query expression's trailing tail on a FROM-less primary —
-      // `VALUES (1) ORDER BY 1`, `(SELECT 1 FETCH FIRST 0 ROWS ONLY) UNION …` —
-      // runs rather than faulting. The parser never produces a WHERE/GROUP/
-      // HAVING/JOIN here, but a direct `Select(from: nil, …)` can.
-      let ungrouped = if case .keys([]) = select.grouping { true } else {
-        false
-      }
-      guard select.joins.isEmpty, select.predicate == nil,
-          ungrouped, select.having == nil else {
-        throw .unsupported(
-            "a WHERE, GROUP BY, HAVING, or JOIN requires a FROM clause")
-      }
-      if let limit = select.limit {
-        // As on the FROM'd path, a direct `Limit` may carry negatives the
-        // executor would trap on (the parser yields only non-negative counts).
-        guard limit.offset >= 0 else {
-          throw .state("2201X", "OFFSET row count must be non-negative")
-        }
-        guard (limit.count ?? 0) >= 0 else {
-          throw .state("2201W", "FETCH row count must be non-negative")
-        }
-      }
-      // A scalar projection may still nest an uncorrelated subquery
-      // (`SELECT CASE WHEN EXISTS (Q) …`); compile each once for its width and
-      // thread the map through so the term lowers as it does on the FROM'd path
-      // rather than hit the default unsupported map. The run path builds the
-      // matching run-time cache from `query.subqueries` (which descends the
-      // projection), so the subquery is materialised there — `compile` runs it
-      // never.
-      // A FROM-less select adds no relations, so its nested subqueries
-      // correlate against this select's own enclosing scope `outer` unchanged;
-      // and its own columns (none but a projected outer reference) correlate
-      // outward through `outer` too. The seam is `plans.rest`; `scalar` (via
-      // `Schema.terms`) bars it — a projection is a barred clause position — so
-      // a correlated column of this query is diagnosed, not lowered to a
-      // `Term.parameter`, matching `columns(of:)`'s schema-path rejection.
-      let plans = try subquery(of: select, context)
-      return try select.projection.scalar(context.routines,
-                                          subquery: plans.rest,
-                                          distinct: select.distinct,
-                                          order: select.order,
-                                          limit: select.limit)
-    }
+    let relation = select.from
     // A LATERAL first FROM item has no preceding relation to correlate against,
     // so it is meaningless (and ISO forbids it) — fault rather than resolve a
     // lateral body against nothing.

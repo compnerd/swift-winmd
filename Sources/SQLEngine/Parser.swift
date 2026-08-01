@@ -536,10 +536,10 @@ internal struct Parser: ~Escapable {
 
   /// Parses a `SELECT` query.
   ///
-  /// `FROM` is optional: a FROM-less `SELECT <expr-list>` projects over a
-  /// single empty row (the standard way to compute a scalar, `SELECT 1 + 1`),
-  /// and so admits no relation, joins, `WHERE`, `ORDER BY`, or `LIMIT` to
-  /// follow.
+  /// A `SELECT` requires a `FROM` clause: the dialect admits no FROM-less
+  /// `SELECT`. The ISO `VALUES` table value constructor projects a computed row
+  /// (`VALUES (1 + 1)`) and is parsed by `query`, not here — a bare `SELECT`
+  /// with no `FROM` faults 42601 rather than projecting over an empty row.
   private mutating func select() throws(SQLError) -> Select {
     try expect(.select)
     // An optional set quantifier: `DISTINCT` deduplicates the result rows;
@@ -548,7 +548,9 @@ internal struct Parser: ~Escapable {
     if !distinct { _ = try match(.all) }
     let projection = try projection()
     guard try match(.from) else {
-      return Select(distinct: distinct, projection: projection, from: nil)
+      throw .state("42601",
+                   "a SELECT requires a FROM clause; use VALUES to project a "
+                   + "computed row")
     }
     let from = try relation()
 

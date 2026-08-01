@@ -459,13 +459,13 @@ public struct Select: Hashable, Sendable {
   /// The columns the query yields.
   public let projection: Projection
 
-  /// The primary relation the query scans, or `nil` for a FROM-less `SELECT`
-  /// that projects over a single empty row.
-  public let from: Relation?
+  /// The primary relation the query scans. A `SELECT` always has a `FROM`: the
+  /// dialect admits no FROM-less `SELECT` (the ISO `VALUES` table value
+  /// constructor is the way to project a computed row).
+  public let from: Relation
 
   /// The joins applied to `from`, in source order — `from JOIN joins[0] JOIN
-  /// joins[1] …`, a left-deep chain. Empty for a single-relation query and for
-  /// a FROM-less one.
+  /// joins[1] …`, a left-deep chain. Empty for a single-relation query.
   public let joins: Array<Join>
 
   /// The row filter, if any.
@@ -495,7 +495,7 @@ public struct Select: Hashable, Sendable {
   public let limit: Limit?
 
   public init(distinct: Bool = false, projection: Projection,
-              from: Relation?, joins: Array<Join> = [],
+              from: Relation, joins: Array<Join> = [],
               predicate: Predicate? = nil, grouping: Grouping = .keys([]),
               having: Predicate? = nil, order: Order? = nil,
               limit: Limit? = nil) {
@@ -510,13 +510,12 @@ public struct Select: Hashable, Sendable {
     self.limit = limit
   }
 
-  /// The name of the primary relation, or the empty string for a FROM-less
-  /// `SELECT`.
+  /// The name of the primary relation.
   ///
   /// Retained for single-relation consumers that only ever name one table; it
   /// reads the `from` relation's name.
   public var table: String {
-    from?.name ?? ""
+    from.name
   }
 
   /// Whether the EXISTS cardinality `probe` preserves this select's existence —

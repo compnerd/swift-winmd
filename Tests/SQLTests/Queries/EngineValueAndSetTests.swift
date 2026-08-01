@@ -721,7 +721,7 @@ struct EngineScalarSelectTests {
                         fails: .operand("operands must be numeric"))
   }
 
-  @Test func `a NULL-yielding FROM-less expression projects NULL`() throws {
+  @Test func `a NULL-yielding VALUES expression projects NULL`() throws {
     // The bare literal NULL is not in the grammar, but a NULL arises from a
     // function returning it; `nothing` yields NULL for the single row.
     let routines: Routines =
@@ -730,61 +730,8 @@ struct EngineScalarSelectTests {
     #expect(rows == [[.null]])
   }
 
-  @Test func `a FROM-less SELECT * is rejected — no relation to expand`() throws {
-    #expect(throws: SQLError.unsupported("SELECT * requires a FROM clause")) {
-      try answer("SELECT *")
-    }
-  }
-
-  @Test func `a FROM-less bare column is rejected — no column to bind`() throws {
+  @Test func `a VALUES bare column is rejected — no column to bind`() throws {
     try roster().expect("VALUES (Name)", fails: .column("Name"))
-  }
-
-  @Test func `a directly-built FROM-less select with clauses is rejected`() throws {
-    // The parser never builds a FROM-less select carrying a WHERE, GROUP BY,
-    // HAVING, or JOIN, but a direct `Select(from: nil, …)` can. The engine
-    // rejects it rather than silently drop the clause — a false predicate or
-    // HAVING would otherwise still return the scalar row. (ORDER BY and
-    // OFFSET/FETCH do apply to the single row and are covered by the VALUES
-    // FROM-less tail tests.)
-    let fault =
-        SQLError.unsupported(
-            "a WHERE, GROUP BY, HAVING, or JOIN requires a FROM clause")
-    let filtered = try EngineScalarSelectTests.select(
-        "SELECT 1 FROM People WHERE Id = 99")
-    #expect(throws: fault) {
-      try roster().run(.select(Select(projection: filtered.projection,
-                                    from: nil,
-                                    predicate: filtered.predicate)))
-    }
-    let grouped = try EngineScalarSelectTests.select(
-        "SELECT Id FROM People GROUP BY Id")
-    #expect(throws: fault) {
-      try roster().run(.select(Select(projection: grouped.projection, from: nil,
-                                    grouping: grouped.grouping)))
-    }
-    let filteredGroup = try EngineScalarSelectTests.select(
-        "SELECT Id FROM People GROUP BY Id HAVING COUNT(*) > 0")
-    #expect(throws: fault) {
-      try roster().run(.select(Select(projection: filteredGroup.projection,
-                                    from: nil,
-                                    having: filteredGroup.having)))
-    }
-    let joined = try EngineScalarSelectTests.select(
-        "SELECT Id FROM People JOIN Pets ON Pets.Owner = People.Id")
-    #expect(throws: fault) {
-      try roster().run(.select(Select(projection: joined.projection, from: nil,
-                                    joins: joined.joins)))
-    }
-  }
-
-  /// The `Select` of a parsed single-`SELECT` query — for building the FROM-less
-  /// shapes the parser will not, by re-homing a clause onto a `from: nil` select.
-  private static func select(_ text: String) throws -> Select {
-    guard case let .select(select) = try parse(text).body else {
-      throw SQLError.incomplete(expected: "a SELECT")
-    }
-    return select
   }
 
   @Test func `a VALUES arm of a UNION combines with a FROM arm`() throws {
@@ -797,8 +744,7 @@ struct EngineScalarSelectTests {
   }
 
   @Test func `an existing SELECT … FROM … query is unaffected`() throws {
-    // The FROM-optional grammar leaves a normal query parsing and running
-    // exactly as before.
+    // A normal FROM'd query parses and runs exactly as before.
     try roster().expect("SELECT Name FROM People WHERE Id = 1",
                         yields: [["Alice"]])
   }

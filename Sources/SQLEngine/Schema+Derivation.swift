@@ -1024,11 +1024,10 @@ extension Catalog where Self: ~Escapable {
   /// counterpart of the former `UNION ALL` of FROM-less selects, so a run and a
   /// `columns(of:)` derive fault a `VALUES` alike.
   ///
-  /// The rows are a FROM-less barred surface (an empty scope, `Scope([])`), so
-  /// a row's expression resolves only its literals, calls, and subqueries — a
-  /// bare column names nothing and faults, and a correlated reference is
-  /// barred, exactly as a FROM-less `SELECT`'s projection is. Each row
-  /// subquery's
+  /// The rows are a barred surface (an empty scope, `Scope([])`), so a row's
+  /// expression resolves only its literals, calls, and subqueries — a bare
+  /// column names nothing and faults, and a correlated reference is barred,
+  /// exactly as a FROM-less `SELECT`'s projection is. Each row subquery's
   /// cursor-free width and single-column type derive against the enclosing
   /// `outer` (a `VALUES` in subquery position), then in validate mode each row
   /// expression's reachable operands and calls are checked (`aggregates`/
@@ -1036,6 +1035,13 @@ extension Catalog where Self: ~Escapable {
   /// comparability mode each row expression's cross-kind comparisons are found
   /// (`comparisons`) and each reached body recursed — the same discipline the
   /// carrier `ORDER BY` and the plain arm use.
+  ///
+  /// A LATERAL `VALUES` constructor (`context.lateral`) is the exception, the
+  /// counterpart of a LATERAL FROM-less `SELECT`'s projection: ISO puts the
+  /// preceding FROM references in scope throughout the constructor, so the
+  /// `SubqueryCheck` carries the enclosing `outer` and admits a correlated
+  /// preceding column everywhere (`everywhere`) — `barred` a no-op there —
+  /// while a non-LATERAL constructor stays barred, its correlation faulted.
   private borrowing func typecheck(values rows: Array<Array<Expression>>,
                                    _ query: Query, _ context: Context)
       throws(SQLError) {
@@ -1084,7 +1090,9 @@ extension Catalog where Self: ~Escapable {
           throw error
         }
       }
-      let check = SubqueryCheck(widths, types, deferred: scalars).barred
+      let check = SubqueryCheck(widths, types, deferred: scalars,
+                                outer: nested,
+                                everywhere: context.lateral).barred
       for expression in expressions {
         try scope.comparisons(in: expression, context.routines, subquery: check)
       }
@@ -1109,7 +1117,9 @@ extension Catalog where Self: ~Escapable {
       for query in subqueries {
         try width(query, [], context, nested, &widths, &types)
       }
-      let check = SubqueryCheck(widths, types, deferred: scalars).barred
+      let check = SubqueryCheck(widths, types, deferred: scalars,
+                                outer: nested,
+                                everywhere: context.lateral).barred
       for expression in expressions {
         try scope.aggregates(in: expression, context.routines, subquery: check)
         _ = try scope.validate(expression, context.routines, subquery: check)

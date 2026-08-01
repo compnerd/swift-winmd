@@ -459,6 +459,60 @@ struct LateralProjectionCorrelationTests {
       _ = try fixture().columns(of: query, validate: true)
     }
   }
+
+  @Test func `a LATERAL VALUES projects a preceding column`() throws {
+    // `JOIN LATERAL (VALUES (T.Id)) AS d ON 1 = 1` — the ISO table value
+    // constructor in LATERAL position names the preceding `T.Id`, which ISO
+    // puts in scope throughout a LATERAL derived table. It is the `VALUES` twin
+    // of `LATERAL (SELECT T.Id AS id)`: the strict schema path derives the
+    // constructor's default `column1` typed from `T.Id` (`.integer`), and a run
+    // binds it per outer row through the apply's correlation — the result the
+    // FROM-less SELECT form yields.
+    let query = try parse(query:
+        "SELECT d.column1 FROM T " +
+        "JOIN LATERAL (VALUES (T.Id)) AS d ON 1 = 1")
+    let columns = try fixture().columns(of: query, validate: true)
+    #expect(columns.count == 1)
+    #expect(columns[0].name == "column1")
+    #expect(columns[0].type == .integer)
+    try fixture().expect(
+        "SELECT d.column1 FROM T " +
+        "JOIN LATERAL (VALUES (T.Id)) AS d ON 1 = 1 " +
+        "ORDER BY d.column1",
+        yields: [[1], [2], [3]])
+    // The FROM-less-SELECT form yields the identical rows — the two spellings
+    // of the correlated derived table are value-equivalent.
+    try fixture().expect(
+        "SELECT d.id FROM T " +
+        "JOIN LATERAL (SELECT T.Id AS id) AS d ON 1 = 1 " +
+        "ORDER BY d.id",
+        yields: [[1], [2], [3]])
+  }
+
+  @Test func `a LATERAL VALUES multi-row correlated constructor`() throws {
+    // A multi-row LATERAL `VALUES` re-evaluates its rows per outer row: each
+    // `T` row expands to two `VALUES` rows, `T.Id` and `T.Id * 10`, so the
+    // apply yields two rows per left row, the correlated column bound per row.
+    try fixture().expect(
+        "SELECT d.column1 FROM T " +
+        "JOIN LATERAL (VALUES (T.Id), (T.Id * 10)) AS d ON 1 = 1 " +
+        "ORDER BY d.column1",
+        yields: [[1], [2], [3], [10], [20], [30]])
+  }
+
+  @Test func `a non-LATERAL VALUES cannot reference an outer column`() throws {
+    // The correlation admission is LATERAL-only, as for a FROM-less SELECT: an
+    // ordinary (non-LATERAL) `VALUES` derived table naming a preceding `T.Id`
+    // faults — a `VALUES` constructor's rows are an uncorrelated projection
+    // surface, so a bound outer name is out of scope. This pins the exemption
+    // to the LATERAL surface, the `VALUES` twin of the FROM-less-SELECT case.
+    let query = try parse(query:
+        "SELECT d.column1 FROM T " +
+        "JOIN (VALUES (T.Id)) AS d ON 1 = 1")
+    #expect(throws: SQLError.column("Id")) {
+      _ = try fixture().columns(of: query, validate: true)
+    }
+  }
 }
 
 // MARK: - LATERAL aggregate body correlates a preceding-FROM column

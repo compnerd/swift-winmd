@@ -46,10 +46,10 @@ struct ParserDepthTests {
     // A handful of nesting levels — well under the limit — parses normally, so
     // the guard never bites a real query. A flat chain iterates rather than
     // recurses, so its length costs no depth.
-    _ = try parse(query: "SELECT " + String(repeating: "(", count: 10) + "1"
-                         + String(repeating: ")", count: 10))
+    _ = try parse(query: "VALUES (" + String(repeating: "(", count: 10) + "1"
+                         + String(repeating: ")", count: 10) + ")")
     _ = try parse(query:
-        "SELECT * FROM (SELECT * FROM (SELECT 1) AS a) AS b")
+        "SELECT * FROM (SELECT * FROM (VALUES (1)) AS a) AS b")
     _ = try parse(query: "SELECT 1 FROM t WHERE ((1 = 1 AND 2 = 2) OR (3 = 3))")
     _ = try parse(query:
         "SELECT 1 FROM t WHERE x IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)")

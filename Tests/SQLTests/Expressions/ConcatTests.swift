@@ -32,7 +32,7 @@ struct ConcatParsingTests {
 
   @Test func `concatenation is left-associative`() throws {
     // `a || b || c` reads `(a || b) || c`.
-    let select = try parse(select: "SELECT 'a' || 'b' || 'c'")
+    let select = try parse(select: "SELECT 'a' || 'b' || 'c' FROM T")
     let inner = Expression.binary(.concatenate, .literal(.string("a")),
                                   .literal(.string("b")))
     let outer = Expression.binary(.concatenate, inner,

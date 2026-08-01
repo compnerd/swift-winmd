@@ -333,12 +333,12 @@ struct ParenthesizedQueryTests {
   }
 
   @Test func `a parenthesized scalar subquery body is a query`() throws {
-    // A scalar subquery whose body starts with `(` — `((SELECT …) UNION …)` —
+    // A scalar subquery whose body starts with `(` — `((VALUES …) UNION …)` —
     // is a subquery over the union, not a parenthesised expression that fails at
     // UNION. It yields the union's single value. A parenthesised scalar
     // expression starting with `(` still parses as an expression (the
     // speculative query parse rewinds on the trailing operator).
-    try sets().expect("SELECT ((SELECT 1) UNION SELECT 1)", yields: [[1]])
+    try sets().expect("VALUES (((VALUES (1)) UNION VALUES (1)))", yields: [[1]])
     try sets().expect("VALUES (((1) + 2))", yields: [[3]])
   }
 

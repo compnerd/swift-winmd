@@ -361,34 +361,34 @@ struct RollupCubeTests {
 
   @Test func `a scalar-subquery unit keeps its own parenthesis`() throws {
     // A `ROLLUP`/`CUBE` unit, or a `GROUPING SETS` member, that IS a scalar
-    // subquery `(SELECT …)` must route through `expression` — the leading `(`
+    // subquery `(VALUES …)` must route through `expression` — the leading `(`
     // is the subquery's, not a composite-set delimiter, so it is not stolen
-    // (which produced `expected an identifier but found 'SELECT'`). A scalar
+    // (which produced `expected an identifier but found 'VALUES'`). A scalar
     // subquery is a valid ordinary grouping key, so it is valid as a unit too.
-    // `(SELECT 1)` is a constant, so grouping on it forms one group.
+    // `(VALUES (1))` is a constant, so grouping on it forms one group.
     try sales().expect("""
-        SELECT SUM(Qty) FROM Sales GROUP BY ROLLUP((SELECT 1))
+        SELECT SUM(Qty) FROM Sales GROUP BY ROLLUP((VALUES (1)))
         """, equals: """
         SELECT SUM(Qty) FROM Sales
-          GROUP BY GROUPING SETS (((SELECT 1)), ())
+          GROUP BY GROUPING SETS (((VALUES (1))), ())
         """)
     try sales().expect("""
-        SELECT SUM(Qty) FROM Sales GROUP BY CUBE((SELECT 1))
+        SELECT SUM(Qty) FROM Sales GROUP BY CUBE((VALUES (1)))
         """, equals: """
         SELECT SUM(Qty) FROM Sales
-          GROUP BY GROUPING SETS (((SELECT 1)), ())
+          GROUP BY GROUPING SETS (((VALUES (1))), ())
         """)
     try sales().expect("""
-        SELECT SUM(Qty) FROM Sales GROUP BY GROUPING SETS ((SELECT 1))
-        """, equals: "SELECT SUM(Qty) FROM Sales GROUP BY (SELECT 1)")
+        SELECT SUM(Qty) FROM Sales GROUP BY GROUPING SETS ((VALUES (1)))
+        """, equals: "SELECT SUM(Qty) FROM Sales GROUP BY (VALUES (1))")
     // A subquery beside an ordinary key in a composite unit still parses — the
-    // composite `(` is the delimiter, the inner `(SELECT …)` its own key.
+    // composite `(` is the delimiter, the inner `(VALUES …)` its own key.
     try sales().expect("""
         SELECT Region, SUM(Qty) FROM Sales
-          GROUP BY ROLLUP(((SELECT 1), Region))
+          GROUP BY ROLLUP(((VALUES (1)), Region))
         """, equals: """
         SELECT Region, SUM(Qty) FROM Sales
-          GROUP BY GROUPING SETS (((SELECT 1), Region), ())
+          GROUP BY GROUPING SETS (((VALUES (1)), Region), ())
         """)
     // guard: a plain composite unit `(a, b)` is unaffected — no subquery, the
     // `(` stays a set delimiter.
@@ -429,8 +429,9 @@ struct RollupCubeTests {
     try nums().expect("SELECT A + 1, SUM(V) FROM N GROUP BY (A) + 1",
                       equals: "SELECT A + 1, SUM(V) FROM N GROUP BY A + 1")
     // A top-level scalar subquery key still parses (the `(` is the subquery's).
-    try sales().expect("SELECT SUM(Qty) FROM Sales GROUP BY (SELECT 1)",
-                       equals: "SELECT SUM(Qty) FROM Sales GROUP BY (SELECT 1)")
+    try sales().expect("""
+        SELECT SUM(Qty) FROM Sales GROUP BY (VALUES (1))
+        """, equals: "SELECT SUM(Qty) FROM Sales GROUP BY (VALUES (1))")
   }
 
   @Test func `GROUP BY () is the grand total, not absent grouping`() throws {

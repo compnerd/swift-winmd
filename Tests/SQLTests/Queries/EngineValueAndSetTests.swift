@@ -274,17 +274,17 @@ struct EngineUnionTests {
   @Test func `an all-NULL view column unifies with a later text arm`() throws {
     // The reviewer's VIEW all-NULL case. The view `v`'s column `x` is a constant
     // NULL in both arms, so its resolved schema marks the column unconstrained:
-    // an enclosing `SELECT x FROM v UNION SELECT 'c'` must unify the view column
-    // with the text `'c'` arm and run — yielding the NULL and the text — rather
-    // than fault integer against text. The view's schema resolution builds its
-    // Schema from the body carrier through `Schema(from:)`, so the `Scope`
-    // reader reports the column unconstrained and the outer fold skips its type,
-    // exactly as it skips a fresh constant-NULL arm.
+    // an enclosing `SELECT x FROM v UNION VALUES ('c')` must unify the view
+    // column with the text `'c'` arm and run — yielding the NULL and the text —
+    // rather than fault integer against text. The view's schema resolution
+    // builds its Schema from the body carrier through `Schema(from:)`, so the
+    // `Scope` reader reports the column unconstrained and the outer fold skips
+    // its type, exactly as it skips a fresh constant-NULL arm.
     let view = try View(query: select("""
-        SELECT NULLIF(1, 1) AS x UNION SELECT NULLIF('b', 'b')
+        VALUES (NULLIF(1, 1)) UNION VALUES (NULLIF('b', 'b'))
         """), columns: ["x"])
     let catalog = EngineMemory(tags().catalog, views: ["V": view])
-    let rows = try catalog.run(parse("SELECT x FROM V UNION SELECT 'c'"))
+    let rows = try catalog.run(parse("SELECT x FROM V UNION VALUES ('c')"))
     #expect(rows == [[.null], [.text("c")]])
   }
 
@@ -787,11 +787,11 @@ struct EngineScalarSelectTests {
     return select
   }
 
-  @Test func `a FROM-less arm of a UNION combines with a FROM arm`() throws {
-    // Both arms project one integer column; the FROM-less arm contributes its
-    // single computed row, deduplicating against the People ages.
+  @Test func `a VALUES arm of a UNION combines with a FROM arm`() throws {
+    // Both arms project one integer column; the VALUES arm contributes its
+    // single row, deduplicating against the People ages.
     let rows = try roster().run(parse("""
-        SELECT 100 UNION ALL SELECT Age FROM People WHERE Id = 1
+        VALUES (100) UNION ALL SELECT Age FROM People WHERE Id = 1
         """))
     #expect(rows == [[.integer(100)], [.integer(30)]])
   }
@@ -856,7 +856,7 @@ struct EngineSetOperationCoercionTests {
 
   @Test func `a nested-arm UNION arity mismatch faults not traps`() throws {
     // The outer widths match (both 2), so the outer check passes; the fold
-    // then descends into the left child `SELECT 1, 2 UNION SELECT 3` whose
+    // then descends into the left child `VALUES (1, 2) UNION VALUES (3)` whose
     // arms differ (2 vs 1) — the fold's own guard faults `.arity` rather than
     // trapping on an out-of-bounds column index.
     try roster().expect("VALUES (1, 2) UNION VALUES (3) UNION VALUES (4, 5)",
@@ -880,7 +880,7 @@ struct EngineSetOperationCoercionTests {
     // The derived table runs through the `.setop` Plan node, whose carried
     // `types` (computed at compile) coerce each arm's rows — the outer
     // `SELECT *` reads the widened `double` column.
-    try roster().expect("SELECT * FROM (SELECT 1 UNION SELECT 2.5) AS d",
+    try roster().expect("SELECT * FROM (VALUES (1) UNION VALUES (2.5)) AS d",
                               yields: [[1.0], [2.5]])
   }
 
@@ -892,7 +892,7 @@ struct EngineSetOperationCoercionTests {
     // explicit output column list). Selecting `d.a` reads the widened, coerced
     // values under the list's name — the two features compose.
     try roster().expect(
-        "SELECT d.a FROM (SELECT 1 UNION SELECT 2.5) AS d(a) ORDER BY d.a",
+        "SELECT d.a FROM (VALUES (1) UNION VALUES (2.5)) AS d(a) ORDER BY d.a",
         yields: [[1.0], [2.5]])
   }
 
@@ -915,7 +915,7 @@ struct EngineSetOperationCoercionTests {
     // its rows).
     let rows = try statement("""
         WITH RECURSIVE t (n) AS (
-          SELECT 1 UNION ALL SELECT n + 0.5 FROM t WHERE n < 3
+          VALUES (1) UNION ALL SELECT n + 0.5 FROM t WHERE n < 3
         ) SELECT n FROM t
         """, roster())
     #expect(rows == [[.double(1.0)], [.double(1.5)], [.double(2.0)],
@@ -955,16 +955,16 @@ struct EngineCorrelatedNullUnificationTests {
   @Test func `a correlated all-NULL column unifies through a LATERAL set-op arm`()
       throws {
     // The reviewer's case. `t`'s column `x` is a constant NULL in both arms, so
-    // it is unconstrained. The lateral body `SELECT x UNION SELECT 'c'`
+    // it is unconstrained. The lateral body `VALUES (x) UNION VALUES ('c')`
     // references the correlated `x`, whose mask must survive the correlation
     // surface so the arm is unconstrained and unifies with the text `'c'` — the
     // body yields the NULL row and the `'c'` row. Before the read-side
     // unification the mask was read local-only, so the correlated `x` folded as
     // a concrete integer and the arm faulted int-vs-text.
     let rows = try statement("""
-        WITH t (x) AS (SELECT NULLIF(1, 1) UNION SELECT NULLIF('a', 'a'))
+        WITH t (x) AS (VALUES (NULLIF(1, 1)) UNION VALUES (NULLIF('a', 'a')))
           SELECT y FROM t
-          JOIN LATERAL (SELECT x UNION SELECT 'c') AS d (y) ON 1 = 1
+          JOIN LATERAL (VALUES (x) UNION VALUES ('c')) AS d (y) ON 1 = 1
         """, family())
     #expect(rows == [[.null], [.text("c")]])
   }
@@ -977,11 +977,11 @@ struct EngineCorrelatedNullUnificationTests {
     // unconstrained mask up from that grandparent scope, so the innermost arm
     // still unifies the NULL with the text `'c'`.
     let rows = try statement("""
-        WITH t (x) AS (SELECT NULLIF(1, 1) UNION SELECT NULLIF('a', 'a'))
+        WITH t (x) AS (VALUES (NULLIF(1, 1)) UNION VALUES (NULLIF('a', 'a')))
           SELECT z FROM t
           JOIN LATERAL (
-            SELECT y FROM (SELECT 1 AS one) AS u
-            JOIN LATERAL (SELECT x UNION SELECT 'c') AS d (y) ON 1 = 1
+            SELECT y FROM (VALUES (1)) AS u(one)
+            JOIN LATERAL (VALUES (x) UNION VALUES ('c')) AS d (y) ON 1 = 1
           ) AS e (z) ON 1 = 1
         """, family())
     #expect(rows == [[.null], [.text("c")]])
@@ -990,16 +990,16 @@ struct EngineCorrelatedNullUnificationTests {
   @Test func `a genuinely-typed correlated column in a LATERAL arm stays concrete`()
       throws {
     // The over-marking guard: `t`'s column `x` is a concrete integer (a plain
-    // `SELECT 1`), so the correlated reference must NOT be marked
-    // unconstrained — the lateral arm `SELECT x UNION SELECT 'c'` then folds a
-    // genuine integer against text and faults `.operand` (SQLSTATE 42804),
-    // exactly as an irreconcilable local pair does. This proves the mask is
-    // not spuriously set for every correlated column.
+    // `VALUES (1)`), so the correlated reference must NOT be marked
+    // unconstrained — the lateral arm `VALUES (x) UNION VALUES ('c')` then
+    // folds a genuine integer against text and faults `.operand` (SQLSTATE
+    // 42804), exactly as an irreconcilable local pair does. This proves the
+    // mask is not spuriously set for every correlated column.
     #expect(throws: SQLError.operand("UNION arms have irreconcilable types")) {
       _ = try statement("""
-          WITH t (x) AS (SELECT 1)
+          WITH t (x) AS (VALUES (1))
             SELECT y FROM t
-            JOIN LATERAL (SELECT x UNION SELECT 'c') AS d (y) ON 1 = 1
+            JOIN LATERAL (VALUES (x) UNION VALUES ('c')) AS d (y) ON 1 = 1
           """, family())
     }
   }
@@ -1009,8 +1009,8 @@ struct EngineCorrelatedNullUnificationTests {
     // local path, whose resolved lookup carries the same mask, so a bare
     // reference in a set-op arm unifies with the text arm and runs.
     let rows = try statement("""
-        WITH t (x) AS (SELECT NULLIF(1, 1) UNION SELECT NULLIF('a', 'a'))
-          SELECT x FROM t UNION SELECT 'c'
+        WITH t (x) AS (VALUES (NULLIF(1, 1)) UNION VALUES (NULLIF('a', 'a')))
+          SELECT x FROM t UNION VALUES ('c')
         """, family())
     #expect(rows == [[.null], [.text("c")]])
   }
@@ -1032,7 +1032,7 @@ struct EngineCorrelatedNullUnificationTests {
     let people = try roster()
     #expect(throws: SQLError.state("0A000",
         "a correlated column is only supported in a subquery's WHERE")) {
-      _ = try people.run(parse("SELECT (SELECT P.Age) FROM People AS P"))
+      _ = try people.run(parse("SELECT (VALUES (P.Age)) FROM People AS P"))
     }
   }
 }
@@ -1050,8 +1050,8 @@ struct EngineCorrelatedNullUnificationTests {
 /// fault `.operand` (SQLSTATE 42804), so the seal marks exactly the
 /// constant-NULL columns and no others. The scalar-subquery pair is the fix for
 /// the last leaking channel: the output memo once stored a bare `ValueType`, so
-/// a scalar wrapper dropped the mask — `SELECT (SELECT NULLIF('a','a')) UNION
-/// SELECT 1` was wrongly rejected while the unwrapped form ran.
+/// a scalar wrapper dropped the mask — `VALUES ((VALUES (NULLIF('a','a'))))
+/// UNION VALUES (1)` was wrongly rejected while the unwrapped form ran.
 struct EngineUnconstrainedMaskSealTests {
   @Test func `a bare all-NULL arm unifies with a typed arm; a typed one faults`()
       throws {
@@ -1067,16 +1067,16 @@ struct EngineUnconstrainedMaskSealTests {
 
   @Test func `a scalar-subquery all-NULL wrapper unifies; a typed one faults`()
       throws {
-    // the fix. The scalar subquery `(SELECT NULLIF('a','a'))` collapses to a
+    // the fix. The scalar subquery `(VALUES (NULLIF('a','a')))` collapses to a
     // constant NULL, so its resolved output column is unconstrained — the memo
     // now carries that mask into the outer fold, which unifies the wrapper with
     // the integer arm and runs (NULL row + `1` row). A genuinely-typed wrapper
-    // `(SELECT 'a')` stays concrete text and faults int-vs-text.
+    // `(VALUES ('a'))` stays concrete text and faults int-vs-text.
     try roster().expect(
-        "SELECT (SELECT NULLIF('a', 'a')) UNION SELECT 1",
+        "VALUES ((VALUES (NULLIF('a', 'a')))) UNION VALUES (1)",
         yields: [[nil], [1]])
     try roster().expect(
-        "SELECT (SELECT 'a') UNION SELECT 1",
+        "VALUES ((VALUES ('a'))) UNION VALUES (1)",
         fails: .operand("UNION arms have irreconcilable types"))
   }
 
@@ -1085,14 +1085,14 @@ struct EngineUnconstrainedMaskSealTests {
     // The scalar subquery's own body is a set operation both of whose arms fold
     // to constant NULL, so the inner unification leaves the column
     // unconstrained — the memo carries that mask out, and the outer fold unifies
-    // the wrapper with the text `'c'` arm. A typed inner UNION (`SELECT 1 UNION
-    // SELECT 2`) stays a concrete integer and faults int-vs-text.
+    // the wrapper with the text `'c'` arm. A typed inner UNION (`VALUES (1)
+    // UNION VALUES (2)`) stays a concrete integer and faults int-vs-text.
     try roster().expect("""
-        SELECT (SELECT NULLIF(1, 1) UNION SELECT NULLIF('a', 'a'))
-          UNION SELECT 'c'
+        VALUES ((VALUES (NULLIF(1, 1)) UNION VALUES (NULLIF('a', 'a'))))
+          UNION VALUES ('c')
         """, yields: [[nil], ["c"]])
     try roster().expect(
-        "SELECT (SELECT 1 UNION SELECT 2) UNION SELECT 'c'",
+        "VALUES ((VALUES (1) UNION VALUES (2))) UNION VALUES ('c')",
         fails: .operand("UNION arms have irreconcilable types"))
   }
 
@@ -1101,12 +1101,12 @@ struct EngineUnconstrainedMaskSealTests {
     // The derived-table channel: the derived body's column `x` folds to constant
     // NULL, so its resolved schema marks it unconstrained; a bare reference in
     // the outer set-op arm unifies with the integer `1`. A typed derived column
-    // (`SELECT 'a' AS x`) stays concrete text and faults int-vs-text.
+    // (`VALUES ('a')`) stays concrete text and faults int-vs-text.
     try roster().expect("""
-        SELECT x FROM (SELECT NULLIF('a', 'a') AS x) AS d UNION SELECT 1
+        SELECT x FROM (VALUES (NULLIF('a', 'a'))) AS d(x) UNION VALUES (1)
         """, yields: [[nil], [1]])
     try roster().expect(
-        "SELECT x FROM (SELECT 'a' AS x) AS d UNION SELECT 1",
+        "SELECT x FROM (VALUES ('a')) AS d(x) UNION VALUES (1)",
         fails: .operand("UNION arms have irreconcilable types"))
   }
 }
@@ -1127,7 +1127,7 @@ struct EngineUnconstrainedMaskSealTests {
 /// still raises `SQLError.function` when the arm is reached, so a
 /// genuinely-missing routine is never hidden — only the fold defers. A CTE's
 /// declared-name carrier is likewise a placeholder, so a genuine body
-/// incompatibility (`SELECT 'b' UNION SELECT 1`) propagates `.operand`
+/// incompatibility (`VALUES ('b') UNION VALUES (1)`) propagates `.operand`
 /// identically at run and at `columns(of:validate:true)`, rather than being
 /// swallowed into a phantom `.integer`. A registered-only expression carries a
 /// genuine type and still constrains, and a literal mismatch still faults, so
@@ -1158,7 +1158,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
     // only the reached `'x'` row.
     try roster().expect("""
         (SELECT NOPE(Name) FROM People FETCH FIRST 0 ROWS ONLY)
-          UNION SELECT 'x'
+          UNION VALUES ('x')
         """, yields: [["x"]])
   }
 
@@ -1171,7 +1171,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
     // `.operand` on the fabricated `.integer`. The union yields only `'x'`.
     try roster().expect("""
         (SELECT NOPE(Name) + 0 FROM People FETCH FIRST 0 ROWS ONLY)
-          UNION SELECT 'x'
+          UNION VALUES ('x')
         """, yields: [["x"]])
   }
 
@@ -1183,7 +1183,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
     // `.operand`. Deferring the fold does not hide the missing routine even
     // when it is nested.
     try roster().expect("""
-        SELECT NOPE(Name) + 0 FROM People UNION SELECT 'x'
+        SELECT NOPE(Name) + 0 FROM People UNION VALUES ('x')
         """, fails: .function("nope"))
   }
 
@@ -1216,7 +1216,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
     // reachable-branch mirror of `derive`) marks it unconstrained. The arm is
     // reached, so the run dispatches `missing()` and faults `.function`.
     try roster().expect("""
-        SELECT CASE WHEN 1 = 1 THEN missing() END UNION SELECT 'x'
+        VALUES (CASE WHEN 1 = 1 THEN missing() END) UNION VALUES ('x')
         """, fails: .function("missing"))
   }
 
@@ -1240,7 +1240,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
     // call, so the union folds and yields only the reached text `'x'`.
     try roster().expect("""
         (SELECT COALESCE(missing(), 1) FROM People FETCH FIRST 0 ROWS ONLY)
-          UNION SELECT 'x'
+          UNION VALUES ('x')
         """, yields: [["x"]])
   }
 
@@ -1270,14 +1270,14 @@ struct EnginePlaceholderUnconstrainedClosureTests {
 
   @Test func `a scalar subquery with an unregistered call defers via the memo`()
       throws {
-    // Subquery composition: `(SELECT NOPE())` resolves its own single column
+    // Subquery composition: `(VALUES (NOPE()))` resolves its own single column
     // through the subquery memo (`scalar(resolved:)`), which already carries
     // the unconstrained mask for the unregistered call inside — so `unresolved`
     // returns false for the outer `.subquery` and does NOT double-handle it.
-    // The outer fold defers to the text `'x'`; the FROM-less subquery arm is
+    // The outer fold defers to the text `'x'`; the VALUES subquery arm is
     // reached, so the run dispatches `NOPE` (folded to `nope`) and faults
     // `.function`.
-    try roster().expect("SELECT (SELECT NOPE()) UNION SELECT 'x'",
+    try roster().expect("VALUES ((VALUES (NOPE()))) UNION VALUES ('x')",
                               fails: .function("nope"))
   }
 
@@ -1289,7 +1289,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
     let routines: Routines = [
       "tag": Routine(returns: .text, parameters: [.text]) { _ in .text("t") }
     ]
-    try roster().expect("SELECT tag(Name) FROM People UNION SELECT 1",
+    try roster().expect("SELECT tag(Name) FROM People UNION VALUES (1)",
                               fails: .operand(
                                   "UNION arms have irreconcilable types"),
                               routines: routines)
@@ -1301,7 +1301,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
     let routines: Routines =
         ["tag": Routine(returns: .text, parameters: [.text]) { row in row[0] }]
     try roster().expect("""
-        SELECT tag(Name) FROM People WHERE Id = 1 UNION SELECT 'x'
+        SELECT tag(Name) FROM People WHERE Id = 1 UNION VALUES ('x')
         """, yields: [["Alice"], ["x"]], routines: routines)
   }
 
@@ -1314,13 +1314,13 @@ struct EnginePlaceholderUnconstrainedClosureTests {
   }
 
   @Test func `a genuine CTE body incompatibility faults at run`() throws {
-    // The CTE-validate case at run: the body `SELECT 'b' UNION SELECT 1` folds
-    // two genuine types (text vs integer) — irreconcilable — so the run faults
-    // `.operand` rather than swallowing it into the declared `.integer`
+    // The CTE-validate case at run: the body `VALUES ('b') UNION VALUES (1)`
+    // folds two genuine types (text vs integer) — irreconcilable — so the run
+    // faults `.operand` rather than swallowing it into the declared `.integer`
     // placeholder.
     #expect(throws: SQLError.operand("UNION arms have irreconcilable types")) {
       _ = try statement(
-          "WITH a(x) AS (SELECT 'b' UNION SELECT 1) SELECT x FROM a",
+          "WITH a(x) AS (VALUES ('b') UNION VALUES (1)) SELECT x FROM a",
           family())
     }
   }
@@ -1331,7 +1331,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
     // throw `.operand` — no divergence, no phantom integer column advertised
     // for a query that cannot run.
     let statement = try Statement(parsing:
-        "WITH a(x) AS (SELECT 'b' UNION SELECT 1) SELECT x FROM a")
+        "WITH a(x) AS (VALUES ('b') UNION VALUES (1)) SELECT x FROM a")
     #expect(throws: SQLError.operand("UNION arms have irreconcilable types")) {
       _ = try family().columns(of: statement, validate: true)
     }
@@ -1346,21 +1346,23 @@ struct EnginePlaceholderUnconstrainedClosureTests {
 /// walk that decides which subqueries actually run, so it must NOT fault
 /// `SQLError.operand` (SQLSTATE 42804) on an incompatible set-operation
 /// subquery a short-circuited `AND`/`OR` leg never reaches — a `… WHERE 1 = 0
-/// AND EXISTS (SELECT 'x' UNION SELECT 1)` runs and yields no rows. Deferral
-/// alone would hide a genuine incompatibility in a subquery that does run, so
-/// a reached scalar or `IN`/quantified occurrence is re-folded strictly on the
-/// reached path and faults exactly as before; an `EXISTS`/`LATERAL` reach does
-/// not constrain column type and never faults on it. The top-level and CTE
-/// folds are outside the pre-pass (`shape` is `false`), so they keep faulting.
+/// AND EXISTS (VALUES ('x') UNION VALUES (1))` runs and yields no rows.
+/// Deferral alone would hide a genuine incompatibility in a subquery that runs,
+/// so a reached scalar or `IN`/quantified occurrence is re-folded strictly on
+/// the reached path and faults exactly as before; an `EXISTS`/`LATERAL` reach
+/// does not constrain column type and never faults on it. The top-level and
+/// CTE folds are outside the pre-pass (`shape` is `false`), so they keep
+/// faulting.
 struct EngineDeferredSetopShapeTests {
   @Test func `a dead-branch EXISTS over an incompatible UNION runs to no rows`()
       throws {
     // The reviewer oracle: the `EXISTS` is short-circuited by `1 = 0 AND …`, so
-    // the incompatible `SELECT 'x' UNION SELECT 1` is never reached — the shape
-    // pre-pass defers its operand fold rather than faulting 42804, and the
-    // query runs to no rows.
+    // the incompatible `VALUES ('x') UNION VALUES (1)` is never reached — the
+    // shape pre-pass defers its operand fold rather than faulting 42804, and
+    // the query runs to no rows.
     try roster().empty("""
-        SELECT 1 FROM People WHERE 1 = 0 AND EXISTS (SELECT 'x' UNION SELECT 1)
+        SELECT 1 FROM People
+          WHERE 1 = 0 AND EXISTS (VALUES ('x') UNION VALUES (1))
         """)
   }
 
@@ -1370,7 +1372,7 @@ struct EngineDeferredSetopShapeTests {
     // on the incompatible pair (role `.existential`, skipped by the re-fold).
     // People has rows, so the EXISTS is present and every row projects `1`.
     try roster().expect("""
-        SELECT 1 FROM People WHERE EXISTS (SELECT 'x' UNION SELECT 1)
+        SELECT 1 FROM People WHERE EXISTS (VALUES ('x') UNION VALUES (1))
         """, yields: Array(repeating: [1], count: 5))
   }
 
@@ -1379,7 +1381,8 @@ struct EngineDeferredSetopShapeTests {
     // The `IN` is unreachable behind `1 = 0 AND …`, so its incompatible UNION
     // defers in the shape pre-pass and the query runs to no rows.
     try roster().empty("""
-        SELECT 1 FROM People WHERE 1 = 0 AND Age IN (SELECT 'a' UNION SELECT 1)
+        SELECT 1 FROM People
+          WHERE 1 = 0 AND Age IN (VALUES ('a') UNION VALUES (1))
         """)
   }
 
@@ -1388,7 +1391,7 @@ struct EngineDeferredSetopShapeTests {
     // re-fold on the reached path restores the strict operand check and the
     // incompatible UNION faults 42804 — the deferral does not hide it.
     try roster().expect("""
-        SELECT 1 FROM People WHERE Age IN (SELECT 'a' UNION SELECT 1)
+        SELECT 1 FROM People WHERE Age IN (VALUES ('a') UNION VALUES (1))
         """, fails: .operand("UNION arms have irreconcilable types"))
   }
 
@@ -1397,7 +1400,7 @@ struct EngineDeferredSetopShapeTests {
     // the reached re-fold checks its arms strictly and the incompatible UNION
     // faults 42804 in the comparison.
     try roster().expect("""
-        SELECT 1 FROM People WHERE Age = (SELECT 'a' UNION SELECT 1)
+        SELECT 1 FROM People WHERE Age = (VALUES ('a') UNION VALUES (1))
         """, fails: .operand("UNION arms have irreconcilable types"))
   }
 
@@ -1407,7 +1410,7 @@ struct EngineDeferredSetopShapeTests {
     // operand fold defers in the pre-pass and the query runs to no rows.
     try roster().empty("""
         SELECT 1 FROM People
-          WHERE 1 = 0 AND Age = (SELECT 'a' UNION SELECT 1)
+          WHERE 1 = 0 AND Age = (VALUES ('a') UNION VALUES (1))
         """)
   }
 
@@ -1425,7 +1428,7 @@ struct EngineDeferredSetopShapeTests {
     // deferral changes nothing for a query that folds cleanly. A `WITH` is a
     // statement, so it runs through the statement overload.
     let rows = try statement(
-        "WITH a(x) AS (SELECT 'b') SELECT x FROM a UNION SELECT 'c'",
+        "WITH a(x) AS (VALUES ('b')) SELECT x FROM a UNION VALUES ('c')",
         roster())
     #expect(rows == [[.text("b")], [.text("c")]])
   }
@@ -1455,8 +1458,8 @@ struct EngineReachedCorrelatedSetopTests {
     // longer coerces to the placeholder type and silently passes.
     try roster().expect("""
         SELECT Id FROM People WHERE 1 IN ( \
-        SELECT 'x' FROM (SELECT 1 AS k) AS d WHERE d.k = People.Id \
-        UNION SELECT 1)
+        SELECT 'x' FROM (VALUES (1)) AS d(k) WHERE d.k = People.Id \
+        UNION VALUES (1))
         """, fails: .operand("UNION arms have irreconcilable types"))
   }
 
@@ -1467,8 +1470,8 @@ struct EngineReachedCorrelatedSetopTests {
     // to no rows.
     try roster().empty("""
         SELECT Id FROM People WHERE 1 = 0 AND 1 IN ( \
-        SELECT 'x' FROM (SELECT 1 AS k) AS d WHERE d.k = People.Id \
-        UNION SELECT 1)
+        SELECT 'x' FROM (VALUES (1)) AS d(k) WHERE d.k = People.Id \
+        UNION VALUES (1))
         """)
   }
 
@@ -1480,8 +1483,8 @@ struct EngineReachedCorrelatedSetopTests {
     // the EXISTS is present for every outer row and each projects its `Id`.
     try roster().expect("""
         SELECT Id FROM People WHERE EXISTS ( \
-        SELECT 'x' FROM (SELECT 1 AS k) AS d WHERE d.k = People.Id \
-        UNION SELECT 1)
+        SELECT 'x' FROM (VALUES (1)) AS d(k) WHERE d.k = People.Id \
+        UNION VALUES (1))
         """, yields: [[1], [2], [3], [4], [5]])
   }
 
@@ -1495,21 +1498,22 @@ struct EngineReachedCorrelatedSetopTests {
       "tag": Routine(returns: .text, parameters: [.text]) { _ in .text("t") }
     ]
     try roster().expect("""
-        (SELECT tag() FROM People FETCH FIRST 0 ROWS ONLY) UNION SELECT 1
+        (SELECT tag() FROM People FETCH FIRST 0 ROWS ONLY) UNION VALUES (1)
         """, yields: [[1]], routines: routines)
   }
 
   @Test func `an invalid reachable call faults on its bad arity, not 42804`()
       throws {
-    // The counterpart on a validating path: `SELECT tag() UNION SELECT 1` calls
-    // `tag(text)` with no argument. The invalid call does not constrain the
-    // fold (so no spurious 42804), but the strict `validate: true` schema path
-    // catches the bad arity and faults `.argument` — NOT the operand fold. (The
-    // lenient run path does not validate arity, so it does not fault there.)
+    // The counterpart on a validating path: `VALUES (tag()) UNION VALUES (1)`
+    // calls `tag(text)` with no argument. The invalid call does not constrain
+    // the fold (so no spurious 42804), but the strict `validate: true` schema
+    // path catches the bad arity and faults `.argument` — NOT the operand fold.
+    // (The lenient run path does not validate arity, so it does not fault
+    // there.)
     let routines: Routines = [
       "tag": Routine(returns: .text, parameters: [.text]) { _ in .text("t") }
     ]
-    let statement = try Statement(parsing: "SELECT tag() UNION SELECT 1")
+    let statement = try Statement(parsing: "VALUES (tag()) UNION VALUES (1)")
     #expect(throws: SQLError.argument("tag takes 1 arguments")) {
       _ = try roster().columns(of: statement, routines: routines,
                                      validate: true)
@@ -1526,7 +1530,7 @@ struct EngineReachedCorrelatedSetopTests {
       "tag": Routine(returns: .text, parameters: [.text]) { _ in .text("t") }
     ]
     try roster().expect("""
-        SELECT tag('a') FROM People UNION SELECT 1
+        SELECT tag('a') FROM People UNION VALUES (1)
         """, fails: .operand("UNION arms have irreconcilable types"),
         routines: routines)
   }

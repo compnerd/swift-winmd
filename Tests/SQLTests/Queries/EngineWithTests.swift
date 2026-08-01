@@ -88,10 +88,10 @@ struct EngineWithTests {
     // it. `1` and `1.0` then compare equal AND emit as the same coerced
     // `double`, so a bare UNION keeps one `1.0` (not the first arm's raw
     // `integer`).
-    #expect(try statement("SELECT 1 UNION SELECT 1.0", family())
+    #expect(try statement("VALUES (1) UNION VALUES (1.0)", family())
             == [[.double(1.0)]])
     // UNION ALL keeps every row, each coerced to the unified `double`.
-    #expect(try statement("SELECT 1 UNION ALL SELECT 1.0", family())
+    #expect(try statement("VALUES (1) UNION ALL VALUES (1.0)", family())
             == [[.double(1.0)], [.double(1.0)]])
   }
 

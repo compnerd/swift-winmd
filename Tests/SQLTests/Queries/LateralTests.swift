@@ -120,7 +120,7 @@ struct LateralExecutionTests {
     // row whose `Id` is 1 (an INNER apply drops Ids 2 and 3, which `c` never
     // equals).
     let statement = try Statement(parsing:
-        "WITH c(x) AS (SELECT 1 AS x) SELECT d.x FROM T " +
+        "WITH c(x) AS (VALUES (1)) SELECT d.x FROM T " +
         "JOIN LATERAL (SELECT x FROM c WHERE x = T.Id) AS d ON 1 = 1")
     let columns = try fixture().columns(of: statement, validate: true)
     #expect(columns.count == 1)
@@ -229,8 +229,8 @@ struct LateralExecutionTests {
     // ever resolved it, the exact path the unified revealed base now closes.
     let sql =
         "SELECT d.x FROM T " +
-        "JOIN (SELECT 9 AS y) AS e ON 1 = 1 " +
-        "JOIN LATERAL (SELECT 0 AS x UNION ALL SELECT x FROM e) AS d ON 1 = 1"
+        "JOIN (VALUES (9)) AS e(y) ON 1 = 1 " +
+        "JOIN LATERAL (VALUES (0) UNION ALL SELECT x FROM e) AS d(x) ON 1 = 1"
     // The run faults the unknown relation the body's later arm names.
     try fixture().expect(sql, fails: .relation("e"))
     // The strict schema path faults it identically — schema and run agree.
@@ -253,8 +253,8 @@ struct LateralExecutionTests {
     // yields the CTE's row and `columns(of:validate: true)` agrees — schema,
     // compile, and execution resolve the body's `FROM` identically.
     let statement = try Statement(parsing:
-        "WITH e(x) AS (SELECT 1 AS x) SELECT T.Id, d.x FROM T " +
-        "JOIN (SELECT 2 AS x) AS e ON 1 = 1 " +
+        "WITH e(x) AS (VALUES (1)) SELECT T.Id, d.x FROM T " +
+        "JOIN (VALUES (2)) AS e(x) ON 1 = 1 " +
         "JOIN LATERAL (SELECT x FROM e WHERE x = T.Id) AS d ON 1 = 1 " +
         "ORDER BY T.Id")
     let columns = try fixture().columns(of: statement, validate: true)
@@ -337,60 +337,58 @@ struct OuterApplyTests {
 /// `Term.parameter` the apply binds per outer row; the ordinary subquery
 /// projection bar is untouched.
 struct LateralProjectionCorrelationTests {
-  @Test func `a LATERAL body projects a preceding column`() throws {
-    // `JOIN LATERAL (SELECT T.Id AS id) AS d ON 1 = 1` — the body's projection
-    // names the preceding `T.Id`, which ISO puts in scope throughout the body.
-    // The strict schema path derives `id` typed from `T.Id` (`.integer`), and a
-    // run yields `d.id == T.Id` for each left row — the projected preceding
-    // column bound per outer row through the apply's correlation.
+  @Test func `a LATERAL body names a preceding column`() throws {
+    // `JOIN LATERAL (VALUES (T.Id)) AS d(id) ON 1 = 1` — the constructor's row
+    // names the preceding `T.Id`, which ISO puts in scope throughout a LATERAL
+    // derived table, and the derived-column list names it `id`. The strict
+    // schema path derives `id` typed from `T.Id` (`.integer`), and a run yields
+    // `d.id == T.Id` for each left row — the correlated element bound per outer
+    // row through the apply's correlation.
     let query = try parse(query:
         "SELECT d.id FROM T " +
-        "JOIN LATERAL (SELECT T.Id AS id) AS d ON 1 = 1")
+        "JOIN LATERAL (VALUES (T.Id)) AS d(id) ON 1 = 1")
     let columns = try fixture().columns(of: query, validate: true)
     #expect(columns.count == 1)
     #expect(columns[0].name == "id")
     #expect(columns[0].type == .integer)
     try fixture().expect(
         "SELECT d.id FROM T " +
-        "JOIN LATERAL (SELECT T.Id AS id) AS d ON 1 = 1 " +
+        "JOIN LATERAL (VALUES (T.Id)) AS d(id) ON 1 = 1 " +
         "ORDER BY d.id",
         yields: [[1], [2], [3]])
   }
 
-  @Test func `a LATERAL body projects a BARE preceding column`() throws {
-    // The bare-COLUMN twin of the aliased case above: a LATERAL body projecting
-    // a preceding `T.Id` without an alias collapses to `Projection.columns` —
-    // the simpler path. The schema-derive `.columns` case must consult the same
-    // lateral correlation surface the aliased expression path does, else a bare
-    // preceding column faults `SQLError.column("Id")` at schema/run even though
-    // the aliased form works. The strict schema path derives `Id` typed from
-    // the preceding `T.Id` (`.integer`), and a run yields `d.Id == T.Id` for
-    // each left row.
+  @Test func `a LATERAL body names a bare preceding column`() throws {
+    // A LATERAL `VALUES (T.Id)` naming the preceding `T.Id`, its one column
+    // named `Id` by the derived-column list. ISO puts the preceding `T.Id` in
+    // scope throughout a LATERAL derived table, so the strict schema path
+    // derives `Id` typed from `T.Id` (`.integer`), and a run yields
+    // `d.Id == T.Id` for each left row — the correlated element bound per outer
+    // row through the apply.
     let query = try parse(query:
         "SELECT d.Id FROM T " +
-        "JOIN LATERAL (SELECT T.Id) AS d ON 1 = 1")
+        "JOIN LATERAL (VALUES (T.Id)) AS d(Id) ON 1 = 1")
     let columns = try fixture().columns(of: query, validate: true)
     #expect(columns.count == 1)
     #expect(columns[0].name == "Id")
     #expect(columns[0].type == .integer)
     try fixture().expect(
         "SELECT T.Id, d.Id FROM T " +
-        "JOIN LATERAL (SELECT T.Id) AS d ON 1 = 1 " +
+        "JOIN LATERAL (VALUES (T.Id)) AS d(Id) ON 1 = 1 " +
         "ORDER BY T.Id",
         yields: [[1, 1], [2, 2], [3, 3]])
   }
 
-  @Test func `an ordinary subquery still cannot project a BARE outer column`()
+  @Test func `an ordinary subquery still cannot name a bare outer column`()
       throws {
-    // The bare-column exemption is gated on the lateral surface, not opened for
-    // the `.columns` path generally: an ordinary (non-lateral) derived table
-    // whose body projects a bare preceding `T.Id` still faults `.unsupported`
-    // at the strict schema check — the barred projection surface of an ordinary
-    // subquery diagnoses the correlated bare column exactly as it does the
-    // aliased one. This pins the exemption to the LATERAL `everywhere` surface.
+    // The correlation exemption is gated on the lateral surface, not opened for
+    // an ordinary derived table: a non-lateral `(VALUES (T.Id))` naming a bare
+    // preceding `T.Id` still faults `.column("Id")` — off a LATERAL a `VALUES`
+    // constructor's rows are an uncorrelated surface, so the outer name is out
+    // of scope. This pins the exemption to the LATERAL surface.
     let query = try parse(query:
         "SELECT d.Id FROM T " +
-        "JOIN (SELECT T.Id) AS d ON 1 = 1")
+        "JOIN (VALUES (T.Id)) AS d(Id) ON 1 = 1")
     #expect(throws: SQLError.column("Id")) {
       _ = try fixture().columns(of: query, validate: true)
     }
@@ -427,13 +425,13 @@ struct LateralProjectionCorrelationTests {
 
   @Test func `an ordinary subquery projection still cannot correlate`() throws {
     // The bar lift is LATERAL-ONLY: an ordinary correlated scalar subquery in
-    // the projection — `SELECT (SELECT T.Id) FROM T` — still faults
+    // the projection — `SELECT (VALUES (T.Id)) FROM T` — still faults
     // `.unsupported`, since a subquery's projection is a barred clause position
     // (no evaluator for an outer column there). This pins the LATERAL-only
     // scoping — the everywhere-correlation admission is set for a LATERAL body
     // alone, never an ordinary subquery.
     try fixture().expect(
-        "SELECT (SELECT T.Id) FROM T",
+        "SELECT (VALUES (T.Id)) FROM T",
         fails: .state("0A000",
             "a correlated column is only supported in a subquery's WHERE"))
   }
@@ -441,19 +439,19 @@ struct LateralProjectionCorrelationTests {
   @Test func `an ordinary nested subquery inside a LATERAL body is not lateralised`()
       throws {
     // The LATERAL everywhere-correlation admission covers ONLY the lateral
-    // body's own projection, never a nested ordinary subquery within it. So an
-    // ordinary correlated scalar subquery in the lateral body's projection —
-    // `SELECT (SELECT T.Id) AS x` — is barred `.unsupported` at the strict
-    // schema check exactly as the non-lateral twin `SELECT (SELECT T.Id) FROM T`
-    // is, since the nested subquery builds its own Resolution with the lateral
-    // flag cleared (`everywhere: false`). Threading the lateral flag into the
-    // nested subquery instead admitted its `T.Id` everywhere and lowered it to a
-    // correlated parameter the nested subquery never wires — a wrong, mismatched
-    // fault (`no such column 'Id'`) rather than the correct barred `.unsupported`
-    // — the bug the cleared flag fixes.
+    // body's own row constructor, never a nested ordinary subquery within it.
+    // So an ordinary correlated scalar subquery inside a lateral `VALUES` row —
+    // `VALUES ((VALUES (T.Id)))` — is barred at the strict schema check exactly
+    // as the non-lateral twin `SELECT (VALUES (T.Id)) FROM T` is, since the
+    // nested subquery builds its own Resolution with the lateral flag cleared
+    // (`everywhere: false`). Threading the lateral flag into the nested
+    // subquery instead admitted its `T.Id` everywhere and lowered it to a
+    // correlated parameter the nested subquery never wires — a wrong,
+    // mismatched fault (`no such column 'Id'`) rather than the correct barred
+    // one — the bug the cleared flag fixes.
     let query = try parse(query:
         "SELECT d.x FROM T " +
-        "JOIN LATERAL (SELECT (SELECT T.Id) AS x) AS d ON 1 = 1")
+        "JOIN LATERAL (VALUES ((VALUES (T.Id)))) AS d(x) ON 1 = 1")
     #expect(throws: SQLError.state("0A000",
         "a correlated column is only supported in a subquery's WHERE")) {
       _ = try fixture().columns(of: query, validate: true)
@@ -463,11 +461,11 @@ struct LateralProjectionCorrelationTests {
   @Test func `a LATERAL VALUES projects a preceding column`() throws {
     // `JOIN LATERAL (VALUES (T.Id)) AS d ON 1 = 1` — the ISO table value
     // constructor in LATERAL position names the preceding `T.Id`, which ISO
-    // puts in scope throughout a LATERAL derived table. It is the `VALUES` twin
-    // of `LATERAL (SELECT T.Id AS id)`: the strict schema path derives the
-    // constructor's default `column1` typed from `T.Id` (`.integer`), and a run
-    // binds it per outer row through the apply's correlation — the result the
-    // FROM-less SELECT form yields.
+    // puts in scope throughout a LATERAL derived table. The strict schema path
+    // derives the constructor's default `column1` typed from `T.Id`
+    // (`.integer`), and a run binds it per outer row through the apply's
+    // correlation. The derived-column-list spelling below (`AS d(id)`) is
+    // value-equivalent.
     let query = try parse(query:
         "SELECT d.column1 FROM T " +
         "JOIN LATERAL (VALUES (T.Id)) AS d ON 1 = 1")
@@ -480,11 +478,11 @@ struct LateralProjectionCorrelationTests {
         "JOIN LATERAL (VALUES (T.Id)) AS d ON 1 = 1 " +
         "ORDER BY d.column1",
         yields: [[1], [2], [3]])
-    // The FROM-less-SELECT form yields the identical rows — the two spellings
-    // of the correlated derived table are value-equivalent.
+    // The derived-column-list spelling `AS d(id)` yields the identical rows —
+    // the two spellings of the correlated constructor are value-equivalent.
     try fixture().expect(
         "SELECT d.id FROM T " +
-        "JOIN LATERAL (SELECT T.Id AS id) AS d ON 1 = 1 " +
+        "JOIN LATERAL (VALUES (T.Id)) AS d(id) ON 1 = 1 " +
         "ORDER BY d.id",
         yields: [[1], [2], [3]])
   }
@@ -501,11 +499,10 @@ struct LateralProjectionCorrelationTests {
   }
 
   @Test func `a non-LATERAL VALUES cannot reference an outer column`() throws {
-    // The correlation admission is LATERAL-only, as for a FROM-less SELECT: an
-    // ordinary (non-LATERAL) `VALUES` derived table naming a preceding `T.Id`
-    // faults — a `VALUES` constructor's rows are an uncorrelated projection
-    // surface, so a bound outer name is out of scope. This pins the exemption
-    // to the LATERAL surface, the `VALUES` twin of the FROM-less-SELECT case.
+    // The correlation admission is LATERAL-only: an ordinary (non-LATERAL)
+    // `VALUES` derived table naming a preceding `T.Id` faults — a `VALUES`
+    // constructor's rows are an uncorrelated surface, so a bound outer name is
+    // out of scope. This pins the exemption to the LATERAL surface.
     let query = try parse(query:
         "SELECT d.column1 FROM T " +
         "JOIN (VALUES (T.Id)) AS d ON 1 = 1")
@@ -628,9 +625,9 @@ struct LateralAggregateCorrelationTests {
 struct LateralSetOperationStarTests {
   @Test func `a set-op SELECT * LATERAL arm resolves its arity with the prefix`()
       throws {
-    // A LATERAL arm's star arity must derive the body's projected preceding
-    // column against the preceding FROM, exactly as the per-arm compile does.
-    // Each arm is `SELECT * FROM T JOIN LATERAL (SELECT T.Id AS id) AS d` — two
+    // A LATERAL arm's star arity must derive the body's correlated element
+    // against the preceding FROM, exactly as the per-arm compile does. Each
+    // arm is `SELECT * FROM T JOIN LATERAL (VALUES (T.Id)) AS d(id)` — two
     // columns wide (`T.Id` + `d.id`). The arity check must thread the running
     // prefix scope so `T.Id` resolves; without it the lateral body derived
     // against no scope and faulted the arity check even though the per-arm
@@ -638,9 +635,9 @@ struct LateralSetOperationStarTests {
     // union's arity matches and it resolves.
     let query = try parse(query:
         "SELECT * FROM T " +
-        "JOIN LATERAL (SELECT T.Id AS id) AS d ON 1 = 1 " +
+        "JOIN LATERAL (VALUES (T.Id)) AS d(id) ON 1 = 1 " +
         "UNION ALL SELECT * FROM T " +
-        "JOIN LATERAL (SELECT T.Id AS id) AS d ON 1 = 1")
+        "JOIN LATERAL (VALUES (T.Id)) AS d(id) ON 1 = 1")
     let columns = try fixture().columns(of: query, validate: true)
     #expect(columns.map(\.name) == ["Id", "id"])
   }

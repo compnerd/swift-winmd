@@ -1198,7 +1198,7 @@ struct EngineSetopViewMemoTests {
     // which over the swapped CTE projects `Id` ∈ {1, 2} (or mis-filters).
     let rows = try shadowed().run(Statement(parsing:
         """
-        WITH S (Val, Id) AS (SELECT 7, 1 UNION ALL SELECT 8, 2)
+        WITH S (Val, Id) AS (VALUES (7, 1) UNION ALL VALUES (8, 2))
           SELECT (SELECT Val FROM S WHERE S.Id = T.Id) AS c
             FROM T JOIN V ON V.c = 0 GROUP BY T.Id ORDER BY c
         """))

@@ -533,7 +533,7 @@ struct DerivedTableScopingTests {
     // a statement, so run it through the statement entry rather than the
     // query-only `expect`.
     let statement = try Statement(parsing:
-        "WITH t(x) AS (SELECT 99) " +
+        "WITH t(x) AS (VALUES (99)) " +
         "SELECT a FROM (SELECT V AS a FROM S) AS t ORDER BY a")
     let rows = try fixture().run(statement, .standard)
     #expect(rows == [[.integer(10)], [.integer(20)], [.integer(30)]])
@@ -773,7 +773,7 @@ struct DerivedTableWithValidateThreadingTests {
     // re-augmented the trailing query's derived table with the DEFAULT
     // `validate: true` before this fix, so it still faulted `.operand`.
     let statement = try Statement(parsing:
-        "WITH c(x) AS (SELECT 1) " +
+        "WITH c(x) AS (VALUES (1)) " +
         "SELECT * FROM (SELECT Label + 1 AS x FROM K WHERE k = 0) AS d")
     let rows = try fixture().run(statement, .standard)
     #expect(rows.isEmpty)
@@ -786,7 +786,7 @@ struct DerivedTableWithValidateThreadingTests {
     // on the same trailing-query body still faults its ill-typed projection.
     #expect(throws: SQLError.operand("operands must be numeric")) {
       let statement = try Statement(parsing:
-          "WITH c(x) AS (SELECT 1) " +
+          "WITH c(x) AS (VALUES (1)) " +
           "SELECT * FROM (SELECT Label + 1 AS x FROM K WHERE k = 0) AS d")
       _ = try fixture().columns(of: statement, validate: true)
     }
@@ -914,7 +914,7 @@ struct DerivedTableSetOperationScopingTests {
     // shared arm map bound the right `T` query-wide, hiding the CTE from the
     // left arm.
     let statement = try Statement(parsing:
-        "WITH T(Id) AS (SELECT 100 UNION ALL SELECT 200) " +
+        "WITH T(Id) AS (VALUES (100) UNION ALL VALUES (200)) " +
         "SELECT Id FROM T " +
         "UNION ALL SELECT a FROM (SELECT V AS a FROM S) AS T")
     let rows = try fixture().run(statement, .standard)
@@ -1107,13 +1107,13 @@ private func views() throws -> FixtureCatalog {
 struct DerivedTableCTEShadowTests {
   @Test func `a derived body resolves an enclosing CTE of its own alias name`()
       throws {
-    // `WITH t(x) AS (SELECT 1) SELECT * FROM (SELECT x FROM t) AS t` — the
+    // `WITH t(x) AS (VALUES (1)) SELECT * FROM (SELECT x FROM t) AS t` — the
     // inner `FROM t` is inside the derived table also aliased `t`; the alias
     // being defined is out of scope in its own body, so `t` resolves the CTE
     // (projecting its `x` = 1), not the derived table itself. A name-blanket
     // drop removed the CTE, faulting `.relation("t")` (or resolving a base).
     let statement = try Statement(parsing:
-        "WITH t(x) AS (SELECT 1) SELECT * FROM (SELECT x FROM t) AS t")
+        "WITH t(x) AS (VALUES (1)) SELECT * FROM (SELECT x FROM t) AS t")
     let rows = try fixture().run(statement, .standard)
     #expect(rows == [[.integer(1)]])
   }
@@ -1122,7 +1122,7 @@ struct DerivedTableCTEShadowTests {
     // Schema ↔ run parity: `columns(of:)` derives the body against the CTE `t`
     // too, so the result column is the CTE's `x`, resolved rather than faulted.
     let statement = try Statement(parsing:
-        "WITH t(x) AS (SELECT 1) SELECT * FROM (SELECT x FROM t) AS t")
+        "WITH t(x) AS (VALUES (1)) SELECT * FROM (SELECT x FROM t) AS t")
     let columns = try fixture().columns(of: statement, validate: true)
     #expect(columns.map(\.name) == ["x"])
   }
@@ -1148,7 +1148,7 @@ struct DerivedTableCTEShadowTests {
     // 7 and the cross join to the three-row sibling `a` gives 7 three times;
     // had `b` read the sibling derived `a` it would be three rows, product 9.
     let statement = try Statement(parsing:
-        "WITH a(v) AS (SELECT 7) " +
+        "WITH a(v) AS (VALUES (7)) " +
         "SELECT b.v FROM (SELECT V AS v FROM S) AS a " +
         "JOIN (SELECT v FROM a) AS b ON b.v = b.v ORDER BY b.v")
     let rows = try fixture().run(statement, .standard)
@@ -1171,7 +1171,7 @@ struct DerivedTableCTEShadowScalarTests {
     // the shadowing derived `d`; the outer FROM's derived `d` yields three rows
     // (T's Ids), so each output row is the CTE's 1.
     let statement = try Statement(parsing:
-        "WITH d(x) AS (SELECT 1) " +
+        "WITH d(x) AS (VALUES (1)) " +
         "SELECT (SELECT x FROM d) FROM (SELECT Id AS y FROM T) AS d")
     let rows = try fixture().run(statement, .standard)
     #expect(rows == [[.integer(1)], [.integer(1)], [.integer(1)]])
@@ -1181,7 +1181,7 @@ struct DerivedTableCTEShadowScalarTests {
     // Schema ↔ run parity: `columns(of:)` derives the scalar against the CTE
     // `d` too, so the projection resolves rather than faulting `.relation`.
     let statement = try Statement(parsing:
-        "WITH d(x) AS (SELECT 1) " +
+        "WITH d(x) AS (VALUES (1)) " +
         "SELECT (SELECT x FROM d) FROM (SELECT Id AS y FROM T) AS d")
     let columns = try fixture().columns(of: statement, validate: true)
     #expect(columns.count == 1)
@@ -1193,7 +1193,7 @@ struct DerivedTableCTEShadowScalarTests {
     // every outer row, so all three derived `d` rows survive — the behaviour
     // the lazy scalar now matches.
     let statement = try Statement(parsing:
-        "WITH d(x) AS (SELECT 1) " +
+        "WITH d(x) AS (VALUES (1)) " +
         "SELECT y FROM (SELECT Id AS y FROM T) AS d " +
         "WHERE EXISTS (SELECT 1 FROM d) ORDER BY y")
     let rows = try fixture().run(statement, .standard)
@@ -1205,7 +1205,7 @@ struct DerivedTableCTEShadowScalarTests {
     // over the CTE `d`'s single value 1, so only the derived row with Id = 1
     // survives — the CTE, not the shadowing derived `d`, feeds the membership.
     let statement = try Statement(parsing:
-        "WITH d(x) AS (SELECT 1) " +
+        "WITH d(x) AS (VALUES (1)) " +
         "SELECT y FROM (SELECT Id AS y FROM T) AS d " +
         "WHERE y IN (SELECT x FROM d) ORDER BY y")
     let rows = try fixture().run(statement, .standard)
@@ -1220,7 +1220,7 @@ struct DerivedTableCTEShadowScalarTests {
     // to avoid the source `T` collision) drives the rows; the scalar collapses
     // to MAX = 3, so each of the three rows carries 3.
     let statement = try Statement(parsing:
-        "WITH c(x) AS (SELECT 1) " +
+        "WITH c(x) AS (VALUES (1)) " +
         "SELECT (SELECT MAX(y) FROM (SELECT Id AS y FROM T) AS e) " +
         "FROM (SELECT Id FROM T) AS d")
     let rows = try fixture().run(statement, .standard)
@@ -1681,21 +1681,21 @@ struct DerivedTableSetOperationValidateTests {
 /// genuine self-reference nested inside a derived body IS.
 struct DerivedTableRecursionReferenceTests {
   @Test func `a shadowing derived alias is not a recursive reference`() throws {
-    // `WITH RECURSIVE a(n) AS (SELECT 1 UNION ALL SELECT n FROM (SELECT 2 AS n)
-    // AS a) SELECT n FROM a` — the second arm's `FROM (…) AS a` merely names a
-    // derived table `a`; it does not reference the CTE `a`, so the CTE is NOT
+    // `WITH RECURSIVE a(n) AS (VALUES (1) UNION ALL SELECT n FROM (VALUES (2))
+    // AS a(n)) SELECT n FROM a` — the second arm's `FROM (…) AS a` merely names
+    // a derived table `a`; it does not reference the CTE `a`, so the CTE is NOT
     // recursive and the arm runs once (never to the recursion cap). The
     // `UNION ALL` keeps both arms: the anchor 1, then the derived table's 2.
     let statement = try Statement(parsing:
         "WITH RECURSIVE a(n) AS " +
-        "(SELECT 1 UNION ALL SELECT n FROM (SELECT 2 AS n) AS a) " +
+        "(VALUES (1) UNION ALL SELECT n FROM (VALUES (2)) AS a(n)) " +
         "SELECT n FROM a ORDER BY n")
     let rows = try fixture().run(statement, .standard)
     #expect(rows == [[.integer(1)], [.integer(2)]])
   }
 
   @Test func `a self-reference nested in a derived body is detected`() throws {
-    // `WITH RECURSIVE a(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM (SELECT n
+    // `WITH RECURSIVE a(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM (SELECT n
     // FROM a) AS d WHERE n < 3) …` — the second arm's derived body `FROM a`
     // genuinely references the CTE `a`, so the CTE IS recursive and routes
     // through the fixpoint. Detecting the nested reference is what makes the
@@ -1704,7 +1704,7 @@ struct DerivedTableRecursionReferenceTests {
     // once against an unbound `a` and fault.
     let statement = try Statement(parsing:
         "WITH RECURSIVE a(n) AS " +
-        "(SELECT 1 UNION ALL " +
+        "(VALUES (1) UNION ALL " +
         "SELECT n + 1 FROM (SELECT n FROM a) AS d WHERE n < 3) " +
         "SELECT n FROM a ORDER BY n")
     let rows = try fixture().run(statement, .standard)
@@ -1849,7 +1849,7 @@ struct DerivedTableSubqueryScopeTests {
     // derived `d`. The alias is SELECT-scoped, invisible to the subquery's
     // FROM, so it faults `.relation("d")` at a run.
     try fixture().expect(
-        "SELECT x FROM (SELECT 1 AS x) AS d WHERE EXISTS (SELECT 1 FROM d)",
+        "SELECT x FROM (VALUES (1)) AS d(x) WHERE EXISTS (SELECT 1 FROM d)",
         fails: .relation("d"))
   }
 
@@ -1858,7 +1858,7 @@ struct DerivedTableSubqueryScopeTests {
     // Schema ↔ run parity: `columns(of:)` faults `.relation("d")` on the same
     // subquery FROM naming the enclosing derived alias.
     let query = try parse(query:
-        "SELECT x FROM (SELECT 1 AS x) AS d WHERE EXISTS (SELECT 1 FROM d)")
+        "SELECT x FROM (VALUES (1)) AS d(x) WHERE EXISTS (SELECT 1 FROM d)")
     #expect(throws: SQLError.relation("d")) {
       _ = try fixture().columns(of: query, validate: true)
     }
@@ -1879,7 +1879,7 @@ struct DerivedTableSubqueryScopeTests {
     // The `IN` variant: `Id IN (SELECT Id FROM d)` names the enclosing derived
     // `d`, invisible to the subquery's FROM — the same `.relation("d")` fault.
     try fixture().expect(
-        "SELECT x FROM (SELECT 1 AS x, 1 AS Id) AS d " +
+        "SELECT x FROM (VALUES (1, 1)) AS d(x, Id) " +
         "WHERE Id IN (SELECT Id FROM d)",
         fails: .relation("d"))
   }
@@ -1889,7 +1889,7 @@ struct DerivedTableSubqueryScopeTests {
     // The scalar variant: `(SELECT MAX(x) FROM d)` names the enclosing derived
     // `d` — invisible to its FROM, so it faults `.relation("d")`.
     try fixture().expect(
-        "SELECT x FROM (SELECT 1 AS x) AS d " +
+        "SELECT x FROM (VALUES (1)) AS d(x) " +
         "WHERE (SELECT MAX(x) FROM d) = 1",
         fails: .relation("d"))
   }
@@ -1900,8 +1900,8 @@ struct DerivedTableSubqueryScopeTests {
     // `EXISTS (SELECT 1 FROM d)` resolves the CTE `d` (one row), so the
     // subquery is TRUE and the outer derived row is kept.
     let statement = try Statement(parsing:
-        "WITH d(x) AS (SELECT 1) " +
-        "SELECT y FROM (SELECT 2 AS y) AS d WHERE EXISTS (SELECT 1 FROM d)")
+        "WITH d(x) AS (VALUES (1)) " +
+        "SELECT y FROM (VALUES (2)) AS d(y) WHERE EXISTS (SELECT 1 FROM d)")
     let rows = try fixture().run(statement, .standard)
     #expect(rows == [[.integer(2)]])
   }
@@ -1912,19 +1912,19 @@ struct DerivedTableSubqueryScopeTests {
     // subquery FROM too (never faulting on the stripped enclosing derived `d`),
     // advertising the outer projection `y`.
     let statement = try Statement(parsing:
-        "WITH d(x) AS (SELECT 1) " +
-        "SELECT y FROM (SELECT 2 AS y) AS d WHERE EXISTS (SELECT 1 FROM d)")
+        "WITH d(x) AS (VALUES (1)) " +
+        "SELECT y FROM (VALUES (2)) AS d(y) WHERE EXISTS (SELECT 1 FROM d)")
     let columns = try fixture().columns(of: statement, validate: true)
     #expect(columns.map(\.name) == ["y"])
   }
 
   @Test func `a subquery's own derived table still resolves`() throws {
     // The subquery augments its own derived table `e` — the strip drops only
-    // the enclosing derived aliases, so `EXISTS (SELECT 1 FROM (SELECT 2 AS z)
+    // the enclosing derived aliases, so `EXISTS (SELECT 1 FROM (VALUES (2))
     // AS e)` resolves `e` and the subquery is TRUE, keeping the outer row.
     try fixture().expect(
-        "SELECT x FROM (SELECT 1 AS x) AS d " +
-        "WHERE EXISTS (SELECT 1 FROM (SELECT 2 AS z) AS e)",
+        "SELECT x FROM (VALUES (1)) AS d(x) " +
+        "WHERE EXISTS (SELECT 1 FROM (VALUES (2)) AS e)",
         yields: [[1]])
   }
 
@@ -1954,17 +1954,17 @@ struct DerivedTableSubqueryScopeTests {
 struct DerivedTableBodyCTEShadowSubqueryTests {
   @Test func `a body FROM alias shadows a CTE its nested subquery still reads`()
       throws {
-    // `WITH t(x) AS (SELECT 1) SELECT * FROM (SELECT y FROM (SELECT 2 AS y)
-    // AS t WHERE EXISTS (SELECT x FROM t)) AS d` — the outer derived body's own
-    // `FROM (SELECT 2 AS y) AS t` shadows the CTE `t`, and the body's nested
-    // `EXISTS (SELECT x FROM t)` names `t` — which resolves the CTE
+    // `WITH t(x) AS (VALUES (1)) SELECT * FROM (SELECT y FROM (VALUES (2))
+    // AS t(y) WHERE EXISTS (SELECT x FROM t)) AS d` — the outer derived body's
+    // own `FROM (VALUES (2)) AS t(y)` shadows the CTE `t`, and the body's
+    // nested `EXISTS (SELECT x FROM t)` names `t` — which resolves the CTE
     // (statement-scoped, visible in a subquery), reading its `x` = 1. The CTE
     // has one row, so the EXISTS is TRUE and the body yields `y` = 2. Before
     // the fix the schema walk's overlay overwrote the CTE with the body's
     // derived `t`, so subscoping dropped it and `SELECT x FROM t` faulted.
     let statement = try Statement(parsing:
-        "WITH t(x) AS (SELECT 1) " +
-        "SELECT * FROM (SELECT y FROM (SELECT 2 AS y) AS t " +
+        "WITH t(x) AS (VALUES (1)) " +
+        "SELECT * FROM (SELECT y FROM (VALUES (2)) AS t(y) " +
                        "WHERE EXISTS (SELECT x FROM t)) AS d")
     let rows = try fixture().run(statement, .standard)
     #expect(rows == [[.integer(2)]])
@@ -1976,8 +1976,8 @@ struct DerivedTableBodyCTEShadowSubqueryTests {
     // faulting on the body's derived `t` (no column `x`) — advertising the
     // outer projection `y`.
     let statement = try Statement(parsing:
-        "WITH t(x) AS (SELECT 1) " +
-        "SELECT * FROM (SELECT y FROM (SELECT 2 AS y) AS t " +
+        "WITH t(x) AS (VALUES (1)) " +
+        "SELECT * FROM (SELECT y FROM (VALUES (2)) AS t(y) " +
                        "WHERE EXISTS (SELECT x FROM t)) AS d")
     let columns = try fixture().columns(of: statement, validate: true)
     #expect(columns.map(\.name) == ["y"])
@@ -2136,7 +2136,7 @@ private func scopedScalarView() throws -> FixtureCatalog {
     // The scalar `(SELECT COUNT(*) FROM T)` is a lazy scalar occurrence keyed
     // under `.view("count")`; it must resolve against the base `T` (count 3),
     // never a caller CTE `T`.
-    try View("Count", "SELECT (SELECT COUNT(*) FROM T) AS n", as: ["n"])
+    try View("Count", "VALUES ((SELECT COUNT(*) FROM T))", as: ["n"])
   }
 }
 
@@ -2155,8 +2155,8 @@ struct DerivedTableViewScalarScopeTests {
     // 5. The lazy scalar now resolves under its own `.view("count")` scope (the
     // view's base `T`), not the merged caller scope.
     let statement = try Statement(parsing:
-        "WITH T(V) AS (SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 " +
-        "UNION ALL SELECT 4 UNION ALL SELECT 5) SELECT * FROM Count")
+        "WITH T(V) AS (VALUES (1) UNION ALL VALUES (2) UNION ALL VALUES (3) " +
+        "UNION ALL VALUES (4) UNION ALL VALUES (5)) SELECT * FROM Count")
     let rows = try scopedScalarView().run(statement, .standard)
     #expect(rows == [[.integer(3)]])
   }
@@ -2167,8 +2167,8 @@ struct DerivedTableViewScalarScopeTests {
     // same `.view` scope, advertising the view's projection `n` rather than
     // faulting or shifting to the caller CTE.
     let statement = try Statement(parsing:
-        "WITH T(V) AS (SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 " +
-        "UNION ALL SELECT 4 UNION ALL SELECT 5) SELECT * FROM Count")
+        "WITH T(V) AS (VALUES (1) UNION ALL VALUES (2) UNION ALL VALUES (3) " +
+        "UNION ALL VALUES (4) UNION ALL VALUES (5)) SELECT * FROM Count")
     let columns = try scopedScalarView().columns(of: statement, validate: true)
     #expect(columns.map(\.name) == ["n"])
   }
@@ -2180,8 +2180,8 @@ struct DerivedTableViewScalarScopeTests {
     // against. The per-`Subscope` map keeps the caller scalar on the caller
     // scope and the view scalar on the view scope at once.
     let statement = try Statement(parsing:
-        "WITH T(V) AS (SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 " +
-        "UNION ALL SELECT 4 UNION ALL SELECT 5) " +
+        "WITH T(V) AS (VALUES (1) UNION ALL VALUES (2) UNION ALL VALUES (3) " +
+        "UNION ALL VALUES (4) UNION ALL VALUES (5)) " +
         "SELECT (SELECT COUNT(*) FROM T) AS n FROM One")
     let rows = try scopedScalarView().run(statement, .standard)
     #expect(rows == [[.integer(5)]])
@@ -2262,14 +2262,14 @@ struct DerivedTableDirectCompileTests {
 struct DerivedTableGroupedOrderScalarShadowTests {
   @Test func `a grouped ORDER BY aggregate subquery reads the shadowed CTE`()
       throws {
-    // `WITH d(x) AS (SELECT 1) SELECT y FROM (SELECT 2 AS y) AS d GROUP BY y
+    // `WITH d(x) AS (VALUES (1)) SELECT y FROM (VALUES (2)) AS d(y) GROUP BY y
     // ORDER BY SUM((SELECT x FROM d))` — the scalar `(SELECT x FROM d)` in
     // the ORDER BY aggregate names the CTE `d` (x = 1), NOT the shadowing
     // `d` (whose column is `y`). One group (y = 2), so `SUM` folds the single
     // scalar value 1; the row is the group's `y` = 2. Had the scalar read the
     // derived `d`, `x` would not resolve and it would fault.
     let statement = try Statement(parsing:
-        "WITH d(x) AS (SELECT 1) SELECT y FROM (SELECT 2 AS y) AS d " +
+        "WITH d(x) AS (VALUES (1)) SELECT y FROM (VALUES (2)) AS d(y) " +
         "GROUP BY y ORDER BY SUM((SELECT x FROM d))")
     let rows = try fixture().run(statement, .standard)
     #expect(rows == [[.integer(2)]])
@@ -2282,7 +2282,7 @@ struct DerivedTableGroupedOrderScalarShadowTests {
     // CTE `d` rather than faulting on the shadowing derived `d`, and advertises
     // the outer projection `y`.
     let statement = try Statement(parsing:
-        "WITH d(x) AS (SELECT 1) SELECT y FROM (SELECT 2 AS y) AS d " +
+        "WITH d(x) AS (VALUES (1)) SELECT y FROM (VALUES (2)) AS d(y) " +
         "GROUP BY y ORDER BY SUM((SELECT x FROM d))")
     let columns = try fixture().columns(of: statement, validate: true)
     #expect(columns.map(\.name) == ["y"])
@@ -2362,7 +2362,7 @@ struct DerivedTableLenientOutputTests {
 /// constraint on it, exactly as a bare constant-NULL set-operation arm does.
 /// `materialise` carries the fold's per-column unconstrained marker through the
 /// derived-table binding (and through an `AS d(a)` rename), so a transparent
-/// `(SELECT NULLIF('a','a') AS x) AS d` wrapper unifies with a later typed arm
+/// `(VALUES (NULLIF('a','a'))) AS d(x)` wrapper unifies with a later typed arm
 /// ORDER-independently rather than folding as its literal-fix type and
 /// faulting.
 struct DerivedTableNullUnificationTests {
@@ -2372,7 +2372,7 @@ struct DerivedTableNullUnificationTests {
     // unconstrained and unify it with the `1` arm — the reviewer's case, which
     // faulted before the marker survived the derived-table binding.
     try fixture().expect(
-        "SELECT x FROM (SELECT NULLIF('a', 'a') AS x) AS d UNION SELECT 1",
+        "SELECT x FROM (VALUES (NULLIF('a', 'a'))) AS d(x) UNION VALUES (1)",
         yields: [[nil], [1]])
   }
 
@@ -2382,7 +2382,7 @@ struct DerivedTableNullUnificationTests {
     // the derived column would fold as its literal-fix type and fault; the
     // marker unifies it either way.
     try fixture().expect(
-        "SELECT 1 AS n UNION SELECT x FROM (SELECT NULLIF('a', 'a') AS x) AS d",
+        "VALUES (1) UNION SELECT x FROM (VALUES (NULLIF('a', 'a'))) AS d(x)",
         yields: [[1], [nil]])
   }
 
@@ -2392,7 +2392,7 @@ struct DerivedTableNullUnificationTests {
     // column-list rename, so `d(a)` over a constant-NULL body still unifies
     // with the `1` arm rather than taking a concrete literal-fix type.
     try fixture().expect(
-        "SELECT a FROM (SELECT NULLIF('a', 'a') AS x) AS d(a) UNION SELECT 1",
+        "SELECT a FROM (VALUES (NULLIF('a', 'a'))) AS d(a) UNION VALUES (1)",
         yields: [[nil], [1]])
   }
 
@@ -2401,7 +2401,7 @@ struct DerivedTableNullUnificationTests {
     // over-marked as unconstrained, so a UNION with an integer arm still faults
     // on the irreconcilable text/integer pair.
     try fixture().expect(
-        "SELECT x FROM (SELECT 'a' AS x) AS d UNION SELECT 1",
+        "SELECT x FROM (VALUES ('a')) AS d(x) UNION VALUES (1)",
         fails: .operand("UNION arms have irreconcilable types"))
   }
 }

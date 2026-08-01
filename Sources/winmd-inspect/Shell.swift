@@ -773,7 +773,7 @@ internal struct Shell: ~Escapable {
                                           validate: false) {
       return columns.map(\.name)
     }
-    return Shell.names(of: Shell.trailing(statement).first.projection, rows)
+    return Shell.names(of: Shell.trailing(statement), rows)
   }
 
   /// The row-producing query of `statement` — a `select`'s query, or a `with`'s
@@ -796,6 +796,19 @@ internal struct Shell: ~Escapable {
   /// aliased or bare column projects its name, the qualifier dropped; a
   /// computed expression with no alias falls back to a positional `column N`);
   /// a `SELECT *` carries no names, so it frames by the produced width.
+  private static func names(of query: SQLEngine.Query,
+                            _ rows: Array<Array<Value>>) -> Array<String> {
+    // The names come off the query's leftmost arm's projection — the ISO rule a
+    // set operation's result columns follow; a body with no syntactic
+    // projection frames by the produced width.
+    switch query.arm.body {
+    case let .select(select):
+      return names(of: select.projection, rows)
+    case .setop:
+      return generic(rows)
+    }
+  }
+
   private static func names(of projection: SQLEngine.Projection,
                             _ rows: Array<Array<Value>>) -> Array<String> {
     switch projection {

@@ -229,15 +229,65 @@ public struct Query: Hashable, Sendable {
     self.carriers = carriers
   }
 
-  /// The first `SELECT` of the query — the leftmost arm, reached by descending
-  /// the left arm of each set operation. Its projection names the result
-  /// columns (the ISO rule — their types unify across every arm), so a `CREATE
-  /// VIEW` infers a set operation's column names from it. Carriers are
-  /// transparent — the first is the body's.
-  public var first: Select {
+  /// The query's leftmost arm as a carrier-free `Query` — reached by descending
+  /// the left arm of each set operation, stopping at the first non-`setop` body
+  /// (a `select`). Its projection names the result columns (the ISO rule —
+  /// their types unify across every arm), so `CREATE VIEW`/CTE column inference
+  /// reads its output. Carriers are transparent — the leftmost is the body's —
+  /// so this works for any body, not only one bottoming out in a `Select`.
+  public var arm: Query {
     switch body {
-    case let .select(select): select
-    case let .setop(_, left, _, _): left.first
+    case .select: core
+    case let .setop(_, left, _, _): left.arm
+    }
+  }
+
+  /// The query's output column names, inferred from its leftmost arm's
+  /// projection — the ISO rule a `UNION`'s result columns follow (the names
+  /// come from the first arm), shared by `CREATE VIEW`/CTE column inference. A
+  /// `*` or an unaliased non-column expression names no column and faults
+  /// `SQLError.named`, exactly as `Projection.names()` does.
+  public var names: Array<String> {
+    get throws(SQLError) {
+      switch arm.body {
+      case let .select(select): try select.projection.names()
+      case .setop: []
+      }
+    }
+  }
+
+  /// The statically-known width of the query's output — the leftmost arm's
+  /// projected item count — or `nil` when it is not statically known (a `SELECT
+  /// *`, whose width resolves only against the relations in scope). It is the
+  /// arity a `CREATE VIEW`/CTE explicit column list is checked against.
+  public var arity: Int? {
+    switch arm.body {
+    case let .select(select):
+      switch select.projection {
+      case .all: nil
+      case let .columns(columns): columns.count
+      case let .expressions(items): items.count
+      }
+    case .setop: nil
+    }
+  }
+
+  /// The projection surface of the query's leftmost arm — the projected items
+  /// an `ORDER BY` ordinal / output-name / projected-expression key resolves
+  /// against on the carrier path. A `columns` list lowers each to a bare-column
+  /// `Projected`, an `expressions` list is itself, and a `*` (no enumerated
+  /// projection) yields none. Body-agnostic so a carrier over any leftmost arm
+  /// reads its output surface uniformly.
+  internal var items: Array<Projected> {
+    switch arm.body {
+    case let .select(select):
+      switch select.projection {
+      case let .expressions(list): list
+      case let .columns(columns):
+        columns.map { Projected(expression: .column($0)) }
+      case .all: []
+      }
+    case .setop: []
     }
   }
 

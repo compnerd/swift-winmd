@@ -85,7 +85,7 @@ extension View {
     guard case let .select(query) = try! Statement(parsing: text) else {
       fatalError("a view body must be a SELECT")
     }
-    self.init(query: query, columns: try! query.first.projection.names())
+    self.init(query: query, columns: try! query.names)
   }
 
   /// The engine-provided (built-in `INFORMATION_SCHEMA`) view named `name`

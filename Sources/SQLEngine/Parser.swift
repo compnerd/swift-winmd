@@ -254,14 +254,13 @@ internal struct Parser: ~Escapable {
   /// (`SQLError.duplicate`).
   private func columns(_ explicit: Array<String>?, _ query: Query)
       throws(SQLError) -> Array<String> {
-    if let explicit, let arity = arity(query.first.projection),
-        explicit.count != arity {
+    if let explicit, let arity = query.arity, explicit.count != arity {
       throw .columns(expected: arity, got: explicit.count)
     }
     let columns: Array<String> = if let explicit {
       explicit
     } else {
-      try query.first.projection.names()
+      try query.names
     }
     var seen = Set<String>()
     for column in columns where !seen.insert(column.lowercased()).inserted {
@@ -568,21 +567,6 @@ internal struct Parser: ~Escapable {
     case "BLOB", "BINARY": return .blob
     default:
       throw .unexpected(text, expected: "a type", at: token.location)
-    }
-  }
-
-  /// The number of values `projection` projects, or `nil` when it is not
-  /// statically known — a `SELECT *`, whose width depends on the relations it
-  /// is resolved against. A `.columns` or `.expressions` projection has a fixed
-  /// item count.
-  private func arity(_ projection: Projection) -> Int? {
-    switch projection {
-    case .all:
-      nil
-    case let .columns(columns):
-      columns.count
-    case let .expressions(items):
-      items.count
     }
   }
 

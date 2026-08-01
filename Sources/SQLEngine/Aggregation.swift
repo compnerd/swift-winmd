@@ -364,6 +364,35 @@ extension Query {
       left.existential.union(right.existential)
     }
   }
+
+  /// The `Role`s `query` occupies within this arm under a carrier's `order` —
+  /// the union of the roles it occupies in this leftmost arm's own clauses and
+  /// the roles it occupies in the carrier's `ORDER BY` keys. The carrier path
+  /// classifies its `ORDER BY` subqueries this way — over the leftmost arm's
+  /// output surface plus the carrier order — rather than through a synthetic
+  /// `Select`, so it resolves for any body (a `Select` arm or a `VALUES` one).
+  internal func roles(of query: Query, order: Order?) -> Array<Role> {
+    var armScalar = false, armValued = false, armExistential = false
+    if case let .select(select) = arm.body {
+      armScalar = select.scalar.contains(query)
+      armValued = select.valued.contains(query)
+      armExistential = select.existential.contains(query)
+    }
+    var scalar = Set<Query>(), valued = Set<Query>(), existential = Set<Query>()
+    for key in order?.keys ?? [] {
+      guard case let .expression(expression) = key.sort else { continue }
+      expression.collect(scalar: &scalar)
+      expression.collect(valued: &valued)
+      expression.collect(existential: &existential)
+    }
+    var roles = Array<Role>()
+    if armScalar || scalar.contains(query) { roles.append(.scalar) }
+    if armValued || valued.contains(query) { roles.append(.valued) }
+    if armExistential || existential.contains(query) {
+      roles.append(.existential)
+    }
+    return roles
+  }
 }
 
 extension Select {

@@ -232,7 +232,11 @@ struct EngineViewCorrelationTests {
     // `Env.k`. This is the seam the run/compile path (`resolve`/`overlay`)
     // clears elsewhere but `schema(of:)` did NOT until routed through `body`.
     let catalog = try leaked()
-    let target = try select("SELECT m FROM Proj").first
+    guard case let .select(target) = try select("SELECT m FROM Proj").body
+    else {
+      Issue.record("expected a SELECT")
+      return
+    }
     let context = try enclosing(catalog)
     var raised: SQLError?
     do {
@@ -258,7 +262,11 @@ struct EngineViewCorrelationTests {
       "Src": FixtureRelation([EngineField(name: "n", type: .integer)],
                              [[.integer(7)]] as Array<Array<Value>>),
     ], views: ["Fine": fine])
-    let target = try select("SELECT m FROM Fine").first
+    guard case let .select(target) = try select("SELECT m FROM Fine").body
+    else {
+      Issue.record("expected a SELECT")
+      return
+    }
     let context = try enclosing(catalog)
     // Eager rather than `#expect(throws:)` — a borrowed `~Escapable` catalog
     // cannot be captured by the assertion's escaping closure.

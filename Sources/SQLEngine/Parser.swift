@@ -29,8 +29,8 @@
 /// term           := select | TABLE identifier | values
 ///                   // TABLE t = SELECT * FROM t; none of these primaries
 ///                   // consumes a trailing tail — `query` does, above
-/// values         := VALUES tuple (',' tuple)*  // ISO table value constructor;
-///                   // desugars to a UNION ALL of FROM-less constant SELECTs
+/// values         := VALUES tuple (',' tuple)*  // ISO table value constructor,
+///                   // the first-class `Query.Body.values` node
 /// tuple          := '(' expression (',' expression)* ')'
 /// select         := SELECT [DISTINCT | ALL] projection
 ///                   [FROM relation (join)*
@@ -368,9 +368,9 @@ internal struct Parser: ~Escapable {
   /// to the enclosing query expression (`query()` takes it), as after any
   /// primary — the primary itself carries no order.
   ///
-  /// `VALUES (…), …` desugars to a `UNION ALL` of FROM-less constant selects
-  /// (see `values()`); a trailing `ORDER BY`/limit binds to the enclosing
-  /// query expression, as after any primary.
+  /// `VALUES (…), …` parses to the first-class `Query.Body.values` node (see
+  /// `values()`); a trailing `ORDER BY`/limit binds to the enclosing query
+  /// expression, as after any primary.
   private mutating func term()
       throws(SQLError) -> (query: Query, parenthesized: Bool) {
     if try match(.lparen) {
@@ -400,26 +400,18 @@ internal struct Parser: ~Escapable {
   }
 
   /// Parses the ISO `<table value constructor>` `VALUES (v, …), (v, …), …` (the
-  /// `VALUES` keyword is the next token), desugaring it to a `UNION ALL` of
-  /// FROM-less constant `SELECT`s — no new AST node, so `compile`, execute, the
-  /// per-column type unification, and set-operation composition all apply
-  /// unchanged.
+  /// `VALUES` keyword is the next token) directly into the first-class
+  /// `Query.Body.values` node — one row per parenthesised tuple, in source
+  /// order.
   ///
   /// Each parenthesised row is a tuple of scalar expressions (usually literals,
-  /// but any row-independent expression is admitted, since a FROM-less `SELECT`
-  /// evaluates it over the single empty row). Every row must have equal arity —
-  /// a mismatch is `SQLError.arity` — and there is at least one row, each with
-  /// at least one element (the parser rejects an empty `VALUES ()`). The rows
-  /// lower to `SELECT v, … UNION ALL SELECT v, …` in source order, so `UNION
-  /// ALL` preserves both the order and any duplicate rows.
-  ///
-  /// The constructor's DEFAULT column names are the ISO `column1, column2, …`,
-  /// emitted as the FIRST arm's projection aliases (the ISO rule that a set
-  /// operation's result columns come from its first arm) so a `SELECT column1
-  /// FROM (VALUES …) AS t` names them. A per-column `ValueType` unifies across
-  /// the rows through the same set-operation schema derivation `UNION` uses (a
-  /// column mixing integer and double widens to double), so this parse only
-  /// shapes the desugar and leaves the typing to resolution.
+  /// but any row-independent expression is admitted, since it evaluates over
+  /// the single empty row). There is at least one row, each with at least one
+  /// element (the parser rejects an empty `VALUES ()`). The equal-arity rule
+  /// (the ISO degree constraint), the ISO default `column1, column2, …` output
+  /// names, and the per-column type unification across the rows are all
+  /// resolved by the node's compile/schema paths (`columns(unifying:)`), so
+  /// this parse only shapes the rows.
   private mutating func values() throws(SQLError) -> Query {
     try expect(.values)
 
@@ -429,35 +421,7 @@ internal struct Parser: ~Escapable {
       try rows.append(tuple())
     }
 
-    // Every row constructs the same number of columns; a later row of a
-    // different arity is an ISO arity error.
-    let arity = rows[0].count
-    for row in rows.dropFirst() where row.count != arity {
-      throw .arity(arity, row.count)
-    }
-
-    // The FIRST arm carries the default `column1, column2, …` output names as
-    // explicit aliases; the ISO first-arm rule propagates them to the result.
-    // Later arms need no aliases — a set operation names its result from the
-    // first arm alone — so they project the bare expressions.
-    var query = Query.select(row(rows[0], named: true))
-    for arm in rows.dropFirst() {
-      query = .setop(.union, query, .select(row(arm, named: false)),
-                     all: true)
-    }
-    return query
-  }
-
-  /// Builds one `VALUES` arm — a FROM-less `SELECT` projecting `row`'s element
-  /// expressions. The FIRST arm (`named`) aliases each column `column1,
-  /// column2, …` (the constructor's default names); a later arm leaves them
-  /// bare, as a set operation names its result from the first arm alone.
-  private func row(_ row: Array<Expression>, named: Bool) -> Select {
-    let items = row.enumerated().map { (index, expression) in
-      Projected(expression: expression,
-                alias: named ? "column\(index + 1)" : nil)
-    }
-    return Select(projection: .expressions(items), from: nil)
+    return Query(body: .values(rows))
   }
 
   /// Parses one parenthesised `VALUES` row — `'(' expression (',' expression)*

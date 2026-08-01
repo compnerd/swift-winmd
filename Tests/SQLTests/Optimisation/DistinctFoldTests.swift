@@ -65,7 +65,7 @@ private func distincts(_ plan: Plan) -> Bool {
     distincts(left)
   case let .setop(_, left, right, _, _, _):
     distincts(left) || distincts(right)
-  case .single, .empty, .scan:
+  case .single, .values, .empty, .scan:
     false
   }
 }

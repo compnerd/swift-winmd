@@ -310,6 +310,7 @@ extension Query {
     switch body {
     case let .select(select): select.bound
     case let .setop(_, left, right, _): left.bound || right.bound
+    case let .values(rows): rows.contains { $0.contains(where: \.bound) }
     }
   }
 
@@ -323,6 +324,10 @@ extension Query {
     switch body {
     case let .select(select): select.subqueries
     case let .setop(_, left, right, _): left.subqueries + right.subqueries
+    case let .values(rows):
+      rows.reduce(into: Array<Query>()) { queries, row in
+        for expression in row { expression.collect(subqueries: &queries) }
+      }
     }
   }
 
@@ -336,6 +341,10 @@ extension Query {
     switch body {
     case let .select(select): select.valued
     case let .setop(_, left, right, _): left.valued.union(right.valued)
+    case let .values(rows):
+      rows.reduce(into: Set<Query>()) { queries, row in
+        for expression in row { expression.collect(valued: &queries) }
+      }
     }
   }
 
@@ -348,6 +357,10 @@ extension Query {
     switch body {
     case let .select(select): select.scalar
     case let .setop(_, left, right, _): left.scalar.union(right.scalar)
+    case let .values(rows):
+      rows.reduce(into: Set<Query>()) { queries, row in
+        for expression in row { expression.collect(scalar: &queries) }
+      }
     }
   }
 
@@ -362,23 +375,39 @@ extension Query {
     case let .select(select): select.existential
     case let .setop(_, left, right, _):
       left.existential.union(right.existential)
+    case let .values(rows):
+      rows.reduce(into: Set<Query>()) { queries, row in
+        for expression in row { expression.collect(existential: &queries) }
+      }
     }
   }
 
   /// The `Role`s `query` occupies within this arm under a carrier's `order` —
-  /// the union of the roles it occupies in this leftmost arm's own clauses and
-  /// the roles it occupies in the carrier's `ORDER BY` keys. The carrier path
-  /// classifies its `ORDER BY` subqueries this way — over the leftmost arm's
-  /// output surface plus the carrier order — rather than through a synthetic
-  /// `Select`, so it resolves for any body (a `Select` arm or a `VALUES` one).
+  /// the union of the roles it occupies in this leftmost arm's own clauses (a
+  /// `Select`'s, or a `VALUES` body's row expressions) and the roles it
+  /// occupies in the carrier's `ORDER BY` keys. The carrier path classifies its
+  /// `ORDER BY` subqueries this way — over the leftmost arm's output surface
+  /// plus the carrier order — rather than through a synthetic `Select`, so it
+  /// resolves for any body; `compile(values:)` reuses it (with no order) to
+  /// classify a row expression's own nested subqueries.
   internal func roles(of query: Query, order: Order?) -> Array<Role> {
-    var armScalar = false, armValued = false, armExistential = false
-    if case let .select(select) = arm.body {
-      armScalar = select.scalar.contains(query)
-      armValued = select.valued.contains(query)
-      armExistential = select.existential.contains(query)
-    }
     var scalar = Set<Query>(), valued = Set<Query>(), existential = Set<Query>()
+    switch arm.body {
+    case let .select(select):
+      scalar = select.scalar
+      valued = select.valued
+      existential = select.existential
+    case let .values(rows):
+      for row in rows {
+        for expression in row {
+          expression.collect(scalar: &scalar)
+          expression.collect(valued: &valued)
+          expression.collect(existential: &existential)
+        }
+      }
+    case .setop:
+      break
+    }
     for key in order?.keys ?? [] {
       guard case let .expression(expression) = key.sort else { continue }
       expression.collect(scalar: &scalar)
@@ -386,11 +415,9 @@ extension Query {
       expression.collect(existential: &existential)
     }
     var roles = Array<Role>()
-    if armScalar || scalar.contains(query) { roles.append(.scalar) }
-    if armValued || valued.contains(query) { roles.append(.valued) }
-    if armExistential || existential.contains(query) {
-      roles.append(.existential)
-    }
+    if scalar.contains(query) { roles.append(.scalar) }
+    if valued.contains(query) { roles.append(.valued) }
+    if existential.contains(query) { roles.append(.existential) }
     return roles
   }
 }

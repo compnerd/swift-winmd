@@ -34,6 +34,10 @@ extension Catalog where Self: ~Escapable {
     switch plan {
     case .single:
       plan
+    case .values:
+      // A values leaf is already physical — no seek, join, or source below it —
+      // so it optimises to itself.
+      plan
     case .empty:
       // The known-empty relation is already physical — no seek, join, or source
       // to rewrite below it — so it optimises to itself (and re-optimising a

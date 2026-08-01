@@ -309,7 +309,7 @@ func derived(_ plan: Plan) -> Plan? {
     derived(source)
   case let .aggregate(_, _, source):
     derived(source)
-  case .single, .empty, .scan, .join:
+  case .single, .values, .empty, .scan, .join:
     nil
   }
 }
@@ -347,7 +347,7 @@ func sought(_ plan: Plan) -> Bool {
     sought(source)
   case let .aggregate(_, _, source):
     sought(source)
-  case .single, .empty:
+  case .single, .values, .empty:
     false
   }
 }
@@ -382,7 +382,7 @@ func filters(_ plan: Plan) -> Bool {
     filters(source)
   case let .aggregate(_, _, source):
     filters(source)
-  case .single, .empty, .scan, .join:
+  case .single, .values, .empty, .scan, .join:
     false
   }
 }
@@ -422,7 +422,7 @@ func pushed(_ plan: Plan) -> Bool {
     pushed(source)
   case let .aggregate(_, _, source):
     pushed(source)
-  case .single, .empty, .scan:
+  case .single, .values, .empty, .scan:
     false
   }
 }
@@ -476,7 +476,7 @@ func joined(_ plan: Plan) -> Bool {
     joined(left) || joined(right)
   case let .aggregate(_, _, source):
     joined(source)
-  case .single, .empty, .scan:
+  case .single, .values, .empty, .scan:
     false
   }
 }
@@ -514,7 +514,7 @@ func residue(_ plan: Plan) -> Bool {
     residue(left) || residue(right)
   case let .aggregate(_, _, source):
     residue(source)
-  case .single, .empty, .scan:
+  case .single, .values, .empty, .scan:
     false
   }
 }
@@ -553,7 +553,7 @@ func separated(_ plan: Plan) -> Bool {
     separated(left) || separated(right)
   case let .aggregate(_, _, source):
     separated(source)
-  case .single, .empty, .scan:
+  case .single, .values, .empty, .scan:
     false
   }
 }
@@ -593,7 +593,7 @@ func stacked(_ plan: Plan) -> Bool {
     stacked(left) || stacked(right)
   case let .aggregate(_, _, source):
     stacked(source)
-  case .single, .empty, .scan:
+  case .single, .values, .empty, .scan:
     false
   }
 }
@@ -709,7 +709,7 @@ private func injected(_ plan: Plan) -> Bool {
     injected(outer)
   case let .aggregate(_, _, source):
     injected(source)
-  case .single, .empty, .scan:
+  case .single, .values, .empty, .scan:
     false
   }
 }

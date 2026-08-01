@@ -78,7 +78,7 @@ private func selects(_ plan: Plan) -> Bool {
     selects(left)
   case let .setop(_, left, right, _, _, _):
     selects(left) || selects(right)
-  case .single, .empty, .scan:
+  case .single, .empty, .values, .scan:
     false
   }
 }
@@ -117,7 +117,7 @@ private func empties(_ plan: Plan) -> Bool {
     empties(left)
   case let .setop(_, left, right, _, _, _):
     empties(left) || empties(right)
-  case .single, .scan:
+  case .single, .values, .scan:
     false
   }
 }

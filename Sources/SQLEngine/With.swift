@@ -76,6 +76,11 @@ extension Query {
       select.references(name)
     case let .setop(_, left, right, _):
       left.references(name) || right.references(name)
+    case .values:
+      // A `VALUES` body names no relation in a `FROM`/`JOIN` — its rows are
+      // FROM-less constant tuples — so it references none (a subquery nested in
+      // a row is not descended, exactly as a select's own subqueries are not).
+      false
     }
   }
 }

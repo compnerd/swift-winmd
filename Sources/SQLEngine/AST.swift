@@ -174,6 +174,16 @@ public struct Query: Hashable, Sendable {
     /// `all`) over a left and a right query term, the right appended so a
     /// same-precedence chain reads left to right.
     case setop(SetOperation, Query, Query, all: Bool)
+    /// The ISO `<table value constructor>` `VALUES (v, …), (v, …), …` — one row
+    /// per parenthesised tuple of scalar expressions, evaluated over the single
+    /// empty row (as a FROM-less `SELECT` evaluates a constant). Every row has
+    /// equal arity (the ISO degree rule), at least one row, each with at least
+    /// one element. Its result columns are named the ISO default `column1,
+    /// column2, …` and typed by unifying each column across the rows (a column
+    /// mixing integer and double widening to double), so `VALUES` is a
+    /// first-class query body — a leaf the compile/schema/execute paths handle
+    /// directly — rather than desugaring to a `UNION ALL` of FROM-less selects.
+    case values(Array<Array<Expression>>)
   }
 
   /// A query-level `ORDER BY` / `SELECT DISTINCT` / `OFFSET`·`FETCH` carried
@@ -237,7 +247,7 @@ public struct Query: Hashable, Sendable {
   /// so this works for any body, not only one bottoming out in a `Select`.
   public var arm: Query {
     switch body {
-    case .select: core
+    case .select, .values: core
     case let .setop(_, left, _, _): left.arm
     }
   }
@@ -251,6 +261,9 @@ public struct Query: Hashable, Sendable {
     get throws(SQLError) {
       switch arm.body {
       case let .select(select): try select.projection.names()
+      case let .values(rows): (0 ..< (rows.first?.count ?? 0)).map {
+        "column\($0 + 1)"
+      }
       case .setop: []
       }
     }
@@ -268,6 +281,7 @@ public struct Query: Hashable, Sendable {
       case let .columns(columns): columns.count
       case let .expressions(items): items.count
       }
+    case let .values(rows): rows.first?.count
     case .setop: nil
     }
   }
@@ -287,6 +301,12 @@ public struct Query: Hashable, Sendable {
         columns.map { Projected(expression: .column($0)) }
       case .all: []
       }
+    case let .values(rows):
+      // The first row named `column1, column2, …` — the ISO default output
+      // names, the surface an `ORDER BY` output-name/ordinal key binds against.
+      (rows.first ?? []).enumerated().map {
+        Projected(expression: $0.element, alias: "column\($0.offset + 1)")
+      }
     case .setop: []
     }
   }
@@ -301,7 +321,7 @@ public struct Query: Hashable, Sendable {
   /// SUM(m)) UNION SELECT n` is a valid one-column union).
   internal var generated: Int {
     let body: Int = switch self.body {
-    case .select: 0
+    case .select, .values: 0
     case let .setop(_, left, _, _): left.generated
     }
     return carriers.reduce(body) { $0 + $1.generated }

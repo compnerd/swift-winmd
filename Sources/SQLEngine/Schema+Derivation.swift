@@ -345,6 +345,61 @@ extension Catalog where Self: ~Escapable {
       cols = try l.indices.map { index throws(SQLError) in
         try merge(l[index], r[index], shape: context.shape)
       }
+    case let .values(rows):
+      // The ISO table value constructor's result columns: each row's
+      // expressions typed against the empty FROM-less scope (a subquery a row
+      // nests reads its single-column type from the same cursor-free
+      // `Resolution` the compile path builds), then folded column-wise across
+      // the rows through the SAME set-operation `merge` a `UNION ALL` uses — so
+      // a mixed integer/double column widens to `double` and an irreconcilable
+      // pair (`VALUES ('a'), (1)`) faults `SQLError.operand` exactly as the
+      // former `UNION ALL` desugar did. Each row has equal arity (the ISO
+      // degree rule) — a mismatch is `SQLError.arity(first, offending)` — and
+      // the result columns are named the ISO default `column1, column2, …` off
+      // the first row's aliases (the ISO first-arm rule the `merge` carries).
+      //
+      // The parser enforces the ISO `≥ 1 row, each ≥ 1 element` shape
+      // syntactically, but `Query`/`Query.Body` are public: a caller can hand-
+      // build `.values([])` (no rows) or `.values([[]])` (a zero-column row),
+      // which the type fold below would otherwise treat as a valid empty
+      // relation. Reject them here — the single deriver both the run
+      // (`compile(values:)`) and `columns(of: validate:)` reach — before the
+      // fold, so a malformed AST faults cleanly rather than producing a zero-
+      // column relation. A later empty row is caught by the equal-arity check.
+      guard let first = rows.first else {
+        throw .state("42601", "VALUES requires at least one row")
+      }
+      guard !first.isEmpty else {
+        throw .state("42601", "VALUES requires at least one column per row")
+      }
+      let arity = first.count
+      for row in rows.dropFirst() where row.count != arity {
+        throw .arity(arity, row.count)
+      }
+      var subqueries = Array<Query>()
+      for row in rows {
+        for expression in row { expression.collect(subqueries: &subqueries) }
+      }
+      let resolution =
+          try subquery(subqueries, roles: { query.roles(of: $0, order: nil) },
+                       context, within: nil)
+      var folded: Array<ResolvedColumn>? = nil
+      for row in rows {
+        let items = row.enumerated().map {
+          Projected(expression: $0.element, alias: "column\($0.offset + 1)")
+        }
+        let typed = try Scope([]).columns(of: .expressions(items),
+                                          context.routines,
+                                          subquery: resolution.barred)
+        if let current = folded {
+          folded = try current.indices.map { index throws(SQLError) in
+            try merge(current[index], typed[index], shape: context.shape)
+          }
+        } else {
+          folded = typed
+        }
+      }
+      cols = folded ?? []
     }
     // A carrier is transparent to the result schema: `ORDER BY`, `DISTINCT`,
     // and `OFFSET`/`FETCH` are row operators — they do NOT project — so the
@@ -613,6 +668,12 @@ extension Catalog where Self: ~Escapable {
       // enclosing scope, so each type-checks under the shared `context.outer`.
       try typecheck(left, context)
       try typecheck(right, context)
+    case let .values(rows):
+      // A `VALUES` body type-checks each row's expressions — its reachable
+      // operands and calls (validate), or its cross-kind comparisons (the run's
+      // comparability walk) — exactly as the former `UNION ALL` of FROM-less
+      // selects type-checked each arm's projection.
+      try typecheck(values: rows, query, context)
     }
     // Each carrier's own `ORDER BY` keys are a new expression surface, handled
     // only by the carrier compile (`ordered(…)`). A reached scalar/`IN`
@@ -955,6 +1016,95 @@ extension Catalog where Self: ~Escapable {
       try prefix.check(select.joins[index].on, context.routines, subquery: on)
       for reach in on.visited {
         try typecheck(shape(of: reach), revealed.with(outer: scope))
+      }
+    }
+  }
+
+  /// Type-checks a `VALUES` body's row expressions — the first-class node's
+  /// counterpart of the former `UNION ALL` of FROM-less selects, so a run and a
+  /// `columns(of:)` derive fault a `VALUES` alike.
+  ///
+  /// The rows are a FROM-less barred surface (an empty scope, `Scope([])`), so
+  /// a row's expression resolves only its literals, calls, and subqueries — a
+  /// bare column names nothing and faults, and a correlated reference is
+  /// barred, exactly as a FROM-less `SELECT`'s projection is. Each row
+  /// subquery's
+  /// cursor-free width and single-column type derive against the enclosing
+  /// `outer` (a `VALUES` in subquery position), then in validate mode each row
+  /// expression's reachable operands and calls are checked (`aggregates`/
+  /// `validate`) and each reached subquery body recursed, and in the run's
+  /// comparability mode each row expression's cross-kind comparisons are found
+  /// (`comparisons`) and each reached body recursed — the same discipline the
+  /// carrier `ORDER BY` and the plain arm use.
+  private borrowing func typecheck(values rows: Array<Array<Expression>>,
+                                   _ query: Query, _ context: Context)
+      throws(SQLError) {
+    let scope = Scope([])
+    let expressions = rows.flatMap { $0 }
+    let nested = context.outer
+    var subqueries = Array<Query>()
+    var scalars = Set<Query>()
+    for expression in expressions {
+      expression.collect(subqueries: &subqueries)
+      expression.collect(scalar: &scalars)
+    }
+    if context.comparability {
+      // The run's comparability walk: derive each row subquery's width best-
+      // effort (a structural fault defers, matching the finder's discipline),
+      // find each row expression's cross-kind comparisons, and recurse the
+      // finder into each reached predicate/scalar-subquery body — rethrowing
+      // only 42804.
+      var widths = Dictionary<Query, Int>()
+      var types = Dictionary<Query, ValueType>()
+      for query in subqueries {
+        do {
+          try width(query, [], context, nested, &widths, &types)
+        } catch let error {
+          guard case let .state(code, _) = error, code == "42804" else {
+            continue
+          }
+          throw error
+        }
+      }
+      let check = SubqueryCheck(widths, types, deferred: scalars).barred
+      for expression in expressions {
+        try scope.comparisons(in: expression, context.routines, subquery: check)
+      }
+      let inner = context.revealed().with(outer: nested).comparing()
+      for reach in check.visited {
+        do {
+          try typecheck(shape(of: reach), inner)
+        } catch let error {
+          guard case let .state(code, _) = error, code == "42804" else {
+            continue
+          }
+          throw error
+        }
+      }
+    } else {
+      // Validate mode: derive each row subquery's width/type, type-check each
+      // row expression's reachable operands and calls, then re-derive each
+      // reached scalar/`IN` subquery body strictly (an `EXISTS`/`LATERAL` reach
+      // does not constrain column type).
+      var widths = Dictionary<Query, Int>()
+      var types = Dictionary<Query, ValueType>()
+      for query in subqueries {
+        try width(query, [], context, nested, &widths, &types)
+      }
+      let check = SubqueryCheck(widths, types, deferred: scalars).barred
+      for expression in expressions {
+        try scope.aggregates(in: expression, context.routines, subquery: check)
+        _ = try scope.validate(expression, context.routines, subquery: check)
+      }
+      let inner = context.revealed().with(outer: nested)
+      for reach in check.visited {
+        try typecheck(shape(of: reach), inner)
+        switch reach.role {
+        case .scalar, .valued:
+          _ = try columns(unifying: reach.query, inner)
+        case .existential, .lateral:
+          break
+        }
       }
     }
   }

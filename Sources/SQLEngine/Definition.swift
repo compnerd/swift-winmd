@@ -677,6 +677,11 @@ extension Query {
     case let .setop(_, left, right, _):
       left.collect(into: &names)
       right.collect(into: &names)
+    case .values:
+      // A `VALUES` body names no `FROM`/`JOIN` relation — its rows are
+      // FROM-less constant tuples — so it contributes no store relation here (a
+      // subquery a row nests binds its own store relations in its own scope).
+      break
     }
   }
 
@@ -713,7 +718,7 @@ extension Query {
     switch body {
     case let .select(select):
       select.collect(derived: &derivations)
-    case .setop:
+    case .setop, .values:
       break
     }
   }
@@ -730,7 +735,7 @@ extension Query {
     switch body {
     case let .select(select):
       select.collect(ranges: &ranges)
-    case .setop:
+    case .setop, .values:
       break
     }
   }
@@ -749,7 +754,7 @@ extension Query {
     switch body {
     case let .select(select):
       select.collect(sources: &sources)
-    case .setop:
+    case .setop, .values:
       break
     }
   }

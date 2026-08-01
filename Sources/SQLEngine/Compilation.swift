@@ -364,12 +364,16 @@ extension Catalog where Self: ~Escapable {
                          generated: carrier.generated, context)
     }
     guard case let .setop(kind, left, right, all) = query.body else {
-      // A carrier-free non-set-operation body is a single `SELECT` (a `.values`
-      // body is intercepted ahead of this dispatch), compiled directly.
-      guard case let .select(select) = query.body else {
-        preconditionFailure("a carrier-free non-setop body is a SELECT")
+      // A carrier-free non-set-operation body is a single `SELECT` or a
+      // `VALUES` table value constructor, compiled to its own leaf.
+      switch query.body {
+      case let .select(select):
+        return try compile(select, context)
+      case let .values(rows):
+        return try compile(values: rows, query, context)
+      case .setop:
+        preconditionFailure("a set operation is handled by the guard above")
       }
-      return try compile(select, context)
     }
 
     // A set operation collects no derived aliases at the query level — arms are
@@ -431,6 +435,51 @@ extension Catalog where Self: ~Escapable {
     })
     return try .setop(kind, compile(left, context), compile(right, context),
                       all: all, types: types, widened: widened)
+  }
+
+  /// Compiles a `VALUES` body — the ISO table value constructor — into a
+  /// `Plan.values` leaf: the unified per-column `types` (with the cross-row
+  /// arity check) from `columns(unifying:)`, and each row's expressions lowered
+  /// to `Term`s against the empty FROM-less scope, exactly as the scalar
+  /// projection path lowers a FROM-less `SELECT`'s items.
+  ///
+  /// A row nests a subquery through the same cursor-free `Resolution` the
+  /// FROM'd path builds — every nested query compiled once for its width and
+  /// single-column type, a correlated one's runtime plan recorded into the
+  /// shared box — so a scalar/`IN`/`EXISTS` in a row lowers and runs as
+  /// elsewhere.
+  /// The lowering surface is barred (a projection position), so a bare column
+  /// names nothing and a correlated reference is diagnosed, as in a FROM-less
+  /// `SELECT`'s projection.
+  private borrowing func compile(values rows: Array<Array<Expression>>,
+                                 _ query: Query, _ context: Context)
+      throws(SQLError) -> Plan {
+    // The unified column types (arity checked equal across the rows) — the same
+    // fold `columns(unifying:)` derives, so `run ≡ columns(of:)`.
+    let types = try columns(unifying: query, context).map(\.type)
+    // Resolve the subqueries the rows nest, classified by their role in the row
+    // expressions (a `VALUES` has no ORDER BY of its own here).
+    var subqueries = Array<Query>()
+    for row in rows {
+      for expression in row { expression.collect(subqueries: &subqueries) }
+    }
+    let resolution =
+        try subquery(subqueries, roles: { query.roles(of: $0, order: nil) },
+                     context, within: nil)
+    // Lower each row's expressions against the empty scope, as the FROM-less
+    // scalar path lowers a projection; `terms` bars the resolution surface.
+    let schema = Schema(width: 0, extent: 0, names: [], types: [],
+                        virtuals: [])
+    let relation = Relation(name: "")
+    var lowered = Array<Array<Term>>()
+    lowered.reserveCapacity(rows.count)
+    for row in rows {
+      let projection =
+          Projection.expressions(row.map { Projected(expression: $0) })
+      try lowered.append(schema.terms(projection, in: relation,
+                                      context.routines, subquery: resolution))
+    }
+    return .values(rows: lowered, types: types)
   }
 
   /// The distinct uncorrelated subqueries `select` nests, each compiled once
@@ -722,11 +771,13 @@ extension Catalog where Self: ~Escapable {
   /// The cardinality-only shape of `query` an `EXISTS` tests for non-emptiness:
   /// a `probable` `SELECT`'s probe rewrite (`Select.probe` — its select list
   /// and `ORDER BY` replaced by a cardinality-preserving target, so a `1 / 0`
-  /// projection never evaluates) and the full `query` otherwise (a `HAVING`
-  /// select, a `DISTINCT`-with-`OFFSET` one, or a set operation, whose empty
-  /// test is not a source-only fact the rewrite preserves). The `probe(_:)` run
-  /// and the correlated `existential` plan both compile/execute this shape, so
-  /// a correlated EXISTS probes per outer row as an uncorrelated one does.
+  /// projection never evaluates), a `VALUES` body's per-row rewrite to a single
+  /// constant column (its row count preserved, no cell evaluated), and the full
+  /// `query` otherwise (a `HAVING` select, a `DISTINCT`-with-`OFFSET` one, or a
+  /// set operation, whose empty test is not a source-only fact the rewrite
+  /// preserves). The `probe(_:)` run and the correlated `existential` plan both
+  /// compile/execute this shape, so a correlated EXISTS probes per outer row as
+  /// an uncorrelated one does.
   internal borrowing func probed(_ query: Query) -> Query {
     // An `ordered` carrier over a probable primary — a parenthesised
     // `(SELECT …) ORDER BY … FETCH n` in EXISTS position — must probe its inner
@@ -750,6 +801,16 @@ extension Catalog where Self: ~Escapable {
       if query.dedups, (carrier.limit?.offset ?? 0) >= 1 { return query }
       return .ordered(probed(inner), distinct: carrier.distinct, order: nil,
                       limit: carrier.limit, generated: 0)
+    }
+    // A `VALUES` body probes for existence the same way a `probable` select
+    // does: rewrite each row to a single cheap constant, preserving the row
+    // count (so the EXISTS reads the right cardinality) while never evaluating
+    // a would-fault cell — the `.values` counterpart of `Select.probe`
+    // replacing a select list with a constant target. So `EXISTS (VALUES (1 /
+    // 0), (2))` probes a two-row constant `VALUES` (EXISTS true, no cell run),
+    // as the former `UNION ALL` desugar's probed projection did.
+    if case let .values(rows) = query.body {
+      return Query(body: .values(rows.map { _ in [.literal(.integer(1))] }))
     }
     guard case let .select(select) = query.body, select.probable else {
       return query
@@ -821,6 +882,10 @@ extension Catalog where Self: ~Escapable {
       // SELECT-scoped), so augment it before measuring a `*`.
       let scope = try augment(context, for: .select(select), rows: false)
       return try arity(select, scope)
+    case let .values(rows):
+      // A `VALUES` operand's width is its row width (every row equal by the ISO
+      // degree rule).
+      return rows.first?.count ?? 0
     }
   }
 

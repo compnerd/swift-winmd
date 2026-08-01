@@ -376,12 +376,52 @@ struct ValuesTests {
   @Test func `a standalone multi-row VALUES takes a query-expression tail`()
       throws {
     // A trailing ORDER BY / OFFSET·FETCH after a `VALUES (…), …` binds to the
-    // enclosing query expression (the multi-row constructor is a `UNION ALL`,
-    // so the tail rides an output-scoped carrier) — ordering/paging the rows.
+    // enclosing query expression — the tail rides an output-scoped carrier over
+    // the `.values` body, resolving and paging its output rows.
     try store().expect("VALUES (3), (1), (2) ORDER BY 1",
                        yields: [[1], [2], [3]])
     try store().expect("VALUES (3), (1), (2) ORDER BY 1 OFFSET 1 ROWS",
                        yields: [[2], [3]])
+  }
+
+  @Test func `a VALUES carrier orders by an output name and a direction`()
+      throws {
+    // The carrier resolves an `ORDER BY` key against the constructor's default
+    // output names (`column1, …`), and honours a per-key `DESC`, exactly as it
+    // does over a set operation's output.
+    try store().expect("VALUES (3), (1), (2) ORDER BY column1",
+                       yields: [[1], [2], [3]])
+    try store().expect("VALUES (3), (1), (2) ORDER BY column1 DESC",
+                       yields: [[3], [2], [1]])
+  }
+
+  @Test func `a VALUES carrier pages with OFFSET and FETCH`() throws {
+    // OFFSET and FETCH FIRST n ROWS slice the ordered constructor rows.
+    try store().expect(
+        "VALUES (3), (1), (2) ORDER BY 1 FETCH FIRST 2 ROWS ONLY",
+        yields: [[1], [2]])
+    try store().expect("""
+        VALUES (5), (4), (3), (2), (1) ORDER BY 1 OFFSET 1 ROWS
+        FETCH FIRST 2 ROWS ONLY
+        """, yields: [[2], [3]])
+    try store().empty("VALUES (1), (2) ORDER BY 1 FETCH FIRST 0 ROWS ONLY")
+  }
+
+  @Test func `a multi-column VALUES carrier orders by a later ordinal`()
+      throws {
+    // A two-column constructor orders on its second output column by ordinal,
+    // the carrier resolving the key over the values output slot space.
+    try store().expect("VALUES (1, 3), (2, 1), (3, 2) ORDER BY 2",
+                       yields: [[2, 1], [3, 2], [1, 3]])
+  }
+
+  @Test func `a SELECT DISTINCT over a derived VALUES deduplicates`() throws {
+    // DISTINCT collapses the constructor's duplicate rows when a `SELECT
+    // DISTINCT` reads them through a derived table, keeping the first of each.
+    try store().expect(
+        "SELECT DISTINCT column1 FROM (VALUES (1), (1), (2), (1)) AS t "
+            + "ORDER BY column1",
+        yields: [[1], [2]])
   }
 
   @Test func `a parenthesized VALUES operand carries its tail before a union`()
@@ -439,6 +479,149 @@ struct ValuesTests {
     // cell as before, so the division still faults.
     try store().expect("VALUES (1 / 0)", fails: .divide)
     try store().expect("SELECT * FROM (VALUES (1 / 0)) AS t", fails: .divide)
+  }
+
+  // MARK: - Carrier limit sparing
+
+  @Test func `a VALUES carrier limit spares a discarded row's cell`() throws {
+    // A carried `OFFSET`/`FETCH` with no ORDER BY and no DISTINCT applies its
+    // positional page at compile time, slicing the constructor's rows before
+    // their cells lower — so a row the page discards never evaluates. A
+    // `FETCH FIRST 0 ROWS` keeps none and an `OFFSET` past the sole row keeps
+    // none, so the would-fault `1 / 0` never divides and the run is empty, not
+    // a fault.
+    try store().empty("VALUES (1 / 0) FETCH FIRST 0 ROWS ONLY")
+    try store().empty("VALUES (1 / 0) OFFSET 1 ROWS")
+    // The `validate: true` derive pages the same discarded rows through the
+    // same slice, value-checking only the rows the run evaluates — so it agrees
+    // with the run and does not fault the discarded `1 / 0`. Its reachability
+    // now matches a `FETCH FIRST 0 ROWS` SELECT, whose projection is unreachable
+    // (and non-faulting) under a page that keeps no row.
+    #expect(fault(deriving:
+        try parse(query: "VALUES (1 / 0) FETCH FIRST 0 ROWS ONLY")) == nil)
+    #expect(fault(deriving:
+        try parse(query: "VALUES (1 / 0) OFFSET 1 ROWS")) == nil)
+    // The result schema is unaffected: it types the constructor's columns off
+    // all the AST rows without building the carrier plan, so a carried
+    // constructor still advertises the ISO default `column1` output at its
+    // unified type.
+    let columns = try store().columns(of:
+        parse(query: "VALUES (2), (3) FETCH FIRST 0 ROWS ONLY"),
+        routines: .standard, validate: true)
+    #expect(columns.map(\.name) == ["column1"])
+    #expect(columns.map(\.type) == [.integer])
+  }
+
+  @Test func `a VALUES carrier limit still evaluates a surviving row`()
+      throws {
+    // The sparing is the limit's, not a blanket suppression: a row the page
+    // keeps still evaluates its cells. `FETCH FIRST 1 ROW` over `(2), (1 / 0)`
+    // keeps the safe row 0 and drops the faulting row 1 — `[2]`, no fault — but
+    // over `(1 / 0), (2)` keeps the faulting row 0, so the division faults. An
+    // `OFFSET 1` over `(1 / 0), (2)` drops the faulting row 0 and keeps row 1 —
+    // `[2]`, no fault.
+    try store().expect("VALUES (2), (1 / 0) FETCH FIRST 1 ROW ONLY",
+                       yields: [[2]])
+    try store().expect("VALUES (1 / 0), (2) FETCH FIRST 1 ROW ONLY",
+                       fails: .divide)
+    try store().expect("VALUES (1 / 0), (2) OFFSET 1 ROWS", yields: [[2]])
+    // The validate derive pages the same rows and agrees row for row: it spares
+    // the discarded `1 / 0` and faults the surviving one.
+    #expect(fault(deriving:
+        try parse(query: "VALUES (2), (1 / 0) FETCH FIRST 1 ROW ONLY")) == nil)
+    #expect(fault(deriving:
+        try parse(query: "VALUES (1 / 0), (2) FETCH FIRST 1 ROW ONLY"))
+        == .divide)
+    #expect(fault(deriving:
+        try parse(query: "VALUES (1 / 0), (2) OFFSET 1 ROWS")) == nil)
+  }
+
+  @Test func `an ORDER BY VALUES carrier evaluates every row before paging`()
+      throws {
+    // An ORDER BY must materialise and sort every row before the page applies,
+    // so the compile-time slice does not engage — the eager `.values` leaf
+    // evaluates every cell. `VALUES (1 / 0) ORDER BY 1 FETCH FIRST 0 ROWS` thus
+    // still divides and faults, even though the page keeps no row.
+    try store().expect("VALUES (1 / 0) ORDER BY 1 FETCH FIRST 0 ROWS ONLY",
+                       fails: .divide)
+    // The ORDER BY carrier is eager on both paths: the validate derive stops
+    // the peel at it and value-checks every row, so it faults the division too.
+    #expect(fault(deriving: try parse(query:
+        "VALUES (1 / 0) ORDER BY 1 FETCH FIRST 0 ROWS ONLY")) == .divide)
+  }
+
+  @Test func `a DISTINCT VALUES carrier evaluates every row before paging`()
+      throws {
+    // A DISTINCT carrier must evaluate every row to deduplicate it, so the
+    // compile-time slice is gated off for it too — the `.values` leaf stays
+    // eager under the dedup. A hand-built distinct carrier (the parser emits
+    // `distinct: false`, so this is the public-AST path) over `VALUES (1 / 0)`
+    // with a `FETCH FIRST 0 ROWS` still faults, proving the sparing is
+    // DISTINCT-gated, not a general suppression of cell evaluation.
+    let query = Query(body: try parse(query: "VALUES (1 / 0)").body,
+                      carriers: [Query.Carrier(distinct: true, order: nil,
+                                               limit: Limit(count: 0),
+                                               generated: 0)])
+    #expect(fault(running: query) == .divide)
+  }
+
+  @Test func `a VALUES set operation evaluates every row`() throws {
+    // A `UNION` is a set operation, not a carrier, so its arms materialise in
+    // full — the compile-time carrier slice never reaches it. `VALUES (1 / 0)
+    // UNION VALUES (2)` therefore evaluates the faulting cell and divides,
+    // confirming the sparing is limit-carrier-gated.
+    try store().expect("VALUES (1 / 0) UNION VALUES (2)", fails: .divide)
+  }
+
+  @Test func `a VALUES carrier limit never hides a discarded row's arity`()
+      throws {
+    // The compile-time slice pages only the value-validation, never the
+    // arity/degree derivation — the ISO equal-degree rule holds over all the
+    // rows, independent of the page (the result schema is limit-independent,
+    // and the run arity-checks every row before its own slice). A `FETCH FIRST
+    // 1 ROW` that discards the malformed second row still faults the cross-row
+    // arity mismatch — a structural fault, not a value one — on both the run
+    // and the validate path, exactly as it does with no carrier.
+    try store().expect("VALUES (1), (2, 3) FETCH FIRST 1 ROW ONLY",
+                       fails: .arity(1, 2))
+    #expect(fault(deriving:
+        try parse(query: "VALUES (1), (2, 3) FETCH FIRST 1 ROW ONLY"))
+        == .arity(1, 2))
+  }
+
+  @Test func `a VALUES carrier limit trims a generated column`() throws {
+    // A public `Query.Carrier` may combine a nonzero `generated` with a limit
+    // over a wider `.values` — the parser only ever emits `generated: 0`, so
+    // this is the hand-built-AST path. The carrier's compile-time row slice
+    // pages the rows positionally, but must still trim the trailing `generated`
+    // hidden columns, exactly as the schema path does (`columns(unifying:)`
+    // drops them through `cols.prefix(real)`): the slice returns the `.values`
+    // leaf directly, so without the trim the run yields all `width` columns
+    // where `columns(of:)` advertises `width − generated` — a run ≠ schema
+    // split. Over a two-column `VALUES` with `generated: 1` and a `FETCH FIRST
+    // 1 ROW` limit, both the derive and the run resolve to one column.
+    let carrier = Query.Carrier(distinct: false, order: nil,
+                                limit: Limit(count: 1), generated: 1)
+    let query = Query(body: try parse(query: "VALUES (1, 2), (3, 4)").body,
+                      carriers: [carrier])
+    let columns = try store().columns(of: query, routines: .standard,
+                                      validate: true)
+    #expect(columns.count == 1)
+    let rows = try store().run(query, .standard)
+    // The limit keeps the first row and the trim drops its second column, so
+    // the run yields the single leading cell — the same one-column arity the
+    // derive advertises.
+    #expect(rows == [[.integer(1)]])
+    #expect(rows.first?.count == columns.count)
+
+    // The trim rides above the positional slice, not instead of it: the limit
+    // still spares a discarded row's cell. `FETCH FIRST 1 ROW` keeps only the
+    // first row, so a would-fault `1 / 0` in the dropped second row never
+    // evaluates — the run does not fault and yields the surviving leading cell.
+    let spared = Query(body: try parse(query: "VALUES (1, 2), (1 / 0, 4)").body,
+                       carriers: [carrier])
+    #expect(fault(running: spared) == nil)
+    #expect(try store().run(spared, .standard) == [[.integer(1)]])
   }
 
   // MARK: - Malformed hand-built nodes

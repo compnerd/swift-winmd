@@ -468,6 +468,47 @@ extension Catalog where Self: ~Escapable {
       keys = try SQLEngine.distinct(order.keys, keys,
                                     (0 ..< real).map(Term.slot))
     }
+    // A `VALUES` leaf holds each row's cell expressions in the leaf itself,
+    // below the carrier's limit. Stacking a `limit` over it evaluates every
+    // row's cells before the slice runs — the `limit` interpreter materialises
+    // its whole source, then pages — so a row the page drops still evaluates,
+    // faulting `VALUES (1 / 0) FETCH FIRST 0 ROWS` and running a dropped row's
+    // side effects. A `SELECT` is spared this by sitting its projection above
+    // the limit (`Project(Limit(…))`, see `Plan.shaped`), so a dropped row
+    // never runs its select list. Give the constructor the same sparing when it
+    // carries neither an ORDER BY nor a DISTINCT — each of which must evaluate
+    // every row to sort or dedup it — by applying the positional limit at
+    // compile time: slice the leaf's rows, so a discarded row's cells never
+    // lower into the plan and so never evaluate. The `Limit` count and offset
+    // are constant integers (the AST models no dynamic or parameterised page
+    // bound), so the slice is exact and total. An ORDER BY or a DISTINCT keeps
+    // the eager `.values` leaf and evaluates every row, as sorting and
+    // deduplicating require. The sliced set may be empty (`FETCH FIRST 0 ROWS`,
+    // an `OFFSET` past the end); the empty-body guard already passed on the
+    // original non-empty rows, so an empty result is a valid `.values([])`
+    // leaf, not the malformed empty node that guard rejects. The validate
+    // path's value-check pages the same rows through the same `paged`, so a
+    // discarded row's cell faults neither the run nor `columns(of: validate:)`
+    // — the two agree (see `typecheck(values:)`).
+    //
+    // The positional slice pages the rows but does not trim their columns, so a
+    // carrier with a nonzero `generated` (a hand-built public `Query.Carrier`
+    // combining `generated` with a limit over a wider `.values`) still needs
+    // its trailing hidden columns dropped: the schema path trims them
+    // (`columns(unifying:)`, `cols.prefix(real)`), so the run must too or it
+    // returns `width` columns where `columns(of:)` advertises `real`. Trim the
+    // sliced leaf with the same identity projection `0 ..< real` the eager path
+    // below applies — the page already dropped the discarded rows, so the
+    // projection only trims the surviving rows' columns and re-introduces no
+    // eager evaluation. When `real == width` (the parser's every carrier, whose
+    // `generated` is `0`) the projection is the identity, so return the sliced
+    // leaf directly and keep the plan shape the common path had.
+    if !distinct, order == nil, let limit,
+       case let .values(rows, types) = plan {
+      let sliced = Plan.values(rows: paged(rows, by: limit), types: types)
+      guard real < width else { return sliced }
+      return .project((0 ..< real).map(Term.slot), sliced)
+    }
     // Stack the row operators over the union plan, trimming to the REAL output
     // columns with the identity projection `0 ..< real` (dropping any hidden
     // materialised sort column).
@@ -475,4 +516,22 @@ extension Catalog where Self: ~Escapable {
                        projection: (0 ..< real).map(Term.slot),
                        filter: nil, order: keys, limit: limit)
   }
+}
+
+/// The `VALUES` rows a positional `limit` keeps — the compile-time counterpart
+/// of the interpreter's `limited` row slice (see `Interpreter`). Drops the
+/// leading `offset` rows, then caps at `count` (no cap when `count` is nil, an
+/// `OFFSET` without a `FETCH`). Both bounds are the constant integers the parser
+/// and the range guard already vetted non-negative.
+///
+/// It is generic over the row element so the one slice serves both the run and
+/// the validate paths and the two cannot drift: the compile lowers a leaf's
+/// `Term` rows through it, so a discarded row's cells never evaluate, and the
+/// `columns(of: validate:)` value-check pages the `Expression` rows through it,
+/// so it validates only the rows the run evaluates (see `typecheck(values:)`).
+internal func paged<Row>(_ rows: Array<Row>, by limit: Limit) -> Array<Row> {
+  guard limit.offset < rows.count else { return [] }
+  let tail = rows[limit.offset...]
+  guard let count = limit.count else { return Array(tail) }
+  return Array(tail.prefix(count))
 }

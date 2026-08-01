@@ -824,33 +824,33 @@ struct EngineSetOperationCoercionTests {
   @Test func `UNION widens a mixed integer/double column and coerces its values`() throws {
     // The unified column type is `double`, so the `integer` arm's `1` coerces
     // to `1.0` and the result column is `double` throughout.
-    try roster().expect("SELECT 1 UNION SELECT 2.5",
+    try roster().expect("VALUES (1) UNION VALUES (2.5)",
                               yields: [[1.0], [2.5]])
-    try roster().expect("SELECT 1 UNION ALL SELECT 2.5",
+    try roster().expect("VALUES (1) UNION ALL VALUES (2.5)",
                               yields: [[1.0], [2.5]])
   }
 
   @Test func `UNION dedups numerically-equal rows to the coerced double`() throws {
     // `1` coerces to `1.0`, equal to the double arm's `1.0`, so the bare UNION
     // keeps one — the emitted `double`.
-    try roster().expect("SELECT 1 UNION SELECT 1.0", yields: [[1.0]])
+    try roster().expect("VALUES (1) UNION VALUES (1.0)", yields: [[1.0]])
   }
 
   @Test func `INTERSECT and EXCEPT emit the coerced double`() throws {
     // Equality already canonicalises `1` and `1.0`, so both match/subtract; the
     // coercion makes the emitted cell carry the unified `double` type.
-    try roster().expect("SELECT 1 INTERSECT SELECT 1.0", yields: [[1.0]])
-    try roster().expect("SELECT 2 EXCEPT SELECT 1.0", yields: [[2.0]])
+    try roster().expect("VALUES (1) INTERSECT VALUES (1.0)", yields: [[1.0]])
+    try roster().expect("VALUES (2) EXCEPT VALUES (1.0)", yields: [[2.0]])
   }
 
   @Test func `a UNION of irreconcilable column types faults`() throws {
     // A text arm beside a number, or a boolean beside a number, has no common
     // type — the fold faults `SQLError.operand` (SQLSTATE 42804).
     try roster().expect(
-        "SELECT 1 UNION SELECT 'x'",
+        "VALUES (1) UNION VALUES ('x')",
         fails: .operand("UNION arms have irreconcilable types"))
     try roster().expect(
-        "SELECT TRUE UNION SELECT 1",
+        "VALUES (TRUE) UNION VALUES (1)",
         fails: .operand("UNION arms have irreconcilable types"))
   }
 
@@ -859,20 +859,20 @@ struct EngineSetOperationCoercionTests {
     // then descends into the left child `SELECT 1, 2 UNION SELECT 3` whose
     // arms differ (2 vs 1) — the fold's own guard faults `.arity` rather than
     // trapping on an out-of-bounds column index.
-    try roster().expect("SELECT 1, 2 UNION SELECT 3 UNION SELECT 4, 5",
+    try roster().expect("VALUES (1, 2) UNION VALUES (3) UNION VALUES (4, 5)",
                               fails: .arity(2, 1))
   }
 
   @Test func `a chained 3-arm UNION widens across every arm`() throws {
     // The left-associative chain folds pairwise, so the trailing `double`
     // widens the whole column and every value coerces.
-    try roster().expect("SELECT 1 UNION SELECT 2 UNION SELECT 3.5",
+    try roster().expect("VALUES (1) UNION VALUES (2) UNION VALUES (3.5)",
                               yields: [[1.0], [2.0], [3.5]])
   }
 
   @Test func `a chained UNION with an incompatible tail faults`() throws {
     try roster().expect(
-        "SELECT 1 UNION SELECT 2 UNION SELECT 'x'",
+        "VALUES (1) UNION VALUES (2) UNION VALUES ('x')",
         fails: .operand("UNION arms have irreconcilable types"))
   }
 
@@ -900,11 +900,11 @@ struct EngineSetOperationCoercionTests {
     // A `NULLIF(2, 2)` arm folds to constant NULL, so it constrains nothing (a
     // NULL unifies with any typed arm): the other arm's `double` types the
     // column, its NULL row stays NULL and the double row coerces.
-    try roster().expect("SELECT NULLIF(2, 2) UNION SELECT 2.5",
+    try roster().expect("VALUES (NULLIF(2, 2)) UNION VALUES (2.5)",
                               yields: [[nil], [2.5]])
     // A typed integer arm beside a constant-NULL arm keeps the `integer`
     // column.
-    try roster().expect("SELECT 1 UNION SELECT NULLIF(2, 2)",
+    try roster().expect("VALUES (1) UNION VALUES (NULLIF(2, 2))",
                               yields: [[1], [nil]])
   }
 
@@ -1058,10 +1058,10 @@ struct EngineUnconstrainedMaskSealTests {
     // The baseline channel — a bare projected expression folding to constant
     // NULL is unconstrained, so it unifies; a typed literal constrains and
     // faults int-vs-text.
-    try roster().expect("SELECT NULLIF('a', 'a') UNION SELECT 1",
+    try roster().expect("VALUES (NULLIF('a', 'a')) UNION VALUES (1)",
                               yields: [[nil], [1]])
     try roster().expect(
-        "SELECT 'a' UNION SELECT 1",
+        "VALUES ('a') UNION VALUES (1)",
         fails: .operand("UNION arms have irreconcilable types"))
   }
 
@@ -1138,7 +1138,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
     // The unregistered `missing()` is reached (a FROM-less single-row arm), so
     // the reachable typecheck raises `SQLError.function` — NOT `.operand`. The
     // fold deferring on the placeholder does not hide the missing routine.
-    try roster().expect("SELECT missing() UNION SELECT 'x'",
+    try roster().expect("VALUES (missing()) UNION VALUES ('x')",
                               fails: .function("missing"))
   }
 
@@ -1146,7 +1146,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
       throws {
     // The right-side variant: the fold defers on the placeholder either way,
     // and the reachable typecheck raises `.function` when the arm is reached.
-    try roster().expect("SELECT 1 UNION SELECT missing()",
+    try roster().expect("VALUES (1) UNION VALUES (missing())",
                               fails: .function("missing"))
   }
 
@@ -1193,7 +1193,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
     // and the fold defers to the text `'x'` rather than faulting `.operand`. A
     // FROM-less single-row arm is reached, so `missing()` dispatches — hence
     // the run faults `.function`, proving the deferral touches only the fold.
-    try roster().expect("SELECT COALESCE(missing(), 1) UNION SELECT 'x'",
+    try roster().expect("VALUES (COALESCE(missing(), 1)) UNION VALUES ('x')",
                               fails: .function("missing"))
   }
 
@@ -1205,7 +1205,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
     // genuinely irreconcilable and must fault `.operand`, not defer and leave
     // the integer `1` cell uncoerced against text.
     try roster().expect(
-        "SELECT COALESCE(1, missing()) UNION ALL SELECT 'x'",
+        "VALUES (COALESCE(1, missing())) UNION ALL VALUES ('x')",
         fails: .operand("UNION arms have irreconcilable types"))
   }
 
@@ -1229,7 +1229,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
     // inner `missing()` and faults `.function`.
     let routines: Routines =
         ["up": Routine(returns: .text, parameters: [.text]) { row in row[0] }]
-    try roster().expect("SELECT up(missing()) UNION SELECT 'x'",
+    try roster().expect("VALUES (up(missing())) UNION VALUES ('x')",
                               fails: .function("missing"), routines: routines)
   }
 
@@ -1253,7 +1253,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
     // ONLY unregistered calls, never a genuine mismatch.
     let routines: Routines =
         ["one": Routine(returns: .integer, parameters: []) { _ in .integer(1) }]
-    try roster().expect("SELECT one() + 0 UNION SELECT 'x'",
+    try roster().expect("VALUES (one() + 0) UNION VALUES ('x')",
                               fails: .operand(
                                   "UNION arms have irreconcilable types"),
                               routines: routines)
@@ -1264,7 +1264,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
     // call at all, so it stays constrained and faults `.operand` against the
     // text `'x'` — the recursion adds no over-suppression to a call-free tree.
     try roster().expect(
-        "SELECT 1 + 0 UNION SELECT 'x'",
+        "VALUES (1 + 0) UNION VALUES ('x')",
         fails: .operand("UNION arms have irreconcilable types"))
   }
 
@@ -1309,7 +1309,7 @@ struct EnginePlaceholderUnconstrainedClosureTests {
     // The baseline over-suppression guard: two genuine literal types still fold
     // to an irreconcilable pair and fault — the closure widens nothing.
     try roster().expect(
-        "SELECT 1 UNION SELECT 'x'",
+        "VALUES (1) UNION VALUES ('x')",
         fails: .operand("UNION arms have irreconcilable types"))
   }
 
@@ -1415,7 +1415,7 @@ struct EngineDeferredSetopShapeTests {
     // The top level is not a shape pre-pass (`shape` is `false`), so its
     // operand fold still faults — the deferral is scoped to nested subqueries.
     try roster().expect(
-        "SELECT 'x' UNION SELECT 1",
+        "VALUES ('x') UNION VALUES (1)",
         fails: .operand("UNION arms have irreconcilable types"))
   }
 

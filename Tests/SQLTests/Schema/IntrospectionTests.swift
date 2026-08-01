@@ -451,7 +451,7 @@ struct IntrospectionTests {
     // The overlay sits after the CTEs: a `WITH` binding the reserved name wins,
     // so the query reads the CTE's rows, not the enumerated metadata.
     let rows = try catalog().run(Statement(parsing: """
-        WITH "information_schema.tables" (x) AS (SELECT 1)
+        WITH "information_schema.tables" (x) AS (VALUES (1))
           SELECT x FROM "information_schema.tables"
         """))
     #expect(rows == [[.integer(1)]])
@@ -1065,8 +1065,8 @@ struct IntrospectionTests {
 
   @Test func `columns(of:) rejects statically-overflowing literal arithmetic`() throws {
     let cat = MetaCatalog(["People": MetaRelation([("Age", .integer)], [])])
-    // Both operands literal, so the result overflows on every row (a FROM-less
-    // SELECT at once); the schema rejects it rather than advertise a column.
+    // Both operands literal, so the result overflows on every row (a constant
+    // folded at once); the schema rejects it rather than advertise a column.
     #expect(throws: SQLError.self) {
       let _ = try cat.columns(of:
           parse(query: "SELECT 9223372036854775807 + 1 AS x FROM People"))
@@ -1285,7 +1285,7 @@ struct IntrospectionTests {
 
   @Test func `a user CTE shadows the definition_schema store`() throws {
     let rows = try catalog().run(Statement(parsing: """
-        WITH "definition_schema.tables" (x) AS (SELECT 1)
+        WITH "definition_schema.tables" (x) AS (VALUES (1))
           SELECT x FROM "definition_schema.tables"
         """))
     #expect(rows == [[.integer(1)]])

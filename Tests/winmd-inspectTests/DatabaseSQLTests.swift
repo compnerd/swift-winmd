@@ -1379,7 +1379,8 @@ struct DatabaseSQLTests {
     DatabaseSQLTests.with { catalog in
       let shell = Shell(catalog)
       #expect(shell.headers(of:
-          "WITH TypeDef(x) AS (SELECT 1) SELECT * FROM TypeDef", [[.integer(1)]])
+          "WITH TypeDef(x) AS (VALUES (1)) SELECT * FROM TypeDef",
+          [[.integer(1)]])
           == ["x"])
     }
   }
@@ -1391,10 +1392,10 @@ struct DatabaseSQLTests {
     DatabaseSQLTests.with { catalog in
       let shell = Shell(catalog)
       #expect(shell.headers(of:
-          "WITH t(a, b) AS (SELECT 1, 2) SELECT * FROM t",
+          "WITH t(a, b) AS (VALUES (1, 2)) SELECT * FROM t",
           [[.integer(1), .integer(2)]]) == ["a", "b"])
       #expect(shell.headers(of:
-          "WITH t(a, b) AS (SELECT 1, 2) SELECT b FROM t",
+          "WITH t(a, b) AS (VALUES (1, 2)) SELECT b FROM t",
           [[.integer(2)]]) == ["b"])
     }
   }
@@ -1406,7 +1407,7 @@ struct DatabaseSQLTests {
     DatabaseSQLTests.with { catalog in
       let shell = Shell(catalog)
       #expect(shell.headers(of:
-          "WITH t(x) AS (SELECT 1) SELECT * FROM TypeDef", [])
+          "WITH t(x) AS (VALUES (1)) SELECT * FROM TypeDef", [])
           == ["Flags", "TypeName", "TypeNamespace", "Extends",
               "FieldList", "MethodList"])
     }

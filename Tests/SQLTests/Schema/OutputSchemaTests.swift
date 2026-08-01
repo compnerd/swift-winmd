@@ -230,27 +230,27 @@ struct OutputSchemaTests {
   @Test func `a UNION widens a mixed integer/double column to double`() throws {
     // ISO unifies the result column type across the arms — an `integer` arm and
     // a `double` arm widen to `double` (the name still the first arm's).
-    let columns = try schema("SELECT 1 UNION SELECT 2.5")
+    let columns = try schema("VALUES (1) UNION VALUES (2.5)")
     #expect(columns.count == 1)
-    #expect(columns[0] == ("column 1", .double))
+    #expect(columns[0] == ("column1", .double))
   }
 
   @Test func `a chained UNION widens across every arm`() throws {
     // A left-associative 3-arm chain folds its types pairwise, so a `double`
     // tail widens the whole column even where the leading arms are `integer`.
-    let columns = try schema("SELECT 1 UNION SELECT 2 UNION SELECT 3.5")
+    let columns = try schema("VALUES (1) UNION VALUES (2) UNION VALUES (3.5)")
     #expect(columns.count == 1)
-    #expect(columns[0] == ("column 1", .double))
+    #expect(columns[0] == ("column1", .double))
   }
 
   @Test func `a UNION of irreconcilable column types faults`() throws {
     // A text arm beside a number has no common type, so the fold faults
     // `SQLError.operand` (SQLSTATE 42804) rather than typing off the first arm.
     #expect(throws: SQLError.self) {
-      try catalog().columns(of: parse(query: "SELECT 1 UNION SELECT 'x'"))
+      try catalog().columns(of: parse(query: "VALUES (1) UNION VALUES ('x')"))
     }
     #expect(throws: SQLError.self) {
-      try catalog().columns(of: parse(query: "SELECT TRUE UNION SELECT 1"))
+      try catalog().columns(of: parse(query: "VALUES (TRUE) UNION VALUES (1)"))
     }
   }
 
@@ -260,12 +260,12 @@ struct OutputSchemaTests {
     // skip, so the other arm's type wins — a `NULLIF(2, 2)` (constant NULL) arm
     // beside a `double` arm types the column `double`, not the NULLIF arm's
     // `integer`.
-    let leading = try schema("SELECT NULLIF(2, 2) UNION SELECT 2.5")
+    let leading = try schema("VALUES (NULLIF(2, 2)) UNION VALUES (2.5)")
     #expect(leading.count == 1)
     #expect(leading[0].1 == .double)
     // A typed arm beside a trailing constant-NULL arm keeps the typed arm's
     // type.
-    let trailing = try schema("SELECT 1 UNION SELECT NULLIF(2, 2)")
+    let trailing = try schema("VALUES (1) UNION VALUES (NULLIF(2, 2))")
     #expect(trailing.count == 1)
     #expect(trailing[0].1 == .integer)
   }
@@ -280,7 +280,7 @@ struct OutputSchemaTests {
     let star = try schema("""
         SELECT * FROM (SELECT NULLIF(1, 1) AS k FROM People) AS a
           JOIN (SELECT NULLIF(1, 1) AS k FROM People) AS b USING (k)
-          UNION SELECT 'x'
+          UNION VALUES ('x')
         """)
     #expect(star.count == 1)
     #expect(star[0] == ("k", .text))
@@ -291,7 +291,7 @@ struct OutputSchemaTests {
       try catalog().columns(of: parse(query: """
           SELECT * FROM (SELECT Age AS k FROM People) AS a
             JOIN (SELECT Age AS k FROM People) AS b USING (k)
-            UNION SELECT 'x'
+            UNION VALUES ('x')
           """))
     }
   }
@@ -301,7 +301,7 @@ struct OutputSchemaTests {
     // table), which carries its unified `types` from compile — the outer
     // `SELECT *` reports the widened `double` column.
     let columns =
-        try schema("SELECT * FROM (SELECT 1 UNION SELECT 2.5) AS d")
+        try schema("SELECT * FROM (VALUES (1) UNION VALUES (2.5)) AS d")
     #expect(columns.count == 1)
     #expect(columns[0].1 == .double)
   }
@@ -314,7 +314,7 @@ struct OutputSchemaTests {
     // column list). The rename applies after the fold determines the column
     // count and type, so the column is both named `a` and typed `double`.
     let columns =
-        try schema("SELECT d.a FROM (SELECT 1 UNION SELECT 2.5) AS d(a)")
+        try schema("SELECT d.a FROM (VALUES (1) UNION VALUES (2.5)) AS d(a)")
     #expect(columns.count == 1)
     #expect(columns[0] == ("a", .double))
   }
@@ -554,7 +554,7 @@ struct OutputSchemaTests {
     // a CTE `People` shadows the two-column base relation, so a `SELECT *` over
     // it names the CTE's one declared column `x`, not the base's `Name, Age`.
     let columns = try catalog().columns(of: Statement(parsing:
-        "WITH People(x) AS (SELECT 1) SELECT * FROM People"))
+        "WITH People(x) AS (VALUES (1)) SELECT * FROM People"))
     #expect(columns.count == 1)
     #expect(columns[0].name == "x")
   }
@@ -563,7 +563,7 @@ struct OutputSchemaTests {
     // A bare-column projection reads the CTE's declared columns; a two-column
     // CTE heads its two names, no base relation involved.
     let columns = try catalog().columns(of: Statement(parsing:
-        "WITH t(a, b) AS (SELECT 1, 2) SELECT a, b FROM t"))
+        "WITH t(a, b) AS (VALUES (1, 2)) SELECT a, b FROM t"))
     #expect(same(columns.map { ($0.name, $0.type) },
                  [("a", .integer), ("b", .integer)]))
   }
@@ -572,7 +572,7 @@ struct OutputSchemaTests {
     // A CTE whose name does not collide leaves the base `People` reachable — the
     // trailing `SELECT *` resolves its two real columns.
     let columns = try catalog().columns(of: Statement(parsing:
-        "WITH t(x) AS (SELECT 1) SELECT * FROM People"))
+        "WITH t(x) AS (VALUES (1)) SELECT * FROM People"))
     #expect(same(columns.map { ($0.name, $0.type) },
                  [("Name", .text), ("Age", .integer)]))
   }
@@ -664,7 +664,7 @@ struct OutputSchemaTests {
     // `Engine.with` raises before materialising — rather than advertise a schema
     // off the shadowing definition.
     let statement = try Statement(parsing:
-        "WITH t(a) AS (SELECT 1), T(b) AS (SELECT 2) SELECT * FROM t")
+        "WITH t(a) AS (VALUES (1)), T(b) AS (VALUES (2)) SELECT * FROM t")
     #expect(throws: SQLError.redefinition("T")) {
       let _ = try catalog().columns(of: statement, validate: true)
     }
@@ -677,7 +677,7 @@ struct OutputSchemaTests {
     // the CTE, and the trailing query names the CTE's declared column `n`.
     let statement = try Statement(parsing: """
         WITH RECURSIVE t(n) AS (
-          SELECT 1 UNION SELECT n + 1 FROM t
+          VALUES (1) UNION SELECT n + 1 FROM t
         ) SELECT n FROM t
         """)
     let columns = try catalog().columns(of: statement, validate: true)
@@ -740,7 +740,7 @@ struct OutputSchemaTests {
     // per-arm operand check accepts exactly what a run does.
     let statement = try Statement(parsing: """
         WITH RECURSIVE Counter(n) AS (
-          SELECT 1 UNION SELECT n + 1 FROM Counter
+          VALUES (1) UNION SELECT n + 1 FROM Counter
         ) SELECT n FROM Counter
         """)
     let columns = try catalog().columns(of: statement, validate: true)
@@ -848,7 +848,7 @@ struct CTEProducerParityTests {
     // `fixpoint` — so all three agree on one integer column `n`.
     let t = try Triple("""
         WITH RECURSIVE t(n) AS (
-          SELECT 1 UNION SELECT n + 1 FROM t WHERE n < 3
+          VALUES (1) UNION SELECT n + 1 FROM t WHERE n < 3
         ) SELECT n FROM t
         """)
     #expect(pairs(t.run).map { same($0, [("n", .integer)]) } == true)
@@ -868,7 +868,7 @@ struct CTEProducerParityTests {
     // the one integer column `n`.
     let t = try Triple("""
         WITH RECURSIVE t(n) AS (
-          SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3 ORDER BY 1
+          VALUES (1) UNION ALL SELECT n + 1 FROM t WHERE n < 3 ORDER BY 1
         ) SELECT n FROM t
         """)
     #expect(pairs(t.run).map { same($0, [("n", .integer)]) } == true)
@@ -883,7 +883,7 @@ struct CTEProducerParityTests {
     // to it, the derives type the declared column at it.
     let t = try Triple("""
         WITH RECURSIVE t(n) AS (
-          SELECT 1 UNION SELECT n + 0.5 FROM t WHERE n < 3
+          VALUES (1) UNION SELECT n + 0.5 FROM t WHERE n < 3
         ) SELECT n FROM t
         """)
     #expect(pairs(t.run).map { same($0, [("n", .double)]) } == true)
@@ -896,7 +896,7 @@ struct CTEProducerParityTests {
     // A non-recursive UNION body of an `integer` and a `double` arm folds to a
     // `.double` column on every path — the producer's `kinds` fold and the
     // run's `run`-then-`kinds` re-derive read the same `merge`.
-    let t = try Triple("WITH a(x) AS (SELECT 1 UNION SELECT 2.5) " +
+    let t = try Triple("WITH a(x) AS (VALUES (1) UNION VALUES (2.5)) " +
                        "SELECT x FROM a")
     #expect(pairs(t.run).map { same($0, [("x", .double)]) } == true)
     #expect(t.run == t.lenient)
@@ -910,7 +910,8 @@ struct CTEProducerParityTests {
     // recogniser sees a non-recursive CTE and falls through to the unifying
     // fold, whose `.ordered` case peels the carrier transparently — the
     // regression guard for the fall-through side of the carrier peel.
-    let t = try Triple("WITH a(x) AS (SELECT 1 UNION SELECT 2.5 ORDER BY 1) " +
+    let t = try Triple("WITH a(x) AS " +
+                       "(VALUES (1) UNION VALUES (2.5) ORDER BY 1) " +
                        "SELECT x FROM a")
     #expect(pairs(t.run).map { same($0, [("x", .double)]) } == true)
     #expect(t.run == t.lenient)
@@ -923,7 +924,7 @@ struct CTEProducerParityTests {
     // faults `.operand` (42804) — through the producer's shared `kinds`/`merge`
     // on the derives (a fold that runs regardless of the validate gate) and the
     // run's own fold — the same on all three.
-    let t = try Triple("WITH a(x) AS (SELECT 'b' UNION SELECT 1) " +
+    let t = try Triple("WITH a(x) AS (VALUES ('b') UNION VALUES (1)) " +
                        "SELECT x FROM a")
     let fault = Outcome.fault(.operand("UNION arms have irreconcilable types"))
     #expect(t.run == fault)
@@ -978,7 +979,7 @@ struct CTEProducerParityTests {
     // A case-insensitive redefinition is rejected by the producer's ungated
     // guard — the same `.redefinition` on the run and both derives, lenient
     // included (the guard runs before any validate gate).
-    let t = try Triple("WITH a(x) AS (SELECT 1), A(y) AS (SELECT 2) " +
+    let t = try Triple("WITH a(x) AS (VALUES (1)), A(y) AS (VALUES (2)) " +
                        "SELECT * FROM a")
     let fault = Outcome.fault(.redefinition("A"))
     #expect(t.run == fault)
@@ -993,7 +994,7 @@ struct CTEProducerParityTests {
     // `.double`, so all three paths agree on one `.double` column — proving it
     // threads the growing overlay identically (types, not rows) on both.
     let t = try Triple("""
-        WITH a(x) AS (SELECT 1 UNION SELECT 2.5),
+        WITH a(x) AS (VALUES (1) UNION VALUES (2.5)),
              b(y) AS (SELECT x FROM a)
           SELECT y FROM b
         """)

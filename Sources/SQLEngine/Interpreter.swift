@@ -26,6 +26,24 @@ extension Catalog where Self: ~Escapable {
       // The FROM-less single row: one record with no cells, the source a scalar
       // projection evaluates its constant/call expressions against.
       return [Record([])]
+    case let .values(rows, types):
+      // The ISO table value constructor: one record per row, each the row's
+      // lowered terms evaluated against the single empty record (as `single`'s
+      // row is) then coerced to the unified column `types` — so `VALUES (1),
+      // (2.5)` yields a `double` column. An explicit loop keeps the borrowed
+      // `~Escapable` self a row's scalar subquery materialises against out of a
+      // closure capture.
+      var records = Array<Record>()
+      records.reserveCapacity(rows.count)
+      for row in rows {
+        var cells = Array<Value>()
+        cells.reserveCapacity(row.count)
+        for term in row {
+          try cells.append(evaluate(Record([]), term, context))
+        }
+        records.append(Record(cells).coerced(to: types))
+      }
+      return records
     case .empty:
       // The known-empty relation yields no records — the optimiser proved its
       // constant-false guard admits none — so nothing above it (a project, an

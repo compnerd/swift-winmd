@@ -30,8 +30,9 @@ extension Catalog where Self: ~Escapable {
     switch plan {
     // `.empty` is produced only by `optimise`, which runs after decorrelation,
     // so a plan reaching here never carries one; the arm is a structural
-    // no-op keeping the switch exhaustive.
-    case .single, .empty, .scan, .join:
+    // no-op keeping the switch exhaustive. A `values` leaf holds no correlated
+    // apply/subquery of its own to lift.
+    case .single, .empty, .values, .scan, .join:
       return plan
     case let .derived(name, plan, ordinals, seek):
       // A view body is compiled and re-executed under its own scope; its

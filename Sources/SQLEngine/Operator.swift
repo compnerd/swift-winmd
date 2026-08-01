@@ -118,6 +118,16 @@ internal indirect enum Plan {
   /// record (no slots), the row a scalar projection (`SELECT 1 + 1`) computes
   /// its expressions against.
   case single
+  /// The ISO `<table value constructor>` leaf — one `Record` per row, each the
+  /// row's lowered `Term`s evaluated against the single empty record (as the
+  /// `single` leaf's row is) then coerced to the unified column `types`.
+  /// `types` is the per-column type unified across the rows (a mixed
+  /// integer/double column widening to `double`), one entry per output column;
+  /// every row has `types.count` terms (the ISO equal-degree rule the compile
+  /// enforces). It is a leaf the pushdown/optimise/decorrelate passes recurse
+  /// through unchanged, feeding a query-level `ORDER BY`/`OFFSET`·`FETCH`/
+  /// `DISTINCT` carrier.
+  case values(rows: Array<Array<Term>>, types: Array<ValueType>)
   /// The known-empty relation of `slots` columns: it yields zero records over
   /// exactly that combined slot width, the shape the optimiser rewrites a
   /// provably constant-false selection into (a `WHERE 1 = 0` admits no row).
@@ -285,6 +295,9 @@ extension Plan {
       // replaced, so a view sub-plan measuring a data-empty body reads its true
       // column count rather than the `select`'s conservative zero.
       slots
+    case let .values(_, types):
+      // A values leaf's output is one column per unified column type.
+      types.count
     case let .project(terms, _):
       terms.count
     case let .setop(_, left, _, _, _, _):
@@ -323,6 +336,10 @@ extension Plan {
       // The single empty row has no slots — a FROM-less projection reads only
       // constants and calls over them, never a slot of this row.
       0
+    case let .values(_, types):
+      // A values leaf yields one slot per unified column, so a downstream
+      // consumer that reads its width shapes correctly.
+      types.count
     case let .empty(slots):
       // The known-empty relation spans exactly the slots of the subtree it
       // replaced — it drops the rows, never the schema — so a downstream join's
@@ -414,6 +431,11 @@ extension Plan {
       // A single empty row and the known-empty relation both yield their rows
       // without evaluating anything — neither can raise.
       true
+    case let .values(rows, _):
+      // Each row's terms evaluate over the empty record, so a values leaf is
+      // throw-free only when every term is (a constant row is; a `1 / 0` row is
+      // not).
+      rows.allSatisfy { $0.allSatisfy(\.safe) }
     case .scan:
       // A scan reads cells and never evaluates an expression, so materialising
       // it cannot raise; a compiled plan's scan name is already resolved.
@@ -508,13 +530,14 @@ extension Plan {
       }
       return covered == Set(0 ..< width)
     // A base `scan` is an ISO multiset (a duplicate row is possible, no unique
-    // key is tracked); a `derived` view body runs an arbitrary sub-plan; a
+    // key is tracked); a `values` leaf likewise keeps duplicate rows (`VALUES
+    // (1), (1)`); a `derived` view body runs an arbitrary sub-plan; a
     // `product`/`join`/`outer`/`apply` can multiply rows (a fan-out pairs one
     // row with many). None provably yields distinct full rows, so each reports
     // `false` — the `.distinct` stays, never unsound. A `semijoin` emits each
     // left row at most once but does not deduplicate the left, so it is only as
     // unique as its left source and is conservatively `false` here.
-    case .scan, .derived, .product, .join, .outer, .semijoin, .apply:
+    case .scan, .values, .derived, .product, .join, .outer, .semijoin, .apply:
       return false
     }
   }

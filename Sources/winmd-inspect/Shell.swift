@@ -804,6 +804,9 @@ internal struct Shell: ~Escapable {
     switch query.arm.body {
     case let .select(select):
       return names(of: select.projection, rows)
+    case let .values(rows):
+      // The ISO table value constructor's default output names.
+      return (0 ..< (rows.first?.count ?? 0)).map { "column\($0 + 1)" }
     case .setop:
       return generic(rows)
     }

@@ -34,6 +34,9 @@ extension Query {
         return Query(body: .setop(kind, try left.expanded,
                                   try right.expanded, all: all),
                      carriers: carriers)
+      case .values:
+        // A `VALUES` body carries no grouping to expand.
+        return self
       }
     }
   }

@@ -24,8 +24,9 @@ extension Plan {
   internal func pushdown() throws(SQLError) -> Plan {
     switch self {
     // Pushdown runs before optimise, the only producer of `.empty`, so a plan
-    // reaching here never carries one; the arm keeps the switch exhaustive.
-    case .single, .empty, .scan, .join:
+    // reaching here never carries one; the arm keeps the switch exhaustive. A
+    // `values` leaf is FROM-less — no `WHERE` conjunct rides into it.
+    case .single, .empty, .values, .scan, .join:
       self
     case let .derived(name, sub, ordinals, seek):
       try .derived(name: name, plan: sub.pushdown(), ordinals: ordinals,

@@ -9,11 +9,11 @@ import func SQLTestSupport.parse
 
 // MARK: - VALUES
 
-/// The ISO `VALUES (…), …` table value constructor desugars to a `UNION ALL` of
-/// FROM-less constant `SELECT`s. These tests confirm it yields its rows in
-/// order, names the default `column1, column2, …` outputs, works standalone and
-/// as a derived table, preserves duplicate rows, composes with a set operation,
-/// and faults on a cross-row arity mismatch.
+/// The ISO `VALUES (…), …` table value constructor is a first-class query body
+/// (`Query.Body.values`). These tests confirm it parses to that node, yields
+/// its rows in order, names the default `column1, column2, …` outputs, works
+/// standalone and as a derived table, preserves duplicate rows, composes with a
+/// set operation, and faults on a cross-row arity mismatch.
 struct ValuesTests {
   /// A minimal catalog for the FROM-less `VALUES` runs — the constructor names
   /// no relation, so its single one-element relation is never scanned; the run
@@ -26,51 +26,58 @@ struct ValuesTests {
     }
   }
 
-  // MARK: - Desugar shape
-
-  @Test func `VALUES desugars to a UNION ALL of FROM-less SELECTs`() throws {
-    // `VALUES (1, 2), (3, 4)` lowers to `SELECT 1 AS column1, 2 AS column2
-    // UNION ALL SELECT 3, 4` — a `.setop(.union, …, all: true)` whose first arm
-    // is FROM-less and aliases the default output names.
-    let query = try parse(query: "VALUES (1, 2), (3, 4)")
-    guard case let .setop(kind, left, right, all) = query.body else {
-      Issue.record("expected a UNION ALL set operation")
-      return
+  /// The `SQLError` running a hand-built `query` against a fresh store raises,
+  /// or nil — the eager form the borrowed `~Escapable` catalog needs (it cannot
+  /// be captured by an `#expect(throws:)` closure).
+  private func fault(running query: Query) -> SQLError? {
+    do {
+      _ = try store().run(query, .standard)
+      return nil
+    } catch let error as SQLError {
+      return error
+    } catch {
+      return nil
     }
-    #expect(kind == .union)
-    #expect(all)
-
-    guard case let .select(head) = left.body,
-          case let .expressions(items) = head.projection else {
-      Issue.record("expected a FROM-less expression projection as the head arm")
-      return
-    }
-    #expect(head.from == nil)
-    #expect(items.map(\.alias) == ["column1", "column2"])
-    #expect(items.map(\.expression) == [.literal(.integer(1)),
-                                        .literal(.integer(2))])
-
-    // The trailing arm projects the bare expressions — a set operation names
-    // its result from the first arm alone, so a later arm carries no aliases.
-    guard case let .select(tail) = right.body,
-          case let .expressions(later) = tail.projection else {
-      Issue.record("expected a FROM-less expression projection as the tail arm")
-      return
-    }
-    #expect(tail.from == nil)
-    #expect(later.map(\.alias) == [nil, nil])
   }
 
-  @Test func `a single-row VALUES is one FROM-less SELECT`() throws {
-    // With one row there is no set operation — the desugar is the single arm.
-    let query = try parse(query: "VALUES (1, 2)")
-    guard case let .select(select) = query.body,
-          case let .expressions(items) = select.projection else {
-      Issue.record("expected a single FROM-less SELECT")
+  /// The `SQLError` deriving (validate) a hand-built `query`'s columns against
+  /// a fresh store raises, or nil.
+  private func fault(deriving query: Query) -> SQLError? {
+    do {
+      _ = try store().columns(of: query, routines: .standard, validate: true)
+      return nil
+    } catch let error as SQLError {
+      return error
+    } catch {
+      return nil
+    }
+  }
+
+  // MARK: - Node shape
+
+  @Test func `VALUES parses to a first-class values node`() throws {
+    // `VALUES (1, 2), (3, 4)` parses directly to the `.values` body — one row
+    // per parenthesised tuple, holding the bare element expressions in source
+    // order — rather than a `UNION ALL` of FROM-less selects.
+    let query = try parse(query: "VALUES (1, 2), (3, 4)")
+    guard case let .values(rows) = query.body else {
+      Issue.record("expected a values body")
       return
     }
-    #expect(select.from == nil)
-    #expect(items.map(\.alias) == ["column1", "column2"])
+    #expect(rows == [[.literal(.integer(1)), .literal(.integer(2))],
+                     [.literal(.integer(3)), .literal(.integer(4))]])
+    // Carrier-free — a bare constructor carries no query-level tail.
+    #expect(query.carriers.isEmpty)
+  }
+
+  @Test func `a single-row VALUES is a one-row values node`() throws {
+    // With one row the node holds a single tuple.
+    let query = try parse(query: "VALUES (1, 2)")
+    guard case let .values(rows) = query.body else {
+      Issue.record("expected a values body")
+      return
+    }
+    #expect(rows == [[.literal(.integer(1)), .literal(.integer(2))]])
   }
 
   // MARK: - Standalone
@@ -217,6 +224,35 @@ struct ValuesTests {
     try roster().expect(
         "SELECT Id FROM People WHERE Age = ANY (VALUES (30), (40))",
         yields: [[1], [3], [4]])
+  }
+
+  @Test func `VALUES is an EXISTS subquery`() throws {
+    // `EXISTS (VALUES (1))` tests the constructor's non-emptiness — a one-row
+    // constructor is always non-empty, so the EXISTS holds for every outer row.
+    try roster().expect(
+        "SELECT Id FROM People WHERE EXISTS (VALUES (1)) ORDER BY Id",
+        yields: [[1], [2], [3], [4], [5]])
+  }
+
+  // MARK: - CTE body
+
+  @Test func `VALUES is a CTE body`() throws {
+    // A `WITH t(a, b) AS (VALUES …)` binds the constructor's rows under the
+    // CTE's declared columns, so the trailing query reads them by name.
+    let rows = try store().run(Statement(parsing: """
+        WITH t(a, b) AS (VALUES (1, 2), (3, 4)) SELECT b, a FROM t
+        """), .standard)
+    #expect(rows == [[.integer(2), .integer(1)],
+                     [.integer(4), .integer(3)]])
+  }
+
+  @Test func `a VALUES CTE body infers the default column names`() throws {
+    // Without an explicit column list the CTE inherits the constructor's ISO
+    // default `column1, column2, …` output names.
+    let rows = try store().run(Statement(parsing: """
+        WITH t AS (VALUES (5, 6)) SELECT column1, column2 FROM t
+        """), .standard)
+    #expect(rows == [[.integer(5), .integer(6)]])
   }
 
   @Test func `an incompatible mixed VALUES column faults`() throws {
@@ -369,5 +405,68 @@ struct ValuesTests {
     try roster().expect(
         "SELECT Id FROM People WHERE Id IN (VALUES (3), (1) ORDER BY 1)",
         yields: [[1], [3]])
+  }
+
+  // MARK: - EXISTS cardinality probe
+
+  @Test func `an EXISTS VALUES probe evaluates no row cell`() throws {
+    // `EXISTS (VALUES …)` reads only the constructor's cardinality, so its cell
+    // expressions never evaluate — the probe rewrites each row to a cheap
+    // constant, preserving the row count. A would-fault `1 / 0` cell therefore
+    // never divides: the one-row constructor is non-empty, so EXISTS holds for
+    // every outer row. The schema derive types the row without evaluating it.
+    try roster().expect(
+        "SELECT Id FROM People WHERE EXISTS (VALUES (1 / 0)) ORDER BY Id",
+        yields: [[1], [2], [3], [4], [5]])
+    _ = try roster().columns(of:
+        parse(query: "SELECT Id FROM People WHERE EXISTS (VALUES (1 / 0))"),
+        routines: .standard, validate: true)
+  }
+
+  @Test func `a multi-row EXISTS VALUES probe evaluates no cell`() throws {
+    // The probe preserves the row count, not the cells: a two-row `VALUES (1 /
+    // 0), (2)` probes a two-row constant constructor — EXISTS true, no cell
+    // (neither the faulting `1 / 0` nor the `2`) evaluated.
+    try roster().expect(
+        "SELECT Id FROM People WHERE EXISTS (VALUES (1 / 0), (2)) ORDER BY Id",
+        yields: [[1], [2], [3], [4], [5]])
+  }
+
+  @Test func `a non-EXISTS VALUES still evaluates its cell and faults`()
+      throws {
+    // The probe rewrite is EXISTS-only, not a general suppression: a `VALUES (1
+    // / 0)` reached as a top-level query or as a derived table evaluates its
+    // cell as before, so the division still faults.
+    try store().expect("VALUES (1 / 0)", fails: .divide)
+    try store().expect("SELECT * FROM (VALUES (1 / 0)) AS t", fails: .divide)
+  }
+
+  // MARK: - Malformed hand-built nodes
+
+  @Test func `an empty VALUES node faults on run and validate`() throws {
+    // `Query`/`Query.Body` are public, so a caller can hand-build a `VALUES`
+    // with no rows — a shape the parser (≥ 1 row) never emits. The single
+    // deriver both the run and `columns(of: validate:)` reach rejects it with a
+    // typed `42601`, rather than silently deriving an empty relation.
+    let empty = Query(body: .values([]))
+    #expect(fault(running: empty)?.sqlstate == "42601")
+    #expect(fault(deriving: empty)?.sqlstate == "42601")
+  }
+
+  @Test func `a zero-column VALUES row faults on run and validate`() throws {
+    // A single zero-column row (`VALUES ()`, which the parser also rejects) is
+    // faulted alike — a query yielding a zero-column relation is not a valid
+    // shape — on both the run and the validate path.
+    let bare = Query(body: .values([[]]))
+    #expect(fault(running: bare)?.sqlstate == "42601")
+    #expect(fault(deriving: bare)?.sqlstate == "42601")
+  }
+
+  @Test func `a well-formed hand-built VALUES node runs`() throws {
+    // A hand-built node with rows and columns is unaffected by the guard.
+    let node = Query(body: .values([[.literal(.integer(1))],
+                                    [.literal(.integer(2))]]))
+    let rows = try store().run(node, .standard)
+    #expect(rows == [[.integer(1)], [.integer(2)]])
   }
 }

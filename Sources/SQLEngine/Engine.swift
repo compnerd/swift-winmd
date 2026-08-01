@@ -547,7 +547,7 @@ extension Catalog where Self: ~Escapable {
           // all page and order the same set-op output, so each validates it.
           let outputs = try columns(unifying: anchor, scope)
           for carrier in carriers {
-            try validate(carrier: carrier, over: outputs, arm: anchor.first,
+            try validate(carrier: carrier, over: outputs, arm: anchor.arm,
                          context.validating(true))
           }
         }
@@ -798,7 +798,7 @@ extension Catalog where Self: ~Escapable {
       // innermost first — the peel order — each over the prior result, so the
       // outer tail pages/orders what the inner already produced.
       for carrier in carriers {
-        result = try apply(carrier, result, named, arm: anchor.first, context)
+        result = try apply(carrier, result, named, arm: anchor.arm, context)
       }
     }
     return (result, merged)
@@ -807,7 +807,8 @@ extension Catalog where Self: ~Escapable {
   /// Applies a peeled query-level `carrier` — `DISTINCT`/`ORDER BY`/`OFFSET`·
   /// `FETCH` — to the materialised `rows` a recursive-CTE fixpoint produced,
   /// typed by the fixpoint's unified `carrier` `columns` (the body's arm-0
-  /// output names), `arm` the body's FIRST arm (the anchor).
+  /// output names), `arm` the body's leftmost arm as a carrier-free `Query`
+  /// (the anchor).
   ///
   /// The rows are bound as a temporary relation under a non-spellable name; a
   /// bare scan over it seeds the shared `carried(over:)` carrier resolver — the
@@ -821,7 +822,7 @@ extension Catalog where Self: ~Escapable {
   private borrowing func apply(_ carrier: Query.Carrier,
                                _ rows: Array<Array<Value>>,
                                _ columns: Array<ResolvedColumn>,
-                               arm: Select, _ context: Context)
+                               arm: Query, _ context: Context)
       throws(SQLError) -> Array<Array<Value>> {
     let name = "*fixpoint"
     let temp = RelationInstance(from: columns, rows: rows)
@@ -873,12 +874,13 @@ extension Catalog where Self: ~Escapable {
   /// shared `carried(over:)` resolver `apply` runs, under a validating context,
   /// so a schema-path `columns(of:validate:true)` faults a carrier `ORDER BY`
   /// naming a missing column or function exactly as the run does, closing the
-  /// run-vs-validate gap. `arm` is the body's FIRST arm (the anchor), the
-  /// projection surface an ordinal / projected-expression / aliased key binds
-  /// against. Discards the resolved plan — only its resolution can fault.
+  /// run-vs-validate gap. `arm` is the body's leftmost arm as a carrier-free
+  /// `Query` (the anchor), the projection surface an ordinal / projected-
+  /// expression / aliased key binds against. Discards the resolved plan — only
+  /// its resolution can fault.
   private borrowing func validate(carrier: Query.Carrier,
                                   over columns: Array<ResolvedColumn>,
-                                  arm: Select, _ context: Context)
+                                  arm: Query, _ context: Context)
       throws(SQLError) {
     let name = "*fixpoint"
     let temp = RelationInstance(from: columns, rows: [])

@@ -57,13 +57,14 @@ extension Catalog where Self: ~Escapable {
     // projected aggregate by resolved identity (`SUM(s.Qty)` ≡ projected
     // `SUM(Qty)`), the plain grouped `ORDER BY` path's rule. A plain arm has no
     // grouped aggregate space and injects none.
+    let arm = union.arm
     let resolver: Resolver? =
-        if case .arm = union.first.grouping {
-          try projected(arm: union.first, context)
+        if case let .select(select) = arm.body, case .arm = select.grouping {
+          try projected(arm: select, context)
         } else {
           nil
         }
-    return try carried(over: plan, output: cols, arm: union.first,
+    return try carried(over: plan, output: cols, arm: arm,
                        distinct: distinct, order: order, limit: limit,
                        generated: generated, resolver: resolver, context)
   }
@@ -93,9 +94,9 @@ extension Catalog where Self: ~Escapable {
   /// `OFFSET`·`FETCH` — over an already-compiled set-operation `plan`, resolved
   /// through the setop's output scope. `plan`'s output sits at slots
   /// `0 ..< output.count`, the arm-0-named, type-unified result columns
-  /// (`output`); `arm` is the union's FIRST arm — its projection is the surface
-  /// a projected-expression / aliased / qualified ORDER BY key matches against
-  /// by AST (a plain set-op arm).
+  /// (`output`); `arm` is the query's leftmost arm (a carrier-free `Query`) —
+  /// its `items` projection surface is what a projected-expression / aliased /
+  /// qualified ORDER BY key matches against by AST (a plain set-op arm).
   ///
   /// `resolver`, when injected, lowers the arm's projected items to a grouped
   /// slot space and lowers an arbitrary expression to the same space — a
@@ -118,7 +119,7 @@ extension Catalog where Self: ~Escapable {
   /// (`0 ..< real`), which also trims any hidden materialised column.
   internal borrowing func carried(over plan: Plan,
                                   output cols: Array<ResolvedColumn>,
-                                  arm: Select, distinct: Bool, order: Order?,
+                                  arm: Query, distinct: Bool, order: Order?,
                                   limit: Limit?, generated: Int,
                                   resolver: Resolver? = nil,
                                   _ context: Context)
@@ -143,14 +144,7 @@ extension Catalog where Self: ~Escapable {
     // slots `0 ..< real` are the real outputs and `real ..< width` the hidden
     // ones. The hidden expressions map to their `*gsN` output slots for a
     // materialised ORDER BY key.
-    let items: Array<Projected> = switch arm.projection {
-    case let .expressions(list):
-      list
-    case let .columns(columns):
-      columns.map { Projected(expression: .column($0)) }
-    case .all:
-      []
-    }
+    let items = arm.items
     // Range-check the `generated` count against the width and derive the trim
     // width `real` through the shared guard (see `real(trimming:of:)`), which
     // faults a malformed public-AST count rather than letting the `0 ..< real`
@@ -207,7 +201,7 @@ extension Catalog where Self: ~Escapable {
     // ORDER BY / DISTINCT names resolve unqualified over the `schema`; its
     // inner query is inspected nowhere here, so the arm-0 `SELECT` stands in
     // for it uniformly.
-    let scope = Scope([(Relation(derived: .select(arm), as: ""), schema)])
+    let scope = Scope([(Relation(derived: arm, as: ""), schema)])
     // collect and resolve the carrier ORDER BY's own nested subqueries — the
     // same machinery a plain `SELECT … ORDER BY CASE WHEN EXISTS (…) …` uses
     // (`subquery(_:_:_:within:)` builds a `Resolution` recording each nested
@@ -221,31 +215,23 @@ extension Catalog where Self: ~Escapable {
     // position bars a new correlation (`.barred` inside `scope.order`), so a
     // genuinely-unsupported case still faults exactly as it does on a SELECT.
     //
-    // `roles(of:)` classifies a subquery by the clause it occurs in, so the
-    // recording pass must inspect a select whose ORDER BY IS the carrier's —
-    // NOT the bare `arm`, whose own ORDER BY does not carry the carrier's sort-
-    // key subqueries. Reusing `arm` there records no runtime plan (empty
-    // roles), so a correlated carrier sort-key subquery lowers to a
+    // `roles(of:order:)` classifies a subquery by the clause it occurs in — the
+    // carrier path's `ORDER BY` IS the carrier's, NOT the leftmost arm's own (a
+    // bare arm's ORDER BY does not carry the carrier's sort-key subqueries).
+    // Classifying over `arm`'s clauses ⊕ the carrier's `order` records a
+    // correlated carrier sort-key subquery's runtime plan (else it lowers to a
     // `Term.subquery`/`.parameter` yet faults "a correlated subquery plan was
-    // not compiled" at execution — where the same ORDER BY on a plain SELECT
-    // records and re-executes it per row. Overlay the carrier's `order` on the
-    // arm (keeping the arm's projection surface a projected-expression key
-    // resolves against) so the recording sees the carrier's sort-key subqueries
-    // in their ORDER BY role. The projected-key resolution itself still runs
-    // over `arm` in `scope.order` below; `subquery(_:_:_:within:)` reads the
-    // passed select ONLY for `roles(of:)`.
+    // not compiled" at execution), and resolves for any leftmost arm — a
+    // `Select` or a `VALUES` — without a synthetic classifier `Select`.
     var subqueries = Array<Query>()
     for key in order?.keys ?? [] {
       if case let .expression(expression) = key.sort {
         expression.collect(subqueries: &subqueries)
       }
     }
-    let classifier = Select(distinct: arm.distinct, projection: arm.projection,
-                            from: arm.from, joins: arm.joins,
-                            predicate: arm.predicate, grouping: arm.grouping,
-                            having: arm.having, order: order, limit: arm.limit)
-    let resolution = try subquery(subqueries, classifier, context,
-                                  within: scope)
+    let resolution = try subquery(subqueries,
+                                  roles: { arm.roles(of: $0, order: order) },
+                                  context, within: scope)
     // The identity projection over the REAL output slots, and the REAL output
     // names a bare ORDER BY name or a DISTINCT key binds against — alias-or-
     // bare, `nil` for an unnamed output. `scope.order` bounds an ordinal key by

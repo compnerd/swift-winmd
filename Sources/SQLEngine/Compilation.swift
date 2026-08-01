@@ -364,7 +364,12 @@ extension Catalog where Self: ~Escapable {
                          generated: carrier.generated, context)
     }
     guard case let .setop(kind, left, right, all) = query.body else {
-      return try compile(query.first, context)
+      // A carrier-free non-set-operation body is a single `SELECT` (a `.values`
+      // body is intercepted ahead of this dispatch), compiled directly.
+      guard case let .select(select) = query.body else {
+        preconditionFailure("a carrier-free non-setop body is a SELECT")
+      }
+      return try compile(select, context)
     }
 
     // A set operation collects no derived aliases at the query level — arms are
@@ -376,17 +381,17 @@ extension Catalog where Self: ~Escapable {
     // d` resolves `d`'s width. It is per arm so the left arm's `d` never
     // leaks to the right (the arm-scoping fix); the width each check computes
     // matches what the arm actually produces at run.
-    // Compare each operand's real output width — its first arm's projection
-    // width less the hidden `generated` sort columns the carriers on the path
-    // appended (a parenthesised operand with an unprojected-aggregate ORDER BY
-    // carries one, trimmed at its carrier), so a valid one-column union of such
-    // an operand is not rejected on the leaked hidden column.
-    let head = try augment(context, for: .select(query.first), rows: false)
-    let tail = try augment(context, for: .select(right.first), rows: false)
+    // Compare each operand's real output width — its leftmost arm's width less
+    // the hidden `generated` sort columns the carriers on the path appended (a
+    // parenthesised operand with an unprojected-aggregate ORDER BY carries one,
+    // trimmed at its carrier), so a valid one-column union of such an operand
+    // is not rejected on the leaked hidden column. `arity(_ query:_:)` descends
+    // to the leftmost arm and augments it, so it measures a `SELECT`, a
+    // `TABLE`, or a `VALUES` operand alike.
     let width = try real(trimming: query.generated,
-                         of: arity(query.first, head))
+                         of: arity(query, context))
     let count = try real(trimming: right.generated,
-                         of: arity(right.first, tail))
+                         of: arity(right, context))
     guard count == width else { throw .arity(width, count) }
     // Both arms of a set-operation subquery correlate against the same
     // enclosing scope, so each lowers under the shared `context.outer`. The
@@ -513,6 +518,22 @@ extension Catalog where Self: ~Escapable {
   internal borrowing func subquery(_ queries: Array<Query>, _ select: Select,
                                    _ context: Context, within: Scope?)
       throws(SQLError) -> Resolution {
+    // The select classifies each collected subquery's role (`scalar`/`valued`/
+    // `existential`); the carrier path supplies its own body-agnostic
+    // classifier through the roles overload below.
+    try subquery(queries, roles: { select.roles(of: $0) }, context,
+                 within: within)
+  }
+
+  /// `subquery(_:_:_:within:)` with the subquery-role classification supplied
+  /// as a closure rather than read off a `Select` — the seam the carrier uses
+  /// to classify a query-level `ORDER BY`'s subqueries over a leftmost arm that
+  /// need not be a `Select` (a `VALUES` body). Every other caller passes a
+  /// `Select`'s own `roles(of:)`.
+  internal borrowing func subquery(_ queries: Array<Query>,
+                                   roles: (Query) -> Array<Role>,
+                                   _ context: Context, within: Scope?)
+      throws(SQLError) -> Resolution {
     // A nested subquery's FROM resolves against base tables and enclosing CTEs,
     // NOT the enclosing SELECT's derived-table aliases (SELECT-scoped, unseen
     // by a subquery's FROM as a base-table alias would be) — so strip them, the
@@ -601,7 +622,7 @@ extension Catalog where Self: ~Escapable {
       // exactly as the uncorrelated EXISTS probes. A schema-only path threads a
       // throwaway memo, harmless there.
       if !nested.correlation.isEmpty {
-        for role in select.roles(of: query) {
+        for role in roles(query) {
           // Recompile the EXISTS probe leniently (`validate: false`), the same
           // way the `plan` above compiled: this builds the run-time plan a
           // correlated re-execution reuses, so it must not eager-type-check a
@@ -781,6 +802,26 @@ extension Catalog where Self: ~Escapable {
       relations.append((joins[index].relation, resolved.schema))
     }
     return (joined, relations)
+  }
+
+  /// The raw output width of `query`'s leftmost arm — the operand width the
+  /// `UNION` arity check compares (before trimming the carriers' hidden
+  /// `generated` sort columns). It descends the left arm of each set operation
+  /// to the leftmost non-`setop` body and measures it: a `SELECT`'s projected
+  /// width (a `*` resolved against its own augmented FROM/JOIN scope), or a
+  /// `VALUES` body's row width. Body-agnostic, so a `VALUES` or `TABLE` operand
+  /// measures exactly as a `SELECT` one.
+  private borrowing func arity(_ query: Query, _ context: Context)
+      throws(SQLError) -> Int {
+    switch query.body {
+    case let .setop(_, left, _, _):
+      return try arity(left, context)
+    case let .select(select):
+      // The leftmost arm resolves its own FROM/JOIN derived aliases (arms are
+      // SELECT-scoped), so augment it before measuring a `*`.
+      let scope = try augment(context, for: .select(select), rows: false)
+      return try arity(select, scope)
+    }
   }
 
   /// The number of result columns `select` projects — the extent of a `*` over

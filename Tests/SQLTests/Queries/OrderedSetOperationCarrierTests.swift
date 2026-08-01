@@ -110,8 +110,8 @@ struct OrderedSetOperationCarrierTests {
     // augmenting `x` before the arm scan. Alice (Age 30) matches the arm value.
     try people().expect("""
         SELECT Id FROM People p WHERE p.Age IN
-          (SELECT V FROM (SELECT 30 AS V) AS x WHERE x.V = p.Age
-           UNION SELECT 99 ORDER BY 1)
+          (SELECT V FROM (VALUES (30)) AS x(V) WHERE x.V = p.Age
+           UNION VALUES (99) ORDER BY 1)
         """, yields: [[1]])
   }
 
@@ -121,8 +121,8 @@ struct OrderedSetOperationCarrierTests {
     // ordered form now matches it exactly.
     try people().expect("""
         SELECT Id FROM People p WHERE p.Age IN
-          (SELECT V FROM (SELECT 30 AS V) AS x WHERE x.V = p.Age
-           UNION SELECT 99)
+          (SELECT V FROM (VALUES (30)) AS x(V) WHERE x.V = p.Age
+           UNION VALUES (99))
         """, yields: [[1]])
   }
 
@@ -176,8 +176,9 @@ struct OrderedSetOperationCarrierTests {
     try people().expect("""
         SELECT Id FROM People p WHERE p.Age IN
           (SELECT V FROM S
-            UNION ALL (SELECT V FROM (SELECT 30 AS V) AS d WHERE d.V = p.Age
-                        UNION ALL SELECT 99 ORDER BY V FETCH FIRST 1 ROW ONLY))
+            UNION ALL (SELECT V FROM (VALUES (30)) AS d(V) WHERE d.V = p.Age
+                        UNION ALL VALUES (99)
+                        ORDER BY V FETCH FIRST 1 ROW ONLY))
         """, yields: [[1]])
   }
 
@@ -222,8 +223,10 @@ struct OrderedSetOperationCarrierTests {
       throws {
     // The uncorrelated form the correlated one must match: its arms are folded
     // eagerly, faulting `.operand` at run whether ordered or not.
-    try people().expect("SELECT Id FROM People WHERE Age = (SELECT 'a' UNION SELECT 1 ORDER BY 1)",
-                        fails: .operand("UNION arms have irreconcilable types"))
+    try people().expect("""
+        SELECT Id FROM People
+          WHERE Age = (VALUES ('a') UNION VALUES (1) ORDER BY 1)
+        """, fails: .operand("UNION arms have irreconcilable types"))
   }
 
   @Test func `an unreached correlated scalar ordered set op does not fault`()
@@ -464,12 +467,12 @@ struct OrderedSetOperationCarrierTests {
     // The arms select from arm-local derived tables (`d`, `e`), not `Anchor` —
     // `Anchor` only gives the catalog a base relation. Ordered = bare, sorted.
     try cat.expect("""
-        SELECT v FROM (SELECT 1 AS v) AS d WHERE v = 1
-        UNION ALL SELECT v FROM (SELECT 2 AS v) AS e ORDER BY 1
+        SELECT v FROM (VALUES (1)) AS d(v) WHERE v = 1
+        UNION ALL SELECT v FROM (VALUES (2)) AS e(v) ORDER BY 1
         """, yields: [[1], [2]])
     try cat.expect("""
-        SELECT v FROM (SELECT 1 AS v) AS d WHERE v = 1
-        UNION ALL SELECT v FROM (SELECT 2 AS v) AS e
+        SELECT v FROM (VALUES (1)) AS d(v) WHERE v = 1
+        UNION ALL SELECT v FROM (VALUES (2)) AS e(v)
         """, yields: [[1], [2]])
   }
 
@@ -486,9 +489,9 @@ struct OrderedSetOperationCarrierTests {
       Relation("Anchor", ["x": .integer]) { Row(0) }
     }
     try cat.expect("""
-        SELECT v FROM (SELECT 1 AS v) AS d WHERE v = 1
-        UNION SELECT v FROM (SELECT 1 AS v) AS e WHERE v = 1
-        UNION SELECT v FROM (SELECT 2 AS v) AS f WHERE v = 2
+        SELECT v FROM (VALUES (1)) AS d(v) WHERE v = 1
+        UNION SELECT v FROM (VALUES (1)) AS e(v) WHERE v = 1
+        UNION SELECT v FROM (VALUES (2)) AS f(v) WHERE v = 2
         ORDER BY 1 OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY
         """, yields: [[2]])
   }
@@ -504,10 +507,10 @@ struct OrderedSetOperationCarrierTests {
       Relation("Anchor", ["x": .integer]) { Row(0) }
     }
     cat.expect("""
-        SELECT v FROM NoSuchRel UNION ALL SELECT 2 AS v ORDER BY 1
+        SELECT v FROM NoSuchRel UNION ALL VALUES (2) ORDER BY 1
         """, fails: .relation("NoSuchRel"))
     cat.expect("""
-        SELECT v FROM NoSuchRel UNION ALL SELECT 2 AS v
+        SELECT v FROM NoSuchRel UNION ALL VALUES (2)
         """, fails: .relation("NoSuchRel"))
   }
 

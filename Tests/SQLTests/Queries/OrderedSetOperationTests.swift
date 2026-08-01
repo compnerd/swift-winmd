@@ -266,8 +266,8 @@ struct OrderedSetOperationTests {
     // the direct `setop` and a correlated-subquery setop use), materialising
     // each arm's derived table in its own scope: 1 then 2.
     try pair().expect("""
-        SELECT v FROM (SELECT 1 AS v) AS d
-         UNION ALL SELECT v FROM (SELECT 2 AS v) AS e ORDER BY 1
+        SELECT v FROM (VALUES (1)) AS d(v)
+         UNION ALL SELECT v FROM (VALUES (2)) AS e(v) ORDER BY 1
         """, yields: [[1], [2]])
   }
 
@@ -276,8 +276,8 @@ struct OrderedSetOperationTests {
     // The per-arm materialisation rides any set operation: an `INTERSECT` of
     // two derived arms sharing the row 1 keeps it.
     try pair().expect("""
-        SELECT v FROM (SELECT 1 AS v) AS d
-         INTERSECT SELECT v FROM (SELECT 1 AS v) AS e ORDER BY 1
+        SELECT v FROM (VALUES (1)) AS d(v)
+         INTERSECT SELECT v FROM (VALUES (1)) AS e(v) ORDER BY 1
         """, yields: [[1]])
   }
 
@@ -285,8 +285,8 @@ struct OrderedSetOperationTests {
       throws {
     // `EXCEPT` of derived arms keeps the left row absent from the right.
     try pair().expect("""
-        SELECT v FROM (SELECT 1 AS v) AS d
-         EXCEPT SELECT v FROM (SELECT 2 AS v) AS e ORDER BY 1
+        SELECT v FROM (VALUES (1)) AS d(v)
+         EXCEPT SELECT v FROM (VALUES (2)) AS e(v) ORDER BY 1
         """, yields: [[1]])
   }
 

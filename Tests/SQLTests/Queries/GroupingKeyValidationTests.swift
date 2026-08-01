@@ -321,12 +321,12 @@ struct GroupingKeyValidationTests {
 
   @Test func `GROUP BY of a scalar subquery resolves runs and validates`()
       throws {
-    // A scalar subquery is a scalar expression, so `GROUP BY (SELECT 1)` is a
+    // A scalar subquery is a scalar expression, so `GROUP BY (VALUES (1))` is a
     // valid grouping key — the constant `1` puts every row in one group. The
     // subquery collectors now visit `select.grouping`, so the occurrence is
     // registered and lowers exactly as the same subquery in any other clause;
     // before the fix it faulted "a subquery is not supported in this position".
-    let sql = "SELECT COUNT(*) FROM Orders GROUP BY (SELECT 1)"
+    let sql = "SELECT COUNT(*) FROM Orders GROUP BY (VALUES (1))"
     let columns = try shipments().columns(of: parse(query: sql), validate: true)
     #expect(columns.count == 1)
     try shipments().expect(sql, yields: [[2]])
@@ -357,7 +357,7 @@ struct GroupingKeyValidationTests {
     // grouping key registers once (its role is shared) — no double-register
     // or width mismatch — and groups every row into the one constant group.
     let sql = """
-        SELECT (SELECT 1) AS k, COUNT(*) FROM Orders GROUP BY (SELECT 1)
+        SELECT (VALUES (1)) AS k, COUNT(*) FROM Orders GROUP BY (VALUES (1))
         """
     let columns = try shipments().columns(of: parse(query: sql), validate: true)
     #expect(columns.count == 2)

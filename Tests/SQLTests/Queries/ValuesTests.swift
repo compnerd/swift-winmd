@@ -187,18 +187,19 @@ struct ValuesTests {
     // `(VALUES (1))` is a query, so it is a first-class scalar subquery: a
     // one-row one-column constructor yields that single scalar, exactly as
     // `(SELECT …)` does. The parse must route the parenthesised `VALUES` to the
-    // query parser, not the value-expression parser.
-    let query = try parse(query: "SELECT (VALUES (1)) AS x")
-    guard case let .select(select) = query.body,
-          case let .expressions(items) = select.projection else {
-      Issue.record("expected an expression projection")
+    // query parser, not the value-expression parser — here nested as the
+    // element of an outer `VALUES` row.
+    let query = try parse(query: "VALUES ((VALUES (1)))")
+    guard case let .values(rows) = query.body, let row = rows.first,
+          row.count == 1 else {
+      Issue.record("expected a single-element VALUES row")
       return
     }
-    guard case .subquery = items[0].expression else {
+    guard case .subquery = row[0] else {
       Issue.record("expected a scalar subquery expression")
       return
     }
-    try store().expect("SELECT (VALUES (1)) AS x", yields: [[1]])
+    try store().expect("VALUES ((VALUES (1)))", yields: [[1]])
   }
 
   @Test func `VALUES is an IN-subquery`() throws {
@@ -441,7 +442,7 @@ struct ValuesTests {
     try store().expect(
         "SELECT column1 FROM (VALUES (3), (1), (2) ORDER BY 1) AS t",
         yields: [[1], [2], [3]])
-    try store().expect("SELECT (VALUES (5) ORDER BY 1) AS x", yields: [[5]])
+    try store().expect("VALUES ((VALUES (5) ORDER BY 1))", yields: [[5]])
     try roster().expect(
         "SELECT Id FROM People WHERE Id IN (VALUES (3), (1) ORDER BY 1)",
         yields: [[1], [3]])

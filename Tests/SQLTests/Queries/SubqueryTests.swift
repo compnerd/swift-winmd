@@ -1379,7 +1379,7 @@ struct ViewPushdownSubqueryTests {
       throws {
     // Bug 2, the inverse direction: the VIEW body's `EXISTS (SELECT V FROM S)`
     // resolves against the view's own base `S` (here empty), and the caller's
-    // AST-identical `WITH S AS (SELECT 1)` CTE must NOT leak into that body.
+    // AST-identical `WITH S(V) AS (VALUES (1))` CTE must not leak into it.
     // Keying the run-time cache by the `Query` value alone let the caller's
     // (non-empty) CTE result win the merge, so the view body's own EXISTS
     // wrongly read the CTE and kept every row. Keying by occurrence — each
@@ -1389,7 +1389,7 @@ struct ViewPushdownSubqueryTests {
     // non-empty CTE and keeps them. The view filters correctly (its base `S` is
     // empty), so the result is empty.
     let statement = try Statement(parsing:
-        "WITH S(V) AS (SELECT 1) "
+        "WITH S(V) AS (VALUES (1)) "
         + "SELECT Id FROM VN WHERE EXISTS (SELECT V FROM S)")
     let rows = try hollow().run(statement, .standard)
     // The view body's EXISTS reads its empty base `S`, filtering every row —
@@ -1417,7 +1417,7 @@ struct ViewPushdownSubqueryTests {
     // EXISTS (base `S` non-empty) is TRUE too, so every row survives — the
     // caller's CTE result did NOT collapse the view body's base read.
     let full = try Statement(parsing:
-        "WITH S(V) AS (SELECT 1) "
+        "WITH S(V) AS (VALUES (1)) "
         + "SELECT Id FROM VN WHERE EXISTS (SELECT V FROM S)")
     let kept: Array<Array<Value>> = [[.integer(1)], [.integer(2)]]
     #expect(try nested().run(full, .standard) == kept)
@@ -1578,41 +1578,41 @@ struct CorrelatedOwnDerivationTests {
   @Test func `a correlated EXISTS binds its own derived table`() throws {
     // Pre-fix: the correlated `execute(plan, context)` ran the precompiled plan
     // under only the parent overlay, so the plan's `.scan("d")` for the derived
-    // table `(SELECT 1 AS k) AS d` faulted `SQLError.relation("d")`. Post-fix
+    // table `(VALUES (1)) AS d(k)` faulted `SQLError.relation("d")`. Post-fix
     // the execute path augments the subquery's own derived rows first, binding
     // `d`. The self-contained `d.k` is 1, correlated `= T.Id` in the subquery's
     // WHERE, so the EXISTS is TRUE only for the outer row `Id = 1`.
     try fixture().expect(
         """
         SELECT Id FROM T \
-        WHERE EXISTS (SELECT 1 FROM (SELECT 1 AS k) AS d WHERE d.k = T.Id)
+        WHERE EXISTS (SELECT 1 FROM (VALUES (1)) AS d(k) WHERE d.k = T.Id)
         """,
         yields: [[1]])
   }
 
   @Test func `a correlated scalar subquery binds its own derived table`()
       throws {
-    // The scalar variant: `(SELECT d.k FROM (SELECT 1 AS k) AS d WHERE d.k =
+    // The scalar variant: `(SELECT d.k FROM (VALUES (1)) AS d(k) WHERE d.k =
     // T.Id)` derives `d.k` (a self-contained 1) and correlates it `= T.Id` per
     // outer row, collapsing to 1 for `Id = 1` and NULL (no matching row) for
     // the rest. Pre-fix it faulted `.relation("d")`; post-fix `d` binds a row.
     try fixture().expect(
         """
-        SELECT (SELECT d.k FROM (SELECT 1 AS k) AS d WHERE d.k = T.Id) \
+        SELECT (SELECT d.k FROM (VALUES (1)) AS d(k) WHERE d.k = T.Id) \
         FROM T
         """,
         yields: [[1], [nil], [nil]])
   }
 
   @Test func `a correlated IN binds its own derived table`() throws {
-    // The `IN (Q)` variant: `Id IN (SELECT d.k FROM (SELECT 1 AS k) AS d WHERE
+    // The `IN (Q)` variant: `Id IN (SELECT d.k FROM (VALUES (1)) AS d(k) WHERE
     // d.k = T.Id)` — the correlated subquery yields its self-contained `d.k`
     // (1) only when `d.k = T.Id`, so it is TRUE for `Id = 1` alone. Pre-fix the
     // per-row execute faulted `.relation("d")`; post-fix `d` binds each row.
     try fixture().expect(
         """
         SELECT Id FROM T \
-        WHERE Id IN (SELECT d.k FROM (SELECT 1 AS k) AS d WHERE d.k = T.Id)
+        WHERE Id IN (SELECT d.k FROM (VALUES (1)) AS d(k) WHERE d.k = T.Id)
         """,
         yields: [[1]])
   }
@@ -1621,7 +1621,7 @@ struct CorrelatedOwnDerivationTests {
       throws {
     // The SET-operation shape: the correlated `EXISTS` subquery is a `UNION
     // ALL` whose LEFT arm derives its own `d` and correlates it `d.k = T.Id`,
-    // and whose RIGHT arm is a bare `SELECT 2`. Pre-fix the correlated
+    // and whose RIGHT arm is a bare `VALUES (2)`. Pre-fix the correlated
     // augment-and-execute augmented at the query level, binding no arm-local
     // `d`, so the left arm's `.scan("d")` faulted `.relation("d")`; post-fix
     // it augments each ARM, so `d` binds per outer row. The right arm always
@@ -1629,8 +1629,8 @@ struct CorrelatedOwnDerivationTests {
     try fixture().expect(
         """
         SELECT Id FROM T WHERE EXISTS ( \
-        SELECT k FROM (SELECT 1 AS k) AS d WHERE d.k = T.Id \
-        UNION ALL SELECT 2)
+        SELECT k FROM (VALUES (1)) AS d(k) WHERE d.k = T.Id \
+        UNION ALL VALUES (2))
         """,
         yields: [[1], [2], [3]])
   }
@@ -1638,16 +1638,16 @@ struct CorrelatedOwnDerivationTests {
   @Test func `a correlated IN setop keeps only the row its arm derives`()
       throws {
     // A discriminating setop: `Id IN (SELECT d.k … WHERE d.k = T.Id UNION ALL
-    // SELECT 9)`. The right arm contributes the constant 9 (never an `Id`), so
-    // the membership turns ONLY on the left arm's per-row correlated
+    // VALUES (9))`. The right arm contributes the constant 9 (never an `Id`),
+    // so the membership turns ONLY on the left arm's per-row correlated
     // derivation — `d.k` (1) is in the column iff `T.Id = 1`. So only the outer
     // row `Id = 1` is kept, proving each arm augments its own `d` under the
     // per-row correlation rather than merely not faulting.
     try fixture().expect(
         """
         SELECT Id FROM T WHERE Id IN ( \
-        SELECT d.k FROM (SELECT 1 AS k) AS d WHERE d.k = T.Id \
-        UNION ALL SELECT 9)
+        SELECT d.k FROM (VALUES (1)) AS d(k) WHERE d.k = T.Id \
+        UNION ALL VALUES (9))
         """,
         yields: [[1]])
   }
@@ -1787,32 +1787,29 @@ struct ProjectionSubqueryReachabilityTests {
   }
 }
 
-// MARK: - FROM-less scalar subqueries
+// MARK: - VALUES row constructors nesting a subquery
 
-/// A FROM-less scalar `SELECT <expr-list>` whose projection nests an
-/// uncorrelated `EXISTS`/`IN (subquery)` compiles, validates, and runs exactly
-/// as the identical projection does with a FROM clause. The scalar lowering
-/// (`projection.scalar`) is the one compile path that otherwise threads the
-/// DEFAULT unsupported subquery map, so a subquery there faulted at compile
-/// before the run-time cache was ever built; the map is now threaded through so
-/// the term lowers, and `run`'s cache (built from `query.subqueries`, which
-/// descends the projection) materialises the subquery the evaluator reads.
-struct FromlessScalarSubqueryTests {
+/// A `VALUES` row whose element nests an uncorrelated `EXISTS`/`IN (subquery)`
+/// compiles, validates, and runs — the constructor's element lowers its nested
+/// subquery the same as any value expression, and `run`'s cache (built from
+/// `query.subqueries`, which descends the constructor) materialises the
+/// subquery the evaluator reads.
+struct ValuesRowSubqueryTests {
   @Test func `a scalar EXISTS yields 1 when the subquery is non-empty`()
       throws {
-    // No outer FROM; the subquery's own `FROM T` is fine. `T` is non-empty, so
+    // The row element nests `EXISTS (SELECT Id FROM T)`; `T` is non-empty, so
     // `EXISTS` is TRUE and the CASE yields 1.
     try fixture().expect(
-        "SELECT CASE WHEN EXISTS (SELECT Id FROM T) THEN 1 ELSE 0 END",
+        "VALUES (CASE WHEN EXISTS (SELECT Id FROM T) THEN 1 ELSE 0 END)",
         yields: [[1]])
   }
 
   @Test func `a scalar EXISTS yields 0 when the subquery is empty`() throws {
     // The subquery filters to zero rows, so `EXISTS` is FALSE and the CASE
-    // yields 0 — the scalar projection runs against the single empty row.
+    // yields 0 — the constructor's single row carries it.
     try fixture().expect(
-        "SELECT CASE WHEN EXISTS (SELECT Id FROM T WHERE Id = 99) "
-        + "THEN 1 ELSE 0 END",
+        "VALUES (CASE WHEN EXISTS (SELECT Id FROM T WHERE Id = 99) "
+        + "THEN 1 ELSE 0 END)",
         yields: [[0]])
   }
 
@@ -1820,11 +1817,11 @@ struct FromlessScalarSubqueryTests {
     // Over the empty subquery `NOT EXISTS` is TRUE (yields 1); over the
     // non-empty one it is FALSE (yields 0).
     try fixture().expect(
-        "SELECT CASE WHEN NOT EXISTS (SELECT Id FROM T WHERE Id = 99) "
-        + "THEN 1 ELSE 0 END",
+        "VALUES (CASE WHEN NOT EXISTS (SELECT Id FROM T WHERE Id = 99) "
+        + "THEN 1 ELSE 0 END)",
         yields: [[1]])
     try fixture().expect(
-        "SELECT CASE WHEN NOT EXISTS (SELECT Id FROM T) THEN 1 ELSE 0 END",
+        "VALUES (CASE WHEN NOT EXISTS (SELECT Id FROM T) THEN 1 ELSE 0 END)",
         yields: [[0]])
   }
 
@@ -1833,10 +1830,10 @@ struct FromlessScalarSubqueryTests {
     // `77 IN (…)` is FALSE (yields 0) — the value-list `IN` core over the
     // subquery's single materialised column.
     try fixture().expect(
-        "SELECT CASE WHEN 10 IN (SELECT V FROM S) THEN 1 ELSE 0 END",
+        "VALUES (CASE WHEN 10 IN (SELECT V FROM S) THEN 1 ELSE 0 END)",
         yields: [[1]])
     try fixture().expect(
-        "SELECT CASE WHEN 77 IN (SELECT V FROM S) THEN 1 ELSE 0 END",
+        "VALUES (CASE WHEN 77 IN (SELECT V FROM S) THEN 1 ELSE 0 END)",
         yields: [[0]])
   }
 
@@ -1844,27 +1841,27 @@ struct FromlessScalarSubqueryTests {
       throws {
     // The `IN (Q)` single-column arity is decided from the subquery's compiled
     // width at compile — cursor-free — so a two-column subquery faults
-    // `SQLError.arity` on the FROM-less path exactly as on the FROM'd one.
+    // `SQLError.arity` in the row element exactly as it does under a FROM.
     try fixture().expect(
-        "SELECT CASE WHEN 1 IN (SELECT Id, K FROM T) THEN 1 ELSE 0 END",
+        "VALUES (CASE WHEN 1 IN (SELECT Id, K FROM T) THEN 1 ELSE 0 END)",
         fails: .arity(1, 2))
   }
 
   @Test func `columns validates a scalar EXISTS projection`() throws {
-    // The schema path compiles and type-checks the same FROM-less scalar
-    // projection, so `columns(of:validate:)` accepts exactly what the run does.
+    // The schema path compiles and type-checks the same constructor element, so
+    // `columns(of:validate:)` accepts exactly what the run does.
     let query = try parse(query:
-        "SELECT CASE WHEN EXISTS (SELECT Id FROM T) THEN 1 ELSE 0 END")
+        "VALUES (CASE WHEN EXISTS (SELECT Id FROM T) THEN 1 ELSE 0 END)")
     let columns = try fixture().columns(of: query, validate: true)
     #expect(columns.count == 1)
   }
 
   @Test func `a bad inner column in a scalar subquery faults the check`()
       throws {
-    // A bad column inside the scalar projection's subquery faults the
-    // validation exactly as a run would — the check reaches the subquery.
+    // A bad column inside the row element's subquery faults the validation
+    // exactly as a run would — the check reaches the subquery.
     let query = try parse(query:
-        "SELECT CASE WHEN EXISTS (SELECT Missing FROM T) THEN 1 ELSE 0 END")
+        "VALUES (CASE WHEN EXISTS (SELECT Missing FROM T) THEN 1 ELSE 0 END)")
     let resolve = { () throws -> Array<OutputColumn> in
       try fixture().columns(of: query, validate: true)
     }
@@ -1873,20 +1870,19 @@ struct FromlessScalarSubqueryTests {
     }
   }
 
-  @Test func `a plain scalar SELECT without a subquery is unaffected`() throws {
-    // A FROM-less scalar select carrying no subquery lowers exactly as before —
-    // the threaded map is empty and the projection is a plain constant.
-    try fixture().expect("SELECT 1 + 2", yields: [[3]])
+  @Test func `a plain VALUES row without a subquery is unaffected`() throws {
+    // A constructor element carrying no subquery lowers as a plain constant.
+    try fixture().expect("VALUES (1 + 2)", yields: [[3]])
   }
 }
 
-// MARK: - FROM-less scalar reserved-relation subqueries
+// MARK: - VALUES rows nesting a reserved-relation subquery
 
 /// A reserved `definition_schema.` relation named ONLY inside a subquery of a
-/// FROM-less scalar `SELECT` still augments and runs — the relation-name
-/// collector descends the projection's subqueries the same on this path, so the
-/// store overlay is materialised before the subquery's width compile and run.
-struct FromlessScalarReservedRelationTests {
+/// `VALUES` row element still augments and runs — the relation-name collector
+/// descends the constructor's subqueries, so the store overlay is materialised
+/// before the subquery's width compile and run.
+struct ValuesRowReservedRelationTests {
   private func fixture() throws -> FixtureCatalog {
     try Catalog {
       Relation("T", ["Id": .integer]) {
@@ -1898,13 +1894,13 @@ struct FromlessScalarReservedRelationTests {
 
   @Test func `a scalar EXISTS over definition_schema.tables runs`() throws {
     // The reserved store relation is named ONLY inside the subquery of a
-    // FROM-less scalar select; the descent still augments it, so the width
-    // compile resolves and the run materialises it. It lists `T`, so `EXISTS`
-    // is TRUE and the CASE yields 1.
+    // `VALUES` row element; the descent still augments it, so the width compile
+    // resolves and the run materialises it. It lists `T`, so `EXISTS` is TRUE
+    // and the CASE yields 1.
     try fixture().expect(
-        "SELECT CASE WHEN EXISTS "
+        "VALUES (CASE WHEN EXISTS "
         + "(SELECT table_name FROM definition_schema.tables) "
-        + "THEN 1 ELSE 0 END",
+        + "THEN 1 ELSE 0 END)",
         yields: [[1]])
   }
 
@@ -1912,9 +1908,9 @@ struct FromlessScalarReservedRelationTests {
     // The schema path shares the same augment, so `columns(of:validate:)`
     // resolves the subquery-only reserved relation exactly as the run does.
     let query = try parse(query:
-        "SELECT CASE WHEN EXISTS "
+        "VALUES (CASE WHEN EXISTS "
         + "(SELECT table_name FROM definition_schema.tables) "
-        + "THEN 1 ELSE 0 END")
+        + "THEN 1 ELSE 0 END)")
     let columns = try fixture().columns(of: query, validate: true)
     #expect(columns.count == 1)
   }

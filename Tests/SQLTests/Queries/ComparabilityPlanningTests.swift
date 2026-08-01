@@ -345,7 +345,7 @@ struct CarrierSubqueryComparabilityTests {
     let catalog = try crossable()
     let sql = """
         WITH RECURSIVE t(n) AS (
-          SELECT 1 AS x
+          VALUES (1)
           UNION ALL
           SELECT n + 1 FROM t WHERE n < 3
           ORDER BY CASE WHEN EXISTS (SELECT 1 FROM A a WHERE a.num = a.txt)

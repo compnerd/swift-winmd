@@ -475,7 +475,7 @@ struct GroupingSetsTests {
       _ = try cat.columns(of: Statement(parsing: cte), validate: true)
     }
     // The same query as the trailing WITH query faults under the schema derive.
-    let trailing = "WITH u AS (SELECT 1 AS x) \(sql)"
+    let trailing = "WITH u AS (VALUES (1)) \(sql)"
     #expect(throws: SQLError.divide) {
       _ = try cat.run(Statement(parsing: trailing))
     }
@@ -1086,20 +1086,21 @@ struct GroupingSetsTests {
       throws {
     // A scalar subquery in a set's key must be pre-registered for every arm,
     // not only the arms whose set includes it: an `.arm` lowers the superset
-    // (to NULL an absent key), so the `()` grand-total arm lowers `(SELECT 1)`
-    // and needs it collected. The present arm groups on the constant subquery
-    // value (one group) and projects it (1); the `()` arm NULLs the absent key.
+    // (to NULL an absent key), so the `()` grand-total arm lowers the
+    // `(VALUES (1))` and needs it collected. The present arm groups on the
+    // constant subquery value (one group) and projects it (1); the `()` arm
+    // NULLs the absent key.
     let cat = try sales()
     try cat.expect("""
-        SELECT (SELECT 1)
+        SELECT (VALUES (1))
           FROM Sales
-         GROUP BY GROUPING SETS (((SELECT 1)), ())
+         GROUP BY GROUPING SETS (((VALUES (1))), ())
         """, yields: [[1], [nil]])
     // run ≡ columns(of:): the schema derive resolves the same, not a fault.
     let columns = try cat.columns(of: parse(query: """
-        SELECT (SELECT 1)
+        SELECT (VALUES (1))
           FROM Sales
-         GROUP BY GROUPING SETS (((SELECT 1)), ())
+         GROUP BY GROUPING SETS (((VALUES (1))), ())
         """), validate: true)
     #expect(columns == [OutputColumn(name: "column 1", type: .integer)])
   }

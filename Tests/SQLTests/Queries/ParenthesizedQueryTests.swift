@@ -339,7 +339,7 @@ struct ParenthesizedQueryTests {
     // expression starting with `(` still parses as an expression (the
     // speculative query parse rewinds on the trailing operator).
     try sets().expect("SELECT ((SELECT 1) UNION SELECT 1)", yields: [[1]])
-    try sets().expect("SELECT ((1) + 2)", yields: [[3]])
+    try sets().expect("VALUES (((1) + 2))", yields: [[3]])
   }
 
   @Test func `an unterminated parenthesized query faults`() throws {

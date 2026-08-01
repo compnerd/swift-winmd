@@ -46,7 +46,7 @@ struct ConcatParsingTests {
 
 struct ConcatEvaluationTests {
   @Test func `concatenates two text values`() throws {
-    try things().expect("SELECT 'a' || 'b'", yields: [["ab"]])
+    try things().expect("VALUES ('a' || 'b')", yields: [["ab"]])
   }
 
   @Test func `a NULL right operand propagates NULL`() throws {
@@ -70,7 +70,7 @@ struct ConcatEvaluationTests {
   @Test func `a non-text operand faults`() throws {
     // `||` is a character-string operator; a numeric operand is a type error,
     // as arithmetic faults on a non-numeric one.
-    try things().expect("SELECT 'a' || 1", fails:
+    try things().expect("VALUES ('a' || 1)", fails:
         .operand("|| operands must be text"))
   }
 
@@ -80,7 +80,7 @@ struct ConcatEvaluationTests {
     // it inspects kinds, so this validates — the output-schema text guard
     // admits the folded NULL rather than rejecting the `.integer` type — and
     // runs, yielding NULL; the caller need not fall back to a CASE desugar.
-    try things().expect("SELECT (CASE WHEN 1 = 0 THEN 1 END) || 'x'",
+    try things().expect("VALUES ((CASE WHEN 1 = 0 THEN 1 END) || 'x')",
                         yields: [[nil]])
   }
 
@@ -90,7 +90,7 @@ struct ConcatEvaluationTests {
     // operand's type: `(CASE WHEN 1 = 0 THEN 1 END) || 1` — a folded NULL
     // beside a bare integer — validates and yields NULL rather than being
     // rejected for the integer right operand.
-    try things().expect("SELECT (CASE WHEN 1 = 0 THEN 1 END) || 1",
+    try things().expect("VALUES ((CASE WHEN 1 = 0 THEN 1 END) || 1)",
                         yields: [[nil]])
   }
 }

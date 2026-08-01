@@ -54,6 +54,21 @@ public struct Routine: Sendable {
     case defined(Term, Routines)
   }
 
+  /// An opaque per-construction identity token. Every `Routine` initializer
+  /// mints a fresh instance; copying a `Routine` value — an assignment, storing
+  /// it in a `Routines` map, carrying it through `merging(_:)` — shares the
+  /// reference, so two `Routine` values are `same(as:)` exactly when they
+  /// descend from one constructed routine. It has no state and never varies a
+  /// routine's behaviour; it exists only so a consumer can tell one shipped
+  /// routine value from a like-signatured other, which the signature cannot.
+  private final class Identity: Sendable {}
+
+  /// This routine's construction identity — a fresh token per initializer,
+  /// shared by every copy of the value. A caller cannot mint one matching
+  /// another routine's: the only route to a given routine's identity is that
+  /// routine value itself.
+  private let identity = Identity()
+
   /// The declared type of each positional argument, in order — its count the
   /// routine's arity. The static type-check validates a call against this: a
   /// wrong argument count or a definitively-wrong argument type is rejected
@@ -199,6 +214,18 @@ public struct Routine: Sendable {
       // rejects one at registration — so the subquery-free evaluate suffices.
       return try Record(arguments).evaluate(term, routines)
     }
+  }
+
+  /// Whether `other` is the very same routine value as this one — identical by
+  /// construction identity, not by signature. Two routines with matching
+  /// `parameters`/`returns` are not `same` unless one is a copy of the other;
+  /// a copy carried through a `Routines` map or `merging(_:)` is. This is the
+  /// unforgeable test of whether a set's binding for a name is a given
+  /// prelude's shipped routine (`Routines.standard[name]`) rather than a
+  /// caller's like-named replacement — a name and a protection flag cannot
+  /// distinguish those, but a fresh construction identity does.
+  public func same(as other: Routine) -> Bool {
+    identity === other.identity
   }
 }
 

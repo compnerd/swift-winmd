@@ -31,7 +31,7 @@ struct EngineWithTests {
     // fold unifies text against text and runs — a `.integer` declared-name
     // placeholder would wrongly fault the all-text UNION as irreconcilable.
     let text = """
-        WITH a (x) AS (SELECT 'b') SELECT x FROM a UNION SELECT 'c'
+        WITH a (x) AS (VALUES ('b')) SELECT x FROM a UNION VALUES ('c')
         """
     // The schema path folds the CTE column at its body-derived type too: it
     // must report `x` as `.text` and NOT fault, the compile-time mirror of the
@@ -50,7 +50,7 @@ struct EngineWithTests {
     // are equal, so the row joins rather than being dropped by a raw-`Value`
     // key comparison.
     let rows = try statement("""
-        WITH a (x) AS (SELECT 1), b (x) AS (SELECT 1.0)
+        WITH a (x) AS (VALUES (1)), b (x) AS (VALUES (1.0))
           SELECT * FROM a JOIN b ON a.x = b.x
         """, family())
     #expect(rows == [[.integer(1), .double(1.0)]])
@@ -62,8 +62,8 @@ struct EngineWithTests {
     // promoting the integer to `Double` (both round to 2^53), so the optimized
     // join must too — a fold-double-to-Int key would drop the row.
     let rows = try statement("""
-        WITH a (x) AS (SELECT 9007199254740993),
-             b (x) AS (SELECT 9007199254740993.0)
+        WITH a (x) AS (VALUES (9007199254740993)),
+             b (x) AS (VALUES (9007199254740993.0))
           SELECT a.x FROM a JOIN b ON a.x = b.x
         """, family())
     #expect(rows == [[.integer(9007199254740993)]])
@@ -75,8 +75,8 @@ struct EngineWithTests {
     // may collide, but the residual `matches` check keeps integer equality
     // exact.
     let rows = try statement("""
-        WITH a (x) AS (SELECT 9007199254740992),
-             b (x) AS (SELECT 9007199254740993)
+        WITH a (x) AS (VALUES (9007199254740992)),
+             b (x) AS (VALUES (9007199254740993))
           SELECT a.x FROM a JOIN b ON a.x = b.x
         """, family())
     #expect(rows.isEmpty)
@@ -102,9 +102,9 @@ struct EngineWithTests {
     // three arms collapse to the one distinct `double`, the ISO
     // approximate-numeric result of a mixed-type UNION.
     let rows = try statement("""
-        SELECT 9007199254740992.0
-          UNION SELECT 9007199254740992
-          UNION SELECT 9007199254740993
+        VALUES (9007199254740992.0)
+          UNION VALUES (9007199254740992)
+          UNION VALUES (9007199254740993)
         """, family())
     #expect(rows == [[.double(9007199254740992.0)]])
   }
@@ -113,7 +113,8 @@ struct EngineWithTests {
     // The CTE column unifies to `double`, so its integer arm coerces — `3`
     // emits as `3.0` — and the ordering runs over the widened values.
     let rows = try statement("""
-        WITH a (x) AS (SELECT 3 UNION ALL SELECT 1.5) SELECT x FROM a ORDER BY x
+        WITH a (x) AS (VALUES (3) UNION ALL VALUES (1.5))
+          SELECT x FROM a ORDER BY x
         """, family())
     #expect(rows == [[.double(1.5)], [.double(3.0)]])
   }
@@ -124,9 +125,9 @@ struct EngineWithTests {
     // stays a strict weak ordering, and the greatest value is the coerced
     // `double`.
     let rows = try statement("""
-        WITH a (x) AS (SELECT 9007199254740993
-                       UNION ALL SELECT 9007199254740993.0
-                       UNION ALL SELECT 9007199254740992)
+        WITH a (x) AS (VALUES (9007199254740993)
+                       UNION ALL VALUES (9007199254740993.0)
+                       UNION ALL VALUES (9007199254740992))
           SELECT x FROM a ORDER BY x
         """, family())
     #expect(rows.count == 3)
@@ -433,7 +434,7 @@ struct EngineRecursiveTests {
     // run-vs-schema divergence cannot hide.
     let statement = try Statement(parsing: """
         WITH RECURSIVE t (n) AS (
-          SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3 ORDER BY 1
+          VALUES (1) UNION ALL SELECT n + 1 FROM t WHERE n < 3 ORDER BY 1
         ) SELECT n FROM t
         """)
     let columns = try family().columns(of: statement, validate: true)
@@ -452,7 +453,7 @@ struct EngineRecursiveTests {
     // Schema and run agree: one column `n`, fixpoint 1, 2, 3.
     let statement = try Statement(parsing: """
         WITH RECURSIVE t (n) AS (
-          (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3 ORDER BY 1)
+          (VALUES (1) UNION ALL SELECT n + 1 FROM t WHERE n < 3 ORDER BY 1)
           ORDER BY 1
         ) SELECT n FROM t
         """)
@@ -467,7 +468,7 @@ struct EngineRecursiveTests {
       throws {
     // The carrier `ORDER BY` peeled off a recursive-CTE fixpoint is applied to
     // the materialised rows through `carried(over:)`, which records a sort key
-    // correlated to the set-op output (`EXISTS (… WHERE V = x)`) into the
+    // correlated to the set-op output (`EXISTS (… WHERE V = column1)`) into the
     // context's `Subqueries` box, and then executed — but `apply` used to
     // execute against a fresh empty box, so the executor found no recorded plan
     // and faulted `a correlated subquery plan was not compiled` (wrapped as a
@@ -486,10 +487,10 @@ struct EngineRecursiveTests {
     }
     let rows = try catalog.run(Statement(parsing: """
         WITH RECURSIVE t(n) AS (
-          SELECT 1 AS x
+          VALUES (1)
           UNION ALL
           SELECT n + 1 FROM t WHERE n < 3
-          ORDER BY CASE WHEN EXISTS (SELECT V FROM S WHERE V = x)
+          ORDER BY CASE WHEN EXISTS (SELECT V FROM S WHERE V = column1)
                         THEN 0 ELSE 1 END
         ) SELECT n FROM t
         """))
@@ -499,10 +500,10 @@ struct EngineRecursiveTests {
   @Test func `a recursive CTE carrier ORDER BY on a plain sort key still runs`()
       throws {
     // guard: the memo fix must not regress a non-correlated carrier sort key.
-    // The same fixpoint (1,2,3), ordered by the plain output column `x`
-    // descending (the set-op output takes arm-0's projection name), still runs
-    // and reorders — the shared fresh box carries no recorded plan here, and
-    // none is needed.
+    // The same fixpoint (1,2,3), ordered by the plain output column `column1`
+    // descending (the set-op output takes arm-0's default VALUES name), still
+    // runs and reorders — the shared fresh box carries no recorded plan here,
+    // and none is needed.
     let catalog = try Catalog {
       Relation("S", ["V": .integer]) {
         Row(2)
@@ -510,10 +511,10 @@ struct EngineRecursiveTests {
     }
     let rows = try catalog.run(Statement(parsing: """
         WITH RECURSIVE t(n) AS (
-          SELECT 1 AS x
+          VALUES (1)
           UNION ALL
           SELECT n + 1 FROM t WHERE n < 3
-          ORDER BY x DESC
+          ORDER BY column1 DESC
         ) SELECT n FROM t
         """))
     #expect(rows == [[.integer(3)], [.integer(2)], [.integer(1)]])
@@ -532,7 +533,7 @@ struct EngineRecursiveTests {
     #expect(throws: SQLError.column("Zzz")) {
       _ = try catalog.run(Statement(parsing: """
           WITH RECURSIVE t(n) AS (
-            SELECT 1 AS x
+            VALUES (1)
             UNION ALL
             SELECT n + 1 FROM t WHERE n < 3
             ORDER BY Zzz
@@ -762,16 +763,17 @@ struct EngineRecursiveTests {
   }
 
   @Test func `a recursive arm that is itself a set-op folds the self at the anchor type`() throws {
-    // The recursive arm `SELECT s FROM t INTERSECT SELECT 'b'` is itself a set
-    // operation, so `validate`'s recursive-arm typecheck folds its self column
+    // The recursive arm `SELECT s FROM t INTERSECT VALUES ('b')` is itself a
+    // set operation, so `validate`'s recursive-arm typecheck folds its self
+    // column
     // (`s`) before `fixpoint` rebinds it. Binding the self under the anchor's
-    // derived type (`s` is text, from `SELECT 'b'`) — not a `.integer`
+    // derived type (`s` is text, from `VALUES ('b')`) — not a `.integer`
     // placeholder — lets text INTERSECT text unify rather than faulting a text
     // arm against an integer self. The schema path must report `s` as `.text`
     // without throwing, and the run terminates yielding `b`.
     let text = """
         WITH RECURSIVE t (s) AS (
-          SELECT 'b' UNION SELECT s FROM t INTERSECT SELECT 'b'
+          VALUES ('b') UNION SELECT s FROM t INTERSECT VALUES ('b')
         )
         SELECT s FROM t
         """
@@ -843,8 +845,8 @@ struct EngineRecursiveTests {
     // carries the per-column unconstrained marker, so a bare reference to `x`
     // unifies like a fresh constant-NULL arm.
     let rows = try statement("""
-        WITH t (x) AS (SELECT NULLIF('b', 'b') UNION SELECT NULLIF(1, 1))
-          SELECT x FROM t UNION SELECT 'c'
+        WITH t (x) AS (VALUES (NULLIF('b', 'b')) UNION VALUES (NULLIF(1, 1)))
+          SELECT x FROM t UNION VALUES ('c')
         """, family())
     #expect(rows == [[.null], [.text("c")]])
   }
@@ -857,8 +859,8 @@ struct EngineRecursiveTests {
     // the `'c'` text arm (the literal-fix regression); the marker unifies it
     // either way.
     let rows = try statement("""
-        WITH t (x) AS (SELECT NULLIF(1, 1) UNION SELECT NULLIF('b', 'b'))
-          SELECT x FROM t UNION SELECT 'c'
+        WITH t (x) AS (VALUES (NULLIF(1, 1)) UNION VALUES (NULLIF('b', 'b')))
+          SELECT x FROM t UNION VALUES ('c')
         """, family())
     #expect(rows == [[.null], [.text("c")]])
   }
@@ -868,15 +870,15 @@ struct EngineRecursiveTests {
     // the enclosing UNION unifies it with the text arm — both the integer-first
     // and the text-first orderings yield the same {NULL, 'c'}.
     let forward = try statement("""
-        WITH t (x) AS (SELECT NULLIF(1, 1) UNION SELECT NULLIF('a', 'a')
-                       UNION SELECT NULLIF('b', 'b'))
-          SELECT x FROM t UNION SELECT 'c'
+        WITH t (x) AS (VALUES (NULLIF(1, 1)) UNION VALUES (NULLIF('a', 'a'))
+                       UNION VALUES (NULLIF('b', 'b')))
+          SELECT x FROM t UNION VALUES ('c')
         """, family())
     #expect(forward == [[.null], [.text("c")]])
     let reversed = try statement("""
-        WITH t (x) AS (SELECT NULLIF('b', 'b') UNION SELECT NULLIF('a', 'a')
-                       UNION SELECT NULLIF(1, 1))
-          SELECT x FROM t UNION SELECT 'c'
+        WITH t (x) AS (VALUES (NULLIF('b', 'b')) UNION VALUES (NULLIF('a', 'a'))
+                       UNION VALUES (NULLIF(1, 1)))
+          SELECT x FROM t UNION VALUES ('c')
         """, family())
     #expect(reversed == [[.null], [.text("c")]])
   }
@@ -887,9 +889,9 @@ struct EngineRecursiveTests {
     // arm and `b`'s double with the integer arm — `a` yields NULLs, `b` the
     // coerced doubles.
     let rows = try statement("""
-        WITH t (a, b) AS (SELECT NULLIF(1, 1), 1
-                          UNION SELECT NULLIF('x', 'x'), 2.5)
-          SELECT a, b FROM t UNION SELECT 'c', 3
+        WITH t (a, b) AS (VALUES (NULLIF(1, 1), 1)
+                          UNION VALUES (NULLIF('x', 'x'), 2.5))
+          SELECT a, b FROM t UNION VALUES ('c', 3)
         """, family())
     #expect(Set(rows) == [[.null, .double(1.0)], [.null, .double(2.5)],
                           [.text("c"), .double(3.0)]])
@@ -900,7 +902,7 @@ struct EngineRecursiveTests {
     // top-level select over the all-NULL CTE column runs and yields the NULL,
     // exactly as before.
     let rows = try statement("""
-        WITH t (x) AS (SELECT NULLIF(1, 1) UNION SELECT NULLIF('b', 'b'))
+        WITH t (x) AS (VALUES (NULLIF(1, 1)) UNION VALUES (NULLIF('b', 'b')))
           SELECT x FROM t
         """, family())
     #expect(rows == [[.null]])
@@ -909,7 +911,7 @@ struct EngineRecursiveTests {
   @Test func `an all-NULL CTE column filters through IS NULL`() throws {
     // `x` is NULL, so `x IS NULL` is TRUE and keeps the row.
     let rows = try statement("""
-        WITH t (x) AS (SELECT NULLIF(1, 1) UNION SELECT NULLIF('b', 'b'))
+        WITH t (x) AS (VALUES (NULLIF(1, 1)) UNION VALUES (NULLIF('b', 'b')))
           SELECT x FROM t WHERE x IS NULL
         """, family())
     #expect(rows == [[.null]])
@@ -919,7 +921,7 @@ struct EngineRecursiveTests {
     // `NULL = 'c'` is UNKNOWN under three-valued logic, so the row is filtered
     // and the result is empty.
     let rows = try statement("""
-        WITH t (x) AS (SELECT NULLIF(1, 1) UNION SELECT NULLIF('b', 'b'))
+        WITH t (x) AS (VALUES (NULLIF(1, 1)) UNION VALUES (NULLIF('b', 'b')))
           SELECT x FROM t WHERE x = 'c'
         """, family())
     #expect(rows.isEmpty)
@@ -937,7 +939,7 @@ struct EngineRecursiveTests {
     // on the schema path. Assert the shared value so a future reorder cannot
     // silently re-diverge the two paths.
     let text = """
-        WITH RECURSIVE t (a, b) AS (SELECT 1, 2 UNION SELECT Id FROM t)
+        WITH RECURSIVE t (a, b) AS (VALUES (1, 2) UNION SELECT Id FROM t)
           SELECT * FROM t
         """
     #expect(throws: SQLError.columns(expected: 1, got: 2)) {
@@ -956,7 +958,7 @@ struct EngineRecursiveTests {
     // the two-name list in the same ISO order — the sibling of the arm-mismatch
     // parity, proving the declared-list guard wins whichever arm diverges.
     let text = """
-        WITH RECURSIVE t (a, b) AS (SELECT 1 UNION SELECT Id, Id FROM t)
+        WITH RECURSIVE t (a, b) AS (VALUES (1) UNION SELECT Id, Id FROM t)
           SELECT * FROM t
         """
     #expect(throws: SQLError.columns(expected: 1, got: 2)) {
@@ -970,14 +972,15 @@ struct EngineRecursiveTests {
   @Test func `a no-list recursive CTE faults its arm alike on both paths`()
       throws {
     // With no explicit `(a, b)` list the CTE's column names come from the
-    // anchor's aliases (degree 2), so `cte.columns` is populated exactly as a
-    // declared list would be. The recursive arm's single column therefore hits
+    // anchor's columns (degree 2, the default `column1, column2`), so
+    // `cte.columns` is populated exactly as a declared list would be. The
+    // recursive arm's single column therefore hits
     // the same arm-width guard, faulting `(expected: 1, got: 2)` on both paths
     // — never reaching the `kinds`/`contributions` inter-arm throw, which is
     // consequently unreachable for a recursive CTE (its width is always checked
     // against the anchor-derived list first).
     let text = """
-        WITH RECURSIVE t AS (SELECT 1 AS a, 2 AS b UNION SELECT Id AS a FROM t)
+        WITH RECURSIVE t AS (VALUES (1, 2) UNION SELECT Id AS a FROM t)
           SELECT * FROM t
         """
     #expect(throws: SQLError.columns(expected: 1, got: 2)) {
@@ -995,16 +998,17 @@ struct EngineRecursiveTests {
     // compiled body width against the declared list count.
     #expect(throws: SQLError.columns(expected: 1, got: 2)) {
       _ = try statement("""
-          WITH t (a, b) AS (SELECT 1) SELECT a FROM t
+          WITH t (a, b) AS (VALUES (1)) SELECT a FROM t
           """, family())
     }
   }
 
   @Test func `a recursive CTE with an all-NULL anchor unifies its recursive arm`()
       throws {
-    // The reviewer's anchor-NULL case. The anchor `SELECT NULLIF(1, 1)` folds
+    // The reviewer's anchor-NULL case. The anchor `VALUES (NULLIF(1, 1))` folds
     // to a constant NULL, so the CTE column `x` is unconstrained: the recursive
-    // arm — itself a set operation `SELECT x FROM t INTERSECT SELECT 'c'` — must
+    // arm — itself a set operation `SELECT x FROM t INTERSECT VALUES ('c')` —
+    // must
     // fold the self column against the text `'c'` without faulting integer
     // against text, exactly as a bare constant-NULL arm unifies with any typed
     // arm. Because the schema-only self and the run-iteration self bind through
@@ -1013,7 +1017,7 @@ struct EngineRecursiveTests {
     // (no match), so the fixpoint terminates at the anchor's single NULL row.
     let rows = try statement("""
         WITH RECURSIVE t (x) AS (
-          SELECT NULLIF(1, 1) UNION SELECT x FROM t INTERSECT SELECT 'c'
+          VALUES (NULLIF(1, 1)) UNION SELECT x FROM t INTERSECT VALUES ('c')
         ) SELECT x FROM t
         """, family())
     #expect(rows == [[.null]])
@@ -1034,7 +1038,7 @@ struct EngineRecursiveTests {
     // without throwing, agreeing with the run's terminating rows.
     let text = """
         WITH RECURSIVE t (s) AS (
-          SELECT 'b'
+          VALUES ('b')
           UNION ALL
           SELECT s FROM (SELECT s || 'c' AS s FROM t WHERE s = 'b') AS d
         ) SELECT * FROM t
@@ -1057,7 +1061,7 @@ struct EngineRecursiveTests {
     // arithmetic-on-integer and must fault on both the schema path and the run.
     let text = """
         WITH RECURSIVE t (n) AS (
-          SELECT 1
+          VALUES (1)
           UNION ALL
           SELECT n || 'c' FROM t WHERE n < 3
         ) SELECT * FROM t
@@ -1085,7 +1089,7 @@ struct EngineRecursiveTests {
     // type, so `b` reads (and the query returns) `.double` values — the same
     // widened carrier the schema path threads with empty rows.
     let rows = try statement("""
-        WITH a(x) AS (SELECT 1 UNION SELECT 2.5),
+        WITH a(x) AS (VALUES (1) UNION VALUES (2.5)),
              b(y) AS (SELECT x FROM a)
           SELECT y FROM b ORDER BY y
         """, family())
@@ -1100,7 +1104,7 @@ struct EngineRecursiveTests {
     // of the schema derive's `.double` header.
     let rows = try statement("""
         WITH RECURSIVE t(n) AS (
-          SELECT 1 UNION ALL SELECT n + 0.5 FROM t WHERE n < 2
+          VALUES (1) UNION ALL SELECT n + 0.5 FROM t WHERE n < 2
         ) SELECT n FROM t ORDER BY n
         """, family())
     #expect(rows == [[.double(1.0)], [.double(1.5)], [.double(2.0)]])
@@ -1112,7 +1116,7 @@ struct EngineRecursiveTests {
     // arm's values to the unified type before binding, so `1` materialises as
     // `1.0` — the producer's carrier and the run's rows agree on the type.
     let rows = try statement("""
-        WITH a(x) AS (SELECT 1 UNION SELECT 2.5) SELECT x FROM a ORDER BY x
+        WITH a(x) AS (VALUES (1) UNION VALUES (2.5)) SELECT x FROM a ORDER BY x
         """, family())
     #expect(rows == [[.double(1.0)], [.double(2.5)]])
   }
@@ -1182,16 +1186,17 @@ struct EngineRecursiveTests {
 
   @Test func `a renaming recursive body orders by its first-arm output name`()
       throws {
-    // The body's set-op output is named off its FIRST arm (`SELECT 1 AS x`), so
-    // the carrier's `ORDER BY x` resolves against that output name `x`, not the
-    // CTE's declared name `n` — exactly as the non-recursive analog below does.
+    // The body's set-op output is named off its first arm (`VALUES (1)`), so
+    // the carrier's `ORDER BY column1` resolves against that default output
+    // name `column1`, not the CTE's declared name `n` — exactly as the
+    // non-recursive analog below does.
     // The fixpoint temp the carrier applies over is named by the anchor's
     // output names; the CTE-declared rename rides the returned carrier, so the
     // outer `SELECT n FROM t` still sees `n`. Assert schema AND run on the same
     // query so a run-vs-validate divergence cannot hide.
     let statement = try Statement(parsing: """
         WITH RECURSIVE t (n) AS (
-          SELECT 1 AS x UNION ALL SELECT n + 1 FROM t WHERE n < 3 ORDER BY x
+          VALUES (1) UNION ALL SELECT n + 1 FROM t WHERE n < 3 ORDER BY column1
         ) SELECT n FROM t
         """)
     let catalog = EngineMemory([:])
@@ -1204,11 +1209,11 @@ struct EngineRecursiveTests {
 
   @Test func `a non-recursive ordered CTE body orders by its output name`()
       throws {
-    // The non-recursive analog of the renaming recursive body: `ORDER BY x`
-    // resolves against the first arm's output `x`. This is the oracle the
-    // recursive form mirrors — the two paths must agree.
+    // The non-recursive analog of the renaming recursive body: `ORDER BY
+    // column1` resolves against the first arm's output `column1`. This is the
+    // oracle the recursive form mirrors — the two paths must agree.
     let statement = try Statement(parsing: """
-        WITH t (n) AS (SELECT 1 AS x UNION ALL SELECT 2 ORDER BY x)
+        WITH t (n) AS (VALUES (1) UNION ALL VALUES (2) ORDER BY column1)
         SELECT n FROM t
         """)
     let catalog = EngineMemory([:])
@@ -1218,14 +1223,15 @@ struct EngineRecursiveTests {
 
   @Test func `a recursive carrier ORDER BY of a non-output name faults`()
       throws {
-    // `ORDER BY n` names the CTE's declared name, NOT a body output (the first
-    // arm projects `x`), so the carrier — which resolves against the body's
-    // output names — faults `.column('n')` on the schema path, exactly as the
-    // run does when `apply` reapplies the carrier after the fixpoint (`run ≡
-    // columns(of:)`), and exactly as the non-recursive analog below faults.
+    // `ORDER BY n` names the CTE's declared name, not a body output (the first
+    // arm outputs `column1`), so the carrier — which resolves against the
+    // body's output names — faults `.column('n')` on the schema path, exactly
+    // as the run does when `apply` reapplies the carrier after the fixpoint
+    // (`run ≡ columns(of:)`), and exactly as the non-recursive analog below
+    // faults.
     let statement = try Statement(parsing: """
         WITH RECURSIVE t (n) AS (
-          SELECT 1 AS x UNION ALL SELECT n + 1 FROM t WHERE n < 3 ORDER BY n
+          VALUES (1) UNION ALL SELECT n + 1 FROM t WHERE n < 3 ORDER BY n
         ) SELECT n FROM t
         """)
     let catalog = EngineMemory([:])
@@ -1240,10 +1246,10 @@ struct EngineRecursiveTests {
   @Test func `a non-recursive carrier ORDER BY of a non-output name faults`()
       throws {
     // The non-recursive oracle: `ORDER BY n` (the declared name, not the first
-    // arm's output `x`) faults `.column('n')`, the behaviour the recursive form
-    // mirrors.
+    // arm's output `column1`) faults `.column('n')`, the behaviour the
+    // recursive form mirrors.
     let statement = try Statement(parsing: """
-        WITH t (n) AS (SELECT 1 AS x UNION ALL SELECT 2 ORDER BY n)
+        WITH t (n) AS (VALUES (1) UNION ALL VALUES (2) ORDER BY n)
         SELECT n FROM t
         """)
     let catalog = EngineMemory([:])
@@ -1256,15 +1262,16 @@ struct EngineRecursiveTests {
       throws {
     // The recursive validate path validates the carrier's ORDER BY keys against
     // the body's output scope, the same check an ordinary ordered set operation
-    // gets. A carrier `ORDER BY missing(n)` — where `n` IS a body output
-    // (`SELECT 1 AS n`) — faults `.function('missing')` on both the schema path
+    // gets. A carrier `ORDER BY missing(column1)` — where `column1` is a body
+    // output (`VALUES (1)`) — faults `.function('missing')` on both the schema
+    // path
     // (`columns(of:validate:true)`) AND the run (`run ≡ columns(of:)`), closing
     // the run-vs-validate gap where validate passed yet the run faulted when
     // `apply` reapplied the carrier after the fixpoint.
     let statement = try Statement(parsing: """
         WITH RECURSIVE t (n) AS (
-          SELECT 1 AS n UNION ALL SELECT n + 1 FROM t WHERE n < 3
-          ORDER BY missing(n)
+          VALUES (1) UNION ALL SELECT n + 1 FROM t WHERE n < 3
+          ORDER BY missing(column1)
         ) SELECT n FROM t
         """)
     let catalog = EngineMemory([:])
@@ -1277,13 +1284,13 @@ struct EngineRecursiveTests {
   }
 
   @Test func `a valid recursive carrier ORDER BY validates and runs`() throws {
-    // The positive companion: a carrier key that IS a body output (`ORDER BY n`
-    // over an anchor `SELECT 1 AS n`) validates AND runs the fixpoint, ordered
-    // by that output — the valid-key half of the run≡validate oracle.
+    // The positive companion: a carrier key that is a body output (`ORDER BY
+    // column1` over an anchor `VALUES (1)`) validates and runs the fixpoint,
+    // ordered by that output — the valid-key half of the run≡validate oracle.
     let statement = try Statement(parsing: """
         WITH RECURSIVE t (n) AS (
-          SELECT 1 AS n UNION ALL SELECT n + 1 FROM t WHERE n < 3
-          ORDER BY n DESC
+          VALUES (1) UNION ALL SELECT n + 1 FROM t WHERE n < 3
+          ORDER BY column1 DESC
         ) SELECT n FROM t
         """)
     let catalog = EngineMemory([:])
@@ -1321,7 +1328,7 @@ struct EngineRecursiveTests {
     // key against the same arm-0 surface and runs without faulting.
     let analog = try Statement(parsing: """
         SELECT Age * 1 AS m FROM People WHERE Age = 1
-        UNION ALL SELECT 9 ORDER BY Age * 1
+        UNION ALL VALUES (9) ORDER BY Age * 1
         """)
     #expect(try people.run(analog) == [[.integer(1)], [.integer(9)]])
   }
@@ -1383,7 +1390,7 @@ struct EngineRecursiveTests {
     // BY 1` binds the first output column, ordering the fixpoint descending.
     let statement = try Statement(parsing: """
         WITH RECURSIVE t (n) AS (
-          SELECT 1 AS n
+          VALUES (1)
             UNION ALL SELECT n + 1 FROM t WHERE n < 3 ORDER BY 1 DESC
         ) SELECT n FROM t
         """)
@@ -1400,7 +1407,7 @@ struct EngineRecursiveTests {
     // `SQLError.relation('t')`. It now faults the precise `0A000` feature
     // diagnostic on both the run and the schema path.
     let statement = try Statement(parsing: """
-        WITH RECURSIVE t (n) AS (SELECT n FROM t EXCEPT SELECT 1)
+        WITH RECURSIVE t (n) AS (SELECT n FROM t EXCEPT VALUES (1))
           SELECT n FROM t
         """)
     let catalog = EngineMemory([:])
@@ -1417,7 +1424,7 @@ struct EngineRecursiveTests {
     // The `INTERSECT` sibling faults the same `0A000` — the guard matches any
     // non-`UNION` self-referencing setop core.
     let statement = try Statement(parsing: """
-        WITH RECURSIVE t (n) AS (SELECT n FROM t INTERSECT SELECT 1)
+        WITH RECURSIVE t (n) AS (SELECT n FROM t INTERSECT VALUES (1))
           SELECT n FROM t
         """)
     #expect(throws: SQLError.state("0A000", "recursion requires UNION [ALL]")) {
@@ -1435,7 +1442,7 @@ struct EngineRecursiveTests {
                        [[.integer(1)], [.integer(2)]] as Array<Array<Value>>),
     ])
     let statement = try Statement(parsing: """
-        WITH RECURSIVE t (n) AS (SELECT n FROM t EXCEPT SELECT 2)
+        WITH RECURSIVE t (n) AS (SELECT n FROM t EXCEPT VALUES (2))
           SELECT n FROM t
         """)
     #expect(try catalog.run(statement) == [[.integer(1)]])
@@ -1448,7 +1455,7 @@ struct EngineRecursiveTests {
     // core.
     let statement = try Statement(parsing: """
         WITH RECURSIVE t (n) AS (
-          SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3
+          VALUES (1) UNION ALL SELECT n + 1 FROM t WHERE n < 3
         ) SELECT n FROM t
         """)
     #expect(try EngineMemory([:]).run(statement) == [[.integer(1)],

@@ -1527,7 +1527,7 @@ struct EngineNaturalUsingTests {
 
   @Test func `a USING join defers to the right when the left is unconstrained`()
       throws {
-    // `(SELECT NULLIF(1, 1) AS k) AS a` — the left `k` is constant NULL, so
+    // `(VALUES (NULLIF(1, 1))) AS a(k)` — the left `k` is constant NULL, so
     // unconstrained (a placeholder `integer` that places no type constraint) —
     // RIGHT JOIN `B_text` whose `k` is `text`. The merged `k` types off the
     // constrained right (`text`) through the same mask-aware unification the
@@ -1541,7 +1541,7 @@ struct EngineNaturalUsingTests {
       }
     }
     let text = """
-        SELECT k FROM (SELECT NULLIF(1, 1) AS k) AS a
+        SELECT k FROM (VALUES (NULLIF(1, 1))) AS a(k)
           RIGHT JOIN B_text USING (k) ORDER BY k
         """
     let columns = try catalog.columns(of: Statement(parsing: text),
@@ -1554,7 +1554,7 @@ struct EngineNaturalUsingTests {
   @Test func `a USING join defers to the left when the right is unconstrained`()
       throws {
     // The symmetric case: the constrained left `A_text.k` (`text`) beside an
-    // unconstrained right `(SELECT NULLIF(1, 1) AS k)` — the merged `k` types
+    // unconstrained right `(VALUES (NULLIF(1, 1)))` — the merged `k` types
     // off the left (`text`), and a LEFT join keeps every left row, its merged
     // `k` the left value (the always-NULL right coalesces away).
     let catalog = try Catalog {
@@ -1565,7 +1565,7 @@ struct EngineNaturalUsingTests {
     }
     let text = """
         SELECT k FROM A_text
-          LEFT JOIN (SELECT NULLIF(1, 1) AS k) AS b USING (k) ORDER BY k
+          LEFT JOIN (VALUES (NULLIF(1, 1))) AS b(k) USING (k) ORDER BY k
         """
     let columns = try catalog.columns(of: Statement(parsing: text),
                                       validate: true)
@@ -1577,11 +1577,11 @@ struct EngineNaturalUsingTests {
   @Test func `a USING join of two unconstrained sides stays unconstrained`()
       throws {
     // both constituents constant NULL (unconstrained): the merged `k` stays a
-    // placeholder that places no constraint, so a further `UNION SELECT 1` over
-    // it unifies to `integer` rather than faulting the placeholder beside the
-    // typed arm — the merged column carries its own `unconstrained` bit into
-    // the enclosing set-operation fold, exactly as a bare unconstrained column
-    // would.
+    // placeholder that places no constraint, so a further `UNION VALUES (1)`
+    // over it unifies to `integer` rather than faulting the placeholder beside
+    // the typed arm — the merged column carries its own `unconstrained` bit
+    // into the enclosing set-operation fold, exactly as a bare unconstrained
+    // column would.
     let catalog = try Catalog {
       Relation("Unit", ["only": .integer]) {
         Row(1)
@@ -1590,7 +1590,7 @@ struct EngineNaturalUsingTests {
     let text = """
         SELECT k FROM (SELECT NULLIF(1, 1) AS k FROM Unit) AS a
           JOIN (SELECT NULLIF(1, 1) AS k FROM Unit) AS b USING (k)
-        UNION SELECT 1
+        UNION VALUES (1)
         """
     let columns = try catalog.columns(of: Statement(parsing: text),
                                       validate: true)
@@ -1655,7 +1655,7 @@ struct EngineNaturalUsingTests {
     // `.ambiguous` between the two physical `Dept`s. Run and schema agree.
     let text = """
         SELECT d.n FROM Emp JOIN Team USING (Dept)
-          JOIN LATERAL (SELECT Dept AS n) AS d ON 1 = 1
+          JOIN LATERAL (VALUES (Dept)) AS d(n) ON 1 = 1
         """
     try named().expect(text, yields: [[20], [20]])
     let columns = try named()
@@ -1668,7 +1668,7 @@ struct EngineNaturalUsingTests {
     // same way `USING` does.
     let text = """
         SELECT d.n FROM Emp NATURAL JOIN Team
-          JOIN LATERAL (SELECT Dept AS n) AS d ON 1 = 1
+          JOIN LATERAL (VALUES (Dept)) AS d(n) ON 1 = 1
         """
     try named().expect(text, yields: [[20], [20]])
   }
@@ -1680,7 +1680,7 @@ struct EngineNaturalUsingTests {
     // the `.coalesce` correlation source over the outer row's two cells.
     let text = """
         SELECT d.n FROM Emp RIGHT JOIN Team USING (Dept)
-          JOIN LATERAL (SELECT Dept AS n) AS d ON 1 = 1
+          JOIN LATERAL (VALUES (Dept)) AS d(n) ON 1 = 1
         """
     try named().expect(text, yields: [[20], [20], [30]])
   }
@@ -1691,7 +1691,7 @@ struct EngineNaturalUsingTests {
     // reaches its own physical side, correlating as an ordinary outer slot.
     let text = """
         SELECT d.n FROM Emp JOIN Team USING (Dept)
-          JOIN LATERAL (SELECT Emp.Dept AS n) AS d ON 1 = 1
+          JOIN LATERAL (VALUES (Emp.Dept)) AS d(n) ON 1 = 1
         """
     try named().expect(text, yields: [[20], [20]])
   }
@@ -1703,21 +1703,21 @@ struct EngineNaturalUsingTests {
     let text = """
         SELECT d.n FROM Emp JOIN Team USING (Dept)
           JOIN Bonus ON Bonus.Dept = Emp.Dept
-          JOIN LATERAL (SELECT Dept AS n) AS d ON 1 = 1
+          JOIN LATERAL (VALUES (Dept)) AS d(n) ON 1 = 1
         """
     try named().expect(text, fails: .ambiguous("Dept"))
   }
 
   @Test func `a merged column and its constituent correlate independently`()
       throws {
-    // A LATERAL body of `Emp RIGHT JOIN Team USING (Dept)` projects both the
-    // bare merged `Dept` (COALESCE) and the physical `Emp.Dept` constituent. On
-    // the right-only Dept 30 row the merged `Dept` coalesces to 30 while
-    // `Emp.Dept` is NULL — each correlates through its own parameter identity,
-    // so neither read overwrites the other regardless of projection order.
+    // A LATERAL body of `Emp RIGHT JOIN Team USING (Dept)` names in its row
+    // both the bare merged `Dept` (COALESCE) and the physical `Emp.Dept`
+    // constituent. On the right-only Dept 30 row the merged `Dept` coalesces to
+    // 30 while `Emp.Dept` is NULL — each correlates through its own parameter
+    // identity, so neither read overwrites the other regardless of row order.
     let forward = """
         SELECT m, e FROM Emp RIGHT JOIN Team USING (Dept)
-          JOIN LATERAL (SELECT Dept AS m, Emp.Dept AS e) AS d ON 1 = 1
+          JOIN LATERAL (VALUES (Dept, Emp.Dept)) AS d(m, e) ON 1 = 1
           ORDER BY m
         """
     try named().expect(forward, yields: [
@@ -1725,12 +1725,12 @@ struct EngineNaturalUsingTests {
       [20, 20],
       [30, nil],
     ])
-    // The reverse projection order yields the same values — the merged and the
+    // The reverse row order yields the same values — the merged and the
     // constituent correlation keys do not collide, so lowering order is
     // irrelevant.
     let reverse = """
         SELECT m, e FROM Emp RIGHT JOIN Team USING (Dept)
-          JOIN LATERAL (SELECT Emp.Dept AS e, Dept AS m) AS d ON 1 = 1
+          JOIN LATERAL (VALUES (Emp.Dept, Dept)) AS d(e, m) ON 1 = 1
           ORDER BY m
         """
     try named().expect(reverse, yields: [
@@ -1750,7 +1750,7 @@ struct EngineNaturalUsingTests {
     let star = """
         SELECT * FROM (SELECT NULLIF(1, 1) AS k FROM Solo) AS a
           JOIN (SELECT NULLIF(1, 1) AS k FROM Solo) AS b USING (k)
-          UNION SELECT 'x'
+          UNION VALUES ('x')
         """
     let starred = try named()
         .columns(of: Statement(parsing: star), validate: true)
@@ -1760,7 +1760,7 @@ struct EngineNaturalUsingTests {
     let explicit = """
         SELECT k FROM (SELECT NULLIF(1, 1) AS k FROM Solo) AS a
           JOIN (SELECT NULLIF(1, 1) AS k FROM Solo) AS b USING (k)
-          UNION SELECT 'x'
+          UNION VALUES ('x')
         """
     let named = try named()
         .columns(of: Statement(parsing: explicit), validate: true)
@@ -1774,7 +1774,7 @@ struct EngineNaturalUsingTests {
     // integer and the text UNION arm is irreconcilable: 42804 still faults,
     // proving the mask is carried, not hard-coded unconstrained.
     let text = """
-        SELECT * FROM Emp JOIN Team USING (Dept) UNION SELECT 'x', 'y', 'z'
+        SELECT * FROM Emp JOIN Team USING (Dept) UNION VALUES ('x', 'y', 'z')
         """
     try named().expect(text,
         fails: .operand("UNION arms have irreconcilable types"))
@@ -2055,7 +2055,7 @@ struct EngineNaturalUsingTests {
     // now unifies rather than faulting.
     try named().expect("""
         SELECT * FROM Emp JOIN Team USING (Id)
-        UNION ALL SELECT 9, 99, 'z', 88, 'w'
+        UNION ALL VALUES (9, 99, 'z', 88, 'w')
         """,
         yields: [
           [1, 10, "Ann", 20, "Deb"],
@@ -2070,7 +2070,7 @@ struct EngineNaturalUsingTests {
     // arm's five) still faults `.arity`, so deriving width from the enumeration
     // did not disable the check.
     try named().expect("""
-        SELECT * FROM Emp JOIN Team USING (Id) UNION ALL SELECT 1, 2, 3
+        SELECT * FROM Emp JOIN Team USING (Id) UNION ALL VALUES (1, 2, 3)
         """,
         fails: .arity(5, 3))
   }

@@ -190,37 +190,37 @@ struct ColumnListFaultTests {
 // MARK: - Execution: LATERAL derived table
 
 struct LateralColumnListTests {
-  @Test func `a column list renames a lateral body's duplicate inner names`()
+  @Test func `a column list names a lateral row of two equal values`()
       throws {
-    // The reviewer's case: the body projects `T.Id AS x` twice — a duplicate
-    // INNER name the `d(a, b)` list renames positionally to the unique exposed
-    // `a`, `b`. The compile-path validation in `lateral` must check the renamed
-    // names, so this runs (both columns = `T.Id`) rather than faulting the
-    // inner duplicate — parity with the schema pass.
+    // The reviewer's case in VALUES form: the lateral row lists `T.Id` twice,
+    // which the `d(a, b)` list names positionally as the exposed `a`, `b`. The
+    // compile-path validation in `lateral` checks the exposed names, so this
+    // runs (both columns = `T.Id`) rather than faulting — parity with the
+    // schema pass.
     try fixture().expect(
         "SELECT d.a, d.b FROM T " +
-        "JOIN LATERAL (SELECT T.Id AS x, T.Id AS x) AS d(a, b) ON 1 = 1 " +
+        "JOIN LATERAL (VALUES (T.Id, T.Id)) AS d(a, b) ON 1 = 1 " +
         "ORDER BY d.a",
         yields: [[1, 1], [2, 2]])
   }
 
-  @Test func `a column list renames a lateral body's distinct columns`()
+  @Test func `a column list names a lateral row's distinct values`()
       throws {
-    // A list over DISTINCT inner columns renames them positionally, unchanged
-    // by the fix — the body projects two real columns, addressed as `a`, `b`.
+    // A list over two distinct values names them positionally, unchanged by the
+    // fix — the lateral row lists `T.Id`, `T.V`, addressed as `a`, `b`.
     try fixture().expect(
         "SELECT d.a, d.b FROM T " +
-        "JOIN LATERAL (SELECT T.Id, T.V) AS d(a, b) ON 1 = 1 " +
+        "JOIN LATERAL (VALUES (T.Id, T.V)) AS d(a, b) ON 1 = 1 " +
         "ORDER BY d.a",
         yields: [[1, 100], [2, 200]])
   }
 
   @Test func `a lateral column list of the wrong arity faults`() throws {
-    // A one-name list against a two-column body mismatches —
+    // A one-name list against a two-column lateral row mismatches —
     // `SQLError.columns`, as the non-lateral seam faults.
     try fixture().expect(
         "SELECT d.a FROM T " +
-        "JOIN LATERAL (SELECT T.Id, T.V) AS d(a) ON 1 = 1",
+        "JOIN LATERAL (VALUES (T.Id, T.V)) AS d(a) ON 1 = 1",
         fails: .columns(expected: 2, got: 1))
   }
 
@@ -231,7 +231,7 @@ struct LateralColumnListTests {
     // names, and here they collide.
     try fixture().expect(
         "SELECT d.a FROM T " +
-        "JOIN LATERAL (SELECT T.Id, T.V) AS d(a, a) ON 1 = 1",
+        "JOIN LATERAL (VALUES (T.Id, T.V)) AS d(a, a) ON 1 = 1",
         fails: .duplicate("a"))
   }
 }

@@ -19,15 +19,15 @@ struct NullifTests {
   }
 
   @Test func `equal arguments yield NULL`() throws {
-    try nullable().expect("SELECT NULLIF(1, 1)", yields: [[nil]])
+    try nullable().expect("VALUES (NULLIF(1, 1))", yields: [[nil]])
   }
 
   @Test func `unequal integer arguments yield the first`() throws {
-    try nullable().expect("SELECT NULLIF(1, 2)", yields: [[1]])
+    try nullable().expect("VALUES (NULLIF(1, 2))", yields: [[1]])
   }
 
   @Test func `unequal text arguments yield the first`() throws {
-    try nullable().expect("SELECT NULLIF('a', 'b')", yields: [["a"]])
+    try nullable().expect("VALUES (NULLIF('a', 'b'))", yields: [["a"]])
   }
 
   @Test func `the column type is the first argument's`() throws {

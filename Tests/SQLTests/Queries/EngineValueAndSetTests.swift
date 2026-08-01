@@ -674,50 +674,50 @@ struct EngineScalarSelectTests {
   @Test func `a FROM-less literal yields exactly one row`() throws {
     // No relation, so the projection runs against a single empty row; the
     // catalog is never consulted for a table.
-    try roster().expect("SELECT 42", yields: [[42]])
+    try roster().expect("VALUES (42)", yields: [[42]])
   }
 
   @Test func `a FROM-less arithmetic computes a scalar`() throws {
-    try roster().expect("SELECT 1 + 1", yields: [[2]])
+    try roster().expect("VALUES (1 + 1)", yields: [[2]])
   }
 
   @Test func `FROM-less arithmetic honours precedence`() throws {
-    try roster().expect("SELECT 2 + 3 * 4", yields: [[14]])
+    try roster().expect("VALUES (2 + 3 * 4)", yields: [[14]])
   }
 
   @Test func `a FROM-less multi-column projection yields one row of each value`() throws {
-    try roster().expect("SELECT 1, 2, 3", yields: [[1, 2, 3]])
+    try roster().expect("VALUES (1, 2, 3)", yields: [[1, 2, 3]])
   }
 
   @Test func `a FROM-less projection mixes text and integer expressions`() throws {
-    try roster().expect("SELECT 'x', 10 / 2", yields: [["x", 5]])
+    try roster().expect("VALUES ('x', 10 / 2)", yields: [["x", 5]])
   }
 
   @Test func `a FROM-less scalar call evaluates against the single row`() throws {
-    let rows = try functions("SELECT add(40, 2)")
+    let rows = try functions("VALUES (add(40, 2))")
     #expect(rows == [[.integer(42)]])
   }
 
   @Test func `a boolean literal lowers to its truth value`() throws {
-    try roster().expect("SELECT TRUE, FALSE", yields: [[true, false]])
+    try roster().expect("VALUES (TRUE, FALSE)", yields: [[true, false]])
   }
 
   @Test func `a hex blob literal lowers to its bytes`() throws {
     // The `x'53514c'` literal lexes, parses, and lowers to the three-byte
     // blob `SQL`, projected as a `Value.blob`.
-    try roster().expect("SELECT x'53514c'",
+    try roster().expect("VALUES (x'53514c')",
                         yields: [[[0x53, 0x51, 0x4c] as Array<UInt8>]])
   }
 
   @Test func `a boolean operand faults as a non-numeric type error`() throws {
     // Neither boolean nor blob is numeric, so arithmetic over either faults
     // exactly as text does — the type-checker rejects any non-numeric operand.
-    try roster().expect("SELECT TRUE + 1",
+    try roster().expect("VALUES (TRUE + 1)",
                         fails: .operand("operands must be numeric"))
   }
 
   @Test func `a blob operand faults as a non-numeric type error`() throws {
-    try roster().expect("SELECT x'00' + 1",
+    try roster().expect("VALUES (x'00' + 1)",
                         fails: .operand("operands must be numeric"))
   }
 
@@ -726,7 +726,7 @@ struct EngineScalarSelectTests {
     // function returning it; `nothing` yields NULL for the single row.
     let routines: Routines =
         ["nothing": Routine(parameters: []) { _ in .null }]
-    let rows = try roster().run(parse("SELECT nothing()"), routines)
+    let rows = try roster().run(parse("VALUES (nothing())"), routines)
     #expect(rows == [[.null]])
   }
 
@@ -737,7 +737,7 @@ struct EngineScalarSelectTests {
   }
 
   @Test func `a FROM-less bare column is rejected — no column to bind`() throws {
-    try roster().expect("SELECT Name", fails: .column("Name"))
+    try roster().expect("VALUES (Name)", fails: .column("Name"))
   }
 
   @Test func `a directly-built FROM-less select with clauses is rejected`() throws {

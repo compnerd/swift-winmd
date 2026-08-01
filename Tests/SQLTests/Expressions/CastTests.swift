@@ -71,16 +71,16 @@ struct CastNumericTests {
   }
 
   @Test func `a number casts to its canonical text`() throws {
-    try things().expect("SELECT CAST(42 AS TEXT)", yields: [["42"]])
+    try things().expect("VALUES (CAST(42 AS TEXT))", yields: [["42"]])
   }
 
   @Test func `text parses to an integer`() throws {
-    try things().expect("SELECT CAST('42' AS INTEGER)", yields: [[42]])
+    try things().expect("VALUES (CAST('42' AS INTEGER))", yields: [[42]])
   }
 
   @Test func `text parses to a double`() throws {
-    try things().expect("SELECT CAST('2.5' AS DOUBLE)", yields: [[2.5]])
-    try things().expect("SELECT CAST('1.5' AS DOUBLE)", yields: [[1.5]])
+    try things().expect("VALUES (CAST('2.5' AS DOUBLE))", yields: [[2.5]])
+    try things().expect("VALUES (CAST('1.5' AS DOUBLE))", yields: [[1.5]])
   }
 
   @Test func `text of overflowing magnitude to double faults`() throws {
@@ -90,7 +90,7 @@ struct CastNumericTests {
     // NOT the invalid-character fault (`22018`) reserved for an unparseable
     // spelling.
     try things().expect(
-        "SELECT CAST('1e999' AS DOUBLE)",
+        "VALUES (CAST('1e999' AS DOUBLE))",
         fails: .magnitude("double '1e999' out of range for cast"))
   }
 
@@ -98,7 +98,7 @@ struct CastNumericTests {
     // `'abc'` is no number at all, so its cast raises the ISO
     // invalid-character-for-cast fault (`22018`), distinct from the
     // out-of-range fault above.
-    try things().expect("SELECT CAST('abc' AS DOUBLE)",
+    try things().expect("VALUES (CAST('abc' AS DOUBLE))",
                         fails: .state("22018", "cannot cast 'abc' to double"))
   }
 
@@ -120,27 +120,27 @@ struct CastValueTests {
   }
 
   @Test func `a boolean casts to text`() throws {
-    try things().expect("SELECT CAST(TRUE AS TEXT)", yields: [["true"]])
+    try things().expect("VALUES (CAST(TRUE AS TEXT))", yields: [["true"]])
   }
 
   @Test func `text casts to a boolean`() throws {
-    try things().expect("SELECT CAST('no' AS BOOLEAN)", yields: [[false]])
+    try things().expect("VALUES (CAST('no' AS BOOLEAN))", yields: [[false]])
   }
 
   @Test func `text casts to a blob as its UTF-8 octets`() throws {
-    try things().expect("SELECT CAST('AB' AS BLOB)",
+    try things().expect("VALUES (CAST('AB' AS BLOB))",
                         yields: [[[UInt8(0x41), UInt8(0x42)]]])
   }
 
   @Test func `a blob casts back to text`() throws {
-    try things().expect("SELECT CAST(x'4142' AS TEXT)", yields: [["AB"]])
+    try things().expect("VALUES (CAST(x'4142' AS TEXT))", yields: [["AB"]])
   }
 
   @Test func `an unsupported cross-kind cast faults`() throws {
     // A boolean has no conversion to an integer — a cross-kind pair with no ISO
     // conversion faults `42846` (cannot coerce).
     try things().expect(
-        "SELECT CAST(TRUE AS INTEGER)",
+        "VALUES (CAST(TRUE AS INTEGER))",
         fails: .state("42846", "cannot cast boolean to integer"))
   }
 }
@@ -177,7 +177,8 @@ struct CastSchemaTests {
     // schema type-check rejects it rather than advertising an integer column.
     #expect(throws: SQLError.state("42846",
                                    "cannot cast boolean to integer")) {
-      _ = try things().columns(of: parse(query: "SELECT CAST(TRUE AS INTEGER)"))
+      _ = try things()
+          .columns(of: parse(query: "VALUES (CAST(TRUE AS INTEGER))"))
     }
   }
 
@@ -185,8 +186,8 @@ struct CastSchemaTests {
     // A castable-but-value-dependent pair — `integer` → `double` always
     // convertible, `text` → `integer` convertible for a good spelling —
     // type-checks and reports the target type; only a bad value faults at run.
-    #expect(try things().type(of: "SELECT CAST(1 AS DOUBLE)") == .double)
-    #expect(try things().type(of: "SELECT CAST('1' AS INTEGER)") == .integer)
+    #expect(try things().type(of: "VALUES (CAST(1 AS DOUBLE))") == .double)
+    #expect(try things().type(of: "VALUES (CAST('1' AS INTEGER))") == .integer)
   }
 
   @Test func `a constant cast that always fails is rejected at validation`()
@@ -196,7 +197,7 @@ struct CastSchemaTests {
     // at validation, not only at run.
     #expect(throws: SQLError.state("22018",
                                    "cannot cast 'abc' to integer")) {
-      let query = try parse(query: "SELECT CAST('abc' AS INTEGER)")
+      let query = try parse(query: "VALUES (CAST('abc' AS INTEGER))")
       _ = try things().columns(of: query)
     }
   }
@@ -207,7 +208,7 @@ struct CastSchemaTests {
     // unsupported. The constant fold runs FIRST, so the folded NULL trial-casts
     // to `.blob` — a NULL casts to ANY target — and validation succeeds with a
     // blob column rather than rejecting `42846` a query the run would perform.
-    let sql = "SELECT CAST(CASE WHEN 1 = 0 THEN 1 END AS BLOB)"
+    let sql = "VALUES (CAST(CASE WHEN 1 = 0 THEN 1 END AS BLOB))"
     let columns = try things().columns(of: parse(query: sql), validate: true)
     #expect(columns.count == 1)
     #expect(columns[0].type == .blob)
@@ -220,8 +221,9 @@ struct CastSchemaTests {
     // `42846`, the same fault the structural check would raise.
     #expect(throws: SQLError.state("42846",
                                    "cannot cast boolean to integer")) {
-      _ = try things().columns(of: parse(query: "SELECT CAST(TRUE AS INTEGER)"),
-                               validate: true)
+      _ = try things()
+          .columns(of: parse(query: "VALUES (CAST(TRUE AS INTEGER))"),
+                   validate: true)
     }
   }
 
@@ -242,7 +244,7 @@ struct CastSchemaTests {
     // `CAST('1' AS INTEGER)` is a castable pair whose fault depends on the
     // value, so it type-checks as an integer column even after the reorder —
     // the trial cast of the constant `'1'` succeeds.
-    #expect(try things().type(of: "SELECT CAST('1' AS INTEGER)") == .integer)
+    #expect(try things().type(of: "VALUES (CAST('1' AS INTEGER))") == .integer)
   }
 }
 
@@ -253,7 +255,7 @@ struct CastNumericFormatTests {
     // `Double('0x1p2')` is `4.0`, a Swift spelling the SQL grammar rejects, so
     // the cast faults invalid character (`22018`), never yielding `4.0`.
     try things().expect(
-        "SELECT CAST('0x1p2' AS DOUBLE)",
+        "VALUES (CAST('0x1p2' AS DOUBLE))",
         fails: .state("22018", "cannot cast '0x1p2' to double"))
   }
 
@@ -261,12 +263,12 @@ struct CastNumericFormatTests {
     // `Double('inf')` parses to a non-finite magnitude, but `inf` is no SQL
     // numeric spelling, so it is an invalid character (`22018`) — NOT the
     // out-of-range fault (`22003`) a valid-format overflow raises.
-    try things().expect("SELECT CAST('inf' AS DOUBLE)",
+    try things().expect("VALUES (CAST('inf' AS DOUBLE))",
                         fails: .state("22018", "cannot cast 'inf' to double"))
   }
 
   @Test func `the NaN spelling is not a SQL number`() throws {
-    try things().expect("SELECT CAST('nan' AS DOUBLE)",
+    try things().expect("VALUES (CAST('nan' AS DOUBLE))",
                         fails: .state("22018", "cannot cast 'nan' to double"))
   }
 
@@ -275,14 +277,14 @@ struct CastNumericFormatTests {
     // so it passes the format gate and faults out-of-range (`22003`),
     // unchanged.
     try things().expect(
-        "SELECT CAST('1e999' AS DOUBLE)",
+        "VALUES (CAST('1e999' AS DOUBLE))",
         fails: .magnitude("double '1e999' out of range for cast"))
   }
 
   @Test func `valid SQL decimal spellings parse`() throws {
-    try things().expect("SELECT CAST('1.5' AS DOUBLE)", yields: [[1.5]])
-    try things().expect("SELECT CAST('-3' AS DOUBLE)", yields: [[-3.0]])
-    try things().expect("SELECT CAST('2e3' AS DOUBLE)", yields: [[2000.0]])
+    try things().expect("VALUES (CAST('1.5' AS DOUBLE))", yields: [[1.5]])
+    try things().expect("VALUES (CAST('-3' AS DOUBLE))", yields: [[-3.0]])
+    try things().expect("VALUES (CAST('2e3' AS DOUBLE))", yields: [[2000.0]])
   }
 
   @Test func `a format-valid integer overflow is out of range`() throws {
@@ -291,7 +293,7 @@ struct CastNumericFormatTests {
     // range, faulting out-of-range (`22003`), NOT the invalid-character fault
     // (`22018`) an unspellable text raises.
     try things().expect(
-        "SELECT CAST('9223372036854775808' AS INTEGER)",
+        "VALUES (CAST('9223372036854775808' AS INTEGER))",
         fails: .magnitude(
             "integer '9223372036854775808' out of range for cast"))
   }
@@ -301,15 +303,15 @@ struct CastNumericFormatTests {
     // fraction — so each is an invalid character (`22018`), the format gate
     // rejecting them before `Int(_:)` conflates them with a range overflow.
     try things().expect(
-        "SELECT CAST('12abc' AS INTEGER)",
+        "VALUES (CAST('12abc' AS INTEGER))",
         fails: .state("22018", "cannot cast '12abc' to integer"))
     try things().expect(
-        "SELECT CAST('1.5' AS INTEGER)",
+        "VALUES (CAST('1.5' AS INTEGER))",
         fails: .state("22018", "cannot cast '1.5' to integer"))
   }
 
   @Test func `valid SQL integer spellings parse`() throws {
-    try things().expect("SELECT CAST('42' AS INTEGER)", yields: [[42]])
-    try things().expect("SELECT CAST('-7' AS INTEGER)", yields: [[-7]])
+    try things().expect("VALUES (CAST('42' AS INTEGER))", yields: [[42]])
+    try things().expect("VALUES (CAST('-7' AS INTEGER))", yields: [[-7]])
   }
 }

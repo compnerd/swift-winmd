@@ -1039,6 +1039,24 @@ extension Catalog where Self: ~Escapable {
   private borrowing func typecheck(values rows: Array<Array<Expression>>,
                                    _ query: Query, _ context: Context)
       throws(SQLError) {
+    // Value-check (and, on the run's comparability walk, compare) only the rows
+    // the run evaluates. A carried positional limit over a bare `VALUES` — no
+    // ORDER BY, no DISTINCT — pages the constructor at compile time: the run
+    // slices the `.values` leaf's rows before their cells lower (`paged`, see
+    // `ordered`), so a discarded row never evaluates and its cell faults never
+    // surface — exactly as a `FETCH FIRST 0 ROWS` SELECT's projection is
+    // unreachable. Page these AST rows through that same `paged` so a discarded
+    // row's `1 / 0` faults neither the run nor `columns(of: validate:)`. An
+    // ORDER BY or a DISTINCT carrier keeps the eager leaf — every row evaluates
+    // to sort or dedup it — so `surviving` stops the peel at the first such
+    // carrier and every row that reaches it is checked (a `VALUES (1 / 0) ORDER
+    // BY 1 FETCH FIRST 0 ROWS` still faults, matching the run).
+    //
+    // The arity/degree and column-type derivation is not sliced: it stays over
+    // all the rows in `columns(unifying:)` (the result schema is limit-
+    // independent, and the run arity-checks every row before its own carrier
+    // slice), so a discarded row's arity mismatch still faults on both paths.
+    let rows = surviving(rows, under: query.carriers)
     let scope = Scope([])
     let expressions = rows.flatMap { $0 }
     let nested = context.outer
@@ -1107,6 +1125,27 @@ extension Catalog where Self: ~Escapable {
         }
       }
     }
+  }
+
+  /// The `VALUES` rows the run evaluates under its query-level carriers — the
+  /// rows a value-check faults over, matching the run's compile-time page.
+  ///
+  /// It mirrors the compile's carrier peel (`ordered`, innermost first): a
+  /// carrier that neither orders nor deduplicates and carries a positional
+  /// limit pages the still-`.values` leaf (`paged`), so the rows it discards
+  /// never evaluate. The peel stops at the first carrier that orders or
+  /// deduplicates — its eager leaf evaluates every row that reaches it — or that
+  /// carries no limit, leaving the surviving rows those the run evaluates.
+  private func surviving(_ rows: Array<Array<Expression>>,
+                         under carriers: Array<Query.Carrier>)
+      -> Array<Array<Expression>> {
+    var rows = rows
+    for carrier in carriers {
+      guard !carrier.distinct, carrier.order == nil,
+            let limit = carrier.limit else { return rows }
+      rows = paged(rows, by: limit)
+    }
+    return rows
   }
 
   /// The comparison-finder over a single arm — the comparability-only

@@ -147,6 +147,76 @@ struct EngineFunctionTests {
         try functions("SELECT Name FROM People WHERE add(Id, 10) = 12")
     #expect(rows == [[.text("Bob")]])
   }
+
+  @Test func `a native routine's own structural fault stays off the run-validate tripwire`() throws {
+    // A host-registered native routine may throw a structural-classed fault
+    // from its own body — here `detonate` unconditionally raises `.function`,
+    // a structural code — while the schema path validates only its declared
+    // signature: a valid INTEGER argument (`Id`) against an INTEGER parameter,
+    // which succeeds without invoking the body. The run then invokes the body
+    // and it faults. The `run ≡ validate` tripwire (`Expect.swift`) must read
+    // this as the expected run/validate difference it is — the fault
+    // originates in the routine body, not a hole the schema derive owns — and
+    // stay silent, so this observes only the raw fault, no recorded issue. The
+    // tripwire fires without its native-routine exemption (drop `native(_:)`
+    // from the guard to see it record a spurious issue on this query).
+    let routines = try Routines.standard
+        .registering("detonate", parameters: [.integer]) {
+          _ throws(SQLError) in throw .function("detonate always faults")
+        }
+    try roster().expect("SELECT detonate(Id) FROM People WHERE Id = 1",
+                        fails: .function("detonate always faults"),
+                        routines: routines)
+  }
+
+  @Test func `a native routine replacing a standard name stays off the tripwire`() throws {
+    // The same exemption when the native body is installed under a *standard*
+    // name rather than a new one. A dictionary-literal `Routines` carries no
+    // protection, so it may bind `upper` — a name `registering(_:…)` refuses to
+    // shadow — to an arbitrary native body; here it always raises `.function`,
+    // a structural code. The schema path validates only the declared signature
+    // (a `TEXT` argument against `upper`'s `TEXT` parameter) and succeeds
+    // without invoking the body, while the run invokes it and it faults. The
+    // exemption must not key on the name — `upper` is a standard name, so a
+    // name-set test reads this set as standard-only and would record a spurious
+    // issue — but on the bound routine's construction identity: this `upper` is
+    // a freshly built routine value, not the one `Routines.standard` ships, so
+    // the `run ≡ validate` tripwire stays silent and this observes only the raw
+    // fault.
+    let routines: Routines = [
+      "upper": Routine(returns: .text, parameters: [.text]) {
+        _ throws(SQLError) in throw .function("upper always faults")
+      }
+    ]
+    try roster().expect("SELECT upper(Name) FROM People WHERE Id = 1",
+                        fails: .function("upper always faults"),
+                        routines: routines)
+  }
+
+  @Test func `a native routine merged over a standard name stays off the tripwire`() throws {
+    // The exemption must survive the merge path, where the earlier
+    // protection-based gate failed. `Routines.standard.merging(custom)` binds
+    // the caller's `upper` — the right-hand side of a merge wins — yet unions
+    // both sides' protected names, so `upper` stays protected though the
+    // routine under it is now the caller's body, which here always raises
+    // `.function`, a structural code. The schema path validates only the
+    // declared signature (`upper`'s `TEXT` parameter) and succeeds without
+    // invoking the body, while the run invokes it and it faults. A gate keyed
+    // on protection reads this set as standard-only and records a spurious
+    // issue; the identity gate sees this `upper` is a fresh routine value, not
+    // the one `Routines.standard` ships — while every unreplaced standard name
+    // keeps the shipped value — so the `run ≡ validate` tripwire stays silent
+    // and this observes only the raw fault.
+    let custom: Routines = [
+      "upper": Routine(returns: .text, parameters: [.text]) {
+        _ throws(SQLError) in throw .function("upper always faults")
+      }
+    ]
+    let routines = Routines.standard.merging(custom)
+    try roster().expect("SELECT upper(Name) FROM People WHERE Id = 1",
+                        fails: .function("upper always faults"),
+                        routines: routines)
+  }
 }
 
 // MARK: - Defined function (CREATE FUNCTION) tests

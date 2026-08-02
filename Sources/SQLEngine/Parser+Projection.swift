@@ -333,11 +333,11 @@ extension Parser {
     return WindowSpec(partition: partition, order: order, frame: frame)
   }
 
-  /// Parses an optional window frame clause — `(ROWS | RANGE | GROUPS) <extent>`
-  /// — after the window `ORDER BY`, or `nil` when none is written (the default
-  /// frame then applies). The extent is either the ISO `BETWEEN <start> AND
-  /// <end>` pair or a single `<start>` bound, the shorthand for `BETWEEN
-  /// <start> AND CURRENT ROW`.
+  /// Parses an optional window frame clause — `(ROWS | RANGE | GROUPS)
+  /// <extent>` after the window `ORDER BY`, or `nil` when none is written (the
+  /// default frame then applies). The extent is either the ISO `BETWEEN
+  /// <start> AND <end>` pair or a single `<start>` bound, the shorthand for
+  /// `BETWEEN <start> AND CURRENT ROW`.
   private mutating func frame() throws(SQLError) -> Frame? {
     let unit: Frame.Unit
     if try match(.rows) {
@@ -361,8 +361,8 @@ extension Parser {
   }
 
   /// Parses one window frame bound — `UNBOUNDED PRECEDING`, `UNBOUNDED
-  /// FOLLOWING`, `CURRENT ROW`, `n PRECEDING`, or `n FOLLOWING` — where `n` is a
-  /// non-negative integer literal.
+  /// FOLLOWING`, `CURRENT ROW`, `n PRECEDING`, or `n FOLLOWING` — where `n` is
+  /// a non-negative integer literal.
   private mutating func bound() throws(SQLError) -> Frame.Bound {
     if try match(.unbounded) {
       if try match(.preceding) { return .unboundedPreceding }

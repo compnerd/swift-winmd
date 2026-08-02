@@ -80,6 +80,33 @@ public enum WindowFunction: Hashable, Sendable {
   /// current peer group).
   case aggregate(Aggregate, of: Aggregand, distinct: Bool = false,
                  filter: Predicate? = nil)
+  /// `LEAD(value [, offset [, default]]) OVER (…)` — the `value` expression
+  /// evaluated at the row `offset` positions after the current row in the
+  /// window order (`offset` defaulting to `1`); when that row falls past the
+  /// partition end, the `default` expression (or `NULL` when none is written).
+  /// It requires a window `ORDER BY` — the offset is meaningless without a row
+  /// order.
+  case lead(Expression, offset: Int = 1, default: Expression? = nil)
+  /// `LAG(value [, offset [, default]]) OVER (…)` — the mirror of `LEAD`,
+  /// reading the row `offset` positions before the current row; `default` (or
+  /// `NULL`) when that row falls before the partition start. It requires a
+  /// window `ORDER BY`.
+  case lag(Expression, offset: Int = 1, default: Expression? = nil)
+}
+
+extension WindowFunction {
+  /// The value expression and optional default of an offset function
+  /// (`LEAD`/`LAG`), or `nil` for a ranking or aggregate window. The structural
+  /// walks descend these exactly as they descend an aggregate window's operand,
+  /// so a subquery or unregistered call nested in either is seen.
+  internal var positional: (value: Expression, default: Expression?)? {
+    switch self {
+    case let .lead(value, _, fallback), let .lag(value, _, fallback):
+      (value, fallback)
+    case .rowNumber, .rank, .denseRank, .aggregate:
+      nil
+    }
+  }
 }
 
 /// A window specification — the `OVER (…)` clause governing a window function:

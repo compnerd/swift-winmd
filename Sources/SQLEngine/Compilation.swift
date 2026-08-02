@@ -1751,6 +1751,7 @@ extension Catalog where Self: ~Escapable {
       guard function.supported else {
         throw .state("0A000", "\(function.keyword) is not yet supported")
       }
+      try function.require(order: spec)
       if let frame = spec.frame {
         try frame.reject(for: function)
       }

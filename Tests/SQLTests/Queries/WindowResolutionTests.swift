@@ -89,3 +89,65 @@ struct WindowResolutionTests {
     #expect(collected == [window])
   }
 }
+
+// MARK: - Argument invariants (public AST)
+
+/// A window function argument the parser's grammar cannot express — a
+/// nonpositive `NTILE` bucket count or `NTH_VALUE` position, a negative
+/// `LEAD`/`LAG` offset — faults where the window lowers (`windowing`), the
+/// shared point compile reaches on the run and validate paths alike. So a query
+/// built directly through the public AST, bypassing the parser's guards, cannot
+/// drive the executor into a division by a zero bucket count, a subscript before
+/// the partition start, or the `-Int.min` negation `LAG` forms.
+struct WindowArgumentTests {
+  private let ordered =
+      WindowSpec(order: Order(keys: [Order.Key(column: Column("x"))]))
+
+  @Test func `a minimum LAG offset faults at lowering`() {
+    let window = Expression.window(
+        function: .lag(.column(Column("x")), offset: Int.min, default: nil),
+        spec: ordered)
+    #expect(throws:
+        SQLError.state("22023", "LAG requires a nonnegative offset")) {
+      _ = try window.windowing(scope())
+    }
+  }
+
+  @Test func `a negative LEAD offset faults at lowering`() {
+    let window = Expression.window(
+        function: .lead(.column(Column("x")), offset: -1, default: nil),
+        spec: ordered)
+    #expect(throws:
+        SQLError.state("22023", "LEAD requires a nonnegative offset")) {
+      _ = try window.windowing(scope())
+    }
+  }
+
+  @Test func `a negative frame offset is rejected`() {
+    // The parser admits only nonnegative frame offsets, but a public AST can
+    // build `.preceding(-1)`/`.following(-1)` — which run the bound the opposite
+    // way — so the shared frame check rejects them. `reject(for:)` validates the
+    // frame before the function's own frameability.
+    for bound in [Frame.Bound.preceding(-1), .following(-1)] {
+      let frame = Frame(unit: .rows, start: bound, end: .currentRow)
+      #expect(throws:
+          SQLError.state("22023", "a window frame offset must be nonnegative")) {
+        try frame.reject(for: .rowNumber)
+      }
+    }
+  }
+
+  @Test func `an invalid frame bound ordering is rejected`() {
+    // A directly built frame reaches the same validity checks a parsed one does.
+    #expect(throws: SQLError.state(
+        "42601", "a window frame cannot start at UNBOUNDED FOLLOWING")) {
+      try Frame(unit: .rows, start: .unboundedFollowing, end: .currentRow)
+          .reject(for: .rowNumber)
+    }
+    #expect(throws: SQLError.state(
+        "42601", "a window frame cannot end at UNBOUNDED PRECEDING")) {
+      try Frame(unit: .rows, start: .currentRow, end: .unboundedPreceding)
+          .reject(for: .rowNumber)
+    }
+  }
+}

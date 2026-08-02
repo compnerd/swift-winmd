@@ -19,6 +19,9 @@ extension WindowFunction {
     case .aggregate:
       preconditionFailure(
           "an aggregate window types from its argument through a scope")
+    case .lead, .lag:
+      preconditionFailure(
+          "an offset window types from its value through a scope")
     }
   }
 
@@ -28,7 +31,7 @@ extension WindowFunction {
   /// diagnostic on both the run and validate paths until then.
   internal var supported: Bool {
     switch self {
-    case .rowNumber, .rank, .denseRank, .aggregate:
+    case .rowNumber, .rank, .denseRank, .aggregate, .lead, .lag:
       true
     }
   }
@@ -41,6 +44,8 @@ extension WindowFunction {
     case .rank: "RANK"
     case .denseRank: "DENSE_RANK"
     case let .aggregate(function, _, _, _): function.keyword
+    case .lead: "LEAD"
+    case .lag: "LAG"
     }
   }
 
@@ -67,6 +72,24 @@ extension Frame.Bound {
     switch self {
     case .preceding(0), .following(0): .currentRow
     default: self
+    }
+  }
+}
+
+extension WindowFunction {
+  /// Faults when this window function requires a window `ORDER BY` that `spec`
+  /// lacks — an offset function (`LEAD`/`LAG`) reads the row a fixed distance
+  /// along the window order, so an unordered window has no neighbour to read.
+  /// Called on both the compile (run) and validate paths so the two stay in
+  /// lockstep (the run ≡ validate tripwire).
+  internal func require(order spec: WindowSpec) throws(SQLError) {
+    switch self {
+    case .rowNumber, .rank, .denseRank, .aggregate:
+      break
+    case .lead, .lag:
+      guard spec.order != nil else {
+        throw .state("0A000", "\(keyword) requires an ORDER BY")
+      }
     }
   }
 }
@@ -239,6 +262,13 @@ internal struct Windowing: Equatable {
     /// executor accumulates, mirroring the collapsing grouping path's fold but
     /// cardinality-preserving.
     case aggregate(Aggregation)
+    /// `LEAD` — the lowered `value` term read `offset` rows after the current
+    /// row in the window order, else the lowered `default` term (or NULL) at a
+    /// partition edge.
+    case lead(Term, offset: Int, default: Term?)
+    /// `LAG` — the mirror of `lead`, reading `offset` rows before the current
+    /// row.
+    case lag(Term, offset: Int, default: Term?)
   }
 
   /// The window function computed over each ordered partition.
@@ -277,15 +307,27 @@ extension Windowing.Function {
       self
     case let .aggregate(aggregation):
       .aggregate(aggregation.remapped(through: slot))
+    case let .lead(value, offset, fallback):
+      .lead(value.remapped(through: slot), offset: offset,
+            default: fallback.map { $0.remapped(through: slot) })
+    case let .lag(value, offset, fallback):
+      .lag(value.remapped(through: slot), offset: offset,
+           default: fallback.map { $0.remapped(through: slot) })
     }
   }
 
   /// The source slots this function reads, accumulated into `slots` — an
-  /// aggregate window's argument and `FILTER` slots, none for a ranking
-  /// function.
+  /// aggregate window's argument and `FILTER` slots, an offset function's value
+  /// and default slots, none for a ranking function.
   internal func references(into slots: inout Set<Int>) {
-    if case let .aggregate(aggregation) = self {
+    switch self {
+    case .rowNumber, .rank, .denseRank:
+      break
+    case let .aggregate(aggregation):
       aggregation.references(into: &slots)
+    case let .lead(value, _, fallback), let .lag(value, _, fallback):
+      value.references(into: &slots)
+      fallback?.references(into: &slots)
     }
   }
 }
@@ -329,6 +371,9 @@ extension Windowing {
     case let .aggregate(aggregation):
       return aggregation.filter == nil
           && (aggregation.argument?.deterministic(routines) ?? true)
+    case let .lead(value, _, fallback), let .lag(value, _, fallback):
+      return value.deterministic(routines)
+          && (fallback?.deterministic(routines) ?? true)
     }
   }
 }
@@ -433,9 +478,27 @@ extension WindowFunction {
   /// aggregate window lowers its operand and `FILTER` to the source slot space,
   /// reusing the collapsing aggregate's own `aggregation` lowering so the two
   /// resolve identically (run ≡ validate).
+  /// Faults a constant argument the parser's grammar rejects but a directly
+  /// built AST could still carry — a nonpositive `NTILE` bucket count or
+  /// `NTH_VALUE` position, or a negative `LEAD`/`LAG` offset. `lowered` calls
+  /// this, the point compile lowers every window through, so the executor never
+  /// divides by a zero bucket count, subscripts a row before the partition
+  /// start, or negates `Int.min`, and the run and validate paths fault alike.
+  private func check() throws(SQLError) {
+    switch self {
+    case let .lead(_, offset, _), let .lag(_, offset, _):
+      guard offset >= 0 else {
+        throw .state("22023", "\(keyword) requires a nonnegative offset")
+      }
+    default:
+      break
+    }
+  }
+
   internal func lowered(_ scope: Scope, _ routines: Routines = [:],
                         subquery: Resolution = .unsupported)
       throws(SQLError) -> Windowing.Function {
+    try check()
     switch self {
     case .rowNumber:
       return .rowNumber
@@ -448,6 +511,20 @@ extension WindowFunction {
           .aggregate(function, of: operand, distinct: distinct, filter: filter)
           .aggregation(scope, routines, subquery: subquery)
       return .aggregate(aggregation)
+    case let .lead(value, offset, fallback):
+      return try .lead(scope.term(value, routines, subquery: subquery),
+                       offset: offset,
+                       default: fallback.map { expression throws(SQLError) in
+                         try scope.reconciled(expression, with: value, routines,
+                                              subquery: subquery)
+                       })
+    case let .lag(value, offset, fallback):
+      return try .lag(scope.term(value, routines, subquery: subquery),
+                      offset: offset,
+                      default: fallback.map { expression throws(SQLError) in
+                        try scope.reconciled(expression, with: value, routines,
+                                             subquery: subquery)
+                      })
     }
   }
 }

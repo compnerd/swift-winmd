@@ -216,6 +216,19 @@ extension Parser {
       return try overlay()
     }
 
+    // A window ranking function — `ROW_NUMBER`, `RANK`, `DENSE_RANK` — is one of
+    // a fixed set of names (recognised case-insensitively, only when written
+    // bare — a delimited `"RANK"` is an ordinary scalar name), each taking an
+    // empty argument list and REQUIRING an `OVER` clause. Unlike an aggregate it
+    // preserves cardinality: it numbers or ranks each row within its window
+    // rather than folding the window to one value. The `(` is consumed, so the
+    // empty `)` closes the argument list and `over()` reads the required window
+    // specification.
+    if !ident.quoted, let function = window(ident.text) {
+      try expect(.rparen)
+      return try .window(function: function, spec: over())
+    }
+
     // An aggregate is one of the fixed set of names (recognised
     // case-insensitively, only when written bare — a delimited `"COUNT"` is a
     // scalar name), distinct from a scalar call: it accumulates over a group
@@ -275,6 +288,50 @@ extension Parser {
     case "AVG": .avg
     default: nil
     }
+  }
+
+  /// The window ranking `WindowFunction` the bare name `text` spells
+  /// (case-insensitively), or `nil` when it is not one — a scalar or aggregate
+  /// name. Each takes an empty argument list and requires an `OVER` clause.
+  private func window(_ text: String) -> WindowFunction? {
+    switch text.uppercased() {
+    case "ROW_NUMBER": .rowNumber
+    case "RANK": .rank
+    case "DENSE_RANK": .denseRank
+    default: nil
+    }
+  }
+
+  /// Parses a window function's required `OVER (<window spec>)` clause into a
+  /// `WindowSpec` — an optional `PARTITION BY` key list and an optional window
+  /// `ORDER BY`, in that ISO order (`OVER` is the next token).
+  ///
+  /// The `OVER` keyword is required — a ranking function written without it is
+  /// a syntax error — but either inner clause may be absent: a bare `OVER ()`
+  /// is the single unordered partition of every row, `OVER (PARTITION BY d)`
+  /// partitions without ordering, and `OVER (ORDER BY x)` orders the one
+  /// partition. The window `ORDER BY` is the same `<sort specification list>` a
+  /// query-level `ORDER BY` is, so it reuses `order()`.
+  private mutating func over() throws(SQLError) -> WindowSpec {
+    try expect(.over)
+    try expect(.lparen)
+    let partition = try match(.partition) ? partitions() : []
+    let order: Order? = try match(.order) ? self.order() : nil
+    try expect(.rparen)
+    return WindowSpec(partition: partition, order: order)
+  }
+
+  /// Parses a window's `PARTITION BY expression (',' expression)*` key list
+  /// (the `PARTITION` keyword is already consumed) — the scalar expressions
+  /// splitting the rows into the partitions the window function folds over
+  /// independently.
+  private mutating func partitions() throws(SQLError) -> Array<Expression> {
+    try expect(.by)
+    var keys = [try expression()]
+    while try match(.comma) {
+      try keys.append(expression())
+    }
+    return keys
   }
 
   /// Parses an aggregate's operand and its optional `<set quantifier>` (the `(`

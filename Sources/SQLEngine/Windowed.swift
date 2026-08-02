@@ -16,16 +16,14 @@ extension WindowFunction {
     }
   }
 
-  /// Whether the executor computes this window function yet. `ROW_NUMBER` is the
-  /// first slice; `RANK`/`DENSE_RANK` follow, so an unsupported one is rejected
-  /// with the feature diagnostic on both the run and validate paths until its
-  /// executor lands.
+  /// Whether the executor computes this window function yet — every ranking
+  /// function (`ROW_NUMBER`, `RANK`, `DENSE_RANK`) now does. A future window
+  /// function lands here `false` until its executor does, rejected with the
+  /// feature diagnostic on both the run and validate paths until then.
   internal var supported: Bool {
     switch self {
-    case .rowNumber:
+    case .rowNumber, .rank, .denseRank:
       true
-    case .rank, .denseRank:
-      false
     }
   }
 

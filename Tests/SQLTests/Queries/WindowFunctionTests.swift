@@ -144,6 +144,61 @@ struct RowNumberExecutionTests {
   }
 }
 
+// MARK: - RANK / DENSE_RANK execution
+
+/// `RANK()` and `DENSE_RANK()` rank each row within its partition by the window
+/// order: peer rows (equal on every order key) share a rank; `RANK` then skips
+/// to the 1-based position of the next distinct row, while `DENSE_RANK` takes
+/// the immediately following rank, leaving no gap.
+struct RankExecutionTests {
+  private func fixture() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+        Row(20)
+        Row(30)
+      }
+    }
+  }
+
+  @Test func `RANK shares a rank on a tie and skips after it`() throws {
+    // 10 → 1, the two 20s → 2 (peers), 30 → 4 (RANK skips the used-up 3).
+    try fixture().expect(
+        "SELECT x, RANK() OVER (ORDER BY x) FROM T",
+        yields: [[10, 1], [20, 2], [20, 2], [30, 4]])
+  }
+
+  @Test func `DENSE_RANK shares a rank on a tie and leaves no gap`() throws {
+    // 10 → 1, the two 20s → 2 (peers), 30 → 3 (no gap).
+    try fixture().expect(
+        "SELECT x, DENSE_RANK() OVER (ORDER BY x) FROM T",
+        yields: [[10, 1], [20, 2], [20, 2], [30, 3]])
+  }
+
+  @Test func `RANK ranks each partition independently`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["d": .integer, "x": .integer]) {
+        Row(1, 10)
+        Row(1, 10)
+        Row(1, 20)
+        Row(2, 5)
+      }
+    }
+    // d=1: the two 10s → 1, then 20 → 3; d=2's lone 5 → 1.
+    try catalog.expect(
+        "SELECT d, x, RANK() OVER (PARTITION BY d ORDER BY x) FROM T",
+        yields: [[1, 10, 1], [1, 10, 1], [1, 20, 3], [2, 5, 1]])
+  }
+
+  @Test func `RANK without an ORDER BY makes every row a peer`() throws {
+    // No window ORDER BY: every row is a peer, so RANK is 1 throughout.
+    try fixture().expect(
+        "SELECT x, RANK() OVER () FROM T",
+        yields: [[10, 1], [20, 1], [20, 1], [30, 1]])
+  }
+}
+
 // MARK: - Resolution parity (run ≡ validate)
 
 /// A window function the executor does not yet compute, or one written outside
@@ -173,15 +228,17 @@ struct WindowFunctionRejectionTests {
     }
   }
 
-  @Test func `an unsupported ranking function faults 0A000`() throws {
-    try rejects("SELECT RANK() OVER (ORDER BY x) FROM T",
-                .state("0A000", "RANK is not yet supported"))
-  }
-
   @Test func `a window in a WHERE is rejected`() throws {
     try rejects(
         "SELECT x FROM T WHERE ROW_NUMBER() OVER () > 1",
         .state("0A000",
                "a window function is allowed only in SELECT and ORDER BY"))
+  }
+
+  @Test func `a window ORDER BY output ordinal is rejected`() throws {
+    try rejects(
+        "SELECT ROW_NUMBER() OVER (ORDER BY 1) FROM T",
+        .state("0A000",
+               "a window ORDER BY output ordinal is not supported"))
   }
 }

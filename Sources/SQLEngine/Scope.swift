@@ -960,7 +960,7 @@ internal struct Scope {
       throw .state("0A000", "\(function.keyword) is not yet supported")
     }
     if let frame = spec.frame {
-      try frame.reject()
+      try frame.reject(for: function)
     }
     // An aggregate window validates its operand and `FILTER` exactly as a
     // collapsing aggregate does (the same `aggregate` helper), yielding the

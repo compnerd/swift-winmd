@@ -58,14 +58,131 @@ extension WindowFunction {
   }
 }
 
+extension Frame.Bound {
+  /// This bound with a zero offset collapsed to `CURRENT ROW` — `0 PRECEDING`
+  /// and `0 FOLLOWING` both name the current row. So a `RANGE` frame bounded by
+  /// one covers the current peer group (the bound the executor handles), not an
+  /// unsupported numeric offset, and it orders with `CURRENT ROW`.
+  internal var normalized: Frame.Bound {
+    switch self {
+    case .preceding(0), .following(0): .currentRow
+    default: self
+    }
+  }
+}
+
 extension Frame {
+  /// Whether a bound is an `n PRECEDING`/`n FOLLOWING` numeric offset — a zero
+  /// offset is the current row, not a numeric offset, so it is normalized away
+  /// first.
+  private var offset: Bool {
+    switch (start.normalized, end.normalized) {
+    case (.preceding, _), (.following, _), (_, .preceding), (_, .following):
+      true
+    default:
+      false
+    }
+  }
+
   /// Faults the feature diagnostic when the executor cannot compute this frame
-  /// yet — called on both the compile (run) and validate paths so the two stay
-  /// in lockstep (the run ≡ validate tripwire): a frame the schema types is one
-  /// the run executes. No frame shape executes yet, so every explicit frame
-  /// faults `0A000`.
-  internal func reject() throws(SQLError) {
-    throw .state("0A000", "an explicit window frame is not yet supported")
+  /// over `function` yet — called on both the compile (run) and validate paths
+  /// so the two stay in lockstep (the run ≡ validate tripwire): a frame the
+  /// schema types is one the run executes.
+  ///
+  /// The executor folds a frame only for an aggregate window (a ranking
+  /// function reads its position, not a frame); a `ROWS` frame of any bounds; a
+  /// `RANGE` frame whose bounds are the partition edges or the current peer
+  /// group (a `RANGE` numeric offset — measured against the order-key value —
+  /// is not yet computed); `GROUPS` is not yet computed.
+  /// Faults a structurally invalid frame — one the parser can spell or a public
+  /// AST can construct but no execution can honor. A frame may not start at
+  /// `UNBOUNDED FOLLOWING` or end at `UNBOUNDED PRECEDING` — the start would
+  /// follow, or the end precede, every row, so the frame is empty everywhere but
+  /// the partition edge (a misleading total rather than a diagnostic). The
+  /// single-bound form (`ROWS UNBOUNDED FOLLOWING`) reaches the same invalid
+  /// start. And an `n PRECEDING`/`n FOLLOWING` size must be nonnegative — a
+  /// negative one (a directly built `.preceding(-1)`, which the parser cannot
+  /// spell) runs the bound the opposite way, as the `LEAD`/`LAG` offset check
+  /// guards there. Reached from `reject(for:)` for a referenced window, and
+  /// directly when validating an unused named window's specification, so an
+  /// unused definition's frame is checked as a referenced one's is.
+  internal func check() throws(SQLError) {
+    if case .unboundedFollowing = start {
+      throw .state("42601",
+                   "a window frame cannot start at UNBOUNDED FOLLOWING")
+    }
+    if case .unboundedPreceding = end {
+      throw .state("42601", "a window frame cannot end at UNBOUNDED PRECEDING")
+    }
+    for bound in [start, end] {
+      switch bound {
+      case let .preceding(size), let .following(size):
+        guard size >= 0 else {
+          throw .state("22023", "a window frame offset must be nonnegative")
+        }
+      default:
+        break
+      }
+    }
+    // The five bound categories order UNBOUNDED PRECEDING < n PRECEDING <
+    // CURRENT ROW < n FOLLOWING < UNBOUNDED FOLLOWING; a start from a later
+    // category than the end (CURRENT ROW AND 1 PRECEDING, or 1 FOLLOWING AND
+    // CURRENT ROW) begins the frame after it ends, so it frames nothing for
+    // every row rather than raising the required error.
+    guard category(of: start) <= category(of: end) else {
+      throw .state("42601", "a window frame start follows its end")
+    }
+    // Within one category, the offsets still order the bounds: an `n PRECEDING`
+    // is earlier the larger its offset, an `n FOLLOWING` earlier the smaller. So
+    // `2 PRECEDING AND 5 PRECEDING` and `5 FOLLOWING AND 2 FOLLOWING` each begin
+    // after they end — an empty frame, not the required error — unless the
+    // offsets are compared too.
+    switch (start.normalized, end.normalized) {
+    case let (.preceding(from), .preceding(to)):
+      guard from >= to else {
+        throw .state("42601", "a window frame start follows its end")
+      }
+    case let (.following(from), .following(to)):
+      guard from <= to else {
+        throw .state("42601", "a window frame start follows its end")
+      }
+    default:
+      break
+    }
+  }
+
+  /// A bound's position in the frame ordering, earliest to latest. A zero
+  /// offset is the current row — `0 PRECEDING` and `0 FOLLOWING` both name it —
+  /// so each ranks with `CURRENT ROW`, making `CURRENT ROW AND 0 PRECEDING` and
+  /// `0 FOLLOWING AND CURRENT ROW` the valid single-row frames they are rather
+  /// than a rejected inversion.
+  private func category(of bound: Bound) -> Int {
+    switch bound.normalized {
+    case .unboundedPreceding: 0
+    case .preceding: 1
+    case .currentRow: 2
+    case .following: 3
+    case .unboundedFollowing: 4
+    }
+  }
+
+  internal func reject(for function: WindowFunction) throws(SQLError) {
+    try check()
+    guard case .aggregate = function else {
+      throw .state("0A000",
+                   "a window frame is not supported for \(function.keyword)")
+    }
+    switch unit {
+    case .rows:
+      break
+    case .range:
+      if offset {
+        throw .state("0A000",
+                     "a RANGE numeric offset frame is not yet supported")
+      }
+    case .groups:
+      throw .state("0A000", "a GROUPS window frame is not yet supported")
+    }
   }
 }
 
@@ -135,11 +252,18 @@ internal struct Windowing: Equatable {
   /// empty when none is written (every row a peer).
   internal let order: Array<SortKey>
 
+  /// The explicit window frame the executor folds an aggregate window over, or
+  /// `nil` for the default frame (the whole partition with no `order`, the
+  /// running `RANGE UNBOUNDED PRECEDING` through the current peer group with
+  /// one). The frame bounds are literal offsets, so nothing lowers here.
+  internal let frame: Frame?
+
   internal init(function: Function, partition: Array<Term>,
-                order: Array<SortKey>) {
+                order: Array<SortKey>, frame: Frame? = nil) {
     self.function = function
     self.partition = partition
     self.order = order
+    self.frame = frame
   }
 }
 
@@ -173,7 +297,7 @@ extension Windowing {
   internal func remapped(through slot: Dictionary<Int, Int>) -> Windowing {
     Windowing(function: function.remapped(through: slot),
               partition: partition.map { $0.remapped(through: slot) },
-              order: order.map { $0.remapped(through: slot) })
+              order: order.map { $0.remapped(through: slot) }, frame: frame)
   }
 
   /// The source slots this windowing reads, accumulated into `slots` — its
@@ -298,7 +422,8 @@ extension Expression {
       []
     }
     let lowered = try function.lowered(scope, routines, subquery: subquery)
-    return Windowing(function: lowered, partition: partition, order: order)
+    return Windowing(function: lowered, partition: partition, order: order,
+                     frame: spec.frame)
   }
 }
 

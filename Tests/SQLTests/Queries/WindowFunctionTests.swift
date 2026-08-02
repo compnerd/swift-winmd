@@ -609,13 +609,446 @@ struct WindowFunctionRejectionTests {
                "a window ORDER BY output ordinal is not supported"))
   }
 
-  @Test func `an explicit window frame is rejected`() throws {
+  @Test func `a RANGE numeric offset frame is rejected`() throws {
+    // A RANGE frame measured by an n PRECEDING/FOLLOWING order-key offset is
+    // not yet computed; only the partition edges and the peer group are.
     try rejects(
         """
-        SELECT SUM(x) OVER (ORDER BY x ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
+        SELECT SUM(x) OVER (ORDER BY x
+            RANGE BETWEEN 1 PRECEDING AND CURRENT ROW)
         FROM T
         """,
-        .state("0A000", "an explicit window frame is not yet supported"))
+        .state("0A000", "a RANGE numeric offset frame is not yet supported"))
   }
 
+  @Test func `a GROUPS frame is rejected`() throws {
+    try rejects(
+        """
+        SELECT SUM(x) OVER (ORDER BY x
+            GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW)
+        FROM T
+        """,
+        .state("0A000", "a GROUPS window frame is not yet supported"))
+  }
+
+  @Test func `a frame starting at UNBOUNDED FOLLOWING is rejected`() throws {
+    // The parser spells it, but the start would follow every row, so the frame
+    // is empty for all but the partition's last row — a misleading total rather
+    // than the required error.
+    try rejects(
+        """
+        SELECT SUM(x) OVER (ORDER BY x
+            ROWS BETWEEN UNBOUNDED FOLLOWING AND CURRENT ROW)
+        FROM T
+        """,
+        .state("42601", "a window frame cannot start at UNBOUNDED FOLLOWING"))
+  }
+
+  @Test func `the single-bound UNBOUNDED FOLLOWING frame is rejected`() throws {
+    // `ROWS UNBOUNDED FOLLOWING` is the shorthand for `BETWEEN UNBOUNDED
+    // FOLLOWING AND CURRENT ROW` — the same invalid start.
+    try rejects(
+        "SELECT SUM(x) OVER (ORDER BY x ROWS UNBOUNDED FOLLOWING) FROM T",
+        .state("42601", "a window frame cannot start at UNBOUNDED FOLLOWING"))
+  }
+
+  @Test func `a frame ending at UNBOUNDED PRECEDING is rejected`() throws {
+    try rejects(
+        """
+        SELECT SUM(x) OVER (ORDER BY x
+            ROWS BETWEEN CURRENT ROW AND UNBOUNDED PRECEDING)
+        FROM T
+        """,
+        .state("42601", "a window frame cannot end at UNBOUNDED PRECEDING"))
+  }
+
+  @Test func `a start from a later category than the end is rejected`() throws {
+    // CURRENT ROW (category 2) starts after 1 PRECEDING (category 1) ends, and
+    // 1 FOLLOWING (3) after CURRENT ROW (2) — each frames nothing rather than
+    // raising the error, so both are rejected by the bound-category ordering.
+    try rejects(
+        "SELECT SUM(x) OVER (ORDER BY x ROWS BETWEEN CURRENT ROW AND 1 PRECEDING)"
+            + " FROM T",
+        .state("42601", "a window frame start follows its end"))
+    try rejects(
+        "SELECT SUM(x) OVER (ORDER BY x ROWS BETWEEN 1 FOLLOWING AND CURRENT ROW)"
+            + " FROM T",
+        .state("42601", "a window frame start follows its end"))
+    try rejects(
+        "SELECT SUM(x) OVER (ORDER BY x ROWS BETWEEN 1 FOLLOWING AND 1 PRECEDING)"
+            + " FROM T",
+        .state("42601", "a window frame start follows its end"))
+  }
+
+  @Test func `reversed offsets within one category are rejected`() throws {
+    // Same category, but the offsets order the bounds: 2 PRECEDING is nearer the
+    // current row than 5 PRECEDING (so the start is later), and 5 FOLLOWING is
+    // farther than 2 FOLLOWING — each an empty frame rather than the error.
+    try rejects(
+        "SELECT SUM(x) OVER (ORDER BY x ROWS BETWEEN 2 PRECEDING AND 5 PRECEDING)"
+            + " FROM T",
+        .state("42601", "a window frame start follows its end"))
+    try rejects(
+        "SELECT SUM(x) OVER (ORDER BY x ROWS BETWEEN 5 FOLLOWING AND 2 FOLLOWING)"
+            + " FROM T",
+        .state("42601", "a window frame start follows its end"))
+  }
+
+  @Test func `a frame on a ranking function is rejected`() throws {
+    // A ranking function reads its position, not a frame — a frame on it is
+    // rejected rather than silently ignored.
+    try rejects(
+        "SELECT ROW_NUMBER() OVER (ORDER BY x ROWS UNBOUNDED PRECEDING) FROM T",
+        .state("0A000",
+               "a window frame is not supported for ROW_NUMBER"))
+  }
+
+}
+
+// MARK: - Explicit frame execution
+
+/// An aggregate window with an explicit `ROWS`/`RANGE` frame folds the
+/// aggregate over each row's framed slice rather than the default running
+/// frame: `ROWS` bounds are physical row offsets (a moving window), `RANGE`
+/// bounds are the partition edges or — for `CURRENT ROW` — the current row's
+/// peer group. `columns(of:)` types the framed column in parity with the run.
+struct WindowFrameExecutionTests {
+  private func fixture() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+        Row(30)
+        Row(40)
+      }
+    }
+  }
+
+  @Test func `ROWS one preceding through current row is a moving sum`()
+      throws {
+    // Each row sums itself and the one before: 10, 10+20, 20+30, 30+40.
+    try fixture().expect(
+        """
+        SELECT x, SUM(x) OVER (ORDER BY x
+            ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
+        FROM T
+        """,
+        yields: [[10, 10], [20, 30], [30, 50], [40, 70]])
+  }
+
+  @Test func `ROWS unbounded preceding through current row is the running sum`()
+      throws {
+    // The explicit spelling of the default running frame: 10, 30, 60, 100.
+    try fixture().expect(
+        """
+        SELECT x,
+               SUM(x) OVER
+                   (ORDER BY x ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+        FROM T
+        """,
+        yields: [[10, 10], [20, 30], [30, 60], [40, 100]])
+  }
+
+  @Test func `an explicit cumulative RANGE frame shares its peers`() throws {
+    // RANGE UNBOUNDED PRECEDING AND CURRENT ROW: the two tied 20s share the
+    // total through their peer group (10 + 20 + 20 = 50) — the streaming
+    // accumulator folds each row once as the peer-group end advances, and a peer
+    // reads the value the first of its group reached.
+    let catalog = try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+        Row(20)
+        Row(30)
+      }
+    }
+    try catalog.expect(
+        """
+        SELECT x, SUM(x) OVER (ORDER BY x
+            RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+        FROM T
+        """,
+        yields: [[10, 10], [20, 50], [20, 50], [30, 80]])
+  }
+
+  @Test func `a cumulative frame streams DISTINCT once per new value`() throws {
+    // SUM(DISTINCT x) over a cumulative ROWS frame folds each row once into the
+    // running distinct set, so a repeated value adds nothing: 10, 30, 30, 60.
+    let catalog = try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+        Row(20)
+        Row(30)
+      }
+    }
+    try catalog.expect(
+        """
+        SELECT x, SUM(DISTINCT x) OVER
+            (ORDER BY x ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+        FROM T
+        """,
+        yields: [[10, 10], [20, 30], [20, 30], [30, 60]])
+  }
+
+  @Test func `ROWS current row through unbounded following is a reverse sum`()
+      throws {
+    // Each row sums itself and every later row: 100, 90, 70, 40. This is the
+    // reverse-cumulative fast path — one running accumulator folded in reverse.
+    try fixture().expect(
+        """
+        SELECT x,
+               SUM(x) OVER
+                   (ORDER BY x ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+        FROM T
+        """,
+        yields: [[10, 100], [20, 90], [30, 70], [40, 40]])
+  }
+
+  @Test func `a reverse cumulative RANGE frame shares its peers`() throws {
+    // RANGE CURRENT ROW AND UNBOUNDED FOLLOWING: the two tied 20s share the
+    // total from their peer-group start through the end (20 + 20 + 30 = 70) —
+    // the reverse running accumulator folds each row once as the lower bound
+    // retreats, and a peer reads the value the last of its group reached.
+    let catalog = try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+        Row(20)
+        Row(30)
+      }
+    }
+    try catalog.expect(
+        """
+        SELECT x, SUM(x) OVER (ORDER BY x
+            RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+        FROM T
+        """,
+        yields: [[10, 80], [20, 70], [20, 70], [30, 30]])
+  }
+
+  @Test func `a zero offset bound frames the current row`() throws {
+    // `0 PRECEDING` and `0 FOLLOWING` both name the current row, so these frames
+    // are the single current row — SUM is the row's own value, not a rejected
+    // inversion — whether the zero is the end or the start.
+    try fixture().expect(
+        """
+        SELECT x, SUM(x) OVER
+            (ORDER BY x ROWS BETWEEN CURRENT ROW AND 0 PRECEDING)
+        FROM T
+        """,
+        yields: [[10, 10], [20, 20], [30, 30], [40, 40]])
+    try fixture().expect(
+        """
+        SELECT x, SUM(x) OVER
+            (ORDER BY x ROWS BETWEEN 0 FOLLOWING AND CURRENT ROW)
+        FROM T
+        """,
+        yields: [[10, 10], [20, 20], [30, 30], [40, 40]])
+  }
+
+  @Test func `a zero RANGE offset bound is the current peer group`() throws {
+    // Under RANGE, `0 FOLLOWING` is the current row's peer group (it normalizes
+    // to CURRENT ROW), not a rejected numeric offset — the two tied 20s share
+    // their peer-group total 40.
+    let catalog = try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+        Row(20)
+        Row(30)
+      }
+    }
+    try catalog.expect(
+        """
+        SELECT x, SUM(x) OVER
+            (ORDER BY x RANGE BETWEEN CURRENT ROW AND 0 FOLLOWING)
+        FROM T
+        """,
+        yields: [[10, 10], [20, 40], [20, 40], [30, 30]])
+  }
+
+  @Test func `a huge FOLLOWING bound clamps to the partition end`() throws {
+    // `index + Int.max` would overflow-trap at the second row; the bound
+    // instead saturates past the end, so the frame reaches the last row exactly
+    // as UNBOUNDED FOLLOWING does — the reverse sum 100, 90, 70, 40.
+    try fixture().expect(
+        """
+        SELECT x,
+               SUM(x) OVER (ORDER BY x
+                   ROWS BETWEEN CURRENT ROW AND 9223372036854775807 FOLLOWING)
+        FROM T
+        """,
+        yields: [[10, 100], [20, 90], [30, 70], [40, 40]])
+  }
+
+  @Test func `ROWS between the partition edges totals the whole partition`()
+      throws {
+    try fixture().expect(
+        """
+        SELECT x,
+               SUM(x) OVER (ORDER BY x
+                   ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+        FROM T
+        """,
+        yields: [[10, 100], [20, 100], [30, 100], [40, 100]])
+  }
+
+  @Test func `a ROWS frame off the partition end is empty`() throws {
+    // COUNT over `2 FOLLOWING AND 3 FOLLOWING`: the last rows frame past the
+    // end and count nothing (0), the earlier rows count their tail.
+    try fixture().expect(
+        """
+        SELECT x,
+               COUNT(*) OVER
+                   (ORDER BY x ROWS BETWEEN 2 FOLLOWING AND 3 FOLLOWING)
+        FROM T
+        """,
+        yields: [[10, 2], [20, 1], [30, 0], [40, 0]])
+  }
+
+  @Test func `RANGE unbounded preceding through current row shares peers`()
+      throws {
+    // RANGE CURRENT ROW is the peer group, so tied rows share the running total
+    // through the last peer — the explicit spelling of the default frame.
+    let catalog = try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+        Row(20)
+        Row(30)
+      }
+    }
+    try catalog.expect(
+        """
+        SELECT x, SUM(x) OVER (ORDER BY x
+            RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+        FROM T
+        """,
+        yields: [[10, 10], [20, 50], [20, 50], [30, 80]])
+  }
+
+  @Test func `RANGE current row through unbounded following shares peers`()
+      throws {
+    // From the peer group's start through the partition end: the tied 20s both
+    // sum 20 + 20 + 30 = 70.
+    let catalog = try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+        Row(20)
+        Row(30)
+      }
+    }
+    try catalog.expect(
+        """
+        SELECT x, SUM(x) OVER (ORDER BY x
+            RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+        FROM T
+        """,
+        yields: [[10, 80], [20, 70], [20, 70], [30, 30]])
+  }
+
+  @Test func `a moving frame resets per partition`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["d": .integer, "x": .integer]) {
+        Row(1, 10)
+        Row(2, 100)
+        Row(1, 20)
+        Row(2, 200)
+        Row(1, 30)
+      }
+    }
+    // Each partition runs its own moving sum over `1 PRECEDING AND CURRENT
+    // ROW`; d=1: 10, 30, 50; d=2: 100, 300. Source order is preserved.
+    try catalog.expect(
+        """
+        SELECT d, x,
+               SUM(x) OVER (PARTITION BY d ORDER BY x
+                   ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
+        FROM T
+        """,
+        yields: [[1, 10, 10], [2, 100, 100], [1, 20, 30],
+                 [2, 200, 300], [1, 30, 50]])
+  }
+
+  @Test func `the schema types a framed aggregate window`() throws {
+    // Both paths type the framed column: SUM over integers an integer — the run
+    // yields the moving totals and validate types the column.
+    let query = try parse(query:
+        """
+        SELECT x,
+               SUM(x) OVER
+                   (ORDER BY x ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS m
+        FROM T
+        """)
+    let columns = try fixture().columns(of: query, validate: true)
+    #expect(columns.map(\.name) == ["x", "m"])
+    #expect(columns.map(\.type) == [.integer, .integer])
+  }
+}
+
+// MARK: - Non-deterministic argument evaluation
+
+/// A shared call counter a stateful routine increments, so a non-deterministic
+/// `tick()` both yields the sequence `1, 2, 3, …` and records how many times the
+/// run invoked it. The engine evaluates one window over one thread, so the box
+/// needs no lock.
+private final class Counter: @unchecked Sendable {
+  private(set) var count = 0
+  func next() -> Int { count += 1; return count }
+}
+
+/// A window's argument or value calls a source row's routine once per input row,
+/// not once per frame that contains the row nor once per output that reads it —
+/// so a stateful or non-deterministic routine (`tick()`) folds and reads one
+/// value per row, the result a single evaluation per input yields.
+struct WindowNonDeterminismTests {
+  private func fixture() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+        Row(30)
+      }
+    }
+  }
+
+  private func ticking() throws -> (Counter, Routines) {
+    let counter = Counter()
+    let routines = try Routines.standard
+        .registering("tick", returns: .integer, deterministic: false) { _ in
+          .integer(counter.next())
+        }
+    return (counter, routines)
+  }
+
+  @Test func `a framed aggregate argument folds once per source row`() throws {
+    // A running frame contains the first row in every frame. Re-evaluating per
+    // frame would call tick() six times and fold 1, then 2+3, then 4+5+6 — the
+    // misleading 1, 5, 15. Evaluated once per row (1, 2, 3), the running sums
+    // are 1, 3, 6.
+    let (counter, routines) = try ticking()
+    try fixture().expect(
+        """
+        SELECT SUM(tick()) OVER
+            (ORDER BY x ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+        FROM T
+        """,
+        yields: [[1], [3], [6]], routines: routines)
+    #expect(counter.count == 3)
+  }
+
+  @Test func `a framed argument is skipped when its FILTER rejects the row`()
+      throws {
+    // The FILTER is false for every row, so the throwing argument 1 / 0 is never
+    // evaluated and each frame folds nothing — SUM is NULL, not a raised error.
+    try fixture().expect(
+        """
+        SELECT SUM(1 / 0) FILTER (WHERE 1 = 0) OVER
+            (ORDER BY x ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+        FROM T
+        """,
+        yields: [[nil], [nil], [nil]])
+  }
 }

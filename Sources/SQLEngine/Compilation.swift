@@ -1752,7 +1752,7 @@ extension Catalog where Self: ~Escapable {
         throw .state("0A000", "\(function.keyword) is not yet supported")
       }
       if let frame = spec.frame {
-        try frame.reject()
+        try frame.reject(for: function)
       }
     }
 

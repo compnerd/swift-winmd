@@ -113,13 +113,13 @@ public struct WindowSpec: Hashable, Sendable {
 }
 
 /// An explicit window frame — the `ROWS`/`RANGE`/`GROUPS BETWEEN <start> AND
-/// <end>` clause narrowing which of a partition's ordered rows a frame-sensitive
-/// window function reads.
+/// <end>` clause narrowing which of a partition's ordered rows a
+/// frame-sensitive window function reads.
 ///
 /// The `unit` fixes how the bounds are measured: `ROWS` counts physical rows,
 /// `RANGE` measures by the order-key value (a `CURRENT ROW` bound spans the
-/// current row's whole peer group — the rows tied with it on the order key), and
-/// `GROUPS` counts peer groups. `start` and `end` are the frame's lower and
+/// current row's whole peer group — the rows tied with it on the order key),
+/// and `GROUPS` counts peer groups. `start` and `end` are the frame's lower and
 /// upper bounds, in row order — the ISO `BETWEEN <start> AND <end>` form, with
 /// the single-bound shorthand `ROWS <start>` read as `BETWEEN <start> AND
 /// CURRENT ROW`.
@@ -131,7 +131,7 @@ public struct Frame: Hashable, Sendable {
     /// `RANGE` — bounds are order-key values; a `CURRENT ROW` bound is the
     /// current row's peer group.
     case range
-    /// `GROUPS` — bounds are counts of peer groups from the current row's group.
+    /// `GROUPS` — bounds are peer-group counts from the current row's group.
     case groups
   }
 

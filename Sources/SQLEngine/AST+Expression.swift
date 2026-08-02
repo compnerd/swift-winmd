@@ -98,9 +98,72 @@ public struct WindowSpec: Hashable, Sendable {
   /// The window's `ORDER BY`, or `nil` when none is written.
   public let order: Order?
 
-  public init(partition: Array<Expression> = [], order: Order? = nil) {
+  /// The explicit window frame (`ROWS`/`RANGE`/`GROUPS BETWEEN … AND …`), or
+  /// `nil` when none is written — the default frame then applies (the whole
+  /// partition with no `ORDER BY`, the running `RANGE UNBOUNDED PRECEDING`
+  /// through the current peer group with one).
+  public let frame: Frame?
+
+  public init(partition: Array<Expression> = [], order: Order? = nil,
+              frame: Frame? = nil) {
     self.partition = partition
     self.order = order
+    self.frame = frame
+  }
+}
+
+/// An explicit window frame — the `ROWS`/`RANGE`/`GROUPS BETWEEN <start> AND
+/// <end>` clause narrowing which of a partition's ordered rows a frame-sensitive
+/// window function reads.
+///
+/// The `unit` fixes how the bounds are measured: `ROWS` counts physical rows,
+/// `RANGE` measures by the order-key value (a `CURRENT ROW` bound spans the
+/// current row's whole peer group — the rows tied with it on the order key), and
+/// `GROUPS` counts peer groups. `start` and `end` are the frame's lower and
+/// upper bounds, in row order — the ISO `BETWEEN <start> AND <end>` form, with
+/// the single-bound shorthand `ROWS <start>` read as `BETWEEN <start> AND
+/// CURRENT ROW`.
+public struct Frame: Hashable, Sendable {
+  /// How a frame's bounds are measured.
+  public enum Unit: Hashable, Sendable {
+    /// `ROWS` — bounds are physical row offsets from the current row.
+    case rows
+    /// `RANGE` — bounds are order-key values; a `CURRENT ROW` bound is the
+    /// current row's peer group.
+    case range
+    /// `GROUPS` — bounds are counts of peer groups from the current row's group.
+    case groups
+  }
+
+  /// One frame bound — a partition edge, the current row/peer group, or an
+  /// offset from it.
+  public enum Bound: Hashable, Sendable {
+    /// `UNBOUNDED PRECEDING` — the partition start.
+    case unboundedPreceding
+    /// `n PRECEDING` — `n` rows/values/groups before the current row.
+    case preceding(Int)
+    /// `CURRENT ROW` — the current row (`ROWS`/`GROUPS`) or its peer group
+    /// (`RANGE`).
+    case currentRow
+    /// `n FOLLOWING` — `n` rows/values/groups after the current row.
+    case following(Int)
+    /// `UNBOUNDED FOLLOWING` — the partition end.
+    case unboundedFollowing
+  }
+
+  /// How the bounds are measured — `ROWS`, `RANGE`, or `GROUPS`.
+  public let unit: Unit
+
+  /// The frame's lower bound (the earlier row in the window order).
+  public let start: Bound
+
+  /// The frame's upper bound (the later row in the window order).
+  public let end: Bound
+
+  public init(unit: Unit, start: Bound, end: Bound) {
+    self.unit = unit
+    self.start = start
+    self.end = end
   }
 }
 

@@ -1215,8 +1215,9 @@ internal struct Parser: ~Escapable {
   // MARK: - Terminals
 
   /// Consumes a non-negative integer literal and returns its value — an
-  /// `OFFSET` skip or a `FETCH` row count.
-  private mutating func count() throws(SQLError) -> Int {
+  /// `OFFSET` skip, a `FETCH` row count, or a window frame's `n PRECEDING`/
+  /// `n FOLLOWING` offset.
+  internal mutating func count() throws(SQLError) -> Int {
     let token = try advance(expecting: "an integer")
     guard case let .integer(value) = token.kind else {
       throw .unexpected(token.kind.description,

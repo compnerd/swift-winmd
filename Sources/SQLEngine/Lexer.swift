@@ -420,6 +420,12 @@ internal struct Lexer: ~Escapable {
     case "OVER": .over
     case "PARTITION": .partition
     case "WINDOW": .window
+    case "RANGE": .range
+    case "GROUPS": .groups
+    case "UNBOUNDED": .unbounded
+    case "PRECEDING": .preceding
+    case "FOLLOWING": .following
+    case "CURRENT": .current
     case "BY": .by
     case "ASC": .asc
     case "DESC": .desc

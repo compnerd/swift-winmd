@@ -47,6 +47,25 @@ extension Token {
     /// The `WINDOW` keyword introducing a `SELECT`'s named-window clause
     /// (`WINDOW w AS (…)`), a window specification a later `OVER w` references.
     case window
+    /// The `RANGE` keyword introducing a `RANGE`-unit window frame — a frame
+    /// bounded by the order-key value (its peer group), as `ROWS` bounds by
+    /// physical row offset.
+    case range
+    /// The `GROUPS` keyword introducing a `GROUPS`-unit window frame — a frame
+    /// bounded by a count of peer groups.
+    case groups
+    /// The `UNBOUNDED` keyword forming a frame's `UNBOUNDED PRECEDING`/
+    /// `UNBOUNDED FOLLOWING` bound — the partition start or end.
+    case unbounded
+    /// The `PRECEDING` keyword ending a frame bound before the current row
+    /// (`UNBOUNDED PRECEDING`, `n PRECEDING`).
+    case preceding
+    /// The `FOLLOWING` keyword ending a frame bound after the current row
+    /// (`n FOLLOWING`, `UNBOUNDED FOLLOWING`).
+    case following
+    /// The `CURRENT` keyword forming a frame's `CURRENT ROW` bound — the current
+    /// row (`ROWS`) or its peer group (`RANGE`).
+    case current
     case by
     case asc
     case desc
@@ -168,6 +187,12 @@ extension Token.Kind {
     case .over: "OVER"
     case .partition: "PARTITION"
     case .window: "WINDOW"
+    case .range: "RANGE"
+    case .groups: "GROUPS"
+    case .unbounded: "UNBOUNDED"
+    case .preceding: "PRECEDING"
+    case .following: "FOLLOWING"
+    case .current: "CURRENT"
     case .by: "BY"
     case .asc: "ASC"
     case .desc: "DESC"

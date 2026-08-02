@@ -328,8 +328,55 @@ extension Parser {
     try expect(.lparen)
     let partition = try match(.partition) ? partitions() : []
     let order: Order? = try match(.order) ? self.order() : nil
+    let frame = try self.frame()
     try expect(.rparen)
-    return WindowSpec(partition: partition, order: order)
+    return WindowSpec(partition: partition, order: order, frame: frame)
+  }
+
+  /// Parses an optional window frame clause — `(ROWS | RANGE | GROUPS) <extent>`
+  /// — after the window `ORDER BY`, or `nil` when none is written (the default
+  /// frame then applies). The extent is either the ISO `BETWEEN <start> AND
+  /// <end>` pair or a single `<start>` bound, the shorthand for `BETWEEN
+  /// <start> AND CURRENT ROW`.
+  private mutating func frame() throws(SQLError) -> Frame? {
+    let unit: Frame.Unit
+    if try match(.rows) {
+      unit = .rows
+    } else if try match(.range) {
+      unit = .range
+    } else if try match(.groups) {
+      unit = .groups
+    } else {
+      return nil
+    }
+    if try match(.between) {
+      let start = try bound()
+      try expect(.and)
+      let end = try bound()
+      return Frame(unit: unit, start: start, end: end)
+    }
+    // The single-bound shorthand `<unit> <start>` is `BETWEEN <start> AND
+    // CURRENT ROW`.
+    return Frame(unit: unit, start: try bound(), end: .currentRow)
+  }
+
+  /// Parses one window frame bound — `UNBOUNDED PRECEDING`, `UNBOUNDED
+  /// FOLLOWING`, `CURRENT ROW`, `n PRECEDING`, or `n FOLLOWING` — where `n` is a
+  /// non-negative integer literal.
+  private mutating func bound() throws(SQLError) -> Frame.Bound {
+    if try match(.unbounded) {
+      if try match(.preceding) { return .unboundedPreceding }
+      try expect(.following)
+      return .unboundedFollowing
+    }
+    if try match(.current) {
+      try expect(.rows)
+      return .currentRow
+    }
+    let offset = try count()
+    if try match(.preceding) { return .preceding(offset) }
+    try expect(.following)
+    return .following(offset)
   }
 
   /// Parses a window's `PARTITION BY expression (',' expression)*` key list

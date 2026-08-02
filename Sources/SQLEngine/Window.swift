@@ -107,6 +107,12 @@ extension Catalog where Self: ~Escapable {
           try accumulate(aggregation, over: ordered, keyed, in: records,
                          context, into: &values)
         }
+      case let .lead(value, offset, fallback):
+        try position(value, by: offset, default: fallback, over: ordered,
+                     in: records, context, into: &values)
+      case let .lag(value, offset, fallback):
+        try position(value, by: -offset, default: fallback, over: ordered,
+                     in: records, context, into: &values)
       }
     }
     return values
@@ -313,6 +319,50 @@ extension Catalog where Self: ~Escapable {
     }
   }
 
+  /// Reads an offset function's `value` at the row `offset` positions along the
+  /// window order from each row (`LEAD` a positive `offset`, `LAG` a negative
+  /// one), writing into `values` at the record's original position. `ordered`
+  /// is the partition in window order.
+  ///
+  /// When the offset row falls outside the partition — off the end for `LEAD`,
+  /// before the start for `LAG` — the `default` term evaluated at the current
+  /// row is written, or `NULL` when no default is given. The `value` (and the
+  /// default) is a source-space `Term`, so it is evaluated against the target
+  /// (or current) record exactly as a projection term is.
+  private borrowing func position(_ value: Term, by offset: Int,
+                                  default fallback: Term?,
+                                  over ordered: Array<Int>,
+                                  in records: Array<Record>,
+                                  _ context: Context,
+                                  into values: inout Array<Value>)
+      throws(SQLError) {
+    let count = ordered.count
+    // Materialise each source row's value once, in window order, before shifting
+    // by the offset — so a stateful or non-deterministic value (`LEAD(tick())`)
+    // is evaluated one time per input row (as the other positional windows now
+    // do), not once per row that some output shifts onto. `LEAD`/`LAG` then read
+    // the target row's materialised value.
+    var evaluated = Array<Value>()
+    evaluated.reserveCapacity(count)
+    for slot in 0 ..< count {
+      try evaluated.append(evaluate(records[ordered[slot]], value, context))
+    }
+    for index in 0 ..< count {
+      // A large parsed offset (`LEAD(x, 9223372036854775807)`) would overflow
+      // `index + offset`; the sum overflowing means the target is off the end
+      // of the partition, so treat it as out of bounds and fall to the default.
+      let (target, overflow) = index.addingReportingOverflow(offset)
+      if !overflow, target >= 0, target < count {
+        values[ordered[index]] = evaluated[target]
+      } else if let fallback {
+        values[ordered[index]] =
+            try evaluate(records[ordered[index]], fallback, context)
+      } else {
+        values[ordered[index]] = .null
+      }
+    }
+  }
+
   /// Assigns `function`'s value to each record of an already-ordered partition,
   /// writing into `values` at the record's original position. `keyed` holds each
   /// record's window `ORDER BY` values, so the peer-aware ranks detect ties.
@@ -331,10 +381,14 @@ extension Catalog where Self: ~Escapable {
                                 over ordered: Array<Int>,
                                 _ keyed: Dictionary<Int, Array<Value>>,
                                 into values: inout Array<Value>) {
-    // An aggregate window is folded over its frame by `accumulate`, never
-    // ranked, so `computed` dispatches it there — it never reaches this ranker.
-    if case .aggregate = function {
-      preconditionFailure("an aggregate window is accumulated, not ranked")
+    // Only a ranking function is ranked here: an aggregate window is folded by
+    // `accumulate`/`framed` and an offset function read by `position`, so
+    // `computed` dispatches those elsewhere and neither reaches this ranker.
+    switch function {
+    case .aggregate, .lead, .lag:
+      preconditionFailure("a non-ranking window is computed, not ranked")
+    case .rowNumber, .rank, .denseRank:
+      break
     }
     if case .rowNumber = function {
       for position in ordered.indices {

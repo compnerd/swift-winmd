@@ -229,6 +229,18 @@ extension Parser {
       return try .window(function: function, spec: over())
     }
 
+    // `LEAD`/`LAG` are offset window functions — recognised case-insensitively
+    // only when written bare (a delimited `"LEAD"` is a scalar name) — taking
+    // `(value [, offset [, default]])` and requiring an `OVER` clause. Like the
+    // ranking functions they preserve cardinality: each reads a neighbouring
+    // row of the window order rather than folding the window. The `(` is
+    // consumed, so this reads the value expression, its optional integer offset
+    // and default, then the closing `)` and the required window specification.
+    if !ident.quoted, let lead = offset(ident.text) {
+      let function = try self.offset(lead)
+      return try .window(function: function, spec: over())
+    }
+
     // An aggregate is one of the fixed set of names (recognised
     // case-insensitively, only when written bare — a delimited `"COUNT"` is a
     // scalar name), distinct from a scalar call: it accumulates over a group
@@ -311,6 +323,36 @@ extension Parser {
     case "DENSE_RANK": .denseRank
     default: nil
     }
+  }
+
+  /// Whether the bare name `text` spells an offset window function
+  /// (case-insensitively) — `true` for `LEAD`, `false` for `LAG`, `nil` for
+  /// neither.
+  private func offset(_ text: String) -> Bool? {
+    switch text.uppercased() {
+    case "LEAD": true
+    case "LAG": false
+    default: nil
+    }
+  }
+
+  /// Parses an offset window function's `(value [, offset [, default]])`
+  /// argument list and its closing `)` (the `(` is already consumed),
+  /// returning the `LEAD` (`lead` `true`) or `LAG` window function. The offset
+  /// is a non-negative integer literal defaulting to `1`; the default value is
+  /// any expression, defaulting to absent (`NULL`).
+  private mutating func offset(_ lead: Bool)
+      throws(SQLError) -> WindowFunction {
+    let value = try expression()
+    var count = 1
+    var fallback: Expression? = nil
+    if try match(.comma) {
+      count = try self.count()
+      if try match(.comma) { fallback = try expression() }
+    }
+    try expect(.rparen)
+    return lead ? .lead(value, offset: count, default: fallback)
+                : .lag(value, offset: count, default: fallback)
   }
 
   /// Parses a window function's required `OVER (<window spec>)` clause into a

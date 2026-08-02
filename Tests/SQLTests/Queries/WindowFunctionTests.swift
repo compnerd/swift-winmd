@@ -119,6 +119,41 @@ struct WindowFunctionParsingTests {
   }
 }
 
+// MARK: - LEAD / LAG parsing
+
+/// The offset window functions `LEAD`/`LAG(value [, offset [, default]])` parse
+/// into an `Expression.window` carrying the offset `WindowFunction` and the
+/// `OVER (…)` specification.
+struct OffsetFunctionParsingTests {
+  @Test func `LAG with only a value parses`() throws {
+    #expect(try projected("SELECT LAG(x) OVER (ORDER BY x) FROM T")
+                == .window(
+                    function: .lag(.column(Column("x"))),
+                    spec: WindowSpec(order: Order(keys:
+                        [Order.Key(column: Column("x"))]))))
+  }
+
+  @Test func `LEAD with an offset and default parses`() throws {
+    #expect(try projected("SELECT LEAD(x, 2, 0) OVER (ORDER BY x) FROM T")
+                == .window(
+                    function: .lead(.column(Column("x")), offset: 2,
+                                    default: .literal(.integer(0))),
+                    spec: WindowSpec(order: Order(keys:
+                        [Order.Key(column: Column("x"))]))))
+  }
+
+  @Test func `an offset function without OVER is a syntax error`() {
+    #expect(throws: SQLError.self) {
+      _ = try parse(select: "SELECT LAG(x) FROM T")
+    }
+  }
+
+  @Test func `a delimited offset name stays a scalar call`() throws {
+    #expect(try projected("SELECT \"lag\"(x) FROM T")
+                == .call(name: "lag", arguments: [.column(Column("x"))]))
+  }
+}
+
 // MARK: - Frame parsing
 
 /// An explicit window frame — `(ROWS | RANGE | GROUPS) BETWEEN <start> AND
@@ -566,6 +601,127 @@ struct RunningAggregateWindowTests {
   }
 }
 
+// MARK: - LEAD / LAG execution
+
+/// `LEAD`/`LAG(value [, offset [, default]]) OVER (…)` read the `value` a fixed
+/// number of rows after (`LEAD`) or before (`LAG`) the current row in the
+/// window order, yielding the default (or NULL) at a partition edge.
+/// `columns(of:)` types the column as the value expression in parity with the
+/// run.
+struct OffsetFunctionExecutionTests {
+  private func fixture() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+        Row(30)
+        Row(40)
+      }
+    }
+  }
+
+  @Test func `LAG reads the previous row, NULL at the start`() throws {
+    try fixture().expect(
+        "SELECT x, LAG(x) OVER (ORDER BY x) FROM T",
+        yields: [[10, nil], [20, 10], [30, 20], [40, 30]])
+  }
+
+  @Test func `LEAD reads the next row, NULL at the end`() throws {
+    try fixture().expect(
+        "SELECT x, LEAD(x) OVER (ORDER BY x) FROM T",
+        yields: [[10, 20], [20, 30], [30, 40], [40, nil]])
+  }
+
+  @Test func `LAG honours an offset and a default at the edge`() throws {
+    // Two rows back, default 99 where the offset runs off the start.
+    try fixture().expect(
+        "SELECT x, LAG(x, 2, 99) OVER (ORDER BY x) FROM T",
+        yields: [[10, 99], [20, 99], [30, 10], [40, 20]])
+  }
+
+  @Test func `LEAD honours an offset and a default at the edge`() throws {
+    try fixture().expect(
+        "SELECT x, LEAD(x, 1, 0) OVER (ORDER BY x) FROM T",
+        yields: [[10, 20], [20, 30], [30, 40], [40, 0]])
+  }
+
+  @Test func `an explicit NULL default reconciles with any value type`()
+      throws {
+    // A literal NULL default is type-neutral — the value type's NULL — so it is
+    // valid for a text value, not rejected as irreconcilable with the `.integer`
+    // placeholder a bare NULL derives as. The last row takes the NULL.
+    let catalog = try Catalog {
+      Relation("T", ["id": .integer, "name": .text]) {
+        Row(1, "a")
+        Row(2, "b")
+      }
+    }
+    try catalog.expect(
+        "SELECT id, LEAD(name, 1, NULL) OVER (ORDER BY id) FROM T",
+        yields: [[1, "b"], [2, nil]])
+  }
+
+  @Test func `a reconcilable default coerces to the value type`() throws {
+    // With integer `x` the column is integer, so a double default (`2.0`) is
+    // cast to integer at the edge row rather than reaching it as a double —
+    // every value of the window column is an integer.
+    try fixture().expect(
+        "SELECT x, LEAD(x, 1, 2.0) OVER (ORDER BY x) FROM T",
+        yields: [[10, 20], [20, 30], [30, 40], [40, 2]])
+    let query = try parse(query:
+        "SELECT LEAD(x, 1, 2.0) OVER (ORDER BY x) FROM T")
+    #expect(try fixture().columns(of: query, validate: true).map(\.type)
+                == [.integer])
+  }
+
+  @Test func `a huge offset runs off the partition without overflowing`()
+      throws {
+    // `index + Int.max` would overflow-trap at the second row; the offset
+    // instead recognises the target is off the end and yields NULL (no default)
+    // or the default everywhere.
+    try fixture().expect(
+        "SELECT x, LEAD(x, 9223372036854775807) OVER (ORDER BY x) FROM T",
+        yields: [[10, nil], [20, nil], [30, nil], [40, nil]])
+    try fixture().expect(
+        "SELECT x, LAG(x, 9223372036854775807, 0) OVER (ORDER BY x) FROM T",
+        yields: [[10, 0], [20, 0], [30, 0], [40, 0]])
+  }
+
+  @Test func `the default is evaluated at the current row`() throws {
+    // At the first row the offset runs off the start, so the default `x * 10`
+    // is evaluated there (10 * 10 = 100); the rest read the previous row.
+    try fixture().expect(
+        "SELECT x, LAG(x, 1, x * 10) OVER (ORDER BY x) FROM T",
+        yields: [[10, 100], [20, 10], [30, 20], [40, 30]])
+  }
+
+  @Test func `LAG resets per partition`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["d": .integer, "x": .integer]) {
+        Row(1, 10)
+        Row(2, 100)
+        Row(1, 20)
+        Row(2, 200)
+      }
+    }
+    // Each partition's first row has no previous row (NULL); source order is
+    // preserved.
+    try catalog.expect(
+        "SELECT d, x, LAG(x) OVER (PARTITION BY d ORDER BY x) FROM T",
+        yields: [[1, 10, nil], [2, 100, nil], [1, 20, 10], [2, 200, 100]])
+  }
+
+  @Test func `the schema types an offset window`() throws {
+    // Both paths type the column as the value expression: LAG(x) an integer —
+    // the run yields the neighbours and validate types the column.
+    let query = try parse(query:
+        "SELECT x, LAG(x) OVER (ORDER BY x) AS prev FROM T")
+    let columns = try fixture().columns(of: query, validate: true)
+    #expect(columns.map(\.name) == ["x", "prev"])
+    #expect(columns.map(\.type) == [.integer, .integer])
+  }
+}
+
 // MARK: - Resolution parity (run ≡ validate)
 
 /// A window function the executor does not yet compute, or one written outside
@@ -692,6 +848,34 @@ struct WindowFunctionRejectionTests {
         "SELECT SUM(x) OVER (ORDER BY x ROWS BETWEEN 5 FOLLOWING AND 2 FOLLOWING)"
             + " FROM T",
         .state("42601", "a window frame start follows its end"))
+  }
+
+  @Test func `an offset function without an ORDER BY is rejected`() throws {
+    // LEAD/LAG read a neighbour of the window order, so an unordered window has
+    // no neighbour — rejected on both paths.
+    try rejects(
+        "SELECT LAG(x) OVER () FROM T",
+        .state("0A000", "LAG requires an ORDER BY"))
+  }
+
+  @Test func `a frame on an offset function is rejected`() throws {
+    try rejects(
+        """
+        SELECT LEAD(x) OVER (ORDER BY x
+            ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
+        FROM T
+        """,
+        .state("0A000", "a window frame is not supported for LEAD"))
+  }
+
+  @Test func `a LEAD default irreconcilable with the value is rejected`()
+      throws {
+    // Integer `x` and a text default share no common type, so the default
+    // cannot stand in at a partition edge — rejected on both paths, never
+    // advertised as an integer column a text value then reaches.
+    try rejects(
+        "SELECT LEAD(x, 1, 'a') OVER (ORDER BY x) FROM T",
+        .operand("a LEAD/LAG default and value have irreconcilable types"))
   }
 
   @Test func `a frame on a ranking function is rejected`() throws {
@@ -1036,6 +1220,18 @@ struct WindowNonDeterminismTests {
         FROM T
         """,
         yields: [[1], [3], [6]], routines: routines)
+    #expect(counter.count == 3)
+  }
+
+  @Test func `an offset value is evaluated once per source row`() throws {
+    // LEAD reads the next row's value. Materialising each source row's value
+    // once (tick() 1, 2, 3) reads the next row's value — 2, 3, then NULL past
+    // the end — three calls, one per input row. Evaluating only at the shifted
+    // target would call tick() twice and return 1, 2, NULL.
+    let (counter, routines) = try ticking()
+    try fixture().expect(
+        "SELECT LEAD(tick()) OVER (ORDER BY x) FROM T",
+        yields: [[2], [3], [nil]], routines: routines)
     #expect(counter.count == 3)
   }
 

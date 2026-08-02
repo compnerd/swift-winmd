@@ -678,6 +678,9 @@ internal struct Scope {
       // a supported SELECT/ORDER BY one whose type the schema advertises.
       if case let .aggregate(aggregate, operand, _, _) = function {
         try result(of: aggregate, over: operand, routines, subquery: subquery)
+      } else if let positional = function.positional {
+        // An offset function (`LEAD`/`LAG`) types as its value expression.
+        try derive(positional.value, routines, subquery: subquery)
       } else {
         try function.result
       }
@@ -959,6 +962,7 @@ internal struct Scope {
     guard function.supported else {
       throw .state("0A000", "\(function.keyword) is not yet supported")
     }
+    try function.require(order: spec)
     if let frame = spec.frame {
       try frame.reject(for: function)
     }
@@ -971,6 +975,26 @@ internal struct Scope {
     if case let .aggregate(aggregate, operand, _, filter) = function {
       type = try self.aggregate(aggregate, over: operand, filter: filter,
                                 routines, subquery: subquery)
+    } else if let positional = function.positional {
+      // An offset function (`LEAD`/`LAG`) types as its value expression — the
+      // neighbouring row's value has that type. The default stands in at a
+      // partition edge, so it must reconcile with that type (the run coerces it
+      // there); an irreconcilable default — a text default for an integer
+      // value — faults, as it does on the run path when `compile` lowers it.
+      type = try validate(positional.value, routines, subquery: subquery)
+      // An explicit NULL default is type-neutral (the value type's NULL), so it
+      // reconciles with any value type; only a non-NULL default must unify with
+      // the value, matching the run path's `reconciled`.
+      if let fallback = positional.default {
+        if case .literal(.null) = fallback {
+        } else {
+          let otherwise = try validate(fallback, routines, subquery: subquery)
+          guard type.unified(with: otherwise) != nil else {
+            throw .operand(
+                "a LEAD/LAG default and value have irreconcilable types")
+          }
+        }
+      }
     } else {
       type = function.type
     }
@@ -2285,6 +2309,12 @@ internal struct Scope {
       if case let .aggregate(_, .expression(argument), _, _) = function {
         return unresolved(argument, routines)
       }
+      // As the aggregate operand: an offset function's value and default are
+      // read per row, so an unregistered call in either is unresolved.
+      if let positional = function.positional {
+        return unresolved(positional.value, routines)
+            || (positional.default.map { unresolved($0, routines) } ?? false)
+      }
       return false
     }
   }
@@ -2702,6 +2732,15 @@ internal struct Scope {
       if case let .aggregate(aggregate, operand, _, filter) = function {
         _ = try self.aggregate(aggregate, over: operand, filter: filter,
                                routines, subquery: subquery)
+      }
+      // An offset function's value and default are read in the window node
+      // before any `LIMIT`, so — as the aggregate operand — recurse them so an
+      // aggregate nested in either is validated.
+      if let positional = function.positional {
+        try aggregates(in: positional.value, routines, subquery: subquery)
+        if let fallback = positional.default {
+          try aggregates(in: fallback, routines, subquery: subquery)
+        }
       }
     }
   }
@@ -3269,6 +3308,37 @@ internal struct Scope {
       }
       return terms
     }
+  }
+
+  /// Lowers a `LEAD`/`LAG` `fallback` default, reconciling its type with the
+  /// `value` it stands in for at a partition edge. The two must share a common
+  /// type — the reconciliation a `CASE` makes across its results — and the
+  /// default coerces to the value's declared type, so the edge row matches the
+  /// column the schema advertises (the value's type). A default of an
+  /// irreconcilable type — a text default for an integer value — faults, and a
+  /// merely different but reconcilable one — a double default for an integer
+  /// value — is cast rather than left to reach a row as its own type. `compile`
+  /// lowers a window before either path reads a type, so the fault and the
+  /// coercion hold on the run and the validate paths alike.
+  internal func reconciled(_ fallback: Expression, with value: Expression,
+                           _ routines: Routines = [:],
+                           subquery: Resolution = .unsupported)
+      throws(SQLError) -> Term {
+    let expected = try derive(value, routines, subquery: subquery)
+    // An explicit NULL default is type-neutral — it is the value type's NULL,
+    // equivalent to omitting the default — so it reconciles with any value type;
+    // coerce it to the value type rather than reconciling. A literal NULL
+    // otherwise derives as the `.integer` placeholder and would fault against a
+    // text, boolean, or blob value.
+    if case .literal(.null) = fallback {
+      return try .cast(term(fallback, routines, subquery: subquery), expected)
+    }
+    let actual = try derive(fallback, routines, subquery: subquery)
+    guard expected.unified(with: actual) != nil else {
+      throw .operand("a LEAD/LAG default and value have irreconcilable types")
+    }
+    let lowered = try term(fallback, routines, subquery: subquery)
+    return expected == actual ? lowered : .cast(lowered, expected)
   }
 
   /// Lowers a scalar `expression` to a combined-ordinal `Term`.
@@ -3911,6 +3981,14 @@ extension Scope {
           try comparisons(in: argument, routines, subquery: subquery)
         }
       }
+      // An offset function's value and default are read in the window node
+      // before any `LIMIT`, so their comparisons are always reachable.
+      if let positional = function.positional {
+        try comparisons(in: positional.value, routines, subquery: subquery)
+        if let fallback = positional.default {
+          try comparisons(in: fallback, routines, subquery: subquery)
+        }
+      }
     }
   }
 
@@ -3964,6 +4042,14 @@ extension Scope {
         if case let .expression(argument) = operand,
             !(filter.map { dead($0, routines) } ?? false) {
           try comparisons(in: argument, routines, subquery: subquery)
+        }
+      }
+      // An offset function's value and default are read in the window node
+      // before any `LIMIT`, so their comparisons are always reachable.
+      if let positional = function.positional {
+        try comparisons(in: positional.value, routines, subquery: subquery)
+        if let fallback = positional.default {
+          try comparisons(in: fallback, routines, subquery: subquery)
         }
       }
     }

@@ -875,6 +875,13 @@ extension Expression {
         }
         filter?.collect(subqueries: &queries)
       }
+      // An offset function's value and default are read per row, so descend
+      // them as the aggregate operand is (a subquery in `LAG((SELECT …)) OVER
+      // (…)` is collected for the pre-pass).
+      if let positional = function.positional {
+        positional.value.collect(subqueries: &queries)
+        positional.default?.collect(subqueries: &queries)
+      }
     }
   }
 
@@ -923,6 +930,12 @@ extension Expression {
           expression.collect(valued: &queries)
         }
         filter?.collect(valued: &queries)
+      }
+      // As the aggregate operand: descend an offset function's value and
+      // default for any `IN (Q)`-position subquery.
+      if let positional = function.positional {
+        positional.value.collect(valued: &queries)
+        positional.default?.collect(valued: &queries)
       }
     }
   }
@@ -975,6 +988,12 @@ extension Expression {
         }
         filter?.collect(scalar: &queries)
       }
+      // As the aggregate operand: descend an offset function's value and
+      // default for any scalar-subquery position.
+      if let positional = function.positional {
+        positional.value.collect(scalar: &queries)
+        positional.default?.collect(scalar: &queries)
+      }
     }
   }
 
@@ -1024,6 +1043,12 @@ extension Expression {
           expression.collect(existential: &queries)
         }
         filter?.collect(existential: &queries)
+      }
+      // As the aggregate operand: descend an offset function's value and
+      // default for any `EXISTS (Q)`-position subquery.
+      if let positional = function.positional {
+        positional.value.collect(existential: &queries)
+        positional.default?.collect(existential: &queries)
       }
     }
   }

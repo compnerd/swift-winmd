@@ -79,6 +79,32 @@ struct WindowResolutionTests {
                 == .binary(.add, .slot(2), .constant(.integer(1))))
   }
 
+  @Test func `a deterministic window shares a slot, a stateful one does not`()
+      throws {
+    let ordered = WindowSpec(order: Order(keys: [Order.Key(column: Column("x"))]))
+
+    // ROW_NUMBER is deterministic, so two occurrences share one appended slot.
+    let deterministic = Expression.window(function: .rowNumber, spec: ordered)
+    let shared = Windowed(scope(), [0: 0, 1: 1], width: 2)
+    _ = try shared.resolve(deterministic)
+    _ = try shared.resolve(deterministic)
+    #expect(shared.windowings.count == 1)
+
+    // FIRST_VALUE(tick()) reads a non-deterministic routine, so two occurrences
+    // each take their own slot rather than collapsing to one.
+    let routines = try Routines.standard
+        .registering("tick", returns: .integer, deterministic: false) { _ in
+          .integer(0)
+        }
+    let stateful = Expression.window(
+        function: .firstValue(.call(name: "tick", arguments: [])),
+        spec: ordered)
+    let distinct = Windowed(scope(), [0: 0, 1: 1], width: 2)
+    _ = try distinct.resolve(stateful, routines)
+    _ = try distinct.resolve(stateful, routines)
+    #expect(distinct.windowings.count == 2)
+  }
+
   @Test func `a window is discovered inside a compound expression`() {
     let window = Expression.window(function: .rowNumber, spec: WindowSpec())
     #expect(Expression.binary(.add, window, .literal(.integer(1))).windowed)
@@ -102,6 +128,15 @@ struct WindowResolutionTests {
 struct WindowArgumentTests {
   private let ordered =
       WindowSpec(order: Order(keys: [Order.Key(column: Column("x"))]))
+
+  @Test func `a zero NTH_VALUE position faults at lowering`() {
+    let window = Expression.window(
+        function: .nthValue(.column(Column("x")), 0), spec: ordered)
+    #expect(throws:
+        SQLError.state("22023", "NTH_VALUE requires a positive position")) {
+      _ = try window.windowing(scope())
+    }
+  }
 
   @Test func `a minimum LAG offset faults at lowering`() {
     let window = Expression.window(

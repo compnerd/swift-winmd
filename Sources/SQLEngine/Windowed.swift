@@ -19,9 +19,9 @@ extension WindowFunction {
     case .aggregate:
       preconditionFailure(
           "an aggregate window types from its argument through a scope")
-    case .lead, .lag:
+    case .lead, .lag, .firstValue, .lastValue, .nthValue:
       preconditionFailure(
-          "an offset window types from its value through a scope")
+          "a positional window types from its value through a scope")
     }
   }
 
@@ -31,7 +31,8 @@ extension WindowFunction {
   /// diagnostic on both the run and validate paths until then.
   internal var supported: Bool {
     switch self {
-    case .rowNumber, .rank, .denseRank, .aggregate, .lead, .lag:
+    case .rowNumber, .rank, .denseRank, .aggregate, .lead, .lag,
+         .firstValue, .lastValue, .nthValue:
       true
     }
   }
@@ -46,6 +47,9 @@ extension WindowFunction {
     case let .aggregate(function, _, _, _): function.keyword
     case .lead: "LEAD"
     case .lag: "LAG"
+    case .firstValue: "FIRST_VALUE"
+    case .lastValue: "LAST_VALUE"
+    case .nthValue: "NTH_VALUE"
     }
   }
 
@@ -84,7 +88,8 @@ extension WindowFunction {
   /// lockstep (the run ≡ validate tripwire).
   internal func require(order spec: WindowSpec) throws(SQLError) {
     switch self {
-    case .rowNumber, .rank, .denseRank, .aggregate:
+    case .rowNumber, .rank, .denseRank, .aggregate,
+         .firstValue, .lastValue, .nthValue:
       break
     case .lead, .lag:
       guard spec.order != nil else {
@@ -112,11 +117,12 @@ extension Frame {
   /// so the two stay in lockstep (the run ≡ validate tripwire): a frame the
   /// schema types is one the run executes.
   ///
-  /// The executor folds a frame only for an aggregate window (a ranking
-  /// function reads its position, not a frame); a `ROWS` frame of any bounds; a
-  /// `RANGE` frame whose bounds are the partition edges or the current peer
-  /// group (a `RANGE` numeric offset — measured against the order-key value —
-  /// is not yet computed); `GROUPS` is not yet computed.
+  /// The executor honours a frame only for a frame-sensitive function (an
+  /// aggregate window folds over it, a `FIRST_VALUE`/`LAST_VALUE`/`NTH_VALUE`
+  /// reads a row of it — a ranking or offset function takes none); a `ROWS`
+  /// frame of any bounds; a `RANGE` frame whose bounds are the partition edges
+  /// or the current peer group (a `RANGE` numeric offset — measured against
+  /// the order-key value — is not yet computed); `GROUPS` is not yet computed.
   /// Faults a structurally invalid frame — one the parser can spell or a public
   /// AST can construct but no execution can honor. A frame may not start at
   /// `UNBOUNDED FOLLOWING` or end at `UNBOUNDED PRECEDING` — the start would
@@ -191,7 +197,7 @@ extension Frame {
 
   internal func reject(for function: WindowFunction) throws(SQLError) {
     try check()
-    guard case .aggregate = function else {
+    guard function.frameable else {
       throw .state("0A000",
                    "a window frame is not supported for \(function.keyword)")
     }
@@ -269,6 +275,14 @@ internal struct Windowing: Equatable {
     /// `LAG` — the mirror of `lead`, reading `offset` rows before the current
     /// row.
     case lag(Term, offset: Int, default: Term?)
+    /// `FIRST_VALUE` — the lowered `value` term read at the first row of the
+    /// frame.
+    case firstValue(Term)
+    /// `LAST_VALUE` — the `value` term read at the last row of the frame.
+    case lastValue(Term)
+    /// `NTH_VALUE` — the `value` term read at the 1-based `n`-th row of the
+    /// frame, else NULL when the frame holds fewer than `n` rows.
+    case nthValue(Term, Int)
   }
 
   /// The window function computed over each ordered partition.
@@ -313,6 +327,12 @@ extension Windowing.Function {
     case let .lag(value, offset, fallback):
       .lag(value.remapped(through: slot), offset: offset,
            default: fallback.map { $0.remapped(through: slot) })
+    case let .firstValue(value):
+      .firstValue(value.remapped(through: slot))
+    case let .lastValue(value):
+      .lastValue(value.remapped(through: slot))
+    case let .nthValue(value, position):
+      .nthValue(value.remapped(through: slot), position)
     }
   }
 
@@ -328,6 +348,9 @@ extension Windowing.Function {
     case let .lead(value, _, fallback), let .lag(value, _, fallback):
       value.references(into: &slots)
       fallback?.references(into: &slots)
+    case let .firstValue(value), let .lastValue(value),
+         let .nthValue(value, _):
+      value.references(into: &slots)
     }
   }
 }
@@ -374,6 +397,9 @@ extension Windowing {
     case let .lead(value, _, fallback), let .lag(value, _, fallback):
       return value.deterministic(routines)
           && (fallback?.deterministic(routines) ?? true)
+    case let .firstValue(value), let .lastValue(value),
+         let .nthValue(value, _):
+      return value.deterministic(routines)
     }
   }
 }
@@ -486,6 +512,10 @@ extension WindowFunction {
   /// start, or negates `Int.min`, and the run and validate paths fault alike.
   private func check() throws(SQLError) {
     switch self {
+    case let .nthValue(_, position):
+      guard position >= 1 else {
+        throw .state("22023", "NTH_VALUE requires a positive position")
+      }
     case let .lead(_, offset, _), let .lag(_, offset, _):
       guard offset >= 0 else {
         throw .state("22023", "\(keyword) requires a nonnegative offset")
@@ -525,6 +555,13 @@ extension WindowFunction {
                         try scope.reconciled(expression, with: value, routines,
                                              subquery: subquery)
                       })
+    case let .firstValue(value):
+      return try .firstValue(scope.term(value, routines, subquery: subquery))
+    case let .lastValue(value):
+      return try .lastValue(scope.term(value, routines, subquery: subquery))
+    case let .nthValue(value, position):
+      return try .nthValue(scope.term(value, routines, subquery: subquery),
+                           position)
     }
   }
 }

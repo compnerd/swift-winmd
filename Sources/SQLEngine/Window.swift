@@ -113,6 +113,18 @@ extension Catalog where Self: ~Escapable {
       case let .lag(value, offset, fallback):
         try position(value, by: -offset, default: fallback, over: ordered,
                      in: records, context, into: &values)
+      case let .firstValue(value):
+        try extremum(value, at: .first, over: ordered, keyed,
+                     frame: windowing.frame, in: records, context,
+                     into: &values)
+      case let .lastValue(value):
+        try extremum(value, at: .last, over: ordered, keyed,
+                     frame: windowing.frame, in: records, context,
+                     into: &values)
+      case let .nthValue(value, position):
+        try extremum(value, at: .nth(position), over: ordered, keyed,
+                     frame: windowing.frame, in: records, context,
+                     into: &values)
       }
     }
     return values
@@ -207,25 +219,7 @@ extension Catalog where Self: ~Escapable {
                                 into values: inout Array<Value>)
       throws(SQLError) {
     let count = ordered.count
-    // Each ordered position's peer group — the maximal contiguous run of rows
-    // tied on the window `ORDER BY` (with no order keys the whole partition) —
-    // the `RANGE` `CURRENT ROW` bound. The partition is already sorted, so a
-    // peer group is contiguous and a single forward scan bounds every position.
-    var peerLo = Array(repeating: 0, count: count)
-    var peerHi = Array(repeating: 0, count: count)
-    var group = 0
-    while group < count {
-      var end = group + 1
-      while end < count, peers(keyed[ordered[end - 1]]!, keyed[ordered[end]]!) {
-        end += 1
-      }
-      for index in group ..< end {
-        peerLo[index] = group
-        peerHi[index] = end - 1
-      }
-      group = end
-    }
-
+    let (peerLo, peerHi) = peering(ordered, keyed)
     // Evaluate each source row's `FILTER` and argument once, up front, before
     // folding the individual frames. Explicit frames overlap between output rows
     // (a running `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` contains the
@@ -363,6 +357,69 @@ extension Catalog where Self: ~Escapable {
     }
   }
 
+  /// Reads a frame-sensitive positional function's `value` at a chosen row of
+  /// each row's frame, writing into `values` at the record's original position.
+  /// `ordered` is the partition in window order, `keyed` each record's window
+  /// `ORDER BY` values (so a `RANGE`/default frame finds a row's peer group).
+  ///
+  /// `FIRST_VALUE` reads the frame's first row, `LAST_VALUE` its last, and
+  /// `NTH_VALUE` its 1-based `n`-th row (`NULL` when the frame holds fewer than
+  /// `n` rows). The frame is the explicit `frame`, or — when none is written —
+  /// the window default (`RANGE UNBOUNDED PRECEDING` through the current peer
+  /// group), so a default-framed `LAST_VALUE` reads the current peer group's
+  /// end (the current row with distinct order keys), the classic gotcha.
+  private borrowing func extremum(_ value: Term, at position: Position,
+                                  over ordered: Array<Int>,
+                                  _ keyed: Dictionary<Int, Array<Value>>,
+                                  frame: Frame?,
+                                  in records: Array<Record>,
+                                  _ context: Context,
+                                  into values: inout Array<Value>)
+      throws(SQLError) {
+    let count = ordered.count
+    let (peerLo, peerHi) = peering(ordered, keyed)
+    // The default frame is `RANGE UNBOUNDED PRECEDING AND CURRENT ROW` — the
+    // partition start through the current peer group — the frame the value
+    // functions read over when none is written.
+    let frame = frame ?? Frame(unit: .range, start: .unboundedPreceding,
+                               end: .currentRow)
+    // Evaluate each source row's value once, before selecting frame positions.
+    // Several output rows may select the same target — `FIRST_VALUE` returns the
+    // partition's first value throughout — so reading a materialised value keeps
+    // a stateful or non-deterministic value (`FIRST_VALUE(tick())`) evaluated
+    // one time per input row rather than once per output that reads it.
+    var evaluated = Array<Value>()
+    evaluated.reserveCapacity(count)
+    for slot in 0 ..< count {
+      try evaluated.append(evaluate(records[ordered[slot]], value, context))
+    }
+    for index in 0 ..< count {
+      let low = bound(frame.start, at: index, frame.unit, start: true,
+                      peerLo, peerHi, count)
+      let high = bound(frame.end, at: index, frame.unit, start: false,
+                       peerLo, peerHi, count)
+      let lo = max(0, low)
+      let hi = min(count - 1, high)
+      // The chosen row's index into `ordered`, or `nil` when the frame is empty
+      // or holds fewer than `n` rows (`NTH_VALUE`).
+      let target: Int? = if lo > hi {
+        nil
+      } else {
+        switch position {
+        case .first: lo
+        case .last: hi
+        // Compare the 1-based offset against the frame width rather than adding
+        // it to `lo`, so a large parsed position (`NTH_VALUE(x,
+        // 9223372036854775807)`) decides it is past the frame (NULL) without
+        // `lo + n - 1` overflowing. Both sides here are small, and `lo + n - 1`
+        // is formed only once it is known to land within `[lo, hi]`.
+        case let .nth(n): n - 1 > hi - lo ? nil : lo + n - 1
+        }
+      }
+      values[ordered[index]] = target.map { evaluated[$0] } ?? .null
+    }
+  }
+
   /// Assigns `function`'s value to each record of an already-ordered partition,
   /// writing into `values` at the record's original position. `keyed` holds each
   /// record's window `ORDER BY` values, so the peer-aware ranks detect ties.
@@ -385,7 +442,7 @@ extension Catalog where Self: ~Escapable {
     // `accumulate`/`framed` and an offset function read by `position`, so
     // `computed` dispatches those elsewhere and neither reaches this ranker.
     switch function {
-    case .aggregate, .lead, .lag:
+    case .aggregate, .lead, .lag, .firstValue, .lastValue, .nthValue:
       preconditionFailure("a non-ranking window is computed, not ranked")
     case .rowNumber, .rank, .denseRank:
       break
@@ -452,6 +509,43 @@ private func bound(_ bound: Frame.Bound, at index: Int, _ unit: Frame.Unit,
     let (high, overflow) = index.addingReportingOverflow(offset)
     return overflow ? (offset < 0 ? Int.min : Int.max) : high
   }
+}
+
+/// Which row of the frame a positional value function reads.
+private enum Position {
+  /// `FIRST_VALUE` — the frame's first row.
+  case first
+  /// `LAST_VALUE` — the frame's last row.
+  case last
+  /// `NTH_VALUE` — the frame's 1-based `n`-th row.
+  case nth(Int)
+}
+
+/// Each ordered position's peer-group bounds — for the row at position `p`, the
+/// `[low[p], high[p]]` index range of the maximal contiguous run of rows tied
+/// on the window `ORDER BY` (with no order keys the whole partition). The
+/// partition is already sorted, so a peer group is contiguous and a single
+/// forward scan bounds every position — used for the `RANGE`/default frame's
+/// `CURRENT ROW` bound.
+private func peering(_ ordered: Array<Int>,
+                     _ keyed: Dictionary<Int, Array<Value>>)
+    -> (low: Array<Int>, high: Array<Int>) {
+  let count = ordered.count
+  var low = Array(repeating: 0, count: count)
+  var high = Array(repeating: 0, count: count)
+  var group = 0
+  while group < count {
+    var end = group + 1
+    while end < count, peers(keyed[ordered[end - 1]]!, keyed[ordered[end]]!) {
+      end += 1
+    }
+    for index in group ..< end {
+      low[index] = group
+      high[index] = end - 1
+    }
+    group = end
+  }
+  return (low, high)
 }
 
 /// Whether two records are peers of a window `ORDER BY` — equal on every order

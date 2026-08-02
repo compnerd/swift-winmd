@@ -93,6 +93,13 @@ private let kLexing: Array<Lexing> = [
                     .integer(2)]),
   Lexing(name: "bound-parameter placeholder", text: "WHERE a = :pid",
          expected: [.where, .identifier("a"), .equal, .parameter("pid")]),
+  Lexing(name: "window keywords", text: "OVER PARTITION WINDOW",
+         expected: [.over, .partition, .window]),
+  Lexing(name: "case-insensitive window keywords", text: "over Partition Window",
+         expected: [.over, .partition, .window]),
+  Lexing(name: "quoted window keyword stays an identifier",
+         text: "\"over\" \"partition\"",
+         expected: [.quoted("over"), .quoted("partition")]),
 ]
 
 private struct Fault: Sendable, CustomTestStringConvertible {

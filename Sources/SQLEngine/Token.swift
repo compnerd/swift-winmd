@@ -37,6 +37,16 @@ extension Token {
     /// The `FILTER` keyword introducing an aggregate's `FILTER (WHERE …)`
     /// per-row gate.
     case filter
+    /// The `OVER` keyword introducing a window function's `OVER (…)` window
+    /// specification (`ROW_NUMBER() OVER (PARTITION BY … ORDER BY …)`).
+    case over
+    /// The `PARTITION` keyword introducing a window's `PARTITION BY …` — the
+    /// keys that split the rows into the partitions a window function folds
+    /// over independently.
+    case partition
+    /// The `WINDOW` keyword introducing a `SELECT`'s named-window clause
+    /// (`WINDOW w AS (…)`), a window specification a later `OVER w` references.
+    case window
     case by
     case asc
     case desc
@@ -155,6 +165,9 @@ extension Token.Kind {
     case .group: "GROUP"
     case .having: "HAVING"
     case .filter: "FILTER"
+    case .over: "OVER"
+    case .partition: "PARTITION"
+    case .window: "WINDOW"
     case .by: "BY"
     case .asc: "ASC"
     case .desc: "DESC"

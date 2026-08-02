@@ -353,6 +353,36 @@ internal indirect enum Term: Equatable, Sendable {
 }
 
 extension Term {
+  /// Whether this term evaluates to the same value at every occurrence — a fixed
+  /// cell, constant, bound parameter, or compile-time GROUPING bit-vector, or an
+  /// arithmetic/CAST/COALESCE/NULLIF built from such, and a scalar call only when
+  /// its routine is declared deterministic and every argument is. A `CASE` (whose
+  /// guards this does not descend) and a scalar `subquery` are conservatively not
+  /// deterministic — treating an uncertain term as non-deterministic never shares
+  /// two window occurrences that should evaluate independently, only forgoes
+  /// sharing two that could.
+  internal func deterministic(_ routines: Routines) -> Bool {
+    switch self {
+    case .slot, .constant, .parameter, .grouping:
+      true
+    case let .apply(name, arguments):
+      routines[name]?.deterministic == true
+          && arguments.allSatisfy { $0.deterministic(routines) }
+    case let .binary(_, lhs, rhs):
+      lhs.deterministic(routines) && rhs.deterministic(routines)
+    case let .cast(operand, _):
+      operand.deterministic(routines)
+    case let .coalesce(elements, _):
+      elements.allSatisfy { $0.deterministic(routines) }
+    case let .nullif(lhs, rhs):
+      lhs.deterministic(routines) && rhs.deterministic(routines)
+    case .case, .subquery:
+      false
+    }
+  }
+}
+
+extension Term {
   /// Structural equality over two lowered terms — the resolved form column
   /// qualification has already normalized to a slot — so a `DISTINCT` ORDER BY
   /// key can be recognised as one of the projected select-list values it must

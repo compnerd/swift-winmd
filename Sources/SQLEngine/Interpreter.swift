@@ -103,6 +103,11 @@ extension Catalog where Self: ~Escapable {
       return deduplicated(try execute(source, context))
     case let .aggregate(keys, aggregates, source):
       return try grouped(execute(source, context), keys, aggregates, context)
+    case .window:
+      // No compile path yet emits a window node; its executor lands with the
+      // dispatch that produces it. The arm keeps the switch exhaustive — a
+      // window plan reaching here would be an internal inconsistency.
+      throw .state("XX000", "window plan is not yet executable")
     case let .limit(count, offset, source):
       return limited(try execute(source, context), count, offset)
     }

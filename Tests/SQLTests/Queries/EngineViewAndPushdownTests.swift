@@ -307,7 +307,7 @@ func derived(_ plan: Plan) -> Plan? {
     derived(source)
   case let .distinct(source):
     derived(source)
-  case let .aggregate(_, _, source):
+  case let .aggregate(_, _, source), let .window(_, source):
     derived(source)
   case .single, .values, .empty, .scan, .join:
     nil
@@ -345,7 +345,7 @@ func sought(_ plan: Plan) -> Bool {
     sought(source)
   case let .distinct(source):
     sought(source)
-  case let .aggregate(_, _, source):
+  case let .aggregate(_, _, source), let .window(_, source):
     sought(source)
   case .single, .values, .empty:
     false
@@ -380,7 +380,7 @@ func filters(_ plan: Plan) -> Bool {
     filters(source)
   case let .distinct(source):
     filters(source)
-  case let .aggregate(_, _, source):
+  case let .aggregate(_, _, source), let .window(_, source):
     filters(source)
   case .single, .values, .empty, .scan, .join:
     false
@@ -420,7 +420,7 @@ func pushed(_ plan: Plan) -> Bool {
     pushed(source)
   case let .distinct(source):
     pushed(source)
-  case let .aggregate(_, _, source):
+  case let .aggregate(_, _, source), let .window(_, source):
     pushed(source)
   case .single, .values, .empty, .scan:
     false
@@ -474,7 +474,7 @@ func joined(_ plan: Plan) -> Bool {
     joined(left)
   case let .setop(_, left, right, _, _, _):
     joined(left) || joined(right)
-  case let .aggregate(_, _, source):
+  case let .aggregate(_, _, source), let .window(_, source):
     joined(source)
   case .single, .values, .empty, .scan:
     false
@@ -512,7 +512,7 @@ func residue(_ plan: Plan) -> Bool {
     residue(left)
   case let .setop(_, left, right, _, _, _):
     residue(left) || residue(right)
-  case let .aggregate(_, _, source):
+  case let .aggregate(_, _, source), let .window(_, source):
     residue(source)
   case .single, .values, .empty, .scan:
     false
@@ -551,7 +551,7 @@ func separated(_ plan: Plan) -> Bool {
     separated(left)
   case let .setop(_, left, right, _, _, _):
     separated(left) || separated(right)
-  case let .aggregate(_, _, source):
+  case let .aggregate(_, _, source), let .window(_, source):
     separated(source)
   case .single, .values, .empty, .scan:
     false
@@ -591,7 +591,7 @@ func stacked(_ plan: Plan) -> Bool {
     stacked(left)
   case let .setop(_, left, right, _, _, _):
     stacked(left) || stacked(right)
-  case let .aggregate(_, _, source):
+  case let .aggregate(_, _, source), let .window(_, source):
     stacked(source)
   case .single, .values, .empty, .scan:
     false
@@ -707,7 +707,7 @@ private func injected(_ plan: Plan) -> Bool {
     injected(left)
   case let .join(outer, _, _, _, _, _, _):
     injected(outer)
-  case let .aggregate(_, _, source):
+  case let .aggregate(_, _, source), let .window(_, source):
     injected(source)
   case .single, .values, .empty, .scan:
     false

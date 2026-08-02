@@ -271,6 +271,20 @@ internal indirect enum Plan {
   /// projection, so it aggregates the filtered rows and the projection reads
   /// its output.
   case aggregate(keys: Array<Term>, aggregates: Array<Aggregation>, Plan)
+  /// ω — computes each `windowings` window function over its `source`'s records
+  /// and appends the result as a fresh slot, cardinality-preserving. Unlike the
+  /// grouping `aggregate` — which folds a group to one row — a window function
+  /// keeps every input row and gives it the function's value for its position
+  /// in the window, so the node's output is the source's records widened by one
+  /// slot per windowing: slot `source.slots + j` holds `windowings[j]`'s value,
+  /// the source's own slots `0 ..< source.slots` passing through unchanged. Each
+  /// windowing partitions the records by its own `PARTITION BY` terms, orders
+  /// each partition by its own `ORDER BY` keys, and assigns the ranking value;
+  /// the several windowings of one query (each with its own `OVER`) are computed
+  /// independently over the shared source. It sits above the WHERE/join chain
+  /// and below the projection, so the projection reads the appended slots
+  /// through a `Windowed`.
+  case window(Array<Windowing>, Plan)
   /// A row cap on its `source`'s output: skips the first `offset` records then
   /// takes at most `count` of the rest, in the source's order. It sits over the
   /// sort/select but below the projection, so it caps the ordered rows before
@@ -313,6 +327,10 @@ extension Plan {
     case let .aggregate(keys, aggregates, _):
       // A grouped record is the key values followed by the aggregate results.
       keys.count + aggregates.count
+    case let .window(windowings, source):
+      // A window node passes its source's rows through and appends one slot per
+      // windowing, so it is as wide as its source plus the window results.
+      source.width + windowings.count
     default:
       // `compile` always tops an arm with a `project`; nothing else reaches a
       // view's sub-plan root. Measuring nil would mask a width mismatch, so a
@@ -391,6 +409,11 @@ extension Plan {
       // A grouped record reshapes its source into the key values followed by
       // the aggregate results — a fresh slot space of that width.
       keys.count + aggregates.count
+    case let .window(windowings, source):
+      // A window node preserves its source's rows and appends one slot per
+      // windowing, so the next relation's slots begin past the source's own
+      // width plus the window results.
+      source.slots.map { $0 + windowings.count }
     case let .project(terms, _):
       // A projection's output is exactly its projected terms, so the next
       // relation's slots begin at `terms.count` — regardless of the source's
@@ -461,9 +484,10 @@ extension Plan {
     // A `derived` view body runs an arbitrary sub-plan (and augments/validates
     // its schema); a `join`/`outer`/`semijoin`/`apply` evaluates an `on`,
     // seeks, or re-executes a correlated body; an `aggregate` may overflow a
-    // `SUM` or type-fault a `MIN`/`MAX`. None is provably throw-free here, so
-    // each reports `false` — the fold is missed, never unsound.
-    case .derived, .join, .outer, .semijoin, .apply, .aggregate:
+    // `SUM` or type-fault a `MIN`/`MAX`; a `window` evaluates a partition/order
+    // term per row. None is provably throw-free here, so each reports `false` —
+    // the fold is missed, never unsound.
+    case .derived, .join, .outer, .semijoin, .apply, .aggregate, .window:
       false
     }
   }
@@ -510,6 +534,11 @@ extension Plan {
     case let .sort(_, source):
       // A sort reorders rows without duplicating one, so it preserves the
       // source's distinctness (which ignores row order).
+      return source.unique
+    case let .window(_, source):
+      // A window node passes every source row through and appends a computed
+      // slot, so two source rows that already differ still differ (the extra
+      // column cannot collapse them); it preserves the source's distinctness.
       return source.unique
     case let .project(terms, source):
       // A projection preserves full-row distinctness ONLY when it is an

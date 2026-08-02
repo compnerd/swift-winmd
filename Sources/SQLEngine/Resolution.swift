@@ -1772,7 +1772,7 @@ private func lower(_ operand: Predicate.Operand,
 /// ordering check reads `output`, since an output key is well-defined over the
 /// deduplicated rows (its value is constant across a dedup group) whether its
 /// term is a bare column or not.
-internal struct SortKey {
+internal struct SortKey: Equatable {
   /// The value this key orders on.
   let term: Term
 

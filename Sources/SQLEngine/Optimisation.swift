@@ -138,6 +138,12 @@ extension Catalog where Self: ~Escapable {
       // seek a base relation.
       try .aggregate(keys: keys, aggregates: aggregates,
                      optimise(source, context))
+    case let .window(windowings, source):
+      // A window node reshapes its source's rows (appending the window results)
+      // and has no seek or join of its own; optimise its source (the WHERE/join
+      // chain below it seeks and nests as usual) and rewrap. The projection sits
+      // above it as a `project` the recursion reaches through here.
+      try .window(windowings, optimise(source, context))
     case let .limit(count, offset, source):
       // A `limit` is a transparent wrapper — optimise its source and re-cap;
       // the cap itself has no seek or join to rewrite.

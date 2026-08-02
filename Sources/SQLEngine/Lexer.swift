@@ -417,6 +417,9 @@ internal struct Lexer: ~Escapable {
     case "GROUP": .group
     case "HAVING": .having
     case "FILTER": .filter
+    case "OVER": .over
+    case "PARTITION": .partition
+    case "WINDOW": .window
     case "BY": .by
     case "ASC": .asc
     case "DESC": .desc

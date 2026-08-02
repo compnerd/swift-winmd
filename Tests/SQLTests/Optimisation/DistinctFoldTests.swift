@@ -49,7 +49,7 @@ private func distincts(_ plan: Plan) -> Bool {
     distincts(source)
   case let .derived(_, sub, _, _):
     distincts(sub)
-  case let .aggregate(_, _, source):
+  case let .aggregate(_, _, source), let .window(_, source):
     distincts(source)
   case let .select(_, source):
     distincts(source)

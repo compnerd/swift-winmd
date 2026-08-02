@@ -64,7 +64,7 @@ private func selects(_ plan: Plan) -> Bool {
     selects(source)
   case let .derived(_, sub, _, _):
     selects(sub)
-  case let .aggregate(_, _, source):
+  case let .aggregate(_, _, source), let .window(_, source):
     selects(source)
   case let .product(left, right):
     selects(left) || selects(right)
@@ -101,7 +101,7 @@ private func empties(_ plan: Plan) -> Bool {
     empties(source)
   case let .derived(_, sub, _, _):
     empties(sub)
-  case let .aggregate(_, _, source):
+  case let .aggregate(_, _, source), let .window(_, source):
     empties(source)
   case let .select(_, source):
     empties(source)

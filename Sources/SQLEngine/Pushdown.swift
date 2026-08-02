@@ -83,6 +83,13 @@ extension Plan {
       // over the aggregate), while the WHERE below it — already placed under
       // the aggregate at compile — pushes down within the source as usual.
       try .aggregate(keys: keys, aggregates: aggregates, source.pushdown())
+    case let .window(windowings, source):
+      // A window node appends the window results to a fresh output slot space,
+      // so it is a pushdown barrier: a projection filter above it is in that
+      // widened space and stays there (`distribute`'s default keeps it a
+      // `select` over the window), while the WHERE below it — already placed
+      // under the window at compile — pushes down within the source as usual.
+      try .window(windowings, source.pushdown())
     case let .limit(count, offset, source):
       // A `limit` is the outermost operator, so no `WHERE` conjunct ever
       // reaches it to push down; it recurses transparently, its source pushed

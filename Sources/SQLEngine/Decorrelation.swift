@@ -96,6 +96,8 @@ extension Catalog where Self: ~Escapable {
     case let .aggregate(keys, aggregates, source):
       return try .aggregate(keys: keys, aggregates: aggregates,
                             decorrelate(source, context))
+    case let .window(windowings, source):
+      return try .window(windowings, decorrelate(source, context))
     case let .limit(count, offset, source):
       return try .limit(count: count, offset: offset,
                         decorrelate(source, context))

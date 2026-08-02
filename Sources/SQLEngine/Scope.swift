@@ -961,9 +961,9 @@ internal struct Scope {
     }
     // An aggregate window validates its operand and `FILTER` exactly as a
     // collapsing aggregate does (the same `aggregate` helper), yielding the
-    // aggregate's result type; a ranking function types `.integer`. `compile`
-    // gates an aggregate window's `ORDER BY` (the running frame is not yet
-    // computed), so a supported one reaching here has none.
+    // aggregate's result type; a ranking function types `.integer`. The window
+    // `ORDER BY` fixes the running frame the executor folds over — it does not
+    // shape the column type — and is validated with the partition keys below.
     let type: ValueType
     if case let .aggregate(aggregate, operand, _, filter) = function {
       type = try self.aggregate(aggregate, over: operand, filter: filter,

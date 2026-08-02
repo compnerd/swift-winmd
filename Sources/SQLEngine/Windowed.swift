@@ -15,6 +15,56 @@ extension WindowFunction {
       .integer
     }
   }
+
+  /// Whether the executor computes this window function yet. `ROW_NUMBER` is the
+  /// first slice; `RANK`/`DENSE_RANK` follow, so an unsupported one is rejected
+  /// with the feature diagnostic on both the run and validate paths until its
+  /// executor lands.
+  internal var supported: Bool {
+    switch self {
+    case .rowNumber:
+      true
+    case .rank, .denseRank:
+      false
+    }
+  }
+
+  /// The ISO keyword spelling of this window function, for a diagnostic.
+  internal var keyword: String {
+    switch self {
+    case .rowNumber: "ROW_NUMBER"
+    case .rank: "RANK"
+    case .denseRank: "DENSE_RANK"
+    }
+  }
+
+  /// This window function's result `type`, or the feature diagnostic when its
+  /// executor has not yet landed — the type the schema advertises for a
+  /// supported window, faulting an unsupported one in parity with the run.
+  internal var result: ValueType {
+    get throws(SQLError) {
+      guard supported else {
+        throw .state("0A000", "\(keyword) is not yet supported")
+      }
+      return type
+    }
+  }
+}
+
+extension Select {
+  /// Whether the select projects (or orders by) a window function — the query
+  /// compiles through the window path, appending each window's result to the
+  /// source rows before the projection reads it. A window is allowed only in
+  /// the SELECT list and `ORDER BY` (ISO 9075); one elsewhere is rejected.
+  internal var windows: Bool {
+    let projected = switch projection {
+    case .all, .columns:
+      false
+    case let .expressions(items):
+      items.contains { $0.expression.windowed }
+    }
+    return projected || orderKeys.contains { $0.windowed }
+  }
 }
 
 // MARK: - Windowing (lowered)

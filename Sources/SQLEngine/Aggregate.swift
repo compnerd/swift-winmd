@@ -83,6 +83,19 @@ extension Aggregation {
   }
 }
 
+extension Aggregate {
+  /// The ISO keyword spelling of this aggregate, for a diagnostic.
+  internal var keyword: String {
+    switch self {
+    case .count: "COUNT"
+    case .sum: "SUM"
+    case .min: "MIN"
+    case .max: "MAX"
+    case .avg: "AVG"
+    }
+  }
+}
+
 // MARK: - Accumulation
 
 /// A running aggregate over the rows of a group — the fold's state.
@@ -98,7 +111,11 @@ extension Aggregation {
 /// `less`. Every aggregate but `COUNT` ignores NULLs — a NULL argument does not
 /// fold — and an empty or all-NULL group yields `COUNT` `0` and the others
 /// NULL.
-private struct Accumulator {
+///
+/// The window executor reuses this fold: a whole-partition aggregate window
+/// (`SUM(x) OVER (PARTITION BY d)`) folds every partition row through one
+/// accumulator, so it is `internal` rather than the grouping path's private.
+internal struct Accumulator {
   private let function: Aggregate
   // Whether to fold each DISTINCT non-NULL value once — the ISO `DISTINCT` set
   // quantifier — tracking the values already folded in `seen`. `MIN`/`MAX`

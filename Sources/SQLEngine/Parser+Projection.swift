@@ -237,6 +237,17 @@ extension Parser {
     if !ident.quoted, let aggregate = aggregate(ident.text) {
       let (operand, distinct) = try aggregand(aggregate)
       let filter = try self.filter()
+      // An `OVER (…)` after the aggregate (and its optional `FILTER`) makes it
+      // a window function computed over the frame rather than a collapsing
+      // aggregate — `SUM(x) OVER (…)` widens each row, `SUM(x)` folds the
+      // group. The same operand, `DISTINCT`, and `FILTER` carry into the window
+      // function; `over()` reads the required window specification.
+      if current?.kind == .over {
+        let function = WindowFunction.aggregate(aggregate, of: operand,
+                                                distinct: distinct,
+                                                filter: filter)
+        return try .window(function: function, spec: over())
+      }
       return .aggregate(aggregate, of: operand, distinct: distinct,
                         filter: filter)
     }

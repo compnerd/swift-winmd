@@ -861,11 +861,19 @@ extension Expression {
       // As a `call`: descend the arguments so a subquery nested in one is
       // collected for the pre-pass.
       for argument in arguments { argument.collect(subqueries: &queries) }
-    case let .window(_, spec):
+    case let .window(function, spec):
       // As a `call`: descend the specification's expressions for a nested
-      // subquery.
+      // subquery, and — as the collapsing `.aggregate` does — an aggregate
+      // window's own operand and `FILTER`, so a subquery in `COUNT((SELECT …))
+      // OVER (…)` is collected for the pre-pass.
       for expression in spec.expressions {
         expression.collect(subqueries: &queries)
+      }
+      if case let .aggregate(_, operand, _, filter) = function {
+        if case let .expression(expression) = operand {
+          expression.collect(subqueries: &queries)
+        }
+        filter?.collect(subqueries: &queries)
       }
     }
   }
@@ -906,9 +914,16 @@ extension Expression {
     case let .grouping(arguments):
       // As a `call`: descend the arguments for any `IN (Q)`-position subquery.
       for argument in arguments { argument.collect(valued: &queries) }
-    case let .window(_, spec):
-      // As a `call`: descend the specification's expressions.
+    case let .window(function, spec):
+      // As a `call`: descend the specification's expressions, and an aggregate
+      // window's own operand and `FILTER` (as `.aggregate` does).
       for expression in spec.expressions { expression.collect(valued: &queries) }
+      if case let .aggregate(_, operand, _, filter) = function {
+        if case let .expression(expression) = operand {
+          expression.collect(valued: &queries)
+        }
+        filter?.collect(valued: &queries)
+      }
     }
   }
 
@@ -950,9 +965,16 @@ extension Expression {
     case let .grouping(arguments):
       // As a `call`: descend the arguments for any scalar-subquery position.
       for argument in arguments { argument.collect(scalar: &queries) }
-    case let .window(_, spec):
-      // As a `call`: descend the specification's expressions.
+    case let .window(function, spec):
+      // As a `call`: descend the specification's expressions, and an aggregate
+      // window's own operand and `FILTER` (as `.aggregate` does).
       for expression in spec.expressions { expression.collect(scalar: &queries) }
+      if case let .aggregate(_, operand, _, filter) = function {
+        if case let .expression(expression) = operand {
+          expression.collect(scalar: &queries)
+        }
+        filter?.collect(scalar: &queries)
+      }
     }
   }
 
@@ -991,10 +1013,17 @@ extension Expression {
       // As a `call`: descend the arguments for any `EXISTS (Q)`-position
       // subquery.
       for argument in arguments { argument.collect(existential: &queries) }
-    case let .window(_, spec):
-      // As a `call`: descend the specification's expressions.
+    case let .window(function, spec):
+      // As a `call`: descend the specification's expressions, and an aggregate
+      // window's own operand and `FILTER` (as `.aggregate` does).
       for expression in spec.expressions {
         expression.collect(existential: &queries)
+      }
+      if case let .aggregate(_, operand, _, filter) = function {
+        if case let .expression(expression) = operand {
+          expression.collect(existential: &queries)
+        }
+        filter?.collect(existential: &queries)
       }
     }
   }

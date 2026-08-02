@@ -96,9 +96,56 @@ extension Catalog where Self: ~Escapable {
         }
         return lhs < rhs
       }
-      assign(windowing.function, over: ordered, keyed, into: &values)
+      switch windowing.function {
+      case .rowNumber, .rank, .denseRank:
+        assign(windowing.function, over: ordered, keyed, into: &values)
+      case let .aggregate(aggregation):
+        try accumulate(aggregation, over: ordered, in: records, context,
+                       into: &values)
+      }
     }
     return values
+  }
+
+  /// Folds an aggregate window's `aggregation` over each row's frame, writing
+  /// the result into `values` at each record's original position.
+  ///
+  /// With no window `ORDER BY` the default frame is the whole partition, so one
+  /// `Accumulator` folds every partition row — gated by the aggregate's
+  /// `FILTER`, reading its argument value (a `COUNT(*)` sentinel when it has no
+  /// argument) — and its single result is assigned to every row of the
+  /// partition. The fold is the collapsing grouping path's own, so a
+  /// partition's aggregate window equals the aggregate a `GROUP BY` on the same
+  /// key would fold, spread back over the partition's rows rather than
+  /// collapsed to one.
+  private borrowing func accumulate(_ aggregation: Aggregation,
+                                    over ordered: Array<Int>,
+                                    in records: Array<Record>,
+                                    _ context: Context,
+                                    into values: inout Array<Value>)
+      throws(SQLError) {
+    var accumulator = Accumulator(aggregation.function,
+                                  distinct: aggregation.distinct)
+    for position in ordered {
+      // The aggregate's `FILTER (WHERE …)` gates the row before the fold (and
+      // so before the DISTINCT dedup): only a definite TRUE admits it, a FALSE
+      // or UNKNOWN row skipped, exactly as the grouping path gates.
+      if let filter = aggregation.filter {
+        guard try evaluate(records[position], filter, context) == true else {
+          continue
+        }
+      }
+      // `COUNT(*)` folds a non-NULL sentinel (a row is always counted); every
+      // other aggregate folds its evaluated argument value.
+      let value: Value = if let argument = aggregation.argument {
+        try evaluate(records[position], argument, context)
+      } else {
+        .integer(0)
+      }
+      try accumulator.fold(value)
+    }
+    let result = try accumulator.value
+    for position in ordered { values[position] = result }
   }
 
   /// Assigns `function`'s value to each record of an already-ordered partition,
@@ -115,10 +162,15 @@ extension Catalog where Self: ~Escapable {
   ///
   /// With no `ORDER BY` every row is a peer, so `RANK`/`DENSE_RANK` are `1`
   /// throughout while `ROW_NUMBER` still numbers each row.
-  private borrowing func assign(_ function: WindowFunction,
+  private borrowing func assign(_ function: Windowing.Function,
                                 over ordered: Array<Int>,
                                 _ keyed: Dictionary<Int, Array<Value>>,
                                 into values: inout Array<Value>) {
+    // An aggregate window is folded over its frame by `accumulate`, never
+    // ranked, so `computed` dispatches it there — it never reaches this ranker.
+    if case .aggregate = function {
+      preconditionFailure("an aggregate window is accumulated, not ranked")
+    }
     if case .rowNumber = function {
       for position in ordered.indices {
         values[ordered[position]] = .integer(position + 1)

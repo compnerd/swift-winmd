@@ -1133,7 +1133,10 @@ internal struct Parser: ~Escapable {
   /// sort value and its own optional `ASC`/`DESC` — into an `Order` (the
   /// `ORDER` keyword is already consumed). The keys read in source order, major
   /// to minor.
-  private mutating func order() throws(SQLError) -> Order {
+  ///
+  /// Shared with a window function's `OVER (… ORDER BY …)`, whose window order
+  /// is the same `<sort specification list>` a query-level `ORDER BY` is.
+  internal mutating func order() throws(SQLError) -> Order {
     try expect(.by)
     var keys = [try key()]
     while try match(.comma) {

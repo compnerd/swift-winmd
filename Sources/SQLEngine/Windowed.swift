@@ -14,8 +14,10 @@ extension WindowFunction {
   /// reaching this scope-free property.
   internal var type: ValueType {
     switch self {
-    case .rowNumber, .rank, .denseRank:
+    case .rowNumber, .rank, .denseRank, .ntile:
       .integer
+    case .percentRank, .cumeDist:
+      .double
     case .aggregate:
       preconditionFailure(
           "an aggregate window types from its argument through a scope")
@@ -32,7 +34,8 @@ extension WindowFunction {
   internal var supported: Bool {
     switch self {
     case .rowNumber, .rank, .denseRank, .aggregate, .lead, .lag,
-         .firstValue, .lastValue, .nthValue:
+         .firstValue, .lastValue, .nthValue,
+         .ntile, .percentRank, .cumeDist:
       true
     }
   }
@@ -50,6 +53,9 @@ extension WindowFunction {
     case .firstValue: "FIRST_VALUE"
     case .lastValue: "LAST_VALUE"
     case .nthValue: "NTH_VALUE"
+    case .ntile: "NTILE"
+    case .percentRank: "PERCENT_RANK"
+    case .cumeDist: "CUME_DIST"
     }
   }
 
@@ -89,7 +95,8 @@ extension WindowFunction {
   internal func require(order spec: WindowSpec) throws(SQLError) {
     switch self {
     case .rowNumber, .rank, .denseRank, .aggregate,
-         .firstValue, .lastValue, .nthValue:
+         .firstValue, .lastValue, .nthValue,
+         .ntile, .percentRank, .cumeDist:
       break
     case .lead, .lag:
       guard spec.order != nil else {
@@ -283,6 +290,13 @@ internal struct Windowing: Equatable {
     /// `NTH_VALUE` — the `value` term read at the 1-based `n`-th row of the
     /// frame, else NULL when the frame holds fewer than `n` rows.
     case nthValue(Term, Int)
+    /// `NTILE` — the 1-based bucket number when the partition is split into `n`
+    /// equal buckets.
+    case ntile(Int)
+    /// `PERCENT_RANK` — the relative rank in `[0, 1]`.
+    case percentRank
+    /// `CUME_DIST` — the cumulative distribution in `(0, 1]`.
+    case cumeDist
   }
 
   /// The window function computed over each ordered partition.
@@ -317,7 +331,7 @@ extension Windowing.Function {
   internal func remapped(through slot: Dictionary<Int, Int>)
       -> Windowing.Function {
     switch self {
-    case .rowNumber, .rank, .denseRank:
+    case .rowNumber, .rank, .denseRank, .ntile, .percentRank, .cumeDist:
       self
     case let .aggregate(aggregation):
       .aggregate(aggregation.remapped(through: slot))
@@ -341,7 +355,7 @@ extension Windowing.Function {
   /// and default slots, none for a ranking function.
   internal func references(into slots: inout Set<Int>) {
     switch self {
-    case .rowNumber, .rank, .denseRank:
+    case .rowNumber, .rank, .denseRank, .ntile, .percentRank, .cumeDist:
       break
     case let .aggregate(aggregation):
       aggregation.references(into: &slots)
@@ -389,7 +403,7 @@ extension Windowing {
       return false
     }
     switch function {
-    case .rowNumber, .rank, .denseRank:
+    case .rowNumber, .rank, .denseRank, .ntile, .percentRank, .cumeDist:
       return true
     case let .aggregate(aggregation):
       return aggregation.filter == nil
@@ -512,6 +526,10 @@ extension WindowFunction {
   /// start, or negates `Int.min`, and the run and validate paths fault alike.
   private func check() throws(SQLError) {
     switch self {
+    case let .ntile(buckets):
+      guard buckets >= 1 else {
+        throw .state("22023", "NTILE requires a positive bucket count")
+      }
     case let .nthValue(_, position):
       guard position >= 1 else {
         throw .state("22023", "NTH_VALUE requires a positive position")
@@ -562,6 +580,12 @@ extension WindowFunction {
     case let .nthValue(value, position):
       return try .nthValue(scope.term(value, routines, subquery: subquery),
                            position)
+    case let .ntile(buckets):
+      return .ntile(buckets)
+    case .percentRank:
+      return .percentRank
+    case .cumeDist:
+      return .cumeDist
     }
   }
 }

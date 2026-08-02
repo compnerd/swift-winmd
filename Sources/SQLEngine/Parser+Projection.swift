@@ -251,6 +251,16 @@ extension Parser {
       return try .window(function: function, spec: over())
     }
 
+    // `NTILE`/`PERCENT_RANK`/`CUME_DIST` are distribution window functions —
+    // recognised case-insensitively only when written bare — computed from the
+    // row's position in the ordered partition and requiring an `OVER` clause.
+    // `NTILE` takes a positive-integer bucket count; the other two take an
+    // empty argument list. The `(` is consumed.
+    if !ident.quoted, let distribution = self.distribution(ident.text) {
+      let function = try self.distribution(distribution)
+      return try .window(function: function, spec: over())
+    }
+
     // An aggregate is one of the fixed set of names (recognised
     // case-insensitively, only when written bare — a delimited `"COUNT"` is a
     // scalar name), distinct from a scalar call: it accumulates over a group
@@ -401,6 +411,43 @@ extension Parser {
         throw .state("22023", "NTH_VALUE requires a positive position")
       }
       return .nthValue(value, position)
+    }
+  }
+
+  /// A distribution window function — the bare name `text`'s kind
+  /// (case-insensitively), or `nil` when it is not one.
+  private enum Distribution { case ntile, percentRank, cumeDist }
+
+  /// The `Distribution` the bare name `text` spells, or `nil` for a scalar
+  /// name.
+  private func distribution(_ text: String) -> Distribution? {
+    switch text.uppercased() {
+    case "NTILE": .ntile
+    case "PERCENT_RANK": .percentRank
+    case "CUME_DIST": .cumeDist
+    default: nil
+    }
+  }
+
+  /// Parses a distribution function's arguments and closing `)` (the `(` is
+  /// already consumed) into its `WindowFunction`: `NTILE` takes a positive
+  /// integer bucket count, `PERCENT_RANK`/`CUME_DIST` an empty argument list.
+  private mutating func distribution(_ kind: Distribution)
+      throws(SQLError) -> WindowFunction {
+    switch kind {
+    case .ntile:
+      let buckets = try count()
+      try expect(.rparen)
+      guard buckets >= 1 else {
+        throw .state("22023", "NTILE requires a positive bucket count")
+      }
+      return .ntile(buckets)
+    case .percentRank:
+      try expect(.rparen)
+      return .percentRank
+    case .cumeDist:
+      try expect(.rparen)
+      return .cumeDist
     }
   }
 

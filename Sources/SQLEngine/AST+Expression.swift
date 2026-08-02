@@ -92,19 +92,50 @@ public enum WindowFunction: Hashable, Sendable {
   /// `NULL`) when that row falls before the partition start. It requires a
   /// window `ORDER BY`.
   case lag(Expression, offset: Int = 1, default: Expression? = nil)
+  /// `FIRST_VALUE(value) OVER (…)` — the `value` expression evaluated at the
+  /// first row of the window frame. It is frame-sensitive: over the default
+  /// frame (the partition start through the current peer group) the first row
+  /// is the partition's first in window order.
+  case firstValue(Expression)
+  /// `LAST_VALUE(value) OVER (…)` — the `value` at the last row of the frame.
+  /// Over the default frame the last row is the current row's peer group end
+  /// (the current row itself with distinct order keys) — not the partition's
+  /// last row — the classic frame-sensitivity gotcha.
+  case lastValue(Expression)
+  /// `NTH_VALUE(value, n) OVER (…)` — the `value` at the `n`-th row (1-based)
+  /// of the frame, or `NULL` when the frame holds fewer than `n` rows.
+  case nthValue(Expression, Int)
 }
 
 extension WindowFunction {
-  /// The value expression and optional default of an offset function
-  /// (`LEAD`/`LAG`), or `nil` for a ranking or aggregate window. The structural
-  /// walks descend these exactly as they descend an aggregate window's operand,
-  /// so a subquery or unregistered call nested in either is seen.
+  /// The value expression and optional default of a positional window function
+  /// (`LEAD`/`LAG`, `FIRST_VALUE`/`LAST_VALUE`/`NTH_VALUE`), or `nil` for a
+  /// ranking or aggregate window. The structural walks descend these exactly as
+  /// they descend an aggregate window's operand, so a subquery or unregistered
+  /// call nested in either is seen; a positional function types as its value.
   internal var positional: (value: Expression, default: Expression?)? {
     switch self {
     case let .lead(value, _, fallback), let .lag(value, _, fallback):
       (value, fallback)
+    case let .firstValue(value), let .lastValue(value),
+         let .nthValue(value, _):
+      (value, nil)
     case .rowNumber, .rank, .denseRank, .aggregate:
       nil
+    }
+  }
+
+  /// Whether an explicit window frame governs this function's result — an
+  /// aggregate window folds over its frame, and `FIRST_VALUE`/`LAST_VALUE`/
+  /// `NTH_VALUE` read a row of it. A ranking function reads its whole-partition
+  /// position, and `LEAD`/`LAG` read a fixed offset along the order, so neither
+  /// takes a frame.
+  internal var frameable: Bool {
+    switch self {
+    case .aggregate, .firstValue, .lastValue, .nthValue:
+      true
+    case .rowNumber, .rank, .denseRank, .lead, .lag:
+      false
     }
   }
 }

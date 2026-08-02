@@ -241,6 +241,16 @@ extension Parser {
       return try .window(function: function, spec: over())
     }
 
+    // `FIRST_VALUE`/`LAST_VALUE`/`NTH_VALUE` are frame-sensitive positional
+    // window functions — recognised case-insensitively only when written bare —
+    // reading a row of the window frame and requiring an `OVER` clause.
+    // `FIRST_VALUE`/`LAST_VALUE` take `(value)`; `NTH_VALUE` takes `(value, n)`
+    // for a 1-based position. The `(` is consumed.
+    if !ident.quoted, let value = self.value(ident.text) {
+      let function = try self.value(value)
+      return try .window(function: function, spec: over())
+    }
+
     // An aggregate is one of the fixed set of names (recognised
     // case-insensitively, only when written bare — a delimited `"COUNT"` is a
     // scalar name), distinct from a scalar call: it accumulates over a group
@@ -353,6 +363,45 @@ extension Parser {
     try expect(.rparen)
     return lead ? .lead(value, offset: count, default: fallback)
                 : .lag(value, offset: count, default: fallback)
+  }
+
+  /// A frame-sensitive positional window function — which row of the frame the
+  /// bare name `text` reads (case-insensitively), or `nil` when it is not one.
+  private enum Positional { case first, last, nth }
+
+  /// The `Positional` the bare name `text` spells, or `nil` for a scalar name.
+  private func value(_ text: String) -> Positional? {
+    switch text.uppercased() {
+    case "FIRST_VALUE": .first
+    case "LAST_VALUE": .last
+    case "NTH_VALUE": .nth
+    default: nil
+    }
+  }
+
+  /// Parses a positional value function's arguments and closing `)` (the `(` is
+  /// already consumed) into its `WindowFunction`: `FIRST_VALUE`/`LAST_VALUE`
+  /// take `(value)`, `NTH_VALUE` takes `(value, n)` with `n` a positive integer
+  /// literal.
+  private mutating func value(_ kind: Positional)
+      throws(SQLError) -> WindowFunction {
+    let value = try expression()
+    switch kind {
+    case .first:
+      try expect(.rparen)
+      return .firstValue(value)
+    case .last:
+      try expect(.rparen)
+      return .lastValue(value)
+    case .nth:
+      try expect(.comma)
+      let position = try count()
+      try expect(.rparen)
+      guard position >= 1 else {
+        throw .state("22023", "NTH_VALUE requires a positive position")
+      }
+      return .nthValue(value, position)
+    }
   }
 
   /// Parses a window function's required `OVER (<window spec>)` clause into a

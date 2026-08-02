@@ -154,6 +154,39 @@ struct OffsetFunctionParsingTests {
   }
 }
 
+// MARK: - Value function parsing
+
+/// The frame-sensitive positional functions `FIRST_VALUE`/`LAST_VALUE(value)`
+/// and `NTH_VALUE(value, n)` parse into an `Expression.window`.
+struct ValueFunctionParsingTests {
+  @Test func `FIRST_VALUE parses`() throws {
+    #expect(try projected("SELECT FIRST_VALUE(x) OVER (ORDER BY x) FROM T")
+                == .window(
+                    function: .firstValue(.column(Column("x"))),
+                    spec: WindowSpec(order: Order(keys:
+                        [Order.Key(column: Column("x"))]))))
+  }
+
+  @Test func `NTH_VALUE parses its position argument`() throws {
+    #expect(try projected("SELECT NTH_VALUE(x, 2) OVER (ORDER BY x) FROM T")
+                == .window(
+                    function: .nthValue(.column(Column("x")), 2),
+                    spec: WindowSpec(order: Order(keys:
+                        [Order.Key(column: Column("x"))]))))
+  }
+
+  @Test func `NTH_VALUE without a position is a syntax error`() {
+    #expect(throws: SQLError.self) {
+      _ = try parse(select: "SELECT NTH_VALUE(x) OVER (ORDER BY x) FROM T")
+    }
+  }
+
+  @Test func `a delimited value name stays a scalar call`() throws {
+    #expect(try projected("SELECT \"first_value\"(x) FROM T")
+                == .call(name: "first_value", arguments: [.column(Column("x"))]))
+  }
+}
+
 // MARK: - Frame parsing
 
 /// An explicit window frame — `(ROWS | RANGE | GROUPS) BETWEEN <start> AND
@@ -722,6 +755,134 @@ struct OffsetFunctionExecutionTests {
   }
 }
 
+// MARK: - FIRST_VALUE / LAST_VALUE / NTH_VALUE execution
+
+/// `FIRST_VALUE`/`LAST_VALUE`/`NTH_VALUE(value [, n]) OVER (…)` read the value
+/// at the first, last, or n-th row of the window frame. They are
+/// frame-sensitive:
+/// over the default frame (the partition start through the current peer group)
+/// `LAST_VALUE` reads the current row, the classic gotcha. `columns(of:)` types
+/// the column as the value expression in parity with the run.
+struct ValueFunctionExecutionTests {
+  private func fixture() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+        Row(30)
+        Row(40)
+      }
+    }
+  }
+
+  @Test func `FIRST_VALUE reads the partition first over the default frame`()
+      throws {
+    // The default frame starts at the partition, so every row reads the first.
+    try fixture().expect(
+        "SELECT x, FIRST_VALUE(x) OVER (ORDER BY x) FROM T",
+        yields: [[10, 10], [20, 10], [30, 10], [40, 10]])
+  }
+
+  @Test func `LAST_VALUE over the default frame reads the current row`()
+      throws {
+    // The gotcha: the default frame ends at the current peer group, so with
+    // distinct order keys LAST_VALUE is each row's own value, not the last.
+    try fixture().expect(
+        "SELECT x, LAST_VALUE(x) OVER (ORDER BY x) FROM T",
+        yields: [[10, 10], [20, 20], [30, 30], [40, 40]])
+  }
+
+  @Test func `LAST_VALUE over the whole frame reads the partition last`()
+      throws {
+    try fixture().expect(
+        """
+        SELECT x, LAST_VALUE(x) OVER (ORDER BY x
+            ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+        FROM T
+        """,
+        yields: [[10, 40], [20, 40], [30, 40], [40, 40]])
+  }
+
+  @Test func `FIRST_VALUE is frame-sensitive`() throws {
+    // A moving `1 PRECEDING AND CURRENT ROW` frame's first row is the previous
+    // row (or the current one at the partition start).
+    try fixture().expect(
+        """
+        SELECT x, FIRST_VALUE(x) OVER (ORDER BY x
+            ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
+        FROM T
+        """,
+        yields: [[10, 10], [20, 10], [30, 20], [40, 30]])
+  }
+
+  @Test func `NTH_VALUE reads the n-th frame row, NULL when too short`()
+      throws {
+    // Default frame: the 2nd row is absent at the first row (NULL), then the
+    // 2nd partition value (20) once the frame reaches it.
+    try fixture().expect(
+        "SELECT x, NTH_VALUE(x, 2) OVER (ORDER BY x) FROM T",
+        yields: [[10, nil], [20, 20], [30, 20], [40, 20]])
+  }
+
+  @Test func `a huge NTH_VALUE position is NULL without overflowing`() throws {
+    // `lo + n - 1` would overflow-trap; the position instead recognises the
+    // frame holds fewer than `n` rows and yields NULL.
+    try fixture().expect(
+        "SELECT x, NTH_VALUE(x, 9223372036854775807) OVER (ORDER BY x) FROM T",
+        yields: [[10, nil], [20, nil], [30, nil], [40, nil]])
+  }
+
+  @Test func `NTH_VALUE over the whole frame reads the n-th partition row`()
+      throws {
+    try fixture().expect(
+        """
+        SELECT x, NTH_VALUE(x, 3) OVER (ORDER BY x
+            ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+        FROM T
+        """,
+        yields: [[10, 30], [20, 30], [30, 30], [40, 30]])
+  }
+
+  @Test func `LAST_VALUE shares the peer group over the default frame`()
+      throws {
+    // The tied 20s' peer group ends at the last 20, so both read 20.
+    let catalog = try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+        Row(20)
+        Row(30)
+      }
+    }
+    try catalog.expect(
+        "SELECT x, LAST_VALUE(x) OVER (ORDER BY x) FROM T",
+        yields: [[10, 10], [20, 20], [20, 20], [30, 30]])
+  }
+
+  @Test func `a value function resets per partition`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["d": .integer, "x": .integer]) {
+        Row(1, 10)
+        Row(2, 100)
+        Row(1, 20)
+        Row(2, 200)
+      }
+    }
+    // Each partition reads its own first value; source order is preserved.
+    try catalog.expect(
+        "SELECT d, x, FIRST_VALUE(x) OVER (PARTITION BY d ORDER BY x) FROM T",
+        yields: [[1, 10, 10], [2, 100, 100], [1, 20, 10], [2, 200, 100]])
+  }
+
+  @Test func `the schema types a value window`() throws {
+    let query = try parse(query:
+        "SELECT x, FIRST_VALUE(x) OVER (ORDER BY x) AS f FROM T")
+    let columns = try fixture().columns(of: query, validate: true)
+    #expect(columns.map(\.name) == ["x", "f"])
+    #expect(columns.map(\.type) == [.integer, .integer])
+  }
+}
+
 // MARK: - Resolution parity (run ≡ validate)
 
 /// A window function the executor does not yet compute, or one written outside
@@ -866,6 +1027,15 @@ struct WindowFunctionRejectionTests {
         FROM T
         """,
         .state("0A000", "a window frame is not supported for LEAD"))
+  }
+
+  @Test func `NTH_VALUE with a zero position is rejected`() throws {
+    // Position 0 is meaningless (positions are 1-based) — rejected at parse, so
+    // the executor never computes the frame index `lo + 0 - 1` and subscripts a
+    // row before the partition start.
+    try rejects(
+        "SELECT NTH_VALUE(x, 0) OVER (ORDER BY x) FROM T",
+        .state("22023", "NTH_VALUE requires a positive position"))
   }
 
   @Test func `a LEAD default irreconcilable with the value is rejected`()
@@ -1223,6 +1393,17 @@ struct WindowNonDeterminismTests {
     #expect(counter.count == 3)
   }
 
+  @Test func `a positional value reads one evaluation per source row`() throws {
+    // FIRST_VALUE reads the partition's first row's value throughout. Re-reading
+    // it per output would call tick() afresh each time and return the changing
+    // 1, 2, 3; materialised once per row, every output is the first value, 1.
+    let (counter, routines) = try ticking()
+    try fixture().expect(
+        "SELECT FIRST_VALUE(tick()) OVER (ORDER BY x) FROM T",
+        yields: [[1], [1], [1]], routines: routines)
+    #expect(counter.count == 3)
+  }
+
   @Test func `an offset value is evaluated once per source row`() throws {
     // LEAD reads the next row's value. Materialising each source row's value
     // once (tick() 1, 2, 3) reads the next row's value — 2, 3, then NULL past
@@ -1246,5 +1427,22 @@ struct WindowNonDeterminismTests {
         FROM T
         """,
         yields: [[nil], [nil], [nil]])
+  }
+
+  @Test func `repeated non-deterministic windows evaluate independently`()
+      throws {
+    // Two occurrences of the same non-deterministic window must not share one
+    // appended slot: each materialises its own per-row values. The first window
+    // reads tick() 1, 2, 3 (first value 1); the second reads 4, 5, 6 (first
+    // value 4); six calls in all — not one deduped slot reading 1, 1.
+    let (counter, routines) = try ticking()
+    try fixture().expect(
+        """
+        SELECT FIRST_VALUE(tick()) OVER (ORDER BY x),
+               FIRST_VALUE(tick()) OVER (ORDER BY x)
+        FROM T
+        """,
+        yields: [[1, 4], [1, 4], [1, 4]], routines: routines)
+    #expect(counter.count == 6)
   }
 }

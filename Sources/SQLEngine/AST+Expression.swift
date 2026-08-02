@@ -49,6 +49,69 @@ public enum Aggregand: Hashable, Sendable {
   case expression(Expression)
 }
 
+/// A window function — a function evaluated over a window of rows without
+/// collapsing them, so each input row keeps its identity and gains the
+/// function's value for its position in the window.
+///
+/// Unlike an aggregate — which folds a group to one row — a window function is
+/// cardinality-preserving: `ROW_NUMBER() OVER (ORDER BY x)` numbers every row
+/// rather than reducing the rows to one. The engine recognises this fixed set
+/// by name at parse time, each requiring an `OVER` clause, distinct from both
+/// an aggregate and a scalar `call`.
+public enum WindowFunction: Hashable, Sendable {
+  /// `ROW_NUMBER()` — the 1-based sequential number of the row within its
+  /// partition, in the window's order; distinct for every row of the partition
+  /// even where the order keys tie.
+  case rowNumber
+  /// `RANK()` — the 1-based rank of the row within its partition: peer rows
+  /// (equal on the window's order keys) share a rank, and the next distinct row
+  /// takes the rank one past the peers already seen, so ranks skip after a tie.
+  case rank
+  /// `DENSE_RANK()` — like `RANK`, but the ranks are dense: the next distinct
+  /// row after a tie takes the immediately following rank, leaving no gap.
+  case denseRank
+}
+
+/// A window specification — the `OVER (…)` clause governing a window function:
+/// how the rows are partitioned and, within a partition, ordered.
+///
+/// `partition` are the `PARTITION BY` keys splitting the rows into independent
+/// partitions the function folds over (empty when no `PARTITION BY` is written
+/// — the whole input is one partition). `order` is the window's `ORDER BY`,
+/// fixing the row order the ranking functions read (`nil` when none is
+/// written).
+public struct WindowSpec: Hashable, Sendable {
+  /// The `PARTITION BY` keys — the rows split into one partition per distinct
+  /// key combination — empty when no `PARTITION BY` is written.
+  public let partition: Array<Expression>
+
+  /// The window's `ORDER BY`, or `nil` when none is written.
+  public let order: Order?
+
+  public init(partition: Array<Expression> = [], order: Order? = nil) {
+    self.partition = partition
+    self.order = order
+  }
+}
+
+extension WindowSpec {
+  /// The constituent scalar expressions of this specification — its
+  /// `PARTITION BY` keys and its `ORDER BY` keys' value expressions (an ordinal
+  /// key names an output column, not a value, so it contributes none). The
+  /// structural walks (`aggregated`, `collect(subqueries:)`, …) descend these
+  /// as they descend a call's arguments, so a subquery or aggregate nested in a
+  /// window's partition or order is seen by the same machinery.
+  internal var expressions: Array<Expression> {
+    var expressions = partition
+    for key in order?.keys ?? [] {
+      if case let .expression(expression) = key.sort {
+        expressions.append(expression)
+      }
+    }
+    return expressions
+  }
+}
+
 /// A binary operator over two scalar operands.
 ///
 /// The four standard arithmetic operators over numbers, and the ISO `||`

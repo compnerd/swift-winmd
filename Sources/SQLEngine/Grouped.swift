@@ -317,6 +317,12 @@ internal struct Grouped {
       // switch), so it never reaches here — an internal inconsistency if it
       // does.
       throw .state("XX000", "unlowered GROUPING")
+    case .window:
+      // A window function is not yet supported anywhere; its resolution faults
+      // the feature diagnostic before this grouped lowering, so it never
+      // reaches here in practice, but the reject is uniform across every
+      // resolution surface.
+      throw .state("0A000", "a window function is not supported")
     }
   }
 

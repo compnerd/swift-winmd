@@ -4,41 +4,50 @@
 // MARK: - Window function
 
 extension WindowFunction {
-  /// The result type of this window function.
+  /// The result type of a ranking window function — `ROW_NUMBER`, `RANK`,
+  /// `DENSE_RANK` each yield a 1-based integer position, so each types as
+  /// `.integer`, the type the schema advertises for a projected window column.
   ///
-  /// The ranking functions (`ROW_NUMBER`, `RANK`, `DENSE_RANK`) each yield a
-  /// 1-based integer position, so each types as `.integer` — the type the
-  /// schema advertises for a projected window column.
+  /// An aggregate window's type depends on its argument (an integer `SUM` over
+  /// integers, a double over doubles), so it is derived with a scope in
+  /// `Scope.derive`/`validate`, which branch on the aggregate case before
+  /// reaching this scope-free property.
   internal var type: ValueType {
     switch self {
     case .rowNumber, .rank, .denseRank:
       .integer
+    case .aggregate:
+      preconditionFailure(
+          "an aggregate window types from its argument through a scope")
     }
   }
 
   /// Whether the executor computes this window function yet — every ranking
-  /// function (`ROW_NUMBER`, `RANK`, `DENSE_RANK`) now does. A future window
-  /// function lands here `false` until its executor does, rejected with the
-  /// feature diagnostic on both the run and validate paths until then.
+  /// function and every aggregate window now does. A future window function
+  /// lands here `false` until its executor does, rejected with the feature
+  /// diagnostic on both the run and validate paths until then.
   internal var supported: Bool {
     switch self {
-    case .rowNumber, .rank, .denseRank:
+    case .rowNumber, .rank, .denseRank, .aggregate:
       true
     }
   }
 
-  /// The ISO keyword spelling of this window function, for a diagnostic.
+  /// The ISO keyword spelling of this window function, for a diagnostic — the
+  /// ranking name, or the aggregate's own keyword for an aggregate window.
   internal var keyword: String {
     switch self {
     case .rowNumber: "ROW_NUMBER"
     case .rank: "RANK"
     case .denseRank: "DENSE_RANK"
+    case let .aggregate(function, _, _, _): function.keyword
     }
   }
 
-  /// This window function's result `type`, or the feature diagnostic when its
-  /// executor has not yet landed — the type the schema advertises for a
-  /// supported window, faulting an unsupported one in parity with the run.
+  /// This ranking window function's result `type`, or the feature diagnostic
+  /// when its executor has not yet landed — the type the schema advertises for
+  /// a supported window, faulting an unsupported one in parity with the run. An
+  /// aggregate window is typed through a scope, never this property.
   internal var result: ValueType {
     get throws(SQLError) {
       guard supported else {
@@ -84,8 +93,28 @@ extension Select {
 /// slot. Equality is how the window path dedups the windows collected from the
 /// projection and the `ORDER BY`.
 internal struct Windowing: Equatable {
+  /// A lowered window computation over an ordered partition.
+  ///
+  /// A ranking function carries nothing to lower — it reads only each row's
+  /// position (and its peers) in the ordered partition. An aggregate window
+  /// carries its lowered `Aggregation` (the argument `Term` and `FILTER`
+  /// `Filter` already resolved to the source slot space), folded over the row's
+  /// frame.
+  internal enum Function: Equatable {
+    /// `ROW_NUMBER` — the 1-based position of the row in the window order.
+    case rowNumber
+    /// `RANK` — the peer-aware rank, skipping after a tie.
+    case rank
+    /// `DENSE_RANK` — the peer-aware rank, dense (no gap after a tie).
+    case denseRank
+    /// An aggregate folded over the row's frame — the lowered `Aggregation` the
+    /// executor accumulates, mirroring the collapsing grouping path's fold but
+    /// cardinality-preserving.
+    case aggregate(Aggregation)
+  }
+
   /// The window function computed over each ordered partition.
-  internal let function: WindowFunction
+  internal let function: Function
 
   /// The `PARTITION BY` keys splitting the records into partitions — empty when
   /// no `PARTITION BY` is written (the whole input is one partition).
@@ -95,11 +124,34 @@ internal struct Windowing: Equatable {
   /// empty when none is written (every row a peer).
   internal let order: Array<SortKey>
 
-  internal init(function: WindowFunction, partition: Array<Term>,
+  internal init(function: Function, partition: Array<Term>,
                 order: Array<SortKey>) {
     self.function = function
     self.partition = partition
     self.order = order
+  }
+}
+
+extension Windowing.Function {
+  /// This function with the slots of any aggregate window's argument and
+  /// `FILTER` remapped through `slot` — a ranking function has none to remap.
+  internal func remapped(through slot: Dictionary<Int, Int>)
+      -> Windowing.Function {
+    switch self {
+    case .rowNumber, .rank, .denseRank:
+      self
+    case let .aggregate(aggregation):
+      .aggregate(aggregation.remapped(through: slot))
+    }
+  }
+
+  /// The source slots this function reads, accumulated into `slots` — an
+  /// aggregate window's argument and `FILTER` slots, none for a ranking
+  /// function.
+  internal func references(into slots: inout Set<Int>) {
+    if case let .aggregate(aggregation) = self {
+      aggregation.references(into: &slots)
+    }
   }
 }
 
@@ -108,15 +160,17 @@ extension Windowing {
   /// `slot` — the base-ordinal → source-slot map the window node's source is
   /// packed under.
   internal func remapped(through slot: Dictionary<Int, Int>) -> Windowing {
-    Windowing(function: function,
+    Windowing(function: function.remapped(through: slot),
               partition: partition.map { $0.remapped(through: slot) },
               order: order.map { $0.remapped(through: slot) })
   }
 
   /// The source slots this windowing reads, accumulated into `slots` — its
-  /// partition and order terms', so the source scan materialises exactly the
-  /// cells the window partitions and orders on.
+  /// partition and order terms', plus an aggregate window's argument and
+  /// `FILTER`, so the source scan materialises exactly the cells the window
+  /// partitions, orders, and folds on.
   internal func references(into slots: inout Set<Int>) {
+    function.references(into: &slots)
     for term in partition { term.references(into: &slots) }
     for key in order { key.term.references(into: &slots) }
   }
@@ -137,6 +191,9 @@ extension Windowing {
     switch function {
     case .rowNumber, .rank, .denseRank:
       return true
+    case let .aggregate(aggregation):
+      return aggregation.filter == nil
+          && (aggregation.argument?.deterministic(routines) ?? true)
     }
   }
 }
@@ -229,7 +286,33 @@ extension Expression {
     } else {
       []
     }
-    return Windowing(function: function, partition: partition, order: order)
+    let lowered = try function.lowered(scope, routines, subquery: subquery)
+    return Windowing(function: lowered, partition: partition, order: order)
+  }
+}
+
+extension WindowFunction {
+  /// Lowers this AST window function to a `Windowing.Function` over `scope` — a
+  /// ranking function maps to its ranking case (nothing to resolve), and an
+  /// aggregate window lowers its operand and `FILTER` to the source slot space,
+  /// reusing the collapsing aggregate's own `aggregation` lowering so the two
+  /// resolve identically (run ≡ validate).
+  internal func lowered(_ scope: Scope, _ routines: Routines = [:],
+                        subquery: Resolution = .unsupported)
+      throws(SQLError) -> Windowing.Function {
+    switch self {
+    case .rowNumber:
+      return .rowNumber
+    case .rank:
+      return .rank
+    case .denseRank:
+      return .denseRank
+    case let .aggregate(function, operand, distinct, filter):
+      let aggregation = try Expression
+          .aggregate(function, of: operand, distinct: distinct, filter: filter)
+          .aggregation(scope, routines, subquery: subquery)
+      return .aggregate(aggregation)
+    }
   }
 }
 

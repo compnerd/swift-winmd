@@ -70,6 +70,16 @@ public enum WindowFunction: Hashable, Sendable {
   /// `DENSE_RANK()` — like `RANK`, but the ranks are dense: the next distinct
   /// row after a tie takes the immediately following rank, leaving no gap.
   case denseRank
+  /// A standard aggregate computed over the window frame rather than folded to
+  /// one row — `SUM(x) OVER (…)`, `COUNT(*) OVER (…)`, `AVG`/`MIN`/`MAX` — so
+  /// each row keeps its identity and gains the aggregate over its frame. It
+  /// carries the same operand shape a collapsing aggregate does: the aggregate,
+  /// its `*`-or-expression operand, the `DISTINCT` set quantifier, and an
+  /// optional `FILTER (WHERE …)` gate; the frame is the window default (with no
+  /// `ORDER BY` the whole partition, with one the running rows up to the
+  /// current peer group).
+  case aggregate(Aggregate, of: Aggregand, distinct: Bool = false,
+                 filter: Predicate? = nil)
 }
 
 /// A window specification — the `OVER (…)` clause governing a window function:

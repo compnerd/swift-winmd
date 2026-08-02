@@ -616,18 +616,7 @@ internal struct Scope {
     case let .call(name, _):
       routines[name]?.returns ?? .integer
     case let .aggregate(function, operand, _, _):
-      switch function {
-      // `COUNT` always counts rows to an integer; `AVG` folds to a double;
-      // `SUM`/`MIN`/`MAX` take the operand's own type (an integer for `.star`).
-      case .count: .integer
-      case .avg: .double
-      case .sum, .min, .max:
-        switch operand {
-        case .star: .integer
-        case let .expression(argument):
-          try derive(argument, routines, subquery: subquery)
-        }
-      }
+      try result(of: function, over: operand, routines, subquery: subquery)
     case let .binary(.concatenate, lhs, rhs):
       // `||` yields text; the operands' own types do not shape it, but derive
       // both for resolution — an unresolved column faults `SQLError.column`
@@ -682,13 +671,36 @@ internal struct Scope {
       .integer
     case let .window(function, _):
       // A window function types by its result — the ranking functions to
-      // `.integer`. `compile` gates the supported functions and the clause
-      // positions a window is allowed in, and `columns(of:)` runs that compile
-      // before this type derive, so a window reaching here is a supported
-      // SELECT/ORDER BY one whose type the schema advertises — like a `call`,
-      // typed from the function rather than its specification's expressions. An
-      // unsupported function is rejected in parity with that compile.
-      try function.result
+      // `.integer`, an aggregate window from its argument (the same derive the
+      // collapsing aggregate takes). `compile` gates the supported functions
+      // and the clause positions a window is allowed in, and `columns(of:)`
+      // runs that compile before this type derive, so a window reaching here is
+      // a supported SELECT/ORDER BY one whose type the schema advertises.
+      if case let .aggregate(aggregate, operand, _, _) = function {
+        try result(of: aggregate, over: operand, routines, subquery: subquery)
+      } else {
+        try function.result
+      }
+    }
+  }
+
+  /// The static result type of `function` folded over `operand` — `COUNT` an
+  /// integer count, `AVG` a double, `SUM`/`MIN`/`MAX` the operand's own derived
+  /// type (an integer for `*`). Shared by the collapsing aggregate's derive and
+  /// the aggregate-window derive, so the two type identically.
+  private func result(of function: Aggregate, over operand: Aggregand,
+                      _ routines: Routines,
+                      subquery: Resolution = .unsupported)
+      throws(SQLError) -> ValueType {
+    switch function {
+    case .count: return .integer
+    case .avg: return .double
+    case .sum, .min, .max:
+      switch operand {
+      case .star: return .integer
+      case let .expression(argument):
+        return try derive(argument, routines, subquery: subquery)
+      }
     }
   }
 
@@ -947,6 +959,18 @@ internal struct Scope {
     guard function.supported else {
       throw .state("0A000", "\(function.keyword) is not yet supported")
     }
+    // An aggregate window validates its operand and `FILTER` exactly as a
+    // collapsing aggregate does (the same `aggregate` helper), yielding the
+    // aggregate's result type; a ranking function types `.integer`. `compile`
+    // gates an aggregate window's `ORDER BY` (the running frame is not yet
+    // computed), so a supported one reaching here has none.
+    let type: ValueType
+    if case let .aggregate(aggregate, operand, _, filter) = function {
+      type = try self.aggregate(aggregate, over: operand, filter: filter,
+                                routines, subquery: subquery)
+    } else {
+      type = function.type
+    }
     for key in spec.partition {
       _ = try validate(key, routines, subquery: subquery)
     }
@@ -959,7 +983,7 @@ internal struct Scope {
         _ = try validate(expression, routines, subquery: subquery)
       }
     }
-    return function.type
+    return type
   }
 
   /// The type of `GROUPING(a, …)` under `validate` — `.integer`, validating
@@ -2248,11 +2272,17 @@ internal struct Scope {
     // fabricates no routine type and constrains the fold — never unresolved.
     case .grouping:
       return false
-    // `.window`: `derive` rejects a window outright (the feature is
-    // unsupported), so this probe never shapes a fold over one; descend the
-    // specification's expressions for an unregistered call for consistency.
-    case let .window(_, spec):
-      return spec.expressions.contains { unresolved($0, routines) }
+    // `.window`: descend the specification's expressions, and — as `.aggregate`
+    // recurses its operand — an aggregate window's own operand, so an
+    // unregistered call in either is seen (a ranking function has no operand).
+    case let .window(function, spec):
+      if spec.expressions.contains(where: { unresolved($0, routines) }) {
+        return true
+      }
+      if case let .aggregate(_, .expression(argument), _, _) = function {
+        return unresolved(argument, routines)
+      }
+      return false
     }
   }
 
@@ -2656,12 +2686,19 @@ internal struct Scope {
       for argument in arguments {
         try aggregates(in: argument, routines, subquery: subquery)
       }
-    case let .window(_, spec):
-      // A window function is not itself an aggregate, but — like a `call` —
-      // recurse its specification's expressions so an aggregate nested in a
-      // partition or order is validated.
+    case let .window(function, spec):
+      // A window function is not itself a query aggregate, but — like a `call`
+      // — recurse its specification's expressions so an aggregate nested in a
+      // partition or order is validated. An aggregate window's own fold runs in
+      // the window node before any `LIMIT`, so — like `.aggregate` — validate
+      // its operand and `FILTER` here too, so `SUM(1 / 0) OVER ()` faults even
+      // under a zero-row limit.
       for expression in spec.expressions {
         try aggregates(in: expression, routines, subquery: subquery)
+      }
+      if case let .aggregate(aggregate, operand, _, filter) = function {
+        _ = try self.aggregate(aggregate, over: operand, filter: filter,
+                               routines, subquery: subquery)
       }
     }
   }
@@ -3854,9 +3891,22 @@ extension Scope {
       for argument in arguments {
         try comparisons(in: argument, routines, subquery: subquery)
       }
-    case let .window(_, spec):
+    case let .window(function, spec):
       for expression in spec.expressions {
         try comparisons(in: expression, routines, subquery: subquery)
+      }
+      // An aggregate window's operand and `FILTER` fold in the window node, so
+      // — as the `.aggregate` case does — the filter's comparisons are always
+      // reachable and the operand's are reachable unless a `dead` filter admits
+      // no row.
+      if case let .aggregate(_, operand, _, filter) = function {
+        if let filter {
+          try comparisons(in: filter, routines, subquery: subquery)
+        }
+        if case let .expression(argument) = operand,
+            !(filter.map { dead($0, routines) } ?? false) {
+          try comparisons(in: argument, routines, subquery: subquery)
+        }
       }
     }
   }
@@ -3896,9 +3946,22 @@ extension Scope {
       for argument in arguments {
         try comparisons(aggregatesIn: argument, routines, subquery: subquery)
       }
-    case let .window(_, spec):
+    case let .window(function, spec):
       for expression in spec.expressions {
         try comparisons(aggregatesIn: expression, routines, subquery: subquery)
+      }
+      // An aggregate window's operand and `FILTER` fold in the window node
+      // before any `LIMIT`, so their comparisons are reachable — check them as
+      // the `.aggregate` case checks a collapsing aggregate's, honouring a
+      // `dead` filter that admits no row.
+      if case let .aggregate(_, operand, _, filter) = function {
+        if let filter {
+          try comparisons(in: filter, routines, subquery: subquery)
+        }
+        if case let .expression(argument) = operand,
+            !(filter.map { dead($0, routines) } ?? false) {
+          try comparisons(in: argument, routines, subquery: subquery)
+        }
       }
     }
   }

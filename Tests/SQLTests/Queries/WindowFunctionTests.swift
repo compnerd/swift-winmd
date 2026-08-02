@@ -86,6 +86,37 @@ struct WindowFunctionParsingTests {
       _ = try parse(select: "SELECT ROW_NUMBER(x) OVER () FROM T")
     }
   }
+
+  @Test func `an aggregate with OVER parses as a window function`() throws {
+    // `SUM(x) OVER (…)` is a window function, not a collapsing aggregate: the
+    // `OVER` after the aggregate makes the same operand a window fold.
+    let expected = Expression.window(
+        function: .aggregate(.sum, of: .expression(.column(Column("x")))),
+        spec: WindowSpec(partition: [.column(Column("d"))]))
+    #expect(try projected(
+        "SELECT SUM(x) OVER (PARTITION BY d) FROM T") == expected)
+  }
+
+  @Test func `COUNT(*) with OVER parses as a window function`() throws {
+    #expect(try projected("SELECT COUNT(*) OVER () FROM T")
+                == .window(function: .aggregate(.count, of: .star),
+                           spec: WindowSpec()))
+  }
+
+  @Test func `an aggregate without OVER stays a collapsing aggregate`() throws {
+    // No `OVER`: the aggregate is the ordinary collapsing one, not a window.
+    #expect(try projected("SELECT SUM(x) FROM T")
+                == .aggregate(.sum, of: .expression(.column(Column("x")))))
+  }
+
+  @Test func `a DISTINCT aggregate window carries the quantifier`() throws {
+    #expect(try projected("SELECT COUNT(DISTINCT x) OVER () FROM T")
+                == .window(
+                    function: .aggregate(.count,
+                                         of: .expression(.column(Column("x"))),
+                                         distinct: true),
+                    spec: WindowSpec()))
+  }
 }
 
 // MARK: - ROW_NUMBER execution
@@ -199,6 +230,129 @@ struct RankExecutionTests {
   }
 }
 
+// MARK: - Aggregate window execution (whole-partition frame)
+
+/// An aggregate window `SUM/COUNT/AVG/MIN/MAX (…) OVER (…)` with no window
+/// `ORDER BY` folds the aggregate over the whole partition and assigns that one
+/// value to every row of the partition, cardinality-preserving — the aggregate
+/// a `GROUP BY` on the same key would fold, spread back over the partition's
+/// rows. `columns(of:)` advertises the aggregate's own result type in parity
+/// with the run.
+struct AggregateWindowExecutionTests {
+  private func fixture() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("T", ["d": .integer, "x": .integer]) {
+        Row(1, 10)
+        Row(1, 30)
+        Row(2, 20)
+        Row(1, 20)
+      }
+    }
+  }
+
+  @Test func `SUM over a partition totals every partition row`() throws {
+    // d=1 totals 10 + 30 + 20 = 60 on each of its rows; d=2's lone 20 is 20.
+    // The source row order is preserved, each row gaining its partition total.
+    try fixture().expect(
+        "SELECT d, x, SUM(x) OVER (PARTITION BY d) FROM T",
+        yields: [[1, 10, 60], [1, 30, 60], [2, 20, 20], [1, 20, 60]])
+  }
+
+  @Test func `COUNT(*) over a partition counts every partition row`() throws {
+    try fixture().expect(
+        "SELECT d, COUNT(*) OVER (PARTITION BY d) FROM T",
+        yields: [[1, 3], [1, 3], [2, 1], [1, 3]])
+  }
+
+  @Test func `AVG over a partition averages to a double`() throws {
+    // d=1 averages (10 + 30 + 20) / 3 = 20.0 (real division, a double).
+    try fixture().expect(
+        "SELECT d, AVG(x) OVER (PARTITION BY d) FROM T",
+        yields: [[1, 20.0], [1, 20.0], [2, 20.0], [1, 20.0]])
+  }
+
+  @Test func `MIN and MAX over a partition take the extremes`() throws {
+    try fixture().expect(
+        """
+        SELECT d, MIN(x) OVER (PARTITION BY d), MAX(x) OVER (PARTITION BY d)
+        FROM T
+        """,
+        yields: [[1, 10, 30], [1, 10, 30], [2, 20, 20], [1, 10, 30]])
+  }
+
+  @Test func `an aggregate window with no PARTITION BY is a grand total`()
+      throws {
+    // No PARTITION BY: the whole input is one partition, so every row gains the
+    // grand total 10 + 30 + 20 + 20 = 80.
+    try fixture().expect(
+        "SELECT x, SUM(x) OVER () FROM T",
+        yields: [[10, 80], [30, 80], [20, 80], [20, 80]])
+  }
+
+  @Test func `COUNT of a value skips NULLs while COUNT(*) counts rows`()
+      throws {
+    // COUNT(v) folds only the non-NULL values (2), COUNT(*) every row (3).
+    let catalog = try Catalog {
+      Relation("T", ["v": .integer]) {
+        Row(10)
+        Row(nil)
+        Row(20)
+      }
+    }
+    try catalog.expect(
+        "SELECT COUNT(v) OVER (), COUNT(*) OVER () FROM T",
+        yields: [[2, 3], [2, 3], [2, 3]])
+  }
+
+  @Test func `a DISTINCT aggregate window folds each value once`() throws {
+    // SUM(DISTINCT x) totals 10 + 20 = 30 (the repeated 10 folds once); the
+    // plain SUM totals 40, and COUNT(DISTINCT x) is 2.
+    let catalog = try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(10)
+        Row(20)
+      }
+    }
+    try catalog.expect(
+        """
+        SELECT SUM(DISTINCT x) OVER (), SUM(x) OVER (),
+               COUNT(DISTINCT x) OVER ()
+        FROM T
+        """,
+        yields: [[30, 40, 2], [30, 40, 2], [30, 40, 2]])
+  }
+
+  @Test func `an aggregate window in a compound expression evaluates`()
+      throws {
+    // A window nested in arithmetic lowers its window leaf to the appended slot
+    // and the constant leaf over the source, so `SUM(x) OVER () + 1` widens.
+    try fixture().expect(
+        "SELECT SUM(x) OVER () + 1 FROM T",
+        yields: [[81], [81], [81], [81]])
+  }
+
+  @Test func `an empty relation yields no aggregate window rows`() throws {
+    let catalog = try Catalog { Relation("T", ["x": .integer]) {} }
+    try catalog.empty("SELECT SUM(x) OVER () FROM T")
+  }
+
+  @Test func `the schema advertises the aggregate window column types`()
+      throws {
+    // Both paths type the columns: SUM(x) an integer (integer operand), AVG a
+    // double, COUNT an integer — the run yields rows and validate types them.
+    let query = try parse(query:
+        """
+        SELECT SUM(x) OVER () AS s, AVG(x) OVER () AS a,
+               COUNT(*) OVER () AS c
+        FROM T
+        """)
+    let columns = try fixture().columns(of: query, validate: true)
+    #expect(columns.map(\.name) == ["s", "a", "c"])
+    #expect(columns.map(\.type) == [.integer, .double, .integer])
+  }
+}
+
 // MARK: - Resolution parity (run ≡ validate)
 
 /// A window function the executor does not yet compute, or one written outside
@@ -240,5 +394,15 @@ struct WindowFunctionRejectionTests {
         "SELECT ROW_NUMBER() OVER (ORDER BY 1) FROM T",
         .state("0A000",
                "a window ORDER BY output ordinal is not supported"))
+  }
+
+  @Test func `an aggregate window with ORDER BY is rejected`() throws {
+    // The running frame (an aggregate window with a window `ORDER BY`) is not
+    // yet computed, so it faults the feature diagnostic on both paths — the
+    // schema never advertises a running total the run cannot compute.
+    try rejects(
+        "SELECT SUM(x) OVER (ORDER BY x) FROM T",
+        .state("0A000",
+               "an aggregate window with ORDER BY is not yet supported"))
   }
 }

@@ -105,6 +105,19 @@ public enum WindowFunction: Hashable, Sendable {
   /// `NTH_VALUE(value, n) OVER (…)` — the `value` at the `n`-th row (1-based)
   /// of the frame, or `NULL` when the frame holds fewer than `n` rows.
   case nthValue(Expression, Int)
+  /// `NTILE(n) OVER (…)` — the 1-based number of the bucket the row falls in
+  /// when the ordered partition is split into `n` buckets as equally as
+  /// possible (the first `rows mod n` buckets one row larger). A whole-number
+  /// distribution, so it types `.integer`.
+  case ntile(Int)
+  /// `PERCENT_RANK() OVER (…)` — the relative rank `(rank - 1) / (rows - 1)` in
+  /// `[0, 1]` (`0` for a single-row partition), where `rank` is the `RANK`
+  /// value. An approximate-numeric ratio, so it types `.double`.
+  case percentRank
+  /// `CUME_DIST() OVER (…)` — the cumulative distribution `rows up to and
+  /// including the current peer group / rows`, in `(0, 1]`. An
+  /// approximate-numeric ratio, so it types `.double`.
+  case cumeDist
 }
 
 extension WindowFunction {
@@ -120,7 +133,8 @@ extension WindowFunction {
     case let .firstValue(value), let .lastValue(value),
          let .nthValue(value, _):
       (value, nil)
-    case .rowNumber, .rank, .denseRank, .aggregate:
+    case .rowNumber, .rank, .denseRank, .aggregate,
+         .ntile, .percentRank, .cumeDist:
       nil
     }
   }
@@ -134,7 +148,8 @@ extension WindowFunction {
     switch self {
     case .aggregate, .firstValue, .lastValue, .nthValue:
       true
-    case .rowNumber, .rank, .denseRank, .lead, .lag:
+    case .rowNumber, .rank, .denseRank, .lead, .lag,
+         .ntile, .percentRank, .cumeDist:
       false
     }
   }

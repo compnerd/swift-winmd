@@ -187,6 +187,37 @@ struct ValueFunctionParsingTests {
   }
 }
 
+// MARK: - Distribution parsing
+
+/// The distribution functions `NTILE(n)`, `PERCENT_RANK()`, and `CUME_DIST()`
+/// parse into an `Expression.window`.
+struct DistributionParsingTests {
+  @Test func `NTILE parses its bucket count`() throws {
+    #expect(try projected("SELECT NTILE(4) OVER (ORDER BY x) FROM T")
+                == .window(function: .ntile(4),
+                           spec: WindowSpec(order: Order(keys:
+                               [Order.Key(column: Column("x"))]))))
+  }
+
+  @Test func `PERCENT_RANK and CUME_DIST parse an empty argument list`()
+      throws {
+    #expect(try projected("SELECT PERCENT_RANK() OVER (ORDER BY x) FROM T")
+                == .window(function: .percentRank,
+                           spec: WindowSpec(order: Order(keys:
+                               [Order.Key(column: Column("x"))]))))
+    #expect(try projected("SELECT CUME_DIST() OVER (ORDER BY x) FROM T")
+                == .window(function: .cumeDist,
+                           spec: WindowSpec(order: Order(keys:
+                               [Order.Key(column: Column("x"))]))))
+  }
+
+  @Test func `a delimited distribution name stays a scalar call`() throws {
+    #expect(try projected("SELECT \"ntile\"(4) FROM T")
+                == .call(name: "ntile",
+                         arguments: [.literal(.integer(4))]))
+  }
+}
+
 // MARK: - Frame parsing
 
 /// An explicit window frame — `(ROWS | RANGE | GROUPS) BETWEEN <start> AND
@@ -883,6 +914,109 @@ struct ValueFunctionExecutionTests {
   }
 }
 
+// MARK: - Distribution execution
+
+/// `NTILE(n)` buckets the ordered partition; `PERCENT_RANK()` and `CUME_DIST()`
+/// are ratio ranks over the partition (a double). `columns(of:)` types the
+/// column — integer for `NTILE`, double for the ratios — matching the run.
+struct DistributionExecutionTests {
+  @Test func `NTILE splits the partition into equal buckets`() throws {
+    // 5 rows, 2 buckets: the first bucket takes the extra row (3 then 2).
+    let catalog = try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+        Row(30)
+        Row(40)
+        Row(50)
+      }
+    }
+    try catalog.expect(
+        "SELECT x, NTILE(2) OVER (ORDER BY x) FROM T",
+        yields: [[10, 1], [20, 1], [30, 1], [40, 2], [50, 2]])
+  }
+
+  @Test func `NTILE spreads the remainder across the leading buckets`()
+      throws {
+    // 5 rows, 3 buckets: the first two buckets take two rows, the last one.
+    let catalog = try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+        Row(30)
+        Row(40)
+        Row(50)
+      }
+    }
+    try catalog.expect(
+        "SELECT x, NTILE(3) OVER (ORDER BY x) FROM T",
+        yields: [[10, 1], [20, 1], [30, 2], [40, 2], [50, 3]])
+  }
+
+  @Test func `PERCENT_RANK is the peer-relative rank`() throws {
+    // rank starts 1, 2, 2, 4 → (rank - 1) / (rows - 1) over 4 rows.
+    let catalog = try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+        Row(20)
+        Row(30)
+      }
+    }
+    try catalog.expect(
+        "SELECT x, PERCENT_RANK() OVER (ORDER BY x) FROM T",
+        yields: [[10, 0.0], [20, 1.0 / 3.0], [20, 1.0 / 3.0], [30, 1.0]])
+  }
+
+  @Test func `CUME_DIST counts through the peer group`() throws {
+    // Rows through the peer group over total: 1/4, 3/4, 3/4, 4/4.
+    let catalog = try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+        Row(20)
+        Row(30)
+      }
+    }
+    try catalog.expect(
+        "SELECT x, CUME_DIST() OVER (ORDER BY x) FROM T",
+        yields: [[10, 0.25], [20, 0.75], [20, 0.75], [30, 1.0]])
+  }
+
+  @Test func `NTILE resets per partition`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["d": .integer, "x": .integer]) {
+        Row(1, 10)
+        Row(1, 20)
+        Row(2, 100)
+        Row(2, 200)
+      }
+    }
+    try catalog.expect(
+        "SELECT d, x, NTILE(2) OVER (PARTITION BY d ORDER BY x) FROM T",
+        yields: [[1, 10, 1], [1, 20, 2], [2, 100, 1], [2, 200, 2]])
+  }
+
+  @Test func `the schema types the distribution columns`() throws {
+    let catalog = try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+      }
+    }
+    let query = try parse(query:
+        """
+        SELECT NTILE(2) OVER (ORDER BY x) AS n,
+               PERCENT_RANK() OVER (ORDER BY x) AS p,
+               CUME_DIST() OVER (ORDER BY x) AS c
+        FROM T
+        """)
+    let columns = try catalog.columns(of: query, validate: true)
+    #expect(columns.map(\.name) == ["n", "p", "c"])
+    #expect(columns.map(\.type) == [.integer, .double, .double])
+  }
+}
+
 // MARK: - Resolution parity (run ≡ validate)
 
 /// A window function the executor does not yet compute, or one written outside
@@ -1029,6 +1163,12 @@ struct WindowFunctionRejectionTests {
         .state("0A000", "a window frame is not supported for LEAD"))
   }
 
+  @Test func `NTILE with a non-positive bucket count is rejected`() throws {
+    try rejects(
+        "SELECT NTILE(0) OVER (ORDER BY x) FROM T",
+        .state("22023", "NTILE requires a positive bucket count"))
+  }
+
   @Test func `NTH_VALUE with a zero position is rejected`() throws {
     // Position 0 is meaningless (positions are 1-based) — rejected at parse, so
     // the executor never computes the frame index `lo + 0 - 1` and subscripts a
@@ -1046,6 +1186,16 @@ struct WindowFunctionRejectionTests {
     try rejects(
         "SELECT LEAD(x, 1, 'a') OVER (ORDER BY x) FROM T",
         .operand("a LEAD/LAG default and value have irreconcilable types"))
+  }
+
+  @Test func `a frame on a distribution function is rejected`() throws {
+    try rejects(
+        """
+        SELECT CUME_DIST() OVER (ORDER BY x
+            ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
+        FROM T
+        """,
+        .state("0A000", "a window frame is not supported for CUME_DIST"))
   }
 
   @Test func `a frame on a ranking function is rejected`() throws {

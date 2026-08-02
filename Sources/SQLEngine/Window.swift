@@ -99,6 +99,8 @@ extension Catalog where Self: ~Escapable {
       switch windowing.function {
       case .rowNumber, .rank, .denseRank:
         assign(windowing.function, over: ordered, keyed, into: &values)
+      case .ntile, .percentRank, .cumeDist:
+        distribute(windowing.function, over: ordered, keyed, into: &values)
       case let .aggregate(aggregation):
         if let frame = windowing.frame {
           try framed(aggregation, over: ordered, keyed, in: records, context,
@@ -420,6 +422,57 @@ extension Catalog where Self: ~Escapable {
     }
   }
 
+  /// Assigns a distribution function's value to each record of an
+  /// already-ordered partition, writing into `values` at the record's original
+  /// position. `keyed` holds each record's window `ORDER BY` values, so the
+  /// peer groups (`PERCENT_RANK`, `CUME_DIST`) are found by tie.
+  ///
+  /// - `NTILE(n)` — the ordered partition is split into `n` contiguous buckets
+  ///   as equally as possible: with `rows = q * n + r`, the first `r` buckets
+  ///   hold `q + 1` rows and the rest `q`, and each row takes its 1-based
+  ///   bucket number (more buckets than rows leaves the trailing ones empty).
+  /// - `PERCENT_RANK` — `(rank - 1) / (rows - 1)`, where `rank` is the peer
+  ///   group's 1-based start position; a single-row partition is `0`.
+  /// - `CUME_DIST` — `rows through the current peer group / rows`, so peers
+  ///   share the value and the last peer group is `1`.
+  private borrowing func distribute(_ function: Windowing.Function,
+                                    over ordered: Array<Int>,
+                                    _ keyed: Dictionary<Int, Array<Value>>,
+                                    into values: inout Array<Value>) {
+    let count = ordered.count
+    switch function {
+    case let .ntile(buckets):
+      // `q` rows per bucket, the first `r` buckets one larger; the large
+      // buckets fill the first `r * (q + 1)` positions, the rest follow.
+      let quotient = count / buckets
+      let remainder = count % buckets
+      let large = remainder * (quotient + 1)
+      for position in 0 ..< count {
+        let bucket = position < large
+            ? position / (quotient + 1) + 1
+            : remainder + (position - large) / quotient + 1
+        values[ordered[position]] = .integer(bucket)
+      }
+    case .percentRank:
+      let (peerLo, _) = peering(ordered, keyed)
+      for position in 0 ..< count {
+        values[ordered[position]] = count <= 1
+            ? .double(0)
+            : .double(Double(peerLo[position]) / Double(count - 1))
+      }
+    case .cumeDist:
+      let (_, peerHi) = peering(ordered, keyed)
+      for position in 0 ..< count {
+        values[ordered[position]] =
+            .double(Double(peerHi[position] + 1) / Double(count))
+      }
+    default:
+      // A ranking, aggregate, or positional window is computed elsewhere and
+      // never dispatched here.
+      preconditionFailure("a non-distribution window is not distributed")
+    }
+  }
+
   /// Assigns `function`'s value to each record of an already-ordered partition,
   /// writing into `values` at the record's original position. `keyed` holds each
   /// record's window `ORDER BY` values, so the peer-aware ranks detect ties.
@@ -442,7 +495,8 @@ extension Catalog where Self: ~Escapable {
     // `accumulate`/`framed` and an offset function read by `position`, so
     // `computed` dispatches those elsewhere and neither reaches this ranker.
     switch function {
-    case .aggregate, .lead, .lag, .firstValue, .lastValue, .nthValue:
+    case .aggregate, .lead, .lag, .firstValue, .lastValue, .nthValue,
+         .ntile, .percentRank, .cumeDist:
       preconditionFailure("a non-ranking window is computed, not ranked")
     case .rowNumber, .rank, .denseRank:
       break

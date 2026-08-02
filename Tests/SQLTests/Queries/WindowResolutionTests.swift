@@ -129,6 +129,14 @@ struct WindowArgumentTests {
   private let ordered =
       WindowSpec(order: Order(keys: [Order.Key(column: Column("x"))]))
 
+  @Test func `a zero NTILE bucket count faults at lowering`() {
+    let window = Expression.window(function: .ntile(0), spec: ordered)
+    #expect(throws:
+        SQLError.state("22023", "NTILE requires a positive bucket count")) {
+      _ = try window.windowing(scope())
+    }
+  }
+
   @Test func `a zero NTH_VALUE position faults at lowering`() {
     let window = Expression.window(
         function: .nthValue(.column(Column("x")), 0), spec: ordered)

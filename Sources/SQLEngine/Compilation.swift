@@ -492,6 +492,17 @@ extension Catalog where Self: ~Escapable {
         expression.collect(subqueries: &rest)
       }
     }
+    // A named window a query references is inlined into the projection/ORDER BY
+    // above, so its subqueries are already collected; an unused definition is
+    // not, so collect from every definition's own specification here — a
+    // subquery living only in a `WINDOW w AS (ORDER BY (SELECT …))` is then
+    // precompiled for the validation that resolves each definition (a duplicate
+    // from a referenced one dedups by `Query`).
+    for definition in select.window {
+      for expression in definition.spec.expressions {
+        expression.collect(subqueries: &rest)
+      }
+    }
     let remainder = try subquery(rest, select, context, within: enclosing)
     return Plans(lowerings, remainder)
   }
@@ -1452,6 +1463,10 @@ extension Catalog where Self: ~Escapable {
       // through `outer`.
       let enclosing = Scope([(relation, from.schema)])
       let plans = try subquery(of: select, context, enclosing: enclosing)
+      // A `WINDOW` clause with no window function is dropped after compilation,
+      // so validate its definitions here against the source scope first.
+      try validate(named: select.window, against: enclosing, context.routines,
+                   subquery: plans.rest.barred)
       var filter: Filter? = nil
       if let predicate = select.predicate {
         filter = try from.schema.lower(predicate, in: relation,
@@ -1565,6 +1580,12 @@ extension Catalog where Self: ~Escapable {
     // type-check.
     let plans = try subquery(of: select, context, enclosing: scope,
                              prefixes: prefixes)
+    // A `WINDOW` clause with no window function is dropped after compilation, so
+    // validate its definitions here — against the whole join `scope`, so a
+    // definition naming a joined relation's column resolves as the query's own
+    // clauses do.
+    try validate(named: select.window, against: scope, context.routines,
+                 subquery: plans.rest.barred)
     var matches = Array<Filter>()
     matches.reserveCapacity(select.joins.count)
     for index in select.joins.indices {
@@ -1713,6 +1734,28 @@ extension Catalog where Self: ~Escapable {
   /// This first slice supports a single relation: a window over a join faults
   /// the feature diagnostic (on both the run and validate paths) until the join
   /// chain is threaded through the window source.
+  /// Validates every named window `windows` defines against `scope`, resolving
+  /// each spec's base (an undefined base faults `42704`) then its partition and
+  /// order keys against the scope (an unknown column faults) exactly as a
+  /// referenced window resolves — with `subquery` for a spec's own scalar
+  /// subquery, the same barred resolution the referenced path uses, so a
+  /// definition carrying a subquery is not spuriously rejected. Every definition
+  /// is validated whether or not a window function references it, so a query
+  /// with a `WINDOW` clause never silently accepts an unresolvable unused one.
+  internal borrowing func validate(named windows: Array<NamedWindow>,
+                                   against scope: Scope, _ routines: Routines,
+                                   subquery: Resolution) throws(SQLError) {
+    for definition in windows {
+      let spec = try definition.spec.resolved(against: windows)
+      // The function-independent structural frame check — a reversed or inverted
+      // frame — that `reject(for:)` runs for a referenced window; `windowing`
+      // resolves the keys but not the frame's bounds, so run it here too.
+      if let frame = spec.frame { try frame.check() }
+      _ = try Expression.window(function: .rowNumber, spec: spec)
+          .windowing(scope, routines, subquery: subquery)
+    }
+  }
+
   internal borrowing func windowed(_ select: Select, _ relation: Relation,
                                    _ from: Resolved, _ context: Context)
       throws(SQLError) -> Plan {
@@ -1724,6 +1767,13 @@ extension Catalog where Self: ~Escapable {
     let plans = try subquery(of: select, context, enclosing: scope)
     let barred = plans.rest.barred
     let routines = context.routines
+
+    // Validate every named window the clause defines, including one no window
+    // function references — a referenced window is also resolved through its
+    // inlined use below, but an unused definition would otherwise be dropped
+    // unchecked.
+    try validate(named: select.window, against: scope, routines,
+                 subquery: barred)
 
     // The WHERE lowers below the window node, in the source's base-ordinal
     // space; a correlated column of this query is admitted here, as the run's

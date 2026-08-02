@@ -1150,6 +1150,13 @@ extension Catalog where Self: ~Escapable {
     let plans = try subquery(of: select, context, enclosing: scope,
                              prefixes: prefixes)
     let barred = plans.rest.barred
+    // Validate every named window the `WINDOW` clause defines, whether or not it
+    // is referenced — the aggregate route reaches here ahead of the window and
+    // ordinary paths' checks, so an unused malformed definition (an undefined
+    // base, an unresolvable column, or an invalid frame) would otherwise slip
+    // through into a grouped compile.
+    try validate(named: select.window, against: scope, context.routines,
+                 subquery: barred)
     var matches = Array<Filter>()
     matches.reserveCapacity(select.joins.count)
     for index in select.joins.indices {

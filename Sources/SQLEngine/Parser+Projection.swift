@@ -463,12 +463,53 @@ extension Parser {
   /// query-level `ORDER BY` is, so it reuses `order()`.
   private mutating func over() throws(SQLError) -> WindowSpec {
     try expect(.over)
+    // A bare `OVER w` names a window the query's `WINDOW` clause defines — a
+    // forward reference the `Query.expanded` prelude inlines to that window's
+    // specification. A window name is an identifier, distinct from the
+    // parenthesised inline specification.
+    guard current?.kind == .lparen else {
+      return WindowSpec(base: try identifier())
+    }
+    return try windowspec()
+  }
+
+  /// Parses a parenthesised window specification — `( [name] [PARTITION BY …]
+  /// [ORDER BY …] [<frame>] )` — the body shared by an `OVER (…)` clause and a
+  /// `WINDOW name AS (…)` definition (the opening `(` is `current`).
+  ///
+  /// A leading identifier is an existing window `name` the spec refines (`OVER
+  /// (w ORDER BY …)`, `WINDOW w2 AS (w ORDER BY …)`); any other opening
+  /// token begins the inline clauses. The window `ORDER BY` is the same `<sort
+  /// specification list>` a query-level `ORDER BY` is, so it reuses `order()`.
+  private mutating func windowspec() throws(SQLError) -> WindowSpec {
     try expect(.lparen)
+    let base: String?
+    switch current?.kind {
+    case .identifier, .quoted:
+      base = try identifier()
+    default:
+      base = nil
+    }
     let partition = try match(.partition) ? partitions() : []
     let order: Order? = try match(.order) ? self.order() : nil
     let frame = try self.frame()
     try expect(.rparen)
-    return WindowSpec(partition: partition, order: order, frame: frame)
+    return WindowSpec(base: base, partition: partition, order: order,
+                      frame: frame)
+  }
+
+  /// Parses a `SELECT`'s `WINDOW` clause — `WINDOW name AS (<window spec>) (','
+  /// name AS (<window spec>))*` (the `WINDOW` keyword is already consumed) — into
+  /// its named window definitions, in source order. Each `OVER name` reference
+  /// resolves to the matching definition at the `Query.expanded` prelude.
+  internal mutating func windows() throws(SQLError) -> Array<NamedWindow> {
+    var defined = Array<NamedWindow>()
+    repeat {
+      let name = try identifier()
+      try expect(.as)
+      try defined.append(NamedWindow(name: name, spec: windowspec()))
+    } while try match(.comma)
+    return defined
   }
 
   /// Parses an optional window frame clause — `(ROWS | RANGE | GROUPS)

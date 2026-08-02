@@ -959,6 +959,9 @@ internal struct Scope {
     guard function.supported else {
       throw .state("0A000", "\(function.keyword) is not yet supported")
     }
+    if let frame = spec.frame {
+      try frame.reject()
+    }
     // An aggregate window validates its operand and `FILTER` exactly as a
     // collapsing aggregate does (the same `aggregate` helper), yielding the
     // aggregate's result type; a ranking function types `.integer`. The window

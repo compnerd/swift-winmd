@@ -119,6 +119,97 @@ struct WindowFunctionParsingTests {
   }
 }
 
+// MARK: - Frame parsing
+
+/// An explicit window frame — `(ROWS | RANGE | GROUPS) BETWEEN <start> AND
+/// <end>`, or the single-bound `<unit> <start>` shorthand — parses into the
+/// `WindowSpec`'s `Frame` after the window `ORDER BY`.
+struct WindowFrameParsingTests {
+  /// The window `spec` of the single projected window of `sql`.
+  private func spec(_ sql: String,
+                    location: Testing.SourceLocation = #_sourceLocation)
+      throws -> WindowSpec {
+    guard case let .window(_, spec) = try projected(sql, location: location)
+    else {
+      Issue.record("expected a window function", sourceLocation: location)
+      throw SQLError.incomplete(expected: "a window function")
+    }
+    return spec
+  }
+
+  @Test func `ROWS BETWEEN a preceding offset and the current row parses`()
+      throws {
+    #expect(try spec(
+        """
+        SELECT SUM(x) OVER
+            (ORDER BY x ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
+        FROM T
+        """)
+                .frame
+                == Frame(unit: .rows, start: .preceding(1), end: .currentRow))
+  }
+
+  @Test func `RANGE between the partition edges parses`() throws {
+    #expect(try spec(
+        """
+        SELECT SUM(x) OVER (ORDER BY x
+            RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+        FROM T
+        """)
+                .frame
+                == Frame(unit: .range, start: .unboundedPreceding,
+                         end: .unboundedFollowing))
+  }
+
+  @Test func `a following offset parses`() throws {
+    #expect(try spec(
+        """
+        SELECT SUM(x) OVER
+            (ORDER BY x ROWS BETWEEN CURRENT ROW AND 2 FOLLOWING)
+        FROM T
+        """)
+                .frame
+                == Frame(unit: .rows, start: .currentRow, end: .following(2)))
+  }
+
+  @Test func `the single-bound shorthand ends at the current row`() throws {
+    // `ROWS <start>` is `BETWEEN <start> AND CURRENT ROW`.
+    #expect(try spec(
+        "SELECT SUM(x) OVER (ORDER BY x ROWS UNBOUNDED PRECEDING) FROM T")
+                .frame
+                == Frame(unit: .rows, start: .unboundedPreceding,
+                         end: .currentRow))
+  }
+
+  @Test func `a GROUPS frame parses`() throws {
+    #expect(try spec(
+        """
+        SELECT SUM(x) OVER
+            (ORDER BY x GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING)
+        FROM T
+        """)
+                .frame
+                == Frame(unit: .groups, start: .preceding(1),
+                         end: .following(1)))
+  }
+
+  @Test func `frame keywords are case-insensitive`() throws {
+    #expect(try spec(
+        """
+        SELECT SUM(x) OVER
+            (ORDER BY x rows between unbounded preceding and current row)
+        FROM T
+        """)
+                .frame
+                == Frame(unit: .rows, start: .unboundedPreceding,
+                         end: .currentRow))
+  }
+
+  @Test func `no frame clause leaves the frame absent`() throws {
+    #expect(try spec("SELECT SUM(x) OVER (ORDER BY x) FROM T").frame == nil)
+  }
+}
+
 // MARK: - ROW_NUMBER execution
 
 /// `ROW_NUMBER() OVER (…)` numbers each row 1-based within its partition, in the
@@ -516,6 +607,15 @@ struct WindowFunctionRejectionTests {
         "SELECT ROW_NUMBER() OVER (ORDER BY 1) FROM T",
         .state("0A000",
                "a window ORDER BY output ordinal is not supported"))
+  }
+
+  @Test func `an explicit window frame is rejected`() throws {
+    try rejects(
+        """
+        SELECT SUM(x) OVER (ORDER BY x ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
+        FROM T
+        """,
+        .state("0A000", "an explicit window frame is not yet supported"))
   }
 
 }

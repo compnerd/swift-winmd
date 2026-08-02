@@ -1745,11 +1745,14 @@ extension Catalog where Self: ~Escapable {
       expression.collect(windows: &expressions)
     }
     for expression in expressions {
-      guard case let .window(function, _) = expression else {
+      guard case let .window(function, spec) = expression else {
         throw .state("XX000", "expected a window function")
       }
       guard function.supported else {
         throw .state("0A000", "\(function.keyword) is not yet supported")
+      }
+      if let frame = spec.frame {
+        try frame.reject()
       }
     }
 

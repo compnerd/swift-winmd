@@ -58,6 +58,17 @@ extension WindowFunction {
   }
 }
 
+extension Frame {
+  /// Faults the feature diagnostic when the executor cannot compute this frame
+  /// yet — called on both the compile (run) and validate paths so the two stay
+  /// in lockstep (the run ≡ validate tripwire): a frame the schema types is one
+  /// the run executes. No frame shape executes yet, so every explicit frame
+  /// faults `0A000`.
+  internal func reject() throws(SQLError) {
+    throw .state("0A000", "an explicit window frame is not yet supported")
+  }
+}
+
 extension Select {
   /// Whether the select projects (or orders by) a window function — the query
   /// compiles through the window path, appending each window's result to the

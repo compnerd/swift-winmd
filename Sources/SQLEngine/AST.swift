@@ -1040,6 +1040,20 @@ public indirect enum Expression: Hashable, Sendable {
   /// only the admitted rows.
   case aggregate(Aggregate, of: Aggregand, distinct: Bool = false,
                  filter: Predicate? = nil)
+  /// A window function `f(…) OVER (<window spec>)` — a function evaluated over a
+  /// window of rows (a partition, optionally ordered) that, unlike an aggregate
+  /// (which folds a group to one row), preserves cardinality: every input row
+  /// keeps its identity and gains the function's value for its position in the
+  /// window. `ROW_NUMBER() OVER (PARTITION BY d ORDER BY x)` numbers the rows of
+  /// each partition `d` in `x` order.
+  ///
+  /// Like an aggregate it is a first-class node rather than a scalar `call` — an
+  /// unregistered `ROW_NUMBER` routine would fault `.function` — because it
+  /// resolves against a window (a partition and its order) rather than through
+  /// the routines, lowering to a cardinality-preserving `Plan.window` that
+  /// appends the computed value as a new slot each partitioned, ordered pass
+  /// fills.
+  case window(function: WindowFunction, spec: WindowSpec)
   /// A `CASE` conditional expression — the result of its FIRST `when` whose
   /// predicate is TRUE (three-valued: UNKNOWN and FALSE both skip), else the
   /// `else` result, or `NULL` when there is no `ELSE`. The `when`s are held in

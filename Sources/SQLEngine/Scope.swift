@@ -190,6 +190,11 @@ extension Schema {
       // projection, WHERE, or join ON), so it faults exactly as an aggregate
       // does. A grouped query lowers it through `Grouped.term` instead.
       throw .state("42803", "GROUPING requires a GROUP BY")
+    case .window:
+      // A window function is not yet supported; every resolution surface faults
+      // the same feature diagnostic, so validate and the run reject a window in
+      // parity until the executor lands.
+      throw .state("0A000", "a window function is not supported")
     }
   }
 
@@ -675,6 +680,10 @@ internal struct Scope {
       // types from its routine's declared return, not its arguments) — it types
       // as `.integer` here without deriving them.
       .integer
+    case .window:
+      // A window function is not yet supported, so the schema surface rejects it
+      // too — no path advertises a type for a shape the run cannot execute.
+      throw .state("0A000", "a window function is not supported")
     }
   }
 
@@ -907,6 +916,13 @@ internal struct Scope {
       // each names a `GROUP BY` expression — `SQLError.grouping` otherwise —
       // which this per-operand type-check does not duplicate), then accept.
       try grouping(over: arguments, routines, subquery: subquery)
+    case .window:
+      // A window function is not yet supported. This type-check surface faults
+      // the same feature diagnostic the run's lowering does, so
+      // `columns(of:validate:true)` rejects a window in parity with the run
+      // (the run ≡ validate tripwire), never advertising a schema the run
+      // cannot execute.
+      throw .state("0A000", "a window function is not supported")
     }
   }
 
@@ -1856,6 +1872,11 @@ internal struct Scope {
       stable(lhs, routines) && stable(rhs, routines)
     case .subquery:
       false
+    case .window:
+      // A window function is conservatively not stable — no reflexive `IN`
+      // shortcut over a window operand — which is always safe: the walk keeps
+      // considering later elements, never wrongly pruning one.
+      false
     }
   }
 
@@ -1954,6 +1975,11 @@ internal struct Scope {
       (otherwise.map { defined($0) } ?? false)
           && whens.allSatisfy { defined($0.then) }
     case .column, .call, .aggregate, .nullif, .subquery:
+      false
+    case .window:
+      // A window function may yield NULL (an aggregate window over an all-NULL
+      // frame), so it is conservatively treated as nullable — never pruning a
+      // row a NULL could reach.
       false
     }
   }
@@ -2070,6 +2096,10 @@ internal struct Scope {
       // relative to a specific grouped ARM (this AST-level fold has no arm
       // context), so it too is `nil` here — decided later by `Grouped.term`.
       return nil
+    case .window:
+      // A window function reads its whole partition in the window's order, so
+      // it is not a row-independent constant — `nil`, like an `aggregate`.
+      return nil
     }
   }
 
@@ -2182,6 +2212,11 @@ internal struct Scope {
     // fabricates no routine type and constrains the fold — never unresolved.
     case .grouping:
       return false
+    // `.window`: `derive` rejects a window outright (the feature is
+    // unsupported), so this probe never shapes a fold over one; descend the
+    // specification's expressions for an unregistered call for consistency.
+    case let .window(_, spec):
+      return spec.expressions.contains { unresolved($0, routines) }
     }
   }
 
@@ -2585,6 +2620,13 @@ internal struct Scope {
       for argument in arguments {
         try aggregates(in: argument, routines, subquery: subquery)
       }
+    case let .window(_, spec):
+      // A window function is not itself an aggregate, but — like a `call` —
+      // recurse its specification's expressions so an aggregate nested in a
+      // partition or order is validated.
+      for expression in spec.expressions {
+        try aggregates(in: expression, routines, subquery: subquery)
+      }
     }
   }
 
@@ -2797,6 +2839,10 @@ internal struct Scope {
       var bits = 0
       for _ in arguments { bits = (bits << 1) | 1 }
       return .integer(bits)
+    case .window:
+      // A window function is unsupported and rejected before this empty-group
+      // fold runs; fault the same feature diagnostic for a uniform reject.
+      throw .state("0A000", "a window function is not supported")
     }
   }
 
@@ -3248,6 +3294,12 @@ internal struct Scope {
       // it faults as an aggregate does. A grouped query lowers it through
       // `Grouped.term` instead.
       throw .state("42803", "GROUPING requires a GROUP BY")
+    case .window:
+      // A window function is not yet supported; the run's lowering faults the
+      // feature diagnostic in parity with the `validate` type-check, so a query
+      // projecting a window is rejected identically on both paths (the run ≡
+      // validate tripwire) until the executor lands.
+      throw .state("0A000", "a window function is not supported")
     }
   }
 
@@ -3766,6 +3818,10 @@ extension Scope {
       for argument in arguments {
         try comparisons(in: argument, routines, subquery: subquery)
       }
+    case let .window(_, spec):
+      for expression in spec.expressions {
+        try comparisons(in: expression, routines, subquery: subquery)
+      }
     }
   }
 
@@ -3803,6 +3859,10 @@ extension Scope {
     case let .coalesce(arguments):
       for argument in arguments {
         try comparisons(aggregatesIn: argument, routines, subquery: subquery)
+      }
+    case let .window(_, spec):
+      for expression in spec.expressions {
+        try comparisons(aggregatesIn: expression, routines, subquery: subquery)
       }
     }
   }

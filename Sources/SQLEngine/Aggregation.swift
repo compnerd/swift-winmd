@@ -57,6 +57,12 @@ extension Expression {
       // only if an argument is (a GROUP BY expression never is, so this is
       // false in practice) — mirroring the neighbouring `call` arm.
       arguments.contains { $0.aggregated }
+    case let .window(_, spec):
+      // A window function is not itself an aggregate — it preserves cardinality
+      // rather than folding a group — but a query aggregate nested in its
+      // partition or order (`ROW_NUMBER() OVER (ORDER BY SUM(x))`) is one, so
+      // descend the specification's expressions as a `call`'s arguments.
+      spec.expressions.contains { $0.aggregated }
     }
   }
 
@@ -88,6 +94,10 @@ extension Expression {
       arguments.contains { $0.grouping }
     case let .nullif(lhs, rhs):
       lhs.grouping || rhs.grouping
+    case let .window(_, spec):
+      // As a `call`: GROUPING-bearing only if the specification's expressions
+      // are (a well-formed window carries none).
+      spec.expressions.contains { $0.grouping }
     }
   }
 
@@ -119,6 +129,10 @@ extension Expression {
     case let .grouping(arguments):
       // As a `call`: bound only if an argument references a query binding.
       arguments.contains { $0.bound }
+    case let .window(_, spec):
+      // As a `call`: bound only if a specification expression references a query
+      // binding.
+      spec.expressions.contains { $0.bound }
     }
   }
 }
@@ -847,6 +861,12 @@ extension Expression {
       // As a `call`: descend the arguments so a subquery nested in one is
       // collected for the pre-pass.
       for argument in arguments { argument.collect(subqueries: &queries) }
+    case let .window(_, spec):
+      // As a `call`: descend the specification's expressions for a nested
+      // subquery.
+      for expression in spec.expressions {
+        expression.collect(subqueries: &queries)
+      }
     }
   }
 
@@ -886,6 +906,9 @@ extension Expression {
     case let .grouping(arguments):
       // As a `call`: descend the arguments for any `IN (Q)`-position subquery.
       for argument in arguments { argument.collect(valued: &queries) }
+    case let .window(_, spec):
+      // As a `call`: descend the specification's expressions.
+      for expression in spec.expressions { expression.collect(valued: &queries) }
     }
   }
 
@@ -927,6 +950,9 @@ extension Expression {
     case let .grouping(arguments):
       // As a `call`: descend the arguments for any scalar-subquery position.
       for argument in arguments { argument.collect(scalar: &queries) }
+    case let .window(_, spec):
+      // As a `call`: descend the specification's expressions.
+      for expression in spec.expressions { expression.collect(scalar: &queries) }
     }
   }
 
@@ -965,6 +991,11 @@ extension Expression {
       // As a `call`: descend the arguments for any `EXISTS (Q)`-position
       // subquery.
       for argument in arguments { argument.collect(existential: &queries) }
+    case let .window(_, spec):
+      // As a `call`: descend the specification's expressions.
+      for expression in spec.expressions {
+        expression.collect(existential: &queries)
+      }
     }
   }
 
@@ -1313,6 +1344,13 @@ extension Expression {
       // arguments so any aggregate nested in one is collected (a GROUP BY
       // expression never nests one, so this gathers nothing in practice).
       for argument in arguments { argument.collect(into: &expressions) }
+    case let .window(_, spec):
+      // A window function is not a query aggregate, but — like a `call` —
+      // descend its specification's expressions so an aggregate nested in a
+      // partition or order (`ROW_NUMBER() OVER (ORDER BY SUM(x))`) is collected.
+      for expression in spec.expressions {
+        expression.collect(into: &expressions)
+      }
     }
   }
 

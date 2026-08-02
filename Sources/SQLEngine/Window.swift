@@ -100,7 +100,7 @@ extension Catalog where Self: ~Escapable {
       case .rowNumber, .rank, .denseRank:
         assign(windowing.function, over: ordered, keyed, into: &values)
       case let .aggregate(aggregation):
-        try accumulate(aggregation, over: ordered, in: records, context,
+        try accumulate(aggregation, over: ordered, keyed, in: records, context,
                        into: &values)
       }
     }
@@ -108,44 +108,68 @@ extension Catalog where Self: ~Escapable {
   }
 
   /// Folds an aggregate window's `aggregation` over each row's frame, writing
-  /// the result into `values` at each record's original position.
+  /// the result into `values` at each record's original position. `ordered` is
+  /// the partition in window order, `keyed` each record's window `ORDER BY`
+  /// values, so the peer-aware running frame detects ties.
   ///
-  /// With no window `ORDER BY` the default frame is the whole partition, so one
-  /// `Accumulator` folds every partition row — gated by the aggregate's
-  /// `FILTER`, reading its argument value (a `COUNT(*)` sentinel when it has no
-  /// argument) — and its single result is assigned to every row of the
-  /// partition. The fold is the collapsing grouping path's own, so a
-  /// partition's aggregate window equals the aggregate a `GROUP BY` on the same
-  /// key would fold, spread back over the partition's rows rather than
-  /// collapsed to one.
+  /// The default frame is `RANGE UNBOUNDED PRECEDING`: a row's frame is every
+  /// partition row up to and including its peer group — the rows tied with it
+  /// on the window `ORDER BY`. So the fold runs cumulatively over the ordered
+  /// partition one peer group at a time, and every peer of a group takes the
+  /// same running value (the total through the last peer), never a row-by-row
+  /// step within a tie. With no window `ORDER BY` every row is a peer, so the
+  /// one peer group is the whole partition and every row takes the grand total
+  /// — the whole-partition frame.
+  ///
+  /// The fold is the collapsing grouping path's own `Accumulator`, carried
+  /// across the peer groups, so an aggregate window equals the running
+  /// aggregate a cumulative `GROUP BY` would compute, spread over the rows
+  /// rather than collapsed.
   private borrowing func accumulate(_ aggregation: Aggregation,
                                     over ordered: Array<Int>,
+                                    _ keyed: Dictionary<Int, Array<Value>>,
                                     in records: Array<Record>,
                                     _ context: Context,
                                     into values: inout Array<Value>)
       throws(SQLError) {
     var accumulator = Accumulator(aggregation.function,
                                   distinct: aggregation.distinct)
-    for position in ordered {
-      // The aggregate's `FILTER (WHERE …)` gates the row before the fold (and
-      // so before the DISTINCT dedup): only a definite TRUE admits it, a FALSE
-      // or UNKNOWN row skipped, exactly as the grouping path gates.
-      if let filter = aggregation.filter {
-        guard try evaluate(records[position], filter, context) == true else {
-          continue
+    var start = 0
+    while start < ordered.count {
+      // The peer group [start, end) — the rows tied with `ordered[start]` on
+      // every window `ORDER BY` key. With no order keys every row is a peer, so
+      // this spans the whole partition.
+      var end = start + 1
+      while end < ordered.count,
+            peers(keyed[ordered[end - 1]]!, keyed[ordered[end]]!) {
+        end += 1
+      }
+      // Fold every row of the peer group into the running accumulator, then
+      // assign its cumulative value to each — RANGE, so peers share the frame
+      // end.
+      for index in start ..< end {
+        let position = ordered[index]
+        // The aggregate's `FILTER (WHERE …)` gates the row before the fold (and
+        // so before the DISTINCT dedup): only a definite TRUE admits it, a
+        // FALSE or UNKNOWN row skipped, exactly as the grouping path gates.
+        if let filter = aggregation.filter {
+          guard try evaluate(records[position], filter, context) == true else {
+            continue
+          }
         }
+        // `COUNT(*)` folds a non-NULL sentinel (a row is always counted); every
+        // other aggregate folds its evaluated argument value.
+        let value: Value = if let argument = aggregation.argument {
+          try evaluate(records[position], argument, context)
+        } else {
+          .integer(0)
+        }
+        try accumulator.fold(value)
       }
-      // `COUNT(*)` folds a non-NULL sentinel (a row is always counted); every
-      // other aggregate folds its evaluated argument value.
-      let value: Value = if let argument = aggregation.argument {
-        try evaluate(records[position], argument, context)
-      } else {
-        .integer(0)
-      }
-      try accumulator.fold(value)
+      let running = try accumulator.value
+      for index in start ..< end { values[ordered[index]] = running }
+      start = end
     }
-    let result = try accumulator.value
-    for position in ordered { values[position] = result }
   }
 
   /// Assigns `function`'s value to each record of an already-ordered partition,

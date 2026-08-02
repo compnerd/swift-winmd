@@ -353,6 +353,128 @@ struct AggregateWindowExecutionTests {
   }
 }
 
+// MARK: - Aggregate window execution (running RANGE frame)
+
+/// An aggregate window with a window `ORDER BY` folds over the default running
+/// frame `RANGE UNBOUNDED PRECEDING`: a row's frame is every partition row up
+/// to and including its peer group (the rows tied with it on the order key), so
+/// the aggregate is cumulative and tied rows share the same running value — the
+/// total through the last peer, never a row-by-row step within a tie.
+struct RunningAggregateWindowTests {
+  @Test func `SUM with ORDER BY is a running total`() throws {
+    // Distinct keys are strictly cumulative: 10, 10+20=30, 30+30=60.
+    let catalog = try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+        Row(30)
+      }
+    }
+    try catalog.expect(
+        "SELECT x, SUM(x) OVER (ORDER BY x) FROM T",
+        yields: [[10, 10], [20, 30], [30, 60]])
+  }
+
+  @Test func `tied order keys share the running total (RANGE peers)`()
+      throws {
+    // Ordered by x: 10, 20, 20, 30. The two 20s are peers, so both take the
+    // total through the END of their peer group — 10 + 20 + 20 = 50 — not a
+    // row-by-row 30 then 50. Then 30 takes 80.
+    let catalog = try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+        Row(20)
+        Row(30)
+      }
+    }
+    try catalog.expect(
+        "SELECT x, SUM(x) OVER (ORDER BY x) FROM T",
+        yields: [[10, 10], [20, 50], [20, 50], [30, 80]])
+  }
+
+  @Test func `COUNT with ORDER BY counts through the peer group`() throws {
+    // The two 20s are peers, so both count 3 (the rows through the peer group);
+    // 30 counts 4.
+    let catalog = try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+        Row(20)
+        Row(30)
+      }
+    }
+    try catalog.expect(
+        "SELECT x, COUNT(*) OVER (ORDER BY x) FROM T",
+        yields: [[10, 1], [20, 3], [20, 3], [30, 4]])
+  }
+
+  @Test func `AVG with ORDER BY is a running average to a double`() throws {
+    // Running average: 10/1 = 10.0, (10+20)/2 = 15.0, the tied 20s both
+    // (10+20+20)/3 = ~16.666…, then (…+30)/4 = 20.0.
+    let catalog = try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+        Row(20)
+        Row(30)
+      }
+    }
+    try catalog.expect(
+        "SELECT x, AVG(x) OVER (ORDER BY x) FROM T",
+        yields: [[10, 10.0], [20, 50.0 / 3.0], [20, 50.0 / 3.0], [30, 20.0]])
+  }
+
+  @Test func `MIN and MAX with ORDER BY run cumulatively`() throws {
+    // Running MIN stays 10 from the start; running MAX climbs 10, 20, 20, 30.
+    let catalog = try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+        Row(20)
+        Row(30)
+      }
+    }
+    try catalog.expect(
+        """
+        SELECT x, MIN(x) OVER (ORDER BY x), MAX(x) OVER (ORDER BY x) FROM T
+        """,
+        yields: [[10, 10, 10], [20, 10, 20], [20, 10, 20], [30, 10, 30]])
+  }
+
+  @Test func `a running window resets per partition`() throws {
+    // Each partition runs its own cumulative total in the window order.
+    let catalog = try Catalog {
+      Relation("T", ["d": .integer, "x": .integer]) {
+        Row(1, 10)
+        Row(2, 100)
+        Row(1, 20)
+        Row(2, 200)
+      }
+    }
+    // d=1: 10 then 30; d=2: 100 then 300. Source order is preserved.
+    try catalog.expect(
+        "SELECT d, x, SUM(x) OVER (PARTITION BY d ORDER BY x) FROM T",
+        yields: [[1, 10, 10], [2, 100, 100], [1, 20, 30], [2, 200, 300]])
+  }
+
+  @Test func `the schema types a running aggregate window`() throws {
+    // Both paths type the running column: SUM over integers an integer — the
+    // run yields the running totals and validate types the column.
+    let catalog = try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+      }
+    }
+    let query = try parse(query:
+        "SELECT x, SUM(x) OVER (ORDER BY x) AS running FROM T")
+    let columns = try catalog.columns(of: query, validate: true)
+    #expect(columns.map(\.name) == ["x", "running"])
+    #expect(columns.map(\.type) == [.integer, .integer])
+  }
+}
+
 // MARK: - Resolution parity (run ≡ validate)
 
 /// A window function the executor does not yet compute, or one written outside
@@ -396,13 +518,4 @@ struct WindowFunctionRejectionTests {
                "a window ORDER BY output ordinal is not supported"))
   }
 
-  @Test func `an aggregate window with ORDER BY is rejected`() throws {
-    // The running frame (an aggregate window with a window `ORDER BY`) is not
-    // yet computed, so it faults the feature diagnostic on both paths — the
-    // schema never advertises a running total the run cannot compute.
-    try rejects(
-        "SELECT SUM(x) OVER (ORDER BY x) FROM T",
-        .state("0A000",
-               "an aggregate window with ORDER BY is not yet supported"))
-  }
 }

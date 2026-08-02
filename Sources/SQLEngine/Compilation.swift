@@ -1745,19 +1745,11 @@ extension Catalog where Self: ~Escapable {
       expression.collect(windows: &expressions)
     }
     for expression in expressions {
-      guard case let .window(function, spec) = expression else {
+      guard case let .window(function, _) = expression else {
         throw .state("XX000", "expected a window function")
       }
       guard function.supported else {
         throw .state("0A000", "\(function.keyword) is not yet supported")
-      }
-      // A default running frame — an aggregate window with an `ORDER BY` — is
-      // not yet computed; only the whole-partition frame (no `ORDER BY`) is. It
-      // faults the feature diagnostic here, so `columns(of:)` (which runs this
-      // compile) and the run reject it in parity until the running frame lands.
-      if case .aggregate = function, spec.order != nil {
-        throw .state("0A000",
-                     "an aggregate window with ORDER BY is not yet supported")
       }
     }
 

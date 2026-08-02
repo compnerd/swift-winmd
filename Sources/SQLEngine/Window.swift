@@ -71,68 +71,88 @@ extension Catalog where Self: ~Escapable {
 
     var values = Array(repeating: Value.null, count: records.count)
     for partition in partitions {
-      let ordered = try ordered(partition, records, windowing.order, context)
-      try assign(windowing.function, over: ordered, into: &values)
+      // The window `ORDER BY` key values for every record of the partition —
+      // computed once, used both to order the partition and (for the peer-aware
+      // ranks) to detect ties.
+      var keyed = Dictionary<Int, Array<Value>>(minimumCapacity: partition.count)
+      for position in partition {
+        var cells = Array<Value>()
+        cells.reserveCapacity(windowing.order.count)
+        for key in windowing.order {
+          try cells.append(evaluate(records[position], key.term, context))
+        }
+        keyed[position] = cells
+      }
+      // Order the partition by the key values, major to minor, stably — with no
+      // `ORDER BY` every row is a peer and the original order is kept.
+      let ordered = partition.sorted { lhs, rhs in
+        let left = keyed[lhs]!
+        let right = keyed[rhs]!
+        for index in windowing.order.indices {
+          let ordered = less(left[index], right[index])
+          let reverse = less(right[index], left[index])
+          if ordered == reverse { continue }
+          return windowing.order[index].ascending ? ordered : reverse
+        }
+        return lhs < rhs
+      }
+      assign(windowing.function, over: ordered, keyed, into: &values)
     }
     return values
   }
 
-  /// The `indices` of one partition ordered by the window `ORDER BY` keys, major
-  /// to minor, stably (ties keep their original order) — the row order the
-  /// ranking reads. With no `ORDER BY` every row is a peer and the partition's
-  /// original order is kept.
-  ///
-  /// Each key's `Term` is evaluated against every record up front, so the
-  /// comparator sorts on precomputed values (a scalar term may throw, which a
-  /// `sorted(by:)` comparator cannot) — mirroring the query-level `sorted`.
-  private borrowing func ordered(_ indices: Array<Int>,
-                                 _ records: Array<Record>,
-                                 _ keys: Array<SortKey>,
-                                 _ context: Context)
-      throws(SQLError) -> Array<Int> {
-    var sortable = Dictionary<Int, Array<Value>>(minimumCapacity: indices.count)
-    for position in indices {
-      var cells = Array<Value>()
-      cells.reserveCapacity(keys.count)
-      for key in keys {
-        try cells.append(evaluate(records[position], key.term, context))
-      }
-      sortable[position] = cells
-    }
-    return indices.sorted { lhs, rhs in
-      let left = sortable[lhs]!
-      let right = sortable[rhs]!
-      for index in keys.indices {
-        let ordered = less(left[index], right[index])
-        let reverse = less(right[index], left[index])
-        if ordered == reverse { continue }
-        return keys[index].ascending ? ordered : reverse
-      }
-      // Equal on every key: keep the source order (a stable order) by
-      // tie-breaking on the original index.
-      return lhs < rhs
-    }
-  }
-
   /// Assigns `function`'s value to each record of an already-ordered partition,
-  /// writing into `values` at the record's original position.
+  /// writing into `values` at the record's original position. `keyed` holds each
+  /// record's window `ORDER BY` values, so the peer-aware ranks detect ties.
   ///
-  /// `ROW_NUMBER` is the 1-based sequential position — distinct for every row,
-  /// even where the order keys tie.
+  /// - `ROW_NUMBER` — the 1-based sequential position, distinct for every row
+  ///   even where the order keys tie.
+  /// - `RANK` — peer rows (equal on every order key) share a rank, and the next
+  ///   distinct row takes the rank one past every peer already seen, so ranks
+  ///   skip after a tie.
+  /// - `DENSE_RANK` — like `RANK`, but the next distinct row after a tie takes
+  ///   the immediately following rank, leaving no gap.
+  ///
+  /// With no `ORDER BY` every row is a peer, so `RANK`/`DENSE_RANK` are `1`
+  /// throughout while `ROW_NUMBER` still numbers each row.
   private borrowing func assign(_ function: WindowFunction,
                                 over ordered: Array<Int>,
-                                into values: inout Array<Value>)
-      throws(SQLError) {
-    switch function {
-    case .rowNumber:
+                                _ keyed: Dictionary<Int, Array<Value>>,
+                                into values: inout Array<Value>) {
+    if case .rowNumber = function {
       for position in ordered.indices {
         values[ordered[position]] = .integer(position + 1)
       }
-    case .rank, .denseRank:
-      // The peer-aware ranking functions are gated unsupported at compile until
-      // their executor lands, so a plan reaching here is an internal
-      // inconsistency.
-      throw .state("XX000", "\(function.keyword) is not yet executable")
+      return
+    }
+    // `RANK`/`DENSE_RANK`: walk the ordered rows, opening a new rank only at a
+    // non-peer boundary. `count` is the 1-based position (the rank `RANK` takes
+    // at a boundary, so it skips over the peers just closed); `rank` is the last
+    // assigned rank (incremented by one for `DENSE_RANK`, leaving no gap).
+    var rank = 0
+    var count = 0
+    for position in ordered.indices {
+      count += 1
+      let row = ordered[position]
+      let peer = position > 0
+          && peers(keyed[ordered[position - 1]]!, keyed[row]!)
+      if !peer {
+        rank = function == .rank ? count : rank + 1
+      }
+      values[row] = .integer(rank)
     }
   }
+}
+
+/// Whether two records are peers of a window `ORDER BY` — equal on every order
+/// key by the engine's typed comparison (neither orders before the other), the
+/// same tie the ordering falls through on. Two rows with no order keys (an
+/// unordered window) are trivially peers.
+private func peers(_ left: Array<Value>, _ right: Array<Value>) -> Bool {
+  for index in left.indices {
+    if less(left[index], right[index]) || less(right[index], left[index]) {
+      return false
+    }
+  }
+  return true
 }

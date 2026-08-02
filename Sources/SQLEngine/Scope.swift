@@ -680,10 +680,15 @@ internal struct Scope {
       // types from its routine's declared return, not its arguments) — it types
       // as `.integer` here without deriving them.
       .integer
-    case .window:
-      // A window function is not yet supported, so the schema surface rejects it
-      // too — no path advertises a type for a shape the run cannot execute.
-      throw .state("0A000", "a window function is not supported")
+    case let .window(function, _):
+      // A window function types by its result — the ranking functions to
+      // `.integer`. `compile` gates the supported functions and the clause
+      // positions a window is allowed in, and `columns(of:)` runs that compile
+      // before this type derive, so a window reaching here is a supported
+      // SELECT/ORDER BY one whose type the schema advertises — like a `call`,
+      // typed from the function rather than its specification's expressions. An
+      // unsupported function is rejected in parity with that compile.
+      try function.result
     }
   }
 
@@ -916,14 +921,45 @@ internal struct Scope {
       // each names a `GROUP BY` expression — `SQLError.grouping` otherwise —
       // which this per-operand type-check does not duplicate), then accept.
       try grouping(over: arguments, routines, subquery: subquery)
-    case .window:
-      // A window function is not yet supported. This type-check surface faults
-      // the same feature diagnostic the run's lowering does, so
-      // `columns(of:validate:true)` rejects a window in parity with the run
-      // (the run ≡ validate tripwire), never advertising a schema the run
-      // cannot execute.
-      throw .state("0A000", "a window function is not supported")
+    case let .window(function, spec):
+      // A window function types as its result (the ranking functions to
+      // `.integer`), validating its `PARTITION BY` keys and window `ORDER BY`
+      // as a run evaluates them. `compile` gates the supported functions and
+      // the clause positions a window may appear in — a window in a WHERE,
+      // HAVING, GROUP BY, or JOIN ON is rejected there, and `columns(of:)` runs
+      // that compile before this reachable-operand check — so this surface is
+      // reached only for a supported SELECT/ORDER BY window and accepts it in
+      // parity with the run (the run ≡ validate tripwire).
+      try window(function, over: spec, routines, subquery: subquery)
     }
+  }
+
+  /// The result type of a window function under `validate` — its result type
+  /// (the ranking functions `.integer`), validating each `PARTITION BY` key and
+  /// window `ORDER BY` key as a run evaluates them (an unknown column, a bad
+  /// operand, or an ill-typed call inside one faults). An unsupported function,
+  /// or an output-ordinal window sort key (meaningless for the input order),
+  /// faults the feature diagnostic in parity with the run's compile.
+  private func window(_ function: WindowFunction, over spec: WindowSpec,
+                      _ routines: Routines,
+                      subquery: SubqueryCheck = .unsupported)
+      throws(SQLError) -> ValueType {
+    guard function.supported else {
+      throw .state("0A000", "\(function.keyword) is not yet supported")
+    }
+    for key in spec.partition {
+      _ = try validate(key, routines, subquery: subquery)
+    }
+    for key in spec.order?.keys ?? [] {
+      switch key.sort {
+      case .ordinal:
+        throw .state("0A000",
+                     "a window ORDER BY output ordinal is not supported")
+      case let .expression(expression):
+        _ = try validate(expression, routines, subquery: subquery)
+      }
+    }
+    return function.type
   }
 
   /// The type of `GROUPING(a, …)` under `validate` — `.integer`, validating

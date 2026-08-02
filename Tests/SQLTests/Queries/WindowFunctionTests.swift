@@ -88,12 +88,69 @@ struct WindowFunctionParsingTests {
   }
 }
 
+// MARK: - ROW_NUMBER execution
+
+/// `ROW_NUMBER() OVER (…)` numbers each row 1-based within its partition, in the
+/// window's order, appending the number to every source row (cardinality-
+/// preserving). Its `columns(of:)` schema advertises the integer window column
+/// in parity with the run.
+struct RowNumberExecutionTests {
+  private func fixture() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("T", ["d": .integer, "x": .integer]) {
+        Row(1, 10)
+        Row(1, 30)
+        Row(2, 20)
+        Row(1, 20)
+      }
+    }
+  }
+
+  @Test func `ROW_NUMBER numbers each partition in the window order`() throws {
+    // d=1 rows ordered by x (10, 20, 30) number 1, 2, 3; d=2's lone row is 1.
+    // The output keeps the source row order, each row gaining its number.
+    try fixture().expect(
+        "SELECT d, x, ROW_NUMBER() OVER (PARTITION BY d ORDER BY x) FROM T",
+        yields: [[1, 10, 1], [1, 30, 3], [2, 20, 1], [1, 20, 2]])
+  }
+
+  @Test func `ROW_NUMBER over one partition numbers every row`() throws {
+    // No PARTITION BY: the whole input is one partition, ordered by x — the two
+    // x=20 rows tie but ROW_NUMBER is still distinct, keeping their input order.
+    try fixture().expect(
+        "SELECT x, ROW_NUMBER() OVER (ORDER BY x) FROM T",
+        yields: [[10, 1], [30, 4], [20, 2], [20, 3]])
+  }
+
+  @Test func `a query ORDER BY sorts the numbered rows`() throws {
+    try fixture().expect(
+        """
+        SELECT x, ROW_NUMBER() OVER (ORDER BY x) AS rn FROM T ORDER BY rn DESC
+        """,
+        yields: [[30, 4], [20, 3], [20, 2], [10, 1]])
+  }
+
+  @Test func `an empty partition yields no rows`() throws {
+    let catalog = try Catalog { Relation("T", ["x": .integer]) {} }
+    try catalog.empty("SELECT ROW_NUMBER() OVER (ORDER BY x) FROM T")
+  }
+
+  @Test func `the schema advertises the integer window column`() throws {
+    let query = try parse(query:
+        "SELECT x, ROW_NUMBER() OVER (ORDER BY x) AS rn FROM T")
+    let columns = try fixture().columns(of: query, validate: true)
+    #expect(columns.map(\.name) == ["x", "rn"])
+    #expect(columns.map(\.type) == [.integer, .integer])
+  }
+}
+
 // MARK: - Resolution parity (run ≡ validate)
 
-/// Until the executor lands, a window function is rejected with the 0A000
-/// feature-not-supported diagnostic on BOTH the run and the validate paths, so
-/// `columns(of:validate:true)` never advertises a schema the run cannot execute
-/// (the run ≡ validate tripwire).
+/// A window function the executor does not yet compute, or one written outside
+/// the SELECT list and `ORDER BY`, is rejected with the 0A000 feature
+/// diagnostic on BOTH the run and the validate paths, so `columns(of:
+/// validate:true)` never advertises a schema the run cannot execute (the run ≡
+/// validate tripwire).
 struct WindowFunctionRejectionTests {
   private func fixture() throws -> FixtureCatalog {
     try Catalog {
@@ -104,18 +161,27 @@ struct WindowFunctionRejectionTests {
     }
   }
 
-  @Test func `a projected window function faults 0A000 on the run`() throws {
-    try fixture().expect(
-        "SELECT ROW_NUMBER() OVER (ORDER BY x) FROM T",
-        fails: .state("0A000", "a window function is not supported"))
+  private func rejects(_ sql: String, _ fault: SQLError,
+                       location: Testing.SourceLocation = #_sourceLocation)
+      throws {
+    // The run faults, and `columns(of:validate:true)` faults identically — the
+    // schema never types a shape the run rejects.
+    try fixture().expect(sql, fails: fault, location: location)
+    #expect(throws: fault, sourceLocation: location) {
+      _ = try fixture().columns(of: parse(query: sql, location: location),
+                                validate: true)
+    }
   }
 
-  @Test func `a projected window function faults 0A000 on validate`() {
-    #expect(throws:
-        SQLError.state("0A000", "a window function is not supported")) {
-      let query =
-          try parse(query: "SELECT ROW_NUMBER() OVER (ORDER BY x) FROM T")
-      _ = try fixture().columns(of: query, validate: true)
-    }
+  @Test func `an unsupported ranking function faults 0A000`() throws {
+    try rejects("SELECT RANK() OVER (ORDER BY x) FROM T",
+                .state("0A000", "RANK is not yet supported"))
+  }
+
+  @Test func `a window in a WHERE is rejected`() throws {
+    try rejects(
+        "SELECT x FROM T WHERE ROW_NUMBER() OVER () > 1",
+        .state("0A000",
+               "a window function is allowed only in SELECT and ORDER BY"))
   }
 }

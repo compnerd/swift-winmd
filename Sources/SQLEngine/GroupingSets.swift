@@ -24,12 +24,17 @@ extension Query {
       // recurses into its arms.
       switch body {
       case let .select(select):
+        // Inline every `OVER w` named-window reference to its `WINDOW` clause
+        // definition first — the resolution prelude, run before any structural
+        // walk — so a named window and the equivalent inline `OVER (…)` resolve
+        // identically on the run and validate paths (both enter `expanded`).
+        let select = try select.inlined
         if case let .sets(sets) = select.grouping {
           let expanded = try expand(select, sets: sets)
           return Query(body: expanded.body,
                        carriers: expanded.carriers + carriers)
         }
-        return self
+        return Query(body: .select(select), carriers: carriers)
       case let .setop(kind, left, right, all):
         return Query(body: .setop(kind, try left.expanded,
                                   try right.expanded, all: all),

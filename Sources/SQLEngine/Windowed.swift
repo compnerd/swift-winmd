@@ -498,6 +498,12 @@ extension Expression {
     guard case let .window(function, spec) = self else {
       throw .state("XX000", "expected a window function")
     }
+    // The `Query.expanded` prelude inlines every named-window reference, so a
+    // lowered spec carries its own partition/order/frame — a residual base name
+    // reaching here is an internal inconsistency, never a user diagnostic.
+    guard spec.base == nil else {
+      throw .state("XX000", "an un-inlined window reference")
+    }
     let partition = try spec.partition.map { key throws(SQLError) -> Term in
       try scope.term(key, routines, subquery: subquery)
     }
@@ -696,6 +702,211 @@ extension Predicate {
       rhs.collect(windows: &expressions)
     case let .not(operand):
       operand.collect(windows: &expressions)
+    }
+  }
+}
+
+// MARK: - Named-window inlining
+
+extension WindowSpec {
+  /// This specification with a named-window reference (`OVER w`) resolved to
+  /// the specification `windows` defines under that name, an inline spec (`OVER
+  /// (…)`) returned unchanged. A reference to an undefined window faults
+  /// `42704`; a refinement (a base name with added `PARTITION`/`ORDER`/frame
+  /// clauses) and a chained reference (a named window that itself references
+  /// another) are not yet supported and fault `0A000`. Each fault is on both
+  /// the run and validate paths, since the inlining runs at the shared
+  /// `Query.expanded` prelude.
+  internal func resolved(against windows: Array<NamedWindow>)
+      throws(SQLError) -> WindowSpec {
+    guard let base else { return self }
+    guard partition.isEmpty, order == nil, frame == nil else {
+      throw .state("0A000", "refining a named window is not yet supported")
+    }
+    guard let named = windows.first(where: {
+      $0.name.lowercased() == base.lowercased()
+    })?.spec else {
+      throw .state("42704", "window \"\(base)\" is not defined")
+    }
+    guard named.base == nil else {
+      throw .state("0A000", "a chained window reference is not yet supported")
+    }
+    return named
+  }
+}
+
+extension Expression {
+  /// This expression with every window reference (`OVER w`) inlined to the
+  /// window `windows` defines — the resolution prelude run before any structural
+  /// walk descends a window specification, so a named window's `PARTITION BY`/
+  /// `ORDER BY` expressions are visible to the subquery, aggregate, and
+  /// comparison walks exactly as an inline `OVER (…)` spec's are, keeping the
+  /// run and validate paths in lockstep by construction. It mirrors the descent
+  /// of `collect(windows:)`: a nested scalar `subquery` or an aggregate's
+  /// argument is its own scope (its own `WINDOW` clause resolved when it
+  /// re-enters `expanded`), so neither is descended here.
+  internal func resolving(_ windows: Array<NamedWindow>)
+      throws(SQLError) -> Expression {
+    switch self {
+    case .column, .literal, .subquery, .aggregate:
+      self
+    case let .window(function, spec):
+      .window(function: function, spec: try spec.resolved(against: windows))
+    case let .call(name, arguments):
+      .call(name: name, arguments: try arguments.map { argument throws(SQLError)
+        in try argument.resolving(windows)
+      })
+    case let .binary(op, lhs, rhs):
+      .binary(op, try lhs.resolving(windows), try rhs.resolving(windows))
+    case let .case(whens, otherwise):
+      .case(try whens.map { branch throws(SQLError) in
+        When(when: try branch.when.resolving(windows),
+             then: try branch.then.resolving(windows))
+      }, else: try otherwise?.resolving(windows))
+    case let .cast(operand, type):
+      .cast(try operand.resolving(windows), type)
+    case let .coalesce(arguments):
+      .coalesce(try arguments.map { argument throws(SQLError) in
+        try argument.resolving(windows)
+      })
+    case let .nullif(lhs, rhs):
+      .nullif(try lhs.resolving(windows), try rhs.resolving(windows))
+    case let .grouping(arguments):
+      .grouping(try arguments.map { argument throws(SQLError) in
+        try argument.resolving(windows)
+      })
+    }
+  }
+}
+
+extension Predicate.Operand {
+  /// This LIKE pattern/escape operand with any window reference in an
+  /// expression operand inlined — a `:parameter` carries none.
+  fileprivate func resolving(_ windows: Array<NamedWindow>)
+      throws(SQLError) -> Predicate.Operand {
+    switch self {
+    case let .expression(expression):
+      .expression(try expression.resolving(windows))
+    case .parameter:
+      self
+    }
+  }
+}
+
+extension Predicate {
+  /// This predicate with every window reference (`OVER w`) inlined — the
+  /// `Expression.resolving` companion for a `CASE` guard's predicate. It
+  /// mirrors the descent of `collect(windows:)`; an `EXISTS`/`IN (Q)` subquery
+  /// is its own scope, so a window inside it is not descended here.
+  internal func resolving(_ windows: Array<NamedWindow>)
+      throws(SQLError) -> Predicate {
+    switch self {
+    case let .comparison(left, op, right):
+      .comparison(left: try left.resolving(windows), op: op,
+                  right: try right.resolving(windows))
+    case let .bound(left, op, parameter):
+      .bound(left: try left.resolving(windows), op: op, parameter: parameter)
+    case let .null(expression, negated):
+      .null(try expression.resolving(windows), negated: negated)
+    case let .membership(operand, values, negated):
+      .membership(try operand.resolving(windows),
+                  try values.map { value throws(SQLError) in
+                    try value.resolving(windows)
+                  }, negated: negated)
+    case let .rows(lhs, op, rhs):
+      .rows(try lhs.map { l throws(SQLError) in try l.resolving(windows) }, op,
+            try rhs.map { r throws(SQLError) in try r.resolving(windows) })
+    case let .among(lhs, rows, negated):
+      .among(try lhs.map { l throws(SQLError) in try l.resolving(windows) },
+             try rows.map { row throws(SQLError) in
+               try row.map { r throws(SQLError) in try r.resolving(windows) }
+             }, negated: negated)
+    case let .like(operand, pattern, escape, negated):
+      .like(try operand.resolving(windows),
+            pattern: try pattern.resolving(windows),
+            escape: try escape?.resolving(windows), negated: negated)
+    case let .between(test, lower, upper, negated):
+      .between(try test.resolving(windows), try lower.resolving(windows),
+               try upper.resolving(windows), negated: negated)
+    case let .distinct(lhs, rhs, negated):
+      .distinct(try lhs.resolving(windows), try rhs.resolving(windows),
+                negated: negated)
+    case .exists:
+      self
+    case let .within(lhs, query, negated):
+      .within(try lhs.map { l throws(SQLError) in try l.resolving(windows) },
+              query, negated: negated)
+    case let .quantified(lhs, op, quantifier, query):
+      .quantified(try lhs.map { l throws(SQLError) in
+        try l.resolving(windows)
+      }, op, quantifier, query)
+    case let .truth(inner, value, negated):
+      .truth(try inner.resolving(windows), value: value, negated: negated)
+    case let .and(lhs, rhs):
+      .and(try lhs.resolving(windows), try rhs.resolving(windows))
+    case let .or(lhs, rhs):
+      .or(try lhs.resolving(windows), try rhs.resolving(windows))
+    case let .not(operand):
+      .not(try operand.resolving(windows))
+    }
+  }
+}
+
+extension Select {
+  /// This select with every `OVER w` reference in its projection and `ORDER BY`
+  /// inlined to the `WINDOW` clause's definition, and the clause dropped — the
+  /// resolution prelude the `Query.expanded` entry runs before any structural
+  /// walk, so a named window and the equivalent inline `OVER (…)` compile and
+  /// validate identically (a named window's specification is seen by the same
+  /// subquery/aggregate/comparison walks). A projection or `ORDER BY` are the
+  /// only clauses a window is allowed in (ISO 9075); a reference elsewhere is
+  /// rejected there, spec-independently, on both paths.
+  ///
+  /// A duplicate `WINDOW` name faults `42601`, and an `OVER w` naming an
+  /// undefined window faults `42704` — each on both paths, since the prelude is
+  /// shared. A select with no window clause and no window function is returned
+  /// unchanged.
+  internal var inlined: Select {
+    get throws(SQLError) {
+      // A duplicate named-window definition is a semantic error regardless of
+      // whether the query uses any window function.
+      var seen = Set<String>()
+      for definition in window {
+        guard seen.insert(definition.name.lowercased()).inserted else {
+          throw .state("42601",
+                       "window \"\(definition.name)\" is already defined")
+        }
+      }
+      // Nothing to inline unless the projection or `ORDER BY` bears a window.
+      // The clause is kept either way — compile validates every named
+      // definition against the source scope, whether or not it is referenced,
+      // rather than silently discarding an unused one.
+      guard windows else { return self }
+      let projection: Projection = switch projection {
+      case .all, .columns:
+        projection
+      case let .expressions(items):
+        .expressions(try items.map { item throws(SQLError) in
+          Projected(expression: try item.expression.resolving(window),
+                    alias: item.alias)
+        })
+      }
+      let order: Order? = if let order {
+        Order(keys: try order.keys.map { key throws(SQLError) in
+          switch key.sort {
+          case .ordinal:
+            key
+          case let .expression(expression):
+            Order.Key(sort: .expression(try expression.resolving(window)),
+                      ascending: key.ascending)
+          }
+        })
+      } else {
+        nil
+      }
+      return Select(distinct: distinct, projection: projection, from: from,
+                    joins: joins, predicate: predicate, grouping: grouping,
+                    having: having, window: window, order: order, limit: limit)
     }
   }
 }

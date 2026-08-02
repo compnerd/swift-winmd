@@ -1178,6 +1178,90 @@ struct WindowFunctionRejectionTests {
         .state("22023", "NTH_VALUE requires a positive position"))
   }
 
+  @Test func `an unused named window is validated before being dropped`()
+      throws {
+    // With no window function, the WINDOW clause is dropped — but not before
+    // each definition is validated: an undefined base and an unresolvable ORDER
+    // BY column each fault, rather than the query silently executing.
+    try rejects("SELECT x FROM T WINDOW w AS (missing)",
+                .state("42704", "window \"missing\" is not defined"))
+    try rejects("SELECT x FROM T WINDOW w AS (ORDER BY nonesuch)",
+                .column("nonesuch"))
+  }
+
+  @Test func `an unused but valid named window still runs`() throws {
+    // A resolvable unused definition is not an error — the query runs.
+    try fixture().expect("SELECT x FROM T WINDOW w AS (ORDER BY x)",
+                         yields: [[1], [2]])
+  }
+
+  @Test func `an unused definition is validated even beside a used window`()
+      throws {
+    // A window function is present, so the query runs the window path — but an
+    // undefined base in an unused definition is still an error, not accepted
+    // because nothing references it.
+    try rejects("SELECT ROW_NUMBER() OVER () FROM T WINDOW bad AS (missing)",
+                .state("42704", "window \"missing\" is not defined"))
+  }
+
+  @Test func `an unused definition is validated in an aggregate query`()
+      throws {
+    // An aggregate query routes through the grouped path ahead of the window and
+    // ordinary paths' checks, so its `WINDOW` clause is validated there too — an
+    // undefined base still faults rather than the query grouping regardless.
+    try rejects("SELECT SUM(x) FROM T WINDOW bad AS (missing)",
+                .state("42704", "window \"missing\" is not defined"))
+  }
+
+  @Test func `an unused definition resolves against the whole join scope`()
+      throws {
+    // `w` names a column of the joined `U`, absent from the FROM relation alone;
+    // it resolves against the full join scope the query's own clauses see, so
+    // the valid definition does not spuriously fault.
+    let catalog = try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(1)
+        Row(2)
+      }
+      Relation("U", ["y": .integer]) {
+        Row(2)
+        Row(3)
+      }
+    }
+    try catalog.expect(
+        """
+        SELECT T.x FROM T JOIN U ON T.x = U.y WINDOW w AS (ORDER BY U.y)
+        """,
+        yields: [[2]])
+  }
+
+  @Test func `an unused definition's own subquery is collected`() throws {
+    // The subquery lives only in the unused definition, not the projection or
+    // ORDER BY, so the subquery pre-pass must gather it too — otherwise
+    // validating `w` faults as if the subquery were in an unsupported position.
+    let catalog = try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(1)
+        Row(2)
+      }
+      Relation("U", ["y": .integer]) {
+        Row(9)
+      }
+    }
+    try catalog.expect(
+        "SELECT x FROM T WINDOW w AS (ORDER BY (SELECT 1 FROM U))",
+        yields: [[1], [2]])
+  }
+
+  @Test func `an unused definition's reversed frame is rejected`() throws {
+    // An unused definition's frame is validated structurally like a referenced
+    // one's: a reversed `CURRENT ROW AND 1 PRECEDING` faults rather than the
+    // query silently running.
+    try rejects(
+        "SELECT x FROM T WINDOW w AS (ROWS BETWEEN CURRENT ROW AND 1 PRECEDING)",
+        .state("42601", "a window frame start follows its end"))
+  }
+
   @Test func `a LEAD default irreconcilable with the value is rejected`()
       throws {
     // Integer `x` and a text default share no common type, so the default

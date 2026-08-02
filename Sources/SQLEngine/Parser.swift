@@ -315,7 +315,7 @@ internal struct Parser: ~Escapable {
                             projection: select.projection, from: select.from,
                             joins: select.joins, predicate: select.predicate,
                             grouping: select.grouping, having: select.having,
-                            order: order, limit: limit))
+                            window: select.window, order: order, limit: limit))
     }
     return .ordered(query, distinct: false, order: order, limit: limit,
                     generated: 0)
@@ -570,6 +570,10 @@ internal struct Parser: ~Escapable {
     } else {
       nil
     }
+    // The named-window clause follows `HAVING` and precedes `ORDER BY` (ISO
+    // 9075) — the window definitions an `OVER w` reference in the projection or
+    // `ORDER BY` resolves to.
+    let window = try match(.window) ? try windows() : []
 
     // ORDER BY / OFFSET·FETCH are not consumed here: they belong to the
     // enclosing `<query expression>`, not this `<query specification>`, so
@@ -581,7 +585,7 @@ internal struct Parser: ~Escapable {
     // schema time (by resolved identity), not desugared here.
     return Select(distinct: distinct, projection: projection, from: from,
                   joins: joins, predicate: predicate, grouping: grouping,
-                  having: having, order: nil, limit: nil)
+                  having: having, window: window, order: nil, limit: nil)
   }
 
   /// Parses `BY <element> (',' <element>)*` (the `GROUP` keyword is already

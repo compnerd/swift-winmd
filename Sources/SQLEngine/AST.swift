@@ -488,6 +488,14 @@ public struct Select: Hashable, Sendable {
   /// whole-result group.
   public let having: Predicate?
 
+  /// The named windows the `WINDOW` clause defines (`WINDOW w AS (…), …`), in
+  /// source order — the specifications an `OVER w` reference resolves to.
+  /// Empty when no `WINDOW` clause is written. The clause follows `HAVING` and
+  /// precedes `ORDER BY` (ISO 9075); a reference is inlined to its window's
+  /// specification by the `Query.expanded` prelude, before any structural walk,
+  /// so the field is dropped from the query the pipeline compiles and runs.
+  public let window: Array<NamedWindow>
+
   /// The ordering applied to the result, if any.
   public let order: Order?
 
@@ -497,8 +505,8 @@ public struct Select: Hashable, Sendable {
   public init(distinct: Bool = false, projection: Projection,
               from: Relation, joins: Array<Join> = [],
               predicate: Predicate? = nil, grouping: Grouping = .keys([]),
-              having: Predicate? = nil, order: Order? = nil,
-              limit: Limit? = nil) {
+              having: Predicate? = nil, window: Array<NamedWindow> = [],
+              order: Order? = nil, limit: Limit? = nil) {
     self.distinct = distinct
     self.projection = projection
     self.from = from
@@ -506,6 +514,7 @@ public struct Select: Hashable, Sendable {
     self.predicate = predicate
     self.grouping = grouping
     self.having = having
+    self.window = window
     self.order = order
     self.limit = limit
   }

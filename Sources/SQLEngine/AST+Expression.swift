@@ -164,6 +164,15 @@ extension WindowFunction {
 /// fixing the row order the ranking functions read (`nil` when none is
 /// written).
 public struct WindowSpec: Hashable, Sendable {
+  /// The name of a `WINDOW` clause window this specification references
+  /// (`OVER w`), or `nil` for an inline specification (`OVER (…)`). A reference
+  /// is a forward one — the `WINDOW` clause follows the projection — so it
+  /// carries no `PARTITION`/`ORDER`/frame of its own here; it is inlined to the
+  /// named window's specification by the `Query.expanded` prelude before any
+  /// structural walk descends it, so a bare reference and the inline form
+  /// resolve identically.
+  public let base: String?
+
   /// The `PARTITION BY` keys — the rows split into one partition per distinct
   /// key combination — empty when no `PARTITION BY` is written.
   public let partition: Array<Expression>
@@ -177,11 +186,30 @@ public struct WindowSpec: Hashable, Sendable {
   /// through the current peer group with one).
   public let frame: Frame?
 
-  public init(partition: Array<Expression> = [], order: Order? = nil,
-              frame: Frame? = nil) {
+  public init(base: String? = nil, partition: Array<Expression> = [],
+              order: Order? = nil, frame: Frame? = nil) {
+    self.base = base
     self.partition = partition
     self.order = order
     self.frame = frame
+  }
+}
+
+/// A named window definition — one `name AS (<window spec>)` entry of a
+/// `SELECT`'s `WINDOW` clause, a specification a later `OVER name` reference
+/// resolves to. The `spec` is an ordinary `WindowSpec` (it may carry
+/// `PARTITION`/`ORDER`/frame), inlined into each reference by the
+/// `Query.expanded` prelude.
+public struct NamedWindow: Hashable, Sendable {
+  /// The window's name, the identifier an `OVER name` reference spells.
+  public let name: String
+
+  /// The window's specification.
+  public let spec: WindowSpec
+
+  public init(name: String, spec: WindowSpec) {
+    self.name = name
+    self.spec = spec
   }
 }
 

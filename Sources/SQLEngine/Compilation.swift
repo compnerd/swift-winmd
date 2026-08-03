@@ -1724,28 +1724,6 @@ extension Catalog where Self: ~Escapable {
         limit: select.limit)
   }
 
-  /// Compiles a window `select` — one projecting or ordering by a window
-  /// function, with no aggregation — into `Project(Limit(Sort(Window(Select(
-  /// scan)))))`, the `Select` the WHERE over the single FROM relation and the
-  /// `Window` appending each window's result.
-  ///
-  /// The distinct windows are collected from the projection and the `ORDER BY`,
-  /// each lowered to a `Windowing` (its `PARTITION BY` keys and window `ORDER
-  /// BY` over the source scope) and deduped. The `window` node passes the
-  /// source's rows through and appends one slot per windowing; the projection
-  /// and query `ORDER BY` lower against that widened slot space through a
-  /// `Windowed`, a window reading its appended slot and an ordinary column its
-  /// own packed source slot.
-  ///
-  /// The source materialises exactly the base ordinals the windows, the WHERE,
-  /// the projection, and the `ORDER BY` read — discovered by a first lowering
-  /// over an identity source space (a window term lands past the source width,
-  /// so it names no base ordinal), then packed. A second lowering over the
-  /// packed slots yields the terms the plan carries.
-  ///
-  /// This first slice supports a single relation: a window over a join faults
-  /// the feature diagnostic (on both the run and validate paths) until the join
-  /// chain is threaded through the window source.
   /// Validates every named window `windows` defines against `scope`, resolving
   /// each spec's base (an undefined base faults `42704`) then its partition and
   /// order keys against the scope (an unknown column faults) exactly as a
@@ -1768,36 +1746,45 @@ extension Catalog where Self: ~Escapable {
     }
   }
 
+  /// Compiles a window `select` — one projecting or ordering by a window
+  /// function, with no aggregation — into `Project(Limit(Sort(Window(Select(
+  /// source)))))`, the `Select` the WHERE over the source and the `Window`
+  /// appending each window's result. The source is the FROM relation's scan or,
+  /// when the query joins, the left-deep join chain the plain join path builds
+  /// (INNER/OUTER/CROSS·OUTER APPLY) — so a window partitions and orders over
+  /// the joined rows exactly as it does over a single relation's.
+  ///
+  /// The distinct windows are collected from the projection and the `ORDER BY`,
+  /// each lowered to a `Windowing` (its `PARTITION BY` keys and window `ORDER
+  /// BY` over the source scope) and deduped. The `window` node passes the
+  /// source's rows through and appends one slot per windowing; the projection
+  /// and query `ORDER BY` lower against that widened slot space through a
+  /// `Windowed`, a window reading its appended slot and an ordinary column its
+  /// own packed source slot.
+  ///
+  /// The source materialises exactly the combined base ordinals the windows,
+  /// the WHERE, the join matches, the LATERAL correlations, the projection, and
+  /// the `ORDER BY` read — discovered by a first lowering over an identity
+  /// combined source space (a window term lands past the source width, so it
+  /// names no base ordinal), then packed per relation. A second lowering over
+  /// the packed slots yields the terms the plan carries.
   internal borrowing func windowed(_ select: Select, _ relation: Relation,
                                    _ from: Resolved, _ context: Context)
       throws(SQLError) -> Plan {
-    guard select.joins.isEmpty else {
-      throw .state("0A000",
-                   "a window function with a join is not yet supported")
-    }
-    let scope = Scope([(relation, from.schema)])
-    let plans = try subquery(of: select, context, enclosing: scope)
+    // The FROM/JOIN front half — the combined join `scope`, each joined
+    // relation's `Resolved`, the correlated `laterals`, the lowered join
+    // `matches` and WHERE `predicate`, and the nested-subquery `plans` (which
+    // also validates the WINDOW clause) — shared with the grouped and plain
+    // join paths.
+    let front = try front(select, relation, from, context)
+    let scope = front.scope
+    let predicate = front.predicate
     let routines = context.routines
 
-    // Validate every named window the clause defines, including one no window
-    // function references — a referenced window is also resolved through its
-    // inlined use below, but an unused definition would otherwise be dropped
-    // unchecked.
-    try validate(named: select.window, against: scope, routines,
-                 subquery: plans.rest)
-
-    // The WHERE lowers below the window node, in the source's base-ordinal
-    // space; a correlated column of this query is admitted here, as the run's
-    // WHERE lowering allows.
-    var predicate: Filter? = nil
-    if let clause = select.predicate {
-      predicate = try scope.lower(clause, routines, subquery: plans.rest)
-    }
-
     // The distinct windows the query computes, in first-appearance order,
-    // gathered from the projection and the `ORDER BY` and resolved to
-    // base-ordinal windowings. An unsupported function faults the feature
-    // diagnostic in parity with the schema type derive.
+    // gathered from the projection and the `ORDER BY`. An unsupported function
+    // or frame faults the feature diagnostic in parity with the schema type
+    // derive.
     var expressions = Array<Expression>()
     for expression in select.projection.projected {
       expression.collect(windows: &expressions)
@@ -1818,44 +1805,70 @@ extension Catalog where Self: ~Escapable {
       }
     }
 
-    // First pass: lower the projection and `ORDER BY` over an identity source
-    // space. This both discovers the base ordinals they read — a window term
-    // lands at or past the source width, so it contributes no base ordinal — and
-    // gathers the query's windowings, which the `Windowed` appends as it first
-    // meets each (sharing a deterministic window, keeping a non-deterministic one
-    // distinct). Their partition/order references, and the WHERE's, join those.
+    // First pass: lower the projection and `ORDER BY` over an identity combined
+    // source space (the FROM relation and every joined one end to end). This
+    // discovers the base ordinals they read — a window term lands at or past
+    // the source width, contributing no base ordinal — and gathers the query's
+    // windowings, which the `Windowed` appends as it first meets each (sharing
+    // a deterministic window, keeping a non-deterministic one distinct). Their
+    // partition/order references, the WHERE's, each join match's, and each
+    // LATERAL apply's correlation slots join the referenced set.
     let space = scope.layout.reduce(0) { $0 + $1.extent }
     let identity =
         Dictionary(uniqueKeysWithValues: (0 ..< space).map { ($0, $0) })
     var probe = Windowed(scope, identity, width: space)
     let probed = try probe.terms(select.projection, routines,
-                                 subquery: plans.rest)
+                                 subquery: front.plans.rest)
     var references = Set<Int>()
     for term in probed { term.references(into: &references) }
     if let clause = select.order {
       for key in try probe.order(clause, probed, routines,
-                                 subquery: plans.rest) {
+                                 subquery: front.plans.rest) {
         key.term.references(into: &references)
       }
     }
     for windowing in probe.windowings { windowing.references(into: &references) }
     predicate?.references(into: &references)
+    for match in front.matches { match.references(into: &references) }
+    // A LATERAL apply reads its correlation's outer ordinals from the left
+    // chain's record, so those preceding-relation ordinals must be materialised
+    // even when no clause references them.
+    for lateral in front.laterals {
+      references.formUnion(lateral?.correlation.slots ?? [])
+    }
     // The window results occupy slots at or past the source width; only the
-    // base ordinals (below it) name columns the scan materialises.
-    let ordinals = references.filter { $0 < space }.sorted()
-    let slot = invert(ordinals)
+    // base ordinals (below it) name columns the source materialises. Pack them
+    // per relation in chain order — relation `i`'s referenced ordinals take a
+    // contiguous slot run after every earlier relation's — building the
+    // combined-ordinal → slot map and each relation's leaf ordinals. For a
+    // single relation this is the flat `invert(ordinals)` the old path used.
+    let combined = references.filter { $0 < space }.sorted()
+    var slot = Dictionary<Int, Int>(minimumCapacity: combined.count)
+    var locals = Array<Array<Int>>()
+    var packed = 0
+    for (offset, extent) in scope.layout {
+      let local = combined.compactMap {
+        offset <= $0 && $0 < offset + extent ? $0 - offset : nil
+      }
+      for index in local.indices {
+        slot[offset + local[index]] = packed + index
+      }
+      locals.append(local)
+      packed += local.count
+    }
 
     // Second pass: lower against the packed source slots — a window reads its
-    // appended slot (source width plus its index), an ordinary column its packed
-    // slot. It gathers the same windowings (the same walk and sharing rule) now
-    // over the source slot space, so windowing `j` reads packed source cells.
-    var windowed = Windowed(scope, slot, width: ordinals.count)
+    // appended slot (packed source width plus its index), an ordinary column
+    // its packed slot. It gathers the same windowings (the same walk and
+    // sharing rule) over the packed slot space, so windowing `j` reads packed
+    // source cells.
+    var windowed = Windowed(scope, slot, width: combined.count)
     let projection = try windowed.terms(select.projection, routines,
-                                        subquery: plans.rest)
+                                        subquery: front.plans.rest)
     var order = Array<SortKey>()
     if let clause = select.order {
       order = try windowed.order(clause, projection, routines,
-                                 subquery: plans.rest)
+                                 subquery: front.plans.rest)
     }
     // Under DISTINCT every `ORDER BY` key must be a select-list value (see
     // `distinct`); the keys and projection are in the window's output slot
@@ -1864,7 +1877,30 @@ extension Catalog where Self: ~Escapable {
       order = try distinct(clause.keys, order, projection)
     }
 
-    var chain = from.leaf(ordinals)
+    // The left-deep source chain (as the plain join path builds it): from the
+    // FROM relation's leaf, each join folds in the next relation — an INNER
+    // join a `Select` on its ON over the product, an OUTER join an `outer`
+    // node, a LATERAL join a correlated `apply`. The WHERE then filters the
+    // whole chain below the window node, so window functions see the post-WHERE
+    // rows (ISO).
+    var chain = from.leaf(locals[0])
+    for index in select.joins.indices {
+      let on = front.matches[index].remapped(through: slot)
+      if let lateral = front.laterals[index] {
+        chain = .apply(chain, key: lateral.key,
+                       correlation: lateral.correlation.remapped(through: slot),
+                       ordinals: locals[index + 1], on: on,
+                       kind: select.joins[index].kind)
+        continue
+      }
+      let leaf = front.joined[index].leaf(locals[index + 1])
+      switch select.joins[index].kind {
+      case .inner:
+        chain = .select(on, .product(chain, leaf))
+      case .left, .right, .full:
+        chain = .outer(chain, leaf, on: on, kind: select.joins[index].kind)
+      }
+    }
     if let predicate {
       chain = .select(predicate.remapped(through: slot), chain)
     }

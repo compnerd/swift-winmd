@@ -65,17 +65,6 @@ internal struct Context {
   /// recording the correlation. `nil` at the top level (no enclosing query).
   internal let outer: Outer?
 
-  /// Whether the query being resolved is a LATERAL derived table's body — set
-  /// only by `lateral(_:against:_:)` as it derives/compiles the body. Per ISO
-  /// 9075 a `LATERAL` body's preceding-FROM references are in scope throughout
-  /// its query expression, including the select list, so the body admits a
-  /// correlated column everywhere (not only its `WHERE`/`ON`). This flag
-  /// threads into the `Resolution`/`SubqueryCheck` the body's lowering and
-  /// validation build (`everywhere`), lifting the projection-correlation bar
-  /// for the lateral body alone — an ordinary subquery's projection stays
-  /// barred (`false`).
-  internal let lateral: Bool
-
   /// Whether the query being resolved is a nested-subquery shape pre-pass — the
   /// cursor-free derive that records a nested subquery's width, arity, and
   /// single-column type ahead of the reachability walk. Set only at the
@@ -117,7 +106,7 @@ internal struct Context {
                 subqueries: Subqueries = Subqueries(),
                 visited: Set<String> = [], validate: Bool = true,
                 subscope: Subscope = .caller, outer: Outer? = nil,
-                lateral: Bool = false, shape: Bool = false,
+                shape: Bool = false,
                 comparability: Bool = false) {
     self.relations = relations
     self.routines = routines
@@ -127,7 +116,6 @@ internal struct Context {
     self.validate = validate
     self.subscope = subscope
     self.outer = outer
-    self.lateral = lateral
     self.shape = shape
     self.comparability = comparability
   }
@@ -139,7 +127,7 @@ internal struct Context {
   internal func scoping(_ relations: ScopedRelations) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: lateral, shape: shape,
+            subscope: subscope, outer: outer, shape: shape,
             comparability: comparability)
   }
 
@@ -176,7 +164,7 @@ internal struct Context {
   internal func binding(_ bindings: Bindings) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: lateral, shape: shape,
+            subscope: subscope, outer: outer, shape: shape,
             comparability: comparability)
   }
 
@@ -187,7 +175,7 @@ internal struct Context {
   internal func resolving(_ subqueries: Subqueries) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: lateral, shape: shape,
+            subscope: subscope, outer: outer, shape: shape,
             comparability: comparability)
   }
 
@@ -222,7 +210,7 @@ internal struct Context {
     return Context(relations: relations, routines: routines,
                    bindings: bindings, subqueries: subqueries,
                    visited: visited, validate: validate, subscope: subscope,
-                   outer: outer, lateral: lateral, shape: shape,
+                   outer: outer, shape: shape,
                    comparability: comparability)
   }
 
@@ -232,7 +220,7 @@ internal struct Context {
   internal func validating(_ flag: Bool) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: flag,
-            subscope: subscope, outer: outer, lateral: lateral, shape: shape,
+            subscope: subscope, outer: outer, shape: shape,
             comparability: comparability)
   }
 
@@ -245,7 +233,7 @@ internal struct Context {
   internal func shaping() -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: lateral, shape: true,
+            subscope: subscope, outer: outer, shape: true,
             comparability: comparability)
   }
 
@@ -258,7 +246,7 @@ internal struct Context {
   internal func comparing() -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: lateral, shape: shape,
+            subscope: subscope, outer: outer, shape: shape,
             comparability: true)
   }
 
@@ -268,7 +256,7 @@ internal struct Context {
   internal func scoped(as subscope: Subscope) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: lateral, shape: shape,
+            subscope: subscope, outer: outer, shape: shape,
             comparability: comparability)
   }
 
@@ -287,21 +275,7 @@ internal struct Context {
   internal func with(outer: Outer?) -> Context {
     Context(relations: relations, routines: routines, bindings: bindings,
             subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: lateral, shape: shape,
-            comparability: comparability)
-  }
-
-  /// A copy of this context marking the query it resolves as a LATERAL derived
-  /// table's body (`lateral`) — the single seam `lateral(_:against:_:)` routes
-  /// its body's schema derivation and plan compile through, so the body's
-  /// `Resolution`/`SubqueryCheck` admit a correlated preceding-FROM column
-  /// everywhere, including the projection, per ISO. Every other field is
-  /// preserved; the flag is scoped to the body's own lowering (a nested
-  /// non-lateral body clears it through `body(_:)`).
-  internal func lateralizing() -> Context {
-    Context(relations: relations, routines: routines, bindings: bindings,
-            subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: true, shape: shape,
+            subscope: subscope, outer: outer, shape: shape,
             comparability: comparability)
   }
 
@@ -312,23 +286,9 @@ internal struct Context {
   /// site; a derived table is uncorrelated), so an unbound column in either
   /// must fault rather than bind outward to the caller. Every other field —
   /// the relation overlay, routines, bindings, subquery results, the visited
-  /// guard, the validate gate, and the subscope — is preserved; `outer` resets
-  /// to `nil` (restoring the top-level default) and the LATERAL-body flag
-  /// clears, so a non-lateral body nested inside a lateral one does NOT inherit
-  /// the everywhere-correlation admission.
+  /// guard, the validate gate, and the subscope — is preserved; only `outer`
+  /// resets to `nil`, restoring the top-level default.
   internal func uncorrelated() -> Context {
-    with(outer: nil).unlateralized()
-  }
-
-  /// A copy of this context with the LATERAL-body flag cleared — the reset
-  /// `uncorrelated()`/`body(_:)` fold in, and the seam a nested ordinary
-  /// subquery within a lateral body compiles under, so a body that must NOT
-  /// correlate against the caller (a view or a non-lateral derived table) does
-  /// not carry an enclosing lateral body's everywhere-correlation admission.
-  internal func unlateralized() -> Context {
-    Context(relations: relations, routines: routines, bindings: bindings,
-            subqueries: subqueries, visited: visited, validate: validate,
-            subscope: subscope, outer: outer, lateral: false, shape: shape,
-            comparability: comparability)
+    with(outer: nil)
   }
 }

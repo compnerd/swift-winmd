@@ -423,39 +423,26 @@ struct LateralProjectionCorrelationTests {
     #expect(columns.map(\.type) == [.integer, .integer])
   }
 
-  @Test func `an ordinary subquery projection still cannot correlate`() throws {
-    // The bar lift is LATERAL-ONLY: an ordinary correlated scalar subquery in
-    // the projection — `SELECT (VALUES (T.Id)) FROM T` — still faults
-    // `.unsupported`, since a subquery's projection is a barred clause position
-    // (no evaluator for an outer column there). This pins the LATERAL-only
-    // scoping — the everywhere-correlation admission is set for a LATERAL body
-    // alone, never an ordinary subquery.
-    try fixture().expect(
-        "SELECT (VALUES (T.Id)) FROM T",
-        fails: .state("0A000",
-            "a correlated column is only supported in a subquery's WHERE"))
+  @Test func `an ordinary subquery projection correlates`() throws {
+    // A correlated column is admitted in every subquery clause, not only its
+    // WHERE: `SELECT (VALUES (T.Id)) FROM T` names the outer `T.Id` in the
+    // scalar subquery's projection, bound per outer row, so each row projects
+    // its own `Id`.
+    try fixture().expect("SELECT (VALUES (T.Id)) FROM T",
+                         yields: [[1], [2], [3]])
   }
 
-  @Test func `an ordinary nested subquery inside a LATERAL body is not lateralised`()
+  @Test func `a nested subquery inside a LATERAL body correlates the outer`()
       throws {
-    // The LATERAL everywhere-correlation admission covers ONLY the lateral
-    // body's own row constructor, never a nested ordinary subquery within it.
-    // So an ordinary correlated scalar subquery inside a lateral `VALUES` row —
-    // `VALUES ((VALUES (T.Id)))` — is barred at the strict schema check exactly
-    // as the non-lateral twin `SELECT (VALUES (T.Id)) FROM T` is, since the
-    // nested subquery builds its own Resolution with the lateral flag cleared
-    // (`everywhere: false`). Threading the lateral flag into the nested
-    // subquery instead admitted its `T.Id` everywhere and lowered it to a
-    // correlated parameter the nested subquery never wires — a wrong,
-    // mismatched fault (`no such column 'Id'`) rather than the correct barred
-    // one — the bug the cleared flag fixes.
-    let query = try parse(query:
+    // A correlated column is admitted in every subquery clause, so a nested
+    // ordinary scalar subquery inside a lateral `VALUES` row —
+    // `VALUES ((VALUES (T.Id)))` — resolves its `T.Id` to the outer `T` row the
+    // lateral body ranges over, as the lateral body's own constructor does.
+    // Each `T` row projects its own `Id` through `d.x`.
+    try fixture().expect(
         "SELECT d.x FROM T " +
-        "JOIN LATERAL (VALUES ((VALUES (T.Id)))) AS d(x) ON 1 = 1")
-    #expect(throws: SQLError.state("0A000",
-        "a correlated column is only supported in a subquery's WHERE")) {
-      _ = try fixture().columns(of: query, validate: true)
-    }
+        "JOIN LATERAL (VALUES ((VALUES (T.Id)))) AS d(x) ON 1 = 1",
+        yields: [[1], [2], [3]])
   }
 
   @Test func `a LATERAL VALUES projects a preceding column`() throws {
@@ -588,17 +575,72 @@ struct LateralAggregateCorrelationTests {
         yields: [[1, 2], [2, 1], [3, 0]])
   }
 
-  @Test func `an ordinary grouped subquery projection still cannot correlate`()
-      throws {
-    // The grouped bar lift is LATERAL-ONLY: an ordinary correlated grouped
-    // scalar subquery that projects an outer column — `SELECT (SELECT T.Id FROM S
-    // GROUP BY S.k) FROM T` — STILL faults `.unsupported`, since a subquery's
-    // grouped projection is a barred clause position. This pins the exemption on
-    // the LATERAL `everywhere` surface, never opened for every grouped subquery.
+  @Test func `an ordinary grouped subquery projection correlates`() throws {
+    // A correlated column is admitted in a grouped subquery's projection: the
+    // inner `SELECT T.Id FROM S WHERE S.k = T.Id GROUP BY S.k` collapses `S` to
+    // the single group matching the outer row and projects that row's `T.Id`.
+    // Id 1 and Id 2 each match one group; Id 3 matches no `S` row, so the empty
+    // grouped subquery yields NULL.
     try fixture().expect(
-        "SELECT (SELECT T.Id FROM S GROUP BY S.k) FROM T",
-        fails: .state("0A000",
-            "a correlated column is only supported in a subquery's WHERE"))
+        "SELECT (SELECT T.Id FROM S WHERE S.k = T.Id GROUP BY S.k) FROM T",
+        yields: [[1], [2], [nil]])
+  }
+
+  @Test func `a correlated column resolves in a subquery's ORDER BY`() throws {
+    // A correlated column is admitted in a subquery's ORDER BY: the inner
+    // `EXISTS` body orders by the outer `T.Id`, bound per outer row. `S` has a
+    // matching `k` for Id 1 and Id 2 but none for Id 3.
+    try fixture().expect(
+        "SELECT T.Id FROM T " +
+        "WHERE EXISTS (SELECT 1 FROM S WHERE S.k = T.Id ORDER BY T.Id)",
+        yields: [[1], [2]])
+  }
+
+  @Test func `a correlated column resolves in a subquery's HAVING`() throws {
+    // A correlated column is admitted in a subquery's HAVING: the grouped
+    // `EXISTS` body compares each group's `SUM(S.x)` against the outer `T.Id`.
+    // Group k=1 sums to 201, k=2 to 200. Id 1 keeps both groups, Id 2 keeps
+    // k=1 alone, Id 3 keeps neither, so the subquery is empty and no row shows.
+    try fixture().expect(
+        "SELECT T.Id FROM T WHERE EXISTS " +
+        "(SELECT S.k FROM S GROUP BY S.k HAVING SUM(S.x) > T.Id * 100)",
+        yields: [[1], [2]])
+  }
+
+  @Test func `a correlated column resolves as a subquery's GROUP BY key`()
+      throws {
+    // A correlated column is admitted as a GROUP BY key: the outer `T.Id` joins
+    // the grouping columns of the `EXISTS` body. `S` is non-empty for every
+    // outer row, so each grouped subquery has a row and `EXISTS` holds.
+    try fixture().expect(
+        "SELECT T.Id FROM T " +
+        "WHERE EXISTS (SELECT 1 FROM S GROUP BY S.k, T.Id)",
+        yields: [[1], [2], [3]])
+  }
+
+  @Test func `a set-op carrier ORDER BY correlates the outer column`() throws {
+    // A correlated column drives a set operation's carrier `ORDER BY`: the
+    // scalar subquery's `UNION` output lacks `Id`, so `ORDER BY T.Id` names the
+    // enclosing `T` row. The run resolves the key against the enclosing scope,
+    // and `columns(of:validate:)` must admit it identically rather than
+    // rejecting it as an unknown column. Both arms yield `MAX(S.k)` (2), so the
+    // `UNION` collapses to one row and the scalar is well-formed.
+    let sql = "SELECT (SELECT MAX(S.k) FROM S UNION SELECT MAX(S.k) FROM S " +
+              "ORDER BY T.Id) FROM T"
+    #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                .count == 1)
+    try fixture().expect(sql, yields: [[2], [2], [2]])
+  }
+
+  @Test func `a set-op carrier ORDER BY correlates inside a comparison`()
+      throws {
+    // The comparability pass over the run's carrier `ORDER BY` must resolve a
+    // correlated column nested in a comparison (`T.Id > 1`) against the same
+    // enclosing scope, so a correlated key faults nowhere the run does not.
+    try fixture().expect(
+        "SELECT (SELECT MAX(S.k) FROM S UNION SELECT MAX(S.k) FROM S " +
+        "ORDER BY CASE WHEN T.Id > 1 THEN 0 ELSE 1 END) FROM T",
+        yields: [[2], [2], [2]])
   }
 
   @Test func `a LATERAL join under an aggregate is now supported`() throws {

@@ -319,20 +319,17 @@ struct ScalarSubqueryCorrelationTests {
         yields: [[10], [20], [30]])
   }
 
-  @Test func `a correlated column in the inner projection is unsupported`()
-      throws {
-    // The minimal (b) cut admits a correlated column ONLY in the inner
-    // subquery's WHERE. One in the inner projection (`SELECT T.V …`) needs the
-    // general outer-row evaluator, so it is diagnosed unsupported at both
-    // `columns(of:)` and run rather than mis-resolved.
-    let query = try parse(query: "SELECT (SELECT T.V FROM S) FROM T")
-    #expect(throws: SQLError.self) {
-      try fixture().columns(of: query, validate: true)
-    }
+  @Test func `a correlated column in the inner projection resolves`() throws {
+    // A correlated column is admitted in every clause, not only the inner
+    // WHERE: `SELECT T.V` in the inner projection binds the outer row's `V` per
+    // re-execution. The inner `WHERE S.V = T.V` collapses it to one row so the
+    // scalar subquery yields the outer `V` itself.
+    let query = try parse(query:
+        "SELECT (SELECT T.V FROM S WHERE S.V = T.V) FROM T")
+    #expect(try fixture().columns(of: query, validate: true).count == 1)
     try fixture().expect(
-        "SELECT (SELECT T.V FROM S) FROM T",
-        fails: .state("0A000",
-            "a correlated column is only supported in a subquery's WHERE"))
+        "SELECT (SELECT T.V FROM S WHERE S.V = T.V) FROM T",
+        yields: [[10], [20], [30]])
   }
 
   @Test func `a correlated WHERE subquery still admits and runs`() throws {

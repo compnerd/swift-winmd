@@ -267,9 +267,9 @@ extension Catalog where Self: ~Escapable {
     // its width and single-column type, each discovering its correlation
     // against this select's own scope (`enclosing`) — and pass it to the
     // projection walk so an output type for a `(SELECT …)` matches the type the
-    // run advertises. The projection walk is barred (a correlated column of
-    // this query in the projection is diagnosed, as the run's projection
-    // lowering bars it). Resolve over the augmented context so a subquery
+    // run advertises. The projection walk admits a correlated column of this
+    // query, resolving it against the enclosing scope as the run's projection
+    // lowering does. Resolve over the augmented context so a subquery
     // naming this select's own arm-local derived alias binds it, while
     // `subquery(of:)` reveals the base so the subquery's own FROM sees no
     // derived alias (a CTE a same-named derived alias shadows resolved beneath
@@ -289,11 +289,11 @@ extension Catalog where Self: ~Escapable {
     // one walk yields each column's name, type, AND `unconstrained` mask
     // together — a constant-NULL projection or a reference to an unconstrained
     // (local or correlated) source column carries the mask through the same
-    // resolution as the type, so the two cannot diverge. The projection walk is
-    // barred (a correlated column of this query in the projection is diagnosed,
-    // as the run's projection lowering bars it).
+    // resolution as the type, so the two cannot diverge. The projection walk
+    // admits a correlated column of this query, resolving it against the
+    // enclosing scope as the run's projection lowering does.
     return try scope.columns(of: select.projection, augmented.routines,
-                             subquery: plans.rest.barred)
+                             subquery: plans.rest)
   }
 
   /// The output columns of `query`, type-unified across every set-operation arm
@@ -390,7 +390,7 @@ extension Catalog where Self: ~Escapable {
         }
         let typed = try Scope([]).columns(of: .expressions(items),
                                           context.routines,
-                                          subquery: resolution.barred)
+                                          subquery: resolution)
         if let current = folded {
           folded = try current.indices.map { index throws(SQLError) in
             try merge(current[index], typed[index], shape: context.shape)
@@ -835,12 +835,11 @@ extension Catalog where Self: ~Escapable {
     }
     // Carry this select's own enclosing scope `context.outer` so its WHERE
     // type-check (`walk`) resolves a correlated column of this query against
-    // the outer, matching the run's lowering; the projection/`HAVING` walk uses
-    // `.barred` — a no-OP for a LATERAL body (`everywhere`), whose projection
-    // ISO puts the preceding references in scope for, so validation admits the
-    // projected correlated column exactly as the run's lowering does.
+    // the outer, matching the run's lowering; validation admits a correlated
+    // column in every clause (projection/`GROUP BY`/`HAVING`/`ORDER BY` as well
+    // as `WHERE`/`ON`) exactly as the run's lowering binds it per outer row.
     return SubqueryCheck(widths, types, deferred: deferred,
-                         outer: context.outer, everywhere: context.lateral)
+                         outer: context.outer)
   }
 
   /// Records the cursor-free width and single-column type of `query` into
@@ -1022,11 +1021,11 @@ extension Catalog where Self: ~Escapable {
   /// counterpart of the former `UNION ALL` of FROM-less selects, so a run and a
   /// `columns(of:)` derive fault a `VALUES` alike.
   ///
-  /// The rows are a barred surface (an empty scope, `Scope([])`), so a row's
-  /// expression resolves only its literals, calls, and subqueries — a bare
-  /// column names nothing and faults, and a correlated reference is barred,
-  /// exactly as a FROM-less `SELECT`'s projection is. Each row subquery's
-  /// cursor-free width and single-column type derive against the enclosing
+  /// The rows resolve over an empty local scope (`Scope([])`) carrying the
+  /// enclosing `outer`, so a row's expression resolves its literals, calls, and
+  /// subqueries, and a bare column — naming nothing local — is a correlated
+  /// reference resolved against `outer` (a name neither binds faults). Each row
+  /// subquery's cursor-free width and single-column type derive against that
   /// `outer` (a `VALUES` in subquery position), then in validate mode each row
   /// expression's reachable operands and calls are checked (`aggregates`/
   /// `validate`) and each reached subquery body recursed, and in the run's
@@ -1034,12 +1033,10 @@ extension Catalog where Self: ~Escapable {
   /// (`comparisons`) and each reached body recursed — the same discipline the
   /// carrier `ORDER BY` and the plain arm use.
   ///
-  /// A LATERAL `VALUES` constructor (`context.lateral`) is the exception, the
-  /// counterpart of a LATERAL FROM-less `SELECT`'s projection: ISO puts the
-  /// preceding FROM references in scope throughout the constructor, so the
-  /// `SubqueryCheck` carries the enclosing `outer` and admits a correlated
-  /// preceding column everywhere (`everywhere`) — `barred` a no-op there —
-  /// while a non-LATERAL constructor stays barred, its correlation faulted.
+  /// A correlated column is admitted throughout the constructor whether or not
+  /// the `VALUES` sits in a LATERAL position: ISO puts a LATERAL body's
+  /// preceding FROM references in scope, and an ordinary subquery's `VALUES`
+  /// likewise names its enclosing query's columns — both bind per outer row.
   private borrowing func typecheck(values rows: Array<Array<Expression>>,
                                    _ query: Query, _ context: Context)
       throws(SQLError) {
@@ -1089,8 +1086,7 @@ extension Catalog where Self: ~Escapable {
         }
       }
       let check = SubqueryCheck(widths, types, deferred: scalars,
-                                outer: nested,
-                                everywhere: context.lateral).barred
+                                outer: nested)
       for expression in expressions {
         try scope.comparisons(in: expression, context.routines, subquery: check)
       }
@@ -1116,8 +1112,7 @@ extension Catalog where Self: ~Escapable {
         try width(query, [], context, nested, &widths, &types)
       }
       let check = SubqueryCheck(widths, types, deferred: scalars,
-                                outer: nested,
-                                everywhere: context.lateral).barred
+                                outer: nested)
       for expression in expressions {
         try scope.aggregates(in: expression, context.routines, subquery: check)
         _ = try scope.validate(expression, context.routines, subquery: check)
@@ -1282,9 +1277,9 @@ extension Catalog where Self: ~Escapable {
                               _ context: Context, subquery: SubqueryCheck)
       throws(SQLError) {
     let routines = context.routines
-    // The WHERE admits a correlated column of this query; the projection,
-    // `HAVING`, GROUP BY, and `ORDER BY` bar it (`barred`).
-    let barred = subquery.barred
+    // Every clause admits a correlated column of this query — the WHERE, the
+    // projection, `HAVING`, GROUP BY, and `ORDER BY` alike — each resolving it
+    // through the enclosing `outer` that `subquery` carries.
     if let predicate = select.predicate {
       try scope.comparisons(in: predicate, routines, subquery: subquery)
       // A false WHERE filters every row, so a GROUP BY forms no group and a
@@ -1317,14 +1312,14 @@ extension Catalog where Self: ~Escapable {
           if reachable, case let .expressions(items) = select.projection {
             for item in items {
               try fold(comparisonsIn: item.expression, scope, routines,
-                                subquery: barred)
+                                subquery: subquery)
             }
           }
           // The sort sits below the limit, so its keys fold over the empty
           // group unconditionally.
           for expression in select.orderKeys {
             try fold(comparisonsIn: expression, scope, routines,
-                        subquery: barred)
+                        subquery: subquery)
           }
         }
         return
@@ -1336,18 +1331,18 @@ extension Catalog where Self: ~Escapable {
     if case let .expressions(items) = select.projection {
       for item in items {
         try scope.comparisons(aggregatesIn: item.expression, routines,
-                              subquery: barred)
+                              subquery: subquery)
       }
     }
     for expression in select.orderKeys {
       try scope.comparisons(aggregatesIn: expression, routines,
-                            subquery: barred)
+                            subquery: subquery)
     }
     // Each GROUP BY key is evaluated over the input rows to form the groups,
     // before HAVING, projection, and any limit — so find its comparisons
     // unconditionally in this reachable path.
     for expression in select.grouping.expressions {
-      try scope.comparisons(in: expression, routines, subquery: barred)
+      try scope.comparisons(in: expression, routines, subquery: subquery)
     }
     if let having = select.having {
       // A HAVING aggregate is collected and folded by the group node before the
@@ -1357,8 +1352,8 @@ extension Catalog where Self: ~Escapable {
       // Check them unconditionally, ahead of the reachability-aware scalar
       // walk, exactly as the projection and sort aggregates above and as the
       // validate walk's `aggregates(in:)` does.
-      try scope.comparisons(aggregatesIn: having, routines, subquery: barred)
-      try scope.comparisons(in: having, routines, subquery: barred)
+      try scope.comparisons(aggregatesIn: having, routines, subquery: subquery)
+      try scope.comparisons(in: having, routines, subquery: subquery)
       // A false HAVING filters every group before the projection, so the
       // projection's non-aggregate work is unreachable.
       if scope.constant(having, routines) == false { return }
@@ -1373,14 +1368,14 @@ extension Catalog where Self: ~Escapable {
     if !reachable { reachable = !drops(select.limit, single: sole) }
     if reachable, case let .expressions(items) = select.projection {
       for item in items {
-        try scope.comparisons(in: item.expression, routines, subquery: barred)
+        try scope.comparisons(in: item.expression, routines, subquery: subquery)
       }
     }
     // The sort sits below the limit, so every ORDER BY key runs over the input
     // rows before the cap pages them — its comparisons are checked
     // unconditionally.
     for expression in select.orderKeys {
-      try scope.comparisons(in: expression, routines, subquery: barred)
+      try scope.comparisons(in: expression, routines, subquery: subquery)
     }
   }
 
@@ -1459,11 +1454,9 @@ extension Catalog where Self: ~Escapable {
       throws(SQLError) {
     let routines = context.routines
     let scope = try scope(of: select, context)
-    // The WHERE admits a correlated column of this query (`subquery`); the
-    // projection, `HAVING`, and `ORDER BY` bar it (`barred`), diagnosing the
-    // unsupported correlated-projection/HAVING case exactly as the run's
-    // lowering does.
-    let barred = subquery.barred
+    // Every clause admits a correlated column of this query (`subquery`) — the
+    // WHERE, projection, `HAVING`, and `ORDER BY` alike — resolving it against
+    // the enclosing `outer` exactly as the run's lowering does.
     // An `ORDER BY` ordinal names a 1-based SELECT-list position; one outside
     // `1 ... width` names no output column and faults `SQLError.column`
     // (spelled as the ordinal), exactly as the compile path's ordinal
@@ -1533,7 +1526,7 @@ extension Catalog where Self: ~Escapable {
           if !reachable { reachable = !drops(select.limit, single: true) }
           if reachable, case let .expressions(items) = select.projection {
             for item in items {
-              try scope.fold(item.expression, routines, subquery: barred)
+              try scope.fold(item.expression, routines, subquery: subquery)
             }
           }
           // The lone empty group is sorted below the limit — the shape is
@@ -1545,7 +1538,7 @@ extension Catalog where Self: ~Escapable {
           // projection term reached only via the sort is checked even where the
           // projection block above is skipped.
           for expression in select.orderKeys {
-            try scope.fold(expression, routines, subquery: barred)
+            try scope.fold(expression, routines, subquery: subquery)
           }
         }
         return
@@ -1560,11 +1553,11 @@ extension Catalog where Self: ~Escapable {
     // projection or `HAVING` aggregate's.
     if case let .expressions(items) = select.projection {
       for item in items {
-        try scope.aggregates(in: item.expression, routines, subquery: barred)
+        try scope.aggregates(in: item.expression, routines, subquery: subquery)
       }
     }
     for expression in select.orderKeys {
-      try scope.aggregates(in: expression, routines, subquery: barred)
+      try scope.aggregates(in: expression, routines, subquery: subquery)
     }
     // Each GROUP BY key is evaluated over the input rows to form the groups,
     // before the HAVING, the projection, and any limit — so validate every key
@@ -1579,11 +1572,11 @@ extension Catalog where Self: ~Escapable {
     // exactly as the run evaluates it, closing the gap where `group` lowers the
     // key structurally (no evaluation) so `compile` alone never surfaces it.
     for expression in select.grouping.expressions {
-      _ = try scope.validate(expression, routines, subquery: barred)
+      _ = try scope.validate(expression, routines, subquery: subquery)
     }
     if let having = select.having {
-      try scope.aggregates(in: having, routines, subquery: barred)
-      try scope.check(having, routines, subquery: barred)
+      try scope.aggregates(in: having, routines, subquery: subquery)
+      try scope.check(having, routines, subquery: subquery)
       // A false HAVING filters every group before the projection, so the
       // projection's non-aggregate work is unreachable.
       if scope.constant(having, routines) == false { return }
@@ -1605,7 +1598,7 @@ extension Catalog where Self: ~Escapable {
     if !reachable { reachable = !drops(select.limit, single: sole) }
     if reachable, case let .expressions(items) = select.projection {
       for item in items {
-        _ = try scope.validate(item.expression, routines, subquery: barred)
+        _ = try scope.validate(item.expression, routines, subquery: subquery)
       }
     }
     // The sort sits below the limit — the shape is `Project(Limit(Sort(…)))`
@@ -1620,7 +1613,7 @@ extension Catalog where Self: ~Escapable {
     // projection term no sort key reaches stays correctly unchecked (the
     // projection never runs under a row-dropping limit).
     for expression in select.orderKeys {
-      _ = try scope.validate(expression, routines, subquery: barred)
+      _ = try scope.validate(expression, routines, subquery: subquery)
     }
   }
 
@@ -1693,10 +1686,10 @@ extension Catalog where Self: ~Escapable {
     // `USING` merged key (which binds no single ordinal) is matched by term —
     // the same lowering the run's `group` computes.
     let keys = try grouping.map { key throws(SQLError) -> Term in
-      try scope.term(key, routines, subquery: subquery.barred)
+      try scope.term(key, routines, subquery: subquery)
     }
     let supers = try superset.map { key throws(SQLError) -> Term in
-      try scope.term(key, routines, subquery: subquery.barred)
+      try scope.term(key, routines, subquery: subquery)
     }
     // Build the grouping and lower the projection through it to record each
     // output name (an alias, else a group column's own name) — the surface an
@@ -1767,18 +1760,17 @@ extension Catalog where Self: ~Escapable {
         case .sets: ([], [])
         }
     let keys = try grouping.map { key throws(SQLError) -> Term in
-      try scope.term(key, routines, subquery: subquery.barred)
+      try scope.term(key, routines, subquery: subquery)
     }
     let supers = try superset.map { key throws(SQLError) -> Term in
-      try scope.term(key, routines, subquery: subquery.barred)
+      try scope.term(key, routines, subquery: subquery)
     }
     var grouped = try Grouped(scope, grouping, keys, aggregations,
                               superset: supers, subquery: subquery)
     let terms = try grouped.terms(select.projection, routines,
                                   subquery: subquery)
-    let barred = subquery.barred
     return (terms, { expression throws(SQLError) in
-      try grouped.resolve(expression, routines, subquery: barred)
+      try grouped.resolve(expression, routines, subquery: subquery)
     })
   }
 
@@ -1819,21 +1811,22 @@ extension Catalog where Self: ~Escapable {
     //
     // Per ISO a LATERAL body's preceding-FROM references are in scope
     // throughout its query expression, including the SELECT list, so its output
-    // shape is NOT correlation-independent — a projected preceding column
+    // shape is not correlation-independent — a projected preceding column
     // (`SELECT T.Id AS id`) types from that outer column. So the schema derive
-    // threads the `preceding` scope as the correlation stack (`with(outer:)`)
-    // and marks the body a lateral one (`lateralizing`), the same
-    // revealed-base-with-outer context `compile(select)`'s `lateral` compiles
-    // it under — schema, validation, and compile share it, so a projected
+    // threads the `preceding` scope as the correlation stack (`with(outer:)`),
+    // the same revealed-base-with-outer context `compile(select)` compiles the
+    // body under — schema, validation, and compile share it, so a projected
     // preceding column derives its type here exactly as the run lowers it to a
-    // bound parameter. `validate: false` keeps the derive lenient; the strict
-    // operand/function type-check rides through `compile(select)`'s `lateral`
-    // path where the `validate` gate is honoured, so it is not duplicated here.
+    // bound parameter. Correlation is admitted in every clause, so the
+    // projected preceding column needs no special lateral admission. `validate:
+    // false` keeps the derive lenient; the strict operand/function type-check
+    // rides through `compile(select)` where the `validate` gate is honoured, so
+    // it is not duplicated here.
     if relation.lateral, case let .derived(query) = relation.source {
       let stack = context.outer ?? Outer()
       let nested = stack.nested(under: preceding ?? Scope([]))
       let scope = context.revealed().with(outer: nested)
-          .lateralizing().validating(false)
+          .validating(false)
       return try materialise(query, scope, rows: false,
                              columns: relation.columns).schema()
     }

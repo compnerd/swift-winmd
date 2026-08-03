@@ -970,16 +970,12 @@ struct EngineCorrelatedNullUnificationTests {
         yields: [[30], [25], [40]])
   }
 
-  @Test func `a barred ordinary subquery projection still faults 0A000`() throws {
-    // The parity guard: the read-side resolution keeps the `admits` bar, so an
-    // ordinary (non-lateral) correlated subquery in a projection is still
-    // diagnosed `.unsupported` — the unification does not widen acceptance. The
-    // barred surface faults the same on the run and schema paths.
-    let people = try roster()
-    #expect(throws: SQLError.state("0A000",
-        "a correlated column is only supported in a subquery's WHERE")) {
-      _ = try people.run(parse("SELECT (VALUES (P.Age)) FROM People AS P"))
-    }
+  @Test func `an ordinary subquery projection correlates`() throws {
+    // A correlated column is admitted in a subquery's projection, not only its
+    // WHERE: `(VALUES (P.Age))` names the outer row's `Age`, bound per
+    // re-execution, so each row projects its own age.
+    try roster().expect("SELECT (VALUES (P.Age)) FROM People AS P",
+                        yields: [[30], [25], [30], [40], [25]])
   }
 }
 

@@ -1149,9 +1149,9 @@ internal struct Windowed {
                                _ routines: Routines = [:],
                                subquery: Resolution = .unsupported)
       throws(SQLError) -> Array<Term> {
-    // A window-query projection is a barred clause position (a correlated
-    // column of this query is diagnosed there, as the run's projection bars it).
-    let subquery = subquery.barred
+    // A window-query projection admits a correlated column of this query, as
+    // every clause does: an unbound name resolves against the enclosing `outer`
+    // that `subquery` carries.
     switch projection {
     case .all:
       throw .state("0A000",
@@ -1187,8 +1187,7 @@ internal struct Windowed {
                       _ routines: Routines = [:],
                       subquery: Resolution = .unsupported)
       throws(SQLError) -> Array<SortKey> {
-    // A query ORDER BY is barred, as the projection is.
-    let subquery = subquery.barred
+    // A query ORDER BY admits a correlated column, as the projection does.
     var resolved = Array<SortKey>()
     resolved.reserveCapacity(order.keys.count)
     for key in order.keys {

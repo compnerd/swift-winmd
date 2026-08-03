@@ -246,13 +246,12 @@ extension Dictionary where Key == String, Value == Source {
 /// so the same occurrence lowered on the run and the schema paths accretes into
 /// one map.
 ///
-/// A name no enclosing scope binds either stays the ordinary unknown-column
-/// fault (the local surface already raised `SQLError.column`); this only
-/// intercepts a name the OUTER scope binds. Correlation is admitted ONLY where
-/// a synthetic bound param is a valid lowering — a `WHERE`/`ON` term — so a
-/// scope with no admitted position (a projection / `GROUP BY` / `HAVING`
-/// surface) carries no `Outer` and the outer column stays unresolved, diagnosed
-/// as unsupported rather than mis-bound.
+/// A name no enclosing scope binds stays the ordinary unknown-column fault (the
+/// local surface already raised `SQLError.column`); this only intercepts a name
+/// the outer scope binds. Correlation is admitted in every clause of a subquery
+/// — a projection, `GROUP BY`, `HAVING`, and `ORDER BY` as well as a
+/// `WHERE`/`ON` — since the per-outer-row re-execution binds the synthetic
+/// parameter for the whole subquery, whichever clause names the outer column.
 internal final class Outer {
   /// The enclosing scopes, outermost first — a column resolves against the
   /// nearest enclosing (last) that binds it, matching lexical scoping. The last
@@ -563,40 +562,23 @@ internal struct Resolution {
   /// this select is itself a subquery, so a column its relations do not bind
   /// resolves against the outer query and lowers to a `Term.parameter`. `nil`
   /// for a top-level select (no enclosing scope), leaving an unbound column the
-  /// ordinary fault.
+  /// ordinary fault. A correlated column is admitted in every clause of a
+  /// subquery — its projection, `GROUP BY`, `HAVING`, and `ORDER BY` as well as
+  /// its `WHERE`/`ON` — since the per-outer-row re-execution binds the named
+  /// cell before evaluating any of them (ISO 9075 puts an outer reference in
+  /// scope throughout the subquery).
   private let outer: Outer?
-
-  /// Whether this lowering surface admits a correlated column — TRUE for the
-  /// inner `WHERE`/`ON` (a synthetic bound param is a valid lowering there),
-  /// FALSE for the projection / `GROUP BY` / `HAVING` (the minimal (b) cut has
-  /// no evaluator for an outer column there). A barred surface diagnoses a
-  /// correlated column as unsupported rather than mis-resolving it.
-  private let admits: Bool
-
-  /// Whether the surface admits a correlated column everywhere — in the barred
-  /// clause positions (the projection / `GROUP BY` / `HAVING`) as well as the
-  /// `WHERE`/`ON` — set ONLY when lowering a LATERAL derived table's body. Per
-  /// ISO 9075 a `LATERAL` body's preceding-FROM references are in scope
-  /// throughout its query expression, including the select list, so a lateral
-  /// body correlates everywhere while an ordinary subquery's projection stays
-  /// barred. When `true`, `barred` is a no-OP — it keeps `admits`, so a
-  /// projected preceding column still lowers to a `Term.parameter` — and the
-  /// per-outer-row apply binds it exactly as a `WHERE`-correlated one.
-  private let everywhere: Bool
 
   internal init(_ scope: Subscope = .caller,
                 _ widths: Dictionary<Query, Int> = [:],
                 _ types: Dictionary<Query, ResolvedColumn> = [:],
                 _ correlations: Dictionary<Query, Correlation> = [:],
-                outer: Outer? = nil, admits: Bool = true,
-                everywhere: Bool = false) {
+                outer: Outer? = nil) {
     self.scope = scope
     self.widths = widths
     self.types = types
     self.correlations = correlations
     self.outer = outer
-    self.admits = admits
-    self.everywhere = everywhere
   }
 
   /// A `Resolution` for a lowering surface with no catalog — a schema-only
@@ -606,40 +588,14 @@ internal struct Resolution {
     Resolution()
   }
 
-  /// This seam with correlation barred — the surface a projection / `GROUP BY`
-  /// / `HAVING` lowers under, where an outer column is out of the minimal (b)
-  /// cut. It keeps the widths/types/correlations (nested subqueries there still
-  /// lower and carry their own inner correlation) but rejects a correlated
-  /// column of this query as unsupported.
-  ///
-  /// A LATERAL body's surface (`everywhere`) is the exception: ISO puts the
-  /// preceding-FROM references in scope throughout the body including the
-  /// select list, so `barred` is a no-OP there — the projection keeps admitting
-  /// a correlated column, which lowers to a `Term.parameter` the apply binds
-  /// per outer row.
-  internal var barred: Resolution {
-    if everywhere { return self }
-    return Resolution(scope, widths, types, correlations, outer: outer,
-                      admits: false, everywhere: everywhere)
-  }
-
   /// The synthetic bound-parameter name a correlated reference to `column`
   /// lowers to, or `nil` when no enclosing scope binds it (the ordinary
-  /// unknown-column fault stands). A `.column` lowering consults this ONLY
-  /// after its own relations fail to bind the name.
-  ///
-  /// On a barred surface (a projection / `GROUP BY` / `HAVING`) an outer column
-  /// IS out of the minimal (b) cut, so a name the enclosing scope binds is
-  /// diagnosed `SQLError.unsupported` rather than mis-resolved — the same fault
-  /// on the run and the schema paths, keeping typecheck↔run parity.
+  /// unknown-column fault stands). A `.column` lowering consults this only
+  /// after its own relations fail to bind the name. Admitted in every clause: a
+  /// correlated column becomes a `Term.parameter` the per-outer-row
+  /// re-execution binds before evaluating any of the subquery's clauses.
   internal func correlate(_ column: Column) throws(SQLError) -> String? {
-    guard let name = try outer?.parameter(for: column) else { return nil }
-    guard admits else {
-      throw .state("0A000",
-                   "a correlated column is only supported in a subquery's " +
-                   "WHERE")
-    }
-    return name
+    try outer?.parameter(for: column)
   }
 
   /// The resolved outer column a correlated reference to `column` contributes
@@ -647,22 +603,11 @@ internal struct Resolution {
   /// `nil` when no enclosing scope binds it. Every type/mask reader is a thin
   /// accessor over this one resolver, so a correlated column's type and mask
   /// cannot diverge (the fix for a correlated all-NULL column losing its mask
-  /// through the LATERAL surface).
-  ///
-  /// A barred surface (a projection / `GROUP BY` / `HAVING` of an ordinary
-  /// subquery) still diagnoses a bound name `SQLError.unsupported` — the same
-  /// fault the run's lowering raises, keeping typecheck↔run parity — so this
-  /// widens nothing: a lateral body's projection (`everywhere`) admits it,
-  /// while an ordinary subquery's projection faults exactly as before.
+  /// through the LATERAL surface). Types the reference as the outer column in
+  /// every clause, matching the run's lowering (typecheck↔run parity).
   internal func correlated(_ column: Column) throws(SQLError)
       -> ResolvedColumn? {
-    guard let resolved = try outer?.resolved(for: column) else { return nil }
-    guard admits else {
-      throw .state("0A000",
-                   "a correlated column is only supported in a subquery's " +
-                   "WHERE")
-    }
-    return resolved
+    try outer?.resolved(for: column)
   }
 
   /// The correlation of the nested `query` — its synthetic outer bindings —
@@ -1042,32 +987,16 @@ internal struct SubqueryCheck {
   /// keeping typecheck↔run parity. `nil` for a top-level select.
   private let outer: Outer?
 
-  /// Whether this surface admits a correlated column — the inner `WHERE`/`ON`
-  /// (TRUE) versus a projection / `GROUP BY` / `HAVING` (FALSE, diagnosed) —
-  /// the analog of `Resolution.admits`, so validation faults the unsupported
-  /// correlated-projection case exactly where the run does.
-  private let admits: Bool
-
-  /// Whether the surface admits a correlated column everywhere — a LATERAL
-  /// body's validation surface, the analog of `Resolution.everywhere` — so
-  /// `barred` is a no-OP and the projection/`HAVING` walk of a lateral body
-  /// validates a correlated preceding column rather than faulting, matching the
-  /// run's lowering (typecheck↔run parity).
-  private let everywhere: Bool
-
   internal init(_ widths: Dictionary<Query, Int> = [:],
                 _ types: Dictionary<Query, ValueType> = [:],
                 deferred: Set<Query> = [],
                 reached: ReachedScalars = ReachedScalars(),
-                outer: Outer? = nil, admits: Bool = true,
-                everywhere: Bool = false) {
+                outer: Outer? = nil) {
     self.widths = widths
     self.types = types
     self.deferred = deferred
     self.reached = reached
     self.outer = outer
-    self.admits = admits
-    self.everywhere = everywhere
   }
 
   /// A checker for a surface with no catalog — validating a subquery needs one,
@@ -1075,18 +1004,6 @@ internal struct SubqueryCheck {
   /// subquery unvalidated.
   internal static var unsupported: SubqueryCheck {
     SubqueryCheck()
-  }
-
-  /// This checker with correlation barred — the surface a projection / `GROUP
-  /// BY` / `HAVING` type-checks under, where an outer column is out of the (b)
-  /// cut and is diagnosed rather than resolved. Mirrors `Resolution.barred` —
-  /// including the LATERAL-body exception (`everywhere`), where it is a no-OP
-  /// so the projection/`HAVING` walk keeps admitting the correlated preceding
-  /// column the run's lowering binds.
-  internal var barred: SubqueryCheck {
-    if everywhere { return self }
-    return SubqueryCheck(widths, types, deferred: deferred, reached: reached,
-                         outer: outer, admits: false, everywhere: everywhere)
   }
 
   /// This checker over a fresh `reached` box, carrying `outer` — the surface a
@@ -1104,19 +1021,11 @@ internal struct SubqueryCheck {
 
   /// The outer type `column` correlates to, or `nil` when no enclosing scope
   /// binds it — the validation-side `Resolution.correlate`: it resolves against
-  /// `outer`, faulting `.unsupported` on a barred surface (a projection /
-  /// `GROUP BY` / `HAVING`) so validation rejects the unsupported
-  /// correlated-projection case exactly as the run's lowering does, and returns
-  /// the outer column's type so `validate` types the reference as that column.
-  /// Consulted ONLY after the local relations fail to bind the name.
+  /// `outer` and returns the outer column's type so `validate` types the
+  /// reference as that column, in every clause, exactly as the run's lowering
+  /// binds it. Consulted only after the local relations fail to bind the name.
   internal func correlated(_ column: Column) throws(SQLError) -> ValueType? {
-    guard let type = try outer?.type(for: column) else { return nil }
-    guard admits else {
-      throw .state("0A000",
-                   "a correlated column is only supported in a subquery's " +
-                   "WHERE")
-    }
-    return type
+    try outer?.type(for: column)
   }
 
   /// Asserts the inner `query` was compiled in the pre-pass — a query the

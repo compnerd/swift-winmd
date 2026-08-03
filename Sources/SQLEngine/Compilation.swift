@@ -12,6 +12,26 @@ internal struct Resolved {
   let leaf: (Array<Int>) -> Plan
 }
 
+/// The resolved FROM/JOIN front half a join-bearing compile shares — built once
+/// by `front(_:_:_:_:)` and consumed by the grouped, windowed, and plain join
+/// paths so the three cannot drift. `joined` is each joined relation's
+/// `Resolved` (for its leaf, in join order); `scope` lays the FROM relation and
+/// every joined one end to end in one combined ordinal space (carrying the
+/// NATURAL/USING merged columns); `laterals[i]` is a LATERAL join's
+/// pre-compiled apply data (its body occurrence `key` and correlation), `nil`
+/// for a plain join; `matches[i]` is join `i`'s lowered `ON` (a `column =
+/// column` conjunct a hash-join key, the rest a residual); `predicate` is the
+/// lowered `WHERE`; and `plans` is the nested-subquery pre-pass the clause
+/// lowering reads.
+internal struct Front {
+  let joined: Array<Resolved>
+  let scope: Scope
+  let laterals: Array<(key: Subkey, correlation: Correlation)?>
+  let matches: Array<Filter>
+  let predicate: Filter?
+  let plans: Plans
+}
+
 /// The sorted, deduplicated ordinals a query references: the union of the
 /// ordinals its `projection` terms read, the columns its `filter` reads, and
 /// every column its `order` keys read. The projection terms hold ordinals at
@@ -1345,6 +1365,85 @@ extension Catalog where Self: ~Escapable {
           merged: try merged(through: count, over: relations, joins))
   }
 
+  /// Resolves `select`'s FROM/JOIN front half into a `Front` — the combined
+  /// join scope and the lowered join filters, subquery plans, and WHERE the
+  /// grouped, windowed, and plain join compile paths all build over. Extracted
+  /// verbatim from those paths so a single seam resolves the joins.
+  internal borrowing func front(_ select: Select, _ relation: Relation,
+                                _ from: Resolved, _ context: Context)
+      throws(SQLError) -> Front {
+    // Resolve every joined relation and lay the FROM relation first, then each
+    // joined one in source order, end to end in one combined ordinal space. The
+    // helper threads each join's preceding FROM as its resolve scope, so a
+    // LATERAL arm's schema derives against the relations before it.
+    let (joined, relations) = try resolve(from: relation, schema: from.schema,
+                                          joins: select.joins, context)
+    // Model each NATURAL/USING join's merged columns (ISO 9075 7.10) in the
+    // scope and synthesize each named-column join's lowered `left.c = right.c`
+    // filter — a no-op (empty merged set, all-`nil` `ons`) for a chain with
+    // none, so an ordinary compile is unchanged.
+    let (ons, merged, merges) = try merges(over: relations, select.joins)
+    let scope = Scope(relations, merged: merged)
+    // Each join's prefix scope — the FROM relation and joins `0…index`, never
+    // one joined later — carries the merged columns accumulated before this
+    // join, so a chained `USING` `on` keys on the merged value.
+    let prefixes = select.joins.indices.map { index in
+      Scope(Array(relations[0 ... index + 1]), merged: merges[index])
+    }
+    // Resolve each LATERAL join's body once against the preceding FROM so a
+    // body column naming a preceding relation correlates outward and its plan
+    // is pre-compiled for the per-outer-row apply. A non-lateral join records
+    // `nil`. The apply is `.inner` (CROSS APPLY) or `.left` (OUTER APPLY);
+    // `.right`/`.full` are nonsensical for a correlated body, so fault.
+    let empty: (key: Subkey, correlation: Correlation)? = nil
+    var laterals = Array(repeating: empty, count: select.joins.count)
+    for index in select.joins.indices {
+      let join = select.joins[index]
+      guard join.relation.lateral,
+          case let .derived(body) = join.relation.source else { continue }
+      guard join.kind == .inner || join.kind == .left else {
+        throw .state("0A000", "a RIGHT/FULL LATERAL join is not supported")
+      }
+      let preceding = Scope(Array(relations[0 ... index]),
+                            merged: merges[index])
+      laterals[index] = try lateral(body, against: preceding,
+                                    columns: join.relation.columns, context)
+    }
+    // Compile every nested subquery once for arity/type, ahead of lowering, and
+    // discover each one's correlation: a join `ON`'s against its prefix scope,
+    // the WHERE against the join `scope`. `validate` gates the eager type-check
+    // of a filtered-out derived body a nested subquery names.
+    let plans = try subquery(of: select, context, enclosing: scope,
+                             prefixes: prefixes)
+    // A WINDOW clause with no window function is dropped after compilation, so
+    // validate its definitions here — against the whole join `scope`, so a
+    // definition naming a joined relation's column resolves as the query's own
+    // clauses do.
+    try validate(named: select.window, against: scope, context.routines,
+                 subquery: plans.rest)
+    var matches = Array<Filter>()
+    matches.reserveCapacity(select.joins.count)
+    for index in select.joins.indices {
+      // A NATURAL/USING join's `on` is the synthesized, already-lowered filter
+      // (`ons[index]`, `nil` for a degenerate shared-column-less join); a plain
+      // join lowers its written `ON` against the prefix scope.
+      if let on = ons[index] {
+        matches.append(on)
+      } else {
+        try matches.append(prefixes[index].on(select.joins[index].on,
+                                              context.routines,
+                                              subquery: plans.on(index)))
+      }
+    }
+    var predicate: Filter? = nil
+    if let clause = select.predicate {
+      predicate = try scope.lower(clause, context.routines,
+                                  subquery: plans.rest)
+    }
+    return Front(joined: joined, scope: scope, laterals: laterals,
+                 matches: matches, predicate: predicate, plans: plans)
+  }
+
   /// Compiles `select` over this catalog into a logical operator tree in slot
   /// space.
   ///
@@ -1510,99 +1609,17 @@ extension Catalog where Self: ~Escapable {
           limit: select.limit)
     }
 
-    // Resolve every joined relation and lay all relations — the FROM relation
-    // first, then each joined one in source order — end to end in one combined
-    // ordinal space. The helper builds the running `relations` incrementally
-    // and threads each join's preceding FROM as its resolve scope, so a LATERAL
-    // arm's schema derives against the relations before it.
-    let (joined, relations) = try resolve(from: relation, schema: from.schema,
-                                          joins: select.joins, context)
-    // Model each `NATURAL`/`USING` join's merged columns (ISO 9075 7.10) in the
-    // join scope, and synthesize each named-column join's lowered `left.c =
-    // right.c` `on` filter — a no-op yielding an empty merged set and all-`nil`
-    // `ons` for a chain with none, so an ordinary compile is unchanged. The
-    // scope carries the merged columns so the ordinary `terms`/`term`/order/
-    // `Grouping` machinery consumes them; a named-column join's `ons[index]`
-    // filter replaces its placeholder always-true `on`.
-    let (ons, merged, merges) = try merges(over: relations, select.joins)
-    let scope = Scope(relations, merged: merged)
-
-    // Each join's ON predicate lowers to a `Filter` at its own chain level,
-    // resolved against only the prefix already in scope plus the relation that
-    // join introduces — the FROM relation and joins `0…index` — never a
-    // relation joined later. Since `Scope` lays relations at cumulative offsets
-    // from 0, a prefix scope yields the same global combined ordinals as the
-    // full-chain scope, so the ON ordinals remap through `slot` as before;
-    // resolving against the prefix rejects a reference to a not-yet-joined
-    // relation (`SQLError.column`) and judges ambiguity only within the prefix.
-    // A `column = column` conjunct lowers to a `match` hash-join key; any
-    // inequality or expression equality lowers to a residual the join filters.
-    // The WHERE and ORDER lower against the whole chain, which legitimately
-    // sees every relation. Each join's prefix scope — the FROM relation and
-    // joins `0…index`, the relations available at that join point, never one
-    // joined later — carries the merged columns accumulated before this join
-    // (`merges[index]`), so a chained `USING` `on` keys on the merged value and
-    // an `ON` subquery's bare merged operand resolves.
-    let prefixes = select.joins.indices.map { index in
-      Scope(Array(relations[0 ... index + 1]), merged: merges[index])
-    }
-    // Resolve each LATERAL join's body once against the preceding FROM — the
-    // FROM relation and the joins before this one (`relations[0…index]`, one
-    // less than the prefix, which includes the join's own relation) — so a body
-    // column naming a preceding relation correlates outward and the body's plan
-    // is pre-compiled for the per-outer-row apply. A non-lateral join records
-    // nothing here (its `nil` slot). The apply is `.inner` (CROSS APPLY, which
-    // drops an unmatched outer row) or `.left` (OUTER APPLY, which NULL-extends
-    // one); `.right`/`.full` are nonsensical for a correlated body, so fault.
-    let empty: (key: Subkey, correlation: Correlation)? = nil
-    var laterals = Array(repeating: empty, count: select.joins.count)
-    for index in select.joins.indices {
-      let join = select.joins[index]
-      guard join.relation.lateral,
-          case let .derived(body) = join.relation.source else { continue }
-      guard join.kind == .inner || join.kind == .left else {
-        throw .state("0A000", "a RIGHT/FULL LATERAL join is not supported")
-      }
-      let preceding = Scope(Array(relations[0 ... index]),
-                            merged: merges[index])
-      laterals[index] = try lateral(body, against: preceding,
-                                    columns: join.relation.columns, context)
-    }
-    // Compile every nested subquery once for arity/type, ahead of lowering,
-    // into a map the join ONs, WHERE, projection, and ORDER BY lowering reads —
-    // and discover each one's correlation. A join `ON`'s subquery correlates
-    // against its prefix scope; the WHERE/projection/ORDER against the whole
-    // join `scope`. This select's own columns correlate outward through
-    // `outer`. `validate` gates a nested filtered-out derived body's eager
-    // type-check.
-    let plans = try subquery(of: select, context, enclosing: scope,
-                             prefixes: prefixes)
-    // A `WINDOW` clause with no window function is dropped after compilation, so
-    // validate its definitions here — against the whole join `scope`, so a
-    // definition naming a joined relation's column resolves as the query's own
-    // clauses do.
-    try validate(named: select.window, against: scope, context.routines,
-                 subquery: plans.rest)
-    var matches = Array<Filter>()
-    matches.reserveCapacity(select.joins.count)
-    for index in select.joins.indices {
-      // A `NATURAL`/`USING` join's `on` is the synthesized, already-lowered
-      // `left.c = right.c` filter (`ons[index]`, `nil` for a degenerate
-      // shared-column-less `NATURAL` join — an always-true `CROSS` product);
-      // a plain join lowers its written `ON` against the prefix scope.
-      if let on = ons[index] {
-        matches.append(on)
-      } else {
-        try matches.append(prefixes[index].on(select.joins[index].on,
-                                              context.routines,
-                                              subquery: plans.on(index)))
-      }
-    }
-    var predicate: Filter? = nil
-    if let clause = select.predicate {
-      predicate = try scope.lower(clause, context.routines,
-                                  subquery: plans.rest)
-    }
+    // Resolve the FROM/JOIN front half — the combined join `scope`, each joined
+    // relation's `Resolved`, the correlated `laterals` and lowered `matches`,
+    // the lowered WHERE `predicate`, and the nested-subquery `plans` — shared
+    // with the grouped and windowed paths so the three cannot drift.
+    let front = try front(select, relation, from, context)
+    let scope = front.scope
+    let joined = front.joined
+    let laterals = front.laterals
+    let matches = front.matches
+    let predicate = front.predicate
+    let plans = front.plans
     // The projection and ORDER BY admit a correlated column of this query as
     // the WHERE/ON do: `plans.rest` carries the enclosing `outer`, so an
     // unbound name resolves outward. A nested subquery in the projection also

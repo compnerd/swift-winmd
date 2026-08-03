@@ -1142,21 +1142,20 @@ extension Catalog where Self: ~Escapable {
     }
     // Compile every nested subquery once for arity/type, ahead of lowering, and
     // discover each one's correlation: a join `ON`'s against its prefix scope,
-    // the WHERE against the join `scope`. Only the WHERE and join ONs admit a
-    // correlated column of this query; the aggregations, projection, `HAVING`,
-    // and `ORDER BY` lower under a barred seam. `validate` gates the eager
+    // the WHERE against the join `scope`. Every clause admits a correlated
+    // column of this query — the WHERE, join ONs, aggregations, projection,
+    // `HAVING`, and `ORDER BY` alike. `validate` gates the eager
     // type-check of a filtered-out derived body a nested subquery names, off on
     // the run path, on for a schema check.
     let plans = try subquery(of: select, context, enclosing: scope,
                              prefixes: prefixes)
-    let barred = plans.rest.barred
     // Validate every named window the `WINDOW` clause defines, whether or not it
     // is referenced — the aggregate route reaches here ahead of the window and
     // ordinary paths' checks, so an unused malformed definition (an undefined
     // base, an unresolvable column, or an invalid frame) would otherwise slip
     // through into a grouped compile.
     try validate(named: select.window, against: scope, context.routines,
-                 subquery: barred)
+                 subquery: plans.rest)
     var matches = Array<Filter>()
     matches.reserveCapacity(select.joins.count)
     for index in select.joins.indices {
@@ -1196,13 +1195,12 @@ extension Catalog where Self: ~Escapable {
       // binds reads its combined slot; a bare `NATURAL`/`USING` merged column
       // lowers to its `COALESCE(left, right)` value (so the aggregate node
       // groups a `RIGHT`/`FULL` join's unmatched row by the merged value, not a
-      // NULL left column); a name none binds is a candidate correlated
-      // reference (a LATERAL body grouping on a preceding column) — the
-      // `barred` surface lowers it to a `Term.parameter` the apply binds per
-      // outer row, admitting it only under the LATERAL `everywhere` seam and
-      // faulting `.unsupported` on an ordinary grouped subquery, else the
-      // genuine unknown-column `.column`. A general key lowers by `term` too.
-      try scope.term(key, context.routines, subquery: barred)
+      // NULL left column); a name none binds is a correlated reference (a
+      // LATERAL body or an ordinary grouped subquery grouping on an outer
+      // column) — admitted in every clause, it lowers to a `Term.parameter` the
+      // enclosing scope binds per outer row, else the genuine unknown-column
+      // `.column`. A general key lowers by `term` too.
+      try scope.term(key, context.routines, subquery: plans.rest)
     }
     var expressions = Array<Expression>()
     for expression in select.projection.projected {
@@ -1232,7 +1230,7 @@ extension Catalog where Self: ~Escapable {
     var aggregations = Array<Aggregation>()
     for expression in expressions {
       let aggregation = try expression.aggregation(scope, context.routines,
-                                                   subquery: barred)
+                                                   subquery: plans.rest)
       if !aggregations.contains(aggregation) {
         aggregations.append(aggregation)
       }
@@ -1312,23 +1310,23 @@ extension Catalog where Self: ~Escapable {
     // arm's projection/HAVING reference to a key this set omits NULLs by
     // resolved identity (empty for an ordinary grouped query).
     let supers = try superset.map { key throws(SQLError) -> Term in
-      try scope.term(key, context.routines, subquery: barred)
+      try scope.term(key, context.routines, subquery: plans.rest)
     }
     // Lower the projection, HAVING, and ORDER BY against the grouped slot
     // space, enforcing the projection rule (every non-aggregated column must be
     // a GROUP BY key).
     var grouped = try Grouped(scope, grouping, keys, aggregations,
-                              superset: supers, subquery: barred)
+                              superset: supers, subquery: plans.rest)
     let projection = try grouped.terms(select.projection, context.routines,
-                                       subquery: barred)
+                                       subquery: plans.rest)
     let having: Filter? = if let clause = select.having {
-      try grouped.lower(clause, context.routines, subquery: barred)
+      try grouped.lower(clause, context.routines, subquery: plans.rest)
     } else {
       nil
     }
     var order = if let clause = select.order {
       try grouped.order(clause, projection, context.routines,
-                        subquery: barred)
+                        subquery: plans.rest)
     } else {
       Array<SortKey>()
     }

@@ -55,20 +55,17 @@ extension Schema {
                       _ routines: Routines = [:],
                       subquery: Resolution = .unsupported)
       throws(SQLError) -> Array<Term> {
-    // A projection is a barred clause position: a correlated column of this
-    // query has no evaluator here (only WHERE/ON/HAVING admit one). The cut is
-    // intrinsic to the entry, so a caller cannot pass an admitting seam into a
-    // projection — the FROM-less scalar path included — keeping the run's
+    // A correlated column of this query is admitted in the projection as in
+    // every other clause: `subquery` carries the enclosing `outer` scope, so a
+    // name the local relations do not bind resolves outward, keeping the run's
     // lowering and the schema `columns(of:)` derive in lockstep.
-    let subquery = subquery.barred
     switch projection {
     case .all:
       return (0 ..< width).map { .slot($0) }
     case let .columns(columns):
       // Lower each bare column through `term`, so a name this relation does not
-      // bind consults the `subquery` surface: a correlated reference on the
-      // barred projection surface is diagnosed unsupported (parity with the
-      // schema path) rather than faulting `SQLError.column`.
+      // bind consults the `subquery` surface: a correlated reference resolves
+      // against the enclosing `outer` rather than faulting `SQLError.column`.
       var terms = Array<Term>()
       terms.reserveCapacity(columns.count)
       for column in columns {
@@ -211,9 +208,9 @@ extension Schema {
                       _ routines: Routines = [:],
                       subquery: Resolution = .unsupported)
       throws(SQLError) -> Array<SortKey> {
-    // An ORDER BY is barred, as the projection is: a correlated column of this
-    // query is out of the cut here, so the entry bars the seam by construction.
-    let subquery = subquery.barred
+    // An ORDER BY admits a correlated column of this query as every clause
+    // does: an unbound name lowers through `term` and resolves against the
+    // enclosing `outer` that `subquery` carries.
     return try SQLEngine.order(order, projection, names) {
       expression throws(SQLError) in
       try term(expression, in: relation, routines, subquery: subquery)
@@ -3276,10 +3273,9 @@ internal struct Scope {
                       _ routines: Routines = [:],
                       subquery: Resolution = .unsupported) throws(SQLError)
       -> Array<Term> {
-    // A projection is a barred clause position (see `Schema.terms`): the entry
-    // bars the seam, so no join-scope projection can admit a correlated column
-    // of this query.
-    let subquery = subquery.barred
+    // A correlated column of this query is admitted in a join-scope projection
+    // as in every clause (see `Schema.terms`): an unbound name resolves through
+    // the enclosing `outer` that `subquery` carries.
     switch projection {
     case .all:
       // The `NATURAL`/`USING` merged columns FIRST (ISO 9075 7.10), each as its
@@ -3292,8 +3288,8 @@ internal struct Scope {
     case let .columns(columns):
       // Lower each bare column through `term`, so a name none of this scope's
       // relations bind consults the `subquery` surface: a correlated reference
-      // on the barred projection surface is diagnosed unsupported (parity with
-      // the schema path) rather than faulting `SQLError.column`.
+      // resolves against the enclosing `outer` rather than faulting
+      // `SQLError.column`.
       var terms = Array<Term>()
       terms.reserveCapacity(columns.count)
       for column in columns {
@@ -3461,8 +3457,8 @@ internal struct Scope {
                       _ names: Array<String?>, _ routines: Routines = [:],
                       subquery: Resolution = .unsupported)
       throws(SQLError) -> Array<SortKey> {
-    // An ORDER BY is barred, as the projection is (see `Schema.order`).
-    let subquery = subquery.barred
+    // An ORDER BY admits a correlated column, as the projection does (see
+    // `Schema.order`).
     return try SQLEngine.order(order, projection, names) {
       expression throws(SQLError) in
       try term(expression, routines, subquery: subquery)

@@ -195,10 +195,10 @@ extension Scope {
   /// for a name no local relation binds, from the correlation `subquery`
   /// surface (`resolved(for:)` — carrying the outer column's mask, so a
   /// correlated all-NULL column stays unconstrained), mirroring the expression
-  /// path's `derive`. Under a LATERAL body's admitting (`everywhere`) surface a
-  /// preceding-FROM column types as its outer column; under an ordinary barred
-  /// surface it faults `.unsupported`. A genuinely unknown name re-throws the
-  /// `.column` fault.
+  /// path's `derive`. A correlated column is admitted in every clause, so a
+  /// preceding-FROM or enclosing-query column types as its outer column here.
+  /// A genuinely unknown name — one no local relation and no `outer` binds —
+  /// re-throws the `.column` fault.
   internal func output(of column: Column,
                        subquery: Resolution = .unsupported)
       throws(SQLError) -> ResolvedColumn {

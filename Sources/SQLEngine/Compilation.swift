@@ -386,9 +386,9 @@ extension Catalog where Self: ~Escapable {
   /// single-column type, a correlated one's runtime plan recorded into the
   /// shared box — so a scalar/`IN`/`EXISTS` in a row lowers and runs as
   /// elsewhere.
-  /// The lowering surface is barred (a projection position), so a bare column
-  /// names nothing and a correlated reference is diagnosed, as in a FROM-less
-  /// `SELECT`'s projection.
+  /// A bare column names nothing local, so it is a correlated reference
+  /// resolved against the enclosing `outer` (a name neither binds faults), as
+  /// in a FROM-less `SELECT`'s projection.
   private borrowing func compile(values rows: Array<Array<Expression>>,
                                  _ query: Query, _ context: Context)
       throws(SQLError) -> Plan {
@@ -405,7 +405,8 @@ extension Catalog where Self: ~Escapable {
         try subquery(subqueries, roles: { query.roles(of: $0, order: nil) },
                      context, within: nil)
     // Lower each row's expressions against the empty scope, as the FROM-less
-    // scalar path lowers a projection; `terms` bars the resolution surface.
+    // scalar path lowers a projection; an unbound name resolves against the
+    // enclosing `outer` the `resolution` carries.
     let schema = Schema(width: 0, extent: 0, names: [], types: [],
                         virtuals: [])
     let relation = Relation(name: "")
@@ -556,12 +557,10 @@ extension Catalog where Self: ~Escapable {
       let nested = (context.outer ?? Outer()).nested(under: within ?? Scope([]))
       // The context each nested compile/derive threads: the revealed base with
       // this frame's `nested` as the enclosing correlation stack and the
-      // shape-only lenience below. `unlateralized()` clears the LATERAL-body
-      // flag so a nested ordinary subquery within a lateral body builds its own
-      // Resolution with `everywhere: false` — the lateral everywhere-admission
-      // covers ONLY the lateral body's own projection, NOT a subquery inside
-      // it, so an ordinary correlated scalar-subquery projection is barred
-      // exactly as it is outside a lateral body.
+      // shape-only lenience below. A correlated column is admitted in every
+      // clause, so a nested subquery — ordinary or inside a lateral body —
+      // resolves its correlated references against this `nested` stack alike;
+      // there is no lateral-only admission to thread.
       // `shaping()` defers the set-operation operand-compatibility fold out of
       // this pre-pass: it records every nested subquery's width, arity, and
       // single-column type ahead of the reachability walk, so a `SELECT 'x'
@@ -569,7 +568,7 @@ extension Catalog where Self: ~Escapable {
       // while merely recording shape. A reached scalar/`IN` occurrence is re-
       // folded strictly on the walk's reached path; arity/resolution eager.
       let inner = context.with(outer: nested).validating(false)
-          .unlateralized().shaping()
+          .shaping()
       // A nested subquery's body derivation is shape ONLY, so ALWAYS lenient
       // (`validate: false`) — this pass exists to record the subquery's width,
       // arity, and correlation, never to validate its body. Validation of a
@@ -643,12 +642,12 @@ extension Catalog where Self: ~Escapable {
         }
       }
     }
-    // A LATERAL body's `Resolution` admits a correlated preceding-FROM column
-    // everywhere (`everywhere`), so its projection lowers such a column to a
-    // `Term.parameter` rather than barring it — the ISO scoping a lateral body
-    // gets and an ordinary subquery (`context.lateral == false`) does not.
+    // The `Resolution` admits a correlated column in every clause — a
+    // preceding-FROM column of a LATERAL body, or an enclosing-query column of
+    // any subquery, lowers to a `Term.parameter` the per-outer-row execution
+    // binds, in the projection/`GROUP BY`/`HAVING`/`ORDER BY` as in the WHERE.
     return Resolution(scope, widths, types, correlations,
-                      outer: context.outer, everywhere: context.lateral)
+                      outer: context.outer)
   }
 
   /// The single value a scalar subquery `query` collapses to against this
@@ -951,20 +950,18 @@ extension Catalog where Self: ~Escapable {
     // returned schema is discarded here (`resolve`/`schema(of:)` advertises the
     // columns); this call exists to run the same validation a non-lateral body
     // gets.
-    // Mark the body a LATERAL body (`lateralizing`) so its `Resolution`/
-    // `SubqueryCheck` admit a correlated preceding-FROM column everywhere,
-    // including its projection — per ISO a LATERAL body's preceding references
-    // are in scope throughout, unlike an ordinary subquery whose projection
-    // stays barred. The flag rides through the shared derived-body machinery to
-    // the projection lowering, where a projected preceding column lowers to a
-    // `Term.parameter` rather than faulting `.unsupported`.
+    // A correlated column is admitted in every clause, so the body's
+    // `Resolution`/`SubqueryCheck` resolve a correlated preceding-FROM column
+    // throughout — including its projection, where per ISO a LATERAL body's
+    // preceding references are in scope. A projected preceding column lowers to
+    // a `Term.parameter` through the shared derived-body machinery.
     // Thread the derived table's explicit `AS d(a, b)` column list into the
     // body's schema derive so this validation checks the same exposed (renamed)
     // names `schema(of:)` advertises — its arity (`SQLError.columns`) and
     // uniqueness (`SQLError.duplicate`) run against the renamed list, so a list
     // hiding a duplicate INNER name (`SELECT T.Id AS x, T.Id AS x) AS d(a, b)`)
     // passes at both seams rather than faulting only here.
-    let revealed = context.revealed().with(outer: nested).lateralizing()
+    let revealed = context.revealed().with(outer: nested)
     _ = try materialise(body, revealed, rows: false, columns: renaming)
     // Compile the body leniently for the per-outer-row apply plan (the shape
     // pass a correlated subquery's pre-pass runs), recording it under the
@@ -1466,16 +1463,16 @@ extension Catalog where Self: ~Escapable {
       // A `WINDOW` clause with no window function is dropped after compilation,
       // so validate its definitions here against the source scope first.
       try validate(named: select.window, against: enclosing, context.routines,
-                   subquery: plans.rest.barred)
+                   subquery: plans.rest)
       var filter: Filter? = nil
       if let predicate = select.predicate {
         filter = try from.schema.lower(predicate, in: relation,
                                        context.routines, subquery: plans.rest)
       }
-      // The projection and ORDER BY are barred clause positions (only the WHERE
-      // admits a correlated column of this query); `terms`/`order` bar the seam
-      // intrinsically, so passing `plans.rest` cannot admit one. A nested
-      // subquery there still lowers with its own inner correlation.
+      // The projection and ORDER BY admit a correlated column of this query as
+      // the WHERE does: passing `plans.rest` (which carries the enclosing
+      // `outer`) resolves an unbound name outward. A nested subquery there also
+      // lowers with its own inner correlation.
       let projection =
           try from.schema.terms(select.projection, in: relation,
                                 context.routines, subquery: plans.rest)
@@ -1585,7 +1582,7 @@ extension Catalog where Self: ~Escapable {
     // definition naming a joined relation's column resolves as the query's own
     // clauses do.
     try validate(named: select.window, against: scope, context.routines,
-                 subquery: plans.rest.barred)
+                 subquery: plans.rest)
     var matches = Array<Filter>()
     matches.reserveCapacity(select.joins.count)
     for index in select.joins.indices {
@@ -1606,12 +1603,10 @@ extension Catalog where Self: ~Escapable {
       predicate = try scope.lower(clause, context.routines,
                                   subquery: plans.rest)
     }
-    // The projection and ORDER BY are barred clause positions: a correlated
-    // column of this query is out of the minimal (b) cut there (only its
-    // WHERE/ON admits one), so `terms`/`order` bar the seam intrinsically and
-    // it is diagnosed rather than mis-resolved. A nested subquery in the
-    // projection still lowers — its own inner WHERE correlation was discovered
-    // in the pre-pass.
+    // The projection and ORDER BY admit a correlated column of this query as
+    // the WHERE/ON do: `plans.rest` carries the enclosing `outer`, so an
+    // unbound name resolves outward. A nested subquery in the projection also
+    // lowers — its own inner WHERE correlation was discovered in the pre-pass.
     let projection = try scope.terms(select.projection, context.routines,
                                      subquery: plans.rest)
 
@@ -1738,7 +1733,7 @@ extension Catalog where Self: ~Escapable {
   /// each spec's base (an undefined base faults `42704`) then its partition and
   /// order keys against the scope (an unknown column faults) exactly as a
   /// referenced window resolves — with `subquery` for a spec's own scalar
-  /// subquery, the same barred resolution the referenced path uses, so a
+  /// subquery, the same resolution the referenced path uses, so a
   /// definition carrying a subquery is not spuriously rejected. Every definition
   /// is validated whether or not a window function references it, so a query
   /// with a `WINDOW` clause never silently accepts an unresolvable unused one.
@@ -1765,7 +1760,6 @@ extension Catalog where Self: ~Escapable {
     }
     let scope = Scope([(relation, from.schema)])
     let plans = try subquery(of: select, context, enclosing: scope)
-    let barred = plans.rest.barred
     let routines = context.routines
 
     // Validate every named window the clause defines, including one no window
@@ -1773,7 +1767,7 @@ extension Catalog where Self: ~Escapable {
     // inlined use below, but an unused definition would otherwise be dropped
     // unchecked.
     try validate(named: select.window, against: scope, routines,
-                 subquery: barred)
+                 subquery: plans.rest)
 
     // The WHERE lowers below the window node, in the source's base-ordinal
     // space; a correlated column of this query is admitted here, as the run's
@@ -1817,11 +1811,13 @@ extension Catalog where Self: ~Escapable {
     let identity =
         Dictionary(uniqueKeysWithValues: (0 ..< space).map { ($0, $0) })
     var probe = Windowed(scope, identity, width: space)
-    let probed = try probe.terms(select.projection, routines, subquery: barred)
+    let probed = try probe.terms(select.projection, routines,
+                                 subquery: plans.rest)
     var references = Set<Int>()
     for term in probed { term.references(into: &references) }
     if let clause = select.order {
-      for key in try probe.order(clause, probed, routines, subquery: barred) {
+      for key in try probe.order(clause, probed, routines,
+                                 subquery: plans.rest) {
         key.term.references(into: &references)
       }
     }
@@ -1838,10 +1834,11 @@ extension Catalog where Self: ~Escapable {
     // over the source slot space, so windowing `j` reads packed source cells.
     var windowed = Windowed(scope, slot, width: ordinals.count)
     let projection = try windowed.terms(select.projection, routines,
-                                        subquery: barred)
+                                        subquery: plans.rest)
     var order = Array<SortKey>()
     if let clause = select.order {
-      order = try windowed.order(clause, projection, routines, subquery: barred)
+      order = try windowed.order(clause, projection, routines,
+                                 subquery: plans.rest)
     }
     // Under DISTINCT every `ORDER BY` key must be a select-list value (see
     // `distinct`); the keys and projection are in the window's output slot

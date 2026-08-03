@@ -212,8 +212,8 @@ extension Catalog where Self: ~Escapable {
     // `EXISTS`/`IN`/scalar sort-key subquery a plain `SELECT`'s ORDER BY
     // accepts. Threading this resolution in makes a set operation's ORDER BY
     // resolve a subquery sort key identically to a plain select's; an ORDER BY
-    // position bars a new correlation (`.barred` inside `scope.order`), so a
-    // genuinely-unsupported case still faults exactly as it does on a SELECT.
+    // position admits a correlated column (`scope.order` resolves it against
+    // the enclosing scope), exactly as it does on a SELECT.
     //
     // `roles(of:order:)` classifies a subquery by the clause it occurs in — the
     // carrier path's `ORDER BY` IS the carrier's, NOT the leftmost arm's own (a
@@ -383,7 +383,12 @@ extension Catalog where Self: ~Escapable {
         for query in subqueries {
           try self.width(query, [], context, nested, &widths, &types)
         }
-        let check = SubqueryCheck(widths, types, deferred: scalars).barred
+        // Carry the enclosing `outer` so a key that directly names an outer
+        // column — a correlated `ORDER BY T.Id` over a set operation whose
+        // output lacks `Id` — resolves against it here exactly as the run's
+        // `resolution` above does, rather than faulting `.column`.
+        let check = SubqueryCheck(widths, types, deferred: scalars,
+                                  outer: context.outer)
         for key in rewritten.keys {
           guard case let .expression(expression) = key.sort else { continue }
           try scope.aggregates(in: expression, context.routines,
@@ -430,7 +435,11 @@ extension Catalog where Self: ~Escapable {
             throw error
           }
         }
-        let check = SubqueryCheck(widths, types, deferred: scalars).barred
+        // Carry the enclosing `outer` for the same reason the validate check
+        // does: a correlated column inside a key comparison (`ORDER BY
+        // NULLIF(T.Id, k)`) resolves against the outer here as it does at run.
+        let check = SubqueryCheck(widths, types, deferred: scalars,
+                                  outer: context.outer)
         for key in rewritten.keys {
           guard case let .expression(expression) = key.sort else { continue }
           try scope.comparisons(in: expression, context.routines,

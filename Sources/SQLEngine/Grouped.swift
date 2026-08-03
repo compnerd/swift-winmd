@@ -109,9 +109,8 @@ internal struct Grouped {
       // it occupies grouped slot `index` as a `.parameter` key (in `group`'s
       // keys array) with no ordinal→slot entry — the projection reads it via
       // the same correlation, never through this key dict. A genuinely unknown
-      // column re-throws the `.column` fault; a barred surface diagnoses a
-      // bound outer column `.unsupported`. `correlated` records nothing, so it
-      // stays idempotent against `group`'s own correlation. A general
+      // column re-throws the `.column` fault. `correlated` records nothing, so
+      // it stays idempotent against `group`'s own correlation. A general
       // (non-column) key takes no ordinal entry; it matches by term in `term`.
       guard case let .column(column) = grouping[index],
           column.qualifier == nil ? scope.merges(column.name) == nil : true
@@ -188,10 +187,10 @@ internal struct Grouped {
     // coalesced value, not a NULL left column.
     //
     // A bare plain column is skipped here and falls to the ordinal path below,
-    // which additionally distinguishes a genuine unknown column, a correlated
-    // reference (a LATERAL body's `everywhere` seam), and a barred grouped
-    // surface — cases a bare merged column and a general expression never
-    // reach. A merged column that matches no key faults `.grouping`; a general
+    // which additionally distinguishes a genuine unknown column from a
+    // correlated reference (a LATERAL body or an enclosing query's column) —
+    // cases a bare merged column and a general expression never reach. A merged
+    // column that matches no key faults `.grouping`; a general
     // expression that matches none falls through so its operands are each
     // checked (`Amount + 2` faults on the bare non-key `Amount`). An aggregated
     // expression (`SUM(x) + 1`) is skipped too: `scope.term` faults on an
@@ -228,11 +227,10 @@ internal struct Grouped {
       // `Scope.term`'s `.column`: a name a local relation binds must be a
       // `GROUP BY` key (the standard grouping rule), else `SQLError.grouping`.
       // A name none binds is a candidate correlated reference — consult the
-      // surface, which admits it (a `Term.parameter` the apply binds per outer
-      // row) only for a LATERAL body's `everywhere` seam and diagnoses it
-      // `.unsupported` on an ordinary barred grouped surface. The final
-      // `ordinal(of:)` re-throws the genuine unknown-column `.column` fault,
-      // exactly as `Scope.term` does.
+      // surface, which admits it in every clause (a `Term.parameter` the
+      // enclosing scope binds per outer row). The final `ordinal(of:)`
+      // re-throws the genuine unknown-column `.column` fault, exactly as
+      // `Scope.term` does.
       if let ordinal = try scope.find(column) {
         if let slot = keys[ordinal] { return .slot(slot) }
         // A bare column another set groups on but this arm's set omits is a
@@ -431,10 +429,9 @@ internal struct Grouped {
                                _ routines: Routines = [:],
                                subquery: Resolution = .unsupported)
       throws(SQLError) -> Array<Term> {
-    // A grouped projection is a barred clause position (see `Schema.terms`):
-    // the entry bars the seam so it cannot admit a correlated column of this
-    // query.
-    let subquery = subquery.barred
+    // A grouped projection admits a correlated column of this query as every
+    // clause does (see `Schema.terms`): an unbound name resolves against the
+    // enclosing `outer` that `subquery` carries.
     switch projection {
     case .all:
       throw .state("0A000",
@@ -508,8 +505,8 @@ internal struct Grouped {
                       _ routines: Routines = [:],
                       subquery: Resolution = .unsupported)
       throws(SQLError) -> Array<SortKey> {
-    // A grouped ORDER BY is barred, as the projection is (see `Schema.order`).
-    let subquery = subquery.barred
+    // A grouped ORDER BY admits a correlated column, as the projection does
+    // (see `Schema.order`).
     var resolved = Array<SortKey>()
     resolved.reserveCapacity(order.keys.count)
     for key in order.keys {

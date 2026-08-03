@@ -1680,3 +1680,139 @@ struct WindowNonDeterminismTests {
     #expect(counter.count == 6)
   }
 }
+
+@Suite("Window functions over a join")
+struct WindowOverJoinTests {
+  // `T.id` 4 has no `U` match, so an inner join (and a CROSS APPLY) drops it
+  // while a LEFT join keeps it NULL-extended; `T.g` groups ids 1,2 and 3,4.
+  private func fixture() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("T", ["id": .integer, "g": .integer]) {
+        Row(1, 10)
+        Row(2, 10)
+        Row(3, 20)
+        Row(4, 20)
+      }
+      Relation("U", ["id": .integer, "v": .integer]) {
+        Row(1, 100)
+        Row(2, 200)
+        Row(3, 500)
+      }
+    }
+  }
+
+  @Test func `ROW_NUMBER over an inner join orders by a joined column`()
+      throws {
+    // The inner join drops `id` 4; the window ranks the three surviving rows by
+    // the joined `U.v` descending (500, 200, 100), and the output keeps the
+    // join (source) order, each row carrying its rank.
+    try fixture().expect(
+        "SELECT T.id, ROW_NUMBER() OVER (ORDER BY U.v DESC) " +
+        "FROM T JOIN U ON T.id = U.id",
+        yields: [[1, 3], [2, 2], [3, 1]])
+  }
+
+  @Test func `SUM partitions a window by a joined column`() throws {
+    // Partition by `T.g`: g=10 sums U.v 100 + 200 = 300, g=20 has only id 3's
+    // 500 (id 4 dropped by the inner join). Each partition row gains its total.
+    try fixture().expect(
+        "SELECT T.id, SUM(U.v) OVER (PARTITION BY T.g) " +
+        "FROM T JOIN U ON T.id = U.id",
+        yields: [[1, 300], [2, 300], [3, 500]])
+  }
+
+  @Test func `run and validate agree on a window over a join`() throws {
+    // The schema path types the same two-column shape the run produces — the
+    // parity `compile` gates: no join-specific rejection survives.
+    let sql = "SELECT T.id, SUM(U.v) OVER (PARTITION BY T.g) " +
+              "FROM T JOIN U ON T.id = U.id"
+    #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                .count == 2)
+    try fixture().expect(sql, yields: [[1, 300], [2, 300], [3, 500]])
+  }
+
+  @Test func `COUNT(*) over a LEFT join counts the NULL-extended row`() throws {
+    // The LEFT join keeps `id` 4 (no `U` match, NULL-extended), so the whole-
+    // partition `COUNT(*)` is 4 — the window sees every post-join row.
+    try fixture().expect(
+        "SELECT T.id, COUNT(*) OVER () FROM T LEFT JOIN U ON T.id = U.id",
+        yields: [[1, 4], [2, 4], [3, 4], [4, 4]])
+  }
+
+  @Test func `ROW_NUMBER over a CROSS APPLY orders by the apply body`() throws {
+    // A correlated CROSS APPLY body projects each row's matching `U.v`; `id` 4
+    // matches none and is dropped, and the window ranks the survivors by `d.v`
+    // descending over the apply-bearing chain.
+    try fixture().expect(
+        "SELECT T.id, ROW_NUMBER() OVER (ORDER BY d.v DESC) FROM T " +
+        "JOIN LATERAL (SELECT U.v FROM U WHERE U.id = T.id) AS d ON 1 = 1",
+        yields: [[1, 3], [2, 2], [3, 1]])
+  }
+
+  @Test func `a window in the outer ORDER BY sorts the joined output`() throws {
+    // The query orders by the window rank itself (`U.v` descending), so the
+    // output rows come out id 3, 2, 1 rather than in join order.
+    try fixture().expect(
+        "SELECT T.id FROM T JOIN U ON T.id = U.id " +
+        "ORDER BY ROW_NUMBER() OVER (ORDER BY U.v DESC)",
+        yields: [[3], [2], [1]])
+  }
+
+  @Test func `two windows over a join compute independently`() throws {
+    // A ranking and a grand-total aggregate window share the join source, each
+    // appending its own slot: rank by `U.v` ascending, and the total 800.
+    try fixture().expect(
+        "SELECT T.id, ROW_NUMBER() OVER (ORDER BY U.v), SUM(U.v) OVER () " +
+        "FROM T JOIN U ON T.id = U.id",
+        yields: [[1, 1, 800], [2, 2, 800], [3, 3, 800]])
+  }
+
+  @Test func `the WHERE filters the join before the window`() throws {
+    // `U.v > 100` drops id 1 below the window, so `COUNT(*) OVER ()` counts the
+    // two surviving post-join rows, not all three.
+    try fixture().expect(
+        "SELECT T.id, COUNT(*) OVER () FROM T JOIN U ON T.id = U.id " +
+        "WHERE U.v > 100",
+        yields: [[2, 2], [3, 2]])
+  }
+
+  @Test func `a running frame accumulates over the join`() throws {
+    // A `ROWS UNBOUNDED PRECEDING → CURRENT ROW` frame over the join, ordered
+    // by `U.v`, runs the cumulative sum 100, 300, 800.
+    try fixture().expect(
+        """
+        SELECT T.id, SUM(U.v) OVER (ORDER BY U.v
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+        FROM T JOIN U ON T.id = U.id
+        """,
+        yields: [[1, 100], [2, 300], [3, 800]])
+  }
+
+  @Test func `a window partitions by a USING merged column`() throws {
+    // `USING (id)` merges the join key to one column; partitioning the window
+    // by that merged `id` makes each row its own partition, so the count is 1.
+    try fixture().expect(
+        "SELECT id, COUNT(*) OVER (PARTITION BY id) FROM T JOIN U USING (id)",
+        yields: [[1, 1], [2, 1], [3, 1]])
+  }
+
+  @Test func `a window in a join ON is still rejected`() throws {
+    // Broadening the window source to a join does not admit a window function
+    // in a join ON — it has no per-row meaning there, on a join as on one
+    // relation.
+    try fixture().expect(
+        "SELECT T.id FROM T JOIN U ON ROW_NUMBER() OVER () = 1",
+        fails: .state("0A000",
+            "a window function is allowed only in SELECT and ORDER BY"))
+  }
+
+  @Test func `a window in an aggregate query over a join is still rejected`()
+      throws {
+    // A window beside an aggregate routes to the grouped path (which does not
+    // yet support windows) whether or not the query joins — the join does not
+    // change the routing.
+    try fixture().expect(
+        "SELECT SUM(U.v), ROW_NUMBER() OVER () FROM T JOIN U ON T.id = U.id",
+        fails: .state("0A000", "a window function is not supported"))
+  }
+}

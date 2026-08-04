@@ -22,6 +22,12 @@
 public enum Statement: Hashable, Sendable {
   /// A `SELECT` query — one `SELECT`, or several combined with `UNION`.
   case select(Query)
+  /// An `EXPLAIN <query>` — the diagnostic plan-inspection statement carrying
+  /// the `query` whose optimised physical plan to render rather than run. It is
+  /// a non-ISO extension (like the shell's metacommands), so a consumer that
+  /// runs it yields the plan tree as a single-column relation of text lines
+  /// rather than the query's own rows.
+  case explain(Query)
   /// A `CREATE VIEW name AS query`: the view's `name` and the `View` it binds
   /// — the stored `query` and the column names (explicit or inferred from the
   /// projection). A consumer registers the `View` under `name` in a catalog so

@@ -133,6 +133,20 @@ extension Catalog where Self: ~Escapable {
     switch statement {
     case let .select(query):
       return try columns(of: query, routines: routines, validate: validate)
+    case let .explain(query):
+      // `EXPLAIN` yields the plan tree as one text column per line — a fixed
+      // single-column shape, whatever the inspected query projects. Under
+      // `validate`, prove it plannable by building its plan — exactly what
+      // running the EXPLAIN does (`plan(of:)`) — rather than deriving the
+      // inspected query's schema. Planning faults on a query that cannot be
+      // planned (an unknown column, a statically incomparable comparison), so a
+      // client cannot describe an unplannable EXPLAIN; but it does not eager
+      // type-check a projected row operand the way the schema derive would, so
+      // `EXPLAIN SELECT Name + 1 FROM People` — which runs fine, no row
+      // expression evaluated — is not wrongly rejected. The plan is discarded,
+      // only its faults matter. Then name the fixed diagnostic column.
+      if validate { _ = try plan(of: query, Context(routines: routines)) }
+      return [OutputColumn(name: "plan", type: .text)]
     case let .with(ctes, query):
       return try columns(of: query, with: ctes, routines: routines,
                          validate: validate)

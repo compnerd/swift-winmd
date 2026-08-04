@@ -177,10 +177,22 @@ internal struct Parser: ~Escapable {
   /// leading `WITH` the common-table-expression form; anything else is a
   /// `query` — a `SELECT` or a `UNION` of several.
   internal mutating func parse() throws(SQLError) -> Statement {
-    let statement = switch current?.kind {
-    case .create: try create()
-    case .with: try with()
-    default: try Statement.select(query())
+    // `EXPLAIN` is a contextual keyword recognised only here, at statement
+    // start — not a reserved token — so an existing relation, column, alias, or
+    // routine named `Explain` still lexes as an ordinary identifier and parses
+    // everywhere else (`SELECT Explain FROM T`, `SELECT * FROM Explain`). A
+    // statement never otherwise begins with a bare identifier, so a leading
+    // `explain` is unambiguous.
+    let statement: Statement
+    if case let .identifier(text)? = current?.kind,
+        text.uppercased() == "EXPLAIN" {
+      statement = try explain()
+    } else {
+      statement = switch current?.kind {
+      case .create: try create()
+      case .with: try with()
+      default: try Statement.select(query())
+      }
     }
     if let token = current {
       throw .trailing(at: token.location)
@@ -206,6 +218,19 @@ internal struct Parser: ~Escapable {
       try ctes.append(cte(recursive: recursive))
     }
     return try .with(ctes: ctes, query: query())
+  }
+
+  /// Parses `EXPLAIN <query>` (the leading `EXPLAIN` is the next token) — the
+  /// diagnostic plan-inspection statement.
+  ///
+  /// `EXPLAIN` prefixes a `query` (a `SELECT` or a set-operation chain — the
+  /// same `<query expression>` a bare statement is), so a consumer renders that
+  /// query's optimised physical plan rather than running it. It is deliberately
+  /// query-scoped: a `WITH` or a `CREATE` after `EXPLAIN` is rejected as a
+  /// trailing token, since neither yields a single physical plan to render.
+  private mutating func explain() throws(SQLError) -> Statement {
+    _ = try advance(expecting: "EXPLAIN")
+    return try .explain(query())
   }
 
   /// Parses one `cte := identifier ['(' identifier (, identifier)* ')'] AS '('

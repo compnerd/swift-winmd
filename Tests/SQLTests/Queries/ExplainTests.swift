@@ -174,6 +174,46 @@ private func lines(_ catalog: borrowing FixtureCatalog, _ sql: String,
     #expect(rendered.contains { $0.contains("limit  count 2  offset 1") })
   }
 
+  @Test func `a bounded ORDER BY OFFSET FETCH fuses into a top-N node`()
+      throws {
+    let catalog = try fixtures()
+    // A `.limit` directly over a `.sort` with a bounded FETCH fuses into a
+    // single `top-N` node — the full sort and the cap collapse into one bounded
+    // selection. The node renders its cap, offset, and keys.
+    #expect(try lines(catalog,
+                      "SELECT Name FROM People ORDER BY Age DESC "
+                    + "OFFSET 1 ROWS FETCH FIRST 2 ROWS ONLY") == [
+      "project [slot 0]",
+      "└─ top-N  count 2  offset 1  by slot 1 DESC",
+      "   └─ scan People  reads [1, 2]",
+    ])
+  }
+
+  @Test func `an unbounded OFFSET is not fused into a top-N node`() throws {
+    let catalog = try fixtures()
+    // An `OFFSET` with no `FETCH` is unbounded — there is nothing to bound — so
+    // the fusion never fires: the plan keeps the full sort under a limit.
+    let rendered =
+        try lines(catalog, "SELECT Name FROM People ORDER BY Age OFFSET 1 ROWS")
+    #expect(rendered.allSatisfy { !$0.contains("top-N") })
+    #expect(rendered.contains { $0.contains("sort  slot 1 ASC") })
+    #expect(rendered.contains { $0.contains("limit  count all  offset 1") })
+  }
+
+  @Test func `a DISTINCT ORDER BY FETCH is not fused into a top-N node`()
+      throws {
+    let catalog = try fixtures()
+    // The cap sits over the `.distinct` (which sits over the `.sort`), not
+    // directly over the sort, so the fusion pattern never matches it — dedup
+    // stays before the cap and no `top-N` forms.
+    let rendered = try lines(catalog,
+                             "SELECT DISTINCT Age FROM People ORDER BY Age "
+                           + "FETCH FIRST 2 ROWS ONLY")
+    #expect(rendered.allSatisfy { !$0.contains("top-N") })
+    #expect(rendered.contains { $0.contains("limit  count 2") })
+    #expect(rendered.contains { $0.contains("distinct") })
+  }
+
   @Test func `a GROUP BY plans an aggregate with its keys and folds`() throws {
     let catalog = try fixtures()
     let rendered = try lines(catalog,
@@ -548,6 +588,11 @@ private final class Counter: @unchecked Sendable {
       "SELECT Age FROM People OFFSET 1 ROWS FETCH FIRST 2 ROWS ONLY",
       "SELECT Age FROM People OFFSET 2 ROWS FETCH FIRST 2 ROWS ONLY",
       "SELECT Age FROM People OFFSET 1 ROWS FETCH FIRST 3 ROWS ONLY",
+      "SELECT Age FROM People ORDER BY Age FETCH FIRST 1 ROWS ONLY",
+      "SELECT Age FROM People ORDER BY Age FETCH FIRST 2 ROWS ONLY",
+      "SELECT Age FROM People ORDER BY Age DESC FETCH FIRST 2 ROWS ONLY",
+      "SELECT Age FROM People ORDER BY Age "
+        + "OFFSET 1 ROWS FETCH FIRST 2 ROWS ONLY",
       "SELECT SUM(Age) OVER (ORDER BY Id "
         + "ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM People",
       "SELECT SUM(Age) OVER (ORDER BY Id "

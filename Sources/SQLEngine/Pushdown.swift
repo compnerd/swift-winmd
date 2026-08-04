@@ -97,6 +97,11 @@ extension Plan {
       // filter yields different rows — and none can, since the cap sits above
       // the projection.
       try .limit(count: count, offset: offset, source.pushdown())
+    case let .topN(keys, offset, count, source):
+      // `topN` is produced by `optimise`, which runs after pushdown, so a plan
+      // reaching here never carries one; the arm recurses transparently to keep
+      // the switch exhaustive, mirroring the `limit`/`sort` it fuses.
+      try .topN(keys: keys, offset: offset, count: count, source.pushdown())
     }
   }
 

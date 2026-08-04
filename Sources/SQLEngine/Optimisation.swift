@@ -144,10 +144,28 @@ extension Catalog where Self: ~Escapable {
       // chain below it seeks and nests as usual) and rewrap. The projection sits
       // above it as a `project` the recursion reaches through here.
       try .window(windowings, optimise(source, context))
+    case let .limit(count?, offset, .sort(keys, source)):
+      // Fuse a bounded `limit` directly over a `sort` into a single bounded
+      // selection: the executor keeps only the `offset + count` head rows in
+      // sorted order (an `O(n log(offset + count))` partial sort) rather than
+      // sorting the whole input and slicing. The guard requires `count != nil`
+      // — an `OFFSET` with no `FETCH` is unbounded, nothing to bound, so it
+      // falls through to the plain `limit` recurse below and keeps the full
+      // sort. The keys are unchanged (a sort key is evaluated per row, never
+      // seeked); only the source optimises.
+      try .topN(keys: keys, offset: offset, count: count,
+                optimise(source, context))
     case let .limit(count, offset, source):
       // A `limit` is a transparent wrapper — optimise its source and re-cap;
-      // the cap itself has no seek or join to rewrite.
+      // the cap itself has no seek or join to rewrite. An unbounded `limit`
+      // (`count == nil`) over a sort reaches here, keeping the full sort.
       try .limit(count: count, offset: offset, optimise(source, context))
+    case let .topN(keys, offset, count, source):
+      // A `topN` is already the fused physical shape; optimise its source and
+      // rewrap so re-optimising a folded plan is idempotent (the cap and the
+      // ordering have no seek or join of their own to rewrite).
+      try .topN(keys: keys, offset: offset, count: count,
+                optimise(source, context))
     }
   }
 

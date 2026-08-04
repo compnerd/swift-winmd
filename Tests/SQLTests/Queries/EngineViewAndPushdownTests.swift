@@ -305,6 +305,8 @@ func derived(_ plan: Plan) -> Plan? {
     derived(left) ?? derived(right)
   case let .limit(_, _, source):
     derived(source)
+  case let .topN(_, _, _, source):
+    derived(source)
   case let .distinct(source):
     derived(source)
   case let .aggregate(_, _, source), let .window(_, source):
@@ -343,6 +345,8 @@ func sought(_ plan: Plan) -> Bool {
     sought(left) || sought(right)
   case let .limit(_, _, source):
     sought(source)
+  case let .topN(_, _, _, source):
+    sought(source)
   case let .distinct(source):
     sought(source)
   case let .aggregate(_, _, source), let .window(_, source):
@@ -377,6 +381,8 @@ func filters(_ plan: Plan) -> Bool {
   case let .setop(_, left, right, _, _, _):
     filters(left) || filters(right)
   case let .limit(_, _, source):
+    filters(source)
+  case let .topN(_, _, _, source):
     filters(source)
   case let .distinct(source):
     filters(source)
@@ -418,6 +424,8 @@ func pushed(_ plan: Plan) -> Bool {
     pushed(left) || pushed(right)
   case let .limit(_, _, source):
     pushed(source)
+  case let .topN(_, _, _, source):
+    pushed(source)
   case let .distinct(source):
     pushed(source)
   case let .aggregate(_, _, source), let .window(_, source):
@@ -441,6 +449,8 @@ func floating(_ plan: Plan) -> Bool {
     floating(sub)
   case let .limit(_, _, source):
     floating(source)
+  case let .topN(_, _, _, source):
+    floating(source)
   default:
     false
   }
@@ -459,6 +469,8 @@ func joined(_ plan: Plan) -> Bool {
   case let .sort(_, source):
     joined(source)
   case let .limit(_, _, source):
+    joined(source)
+  case let .topN(_, _, _, source):
     joined(source)
   case let .distinct(source):
     joined(source)
@@ -495,6 +507,8 @@ func residue(_ plan: Plan) -> Bool {
   case let .sort(_, source):
     residue(source)
   case let .limit(_, _, source):
+    residue(source)
+  case let .topN(_, _, _, source):
     residue(source)
   case let .distinct(source):
     residue(source)
@@ -535,6 +549,8 @@ func separated(_ plan: Plan) -> Bool {
     separated(source)
   case let .limit(_, _, source):
     separated(source)
+  case let .topN(_, _, _, source):
+    separated(source)
   case let .distinct(source):
     separated(source)
   case let .derived(_, sub, _, _):
@@ -574,6 +590,8 @@ func stacked(_ plan: Plan) -> Bool {
   case let .sort(_, source):
     stacked(source)
   case let .limit(_, _, source):
+    stacked(source)
+  case let .topN(_, _, _, source):
     stacked(source)
   case let .distinct(source):
     stacked(source)
@@ -692,6 +710,8 @@ private func injected(_ plan: Plan) -> Bool {
   case let .sort(_, source):
     injected(source)
   case let .limit(_, _, source):
+    injected(source)
+  case let .topN(_, _, _, source):
     injected(source)
   case let .distinct(source):
     injected(source)

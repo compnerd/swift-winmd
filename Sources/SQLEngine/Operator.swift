@@ -293,6 +293,22 @@ internal indirect enum Plan {
   /// nor reshapes the rows, a transparent wrapper the pushdown and optimise
   /// passes recurse through.
   case limit(count: Int?, offset: Int, Plan)
+  /// A bounded selection fusing a `sort` with the `limit` directly above it: it
+  /// orders its `source` by `keys` (major to minor, each in its own direction —
+  /// exactly the `sort` node's semantics), skips the first `offset`, and takes
+  /// at most `count` — but selects only the `offset + count` head rows rather
+  /// than sorting the whole input, an `O(n log(offset + count))` partial sort
+  /// in place of `sort`'s full `O(n log n)`. The optimiser folds a
+  /// `limit(count?, offset, sort(keys, source))` into this when `count` is
+  /// bounded (`count != nil`); an unbounded `OFFSET` keeps the full sort under
+  /// a `limit`. The
+  /// retained prefix is byte-identical to `sort` then `limit`: the executor
+  /// selects by the same `less` comparator with the same original-index stable
+  /// tie-break, so among equal keys the lowest input index wins, exactly the
+  /// stable sort's head. It sits where the `limit` sat — over the sort/select
+  /// but below the projection — so a row outside the page is never projected.
+  case topN(keys: Array<(term: Term, ascending: Bool)>, offset: Int,
+            count: Int, Plan)
 }
 
 extension Plan {
@@ -323,6 +339,10 @@ extension Plan {
     case let .limit(_, _, source):
       // A `limit` caps rows without reshaping them, so it is as wide as its
       // source.
+      source.width
+    case let .topN(_, _, _, source):
+      // A `topN` orders and caps rows without reshaping them, so it is as wide
+      // as its source — exactly as the `sort` then `limit` it fuses.
       source.width
     case let .aggregate(keys, aggregates, _):
       // A grouped record is the key values followed by the aggregate results.
@@ -424,6 +444,10 @@ extension Plan {
       // A `sort` reorders rows without reshaping them, so it spans the same
       // slots as its source.
       source.slots
+    case let .topN(_, _, _, source):
+      // A `topN` orders and caps rows without reshaping them, so it spans the
+      // same slots as its source — exactly as the `sort`/`limit` it fuses.
+      source.slots
     }
   }
 
@@ -481,6 +505,11 @@ extension Plan {
       source.safe
     case let .limit(_, _, source):
       source.safe
+    case let .topN(keys, _, _, source):
+      // Each sort key's term is evaluated per row before the selection, exactly
+      // as the fused `sort` evaluates it — so every key term and the source
+      // must be throw-free.
+      keys.allSatisfy { $0.term.safe } && source.safe
     // A `derived` view body runs an arbitrary sub-plan (and augments/validates
     // its schema); a `join`/`outer`/`semijoin`/`apply` evaluates an `on`,
     // seeks, or re-executes a correlated body; an `aggregate` may overflow a
@@ -534,6 +563,10 @@ extension Plan {
     case let .sort(_, source):
       // A sort reorders rows without duplicating one, so it preserves the
       // source's distinctness (which ignores row order).
+      return source.unique
+    case let .topN(_, _, _, source):
+      // A topN orders and caps rows without duplicating one, so it preserves
+      // the source's distinctness — exactly as the sort/limit it fuses.
       return source.unique
     case let .window(_, source):
       // A window node passes every source row through and appends a computed

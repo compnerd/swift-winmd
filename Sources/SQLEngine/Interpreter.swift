@@ -107,6 +107,8 @@ extension Catalog where Self: ~Escapable {
       return try windowed(execute(source, context), windowings, context)
     case let .limit(count, offset, source):
       return limited(try execute(source, context), count, offset)
+    case let .topN(keys, offset, count, source):
+      return try topmost(execute(source, context), keys, offset, count, context)
     }
   }
 
@@ -204,6 +206,69 @@ extension Catalog where Self: ~Escapable {
         return lhs < rhs
       }
       .map { rows[$0] }
+  }
+
+  /// Selects the `offset + count` head rows of `rows` in the order the fused
+  /// `sort` would impose, then drops the first `offset` and takes at most
+  /// `count` — the executor's `topN` node body, byte-identical to
+  /// `sorted(rows, keys)` then `limited(_, count, offset)` but bounded: it
+  /// keeps only the head prefix in a max-heap rather than sorting the input, an
+  /// `O(n log(offset + count))` partial sort in place of `sort`'s `O(n log n)`.
+  ///
+  /// Each key term is evaluated once per row up front — exactly as `sorted`
+  /// does — so a throwing key (`ORDER BY 1 / x`) faults over the same rows,
+  /// before any row is selected or dropped: the fusion changes which rows are
+  /// KEPT, never which rows a key is evaluated on. The comparator is `sorted`'s
+  /// own — major-to-minor `less` with each key's direction flip and the
+  /// original-index ascending tie-break — so among rows equal on every key the
+  /// lowest input index wins, the stable sort's choice; the retained prefix is
+  /// therefore the head of the full stable sort.
+  internal borrowing func topmost(
+      _ rows: Array<Record>,
+      _ keys: Array<(term: Term, ascending: Bool)>,
+      _ offset: Int, _ count: Int, _ context: Context)
+      throws(SQLError) -> Array<Record> {
+    // Evaluate each key once per row, exactly as `sorted` does — so a throwing
+    // key raises over the same rows before any row is selected or dropped.
+    var sortable = Array<Array<Value>>()
+    sortable.reserveCapacity(rows.count)
+    for record in rows {
+      var cells = Array<Value>()
+      cells.reserveCapacity(keys.count)
+      for key in keys {
+        try cells.append(evaluate(record, key.term, context))
+      }
+      sortable.append(cells)
+    }
+
+    // The total order `sorted` sorts by — major-to-minor `less` with each key's
+    // direction, tie-broken by the ascending original index. The index
+    // tie-break makes it a strict total order, so the head selection is
+    // unambiguous and matches the stable sort exactly.
+    let before = { (lhs: Int, rhs: Int) -> Bool in
+      for index in keys.indices {
+        let ordered = less(sortable[lhs][index], sortable[rhs][index])
+        let reverse = less(sortable[rhs][index], sortable[lhs][index])
+        if ordered == reverse { continue }
+        return keys[index].ascending ? ordered : reverse
+      }
+      return lhs < rhs
+    }
+
+    // The bound is `offset + count`, saturated to `Int.max` on overflow so an
+    // `Int.max` FETCH never traps — it then simply exceeds the row count and
+    // the heap keeps every row (degrading to a full sort, never a fault).
+    let sum = offset.addingReportingOverflow(count)
+    let bound = sum.overflow ? Int.max : sum.partialValue
+
+    // Keep only the `bound` smallest indices under `before` in a bounded
+    // max-heap, then sort them into order, drop the first `offset`, and take at
+    // most `count` — byte-identical to `limited` over the full `sorted`.
+    var heap = Heap(capacity: bound, before: before)
+    for index in sortable.indices { heap.offer(index) }
+    let selected = heap.sorted()
+    guard offset < selected.count else { return [] }
+    return selected[offset...].prefix(count).map { rows[$0] }
   }
 
   /// Evaluates each projected `term` against `record` through `routines` to the
@@ -632,6 +697,77 @@ private func equikey(_ on: Filter, _ boundary: Int)
 /// skip and the take never index before the start. The take is a `prefix` of
 /// the skipped slice rather than an `offset + count` bound, so a `count` near
 /// `Int.max` caps the slice instead of overflowing.
+/// A bounded max-heap of row indices ordered by a `before` total order — the
+/// selection buffer `topmost` keeps the head prefix in.
+///
+/// The root is the index that comes LAST under `before` (the largest kept), so
+/// once the heap is full a new index that comes `before` the root evicts it.
+/// Selecting the `capacity` smallest indices this way is `O(n log capacity)`,
+/// where sorting the whole input would be `O(n log n)`. `capacity` may be
+/// `Int.max` (a saturated `offset + count`), so the buffer never pre-reserves
+/// it — it grows to at most `min(n, capacity)` elements as indices are offered.
+private struct Heap {
+  private var elements = Array<Int>()
+  private let capacity: Int
+  private let before: (Int, Int) -> Bool
+
+  internal init(capacity: Int, before: @escaping (Int, Int) -> Bool) {
+    self.capacity = capacity
+    self.before = before
+  }
+
+  /// Offers `index` to the heap: inserted while the heap is below `capacity`,
+  /// else it displaces the root only when it comes `before` it (is smaller than
+  /// the largest kept). A `capacity` of zero keeps nothing.
+  internal mutating func offer(_ index: Int) {
+    if elements.count < capacity {
+      elements.append(index)
+      rise(from: elements.count - 1)
+    } else if capacity > 0, before(index, elements[0]) {
+      elements[0] = index
+      fall(from: 0)
+    }
+  }
+
+  /// The kept indices in ascending `before` order — the sorted head prefix.
+  internal func sorted() -> Array<Int> {
+    elements.sorted(by: before)
+  }
+
+  /// Restores the max-heap property upward from `start`: a child greater than
+  /// its parent (the parent comes `before` it) rises.
+  private mutating func rise(from start: Int) {
+    var index = start
+    while index > 0 {
+      let parent = (index - 1) / 2
+      guard before(elements[parent], elements[index]) else { break }
+      elements.swapAt(parent, index)
+      index = parent
+    }
+  }
+
+  /// Restores the max-heap property downward from `start`: the parent sinks
+  /// past its greater child (the one it comes `before`).
+  private mutating func fall(from start: Int) {
+    var index = start
+    let count = elements.count
+    while true {
+      let left = 2 * index + 1
+      let right = 2 * index + 2
+      var largest = index
+      if left < count, before(elements[largest], elements[left]) {
+        largest = left
+      }
+      if right < count, before(elements[largest], elements[right]) {
+        largest = right
+      }
+      guard largest != index else { break }
+      elements.swapAt(index, largest)
+      index = largest
+    }
+  }
+}
+
 private func limited(_ records: Array<Record>, _ count: Int?, _ offset: Int)
     -> Array<Record> {
   guard offset < records.count else { return [] }

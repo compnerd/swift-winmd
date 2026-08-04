@@ -168,7 +168,8 @@ extension Catalog where Self: ~Escapable {
                                     rows: Bool)
       throws(SQLError) -> (plan: Plan, augmented: Context) {
     let context = context.resolving(Subqueries())
-    let logical = try compile(query, context.validating(false)).pushdown()
+    let logical =
+        try compile(query, context.validating(false)).demoted().pushdown()
     try typecheck(query, context.validating(false).comparing())
     let augmented = try augment(context.validating(false), for: query,
                                 rows: rows)

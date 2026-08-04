@@ -87,7 +87,7 @@ extension Catalog where Self: ~Escapable {
     case let .project(ordinals, source):
       try .project(ordinals, optimise(source, context))
     case let .sort(keys, source):
-      try .sort(keys: keys, optimise(source, context))
+      try elided(keys, over: source, context)
     case let .product(left, right):
       try .product(optimise(left, context), optimise(right, context))
     case .join:
@@ -215,6 +215,27 @@ extension Catalog where Self: ~Escapable {
     return source.unique ? source : .distinct(source)
   }
 
+  /// The fold of a `sort(keys, source)` into its optimised `source` alone when
+  /// that source's guaranteed order already satisfies `keys`, or the `sort`
+  /// left wrapping it otherwise.
+  ///
+  /// A stable sort of an input already in the requested order is the identity,
+  /// so dropping the sort yields byte-identical rows. The source is optimised
+  /// first so its promised order reflects the physical shape the executor runs
+  /// — a seeked scan is still ordered on its key (a seek is a contiguous slice
+  /// of the sorted scan), so `WHERE Id > 1 ORDER BY Id` drops the sort over the
+  /// seek. Dropping is sound only when `satisfies` is provably true — a
+  /// conservative test resolving every doubt (a `DESC` key, an expression key,
+  /// a source with no promised order) to keeping the sort, so a mis-fold never
+  /// reorders rows; a missed fold costs one full sort. A bare-slot sort key
+  /// cannot throw, so dropping it suppresses no fault.
+  private borrowing func elided(_ keys: Array<(term: Term, ascending: Bool)>,
+                                over source: Plan, _ context: Context)
+      throws(SQLError) -> Plan {
+    let source = try optimise(source, context)
+    return satisfies(keys, source, context) ? source : .sort(keys: keys, source)
+  }
+
   /// Optimises a VIEW body's sub-`plan` for the view named `name`, resolving
   /// its scans under the view's own overlay rather than a caller's scope.
   ///
@@ -323,6 +344,98 @@ extension Catalog where Self: ~Escapable {
     // filtered-out rows never reach.
     return try optimise(plan, augment(overlay.validating(false), for: query,
                                       rows: false))
+  }
+
+  // MARK: - Interesting orders
+
+  /// Whether the sort `keys` are already guaranteed by `source`'s output order,
+  /// so the sort is redundant. True only when every key is a bare `.slot` and
+  /// the key list (as `(slot, ascending)`) is a prefix of `source`'s promised
+  /// `ordering` — same slot, same direction, in order. A `DESC` key never
+  /// matches the ascending promised order, an expression key is not a bare
+  /// slot, and a key list longer than the promised prefix is not satisfied —
+  /// each keeps the sort.
+  borrowing func satisfies(_ keys: Array<(term: Term, ascending: Bool)>,
+                           _ source: Plan, _ context: Context) -> Bool {
+    var required = Array<(slot: Int, ascending: Bool)>()
+    for key in keys {
+      guard case let .slot(slot) = key.term else { return false }
+      required.append((slot: slot, ascending: key.ascending))
+    }
+    let promised = ordering(of: source, context)
+    guard required.count <= promised.count else { return false }
+    for index in required.indices
+        where required[index].slot != promised[index].slot
+            || required[index].ascending != promised[index].ascending {
+      return false
+    }
+    return true
+  }
+
+  /// The guaranteed output order of `plan` under `context` — the leading run of
+  /// `(slot, ascending)` keys its rows are known to emerge in, or `[]` when no
+  /// order is promised.
+  ///
+  /// Only order-preserving shapes report non-empty: a base scan (through its
+  /// relation's declared `order`, seeked or not — a seek is a contiguous slice
+  /// of the sorted scan), a selection (drops rows, never reorders), and a
+  /// bare-slot projection (remapped through its terms). Every other node — an
+  /// aggregate, join, product, set operation, window, a limit over an unordered
+  /// source, or another sort — carries no promised order here (conservative:
+  /// doubt reports `[]`, so a sort is merely kept).
+  borrowing func ordering(of plan: Plan, _ context: Context)
+      -> Array<(slot: Int, ascending: Bool)> {
+    switch plan {
+    case let .scan(name, ordinals, _):
+      return promised(order: name, ordinals, context)
+    case let .select(_, source):
+      return ordering(of: source, context)
+    case let .project(terms, source):
+      // Remap the source order through this projection: a source slot survives
+      // only while it maps to a bare `.slot` output term, and the guaranteed
+      // prefix ends at the first source key the projection does not expose.
+      var output = Dictionary<Int, Int>()
+      for slot in terms.indices {
+        if case let .slot(source) = terms[slot], output[source] == nil {
+          output[source] = slot
+        }
+      }
+      var result = Array<(slot: Int, ascending: Bool)>()
+      for key in ordering(of: source, context) {
+        guard let slot = output[key.slot] else { break }
+        result.append((slot: slot, ascending: key.ascending))
+      }
+      return result
+    default:
+      return []
+    }
+  }
+
+  /// The promised order of a base scan of `name` reading `ordinals` — its
+  /// relation's declared `order` mapped into the scan's slot space, ascending.
+  ///
+  /// A materialised CTE (a name bound in `context.relations`) stores no order,
+  /// so it promises none — and a CTE shadowing a same-named base table must not
+  /// borrow the base's order, hence the CTE check precedes the table lookup. A
+  /// seek is a contiguous slice of the sorted scan, so a seeked scan keeps the
+  /// order. The prefix ends at the first declared-order column the scan does
+  /// not reference: the rows are ordered by the whole physical column list, so
+  /// an unprojected major column breaks the projected prefix.
+  borrowing func promised(order name: String, _ ordinals: Array<Int>,
+                          _ context: Context)
+      -> Array<(slot: Int, ascending: Bool)> {
+    guard context.relations[name.lowercased()] == nil,
+        let table = table(named: name) else { return [] }
+    var slot = Dictionary<Int, Int>()
+    for index in ordinals.indices where slot[ordinals[index]] == nil {
+      slot[ordinals[index]] = index
+    }
+    var result = Array<(slot: Int, ascending: Bool)>()
+    for ordinal in table.order {
+      guard let index = slot[ordinal] else { break }
+      result.append((slot: index, ascending: true))
+    }
+    return result
   }
 
   // MARK: - Physical seek

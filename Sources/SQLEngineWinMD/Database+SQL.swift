@@ -393,6 +393,17 @@ public struct WinMDRelation: SQLEngine.Table, ~Escapable {
     width
   }
 
+  /// The physical order the rows are stored in: `Id`, the dense 1-based row
+  /// index, which every WinMD table lays out in ascending order by construction
+  /// (`bound(Id, …)` reads the value directly as the row). The intrinsic sort
+  /// key is a valid secondary order only when the database physically sorts the
+  /// table, but `Id` is unconditionally the primary physical order and the one
+  /// a query most often names, so declare it alone — ascending, NULLs-first
+  /// (an `Id` is never NULL), the engine's `less` order.
+  public var order: Array<Int> {
+    [id]
+  }
+
   /// The name of the owner foreign-key column on a list-owned table — the
   /// owning table's schema name (e.g. `TypeDef` for a `MethodDef`) — or `nil`
   /// when the table owns no list (it then has no owner column).

@@ -40,9 +40,8 @@ private func fixtures() throws -> FixtureCatalog {
 private func lines(_ catalog: borrowing FixtureCatalog, _ sql: String,
                    _ bindings: Bindings = [:]) throws -> Array<String> {
   let query = try parse(query: sql)
-  return try catalog.plan(of: query,
-                          Context(routines: .standard, bindings: bindings))
-                    .render()
+  let context = Context(routines: .standard, bindings: bindings)
+  return try catalog.render(catalog.plan(of: query, context), context)
 }
 
 // MARK: - Leaf and seek
@@ -52,7 +51,7 @@ private func lines(_ catalog: borrowing FixtureCatalog, _ sql: String,
     let catalog = try fixtures()
     #expect(try lines(catalog, "SELECT Name FROM People WHERE Id = 2") == [
       "project [slot 1]",
-      "└─ scan People  reads [0, 1]  seek 1..<2",
+      "└─ scan People  reads [0, 1]  seek 1..<2  ordered [slot 0 ASC]",
     ])
   }
 
@@ -64,7 +63,7 @@ private func lines(_ catalog: borrowing FixtureCatalog, _ sql: String,
                       "SELECT Name FROM People WHERE Id > 1 AND Id < 9") == [
       "project [slot 1]",
       "└─ select  slot 0 < 9",
-      "   └─ scan People  reads [0, 1]  seek 1..<2",
+      "   └─ scan People  reads [0, 1]  seek 1..<2  ordered [slot 0 ASC]",
     ])
   }
 
@@ -85,7 +84,7 @@ private func lines(_ catalog: borrowing FixtureCatalog, _ sql: String,
       "project [slot 1, slot 3]",
       "└─ join (index nested loop)  inner Parent  on slot 0 = slot 2  "
           + "seek column 0  base 2  reads [0, 1]",
-      "   └─ scan Child  reads [0, 1]",
+      "   └─ scan Child  reads [0, 1]  ordered [slot 0 ASC]",
     ])
   }
 
@@ -106,7 +105,7 @@ private func lines(_ catalog: borrowing FixtureCatalog, _ sql: String,
       "project [slot 1, slot 3]",
       "└─ join (index nested loop)  inner Unsorted  on slot 0 = slot 2  "
           + "seek column 0  base 2  reads [0, 1]",
-      "   └─ scan Child  reads [0, 1]",
+      "   └─ scan Child  reads [0, 1]  ordered [slot 0 ASC]",
     ])
   }
 
@@ -135,8 +134,8 @@ private func lines(_ catalog: borrowing FixtureCatalog, _ sql: String,
                     + "LEFT JOIN Parent ON Child.Pid = Parent.Id") == [
       "project [slot 1, slot 3]",
       "└─ outer LEFT  on slot 0 = slot 2",
-      "   ├─ scan Child  reads [0, 1]",
-      "   └─ scan Parent  reads [0, 1]",
+      "   ├─ scan Child  reads [0, 1]  ordered [slot 0 ASC]",
+      "   └─ scan Parent  reads [0, 1]  ordered [slot 0 ASC]",
     ])
   }
 
@@ -276,8 +275,8 @@ private func lines(_ catalog: borrowing FixtureCatalog, _ sql: String,
                     + "(SELECT 1 FROM Child WHERE Child.Pid = Parent.Id)") == [
       "project [slot 1]",
       "└─ semijoin  on slot 0 = slot 2",
-      "   ├─ scan Parent  reads [0, 1]",
-      "   └─ scan Child  reads [0]",
+      "   ├─ scan Parent  reads [0, 1]  ordered [slot 0 ASC]",
+      "   └─ scan Child  reads [0]  ordered [slot 0 ASC]",
     ])
   }
 
@@ -332,9 +331,9 @@ private func lines(_ catalog: borrowing FixtureCatalog, _ sql: String,
                       "SELECT Id FROM People UNION SELECT Id FROM Parent") == [
       "union",
       "├─ project [slot 0]",
-      "│  └─ scan People  reads [0]",
+      "│  └─ scan People  reads [0]  ordered [slot 0 ASC]",
       "└─ project [slot 0]",
-      "   └─ scan Parent  reads [0]",
+      "   └─ scan Parent  reads [0]  ordered [slot 0 ASC]",
     ])
   }
 
@@ -459,8 +458,9 @@ private func lines(_ catalog: borrowing FixtureCatalog, _ sql: String,
       Relation("a\nb", ["x": .integer]) { Row(1) }
     }
     let query = try parse(query: "SELECT x FROM \"a\nb\"")
-    let rendered = try catalog.plan(of: query,
-                                    Context(routines: .standard)).render()
+    let context = Context(routines: .standard)
+    let rendered = try catalog.render(catalog.plan(of: query, context),
+                                      context)
     #expect(rendered.allSatisfy { !$0.contains("\n") })
     #expect(rendered.contains { $0.contains("scan a\\nb") })
   }
@@ -498,8 +498,9 @@ private final class Counter: @unchecked Sendable {
     }
     let query =
         try parse(query: "SELECT x FROM (SELECT tick() AS x FROM T) AS d")
-    let rendered = try catalog.plan(of: query,
-                                    Context(routines: routines)).render()
+    let context = Context(routines: routines)
+    let rendered = try catalog.render(catalog.plan(of: query, context),
+                                      context)
     // The plan is produced, and `tick()` never fired — a materialising augment
     // would have run the derived body once per row.
     #expect(!rendered.isEmpty)
@@ -514,8 +515,9 @@ private final class Counter: @unchecked Sendable {
     // derived table succeeds rather than surfacing an execution-time fault.
     let query =
         try parse(query: "SELECT x FROM (SELECT 1 / 0 AS x FROM T) AS d")
+    let context = Context(routines: .standard)
     #expect(throws: Never.self) {
-      _ = try catalog.plan(of: query, Context(routines: .standard)).render()
+      _ = try catalog.render(catalog.plan(of: query, context), context)
     }
   }
 
@@ -532,8 +534,9 @@ private final class Counter: @unchecked Sendable {
     let sql = "SELECT v FROM (VALUES (1)) AS d(v) WHERE v = 1 " +
               "UNION ALL SELECT v FROM (VALUES (2)) AS e(v)"
     let query = try parse(query: sql)
+    let context = Context(routines: .standard)
     #expect(throws: Never.self) {
-      _ = try catalog.plan(of: query, Context(routines: .standard)).render()
+      _ = try catalog.render(catalog.plan(of: query, context), context)
     }
   }
 
@@ -554,8 +557,9 @@ private final class Counter: @unchecked Sendable {
               "WHERE EXISTS (SELECT 1 FROM Child WHERE Child.Pid = v) " +
               "UNION ALL SELECT Pid FROM Child"
     let query = try parse(query: sql)
-    let rendered = try catalog.plan(of: query,
-                                    Context(routines: .standard)).render()
+    let context = Context(routines: .standard)
+    let rendered = try catalog.render(catalog.plan(of: query, context),
+                                      context)
     #expect(rendered.contains { $0.contains("semijoin") })
   }
 }
@@ -584,6 +588,8 @@ private final class Counter: @unchecked Sendable {
       "SELECT Age FROM People WHERE Age > 1",
       "SELECT Age FROM People ORDER BY Age",
       "SELECT Age FROM People ORDER BY Age DESC",
+      "SELECT Name FROM People ORDER BY Id",
+      "SELECT Name FROM People ORDER BY Id DESC",
       "SELECT DISTINCT Age FROM People",
       "SELECT Age FROM People OFFSET 1 ROWS FETCH FIRST 2 ROWS ONLY",
       "SELECT Age FROM People OFFSET 2 ROWS FETCH FIRST 2 ROWS ONLY",

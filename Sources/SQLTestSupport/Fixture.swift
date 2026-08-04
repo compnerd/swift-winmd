@@ -152,6 +152,13 @@ public struct FixtureTable: Table {
   /// The lone virtual `Id` column at ordinal `width`.
   public var virtuals: Array<String> { ["Id"] }
 
+  /// The physical order the rows are stored in: the `sorted` column when the
+  /// relation declares one (its cells are integers stored ascending, so they
+  /// match the engine's NULLs-first `less` order), else no guarantee. The coded
+  /// column is deliberately excluded — its decoded cell is not monotonic in row
+  /// order (`ordered` reports `false` for it).
+  public var order: Array<Int> { [relation.sorted].compactMap { $0 } }
+
   /// One past the highest ordinal — the real width plus the lone virtual
   /// `Id` column at ordinal `width`.
   public var extent: Int { width + 1 }

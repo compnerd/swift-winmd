@@ -20,37 +20,11 @@
 /// the inner column's live seekability). The physical node is the ground truth.
 
 extension Plan {
-  /// The optimised plan rendered as an indented operator tree — one line per
-  /// node, the root unindented and each child hung under its parent with a
-  /// box-drawing connector. This is what `EXPLAIN` yields, one text row per
-  /// line.
-  internal func render() -> Array<String> {
-    var lines = Array<String>()
-    render(prefix: "", leading: "", into: &lines)
-    return lines
-  }
-
-  /// Appends this node's label line (prefixed by `leading`) and then each
-  /// child's subtree, hung under a `├─`/`└─` connector with the running
-  /// `prefix` extended by `│  ` (a middle child's descendants) or three spaces
-  /// (the last child's), so the tree's spine draws correctly at every depth.
-  private func render(prefix: String, leading: String,
-                      into lines: inout Array<String>) {
-    lines.append(leading + label)
-    let nodes = children
-    for index in nodes.indices {
-      let last = index == nodes.count - 1
-      let branch = prefix + (last ? "└─ " : "├─ ")
-      let onward = prefix + (last ? "   " : "│  ")
-      nodes[index].render(prefix: onward, leading: branch, into: &lines)
-    }
-  }
-
   /// This operator's sub-plans, in draw order — the children the tree hangs
   /// under it. A `join`'s inner relation is named and re-materialised per outer
   /// record rather than being a sub-plan, so it is annotated in the `label`,
   /// not listed here; likewise an `apply`'s correlated body (looked up by key).
-  private var children: Array<Plan> {
+  internal var children: Array<Plan> {
     switch self {
     case .single, .values, .empty, .scan:
       []
@@ -68,11 +42,43 @@ extension Plan {
       [left, right]
     }
   }
+}
 
-  /// The single-line label for this operator — its kind plus the
-  /// optimiser-relevant fields the render annotates.
-  private var label: String {
-    switch self {
+extension Catalog where Self: ~Escapable {
+  /// The optimised plan rendered as an indented operator tree — one line per
+  /// node, the root unindented and each child hung under its parent with a
+  /// box-drawing connector. This is what `EXPLAIN` yields, one text row per
+  /// line. It is a `Catalog` member because a leaf's `ordered` annotation reads
+  /// the relation's declared physical order through this catalog.
+  internal borrowing func render(_ plan: Plan, _ context: Context)
+      -> Array<String> {
+    var lines = Array<String>()
+    render(plan, prefix: "", leading: "", context, into: &lines)
+    return lines
+  }
+
+  /// Appends `plan`'s label line (prefixed by `leading`) and then each child's
+  /// subtree, hung under a `├─`/`└─` connector with the running `prefix`
+  /// extended by `│  ` (a middle child's descendants) or three spaces (the last
+  /// child's), so the tree's spine draws correctly at every depth.
+  private borrowing func render(_ plan: Plan, prefix: String, leading: String,
+                                _ context: Context,
+                                into lines: inout Array<String>) {
+    lines.append(leading + label(plan, context))
+    let nodes = plan.children
+    for index in nodes.indices {
+      let last = index == nodes.count - 1
+      let branch = prefix + (last ? "└─ " : "├─ ")
+      let onward = prefix + (last ? "   " : "│  ")
+      render(nodes[index], prefix: onward, leading: branch, context,
+             into: &lines)
+    }
+  }
+
+  /// The single-line label for `plan` — its kind plus the optimiser-relevant
+  /// fields the render annotates.
+  private borrowing func label(_ plan: Plan, _ context: Context) -> String {
+    switch plan {
     case .single:
       return "single"
     case let .values(rows, types):
@@ -81,7 +87,7 @@ extension Plan {
       return "empty  slots \(slots)"
     case let .scan(name, ordinals, seek):
       return "scan \(escaped(name))  reads \(list(ordinals))"
-          + rendered(seek: seek)
+          + rendered(seek: seek) + annotated(order: name, ordinals, context)
     case let .derived(name, _, ordinals, seek):
       return "derived \(escaped(name))  reads \(list(ordinals))"
           + rendered(seek: seek)
@@ -132,6 +138,24 @@ extension Plan {
           + (offset > 0 ? "  offset \(offset)" : "")
           + "  by " + ordered.joined(separator: ", ")
     }
+  }
+}
+
+extension Catalog where Self: ~Escapable {
+  /// The `  ordered [slot i ASC, …]` annotation of a scan whose relation `name`
+  /// declares a physical order the scan's `ordinals` project, or the empty
+  /// string when the relation promises none — so a test can positively assert
+  /// the redundant-sort elimination recognised the order (rather than merely
+  /// observing the absence of a sort). It reuses `promised(order:)`, the same
+  /// derivation the `.sort` fold consults, so the annotation cannot drift from
+  /// the elimination it explains.
+  fileprivate borrowing func annotated(order name: String,
+                                       _ ordinals: Array<Int>,
+                                       _ context: Context) -> String {
+    let order = promised(order: name, ordinals, context)
+    guard !order.isEmpty else { return "" }
+    let keys = order.map { "slot \($0.slot) \($0.ascending ? "ASC" : "DESC")" }
+    return "  ordered [" + keys.joined(separator: ", ") + "]"
   }
 }
 
@@ -523,6 +547,6 @@ extension Catalog where Self: ~Escapable {
   /// plan lines back as ordinary rows.
   internal borrowing func explain(_ query: Query, _ context: Context)
       throws(SQLError) -> Array<Array<Value>> {
-    try plan(of: query, context).render().map { [.text($0)] }
+    try render(plan(of: query, context), context).map { [.text($0)] }
   }
 }

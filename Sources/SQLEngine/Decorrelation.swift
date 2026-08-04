@@ -101,6 +101,12 @@ extension Catalog where Self: ~Escapable {
     case let .limit(count, offset, source):
       return try .limit(count: count, offset: offset,
                         decorrelate(source, context))
+    case let .topN(keys, offset, count, source):
+      // `topN` is produced by `optimise`, which runs after decorrelate, so a
+      // plan reaching here never carries one; recurse structurally into the
+      // source to keep the switch exhaustive, as `sort`/`limit` do.
+      return try .topN(keys: keys, offset: offset, count: count,
+                       decorrelate(source, context))
     }
   }
 

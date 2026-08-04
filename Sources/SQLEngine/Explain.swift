@@ -59,7 +59,8 @@ extension Plan {
     case let .select(_, source), let .project(_, source),
          let .sort(_, source), let .distinct(source),
          let .aggregate(_, _, source), let .window(_, source),
-         let .limit(_, _, source), let .join(source, _, _, _, _, _, _),
+         let .limit(_, _, source), let .topN(_, _, _, source),
+         let .join(source, _, _, _, _, _, _),
          let .apply(source, _, _, _, _, _):
       [source]
     case let .product(left, right), let .outer(left, right, _, _),
@@ -123,6 +124,13 @@ extension Plan {
     case let .limit(count, offset, _):
       let cap = count.map { "\($0)" } ?? "all"
       return "limit  count \(cap)" + (offset > 0 ? "  offset \(offset)" : "")
+    case let .topN(keys, offset, count, _):
+      let ordered = keys.map {
+        "\($0.term.rendered) \($0.ascending ? "ASC" : "DESC")"
+      }
+      return "top-N  count \(count)"
+          + (offset > 0 ? "  offset \(offset)" : "")
+          + "  by " + ordered.joined(separator: ", ")
     }
   }
 }

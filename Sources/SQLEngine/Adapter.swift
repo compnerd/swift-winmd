@@ -534,6 +534,24 @@ public protocol Table: ~Escapable {
   /// stored sorted returns `nil`, and the executor falls back to a scan.
   func bound(_ column: Int, _ value: Int, strict: Bool) -> Int?
 
+  /// The column ordinals (real or virtual) this relation's rows are physically
+  /// stored ordered by, major to minor — each ascending with NULLs first, the
+  /// engine's own `less` order (Interpreter `less(_:_:)`). An empty array means
+  /// no order is guaranteed; the default is `[]`, so a source opts in only for
+  /// a column it stores sorted.
+  ///
+  /// This is the honest physical-order signal the redundant-sort elimination
+  /// consults, distinct from `ordered(_:)`: `ordered` defaults to `true` for
+  /// every column (it answers "is a `bound` range partition valid"), so it does
+  /// not mean "physically sorted". A relation declares `order` only for a
+  /// column whose stored row order equals the engine's ascending, NULLs-first
+  /// `less` order — the sole order an eager scan promises without a reverse
+  /// pass. A
+  /// column stored in any other order (descending, NULLs last, or a text
+  /// collation differing from `String`'s `<`) must be omitted, or the optimiser
+  /// would drop a sort the rows do not actually satisfy.
+  var order: Array<Int> { get }
+
   /// Whether `column`'s cells are monotonically non-decreasing in row order, so
   /// a `bound` partition brackets a range as well as an equality.
   ///
@@ -565,6 +583,11 @@ extension Table where Self: ~Escapable {
 
   /// A relation exposes no virtual column by default.
   public var virtuals: Array<String> { [] }
+
+  /// A relation guarantees no physical order by default — the redundant-sort
+  /// elimination then keeps every sort. A source overrides this only for a
+  /// column it stores in the engine's ascending, NULLs-first `less` order.
+  public var order: Array<Int> { [] }
 
   /// A seekable column is ordered by default — its `bound` boundary brackets a
   /// range as well as an equality.

@@ -38,7 +38,11 @@ extension Session {
       return []
     case let .select(query):
       return try self.run(query, functions, bindings: bindings)
-    case .with:
+    case .explain, .with:
+      // Both are runnable row-producing statements — `EXPLAIN` yields its plan
+      // tree, a `WITH` its trailing query's rows — so both route through the
+      // statement-level `run`, which materialises a `WITH`'s CTEs and renders
+      // an `EXPLAIN`'s plan.
       return try self.run(parsed, functions, bindings: bindings)
     }
   }

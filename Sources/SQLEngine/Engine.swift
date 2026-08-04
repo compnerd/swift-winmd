@@ -101,105 +101,13 @@ extension Catalog where Self: ~Escapable {
                                  types: types)
       return combined.map(\.values)
     }
-    // Thread a fresh lazy subquery cache — a shared box — through both compile
-    // and execute. The executor's row evaluator runs each nested subquery into
-    // it on first reach (where the borrowing catalog IS in scope; a schema-only
-    // path never reaches it, so opens no cursor): an uncorrelated occurrence
-    // runs once and memoises, while a correlated one re-executes per outer row
-    // against the correlated bindings, bypassing the memo. Compile stashes each
-    // correlated occurrence's inner plan here (compiled once with its enclosing
-    // scope, so its correlated columns are bound `Term.parameter`s), so the
-    // evaluator re-executes that plan rather than recompiling the inner query
-    // with no outer scope.
-    let context = context.resolving(Subqueries())
-    // Compile from the un-augmented `context` (idempotently augmented inside
-    // `compile`, which reveals the base for a nested subquery) — this query's
-    // derived aliases are invisible to a subquery's FROM, and a CTE a
-    // same-named derived alias shadows stays visible beneath the revealed base.
-    // Compile validates the whole query (schema-only, `rows: false`) before any
-    // row materialises below, so an invalid query — an unknown column resolving
-    // over a `FROM (SELECT tick() …) AS d` — faults without ever executing the
-    // derived body's stateful routine. A materialise ahead of this compile
-    // would run the body for a query that cannot run.
-    //
-    // `validate: false` gates the derived-body type-check off: the preflight
-    // proves the OUTER query runnable and resolves its relations, but a data-
-    // dependent body expression a filter drops (`FROM (SELECT Label + 1 AS x
-    // FROM K WHERE k = 0) AS d`) must NOT be rejected here — execution faults
-    // ONLY on an expression a surviving row reaches, exactly as the non-derived
-    // `SELECT Label + 1 FROM K WHERE k = 0` runs to zero rows. The eager body
-    // type-check stays for the explicit schema path (`columns` `validate:
-    // true`).
-    let logical = try compile(query, context.validating(false)).pushdown()
-    // The compile proved the query runnable but deferred every operand fault to
-    // execution (`validate: false`), including the ISO comparability rule — a
-    // number against a string is a data-type mismatch, not a FALSE row. The run
-    // enforces that rule per reachable row through `matches`, but a comparison
-    // the optimiser hashes into disjoint buckets, pushes below an empty
-    // product, or drops with a constant-false fold is never evaluated, so its
-    // fault would silently vanish; and a comparison over an empty input is
-    // never reached at all. Walk the query now for the comparability rule alone
-    // — reachability-, NULL-, and subquery-aware, so a short-circuited leg or a
-    // NULL/subquery operand still defers — so a statically-typed cross-kind
-    // comparison faults at compile regardless of cardinality, before the
-    // optimiser (or an empty scan) can hide it, while every other operand fault
-    // stays deferred to execution. Its derived-table bodies and set-operation
-    // arms are walked through the same gate the `augment` and `typecheck`
-    // recursion carry.
-    try typecheck(query, context.validating(false).comparing())
-    // Now that `compile` proved the query runnable, extend the overlay with any
-    // `definition_schema.` store relation the query names (resolved lazily —
-    // the overlay after the CTEs, before the base catalog) AND materialise this
-    // query's derived tables (`rows: true`, executing each body once). Every
-    // phase reads the extended map, so a reserved store relation resolves,
-    // plans, and materialises exactly as a common table expression does; a
-    // portable `information_schema.` view over the store resolves through the
-    // ordinary view machinery. The routines ride in so a store `data_type` row
-    // types a view's scalar-call column (`GUID(...)`) by its declared return
-    // type.
-    //
-    // `validate: false` — this run materialise executes each body's rows, but a
-    // nested derived body's schema is still derived schema-only inside
-    // `materialise` (to name the inner alias's columns); `validate: true` there
-    // would eager-type-check a doubly-nested filtered-out body on the run path.
-    // The run stays lenient at every depth (the outer query already compiled,
-    // and a reached operand still faults at execution).
-    let augmented = try augment(context.validating(false), for: query,
-                                rows: true)
-    // Record the caller's overlay under `.caller` so a subquery lowered under
-    // it (even one a pushdown moved INTO a view) re-runs against the caller's
-    // relations, not the view's base. reveal the base first — this query's
-    // derived-table aliases are SELECT-scoped, invisible to a subquery's FROM,
-    // while the CTEs and `definition_schema.` store relations a `.caller`
-    // subquery's FROM resolves against are kept, so a subquery `FROM d` reads a
-    // CTE `d` a same-named derived alias shadows rather than the derived rows.
-    // The shared box survives from the un-augmented compile into execution.
-    augmented.subqueries.record(overlay: augmented.revealed().relations,
-                                for: .caller)
-    // Rewrite each decorrelatable correlated CROSS APPLY into a set-based join
-    // before the physical `optimise`/`nest`, so the emitted `select`-over-
-    // `product` folds to a hash equi-join. The pass reads the compiled body
-    // plans recorded above into the shared subquery box; a non-decorrelatable
-    // apply is left verbatim, so a plan with none is unchanged.
-    let decorrelated = try decorrelate(logical, augmented)
-    // A query-level `ORDER BY`/`DISTINCT`/`OFFSET`·`FETCH` over a set operation
-    // — an `ordered` carrier whose `core` is a `.setop` — optimises per ARM,
-    // mirroring the view carrier path (`optimise(_:_:_:)` at the `.ordered`
-    // view seam): the generic optimiser would rewrite both arms under the same
-    // carrier-level `augmented` context, which does NOT bind an arm-owned
-    // derived alias (arms are SELECT-scoped), so its `seek` rewrite faults
-    // `.relation` on a `FROM (SELECT …) AS d WHERE …` arm before the per-arm
-    // `execute(…carrying:)` below can augment each arm under its own overlay.
-    // Descending the carrier to the setop leaf and augmenting each arm under
-    // its own context resolves the arm-local alias. The `case .setop = core`
-    // guard keeps a plain query (and an ordered carrier over a bare `SELECT`,
-    // not a setop) on the generic optimiser.
-    let plan: Plan
-    if !query.carriers.isEmpty, case .setop = query.body {
-      plan = try optimise(decorrelated, query.core, augmented)
-    } else {
-      plan = try optimise(decorrelated, augmented)
-    }
+    // Build the optimised physical plan, then run it. `optimised` is the single
+    // source of the compile → pushdown → decorrelate → optimise walk, so
+    // `EXPLAIN` (`plan(of:)`) inspects exactly the plan this execute runs — the
+    // two cannot drift. It returns the augmented context alongside the plan so
+    // the execute below reads the same materialised derived tables and shared
+    // subquery box the plan was built against.
+    let (plan, augmented) = try optimised(query, context, rows: true)
     // A query-level `ORDER BY`/`DISTINCT`/`OFFSET`·`FETCH` over a set operation
     // — the `ordered` carrier — must run its inner union per ARM, as the direct
     // `run(.setop)` above does: each arm augments its own arm-local derived
@@ -220,6 +128,97 @@ extension Catalog where Self: ~Escapable {
     return try execute(plan, augmented).map(\.values)
   }
 
+  /// Builds the optimised physical `Plan` for `query` under `context`, running
+  /// the full compile → pushdown → decorrelate → optimise pipeline the executor
+  /// uses — the single source of that walk, shared by `run` and by the
+  /// diagnostic `plan(of:)` (so `EXPLAIN` inspects exactly the plan a run
+  /// executes).
+  ///
+  /// It threads a fresh subquery cache — a shared box — through compile and
+  /// the returned context, so the executor's row evaluator (which runs a nested
+  /// subquery on first reach, memoising an uncorrelated occurrence and
+  /// re-executing a correlated one per outer row) reads the correlated inner
+  /// plans compile stashed. Compile validates the whole query schema-only
+  /// (`rows: false`, `validate: false`) before any row materialises; the
+  /// comparability walk faults a statically cross-kind comparison the optimiser
+  /// could otherwise hide; `augment` extends the overlay with any
+  /// `definition_schema.` store relation and — when `rows` — materialises this
+  /// query's derived tables; `decorrelate` rewrites a decorrelatable correlated
+  /// CROSS APPLY into a set-based join; and `optimise` rewrites scans into
+  /// seeks and products into index-nested-loop/hash joins.
+  ///
+  /// `rows` is `true` for `run` (the execute below reads the materialised
+  /// derived tables) and `false` for the diagnostic `plan(of:)`, which must not
+  /// execute: materialising a derived table calls `run` on its body, so a
+  /// stateful routine or a throwing derived expression would fire under
+  /// `EXPLAIN` — which stops before execution. The plan shape is identical
+  /// either way (the physical pass reads base-table cursors and derived
+  /// schemas, never materialised derived rows).
+  ///
+  /// A set operation — bare or under a carrier — optimises per arm
+  /// (`optimise(_:_:_:)`), since each arm scans its own arm-local derived
+  /// aliases the top-level scope does not bind; every other shape uses the
+  /// generic optimiser. `run` reaches this with a set-operation query only
+  /// under a carrier (it runs a bare set operation's arms directly, above); the
+  /// plan-only `plan(of:)` reaches it with a bare set operation too, so both
+  /// take the per-arm path here. The augmented context is returned beside the
+  /// plan so a caller's execute reads the same materialised tables and subquery
+  /// box.
+  internal borrowing func optimised(_ query: Query, _ context: Context,
+                                    rows: Bool)
+      throws(SQLError) -> (plan: Plan, augmented: Context) {
+    let context = context.resolving(Subqueries())
+    let logical = try compile(query, context.validating(false)).pushdown()
+    try typecheck(query, context.validating(false).comparing())
+    let augmented = try augment(context.validating(false), for: query,
+                                rows: rows)
+    augmented.subqueries.record(overlay: augmented.revealed().relations,
+                                for: .caller)
+    // A carrier-free set operation runs each arm separately under its own
+    // augmented scope — arms are SELECT-scoped, binding arm-local derived
+    // aliases the shared context does not — so decorrelate and optimise it per
+    // arm too: recurse through `optimised` (the same pipeline `run` drives per
+    // arm) and recombine with the compiled unified types and widened mask.
+    // Decorrelating on the shared context instead would bail on an arm's
+    // correlated subquery, the arm alias unbound, where a per-arm run
+    // decorrelates it — so the inspected plan would differ from the executed
+    // one. `run` reaches a bare set operation through its own per-arm path and
+    // never through this helper, so this affects only the plan-only path.
+    if query.carriers.isEmpty,
+        case let .setop(kind, left, right, all) = query.body,
+        case let .setop(_, _, _, _, types, widened) = logical {
+      let leftPlan = try optimised(left, context, rows: rows).plan
+      let rightPlan = try optimised(right, context, rows: rows).plan
+      return (.setop(kind, leftPlan, rightPlan, all: all, types: types,
+                     widened: widened), augmented)
+    }
+    let decorrelated = try decorrelate(logical, augmented)
+    let plan: Plan
+    if case .setop = query.body {
+      plan = try optimise(decorrelated, query.core, augmented)
+    } else {
+      plan = try optimise(decorrelated, augmented)
+    }
+    return (plan, augmented)
+  }
+
+  /// The optimised physical `Plan` for `query` under `context` — the plan the
+  /// executor would run, built without executing it. This is the testable
+  /// plan-inspection entry `EXPLAIN` renders: it runs the same compile →
+  /// pushdown → decorrelate → optimise pipeline as `run`, sharing `optimised`,
+  /// but stops short of the final `execute`.
+  ///
+  /// A `GROUP BY GROUPING SETS` query is expanded first (idempotent), as
+  /// `run`/`compile` normalise it, so the inspected plan matches the run's.
+  ///
+  /// Augments schema-only (`rows: false`): unlike `run`, inspecting a plan must
+  /// not materialise a derived table (which would `run` its body), so a
+  /// stateful routine or a throwing derived expression never fires here.
+  internal borrowing func plan(of query: Query, _ context: Context)
+      throws(SQLError) -> Plan {
+    try optimised(query.expanded, context, rows: false).plan
+  }
+
   /// Runs a `Statement` against this catalog, returning its result rows.
   ///
   /// A `select` runs its query directly; a `with` materialises its common table
@@ -236,6 +235,8 @@ extension Catalog where Self: ~Escapable {
     return switch statement {
     case let .select(query):
       try run(query, context)
+    case let .explain(query):
+      try explain(query, context)
     case let .with(ctes, query):
       try with(ctes, query, context)
     case .create:

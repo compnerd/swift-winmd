@@ -783,6 +783,7 @@ internal struct Shell: ~Escapable {
   private static func trailing(_ statement: Statement) -> SQLEngine.Query {
     switch statement {
     case let .select(query): query
+    case let .explain(query): query
     case let .with(_, query): query
     case let .create(_, view): view.query
     case .function:

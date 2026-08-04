@@ -194,11 +194,16 @@ extension Catalog where Self: ~Escapable {
                      widened: widened), augmented)
     }
     let decorrelated = try decorrelate(logical, augmented)
+    // Reorder a two-relation inner-join run to drive from the smaller side,
+    // using the free base-table counts — after decorrelate (so a decorrelated
+    // join is a candidate) and before optimise (so `nest` folds the reordered
+    // product into a seeked join).
+    let reordered = try reordered(decorrelated, augmented)
     let plan: Plan
     if case .setop = query.body {
-      plan = try optimise(decorrelated, query.core, augmented)
+      plan = try optimise(reordered, query.core, augmented)
     } else {
-      plan = try optimise(decorrelated, augmented)
+      plan = try optimise(reordered, augmented)
     }
     return (plan, augmented)
   }

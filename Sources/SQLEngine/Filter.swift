@@ -567,6 +567,31 @@ extension Term {
     }
   }
 
+  /// Whether this term is guaranteed NULL whenever every slot in `nulled` is
+  /// NULL — a NULL-strict term, the property `Filter.strict(on:)` reads to
+  /// decide a comparison is UNKNOWN on a NULL-extended row.
+  ///
+  /// A slot in `nulled` is NULL; a constant, `:parameter`, or GROUPING never
+  /// is; arithmetic and `CAST` propagate a NULL operand; a `NULLIF` is NULL
+  /// when its first operand is (`NULLIF(NULL, b)` returns the NULL); and a
+  /// `COALESCE` is NULL only when every element is. A scalar call, `CASE`, or
+  /// subquery may mask a NULL (a routine ignoring its argument, an `ELSE`
+  /// branch), so each is conservatively not strict — never over-claiming a
+  /// rejection the demotion would act on.
+  internal func strict(on nulled: Set<Int>) -> Bool {
+    switch self {
+    case let .slot(slot): nulled.contains(slot)
+    case .constant, .parameter, .grouping: false
+    case let .binary(_, lhs, rhs):
+      lhs.strict(on: nulled) || rhs.strict(on: nulled)
+    case let .cast(operand, _): operand.strict(on: nulled)
+    case let .nullif(lhs, _): lhs.strict(on: nulled)
+    case let .coalesce(elements, _):
+      !elements.isEmpty && elements.allSatisfy { $0.strict(on: nulled) }
+    case .apply, .case, .subquery: false
+    }
+  }
+
   /// Whether this term is statically a valid single-character `LIKE` escape — a
   /// constant text value of exactly one character, the only form `Row.like`
   /// accepts without faulting. A slot, a call, or a constant that is NULL,
@@ -833,6 +858,58 @@ extension Filter {
     // row-dropping operator. This carried classification is the one place the
     // physical layer learns a comparison's type-derived hazard.
     case .incomparable: false
+    }
+  }
+
+  /// Whether this predicate is guaranteed FALSE or UNKNOWN whenever every slot
+  /// in `nulled` is NULL — a null-rejecting predicate on that side, so a WHERE
+  /// carrying it drops every row an outer join NULL-extends across `nulled`. It
+  /// is the analysis the outer→inner demotion reads: a LEFT join whose
+  /// enclosing WHERE rejects NULL on the (preserved-null) right side never
+  /// keeps an unmatched row, so the join is observably inner.
+  ///
+  /// Grounded in the strictness of the comparison leaves under three-valued
+  /// logic. A `compare`/`bound`/`match`/`membership`/`comparison`/`like`/
+  /// `between` whose operand over a `nulled` slot is strict is UNKNOWN when
+  /// that slot is NULL — rejecting. An `IS NOT NULL` over a strict term is
+  /// FALSE on NULL — rejecting; an `IS NULL` is TRUE — not. `AND` rejects if
+  /// either arm
+  /// does (not-TRUE if either is); `OR` rejects only if both do (TRUE if either
+  /// is). A `NOT`, `IS <truth>`, null-safe `IS [NOT] DISTINCT FROM`, subquery/
+  /// quantified form, or an incomparable leaf is conservatively not rejecting —
+  /// so the demotion never drops a row the un-demoted plan would keep.
+  internal func strict(on nulled: Set<Int>) -> Bool {
+    switch self {
+    case let .compare(lhs, _, rhs):
+      lhs.strict(on: nulled) || rhs.strict(on: nulled)
+    case let .bound(term, _, _):
+      term.strict(on: nulled)
+    case let .match(left, right):
+      nulled.contains(left) || nulled.contains(right)
+    case let .null(term, negated):
+      negated && term.strict(on: nulled)
+    case let .membership(operand, _, _):
+      operand.strict(on: nulled)
+    case let .like(operand, _, _, _):
+      operand.strict(on: nulled)
+    case let .between(test, _, _, _):
+      test.strict(on: nulled)
+    case let .and(lhs, rhs):
+      lhs.strict(on: nulled) || rhs.strict(on: nulled)
+    case let .or(lhs, rhs):
+      lhs.strict(on: nulled) && rhs.strict(on: nulled)
+    // A row-value comparison or membership is NOT rejecting just because one
+    // component is NULL: a lexicographic `(Age, Id) < (100, 0)` is TRUE from
+    // the first component before the NULL `Id` decides anything, and a row
+    // `<>` / `NOT IN` is likewise TRUE from a component that already differs —
+    // a strict component does not force the whole FALSE/UNKNOWN. Conservatively
+    // not rejecting (a precise per-operator, per-position analysis is not worth
+    // the risk of dropping a kept row). A null-safe `IS [NOT] DISTINCT FROM` is
+    // two-valued, and a `NOT`/`IS <truth>`/subquery/quantified/incomparable
+    // form is not provably rejecting either.
+    case .comparison, .memberships, .distinct, .not, .truth, .exists, .within,
+         .quantified, .incomparable:
+      false
     }
   }
 

@@ -80,6 +80,17 @@ struct AggregateTests {
         """, yields: [[1, 0, nil, nil, nil, nil]])
   }
 
+  @Test func `a bare aggregate reachable only from ORDER BY aggregates`()
+      throws {
+    // No GROUP BY and no projected aggregate — the aggregate that makes this a
+    // whole-result aggregation appears only in the ORDER BY, so the routing
+    // must scan the ORDER BY as the window routing does, or the sort lowers
+    // `SUM(Amount)` through the ungrouped scope and faults. One group, one row:
+    // the literal projection ordered by the whole-table SUM.
+    try sales().expect("SELECT 1 FROM Sales ORDER BY SUM(Amount)",
+                       yields: [[1]])
+  }
+
   @Test func `GROUP BY one column aggregates each group`() throws {
     try sales().expect("""
         SELECT Dept, COUNT(*), SUM(Amount) FROM Sales

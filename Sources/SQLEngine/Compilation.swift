@@ -1415,10 +1415,14 @@ extension Catalog where Self: ~Escapable {
     // of a filtered-out derived body a nested subquery names.
     let plans = try subquery(of: select, context, enclosing: scope,
                              prefixes: prefixes)
-    // A WINDOW clause with no window function is dropped after compilation, so
-    // validate its definitions here — against the whole join `scope`, so a
-    // definition naming a joined relation's column resolves as the query's own
-    // clauses do.
+    // A WINDOW clause's definitions are validated here for well-formedness
+    // against the whole join `scope` — a definition naming a joined relation's
+    // column resolves as the query's own clauses do. A referenced definition is
+    // additionally validated strictly by its inlined form in the projection/
+    // ORDER BY on the query's compute surface (base or grouped); this check is
+    // what an unused definition gets, so `validate(named:)` imposes no grouping
+    // rule, admitting `WINDOW w AS (ORDER BY sal)` beside one over `SUM(sal)`
+    // whether the query aggregates or not.
     try validate(named: select.window, against: scope, context.routines,
                  subquery: plans.rest)
     var matches = Array<Filter>()
@@ -1732,17 +1736,33 @@ extension Catalog where Self: ~Escapable {
   /// definition carrying a subquery is not spuriously rejected. Every definition
   /// is validated whether or not a window function references it, so a query
   /// with a `WINDOW` clause never silently accepts an unresolvable unused one.
-  internal borrowing func validate(named windows: Array<NamedWindow>,
-                                   against scope: Scope, _ routines: Routines,
-                                   subquery: Resolution) throws(SQLError) {
+  internal borrowing func validate(
+      named windows: Array<NamedWindow>, against scope: Scope,
+      _ routines: Routines, subquery: Resolution) throws(SQLError) {
     for definition in windows {
       let spec = try definition.spec.resolved(against: windows)
       // The function-independent structural frame check — a reversed or inverted
-      // frame — that `reject(for:)` runs for a referenced window; `windowing`
-      // resolves the keys but not the frame's bounds, so run it here too.
+      // frame — that `reject(for:)` runs for a referenced window.
       if let frame = spec.frame { try frame.check() }
-      _ = try Expression.window(function: .rowNumber, spec: spec)
-          .windowing(scope, routines, subquery: subquery)
+      // A window `ORDER BY` output ordinal has no meaning — there is no output
+      // to name — rejected here as it is for a referenced window's spec.
+      for key in spec.order?.keys ?? [] {
+        if case .ordinal = key.sort {
+          throw .state("0A000",
+                       "a window ORDER BY output ordinal is not supported")
+        }
+      }
+      // A definition is validated for well-formedness against the input scope,
+      // not lowered onto a compute surface: a referenced definition is inlined
+      // into the projection/ORDER BY and validated strictly there (base scope
+      // or grouped), so this need only confirm an unused one is well-formed —
+      // its columns resolve and any aggregate is structurally valid — with no
+      // grouping rule. That is the one check admitting both a dead `ORDER BY
+      // sal` (an ordinary column, no GROUP BY key) and `ORDER BY SUM(sal)` (an
+      // aggregate needing no slot): neither compute surface accepts both.
+      for expression in spec.expressions {
+        try scope.admit(expression, routines, subquery: subquery)
+      }
     }
   }
 

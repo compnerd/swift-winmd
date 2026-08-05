@@ -1709,9 +1709,13 @@ extension Catalog where Self: ~Escapable {
     // output name (an alias, else a group column's own name) — the surface an
     // `ORDER BY` output name resolves against — then lower the `ORDER BY`,
     // which faults a non-group column, an out-of-range ordinal, or an ambiguous
-    // name.
+    // name. A window in the ORDER BY (`ORDER BY RANK() OVER (…)`) makes this a
+    // window query, so build the windowed surface `group` builds — threading
+    // the same `select.windows` — or `Grouped.order` faults lowering the window
+    // through a surface with no window registry.
     var grouped = try Grouped(scope, grouping, keys, aggregations,
-                              superset: supers, subquery: subquery)
+                              superset: supers, subquery: subquery,
+                              windowed: select.windows)
     let projection = try grouped.terms(select.projection, routines,
                                        subquery: subquery)
     _ = try grouped.order(clause, projection, routines, subquery: subquery)

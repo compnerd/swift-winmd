@@ -688,6 +688,32 @@ public struct Select: Hashable, Sendable {
     }
     return expressions
   }
+
+  /// The projection and ORDER BY expressions the select evaluates, for routing
+  /// the query on a feature one of them carries — an aggregate or a window. It
+  /// underlies both `aggregates` and `windows` so the two scan one identical
+  /// set: a feature in the ORDER BY routes the query exactly as one in the
+  /// projection does.
+  ///
+  /// Unlike `orderKeys`, this does no output-name resolution — an ORDER BY
+  /// ordinal or bare-output-name key references a projected item already in
+  /// this set, so only a literal `.expression` key contributes — so it does not
+  /// consult `aggregates` (which `orderKeys` does, to pick the output surface)
+  /// and the aggregate routing may read it without a cycle.
+  internal var expressions: Array<Expression> {
+    var evaluated: Array<Expression> = switch projection {
+    case .all, .columns:
+      []
+    case let .expressions(items):
+      items.map(\.expression)
+    }
+    for key in order?.keys ?? [] {
+      if case let .expression(expression) = key.sort {
+        evaluated.append(expression)
+      }
+    }
+    return evaluated
+  }
 }
 
 /// A relation in a `FROM` or `JOIN`: a base relation named by an identifier, or

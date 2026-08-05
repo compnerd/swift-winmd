@@ -613,6 +613,8 @@ private final class Counter: @unchecked Sendable {
       "SELECT LEAD(Age, 2, 0) OVER (ORDER BY Id) FROM People",
       "SELECT COUNT(*) FROM People",
       "SELECT COUNT(DISTINCT Age) FROM People",
+      "SELECT Age, RANK() OVER (ORDER BY COUNT(*)) "
+        + "FROM People GROUP BY Age",
       "SELECT Name FROM Parent WHERE EXISTS "
         + "(SELECT 1 FROM Child WHERE Child.Pid = Parent.Id)",
       "SELECT Name FROM Parent WHERE NOT EXISTS "
@@ -642,6 +644,7 @@ private final class Counter: @unchecked Sendable {
       "SELECT Age FROM People WHERE Id = 2",
       "SELECT COUNT(*) FROM People",
       "SELECT DISTINCT Age FROM People",
+      "SELECT Age, RANK() OVER (ORDER BY COUNT(*)) FROM People GROUP BY Age",
       "SELECT Missing FROM People",
       "SELECT Age FROM People WHERE Name = 1",
       "SELECT Id FROM People UNION SELECT Id FROM Parent",

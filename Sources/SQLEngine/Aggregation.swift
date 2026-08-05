@@ -5,12 +5,15 @@
 
 extension Select {
   /// Whether the select aggregates — it has a `GROUP BY`, a `HAVING`, or an
-  /// aggregate function anywhere in its projection.
+  /// aggregate function anywhere in its projection or its ORDER BY.
   ///
   /// A query with any of these compiles through the grouped path; one with none
   /// keeps the ordinary `Project(Limit(Sort(Select(_))))` shape unchanged. A
   /// `HAVING` alone (no `GROUP BY`, no aggregate) still aggregates — it filters
-  /// the single whole-result group.
+  /// the single whole-result group. An aggregate reachable only from the ORDER
+  /// BY (`ORDER BY SUM(sal)`, or a window `RANK() OVER (ORDER BY SUM(sal))`)
+  /// aggregates too — the same `expressions` set `windows` scans, so the two
+  /// routings stay in step rather than one forgetting the ORDER BY.
   internal var aggregates: Bool {
     let grouped = switch grouping {
     case let .keys(keys): !keys.isEmpty
@@ -20,11 +23,40 @@ extension Select {
     case .sets, .arm: true
     }
     if grouped || having != nil { return true }
-    switch projection {
-    case .all, .columns:
-      return false
-    case let .expressions(items):
-      return items.contains { $0.expression.aggregated }
+    return expressions.contains { $0.aggregated }
+  }
+}
+
+extension Aggregand {
+  /// Whether this aggregate operand nests a query aggregate — `*` never does,
+  /// an expression its own (the `SUM(sal)` of `SUM(SUM(sal))`).
+  internal var aggregated: Bool {
+    switch self {
+    case .star: false
+    case let .expression(expression): expression.aggregated
+    }
+  }
+}
+
+extension WindowFunction {
+  /// Whether this window function's own operand or FILTER nests a query
+  /// aggregate. The window function itself (an aggregate window `SUM(x) OVER
+  /// ()`) is cardinality-preserving and not a query aggregate; only an
+  /// aggregate in its argument, value, default, or FILTER —
+  /// `SUM(SUM(sal))`, `LEAD(SUM(sal), 1, COUNT(*))` — makes the enclosing query
+  /// an aggregate one, routing it through the grouped path where the inner
+  /// aggregate lowers.
+  internal var aggregated: Bool {
+    switch self {
+    case .rowNumber, .rank, .denseRank, .ntile, .percentRank, .cumeDist:
+      false
+    case let .aggregate(_, argument, _, filter):
+      argument.aggregated || (filter?.aggregated ?? false)
+    case let .lead(value, _, fallback), let .lag(value, _, fallback):
+      value.aggregated || (fallback?.aggregated ?? false)
+    case let .firstValue(value), let .lastValue(value),
+         let .nthValue(value, _):
+      value.aggregated
     }
   }
 }
@@ -57,12 +89,13 @@ extension Expression {
       // only if an argument is (a GROUP BY expression never is, so this is
       // false in practice) — mirroring the neighbouring `call` arm.
       arguments.contains { $0.aggregated }
-    case let .window(_, spec):
+    case let .window(function, spec):
       // A window function is not itself an aggregate — it preserves cardinality
-      // rather than folding a group — but a query aggregate nested in its
-      // partition or order (`ROW_NUMBER() OVER (ORDER BY SUM(x))`) is one, so
-      // descend the specification's expressions as a `call`'s arguments.
-      spec.expressions.contains { $0.aggregated }
+      // rather than folding a group — but a query aggregate nested in its own
+      // operand or FILTER (`SUM(SUM(sal)) OVER ()`, `LEAD(SUM(sal)) OVER ()`),
+      // or in its partition/order (`ROW_NUMBER() OVER (ORDER BY SUM(x))`), is
+      // one, so the enclosing query routes through the grouped path.
+      function.aggregated || spec.expressions.contains { $0.aggregated }
     }
   }
 
@@ -1240,11 +1273,53 @@ extension Catalog where Self: ~Escapable {
     let supers = try superset.map { key throws(SQLError) -> Term in
       try scope.term(key, context.routines, subquery: plans.rest)
     }
+    // A window function beside the aggregation computes over the grouped rows —
+    // one output row per group, widened by the window slots — via a `window`
+    // node above the aggregate. A `GROUPING SETS` arm is deferred: its window
+    // would see only that arm's grouped rows, not the union of every set's the
+    // ISO semantics prescribe, so it faults the feature diagnostic on both the
+    // run and validate paths (this compile is the parity gate).
+    if select.windows, case .arm = select.grouping {
+      throw .state("0A000",
+                   "a window function with GROUPING SETS is not yet supported")
+    }
+
     // Lower the projection, HAVING, and ORDER BY against the grouped slot
     // space, enforcing the projection rule (every non-aggregated column must be
-    // a GROUP BY key).
+    // a GROUP BY key). In a window query the surface additionally routes each
+    // window function to an appended output slot over the aggregate node.
     var grouped = try Grouped(scope, grouping, keys, aggregations,
-                              superset: supers, subquery: plans.rest)
+                              superset: supers, subquery: plans.rest,
+                              windowed: select.windows)
+
+    // A window query validates each collected window's function and frame ahead
+    // of lowering — an unsupported function or frame faulting the feature
+    // diagnostic in parity with the schema type derive, exactly as the plain
+    // window path checks. The windows are gathered from the projection and the
+    // `ORDER BY`, the only clauses a window is allowed in.
+    if select.windows {
+      // `front` already validated the WINDOW-clause definitions for
+      // well-formedness (a referenced one is validated strictly below via its
+      // inlined form in the projection/ORDER BY), so no revalidation here.
+      var windows = Array<Expression>()
+      for expression in select.projection.projected {
+        expression.collect(windows: &windows)
+      }
+      for expression in select.orderKeys {
+        expression.collect(windows: &windows)
+      }
+      for expression in windows {
+        guard case let .window(function, spec) = expression else {
+          throw .state("XX000", "expected a window function")
+        }
+        guard function.supported else {
+          throw .state("0A000", "\(function.keyword) is not yet supported")
+        }
+        try function.require(order: spec)
+        if let frame = spec.frame { try frame.reject(for: function) }
+      }
+    }
+
     let projection = try grouped.terms(select.projection, context.routines,
                                        subquery: plans.rest)
     let having: Filter? = if let clause = select.having {
@@ -1269,12 +1344,28 @@ extension Catalog where Self: ~Escapable {
       order = try distinct(clause.keys, order, projection)
     }
 
-    // The HAVING filters groups below the sort, the slot the WHERE occupies on
-    // the non-aggregate path, so the shared `shaped` applies it identically —
-    // an ORDER BY key naming a computed aggregate output (`COUNT(*) * 2 AS n`)
-    // then materialises once and sorts on the returned value.
-    return node.shaped(distinct: select.distinct, projection: projection,
-                       filter: having, order: order, limit: select.limit)
+    // A non-window aggregate query shapes the aggregate node directly, the
+    // HAVING filtering groups below the sort (the slot the WHERE occupies on
+    // the non-aggregate path), so `shaped` applies it identically — an ORDER BY
+    // key naming a computed aggregate output (`COUNT(*) * 2 AS n`) then
+    // materialises once and sorts on the returned value.
+    guard select.windows else {
+      return node.shaped(distinct: select.distinct, projection: projection,
+                         filter: having, order: order, limit: select.limit)
+    }
+
+    // A window query places a `window` node above the aggregate, the HAVING
+    // filtering groups below it — so the window functions see the surviving
+    // groups (ISO: HAVING restricts groups before the windows compute) — and
+    // the node appends each windowing's value at its output slot. The
+    // projection and ORDER BY were lowered over that widened space, so `shaped`
+    // sorts, projects, dedups, and pages the window output with no residual
+    // filter.
+    var source = node
+    if let having { source = .select(having, source) }
+    let window = Plan.window(grouped.windowings, source)
+    return window.shaped(distinct: select.distinct, projection: projection,
+                         filter: nil, order: order, limit: select.limit)
   }
 }
 
@@ -1331,12 +1422,29 @@ extension Expression {
       // arguments so any aggregate nested in one is collected (a GROUP BY
       // expression never nests one, so this gathers nothing in practice).
       for argument in arguments { argument.collect(into: &expressions) }
-    case let .window(_, spec):
+    case let .window(function, spec):
       // A window function is not a query aggregate, but — like a `call` —
-      // descend its specification's expressions so an aggregate nested in a
-      // partition or order (`ROW_NUMBER() OVER (ORDER BY SUM(x))`) is collected.
+      // descend its constituents so an aggregate the window folds over grouped
+      // output is collected and computed by the group node. Its specification's
+      // partition and order (`RANK() OVER (ORDER BY SUM(x))`) and its own
+      // operands both bear one: an aggregate window's argument and `FILTER`
+      // (`SUM(SUM(x)) OVER ()`), a positional function's value and default
+      // (`LEAD(SUM(x)) OVER (ORDER BY d)`).
       for expression in spec.expressions {
         expression.collect(into: &expressions)
+      }
+      switch function {
+      case let .aggregate(_, operand, _, filter):
+        if case let .expression(expression) = operand {
+          expression.collect(into: &expressions)
+        }
+        filter?.collect(into: &expressions)
+      case .rowNumber, .rank, .denseRank, .ntile, .percentRank, .cumeDist,
+           .lead, .lag, .firstValue, .lastValue, .nthValue:
+        if let positional = function.positional {
+          positional.value.collect(into: &expressions)
+          positional.default?.collect(into: &expressions)
+        }
       }
     }
   }

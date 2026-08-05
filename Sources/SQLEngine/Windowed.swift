@@ -228,13 +228,7 @@ extension Select {
   /// source rows before the projection reads it. A window is allowed only in
   /// the SELECT list and `ORDER BY` (ISO 9075); one elsewhere is rejected.
   internal var windows: Bool {
-    let projected = switch projection {
-    case .all, .columns:
-      false
-    case let .expressions(items):
-      items.contains { $0.expression.windowed }
-    }
-    return projected || orderKeys.contains { $0.windowed }
+    expressions.contains { $0.windowed }
   }
 }
 
@@ -418,6 +412,50 @@ extension Windowing {
   }
 }
 
+// MARK: - Window surface
+
+/// The scalar lowering surface a window's operands resolve against — the base
+/// `Scope` for a window over a plain or joined source, the `Grouped` surface
+/// for a window over grouped output (its partition, order, and aggregate
+/// arguments reading the group keys and aggregate results). Abstracting the
+/// surface keeps `windowing`/`lowered` one shared lowering, so a window over a
+/// scan and a window over grouped output cannot drift — the parity `compile`
+/// gates apply to both by construction.
+internal protocol WindowSurface {
+  /// Lowers a scalar `expression` to a `Term` over this surface's slot space.
+  func resolve(_ expression: Expression, _ routines: Routines,
+               subquery: Resolution) throws(SQLError) -> Term
+
+  /// Lowers a predicate — an aggregate window's `FILTER (WHERE …)` — to a
+  /// `Filter` over this surface's slot space.
+  func lower(_ predicate: Predicate, _ routines: Routines,
+             subquery: Resolution) throws(SQLError) -> Filter
+
+  /// Lowers a window's `ORDER BY` to sort keys over this surface, major to
+  /// minor — each an ISO `<sort key>` value expression, an output ordinal
+  /// meaningless (there is no projected output to name) and rejected.
+  func window(order: Order, _ routines: Routines,
+              subquery: Resolution) throws(SQLError) -> Array<SortKey>
+
+  /// Reconciles a `LEAD`/`LAG` `fallback` default against its `value`'s type,
+  /// lowering the default over this surface and casting it to the value type.
+  func reconciled(_ fallback: Expression, with value: Expression,
+                  _ routines: Routines, subquery: Resolution)
+      throws(SQLError) -> Term
+}
+
+extension Scope: WindowSurface {
+  /// The module-visible entry the window lowering resolves a scalar operand
+  /// through — `term` under the `WindowSurface` name, so the base scope drives
+  /// the shared `windowing`/`lowered` for a window over a plain or joined
+  /// source exactly as the grouped surface does over grouped output.
+  internal func resolve(_ expression: Expression, _ routines: Routines = [:],
+                        subquery: Resolution = .unsupported)
+      throws(SQLError) -> Term {
+    try term(expression, routines, subquery: subquery)
+  }
+}
+
 // MARK: - Window discovery
 
 extension Expression {
@@ -489,12 +527,12 @@ extension Expression {
   }
 
   /// Lowers this AST `.window` expression to a `Windowing`, its `PARTITION BY`
-  /// keys and window `ORDER BY` resolved to combined base-ordinal terms through
-  /// `scope`. `self` is always an `.window` — the window collectors gather only
-  /// those.
-  internal func windowing(_ scope: Scope, _ routines: Routines = [:],
-                          subquery: Resolution = .unsupported)
-      throws(SQLError) -> Windowing {
+  /// keys and window `ORDER BY` resolved to `surface` terms — combined base
+  /// ordinals over the base `Scope`, grouped slots over the `Grouped` surface.
+  /// `self` is always an `.window` — the window collectors gather only those.
+  internal func windowing<Surface: WindowSurface>(
+      _ surface: Surface, _ routines: Routines = [:],
+      subquery: Resolution = .unsupported) throws(SQLError) -> Windowing {
     guard case let .window(function, spec) = self else {
       throw .state("XX000", "expected a window function")
     }
@@ -504,32 +542,85 @@ extension Expression {
     guard spec.base == nil else {
       throw .state("XX000", "an un-inlined window reference")
     }
+    // A window function's operands, its PARTITION/ORDER, and an aggregate
+    // FILTER are scalar (or predicate) positions, so a window nested in any of
+    // them — `LEAD(RANK() OVER (…), 1) OVER (…)`, `… OVER (ORDER BY RANK()
+    // OVER (…))` — is not allowed: the executor computes every windowing from
+    // the source records before any window slot exists, so an operand reading
+    // another window's not-yet-appended slot reads past the record. Reject it
+    // on this shared lowering, before resolving through the surface, so the
+    // grouped surface (whose `term` resolves a window to a registry slot,
+    // unlike the base scope that faults one) rejects a nested window exactly as
+    // the plain path does, run and validate alike.
+    guard !function.windowed,
+          !spec.expressions.contains(where: { $0.windowed }) else {
+      throw .state("0A000",
+                   "a window function is not allowed in a window function")
+    }
     let partition = try spec.partition.map { key throws(SQLError) -> Term in
-      try scope.term(key, routines, subquery: subquery)
+      try surface.resolve(key, routines, subquery: subquery)
     }
     let order: Array<SortKey> = if let clause = spec.order {
-      try scope.window(order: clause, routines, subquery: subquery)
+      try surface.window(order: clause, routines, subquery: subquery)
     } else {
       []
     }
-    let lowered = try function.lowered(scope, routines, subquery: subquery)
+    let lowered = try function.lowered(surface, routines, subquery: subquery)
     return Windowing(function: lowered, partition: partition, order: order,
                      frame: spec.frame)
   }
 }
 
+extension Aggregand {
+  /// Whether this aggregate operand nests a window — `*` never does, an
+  /// expression its own. Mirrors `aggregated`, for the nested-window reject.
+  internal var windowed: Bool {
+    switch self {
+    case .star: false
+    case let .expression(expression): expression.windowed
+    }
+  }
+}
+
 extension WindowFunction {
-  /// Lowers this AST window function to a `Windowing.Function` over `scope` — a
-  /// ranking function maps to its ranking case (nothing to resolve), and an
-  /// aggregate window lowers its operand and `FILTER` to the source slot space,
-  /// reusing the collapsing aggregate's own `aggregation` lowering so the two
-  /// resolve identically (run ≡ validate).
+  /// Whether this window function nests another window in its own operands or
+  /// FILTER — `LEAD(RANK() OVER (…), …)`, `SUM(ROW_NUMBER() OVER ()) OVER ()`.
+  /// A window is not a scalar, so it may not appear in a window's operand (nor,
+  /// checked at the spec, its PARTITION/ORDER); mirrors `aggregated`, which
+  /// carves the same operands for a nested aggregate. `windowing` rejects on it
+  /// before resolving the operand through a surface.
+  internal var windowed: Bool {
+    switch self {
+    case .rowNumber, .rank, .denseRank, .ntile, .percentRank, .cumeDist:
+      false
+    case let .aggregate(_, argument, _, filter):
+      argument.windowed || (filter?.windowed ?? false)
+    case let .lead(value, _, fallback), let .lag(value, _, fallback):
+      value.windowed || (fallback?.windowed ?? false)
+    case let .firstValue(value), let .lastValue(value),
+         let .nthValue(value, _):
+      value.windowed
+    }
+  }
+}
+
+extension WindowFunction {
+  /// Lowers this AST window function to a `Windowing.Function` over `surface` —
+  /// a ranking function maps to its ranking case (nothing to resolve), and an
+  /// aggregate window lowers its operand and `FILTER` to the surface's slot
+  /// space, building the same `Aggregation` the collapsing aggregate does so
+  /// the two resolve identically (run ≡ validate).
   /// Faults a constant argument the parser's grammar rejects but a directly
   /// built AST could still carry — a nonpositive `NTILE` bucket count or
-  /// `NTH_VALUE` position, or a negative `LEAD`/`LAG` offset. `lowered` calls
-  /// this, the point compile lowers every window through, so the executor never
-  /// divides by a zero bucket count, subscripts a row before the partition
-  /// start, or negates `Int.min`, and the run and validate paths fault alike.
+  /// `NTH_VALUE` position, or a negative `LEAD`/`LAG` offset — and an aggregate
+  /// window whose `FILTER` search condition itself contains an aggregate,
+  /// which ISO forbids (a filter is a per-row gate). `lowered` calls this, the
+  /// point compile lowers every window through, so the executor never divides
+  /// by a zero bucket count, subscripts a row before the partition start, or
+  /// negates `Int.min`, and the run and validate paths fault alike — the
+  /// FILTER rule in particular is enforced here, surface-independently, so a
+  /// grouped surface cannot resolve an aggregate FILTER to a grouped slot and
+  /// admit on the run path a shape the type-derive rejects.
   private func check() throws(SQLError) {
     switch self {
     case let .ntile(buckets):
@@ -544,13 +635,16 @@ extension WindowFunction {
       guard offset >= 0 else {
         throw .state("22023", "\(keyword) requires a nonnegative offset")
       }
+    case let .aggregate(_, _, _, filter?) where filter.aggregated:
+      throw .state("42803", "an aggregate is not allowed in a FILTER")
     default:
       break
     }
   }
 
-  internal func lowered(_ scope: Scope, _ routines: Routines = [:],
-                        subquery: Resolution = .unsupported)
+  internal func lowered<Surface: WindowSurface>(
+      _ surface: Surface, _ routines: Routines = [:],
+      subquery: Resolution = .unsupported)
       throws(SQLError) -> Windowing.Function {
     try check()
     switch self {
@@ -561,30 +655,44 @@ extension WindowFunction {
     case .denseRank:
       return .denseRank
     case let .aggregate(function, operand, distinct, filter):
-      let aggregation = try Expression
-          .aggregate(function, of: operand, distinct: distinct, filter: filter)
-          .aggregation(scope, routines, subquery: subquery)
-      return .aggregate(aggregation)
+      // Build the `Aggregation` from the surface exactly as the collapsing
+      // aggregate's `aggregation` does — the argument through `resolve`, the
+      // `FILTER` through `lower` — so a window aggregate over grouped output
+      // (`SUM(SUM(x)) OVER ()`) reads the inner aggregate's grouped slot while
+      // a scan's window aggregate reads its base ordinal, from one lowering.
+      let argument: Term? = switch operand {
+      case .star:
+        nil
+      case let .expression(expression):
+        try surface.resolve(expression, routines, subquery: subquery)
+      }
+      let gate = try filter.map { predicate throws(SQLError) -> Filter in
+        try surface.lower(predicate, routines, subquery: subquery)
+      }
+      return .aggregate(Aggregation(function: function, argument: argument,
+                                    distinct: distinct, filter: gate))
     case let .lead(value, offset, fallback):
-      return try .lead(scope.term(value, routines, subquery: subquery),
+      return try .lead(surface.resolve(value, routines, subquery: subquery),
                        offset: offset,
                        default: fallback.map { expression throws(SQLError) in
-                         try scope.reconciled(expression, with: value, routines,
-                                              subquery: subquery)
+                         try surface.reconciled(expression, with: value,
+                                                routines, subquery: subquery)
                        })
     case let .lag(value, offset, fallback):
-      return try .lag(scope.term(value, routines, subquery: subquery),
+      return try .lag(surface.resolve(value, routines, subquery: subquery),
                       offset: offset,
                       default: fallback.map { expression throws(SQLError) in
-                        try scope.reconciled(expression, with: value, routines,
-                                             subquery: subquery)
+                        try surface.reconciled(expression, with: value,
+                                               routines, subquery: subquery)
                       })
     case let .firstValue(value):
-      return try .firstValue(scope.term(value, routines, subquery: subquery))
+      return try .firstValue(surface.resolve(value, routines,
+                                             subquery: subquery))
     case let .lastValue(value):
-      return try .lastValue(scope.term(value, routines, subquery: subquery))
+      return try .lastValue(surface.resolve(value, routines,
+                                            subquery: subquery))
     case let .nthValue(value, position):
-      return try .nthValue(scope.term(value, routines, subquery: subquery),
+      return try .nthValue(surface.resolve(value, routines, subquery: subquery),
                            position)
     case let .ntile(buckets):
       return .ntile(buckets)

@@ -1053,6 +1053,31 @@ struct WindowFunctionRejectionTests {
                "a window function is allowed only in SELECT and ORDER BY"))
   }
 
+  @Test func `a window nested in a window operand is rejected`() throws {
+    // A window is not a scalar, so it may not be another window's operand. The
+    // grouped surface made this resolvable (its `term` has a window registry),
+    // so `windowing` rejects it uniformly, before resolving, on every surface.
+    try rejects(
+        "SELECT LEAD(RANK() OVER (ORDER BY x), 1) OVER (ORDER BY x) FROM T",
+        .state("0A000",
+               "a window function is not allowed in a window function"))
+  }
+
+  @Test func `a window nested in a window ORDER BY is rejected`() throws {
+    try rejects(
+        "SELECT RANK() OVER (ORDER BY RANK() OVER (ORDER BY x)) FROM T",
+        .state("0A000",
+               "a window function is not allowed in a window function"))
+  }
+
+  @Test func `a window nested in an aggregate window argument is rejected`()
+      throws {
+    try rejects(
+        "SELECT SUM(ROW_NUMBER() OVER ()) OVER () FROM T",
+        .state("0A000",
+               "a window function is not allowed in a window function"))
+  }
+
   @Test func `a window ORDER BY output ordinal is rejected`() throws {
     try rejects(
         "SELECT ROW_NUMBER() OVER (ORDER BY 1) FROM T",
@@ -1206,11 +1231,137 @@ struct WindowFunctionRejectionTests {
 
   @Test func `an unused definition is validated in an aggregate query`()
       throws {
-    // An aggregate query routes through the grouped path ahead of the window and
-    // ordinary paths' checks, so its `WINDOW` clause is validated there too — an
-    // undefined base still faults rather than the query grouping regardless.
+    // An aggregate query with no window used validates its `WINDOW` clause on
+    // the base scope (in `front`), like any query — an undefined base still
+    // faults rather than the query grouping regardless.
     try rejects("SELECT SUM(x) FROM T WINDOW bad AS (missing)",
                 .state("42704", "window \"missing\" is not defined"))
+  }
+
+  @Test func `an unused valid definition runs in an aggregate query`() throws {
+    // The one aggregate makes this a whole-result aggregation with no window
+    // used, so the unused `WINDOW w` validates on the input scope — `x` is an
+    // ordinary column there, NOT a non-GROUP BY column faulting `.grouping`, as
+    // it would were the definition (wrongly) validated on the grouped surface
+    // where no window ever computes. The query runs, counting the two rows.
+    try fixture().expect("SELECT COUNT(*) FROM T WINDOW w AS (ORDER BY x)",
+                         yields: [[2]])
+    #expect(try fixture().columns(
+        of: parse(query: "SELECT COUNT(*) FROM T WINDOW w AS (ORDER BY x)"),
+        validate: true).count == 1)
+  }
+
+  @Test func `an unused bad-column definition faults in an aggregate query`()
+      throws {
+    // The base-scope validation still catches an unresolvable column in an
+    // unused definition of an aggregate query — it is not silently accepted
+    // because no window references it.
+    try rejects("SELECT COUNT(*) FROM T WINDOW w AS (ORDER BY nonesuch)",
+                .column("nonesuch"))
+  }
+
+  @Test func `an unused definition may name an aggregate`() throws {
+    // A dead definition is validated for well-formedness only, so an aggregate
+    // in its spec is admitted (its argument resolves) with no grouped slot to
+    // materialise — the one check that fits both an ordinary column and an
+    // aggregate, since a used definition validates strictly by its inlined
+    // form. It holds whether the query aggregates (a whole-result COUNT) …
+    try fixture().expect("SELECT COUNT(*) FROM T WINDOW w AS (ORDER BY SUM(x))",
+                         yields: [[2]])
+    // … or not (a plain projection): the aggregate in the unused spec neither
+    // makes the query aggregate nor faults.
+    try fixture().expect("SELECT x FROM T WINDOW w AS (ORDER BY SUM(x))",
+                         yields: [[1], [2]])
+    for sql in ["SELECT COUNT(*) FROM T WINDOW w AS (ORDER BY SUM(x))",
+                "SELECT x FROM T WINDOW w AS (ORDER BY SUM(x))"] {
+      #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                  .count == 1)
+    }
+  }
+
+  @Test func `an unused aggregate definition over a bad column faults`()
+      throws {
+    // Well-formedness still resolves the aggregate's argument, so an
+    // unresolvable column inside a dead definition's aggregate faults.
+    try rejects("SELECT x FROM T WINDOW w AS (ORDER BY SUM(nonesuch))",
+                .column("nonesuch"))
+  }
+
+  @Test func `an unused definition validates an aggregate FILTER`() throws {
+    // The FILTER of an aggregate in a dead definition is a per-row predicate,
+    // so an unresolved column in it faults rather than being silently dropped …
+    try rejects(
+        "SELECT x FROM T WINDOW w AS " +
+        "(ORDER BY SUM(x) FILTER (WHERE nonesuch > 0))",
+        .column("nonesuch"))
+    // … while a resolvable FILTER runs.
+    try fixture().expect(
+        "SELECT x FROM T WINDOW w AS (ORDER BY SUM(x) FILTER (WHERE x > 0))",
+        yields: [[1], [2]])
+  }
+
+  @Test func `an unused definition validates a CASE guard`() throws {
+    // A CASE guard in a dead definition's spec is a per-row predicate too — an
+    // aggregate-free guard's unresolved column faults …
+    try rejects(
+        "SELECT x FROM T WINDOW w AS " +
+        "(ORDER BY CASE WHEN nonesuch > 0 THEN SUM(x) END)",
+        .column("nonesuch"))
+    // … while a guard that itself aggregates (valid only in a grouped context)
+    // is not spuriously rejected — the aggregate operand recurses leniently.
+    try fixture().expect(
+        "SELECT x FROM T WINDOW w AS " +
+        "(ORDER BY CASE WHEN SUM(x) > 0 THEN x END)",
+        yields: [[1], [2]])
+    // … yet a non-aggregate leaf beside the aggregate in such a guard is still
+    // validated: the walk admits each operand, so `nonesuch` faults rather than
+    // the whole aggregate-bearing guard being skipped.
+    try rejects(
+        "SELECT x FROM T WINDOW w AS " +
+        "(ORDER BY CASE WHEN SUM(x) > nonesuch THEN x END)",
+        .column("nonesuch"))
+  }
+
+  @Test func `an unused definition rejects a nested aggregate`() throws {
+    // An aggregate's argument is a scalar, so it may not contain an aggregate.
+    // An unused definition's argument is resolved through the same strict
+    // `term` a referenced one is, so the nesting faults rather than the inner
+    // aggregate being recursively admitted.
+    try rejects("SELECT x FROM T WINDOW w AS (ORDER BY SUM(SUM(x)))",
+                .state("42803", "an aggregate is not allowed here"))
+  }
+
+  @Test func `an unused definition faults a context-free error as a used one`()
+      throws {
+    // The contract: an unused definition is validated for every context-free
+    // error a referenced one is — a nested aggregate, an unresolved column in
+    // an aggregate argument, FILTER, or CASE guard, a window in an argument —
+    // differing only in the grouping rule a dead definition is spared. A parity
+    // guard over the class: each malformed spec faults identically whether the
+    // window is referenced (`OVER w`) or left unused. It catches a future
+    // divergence mechanically rather than one reviewed case at a time.
+    func outcome(_ sql: String) throws -> SQLError? {
+      do {
+        _ = try fixture().columns(of: parse(query: sql), validate: true)
+        return nil
+      } catch let error as SQLError {
+        return error
+      }
+    }
+    let specs = [
+      "ORDER BY SUM(SUM(x))",
+      "ORDER BY SUM(x + COUNT(x))",
+      "ORDER BY SUM(nonesuch)",
+      "ORDER BY SUM(x) FILTER (WHERE nonesuch > 0)",
+      "ORDER BY CASE WHEN SUM(x) > nonesuch THEN x END",
+      "ORDER BY SUM(ROW_NUMBER() OVER ())",
+    ]
+    for spec in specs {
+      let referenced =
+          try outcome("SELECT ROW_NUMBER() OVER w FROM T WINDOW w AS (\(spec))")
+      let unused = try outcome("SELECT x FROM T WINDOW w AS (\(spec))")
+      #expect(referenced == unused, "\(spec)")
+    }
   }
 
   @Test func `an unused definition resolves against the whole join scope`()
@@ -1806,13 +1957,324 @@ struct WindowOverJoinTests {
             "a window function is allowed only in SELECT and ORDER BY"))
   }
 
-  @Test func `a window in an aggregate query over a join is still rejected`()
-      throws {
-    // A window beside an aggregate routes to the grouped path (which does not
-    // yet support windows) whether or not the query joins — the join does not
-    // change the routing.
+  @Test func `a window beside an aggregate over a join is supported`() throws {
+    // A window beside an aggregate over a join computes over the grouped rows:
+    // the whole-table `SUM(U.v)` is 800 (id 4 dropped by the inner join) and
+    // the single grouped row's `ROW_NUMBER() OVER ()` is 1.
     try fixture().expect(
         "SELECT SUM(U.v), ROW_NUMBER() OVER () FROM T JOIN U ON T.id = U.id",
-        fails: .state("0A000", "a window function is not supported"))
+        yields: [[800, 1]])
+  }
+}
+
+@Suite("Window functions over grouped output")
+struct WindowOverGroupedTests {
+  // Groups: dept 1 sums 300 (count 2), dept 2 sums 600 (count 2), dept 3 sums
+  // 500 (count 1). The aggregate node yields one row per group in key first-
+  // appearance order (dept 1, 2, 3), the order the window then reads.
+  private func fixture() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("Emp", ["dept": .integer, "sal": .integer]) {
+        Row(1, 100)
+        Row(1, 200)
+        Row(2, 300)
+        Row(2, 300)
+        Row(3, 500)
+      }
+    }
+  }
+
+  @Test func `RANK orders the groups by an aggregate`() throws {
+    // The window ranks the grouped rows by `SUM(sal)` ascending (300, 500, 600
+    // → ranks 1, 2, 3), each group's row carrying its rank; the output stays in
+    // group order (dept 1, 2, 3).
+    try fixture().expect(
+        "SELECT dept, SUM(sal), RANK() OVER (ORDER BY SUM(sal)) " +
+        "FROM Emp GROUP BY dept",
+        yields: [[1, 300, 1], [2, 600, 3], [3, 500, 2]])
+  }
+
+  @Test func `a grand-total aggregate window sums the group totals`() throws {
+    // `SUM(SUM(sal)) OVER ()` folds the outer aggregate over every grouped
+    // row — the group totals summed, 300 + 600 + 500 = 1400 — over each row.
+    try fixture().expect(
+        "SELECT dept, SUM(sal), SUM(SUM(sal)) OVER () FROM Emp GROUP BY dept",
+        yields: [[1, 300, 1400], [2, 600, 1400], [3, 500, 1400]])
+  }
+
+  @Test func `ROW_NUMBER orders the groups by a COUNT`() throws {
+    // Ordering the grouped rows by `COUNT(*)` ascending, dept 3 (count 1) is
+    // first; dept 1 and 2 tie on count 2 and break by group order, so the
+    // ROW_NUMBER is 1 for dept 3, 2 for dept 1, 3 for dept 2.
+    try fixture().expect(
+        "SELECT dept, COUNT(*), ROW_NUMBER() OVER (ORDER BY COUNT(*)) " +
+        "FROM Emp GROUP BY dept",
+        yields: [[1, 2, 2], [2, 2, 3], [3, 1, 1]])
+  }
+
+  @Test func `a window orders by a group key`() throws {
+    // A bare window over a `GROUP BY` key ranks the groups by that key — no
+    // aggregate involved, the key read from its grouped slot.
+    try fixture().expect(
+        "SELECT dept, RANK() OVER (ORDER BY dept) FROM Emp GROUP BY dept",
+        yields: [[1, 1], [2, 2], [3, 3]])
+  }
+
+  @Test func `a window partitions by a group key`() throws {
+    // Partitioning by the `GROUP BY` key makes each group its own partition, so
+    // the whole-partition `COUNT(*)` is 1 for every group.
+    try fixture().expect(
+        "SELECT dept, COUNT(*) OVER (PARTITION BY dept) " +
+        "FROM Emp GROUP BY dept",
+        yields: [[1, 1], [2, 1], [3, 1]])
+  }
+
+  @Test func `HAVING filters the groups below the window`() throws {
+    // HAVING drops dept 1 (300) before the window computes, so the surviving
+    // dept 3 (500) and dept 2 (600) rank 1 and 2 — not 2 and 3, which they
+    // would were the window computed over all three groups.
+    try fixture().expect(
+        "SELECT dept, SUM(sal), RANK() OVER (ORDER BY SUM(sal)) " +
+        "FROM Emp GROUP BY dept HAVING SUM(sal) >= 500",
+        yields: [[2, 600, 2], [3, 500, 1]])
+  }
+
+  @Test func `the query ORDER BY sorts on the window`() throws {
+    // The query orders by the window rank descending (aliased `r`), so the
+    // output comes out dept 2 (rank 3), dept 3 (rank 2), dept 1 (rank 1).
+    try fixture().expect(
+        "SELECT dept, SUM(sal), RANK() OVER (ORDER BY SUM(sal)) AS r " +
+        "FROM Emp GROUP BY dept ORDER BY r DESC",
+        yields: [[2, 600, 3], [3, 500, 2], [1, 300, 1]])
+  }
+
+  @Test func `DISTINCT dedups the windowed rows`() throws {
+    // `COUNT(*) OVER ()` counts the three grouped rows, so every row carries 3;
+    // DISTINCT then collapses them to a single row.
+    try fixture().expect(
+        "SELECT DISTINCT COUNT(*) OVER () FROM Emp GROUP BY dept",
+        yields: [[3]])
+  }
+
+  @Test func `two windows over grouped output compute independently`() throws {
+    // A ranking and a grand-total aggregate window share the grouped source,
+    // each appending its own slot: rank by `SUM(sal)`, and the total 1400.
+    try fixture().expect(
+        "SELECT dept, RANK() OVER (ORDER BY SUM(sal)), SUM(SUM(sal)) OVER () " +
+        "FROM Emp GROUP BY dept",
+        yields: [[1, 1, 1400], [2, 3, 1400], [3, 2, 1400]])
+  }
+
+  @Test func `a window nests in an arithmetic compound`() throws {
+    // `RANK() OVER (…) + 1` lowers the window leaf to its appended slot and the
+    // literal to a constant, so each group's rank is offset by one.
+    try fixture().expect(
+        "SELECT dept, RANK() OVER (ORDER BY SUM(sal)) + 1 " +
+        "FROM Emp GROUP BY dept",
+        yields: [[1, 2], [2, 4], [3, 3]])
+  }
+
+  @Test func `a running frame accumulates over the groups`() throws {
+    // A `ROWS UNBOUNDED PRECEDING → CURRENT ROW` frame over the group totals,
+    // ordered by dept, runs the cumulative total 300, 900, 1400.
+    try fixture().expect(
+        """
+        SELECT dept, SUM(SUM(sal)) OVER (ORDER BY dept
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+        FROM Emp GROUP BY dept
+        """,
+        yields: [[1, 300], [2, 900], [3, 1400]])
+  }
+
+  @Test func `LEAD reads the next group's aggregate with a default`() throws {
+    // `LEAD(SUM(sal), 1, 0)` over the groups ordered by dept reads the next
+    // group's total (300 → 600, 600 → 500) and the default 0 past the last
+    // group — the value and default both aggregates the group node folds, the
+    // default reconciled to the value's integer type.
+    try fixture().expect(
+        "SELECT dept, SUM(sal), LEAD(SUM(sal), 1, 0) OVER (ORDER BY dept) " +
+        "FROM Emp GROUP BY dept",
+        yields: [[1, 300, 600], [2, 600, 500], [3, 500, 0]])
+  }
+
+  @Test func `a window over a whole-table aggregate is one row`() throws {
+    // With no `GROUP BY` the aggregate is the single whole-table group, so the
+    // window computes over one row: the grand `SUM(sal)` 1400, ranked 1.
+    try fixture().expect(
+        "SELECT SUM(sal), RANK() OVER (ORDER BY SUM(sal)) FROM Emp",
+        yields: [[1400, 1]])
+  }
+
+  @Test func `run and validate agree on a window over grouped output`()
+      throws {
+    // The schema path types the same three-column shape the run produces — the
+    // parity `compile` gates, no grouped-specific rejection surviving.
+    let sql = "SELECT dept, SUM(sal), RANK() OVER (ORDER BY SUM(sal)) " +
+              "FROM Emp GROUP BY dept"
+    #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                .count == 3)
+    try fixture().expect(sql,
+                         yields: [[1, 300, 1], [2, 600, 3], [3, 500, 2]])
+  }
+
+  @Test func `a non-grouped column in a window operand is rejected`() throws {
+    // A window `ORDER BY` naming a column that is neither a `GROUP BY` key nor
+    // aggregated has no grouped value — the standard grouping rule rejects it,
+    // on both the run and validate paths.
+    let sql = "SELECT dept, RANK() OVER (ORDER BY sal) FROM Emp GROUP BY dept"
+    try fixture().expect(sql, fails: .grouping("sal"))
+    #expect(throws: SQLError.grouping("sal")) {
+      _ = try fixture().columns(of: parse(query: sql), validate: true)
+    }
+  }
+
+  @Test func `a window with GROUPING SETS is deferred`() throws {
+    // A window over a `GROUPING SETS` arm would see only that arm's grouped
+    // rows, not the union ISO prescribes, so it is deferred — faulting the
+    // feature diagnostic on both the run and validate paths.
+    let sql = "SELECT dept, SUM(sal), RANK() OVER (ORDER BY SUM(sal)) " +
+              "FROM Emp GROUP BY GROUPING SETS ((dept), ())"
+    let fault = SQLError.state(
+        "0A000", "a window function with GROUPING SETS is not yet supported")
+    try fixture().expect(sql, fails: fault)
+    #expect(throws: fault) {
+      _ = try fixture().columns(of: parse(query: sql), validate: true)
+    }
+  }
+
+  @Test func `an aggregate in a grouped window FILTER is rejected`() throws {
+    // A FILTER is a per-row gate, so it may not itself contain an aggregate —
+    // the rule a collapsing aggregate's FILTER obeys. The grouped surface could
+    // otherwise resolve the inner `SUM(sal)` to a grouped slot and lower it, so
+    // the shared window `check` enforces the rule surface-independently and the
+    // run and validate paths reject alike, rather than run admitting a shape
+    // the type-derive faults.
+    let sql = "SELECT SUM(SUM(sal)) FILTER (WHERE SUM(sal) > 0) OVER () " +
+              "FROM Emp GROUP BY dept"
+    let fault = SQLError.state("42803",
+                               "an aggregate is not allowed in a FILTER")
+    try fixture().expect(sql, fails: fault)
+    #expect(throws: fault) {
+      _ = try fixture().columns(of: parse(query: sql), validate: true)
+    }
+  }
+
+  @Test func `a window in a HAVING is rejected`() throws {
+    // A window is allowed only in the SELECT list and `ORDER BY`; one in a
+    // HAVING has no per-row meaning there, rejected ahead of the grouped
+    // routing.
+    let sql = "SELECT dept FROM Emp GROUP BY dept " +
+              "HAVING RANK() OVER (ORDER BY dept) > 1"
+    let fault = SQLError.state(
+        "0A000", "a window function is allowed only in SELECT and ORDER BY")
+    try fixture().expect(sql, fails: fault)
+    #expect(throws: fault) {
+      _ = try fixture().columns(of: parse(query: sql), validate: true)
+    }
+  }
+
+  @Test func `a whole-table aggregate window routes through group`() throws {
+    // No GROUP BY and no other projected aggregate, so the aggregate that makes
+    // this a grouped query hides in the window's own operand — `SUM(sal)` is
+    // 1400 over the whole-table group, and the outer `SUM(…) OVER ()` sums that
+    // lone row. The routing must reach the grouped path, not the plain window
+    // path (which would fault 42803 lowering the inner aggregate).
+    let sql = "SELECT SUM(SUM(sal)) OVER () FROM Emp"
+    try fixture().expect(sql, yields: [[1400]])
+    #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                .count == 1)
+  }
+
+  @Test func `a positional window over a whole-table aggregate routes`()
+      throws {
+    // Same routing gate for a positional window whose operand is the aggregate:
+    // `FIRST_VALUE(SUM(sal)) OVER ()` reads the lone whole-table group's 1400.
+    try fixture().expect(
+        "SELECT FIRST_VALUE(SUM(sal)) OVER () FROM Emp",
+        yields: [[1400]])
+  }
+
+  @Test func `a named grouped window resolves an aggregate spec`() throws {
+    // `WINDOW w AS (ORDER BY SUM(sal))` names an aggregate, which `front`
+    // cannot resolve on the base scope; the grouped surface revalidates it, the
+    // named form matches the inline `RANK() OVER (ORDER BY SUM(sal))`. Ranks by
+    // SUM(sal) ascending (300, 500, 600 → dept 1, 3, 2), output in group order.
+    try fixture().expect(
+        "SELECT dept, RANK() OVER w FROM Emp GROUP BY dept " +
+        "WINDOW w AS (ORDER BY SUM(sal))",
+        yields: [[1, 1], [2, 3], [3, 2]])
+  }
+
+  @Test func `an unused definition runs in a grouped query`() throws {
+    // The definition's ORDER BY names a non-grouped column, but no window is
+    // computed (nothing references `w`), so it validates on the input scope —
+    // `sal` an ordinary column there — not the grouped surface. The grouped
+    // query runs, counting each department (contrast the used window below).
+    let sql = "SELECT dept, COUNT(*) FROM Emp GROUP BY dept " +
+              "WINDOW w AS (ORDER BY sal)"
+    try fixture().expect(sql, yields: [[1, 2], [2, 2], [3, 1]])
+    #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                .count == 2)
+  }
+
+  @Test func `an unused aggregate definition beside a used window runs`()
+      throws {
+    // A window is used (`ROW_NUMBER`), so the query validates every definition;
+    // the unused `w` names an aggregate whose grouped slot nothing computes.
+    // Its well-formedness (`SUM(sal)`'s argument resolves) is confirmed without
+    // requiring a collected grouped slot, so the query runs — the row number
+    // over the three grouped departments — rather than faulting the internal
+    // uncollected-aggregate error.
+    let sql = "SELECT dept, ROW_NUMBER() OVER () FROM Emp GROUP BY dept " +
+              "WINDOW w AS (ORDER BY SUM(sal))"
+    try fixture().expect(sql, yields: [[1, 1], [2, 2], [3, 3]])
+    #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                .count == 2)
+  }
+
+  @Test func `a used grouped window on a non-grouped column is rejected`()
+      throws {
+    // The window is used, so its definition validates on the grouped surface,
+    // where `sal` — neither a GROUP BY key nor aggregated — faults `.grouping`
+    // on both paths. The unused form above validates on the input scope; a used
+    // window imposes the grouped context its rows are computed over.
+    let sql = "SELECT dept, RANK() OVER w FROM Emp GROUP BY dept " +
+              "WINDOW w AS (ORDER BY sal)"
+    try fixture().expect(sql, fails: .grouping("sal"))
+    #expect(throws: SQLError.grouping("sal")) {
+      _ = try fixture().columns(of: parse(query: sql), validate: true)
+    }
+  }
+
+  @Test func `a window nested in a grouped window operand is rejected`()
+      throws {
+    // With the grouped surface's window registry, `LEAD`'s value operand could
+    // With the grouped surface's window registry, `LEAD`'s value operand could
+    // resolve the inner `RANK` to an appended slot the executor has not filled
+    // — it computes every windowing from the grouped records first, so the
+    // outer would read past the record. The nested window is rejected before
+    // lowering, on the run and validate paths alike.
+    let sql = "SELECT LEAD(RANK() OVER (ORDER BY SUM(sal)), 1) " +
+              "OVER (ORDER BY dept) FROM Emp GROUP BY dept"
+    let fault = SQLError.state(
+        "0A000", "a window function is not allowed in a window function")
+    try fixture().expect(sql, fails: fault)
+    #expect(throws: fault) {
+      _ = try fixture().columns(of: parse(query: sql), validate: true)
+    }
+  }
+
+  @Test func `an aggregate window reachable only from ORDER BY routes`()
+      throws {
+    // The one aggregate hides in a window that appears solely in the query
+    // ORDER BY, never the projection — so the aggregate routing must scan the
+    // ORDER BY too (the `expressions` set `windows` already scanned), or the
+    // query takes the plain window path and lowers the inner `SUM(sal)` through
+    // the base scope, faulting 42803. Over the lone whole-table group the
+    // window ranks one row, ordering the literal projection trivially.
+    let sql = "SELECT 1 FROM Emp ORDER BY RANK() OVER (ORDER BY SUM(sal))"
+    try fixture().expect(sql, yields: [[1]])
+    #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                .count == 1)
   }
 }

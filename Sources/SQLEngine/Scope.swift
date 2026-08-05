@@ -2666,6 +2666,144 @@ internal struct Scope {
 
   // MARK: - Aggregate discovery
 
+  /// Validates a `WINDOW` definition expression for well-formedness only —
+  /// every column reference resolves against this scope (a subquery and its
+  /// arity through the full `term`) and an aggregate's operand does too —
+  /// imposing no grouping rule and materialising no aggregate slot. An unused
+  /// definition computes nothing (a referenced one is validated strictly by the
+  /// inlined form in the projection/ORDER BY), so it need only be well-formed;
+  /// this lone check admits both a dead definition naming an ordinary column
+  /// (`ORDER BY sal`, no GROUP BY key) and one naming an aggregate (`ORDER BY
+  /// SUM(sal)`, needing no slot) — neither surface a referenced window resolves
+  /// against (a base scope, a grouped surface) accepts both. An aggregate-free
+  /// subexpression resolves through `term` wholesale; an aggregate node
+  /// recurses into its operand, imposing no grouping there.
+  internal func admit(_ expression: Expression,
+                      _ routines: Routines = [:],
+                      subquery: Resolution = .unsupported)
+      throws(SQLError) {
+    guard expression.aggregated else {
+      _ = try term(expression, routines, subquery: subquery)
+      return
+    }
+    switch expression {
+    case let .aggregate(_, operand, _, filter):
+      // An aggregate's argument is a per-row scalar — resolve it through the
+      // full `term`, not `admit`. `term` faults on any aggregate, so a nested
+      // aggregate (`SUM(SUM(x))`) is rejected exactly as the referenced form
+      // rejects it; admit here would recursively accept the inner one. The
+      // leniency an unused definition earns is confined to the key level (it
+      // may be an aggregate, and a column need not be a GROUP BY key), not
+      // carried into the argument, which stays a strict scalar.
+      if case let .expression(argument) = operand {
+        _ = try term(argument, routines, subquery: subquery)
+      }
+      // The FILTER is a per-row predicate that (ISO) holds no aggregate, so
+      // lower it over the input scope: its columns resolve and an aggregate in
+      // it faults. An unresolved or malformed FILTER in an unused definition
+      // thus still faults rather than being silently dropped.
+      if let filter {
+        _ = try lower(filter, routines, subquery: subquery)
+      }
+    case let .binary(_, lhs, rhs), let .nullif(lhs, rhs):
+      try admit(lhs, routines, subquery: subquery)
+      try admit(rhs, routines, subquery: subquery)
+    case let .case(whens, otherwise):
+      // The `WHEN` guard is a per-row predicate; admit walks it and admits each
+      // expression operand, so a non-aggregate leaf (an unresolved column)
+      // faults while an aggregate operand recurses leniently — a guard valid
+      // only in a grouped context is not rejected, yet its plain columns are
+      // still validated. Each result expression admits as any.
+      for branch in whens {
+        try admit(branch.when, routines, subquery: subquery)
+        try admit(branch.then, routines, subquery: subquery)
+      }
+      if let otherwise {
+        try admit(otherwise, routines, subquery: subquery)
+      }
+    case let .cast(operand, _):
+      try admit(operand, routines, subquery: subquery)
+    case let .coalesce(arguments), let .call(_, arguments),
+         let .grouping(arguments):
+      for argument in arguments {
+        try admit(argument, routines, subquery: subquery)
+      }
+    case .column, .literal, .subquery, .window:
+      _ = try term(expression, routines, subquery: subquery)
+    }
+  }
+
+  /// Admits a predicate from a WINDOW definition's spec — a CASE guard — by
+  /// walking it and admitting each expression operand (see `admit(_:)` over an
+  /// expression): a non-aggregate leaf resolves and faults when unknown, while
+  /// an aggregate operand recurses leniently, so a guard valid only in a
+  /// grouped context is not rejected yet its plain columns are still validated.
+  /// A nested predicate recurses; an EXISTS/quantified subquery is its own
+  /// scope, compiled separately, so only its left operands are admitted here.
+  private func admit(_ predicate: Predicate, _ routines: Routines = [:],
+                     subquery: Resolution = .unsupported) throws(SQLError) {
+    switch predicate {
+    case let .comparison(left, _, right), let .distinct(left, right, _):
+      try admit(left, routines, subquery: subquery)
+      try admit(right, routines, subquery: subquery)
+    case let .bound(left, _, _):
+      try admit(left, routines, subquery: subquery)
+    case let .null(expression, _):
+      try admit(expression, routines, subquery: subquery)
+    case let .membership(operand, values, _):
+      try admit(operand, routines, subquery: subquery)
+      for value in values {
+        try admit(value, routines, subquery: subquery)
+      }
+    case let .rows(lhs, _, rhs):
+      for expression in lhs + rhs {
+        try admit(expression, routines, subquery: subquery)
+      }
+    case let .among(lhs, rows, _):
+      for expression in lhs {
+        try admit(expression, routines, subquery: subquery)
+      }
+      for row in rows {
+        for expression in row {
+          try admit(expression, routines, subquery: subquery)
+        }
+      }
+    case let .within(lhs, _, _), let .quantified(lhs, _, _, _):
+      for expression in lhs {
+        try admit(expression, routines, subquery: subquery)
+      }
+    case let .like(operand, pattern, escape, _):
+      try admit(operand, routines, subquery: subquery)
+      try admit(pattern, routines, subquery: subquery)
+      if let escape {
+        try admit(escape, routines, subquery: subquery)
+      }
+    case let .between(test, lower, upper, _):
+      try admit(test, routines, subquery: subquery)
+      try admit(lower, routines, subquery: subquery)
+      try admit(upper, routines, subquery: subquery)
+    case let .truth(inner, _, _):
+      try admit(inner, routines, subquery: subquery)
+    case let .and(lhs, rhs), let .or(lhs, rhs):
+      try admit(lhs, routines, subquery: subquery)
+      try admit(rhs, routines, subquery: subquery)
+    case let .not(operand):
+      try admit(operand, routines, subquery: subquery)
+    case .exists:
+      break
+    }
+  }
+
+  /// Admits a LIKE/BETWEEN operand — an expression operand is admitted; a
+  /// run-time `:parameter` carries no column to resolve.
+  private func admit(_ operand: Predicate.Operand,
+                     _ routines: Routines = [:],
+                     subquery: Resolution = .unsupported) throws(SQLError) {
+    if case let .expression(expression) = operand {
+      try admit(expression, routines, subquery: subquery)
+    }
+  }
+
   /// Validates the aggregate sub-expressions of `expression` — an aggregate's
   /// fold runs over every row (in the aggregate node) before a `LIMIT`, so it
   /// is reachable even under a zero-row limit — without validating the

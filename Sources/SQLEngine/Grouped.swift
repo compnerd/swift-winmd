@@ -83,19 +83,52 @@ internal struct Grouped {
   /// (`SQLError.ambiguous`) rather than silently picking the last projection.
   private var ambiguous: Set<String> = []
 
+  /// The window registry when this surface lowers a window query over the
+  /// aggregate output — `nil` for an ordinary grouped query, whose `.window`
+  /// arm faults the feature diagnostic. A window function's `term` lowering
+  /// resolves its `Windowing` over this same grouped surface (its partition,
+  /// order, and aggregate arguments reading the group keys and aggregate
+  /// results) and appends it here, taking output slot `width + j`. It is a
+  /// reference so the non-mutating `term` accumulates into it as `slot(of:)`
+  /// does on the plain window path.
+  private final class Registry {
+    var windowings = Array<Windowing>()
+  }
+  private let registry: Registry?
+
+  /// The grouped output width — the key slots plus the aggregate slots — the
+  /// appended window results begin at (windowing `j` at slot `width + j`),
+  /// matching the aggregate node the window node sits above. Zero for an
+  /// ordinary grouped query (no window layer).
+  private let width: Int
+
+  /// The windowings the query computes, each appended as one output slot
+  /// (windowing `j` at slot `width + j`), gathered as the projection and `ORDER
+  /// BY` lower — empty until they have, and for an ordinary grouped query.
+  internal var windowings: Array<Windowing> { registry?.windowings ?? [] }
+
   /// Builds a grouping over `scope` for the `GROUP BY` `columns` (with their
   /// already-lowered base-ordinal `terms`, so a merged column's coalesce term
   /// is matched by term) and the query's distinct `aggregates` (in
   /// first-appearance order — aggregate `j` at grouped slot `columns.count +
   /// j`). The `aggregates` are already deduped by RESOLVED `Aggregation` (see
   /// `group`), so a qualification-equivalent pair is one entry, one slot.
+  ///
+  /// When `windowed`, the surface additionally lowers a window query over the
+  /// aggregate output: a window function `term` meets resolves to an appended
+  /// output slot (`width + j`, past the `grouping.count + aggregates.count`
+  /// grouped slots) rather than faulting, and `windowings` gathers them for the
+  /// window node the caller places above the aggregate.
   internal init(_ scope: Scope, _ grouping: Array<Expression>,
                 _ terms: Array<Term>,
                 _ aggregates: Array<Aggregation>,
                 superset: Array<Term> = [],
-                subquery: Resolution = .unsupported) throws(SQLError) {
+                subquery: Resolution = .unsupported,
+                windowed: Bool = false) throws(SQLError) {
     self.scope = scope
     self.superset = superset
+    self.registry = windowed ? Registry() : nil
+    self.width = windowed ? grouping.count + aggregates.count : 0
     var keys = Dictionary<Int, Int>(minimumCapacity: grouping.count)
     for index in grouping.indices {
       // A bare-column grouping key a local relation binds maps its combined
@@ -208,7 +241,13 @@ internal struct Grouped {
       false
     }
     let plain = if case .column = expression { !merged } else { false }
-    if !plain, !expression.aggregated, !expression.grouping {
+    // A window-bearing expression is skipped too and descends into the switch:
+    // `scope.term` faults on a window (it has no grouped whole-expression key
+    // match), so the `.window` arm routes each window to its appended output
+    // slot and the compound arms recurse, lowering an aggregate/key leaf to its
+    // grouped slot and a window leaf to its appended one.
+    if !plain, !expression.aggregated, !expression.grouping,
+        !expression.windowed {
       let lowered = try scope.term(expression, routines, subquery: subquery)
       if let index = terms.firstIndex(of: lowered) { return .slot(index) }
       // A reference to a column another set groups on but this arm's set omits
@@ -315,12 +354,29 @@ internal struct Grouped {
       // switch), so it never reaches here — an internal inconsistency if it
       // does.
       throw .state("XX000", "unlowered GROUPING")
-    case .window:
-      // A window function is not yet supported anywhere; its resolution faults
-      // the feature diagnostic before this grouped lowering, so it never
-      // reaches here in practice, but the reject is uniform across every
-      // resolution surface.
-      throw .state("0A000", "a window function is not supported")
+    case let .window(function, spec):
+      // A window over grouped output reads the aggregate node's grouped
+      // records: its partition, order, and any aggregate argument lower through
+      // this same grouped surface (a `GROUP BY` key or an aggregate result
+      // slot, a non-grouped column faulting `.grouping` as everywhere), and the
+      // window node above the aggregate appends its value at output slot `width
+      // + j`. A deterministic window shares an already-appended slot; a
+      // stateful or non-deterministic one takes a fresh slot per occurrence, as
+      // the plain window path dedups. Without a registry — an ordinary grouped
+      // query, no window layer — a window has no per-row meaning over a
+      // collapsed group, so it faults, the reject uniform across surfaces.
+      guard let registry else {
+        throw .state("0A000", "a window function is not supported")
+      }
+      let windowing = try Expression.window(function: function, spec: spec)
+          .windowing(self, routines, subquery: subquery)
+      if windowing.deterministic(routines),
+          let index = registry.windowings.firstIndex(of: windowing) {
+        return .slot(width + index)
+      }
+      let index = registry.windowings.count
+      registry.windowings.append(windowing)
+      return .slot(width + index)
     }
   }
 
@@ -541,6 +597,57 @@ internal struct Grouped {
       }
     }
     return resolved
+  }
+}
+
+// MARK: - Grouped window surface
+
+extension Grouped: WindowSurface {
+  /// Lowers a window's `ORDER BY` to grouped-space sort keys, major to minor —
+  /// each key a value expression over the grouped record (an aggregate result
+  /// or a `GROUP BY` key, a non-grouped column faulting `.grouping`). An output
+  /// ordinal names a projected column, meaningless as the window order fixing
+  /// the input row order, so it faults as it does over a plain source.
+  internal func window(order: Order, _ routines: Routines = [:],
+                       subquery: Resolution = .unsupported)
+      throws(SQLError) -> Array<SortKey> {
+    var keys = Array<SortKey>()
+    keys.reserveCapacity(order.keys.count)
+    for key in order.keys {
+      switch key.sort {
+      case .ordinal:
+        throw .state("0A000",
+                     "a window ORDER BY output ordinal is not supported")
+      case let .expression(expression):
+        try keys.append(SortKey(term: resolve(expression, routines,
+                                              subquery: subquery),
+                                ascending: key.ascending, column: nil))
+      }
+    }
+    return keys
+  }
+
+  /// Reconciles a `LEAD`/`LAG` `fallback` default against its `value`'s type
+  /// over grouped output — both may be aggregates, so the type derive runs over
+  /// the base `scope` (which types an aggregate by its result) while the value
+  /// lowering routes through the grouped surface. Mirrors `Scope.reconciled`:
+  /// an explicit NULL default is type-neutral and coerces to the value type,
+  /// while an irreconcilable pair faults, so the run and validate paths agree.
+  internal func reconciled(_ fallback: Expression, with value: Expression,
+                           _ routines: Routines = [:],
+                           subquery: Resolution = .unsupported)
+      throws(SQLError) -> Term {
+    let expected = try scope.derive(value, routines, subquery: subquery)
+    if case .literal(.null) = fallback {
+      let null = try resolve(fallback, routines, subquery: subquery)
+      return .cast(null, expected)
+    }
+    let actual = try scope.derive(fallback, routines, subquery: subquery)
+    guard expected.unified(with: actual) != nil else {
+      throw .operand("a LEAD/LAG default and value have irreconcilable types")
+    }
+    let lowered = try resolve(fallback, routines, subquery: subquery)
+    return expected == actual ? lowered : .cast(lowered, expected)
   }
 }
 

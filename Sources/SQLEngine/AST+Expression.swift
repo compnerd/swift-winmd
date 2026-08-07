@@ -62,14 +62,14 @@ public enum WindowFunction: Hashable, Sendable {
   /// `ROW_NUMBER()` — the 1-based sequential number of the row within its
   /// partition, in the window's order; distinct for every row of the partition
   /// even where the order keys tie.
-  case rowNumber
+  case number
   /// `RANK()` — the 1-based rank of the row within its partition: peer rows
   /// (equal on the window's order keys) share a rank, and the next distinct row
   /// takes the rank one past the peers already seen, so ranks skip after a tie.
   case rank
   /// `DENSE_RANK()` — like `RANK`, but the ranks are dense: the next distinct
   /// row after a tie takes the immediately following rank, leaving no gap.
-  case denseRank
+  case dense
   /// A standard aggregate computed over the window frame rather than folded to
   /// one row — `SUM(x) OVER (…)`, `COUNT(*) OVER (…)`, `AVG`/`MIN`/`MAX` — so
   /// each row keeps its identity and gains the aggregate over its frame. It
@@ -96,15 +96,15 @@ public enum WindowFunction: Hashable, Sendable {
   /// first row of the window frame. It is frame-sensitive: over the default
   /// frame (the partition start through the current peer group) the first row
   /// is the partition's first in window order.
-  case firstValue(Expression)
+  case first(Expression)
   /// `LAST_VALUE(value) OVER (…)` — the `value` at the last row of the frame.
   /// Over the default frame the last row is the current row's peer group end
   /// (the current row itself with distinct order keys) — not the partition's
   /// last row — the classic frame-sensitivity gotcha.
-  case lastValue(Expression)
+  case last(Expression)
   /// `NTH_VALUE(value, n) OVER (…)` — the `value` at the `n`-th row (1-based)
   /// of the frame, or `NULL` when the frame holds fewer than `n` rows.
-  case nthValue(Expression, Int)
+  case nth(Expression, Int)
   /// `NTILE(n) OVER (…)` — the 1-based number of the bucket the row falls in
   /// when the ordered partition is split into `n` buckets as equally as
   /// possible (the first `rows mod n` buckets one row larger). A whole-number
@@ -113,11 +113,11 @@ public enum WindowFunction: Hashable, Sendable {
   /// `PERCENT_RANK() OVER (…)` — the relative rank `(rank - 1) / (rows - 1)` in
   /// `[0, 1]` (`0` for a single-row partition), where `rank` is the `RANK`
   /// value. An approximate-numeric ratio, so it types `.double`.
-  case percentRank
+  case percent
   /// `CUME_DIST() OVER (…)` — the cumulative distribution `rows up to and
   /// including the current peer group / rows`, in `(0, 1]`. An
   /// approximate-numeric ratio, so it types `.double`.
-  case cumeDist
+  case cumulative
 }
 
 extension WindowFunction {
@@ -130,11 +130,11 @@ extension WindowFunction {
     switch self {
     case let .lead(value, _, fallback), let .lag(value, _, fallback):
       (value, fallback)
-    case let .firstValue(value), let .lastValue(value),
-         let .nthValue(value, _):
+    case let .first(value), let .last(value),
+         let .nth(value, _):
       (value, nil)
-    case .rowNumber, .rank, .denseRank, .aggregate,
-         .ntile, .percentRank, .cumeDist:
+    case .number, .rank, .dense, .aggregate,
+         .ntile, .percent, .cumulative:
       nil
     }
   }
@@ -146,10 +146,10 @@ extension WindowFunction {
   /// takes a frame.
   internal var frameable: Bool {
     switch self {
-    case .aggregate, .firstValue, .lastValue, .nthValue:
+    case .aggregate, .first, .last, .nth:
       true
-    case .rowNumber, .rank, .denseRank, .lead, .lag,
-         .ntile, .percentRank, .cumeDist:
+    case .number, .rank, .dense, .lead, .lag,
+         .ntile, .percent, .cumulative:
       false
     }
   }
@@ -240,16 +240,16 @@ public struct Frame: Hashable, Sendable {
   /// offset from it.
   public enum Bound: Hashable, Sendable {
     /// `UNBOUNDED PRECEDING` — the partition start.
-    case unboundedPreceding
+    case head
     /// `n PRECEDING` — `n` rows/values/groups before the current row.
     case preceding(Int)
     /// `CURRENT ROW` — the current row (`ROWS`/`GROUPS`) or its peer group
     /// (`RANGE`).
-    case currentRow
+    case current
     /// `n FOLLOWING` — `n` rows/values/groups after the current row.
     case following(Int)
     /// `UNBOUNDED FOLLOWING` — the partition end.
-    case unboundedFollowing
+    case tail
   }
 
   /// How the bounds are measured — `ROWS`, `RANGE`, or `GROUPS`.

@@ -14,14 +14,14 @@ extension WindowFunction {
   /// reaching this scope-free property.
   internal var type: ValueType {
     switch self {
-    case .rowNumber, .rank, .denseRank, .ntile:
+    case .number, .rank, .dense, .ntile:
       .integer
-    case .percentRank, .cumeDist:
+    case .percent, .cumulative:
       .double
     case .aggregate:
       preconditionFailure(
           "an aggregate window types from its argument through a scope")
-    case .lead, .lag, .firstValue, .lastValue, .nthValue:
+    case .lead, .lag, .first, .last, .nth:
       preconditionFailure(
           "a positional window types from its value through a scope")
     }
@@ -33,9 +33,9 @@ extension WindowFunction {
   /// diagnostic on both the run and validate paths until then.
   internal var supported: Bool {
     switch self {
-    case .rowNumber, .rank, .denseRank, .aggregate, .lead, .lag,
-         .firstValue, .lastValue, .nthValue,
-         .ntile, .percentRank, .cumeDist:
+    case .number, .rank, .dense, .aggregate, .lead, .lag,
+         .first, .last, .nth,
+         .ntile, .percent, .cumulative:
       true
     }
   }
@@ -44,18 +44,18 @@ extension WindowFunction {
   /// ranking name, or the aggregate's own keyword for an aggregate window.
   internal var keyword: String {
     switch self {
-    case .rowNumber: "ROW_NUMBER"
+    case .number: "ROW_NUMBER"
     case .rank: "RANK"
-    case .denseRank: "DENSE_RANK"
+    case .dense: "DENSE_RANK"
     case let .aggregate(function, _, _, _): function.keyword
     case .lead: "LEAD"
     case .lag: "LAG"
-    case .firstValue: "FIRST_VALUE"
-    case .lastValue: "LAST_VALUE"
-    case .nthValue: "NTH_VALUE"
+    case .first: "FIRST_VALUE"
+    case .last: "LAST_VALUE"
+    case .nth: "NTH_VALUE"
     case .ntile: "NTILE"
-    case .percentRank: "PERCENT_RANK"
-    case .cumeDist: "CUME_DIST"
+    case .percent: "PERCENT_RANK"
+    case .cumulative: "CUME_DIST"
     }
   }
 
@@ -80,7 +80,7 @@ extension Frame.Bound {
   /// unsupported numeric offset, and it orders with `CURRENT ROW`.
   internal var normalized: Frame.Bound {
     switch self {
-    case .preceding(0), .following(0): .currentRow
+    case .preceding(0), .following(0): .current
     default: self
     }
   }
@@ -94,9 +94,9 @@ extension WindowFunction {
   /// lockstep (the run ≡ validate tripwire).
   internal func require(order spec: WindowSpec) throws(SQLError) {
     switch self {
-    case .rowNumber, .rank, .denseRank, .aggregate,
-         .firstValue, .lastValue, .nthValue,
-         .ntile, .percentRank, .cumeDist:
+    case .number, .rank, .dense, .aggregate,
+         .first, .last, .nth,
+         .ntile, .percent, .cumulative:
       break
     case .lead, .lag:
       guard spec.order != nil else {
@@ -143,11 +143,11 @@ extension Frame {
   /// directly when validating an unused named window's specification, so an
   /// unused definition's frame is checked as a referenced one's is.
   internal func check() throws(SQLError) {
-    if case .unboundedFollowing = start {
+    if case .tail = start {
       throw .state("42601",
                    "a window frame cannot start at UNBOUNDED FOLLOWING")
     }
-    if case .unboundedPreceding = end {
+    if case .head = end {
       throw .state("42601", "a window frame cannot end at UNBOUNDED PRECEDING")
     }
     for bound in [start, end] {
@@ -194,11 +194,11 @@ extension Frame {
   /// than a rejected inversion.
   private func category(of bound: Bound) -> Int {
     switch bound.normalized {
-    case .unboundedPreceding: 0
+    case .head: 0
     case .preceding: 1
-    case .currentRow: 2
+    case .current: 2
     case .following: 3
-    case .unboundedFollowing: 4
+    case .tail: 4
     }
   }
 
@@ -260,11 +260,11 @@ internal struct Windowing: Equatable {
   /// frame.
   internal enum Function: Equatable {
     /// `ROW_NUMBER` — the 1-based position of the row in the window order.
-    case rowNumber
+    case number
     /// `RANK` — the peer-aware rank, skipping after a tie.
     case rank
     /// `DENSE_RANK` — the peer-aware rank, dense (no gap after a tie).
-    case denseRank
+    case dense
     /// An aggregate folded over the row's frame — the lowered `Aggregation` the
     /// executor accumulates, mirroring the collapsing grouping path's fold but
     /// cardinality-preserving.
@@ -278,19 +278,19 @@ internal struct Windowing: Equatable {
     case lag(Term, offset: Int, default: Term?)
     /// `FIRST_VALUE` — the lowered `value` term read at the first row of the
     /// frame.
-    case firstValue(Term)
+    case first(Term)
     /// `LAST_VALUE` — the `value` term read at the last row of the frame.
-    case lastValue(Term)
+    case last(Term)
     /// `NTH_VALUE` — the `value` term read at the 1-based `n`-th row of the
     /// frame, else NULL when the frame holds fewer than `n` rows.
-    case nthValue(Term, Int)
+    case nth(Term, Int)
     /// `NTILE` — the 1-based bucket number when the partition is split into `n`
     /// equal buckets.
     case ntile(Int)
     /// `PERCENT_RANK` — the relative rank in `[0, 1]`.
-    case percentRank
+    case percent
     /// `CUME_DIST` — the cumulative distribution in `(0, 1]`.
-    case cumeDist
+    case cumulative
   }
 
   /// The window function computed over each ordered partition.
@@ -325,7 +325,7 @@ extension Windowing.Function {
   internal func remapped(through slot: Dictionary<Int, Int>)
       -> Windowing.Function {
     switch self {
-    case .rowNumber, .rank, .denseRank, .ntile, .percentRank, .cumeDist:
+    case .number, .rank, .dense, .ntile, .percent, .cumulative:
       self
     case let .aggregate(aggregation):
       .aggregate(aggregation.remapped(through: slot))
@@ -335,12 +335,12 @@ extension Windowing.Function {
     case let .lag(value, offset, fallback):
       .lag(value.remapped(through: slot), offset: offset,
            default: fallback.map { $0.remapped(through: slot) })
-    case let .firstValue(value):
-      .firstValue(value.remapped(through: slot))
-    case let .lastValue(value):
-      .lastValue(value.remapped(through: slot))
-    case let .nthValue(value, position):
-      .nthValue(value.remapped(through: slot), position)
+    case let .first(value):
+      .first(value.remapped(through: slot))
+    case let .last(value):
+      .last(value.remapped(through: slot))
+    case let .nth(value, position):
+      .nth(value.remapped(through: slot), position)
     }
   }
 
@@ -349,15 +349,15 @@ extension Windowing.Function {
   /// and default slots, none for a ranking function.
   internal func references(into slots: inout Set<Int>) {
     switch self {
-    case .rowNumber, .rank, .denseRank, .ntile, .percentRank, .cumeDist:
+    case .number, .rank, .dense, .ntile, .percent, .cumulative:
       break
     case let .aggregate(aggregation):
       aggregation.references(into: &slots)
     case let .lead(value, _, fallback), let .lag(value, _, fallback):
       value.references(into: &slots)
       fallback?.references(into: &slots)
-    case let .firstValue(value), let .lastValue(value),
-         let .nthValue(value, _):
+    case let .first(value), let .last(value),
+         let .nth(value, _):
       value.references(into: &slots)
     }
   }
@@ -397,7 +397,7 @@ extension Windowing {
       return false
     }
     switch function {
-    case .rowNumber, .rank, .denseRank, .ntile, .percentRank, .cumeDist:
+    case .number, .rank, .dense, .ntile, .percent, .cumulative:
       return true
     case let .aggregate(aggregation):
       return aggregation.filter == nil
@@ -405,8 +405,8 @@ extension Windowing {
     case let .lead(value, _, fallback), let .lag(value, _, fallback):
       return value.deterministic(routines)
           && (fallback?.deterministic(routines) ?? true)
-    case let .firstValue(value), let .lastValue(value),
-         let .nthValue(value, _):
+    case let .first(value), let .last(value),
+         let .nth(value, _):
       return value.deterministic(routines)
     }
   }
@@ -591,14 +591,14 @@ extension WindowFunction {
   /// before resolving the operand through a surface.
   internal var windowed: Bool {
     switch self {
-    case .rowNumber, .rank, .denseRank, .ntile, .percentRank, .cumeDist:
+    case .number, .rank, .dense, .ntile, .percent, .cumulative:
       false
     case let .aggregate(_, argument, _, filter):
       argument.windowed || (filter?.windowed ?? false)
     case let .lead(value, _, fallback), let .lag(value, _, fallback):
       value.windowed || (fallback?.windowed ?? false)
-    case let .firstValue(value), let .lastValue(value),
-         let .nthValue(value, _):
+    case let .first(value), let .last(value),
+         let .nth(value, _):
       value.windowed
     }
   }
@@ -627,7 +627,7 @@ extension WindowFunction {
       guard buckets >= 1 else {
         throw .state("22023", "NTILE requires a positive bucket count")
       }
-    case let .nthValue(_, position):
+    case let .nth(_, position):
       guard position >= 1 else {
         throw .state("22023", "NTH_VALUE requires a positive position")
       }
@@ -648,12 +648,12 @@ extension WindowFunction {
       throws(SQLError) -> Windowing.Function {
     try check()
     switch self {
-    case .rowNumber:
-      return .rowNumber
+    case .number:
+      return .number
     case .rank:
       return .rank
-    case .denseRank:
-      return .denseRank
+    case .dense:
+      return .dense
     case let .aggregate(function, operand, distinct, filter):
       // Build the `Aggregation` from the surface exactly as the collapsing
       // aggregate's `aggregation` does — the argument through `resolve`, the
@@ -685,21 +685,21 @@ extension WindowFunction {
                         try surface.reconciled(expression, with: value,
                                                routines, subquery: subquery)
                       })
-    case let .firstValue(value):
-      return try .firstValue(surface.resolve(value, routines,
+    case let .first(value):
+      return try .first(surface.resolve(value, routines,
                                              subquery: subquery))
-    case let .lastValue(value):
-      return try .lastValue(surface.resolve(value, routines,
+    case let .last(value):
+      return try .last(surface.resolve(value, routines,
                                             subquery: subquery))
-    case let .nthValue(value, position):
-      return try .nthValue(surface.resolve(value, routines, subquery: subquery),
+    case let .nth(value, position):
+      return try .nth(surface.resolve(value, routines, subquery: subquery),
                            position)
     case let .ntile(buckets):
       return .ntile(buckets)
-    case .percentRank:
-      return .percentRank
-    case .cumeDist:
-      return .cumeDist
+    case .percent:
+      return .percent
+    case .cumulative:
+      return .cumulative
     }
   }
 }

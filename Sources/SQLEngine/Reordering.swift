@@ -84,10 +84,10 @@ extension Catalog where Self: ~Escapable {
     case let .limit(count, offset, source):
       return try .limit(count: count, offset: offset,
                         reordered(source, context))
-    case let .topN(keys, offset, count, source):
-      // `topN` is produced by `optimise`, after this pass, so it never reaches
+    case let .top(keys, offset, count, source):
+      // `top` is produced by `optimise`, after this pass, so it never reaches
       // here; recurse structurally to keep the switch exhaustive.
-      return try .topN(keys: keys, offset: offset, count: count,
+      return try .top(keys: keys, offset: offset, count: count,
                        reordered(source, context))
     // A join is produced by `optimise` (after this pass); a leaf holds no run.
     case .single, .values, .empty, .scan, .join:

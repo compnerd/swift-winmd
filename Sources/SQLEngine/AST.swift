@@ -643,13 +643,13 @@ public struct Select: Hashable, Sendable {
     // A grouped query's output-name surface includes an unaliased projected
     // group column (its `Projected.name`), matching the grouped lowering; a
     // non-grouped query's is an explicit `AS` alias only.
-    orderKeys(named: aggregates ? \.name : \.alias)
+    keys(named: aggregates ? \.name : \.alias)
   }
 
   /// The ORDER BY sort keys resolved to the expression the sort evaluates,
   /// matching a bare output name against `output` — the projection accessor a
   /// caller picks to mirror the resolver's lowering (see `orderKeys`).
-  private func orderKeys(named output: KeyPath<Projected, String?>)
+  private func keys(named output: KeyPath<Projected, String?>)
       -> Array<Expression> {
     guard let order else { return [] }
     // Only an `expressions` list carries a projection expression an ordinal or

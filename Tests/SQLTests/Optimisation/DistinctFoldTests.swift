@@ -47,7 +47,7 @@ private func distincts(_ plan: Plan) -> Bool {
     distincts(source)
   case let .limit(_, _, source):
     distincts(source)
-  case let .topN(_, _, _, source):
+  case let .top(_, _, _, source):
     distincts(source)
   case let .derived(_, sub, _, _):
     distincts(sub)

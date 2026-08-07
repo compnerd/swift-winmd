@@ -272,7 +272,7 @@ internal struct SignatureDecoder: ~Escapable {
   /// magnitude is `value >> 1`, and a set low bit selects the negative value
   /// `magnitude - 2^(databits - 1)`, where `databits` is 7, 14, or 29 for the
   /// 1-, 2-, or 4-byte encoding.
-  private mutating func compressedSigned() throws(WinMDError) -> Int {
+  private mutating func signed() throws(WinMDError) -> Int {
     let length = try width()
     let (begin, value) = bytes.compressed(at: position)
     position = begin
@@ -379,7 +379,7 @@ internal struct SignatureDecoder: ~Escapable {
     count = try compressed()
     guard count <= rank else { throw .BadImageFormat }
     for _ in 0 ..< count {
-      try bounds.append(compressedSigned())
+      try bounds.append(signed())
     }
 
     return .matrix(element,

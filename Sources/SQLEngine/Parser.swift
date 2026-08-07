@@ -321,7 +321,7 @@ internal struct Parser: ~Escapable {
     // arm. `select()` does not consume it, so no arm eats a query-level tail;
     // parse it once here and apply it by scope.
     let order: Order? = try match(.order) ? try self.order() : nil
-    let limit = try rowLimit()
+    let limit = try limit()
     guard order != nil || limit != nil else { return query }
     // A bare simple select (not parenthesised) carries the tail on itself,
     // resolved under its own full scope — an `ORDER BY` over a non-projected
@@ -580,7 +580,7 @@ internal struct Parser: ~Escapable {
     let from = try relation()
 
     var joins = Array<Join>()
-    while let kind = try joinKind() {
+    while let kind = try variety() {
       try joins.append(join(kind.kind, cross: kind.cross,
                             natural: kind.natural))
     }
@@ -1010,7 +1010,7 @@ internal struct Parser: ~Escapable {
       try expect(.rparen)
       // ISO requires a derived table be named, so the alias is mandatory — an
       // `AS`-less spelling faults rather than binding an unnamed relation.
-      guard try match(.as) || isName(current?.kind) else {
+      guard try match(.as) || named(current?.kind) else {
         guard let token = current else {
           throw .incomplete(expected: "'AS' and an alias for the derived table")
         }
@@ -1034,7 +1034,7 @@ internal struct Parser: ~Escapable {
     let name = try identifier()
     let alias: String? = if try match(.as) {
       try identifier()
-    } else if isName(current?.kind) {
+    } else if named(current?.kind) {
       try identifier()
     } else {
       nil
@@ -1050,7 +1050,7 @@ internal struct Parser: ~Escapable {
   /// Whether `kind` begins an identifier — a bare or a delimited name — the
   /// token an optional (`AS`-less) relation alias may start with, so a
   /// following keyword or the end of input is not mistaken for an alias.
-  private func isName(_ kind: Token.Kind?) -> Bool {
+  private func named(_ kind: Token.Kind?) -> Bool {
     switch kind {
     case .identifier, .quoted: true
     default: false
@@ -1071,7 +1071,7 @@ internal struct Parser: ~Escapable {
   /// [INNER | LEFT | RIGHT | FULL [OUTER]] JOIN`), but not `CROSS`. A leading
   /// `NATURAL`/`INNER`/`CROSS`/`LEFT`/`RIGHT`/`FULL` commits to a join clause,
   /// so a missing `JOIN` after it faults rather than silently ending the chain.
-  private mutating func joinKind()
+  private mutating func variety()
       throws(SQLError) -> (kind: Join.Kind, cross: Bool, natural: Bool)? {
     let natural = try match(.natural)
     if try match(.join) { return (.inner, false, natural) }
@@ -1218,7 +1218,7 @@ internal struct Parser: ~Escapable {
   /// ROW ONLY`). Both counts are non-negative integer literals; a bare or
   /// negative spelling is not one (the lexer scans a `-` as its own token), so
   /// it faults as any other misplaced token would.
-  private mutating func rowLimit() throws(SQLError) -> Limit? {
+  private mutating func limit() throws(SQLError) -> Limit? {
     let offset: Int
     if try match(.offset) {
       offset = try count()

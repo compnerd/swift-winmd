@@ -97,9 +97,9 @@ extension Catalog where Self: ~Escapable {
         return lhs < rhs
       }
       switch windowing.function {
-      case .rowNumber, .rank, .denseRank:
+      case .number, .rank, .dense:
         assign(windowing.function, over: ordered, keyed, into: &values)
-      case .ntile, .percentRank, .cumeDist:
+      case .ntile, .percent, .cumulative:
         distribute(windowing.function, over: ordered, keyed, into: &values)
       case let .aggregate(aggregation):
         if let frame = windowing.frame {
@@ -115,15 +115,15 @@ extension Catalog where Self: ~Escapable {
       case let .lag(value, offset, fallback):
         try position(value, by: -offset, default: fallback, over: ordered,
                      in: records, context, into: &values)
-      case let .firstValue(value):
+      case let .first(value):
         try extremum(value, at: .first, over: ordered, keyed,
                      frame: windowing.frame, in: records, context,
                      into: &values)
-      case let .lastValue(value):
+      case let .last(value):
         try extremum(value, at: .last, over: ordered, keyed,
                      frame: windowing.frame, in: records, context,
                      into: &values)
-      case let .nthValue(value, position):
+      case let .nth(value, position):
         try extremum(value, at: .nth(position), over: ordered, keyed,
                      frame: windowing.frame, in: records, context,
                      into: &values)
@@ -256,7 +256,7 @@ extension Catalog where Self: ~Escapable {
     // row performs (1 + … + n folds). Peers of a `RANGE` end share the value:
     // the end does not advance across a tie, so a peer folds nothing and reads
     // the running total the first of its group already reached.
-    if case .unboundedPreceding = frame.start {
+    if case .head = frame.start {
       var accumulator = Accumulator(aggregation.function,
                                     distinct: aggregation.distinct)
       var folded = 0
@@ -278,7 +278,7 @@ extension Catalog where Self: ~Escapable {
     // running accumulator in reverse (last row to first), each row folded once as
     // the lower bound retreats — linear, not the quadratic refold. Peers of a
     // `RANGE` start share the value, as the forward path's end peers do.
-    if case .unboundedFollowing = frame.end {
+    if case .tail = frame.end {
       var accumulator = Accumulator(aggregation.function,
                                     distinct: aggregation.distinct)
       var folded = count
@@ -383,8 +383,8 @@ extension Catalog where Self: ~Escapable {
     // The default frame is `RANGE UNBOUNDED PRECEDING AND CURRENT ROW` — the
     // partition start through the current peer group — the frame the value
     // functions read over when none is written.
-    let frame = frame ?? Frame(unit: .range, start: .unboundedPreceding,
-                               end: .currentRow)
+    let frame = frame ?? Frame(unit: .range, start: .head,
+                               end: .current)
     // Evaluate each source row's value once, before selecting frame positions.
     // Several output rows may select the same target — `FIRST_VALUE` returns the
     // partition's first value throughout — so reading a materialised value keeps
@@ -453,14 +453,14 @@ extension Catalog where Self: ~Escapable {
             : remainder + (position - large) / quotient + 1
         values[ordered[position]] = .integer(bucket)
       }
-    case .percentRank:
+    case .percent:
       let (peerLo, _) = peering(ordered, keyed)
       for position in 0 ..< count {
         values[ordered[position]] = count <= 1
             ? .double(0)
             : .double(Double(peerLo[position]) / Double(count - 1))
       }
-    case .cumeDist:
+    case .cumulative:
       let (_, peerHi) = peering(ordered, keyed)
       for position in 0 ..< count {
         values[ordered[position]] =
@@ -495,13 +495,13 @@ extension Catalog where Self: ~Escapable {
     // `accumulate`/`framed` and an offset function read by `position`, so
     // `computed` dispatches those elsewhere and neither reaches this ranker.
     switch function {
-    case .aggregate, .lead, .lag, .firstValue, .lastValue, .nthValue,
-         .ntile, .percentRank, .cumeDist:
+    case .aggregate, .lead, .lag, .first, .last, .nth,
+         .ntile, .percent, .cumulative:
       preconditionFailure("a non-ranking window is computed, not ranked")
-    case .rowNumber, .rank, .denseRank:
+    case .number, .rank, .dense:
       break
     }
-    if case .rowNumber = function {
+    if case .number = function {
       for position in ordered.indices {
         values[ordered[position]] = .integer(position + 1)
       }
@@ -543,11 +543,11 @@ private func bound(_ bound: Frame.Bound, at index: Int, _ unit: Frame.Unit,
   // A zero offset is the current row, so it reads the peer group under `RANGE`
   // (the current row under `ROWS`) rather than a physical offset of `index`.
   switch bound.normalized {
-  case .unboundedPreceding:
+  case .head:
     return 0
-  case .unboundedFollowing:
+  case .tail:
     return count - 1
-  case .currentRow:
+  case .current:
     if case .range = unit { return start ? peerLo[index] : peerHi[index] }
     return index
   case let .preceding(offset):

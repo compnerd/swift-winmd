@@ -107,7 +107,7 @@ extension Catalog where Self: ~Escapable {
       return try windowed(execute(source, context), windowings, context)
     case let .limit(count, offset, source):
       return limited(try execute(source, context), count, offset)
-    case let .topN(keys, offset, count, source):
+    case let .top(keys, offset, count, source):
       return try topmost(execute(source, context), keys, offset, count, context)
     }
   }
@@ -210,7 +210,7 @@ extension Catalog where Self: ~Escapable {
 
   /// Selects the `offset + count` head rows of `rows` in the order the fused
   /// `sort` would impose, then drops the first `offset` and takes at most
-  /// `count` — the executor's `topN` node body, byte-identical to
+  /// `count` — the executor's `top` node body, byte-identical to
   /// `sorted(rows, keys)` then `limited(_, count, offset)` but bounded: it
   /// keeps only the head prefix in a max-heap rather than sorting the input, an
   /// `O(n log(offset + count))` partial sort in place of `sort`'s `O(n log n)`.

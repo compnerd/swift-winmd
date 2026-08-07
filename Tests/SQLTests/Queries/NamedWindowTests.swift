@@ -30,13 +30,13 @@ private func projected(_ sql: String,
 struct NamedWindowParsingTests {
   @Test func `a bare OVER name parses as a window reference`() throws {
     #expect(try projected("SELECT ROW_NUMBER() OVER w FROM T")
-                == .window(function: .rowNumber, spec: WindowSpec(base: "w")))
+                == .window(function: .number, spec: WindowSpec(base: "w")))
   }
 
   @Test func `a parenthesised OVER (name) parses as a window reference`()
       throws {
     #expect(try projected("SELECT ROW_NUMBER() OVER (w) FROM T")
-                == .window(function: .rowNumber, spec: WindowSpec(base: "w")))
+                == .window(function: .number, spec: WindowSpec(base: "w")))
   }
 
   @Test func `the WINDOW clause populates the select's named windows`() throws {

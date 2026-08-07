@@ -60,7 +60,7 @@ private func selects(_ plan: Plan) -> Bool {
     selects(source)
   case let .limit(_, _, source):
     selects(source)
-  case let .topN(_, _, _, source):
+  case let .top(_, _, _, source):
     selects(source)
   case let .distinct(source):
     selects(source)
@@ -99,7 +99,7 @@ private func empties(_ plan: Plan) -> Bool {
     empties(source)
   case let .limit(_, _, source):
     empties(source)
-  case let .topN(_, _, _, source):
+  case let .top(_, _, _, source):
     empties(source)
   case let .distinct(source):
     empties(source)

@@ -41,11 +41,11 @@ private func nulls() throws -> FixtureCatalog {
 
 // MARK: - Plan assertions
 
-/// Whether `plan` carries a `.topN` node — the observable sign the `limit` over
+/// Whether `plan` carries a `.top` node — the observable sign the `limit` over
 /// `sort` fused into a bounded selection.
 private func fused(_ plan: Plan) -> Bool {
   switch plan {
-  case .topN: return true
+  case .top: return true
   case let .select(_, source), let .project(_, source), let .sort(_, source),
        let .distinct(source), let .limit(_, _, source),
        let .aggregate(_, _, source), let .window(_, source):
@@ -70,7 +70,7 @@ private func plan(_ catalog: borrowing FixtureCatalog, _ sql: String)
 @Suite struct TopNTests {
   /// The fusion is a partial sort, so its result must be byte-identical to the
   /// full stable sort then the page slice. Compute the reference from the
-  /// UN-fused full `ORDER BY` (no FETCH, so no `.topN` forms) and slice it in
+  /// UN-fused full `ORDER BY` (no FETCH, so no `.top` forms) and slice it in
   /// Swift, then check every `(offset, count)` page's fused query against it —
   /// a differential proof the optimisation preserves rows and order.
   @Test func `a fused top-N matches the full sort then page slice`() throws {
@@ -171,7 +171,7 @@ private func plan(_ catalog: borrowing FixtureCatalog, _ sql: String)
   @Test func `a DISTINCT ORDER BY FETCH does not fuse and stays correct`()
       throws {
     let catalog = try people()
-    // The cap sits over the `.distinct`, not the `.sort`, so no `.topN` forms;
+    // The cap sits over the `.distinct`, not the `.sort`, so no `.top` forms;
     // the distinct ages ascending are 25, 30, 40 and the FETCH takes the first
     // two.
     let sql = "SELECT DISTINCT Age FROM People ORDER BY Age "

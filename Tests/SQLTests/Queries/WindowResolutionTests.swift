@@ -21,19 +21,19 @@ private func scope() -> Scope {
 /// its own slot — the run's resolution, before the executor lands.
 struct WindowResolutionTests {
   @Test func `each ranking function types as an integer`() {
-    #expect(WindowFunction.rowNumber.type == .integer)
+    #expect(WindowFunction.number.type == .integer)
     #expect(WindowFunction.rank.type == .integer)
-    #expect(WindowFunction.denseRank.type == .integer)
+    #expect(WindowFunction.dense.type == .integer)
   }
 
   @Test func `a window lowers its partition and order to source terms`() throws {
     let window = Expression.window(
-        function: .rowNumber,
+        function: .number,
         spec: WindowSpec(partition: [.column(Column("d"))],
                          order: Order(keys: [Order.Key(column: Column("x"),
                                                        ascending: false)])))
     let windowing = try window.windowing(scope())
-    #expect(windowing.function == .rowNumber)
+    #expect(windowing.function == .number)
     #expect(windowing.partition == [.slot(0)])
     #expect(windowing.order == [SortKey(term: .slot(1), ascending: false,
                                         column: nil)])
@@ -51,7 +51,7 @@ struct WindowResolutionTests {
     // which parses as an output ordinal — is meaningless and faults 0A000, in
     // parity across the run and validate paths.
     let window = Expression.window(
-        function: .rowNumber,
+        function: .number,
         spec: WindowSpec(order: Order(keys: [Order.Key(sort: .ordinal(1))])))
     #expect(throws:
         SQLError.state("0A000",
@@ -62,7 +62,7 @@ struct WindowResolutionTests {
 
   @Test func `the windowed surface maps a window to its appended slot`() throws {
     let window = Expression.window(
-        function: .rowNumber,
+        function: .number,
         spec: WindowSpec(partition: [.column(Column("d"))]))
     // Source `T(d, x)` packed identically (slots 0, 1); the `Windowed` appends
     // the lone windowing as it first resolves it, landing at appended slot
@@ -84,7 +84,7 @@ struct WindowResolutionTests {
     let ordered = WindowSpec(order: Order(keys: [Order.Key(column: Column("x"))]))
 
     // ROW_NUMBER is deterministic, so two occurrences share one appended slot.
-    let deterministic = Expression.window(function: .rowNumber, spec: ordered)
+    let deterministic = Expression.window(function: .number, spec: ordered)
     let shared = Windowed(scope(), [0: 0, 1: 1], width: 2)
     _ = try shared.resolve(deterministic)
     _ = try shared.resolve(deterministic)
@@ -97,7 +97,7 @@ struct WindowResolutionTests {
           .integer(0)
         }
     let stateful = Expression.window(
-        function: .firstValue(.call(name: "tick", arguments: [])),
+        function: .first(.call(name: "tick", arguments: [])),
         spec: ordered)
     let distinct = Windowed(scope(), [0: 0, 1: 1], width: 2)
     _ = try distinct.resolve(stateful, routines)
@@ -106,7 +106,7 @@ struct WindowResolutionTests {
   }
 
   @Test func `a window is discovered inside a compound expression`() {
-    let window = Expression.window(function: .rowNumber, spec: WindowSpec())
+    let window = Expression.window(function: .number, spec: WindowSpec())
     #expect(Expression.binary(.add, window, .literal(.integer(1))).windowed)
     #expect(!Expression.column(Column("x")).windowed)
     var collected = Array<Expression>()
@@ -139,7 +139,7 @@ struct WindowArgumentTests {
 
   @Test func `a zero NTH_VALUE position faults at lowering`() {
     let window = Expression.window(
-        function: .nthValue(.column(Column("x")), 0), spec: ordered)
+        function: .nth(.column(Column("x")), 0), spec: ordered)
     #expect(throws:
         SQLError.state("22023", "NTH_VALUE requires a positive position")) {
       _ = try window.windowing(scope())
@@ -172,10 +172,10 @@ struct WindowArgumentTests {
     // way — so the shared frame check rejects them. `reject(for:)` validates the
     // frame before the function's own frameability.
     for bound in [Frame.Bound.preceding(-1), .following(-1)] {
-      let frame = Frame(unit: .rows, start: bound, end: .currentRow)
+      let frame = Frame(unit: .rows, start: bound, end: .current)
       #expect(throws:
           SQLError.state("22023", "a window frame offset must be nonnegative")) {
-        try frame.reject(for: .rowNumber)
+        try frame.reject(for: .number)
       }
     }
   }
@@ -184,13 +184,13 @@ struct WindowArgumentTests {
     // A directly built frame reaches the same validity checks a parsed one does.
     #expect(throws: SQLError.state(
         "42601", "a window frame cannot start at UNBOUNDED FOLLOWING")) {
-      try Frame(unit: .rows, start: .unboundedFollowing, end: .currentRow)
-          .reject(for: .rowNumber)
+      try Frame(unit: .rows, start: .tail, end: .current)
+          .reject(for: .number)
     }
     #expect(throws: SQLError.state(
         "42601", "a window frame cannot end at UNBOUNDED PRECEDING")) {
-      try Frame(unit: .rows, start: .currentRow, end: .unboundedPreceding)
-          .reject(for: .rowNumber)
+      try Frame(unit: .rows, start: .current, end: .head)
+          .reject(for: .number)
     }
   }
 }

@@ -89,10 +89,10 @@ extension Plan {
       return .window(windowings, source.demoted())
     case let .limit(count, offset, source):
       return .limit(count: count, offset: offset, source.demoted())
-    case let .topN(keys, offset, count, source):
-      // `topN` is produced by `optimise`, after this pass, so it never reaches
+    case let .top(keys, offset, count, source):
+      // `top` is produced by `optimise`, after this pass, so it never reaches
       // here; recurse structurally to keep the switch exhaustive.
-      return .topN(keys: keys, offset: offset, count: count, source.demoted())
+      return .top(keys: keys, offset: offset, count: count, source.demoted())
     // A join is produced by `optimise` (after this pass), a values/single/empty
     // /scan leaf holds no outer join, and `empty` is likewise post-optimise —
     // none carries an outer to demote.

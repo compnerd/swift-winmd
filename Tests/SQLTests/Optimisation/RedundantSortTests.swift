@@ -47,7 +47,7 @@ private func sorts(_ plan: Plan) -> Bool {
   case .sort: return true
   case let .select(_, source), let .project(_, source),
        let .distinct(source), let .limit(_, _, source),
-       let .topN(_, _, _, source), let .aggregate(_, _, source),
+       let .top(_, _, _, source), let .aggregate(_, _, source),
        let .window(_, source):
     return sorts(source)
   case let .derived(_, source, _, _):

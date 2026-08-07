@@ -33,7 +33,7 @@ extension Plan {
     case let .select(_, source), let .project(_, source),
          let .sort(_, source), let .distinct(source),
          let .aggregate(_, _, source), let .window(_, source),
-         let .limit(_, _, source), let .topN(_, _, _, source),
+         let .limit(_, _, source), let .top(_, _, _, source),
          let .join(source, _, _, _, _, _, _),
          let .apply(source, _, _, _, _, _):
       [source]
@@ -130,7 +130,7 @@ extension Catalog where Self: ~Escapable {
     case let .limit(count, offset, _):
       let cap = count.map { "\($0)" } ?? "all"
       return "limit  count \(cap)" + (offset > 0 ? "  offset \(offset)" : "")
-    case let .topN(keys, offset, count, _):
+    case let .top(keys, offset, count, _):
       let ordered = keys.map {
         "\($0.term.rendered) \($0.ascending ? "ASC" : "DESC")"
       }
@@ -499,11 +499,11 @@ extension Frame.Bound {
   /// This frame bound's plan-tree spelling.
   fileprivate var rendered: String {
     switch self {
-    case .unboundedPreceding: "UNBOUNDED PRECEDING"
+    case .head: "UNBOUNDED PRECEDING"
     case let .preceding(rows): "\(rows) PRECEDING"
-    case .currentRow: "CURRENT ROW"
+    case .current: "CURRENT ROW"
     case let .following(rows): "\(rows) FOLLOWING"
-    case .unboundedFollowing: "UNBOUNDED FOLLOWING"
+    case .tail: "UNBOUNDED FOLLOWING"
     }
   }
 }
@@ -513,9 +513,9 @@ extension Windowing.Function {
   /// lowered operands (an aggregate window rendered as its aggregation).
   fileprivate var rendered: String {
     switch self {
-    case .rowNumber: return "ROW_NUMBER()"
+    case .number: return "ROW_NUMBER()"
     case .rank: return "RANK()"
-    case .denseRank: return "DENSE_RANK()"
+    case .dense: return "DENSE_RANK()"
     case let .aggregate(aggregation): return aggregation.rendered
     case let .lead(value, offset, fallback):
       let tail = fallback.map { ", \($0.rendered)" } ?? ""
@@ -523,12 +523,12 @@ extension Windowing.Function {
     case let .lag(value, offset, fallback):
       let tail = fallback.map { ", \($0.rendered)" } ?? ""
       return "LAG(\(value.rendered), \(offset)\(tail))"
-    case let .firstValue(value): return "FIRST_VALUE(\(value.rendered))"
-    case let .lastValue(value): return "LAST_VALUE(\(value.rendered))"
-    case let .nthValue(value, n): return "NTH_VALUE(\(value.rendered), \(n))"
+    case let .first(value): return "FIRST_VALUE(\(value.rendered))"
+    case let .last(value): return "LAST_VALUE(\(value.rendered))"
+    case let .nth(value, n): return "NTH_VALUE(\(value.rendered), \(n))"
     case let .ntile(n): return "NTILE(\(n))"
-    case .percentRank: return "PERCENT_RANK()"
-    case .cumeDist: return "CUME_DIST()"
+    case .percent: return "PERCENT_RANK()"
+    case .cumulative: return "CUME_DIST()"
     }
   }
 }

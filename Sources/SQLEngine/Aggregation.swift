@@ -48,14 +48,14 @@ extension WindowFunction {
   /// aggregate lowers.
   internal var aggregated: Bool {
     switch self {
-    case .rowNumber, .rank, .denseRank, .ntile, .percentRank, .cumeDist:
+    case .number, .rank, .dense, .ntile, .percent, .cumulative:
       false
     case let .aggregate(_, argument, _, filter):
       argument.aggregated || (filter?.aggregated ?? false)
     case let .lead(value, _, fallback), let .lag(value, _, fallback):
       value.aggregated || (fallback?.aggregated ?? false)
-    case let .firstValue(value), let .lastValue(value),
-         let .nthValue(value, _):
+    case let .first(value), let .last(value),
+         let .nth(value, _):
       value.aggregated
     }
   }
@@ -1439,8 +1439,8 @@ extension Expression {
           expression.collect(into: &expressions)
         }
         filter?.collect(into: &expressions)
-      case .rowNumber, .rank, .denseRank, .ntile, .percentRank, .cumeDist,
-           .lead, .lag, .firstValue, .lastValue, .nthValue:
+      case .number, .rank, .dense, .ntile, .percent, .cumulative,
+           .lead, .lag, .first, .last, .nth:
         if let positional = function.positional {
           positional.value.collect(into: &expressions)
           positional.default?.collect(into: &expressions)

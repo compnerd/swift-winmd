@@ -24,7 +24,7 @@ private func applies(_ plan: Plan) -> Bool {
     return applies(source)
   case let .select(_, source), let .project(_, source), let .sort(_, source),
        let .distinct(source), let .limit(_, _, source),
-       let .topN(_, _, _, source),
+       let .top(_, _, _, source),
        let .aggregate(_, _, source), let .window(_, source):
     return applies(source)
   case let .product(left, right), let .outer(left, right, _, _),
@@ -45,7 +45,7 @@ private func joins(_ plan: Plan) -> Bool {
     return joins(source)
   case let .select(_, source), let .project(_, source), let .sort(_, source),
        let .distinct(source), let .limit(_, _, source),
-       let .topN(_, _, _, source),
+       let .top(_, _, _, source),
        let .aggregate(_, _, source), let .window(_, source):
     return joins(source)
   case let .product(left, right), let .outer(left, right, _, _),
@@ -66,7 +66,7 @@ private func outers(_ plan: Plan) -> Bool {
     return outers(source)
   case let .select(_, source), let .project(_, source), let .sort(_, source),
        let .distinct(source), let .limit(_, _, source),
-       let .topN(_, _, _, source),
+       let .top(_, _, _, source),
        let .aggregate(_, _, source), let .window(_, source):
     return outers(source)
   case let .product(left, right), let .semijoin(left, right, _, _),
@@ -89,7 +89,7 @@ private func semijoins(_ plan: Plan) -> Bool {
     return semijoins(source)
   case let .select(_, source), let .project(_, source), let .sort(_, source),
        let .distinct(source), let .limit(_, _, source),
-       let .topN(_, _, _, source),
+       let .top(_, _, _, source),
        let .aggregate(_, _, source), let .window(_, source):
     return semijoins(source)
   case let .product(left, right), let .outer(left, right, _, _),
@@ -110,7 +110,7 @@ private func semijoins(_ plan: Plan, anti wanted: Bool) -> Bool {
     return semijoins(source, anti: wanted)
   case let .select(_, source), let .project(_, source), let .sort(_, source),
        let .distinct(source), let .limit(_, _, source),
-       let .topN(_, _, _, source),
+       let .top(_, _, _, source),
        let .aggregate(_, _, source), let .window(_, source):
     return semijoins(source, anti: wanted)
   case let .product(left, right), let .outer(left, right, _, _),
@@ -132,7 +132,7 @@ private func semijoinCount(_ plan: Plan) -> Int {
     return semijoinCount(source)
   case let .select(_, source), let .project(_, source), let .sort(_, source),
        let .distinct(source), let .limit(_, _, source),
-       let .topN(_, _, _, source),
+       let .top(_, _, _, source),
        let .aggregate(_, _, source), let .window(_, source):
     return semijoinCount(source)
   case let .product(left, right), let .outer(left, right, _, _),
@@ -157,7 +157,7 @@ private func semijoinCount(_ plan: Plan, anti wanted: Bool) -> Int {
     return semijoinCount(source, anti: wanted)
   case let .select(_, source), let .project(_, source), let .sort(_, source),
        let .distinct(source), let .limit(_, _, source),
-       let .topN(_, _, _, source),
+       let .top(_, _, _, source),
        let .aggregate(_, _, source), let .window(_, source):
     return semijoinCount(source, anti: wanted)
   case let .product(left, right), let .outer(left, right, _, _),
@@ -179,7 +179,7 @@ private func exists(in plan: Plan) -> Bool {
     return filter.conjuncts.contains { existential($0) } || exists(in: source)
   case let .derived(_, source, _, _), let .project(_, source),
        let .sort(_, source), let .distinct(source), let .limit(_, _, source),
-       let .topN(_, _, _, source),
+       let .top(_, _, _, source),
        let .aggregate(_, _, source), let .window(_, source):
     return exists(in: source)
   case let .product(left, right), let .outer(left, right, _, _),
@@ -216,7 +216,7 @@ private func within(in plan: Plan) -> Bool {
     return filter.conjuncts.contains { membership($0) } || within(in: source)
   case let .derived(_, source, _, _), let .project(_, source),
        let .sort(_, source), let .distinct(source), let .limit(_, _, source),
-       let .topN(_, _, _, source),
+       let .top(_, _, _, source),
        let .aggregate(_, _, source), let .window(_, source):
     return within(in: source)
   case let .product(left, right), let .outer(left, right, _, _),
@@ -256,7 +256,7 @@ private func subquery(in plan: Plan) -> Bool {
     return subquery(filter) || subquery(in: source)
   case let .derived(_, source, _, _), let .sort(_, source),
        let .distinct(source), let .limit(_, _, source),
-       let .topN(_, _, _, source),
+       let .top(_, _, _, source),
        let .aggregate(_, _, source), let .window(_, source):
     return subquery(in: source)
   case let .product(left, right), let .outer(left, right, _, _),

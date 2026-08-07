@@ -64,7 +64,7 @@ private func inner(_ plan: Plan, is name: String) -> Bool {
     return inner == name
   case let .select(_, source), let .project(_, source), let .sort(_, source),
        let .distinct(source), let .limit(_, _, source),
-       let .topN(_, _, _, source), let .aggregate(_, _, source),
+       let .top(_, _, _, source), let .aggregate(_, _, source),
        let .window(_, source), let .derived(_, source, _, _),
        let .apply(source, _, _, _, _, _):
     return inner(source, is: name)
@@ -89,7 +89,7 @@ private func drives(_ plan: Plan) -> String? {
     return drives(left)
   case let .select(_, source), let .project(_, source), let .sort(_, source),
        let .distinct(source), let .limit(_, _, source),
-       let .topN(_, _, _, source), let .aggregate(_, _, source),
+       let .top(_, _, _, source), let .aggregate(_, _, source),
        let .window(_, source), let .derived(_, source, _, _):
     return drives(source)
   case .single, .values, .empty:

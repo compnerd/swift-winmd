@@ -372,7 +372,7 @@ extension Catalog where Self: ~Escapable {
       }
       if context.validate {
         // Record each nested subquery's width and type — the same cursor-free
-        // pre-pass `subqueryCheck(of:)` runs for a plain SELECT's ORDER BY
+        // pre-pass `precheck(of:)` runs for a plain SELECT's ORDER BY
         // subqueries — so the `scope.validate` type-check validates a subquery
         // sort key rather than faulting `.unsupported`, keeping the schema
         // path in step with the run (which resolves the same key through the

@@ -307,7 +307,7 @@ internal indirect enum Plan {
   /// tie-break, so among equal keys the lowest input index wins, exactly the
   /// stable sort's head. It sits where the `limit` sat — over the sort/select
   /// but below the projection — so a row outside the page is never projected.
-  case topN(keys: Array<(term: Term, ascending: Bool)>, offset: Int,
+  case top(keys: Array<(term: Term, ascending: Bool)>, offset: Int,
             count: Int, Plan)
 }
 
@@ -340,8 +340,8 @@ extension Plan {
       // A `limit` caps rows without reshaping them, so it is as wide as its
       // source.
       source.width
-    case let .topN(_, _, _, source):
-      // A `topN` orders and caps rows without reshaping them, so it is as wide
+    case let .top(_, _, _, source):
+      // A `top` orders and caps rows without reshaping them, so it is as wide
       // as its source — exactly as the `sort` then `limit` it fuses.
       source.width
     case let .aggregate(keys, aggregates, _):
@@ -444,8 +444,8 @@ extension Plan {
       // A `sort` reorders rows without reshaping them, so it spans the same
       // slots as its source.
       source.slots
-    case let .topN(_, _, _, source):
-      // A `topN` orders and caps rows without reshaping them, so it spans the
+    case let .top(_, _, _, source):
+      // A `top` orders and caps rows without reshaping them, so it spans the
       // same slots as its source — exactly as the `sort`/`limit` it fuses.
       source.slots
     }
@@ -505,7 +505,7 @@ extension Plan {
       source.safe
     case let .limit(_, _, source):
       source.safe
-    case let .topN(keys, _, _, source):
+    case let .top(keys, _, _, source):
       // Each sort key's term is evaluated per row before the selection, exactly
       // as the fused `sort` evaluates it — so every key term and the source
       // must be throw-free.
@@ -564,8 +564,8 @@ extension Plan {
       // A sort reorders rows without duplicating one, so it preserves the
       // source's distinctness (which ignores row order).
       return source.unique
-    case let .topN(_, _, _, source):
-      // A topN orders and caps rows without duplicating one, so it preserves
+    case let .top(_, _, _, source):
+      // A top orders and caps rows without duplicating one, so it preserves
       // the source's distinctness — exactly as the sort/limit it fuses.
       return source.unique
     case let .window(_, source):

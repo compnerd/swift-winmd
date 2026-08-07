@@ -31,7 +31,7 @@ private func projected(_ sql: String,
 struct WindowFunctionParsingTests {
   @Test func `ROW_NUMBER over an empty window parses`() throws {
     #expect(try projected("SELECT ROW_NUMBER() OVER () FROM T")
-                == .window(function: .rowNumber, spec: WindowSpec()))
+                == .window(function: .number, spec: WindowSpec()))
   }
 
   @Test func `a PARTITION BY and ORDER BY window parses`() throws {
@@ -47,7 +47,7 @@ struct WindowFunctionParsingTests {
 
   @Test func `a window with only an ORDER BY parses`() throws {
     let expected = Expression.window(
-        function: .denseRank,
+        function: .dense,
         spec: WindowSpec(order: Order(keys: [Order.Key(column: Column("x"))])))
     #expect(try projected("SELECT DENSE_RANK() OVER (ORDER BY x) FROM T")
                 == expected)
@@ -55,7 +55,7 @@ struct WindowFunctionParsingTests {
 
   @Test func `a window with a multi-key partition parses`() throws {
     let expected = Expression.window(
-        function: .rowNumber,
+        function: .number,
         spec: WindowSpec(partition: [.column(Column("a")), .column(Column("b"))]))
     #expect(try projected(
         "SELECT ROW_NUMBER() OVER (PARTITION BY a, b) FROM T") == expected)
@@ -63,7 +63,7 @@ struct WindowFunctionParsingTests {
 
   @Test func `window function names are case-insensitive`() throws {
     #expect(try projected("SELECT row_number() over () FROM T")
-                == .window(function: .rowNumber, spec: WindowSpec()))
+                == .window(function: .number, spec: WindowSpec()))
   }
 
   @Test func `a delimited window name stays a scalar call`() throws {
@@ -162,7 +162,7 @@ struct ValueFunctionParsingTests {
   @Test func `FIRST_VALUE parses`() throws {
     #expect(try projected("SELECT FIRST_VALUE(x) OVER (ORDER BY x) FROM T")
                 == .window(
-                    function: .firstValue(.column(Column("x"))),
+                    function: .first(.column(Column("x"))),
                     spec: WindowSpec(order: Order(keys:
                         [Order.Key(column: Column("x"))]))))
   }
@@ -170,7 +170,7 @@ struct ValueFunctionParsingTests {
   @Test func `NTH_VALUE parses its position argument`() throws {
     #expect(try projected("SELECT NTH_VALUE(x, 2) OVER (ORDER BY x) FROM T")
                 == .window(
-                    function: .nthValue(.column(Column("x")), 2),
+                    function: .nth(.column(Column("x")), 2),
                     spec: WindowSpec(order: Order(keys:
                         [Order.Key(column: Column("x"))]))))
   }
@@ -202,11 +202,11 @@ struct DistributionParsingTests {
   @Test func `PERCENT_RANK and CUME_DIST parse an empty argument list`()
       throws {
     #expect(try projected("SELECT PERCENT_RANK() OVER (ORDER BY x) FROM T")
-                == .window(function: .percentRank,
+                == .window(function: .percent,
                            spec: WindowSpec(order: Order(keys:
                                [Order.Key(column: Column("x"))]))))
     #expect(try projected("SELECT CUME_DIST() OVER (ORDER BY x) FROM T")
-                == .window(function: .cumeDist,
+                == .window(function: .cumulative,
                            spec: WindowSpec(order: Order(keys:
                                [Order.Key(column: Column("x"))]))))
   }
@@ -245,7 +245,7 @@ struct WindowFrameParsingTests {
         FROM T
         """)
                 .frame
-                == Frame(unit: .rows, start: .preceding(1), end: .currentRow))
+                == Frame(unit: .rows, start: .preceding(1), end: .current))
   }
 
   @Test func `RANGE between the partition edges parses`() throws {
@@ -256,8 +256,8 @@ struct WindowFrameParsingTests {
         FROM T
         """)
                 .frame
-                == Frame(unit: .range, start: .unboundedPreceding,
-                         end: .unboundedFollowing))
+                == Frame(unit: .range, start: .head,
+                         end: .tail))
   }
 
   @Test func `a following offset parses`() throws {
@@ -268,7 +268,7 @@ struct WindowFrameParsingTests {
         FROM T
         """)
                 .frame
-                == Frame(unit: .rows, start: .currentRow, end: .following(2)))
+                == Frame(unit: .rows, start: .current, end: .following(2)))
   }
 
   @Test func `the single-bound shorthand ends at the current row`() throws {
@@ -276,8 +276,8 @@ struct WindowFrameParsingTests {
     #expect(try spec(
         "SELECT SUM(x) OVER (ORDER BY x ROWS UNBOUNDED PRECEDING) FROM T")
                 .frame
-                == Frame(unit: .rows, start: .unboundedPreceding,
-                         end: .currentRow))
+                == Frame(unit: .rows, start: .head,
+                         end: .current))
   }
 
   @Test func `a GROUPS frame parses`() throws {
@@ -300,8 +300,8 @@ struct WindowFrameParsingTests {
         FROM T
         """)
                 .frame
-                == Frame(unit: .rows, start: .unboundedPreceding,
-                         end: .currentRow))
+                == Frame(unit: .rows, start: .head,
+                         end: .current))
   }
 
   @Test func `no frame clause leaves the frame absent`() throws {

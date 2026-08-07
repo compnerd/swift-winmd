@@ -736,7 +736,7 @@ private func outers(_ plan: Plan) -> Bool {
     outers(source)
   case let .limit(_, _, source):
     outers(source)
-  case let .topN(_, _, _, source):
+  case let .top(_, _, _, source):
     outers(source)
   case let .distinct(source):
     outers(source)

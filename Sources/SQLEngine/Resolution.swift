@@ -1063,13 +1063,13 @@ internal struct SubqueryCheck {
   /// recorded reached here, for the `typecheck` phase to validate its inner
   /// query. The cursor-free arity/type derivation stays separate and total: the
   /// arity of an unreachable scalar was already enforced eagerly in the
-  /// pre-pass (`subqueryCheck`), so a two-column subquery in a skipped arm
+  /// pre-pass (`precheck`), so a two-column subquery in a skipped arm
   /// still faults.
   internal func type(_ query: Query) throws(SQLError) -> ValueType {
     // A deferred scalar occurrence is reached here in the `scalar` role: record
     // it for the `typecheck` phase to validate its inner query's operands,
     // mirroring the lazy executor materialising only a reached scalar. Its
-    // arity and single-column type were derived eagerly in `subqueryCheck`
+    // arity and single-column type were derived eagerly in `precheck`
     // (cursor-free, total), so this reads them exactly as an eagerly-checked
     // occurrence does — only the operand fault (`.divide`) it might raise
     // defers to the reached walk.

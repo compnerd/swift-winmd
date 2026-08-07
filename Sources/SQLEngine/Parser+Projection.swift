@@ -338,9 +338,9 @@ extension Parser {
   /// name. Each takes an empty argument list and requires an `OVER` clause.
   private func window(_ text: String) -> WindowFunction? {
     switch text.uppercased() {
-    case "ROW_NUMBER": .rowNumber
+    case "ROW_NUMBER": .number
     case "RANK": .rank
-    case "DENSE_RANK": .denseRank
+    case "DENSE_RANK": .dense
     default: nil
     }
   }
@@ -399,10 +399,10 @@ extension Parser {
     switch kind {
     case .first:
       try expect(.rparen)
-      return .firstValue(value)
+      return .first(value)
     case .last:
       try expect(.rparen)
-      return .lastValue(value)
+      return .last(value)
     case .nth:
       try expect(.comma)
       let position = try count()
@@ -410,21 +410,21 @@ extension Parser {
       guard position >= 1 else {
         throw .state("22023", "NTH_VALUE requires a positive position")
       }
-      return .nthValue(value, position)
+      return .nth(value, position)
     }
   }
 
   /// A distribution window function — the bare name `text`'s kind
   /// (case-insensitively), or `nil` when it is not one.
-  private enum Distribution { case ntile, percentRank, cumeDist }
+  private enum Distribution { case ntile, percent, cumulative }
 
   /// The `Distribution` the bare name `text` spells, or `nil` for a scalar
   /// name.
   private func distribution(_ text: String) -> Distribution? {
     switch text.uppercased() {
     case "NTILE": .ntile
-    case "PERCENT_RANK": .percentRank
-    case "CUME_DIST": .cumeDist
+    case "PERCENT_RANK": .percent
+    case "CUME_DIST": .cumulative
     default: nil
     }
   }
@@ -442,12 +442,12 @@ extension Parser {
         throw .state("22023", "NTILE requires a positive bucket count")
       }
       return .ntile(buckets)
-    case .percentRank:
+    case .percent:
       try expect(.rparen)
-      return .percentRank
-    case .cumeDist:
+      return .percent
+    case .cumulative:
       try expect(.rparen)
-      return .cumeDist
+      return .cumulative
     }
   }
 
@@ -536,7 +536,7 @@ extension Parser {
     }
     // The single-bound shorthand `<unit> <start>` is `BETWEEN <start> AND
     // CURRENT ROW`.
-    return Frame(unit: unit, start: try bound(), end: .currentRow)
+    return Frame(unit: unit, start: try bound(), end: .current)
   }
 
   /// Parses one window frame bound — `UNBOUNDED PRECEDING`, `UNBOUNDED
@@ -544,13 +544,13 @@ extension Parser {
   /// a non-negative integer literal.
   private mutating func bound() throws(SQLError) -> Frame.Bound {
     if try match(.unbounded) {
-      if try match(.preceding) { return .unboundedPreceding }
+      if try match(.preceding) { return .head }
       try expect(.following)
-      return .unboundedFollowing
+      return .tail
     }
     if try match(.current) {
       try expect(.rows)
-      return .currentRow
+      return .current
     }
     let offset = try count()
     if try match(.preceding) { return .preceding(offset) }

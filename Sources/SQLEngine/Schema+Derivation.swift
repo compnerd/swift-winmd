@@ -653,12 +653,12 @@ extension Catalog where Self: ~Escapable {
       throws(SQLError) {
     // Bind the derived tables (and store relations) this query names in its own
     // FROM/JOIN before type-checking its arms — SELECT-scoped, so a subquery
-    // type-checked through here (e.g. from `subqueryCheck`) resolves its own
+    // type-checked through here (e.g. from `precheck`) resolves its own
     // aliases. Schema-only (`rows: false`): the type-check reads no cursor.
     // `visited` carries the cyclic-view guard into a derived body's derive.
     // A nested subquery's FROM sees base tables and enclosing CTEs, NOT this
     // query's derived aliases — its type-check lowers against the base
-    // `subqueryCheck` reveals from the augmented `context` (enclosing derived
+    // `precheck` reveals from the augmented `context` (enclosing derived
     // aliases dropped, CTEs and store kept, a shadowed CTE preserved).
     // The type-check subtree resolves its scopes strictly (`validate: true`),
     // as its internal `scope`/`prefixes`/`schema` calls always did — force it
@@ -767,9 +767,9 @@ extension Catalog where Self: ~Escapable {
   /// EXISTS-only query (a `HAVING` or set operation) runs in FULL, so its
   /// original is checked. The arity width is always the original query's
   /// (cursor-free), as `subquery(of:)` records it on the compile path.
-  private borrowing func subqueryCheck(of select: Select, _ context: Context,
-                                       enclosing: Scope? = nil,
-                                       prefixes: Array<Scope> = [])
+  private borrowing func precheck(of select: Select, _ context: Context,
+                                  enclosing: Scope? = nil,
+                                  prefixes: Array<Scope> = [])
       throws(SQLError) -> SubqueryCheck {
     // Every occurrence's inner-query operand validation defers to the
     // reachability walk, mirroring the lazy executor: a subquery in an
@@ -963,8 +963,8 @@ extension Catalog where Self: ~Escapable {
     // occurrence's inner-query operand validation to the walk. Each nested
     // query's correlation resolves against `enclosing` (a join `ON`'s against
     // its prefix) here, matching the run.
-    let subquery = try subqueryCheck(of: select, context, enclosing: enclosing,
-                                     prefixes: prefixes)
+    let subquery = try precheck(of: select, context, enclosing: enclosing,
+                                prefixes: prefixes)
     // Walk the query's operands reachability-aware, so an unreachable
     // `CASE`/`COALESCE` arm's subquery is left unrecorded and unchecked.
     try walk(select, context, subquery: subquery, prefixes: prefixes)
@@ -1176,7 +1176,7 @@ extension Catalog where Self: ~Escapable {
   /// or drop with a constant-false fold.
   ///
   /// It builds the same scopes the validate `typecheck(_ select:)` builds — the
-  /// same `scope`/`prefixes`/`subqueryCheck` pre-pass, so the reachable
+  /// same `scope`/`prefixes`/`precheck` pre-pass, so the reachable
   /// comparison surfaces and the reached-subquery set match — then hands
   /// each surface to the dedicated finder (`Scope.comparisons(in:)`), which
   /// looks only for comparison-bearing constructs and defers each one's own
@@ -1213,8 +1213,8 @@ extension Catalog where Self: ~Escapable {
       scope = try self.scope(of: select, context)
       enclosing = scope
       prefixes = try self.prefixes(of: select, context)
-      subquery = try subqueryCheck(of: select, context, enclosing: enclosing,
-                                   prefixes: prefixes)
+      subquery = try precheck(of: select, context, enclosing: enclosing,
+                              prefixes: prefixes)
     } catch let error {
       guard case let .state(code, _) = error, code == "42804" else { return }
       throw error

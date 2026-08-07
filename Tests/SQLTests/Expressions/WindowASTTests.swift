@@ -10,8 +10,8 @@ import Testing
 /// aggregates.
 struct WindowASTTests {
   @Test func `equal window functions compare equal`() {
-    #expect(WindowFunction.rowNumber == WindowFunction.rowNumber)
-    #expect(WindowFunction.rank != WindowFunction.denseRank)
+    #expect(WindowFunction.number == WindowFunction.number)
+    #expect(WindowFunction.rank != WindowFunction.dense)
   }
 
   @Test func `a window spec compares by partition and order`() {
@@ -42,8 +42,8 @@ struct WindowASTTests {
 
   @Test func `window expressions compare by function and spec`() {
     let spec = WindowSpec(partition: [.column(Column("d"))])
-    let a = Expression.window(function: .rowNumber, spec: spec)
-    let b = Expression.window(function: .rowNumber, spec: spec)
+    let a = Expression.window(function: .number, spec: spec)
+    let b = Expression.window(function: .number, spec: spec)
     let c = Expression.window(function: .rank, spec: spec)
     #expect(a == b)
     #expect(a != c)

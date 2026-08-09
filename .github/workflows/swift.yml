@@ -67,6 +67,22 @@ jobs:
           -Xswiftc -cache-compile-job
           -Xswiftc -cas-path
           -Xswiftc $env:SWIFT_CAS_PATH
+      - name: Build SwiftSQL
+        run: >-
+          swift build --quiet --package-path SwiftSQL
+          -Xswiftc -explicit-module-build
+          -Xswiftc -cache-compile-job
+          -Xswiftc -cas-path
+          -Xswiftc $env:SWIFT_CAS_PATH
+        env:
+          AR: llvm-ar
+      - name: Run SwiftSQL tests
+        run: >-
+          swift test --quiet --disable-xctest --package-path SwiftSQL
+          -Xswiftc -explicit-module-build
+          -Xswiftc -cache-compile-job
+          -Xswiftc -cas-path
+          -Xswiftc $env:SWIFT_CAS_PATH
       - name: Prune LLVM CAS
         if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         shell: pwsh

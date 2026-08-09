@@ -14,7 +14,7 @@ extension Select {
   /// BY (`ORDER BY SUM(sal)`, or a window `RANK() OVER (ORDER BY SUM(sal))`)
   /// aggregates too — the same `expressions` set `windows` scans, so the two
   /// routings stay in step rather than one forgetting the ORDER BY.
-  internal var aggregates: Bool {
+  public var aggregates: Bool {
     let grouped = switch grouping {
     case let .keys(keys): !keys.isEmpty
     // A `GROUPING SETS (…)` (or one expanded arm) always aggregates — even

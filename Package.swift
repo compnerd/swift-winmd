@@ -9,14 +9,16 @@ let _ =
             ],
             products: [
               .executable(name: "winmd-inspect", targets: ["winmd-inspect"]),
-              .library(name: "SQLEngine", targets: ["SQLEngine"]),
-              .library(name: "SQLQuery", targets: ["SQLQuery"]),
-              .library(name: "SQLStandard", targets: ["SQLStandard"]),
               .library(name: "WinMDSynthesis", targets: ["WinMDSynthesis"]),
               .library(name: "SQLEngineWinMD", targets: ["SQLEngineWinMD"]),
               .library(name: "Decant", targets: ["Decant"]),
             ],
             dependencies: [
+              // The SQL engine, standard-prelude overlay, LINQ query builder,
+              // and their test support now live in the nested SwiftSQL package
+              // (a local path dependency so a clone still builds); a later step
+              // splits SwiftSQL into its own repository.
+              .package(path: "SwiftSQL"),
               .package(url: "https://github.com/apple/swift-argument-parser",
                        from: "1.5.0"),
               .package(url: "https://github.com/hummingbird-project/swift-mustache",
@@ -30,43 +32,6 @@ let _ =
                         .enableExperimentalFeature("Lifetimes"),
                       ]),
               .testTarget(name: "DecantTests", dependencies: ["Decant"],
-                          swiftSettings: [
-                            .enableExperimentalFeature("Lifetimes"),
-                          ]),
-
-              // SQLEngine
-              .target(name: "SQLEngine", dependencies: [],
-                      swiftSettings: [
-                        .enableExperimentalFeature("Lifetimes"),
-                      ]),
-              .target(name: "SQLStandard", dependencies: ["SQLEngine"],
-                      swiftSettings: [
-                        .enableExperimentalFeature("Lifetimes"),
-                      ]),
-              .target(name: "SQLQuery", dependencies: ["SQLEngine"],
-                      swiftSettings: [
-                        .enableExperimentalFeature("Lifetimes"),
-                      ]),
-              .testTarget(name: "SQLQueryTests",
-                          dependencies: ["SQLEngine", "SQLQuery",
-                                         "SQLStandard", "SQLTestSupport"],
-                          swiftSettings: [
-                            .enableExperimentalFeature("Lifetimes"),
-                          ]),
-              .target(name: "SQLTestSupport",
-                      dependencies: ["SQLEngine", "SQLStandard"],
-                      swiftSettings: [
-                        .enableExperimentalFeature("Lifetimes"),
-                      ]),
-              .testTarget(name: "SQLTests",
-                          dependencies: ["SQLEngine", "SQLStandard",
-                                         "SQLTestSupport"],
-                          swiftSettings: [
-                            .enableExperimentalFeature("Lifetimes"),
-                          ]),
-              .testTarget(name: "SQLStandardTests",
-                          dependencies: ["SQLEngine", "SQLStandard",
-                                         "SQLTestSupport"],
                           swiftSettings: [
                             .enableExperimentalFeature("Lifetimes"),
                           ]),
@@ -97,8 +62,8 @@ let _ =
                       dependencies: [
                         "WinMD",
                         "WinMDSynthesis",
-                        "SQLEngine",
-                        "SQLStandard",
+                        .product(name: "SQLEngine", package: "SwiftSQL"),
+                        .product(name: "SQLStandard", package: "SwiftSQL"),
                       ],
                       resources: [
                         .copy("Resources"),
@@ -110,8 +75,8 @@ let _ =
               .testTarget(name: "SQLEngineWinMDTests",
                           dependencies: [
                             "SQLEngineWinMD",
-                            "SQLEngine",
-                            "SQLStandard",
+                            .product(name: "SQLEngine", package: "SwiftSQL"),
+                            .product(name: "SQLStandard", package: "SwiftSQL"),
                             "WinMD",
                             "WinMDSynthesis",
                             .product(name: "Mustache",
@@ -125,8 +90,10 @@ let _ =
               .executableTarget(name: "winmd-inspect",
                                 dependencies: [
                                   "SQLEngineWinMD",
-                                  "SQLEngine",
-                                  "SQLStandard",
+                                  .product(name: "SQLEngine",
+                                           package: "SwiftSQL"),
+                                  .product(name: "SQLStandard",
+                                           package: "SwiftSQL"),
                                   "WinMD",
                                   "WinMDSynthesis",
                                   .product(name: "ArgumentParser",
@@ -146,8 +113,8 @@ let _ =
                           dependencies: [
                             "winmd-inspect",
                             "SQLEngineWinMD",
-                            "SQLEngine",
-                            "SQLStandard",
+                            .product(name: "SQLEngine", package: "SwiftSQL"),
+                            .product(name: "SQLStandard", package: "SwiftSQL"),
                             "WinMD",
                             .product(name: "Mustache",
                                      package: "swift-mustache"),

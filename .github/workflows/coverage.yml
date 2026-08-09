@@ -67,7 +67,28 @@ jobs:
             | ForEach-Object { $_ -replace [regex]::Escape("$ws\"), '' -replace [regex]::Escape("$ws/"), '' } `
             | ForEach-Object { $_ -replace '\\', '/' } `
             | Set-Content -Encoding ascii coverage.lcov
+      # The SQL stack lives in the nested SwiftSQL package, whose tests the root
+      # `swift test` does not run; cover it through its own package path.
+      - name: Run SwiftSQL tests
+        run: >-
+          swift test --quiet --disable-xctest --enable-code-coverage
+          --package-path SwiftSQL
+          -Xswiftc -explicit-module-build
+          -Xswiftc -cache-compile-job
+          -Xswiftc -cas-path
+          -Xswiftc $env:SWIFT_CAS_PATH
+      - name: Process SwiftSQL Coverage Information
+        run: |
+          $bin = swift build --package-path SwiftSQL --show-bin-path
+          $objects = Get-ChildItem "$bin" -Include *-test-runner.exe,*Tests.dll -Recurse `
+                   | ForEach-Object { '-object'; $_.FullName }
+          llvm-cov export -format lcov -ignore-filename-regex '\.build[\\/]' -instr-profile "$bin\codecov\default.profdata" @objects | Set-Content -Encoding ascii -Path swiftsql.lcov
+          $ws = $env:GITHUB_WORKSPACE
+          (Get-Content swiftsql.lcov) `
+            | ForEach-Object { $_ -replace [regex]::Escape("$ws\"), '' -replace [regex]::Escape("$ws/"), '' } `
+            | ForEach-Object { $_ -replace '\\', '/' } `
+            | Set-Content -Encoding ascii swiftsql.lcov
       - uses: codecov/codecov-action@v7.0.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: coverage.lcov
+          files: coverage.lcov,swiftsql.lcov

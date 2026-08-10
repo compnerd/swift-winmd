@@ -1214,9 +1214,30 @@ public struct Order: Hashable, Sendable {
     /// descending (`DESC`).
     public let ascending: Bool
 
+    /// The 0-based projected output column a window `ORDER BY` output ordinal
+    /// resolved to, or `nil` for a directly written key and for a query-level
+    /// key. A window `ORDER BY n` is bound to its projected expression at the
+    /// shared prelude (`WindowSpec.resolving(ordinals:)`), which substitutes
+    /// the expression here yet records `n - 1` so the origin survives to
+    /// lowering: the window path materialises an ordinal-named computed value
+    /// once below the window and lets the window sort key and the projection
+    /// read that one slot, so a stateful value ranks the row it reports. It is
+    /// the provenance a directly written key that merely equals a projected
+    /// expression (`OVER (ORDER BY tick())`) does not carry, so that key stays
+    /// an independent evaluation. A query-level ordinal resolves at lowering
+    /// through `SortKey.column` instead, so it leaves this `nil`.
+    ///
+    /// The setter is `internal`: the public initializers always construct it
+    /// `nil`, so only the resolver stamps a non-nil value and a module-external
+    /// caller cannot forge one. That keeps the index resolver-generated, hence
+    /// a valid projection ordinal by construction (range-checked to `42703` at
+    /// binding), so `materialise` never reads an out-of-range projected column.
+    public internal(set) var output: Int?
+
     public init(sort: Sort, ascending: Bool = true) {
       self.sort = sort
       self.ascending = ascending
+      self.output = nil
     }
 
     /// A key ordering on a bare (possibly-qualified) column — the common shape,

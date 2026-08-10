@@ -606,8 +606,11 @@ extension Grouped: WindowSurface {
   /// Lowers a window's `ORDER BY` to grouped-space sort keys, major to minor —
   /// each key a value expression over the grouped record (an aggregate result
   /// or a `GROUP BY` key, a non-grouped column faulting `.grouping`). An output
-  /// ordinal names a projected column, meaningless as the window order fixing
-  /// the input row order, so it faults as it does over a plain source.
+  /// ordinal naming a projected column is bound to that column's expression by
+  /// the shared `Query.expanded` prelude before this lowering. The one form the
+  /// prelude cannot name — a `SELECT *` — is independently rejected over a
+  /// grouped source (a grouped `SELECT *` is ill-defined), before this lowering
+  /// runs, so an ordinal cannot reach here; the guard is defensive.
   internal func window(order: Order, _ routines: Routines = [:],
                        subquery: Resolution = .unsupported)
       throws(SQLError) -> Array<SortKey> {
@@ -617,11 +620,18 @@ extension Grouped: WindowSurface {
       switch key.sort {
       case .ordinal:
         throw .state("0A000",
-                     "a window ORDER BY output ordinal is not supported")
+                     "a window ORDER BY output ordinal is not allowed with "
+                     + "SELECT *")
       case let .expression(expression):
+        // A window `ORDER BY` ordinal was substituted for its projected
+        // expression at the prelude, recording the 0-based output it named in
+        // `key.output`; carry it as the sort key's `column` so a grouped
+        // window's ordinal-named computed value materialises once below the
+        // window (a directly written key carries no output, staying
+        // independent).
         try keys.append(SortKey(term: resolve(expression, routines,
                                               subquery: subquery),
-                                ascending: key.ascending, column: nil))
+                                ascending: key.ascending, column: key.output))
       }
     }
     return keys

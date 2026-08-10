@@ -869,6 +869,52 @@ extension WindowSpec {
                       order: referenced.order ?? order,
                       frame: frame ?? referenced.frame)
   }
+
+  /// This specification with each `ORDER BY` output-ordinal sort key resolved
+  /// to the projected expression it names — `outputs[n - 1]` for `ORDER BY n`,
+  /// the same 1-based projected column a query-level `ORDER BY` ordinal names,
+  /// so a window `ORDER BY 1` orders on the value of projected column 1. It is
+  /// run at the shared `Query.expanded` prelude, so the compile and validate
+  /// paths bind an ordinal identically by construction.
+  ///
+  /// `outputs` are the query's projected expressions in output order, or `nil`
+  /// for a `SELECT *` whose outputs are not statically named here — an ordinal
+  /// against one is left in place for the window path to bind against the
+  /// expanded `SELECT *` columns once the source scope resolves
+  /// (`Scope.window(order:)`). An `n` outside `1 ... outputs.count` faults
+  /// `SQLError.column` (spelled as the ordinal), the same out-of-range fault a
+  /// query-level ordinal raises. A named projected column that is itself a
+  /// window faults: a window `ORDER BY` fixes the source row order the ranking
+  /// reads, and a window value does not exist until every windowing is computed
+  /// from those rows, so it cannot be an input sort key.
+  internal func resolving(ordinals outputs: Array<Expression>?)
+      throws(SQLError) -> WindowSpec {
+    guard let outputs, let order else { return self }
+    let keys = try order.keys.map { key throws(SQLError) -> Order.Key in
+      guard case let .ordinal(position) = key.sort else { return key }
+      guard position >= 1, position <= outputs.count else {
+        throw .column("\(position)")
+      }
+      let expression = outputs[position - 1]
+      guard !expression.windowed else {
+        throw .state("0A000",
+                     "a window ORDER BY cannot order by a window output column")
+      }
+      // Substitute the named expression, but record the 0-based output it came
+      // from (`position - 1`) so lowering can materialise that projected value
+      // once below the window and rank the row it reports — provenance a
+      // directly written key equal to a projection does not carry. The setter
+      // is internal, so only this resolver stamps it; a public caller's key
+      // always carries `nil`.
+      var resolved = Order.Key(sort: .expression(expression),
+                               ascending: key.ascending)
+      resolved.output = position - 1
+      return resolved
+    }
+    return WindowSpec(base: base, parenthesized: parenthesized,
+                      partition: partition, order: Order(keys: keys),
+                      frame: frame)
+  }
 }
 
 extension Array where Element == NamedWindow {
@@ -959,6 +1005,49 @@ extension Expression {
       })
     }
   }
+
+  /// This expression with every window's `ORDER BY` output ordinal resolved to
+  /// the projected expression it names (`WindowSpec.resolving(ordinals:)`) —
+  /// the companion pass to `resolving(_:)`, over the already-inlined projection
+  /// and `ORDER BY` so a window `OVER (ORDER BY 1)` orders on projected column
+  /// 1. It descends exactly as `collect(windows:)` does: a nested scalar
+  /// `subquery` or an aggregate's argument is its own scope, so neither is
+  /// descended, and a window cannot nest another so its own spec is not
+  /// re-descended past the ordinal rewrite.
+  internal func resolving(ordinals outputs: Array<Expression>?)
+      throws(SQLError) -> Expression {
+    switch self {
+    case .column, .literal, .subquery, .aggregate:
+      self
+    case let .window(function, spec):
+      .window(function: function, spec: try spec.resolving(ordinals: outputs))
+    case let .call(name, arguments):
+      .call(name: name, arguments: try arguments.map { argument throws(SQLError)
+        in try argument.resolving(ordinals: outputs)
+      })
+    case let .binary(op, lhs, rhs):
+      .binary(op, try lhs.resolving(ordinals: outputs),
+              try rhs.resolving(ordinals: outputs))
+    case let .case(whens, otherwise):
+      .case(try whens.map { branch throws(SQLError) in
+        When(when: try branch.when.resolving(ordinals: outputs),
+             then: try branch.then.resolving(ordinals: outputs))
+      }, else: try otherwise?.resolving(ordinals: outputs))
+    case let .cast(operand, type):
+      .cast(try operand.resolving(ordinals: outputs), type)
+    case let .coalesce(arguments):
+      .coalesce(try arguments.map { argument throws(SQLError) in
+        try argument.resolving(ordinals: outputs)
+      })
+    case let .nullif(lhs, rhs):
+      .nullif(try lhs.resolving(ordinals: outputs),
+              try rhs.resolving(ordinals: outputs))
+    case let .grouping(arguments):
+      .grouping(try arguments.map { argument throws(SQLError) in
+        try argument.resolving(ordinals: outputs)
+      })
+    }
+  }
 }
 
 extension Predicate.Operand {
@@ -969,6 +1058,18 @@ extension Predicate.Operand {
     switch self {
     case let .expression(expression):
       .expression(try expression.resolving(windows))
+    case .parameter:
+      self
+    }
+  }
+
+  /// This operand with any window ordinal in an expression operand bound to its
+  /// projected expression — a `:parameter` carries none.
+  fileprivate func resolving(ordinals outputs: Array<Expression>?)
+      throws(SQLError) -> Predicate.Operand {
+    switch self {
+    case let .expression(expression):
+      .expression(try expression.resolving(ordinals: outputs))
     case .parameter:
       self
     }
@@ -1032,6 +1133,74 @@ extension Predicate {
       .not(try operand.resolving(windows))
     }
   }
+
+  /// This predicate with every window's `ORDER BY` output ordinal bound to its
+  /// projected expression — the `Expression.resolving(ordinals:)` companion for
+  /// a `CASE` guard's predicate. It mirrors `resolving(_:)`'s descent; an
+  /// `EXISTS`/`IN (Q)` subquery is its own scope, so a window inside it is not
+  /// descended here.
+  internal func resolving(ordinals outputs: Array<Expression>?)
+      throws(SQLError) -> Predicate {
+    switch self {
+    case let .comparison(left, op, right):
+      .comparison(left: try left.resolving(ordinals: outputs), op: op,
+                  right: try right.resolving(ordinals: outputs))
+    case let .bound(left, op, parameter):
+      .bound(left: try left.resolving(ordinals: outputs), op: op,
+             parameter: parameter)
+    case let .null(expression, negated):
+      .null(try expression.resolving(ordinals: outputs), negated: negated)
+    case let .membership(operand, values, negated):
+      .membership(try operand.resolving(ordinals: outputs),
+                  try values.map { value throws(SQLError) in
+                    try value.resolving(ordinals: outputs)
+                  }, negated: negated)
+    case let .rows(lhs, op, rhs):
+      .rows(try lhs.map { l throws(SQLError) in
+        try l.resolving(ordinals: outputs)
+      }, op, try rhs.map { r throws(SQLError) in
+        try r.resolving(ordinals: outputs)
+      })
+    case let .among(lhs, rows, negated):
+      .among(try lhs.map { l throws(SQLError) in
+        try l.resolving(ordinals: outputs)
+      }, try rows.map { row throws(SQLError) in
+        try row.map { r throws(SQLError) in try r.resolving(ordinals: outputs) }
+      }, negated: negated)
+    case let .like(operand, pattern, escape, negated):
+      .like(try operand.resolving(ordinals: outputs),
+            pattern: try pattern.resolving(ordinals: outputs),
+            escape: try escape?.resolving(ordinals: outputs), negated: negated)
+    case let .between(test, lower, upper, negated):
+      .between(try test.resolving(ordinals: outputs),
+               try lower.resolving(ordinals: outputs),
+               try upper.resolving(ordinals: outputs), negated: negated)
+    case let .distinct(lhs, rhs, negated):
+      .distinct(try lhs.resolving(ordinals: outputs),
+                try rhs.resolving(ordinals: outputs), negated: negated)
+    case .exists:
+      self
+    case let .within(lhs, query, negated):
+      .within(try lhs.map { l throws(SQLError) in
+        try l.resolving(ordinals: outputs)
+      }, query, negated: negated)
+    case let .quantified(lhs, op, quantifier, query):
+      .quantified(try lhs.map { l throws(SQLError) in
+        try l.resolving(ordinals: outputs)
+      }, op, quantifier, query)
+    case let .truth(inner, value, negated):
+      .truth(try inner.resolving(ordinals: outputs), value: value,
+             negated: negated)
+    case let .and(lhs, rhs):
+      .and(try lhs.resolving(ordinals: outputs),
+           try rhs.resolving(ordinals: outputs))
+    case let .or(lhs, rhs):
+      .or(try lhs.resolving(ordinals: outputs),
+          try rhs.resolving(ordinals: outputs))
+    case let .not(operand):
+      .not(try operand.resolving(ordinals: outputs))
+    }
+  }
 }
 
 extension Select {
@@ -1048,6 +1217,14 @@ extension Select {
   /// undefined window faults `42704` — each on both paths, since the prelude is
   /// shared. A select with no window clause and no window function is returned
   /// unchanged.
+  ///
+  /// The prelude also binds every window `ORDER BY` output ordinal to the
+  /// projected expression it names (`resolving(ordinals:)`), so a named window
+  /// definition, an inline `OVER (…)`, and a `OVER w` reference resolve an
+  /// ordinal identically. The query's projected expressions are the ordinal
+  /// surface, so the rewrite runs after the columns/expressions projection is
+  /// known but reads its pre-inline form (a window a column names is rejected,
+  /// not inlined into another window's order).
   internal var inlined: Select {
     get throws(SQLError) {
       // A duplicate named-window definition is a semantic error regardless of
@@ -1059,17 +1236,33 @@ extension Select {
                        "window \"\(definition.name)\" is already defined")
         }
       }
+      // The projected expressions a window `ORDER BY` ordinal names, in output
+      // order (nil for a `SELECT *`, whose outputs are not statically known).
+      let outputs = projection.positional
+      // Bind each named-window definition's ORDER BY ordinal — an unreferenced
+      // definition is validated only by `validate(named:)`, so its ordinal must
+      // resolve here exactly as a referenced one's does below.
+      let definitions = try window.map { definition throws(SQLError) in
+        NamedWindow(name: definition.name,
+                    spec: try definition.spec.resolving(ordinals: outputs))
+      }
       // Nothing to inline unless the projection or `ORDER BY` bears a window.
       // The clause is kept either way — compile validates every named
       // definition against the source scope, whether or not it is referenced,
       // rather than silently discarding an unused one.
-      guard windows else { return self }
+      guard windows else {
+        return Select(distinct: distinct, projection: projection, from: from,
+                      joins: joins, predicate: predicate, grouping: grouping,
+                      having: having, window: definitions, order: order,
+                      limit: limit)
+      }
       let projection: Projection = switch projection {
       case .all, .columns:
         projection
       case let .expressions(items):
         .expressions(try items.map { item throws(SQLError) in
-          Projected(expression: try item.expression.resolving(window),
+          Projected(expression: try item.expression.resolving(window)
+                        .resolving(ordinals: outputs),
                     alias: item.alias)
         })
       }
@@ -1079,7 +1272,8 @@ extension Select {
           case .ordinal:
             key
           case let .expression(expression):
-            Order.Key(sort: .expression(try expression.resolving(window)),
+            Order.Key(sort: .expression(try expression.resolving(window)
+                          .resolving(ordinals: outputs)),
                       ascending: key.ascending)
           }
         })
@@ -1088,7 +1282,27 @@ extension Select {
       }
       return Select(distinct: distinct, projection: projection, from: from,
                     joins: joins, predicate: predicate, grouping: grouping,
-                    having: having, window: window, order: order, limit: limit)
+                    having: having, window: definitions, order: order,
+                    limit: limit)
+    }
+  }
+}
+
+extension Projection {
+  /// The projected expressions a positional `ORDER BY` ordinal names, in output
+  /// order — a bare-column list yields each column reference, an `expressions`
+  /// list each item's expression, and a `*` `nil` (its outputs are not
+  /// statically known before expansion). A window `ORDER BY` ordinal binds
+  /// against this list exactly as a query-level ordinal binds against the
+  /// projection.
+  internal var positional: Array<Expression>? {
+    switch self {
+    case .all:
+      nil
+    case let .columns(columns):
+      columns.map { Expression.column($0) }
+    case let .expressions(items):
+      items.map(\.expression)
     }
   }
 }
@@ -1101,12 +1315,15 @@ extension Scope {
   /// its direction preserved.
   ///
   /// A window `ORDER BY` fixes the input row order the ranking reads, so each
-  /// key is a value expression over the source columns — never an output
-  /// ordinal or alias (there is no projected output to name at this point). An
-  /// integer-literal sort key parses as an `ordinal`, which names an output
-  /// column, so it is meaningless here and faults the feature diagnostic on
-  /// both the run and validate paths (kept in parity through the shared
-  /// resolver).
+  /// key is a value expression over the source columns. An integer-literal sort
+  /// key parses as an `ordinal` naming a projected output column; the shared
+  /// `Query.expanded` prelude binds it to that column's expression
+  /// (`resolving(ordinals:)`) before this lowering, so a resolvable ordinal
+  /// never reaches here — except a `SELECT *`, whose outputs are not statically
+  /// named before the source scope resolves, so its ordinals reach here
+  /// unbound. Such an ordinal binds to the source column `SELECT *` projects at
+  /// that position (`terms(.all)`), so `OVER (ORDER BY 1)` orders on projected
+  /// column 1 exactly as a query-level ordinal does over `SELECT *`.
   internal func window(order: Order, _ routines: Routines = [:],
                        subquery: Resolution = .unsupported)
       throws(SQLError) -> Array<SortKey> {
@@ -1114,13 +1331,28 @@ extension Scope {
     keys.reserveCapacity(order.keys.count)
     for key in order.keys {
       switch key.sort {
-      case .ordinal:
-        throw .state("0A000",
-                     "a window ORDER BY output ordinal is not supported")
+      case let .ordinal(position):
+        // Reached only for a `SELECT *` (the prelude binds every other
+        // projection form's ordinal before this); bind it to the position-th
+        // source column `SELECT *` projects. An out-of-range ordinal faults
+        // `.column` (42703), the same fault a query-level out-of-range ordinal
+        // raises.
+        let outputs = try terms(.all)
+        guard position >= 1, position <= outputs.count else {
+          throw .column("\(position)")
+        }
+        keys.append(SortKey(term: outputs[position - 1],
+                            ascending: key.ascending, column: nil))
       case let .expression(expression):
+        // A window `ORDER BY` ordinal was substituted for its projected
+        // expression at the prelude, which recorded the 0-based output it
+        // named in `key.output`; carry it as the sort key's `column` so the
+        // materialisation below the window shares one evaluation with the
+        // projection. A directly written key carries no output, so it stays an
+        // independent evaluation.
         try keys.append(SortKey(term: term(expression, routines,
                                             subquery: subquery),
-                                ascending: key.ascending, column: nil))
+                                ascending: key.ascending, column: key.output))
       }
     }
     return keys
@@ -1325,8 +1557,10 @@ internal struct Windowed {
   }
 
   /// The output-space projected terms, recording each item's output name for an
-  /// `ORDER BY` to name. A `SELECT *` over a window query has no well-defined
-  /// meaning (which windows?), so it faults.
+  /// `ORDER BY` to name. A `SELECT *` projects every source column — a `*`
+  /// holds no window itself, so the only window query it appears in orders by a
+  /// window in the query `ORDER BY`, over the plain source columns `*` names —
+  /// exactly as a plain `SELECT *` does.
   internal mutating func terms(_ projection: Projection,
                                _ routines: Routines = [:],
                                subquery: Resolution = .unsupported)
@@ -1336,8 +1570,21 @@ internal struct Windowed {
     // that `subquery` carries.
     switch projection {
     case .all:
-      throw .state("0A000",
-                   "SELECT * is not allowed with a window function")
+      // Every source column the `SELECT *` names, in chain order — the merged
+      // `NATURAL`/`USING` columns then each real column (`Scope.terms(.all)`),
+      // each remapped into the packed source slot space and recorded under its
+      // output name so a query `ORDER BY` may name it. A window `ORDER BY`
+      // ordinal binds against these outputs (`window(order:)`).
+      let outputs = try scope.terms(.all)
+      let names = scope.names
+      var terms = Array<Term>()
+      terms.reserveCapacity(outputs.count)
+      for index in outputs.indices {
+        let term = outputs[index].remapped(through: slot)
+        terms.append(term)
+        record(names[index], index, term)
+      }
+      return terms
     case let .columns(columns):
       var terms = Array<Term>()
       terms.reserveCapacity(columns.count)

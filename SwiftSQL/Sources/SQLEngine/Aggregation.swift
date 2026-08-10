@@ -1363,9 +1363,20 @@ extension Catalog where Self: ~Escapable {
     // filter.
     var source = node
     if let having { source = .select(having, source) }
-    let window = Plan.window(grouped.windowings, source)
-    return window.shaped(distinct: select.distinct, projection: projection,
-                         filter: nil, order: order, limit: select.limit)
+    // Materialise each ordinal-named window ORDER BY value once below the
+    // window, exactly as the plain path does. A grouped projected value is
+    // usually a group-key or aggregate slot (single-evaluation already), but a
+    // non-deterministic scalar naming no ungrouped column (`tick()`) reaches
+    // here too, so an ordinal over one must rank the value it reports rather
+    // than a second evaluation. The window output begins past the grouped slots
+    // — the group keys and the aggregate results.
+    let hoisted = SQLEngine.materialise(grouped.windowings, projection, order,
+                                        width: keys.count + aggregations.count,
+                                        below: source)
+    let window = Plan.window(hoisted.windowings, hoisted.chain)
+    return window.shaped(distinct: select.distinct,
+                         projection: hoisted.projection, filter: nil,
+                         order: hoisted.order, limit: select.limit)
   }
 }
 

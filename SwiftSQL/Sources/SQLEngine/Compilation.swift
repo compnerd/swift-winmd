@@ -113,6 +113,139 @@ internal func distinct(_ keys: Array<Order.Key>, _ order: Array<SortKey>,
   return bound
 }
 
+/// The window `chain`, its `windowings`, `projection`, and query `order`
+/// rewritten so a window `ORDER BY` value the projection also reports is
+/// evaluated once below the window rather than in both the window node and the
+/// projection.
+///
+/// The shared `Query.expanded` prelude binds a window `ORDER BY` output ordinal
+/// to the projected expression it names, so `OVER (ORDER BY 1)` orders on the
+/// value of projected column 1. Lowering that binding as the window's sort key
+/// and again as the projection column would evaluate the expression twice —
+/// once inside the window node to fix the row order, once in the projection to
+/// report the value — so a stateful or non-deterministic value (a registered
+/// `tick()`, `random()`) would order the ranking on one set of values yet
+/// report another, the ranking not matching the reported column. This mirrors
+/// the query-level ordinal's materialisation (`Plan.materialised`): each such
+/// value is computed once in a projection below the window (a fresh source slot
+/// the passed-through rows carry), the window's sort key reads that slot, and
+/// the projection reads it too, so the value is evaluated once and the ranking
+/// matches the reported column.
+///
+/// Only an ordinal-named computed value is materialised, decided by provenance
+/// rather than by structural equality. A window `ORDER BY` sort key carries the
+/// projected output it named (`SortKey.column`, set from the ordinal the
+/// prelude resolved) only when it originated from an ordinal; a directly
+/// written key carries none. So a key that names an output is shared with that
+/// projection column, while a directly written `OVER (ORDER BY tick())` — even
+/// one equal to a projected `tick()` — carries no output and is left an
+/// independent evaluation, ranking the row on its own values and reporting the
+/// projection's separately. Inferring the relationship from `Term` equality
+/// instead would fold those two `tick()` occurrences into one, changing both
+/// the reported values and the ranking of a stateful routine. For the same
+/// reason the output index — not the term — allocates the hoisted slots: two
+/// distinct outputs an ordinal names (`ORDER BY 1, 2` over two `tick()`
+/// columns) take independent slots and evaluate independently, sharing a slot
+/// only when two keys name the one output.
+///
+/// A key that names an output but is a bare slot or constant already reads a
+/// stored cell — a plain projected column, a `SELECT *` output, a grouped
+/// key/aggregate slot — so reading it twice yields the same value; it is left
+/// in place and, when no key needs materialising, the plan is unchanged.
+/// `width` is the source slot count — the window results begin past it — so a
+/// materialised value takes a slot after the source and the window results
+/// shift right by the count materialised.
+internal func materialise(_ windowings: Array<Windowing>,
+                          _ projection: Array<Term>, _ order: Array<SortKey>,
+                          width: Int, below chain: Plan)
+    -> (chain: Plan, windowings: Array<Windowing>,
+        projection: Array<Term>, order: Array<SortKey>) {
+  // Map each distinct ordinal-named output column to a fresh source slot at
+  // `width + its offset in `carriers``, in first-seen order. Provenance
+  // (`key.column`) is the sole key — never `Term` equality. A window ORDER BY
+  // key carries the output it named only when it came from an ordinal, so two
+  // keys naming the one output share a slot, while two keys naming separate
+  // outputs take independent slots even when those outputs hold an equal
+  // stateful term (`SELECT tick(), tick(), … OVER (ORDER BY 1, 2)` hoists both
+  // occurrences, each evaluated once). A directly written key carries no output
+  // and is never hoisted, so an `OVER (ORDER BY tick())` merely equal to a
+  // projected `tick()` stays a separate evaluation rather than folding into the
+  // ordinal's slot.
+  var slot = Dictionary<Int, Int>()
+  var carriers = Array<Term>()
+  for windowing in windowings {
+    for key in windowing.order {
+      guard let column = key.column, slot[column] == nil else { continue }
+      // Defense in depth: provenance is resolver-generated and unforgeable, so
+      // `column` is always a valid projection index — the ordinal was range
+      // checked to 42703 at binding — and this guard never fires on real input.
+      // It keeps `materialise` total: a future internal miscompile skips
+      // hoisting rather than trapping on an out-of-range `projection[column]`.
+      // It never throws, so the validate path — which skips `materialise` —
+      // still agrees with the run path.
+      guard projection.indices.contains(column) else { continue }
+      switch key.term {
+      case .slot, .constant, .parameter:
+        // A bare slot or constant output already reads a stored cell, so
+        // reading it twice yields the same value — left in place, not hoisted.
+        continue
+      default:
+        break
+      }
+      slot[column] = width + carriers.count
+      carriers.append(projection[column])
+    }
+  }
+  guard !carriers.isEmpty else {
+    return (chain, windowings, projection, order)
+  }
+  let count = carriers.count
+  // The below-window projection passes every source slot through, then appends
+  // each hoisted output value once.
+  let passed = (0 ..< width).map { Term.slot($0) }
+  let source = Plan.project(passed + carriers, chain)
+  // The window results shift right past the hoisted slots; source slots keep
+  // their positions. The map is complete, since `remapped` demands every read
+  // slot resolve.
+  var shift = Dictionary<Int, Int>(minimumCapacity: width + windowings.count)
+  for index in 0 ..< width { shift[index] = index }
+  for index in windowings.indices {
+    shift[width + index] = width + count + index
+  }
+  // A window ORDER BY key that named a hoisted output reads that output's slot;
+  // every other key — a directly written one, or an ordinal over a bare cell —
+  // reads a source slot below `width`, preserved by the passthrough, unchanged.
+  let ordered = windowings.map { windowing in
+    Windowing(function: windowing.function, partition: windowing.partition,
+              order: windowing.order.map { key in
+                if let column = key.column, let hoisted = slot[column] {
+                  SortKey(term: .slot(hoisted), ascending: key.ascending,
+                          column: column)
+                } else {
+                  key
+                }
+              }, frame: windowing.frame)
+  }
+  // The projection reads a hoisted output from its slot; every other term
+  // shifts its window-slot reads past the hoisted slots (a source-slot read is
+  // unchanged).
+  let projected = projection.indices.map { column -> Term in
+    if let hoisted = slot[column] {
+      .slot(hoisted)
+    } else {
+      projection[column].remapped(through: shift)
+    }
+  }
+  // A query ORDER BY key likewise shifts its window-slot reads; a key naming an
+  // output keeps its column, since the outer materialisation reads the
+  // rewritten projection.
+  let keys = order.map { key in
+    SortKey(term: key.term.remapped(through: shift), ascending: key.ascending,
+            column: key.column)
+  }
+  return (source, ordered, projected, keys)
+}
+
 extension Plan {
   /// This source plan wrapped in the projection/limit/sort/select operators,
   /// omitting each layer when its clause is absent. The `projection`, `filter`,
@@ -1475,6 +1608,21 @@ extension Catalog where Self: ~Escapable {
   internal borrowing func compile(_ select: Select,
                                   _ context: Context = Context())
       throws(SQLError) -> Plan {
+    // Run the window-resolution prelude the `Query` wrapper runs (via
+    // `Query.expanded`) before it reaches here: inline every `OVER w` named-
+    // window reference to its `WINDOW` definition and bind every window
+    // `ORDER BY` output ordinal to the projected expression it names
+    // (`Select.inlined`). A select reaching this entry directly (a bare
+    // `compile(select)`, not through the wrapper) would else skip it, so
+    // `SELECT b, ROW_NUMBER() OVER (ORDER BY 1) FROM T` binds the ordinal
+    // against the source columns in the window lowering rather than the
+    // projected `b`, ranking differently from the same statement compiled
+    // through the wrapper. Running it here is the one normalization both
+    // entries share, so the two agree by construction and the window lowering
+    // only ever meets an unbound ordinal from a genuine `SELECT *`. It is
+    // idempotent — a select the wrapper already inlined carries no ordinal or
+    // reference for the second pass to rewrite.
+    let select = try select.inlined
     // A `GROUP BY GROUPING SETS (…)` never reaches here: `Query.expanded` (run
     // at every pipeline entry) has already rewritten it to a `UNION ALL` of
     // `.arm` selects, so `compile(_ select:)` sees only `.keys`/`.arm`.
@@ -1746,12 +1894,20 @@ extension Catalog where Self: ~Escapable {
       // The function-independent structural frame check — a reversed or inverted
       // frame — that `reject(for:)` runs for a referenced window.
       if let frame = spec.frame { try frame.check() }
-      // A window `ORDER BY` output ordinal has no meaning — there is no output
-      // to name — rejected here as it is for a referenced window's spec.
+      // A window `ORDER BY` output ordinal is bound to its projected expression
+      // by the shared `Query.expanded` prelude before this validate (an
+      // unreferenced definition alike), so one reaches here only for a `SELECT
+      // *`, whose outputs the prelude cannot name before the source scope
+      // resolves. It names the position-th `SELECT *` output column,
+      // range-checked here against the scope as a query-level ordinal is — an
+      // out-of-range one faults `.column` (42703) — the same source column a
+      // referenced definition binds through `Scope.window`.
       for key in spec.order?.keys ?? [] {
-        if case .ordinal = key.sort {
-          throw .state("0A000",
-                       "a window ORDER BY output ordinal is not supported")
+        if case let .ordinal(position) = key.sort {
+          let width = scope.width(of: .all)
+          guard position >= 1, position <= width else {
+            throw .column("\(position)")
+          }
         }
       }
       // A definition is validated for well-formedness against the input scope,
@@ -1926,8 +2082,16 @@ extension Catalog where Self: ~Escapable {
     if let predicate {
       chain = .select(predicate.remapped(through: slot), chain)
     }
-    let node = Plan.window(windowed.windowings, chain)
-    return node.shaped(distinct: select.distinct, projection: projection,
-                       filter: nil, order: order, limit: select.limit)
+    // Materialise each window ORDER BY value the projection also reports once
+    // below the window, so a stateful ordinal-named value is evaluated once and
+    // the ranking matches the reported column (mirroring the query-level
+    // ordinal). A window over only bare-column or unshared values is unchanged.
+    let hoisted = SQLEngine.materialise(windowed.windowings, projection,
+                                        order, width: combined.count,
+                                        below: chain)
+    let node = Plan.window(hoisted.windowings, hoisted.chain)
+    return node.shaped(distinct: select.distinct,
+                       projection: hoisted.projection, filter: nil,
+                       order: hoisted.order, limit: select.limit)
   }
 }

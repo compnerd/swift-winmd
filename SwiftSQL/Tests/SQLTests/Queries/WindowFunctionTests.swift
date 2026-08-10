@@ -365,6 +365,255 @@ struct RowNumberExecutionTests {
   }
 }
 
+// MARK: - Window ORDER BY output ordinal
+
+/// A window `ORDER BY` may name a projected output column by its 1-based
+/// ordinal — `OVER (ORDER BY 1)` orders on the value of projected column 1,
+/// exactly as a query-level `ORDER BY` ordinal names an output. The shared
+/// `Query.expanded` prelude binds the ordinal to that column's expression, so
+/// the inline form, a `WINDOW` clause definition, and the compile and validate
+/// paths resolve it identically.
+struct WindowOrderOrdinalTests {
+  private func fixture() throws -> FixtureCatalog {
+    // Ordering by a (1, 2, 3) differs from ordering by b (also from the source
+    // order), so an ordinal naming a distinct column yields a distinct ranking.
+    try Catalog {
+      Relation("T", ["a": .integer, "b": .integer]) {
+        Row(3, 1)
+        Row(1, 3)
+        Row(2, 2)
+      }
+    }
+  }
+
+  @Test func `an ordinal orders the window by the projected column`() throws {
+    // Ordinal 1 names projected column a, so the window orders by a: the row
+    // with a=1 numbers 1, a=2 numbers 2, a=3 numbers 3, kept in source order.
+    try fixture().expect(
+        "SELECT a, b, ROW_NUMBER() OVER (ORDER BY 1) FROM T",
+        yields: [[3, 1, 3], [1, 3, 1], [2, 2, 2]])
+  }
+
+  @Test func `an ordinal equals the named projected column`() throws {
+    try fixture().expect(
+        "SELECT a, b, ROW_NUMBER() OVER (ORDER BY 1) FROM T",
+        equals: "SELECT a, b, ROW_NUMBER() OVER (ORDER BY a) FROM T")
+  }
+
+  @Test func `a second ordinal names the second projected column`() throws {
+    try fixture().expect(
+        "SELECT a, b, ROW_NUMBER() OVER (ORDER BY 2) FROM T",
+        equals: "SELECT a, b, ROW_NUMBER() OVER (ORDER BY b) FROM T")
+  }
+
+  @Test func `a named window ORDER BY ordinal equals its inline form`() throws {
+    try fixture().expect(
+        "SELECT a, b, ROW_NUMBER() OVER w FROM T WINDOW w AS (ORDER BY 1)",
+        equals: "SELECT a, b, ROW_NUMBER() OVER (ORDER BY a) FROM T")
+  }
+
+  @Test func `a named window ordinal equals its inline ordinal form`() throws {
+    try fixture().expect(
+        "SELECT a, b, ROW_NUMBER() OVER w FROM T WINDOW w AS (ORDER BY 2)",
+        equals: "SELECT a, b, ROW_NUMBER() OVER (ORDER BY 2) FROM T")
+  }
+
+  @Test func `a bare-column projection binds a window ORDER BY ordinal`()
+      throws {
+    // The projection is a plain column list (a, b), so the ordinal binds
+    // against the columns positionally — ordinal 1 is a — while the window sits
+    // in the query ORDER BY.
+    try fixture().expect(
+        "SELECT a, b FROM T ORDER BY ROW_NUMBER() OVER (ORDER BY 1)",
+        equals: "SELECT a, b FROM T ORDER BY ROW_NUMBER() OVER (ORDER BY a)")
+  }
+
+  @Test func `the schema advertises the ordinal window's columns`() throws {
+    let query = try parse(query:
+        "SELECT a, b, ROW_NUMBER() OVER (ORDER BY 1) AS rn FROM T")
+    let columns = try fixture().columns(of: query, validate: true)
+    #expect(columns.map(\.name) == ["a", "b", "rn"])
+    #expect(columns.map(\.type) == [.integer, .integer, .integer])
+  }
+}
+
+// MARK: - A SELECT * window ORDER BY ordinal
+
+/// A window `ORDER BY` ordinal over a `SELECT *` projection binds against the
+/// expanded star columns once the source scope resolves — `OVER (ORDER BY 1)`
+/// orders the window on the first projected source column, exactly as the
+/// equivalent query-level `ORDER BY 1` resolves `*`. A `*` names no window
+/// itself, so the window sits in the query `ORDER BY`; the source columns `*`
+/// projects are the ordinal surface.
+struct StarWindowOrdinalTests {
+  private func fixture() throws -> FixtureCatalog {
+    // Ordering by column 1 (a) — (1, 2, 3) — differs from the source order, so
+    // the ordering the window fixes is observable in the result.
+    try Catalog {
+      Relation("T", ["a": .integer, "b": .integer]) {
+        Row(3, 1)
+        Row(1, 3)
+        Row(2, 2)
+      }
+    }
+  }
+
+  private func rejects(_ sql: String, _ fault: SQLError,
+                       location: Testing.SourceLocation = #_sourceLocation)
+      throws {
+    // The run faults, and `columns(of:validate:true)` faults identically — the
+    // schema never types a shape the run rejects.
+    try fixture().expect(sql, fails: fault, location: location)
+    #expect(throws: fault, sourceLocation: location) {
+      _ = try fixture().columns(of: parse(query: sql, location: location),
+                                validate: true)
+    }
+  }
+
+  @Test func `an inline ordinal orders the star projection by column one`()
+      throws {
+    // Ordinal 1 names the first star output column a, so the window orders on
+    // a — the rows come out in a order (1, 2, 3), not source order.
+    try fixture().expect(
+        "SELECT * FROM T ORDER BY ROW_NUMBER() OVER (ORDER BY 1)",
+        yields: [[1, 3], [2, 2], [3, 1]])
+  }
+
+  @Test func `an inline ordinal over star equals the named-column form`()
+      throws {
+    try fixture().expect(
+        "SELECT * FROM T ORDER BY ROW_NUMBER() OVER (ORDER BY 1)",
+        equals: "SELECT a, b FROM T ORDER BY ROW_NUMBER() OVER (ORDER BY a)")
+  }
+
+  @Test func `a second inline ordinal over star names the second column`()
+      throws {
+    try fixture().expect(
+        "SELECT * FROM T ORDER BY ROW_NUMBER() OVER (ORDER BY 2)",
+        equals: "SELECT a, b FROM T ORDER BY ROW_NUMBER() OVER (ORDER BY b)")
+  }
+
+  @Test func `a named window ordinal over star equals its column form`()
+      throws {
+    try fixture().expect(
+        "SELECT * FROM T WINDOW w AS (ORDER BY 1) "
+        + "ORDER BY ROW_NUMBER() OVER w",
+        equals: "SELECT a, b FROM T ORDER BY ROW_NUMBER() OVER (ORDER BY a)")
+  }
+
+  @Test func `an unreferenced star window definition ordinal resolves`()
+      throws {
+    // An unused `WINDOW` definition is validated by `validate(named:)`; its
+    // ordinal 1 range-checks against the star columns and resolves cleanly, so
+    // the query yields the plain star projection rather than faulting.
+    try fixture().expect(
+        "SELECT * FROM T WINDOW w AS (ORDER BY 1)",
+        equals: "SELECT * FROM T")
+  }
+
+  @Test func `the schema advertises the star window's source columns`() throws {
+    let query = try parse(query:
+        "SELECT * FROM T ORDER BY ROW_NUMBER() OVER (ORDER BY 1)")
+    let columns = try fixture().columns(of: query, validate: true)
+    #expect(columns.map(\.name) == ["a", "b"])
+    #expect(columns.map(\.type) == [.integer, .integer])
+  }
+
+  @Test func `an inline ordinal past the star columns faults`() throws {
+    // Two star output columns (a, b), so ordinal 9 is out of range — the same
+    // `.column` (42703) fault a query-level out-of-range ordinal raises, on
+    // both the run and validate paths.
+    try rejects(
+        "SELECT * FROM T ORDER BY ROW_NUMBER() OVER (ORDER BY 9)",
+        .column("9"))
+  }
+
+  @Test func `an unreferenced star window definition out-of-range faults`()
+      throws {
+    try rejects("SELECT * FROM T WINDOW w AS (ORDER BY 9)", .column("9"))
+  }
+}
+
+// MARK: - Bare compile entry ordinal binding
+
+extension FixtureCatalog {
+  /// The rows `select` yields compiled through the bare `Catalog.compile(_
+  /// select:)` entry — the documented direct compile a caller reaches without
+  /// the `Query` wrapper `run` enters through (`Query.expanded`/
+  /// `Select.inlined`). It optimises and executes the bare plan so a test can
+  /// prove the bare entry ranks a window exactly as the `Query` entry does.
+  fileprivate func run(bare select: Select)
+      throws(SQLError) -> Array<Array<Value>> {
+    let context = Context().validating(false).resolving(Subqueries())
+    let plan = try compile(select, context).demoted().pushdown()
+    return try execute(optimise(plan, context), context).map(\.values)
+  }
+}
+
+/// The documented bare `Catalog.compile(_ select:)` entry and the `run`
+/// (`Query`) entry must bind a window `ORDER BY` output ordinal identically —
+/// both against the projected surface — so the two compilation entries yield
+/// one window ranking (PR #322). The bare entry runs the same `Select.inlined`
+/// prelude the `Query` wrapper runs, so a non-star projection's ordinal is
+/// resolved before either reaches the window lowering, which then meets an
+/// unbound ordinal only for a genuine `SELECT *`.
+struct BareCompileEntryOrdinalTests {
+  private func fixture() throws -> FixtureCatalog {
+    // a order (3, 1, 2), b order (1, 3, 2), and source order all differ, so
+    // which column an ordinal binds to is observable in the ranking.
+    try Catalog {
+      Relation("T", ["a": .integer, "b": .integer]) {
+        Row(3, 1)
+        Row(1, 3)
+        Row(2, 2)
+      }
+    }
+  }
+
+  @Test func `the bare entry ranks a window like the query entry`() throws {
+    let catalog = try fixture()
+    let sql = "SELECT b, ROW_NUMBER() OVER (ORDER BY 1) FROM T"
+    // Projected column 1 is b, so ordinal 1 orders the window on b (1, 2, 3):
+    // b=1 ranks 1, b=2 ranks 2, b=3 ranks 3, kept in source order. Binding to
+    // source column a instead would rank the first row 3 — the drift #322
+    // reported — so the two results would differ.
+    let expected: Array<Array<Value>> = [[.integer(1), .integer(1)],
+                                         [.integer(3), .integer(3)],
+                                         [.integer(2), .integer(2)]]
+    let bare = try catalog.run(bare: parse(select: sql))
+    let query = try catalog.run(parse(query: sql), [:])
+    #expect(bare == expected)
+    #expect(query == expected)
+    #expect(bare == query)
+  }
+
+  @Test func `the bare entry binds a star ordinal like the query entry`()
+      throws {
+    let catalog = try fixture()
+    let sql = "SELECT * FROM T ORDER BY ROW_NUMBER() OVER (ORDER BY 1)"
+    // A `SELECT *` leaves the ordinal for the window lowering, which binds it
+    // against the expanded star columns — ordinal 1 is a — so the rows come
+    // out in a order (1, 2, 3). Both entries agree.
+    let expected: Array<Array<Value>> = [[.integer(1), .integer(3)],
+                                         [.integer(2), .integer(2)],
+                                         [.integer(3), .integer(1)]]
+    let bare = try catalog.run(bare: parse(select: sql))
+    let query = try catalog.run(parse(query: sql), [:])
+    #expect(bare == expected)
+    #expect(bare == query)
+  }
+
+  @Test func `the bare entry faults an out-of-range ordinal`() throws {
+    let catalog = try fixture()
+    // Two projected columns, so ordinal 9 is out of range — `.column` (42703),
+    // the same fault the `Query` entry raises on both paths.
+    let sql = "SELECT b, ROW_NUMBER() OVER (ORDER BY 9) FROM T"
+    #expect(throws: SQLError.column("9")) {
+      _ = try catalog.run(bare: parse(select: sql))
+    }
+  }
+}
+
 // MARK: - RANK / DENSE_RANK execution
 
 /// `RANK()` and `DENSE_RANK()` rank each row within its partition by the window
@@ -1078,11 +1327,30 @@ struct WindowFunctionRejectionTests {
                "a window function is not allowed in a window function"))
   }
 
-  @Test func `a window ORDER BY output ordinal is rejected`() throws {
+  @Test func `a window ORDER BY ordinal naming a window output is rejected`()
+      throws {
+    // Ordinal 1 names the sole projected column, which is the window itself; a
+    // window cannot order by another window's value (it does not exist until
+    // every windowing is computed from the source rows), so it faults on both
+    // paths.
     try rejects(
         "SELECT ROW_NUMBER() OVER (ORDER BY 1) FROM T",
         .state("0A000",
-               "a window ORDER BY output ordinal is not supported"))
+               "a window ORDER BY cannot order by a window output column"))
+  }
+
+  @Test func `a window ORDER BY ordinal past the projection faults`() throws {
+    // Two projected columns (x and the window), so ordinal 5 is out of range —
+    // the same `.column` (42703) fault, spelled as the ordinal, a query-level
+    // out-of-range ORDER BY ordinal raises, on both paths.
+    try rejects("SELECT x, ROW_NUMBER() OVER (ORDER BY 5) FROM T",
+                .column("5"))
+  }
+
+  @Test func `a window ORDER BY ordinal below one faults`() throws {
+    // An ordinal is 1-based, so 0 is out of range and faults `.column`.
+    try rejects("SELECT x, ROW_NUMBER() OVER (ORDER BY 0) FROM T",
+                .column("0"))
   }
 
   @Test func `a RANGE numeric offset frame is rejected`() throws {
@@ -1828,6 +2096,89 @@ struct WindowNonDeterminismTests {
         FROM T
         """,
         yields: [[1, 4], [1, 4], [1, 4]], routines: routines)
+    #expect(counter.count == 6)
+  }
+
+  @Test func `a window ORDER BY ordinal orders on the reported value`()
+      throws {
+    // The window ORDER BY names projected column 1 — the tick() value — so the
+    // ordering key and the reported value are one output, a single evaluation.
+    // tick() yields 1, 2, 3 once per row, the window orders on those, and the
+    // row numbered k reports tick() k, so the ranking matches the reported
+    // column. Evaluating the ordinal-named value twice would order on 1, 2, 3
+    // yet report 4, 5, 6 — six calls, the ranking not matching the value.
+    let (counter, routines) = try ticking()
+    try fixture().expect(
+        "SELECT tick(), ROW_NUMBER() OVER (ORDER BY 1) FROM T",
+        yields: [[1, 1], [2, 2], [3, 3]], routines: routines)
+    #expect(counter.count == 3)
+  }
+
+  @Test func `a grouped window ORDER BY ordinal orders on the reported value`()
+      throws {
+    // Each row groups alone (x is distinct), so the ordinal-named tick() value
+    // reaches the window over grouped output. Materialised once below the
+    // window, tick() yields 1, 2, 3 per group, the window orders on those, and
+    // the row numbered k reports tick() k — the ranking matches the reported
+    // column, three calls. Building the window without the materialisation
+    // evaluates the ordinal-named value twice, ordering on 1, 2, 3 yet
+    // reporting 4, 5, 6 over six calls, the ranking not matching the value.
+    let (counter, routines) = try ticking()
+    try fixture().expect(
+        "SELECT tick(), ROW_NUMBER() OVER (ORDER BY 1) FROM T GROUP BY x",
+        yields: [[1, 1], [2, 2], [3, 3]], routines: routines)
+    #expect(counter.count == 3)
+  }
+
+  @Test func `an explicit window key equal to a projection stays independent`()
+      throws {
+    // The window key is written directly, not as an ordinal — it merely equals
+    // the projected tick(). The two occurrences must evaluate independently:
+    // the window orders on its own tick() (1, 2, 3, so the rows rank 1, 2, 3)
+    // and the projection reports a separate tick() (4, 5, 6), six calls in all.
+    // Treating the coincidental equality as an ordinal reference would fold the
+    // two into one hoisted tick(), collapsing to three calls and reporting the
+    // ordered 1, 2, 3 — a changed ranking and changed values.
+    let (counter, routines) = try ticking()
+    try fixture().expect(
+        "SELECT tick(), ROW_NUMBER() OVER (ORDER BY tick()) FROM T",
+        yields: [[4, 1], [5, 2], [6, 3]], routines: routines)
+    #expect(counter.count == 6)
+  }
+
+  @Test func `distinct ordinal outputs hoist to independent slots`() throws {
+    // Two select-list columns hold the same stateful expression and the window
+    // orders on both by ordinal (`ORDER BY 1, 2`). The ordinals name separate
+    // outputs, so each is hoisted to its own slot and evaluated independently.
+    // The below-window projection computes both columns per row, left to right,
+    // so column 0 yields tick() 1, 3, 5 and column 1 yields 2, 4, 6 — six calls
+    // in all — and the window orders by (column 0, column 1). Keying the hoist
+    // on term equality instead of the output index would fold the two
+    // occurrences into one shared slot, calling tick() three times and
+    // reporting identical columns.
+    let (counter, routines) = try ticking()
+    try fixture().expect(
+        "SELECT tick(), tick(), ROW_NUMBER() OVER (ORDER BY 1, 2) FROM T",
+        yields: [[1, 2, 1], [3, 4, 2], [5, 6, 3]], routines: routines)
+    #expect(counter.count == 6)
+  }
+
+  @Test func `an ordinal and an explicit equal key stay independent`() throws {
+    // One window orders on projected column 0 by ordinal, a second orders on a
+    // directly written `tick()` that merely equals that column. The ordinal key
+    // shares its one hoisted tick() with output 0 (three calls, 1, 2, 3, the
+    // rows ranking 1, 2, 3), while the explicit key carries no output and stays
+    // an independent evaluation (its own tick() 4, 5, 6, ranking 1, 2, 3). Six
+    // calls in all. Redirecting every structurally equal key would collapse the
+    // explicit key onto the ordinal's slot, calling tick() only three times.
+    let (counter, routines) = try ticking()
+    try fixture().expect(
+        """
+        SELECT tick(), ROW_NUMBER() OVER (ORDER BY 1),
+               ROW_NUMBER() OVER (ORDER BY tick())
+        FROM T
+        """,
+        yields: [[1, 1, 1], [2, 2, 2], [3, 3, 3]], routines: routines)
     #expect(counter.count == 6)
   }
 }

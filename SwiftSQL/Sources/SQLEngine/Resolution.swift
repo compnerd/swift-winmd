@@ -1702,6 +1702,15 @@ internal struct SortKey: Equatable {
     SortKey(term: term.remapped(through: slot), ascending: ascending,
             column: column)
   }
+
+  /// Two keys are equal when they order on the same value in the same
+  /// direction. The `column` is provenance — which projected output an ordinal
+  /// named — not part of the ordered value, so it is excluded: two windows
+  /// ordering on the same term share one appended slot (`Windowing` equality)
+  /// whether one came from an ordinal and the other was written directly.
+  internal static func ==(lhs: SortKey, rhs: SortKey) -> Bool {
+    lhs.term == rhs.term && lhs.ascending == rhs.ascending
+  }
 }
 
 /// The resolved sort keys `order` lowers to, in major-to-minor order — each

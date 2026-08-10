@@ -377,3 +377,49 @@ struct NamedWindowFaultTests {
         fails: .state("42601", "window \"w\" has a frame and cannot be a base"))
   }
 }
+
+// MARK: - A named window ORDER BY output ordinal
+
+/// A `WINDOW` clause definition's `ORDER BY` ordinal binds to the projected
+/// column it names, exactly as an inline one does — a referenced definition
+/// through the same inlining, and an unreferenced one through the
+/// definition-only `validate(named:)`, so the two agree on the ordinal.
+struct NamedWindowOrdinalTests {
+  private func fixture() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("T", ["d": .integer, "x": .integer]) {
+        Row(2, 10)
+        Row(1, 30)
+        Row(3, 20)
+      }
+    }
+  }
+
+  @Test func `a referenced definition's ordinal names the projected column`()
+      throws {
+    // Ordinal 2 names projected column x, so `w` orders by x — the same rows as
+    // the fully-spelled inline window.
+    try fixture().expect(
+        "SELECT d, x, ROW_NUMBER() OVER w FROM T WINDOW w AS (ORDER BY 2)",
+        equals: "SELECT d, x, ROW_NUMBER() OVER (ORDER BY x) FROM T")
+  }
+
+  @Test func `an unreferenced definition's ordinal resolves and is accepted`()
+      throws {
+    // An unused `WINDOW` definition is validated by `validate(named:)`; its
+    // ordinal 1 binds to projected column d and resolves cleanly, so the query
+    // yields the plain projection rather than faulting the ordinal.
+    try fixture().expect(
+        "SELECT d, x FROM T WINDOW w AS (ORDER BY 1)",
+        equals: "SELECT d, x FROM T")
+  }
+
+  @Test func `an unreferenced definition's out-of-range ordinal faults`()
+      throws {
+    // Two projected columns, so ordinal 9 is out of range — `validate(named:)`
+    // binds it against the same projection a reference would and faults
+    // `.column`, on both paths.
+    try fixture().expect(
+        "SELECT d, x FROM T WINDOW w AS (ORDER BY 9)", fails: .column("9"))
+  }
+}

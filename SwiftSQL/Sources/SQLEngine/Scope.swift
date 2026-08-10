@@ -949,9 +949,11 @@ internal struct Scope {
   /// The result type of a window function under `validate` — its result type
   /// (the ranking functions `.integer`), validating each `PARTITION BY` key and
   /// window `ORDER BY` key as a run evaluates them (an unknown column, a bad
-  /// operand, or an ill-typed call inside one faults). An unsupported function,
-  /// or an output-ordinal window sort key (meaningless for the input order),
-  /// faults the feature diagnostic in parity with the run's compile.
+  /// operand, or an ill-typed call inside one faults). An unsupported function
+  /// faults the feature diagnostic in parity with the run's compile; an output
+  /// ordinal is bound to its projected expression before this validate, so one
+  /// survives only for a `SELECT *`, whose position-th output column it names —
+  /// range-checked as a query-level ordinal is.
   private func window(_ function: WindowFunction, over spec: WindowSpec,
                       _ routines: Routines,
                       subquery: SubqueryCheck = .unsupported)
@@ -1000,9 +1002,18 @@ internal struct Scope {
     }
     for key in spec.order?.keys ?? [] {
       switch key.sort {
-      case .ordinal:
-        throw .state("0A000",
-                     "a window ORDER BY output ordinal is not supported")
+      case let .ordinal(position):
+        // An output ordinal is bound to its projected expression by the shared
+        // `Query.expanded` prelude before this validate, so one reaches here
+        // only for a `SELECT *`, whose outputs the prelude cannot name before
+        // the source scope resolves. It names the position-th `SELECT *`
+        // output column, range-checked here as a query-level ordinal is — an
+        // out-of-range one faults `.column` (42703) — in parity with the
+        // compile that binds it to that source column.
+        let width = self.width(of: .all)
+        guard position >= 1, position <= width else {
+          throw .column("\(position)")
+        }
       case let .expression(expression):
         _ = try validate(expression, routines, subquery: subquery)
       }

@@ -46,16 +46,31 @@ struct WindowResolutionTests {
     #expect(windowing.order.isEmpty)
   }
 
-  @Test func `a window ORDER BY output ordinal is unsupported`() {
-    // A window ORDER BY fixes the input row order, so an integer sort key —
-    // which parses as an output ordinal — is meaningless and faults 0A000, in
-    // parity across the run and validate paths.
+  @Test func `an unbound window ORDER BY ordinal binds to a SELECT star column`()
+      throws {
+    // The `Query.expanded` prelude binds a window ORDER BY ordinal to its
+    // projected expression before this lowering, except a `SELECT *`, whose
+    // outputs are not named before the source scope resolves. A raw spec
+    // resolved directly here carries the ordinal, so the lowering binds it to
+    // the source column `SELECT *` projects at that position — ordinal 1 the
+    // first source column `d` at combined ordinal `0` — on the run and validate
+    // paths alike.
     let window = Expression.window(
         function: .number,
         spec: WindowSpec(order: Order(keys: [Order.Key(sort: .ordinal(1))])))
-    #expect(throws:
-        SQLError.state("0A000",
-                       "a window ORDER BY output ordinal is not supported")) {
+    let windowing = try window.windowing(scope())
+    #expect(windowing.order == [SortKey(term: .slot(0), ascending: true,
+                                        column: nil)])
+  }
+
+  @Test func `a window ORDER BY ordinal past the SELECT star columns faults`() {
+    // The scope names two source columns, so ordinal 3 is out of range and
+    // faults `.column` (42703), spelled as the ordinal — the same fault a
+    // query-level out-of-range ordinal raises.
+    let window = Expression.window(
+        function: .number,
+        spec: WindowSpec(order: Order(keys: [Order.Key(sort: .ordinal(3))])))
+    #expect(throws: SQLError.column("3")) {
       _ = try window.windowing(scope())
     }
   }
@@ -192,5 +207,54 @@ struct WindowArgumentTests {
       try Frame(unit: .rows, start: .current, end: .head)
           .reject(for: .number)
     }
+  }
+}
+
+// MARK: - Ordinal provenance (public AST)
+
+/// The output an ordinal named (`Order.Key.output`) is resolver-generated
+/// provenance, not a public input: the setter is `internal`, so a key built
+/// through a public initializer carries no provenance and only the resolver
+/// stamps one. That keeps the index a valid projection ordinal by construction,
+/// so `materialise` never reads an out-of-range projected column — and the
+/// guard below keeps it total even against a future internal bug.
+struct OrdinalProvenanceTests {
+  @Test func `a public initializer carries no ordinal provenance`() {
+    // Every public initializer constructs `output` as `nil`; there is no public
+    // parameter to supply one, so a module-external caller building the AST —
+    // an ordinal, a bare column, an expression key — cannot forge a provenance
+    // the run path would trust as a projection index.
+    #expect(Order.Key(sort: .ordinal(1)).output == nil)
+    #expect(Order.Key(column: Column("x")).output == nil)
+    #expect(Order.Key(sort: .expression(.column(Column("x"))),
+                      ascending: false).output == nil)
+  }
+
+  @Test func `the resolver stamps the output an ordinal named`() throws {
+    // The one producer of provenance: resolving a window ORDER BY ordinal
+    // substitutes the projected expression and stamps the 0-based output it
+    // came from. Ordinal 1 binds to the first output and records `0`.
+    let spec = WindowSpec(order: Order(keys: [Order.Key(sort: .ordinal(1))]))
+    let outputs = [Expression.column(Column("x")),
+                   Expression.column(Column("d"))]
+    let key = try spec.resolving(ordinals: outputs).order?.keys.first
+    #expect(key?.sort == .expression(.column(Column("x"))))
+    #expect(key?.output == 0)
+  }
+
+  @Test func `materialise skips an out-of-range provenance column`() {
+    // Unreachable on real input — provenance is resolver-generated and always a
+    // valid projection index — this exercises the total guard directly. A key
+    // naming output 9 over a two-column projection hoists nothing and returns
+    // rather than trapping on `projection[9]`.
+    let stray = Windowing(function: .number, partition: [],
+                          order: [SortKey(term: .apply(name: "tick",
+                                                       arguments: []),
+                                          ascending: true, column: 9)])
+    let projection = [Term.slot(0), Term.slot(1)]
+    let result = materialise([stray], projection, [], width: 2,
+                             below: .values(rows: [], types: []))
+    #expect(result.projection == projection)
+    #expect(result.windowings == [stray])
   }
 }

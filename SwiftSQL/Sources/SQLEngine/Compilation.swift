@@ -1739,8 +1739,10 @@ extension Catalog where Self: ~Escapable {
   internal borrowing func validate(
       named windows: Array<NamedWindow>, against scope: Scope,
       _ routines: Routines, subquery: Resolution) throws(SQLError) {
-    for definition in windows {
-      let spec = try definition.spec.resolved(against: windows)
+    for index in windows.indices {
+      // Resolve each definition in its own DEFINITION context — its base may
+      // reference only an earlier entry and it copies a frameless base.
+      let spec = try windows.resolved(at: index)
       // The function-independent structural frame check — a reversed or inverted
       // frame — that `reject(for:)` runs for a referenced window.
       if let frame = spec.frame { try frame.check() }

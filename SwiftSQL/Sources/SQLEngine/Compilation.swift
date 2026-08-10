@@ -1891,9 +1891,22 @@ extension Catalog where Self: ~Escapable {
       // Resolve each definition in its own DEFINITION context — its base may
       // reference only an earlier entry and it copies a frameless base.
       let spec = try windows.resolved(at: index)
-      // The function-independent structural frame check — a reversed or inverted
-      // frame — that `reject(for:)` runs for a referenced window.
-      if let frame = spec.frame { try frame.check() }
+      // The frame checks a referenced window gets, minus the function-dependent
+      // `frameable` gate an unused definition has no function to satisfy: the
+      // structural check (a reversed or inverted frame) `reject(for:order:)`
+      // runs, then — for a measured frame — the same order/type requirements
+      // (`reject(order:)`), typed over this scope through the same `subquery`
+      // resolution and projected-output layout the referenced path uses. So an
+      // unused `RANGE BETWEEN 1 PRECEDING …` with no ORDER BY, or one whose
+      // single key is non-numeric, faults exactly as referencing it would,
+      // rather than being accepted and dropped.
+      if let frame = spec.frame {
+        try frame.check()
+        if frame.measured {
+          let ordering = try scope.ordering(spec, routines, subquery: subquery)
+          try frame.reject(order: ordering)
+        }
+      }
       // A window `ORDER BY` output ordinal is bound to its projected expression
       // by the shared `Query.expanded` prelude before this validate (an
       // unreferenced definition alike), so one reaches here only for a `SELECT
@@ -1979,7 +1992,10 @@ extension Catalog where Self: ~Escapable {
       }
       try function.require(order: spec)
       if let frame = spec.frame {
-        try frame.reject(for: function)
+        let ordering = try frame.measured
+            ? scope.ordering(spec, routines, subquery: front.plans.rest)
+            : nil
+        try frame.reject(for: function, order: ordering)
       }
     }
 

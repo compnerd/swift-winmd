@@ -184,13 +184,14 @@ struct WindowArgumentTests {
   @Test func `a negative frame offset is rejected`() {
     // The parser admits only nonnegative frame offsets, but a public AST can
     // build `.preceding(-1)`/`.following(-1)` — which run the bound the opposite
-    // way — so the shared frame check rejects them. `reject(for:)` validates the
-    // frame before the function's own frameability.
+    // way — so the shared frame check rejects them. `reject(for:order:)`
+    // validates the frame before the function's own frameability; a ROWS frame
+    // reads no order-key types, so `order` is nil.
     for bound in [Frame.Bound.preceding(-1), .following(-1)] {
       let frame = Frame(unit: .rows, start: bound, end: .current)
       #expect(throws:
           SQLError.state("22023", "a window frame offset must be nonnegative")) {
-        try frame.reject(for: .number)
+        try frame.reject(for: .number, order: nil)
       }
     }
   }
@@ -200,12 +201,12 @@ struct WindowArgumentTests {
     #expect(throws: SQLError.state(
         "42601", "a window frame cannot start at UNBOUNDED FOLLOWING")) {
       try Frame(unit: .rows, start: .tail, end: .current)
-          .reject(for: .number)
+          .reject(for: .number, order: nil)
     }
     #expect(throws: SQLError.state(
         "42601", "a window frame cannot end at UNBOUNDED PRECEDING")) {
       try Frame(unit: .rows, start: .current, end: .head)
-          .reject(for: .number)
+          .reject(for: .number, order: nil)
     }
   }
 }

@@ -5,6 +5,7 @@ internal import class Foundation.FileHandle
 internal import struct Foundation.Data
 
 internal import ArgumentParser
+internal import SQLShell
 internal import WinMD
 
 /// The `query` subcommand: run a SQL script against a metadata database, or —
@@ -77,7 +78,9 @@ internal struct Query: ParsableCommand {
     var shell = Shell(storage, strict: sql != nil, search: search)
     if let sql {
       do {
-        for statement in Statements(of: sql) { try shell.attempt(statement) }
+        for statement in Statements(of: sql, multiline: [Template.spelling]) {
+          try shell.attempt(statement)
+        }
       } catch is Shell.Stop {}
     } else {
       note("winmd-inspect — .help for commands, .quit to leave")
@@ -92,7 +95,8 @@ internal struct Query: ParsableCommand {
       let statements =
           Statements(reading: { readLine() },
                      prompt: { pending in prompt(pending ? "   ...> "
-                                                         : "winmd> ") })
+                                                         : "winmd> ") },
+                     multiline: [Template.spelling])
       for statement in statements {
         do {
           try shell.attempt(statement)

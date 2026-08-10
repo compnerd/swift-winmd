@@ -8,8 +8,10 @@ let _ =
               .macOS(.v26),
             ],
             products: [
+              .executable(name: "swift-sql", targets: ["swift-sql"]),
               .library(name: "SQLEngine", targets: ["SQLEngine"]),
               .library(name: "SQLQuery", targets: ["SQLQuery"]),
+              .library(name: "SQLShell", targets: ["SQLShell"]),
               .library(name: "SQLStandard", targets: ["SQLStandard"]),
               .library(name: "SQLTestSupport", targets: ["SQLTestSupport"]),
             ],
@@ -31,6 +33,26 @@ let _ =
                       swiftSettings: [
                         .enableExperimentalFeature("Lifetimes"),
                       ]),
+
+              // SQLShell — the shared shell infrastructure (statement stream,
+              // box rendering, cell display, an in-memory session) the
+              // standalone `swift-sql` CLI runs on.
+              .target(name: "SQLShell",
+                      dependencies: ["SQLEngine", "SQLStandard"],
+                      swiftSettings: [
+                        .enableExperimentalFeature("Lifetimes"),
+                      ]),
+              .executableTarget(name: "swift-sql",
+                                dependencies: ["SQLShell"],
+                                swiftSettings: [
+                                  .enableExperimentalFeature("Lifetimes"),
+                                ]),
+              .testTarget(name: "SQLShellTests",
+                          dependencies: ["SQLShell", "SQLEngine",
+                                         "SQLStandard"],
+                          swiftSettings: [
+                            .enableExperimentalFeature("Lifetimes"),
+                          ]),
 
               .testTarget(name: "SQLTests",
                           dependencies: ["SQLEngine", "SQLStandard",

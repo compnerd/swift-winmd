@@ -8,6 +8,7 @@ import Testing
 
 import ArgumentParser
 import SQLEngine
+import SQLShell
 import WinMDSynthesis
 import WinMD
 
@@ -58,32 +59,35 @@ struct ShellTests {
   @Test func `each meta-command answers to its .-prefixed spelling`() {
     // The leading-token dispatch matches a `.`-token against each `Metacommand`
     // type's `spelling`; these are the tokens `execute` routes on.
-    #expect(Schema.spelling == ".schema")
-    #expect(Help.spelling == ".help")
-    #expect(Quit.spelling == ".quit")
-    #expect(Read.spelling == ".read")
+    // `SQLShell` also exports `Schema`/`Help`/`Quit`/`Read`/`Bind`, so the
+    // winmd-inspect ones are module-qualified to disambiguate under both
+    // imports.
+    #expect(winmd_inspect.Schema.spelling == ".schema")
+    #expect(winmd_inspect.Help.spelling == ".help")
+    #expect(winmd_inspect.Quit.spelling == ".quit")
+    #expect(winmd_inspect.Read.spelling == ".read")
     #expect(Render.spelling == ".render")
-    #expect(Bind.spelling == ".bind")
+    #expect(winmd_inspect.Bind.spelling == ".bind")
     #expect(Template.spelling == ".template")
   }
 
   @Test func `.read parses its trailing path, trimming surrounding whitespace`() {
     // `Read.init` takes the rest of the statement after the spelling token and
     // trims it to the path; the stream has already split off `.read`.
-    #expect(Read(" foo.sql").path == "foo.sql")
-    #expect(Read("  spaced.sql ").path == "spaced.sql")
+    #expect(winmd_inspect.Read(" foo.sql").path == "foo.sql")
+    #expect(winmd_inspect.Read("  spaced.sql ").path == "spaced.sql")
     // No argument leaves an empty path — `execute` rejects it as unknown.
-    #expect(Read("").path.isEmpty)
+    #expect(winmd_inspect.Read("").path.isEmpty)
   }
 
   @Test func `.schema parses its trailing query, dropping a trailing ;`() {
     // `Schema.init` takes the rest of the statement after the spelling token as
     // the query text, trimmed and with a single trailing `;` removed (the same
     // optional terminator a run tolerates).
-    #expect(Schema(" SELECT 1").query == "SELECT 1")
-    #expect(Schema("  SELECT 1 ; ").query == "SELECT 1")
+    #expect(winmd_inspect.Schema(" SELECT 1").query == "SELECT 1")
+    #expect(winmd_inspect.Schema("  SELECT 1 ; ").query == "SELECT 1")
     // No query leaves an empty string — `execute` rejects it as unknown.
-    #expect(Schema("").query.isEmpty)
+    #expect(winmd_inspect.Schema("").query.isEmpty)
   }
 
   @Test func `a blank parameter local avoids colliding with a real name`() {
@@ -126,21 +130,22 @@ struct ShellTests {
     // remainder as the value, typed: an `Int`-parsable value is an `.integer`,
     // else `.text` with a surrounding single-quote pair stripped and a doubled
     // `''` unescaped to one `'`.
-    #expect(Bind(" n 42").name == "n")
-    #expect(Bind(" n 42").value == .integer(42))
-    #expect(Bind(" s hello").value == .text("hello"))
-    #expect(Bind(" s 'hello world' ").value == .text("hello world"))
+    #expect(winmd_inspect.Bind(" n 42").name == "n")
+    #expect(winmd_inspect.Bind(" n 42").value == .integer(42))
+    #expect(winmd_inspect.Bind(" s hello").value == .text("hello"))
+    #expect(winmd_inspect.Bind(" s 'hello world' ").value
+              == .text("hello world"))
     // A quoted numeral stays text — the quotes force the `.text` reading over
     // the `Int` parse.
-    #expect(Bind("s '42'").value == .text("42"))
+    #expect(winmd_inspect.Bind("s '42'").value == .text("42"))
     // A doubled `''` inside the quotes is one literal `'`, so the advertised
     // single-quoted form binds an apostrophe rather than storing two quotes —
     // otherwise `WHERE Name = :name` never matches a row holding `O'Hare`.
-    #expect(Bind("s 'O''Hare'").value == .text("O'Hare"))
+    #expect(winmd_inspect.Bind("s 'O''Hare'").value == .text("O'Hare"))
     // A name with no value clears the binding — `value` is nil.
-    #expect(Bind(" n").name == "n")
-    #expect(Bind(" n").value == nil)
-    #expect(Bind("  ").name.isEmpty)
+    #expect(winmd_inspect.Bind(" n").name == "n")
+    #expect(winmd_inspect.Bind(" n").value == nil)
+    #expect(winmd_inspect.Bind("  ").name.isEmpty)
   }
 
   @Test func `.template parses its name and unquotes the single-quoted body`() {
@@ -281,7 +286,8 @@ struct ShellTests {
       }'
       SELECT 1;
       """
-    let statements = Array(Statements(of: script))
+    let statements =
+        Array(Statements(of: script, multiline: [Template.spelling]))
     #expect(statements.count == 2)
     #expect(statements[0] == """
       .template t '{{! language: swift }}
@@ -299,7 +305,9 @@ struct ShellTests {
     // stays separate. End-of-input flushes even without the trailing statement.
     var lines = ["  .template t 'first", "  ; second", "third'",
                  "SELECT 1"].makeIterator()
-    let statements = Array(Statements(reading: { lines.next() }))
+    let statements =
+        Array(Statements(reading: { lines.next() },
+                        multiline: [Template.spelling]))
     #expect(statements.count == 2)
     #expect(statements[0] == ".template t 'first\n  ; second\nthird'")
     #expect(statements[1] == "SELECT 1")
@@ -314,7 +322,8 @@ struct ShellTests {
       line two'
       SELECT 1;
       """
-    let statements = Array(Statements(of: script))
+    let statements =
+        Array(Statements(of: script, multiline: [Template.spelling]))
     #expect(statements.count == 2)
     #expect(statements[0] == ".template --swift 'line one\nline two'")
     #expect(statements[1] == "SELECT 1")
@@ -323,8 +332,9 @@ struct ShellTests {
   @Test func `an unclosed open-quote meta flushes at end of input`() {
     // End of input before the quote closes flushes what was captured — the
     // closing `'` is as optional as a trailing `;`.
-    #expect(Array(Statements(of: ".template t 'unterminated\nbody"))
-            == [".template t 'unterminated\nbody"])
+    let script = ".template t 'unterminated\nbody"
+    #expect(Array(Statements(of: script, multiline: [Template.spelling]))
+            == [script])
   }
 
   @Test func `only .template accumulates on an open quote; other metas yield whole`() {
@@ -333,7 +343,8 @@ struct ShellTests {
     // is data, not an unterminated literal: the `.read` yields whole and the
     // following statement stays separate, rather than being swallowed as more
     // of the path.
-    #expect(Array(Statements(of: ".read /tmp/O'Brien.sql\nSELECT 1;"))
+    let script = ".read /tmp/O'Brien.sql\nSELECT 1;"
+    #expect(Array(Statements(of: script, multiline: [Template.spelling]))
             == [".read /tmp/O'Brien.sql", "SELECT 1"])
   }
 

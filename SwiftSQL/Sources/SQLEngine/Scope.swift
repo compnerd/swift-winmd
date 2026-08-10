@@ -963,7 +963,9 @@ internal struct Scope {
     }
     try function.require(order: spec)
     if let frame = spec.frame {
-      try frame.reject(for: function)
+      let ordering = try frame.measured
+          ? ordering(spec, routines, subquery: subquery) : nil
+      try frame.reject(for: function, order: ordering)
     }
     // An aggregate window validates its operand and `FILTER` exactly as a
     // collapsing aggregate does (the same `aggregate` helper), yielding the

@@ -119,17 +119,39 @@ extension Frame {
     }
   }
 
-  /// Faults the feature diagnostic when the executor cannot compute this frame
-  /// over `function` yet — called on both the compile (run) and validate paths
-  /// so the two stay in lockstep (the run ≡ validate tripwire): a frame the
-  /// schema types is one the run executes.
+  /// Whether this frame's bounds are measured against the window `ORDER BY`
+  /// beyond the current peer group — a `GROUPS` frame counts peer groups, and a
+  /// numeric-offset `RANGE` frame bands the order-key value, so each consults
+  /// the order keys the legality gate types (a `RANGE` offset requires a single
+  /// numeric key; a `GROUPS` frame requires none — with no order every row is a
+  /// peer, one whole-partition group). A `ROWS` frame is a physical offset, and
+  /// a partition-edge or current-peer `RANGE` frame reads only the peer group,
+  /// so neither consults the order keys.
+  internal var measured: Bool {
+    switch unit {
+    case .rows: false
+    case .range: offset
+    case .groups: true
+    }
+  }
+
+  /// Faults when the executor cannot honor this frame over `function` — called
+  /// on both the compile (run) and validate paths so the two stay in lockstep
+  /// (the run ≡ validate tripwire): a frame the schema types is one the run
+  /// executes. `order` carries the derived types of the window `ORDER BY` keys
+  /// (`nil` for no `ORDER BY`), the surface a measured frame's legality reads.
   ///
   /// The executor honours a frame only for a frame-sensitive function (an
   /// aggregate window folds over it, a `FIRST_VALUE`/`LAST_VALUE`/`NTH_VALUE`
   /// reads a row of it — a ranking or offset function takes none); a `ROWS`
-  /// frame of any bounds; a `RANGE` frame whose bounds are the partition edges
-  /// or the current peer group (a `RANGE` numeric offset — measured against
-  /// the order-key value — is not yet computed); `GROUPS` is not yet computed.
+  /// frame of any bounds; a `RANGE` frame whose bounds are the partition edges,
+  /// the current peer group, or a numeric offset banding the single order-key
+  /// value; and a `GROUPS` frame counting peer groups. A numeric-offset `RANGE`
+  /// frame needs exactly one `ORDER BY` key whose type supports the offset
+  /// arithmetic — a numeric key, the only kind the engine bands (it has no
+  /// datetime/interval arithmetic), `42601` on both paths. A `GROUPS` frame
+  /// needs no `ORDER BY` — with none every partition row is a peer, one peer
+  /// group spanning the whole partition — so it imposes no order requirement.
   /// Faults a structurally invalid frame — one the parser can spell or a public
   /// AST can construct but no execution can honor. A frame may not start at
   /// `UNBOUNDED FOLLOWING` or end at `UNBOUNDED PRECEDING` — the start would
@@ -139,8 +161,8 @@ extension Frame {
   /// start. And an `n PRECEDING`/`n FOLLOWING` size must be nonnegative — a
   /// negative one (a directly built `.preceding(-1)`, which the parser cannot
   /// spell) runs the bound the opposite way, as the `LEAD`/`LAG` offset check
-  /// guards there. Reached from `reject(for:)` for a referenced window, and
-  /// directly when validating an unused named window's specification, so an
+  /// guards there. Reached from `reject(for:order:)` for a referenced window,
+  /// and directly when validating an unused named window's specification, so an
   /// unused definition's frame is checked as a referenced one's is.
   internal func check() throws(SQLError) {
     if case .tail = start {
@@ -202,22 +224,118 @@ extension Frame {
     }
   }
 
-  internal func reject(for function: WindowFunction) throws(SQLError) {
+  internal func reject(for function: WindowFunction,
+                       order types: Array<ValueType>?) throws(SQLError) {
     try check()
     guard function.frameable else {
       throw .state("0A000",
                    "a window frame is not supported for \(function.keyword)")
     }
+    try reject(order: types)
+  }
+
+  /// The function-independent measured-frame order requirement a numeric-offset
+  /// `RANGE` frame places on the window `ORDER BY`, given the derived key
+  /// `types` (`nil` for no `ORDER BY`). A referenced window reaches it via
+  /// `reject(for:order:)` after the function's `frameable` gate; an unused
+  /// named window definition — which carries no window function — reaches it
+  /// directly from `validate(named:)`, so a definition-only frame is held to
+  /// the same order/type rules a referenced one is. A `ROWS` frame, a
+  /// partition-edge or current-peer `RANGE` frame, and a `GROUPS` frame consult
+  /// no order key here, so none constrains the keys — a `GROUPS` frame with no
+  /// `ORDER BY` treats every partition row as a peer, so the whole partition is
+  /// one peer group and the frame resolves against it, the all-peers invariant
+  /// the executor already computes for an unordered window.
+  internal func reject(order types: Array<ValueType>?) throws(SQLError) {
     switch unit {
     case .rows:
       break
     case .range:
+      // A numeric-offset RANGE frame bands the order-key value, so it needs a
+      // single ORDER BY key whose type the offset arithmetic operates on — a
+      // numeric key (the engine bands no datetime/interval). The partition-edge
+      // and current-peer forms carry no offset and read only the peer group, so
+      // they place no such requirement.
       if offset {
-        throw .state("0A000",
-                     "a RANGE numeric offset frame is not yet supported")
+        guard let types, types.count == 1 else {
+          throw .state("42601",
+                       "a RANGE offset frame requires a single ORDER BY key")
+        }
+        guard types[0].numeric else {
+          throw .state("42601",
+                       "a RANGE offset frame requires a numeric ORDER BY key")
+        }
       }
     case .groups:
-      throw .state("0A000", "a GROUPS window frame is not yet supported")
+      // A GROUPS frame counts peer groups, but needs no ORDER BY: with none
+      // every partition row is a peer, so the whole partition is a single peer
+      // group and the frame resolves against it — the all-peers invariant the
+      // executor already computes for an unordered window. So no order key is
+      // required, and none constrains the frame here.
+      break
+    }
+  }
+}
+
+extension Scope {
+  /// The types of `spec`'s window `ORDER BY` keys over this scope, or `nil`
+  /// when it carries no `ORDER BY` — the order-key surface a measured frame's
+  /// legality gate (`Frame.reject(order:)`) reads. It types an expression key
+  /// (a bare column, an aggregate order key by its result, a scalar subquery)
+  /// through
+  /// the schema `derive`, threading the compilation pre-pass `subquery`
+  /// resolution so a scalar-subquery order key resolves as the referenced
+  /// window's normal lowering does rather than faulting the default
+  /// `.unsupported` context.
+  internal func ordering(_ spec: WindowSpec, _ routines: Routines,
+                         subquery: Resolution) throws(SQLError)
+      -> Array<ValueType>? {
+    try ordering(spec) {
+      (expression: Expression) throws(SQLError) -> ValueType in
+      try derive(expression, routines, subquery: subquery)
+    }
+  }
+
+  /// The types of `spec`'s window `ORDER BY` keys over this scope for the
+  /// faulting type-check surface, typing an expression key through `validate`
+  /// (which resolves a scalar subquery through the `SubqueryCheck` the walk
+  /// carries). It resolves an output ordinal through the same projected layout
+  /// the schema overload does, so the run and validate paths read the same key
+  /// types and their frame checks agree by construction.
+  internal func ordering(_ spec: WindowSpec, _ routines: Routines,
+                         subquery: SubqueryCheck) throws(SQLError)
+      -> Array<ValueType>? {
+    try ordering(spec) {
+      (expression: Expression) throws(SQLError) -> ValueType in
+      try validate(expression, routines, subquery: subquery)
+    }
+  }
+
+  /// The types of `spec`'s window `ORDER BY` keys, typing each expression key
+  /// through `type` (the caller's schema `derive` or faulting `validate`) and
+  /// each output ordinal — reached only for a `SELECT *`, whose other
+  /// projection forms the prelude binds before this — through the projected
+  /// layout (`outputs()`). The ordinal is a 1-based projected-output index, so
+  /// it reads the projected column it actually names — the `NATURAL`/`USING`
+  /// merged columns first, then the expanded real columns — which differs from
+  /// the combined source-ordinal space a join with virtual or merged columns
+  /// lays out, exactly the layout `Scope.window(order:)` binds the ordinal
+  /// against. An out-of-range ordinal faults `.column` as that lowering does.
+  private func ordering(_ spec: WindowSpec,
+                        _ type: (Expression) throws(SQLError) -> ValueType)
+      throws(SQLError) -> Array<ValueType>? {
+    guard let order = spec.order else { return nil }
+    let outputs = outputs()
+    return try order.keys.map { key throws(SQLError) -> ValueType in
+      switch key.sort {
+      case let .ordinal(position):
+        guard position >= 1, position <= outputs.count else {
+          throw .column("\(position)")
+        }
+        return outputs[position - 1].type
+      case let .expression(expression):
+        return try type(expression)
+      }
     }
   }
 }

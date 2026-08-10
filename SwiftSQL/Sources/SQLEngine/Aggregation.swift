@@ -1316,7 +1316,12 @@ extension Catalog where Self: ~Escapable {
           throw .state("0A000", "\(function.keyword) is not yet supported")
         }
         try function.require(order: spec)
-        if let frame = spec.frame { try frame.reject(for: function) }
+        if let frame = spec.frame {
+          let ordering = try frame.measured
+              ? scope.ordering(spec, context.routines, subquery: plans.rest)
+              : nil
+          try frame.reject(for: function, order: ordering)
+        }
       }
     }
 

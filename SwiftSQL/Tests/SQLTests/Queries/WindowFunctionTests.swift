@@ -1266,6 +1266,1020 @@ struct DistributionExecutionTests {
   }
 }
 
+// MARK: - GROUPS frame execution
+
+/// A `GROUPS` frame is measured in peer groups — maximal runs of rows sharing
+/// the window `ORDER BY` key — so `GROUPS BETWEEN n PRECEDING AND m FOLLOWING`
+/// frames every row from the start of the peer group `n` groups before the
+/// current row's group through the end of the group `m` after it. `CURRENT ROW`
+/// is the whole current peer group; the `UNBOUNDED` edges are the partition
+/// ends. It differs from the equivalent `ROWS` frame wherever the order key
+/// ties, since a group can hold several rows.
+struct GroupsFrameExecutionTests {
+  /// Ordered by `k` the rows fall in three peer groups — `{1,1}`, `{2}`,
+  /// `{3,3}` — so a group frame spans whole ties where the row frame would
+  /// split them.
+  private func fixture() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("T", ["k": .integer, "v": .integer]) {
+        Row(1, 10)
+        Row(1, 20)
+        Row(2, 30)
+        Row(3, 40)
+        Row(3, 50)
+      }
+    }
+  }
+
+  @Test func `SUM over one group either side frames whole peer groups`()
+      throws {
+    // Group frame [group - 1, group + 1]: the first group sees groups 0-1
+    // (10+20+30 = 60); the middle group sees every group (150); the last sees
+    // groups 1-2 (30+40+50 = 120). Each row of a group takes its group's frame.
+    try fixture().expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k
+            GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 10, 60], [1, 20, 60], [2, 30, 150],
+                 [3, 40, 120], [3, 50, 120]])
+  }
+
+  @Test func `the group frame differs from the equivalent row frame`() throws {
+    // The same bounds over ROWS count physical rows, splitting the ties: the
+    // group frame's 60/60/150/120/120 becomes 30/60/90/120/90.
+    try fixture().expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k
+            ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 10, 30], [1, 20, 60], [2, 30, 90],
+                 [3, 40, 120], [3, 50, 90]])
+  }
+
+  @Test func `CURRENT ROW frames the whole current peer group`() throws {
+    // `GROUPS BETWEEN CURRENT ROW AND CURRENT ROW` is the current group alone:
+    // both 1s sum 30, the 2 sums 30, both 3s sum 90.
+    try fixture().expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k
+            GROUPS BETWEEN CURRENT ROW AND CURRENT ROW)
+        FROM T
+        """,
+        yields: [[1, 10, 30], [1, 20, 30], [2, 30, 30],
+                 [3, 40, 90], [3, 50, 90]])
+  }
+
+  @Test func `UNBOUNDED PRECEDING runs through the current group`() throws {
+    // A running group frame: the partition start through the current group's
+    // end — 30, then 60, then 150 for the last group.
+    try fixture().expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k
+            GROUPS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+        FROM T
+        """,
+        yields: [[1, 10, 30], [1, 20, 30], [2, 30, 60],
+                 [3, 40, 150], [3, 50, 150]])
+  }
+
+  @Test func `UNBOUNDED FOLLOWING reaches the partition end`() throws {
+    // The current group's start through the partition end: 150, 120, 90.
+    try fixture().expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k
+            GROUPS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 10, 150], [1, 20, 150], [2, 30, 120],
+                 [3, 40, 90], [3, 50, 90]])
+  }
+
+  @Test func `a following-only group frame is empty past the last group`()
+      throws {
+    // `GROUPS BETWEEN 1 FOLLOWING AND 2 FOLLOWING`: group 0 sees groups 1-2
+    // (30+40+50 = 120); group 1 sees group 2 (90); group 2 has no following
+    // group, so the frame is empty and SUM is NULL.
+    try fixture().expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k
+            GROUPS BETWEEN 1 FOLLOWING AND 2 FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 10, 120], [1, 20, 120], [2, 30, 90],
+                 [3, 40, nil], [3, 50, nil]])
+  }
+
+  @Test func `the schema types a GROUPS-framed aggregate window`() throws {
+    // Both paths type the framed column: SUM over integers an integer — the run
+    // folds the group frames and validate types the column, run ≡ validate.
+    let query = try parse(query:
+        """
+        SELECT SUM(v) OVER (ORDER BY k
+            GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS s
+        FROM T
+        """)
+    let columns = try fixture().columns(of: query, validate: true)
+    #expect(columns.map(\.name) == ["s"])
+    #expect(columns.map(\.type) == [.integer])
+  }
+
+  @Test func `an unordered GROUPS frame is one whole-partition peer group`()
+      throws {
+    // With no window ORDER BY every partition row is a peer, so the whole
+    // partition is a single peer group and `GROUPS BETWEEN CURRENT ROW AND
+    // CURRENT ROW` frames it entire — every row takes the partition total
+    // (150). Pre-fix this faulted 42601 ("a GROUPS window frame requires an
+    // ORDER BY").
+    try fixture().expect(
+        """
+        SELECT k, v, SUM(v) OVER (GROUPS BETWEEN CURRENT ROW AND CURRENT ROW)
+        FROM T
+        """,
+        yields: [[1, 10, 150], [1, 20, 150], [2, 30, 150],
+                 [3, 40, 150], [3, 50, 150]])
+  }
+
+  @Test func `unordered GROUPS offsets clamp to the single group`() throws {
+    // The one peer group has no group before or after it, so `1 PRECEDING`
+    // clamps to the partition start and `1 FOLLOWING` to its end — the frame is
+    // still the whole partition (150). Pre-fix 42601.
+    try fixture().expect(
+        """
+        SELECT k, v, SUM(v) OVER (GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 10, 150], [1, 20, 150], [2, 30, 150],
+                 [3, 40, 150], [3, 50, 150]])
+  }
+
+  @Test func `an unordered UNBOUNDED GROUPS frame spans the partition`()
+      throws {
+    // Both partition edges over the single group are the whole partition
+    // (150). Pre-fix 42601.
+    try fixture().expect(
+        """
+        SELECT k, v, SUM(v) OVER (GROUPS BETWEEN UNBOUNDED PRECEDING
+            AND UNBOUNDED FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 10, 150], [1, 20, 150], [2, 30, 150],
+                 [3, 40, 150], [3, 50, 150]])
+  }
+
+  @Test func `an unordered GROUPS frame is per-partition under PARTITION BY`()
+      throws {
+    // PARTITION BY k with no order: each partition is its own single peer
+    // group, so `CURRENT ROW` frames that partition entire — k=1 sums 30, k=2
+    // sums 30, k=3 sums 90. Pre-fix 42601.
+    try fixture().expect(
+        """
+        SELECT k, v, SUM(v) OVER (PARTITION BY k
+            GROUPS BETWEEN CURRENT ROW AND CURRENT ROW)
+        FROM T
+        """,
+        yields: [[1, 10, 30], [1, 20, 30], [2, 30, 30],
+                 [3, 40, 90], [3, 50, 90]])
+  }
+
+  @Test func `an unordered GROUPS FIRST_VALUE reads the partition first`()
+      throws {
+    // One whole-partition peer group, so FIRST_VALUE reads the partition's
+    // first row (10, in its original unordered position) on every row. Pre-fix
+    // 42601.
+    try fixture().expect(
+        """
+        SELECT k, v, FIRST_VALUE(v) OVER (GROUPS BETWEEN UNBOUNDED PRECEDING
+            AND UNBOUNDED FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 10, 10], [1, 20, 10], [2, 30, 10],
+                 [3, 40, 10], [3, 50, 10]])
+  }
+
+  @Test func `an unordered GROUPS LAST_VALUE reads the partition last`()
+      throws {
+    // The mirror: LAST_VALUE reads the partition's last row (50) throughout.
+    // Pre-fix 42601.
+    try fixture().expect(
+        """
+        SELECT k, v, LAST_VALUE(v) OVER (GROUPS BETWEEN UNBOUNDED PRECEDING
+            AND UNBOUNDED FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 10, 50], [1, 20, 50], [2, 30, 50],
+                 [3, 40, 50], [3, 50, 50]])
+  }
+}
+
+// MARK: - RANGE numeric offset frame execution
+
+/// A numeric-offset `RANGE` frame is value-based: `RANGE BETWEEN n PRECEDING
+/// AND m FOLLOWING` frames every row whose single order-key value lies in the
+/// band `[current - n, current + m]` (ASC; the direction flips under DESC,
+/// where a
+/// `PRECEDING` bound is the larger-valued side). It differs from both `ROWS`
+/// (physical rows) and `GROUPS` (whole peer groups) wherever the key has gaps
+/// or ties, and a NULL key frames only its NULL peers.
+struct RangeOffsetFrameExecutionTests {
+  /// Gaps (2 → 4 → 7) and a tie (two 2s) so a value band `[k - n, k + m]`
+  /// picks out a different row set than a row count or a group count would.
+  private func fixture() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("T", ["k": .integer, "v": .integer]) {
+        Row(1, 10)
+        Row(2, 20)
+        Row(2, 30)
+        Row(4, 40)
+        Row(7, 50)
+      }
+    }
+  }
+
+  @Test func `SUM bands the order-key value`() throws {
+    // Band [k - 1, k + 1]: k=1 sees 1,2,2 (60); each k=2 sees 1,2,2 (60); k=4
+    // is isolated (40); k=7 is isolated (50).
+    try fixture().expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k
+            RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 10, 60], [2, 20, 60], [2, 30, 60],
+                 [4, 40, 40], [7, 50, 50]])
+  }
+
+  @Test func `the value band differs from the row and group frames`() throws {
+    // The same bounds over ROWS count physical neighbours (30/60/90/120/90),
+    // and over GROUPS whole peer groups (60/100/100/140/90) — both distinct
+    // from the value band's 60/60/60/40/50.
+    try fixture().expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k
+            ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 10, 30], [2, 20, 60], [2, 30, 90],
+                 [4, 40, 120], [7, 50, 90]])
+    try fixture().expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k
+            GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 10, 60], [2, 20, 100], [2, 30, 100],
+                 [4, 40, 140], [7, 50, 90]])
+  }
+
+  @Test func `an asymmetric band ascends`() throws {
+    // Band [k - 1, k + 2] ascending: k=1 sees 1,2,2 (60); each k=2 sees 1,2,2,4
+    // (100); k=4 is isolated (40); k=7 is isolated (50).
+    try fixture().expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k
+            RANGE BETWEEN 1 PRECEDING AND 2 FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 10, 60], [2, 20, 100], [2, 30, 100],
+                 [4, 40, 40], [7, 50, 50]])
+  }
+
+  @Test func `the band direction flips under DESC`() throws {
+    // Descending, a PRECEDING bound is the larger-valued side, so `1 PRECEDING
+    // AND 2 FOLLOWING` bands [k - 2, k + 1]: k=1 and each k=2 see 1,2,2 (60);
+    // k=4 sees 2,2,4 (90); k=7 is isolated (50) — distinct from the ascending
+    // 60/100/100/40/50.
+    try fixture().expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k DESC
+            RANGE BETWEEN 1 PRECEDING AND 2 FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 10, 60], [2, 20, 60], [2, 30, 60],
+                 [4, 40, 90], [7, 50, 50]])
+  }
+
+  @Test func `a running value band folds to the current value`() throws {
+    // `RANGE BETWEEN UNBOUNDED PRECEDING AND 1 FOLLOWING`: the partition start
+    // through every row with key ≤ k + 1 — 60, 60, 60, then 100 (adds 4), then
+    // 150 (adds 7).
+    try fixture().expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k
+            RANGE BETWEEN UNBOUNDED PRECEDING AND 1 FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 10, 60], [2, 20, 60], [2, 30, 60],
+                 [4, 40, 100], [7, 50, 150]])
+  }
+
+  @Test func `FIRST_VALUE and LAST_VALUE read the value band edges`() throws {
+    // Over the band [k - 1, k + 1]: FIRST_VALUE reads the band's first row and
+    // LAST_VALUE its last — for the tied 2s the band runs 1,2,2, so LAST_VALUE
+    // is 30 (the last of the tie), not each row's own value.
+    try fixture().expect(
+        """
+        SELECT k, FIRST_VALUE(v) OVER (ORDER BY k
+            RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 10], [2, 10], [2, 10], [4, 40], [7, 50]])
+    try fixture().expect(
+        """
+        SELECT k, LAST_VALUE(v) OVER (ORDER BY k
+            RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 30], [2, 30], [2, 30], [4, 40], [7, 50]])
+  }
+
+  @Test func `a NULL order key frames only its NULL peers`() throws {
+    // A NULL key is comparable to no value, so its frame is exactly the NULL
+    // peer run (here itself, summing 5); a non-NULL row's band never draws the
+    // NULL in.
+    let catalog = try Catalog {
+      Relation("T", ["k": .integer, "v": .integer]) {
+        Row(nil, 5)
+        Row(1, 10)
+        Row(2, 20)
+      }
+    }
+    try catalog.expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k
+            RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING)
+        FROM T
+        """,
+        yields: [[nil, 5, 5], [1, 10, 30], [2, 20, 30]])
+  }
+
+  @Test func `a double order key bands over a double column`() throws {
+    // The band arithmetic holds for a double key: [k - 1.0, k + 1.0] over
+    // 1.0, 2.0, 2.5 — k=1.0 sees 1.0,2.0 (30); k=2.0 sees 1.0,2.0,2.5 (60);
+    // k=2.5 sees 2.0,2.5 (50).
+    let catalog = try Catalog {
+      Relation("T", ["k": .double, "v": .integer]) {
+        Row(1.0, 10)
+        Row(2.0, 20)
+        Row(2.5, 30)
+      }
+    }
+    try catalog.expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k
+            RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING)
+        FROM T
+        """,
+        yields: [[1.0, 10, 30], [2.0, 20, 60], [2.5, 30, 50]])
+  }
+
+  @Test func `the schema types a RANGE-offset aggregate window`() throws {
+    // Both paths type the framed column: SUM over integers an integer, run ≡
+    // validate over the value-banded frame.
+    let query = try parse(query:
+        """
+        SELECT SUM(v) OVER (ORDER BY k
+            RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS s
+        FROM T
+        """)
+    let columns = try fixture().columns(of: query, validate: true)
+    #expect(columns.map(\.name) == ["s"])
+    #expect(columns.map(\.type) == [.integer])
+  }
+}
+
+// MARK: - Mixed frame units in one query
+
+/// One query projecting windows of different frame units over the same
+/// partition, so the per-unit conditional build of the framing geometry — a
+/// `ROWS` window reading no partition-sized geometry, a `GROUPS` window the
+/// group numbering, a numeric-offset `RANGE` window the order-key values —
+/// runs each shape side by side and the values stay correct. A unit test
+/// cannot assert the geometry a window leaves unbuilt; it proves the build is
+/// still correct under the gating.
+struct MixedFrameUnitsExecutionTests {
+  /// Gaps (2 → 4 → 7) and a tie (two 2s) so a `ROWS`, a `GROUPS`, and a
+  /// numeric-offset `RANGE` frame each pick out a different row set.
+  private func fixture() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("T", ["k": .integer, "v": .integer]) {
+        Row(1, 10)
+        Row(2, 20)
+        Row(2, 30)
+        Row(4, 40)
+        Row(7, 50)
+      }
+    }
+  }
+
+  @Test func `aggregate windows of three frame units compute together`()
+      throws {
+    // Over the k-ordered partition: a ROWS running sum of the two rows ending
+    // at each (10, 30, 50, 70, 90); a GROUPS current-group sum (10; the tied
+    // 2s each 50; 40; 50); and a RANGE band [k - 1, k + 1] sum (the 1 and both
+    // 2s each 60; the isolated 4 and 7 each themselves). One query builds each
+    // framing to its own unit's geometry.
+    try fixture().expect(
+        """
+        SELECT k, v,
+            SUM(v) OVER (ORDER BY k
+                ROWS BETWEEN 1 PRECEDING AND CURRENT ROW),
+            SUM(v) OVER (ORDER BY k
+                GROUPS BETWEEN CURRENT ROW AND CURRENT ROW),
+            SUM(v) OVER (ORDER BY k
+                RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 10, 10, 10, 60], [2, 20, 30, 50, 60],
+                 [2, 30, 50, 50, 60], [4, 40, 70, 40, 40],
+                 [7, 50, 90, 50, 50]])
+  }
+
+  @Test func `value windows of three frame units compute together`() throws {
+    // The frame-sensitive value functions over the same partition: a ROWS
+    // FIRST_VALUE of the two rows ending at each (10, 10, 20, 30, 40); a GROUPS
+    // current-group LAST_VALUE (10; the tied 2s each 30; 40; 50); and a RANGE
+    // band [k - 1, k + 1] LAST_VALUE (the 1 and both 2s each 30, the band's
+    // last row; the isolated 4 and 7 each themselves). Each window's extremum
+    // reads a framing built to its own unit.
+    try fixture().expect(
+        """
+        SELECT k, v,
+            FIRST_VALUE(v) OVER (ORDER BY k
+                ROWS BETWEEN 1 PRECEDING AND CURRENT ROW),
+            LAST_VALUE(v) OVER (ORDER BY k
+                GROUPS BETWEEN CURRENT ROW AND CURRENT ROW),
+            LAST_VALUE(v) OVER (ORDER BY k
+                RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 10, 10, 10, 30], [2, 20, 10, 30, 30],
+                 [2, 30, 20, 30, 30], [4, 40, 30, 40, 40],
+                 [7, 50, 40, 50, 50]])
+  }
+}
+
+// MARK: - Measured-frame ORDER BY key typing
+
+/// A measured frame (`GROUPS`, numeric-offset `RANGE`) types its window `ORDER
+/// BY` keys through `Scope.ordering`, the surface its legality gate reads. The
+/// typing must agree across every path — the run's subquery resolution, the
+/// `SELECT *` projected layout, and the unused named-window validation — so the
+/// same query faults or passes identically whether its window is referenced and
+/// compiled, referenced and validated, or an unused definition validated then
+/// dropped (the run ≡ validate tripwire).
+struct MeasuredFrameOrderTypingTests {
+  private func rejects(_ make: () throws -> FixtureCatalog, _ sql: String,
+                       _ fault: SQLError,
+                       location: Testing.SourceLocation = #_sourceLocation)
+      throws {
+    // The run faults, and `columns(of:validate:true)` faults identically. The
+    // fixture is built afresh for each surface — a borrowed catalog cannot be
+    // captured by the `#expect(throws:)` closure.
+    try make().expect(sql, fails: fault, location: location)
+    #expect(throws: fault, sourceLocation: location) {
+      _ = try make().columns(of: parse(query: sql, location: location),
+                             validate: true)
+    }
+  }
+
+  // Finding 1: a scalar-subquery order key types through the compilation pre-
+  // pass resolution, so a numeric-offset RANGE frame ordering by it resolves
+  // rather than faulting the default `.unsupported` subquery context.
+  @Test func `a RANGE offset orders by a scalar-subquery key`() throws {
+    // `(SELECT MIN(x) FROM T)` is a constant order key (1), so every row is one
+    // peer and the band `[1 - 1, 1]` frames the whole partition — `SUM(x)` is
+    // the table total (6) on each row. Pre-fix the order-key typing ran under
+    // the default `.unsupported` context and faulted 0A000 on both the run and
+    // the derive, since the scalar subquery was unresolvable there.
+    let catalog = try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(1)
+        Row(2)
+        Row(3)
+      }
+    }
+    let sql =
+        """
+        SELECT x, SUM(x) OVER (ORDER BY (SELECT MIN(x) FROM T)
+            RANGE BETWEEN 1 PRECEDING AND CURRENT ROW)
+        FROM T
+        """
+    try catalog.expect(sql, yields: [[1, 6], [2, 6], [3, 6]])
+    let columns = try catalog.columns(of: parse(query: sql), validate: true)
+    #expect(columns.map(\.name) == ["x", "column 2"])
+    #expect(columns.map(\.type) == [.integer, .integer])
+  }
+
+  // Finding 2: a `SELECT *` window ORDER BY ordinal types through the projected
+  // layout, not the combined source-ordinal space. `A JOIN B USING (k)` pulls
+  // the merged join key `k` to the leading output, so the projected columns
+  // [k, at, bt] (integer, text, text) diverge from the source-ordinal space
+  // (whose ordinal 0 is A's leading `at`, text) — a plain `type(at:)` read
+  // mistypes the ordinal, deciding a projected column's numeric gate from a
+  // different column's type.
+  private func joined() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("A", ["at": .text, "k": .integer]) {
+        Row("x", 5)
+        Row("y", 9)
+      }
+      Relation("B", ["bt": .text, "k": .integer]) {
+        Row("p", 5)
+        Row("q", 9)
+      }
+    }
+  }
+
+  @Test func `a star ordinal on a numeric projected output is accepted`()
+      throws {
+    // Ordinal 1 names the projected merged key `k` (integer), so the numeric
+    // key gate passes and the frame orders by it. Pre-fix `type(at: 0)` read
+    // the source ordinal `A.at` (text) and wrongly rejected this valid numeric
+    // ordering. Ordering by `k` (5, 9) leaves the star rows in `k`-ascending
+    // order.
+    let sql =
+        """
+        SELECT * FROM A JOIN B USING (k)
+        ORDER BY SUM(k) OVER (ORDER BY 1
+            RANGE BETWEEN 1 PRECEDING AND CURRENT ROW)
+        """
+    try joined().expect(sql, yields: [[5, "x", "p"], [9, "y", "q"]])
+    let columns = try joined().columns(of: parse(query: sql), validate: true)
+    #expect(columns.map(\.name) == ["k", "at", "bt"])
+    #expect(columns.map(\.type) == [.integer, .text, .text])
+  }
+
+  @Test func `a star ordinal on a text projected output is rejected`() throws {
+    // Ordinal 2 names the projected `at` (text), so the numeric-key gate faults
+    // 42601. Pre-fix `type(at: 1)` read the source ordinal `A.k` (integer), so
+    // the gate passed and the RANGE offset was silently ignored.
+    try rejects(
+        { try joined() },
+        """
+        SELECT * FROM A JOIN B USING (k)
+        ORDER BY SUM(k) OVER (ORDER BY 2
+            RANGE BETWEEN 1 PRECEDING AND CURRENT ROW)
+        """,
+        .state("42601",
+               "a RANGE offset frame requires a numeric ORDER BY key"))
+  }
+
+  // Finding 3: an unused named window's measured frame is held to the same
+  // order/type requirements a referenced one is, so the two paths agree.
+  private func fixture() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("T", ["x": .integer, "name": .text]) {
+        Row(1, "a")
+        Row(2, "b")
+      }
+    }
+  }
+
+  @Test func `an unused RANGE offset without an ORDER BY faults`() throws {
+    // Referencing `w` faults 42601 for the missing single order key; an unused
+    // `w` faults identically rather than being accepted and dropped.
+    let fault = SQLError.state("42601",
+        "a RANGE offset frame requires a single ORDER BY key")
+    try rejects(
+        { try fixture() },
+        """
+        SELECT SUM(x) OVER w FROM T
+        WINDOW w AS (RANGE BETWEEN 1 PRECEDING AND CURRENT ROW)
+        """,
+        fault)
+    try rejects(
+        { try fixture() },
+        """
+        SELECT x FROM T
+        WINDOW w AS (RANGE BETWEEN 1 PRECEDING AND CURRENT ROW)
+        """,
+        fault)
+  }
+
+  @Test func `an unused RANGE offset over a non-numeric key faults`() throws {
+    // Referencing `w` faults 42601 for the non-numeric order key; an unused `w`
+    // faults identically — the same SQLSTATE and message.
+    let fault = SQLError.state("42601",
+        "a RANGE offset frame requires a numeric ORDER BY key")
+    try rejects(
+        { try fixture() },
+        """
+        SELECT COUNT(*) OVER w FROM T
+        WINDOW w AS (ORDER BY name RANGE BETWEEN 1 PRECEDING AND CURRENT ROW)
+        """,
+        fault)
+    try rejects(
+        { try fixture() },
+        """
+        SELECT x FROM T
+        WINDOW w AS (ORDER BY name RANGE BETWEEN 1 PRECEDING AND CURRENT ROW)
+        """,
+        fault)
+  }
+
+  @Test func `an unused GROUPS window without an ORDER BY validates`() throws {
+    // A GROUPS frame needs no ORDER BY: with none the whole partition is one
+    // peer group. So an unused `w` validates rather than faulting 42601, and
+    // referencing it runs the whole-partition frame — run ≡ validate. Pre-fix
+    // both the reference and the unused definition faulted 42601 ("a GROUPS
+    // window frame requires an ORDER BY").
+    let unused =
+        """
+        SELECT x FROM T
+        WINDOW w AS (GROUPS BETWEEN CURRENT ROW AND CURRENT ROW)
+        """
+    let columns = try fixture().columns(of: parse(query: unused),
+                                        validate: true)
+    #expect(columns.map(\.name) == ["x"])
+    // Referencing `w` runs: the whole partition (x = 1, 2) sums 3 on each row.
+    try fixture().expect(
+        """
+        SELECT SUM(x) OVER w FROM T
+        WINDOW w AS (GROUPS BETWEEN CURRENT ROW AND CURRENT ROW)
+        """,
+        yields: [[3], [3]])
+  }
+}
+
+// MARK: - RANGE numeric offset frame overflow edges
+
+/// A numeric-offset `RANGE` band edge that runs past `Int`'s range on an
+/// extreme order key resolves to an empty edge, not the extreme key's own peer
+/// group: a shifted target beyond every key lies off the partition on that
+/// side, so its boundary search yields an off-partition sentinel. The direction
+/// folds in — an add-overflow sits past the late (high-index) end under `ASC`
+/// but past the early end under `DESC`, and a subtract-overflow the reverse.
+struct RangeOffsetOverflowTests {
+  @Test func `an ASC add-overflow following edge frames nothing`() throws {
+    // Ascending, a row keyed `Int.max` with `RANGE BETWEEN 1 FOLLOWING AND 1
+    // FOLLOWING` bands `[max + 1, max + 1]`, above every key, so the frame is
+    // empty and `SUM` is NULL. Saturating the edge to `Int.max` would wrongly
+    // draw the `Int.max` row in (yielding 30).
+    let catalog = try Catalog {
+      Relation("T", ["k": .integer, "v": .integer]) {
+        Row(1, 10)
+        Row(2, 20)
+        Row(Int.max, 30)
+      }
+    }
+    try catalog.expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k
+            RANGE BETWEEN 1 FOLLOWING AND 1 FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 10, 20], [2, 20, nil], [Int.max, 30, nil]])
+  }
+
+  @Test func `an ASC subtract-overflow preceding edge frames nothing`()
+      throws {
+    // Ascending, a row keyed `Int.min` with `RANGE BETWEEN 1 PRECEDING AND 1
+    // PRECEDING` bands `[min - 1, min - 1]`, below every key, so the frame is
+    // empty and `SUM` is NULL. Saturating the edge to `Int.min` would wrongly
+    // draw the `Int.min` row in (yielding 10).
+    let catalog = try Catalog {
+      Relation("T", ["k": .integer, "v": .integer]) {
+        Row(Int.min, 10)
+        Row(1, 20)
+        Row(2, 30)
+      }
+    }
+    try catalog.expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k
+            RANGE BETWEEN 1 PRECEDING AND 1 PRECEDING)
+        FROM T
+        """,
+        yields: [[Int.min, 10, nil], [1, 20, nil], [2, 30, 20]])
+  }
+
+  @Test func `a DESC subtract-overflow following edge frames nothing`()
+      throws {
+    // Descending, a `FOLLOWING` bound is the smaller-valued side, so a row
+    // keyed `Int.min` with `RANGE BETWEEN 1 FOLLOWING AND 1 FOLLOWING` bands
+    // `[min - 1, min - 1]`, past the late end of descending order — an empty
+    // frame, NULL. This mirrors the ascending add-overflow: the empty edge
+    // depends on both the sort and the bound direction, not the sign alone.
+    // Saturating to `Int.min` would draw the `Int.min` row in (yielding 30).
+    let catalog = try Catalog {
+      Relation("T", ["k": .integer, "v": .integer]) {
+        Row(2, 10)
+        Row(1, 20)
+        Row(Int.min, 30)
+      }
+    }
+    try catalog.expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k DESC
+            RANGE BETWEEN 1 FOLLOWING AND 1 FOLLOWING)
+        FROM T
+        """,
+        yields: [[2, 10, 20], [1, 20, nil], [Int.min, 30, nil]])
+  }
+
+  @Test func `a non-overflow edge near Int.max still frames its band`()
+      throws {
+    // The fix must not over-empty: an edge that does not overflow bands as
+    // before. The `Int.max` row with `RANGE BETWEEN 1 PRECEDING AND CURRENT
+    // ROW` shifts to `Int.max - 1`, drawing in the `Int.max - 1` peer (20) and
+    // itself (30) for 50 — unchanged by the overflow path.
+    let catalog = try Catalog {
+      Relation("T", ["k": .integer, "v": .integer]) {
+        Row(1, 10)
+        Row(Int.max - 1, 20)
+        Row(Int.max, 30)
+      }
+    }
+    try catalog.expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k
+            RANGE BETWEEN 1 PRECEDING AND CURRENT ROW)
+        FROM T
+        """,
+        yields: [[1, 10, 10], [Int.max - 1, 20, 20], [Int.max, 30, 50]])
+  }
+}
+
+// MARK: - RANGE numeric offset frame NULL runs at an unbounded edge
+
+/// A `NULL` order key sorts to one physical end of window order — the low end
+/// under `ASC` (adjacent to `UNBOUNDED PRECEDING`), the high end under `DESC`
+/// (adjacent to `UNBOUNDED FOLLOWING`). A numeric-offset `RANGE` edge that runs
+/// off the present (non-`NULL`) span resolves to that span's boundary, not the
+/// partition's, so a `NULL` run lying on an unbounded side stays in the frame;
+/// the frame's intersection with the value-bounded other edge then self-gates
+/// whether the run is actually drawn in. These pin that a `NULL` peer adjacent
+/// to an unbounded edge is retained while a value-versus-value band leaves it
+/// out.
+struct RangeOffsetUnboundedNullTests {
+  /// Ascending, a leading `NULL` run at the low end of window order, next to
+  /// `UNBOUNDED PRECEDING`; distinct values pin which rows the band draws in.
+  private func leading() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("T", ["k": .integer, "v": .integer]) {
+        Row(nil, 100)
+        Row(1, 10)
+        Row(2, 20)
+      }
+    }
+  }
+
+  @Test func `UNBOUNDED PRECEDING retains a leading NULL peer`() throws {
+    // `RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING`: at k=1 the upper
+    // edge shifts to 0, past every present key, resolving to the low `NULL`
+    // index rather than an empty edge — the frame is the leading `NULL` row, so
+    // `LAST_VALUE` reads its 100, not the empty frame's `NULL`. At k=2 the edge
+    // lands on the k=1 row, framing the `NULL` row and the k=1 row, so
+    // `LAST_VALUE` reads the k=1 row's 10. The `NULL` key's own frame is its
+    // peer group. The frame edge is read directly (not through the aggregate's
+    // running fold), so the value functions expose the boundary.
+    try leading().expect(
+        """
+        SELECT k, v, LAST_VALUE(v) OVER (ORDER BY k
+            RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
+        FROM T
+        """,
+        yields: [[nil, 100, 100], [1, 10, 100], [2, 20, 10]])
+    // `FIRST_VALUE` pins the leading `NULL` as the frame's first row at k=1 and
+    // k=2 alike — 100, the `NULL` row's value, never the empty frame's `NULL`.
+    try leading().expect(
+        """
+        SELECT k, v, FIRST_VALUE(v) OVER (ORDER BY k
+            RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
+        FROM T
+        """,
+        yields: [[nil, 100, 100], [1, 10, 100], [2, 20, 100]])
+  }
+
+  @Test func `UNBOUNDED FOLLOWING retains a trailing NULL peer`() throws {
+    // Descending, the `NULL` run sits at the high end next to `UNBOUNDED
+    // FOLLOWING`. `RANGE BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING`: at k=1
+    // the lower edge shifts past the last present key and resolves to the high
+    // `NULL` index, so the frame is the trailing `NULL` row and `FIRST_VALUE`
+    // reads its 99 (not the empty frame's `NULL`). At k=2 the edge lands on the
+    // k=1 row, framing it and the `NULL` row, so `FIRST_VALUE` reads the k=1
+    // row's 10. The `NULL` key frames only its peer.
+    let catalog = try Catalog {
+      Relation("T", ["k": .integer, "v": .integer]) {
+        Row(2, 20)
+        Row(1, 10)
+        Row(nil, 99)
+      }
+    }
+    try catalog.expect(
+        """
+        SELECT k, v, FIRST_VALUE(v) OVER (ORDER BY k DESC
+            RANGE BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING)
+        FROM T
+        """,
+        yields: [[2, 20, 10], [1, 10, 99], [nil, 99, 99]])
+  }
+
+  @Test func `an overflow edge retains a leading NULL peer`() throws {
+    // The overflow short-circuit takes the same present boundary. Ascending
+    // `[NULL, Int.min]` with `RANGE BETWEEN UNBOUNDED PRECEDING AND 1
+    // PRECEDING`: at k=Int.min the upper edge subtract-overflows `Int`, so it
+    // resolves to the low `NULL` index rather than the `-1` sentinel — the
+    // frame is the leading `NULL` row, so `LAST_VALUE` reads its 100, not the
+    // empty frame's `NULL`.
+    let catalog = try Catalog {
+      Relation("T", ["k": .integer, "v": .integer]) {
+        Row(nil, 100)
+        Row(Int.min, 10)
+      }
+    }
+    try catalog.expect(
+        """
+        SELECT k, v, LAST_VALUE(v) OVER (ORDER BY k
+            RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
+        FROM T
+        """,
+        yields: [[nil, 100, 100], [Int.min, 10, 100]])
+  }
+
+  @Test func `a value-versus-value band leaves the NULL run out`() throws {
+    // The self-gating regression guard: with both edges value-bounded, a
+    // `NULL` run is never drawn in. `RANGE BETWEEN 2 PRECEDING AND 1 PRECEDING`
+    // at k=1 has a start edge that cannot reach below the present span, so it
+    // stays empty and `SUM` is `NULL`; only the unbounded cases above gain the
+    // adjacent `NULL`.
+    try leading().expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k
+            RANGE BETWEEN 2 PRECEDING AND 1 PRECEDING)
+        FROM T
+        """,
+        yields: [[nil, 100, 100], [1, 10, nil], [2, 20, 10]])
+  }
+}
+
+// MARK: - RANGE numeric offset frame band search
+
+/// A numeric-offset `RANGE` band edge is located by a direction-aware binary
+/// search over the partition's precomputed non-`NULL` key span, replacing the
+/// per-row linear scan. These pin the search's tie boundaries — a `start` edge
+/// takes the first of a tie run at or after the lower edge (a lower bound) and
+/// an `end` edge the last of a tie run at or before the upper edge (an upper
+/// bound) — under both `ASC` and `DESC`, so the search matches the old scan.
+struct RangeOffsetBandSearchTests {
+  /// Ties (three 3s) and gaps (1 → 3 → 5 → 8) with distinct values, so a value
+  /// band's membership and its `FIRST_VALUE`/`LAST_VALUE` edges reveal exactly
+  /// which slot the search lands on.
+  private func fixture() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("T", ["k": .integer, "v": .integer]) {
+        Row(1, 10)
+        Row(3, 20)
+        Row(3, 30)
+        Row(3, 40)
+        Row(5, 50)
+        Row(8, 60)
+      }
+    }
+  }
+
+  @Test func `an ascending band draws the tie-correct rows`() throws {
+    // Band [k - 2, k + 2] ascending: k=1 sees 1,3,3,3 (100); each k=3 sees
+    // 1,3,3,3,5 (150); k=5 sees 3,3,3,5 (140); k=8 is isolated (60). The tie
+    // run of 3s is wholly in or out of a band, never split.
+    try fixture().expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k
+            RANGE BETWEEN 2 PRECEDING AND 2 FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 10, 100], [3, 20, 150], [3, 30, 150],
+                 [3, 40, 150], [5, 50, 140], [8, 60, 60]])
+  }
+
+  @Test func `ascending edges land on the tie run bounds`() throws {
+    // FIRST_VALUE reads the start edge, LAST_VALUE the end edge of [k - 2,
+    // k + 2]. k=5's start edge (value 3) is the FIRST of the tie run (20, a
+    // lower bound); k=1's end edge (value 3) is the LAST of the tie run (40, an
+    // upper bound). k=8's start edge (value 6) has no exact key, so it lands on
+    // the next key up (60); k=5's end edge (value 7) lands on the key below
+    // (50).
+    try fixture().expect(
+        """
+        SELECT k, FIRST_VALUE(v) OVER (ORDER BY k
+            RANGE BETWEEN 2 PRECEDING AND 2 FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 10], [3, 10], [3, 10], [3, 10], [5, 20], [8, 60]])
+    try fixture().expect(
+        """
+        SELECT k, LAST_VALUE(v) OVER (ORDER BY k
+            RANGE BETWEEN 2 PRECEDING AND 2 FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 40], [3, 50], [3, 50], [3, 50], [5, 50], [8, 60]])
+  }
+
+  @Test func `a descending band draws the tie-correct rows`() throws {
+    // Descending, a PRECEDING bound is the larger-valued side, so `1 PRECEDING
+    // AND 2 FOLLOWING` bands [k - 2, k + 1]: k=1 is isolated (10); each k=3
+    // sees 1,3,3,3 (100); k=5 sees 3,3,3,5 (140); k=8 is isolated (60).
+    try fixture().expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k DESC
+            RANGE BETWEEN 1 PRECEDING AND 2 FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 10, 10], [3, 20, 100], [3, 30, 100],
+                 [3, 40, 100], [5, 50, 140], [8, 60, 60]])
+  }
+
+  @Test func `descending edges land on the tie run bounds`() throws {
+    // Under DESC window order (8,5,3,3,3,1) the band [k - 2, k + 1].
+    // FIRST_VALUE reads the frame's first row (the larger-keyed side),
+    // LAST_VALUE its last
+    // (the smaller). Each k=3's frame runs 3,3,3,1, so FIRST_VALUE is the first
+    // of the tie run (20) and LAST_VALUE the trailing key 1 (10); k=5's frame
+    // runs 5,3,3,3, so LAST_VALUE is the last of the tie run (40).
+    try fixture().expect(
+        """
+        SELECT k, FIRST_VALUE(v) OVER (ORDER BY k DESC
+            RANGE BETWEEN 1 PRECEDING AND 2 FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 10], [3, 20], [3, 20], [3, 20], [5, 50], [8, 60]])
+    try fixture().expect(
+        """
+        SELECT k, LAST_VALUE(v) OVER (ORDER BY k DESC
+            RANGE BETWEEN 1 PRECEDING AND 2 FOLLOWING)
+        FROM T
+        """,
+        yields: [[1, 10], [3, 10], [3, 10], [3, 10], [5, 40], [8, 60]])
+  }
+
+  @Test func `a NULL peer run stays outside every value band`() throws {
+    // Two NULL keys form a peer run the search excludes from `present`: under
+    // ASC the NULLs sort to the low index end, under DESC to the high end, so
+    // each spans a different edge of the non-NULL range. Either way a NULL row
+    // frames only its NULL peers (5,7 → 12) and no non-NULL band draws a NULL
+    // in — k=1's band [0,2] sees 1,2 (30), never the NULLs beside it.
+    let catalog = try Catalog {
+      Relation("T", ["k": .integer, "v": .integer]) {
+        Row(nil, 5)
+        Row(nil, 7)
+        Row(1, 10)
+        Row(2, 20)
+        Row(4, 40)
+      }
+    }
+    let band: Array<Array<(any ValueConvertible)?>> =
+        [[nil, 5, 12], [nil, 7, 12], [1, 10, 30],
+         [2, 20, 30], [4, 40, 40]]
+    try catalog.expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k
+            RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING)
+        FROM T
+        """,
+        yields: band)
+    try catalog.expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k DESC
+            RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING)
+        FROM T
+        """,
+        yields: band)
+  }
+
+  @Test func `the band holds across a larger partition`() throws {
+    // A correctness-at-size check, not a benchmark — a unit test cannot assert
+    // big-O. A few dozen keyed rows with ties and gaps, each row's band
+    // [k - 2, k + 3] computed independently by a brute-force value-membership
+    // scan (the naive definition the binary search replaces) and matched
+    // against the engine's searched band, so the search stays correct at size.
+    let keys = [0, 0, 1, 3, 3, 3, 4, 7, 7, 10, 10, 10, 11, 12, 14, 14,
+                17, 17, 17, 20, 21, 21, 24, 24, 24, 25, 28, 30, 30, 33]
+    let catalog = FixtureCatalog(
+        ["T": FixtureRelation(
+            [FixtureField(name: "k", type: .integer),
+             FixtureField(name: "v", type: .integer)],
+            keys.indices.map { [.integer(keys[$0]), .integer($0)] })])
+    let expected: Array<Array<(any ValueConvertible)?>> =
+        keys.indices.map { slot in
+          let key = keys[slot]
+          let total = keys.indices
+              .filter { keys[$0] >= key - 2 && keys[$0] <= key + 3 }
+              .reduce(0, +)
+          return [key, slot, total]
+        }
+    try catalog.expect(
+        """
+        SELECT k, v, SUM(v) OVER (ORDER BY k
+            RANGE BETWEEN 2 PRECEDING AND 3 FOLLOWING)
+        FROM T
+        """,
+        yields: expected)
+  }
+}
+
 // MARK: - Resolution parity (run ≡ validate)
 
 /// A window function the executor does not yet compute, or one written outside
@@ -1353,26 +2367,81 @@ struct WindowFunctionRejectionTests {
                 .column("0"))
   }
 
-  @Test func `a RANGE numeric offset frame is rejected`() throws {
-    // A RANGE frame measured by an n PRECEDING/FOLLOWING order-key offset is
-    // not yet computed; only the partition edges and the peer group are.
+  @Test func `a RANGE offset frame without an ORDER BY is rejected`() throws {
+    // A numeric-offset RANGE band measures against the single order-key value;
+    // with no ORDER BY there is none, so both paths fault 42601. (A numeric
+    // RANGE offset over one ordered key now executes — see the offset suite.)
     try rejects(
         """
-        SELECT SUM(x) OVER (ORDER BY x
-            RANGE BETWEEN 1 PRECEDING AND CURRENT ROW)
+        SELECT SUM(x) OVER (RANGE BETWEEN 1 PRECEDING AND CURRENT ROW)
         FROM T
         """,
-        .state("0A000", "a RANGE numeric offset frame is not yet supported"))
+        .state("42601",
+               "a RANGE offset frame requires a single ORDER BY key"))
   }
 
-  @Test func `a GROUPS frame is rejected`() throws {
-    try rejects(
+  @Test func `a RANGE offset frame with two ORDER BY keys is rejected`()
+      throws {
+    // The band measures one value, so a pair of order keys is ambiguous —
+    // 42601 on both the run and validate paths.
+    let sql =
         """
-        SELECT SUM(x) OVER (ORDER BY x
-            GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW)
+        SELECT SUM(a) OVER (ORDER BY a, b
+            RANGE BETWEEN 1 PRECEDING AND CURRENT ROW)
+        FROM T
+        """
+    let fault = SQLError.state("42601",
+        "a RANGE offset frame requires a single ORDER BY key")
+    try Catalog {
+      Relation("T", ["a": .integer, "b": .integer]) { Row(1, 2) }
+    }.expect(sql, fails: fault)
+    #expect(throws: fault) {
+      _ = try Catalog {
+        Relation("T", ["a": .integer, "b": .integer]) { Row(1, 2) }
+      }.columns(of: parse(query: sql), validate: true)
+    }
+  }
+
+  @Test func `a RANGE offset frame over a non-numeric key is rejected`()
+      throws {
+    // The offset arithmetic is numeric, so a text order key cannot be banded
+    // (the engine has no datetime/interval arithmetic) — 42601 on both paths.
+    let sql =
+        """
+        SELECT COUNT(*) OVER (ORDER BY name
+            RANGE BETWEEN 1 PRECEDING AND CURRENT ROW)
+        FROM T
+        """
+    let fault = SQLError.state("42601",
+        "a RANGE offset frame requires a numeric ORDER BY key")
+    try Catalog {
+      Relation("T", ["name": .text]) { Row("a") }
+    }.expect(sql, fails: fault)
+    #expect(throws: fault) {
+      _ = try Catalog {
+        Relation("T", ["name": .text]) { Row("a") }
+      }.columns(of: parse(query: sql), validate: true)
+    }
+  }
+
+  @Test func `an unordered GROUPS frame frames the whole partition`() throws {
+    // A GROUPS frame needs no ORDER BY — with none every partition row is a
+    // peer, so the whole partition is one peer group and the frame resolves
+    // against it. `1 PRECEDING AND CURRENT ROW` clamps to the partition start
+    // and the single group's end, framing every row (the table total). Pre-fix
+    // this faulted 42601 ("a GROUPS window frame requires an ORDER BY").
+    try Catalog {
+      Relation("T", ["x": .integer]) {
+        Row(10)
+        Row(20)
+        Row(30)
+      }
+    }.expect(
+        """
+        SELECT SUM(x) OVER (GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW)
         FROM T
         """,
-        .state("0A000", "a GROUPS window frame is not yet supported"))
+        yields: [[60], [60], [60]])
   }
 
   @Test func `a frame starting at UNBOUNDED FOLLOWING is rejected`() throws {

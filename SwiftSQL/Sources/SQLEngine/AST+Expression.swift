@@ -165,13 +165,23 @@ extension WindowFunction {
 /// written).
 public struct WindowSpec: Hashable, Sendable {
   /// The name of a `WINDOW` clause window this specification references
-  /// (`OVER w`), or `nil` for an inline specification (`OVER (…)`). A reference
-  /// is a forward one — the `WINDOW` clause follows the projection — so it
-  /// carries no `PARTITION`/`ORDER`/frame of its own here; it is inlined to the
-  /// named window's specification by the `Query.expanded` prelude before any
-  /// structural walk descends it, so a bare reference and the inline form
-  /// resolve identically.
+  /// (`OVER w`, `OVER (w …)`), or `nil` for an inline specification naming no
+  /// base. It is resolved to the named window's specification by the
+  /// `Query.expanded` prelude before any structural walk descends it, so a
+  /// reference and the inline form resolve identically.
   public let base: String?
+
+  /// Whether this is a parenthesized in-line specification that references a
+  /// base (`OVER (w)`, `OVER (w …)`, or a `WINDOW name AS (…)` definition)
+  /// rather than a bare window-name reference (`OVER w`). ISO 9075 splits a
+  /// bare `<window name>`, which uses the named window wholesale (frame
+  /// included), from an `<in-line window specification>` `(w …)`, which copies
+  /// the named window and so cannot copy a framed one — even `OVER (w)` adding
+  /// nothing. It defaults to `false`, so a programmatic `WindowSpec(base: "w")`
+  /// is the wholesale bare form; the parser passes `true` for a parenthesized
+  /// spec. It matters only with a `base`, so a base-less spec normalizes to
+  /// `false` — its value never distinguishes two otherwise-equal specs.
+  public let parenthesized: Bool
 
   /// The `PARTITION BY` keys — the rows split into one partition per distinct
   /// key combination — empty when no `PARTITION BY` is written.
@@ -186,9 +196,13 @@ public struct WindowSpec: Hashable, Sendable {
   /// through the current peer group with one).
   public let frame: Frame?
 
-  public init(base: String? = nil, partition: Array<Expression> = [],
-              order: Order? = nil, frame: Frame? = nil) {
+  public init(base: String? = nil, parenthesized: Bool = false,
+              partition: Array<Expression> = [], order: Order? = nil,
+              frame: Frame? = nil) {
     self.base = base
+    // The flag is meaningful only for a base reference; normalize a base-less
+    // spec to `false` so two otherwise-equal specs never differ on a dead flag.
+    self.parenthesized = base == nil ? false : parenthesized
     self.partition = partition
     self.order = order
     self.frame = frame

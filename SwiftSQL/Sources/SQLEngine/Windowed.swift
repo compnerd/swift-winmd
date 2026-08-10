@@ -817,29 +817,103 @@ extension Predicate {
 // MARK: - Named-window inlining
 
 extension WindowSpec {
-  /// This specification with a named-window reference (`OVER w`) resolved to
-  /// the specification `windows` defines under that name, an inline spec (`OVER
-  /// (…)`) returned unchanged. A reference to an undefined window faults
-  /// `42704`; a refinement (a base name with added `PARTITION`/`ORDER`/frame
-  /// clauses) and a chained reference (a named window that itself references
-  /// another) are not yet supported and fault `0A000`. Each fault is on both
-  /// the run and validate paths, since the inlining runs at the shared
-  /// `Query.expanded` prelude.
+  /// This projection reference (`OVER w` / `OVER (w …)`) resolved to the ISO
+  /// 9075 window it names in `windows`, merged with the referencing clauses; an
+  /// inline spec (no base) is returned unchanged. It is the USE context — a
+  /// function's `OVER` clause — where the `WINDOW` clause is fully in scope, so
+  /// the base is looked up across the whole list. The named window is itself
+  /// resolved (`Array.resolved(at:)`, the DEFINITION context) first, so a chain
+  /// collapses to a base-free spec.
+  ///
+  /// A bare `OVER w` uses the named window wholesale — its partitioning, `ORDER
+  /// BY`, and frame — so a framed window is usable by a bare reference. A
+  /// parenthesized form (`OVER (w)`, or `OVER (w …)` adding an `ORDER BY`
+  /// and/or a frame) is an in-line specification that copies the base — even
+  /// `OVER (w)` adding nothing — so it may not copy a framed base. The merged
+  /// spec takes the base's partitioning, the base's `ORDER BY` else the
+  /// reference's, and the reference's frame else the base's.
+  ///
+  /// Faults, each on both the run and validate paths (the inlining runs at the
+  /// shared `Query.expanded` prelude): an undefined window `42704`; a reference
+  /// adding a `PARTITION BY`, a parenthesized copy of a framed window, or an
+  /// added `ORDER BY` overriding the base's, `42601`.
   internal func resolved(against windows: Array<NamedWindow>)
       throws(SQLError) -> WindowSpec {
     guard let base else { return self }
-    guard partition.isEmpty, order == nil, frame == nil else {
-      throw .state("0A000", "refining a named window is not yet supported")
+    // A reference inherits the base's partitioning; it may not add its own.
+    guard partition.isEmpty else {
+      throw .state("42601",
+                   "a window referencing \"\(base)\" cannot add a PARTITION BY")
     }
-    guard let named = windows.first(where: {
+    guard let index = windows.firstIndex(where: {
       $0.name.lowercased() == base.lowercased()
-    })?.spec else {
+    }) else {
       throw .state("42704", "window \"\(base)\" is not defined")
     }
-    guard named.base == nil else {
-      throw .state("0A000", "a chained window reference is not yet supported")
+    let referenced = try windows.resolved(at: index)
+    // A parenthesized reference (`OVER (w …)`, or even a bare `OVER (w)`) is an
+    // in-line specification that copies the named window, so it cannot copy a
+    // framed base; a bare `OVER w` uses the window wholesale, inheriting its
+    // frame.
+    if parenthesized, referenced.frame != nil {
+      throw .state("42601",
+                   "window \"\(base)\" has a frame and cannot be copied")
     }
-    return named
+    // An added `ORDER BY` cannot override the base's.
+    if order != nil, referenced.order != nil {
+      throw .state("42601",
+                   "window \"\(base)\" already orders and its ORDER BY "
+                   + "cannot be overridden")
+    }
+    return WindowSpec(base: nil, partition: referenced.partition,
+                      order: referenced.order ?? order,
+                      frame: frame ?? referenced.frame)
+  }
+}
+
+extension Array where Element == NamedWindow {
+  /// The named window at `index` resolved for its own definition — the
+  /// DEFINITION context, distinct from a projection's `OVER` reference. A
+  /// definition references only an earlier window (its preceding prefix — ISO
+  /// scoping: a `WINDOW` entry sees only those before it), and it copies its
+  /// base into a new window, so the base must carry no frame even for a bare
+  /// reference (`v AS (w)`) — unlike a direct `OVER w`, which may use a framed
+  /// window wholesale. Because a base is always strictly earlier, a chain is
+  /// acyclic by construction and the recursion terminates without a cycle
+  /// guard.
+  ///
+  /// Faults mirror the USE context: an out-of-scope base (not in the prefix)
+  /// `42704`; a definition adding a `PARTITION BY`, copying a framed base, or
+  /// adding an `ORDER BY` over one the base already has, `42601`.
+  internal func resolved(at index: Int) throws(SQLError) -> WindowSpec {
+    let spec = self[index].spec
+    guard let base = spec.base else { return spec }
+    let key = base.lowercased()
+    guard spec.partition.isEmpty else {
+      throw .state("42601",
+                   "a window referencing \"\(base)\" cannot add a PARTITION BY")
+    }
+    // A definition sees only the windows defined before it — its prefix.
+    guard let baseIndex = self[..<index].firstIndex(where: {
+      $0.name.lowercased() == key
+    }) else {
+      throw .state("42704", "window \"\(base)\" is not defined")
+    }
+    let referenced = try resolved(at: baseIndex)
+    // A definition copies its base, so the base carries no frame of its own —
+    // even a bare `v AS (w)` cannot inherit one (only a direct `OVER w` may).
+    guard referenced.frame == nil else {
+      throw .state("42601",
+                   "window \"\(base)\" has a frame and cannot be a base")
+    }
+    // An added `ORDER BY` cannot override the base's.
+    if spec.order != nil, referenced.order != nil {
+      throw .state("42601",
+                   "window \"\(base)\" already orders and its ORDER BY "
+                   + "cannot be overridden")
+    }
+    return WindowSpec(base: nil, partition: referenced.partition,
+                      order: referenced.order ?? spec.order, frame: spec.frame)
   }
 }
 

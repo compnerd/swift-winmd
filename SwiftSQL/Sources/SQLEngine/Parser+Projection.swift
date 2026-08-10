@@ -468,6 +468,8 @@ extension Parser {
     // specification. A window name is an identifier, distinct from the
     // parenthesised inline specification.
     guard current?.kind == .lparen else {
+      // A bare `<window name>` uses the named window wholesale (the default
+      // `parenthesized: false`); a parenthesized `( … )` copies it (`true`).
       return WindowSpec(base: try identifier())
     }
     return try windowspec()
@@ -494,8 +496,10 @@ extension Parser {
     let order: Order? = try match(.order) ? self.order() : nil
     let frame = try self.frame()
     try expect(.rparen)
-    return WindowSpec(base: base, partition: partition, order: order,
-                      frame: frame)
+    // A parenthesized spec — the init normalizes the flag back to `false` when
+    // it names no base, so only a base reference carries the copy flag.
+    return WindowSpec(base: base, parenthesized: true, partition: partition,
+                      order: order, frame: frame)
   }
 
   /// Parses a `SELECT`'s `WINDOW` clause — `WINDOW name AS (<window spec>) (','

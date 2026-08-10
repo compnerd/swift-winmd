@@ -13,9 +13,15 @@ import func SQLTestSupport.parse
 /// before faulting — the deep cases here parse to a clean fault, never a crash.
 struct ParserDepthTests {
   private func sqlstate(parsing sql: String) -> String? {
-    do { _ = try parse(query: sql); return nil }
-    catch let error as SQLError { return error.sqlstate }
-    catch { return nil }
+    // `parse(query:)` has typed throws (`throws(SQLError)`), so the caught
+    // `error` is already an `SQLError` — no `as SQLError` cast (always true) or
+    // catch-all needed.
+    do {
+      _ = try parse(query: sql)
+      return nil
+    } catch {
+      return error.sqlstate
+    }
   }
 
   @Test func `deeply nested input faults 54001, not a stack overrun`() throws {

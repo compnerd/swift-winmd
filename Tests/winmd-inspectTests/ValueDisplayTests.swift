@@ -6,6 +6,7 @@ import Testing
 @testable import winmd_inspect
 
 import SQLEngine
+import SQLShell
 
 private struct Display: Sendable, CustomTestStringConvertible {
   internal let value: Value

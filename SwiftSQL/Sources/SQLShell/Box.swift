@@ -1,7 +1,7 @@
 // Copyright © 2026 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-internal import SQLEngine
+public import SQLEngine
 
 // MARK: - Display width
 
@@ -85,7 +85,7 @@ extension StringProtocol {
 /// It is a stateless renderer, not a value: the one `render` static builds the
 /// string and nothing outlives the call, so it is a `caseless enum` namespace
 /// rather than a struct with no stored properties.
-internal enum Box {
+public enum Box {
   /// The single space of padding on each side of every cell.
   private static let padding = " "
 
@@ -98,8 +98,8 @@ internal enum Box {
   /// short arm) pads the missing trailing cells empty, and a cell past `names`
   /// is ignored, so a ragged result still frames cleanly. With no rows the
   /// header and frame print alone.
-  internal static func render(_ names: Array<String>,
-                              _ rows: Array<Array<Value>>) -> String {
+  public static func render(_ names: Array<String>,
+                            _ rows: Array<Array<Value>>) -> String {
     // The display text of every cell, sized alongside its header so a column is
     // as wide as its widest occupant.
     let cells = rows.map { row in

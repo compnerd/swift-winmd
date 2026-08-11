@@ -121,6 +121,16 @@ internal struct ScopedRelations: Hashable, Sendable,
   internal var isEmpty: Bool {
     base.isEmpty && layers.allSatisfy(\.isEmpty)
   }
+
+  /// The statement-scoped base bindings — every common table expression and
+  /// `definition_schema.` store relation in scope, keyed case-folded. The
+  /// windowed grouping-sets local-membership walk reads their exposed column
+  /// names (`Catalog.schemas`) so an unqualified subquery reference to a CTE or
+  /// store column binds locally rather than being mis-rewritten to an outer
+  /// group key. The derived layers are excluded: a nested subquery's FROM never
+  /// sees an enclosing SELECT's derived aliases, so only the base layer names a
+  /// relation a hosted subquery can reference.
+  internal var bindings: Dictionary<String, RelationInstance> { base }
 }
 
 /// An escapable, in-engine relation over `(columns, rows)`.

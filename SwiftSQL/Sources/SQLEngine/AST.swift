@@ -651,7 +651,6 @@ public struct Select: Hashable, Sendable {
   /// caller picks to mirror the resolver's lowering (see `orderKeys`).
   private func keys(named output: KeyPath<Projected, String?>)
       -> Array<Expression> {
-    guard let order else { return [] }
     // Only an `expressions` list carries a projection expression an ordinal or
     // an output-name key could reach; a `*` or bare-column projection names
     // plain column slots compilation already resolves.
@@ -661,32 +660,7 @@ public struct Select: Hashable, Sendable {
     } else {
       items = []
     }
-    var expressions = Array<Expression>()
-    for key in order.keys {
-      switch key.sort {
-      case let .ordinal(position):
-        // An ordinal names the `position`-th projected output (1-based); the
-        // sort recomputes that item's expression below the limit. An
-        // out-of-range ordinal is `compile`'s fault to raise, so skip it here.
-        if position >= 1, position <= items.count {
-          expressions.append(items[position - 1].expression)
-        }
-      case let .expression(expression):
-        // A bare unqualified name binds a matching projection output name
-        // before an input column (the ISO precedence), resolving to that
-        // item's expression — the output surface (`output`) mirrors the
-        // resolver's lowering for this query shape.
-        if case let .column(column) = expression, column.qualifier == nil,
-            let item = items.first(where: {
-              $0[keyPath: output]?.lowercased() == column.name.lowercased()
-            }) {
-          expressions.append(item.expression)
-        } else {
-          expressions.append(expression)
-        }
-      }
-    }
-    return expressions
+    return SQLEngine.orderKeys(items, order, named: output)
   }
 
   /// The projection and ORDER BY expressions the select evaluates, for routing
@@ -714,6 +688,38 @@ public struct Select: Hashable, Sendable {
     }
     return evaluated
   }
+}
+
+/// The `order` sort keys resolved to the value expression each sort evaluates,
+/// over the projected `items` — the one resolver a select's `orderKeys` and a
+/// windowed grouping-sets outer layer share, so the sort-output model cannot
+/// drift. An ordinal names the `position`-th item (1-based); a bare
+/// unqualified name binds a matching output `named` before an input column (the
+/// ISO precedence); any other key keeps its own expression. An out-of-range
+/// ordinal is `compile`'s fault to raise, so it is skipped here.
+internal func orderKeys(_ items: Array<Projected>, _ order: Order?,
+                        named: KeyPath<Projected, String?>)
+    -> Array<Expression> {
+  guard let order else { return [] }
+  var expressions = Array<Expression>()
+  for key in order.keys {
+    switch key.sort {
+    case let .ordinal(position):
+      if position >= 1, position <= items.count {
+        expressions.append(items[position - 1].expression)
+      }
+    case let .expression(expression):
+      if case let .column(column) = expression, column.qualifier == nil,
+          let item = items.first(where: {
+            $0[keyPath: named]?.lowercased() == column.name.lowercased()
+          }) {
+        expressions.append(item.expression)
+      } else {
+        expressions.append(expression)
+      }
+    }
+  }
+  return expressions
 }
 
 /// A relation in a `FROM` or `JOIN`: a base relation named by an identifier, or
@@ -911,9 +917,22 @@ public struct Column: Hashable, Sendable, ExpressibleByStringLiteral {
   /// The column name.
   public let name: String
 
-  public init(qualifier: String? = nil, name: String) {
+  /// Whether this is an engine-synthesized internal reference no user
+  /// identifier can mint — the lifted `*gwN` union columns a windowed
+  /// `GROUPING SETS` rewrite addresses (`GroupingSets`). It rides the
+  /// reference's identity so a quoted user alias spelled exactly `"*gw0"`
+  /// stays distinct from the internal `*gw0`: the parser only ever mints a
+  /// non-synthetic reference, and this flag participates in equality, so the
+  /// two never compare equal. The query-level `ORDER BY` binds a synthetic
+  /// reference to its union column structurally (against the arm-synthesized
+  /// union scope) rather than by output-alias precedence, so a colliding user
+  /// alias cannot capture it (`Windowed.order`).
+  public let synthetic: Bool
+
+  public init(qualifier: String? = nil, name: String, synthetic: Bool = false) {
     self.qualifier = qualifier
     self.name = name
+    self.synthetic = synthetic
   }
 
   /// Parses a reference from its dotted spelling: the text before the last dot
@@ -936,6 +955,7 @@ public struct Column: Hashable, Sendable, ExpressibleByStringLiteral {
       self.qualifier = nil
       self.name = spelling
     }
+    self.synthetic = false
   }
 
   public init(stringLiteral value: String) {

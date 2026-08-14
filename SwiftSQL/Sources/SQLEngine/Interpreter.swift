@@ -148,6 +148,15 @@ extension Catalog where Self: ~Escapable {
     case let .sort(keys, source):
       return try sorted(execute(source, carrying: union, context), keys,
                         context)
+    case let .window(windowings, source):
+      // A windowed `GROUP BY GROUPING SETS` result is a carrier stack over the
+      // arm union (`compile(windowed sets:)`): descend into the window's child
+      // carrying the union — so its setop leaf per-arm augments the arm-local
+      // derived aliases the query-level augment misses — then compute the
+      // windowings over those augmented records, the same as the plain window
+      // node's execution.
+      return try windowed(execute(source, carrying: union, context),
+                          windowings, context)
     case let .distinct(source):
       return deduplicated(try execute(source, carrying: union, context))
     case let .limit(count, offset, source):

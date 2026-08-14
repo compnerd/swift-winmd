@@ -335,11 +335,17 @@ extension Catalog where Self: ~Escapable {
     switch query.body {
     case let .select(select):
       // A `GROUP BY GROUPING SETS (…)` derives its schema through the same
-      // `UNION ALL` expansion the compile path uses, so the run and the derived
-      // columns cannot diverge (`run ≡ columns(of:)`): the arms' NULL-padded
-      // columns type through the set-operation `merge` exactly as the run's do.
+      // lowering the compile path uses, so the run and the derived columns
+      // cannot diverge (`run ≡ columns(of:)`). A windowed one derives the outer
+      // window layer over the arm union's schema — the schema twin of the
+      // direct compile lowering (`compile(windowed sets:)`) — while a
+      // non-windowed one derives its `UNION ALL` expansion, whose arms'
+      // NULL-padded columns type through the set-operation `merge` as the run's
+      // do.
       if case let .sets(sets) = select.grouping {
-        cols = try columns(unifying: expand(select, sets: sets), context)
+        cols = select.windows
+            ? try columns(windowed: select, sets: sets, context)
+            : try columns(unifying: expand(select, sets: sets), context)
       } else {
         cols = try arms(of: select, context)
       }
@@ -933,6 +939,21 @@ extension Catalog where Self: ~Escapable {
 
   private borrowing func typecheck(_ select: Select, _ context: Context)
       throws(SQLError) {
+    // A windowed `GROUP BY GROUPING SETS` select lowers to a window over the
+    // arm union (`compile(windowed sets:)`); its outer window layer references
+    // only synthetic `*gwN` union columns, so every real operand — a group key,
+    // an aggregate, a `GROUPING(…)`, a scalar over them — lives in the arm
+    // union. Type-check (and, on the run's comparability walk, compare) it, so
+    // a reachable-operand or cross-kind-comparison fault surfaces exactly as a
+    // run does, in the mode this `context` carries. The window structure itself
+    // (its function, frame, and slot positions) is validated by `compile`, the
+    // parity gate both paths run before this.
+    if select.windows, case let .sets(sets) = select.grouping {
+      let union = try decompose(windowed: select, sets: sets,
+                                context.routines).union
+      try typecheck(union, context)
+      return
+    }
     // The run's comparability walk visits every reachable comparison surface of
     // this select for the ISO comparability rule — its WHERE, join `ON`s,
     // HAVING, projection, `GROUP BY` and `ORDER BY` keys, aggregate `FILTER`s,
@@ -1790,6 +1811,49 @@ extension Catalog where Self: ~Escapable {
     return (terms, { expression throws(SQLError) in
       try grouped.resolve(expression, routines, subquery: subquery)
     })
+  }
+
+  /// The result columns of a windowed `GROUP BY GROUPING SETS` `select` — the
+  /// schema twin of the direct compile lowering (`compile(windowed sets:)`), so
+  /// validate types exactly the shape run computes (run ≡ columns(of:)).
+  ///
+  /// It reuses the same `decompose` the compile seam does — the window-free arm
+  /// union and the outer window layer's `projection` over it — derives the arm
+  /// union's output schema (its `*gwN`-named, type-unified columns), builds the
+  /// union-output `Scope` over that schema, and types each outer projected
+  /// expression against it: a `*gwN` reference by the union column's type, a
+  /// window by its result (a ranking function `.integer`, an aggregate window
+  /// from its `*gwN` argument — `derive`), exactly the type the compiled
+  /// `Windowed` surface lowers it to.
+  ///
+  /// Each output takes its name and synthesized-header provenance from the
+  /// original projected item — an alias, else a bare column's name, else the
+  /// positional `column N` an unnamed expression takes (marked synthesized), so
+  /// an unnamed windowed output feeding an outer set-op carrier stays
+  /// ordinal-only (not name-bindable), never the internal `*gwN` name it reads.
+  borrowing func columns(windowed select: Select,
+                         sets: Array<Array<Expression>>, _ context: Context)
+      throws(SQLError) -> Array<ResolvedColumn> {
+    let routines = context.routines
+    let parts = try decompose(windowed: select, sets: sets, routines)
+    // The arm union's output schema — the same columns the compile seam builds
+    // its window-source scope from — derived through the shared `columns
+    // (unifying:)` fold, so the arms' NULL-padded columns type through the
+    // set-operation `merge` exactly as at compile.
+    let inner = try columns(unifying: parts.union, context)
+    let arity = inner.count
+    let schema = Schema(from: inner, names: inner.map(\.name), extent: arity,
+                        virtuals: [])
+    let scope = Scope([(Relation(derived: parts.union.arm, as: ""), schema)])
+    // Type each outer window-layer item over the union scope, naming it from
+    // the original item — an inferable name, else a synthesized `column N`.
+    return try parts.items.indices.map { index throws(SQLError) in
+      let name = parts.items[index].name ?? "column \(index + 1)"
+      let type = try scope.derive(parts.projection[index].expression, routines,
+                                  subquery: .unsupported)
+      return ResolvedColumn(OutputColumn(name: name, type: type),
+                            synthesized: parts.items[index].name == nil)
+    }
   }
 
   /// Whether `limit` drops the one row a `single`-row result would yield,

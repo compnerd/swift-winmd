@@ -1275,14 +1275,10 @@ extension Catalog where Self: ~Escapable {
     }
     // A window function beside the aggregation computes over the grouped rows —
     // one output row per group, widened by the window slots — via a `window`
-    // node above the aggregate. A `GROUPING SETS` arm is deferred: its window
-    // would see only that arm's grouped rows, not the union of every set's the
-    // ISO semantics prescribe, so it faults the feature diagnostic on both the
-    // run and validate paths (this compile is the parity gate).
-    if select.windows, case .arm = select.grouping {
-      throw .state("0A000",
-                   "a window function with GROUPING SETS is not yet supported")
-    }
+    // node above the aggregate. A `GROUPING SETS` window rides above the union
+    // of arms instead (ISO: it sees every set's rows), lowered by
+    // `expand(windowed:sets:)` before an arm ever reaches here, so no windowed
+    // `.arm` select is compiled at this seam.
 
     // Lower the projection, HAVING, and ORDER BY against the grouped slot
     // space, enforcing the projection rule (every non-aggregated column must be

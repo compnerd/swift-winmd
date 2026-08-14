@@ -1102,7 +1102,12 @@ extension Catalog where Self: ~Escapable {
     let nested = (context.outer ?? Outer()).nested(under: scope)
     var widths = Dictionary<Query, Int>()
     var types = Dictionary<Query, ValueType>()
-    let scalar = select.scalar
+    // The scalar-position subqueries classified over the rewritten outer
+    // projection and `order` — not the original select — so a correlated
+    // subquery the lifter rewrote to reference `*gwN` is recognised as the very
+    // `Query` the union-scope check hosts, its arity enforced and its reached
+    // body deferred exactly as the run lowers it (run ≡ validate).
+    let scalar = parts.scalar
     var hosted = Array<Query>()
     for item in parts.projection {
       item.expression.collect(subqueries: &hosted)
@@ -2014,7 +2019,12 @@ extension Catalog where Self: ~Escapable {
         expression.collect(subqueries: &hosted)
       }
     }
-    let outer = try subquery(hosted, select, context, within: scope)
+    // Classify each hosted subquery's role over the rewritten outer items,
+    // not the original select: the lifter may rewrite a correlated subquery's
+    // free group-key references to `*gwN` before hosting it, so the `Query` the
+    // `Resolution` compiles differs from the select's original spelling.
+    let outer = try subquery(hosted, roles: { parts.roles(of: $0) }, context,
+                             within: scope)
     // Resolve each outer window-layer item over the union scope through the
     // ordinary projection-output logic, so its `unconstrained` mask comes from
     // the same resolution as its type (a constant NULL unconstrained, a window

@@ -347,6 +347,54 @@ internal struct WindowedSets {
   internal let union: Query
 }
 
+extension WindowedSets {
+  /// The role (`scalar`/`valued`/`existential`) each subquery the outer window
+  /// layer hosts occupies — classified over the rewritten `projection` and
+  /// `order`, NOT the original select. The lifter rewrites a correlated
+  /// subquery's free group-key references to `*gwN` before hosting it, so the
+  /// `Query` the union-scope `Resolution` compiles differs from the select's
+  /// original spelling; classifying against the rewritten expressions keeps a
+  /// hosted subquery's role matched to the very query the `Resolution` lowers.
+  /// An uncorrelated subquery rides through the rewrite verbatim, so it agrees
+  /// with the select's own classification for it.
+  internal func roles(of query: Query) -> Array<Role> {
+    var roles = Array<Role>()
+    if scalar.contains(query) { roles.append(.scalar) }
+    if valued.contains(query) { roles.append(.valued) }
+    if existential.contains(query) { roles.append(.existential) }
+    return roles
+  }
+
+  /// The scalar-position subqueries the rewritten outer layer hosts.
+  internal var scalar: Set<Query> {
+    gather { $0.collect(scalar: &$1) }
+  }
+
+  /// The `IN (Q)`-position subqueries the rewritten outer layer hosts.
+  internal var valued: Set<Query> {
+    gather { $0.collect(valued: &$1) }
+  }
+
+  /// The `EXISTS (Q)`-position subqueries the rewritten outer layer hosts.
+  internal var existential: Set<Query> {
+    gather { $0.collect(existential: &$1) }
+  }
+
+  /// The queries `collect` gathers across the rewritten outer `projection` and
+  /// `order` — the two surfaces the seams host a subquery from.
+  private func gather(_ collect: (Expression, inout Set<Query>) -> Void)
+      -> Set<Query> {
+    var queries = Set<Query>()
+    for item in projection { collect(item.expression, &queries) }
+    for key in order?.keys ?? [] {
+      if case let .expression(expression) = key.sort {
+        collect(expression, &queries)
+      }
+    }
+    return queries
+  }
+}
+
 /// Decomposes a `GROUP BY GROUPING SETS` `select` that also projects (or orders
 /// by) a window function into the window-free arm union and the outer window
 /// layer over it — the two halves the direct lowering composes, without any
@@ -409,10 +457,15 @@ internal struct WindowedSets {
 /// whole, shared with the key — one evaluation, the window ordering by the
 /// reported column.
 ///
-/// A scalar subquery uncorrelated to this query is hosted in the outer layer
-/// through the union-scope `Resolution` (kept verbatim so a `LEAD` default or a
-/// `CASE` branch nesting it stays lazy), while one correlated to a group key
-/// stays arm-lifted, where the arm's grouped scope binds the correlation.
+/// A subquery uncorrelated to this query — or one whose group-key correlations
+/// are all qualified-free references — is hosted in the outer layer through the
+/// union-scope `Resolution`, its qualified-free references rewritten to their
+/// `*gwN` union column so the union scope resolves them as correlated outer
+/// parameters (kept verbatim so a `LEAD` default or a `CASE` branch nesting it
+/// stays lazy). A subquery whose only correlation is an unqualified group-key-
+/// colliding reference is undecidable pre-schema, so it stays arm-lifted (a
+/// scalar one; a predicate one hosts verbatim), the arm's grouped scope binding
+/// the correlation.
 ///
 /// A window `FILTER` and a windowed `CASE` are the two operand shapes not
 /// lowered here — each carries a `Predicate` a `*gwN` column cannot stand in
@@ -457,13 +510,16 @@ internal func decompose(windowed select: Select,
   let targets = ordinals(of: items, select.order)
   // The bare names of the group-key columns — the columns a correlated subquery
   // may reference (ISO restricts a grouped correlation to a grouping column).
-  // The lifter reads them to route a subquery: one naming a group key is
-  // correlated to this query and stays arm-lifted, resolved in the arm's
-  // grouped scope; one naming none is uncorrelated and hosted in the outer
-  // layer through the union-scope `Resolution`.
+  // The lifter reads them to route a subquery by its free variables (`host`): a
+  // qualified-free reference to a group key is rewritten to its `*gwN` union
+  // column and the subquery hosted outer; a subquery whose only correlation is
+  // an unqualified group-key-colliding reference is undecidable pre-schema, a
+  // scalar one falls back to arm-lift (a predicate one hosts verbatim); one
+  // whose every group-key reference is bound within its own scope is
+  // uncorrelated and hosted outer verbatim.
   var keys = Set<String>()
   for set in sets {
-    for key in set { key.collect(columns: &keys) }
+    for key in set { key.collect(free: &keys, bound: []) }
   }
   // Lift the projection and the query-level ORDER BY over the union output,
   // gathering the operands each references into `lift.leaves`. Each outer item
@@ -605,10 +661,12 @@ private func ordinals(of items: Array<Projected>, _ order: Order?) -> Set<Int> {
 /// `scope.term` faults a bare `.aggregate`/`.grouping` (42803) and cannot
 /// resolve a base column against the `*gwN`-only union scope, so those atoms
 /// must be pre-projected by the arms and substituted; every other node the
-/// ordinary machinery resolves against the union scope directly. A scalar
-/// `.subquery` is pushed to an arm too — the outer layer hosts it via the
-/// union-scope `Resolution` `windowed(sets:)` passes, so a `.subquery` left
-/// outer resolves against it.
+/// ordinary machinery resolves against the union scope directly. A `.subquery`
+/// is hosted outer — the outer layer resolves it via the union-scope
+/// `Resolution` `windowed(sets:)` passes — with its free qualified group-key
+/// references rewritten to their `*gwN` union column (`host`), so a correlated
+/// subquery correlates against the union scope; a scalar subquery whose only
+/// correlation is unqualified-ambiguous falls back to an arm-lift instead.
 ///
 /// A window `FILTER` and a windowed `CASE` are the two shapes not lowered here
 /// — each carries a `Predicate` a `*gwN` column cannot stand in for — so each
@@ -619,9 +677,31 @@ private struct Lift {
   private let routines: Routines
 
   /// The bare names of the group-key columns — the columns a correlated
-  /// subquery may reference. A subquery naming one is correlated to this query
-  /// and arm-lifted; one naming none is uncorrelated and hosted outer.
+  /// subquery may reference as a free variable. A subquery correlated to one by
+  /// a qualified-free reference has it rewritten to its `*gwN` union
+  /// column and is hosted outer (`host`); one whose only correlation is an
+  /// unqualified group-key-colliding reference is undecidable pre-schema and
+  /// arm-lifted; one whose every group-key reference is bound within its own
+  /// scope is uncorrelated and hosted outer verbatim.
   private let keys: Set<String>
+
+  /// Whether the in-flight `host` walk met an unqualified free reference whose
+  /// bare name is a group key — an ambiguous correlation the AST cannot resolve
+  /// to a base column pre-schema, so the subquery is not safely rewritten and
+  /// hosted. Set by the leaf rewrite, read by `host` (which then rolls back any
+  /// `*gwN` columns the aborted walk allocated and reports the subquery
+  /// unhostable), and reset at each `host` entry.
+  private var blocked = false
+
+  /// Whether the in-flight rewrite rides a query-level carrier's row operators
+  /// (a set operation's `ORDER BY`), where an unqualified name binds the set-op
+  /// output by ISO output-alias/ordinal precedence — a local output reference,
+  /// not a correlation — so it is left verbatim and never blocks, unlike an
+  /// unqualified body reference (undecidable, so conservatively blocked). Set
+  /// while a carrier's `ORDER BY` is rewritten, reset false when the walk
+  /// crosses into a nested subquery body (via `rewrite(_ query:)`), whose own
+  /// unqualified references follow the ordinary rule.
+  private var riding = false
 
   /// The grounded atoms pushed into the arms, in first-appearance order — arm
   /// column `*gwN` is `leaves[N]`.
@@ -725,18 +805,20 @@ private struct Lift {
       // `*gwN` reference, computed in the arm's grouped scope.
       return reference(expression)
     case let .subquery(query):
-      // A subquery uncorrelated to this query is hosted in the outer layer
-      // through the union-scope `Resolution` — kept verbatim so a `LEAD`
-      // default or a `CASE` branch nesting it stays lazy, evaluated only when
-      // reached — while one correlated to a group key stays arm-lifted (a
-      // `*gwN` reference) where the arm's grouped scope binds the correlation.
-      // Arm-lifting is always value-correct, so over-approximating the
-      // correlation only forgoes the lazy outer host, never mis-hosts a
-      // correlated subquery.
-      var referenced = Set<String>()
-      query.collect(columns: &referenced)
-      return referenced.isDisjoint(with: keys)
-          ? expression : reference(expression)
+      // A subquery uncorrelated to this query — or one whose every group-key
+      // correlation is a qualified-free reference — hosted in the outer layer
+      // through the union-scope `Resolution`, its qualified-free references
+      // rewritten to their `*gwN` union column (`host`), so a `LEAD` default or
+      // a `CASE` branch nesting it stays lazy, evaluated only when reached; the
+      // union scope exposes the `*gwN` column the hosted subquery reads as a
+      // correlated outer parameter. A subquery whose only correlation is an
+      // unqualified group-key-colliding reference is undecidable pre-schema (it
+      // might be a local base column, so rewriting to `*gwN` could be wrong),
+      // so `host` returns `nil` and it falls back to arm-lift (a `*gwN`
+      // reference), where the arm's grouped scope binds the reference — always
+      // value-correct, only forgoing the lazy outer host.
+      if let hosted = host(query) { return .subquery(hosted) }
+      return reference(expression)
     case .literal:
       return expression
     case let .call(name, arguments):
@@ -778,6 +860,378 @@ private struct Lift {
     }
   }
 
+  /// This subquery prepared to be hosted in the outer window layer — its free
+  /// qualified group-key references rewritten to their `*gwN` union column, so
+  /// the union-scope `Resolution` resolves them as correlated parameters —
+  /// or `nil` when it cannot be safely hosted and must be arm-lifted instead.
+  ///
+  /// The rewrite descends the whole subquery body (`rewrite`), threading each
+  /// nested select's own FROM/JOIN aliases as `bound` (the same alias-tracking
+  /// `collect(free:bound:)` uses), and at each column decides by qualifier:
+  ///
+  ///   - a reference qualified by a non-local alias whose bare name is a group
+  ///     key is a free correlation to that key — rewritten to its deduplicated
+  ///     `*gwN` union column (the arm projects the key, the union carries it);
+  ///   - a reference qualified by one of the subquery's own aliases is local —
+  ///     left untouched (`e.dept` over its own `FROM Emp AS e`);
+  ///   - a reference qualified by a non-local alias whose name is NOT a group
+  ///     key is a correlation to some other outer column — left untouched;
+  ///   - an unqualified reference to a group key is undecidable pre-schema
+  ///     (it might be a local base column) so it is never rewritten; a query
+  ///     bearing one is not safely hosted, so the walk marks it `blocked` and
+  ///     `host` reports it unhostable (`nil`), the caller arm-lifting instead.
+  ///
+  /// An uncorrelated subquery meets no free group-key reference, so it rides
+  /// through unchanged (no column allocated), reproducing the verbatim host.
+  private mutating func host(_ query: Query) -> Query? {
+    let leaves = self.leaves
+    let index = self.index
+    let linked = self.linked
+    blocked = false
+    let hosted = rewrite(query, bound: [])
+    guard !blocked else {
+      // The walk met an unqualified key-colliding reference: discard the `*gwN`
+      // columns it allocated for the qualified-free references beside it and
+      // report the subquery unhostable, so the caller arm-lifts the original.
+      self.leaves = leaves
+      self.index = index
+      self.linked = linked
+      return nil
+    }
+    return hosted
+  }
+
+  /// This query with its free qualified group-key references rewritten to their
+  /// `*gwN` column — a `.select` extending `bound` with its own aliases, a
+  /// `.setop` recursing both arms, a `.values` its rows, and each carrier's
+  /// query-level `ORDER BY` — the transforming twin of
+  /// `Query.collect(free:bound:)`.
+  ///
+  /// The body's own references follow the ordinary rule (an unqualified key-
+  /// colliding name is undecidable, so it blocks); a carrier's `ORDER BY` rides
+  /// above the body's output, where an unqualified name binds a local output.
+  /// `riding` is saved and reset false for the body, so a nested subquery
+  /// reached from an enclosing carrier order returns to the body rule, and the
+  /// enclosing carrier context is restored after — the carriers rewritten under
+  /// `riding` by `rewrite(_ carrier:)`.
+  private mutating func rewrite(_ query: Query, bound: Set<String>) -> Query {
+    let saved = riding
+    riding = false
+    let body: Query.Body
+    switch query.body {
+    case let .select(select):
+      body = .select(rewrite(select, bound: bound))
+    case let .setop(kind, left, right, all):
+      body = .setop(kind, rewrite(left, bound: bound),
+                    rewrite(right, bound: bound), all: all)
+    case let .values(rows):
+      body = .values(rows.map { rewrite($0, bound: bound) })
+    }
+    let carriers = query.carriers.map { rewrite($0, bound: bound) }
+    riding = saved
+    return Query(body: body, carriers: carriers)
+  }
+
+  /// This carrier's query-level `ORDER BY` keys rewritten over the set-op
+  /// output — the row operators riding above the body. An unqualified key binds
+  /// a local output (output-alias/ordinal precedence), so the walk rewrites it
+  /// under `riding`: an unqualified name is left verbatim and never blocks, a
+  /// reference qualified by a non-local alias whose bare name is a group key is
+  /// the correlation, rewritten to its `*gwN` union column, and an ordinal is
+  /// carried through. `DISTINCT`/`OFFSET`·`FETCH`/`generated` hold no column
+  /// reference, so they ride through unchanged. A subquery nested in an order
+  /// key resets `riding` (via `rewrite(_ query:)`), so its own body follows the
+  /// ordinary rule.
+  private mutating func rewrite(_ carrier: Query.Carrier, bound: Set<String>)
+      -> Query.Carrier {
+    let saved = riding
+    riding = true
+    let order = rewrite(carrier.order, bound: bound)
+    riding = saved
+    return Query.Carrier(distinct: carrier.distinct, order: order,
+                         limit: carrier.limit, generated: carrier.generated)
+  }
+
+  /// This select's free qualified group-key references rewritten, extending
+  /// `bound` with its own FROM/JOIN aliases (`alias ?? name`, matching
+  /// `Scope.admits`) so a reference qualified by a local alias binds locally —
+  /// the transforming twin of `Select.collect(free:bound:)`, descending its
+  /// FROM/JOIN bodies and `ON`s, predicate, projection, grouping, HAVING, ORDER
+  /// BY, and named-window specifications.
+  private mutating func rewrite(_ select: Select, bound: Set<String>)
+      -> Select {
+    var locals = bound
+    locals.insert((select.from.alias ?? select.from.name).lowercased())
+    for join in select.joins {
+      locals.insert((join.relation.alias ?? join.relation.name).lowercased())
+    }
+    let joins = select.joins.map { join in
+      Join(relation: rewrite(join.relation, bound: locals), kind: join.kind,
+           on: rewrite(join.on, bound: locals), using: join.using)
+    }
+    let window = select.window.map {
+      NamedWindow(name: $0.name, spec: rewrite($0.spec, bound: locals))
+    }
+    return Select(distinct: select.distinct,
+                  projection: rewrite(select.projection, bound: locals),
+                  from: rewrite(select.from, bound: locals), joins: joins,
+                  predicate: select.predicate.map {
+                    rewrite($0, bound: locals)
+                  },
+                  grouping: rewrite(select.grouping, bound: locals),
+                  having: select.having.map { rewrite($0, bound: locals) },
+                  window: window, order: rewrite(select.order, bound: locals),
+                  limit: select.limit)
+  }
+
+  /// A relation's free qualified group-key references rewritten — a `.derived`
+  /// one recursing into its inner query (which extends `bound` with its own
+  /// aliases), a `.named` one carried through (it references no column).
+  private mutating func rewrite(_ relation: Relation, bound: Set<String>)
+      -> Relation {
+    guard case let .derived(query) = relation.source else { return relation }
+    return Relation(derived: rewrite(query, bound: bound),
+                    as: relation.alias ?? "", columns: relation.columns,
+                    lateral: relation.lateral)
+  }
+
+  /// A projection's free qualified group-key references rewritten. A `.columns`
+  /// list every column of which rewrites to itself keeps its shape; one where a
+  /// column rewrites to a `*gwN` reference becomes an `.expressions` list, each
+  /// changed column aliased to its original name so the output name survives
+  /// the rewrite — an enclosing carrier `ORDER BY` or a `.derived` `e.Id` binds
+  /// the name the ordinary grouped form exposes, not the union column.
+  private mutating func rewrite(_ projection: Projection, bound: Set<String>)
+      -> Projection {
+    switch projection {
+    case .all:
+      return .all
+    case let .expressions(items):
+      return .expressions(items.map {
+        Projected(expression: rewrite($0.expression, bound: bound),
+                  alias: $0.alias)
+      })
+    case let .columns(columns):
+      let rewritten = columns.map { rewrite(.column($0), bound: bound) }
+      // A bare column's output name is its own name; when a rewrite changes a
+      // column's identity — a group key to its synthetic `*gwN` — keep that
+      // original name as an explicit alias so the output schema still exposes
+      // it, and an enclosing carrier `ORDER BY` or `e.Id` binds the name the
+      // ordinary grouped query exposes rather than the synthetic union column.
+      let unchanged = zip(rewritten, columns).allSatisfy { item, column in
+        if case let .column(rewrote) = item { return rewrote == column }
+        return false
+      }
+      if unchanged { return projection }
+      return .expressions(zip(rewritten, columns).map { item, column in
+        if case let .column(rewrote) = item, rewrote == column {
+          return Projected(expression: item)
+        }
+        return Projected(expression: item, alias: column.name)
+      })
+    }
+  }
+
+  /// A grouping's keys' free qualified group-key references rewritten
+  /// — a `.keys` its list, a `.sets` each set, an `.arm` its keys and superset.
+  private mutating func rewrite(_ grouping: Grouping, bound: Set<String>)
+      -> Grouping {
+    switch grouping {
+    case let .keys(keys):
+      return .keys(rewrite(keys, bound: bound))
+    case let .sets(sets):
+      return .sets(sets.map { rewrite($0, bound: bound) })
+    case let .arm(keys, superset):
+      return .arm(keys: rewrite(keys, bound: bound),
+                  superset: rewrite(superset, bound: bound))
+    }
+  }
+
+  /// An ORDER BY's sort-key expressions rewritten — an ordinal key carried
+  /// through, a value key's expression rewritten (its `output` kept).
+  private mutating func rewrite(_ order: Order?, bound: Set<String>) -> Order? {
+    guard let order else { return nil }
+    return Order(keys: order.keys.map { key in
+      guard case let .expression(expression) = key.sort else { return key }
+      var rewritten = Order.Key(sort: .expression(rewrite(expression,
+                                                          bound: bound)),
+                                ascending: key.ascending)
+      rewritten.output = key.output
+      return rewritten
+    })
+  }
+
+  /// A window specification's `PARTITION BY` keys and `ORDER BY` values
+  /// rewritten, the base/parenthesized flags and frame carried through — the
+  /// frame's bounds hold no column reference `collect(free:bound:)` descends.
+  private mutating func rewrite(_ spec: WindowSpec, bound: Set<String>)
+      -> WindowSpec {
+    WindowSpec(base: spec.base, parenthesized: spec.parenthesized,
+               partition: rewrite(spec.partition, bound: bound),
+               order: rewrite(spec.order, bound: bound), frame: spec.frame)
+  }
+
+  /// This expression's free qualified group-key references rewritten — the
+  /// transforming twin of `Expression.collect(free:bound:)`. A `.column` leaf
+  /// decides by qualifier (rewrite a non-local group-key reference, mark an
+  /// unqualified key-colliding one `blocked`, leave the rest); every other node
+  /// keeps its structure and recurses its operands, descending a scalar
+  /// `.subquery`'s body and a window's operands so a correlation nested at any
+  /// depth is rewritten.
+  private mutating func rewrite(_ expression: Expression, bound: Set<String>)
+      -> Expression {
+    switch expression {
+    case let .column(column):
+      guard let qualifier = column.qualifier else {
+        // An unqualified body reference to a group key is undecidable pre-
+        // schema (it might be a local base column), so it blocks and the
+        // subquery arm-lifts. A carrier `ORDER BY` reference (`riding`) instead
+        // binds the set-op output by ISO output-alias/ordinal precedence — a
+        // local output, never a correlation — left verbatim without blocking.
+        if !riding, keys.contains(column.name.lowercased()) { blocked = true }
+        return expression
+      }
+      guard !bound.contains(qualifier.lowercased()),
+          keys.contains(column.name.lowercased()) else { return expression }
+      return reference(.column(column))
+    case .literal:
+      return expression
+    case let .call(name, arguments):
+      return .call(name: name, arguments: rewrite(arguments, bound: bound))
+    case let .binary(operation, lhs, rhs):
+      return .binary(operation, rewrite(lhs, bound: bound),
+                     rewrite(rhs, bound: bound))
+    case let .cast(operand, type):
+      return .cast(rewrite(operand, bound: bound), type)
+    case let .coalesce(arguments):
+      return .coalesce(rewrite(arguments, bound: bound))
+    case let .nullif(lhs, rhs):
+      return .nullif(rewrite(lhs, bound: bound), rewrite(rhs, bound: bound))
+    case let .aggregate(aggregate, operand, distinct, filter):
+      let lifted: Aggregand = switch operand {
+      case .star:
+        .star
+      case let .expression(argument):
+        .expression(rewrite(argument, bound: bound))
+      }
+      return .aggregate(aggregate, of: lifted, distinct: distinct,
+                        filter: filter.map { rewrite($0, bound: bound) })
+    case let .grouping(arguments):
+      return .grouping(rewrite(arguments, bound: bound))
+    case let .case(whens, otherwise):
+      let branches = whens.map {
+        When(when: rewrite($0.when, bound: bound),
+             then: rewrite($0.then, bound: bound))
+      }
+      return .case(branches, else: otherwise.map { rewrite($0, bound: bound) })
+    case let .subquery(query):
+      return .subquery(rewrite(query, bound: bound))
+    case let .window(function, spec):
+      return .window(function: rewrite(function, bound: bound),
+                     spec: rewrite(spec, bound: bound))
+    }
+  }
+
+  /// This window function's operands' free qualified group-key references
+  /// rewritten — transforming twin of `WindowFunction.collect(free:bound:)`.
+  private mutating func rewrite(_ function: WindowFunction, bound: Set<String>)
+      -> WindowFunction {
+    switch function {
+    case .number, .rank, .dense, .ntile, .percent, .cumulative:
+      return function
+    case let .aggregate(aggregate, operand, distinct, filter):
+      let lifted: Aggregand = switch operand {
+      case .star:
+        .star
+      case let .expression(argument):
+        .expression(rewrite(argument, bound: bound))
+      }
+      return .aggregate(aggregate, of: lifted, distinct: distinct,
+                        filter: filter.map { rewrite($0, bound: bound) })
+    case let .lead(value, offset, fallback):
+      return .lead(rewrite(value, bound: bound), offset: offset,
+                   default: fallback.map { rewrite($0, bound: bound) })
+    case let .lag(value, offset, fallback):
+      return .lag(rewrite(value, bound: bound), offset: offset,
+                  default: fallback.map { rewrite($0, bound: bound) })
+    case let .first(value):
+      return .first(rewrite(value, bound: bound))
+    case let .last(value):
+      return .last(rewrite(value, bound: bound))
+    case let .nth(value, position):
+      return .nth(rewrite(value, bound: bound), position)
+    }
+  }
+
+  /// This predicate's free qualified group-key references rewritten — the
+  /// transforming twin of `Predicate.collect(free:bound:)`, descending its
+  /// operand expressions, nested predicates, and every `EXISTS`/`IN`/quantified
+  /// subquery body (which extends `bound` with its own aliases).
+  private mutating func rewrite(_ predicate: Predicate, bound: Set<String>)
+      -> Predicate {
+    switch predicate {
+    case let .exists(query, negated):
+      return .exists(rewrite(query, bound: bound), negated: negated)
+    case let .within(lhs, query, negated):
+      return .within(rewrite(lhs, bound: bound), rewrite(query, bound: bound),
+                     negated: negated)
+    case let .quantified(lhs, op, quantifier, query):
+      return .quantified(rewrite(lhs, bound: bound), op, quantifier,
+                         rewrite(query, bound: bound))
+    case let .comparison(left, op, right):
+      return .comparison(left: rewrite(left, bound: bound), op: op,
+                         right: rewrite(right, bound: bound))
+    case let .bound(left, op, parameter):
+      return .bound(left: rewrite(left, bound: bound), op: op,
+                    parameter: parameter)
+    case let .null(operand, negated):
+      return .null(rewrite(operand, bound: bound), negated: negated)
+    case let .membership(operand, values, negated):
+      return .membership(rewrite(operand, bound: bound),
+                         rewrite(values, bound: bound), negated: negated)
+    case let .rows(lhs, op, rhs):
+      return .rows(rewrite(lhs, bound: bound), op, rewrite(rhs, bound: bound))
+    case let .among(lhs, rows, negated):
+      return .among(rewrite(lhs, bound: bound),
+                    rows.map { rewrite($0, bound: bound) }, negated: negated)
+    case let .like(operand, pattern, escape, negated):
+      return .like(rewrite(operand, bound: bound),
+                   pattern: rewrite(pattern, bound: bound),
+                   escape: escape.map { rewrite($0, bound: bound) },
+                   negated: negated)
+    case let .between(operand, lower, upper, negated):
+      return .between(rewrite(operand, bound: bound),
+                      rewrite(lower, bound: bound),
+                      rewrite(upper, bound: bound), negated: negated)
+    case let .distinct(lhs, rhs, negated):
+      return .distinct(rewrite(lhs, bound: bound), rewrite(rhs, bound: bound),
+                       negated: negated)
+    case let .truth(inner, value, negated):
+      return .truth(rewrite(inner, bound: bound), value: value,
+                    negated: negated)
+    case let .and(lhs, rhs):
+      return .and(rewrite(lhs, bound: bound), rewrite(rhs, bound: bound))
+    case let .or(lhs, rhs):
+      return .or(rewrite(lhs, bound: bound), rewrite(rhs, bound: bound))
+    case let .not(inner):
+      return .not(rewrite(inner, bound: bound))
+    }
+  }
+
+  /// A `LIKE`/`BETWEEN` operand's free references rewritten — an expression
+  /// recursed, a `:parameter` carried through.
+  private mutating func rewrite(_ operand: Predicate.Operand,
+                                bound: Set<String>) -> Predicate.Operand {
+    guard case let .expression(expression) = operand else { return operand }
+    return .expression(rewrite(expression, bound: bound))
+  }
+
+  /// Each expression of `expressions` rewritten, in order.
+  private mutating func rewrite(_ expressions: Array<Expression>,
+                                bound: Set<String>) -> Array<Expression> {
+    expressions.map { rewrite($0, bound: bound) }
+  }
+
   /// Each expression of `expressions` substituted, in order — a manual loop
   /// rather than `map`, so the typed `SQLError` throw propagates without
   /// widening to `any Error`.
@@ -810,10 +1264,14 @@ private struct Lift {
   /// comparison, bound, IS NULL, IN, row comparison and membership, LIKE,
   /// BETWEEN, IS DISTINCT FROM, the boolean test, and AND/OR/NOT.
   ///
-  /// A subquery-bearing form (`exists`/`within`/`quantified`) rebuilds
-  /// unchanged: the union-scope `Resolution` the outer layer resolves against
-  /// hosts the guard's subquery in place, so its enclosing predicate needs no
-  /// per-arm rewrite.
+  /// A subquery-bearing form (`exists`/`within`/`quantified`) keeps its
+  /// subquery hosted whole — the union-scope `Resolution` the outer layer
+  /// resolves against hosts it in place — but still substitutes the operands
+  /// beside the subquery: the left row of `(l…) IN (subquery)` or a quantified
+  /// `(l…) op {ANY|ALL} (subquery)`, so a grounded left (`dept IN (…)` → `*gw0
+  /// IN (…)`) the `*gwN`-only outer scope cannot resolve becomes an arm column,
+  /// as it does in a scalar position. `EXISTS` carries no operand beside its
+  /// subquery, so it rebuilds unchanged.
   fileprivate mutating func substitute(_ predicate: Predicate)
       throws(SQLError) -> Predicate {
     switch predicate {
@@ -851,10 +1309,28 @@ private struct Lift {
       return try .or(substitute(left), substitute(right))
     case let .not(inner):
       return try .not(substitute(inner))
-    case .exists, .within, .quantified:
-      // A subquery-bearing guard is hosted whole by the outer layer's union-
-      // scope `Resolution`, so rebuild it unchanged.
-      return predicate
+    case let .exists(query, negated):
+      // `[NOT] EXISTS (subquery)` carries only the subquery, hosted by the
+      // outer layer's union-scope `Resolution`. A subquery correlated to a
+      // key by a qualified-free reference has that reference rewritten to its
+      // `*gwN` column (`host`), so it resolves against the union scope as a
+      // correlated parameter; an uncorrelated one rides through unchanged.
+      // A `*gwN` column cannot stand in for a whole predicate subquery, so
+      // there is no arm-lift here: an unqualified-ambiguous correlation (`host`
+      // returns `nil`) hosts verbatim, the residual behaviour unchanged.
+      return .exists(host(query) ?? query, negated: negated)
+    case let .within(left, query, negated):
+      // `(l…) [NOT] IN (subquery)` — the subquery is hosted (its qualified-
+      // free correlations rewritten by `host`), and the left row still
+      // holds grounded operands the `*gwN`-only outer scope cannot resolve, so
+      // substitute them (`dept IN (…)` → `*gw0 IN (…)`).
+      return try .within(substitute(left), host(query) ?? query,
+                         negated: negated)
+    case let .quantified(left, op, quantifier, query):
+      // `(l…) op {ANY|ALL} (subquery)` — as `within`: host the subquery whole
+      // (rewriting its qualified-free correlations) and substitute the row.
+      return try .quantified(substitute(left), op, quantifier,
+                             host(query) ?? query)
     }
   }
 
@@ -1004,194 +1480,235 @@ extension Expression {
 }
 
 extension Query {
-  /// The bare (unqualified, case-folded) names of every column this query
-  /// references anywhere — its FROM/JOIN derived bodies, predicates,
-  /// projection, grouping, HAVING, ORDER BY, window specifications, and the
-  /// body of every subquery nested within, at any depth. The lifter reads it to
-  /// decide whether a candidate subquery correlates to the enclosing grouping-
-  /// sets query: one naming a group-key column is correlated (ISO restricts a
-  /// grouped correlation to a grouping column) and stays arm-lifted, one naming
-  /// none is uncorrelated and hosted outer. Over-approximating (a subquery's
-  /// own column shadowing a group-key name) only forgoes the outer host, never
-  /// mis-hosts a correlated one, so the routing stays sound.
-  fileprivate func collect(columns names: inout Set<String>) {
+  /// The bare (case-folded) names of every column this query references
+  /// freely — not qualified by a FROM/JOIN alias in `bound`, the local aliases
+  /// accumulated from the enclosing subquery scopes down to here. It descends
+  /// into its FROM/JOIN derived bodies, predicates, projection, grouping,
+  /// HAVING, ORDER BY, window specifications, every nested subquery, and each
+  /// carrier's query-level `ORDER BY`, each `.select` extending `bound` with
+  /// its own aliases so a nested subquery binds its own references in turn.
+  fileprivate func collect(free names: inout Set<String>, bound: Set<String>) {
     switch body {
     case let .select(select):
-      select.collect(columns: &names)
+      select.collect(free: &names, bound: bound)
     case let .setop(_, left, right, _):
-      left.collect(columns: &names)
-      right.collect(columns: &names)
+      left.collect(free: &names, bound: bound)
+      right.collect(free: &names, bound: bound)
     case let .values(rows):
       for row in rows {
-        for expression in row { expression.collect(columns: &names) }
+        for expression in row { expression.collect(free: &names, bound: bound) }
+      }
+    }
+    // Parity with the rewrite twin: a carrier's `ORDER BY` rides above the body
+    // and may hold a correlation the rewrite lifts (a set-op `ORDER BY T.Id`),
+    // so descend its keys too. This gathers group-key names, not the host
+    // decision (which runs through `rewrite`/`blocked`), so it stays in sync
+    // with `rewrite(_ carrier:)` and no future free-reference consumer misses a
+    // carrier correlation.
+    for carrier in carriers {
+      for key in carrier.order?.keys ?? [] {
+        if case let .expression(expression) = key.sort {
+          expression.collect(free: &names, bound: bound)
+        }
       }
     }
   }
 }
 
 extension Select {
-  /// The bare names of every column this select references — its FROM/JOIN
-  /// derived bodies and `ON`s, predicate, projection, grouping keys, HAVING,
-  /// ORDER BY, and named-window specifications.
-  fileprivate func collect(columns names: inout Set<String>) {
-    from.collect(columns: &names)
+  /// The bare names of every column this select references freely, given the
+  /// `bound` aliases of the enclosing subquery scopes. It extends `bound` with
+  /// its own FROM/JOIN aliases — the qualifier each relation's columns bind
+  /// under, `alias ?? name`, matching `Scope.admits` — so a reference qualified
+  /// by a local alias is local, not free; a reference qualified by a non-local
+  /// alias, or unqualified (undecidable pre-schema, so conservatively free), is
+  /// collected. It descends into its FROM/JOIN derived bodies and `ON`s,
+  /// predicate, projection, grouping keys, HAVING, ORDER BY, and named-window
+  /// specifications under that extended scope.
+  fileprivate func collect(free names: inout Set<String>, bound: Set<String>) {
+    var locals = bound
+    locals.insert((from.alias ?? from.name).lowercased())
     for join in joins {
-      join.relation.collect(columns: &names)
-      join.on.collect(columns: &names)
+      locals.insert((join.relation.alias ?? join.relation.name).lowercased())
     }
-    predicate?.collect(columns: &names)
+    from.collect(free: &names, bound: locals)
+    for join in joins {
+      join.relation.collect(free: &names, bound: locals)
+      join.on.collect(free: &names, bound: locals)
+    }
+    predicate?.collect(free: &names, bound: locals)
     switch projection {
     case .all:
       break
     case let .columns(columns):
-      for column in columns { names.insert(column.name.lowercased()) }
+      for column in columns { column.collect(free: &names, bound: locals) }
     case let .expressions(items):
-      for item in items { item.expression.collect(columns: &names) }
+      for item in items {
+        item.expression.collect(free: &names, bound: locals)
+      }
     }
-    for key in grouping.collected { key.collect(columns: &names) }
-    having?.collect(columns: &names)
+    for key in grouping.collected { key.collect(free: &names, bound: locals) }
+    having?.collect(free: &names, bound: locals)
     for key in order?.keys ?? [] {
       if case let .expression(expression) = key.sort {
-        expression.collect(columns: &names)
+        expression.collect(free: &names, bound: locals)
       }
     }
     for definition in window {
       for expression in definition.spec.expressions {
-        expression.collect(columns: &names)
+        expression.collect(free: &names, bound: locals)
       }
     }
   }
 }
 
+extension Column {
+  /// This column's bare name inserted into `names` when it is a free
+  /// reference — unqualified (undecidable against a base relation's schema
+  /// pre-compilation, so conservatively free) or qualified by an alias not in
+  /// `bound`, the local FROM/JOIN aliases in scope. A reference qualified by a
+  /// local alias is bound, so it contributes nothing.
+  fileprivate func collect(free names: inout Set<String>, bound: Set<String>) {
+    if let qualifier, bound.contains(qualifier.lowercased()) { return }
+    names.insert(name.lowercased())
+  }
+}
+
 extension Relation {
-  /// The bare names a relation references — a `.derived` one by recursing into
-  /// its inner query, a `.named` one none (its columns are named at resolution,
-  /// not in the AST).
-  fileprivate func collect(columns names: inout Set<String>) {
-    if case let .derived(query) = source { query.collect(columns: &names) }
+  /// The bare names a relation references freely — a `.derived` one by
+  /// recursing into its inner query (which extends `bound` with its own
+  /// aliases), a `.named` one none (its columns are named at resolution, not in
+  /// the AST).
+  fileprivate func collect(free names: inout Set<String>, bound: Set<String>) {
+    if case let .derived(query) = source {
+      query.collect(free: &names, bound: bound)
+    }
   }
 }
 
 extension Expression {
-  /// The bare (case-folded) names of every column this expression references,
-  /// descending into a scalar `subquery`'s body and a window's operands so a
-  /// correlation nested at any depth is seen.
-  fileprivate func collect(columns names: inout Set<String>) {
+  /// The bare (case-folded) names of every column this expression references
+  /// freely, given the `bound` aliases in scope, descending into a scalar
+  /// `subquery`'s body (which extends `bound` with its own aliases) and a
+  /// window's operands so a correlation nested at any depth is seen.
+  fileprivate func collect(free names: inout Set<String>, bound: Set<String>) {
     switch self {
     case let .column(column):
-      names.insert(column.name.lowercased())
+      column.collect(free: &names, bound: bound)
     case .literal:
       break
     case let .call(_, arguments), let .coalesce(arguments),
          let .grouping(arguments):
-      for argument in arguments { argument.collect(columns: &names) }
+      for argument in arguments { argument.collect(free: &names, bound: bound) }
     case let .binary(_, lhs, rhs), let .nullif(lhs, rhs):
-      lhs.collect(columns: &names)
-      rhs.collect(columns: &names)
+      lhs.collect(free: &names, bound: bound)
+      rhs.collect(free: &names, bound: bound)
     case let .cast(operand, _):
-      operand.collect(columns: &names)
+      operand.collect(free: &names, bound: bound)
     case let .aggregate(_, operand, _, filter):
       if case let .expression(argument) = operand {
-        argument.collect(columns: &names)
+        argument.collect(free: &names, bound: bound)
       }
-      filter?.collect(columns: &names)
+      filter?.collect(free: &names, bound: bound)
     case let .case(whens, otherwise):
       for when in whens {
-        when.when.collect(columns: &names)
-        when.then.collect(columns: &names)
+        when.when.collect(free: &names, bound: bound)
+        when.then.collect(free: &names, bound: bound)
       }
-      otherwise?.collect(columns: &names)
+      otherwise?.collect(free: &names, bound: bound)
     case let .subquery(query):
-      query.collect(columns: &names)
+      query.collect(free: &names, bound: bound)
     case let .window(function, spec):
-      for expression in spec.expressions { expression.collect(columns: &names) }
-      function.collect(columns: &names)
+      for expression in spec.expressions {
+        expression.collect(free: &names, bound: bound)
+      }
+      function.collect(free: &names, bound: bound)
     }
   }
 }
 
 extension WindowFunction {
-  /// The bare names of every column this window function's operands reference —
-  /// an aggregate's argument and FILTER, a positional value and default, a
-  /// FIRST/LAST/NTH value.
-  fileprivate func collect(columns names: inout Set<String>) {
+  /// The bare names of every column this window function's operands reference
+  /// freely — an aggregate's argument and FILTER, a positional value and
+  /// default, a FIRST/LAST/NTH value.
+  fileprivate func collect(free names: inout Set<String>, bound: Set<String>) {
     switch self {
     case .number, .rank, .dense, .ntile, .percent, .cumulative:
       break
     case let .aggregate(_, operand, _, filter):
       if case let .expression(argument) = operand {
-        argument.collect(columns: &names)
+        argument.collect(free: &names, bound: bound)
       }
-      filter?.collect(columns: &names)
+      filter?.collect(free: &names, bound: bound)
     case let .lead(value, _, fallback), let .lag(value, _, fallback):
-      value.collect(columns: &names)
-      fallback?.collect(columns: &names)
+      value.collect(free: &names, bound: bound)
+      fallback?.collect(free: &names, bound: bound)
     case let .first(value), let .last(value), let .nth(value, _):
-      value.collect(columns: &names)
+      value.collect(free: &names, bound: bound)
     }
   }
 }
 
 extension Predicate {
-  /// The bare names of every column this predicate references — its operand
-  /// expressions, nested predicates, and the body of any `EXISTS`/`IN`/
-  /// quantified subquery.
-  fileprivate func collect(columns names: inout Set<String>) {
+  /// The bare names of every column this predicate references freely — its
+  /// operand expressions, nested predicates, and the body of any `EXISTS`/`IN`/
+  /// quantified subquery (which extends `bound` with its own aliases).
+  fileprivate func collect(free names: inout Set<String>, bound: Set<String>) {
     switch self {
     case let .exists(query, _):
-      query.collect(columns: &names)
+      query.collect(free: &names, bound: bound)
     case let .within(lhs, query, _):
-      for expression in lhs { expression.collect(columns: &names) }
-      query.collect(columns: &names)
+      for expression in lhs { expression.collect(free: &names, bound: bound) }
+      query.collect(free: &names, bound: bound)
     case let .quantified(lhs, _, _, query):
-      for expression in lhs { expression.collect(columns: &names) }
-      query.collect(columns: &names)
+      for expression in lhs { expression.collect(free: &names, bound: bound) }
+      query.collect(free: &names, bound: bound)
     case let .comparison(left, _, right):
-      left.collect(columns: &names)
-      right.collect(columns: &names)
+      left.collect(free: &names, bound: bound)
+      right.collect(free: &names, bound: bound)
     case let .bound(left, _, _):
-      left.collect(columns: &names)
+      left.collect(free: &names, bound: bound)
     case let .null(operand, _):
-      operand.collect(columns: &names)
+      operand.collect(free: &names, bound: bound)
     case let .membership(operand, values, _):
-      operand.collect(columns: &names)
-      for value in values { value.collect(columns: &names) }
+      operand.collect(free: &names, bound: bound)
+      for value in values { value.collect(free: &names, bound: bound) }
     case let .rows(lhs, _, rhs):
-      for expression in lhs { expression.collect(columns: &names) }
-      for expression in rhs { expression.collect(columns: &names) }
+      for expression in lhs { expression.collect(free: &names, bound: bound) }
+      for expression in rhs { expression.collect(free: &names, bound: bound) }
     case let .among(lhs, rows, _):
-      for expression in lhs { expression.collect(columns: &names) }
+      for expression in lhs { expression.collect(free: &names, bound: bound) }
       for row in rows {
-        for expression in row { expression.collect(columns: &names) }
+        for expression in row { expression.collect(free: &names, bound: bound) }
       }
     case let .like(operand, pattern, escape, _):
-      operand.collect(columns: &names)
-      pattern.collect(columns: &names)
-      escape?.collect(columns: &names)
+      operand.collect(free: &names, bound: bound)
+      pattern.collect(free: &names, bound: bound)
+      escape?.collect(free: &names, bound: bound)
     case let .between(operand, lower, upper, _):
-      operand.collect(columns: &names)
-      lower.collect(columns: &names)
-      upper.collect(columns: &names)
+      operand.collect(free: &names, bound: bound)
+      lower.collect(free: &names, bound: bound)
+      upper.collect(free: &names, bound: bound)
     case let .distinct(lhs, rhs, _):
-      lhs.collect(columns: &names)
-      rhs.collect(columns: &names)
+      lhs.collect(free: &names, bound: bound)
+      rhs.collect(free: &names, bound: bound)
     case let .truth(inner, _, _):
-      inner.collect(columns: &names)
+      inner.collect(free: &names, bound: bound)
     case let .and(lhs, rhs), let .or(lhs, rhs):
-      lhs.collect(columns: &names)
-      rhs.collect(columns: &names)
+      lhs.collect(free: &names, bound: bound)
+      rhs.collect(free: &names, bound: bound)
     case let .not(operand):
-      operand.collect(columns: &names)
+      operand.collect(free: &names, bound: bound)
     }
   }
 }
 
 extension Predicate.Operand {
-  /// The bare names a `LIKE`/`BETWEEN` operand references — an expression's
-  /// columns, a `:parameter` none.
-  fileprivate func collect(columns names: inout Set<String>) {
+  /// The bare names a `LIKE`/`BETWEEN` operand references freely — an
+  /// expression's columns, a `:parameter` none.
+  fileprivate func collect(free names: inout Set<String>, bound: Set<String>) {
     if case let .expression(expression) = self {
-      expression.collect(columns: &names)
+      expression.collect(free: &names, bound: bound)
     }
   }
 }

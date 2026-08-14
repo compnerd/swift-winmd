@@ -4016,6 +4016,39 @@ struct WindowOverGroupingSetsTests {
     }
   }
 
+  // A grouped `Emp` beside a `U` with no `dept` column, so unqualified `dept`
+  // in a subquery over `U` is a genuine correlation to the group key (not a
+  // local column, and `dept` is no adapter column either) — the unqualified-
+  // ambiguous residual the qualified-free rewrite arm-lifts. `U.v` is 1, 2, 3.
+  private func colliding() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("Emp", ["dept": .integer, "sal": .integer]) {
+        Row(1, 100)
+        Row(2, 300)
+        Row(3, 500)
+      }
+      Relation("U", ["v": .integer]) {
+        Row(1)
+        Row(2)
+        Row(3)
+      }
+    }
+  }
+
+  // A parent `T` with a `T.Id = 0` group and a child `U`, so a fallback
+  // dividing `SUM(U.v)` by the group key `T.Id` faults `.divide` if evaluated —
+  // the eager arm-lift's hazard a lazy outer host avoids.
+  private func zeroed() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("T", ["Id": .integer]) {
+        Row(0)
+      }
+      Relation("U", ["k": .integer, "v": .integer]) {
+        Row(0, 5)
+      }
+    }
+  }
+
   @Test func `a correlated LATERAL windowed GROUPING SETS resolves the outer`()
       throws {
     // The windowed grouping-sets query is a correlated LATERAL body: its arms
@@ -4568,24 +4601,323 @@ struct WindowOverGroupingSetsTests {
                                            [3, 401, 3], [6, 401, 4]])
   }
 
-  @Test func `a correlated subquery still resolves in the arm`() throws {
-    // Approach (B): a scalar subquery correlated to a group key —
-    // `(SELECT SUM(U.v) FROM U WHERE U.k = T.Id)` — names the enclosing `T.Id`,
-    // a group key, so the lifter keeps it arm-lifted (a `*gwN` column) rather
-    // than hosting it outer, resolving `T.Id` in the arm's grouped scope; a
-    // correlated outer host awaits a follow-up (the union scope would have to
-    // expose the group key for the subquery to correlate against). Over the
-    // single set `T.Id` 1 sums its children 201, `T.Id` 2 sums 200, `T.Id` 3
-    // has none (NULL), each numbered, matching the ordinary `GROUP BY T.Id`
-    // form.
+  @Test func `a qualified-correlated subquery hosts outer over the union`()
+      throws {
+    // A scalar subquery correlated to a group key by a qualified-free reference
+    // — `(SELECT SUM(U.v) FROM U WHERE U.k = T.Id)` names the enclosing `T.Id`,
+    // qualified by the outer alias. The lifter rewrites that free reference to
+    // its `*gwN` union column and hosts the subquery in the outer layer, where
+    // the union-scope `Resolution` resolves the `*gwN` as a correlated outer
+    // parameter — the mechanism a correlated outer host earlier deferred (the
+    // union scope now exposes the lifted group key). Over the single set `T.Id`
+    // 1 sums its children 201, `T.Id` 2 sums 200, `T.Id` 3 none (NULL), each
+    // numbered, matching the ordinary `GROUP BY T.Id` form. The hosted subquery
+    // types over the union scope too, so run ≡ validate.
     let sets = "SELECT T.Id, (SELECT SUM(U.v) FROM U WHERE U.k = T.Id), " +
                "ROW_NUMBER() OVER () FROM T GROUP BY GROUPING SETS ((T.Id))"
     try correlated().expect(sets, yields: [[1, 201, 1], [2, 200, 2],
                                            [3, nil, 3]])
+    #expect(try correlated().columns(of: parse(query: sets), validate: true)
+                .count == 3)
     let plain = "SELECT T.Id, (SELECT SUM(U.v) FROM U WHERE U.k = T.Id), " +
                 "ROW_NUMBER() OVER () FROM T GROUP BY T.Id"
     try correlated().expect(plain, yields: [[1, 201, 1], [2, 200, 2],
                                             [3, nil, 3]])
+  }
+
+  @Test func `a set-op carrier ORDER BY correlation hosts outer`() throws {
+    // Finding: a hosted scalar subquery is a set operation whose query-level
+    // `ORDER BY` carrier — riding above the `UNION` — references the group key
+    // by a qualified `T.Id`. The lifter now rewrites the carrier's `ORDER BY`
+    // alongside the body, so the correlation lifts to its `*gwN` union column
+    // and the subquery hosts outer; copying the carrier verbatim left `T.Id`
+    // unresolved over the `*gwN`-only union scope and faulted `.column`. Both
+    // arms take `MAX(U.v)` = 200, the `UNION` yields one row, and the carrier
+    // orders it by the correlated key — 200 for every group, each numbered,
+    // matching the ordinary `GROUP BY T.Id` form on both run and validate.
+    let sets = "SELECT (SELECT MAX(U.v) FROM U UNION " +
+               "SELECT MAX(U.v) FROM U ORDER BY T.Id), " +
+               "ROW_NUMBER() OVER () FROM T GROUP BY GROUPING SETS ((T.Id))"
+    try correlated().expect(sets, yields: [[200, 1], [200, 2], [200, 3]])
+    #expect(try correlated().columns(of: parse(query: sets), validate: true)
+                .count == 2)
+    let plain = "SELECT (SELECT MAX(U.v) FROM U UNION " +
+                "SELECT MAX(U.v) FROM U ORDER BY T.Id), " +
+                "ROW_NUMBER() OVER () FROM T GROUP BY T.Id"
+    try correlated().expect(plain, yields: [[200, 1], [200, 2], [200, 3]])
+  }
+
+  @Test func `a set-op carrier ORDER BY output name is not lifted`() throws {
+    // The regression the carrier rewrite must not break: a hosted set-op scalar
+    // subquery whose carrier `ORDER BY` names a set-op output column (`m`), not
+    // a correlation. An unqualified carrier key binds the union output by ISO
+    // output-alias precedence — a local output, never a group-key reference —
+    // so the rewrite leaves it verbatim and never blocks, the subquery still
+    // hosting outer, not mistaking it for a correlation. The subquery is 200
+    // for every group, ordered by its own output, each numbered, matching the
+    // ordinary `GROUP BY T.Id` form on both run and validate.
+    let sets = "SELECT T.Id, (SELECT MAX(U.v) AS m FROM U UNION " +
+               "SELECT MAX(U.v) FROM U ORDER BY m), " +
+               "ROW_NUMBER() OVER () FROM T GROUP BY GROUPING SETS ((T.Id))"
+    try correlated().expect(sets, yields: [[1, 200, 1], [2, 200, 2],
+                                           [3, 200, 3]])
+    #expect(try correlated().columns(of: parse(query: sets), validate: true)
+                .count == 3)
+    let plain = "SELECT T.Id, (SELECT MAX(U.v) AS m FROM U UNION " +
+                "SELECT MAX(U.v) FROM U ORDER BY m), " +
+                "ROW_NUMBER() OVER () FROM T GROUP BY T.Id"
+    try correlated().expect(plain, yields: [[1, 200, 1], [2, 200, 2],
+                                            [3, 200, 3]])
+  }
+
+  @Test func `a colliding carrier output name stays hosted above the cap`()
+      throws {
+    // The carrier-local guard is load-bearing when the output name collides
+    // with the group key: a hosted set-op scalar subquery whose carrier `ORDER
+    // BY` names an output aliased `Id` — the group key's bare name. Read as a
+    // body reference it would block (`Id` is a group key) and fall back to arm-
+    // lift, evaluating the subquery's `1 / 0` per group and faulting `.divide`
+    // even under a zero `FETCH`. Bound as the local output it is (a carrier key
+    // rides the set-op output), the subquery hosts outer above the
+    // `Project(Limit(Sort))` cap, so the dropped page never evaluates it and
+    // returns the empty page — matching the ordinary `GROUP BY T.Id` form.
+    // `columns(of: validate:)` agrees over the union scope, typing two columns.
+    let sql = "SELECT (SELECT 1 / 0 AS Id FROM U UNION " +
+              "SELECT 1 / 0 FROM U ORDER BY Id), ROW_NUMBER() OVER () " +
+              "FROM T GROUP BY GROUPING SETS ((T.Id)) FETCH FIRST 0 ROWS ONLY"
+    try correlated().empty(sql)
+    #expect(try correlated().columns(of: parse(query: sql), validate: true)
+                .count == 2)
+    let plain = "SELECT (SELECT 1 / 0 AS Id FROM U UNION " +
+                "SELECT 1 / 0 FROM U ORDER BY Id), ROW_NUMBER() OVER () " +
+                "FROM T GROUP BY T.Id FETCH FIRST 0 ROWS ONLY"
+    try correlated().empty(plain)
+  }
+
+  @Test func `a bare-column subquery projecting the key hosts outer`() throws {
+    // F4/F7: a hosted scalar subquery whose projection is a bare column list is
+    // the correlated group key itself — `(SELECT T.Id FROM U FETCH FIRST 1 ROW
+    // ONLY)`. The lifter rewrites `T.Id` to its `*gwN` union column, but the
+    // `.columns` rewrite retained a rewritten list only when a column changed
+    // identity: a shortcut that returned the original whenever every rewritten
+    // item was still a `.column` discarded the `*gwN` reference — it is still a
+    // `.column` — leaving the original `T.Id`, which cannot bind in the
+    // `*gwN`-only union scope and faulted. Comparing each rewritten column to
+    // its origin by full `Column` identity keeps the `*gw0` reference and
+    // aliases it back to the original name, so the subquery hosts outer and
+    // resolves it as a correlated outer parameter. `FETCH FIRST 1 ROW ONLY`
+    // keeps the scalar single-row; the subquery yields the group key — `T.Id`
+    // 1 → 1, 2 → 2, 3 → 3 — each numbered, matching the ordinary `GROUP BY
+    // T.Id` form on both run and validate.
+    let sets = "SELECT (SELECT T.Id FROM U FETCH FIRST 1 ROW ONLY), " +
+               "ROW_NUMBER() OVER () FROM T GROUP BY GROUPING SETS ((T.Id))"
+    try correlated().expect(sets, yields: [[1, 1], [2, 2], [3, 3]])
+    #expect(try correlated().columns(of: parse(query: sets), validate: true)
+                .count == 2)
+    let plain = "SELECT (SELECT T.Id FROM U FETCH FIRST 1 ROW ONLY), " +
+                "ROW_NUMBER() OVER () FROM T GROUP BY T.Id"
+    try correlated().expect(plain, yields: [[1, 1], [2, 2], [3, 3]])
+  }
+
+  @Test func `a bare-column subquery projecting a local column rides through`()
+      throws {
+    // The regression the retained rewrite must not disturb: a hosted scalar
+    // subquery projecting a bare column that is NOT a correlation — `(SELECT
+    // U.v FROM U WHERE U.k = 2 FETCH FIRST 1 ROW ONLY)` names `U`'s own local
+    // column, no group key. The `.columns` rewrite leaves every column intact
+    // (`U.v` is not a key and stays verbatim), so the list compares equal to
+    // its origin and the subquery rides through — hosted outer, uncorrelated,
+    // the same 200 per group. Each row numbered, matching the ordinary `GROUP
+    // BY T.Id` form on both run and validate.
+    let sets = "SELECT T.Id, (SELECT U.v FROM U WHERE U.k = 2 " +
+               "FETCH FIRST 1 ROW ONLY), ROW_NUMBER() OVER () " +
+               "FROM T GROUP BY GROUPING SETS ((T.Id))"
+    try correlated().expect(sets, yields: [[1, 200, 1], [2, 200, 2],
+                                           [3, 200, 3]])
+    #expect(try correlated().columns(of: parse(query: sets), validate: true)
+                .count == 3)
+    let plain = "SELECT T.Id, (SELECT U.v FROM U WHERE U.k = 2 " +
+                "FETCH FIRST 1 ROW ONLY), ROW_NUMBER() OVER () " +
+                "FROM T GROUP BY T.Id"
+    try correlated().expect(plain, yields: [[1, 200, 1], [2, 200, 2],
+                                            [3, 200, 3]])
+  }
+
+  @Test func `a correlated EXISTS CASE guard hosts outer over the union`()
+      throws {
+    // Finding 1: a correlated predicate subquery in a `CASE` guard — `EXISTS
+    // (SELECT U.k FROM U WHERE U.k = T.Id)` — was hosted verbatim and could not
+    // bind `T.Id` (the outer scope holds only `*gwN`), faulting `.column`. The
+    // lifter now rewrites the guard subquery's free qualified `T.Id` to its
+    // `*gwN` union column and hosts it, so it resolves against the union scope
+    // as a correlated outer parameter. `T.Id` 1 has a child `k = 1` and 2 has
+    // `k = 2` (guard true → 1); `T.Id` 3 has none (false → 0), each numbered,
+    // matching the ordinary `GROUP BY T.Id` form on both run and validate.
+    let sets =
+        "SELECT CASE WHEN EXISTS (SELECT U.k FROM U WHERE U.k = T.Id) " +
+        "THEN 1 ELSE 0 END, ROW_NUMBER() OVER () " +
+        "FROM T GROUP BY GROUPING SETS ((T.Id))"
+    try correlated().expect(sets, yields: [[1, 1], [1, 2], [0, 3]])
+    #expect(try correlated().columns(of: parse(query: sets), validate: true)
+                .count == 2)
+    let plain =
+        "SELECT CASE WHEN EXISTS (SELECT U.k FROM U WHERE U.k = T.Id) " +
+        "THEN 1 ELSE 0 END, ROW_NUMBER() OVER () FROM T GROUP BY T.Id"
+    try correlated().expect(plain, yields: [[1, 1], [1, 2], [0, 3]])
+  }
+
+  @Test func `a correlated LEAD fallback over a zero group stays lazy`()
+      throws {
+    // Finding 2: a `LEAD` fallback nests a scalar subquery correlated to the
+    // group key by a qualified `T.Id` — `(SELECT SUM(U.v) / T.Id FROM U)` —
+    // a `T.Id = 0` group. Arm-lifting the fallback evaluated it eagerly per
+    // group, dividing `SUM(U.v)` by zero and faulting `.divide`. Hosting it in
+    // the outer `LEAD` (its qualified `T.Id` rewritten to `*gwN`) keeps it a
+    // lazily evaluated operand: offset 0 always lands on the current row, so
+    // fallback never evaluates and the division never happens — the row is the
+    // current `T.Id` (0), matching the ordinary `GROUP BY T.Id` form.
+    let sets = "SELECT LEAD(T.Id, 0, (SELECT SUM(U.v) / T.Id FROM U)) " +
+               "OVER (ORDER BY T.Id) FROM T GROUP BY GROUPING SETS ((T.Id))"
+    try zeroed().expect(sets, yields: [[0]])
+    let plain = "SELECT LEAD(T.Id, 0, (SELECT SUM(U.v) / T.Id FROM U)) " +
+                "OVER (ORDER BY T.Id) FROM T GROUP BY T.Id"
+    try zeroed().expect(plain, yields: [[0]])
+  }
+
+  @Test func `an unqualified key-colliding subquery still arm-lifts`()
+      throws {
+    // The residual the qualified-free rewrite leaves arm-lifted: a scalar
+    // subquery whose only correlation is an unqualified `dept` — `(SELECT
+    // SUM(U.v) FROM U WHERE U.v > dept)`. `dept` unqualified might be a local
+    // base column of `U`, undecidable pre-schema, so the lifter cannot safely
+    // rewrite it to `*gwN` and host the subquery — it falls back to arm-lift (a
+    // `*gwN` column), where the arm's grouped scope binds `dept` to the group.
+    // Hosting it verbatim would leave `dept` unresolved over the `*gwN`-only
+    // union scope and fault `.column`; arm-lifted it returns rows — `dept` 1
+    // sums `U.v > 1` (2 + 3 = 5), 2 sums `> 2` (3), 3 sums `> 3` (none, NULL) —
+    // the same values the ordinary `GROUP BY dept` yields, value-correct if
+    // eager, only forgoing the lazy outer host.
+    let sets = "SELECT dept, (SELECT SUM(U.v) FROM U WHERE U.v > dept), " +
+               "ROW_NUMBER() OVER () FROM Emp GROUP BY GROUPING SETS ((dept))"
+    try colliding().expect(sets, yields: [[1, 5, 1], [2, 3, 2], [3, nil, 3]])
+    let plain = "SELECT dept, (SELECT SUM(U.v) FROM U WHERE U.v > dept), " +
+                "ROW_NUMBER() OVER () FROM Emp GROUP BY dept"
+    try colliding().expect(plain, yields: [[1, 5, 1], [2, 3, 2], [3, nil, 3]])
+  }
+
+  @Test func `a grouped IN-subquery guard substitutes its left operand`()
+      throws {
+    // Finding: a window-free `CASE` guard `dept IN (SELECT e.dept FROM Emp AS
+    // e)` bears a subquery beside a grounded left operand. The subquery stays
+    // hosted whole by the union-scope `Resolution`, but the left `dept` — a
+    // group value the `*gwN`-only outer scope cannot resolve — must substitute
+    // to its `*gw0` arm column, exactly as `dept` does in a scalar position.
+    // Returning the guard verbatim left `dept` unresolved, faulting `.column`.
+    // Every group's `dept` (1, 2, 3) is in the subquery's `{1, 2, 3}`, so the
+    // guard is true and the `CASE` yields 1, each numbered, matching the
+    // ordinary `GROUP BY dept` companion.
+    let sets =
+        "SELECT CASE WHEN dept IN (SELECT e.dept FROM Emp AS e) " +
+        "THEN 1 ELSE 0 END, ROW_NUMBER() OVER () " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept))"
+    try fixture().expect(sets, yields: [[1, 1], [1, 2], [1, 3]])
+    let plain =
+        "SELECT CASE WHEN dept IN (SELECT e.dept FROM Emp AS e) " +
+        "THEN 1 ELSE 0 END, ROW_NUMBER() OVER () FROM Emp GROUP BY dept"
+    try fixture().expect(plain, yields: [[1, 1], [1, 2], [1, 3]])
+  }
+
+  @Test func `an unqualified IN-subquery guard resolves the inner locally`()
+      throws {
+    // The reviewer's example (gs-2): `CASE WHEN dept IN (SELECT dept FROM Emp)
+    // THEN 1 ELSE 0 END` over `GROUPING SETS ((dept))`. The guard's left `dept`
+    // is the group key, substituted to its `*gw0` arm column; the subquery's
+    // unqualified inner `dept` collides with that key name, so the rewrite walk
+    // blocks and the membership hosts verbatim — resolving `dept` locally to
+    // its own `Emp`, an uncorrelated subquery, not the group key. Every group's
+    // `dept` is in the subquery's `{1, 2, 3}`, so `CASE` yields 1 per group,
+    // each numbered, matching the ordinary `GROUP BY dept` companion on run and
+    // validate. The windowed CASE value that still defers (#136) is covered by
+    // `a windowed CASE over GROUPING SETS is deferred` above.
+    let sets =
+        "SELECT CASE WHEN dept IN (SELECT dept FROM Emp) " +
+        "THEN 1 ELSE 0 END, ROW_NUMBER() OVER () " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept))"
+    try fixture().expect(sets, yields: [[1, 1], [1, 2], [1, 3]])
+    #expect(try fixture().columns(of: parse(query: sets), validate: true)
+                .count == 2)
+    let plain =
+        "SELECT CASE WHEN dept IN (SELECT dept FROM Emp) " +
+        "THEN 1 ELSE 0 END, ROW_NUMBER() OVER () FROM Emp GROUP BY dept"
+    try fixture().expect(plain, yields: [[1, 1], [1, 2], [1, 3]])
+  }
+
+  @Test func `a grouped quantified guard substitutes its left operand`()
+      throws {
+    // The quantified form of the same finding: `dept = ANY (SELECT e.dept FROM
+    // Emp AS e)` bears the subquery beside the grounded left `dept`, which
+    // substitutes to its `*gw0` arm column while the subquery stays hosted
+    // whole. `= ANY` over the subquery's `{1, 2, 3}` holds for every group's
+    // `dept`, so the `CASE` yields 1, matching the ordinary `GROUP BY dept`
+    // companion; before the fix the left `dept` was left unresolved, faulting
+    // `.column`.
+    let sets =
+        "SELECT CASE WHEN dept = ANY (SELECT e.dept FROM Emp AS e) " +
+        "THEN 1 ELSE 0 END, ROW_NUMBER() OVER () " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept))"
+    try fixture().expect(sets, yields: [[1, 1], [1, 2], [1, 3]])
+    let plain =
+        "SELECT CASE WHEN dept = ANY (SELECT e.dept FROM Emp AS e) " +
+        "THEN 1 ELSE 0 END, ROW_NUMBER() OVER () FROM Emp GROUP BY dept"
+    try fixture().expect(plain, yields: [[1, 1], [1, 2], [1, 3]])
+  }
+
+  @Test func `a local key-colliding subquery hosts outer and stays lazy`()
+      throws {
+    // Finding: a `LEAD` default nests a scalar subquery whose columns are all
+    // qualified by its own alias `e` — `(SELECT SUM(e.sal) / 0 FROM Emp AS e
+    // WHERE e.dept = e.dept)`. It is uncorrelated: every reference is bound
+    // within its own `FROM Emp AS e`, none free. The bare-name intersection
+    // wrongly read the local `e.dept` as the group key `dept` and arm-lifted
+    // the subquery — evaluated eagerly per group, dividing by zero. Classified
+    // by free variables it hosts outer and rides the executor's conditional
+    // evaluation: offset 0 always lands on the current row, so the default
+    // never evaluates and the subquery never divides — each group's `dept`
+    // returned, matching the ordinary `GROUP BY dept` companion.
+    let sets =
+        "SELECT LEAD(dept, 0, " +
+        "(SELECT SUM(e.sal) / 0 FROM Emp AS e WHERE e.dept = e.dept)) " +
+        "OVER (ORDER BY dept) FROM Emp GROUP BY GROUPING SETS ((dept))"
+    try fixture().expect(sets, yields: [[1], [2], [3]])
+    let plain =
+        "SELECT LEAD(dept, 0, " +
+        "(SELECT SUM(e.sal) / 0 FROM Emp AS e WHERE e.dept = e.dept)) " +
+        "OVER (ORDER BY dept) FROM Emp GROUP BY dept"
+    try fixture().expect(plain, yields: [[1], [2], [3]])
+  }
+
+  @Test func `a local subquery colliding a key hosts above a zero FETCH`()
+      throws {
+    // The projection half: an uncorrelated scalar subquery whose local `e.dept`
+    // collides with the group key `dept` — `(SELECT SUM(e.sal) / 0 FROM Emp AS
+    // e WHERE e.dept = e.dept)` — is hosted in the outer layer above the
+    // `Project(Limit(Sort))` cap, not arm-lifted below it. A zero `FETCH` drops
+    // every row before the projection runs, so the division never happens and
+    // the query returns the empty page, matching the ordinary `GROUP BY dept`
+    // companion. The bare-name intersection arm-lifted it and divided per
+    // group; free-variable classification keeps it outer and lazy. `columns(of:
+    // validate:)` agrees over the union scope, typing its two columns.
+    let sql =
+        "SELECT (SELECT SUM(e.sal) / 0 FROM Emp AS e WHERE e.dept = e.dept), " +
+        "ROW_NUMBER() OVER () FROM Emp " +
+        "GROUP BY GROUPING SETS ((dept)) FETCH FIRST 0 ROWS ONLY"
+    try fixture().empty(sql)
+    #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                .count == 2)
+    let plain =
+        "SELECT (SELECT SUM(e.sal) / 0 FROM Emp AS e WHERE e.dept = e.dept), " +
+        "ROW_NUMBER() OVER () FROM Emp GROUP BY dept FETCH FIRST 0 ROWS ONLY"
+    try fixture().empty(plain)
   }
 
   @Test func `a stateful derived source materialises per arm`() throws {

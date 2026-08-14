@@ -2188,7 +2188,8 @@ extension Catalog where Self: ~Escapable {
         expression.collect(subqueries: &hosted)
       }
     }
-    let outer = try subquery(hosted, select, context, within: scope)
+    let outer = try subquery(hosted, roles: { parts.roles(of: $0) }, context,
+                             within: scope)
 
     // The distinct windows the outer layer computes, gathered from the lifted
     // projection and `ORDER BY`. An unsupported function or frame faults the

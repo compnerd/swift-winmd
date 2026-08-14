@@ -890,9 +890,13 @@ private struct Lift {
   /// fresh column per occurrence, so each site evaluates it independently. The
   /// reference is unqualified — the compile seam builds the union-output scope
   /// keyed by the empty alias, so a bare `*gwN` resolves against it by name,
-  /// with no derived-table qualifier to match.
+  /// with no derived-table qualifier to match. It is `synthetic`, a `Column`
+  /// identity no user identifier can mint, so a quoted alias spelled `"*gwN"`
+  /// stays distinct and a query-level `ORDER BY` binds this reference to its
+  /// union column structurally rather than by output-alias precedence
+  /// (`Windowed.order`).
   private mutating func reference(_ expression: Expression) -> Expression {
-    .column(Column(name: "*gw\(allocate(expression))"))
+    .column(Column(name: "*gw\(allocate(expression))", synthetic: true))
   }
 
   /// The `*gwN` union reference for a projected `output` a window `ORDER BY`
@@ -907,11 +911,11 @@ private struct Lift {
   private mutating func reference(_ expression: Expression, output: Int)
       -> Expression {
     if let existing = linked[output] {
-      return .column(Column(name: "*gw\(existing)"))
+      return .column(Column(name: "*gw\(existing)", synthetic: true))
     }
     let position = allocate(expression)
     linked[output] = position
-    return .column(Column(name: "*gw\(position)"))
+    return .column(Column(name: "*gw\(position)", synthetic: true))
   }
 
   /// This expression lifted as the projected output a window `ORDER BY` ordinal

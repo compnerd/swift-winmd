@@ -3820,6 +3820,44 @@ struct WindowOverGroupingSetsTests {
         yields: [[nil, 1400, 4], [2, 600, 3], [3, 500, 2], [1, 300, 1]])
   }
 
+  @Test func `a user alias colliding with a lifted column cannot capture it`()
+      throws {
+    // The lifted union columns a windowed `GROUPING SETS` rewrite reads are
+    // named `*gwN`. A user may quote that exact spelling as an output alias
+    // (`AS "*gw0"`), so the query-level `ORDER BY dept` — rewritten to the
+    // lifted `dept` union column — must not bind to that alias by output-alias
+    // precedence. The lifted reference is a synthetic `Column` identity the
+    // parser can never mint, so it binds structurally to its union column:
+    // `ORDER BY dept ASC` sorts on `dept`, numbering by `dept DESC` (3 → 1,
+    // 2 → 2, 1 → 3), so the rows come out `dept` 1, 2, 3 carrying 3, 2, 1.
+    try fixture().expect(
+        "SELECT ROW_NUMBER() OVER (ORDER BY dept DESC) AS \"*gw0\" " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept)) ORDER BY dept ASC",
+        yields: [[3], [2], [1]])
+  }
+
+  @Test func `a non-colliding alias yields the same lifted ordering`() throws {
+    // The oracle for the colliding case: the identical query with an ordinary
+    // alias behaves the same, since `ORDER BY dept` always names the lifted
+    // `dept` union column, never the row-number output. The two results agree.
+    try fixture().expect(
+        "SELECT ROW_NUMBER() OVER (ORDER BY dept DESC) AS x " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept)) ORDER BY dept ASC",
+        yields: [[3], [2], [1]])
+  }
+
+  @Test func `a user reference to a colliding alias still binds it`() throws {
+    // The synthetic-reference bypass is surgical: only the engine's lifted
+    // references skip output-alias precedence. A user naming their own quoted
+    // `"*gw0"` alias in the query `ORDER BY` still binds it, so ordering by the
+    // aliased row number descending (`dept` 1 → 1, 2 → 2, 3 → 3, sorted
+    // descending) yields `dept` 3, 2, 1 carrying 3, 2, 1.
+    try fixture().expect(
+        "SELECT dept, ROW_NUMBER() OVER (ORDER BY dept) AS \"*gw0\" " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept)) ORDER BY \"*gw0\" DESC",
+        yields: [[3, 3], [2, 2], [1, 1]])
+  }
+
   @Test func `run and validate agree on a windowed GROUPING SETS`() throws {
     // Both paths enter `Query.expanded`, so they drive the one rewrite over the
     // union: the schema path types the same three-column shape the run
@@ -4783,6 +4821,26 @@ struct WindowOverGroupingSetsTests {
                 "FROM Emp GROUP BY Id"
     try fixture().expect(plain,
                          yields: [[1, 1], [2, 1], [3, 1], [4, 1], [5, 1]])
+  }
+
+  @Test func `a synthetic ORDER BY key does not bind a colliding alias`()
+      throws {
+    // F6: a windowed GROUPING SETS query lifts its `ORDER BY dept` to the
+    // synthetic `*gw0` union column. The shared `orderKeys` resolver — driving
+    // both the run compile and the validate typecheck — must let that synthetic
+    // key bind structurally, as `Windowed.order` does, not capture a user
+    // projection aliased `"*gw0"`. Here that alias is `NULLIF(ROW_NUMBER() OVER
+    // (), 'x')`, an invalid integer-versus-text compare; resolving the sort key
+    // to it type-checked the `NULLIF` and raised a spurious 42804. `FETCH FIRST
+    // 0 ROWS` drops every row, so the `NULLIF` never evaluates — both the run
+    // and `columns(of: validate:)` succeed on the empty page. Before the fix
+    // both faulted 42804.
+    let sql = "SELECT NULLIF(ROW_NUMBER() OVER (), 'x') AS \"*gw0\" " +
+              "FROM Emp GROUP BY GROUPING SETS ((dept)) " +
+              "ORDER BY dept FETCH FIRST 0 ROWS ONLY"
+    try fixture().empty(sql)
+    #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                .count == 1)
   }
 
   @Test func `a correlated EXISTS CASE guard hosts outer over the union`()

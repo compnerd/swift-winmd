@@ -61,7 +61,7 @@ extension Query {
   /// decision keeps a future entry point from open-coding a `.setop`-only
   /// recognition that silently scans the schema-only source once.
   internal func union(windowed routines: Routines,
-                      schemas: Dictionary<String, Set<String>>)
+                      schemas: Dictionary<String, Exposure>)
       throws(SQLError) -> Query? {
     guard unioned, case let .select(select) = body,
         case let .sets(sets) = select.grouping else { return nil }
@@ -312,39 +312,66 @@ internal func expand(_ select: Select,
 
 // MARK: - Window over GROUPING SETS
 
+/// The columns a relation exposes to the windowed grouping-sets membership
+/// test, split by the two surfaces the `Lift` reads them through — the
+/// physical∪virtual surface a bare name binds against directly, and the real-
+/// only surface a `SELECT *` over the relation projects.
+internal struct Exposure {
+  /// Every column a bare name may bind against in a subquery whose FROM names
+  /// this relation directly — its real columns AND its virtual ones (`Id`, a
+  /// foreign key), the physical∪virtual surface the engine's `Schema
+  /// .ordinal(of:)` resolves an unqualified name against. A subquery `FROM U
+  /// WHERE Id = …` binds `Id` to U's virtual, so the direct-membership test
+  /// must see it, or a bare `Id` over a relation bearing a virtual `Id` would
+  /// mis-rewrite to the outer key rather than binding its own adapter column.
+  internal let bindable: Set<String>
+
+  /// The real columns alone — the surface a `SELECT *` exposes. The engine's
+  /// `*` expansion (`Scope.terms(.all)`) enumerates each source's real columns
+  /// in chain order and never a virtual column, so a derived `(SELECT * FROM U)
+  /// e` exposes U's real columns, not its virtual `Id`. Deriving a `SELECT *`
+  /// output from `bindable` would expose a virtual the engine omits, mis-
+  /// binding a bare `Id` group-key reference to the derived table rather than
+  /// the outer key (the unsound direction — a false local).
+  internal let real: Set<String>
+}
+
 extension Catalog where Self: ~Escapable {
-  /// The exposed column names — real and virtual, case-folded — of every
-  /// relation in scope, keyed by its name: the base tables and views this
-  /// catalog vends and the common table expressions and store relations the
-  /// `overlay` binds. It is the schema map the windowed grouping-sets `Lift`
-  /// decides an unqualified group-key-colliding subquery reference against: a
-  /// name a local relation exposes binds locally, one absent from every local
-  /// is the outer group-key correlation.
+  /// The `Exposure` — the bindable (real∪virtual) and the real-only column
+  /// surfaces, case-folded — of every relation in scope, keyed by its name: the
+  /// base tables and views this catalog vends and the common table expressions
+  /// and store relations the `overlay` binds. It is the schema map the windowed
+  /// grouping-sets `Lift` decides an unqualified group-key-colliding subquery
+  /// reference against: a name a local relation exposes binds locally, one
+  /// absent from every local is the outer group-key correlation. A subquery's
+  /// own FROM relation reads the `bindable` surface (a bare `Id` binds a
+  /// virtual), while a `SELECT *` derived table's output takes the `real`
+  /// surface of its own sources (`*` omits virtuals).
   ///
   /// It mirrors the engine's full schema derivation across every relation kind,
   /// not a subset:
   ///
-  ///   - a base table's real columns plus its virtual columns — the engine's
-  ///     `Schema.ordinal(of:)` resolves an adapter `Id` for a bare name, so the
-  ///     membership test must too, or a bare `Id` over a relation bearing a
-  ///     virtual `Id` would be mis-rewritten to the outer key rather than
-  ///     binding its own adapter column;
+  ///   - a base table's real columns (`real`) plus its virtual columns
+  ///     (`bindable` only) — the engine's `Schema.ordinal(of:)` resolves an
+  ///     adapter `Id` for a bare name, so the direct-membership test must too,
+  ///     while `*` omits the virtual, so the star surface must not;
   ///   - a view's declared column names in projection order (`View.columns`,
-  ///     the ISO first-arm naming), with no virtual column (`View.schema`),
-  ///     shadowing a base table of the same name — the precedence a
-  ///     `view(named:)` lookup applies;
-  ///   - a CTE's or store relation's declared columns plus the universal
-  ///     virtual `Id` a `RelationInstance` vends (`RelationInstance.schema`),
-  ///     shadowing a base table or view — the innermost overlay precedence the
-  ///     resolver applies. Only the overlay's base layer is read: a CTE is
-  ///     statement-scoped, while a nested subquery's FROM never sees an
-  ///     enclosing SELECT's derived aliases, so the derived layers name no
-  ///     relation a hosted subquery can reference.
+  ///     the ISO first-arm naming), with no virtual column (`View.schema`) on
+  ///     either surface, shadowing a base table of the same name — the
+  ///     precedence a `view(named:)` lookup applies;
+  ///   - a CTE's or store relation's declared columns (both surfaces) plus the
+  ///     universal virtual `Id` a `RelationInstance` vends (`bindable` only,
+  ///     as `*` omits it), shadowing a base table or view — the innermost
+  ///     overlay precedence the resolver applies. Only the overlay's base layer
+  ///     is read: a CTE is statement-scoped, while a nested subquery's FROM
+  ///     never sees an enclosing SELECT's derived aliases, so the derived
+  ///     layers name no relation a hosted subquery can reference.
   ///
   /// A relation still absent from the map — the residual — cannot be derived
-  /// pre-compile: only a `SELECT *` derived table inside a hosted subquery,
-  /// whose columns the union scope cannot expand here, leaving `expose` to
-  /// record it opaque (the reference conservatively blocked, arm-lifted).
+  /// pre-compile: only a `SELECT *` over a source the map does not name (an
+  /// unresolved or not-yet-bound CTE), whose columns the union scope cannot
+  /// expand here, leaving `expose` to record it opaque (the reference
+  /// conservatively blocked, arm-lifted).
   ///
   /// Every seam that lowers a windowed grouping-sets query — the compile, the
   /// schema derive and typecheck twins, and each runtime `union(windowed:)`
@@ -353,23 +380,25 @@ extension Catalog where Self: ~Escapable {
   /// so all decide local membership identically and run stays in step with
   /// validate.
   internal borrowing func schemas(_ overlay: ScopedRelations = [:])
-      -> Dictionary<String, Set<String>> {
-    var schemas = Dictionary<String, Set<String>>()
+      -> Dictionary<String, Exposure> {
+    var schemas = Dictionary<String, Exposure>()
     for name in relations() {
       guard let table = table(named: name) else { continue }
-      var columns = Set<String>()
-      for column in table.names { columns.insert(column.lowercased()) }
-      for virtual in table.virtuals { columns.insert(virtual.lowercased()) }
-      schemas[name.lowercased()] = columns
+      var real = Set<String>()
+      for column in table.names { real.insert(column.lowercased()) }
+      var bindable = real
+      for virtual in table.virtuals { bindable.insert(virtual.lowercased()) }
+      schemas[name.lowercased()] = Exposure(bindable: bindable, real: real)
     }
     for name in views() {
       guard let view = view(named: name) else { continue }
-      schemas[name.lowercased()] = Set(view.columns.map { $0.lowercased() })
+      let columns = Set(view.columns.map { $0.lowercased() })
+      schemas[name.lowercased()] = Exposure(bindable: columns, real: columns)
     }
     for (name, instance) in overlay.bindings {
-      var columns = Set(instance.columns.map { $0.lowercased() })
-      columns.insert("id")
-      schemas[name.lowercased()] = columns
+      let real = Set(instance.columns.map { $0.lowercased() })
+      schemas[name.lowercased()] =
+          Exposure(bindable: real.union(["id"]), real: real)
     }
     return schemas
   }
@@ -539,7 +568,7 @@ extension WindowedSets {
 internal func decompose(windowed select: Select,
                         sets: Array<Array<Expression>>,
                         _ routines: Routines,
-                        _ schemas: Dictionary<String, Set<String>>)
+                        _ schemas: Dictionary<String, Exposure>)
     throws(SQLError) -> WindowedSets {
   // `GROUPING SETS ()` has no arm to union — rejected here as in `expand`, so a
   // directly built empty set list faults a syntax error rather than trapping.
@@ -787,30 +816,33 @@ private struct Lift {
   /// serve separate decisions and need not agree.
   private let members: Set<Expression>
 
-  /// The exposed column names — case-folded — of each relation in scope, keyed
-  /// by the relation's name: the catalog's base tables and views, and the
-  /// overlay's common table expressions and store relations. It backs the
-  /// local-membership test an unqualified group-key-colliding reference decides
+  /// The `Exposure` — case-folded — of each relation in scope, keyed by the
+  /// relation's name: the catalog's base tables and views, and the overlay's
+  /// common table expressions and store relations. It backs the local-
+  /// membership test an unqualified group-key-colliding reference decides
   /// against (`expose`): a subquery's FROM relation naming one of these binds
-  /// an unqualified name that appears in its column set locally, so the name is
-  /// its own column, not the outer correlation. Virtual columns count — the
-  /// engine's `Schema.ordinal(of:)` resolves an adapter `Id` for a bare name,
-  /// so a subquery over a `U` bearing a virtual `Id` binds a bare `Id` to that
-  /// `Id`, never the outer key. The map mirrors the engine's full schema
-  /// derivation across every relation kind (`Catalog.schemas`); a relation
-  /// absent from it — only a `SELECT *` derived table — is indeterminate,
-  /// leaving the reference conservatively blocked.
-  private let schemas: Dictionary<String, Set<String>>
+  /// an unqualified name in its `bindable` set locally, so the name is its own
+  /// column, not the outer correlation. Virtual columns count on that surface
+  /// — the engine's `Schema.ordinal(of:)` resolves an adapter `Id` for
+  /// a bare name, so a subquery over a `U` bearing a virtual `Id` binds a bare
+  /// `Id` to that `Id`, never the outer key — while a `SELECT *` over `U` reads
+  /// the `real` surface instead (`*` omits the virtual). The map mirrors the
+  /// engine's full schema derivation across every relation kind
+  /// (`Catalog.schemas`); a relation absent from it — only a `SELECT *` over a
+  /// source the map does not name — is indeterminate, leaving the reference
+  /// conservatively blocked.
+  private let schemas: Dictionary<String, Exposure>
 
   /// The local scope a rewrite walk accumulates as it descends — the enriched
   /// `bound` the transforming twin threads in place of a bare alias set. It
   /// carries the in-scope FROM/JOIN `aliases` (for the qualified-local check),
   /// the exposed unqualified column `names` of every determinate local relation
   /// (for the unqualified-local check), and `opaque` — set when an in-scope
-  /// relation's columns could not be derived (only a `SELECT *` derived table
-  /// remains, now that a view and a CTE derive through `schemas`), so an
-  /// unqualified name might still bind there and the reference stays blocked
-  /// rather than rewritten.
+  /// relation's columns could not be derived (only a `SELECT *` over a source
+  /// the schema map does not name remains, now that a base table, view, CTE,
+  /// VALUES, and a `SELECT *` over any of those all derive through `schemas`),
+  /// so an unqualified name might still bind there and the reference stays
+  /// blocked rather than rewritten.
   private struct Locals {
     var aliases: Set<String>
     var names: Set<String>
@@ -865,7 +897,7 @@ private struct Lift {
 
   fileprivate init(_ routines: Routines, keys: Set<String>,
                    members: Set<Expression>,
-                   schemas: Dictionary<String, Set<String>>) {
+                   schemas: Dictionary<String, Exposure>) {
     self.routines = routines
     self.keys = keys
     self.members = members
@@ -1208,29 +1240,34 @@ private struct Lift {
     locals.names.formUnion(names)
   }
 
-  /// The exposed unqualified column names of `relation`, or `nil` when they
+  /// The exposed unqualified column names of `relation` — the surface a bare
+  /// name in a subquery whose FROM names it binds against — or `nil` when they
   /// cannot be derived pre-compile (an indeterminate local the caller records
-  /// `opaque`). A `.named` relation resolves through the derived `schemas` (a
-  /// base table's real and virtual columns, a view's declared columns, a CTE's
-  /// or store relation's columns and virtual `Id`); a `.derived` table takes
-  /// its inner query's output names, indeterminate only for a `SELECT *` body
-  /// the union scope cannot expand here — the sole remaining opaque local.
+  /// `opaque`). A `.named` relation resolves through the derived `schemas` on
+  /// its `bindable` surface (a base table's real and virtual columns, a view's
+  /// declared columns, a CTE's or store relation's columns and virtual `Id`); a
+  /// `.derived` table takes its inner query's output names, indeterminate only
+  /// for a `SELECT *` over a source the map does not name.
   ///
   /// An explicit `AS t(c, …)` list renames the real columns, but the engine
-  /// keeps a relation's virtual `Id` unrenamed beside them (`Schema.renamed`),
-  /// and a materialised derived table vends the universal `Id` too, so the
-  /// exposed set carries that virtual past the list — a bare `Id` over a
-  /// renamed base table, CTE, store relation, or derived table binds locally
-  /// rather than being mis-rewritten to an outer group key. A view exposes no
-  /// virtual (its bindable surface is its real columns), so its listed form
-  /// stays `Id`-free.
+  /// keeps a relation's virtuals (its universal `Id`) unrenamed beside them
+  /// (`Schema.renamed`), and a materialised derived table vends the universal
+  /// `Id` too, so the exposed set carries that virtual past the list — a bare
+  /// `Id` over a renamed base table, CTE, store relation, or derived table
+  /// binds locally rather than being mis-rewritten to an outer group key. A
+  /// view exposes no virtual (`bindable == real`), so its listed form stays
+  /// `Id`-free.
   private func expose(_ relation: Relation) -> Set<String>? {
     switch relation.source {
     case let .named(name):
-      guard let bindable = schemas[name.lowercased()] else { return nil }
-      guard !relation.columns.isEmpty else { return bindable }
-      let listed = Set(relation.columns.map { $0.lowercased() })
-      return bindable.contains("id") ? listed.union(["id"]) : listed
+      guard let exposure = schemas[name.lowercased()] else { return nil }
+      guard !relation.columns.isEmpty else { return exposure.bindable }
+      // An explicit `AS t(c, …)` list renames the real columns; the engine
+      // keeps the relation's virtuals (its universal `Id`) unrenamed beside
+      // them, so union the listed names with those virtuals. A view has no
+      // virtual (`bindable == real`), so its listed form stays `Id`-free.
+      let virtuals = exposure.bindable.subtracting(exposure.real)
+      return Set(relation.columns.map { $0.lowercased() }).union(virtuals)
     case let .derived(query):
       let names = relation.columns.isEmpty
           ? outputs(of: query) : Set(relation.columns.map { $0.lowercased() })
@@ -1240,21 +1277,24 @@ private struct Lift {
   }
 
   /// The unqualified output names a derived table's `query` exposes, or `nil`
-  /// when they cannot be derived — a `SELECT *` projection, whose columns the
-  /// union scope cannot expand here. An explicit projection contributes each
-  /// named item (an alias, else a bare column); an unnamed computed item
-  /// exposes no bindable name and adds none. A set operation takes the left
-  /// arm's names (ISO 9075 output naming); a `VALUES` body exposes the default
-  /// column names the engine's `VALUES` schema derivation assigns — `column1 …
-  /// columnN` for an N-column row (`Query.names`) — so an unqualified `column1`
-  /// over a `(VALUES …)` derived table binds locally rather than being
-  /// mis-rewritten to an outer group key.
+  /// when they cannot be derived — a `SELECT *` over a source the map does not
+  /// name. An explicit projection contributes each named item (an alias, else a
+  /// bare column); an unnamed computed item exposes no bindable name and adds
+  /// none. A `SELECT *` derives through `starred` — the real columns of its own
+  /// FROM/JOIN sources, the engine's `*` expansion (`Scope.terms(.all)`), so a
+  /// `(SELECT * FROM Emp) e` exposes `Emp`'s real columns and an unqualified
+  /// group-key-colliding name binds there rather than arm-lifting. A set
+  /// operation takes the left arm's names (ISO 9075 output naming); a `VALUES`
+  /// body exposes the default column names the engine's `VALUES` schema
+  /// derivation assigns — `column1 … columnN` for an N-column row
+  /// (`Query.names`) — so an unqualified `column1` over a `(VALUES …)` derived
+  /// table binds locally rather than being mis-rewritten to an outer group key.
   private func outputs(of query: Query) -> Set<String>? {
     switch query.body {
     case let .select(select):
       switch select.projection {
       case .all:
-        return nil
+        return starred(select)
       case let .columns(columns):
         return Set(columns.map { $0.name.lowercased() })
       case let .expressions(items):
@@ -1264,6 +1304,39 @@ private struct Lift {
       return outputs(of: left)
     case let .values(rows):
       return Set((0 ..< (rows.first?.count ?? 0)).map { "column\($0 + 1)" })
+    }
+  }
+
+  /// The real columns a `SELECT *` over `select`'s FROM/JOIN sources exposes —
+  /// the engine's `*` expansion (`Scope.terms(.all)`), which enumerates each
+  /// source relation's real columns in chain order (never a virtual column and
+  /// never a merged constituent, both of which name no column the union
+  /// enumeration omits), unioned as a set since membership tests names alone.
+  /// `nil` when any source's columns cannot be derived (a nested `SELECT *`
+  /// over a source the map does not name), so the whole `*` output is opaque.
+  private func starred(_ select: Select) -> Set<String>? {
+    guard var columns = reals(of: select.from) else { return nil }
+    for join in select.joins {
+      guard let names = reals(of: join.relation) else { return nil }
+      columns.formUnion(names)
+    }
+    return columns
+  }
+
+  /// The real columns `relation` contributes to a `SELECT *` expansion — an
+  /// explicit `AS t(c, …)` list, a base table's/view's/CTE's real columns (the
+  /// `real` surface, never a virtual `Id`, which `*` omits), or a derived
+  /// table's own output names (recursing `outputs`). `nil` when a `.named`
+  /// source is absent from the map or a nested derived `SELECT *` is opaque.
+  private func reals(of relation: Relation) -> Set<String>? {
+    if !relation.columns.isEmpty {
+      return Set(relation.columns.map { $0.lowercased() })
+    }
+    switch relation.source {
+    case let .named(name):
+      return schemas[name.lowercased()]?.real
+    case let .derived(query):
+      return outputs(of: query)
     }
   }
 
@@ -1364,8 +1437,8 @@ private struct Lift {
         // from every determinate local with no opaque local in scope is the
         // outer group key, rewritten to its `*gwN` union column; a name absent
         // from the determinate locals but possibly hiding in an opaque local
-        // (a `SELECT *` derived table) is undecidable, so it blocks and the
-        // subquery arm-lifts.
+        // (a `SELECT *` over a source the schema map does not name) is
+        // undecidable, so it blocks and the subquery arm-lifts.
         guard !riding, keys.contains(name) else { return expression }
         if bound.names.contains(name) { return expression }
         guard !bound.opaque else {
@@ -1778,10 +1851,14 @@ extension Expression {
   /// Dropping the qualifier can over-collapse two distinct relations' same-
   /// named columns (`R.A` vs `S.A`) the resolved term keeps apart, but that
   /// only lifts a whole non-key expression the arm's grouped resolver then
-  /// rejects with the same `.grouping` fault, never a wrong success. A guard
-  /// `Predicate` inside a `CASE`, a scalar `subquery` body, and a `window`
-  /// specification recurse no further (none is a legal grouping-key operand the
-  /// arm would accept), so a qualifier or case variance buried in one is a
+  /// rejects with the same `.grouping` fault, never a wrong success. A `CASE`
+  /// guard `Predicate` canonicalises through `Predicate.canonical` — the same
+  /// two normalisations over its operand expressions — so a computed `CASE` key
+  /// matches a qualification- or case-variant projection of it (`CASE WHEN
+  /// T.A = 1 …` ≡ `CASE WHEN a = 1 …`), as the arm's `Grouped.term` equates the
+  /// whole `CASE` once it has a scope. A scalar `subquery` body and a `window`
+  /// specification recurse no further (neither is a legal grouping-key operand
+  /// the arm would accept), so a qualifier or case variance buried in one is a
   /// residual matched only verbatim — a conservative under-match that forgoes
   /// the whole-key lift and descends, as before.
   fileprivate var canonical: Expression {
@@ -1813,11 +1890,80 @@ extension Expression {
     case let .grouping(arguments):
       return .grouping(arguments.map { $0.canonical })
     case let .case(whens, otherwise):
-      let branches = whens.map { When(when: $0.when, then: $0.then.canonical) }
+      let branches = whens.map {
+        When(when: $0.when.canonical, then: $0.then.canonical)
+      }
       return .case(branches, else: otherwise?.canonical)
     case .subquery, .window:
       return self
     }
+  }
+}
+
+extension Predicate {
+  /// This predicate canonicalised for the grouping-key membership test — the
+  /// pre-scope approximation of the resolved identity grouped lowering a `CASE`
+  /// key's guard matches by. It mirrors `Expression.canonical`'s two
+  /// normalisations over every operand expression the predicate carries — a
+  /// column drops its qualifier and lowercases its name, a scalar-call name
+  /// lowercases — and recurses each nested predicate, so a guard spelled
+  /// `T.A = 1` and one spelled `a = 1` canonicalise to one form, exactly as the
+  /// whole `CASE`'s `Grouped.term` equates the two keys once it has a scope.
+  ///
+  /// A nested `EXISTS`/`IN`/quantified subquery body stays structural — as
+  /// `Expression.canonical` leaves a `.subquery` body — so a qualifier or case
+  /// variance buried in one is matched only verbatim, a conservative under-
+  /// match. The operand expressions beside the subquery (the left row of an
+  /// `IN`/quantified) still canonicalise, as they do in a scalar position.
+  fileprivate var canonical: Predicate {
+    switch self {
+    case let .comparison(left, op, right):
+      return .comparison(left: left.canonical, op: op, right: right.canonical)
+    case let .bound(left, op, parameter):
+      return .bound(left: left.canonical, op: op, parameter: parameter)
+    case let .null(operand, negated):
+      return .null(operand.canonical, negated: negated)
+    case let .membership(operand, values, negated):
+      return .membership(operand.canonical, values.map { $0.canonical },
+                         negated: negated)
+    case let .rows(lhs, op, rhs):
+      return .rows(lhs.map { $0.canonical }, op, rhs.map { $0.canonical })
+    case let .among(lhs, rows, negated):
+      return .among(lhs.map { $0.canonical },
+                    rows.map { $0.map { $0.canonical } }, negated: negated)
+    case let .like(operand, pattern, escape, negated):
+      return .like(operand.canonical, pattern: pattern.canonical,
+                   escape: escape?.canonical, negated: negated)
+    case let .between(operand, lower, upper, negated):
+      return .between(operand.canonical, lower.canonical, upper.canonical,
+                      negated: negated)
+    case let .distinct(lhs, rhs, negated):
+      return .distinct(lhs.canonical, rhs.canonical, negated: negated)
+    case let .truth(inner, value, negated):
+      return .truth(inner.canonical, value: value, negated: negated)
+    case let .and(lhs, rhs):
+      return .and(lhs.canonical, rhs.canonical)
+    case let .or(lhs, rhs):
+      return .or(lhs.canonical, rhs.canonical)
+    case let .not(inner):
+      return .not(inner.canonical)
+    case let .within(lhs, query, negated):
+      return .within(lhs.map { $0.canonical }, query, negated: negated)
+    case let .quantified(lhs, op, quantifier, query):
+      return .quantified(lhs.map { $0.canonical }, op, quantifier, query)
+    case .exists:
+      return self
+    }
+  }
+}
+
+extension Predicate.Operand {
+  /// This `LIKE`/`BETWEEN` operand canonicalised — an ordinary expression
+  /// through `Expression.canonical`, a `:parameter` left verbatim (it names no
+  /// column a qualifier or case variance could reach).
+  fileprivate var canonical: Predicate.Operand {
+    guard case let .expression(expression) = self else { return self }
+    return .expression(expression.canonical)
   }
 }
 

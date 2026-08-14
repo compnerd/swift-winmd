@@ -5884,6 +5884,49 @@ struct WindowOverGroupingSetsTests {
         yields: [[2], [3], [nil]])
   }
 
+  @Test func `a CASE grouping key matches a qualifier-variant guard`() throws {
+    // Finding 1: the grouping key is `CASE WHEN T.A = 1 …`, the projection the
+    // same `CASE` with the unqualified guard `A = 1`. Grouped lowering equates
+    // the two — `T.A` and `A` resolve to one ordinal, so both `CASE`s lower to
+    // one `Term` — so the whole-key member match must too. `Expression
+    // .canonical` once copied the guard `Predicate` verbatim, so the key's
+    // `T.A = 1` and the projection's `A = 1` canonicalised apart, the whole-key
+    // match missed, and the walk descended into the guard, lifting a bare `A`
+    // the `(T.A = 1)` arm rejected `.grouping`. Canonicalising the guard by
+    // `Predicate.canonical` collapses the two spellings, so the whole `CASE`
+    // lifts to its `*gw0` arm column — the exact key the arm groups on. The
+    // guard groups are 1 (the dept-1 rows) and 0 (dept-2), the total NULLs the
+    // key; run ≡ validate over the union, matching the ordinary form.
+    let sql = "SELECT CASE WHEN A = 1 THEN 1 ELSE 0 END, " +
+              "ROW_NUMBER() OVER () FROM N AS T GROUP BY " +
+              "GROUPING SETS ((CASE WHEN T.A = 1 THEN 1 ELSE 0 END), ())"
+    try nums().expect(sql, yields: [[1, 1], [0, 2], [nil, 3]])
+    #expect(try nums().columns(of: parse(query: sql), validate: true)
+                .count == 2)
+    try nums().expect(
+        "SELECT CASE WHEN A = 1 THEN 1 ELSE 0 END FROM N AS T GROUP BY " +
+        "GROUPING SETS ((CASE WHEN T.A = 1 THEN 1 ELSE 0 END), ())",
+        yields: [[1], [0], [nil]])
+  }
+
+  @Test func `a CASE grouping key matches a case-variant guard`() throws {
+    // The same over a case-folded guard: the projection's `CASE WHEN a = 1 …`
+    // must match the key's `CASE WHEN A = 1 …`. `Predicate.canonical` folds
+    // each guard column exactly as `Expression.canonical` does its results, so
+    // the whole `CASE` lifts whole rather than descending to a bare `a` the arm
+    // rejects. Same groups as the qualifier-variant form; run ≡ validate.
+    let sql = "SELECT CASE WHEN a = 1 THEN 1 ELSE 0 END, " +
+              "ROW_NUMBER() OVER () FROM N GROUP BY " +
+              "GROUPING SETS ((CASE WHEN A = 1 THEN 1 ELSE 0 END), ())"
+    try nums().expect(sql, yields: [[1, 1], [0, 2], [nil, 3]])
+    #expect(try nums().columns(of: parse(query: sql), validate: true)
+                .count == 2)
+    try nums().expect(
+        "SELECT CASE WHEN a = 1 THEN 1 ELSE 0 END FROM N GROUP BY " +
+        "GROUPING SETS ((CASE WHEN A = 1 THEN 1 ELSE 0 END), ())",
+        yields: [[1], [0], [nil]])
+  }
+
   // A grouped `Emp` beside the three relations a hosted subquery joins in
   // prefix order — `P` a single carrier row, `Q` keyed on the group key `dept`
   // (its `id` the dept's value ×100), and `R` joined on `Q.id` and, crucially,
@@ -6046,5 +6089,85 @@ struct WindowOverGroupingSetsTests {
         """
     #expect(try catalog.run(Statement(parsing: plain), routines) == expected)
     #expect(counter.count == 0)
+  }
+
+  @Test func `a SELECT-star derived table binds a group key locally`() throws {
+    // Finding 2: a `LEAD` default nests `(SELECT tick() FROM (SELECT * FROM
+    // Emp) e WHERE dept = dept)`. The engine's `*` expansion projects `Emp`'s
+    // real columns, so `e` exposes `dept` — the unqualified `dept` binds
+    // locally, the subquery is uncorrelated and hosts lazily in the outer
+    // `LEAD`. Offset 0 always lands on the current row, so the default never
+    // evaluates and `tick()` never runs. `outputs(of:)` once returned nil for a
+    // `SELECT *` body, marking `e` opaque, so the `dept` reference blocked and
+    // the whole subquery arm-lifted — running `tick()` eagerly per group.
+    // Deriving the star output binds `dept` locally, matching `GROUP BY dept`.
+    // (A literal `1 / 0` default the union scope could stand in for constant-
+    // folds at compile whether hosted or lifted, so a non-deterministic
+    // `tick()` with a call counter is the observable a hosted default is lazy.)
+    let counter = Counter()
+    let routines = try Routines.standard
+        .registering("tick", returns: .integer, deterministic: false) { _ in
+          .integer(counter.next())
+        }
+    let sets = "SELECT dept, LEAD(dept, 0, (SELECT tick() " +
+               "FROM (SELECT * FROM Emp) e WHERE dept = dept)) " +
+               "OVER (ORDER BY dept) FROM Emp GROUP BY GROUPING SETS ((dept))"
+    try fixture().expect(sets, yields: [[1, 1], [2, 2], [3, 3]],
+                         routines: routines)
+    #expect(counter.count == 0)
+    #expect(try fixture().columns(of: parse(query: sets), routines: routines,
+                                  validate: true).count == 2)
+    let plain = "SELECT dept, LEAD(dept, 0, (SELECT tick() " +
+                "FROM (SELECT * FROM Emp) e WHERE dept = dept)) " +
+                "OVER (ORDER BY dept) FROM Emp GROUP BY dept"
+    try fixture().expect(plain, yields: [[1, 1], [2, 2], [3, 3]],
+                         routines: routines)
+    #expect(counter.count == 0)
+  }
+
+  @Test func `a SELECT-star over a join binds a group key locally`() throws {
+    // The join variant: the star spans `(VALUES (0)) AS z JOIN Emp`, so `*`
+    // concatenates each source's real columns — `z`'s `column1` and `Emp`'s
+    // `dept`/`sal` — and `e` exposes `dept` from the joined-in relation, not
+    // just the FROM. The unqualified `dept` binds locally, the subquery hosts
+    // lazily, and offset 0 never evaluates `tick()`. `starred` unions the FROM
+    // and every join's real columns; without the join half `dept` would block
+    // and the subquery arm-lift, ticking per group. Matches the ordinary form.
+    let counter = Counter()
+    let routines = try Routines.standard
+        .registering("tick", returns: .integer, deterministic: false) { _ in
+          .integer(counter.next())
+        }
+    let sets = "SELECT dept, LEAD(dept, 0, (SELECT tick() FROM " +
+               "(SELECT * FROM (VALUES (0)) AS z JOIN Emp ON 1 = 1) e " +
+               "WHERE dept = dept)) OVER (ORDER BY dept) " +
+               "FROM Emp GROUP BY GROUPING SETS ((dept))"
+    try fixture().expect(sets, yields: [[1, 1], [2, 2], [3, 3]],
+                         routines: routines)
+    #expect(counter.count == 0)
+    #expect(try fixture().columns(of: parse(query: sets), routines: routines,
+                                  validate: true).count == 2)
+  }
+
+  @Test func `a SELECT-star keeps a qualified outer correlation outer`()
+      throws {
+    // Soundness: deriving `e`'s columns from `SELECT * FROM Emp` exposes
+    // `dept`, but a reference qualified by the outer alias — `T.dept` — is
+    // still the outer correlation, never `e`'s local column, so the qualifier
+    // check keeps it rewritten to the `*gwN` union key rather than falsely
+    // binding it local. The subquery counts `e`'s rows whose `dept` is below
+    // the group's `T.dept` — dept-1 sees 0, dept-2 sees 2 (the two dept-1
+    // rows), dept-3 sees 4 (the dept-1 and dept-2 rows) — a genuine
+    // correlation, matching `GROUP BY dept`.
+    let sets = "SELECT dept, (SELECT COUNT(*) FROM (SELECT * FROM Emp) e " +
+               "WHERE e.dept < T.dept), ROW_NUMBER() OVER () " +
+               "FROM Emp AS T GROUP BY GROUPING SETS ((dept))"
+    try fixture().expect(sets, yields: [[1, 0, 1], [2, 2, 2], [3, 4, 3]])
+    #expect(try fixture().columns(of: parse(query: sets), validate: true)
+                .count == 3)
+    let plain = "SELECT dept, (SELECT COUNT(*) FROM (SELECT * FROM Emp) e " +
+                "WHERE e.dept < T.dept), ROW_NUMBER() OVER () " +
+                "FROM Emp AS T GROUP BY dept"
+    try fixture().expect(plain, yields: [[1, 0, 1], [2, 2, 2], [3, 4, 3]])
   }
 }

@@ -1319,6 +1319,16 @@ extension Catalog where Self: ~Escapable {
     guard let plan = context.subqueries.plan(key, correlation) else {
       throw .named("a correlated subquery plan was not compiled")
     }
+    // A windowed `GROUP BY GROUPING SETS` subquery keeps a `.select` body over
+    // a hidden arm union, so the `.setop` check below misses it; the one shared
+    // decision recovers that union and this per-row execution routes it through
+    // the same carrier descender, over a `revealed()` context so each arm
+    // re-materialises its schema-only derived layer — the parity a top-level
+    // `run` gets. Without this a correlated windowed grouping-sets body scanned
+    // the schema-only source once, dropping the arm rows.
+    if let union = try key.query.union(windowed: context.routines) {
+      return try execute(plan, carrying: union, context.revealed())
+    }
     // A SET-operation subquery augments per ARM (arm-local derived aliases the
     // query-level augment misses); a single query augments the whole query
     // once. A carried union compiles to a `.shaped` plan (a project/sort/
@@ -1438,6 +1448,16 @@ extension Catalog where Self: ~Escapable {
       // uses, so a mixed-type arm widens identically here.
       return try combine(kind, arms(left, leftQuery, context),
                          arms(right, rightQuery, context), all, types: types)
+    }
+    // An arm that is itself a windowed `GROUP BY GROUPING SETS` select keeps a
+    // `.select` body over a hidden arm union, so the `.setop` check below
+    // misses it; the one shared decision recovers that union and this arm
+    // descends it carrier-aware over a `revealed()` context, per-arm
+    // re-materialising its schema-only derived layer — the parity a top-level
+    // `run` gets. Without this a `(windowed grouping-sets) UNION …` arm scanned
+    // the schema-only source once, dropping its per-group rows.
+    if let union = try query.union(windowed: context.routines) {
+      return try execute(plan, carrying: union, context.revealed())
     }
     // An arm that is itself a suffix-bearing parenthesised set operation
     // (`… UNION (… UNION … ORDER BY V FETCH n)`) reaches here as an

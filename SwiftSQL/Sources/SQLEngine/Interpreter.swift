@@ -162,6 +162,18 @@ extension Catalog where Self: ~Escapable {
     case let .limit(count, offset, source):
       return limited(try execute(source, carrying: union, context), count,
                      offset)
+    case let .top(keys, offset, count, source):
+      // The windowed grouping-sets plan is optimised through the generic
+      // optimiser (its query body is a `.select`, not a `.setop`), which fuses
+      // a bounded `limit` directly over a `sort` into a `top` — so a windowed
+      // grouping-sets under a query `ORDER BY … FETCH n` stacks a `top` above
+      // the window, where the carried set-operation carrier's own plan (a
+      // setop-aware optimise that never fuses) never does. Descend it carrying
+      // the union like the `sort`/`limit` pair it fuses — so the setop leaf
+      // still per-arm augments the arm-local derived aliases — then take the
+      // sorted head, matching the plain `.top` node's execution.
+      return try topmost(execute(source, carrying: union, context), keys,
+                         offset, count, context)
     case let .select(filter, source):
       return try admitted(execute(source, carrying: union, context), filter,
                           context)
@@ -1027,8 +1039,17 @@ extension Catalog where Self: ~Escapable {
     }
     let rows: Array<Record>
     let view = resolve(view: name)
-    if let view, view.query.carriers.isEmpty, case .setop = view.query.body,
-        case .setop = plan {
+    if let view, let union = try view.query.union(windowed: context.routines) {
+      // A windowed `GROUP BY GROUPING SETS` view body keeps a `.select` body
+      // over a hidden arm union, so neither `.setop` branch below sees it; the
+      // one shared decision recovers that union and the body runs through the
+      // same carrier descender the top-level `run` uses, over the `overlay`
+      // revealed so each arm re-materialises its schema-only derived layer.
+      // Without this the body scanned the schema-only source `augment` bound
+      // once (`unioned`), dropping the arm rows.
+      rows = try execute(plan, carrying: union, overlay.revealed())
+    } else if let view, view.query.carriers.isEmpty,
+        case .setop = view.query.body, case .setop = plan {
       // A SET-operation view body executes each ARM's sub-plan under an overlay
       // augmented with that arm's own derived aliases. A `setop` collects no
       // derived aliases at the query level (arms are SELECT-scoped), so the
@@ -1109,6 +1130,16 @@ extension Catalog where Self: ~Escapable {
     // leaves a bare setop or a leaf select unchanged, so a non-carried body is
     // untouched.
     let query = query.core
+    // An arm that is itself a windowed `GROUP BY GROUPING SETS` select keeps a
+    // `.select` body over a hidden arm union, so neither `.setop` branch below
+    // sees it; the one shared decision recovers that union and this arm
+    // descends it carrier-aware over the `overlay` revealed, per-arm
+    // re-materialising its schema-only derived layer. Without this a view body
+    // `(windowed grouping-sets) UNION …` scanned the schema-only source once,
+    // dropping its per-group rows.
+    if let union = try query.union(windowed: overlay.routines) {
+      return try execute(plan, carrying: union, overlay.revealed())
+    }
     if case let .setop(kind, left, right, all, types, _) = plan,
         case let .setop(_, leftQuery, rightQuery, _) = query.body {
       // This node's arm queries are in hand, so the unified column `types` the

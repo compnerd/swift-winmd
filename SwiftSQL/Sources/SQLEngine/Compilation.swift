@@ -2158,10 +2158,6 @@ extension Catalog where Self: ~Escapable {
       throws(SQLError) -> Plan {
     let routines = context.routines
     let parts = try decompose(windowed: select, sets: sets, routines)
-    // The outer window layer reads only `*gwN` union columns and window slots,
-    // so it nests no subquery — the `Lift` pushed a subquery-bearing
-    // window-free operand into an arm — and resolves with no subquery surface.
-    let none = Resolution.unsupported
     // Compile the window-free arm union in the enclosing context and derive its
     // output columns — the `*gwN`-named, type-unified result columns the window
     // layer reads. The union plan's output sits at slots `0 ..< arity` (a
@@ -2177,6 +2173,22 @@ extension Catalog where Self: ~Escapable {
     // resolves unqualified over `schema`; its inner query is inspected nowhere,
     // so the union's arm-0 `SELECT` stands in for the derived relation.
     let scope = Scope([(Relation(derived: parts.union.arm, as: ""), schema)])
+    // The outer layer hosts every subquery the `Lift` kept out of the arms — an
+    // uncorrelated one it did not push into a `*gwN` column — resolved against
+    // the union scope, so a `LEAD` default or a `CASE` branch nesting a
+    // subquery stays lazy above the cap. Build the same `Resolution` the schema
+    // twin builds, over the outer projection and `ORDER BY`, keyed by the
+    // enclosing select's own subquery roles.
+    var hosted = Array<Query>()
+    for item in parts.projection {
+      item.expression.collect(subqueries: &hosted)
+    }
+    for key in parts.order?.keys ?? [] {
+      if case let .expression(expression) = key.sort {
+        expression.collect(subqueries: &hosted)
+      }
+    }
+    let outer = try subquery(hosted, select, context, within: scope)
 
     // The distinct windows the outer layer computes, gathered from the lifted
     // projection and `ORDER BY`. An unsupported function or frame faults the
@@ -2201,7 +2213,7 @@ extension Catalog where Self: ~Escapable {
       try function.require(order: spec)
       if let frame = spec.frame {
         let ordering = try frame.measured
-            ? scope.ordering(spec, routines, subquery: none)
+            ? scope.ordering(spec, routines, subquery: outer)
             : nil
         try frame.reject(for: function, order: ordering)
       }
@@ -2214,11 +2226,11 @@ extension Catalog where Self: ~Escapable {
         Dictionary(uniqueKeysWithValues: (0 ..< arity).map { ($0, $0) })
     var windowed = Windowed(scope, identity, width: arity)
     let projection = try windowed.terms(.expressions(parts.projection),
-                                        routines, subquery: none)
+                                        routines, subquery: outer)
     var order = Array<SortKey>()
     if let clause = parts.order {
       order = try windowed.order(clause, projection, routines,
-                                 subquery: none)
+                                 subquery: outer)
     }
     // Under DISTINCT every `ORDER BY` key must be a select-list value (see
     // `distinct`); the keys and projection are in the window's output slot

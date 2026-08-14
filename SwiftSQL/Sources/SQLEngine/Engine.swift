@@ -121,6 +121,37 @@ extension Catalog where Self: ~Escapable {
     if !query.carriers.isEmpty, case .setop = query.body {
       return try execute(plan, carrying: query.core, augmented).map(\.values)
     }
+    // A multi-set windowed `GROUP BY GROUPING SETS` select lowers to a
+    // `.window` over the arm `union`'s `.setop` (`windowed(sets:)`), yet
+    // keeps a `.select` body: `expanded` does not desugar it, since the window
+    // must ride above the union, not inside each arm. So neither carrier
+    // branch above fires, and the plain `execute` below would run the buried
+    // setop under the one augmented context — every arm scanning the derived
+    // source the query-level augment bound a single time — where the non-
+    // windowed grouping-sets, a `.setop` routed carrier-aware, materialises it
+    // per arm. Recover the arm union the compile split off (`decompose`, the
+    // single source of that split) and route the plan through the same carrier-
+    // aware executor, whose `.window` descent carries the union to the setop
+    // leaf and per-arm augments it. `augment` bound this query's derived tables
+    // schema-only (`unioned`), so the query-level materialise fired no
+    // stateful source; `revealed` drops that schema layer so each arm
+    // materialises the rows itself — matching the non-windowed form. A stray
+    // plan node the `.window` descent does not carry through (a fused `top`)
+    // reads the same revealed base, whose store relations and CTEs it keeps.
+    //
+    // A single-set spelling (a non-empty `((x))` or the grand total `(())`) has
+    // no arm union — `decompose` returns a plain grouped `.select`, one arm,
+    // not a `.setop` — so there is nothing to carry per arm, no schema layer to
+    // reveal: `augment` (keyed on the same `unioned`) materialised its
+    // derived rows once already. `unioned` is false, so it skips the
+    // carrier route and falls through to the ordinary `execute` below, which
+    // reads those rows and runs the `.window` over the lone grouped arm. Both
+    // forks decide the single-arm shape by one predicate, so a future routing
+    // change cannot handle the multi-arm case yet miss the single arm.
+    if let union = try query.union(windowed: context.routines) {
+      return try execute(plan, carrying: union, augmented.revealed())
+          .map(\.values)
+    }
     // A carrier over a bare `SELECT` (a parenthesised simple query with an
     // outer tail — `(SELECT …) ORDER BY …`) has no set-operation arms to
     // augment, so its `.shaped` plan runs through the plain executor; only a

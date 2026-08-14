@@ -2157,7 +2157,8 @@ extension Catalog where Self: ~Escapable {
                                    _ context: Context)
       throws(SQLError) -> Plan {
     let routines = context.routines
-    let parts = try decompose(windowed: select, sets: sets, routines)
+    let parts = try decompose(windowed: select, sets: sets, routines,
+                              schemas(context.relations))
     // Compile the window-free arm union in the enclosing context and derive its
     // output columns — the `*gwN`-named, type-unified result columns the window
     // layer reads. The union plan's output sits at slots `0 ..< arity` (a

@@ -4018,8 +4018,9 @@ struct WindowOverGroupingSetsTests {
 
   // A grouped `Emp` beside a `U` with no `dept` column, so unqualified `dept`
   // in a subquery over `U` is a genuine correlation to the group key (not a
-  // local column, and `dept` is no adapter column either) — the unqualified-
-  // ambiguous residual the qualified-free rewrite arm-lifts. `U.v` is 1, 2, 3.
+  // real column of `U`, and `dept` is no adapter/virtual `Id` column either),
+  // decidable against `U`'s schema and rewritten to the outer key. `U.v` is
+  // 1, 2, 3.
   private func colliding() throws -> FixtureCatalog {
     try Catalog {
       Relation("Emp", ["dept": .integer, "sal": .integer]) {
@@ -4045,6 +4046,21 @@ struct WindowOverGroupingSetsTests {
       }
       Relation("U", ["k": .integer, "v": .integer]) {
         Row(0, 5)
+      }
+    }
+  }
+
+  // A grouped `Emp` with a `dept = 0` group beside a `U` with no `dept` column,
+  // so an unqualified `dept` in a subquery over `U` is a genuine correlation to
+  // the zero group key — neither a real column of `U` nor its virtual `Id`. A
+  // fallback dividing `SUM(U.v)` by `dept` faults `.divide` if eager.
+  private func collidingZero() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("Emp", ["dept": .integer, "sal": .integer]) {
+        Row(0, 100)
+      }
+      Relation("U", ["v": .integer]) {
+        Row(5)
       }
     }
   }
@@ -4743,6 +4759,32 @@ struct WindowOverGroupingSetsTests {
                                             [3, 200, 3]])
   }
 
+  @Test func `a derived table's virtual Id binds locally not the group key`()
+      throws {
+    // F5: `expose` classifies a hosted subquery's FROM relations as local or
+    // outer. A `(VALUES (99)) AS v(x)` derived table renames its lone real
+    // column to `x`, but the materialised relation still vends the universal
+    // virtual `Id`; dropping it under the explicit column list left the
+    // subquery's own `Id` mis-classified as an outer correlation and rewritten
+    // to the group key. The subquery `(SELECT Id FROM (VALUES (99)) AS v(x))`
+    // must read `v`'s own row Id — a constant 1 across every group — not the
+    // outer group Id. Emp's five rows each group on their virtual Id, so
+    // `ROW_NUMBER() OVER (ORDER BY Id)` numbers them 1..5 while `n` stays 1,
+    // matching the ordinary `GROUP BY Id` form on both run and validate; before
+    // the fix `n` bound the group Id (1..5).
+    let sets = "SELECT ROW_NUMBER() OVER (ORDER BY Id) AS r, " +
+               "(SELECT Id FROM (VALUES (99)) AS v(x)) AS n " +
+               "FROM Emp GROUP BY GROUPING SETS ((Id))"
+    try fixture().expect(sets, yields: [[1, 1], [2, 1], [3, 1], [4, 1], [5, 1]])
+    #expect(try fixture().columns(of: parse(query: sets), validate: true)
+                .count == 2)
+    let plain = "SELECT ROW_NUMBER() OVER (ORDER BY Id) AS r, " +
+                "(SELECT Id FROM (VALUES (99)) AS v(x)) AS n " +
+                "FROM Emp GROUP BY Id"
+    try fixture().expect(plain,
+                         yields: [[1, 1], [2, 1], [3, 1], [4, 1], [5, 1]])
+  }
+
   @Test func `a correlated EXISTS CASE guard hosts outer over the union`()
       throws {
     // Finding 1: a correlated predicate subquery in a `CASE` guard — `EXISTS
@@ -4784,25 +4826,91 @@ struct WindowOverGroupingSetsTests {
     try zeroed().expect(plain, yields: [[0]])
   }
 
-  @Test func `an unqualified key-colliding subquery still arm-lifts`()
+  @Test func `an unqualified absent key subquery hosts outer over the union`()
       throws {
-    // The residual the qualified-free rewrite leaves arm-lifted: a scalar
-    // subquery whose only correlation is an unqualified `dept` — `(SELECT
-    // SUM(U.v) FROM U WHERE U.v > dept)`. `dept` unqualified might be a local
-    // base column of `U`, undecidable pre-schema, so the lifter cannot safely
-    // rewrite it to `*gwN` and host the subquery — it falls back to arm-lift (a
-    // `*gwN` column), where the arm's grouped scope binds `dept` to the group.
-    // Hosting it verbatim would leave `dept` unresolved over the `*gwN`-only
-    // union scope and fault `.column`; arm-lifted it returns rows — `dept` 1
-    // sums `U.v > 1` (2 + 3 = 5), 2 sums `> 2` (3), 3 sums `> 3` (none, NULL) —
-    // the same values the ordinary `GROUP BY dept` yields, value-correct if
-    // eager, only forgoing the lazy outer host.
+    // A scalar subquery whose only correlation is an unqualified `dept` —
+    // `(SELECT SUM(U.v) FROM U WHERE U.v > dept)`. `dept` is neither a real
+    // column of `U` (only `v`) nor its virtual `Id`, so no local relation
+    // exposes it: decided against `U`'s schema it is the outer group key,
+    // rewritten to its `*gwN` union column and the subquery hosted outer. It
+    // once fell back to arm-lift (an unqualified name was treated undecidable),
+    // still value-correct but eager; hosting it outer keeps the same values —
+    // `dept` 1 sums `U.v > 1` (2 + 3 = 5), 2 sums `> 2` (3), 3 sums `> 3`
+    // (none, NULL) — matching the ordinary `GROUP BY dept` form, now lazy.
     let sets = "SELECT dept, (SELECT SUM(U.v) FROM U WHERE U.v > dept), " +
                "ROW_NUMBER() OVER () FROM Emp GROUP BY GROUPING SETS ((dept))"
     try colliding().expect(sets, yields: [[1, 5, 1], [2, 3, 2], [3, nil, 3]])
+    #expect(try colliding().columns(of: parse(query: sets), validate: true)
+                .count == 3)
     let plain = "SELECT dept, (SELECT SUM(U.v) FROM U WHERE U.v > dept), " +
                 "ROW_NUMBER() OVER () FROM Emp GROUP BY dept"
     try colliding().expect(plain, yields: [[1, 5, 1], [2, 3, 2], [3, nil, 3]])
+  }
+
+  @Test func `an unqualified key a local relation exposes stays verbatim`()
+      throws {
+    // Soundness guard: an unqualified name a local relation exposes must not be
+    // rewritten to the outer key. `EXISTS (SELECT U.k FROM U WHERE U.k = Id)`
+    // over `GROUP BY GROUPING SETS ((T.Id))` — `Id` is unqualified and names
+    // the group key `T.Id`, but `U` exposes a virtual `Id`, so by ISO inner-
+    // scope precedence `Id` binds locally to `U.Id` (its row index), not the
+    // outer key. The lifter must leave it verbatim: `U.k = U.Id` is true for
+    // `U`'s first row (`k = 1`, `Id = 1`), so `EXISTS` holds for every group,
+    // the `CASE` yields 1 each — exactly what the ordinary `GROUP BY T.Id` form
+    // yields, proving a locally-bound name is never mis-rewritten to `*gwN`.
+    let sets =
+        "SELECT CASE WHEN EXISTS (SELECT U.k FROM U WHERE U.k = Id) " +
+        "THEN 1 ELSE 0 END, ROW_NUMBER() OVER () " +
+        "FROM T GROUP BY GROUPING SETS ((T.Id))"
+    try correlated().expect(sets, yields: [[1, 1], [1, 2], [1, 3]])
+    #expect(try correlated().columns(of: parse(query: sets), validate: true)
+                .count == 2)
+    let plain =
+        "SELECT CASE WHEN EXISTS (SELECT U.k FROM U WHERE U.k = Id) " +
+        "THEN 1 ELSE 0 END, ROW_NUMBER() OVER () FROM T GROUP BY T.Id"
+    try correlated().expect(plain, yields: [[1, 1], [1, 2], [1, 3]])
+  }
+
+  @Test func `an unqualified absent key predicate guard hosts outer`() throws {
+    // The predicate twin of the absent-key fix: an `EXISTS` guard over `U`
+    // correlating on an unqualified `dept` genuinely absent from `U` — `EXISTS
+    // (SELECT 1 FROM U WHERE U.v = dept)`. It once hosted verbatim (an
+    // unqualified key was undecidable), leaving `dept` unresolved over the
+    // `*gwN`-only union scope and faulting `.column`. Decided against `U`'s
+    // schema `dept` is the outer key, rewritten to `*gwN` and hosted as a
+    // correlated parameter: each group's `dept` (1, 2, 3) matches a `U.v`
+    // (1, 2, 3), so the guard holds and the `CASE` yields 1 each, matching the
+    // ordinary `GROUP BY dept` companion.
+    let sets =
+        "SELECT CASE WHEN EXISTS (SELECT 1 FROM U WHERE U.v = dept) " +
+        "THEN 1 ELSE 0 END, ROW_NUMBER() OVER () " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept))"
+    try colliding().expect(sets, yields: [[1, 1], [1, 2], [1, 3]])
+    #expect(try colliding().columns(of: parse(query: sets), validate: true)
+                .count == 2)
+    let plain =
+        "SELECT CASE WHEN EXISTS (SELECT 1 FROM U WHERE U.v = dept) " +
+        "THEN 1 ELSE 0 END, ROW_NUMBER() OVER () FROM Emp GROUP BY dept"
+    try colliding().expect(plain, yields: [[1, 1], [1, 2], [1, 3]])
+  }
+
+  @Test func `an absent key LEAD fallback over a zero group stays lazy`()
+      throws {
+    // The scalar-divergence fix: a `LEAD` fallback nests a scalar subquery
+    // correlating on an unqualified `dept` absent from `U` — the subquery
+    // `(SELECT SUM(U.v) / dept FROM U)` — over a `dept = 0` group. Arm-lifting
+    // evaluated it eagerly per group, dividing `SUM(U.v)` by zero and faulting
+    // `.divide`; the ordinary `GROUP BY dept` form kept it a lazy `LEAD`
+    // fallback, so offset 0 landed on the current row and it never divided.
+    // Rewriting `dept` to `*gwN` and hosting the subquery in the outer `LEAD`
+    // restores that laziness — the row is the current `dept` (0), matching the
+    // ordinary form, where the windowed form once faulted.
+    let sets = "SELECT LEAD(dept, 0, (SELECT SUM(U.v) / dept FROM U)) " +
+               "OVER (ORDER BY dept) FROM Emp GROUP BY GROUPING SETS ((dept))"
+    try collidingZero().expect(sets, yields: [[0]])
+    let plain = "SELECT LEAD(dept, 0, (SELECT SUM(U.v) / dept FROM U)) " +
+                "OVER (ORDER BY dept) FROM Emp GROUP BY dept"
+    try collidingZero().expect(plain, yields: [[0]])
   }
 
   @Test func `a grouped IN-subquery guard substitutes its left operand`()
@@ -5544,5 +5652,341 @@ struct WindowOverGroupingSetsTests {
         .registering("tick", returns: .integer, deterministic: false) { _ in
           .integer(counter.next())
         }
+  }
+
+  // A single-column relation grouped on a computed key `A + 1`: A = 1, 1, 2, so
+  // `A + 1` = 2, 2, 3 — two groups the arithmetic key defines, exactly as a
+  // plain `GROUP BY A + 1` would.
+  private func nums() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("N", ["A": .integer, "V": .integer]) {
+        Row(1, 100)
+        Row(1, 50)
+        Row(2, 30)
+      }
+    }
+  }
+
+  // A two-column relation grouped on a multi-column computed key `A + B`: the
+  // pairs (1, 10), (1, 10), (2, 20) give `A + B` = 11, 11, 22.
+  private func pairs() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("M", ["A": .integer, "B": .integer]) {
+        Row(1, 10)
+        Row(1, 10)
+        Row(2, 20)
+      }
+    }
+  }
+
+  @Test func `a computed grouping-set key lifts whole under a window`() throws {
+    // The grouping key is the arithmetic expression `A + 1`, not a bare column.
+    // The lifter must lift the whole `A + 1` to one `*gw0` arm column, so the
+    // arm projects `A + 1` — its actual GROUP BY key — which the grouped arm
+    // accepts. Recursing the operands would lift the bare `A` instead, and the
+    // arm rejects `A` (only `A + 1` is a grouping key). The `(A + 1)` arm
+    // groups 2, 3; the grand total NULLs the key; `ROW_NUMBER() OVER ()` counts
+    // the union in row order. The projected `A + 1` matches the non-windowed
+    // companion below.
+    try nums().expect(
+        "SELECT A + 1, ROW_NUMBER() OVER () " +
+        "FROM N GROUP BY GROUPING SETS ((A + 1), ())",
+        yields: [[2, 1], [3, 2], [nil, 3]])
+    // The non-windowed grouping-sets form the windowed one must equal on its
+    // shared `A + 1` column — the equivalent query the ordinary path supports.
+    try nums().expect(
+        "SELECT A + 1 FROM N GROUP BY GROUPING SETS ((A + 1), ())",
+        yields: [[2], [3], [nil]])
+  }
+
+  @Test func `run and validate agree on a computed grouping-set key`() throws {
+    // Both paths drive the one `decompose` over the union, so the schema twin
+    // types the same two-column shape the run yields — no grouping deferral or
+    // bare-`A` rejection surviving on either.
+    let sql = "SELECT A + 1, ROW_NUMBER() OVER () " +
+              "FROM N GROUP BY GROUPING SETS ((A + 1), ())"
+    #expect(try nums().columns(of: parse(query: sql), validate: true)
+                .count == 2)
+    try nums().expect(sql, yields: [[2, 1], [3, 2], [nil, 3]])
+  }
+
+  @Test func `a computed key inside a larger expression lifts the key whole`()
+      throws {
+    // `(A + 1) * 2` references the grouping key `A + 1` within a larger scalar.
+    // The key lifts whole to `*gw0`, the `* 2` staying outer as `*gw0 * 2` — so
+    // the arm projects `A + 1` (accepted) and the outer doubles it: 2·2 = 4,
+    // 3·2 = 6, the grand-total NULL staying NULL. It matches the ordinary form.
+    try nums().expect(
+        "SELECT (A + 1) * 2, ROW_NUMBER() OVER () " +
+        "FROM N GROUP BY GROUPING SETS ((A + 1), ())",
+        yields: [[4, 1], [6, 2], [nil, 3]])
+    try nums().expect(
+        "SELECT (A + 1) * 2 FROM N GROUP BY GROUPING SETS ((A + 1), ())",
+        yields: [[4], [6], [nil]])
+  }
+
+  @Test func `a multi-column expression key lifts whole`() throws {
+    // The grouping key spans two columns, `A + B` — the whole key lifts to one
+    // `*gw0` arm column, not either bare operand — so the arm projects
+    // `A + B` (11, 22) and the grand total NULLs it, `ROW_NUMBER() OVER ()`
+    // numbering the union. It matches the non-windowed form.
+    try pairs().expect(
+        "SELECT A + B, ROW_NUMBER() OVER () " +
+        "FROM M GROUP BY GROUPING SETS ((A + B), ())",
+        yields: [[11, 1], [22, 2], [nil, 3]])
+    try pairs().expect(
+        "SELECT A + B FROM M GROUP BY GROUPING SETS ((A + B), ())",
+        yields: [[11], [22], [nil]])
+  }
+
+  @Test func `a bare-column grouping-set key still lifts whole`() throws {
+    // The subsumed case: a bare column `A` is itself a member expression, so it
+    // lifts whole exactly as before — the arm projects `A` (1, 2), the grand
+    // total NULLs it, `ROW_NUMBER() OVER ()` numbering the union. The whole-
+    // member recognition does not regress the bare-column key.
+    try nums().expect(
+        "SELECT A, ROW_NUMBER() OVER () " +
+        "FROM N GROUP BY GROUPING SETS ((A), ())",
+        yields: [[1, 1], [2, 2], [nil, 3]])
+  }
+
+  @Test func `a non-key column over an expression key faults grouping`()
+      throws {
+    // Do not over-accept: projecting the bare `A` when the grouping key is the
+    // expression `A + 1` is ill-formed — `A` is not a grouping key. The bare
+    // column lifts into the arm, whose grouped resolver rejects it with the
+    // same `.grouping` fault the ordinary non-windowed form raises, on both
+    // paths.
+    let sql = "SELECT A, ROW_NUMBER() OVER () " +
+              "FROM N GROUP BY GROUPING SETS ((A + 1), ())"
+    try nums().expect(sql, fails: .grouping("A"))
+    #expect(throws: SQLError.grouping("A")) {
+      _ = try nums().columns(of: parse(query: sql), validate: true)
+    }
+    // The ordinary non-windowed form faults identically.
+    #expect(throws: SQLError.grouping("A")) {
+      _ = try nums().columns(of: parse(query:
+          "SELECT A FROM N GROUP BY GROUPING SETS ((A + 1), ())"),
+          validate: true)
+    }
+  }
+
+  @Test func `a qualified computed key matches an unqualified projection`()
+      throws {
+    // Finding 2: the grouping key is qualified `T.A + 1`, the projection the
+    // unqualified `A + 1`. Grouped lowering equates them — `T.A` and `A`
+    // resolve to one ordinal, so both lower to one `Term` — so the whole-key
+    // member match must too. Matched by resolved identity (canonical,
+    // qualifier-stripped), the whole `A + 1` lifts to its `*gw0` arm column,
+    // the arm projecting the exact `T.A + 1` key it groups on. Raw `Expression`
+    // equality treated `A + 1` ≠ `T.A + 1` and recursed to the bare `A`, which
+    // the arm rejected `.grouping`. The `(T.A + 1)` arm groups 2, 3; the grand
+    // total NULLs the key; run ≡ validate over the union.
+    let sql = "SELECT A + 1, ROW_NUMBER() OVER () " +
+              "FROM N AS T GROUP BY GROUPING SETS ((T.A + 1), ())"
+    try nums().expect(sql, yields: [[2, 1], [3, 2], [nil, 3]])
+    #expect(try nums().columns(of: parse(query: sql), validate: true)
+                .count == 2)
+    // The ordinary non-windowed grouping-sets form the windowed one must
+    // equal — the arm's `Grouped.term` already accepts the different spelling.
+    try nums().expect(
+        "SELECT A + 1 FROM N AS T GROUP BY GROUPING SETS ((T.A + 1), ())",
+        yields: [[2], [3], [nil]])
+  }
+
+  @Test func `an unqualified computed key matches a qualified projection`()
+      throws {
+    // The mirror: the key is the unqualified `A + 1`, the projection the
+    // qualified `T.A + 1`. Both canonicalise alike, so `T.A + 1` lifts whole to
+    // its arm column, the arm projecting `T.A + 1` its `Grouped.term` accepts
+    // as the `A + 1` key. Same groups as the qualified-key form; run ≡ valid.
+    let sql = "SELECT T.A + 1, ROW_NUMBER() OVER () " +
+              "FROM N AS T GROUP BY GROUPING SETS ((A + 1), ())"
+    try nums().expect(sql, yields: [[2, 1], [3, 2], [nil, 3]])
+    #expect(try nums().columns(of: parse(query: sql), validate: true)
+                .count == 2)
+    try nums().expect(
+        "SELECT T.A + 1 FROM N AS T GROUP BY GROUPING SETS ((A + 1), ())",
+        yields: [[2], [3], [nil]])
+  }
+
+  @Test func `a case-variant computed key matches the projection`() throws {
+    // The dialect case-folds identifiers, so grouped lowering equates `a + 1`
+    // with the `A + 1` key. The member match mirrors that fold: the projection
+    // `a + 1` lifts whole to the `A + 1` arm column rather than recursing to a
+    // bare `a` the arm would reject. Same groups as the exact-spelling form;
+    // run ≡ validate over the union.
+    let sql = "SELECT a + 1, ROW_NUMBER() OVER () " +
+              "FROM N GROUP BY GROUPING SETS ((A + 1), ())"
+    try nums().expect(sql, yields: [[2, 1], [3, 2], [nil, 3]])
+    #expect(try nums().columns(of: parse(query: sql), validate: true)
+                .count == 2)
+    try nums().expect(
+        "SELECT a + 1 FROM N GROUP BY GROUPING SETS ((A + 1), ())",
+        yields: [[2], [3], [nil]])
+  }
+
+  // A grouped `Emp` beside the three relations a hosted subquery joins in
+  // prefix order — `P` a single carrier row, `Q` keyed on the group key `dept`
+  // (its `id` the dept's value ×100), and `R` joined on `Q.id` and, crucially,
+  // exposing its own `dept` column joined in later than the `ON` that names the
+  // group key. So the first `ON`'s `dept` is the outer correlation, not `R`'s
+  // column its prefix cannot see.
+  private func prefixed() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("Emp", ["dept": .integer, "sal": .integer]) {
+        Row(1, 100)
+        Row(2, 300)
+        Row(3, 500)
+      }
+      Relation("P", ["a": .integer]) {
+        Row(1)
+      }
+      Relation("Q", ["g": .integer, "id": .integer]) {
+        Row(1, 100)
+        Row(2, 200)
+        Row(3, 300)
+      }
+      Relation("R", ["id": .integer, "dept": .integer]) {
+        Row(100, 9)
+        Row(200, 9)
+        Row(300, 9)
+      }
+    }
+  }
+
+  @Test func `a hosted join ON binds the outer key by its prefix`() throws {
+    // Finding 3: a hosted correlated scalar subquery whose first join `ON`
+    // names the outer grouping key `dept` and whose later join introduces `R`,
+    // a table also exposing `dept`. The local-membership walk once added every
+    // joined relation to the scope before rewriting any `ON`, so `R`'s `dept`
+    // made the first `ON`'s `dept` look local and left it verbatim — yet
+    // prefix-scoped resolution binds a join `ON` only against its prefix
+    // (`P JOIN Q`), which exposes no `dept`, so over the `*gwN`-only union
+    // scope it faulted `.column`. Accumulating the prefix in source order, the
+    // first `ON`'s `dept` is absent from its prefix and rewrites to its `*gw0`
+    // union column, hosting the subquery outer as the outer key. Each group's
+    // `dept` picks its `Q` row (id = dept×100) and joins `R` on it, so
+    // `SUM(Q.id)` is 100, 200, 300 — matching the ordinary `GROUP BY dept` form
+    // on run and validate.
+    let sql = "SELECT dept, " +
+              "(SELECT SUM(Q.id) FROM P JOIN Q ON Q.g = dept " +
+              "JOIN R ON R.id = Q.id), ROW_NUMBER() OVER () " +
+              "FROM Emp GROUP BY GROUPING SETS ((dept))"
+    try prefixed().expect(sql, yields: [[1, 100, 1], [2, 200, 2], [3, 300, 3]])
+    #expect(try prefixed().columns(of: parse(query: sql), validate: true)
+                .count == 3)
+    let plain = "SELECT dept, " +
+                "(SELECT SUM(Q.id) FROM P JOIN Q ON Q.g = dept " +
+                "JOIN R ON R.id = Q.id), ROW_NUMBER() OVER () " +
+                "FROM Emp GROUP BY dept"
+    try prefixed().expect(plain, yields: [[1, 100, 1], [2, 200, 2],
+                                          [3, 300, 3]])
+  }
+
+  @Test func `a VALUES default column in a hosted subquery binds locally`()
+      throws {
+    // Finding 1: a derived `(VALUES (99)) AS v` exposes the default column name
+    // the engine's VALUES schema derivation assigns — `column1` — so the scalar
+    // subquery `(SELECT column1 + 0 FROM (VALUES (99)) AS v)` reads v's own
+    // column (99), bound locally and left verbatim. Grouped by `column1`, the
+    // outer group key shares that bare name; before the VALUES defaults were
+    // derived the membership walk read the local `column1` as the outer key and
+    // rewrote it to a `*gwN` union column, returning the grouping value (1, 2,
+    // 3) rather than 99. The `+ 0` keeps the reference in an expression slot so
+    // the rewrite sticks (a bare `SELECT column1` projection is carried
+    // verbatim by the projection rule). The window `ORDER BY column1` pins the
+    // ranking to the group key, matching the ordinary `GROUP BY column1` form.
+    let sets = "SELECT column1, " +
+               "(SELECT column1 + 0 FROM (VALUES (99)) AS v), " +
+               "ROW_NUMBER() OVER (ORDER BY column1) " +
+               "FROM (VALUES (1), (2), (3)) AS n(column1) " +
+               "GROUP BY GROUPING SETS ((column1)) ORDER BY column1"
+    try fixture().expect(sets, yields: [[1, 99, 1], [2, 99, 2], [3, 99, 3]])
+    #expect(try fixture().columns(of: parse(query: sets), validate: true)
+                .count == 3)
+    let plain = "SELECT column1, " +
+                "(SELECT column1 + 0 FROM (VALUES (99)) AS v), " +
+                "ROW_NUMBER() OVER (ORDER BY column1) " +
+                "FROM (VALUES (1), (2), (3)) AS n(column1) " +
+                "GROUP BY column1 ORDER BY column1"
+    try fixture().expect(plain, yields: [[1, 99, 1], [2, 99, 2], [3, 99, 3]])
+  }
+
+  @Test func `a view column in a hosted LEAD default binds locally and hosts`()
+      throws {
+    // Finding 2 (view): a `LEAD` default nests `(SELECT tick() FROM V WHERE
+    // dept = dept)` over a view `V` exposing `dept`. `V`'s schema is now
+    // derived from the catalog (`view(named:)`), not marked opaque, so the
+    // unqualified `dept` binds locally to `V.dept` — the subquery is
+    // uncorrelated and hosts lazily in the outer `LEAD`. Offset 0 always lands
+    // on the current row, so the default never evaluates and `tick()` never
+    // runs. Marking `V` opaque once arm-lifted the subquery, running `tick()`
+    // per group (eager). The values — each group's `dept` — match the ordinary
+    // `GROUP BY dept` form.
+    let counter = Counter()
+    let routines = try Routines.standard
+        .registering("tick", returns: .integer, deterministic: false) { _ in
+          .integer(counter.next())
+        }
+    let view = try View(query: parse(query: "VALUES (1)"), columns: ["dept"])
+    let catalog = FixtureCatalog(try fixture().catalog, views: ["V": view])
+    let sets = "SELECT dept, LEAD(dept, 0, " +
+               "(SELECT tick() FROM V WHERE dept = dept)) " +
+               "OVER (ORDER BY dept) " +
+               "FROM Emp GROUP BY GROUPING SETS ((dept)) ORDER BY dept"
+    try catalog.expect(sets, yields: [[1, 1], [2, 2], [3, 3]],
+                       routines: routines)
+    #expect(counter.count == 0)
+    #expect(try catalog.columns(of: parse(query: sets), routines: routines,
+                                validate: true).count == 2)
+    let plain = "SELECT dept, LEAD(dept, 0, " +
+                "(SELECT tick() FROM V WHERE dept = dept)) " +
+                "OVER (ORDER BY dept) FROM Emp GROUP BY dept ORDER BY dept"
+    try catalog.expect(plain, yields: [[1, 1], [2, 2], [3, 3]],
+                       routines: routines)
+    #expect(counter.count == 0)
+  }
+
+  @Test func `a CTE column in a hosted LEAD default binds locally and hosts`()
+      throws {
+    // Finding 2 (CTE): the same shape over a statement-scoped CTE `V (dept)`.
+    // The CTE's columns are threaded from the overlay into the membership map
+    // at every decide-point (compile, derive, and the runtime
+    // `union(windowed:)`), so the unqualified `dept` binds locally to the CTE
+    // — the subquery is uncorrelated and hosts lazily in the outer `LEAD`,
+    // offset 0 never reaching the default. `tick()` never runs; marking the CTE
+    // opaque once arm-lifted it, running `tick()` per group. run ≡ validate on
+    // the threaded overlay.
+    let counter = Counter()
+    let routines = try Routines.standard
+        .registering("tick", returns: .integer, deterministic: false) { _ in
+          .integer(counter.next())
+        }
+    let sets = """
+        WITH V (dept) AS (VALUES (1))
+          SELECT dept, LEAD(dept, 0,
+                            (SELECT tick() FROM V WHERE dept = dept))
+                   OVER (ORDER BY dept)
+            FROM Emp GROUP BY GROUPING SETS ((dept)) ORDER BY dept
+        """
+    let catalog = try fixture()
+    let expected: Array<Array<Value>> =
+        [[.integer(1), .integer(1)], [.integer(2), .integer(2)],
+         [.integer(3), .integer(3)]]
+    #expect(try catalog.run(Statement(parsing: sets), routines) == expected)
+    #expect(counter.count == 0)
+    #expect(try catalog.columns(of: Statement(parsing: sets),
+                                routines: routines, validate: true)
+                .count == 2)
+    let plain = """
+        WITH V (dept) AS (VALUES (1))
+          SELECT dept, LEAD(dept, 0,
+                            (SELECT tick() FROM V WHERE dept = dept))
+                   OVER (ORDER BY dept)
+            FROM Emp GROUP BY dept ORDER BY dept
+        """
+    #expect(try catalog.run(Statement(parsing: plain), routines) == expected)
+    #expect(counter.count == 0)
   }
 }

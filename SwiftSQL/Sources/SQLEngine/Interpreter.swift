@@ -1039,7 +1039,9 @@ extension Catalog where Self: ~Escapable {
     }
     let rows: Array<Record>
     let view = resolve(view: name)
-    if let view, let union = try view.query.union(windowed: context.routines) {
+    if let view,
+        let union = try view.query.union(windowed: context.routines,
+                                         schemas: schemas(overlay.relations)) {
       // A windowed `GROUP BY GROUPING SETS` view body keeps a `.select` body
       // over a hidden arm union, so neither `.setop` branch below sees it; the
       // one shared decision recovers that union and the body runs through the
@@ -1137,7 +1139,8 @@ extension Catalog where Self: ~Escapable {
     // re-materialising its schema-only derived layer. Without this a view body
     // `(windowed grouping-sets) UNION …` scanned the schema-only source once,
     // dropping its per-group rows.
-    if let union = try query.union(windowed: overlay.routines) {
+    if let union = try query.union(windowed: overlay.routines,
+                                   schemas: schemas(overlay.relations)) {
       return try execute(plan, carrying: union, overlay.revealed())
     }
     if case let .setop(kind, left, right, all, types, _) = plan,

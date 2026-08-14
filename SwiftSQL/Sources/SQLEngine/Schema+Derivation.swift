@@ -956,7 +956,7 @@ extension Catalog where Self: ~Escapable {
     // both paths run before this.
     if select.windows, case let .sets(sets) = select.grouping {
       let parts = try decompose(windowed: select, sets: sets,
-                                context.routines)
+                                context.routines, schemas(context.relations))
       try typecheck(parts.union, context)
       try typecheck(outer: parts, select, context)
       return
@@ -1996,7 +1996,8 @@ extension Catalog where Self: ~Escapable {
                          sets: Array<Array<Expression>>, _ context: Context)
       throws(SQLError) -> Array<ResolvedColumn> {
     let routines = context.routines
-    let parts = try decompose(windowed: select, sets: sets, routines)
+    let parts = try decompose(windowed: select, sets: sets, routines,
+                              schemas(context.relations))
     // The arm union's output schema — the same columns the compile seam builds
     // its window-source scope from — derived through the shared `columns
     // (unifying:)` fold, so the arms' NULL-padded columns type through the

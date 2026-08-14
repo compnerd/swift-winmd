@@ -60,10 +60,12 @@ extension Query {
   /// `revealed` drops that layer so each arm re-materialises it. Sharing the
   /// decision keeps a future entry point from open-coding a `.setop`-only
   /// recognition that silently scans the schema-only source once.
-  internal func union(windowed routines: Routines) throws(SQLError) -> Query? {
+  internal func union(windowed routines: Routines,
+                      schemas: Dictionary<String, Set<String>>)
+      throws(SQLError) -> Query? {
     guard unioned, case let .select(select) = body,
         case let .sets(sets) = select.grouping else { return nil }
-    return try decompose(windowed: select, sets: sets, routines).union
+    return try decompose(windowed: select, sets: sets, routines, schemas).union
   }
 
   /// This query with each top-level `GROUP BY GROUPING SETS` select replaced by
@@ -310,6 +312,69 @@ internal func expand(_ select: Select,
 
 // MARK: - Window over GROUPING SETS
 
+extension Catalog where Self: ~Escapable {
+  /// The exposed column names — real and virtual, case-folded — of every
+  /// relation in scope, keyed by its name: the base tables and views this
+  /// catalog vends and the common table expressions and store relations the
+  /// `overlay` binds. It is the schema map the windowed grouping-sets `Lift`
+  /// decides an unqualified group-key-colliding subquery reference against: a
+  /// name a local relation exposes binds locally, one absent from every local
+  /// is the outer group-key correlation.
+  ///
+  /// It mirrors the engine's full schema derivation across every relation kind,
+  /// not a subset:
+  ///
+  ///   - a base table's real columns plus its virtual columns — the engine's
+  ///     `Schema.ordinal(of:)` resolves an adapter `Id` for a bare name, so the
+  ///     membership test must too, or a bare `Id` over a relation bearing a
+  ///     virtual `Id` would be mis-rewritten to the outer key rather than
+  ///     binding its own adapter column;
+  ///   - a view's declared column names in projection order (`View.columns`,
+  ///     the ISO first-arm naming), with no virtual column (`View.schema`),
+  ///     shadowing a base table of the same name — the precedence a
+  ///     `view(named:)` lookup applies;
+  ///   - a CTE's or store relation's declared columns plus the universal
+  ///     virtual `Id` a `RelationInstance` vends (`RelationInstance.schema`),
+  ///     shadowing a base table or view — the innermost overlay precedence the
+  ///     resolver applies. Only the overlay's base layer is read: a CTE is
+  ///     statement-scoped, while a nested subquery's FROM never sees an
+  ///     enclosing SELECT's derived aliases, so the derived layers name no
+  ///     relation a hosted subquery can reference.
+  ///
+  /// A relation still absent from the map — the residual — cannot be derived
+  /// pre-compile: only a `SELECT *` derived table inside a hosted subquery,
+  /// whose columns the union scope cannot expand here, leaving `expose` to
+  /// record it opaque (the reference conservatively blocked, arm-lifted).
+  ///
+  /// Every seam that lowers a windowed grouping-sets query — the compile, the
+  /// schema derive and typecheck twins, and each runtime `union(windowed:)`
+  /// entry — builds this map from the one catalog `self` and the same `overlay`
+  /// base layer (established once at statement entry and threaded unchanged),
+  /// so all decide local membership identically and run stays in step with
+  /// validate.
+  internal borrowing func schemas(_ overlay: ScopedRelations = [:])
+      -> Dictionary<String, Set<String>> {
+    var schemas = Dictionary<String, Set<String>>()
+    for name in relations() {
+      guard let table = table(named: name) else { continue }
+      var columns = Set<String>()
+      for column in table.names { columns.insert(column.lowercased()) }
+      for virtual in table.virtuals { columns.insert(virtual.lowercased()) }
+      schemas[name.lowercased()] = columns
+    }
+    for name in views() {
+      guard let view = view(named: name) else { continue }
+      schemas[name.lowercased()] = Set(view.columns.map { $0.lowercased() })
+    }
+    for (name, instance) in overlay.bindings {
+      var columns = Set(instance.columns.map { $0.lowercased() })
+      columns.insert("id")
+      schemas[name.lowercased()] = columns
+    }
+    return schemas
+  }
+}
+
 /// The decomposition of a windowed `GROUP BY GROUPING SETS` `select` into the
 /// two halves the direct lowering composes — the window-free arm `union` and
 /// the outer window layer's `projection` and `order` over it. It is not an AST
@@ -473,7 +538,9 @@ extension WindowedSets {
 /// rather than resolving a base column the union scope cannot see.
 internal func decompose(windowed select: Select,
                         sets: Array<Array<Expression>>,
-                        _ routines: Routines) throws(SQLError) -> WindowedSets {
+                        _ routines: Routines,
+                        _ schemas: Dictionary<String, Set<String>>)
+    throws(SQLError) -> WindowedSets {
   // `GROUPING SETS ()` has no arm to union — rejected here as in `expand`, so a
   // directly built empty set list faults a syntax error rather than trapping.
   guard !sets.isEmpty else {
@@ -521,6 +588,23 @@ internal func decompose(windowed select: Select,
   for set in sets {
     for key in set { key.collect(free: &keys, bound: []) }
   }
+  // The grouping-key member expressions themselves — every set's keys, by the
+  // resolved identity grouped lowering matches a key by, approximated pre-scope
+  // as each key's `canonical` (qualifier-stripped, case-folded). The lifter
+  // matches a whole outer subexpression's `canonical` against these to lift a
+  // complete grouping key to one `*gwN` arm column before descending into its
+  // operands, so the arm projects the exact key it groups on — not a bare
+  // operand (`A` under `A + 1`) the grouped arm would reject. Matching by
+  // canonical (not raw `Expression` equality) collapses a qualification- or
+  // case-variant spelling (`A + 1` ≡ `T.A + 1` ≡ `a + 1`) as the arm's real
+  // `Grouped.term` will, so a projection spelled differently than the key still
+  // lifts whole. This is the projection key-lift lookup, kept distinct from
+  // `keys` (the bare names the correlation classifier routes a subquery
+  // against).
+  var members = Set<Expression>()
+  for set in sets {
+    for key in set { members.insert(key.canonical) }
+  }
   // Lift the projection and the query-level ORDER BY over the union output,
   // gathering the operands each references into `lift.leaves`. Each outer item
   // carries the original item's inferable output name as its alias (`nil` for
@@ -528,7 +612,7 @@ internal func decompose(windowed select: Select,
   // its alias — so a query `ORDER BY` may name a window alias, while an unnamed
   // output takes no `*gwN` name and stays a synthesized `column N` header (the
   // schema twin names it from `items`).
-  var lift = Lift(routines, keys: keys)
+  var lift = Lift(routines, keys: keys, members: members, schemas: schemas)
   var projection = Array<Projected>()
   projection.reserveCapacity(items.count)
   for index in items.indices {
@@ -680,17 +764,73 @@ private struct Lift {
   /// subquery may reference as a free variable. A subquery correlated to one by
   /// a qualified-free reference has it rewritten to its `*gwN` union
   /// column and is hosted outer (`host`); one whose only correlation is an
-  /// unqualified group-key-colliding reference is undecidable pre-schema and
-  /// arm-lifted; one whose every group-key reference is bound within its own
-  /// scope is uncorrelated and hosted outer verbatim.
+  /// unqualified group-key-colliding reference absent from its local relations
+  /// is likewise the outer key, rewritten and hosted; one whose every group-key
+  /// reference binds within its own scope is uncorrelated and hosted verbatim.
   private let keys: Set<String>
 
+  /// The grouping-key member expressions — every grouping set's keys by the
+  /// resolved identity grouped lowering matches a key by, approximated pre-
+  /// scope as each key's `canonical` (qualifier-stripped, case-folded). A whole
+  /// outer subexpression whose `canonical` equals one of these is a complete
+  /// grouping key, lifted to one `*gwN` arm column (`substitute`) before its
+  /// operands are recursed, so a computed key (`A + 1`) is projected whole by
+  /// the arm — not its bare operand (`A`), which the arm's grouped scope would
+  /// reject as a non-key. Matching by canonical rather than raw `Expression`
+  /// equality collapses a qualification- or case-variant spelling (`A + 1` ≡
+  /// `T.A + 1` ≡ `a + 1`) exactly as the arm's `Grouped.term` will once it has
+  /// a scope, so a projection spelled differently than the key still lifts
+  /// whole rather than descending to a bare operand the arm rejects. It is the
+  /// projection key-lift lookup, kept distinct from `keys` (the bare names the
+  /// subquery-correlation classifier routes against): a correlation to a bare
+  /// column when the key is an expression is illegal ISO anyway, so the two
+  /// serve separate decisions and need not agree.
+  private let members: Set<Expression>
+
+  /// The exposed column names — case-folded — of each relation in scope, keyed
+  /// by the relation's name: the catalog's base tables and views, and the
+  /// overlay's common table expressions and store relations. It backs the
+  /// local-membership test an unqualified group-key-colliding reference decides
+  /// against (`expose`): a subquery's FROM relation naming one of these binds
+  /// an unqualified name that appears in its column set locally, so the name is
+  /// its own column, not the outer correlation. Virtual columns count — the
+  /// engine's `Schema.ordinal(of:)` resolves an adapter `Id` for a bare name,
+  /// so a subquery over a `U` bearing a virtual `Id` binds a bare `Id` to that
+  /// `Id`, never the outer key. The map mirrors the engine's full schema
+  /// derivation across every relation kind (`Catalog.schemas`); a relation
+  /// absent from it — only a `SELECT *` derived table — is indeterminate,
+  /// leaving the reference conservatively blocked.
+  private let schemas: Dictionary<String, Set<String>>
+
+  /// The local scope a rewrite walk accumulates as it descends — the enriched
+  /// `bound` the transforming twin threads in place of a bare alias set. It
+  /// carries the in-scope FROM/JOIN `aliases` (for the qualified-local check),
+  /// the exposed unqualified column `names` of every determinate local relation
+  /// (for the unqualified-local check), and `opaque` — set when an in-scope
+  /// relation's columns could not be derived (only a `SELECT *` derived table
+  /// remains, now that a view and a CTE derive through `schemas`), so an
+  /// unqualified name might still bind there and the reference stays blocked
+  /// rather than rewritten.
+  private struct Locals {
+    var aliases: Set<String>
+    var names: Set<String>
+    var opaque: Bool
+
+    /// The empty scope a `host` walk starts from — no local relation yet in
+    /// scope, so an unqualified group-key reference is the outer correlation
+    /// until a descended relation exposes it.
+    static var empty: Locals { Locals(aliases: [], names: [], opaque: false) }
+  }
+
   /// Whether the in-flight `host` walk met an unqualified free reference whose
-  /// bare name is a group key — an ambiguous correlation the AST cannot resolve
-  /// to a base column pre-schema, so the subquery is not safely rewritten and
-  /// hosted. Set by the leaf rewrite, read by `host` (which then rolls back any
-  /// `*gwN` columns the aborted walk allocated and reports the subquery
-  /// unhostable), and reset at each `host` entry.
+  /// bare name is a group key that no determinate in-scope local relation
+  /// exposes yet an opaque local might — undecidable pre-schema, so it is not
+  /// safely rewritten and hosted. Set by the leaf rewrite, read by `host`
+  /// (which then rolls back any `*gwN` columns the aborted walk allocated and
+  /// reports the subquery unhostable), and reset at each `host` entry. A name a
+  /// determinate local exposes is left verbatim without blocking (a local
+  /// bind); one absent from every determinate local with no opaque local in
+  /// scope is rewritten to `*gwN` without blocking (the outer key).
   private var blocked = false
 
   /// Whether the in-flight rewrite rides a query-level carrier's row operators
@@ -723,9 +863,13 @@ private struct Lift {
   /// stateful value stay independent, exactly as `materialise` keys its hoist.
   private var linked = Dictionary<Int, Int>()
 
-  fileprivate init(_ routines: Routines, keys: Set<String>) {
+  fileprivate init(_ routines: Routines, keys: Set<String>,
+                   members: Set<Expression>,
+                   schemas: Dictionary<String, Set<String>>) {
     self.routines = routines
     self.keys = keys
+    self.members = members
+    self.schemas = schemas
   }
 
   /// Registers `expression` as a column and returns its `leaves` position —
@@ -784,10 +928,21 @@ private struct Lift {
 
   /// This outer expression rewritten over the arm union by the uniform
   /// substitution walk — each maximal grounded atom the union scope cannot
-  /// compute (an aggregate, a `GROUPING(…)`, a group column, or a scalar
-  /// subquery the outer layer hosts through the union-scope `Resolution`)
-  /// replaced by its `*gwN` reference, every other node kept in the outer with
-  /// its operands recursed.
+  /// compute (a whole grouping-key member expression, an aggregate, a
+  /// `GROUPING(…)`, a group column, or a scalar subquery the outer layer hosts
+  /// through the union-scope `Resolution`) replaced by its `*gwN` reference,
+  /// every other node kept in the outer with its operands recursed.
+  ///
+  /// A whole grouping-key member expression is recognised before any composite
+  /// recursion: a computed key (`A + 1`) is a `.binary` whose bare operand `A`
+  /// is not itself a grouping key, so recursing into it would lift `A` and the
+  /// grouped arm would reject the arm's projected `A`; matching the whole
+  /// `A + 1` against `members` lifts it to one `*gwN` column the arm projects
+  /// as its exact grouping key. This subsumes the bare-column key (`dept` is a
+  /// `.column` member matched whole), while a bare `A` operand reached only by
+  /// descending an expression key is never reached, and a projected non-key
+  /// column (`SELECT A … GROUP BY (A + 1)`) still lifts as a `.column` atom so
+  /// the arm rejects it with the `.grouping` fault the ordinary form gives.
   ///
   /// A literal and a group-independent scalar (`tick()`, `1 / 0`) stay outer
   /// verbatim (their operands hold no grounded atom); an arithmetic, `CAST`,
@@ -798,6 +953,20 @@ private struct Lift {
   /// own — the outer projection above the cap, a `LEAD`/`LAG` default lazily.
   fileprivate mutating func substitute(_ expression: Expression)
       throws(SQLError) -> Expression {
+    // A whole grouping-key member expression lifts to one `*gwN` arm column
+    // before descending into any composite operands, so the arm projects the
+    // exact key it groups on. Matched by `canonical` (qualifier-stripped, case-
+    // folded), so a projection spelled differently than the key (`A + 1` for a
+    // `T.A + 1` key) still lifts whole rather than descending to a bare operand
+    // the arm rejects, mirroring the arm's `Grouped.term` match. A bare literal
+    // key needs no column (a constant reads the same everywhere) and stays
+    // inline, mirroring the ordinal-linked `lift`. The `reference` shares
+    // a leaf with an equal projected or ordinal-linked key through the
+    // `steady`/`index` dedup.
+    if members.contains(expression.canonical) {
+      if case .literal = expression { return expression }
+      return reference(expression)
+    }
     switch expression {
     case .aggregate, .grouping, .column:
       // A grounded atom the union scope cannot compute — an aggregate, a
@@ -888,7 +1057,7 @@ private struct Lift {
     let index = self.index
     let linked = self.linked
     blocked = false
-    let hosted = rewrite(query, bound: [])
+    let hosted = rewrite(query, bound: .empty)
     guard !blocked else {
       // The walk met an unqualified key-colliding reference: discard the `*gwN`
       // columns it allocated for the qualified-free references beside it and
@@ -914,7 +1083,7 @@ private struct Lift {
   /// reached from an enclosing carrier order returns to the body rule, and the
   /// enclosing carrier context is restored after — the carriers rewritten under
   /// `riding` by `rewrite(_ carrier:)`.
-  private mutating func rewrite(_ query: Query, bound: Set<String>) -> Query {
+  private mutating func rewrite(_ query: Query, bound: Locals) -> Query {
     let saved = riding
     riding = false
     let body: Query.Body
@@ -942,7 +1111,7 @@ private struct Lift {
   /// reference, so they ride through unchanged. A subquery nested in an order
   /// key resets `riding` (via `rewrite(_ query:)`), so its own body follows the
   /// ordinary rule.
-  private mutating func rewrite(_ carrier: Query.Carrier, bound: Set<String>)
+  private mutating func rewrite(_ carrier: Query.Carrier, bound: Locals)
       -> Query.Carrier {
     let saved = riding
     riding = true
@@ -952,29 +1121,54 @@ private struct Lift {
                          limit: carrier.limit, generated: carrier.generated)
   }
 
-  /// This select's free qualified group-key references rewritten, extending
-  /// `bound` with its own FROM/JOIN aliases (`alias ?? name`, matching
-  /// `Scope.admits`) so a reference qualified by a local alias binds locally —
-  /// the transforming twin of `Select.collect(free:bound:)`, descending its
+  /// This select's free group-key references rewritten, each clause resolved
+  /// against the same scope compilation lowers it against — a progressively
+  /// extended join prefix, not one all-relations-at-once scope. The
+  /// transforming twin of `Select.collect(free:bound:)`, descending its
   /// FROM/JOIN bodies and `ON`s, predicate, projection, grouping, HAVING, ORDER
   /// BY, and named-window specifications.
-  private mutating func rewrite(_ select: Select, bound: Set<String>)
+  ///
+  /// Compilation resolves a join `ON` against a prefix scope — the FROM
+  /// relation and joins `0…index`, the joined-in relation included, never a
+  /// relation joined later (`Compilation.subqueries(_:enclosing:prefixes:)`,
+  /// whose `prefixes[index]` is `relations[0 … index + 1]`) — while the
+  /// predicate, projection, grouping, HAVING, and ORDER BY see the full join
+  /// scope, and a derived join relation's body (a LATERAL arm) sees only the
+  /// PRECEDING relations (the FROM and joins before it, itself excluded). The
+  /// prefix accumulates here in that exact order so join[i]'s `ON` is rewritten
+  /// under FROM…join[i] rather than the full scope: without it, a later join
+  /// exposing a group-key-colliding column (`dept`) makes an earlier `ON`'s
+  /// outer-key reference look local, so the reference is left verbatim while
+  /// prefix-scoped resolution — which cannot see that later relation — faults
+  /// `.column` over the `*gwN`-only union scope instead of binding the outer
+  /// key.
+  private mutating func rewrite(_ select: Select, bound: Locals)
       -> Select {
-    var locals = bound
-    locals.insert((select.from.alias ?? select.from.name).lowercased())
+    // FROM is the first relation, resolved with no preceding — its derived body
+    // sees only the enclosing scope.
+    let from = rewrite(select.from, bound: bound)
+    // Accumulate the join prefix in source order. Each join's relation body
+    // resolves against the PRECEDING scope (a LATERAL arm may name a preceding
+    // column, itself excluded); its `ON` against the prefix extended with its
+    // own relation (`A JOIN B ON A.x = B.y` sees `B`). Only after the whole
+    // chain is `prefix` the full scope the remaining clauses resolve against.
+    var prefix = bound
+    extend(&prefix, with: select.from)
+    var joins = Array<Join>()
+    joins.reserveCapacity(select.joins.count)
     for join in select.joins {
-      locals.insert((join.relation.alias ?? join.relation.name).lowercased())
+      let relation = rewrite(join.relation, bound: prefix)
+      extend(&prefix, with: join.relation)
+      joins.append(Join(relation: relation, kind: join.kind,
+                        on: rewrite(join.on, bound: prefix), using: join.using))
     }
-    let joins = select.joins.map { join in
-      Join(relation: rewrite(join.relation, bound: locals), kind: join.kind,
-           on: rewrite(join.on, bound: locals), using: join.using)
-    }
+    let locals = prefix
     let window = select.window.map {
       NamedWindow(name: $0.name, spec: rewrite($0.spec, bound: locals))
     }
     return Select(distinct: select.distinct,
                   projection: rewrite(select.projection, bound: locals),
-                  from: rewrite(select.from, bound: locals), joins: joins,
+                  from: from, joins: joins,
                   predicate: select.predicate.map {
                     rewrite($0, bound: locals)
                   },
@@ -987,12 +1181,86 @@ private struct Lift {
   /// A relation's free qualified group-key references rewritten — a `.derived`
   /// one recursing into its inner query (which extends `bound` with its own
   /// aliases), a `.named` one carried through (it references no column).
-  private mutating func rewrite(_ relation: Relation, bound: Set<String>)
+  private mutating func rewrite(_ relation: Relation, bound: Locals)
       -> Relation {
     guard case let .derived(query) = relation.source else { return relation }
     return Relation(derived: rewrite(query, bound: bound),
                     as: relation.alias ?? "", columns: relation.columns,
                     lateral: relation.lateral)
+  }
+
+  /// Folds `relation` into the accumulating local scope — its binding alias
+  /// into `aliases`, and either its exposed column `names` or, when those
+  /// cannot be derived, `opaque`. It mirrors the alias threading
+  /// `collect(free:bound:)` uses, erring toward "local": an over-admitted name
+  /// is left verbatim (at worst forgoing a lazy host), never mis-rewritten to a
+  /// wrong outer correlation.
+  private func extend(_ locals: inout Locals, with relation: Relation) {
+    locals.aliases.insert((relation.alias ?? relation.name).lowercased())
+    guard let names = expose(relation) else {
+      locals.opaque = true
+      return
+    }
+    locals.names.formUnion(names)
+  }
+
+  /// The exposed unqualified column names of `relation`, or `nil` when they
+  /// cannot be derived pre-compile (an indeterminate local the caller records
+  /// `opaque`). A `.named` relation resolves through the derived `schemas` (a
+  /// base table's real and virtual columns, a view's declared columns, a CTE's
+  /// or store relation's columns and virtual `Id`); a `.derived` table takes
+  /// its inner query's output names, indeterminate only for a `SELECT *` body
+  /// the union scope cannot expand here — the sole remaining opaque local.
+  ///
+  /// An explicit `AS t(c, …)` list renames the real columns, but the engine
+  /// keeps a relation's virtual `Id` unrenamed beside them (`Schema.renamed`),
+  /// and a materialised derived table vends the universal `Id` too, so the
+  /// exposed set carries that virtual past the list — a bare `Id` over a
+  /// renamed base table, CTE, store relation, or derived table binds locally
+  /// rather than being mis-rewritten to an outer group key. A view exposes no
+  /// virtual (its bindable surface is its real columns), so its listed form
+  /// stays `Id`-free.
+  private func expose(_ relation: Relation) -> Set<String>? {
+    switch relation.source {
+    case let .named(name):
+      guard let bindable = schemas[name.lowercased()] else { return nil }
+      guard !relation.columns.isEmpty else { return bindable }
+      let listed = Set(relation.columns.map { $0.lowercased() })
+      return bindable.contains("id") ? listed.union(["id"]) : listed
+    case let .derived(query):
+      let names = relation.columns.isEmpty
+          ? outputs(of: query) : Set(relation.columns.map { $0.lowercased() })
+      guard let names else { return nil }
+      return names.union(["id"])
+    }
+  }
+
+  /// The unqualified output names a derived table's `query` exposes, or `nil`
+  /// when they cannot be derived — a `SELECT *` projection, whose columns the
+  /// union scope cannot expand here. An explicit projection contributes each
+  /// named item (an alias, else a bare column); an unnamed computed item
+  /// exposes no bindable name and adds none. A set operation takes the left
+  /// arm's names (ISO 9075 output naming); a `VALUES` body exposes the default
+  /// column names the engine's `VALUES` schema derivation assigns — `column1 …
+  /// columnN` for an N-column row (`Query.names`) — so an unqualified `column1`
+  /// over a `(VALUES …)` derived table binds locally rather than being
+  /// mis-rewritten to an outer group key.
+  private func outputs(of query: Query) -> Set<String>? {
+    switch query.body {
+    case let .select(select):
+      switch select.projection {
+      case .all:
+        return nil
+      case let .columns(columns):
+        return Set(columns.map { $0.name.lowercased() })
+      case let .expressions(items):
+        return Set(items.compactMap { $0.name?.lowercased() })
+      }
+    case let .setop(_, left, _, _):
+      return outputs(of: left)
+    case let .values(rows):
+      return Set((0 ..< (rows.first?.count ?? 0)).map { "column\($0 + 1)" })
+    }
   }
 
   /// A projection's free qualified group-key references rewritten. A `.columns`
@@ -1001,7 +1269,7 @@ private struct Lift {
   /// changed column aliased to its original name so the output name survives
   /// the rewrite — an enclosing carrier `ORDER BY` or a `.derived` `e.Id` binds
   /// the name the ordinary grouped form exposes, not the union column.
-  private mutating func rewrite(_ projection: Projection, bound: Set<String>)
+  private mutating func rewrite(_ projection: Projection, bound: Locals)
       -> Projection {
     switch projection {
     case .all:
@@ -1034,7 +1302,7 @@ private struct Lift {
 
   /// A grouping's keys' free qualified group-key references rewritten
   /// — a `.keys` its list, a `.sets` each set, an `.arm` its keys and superset.
-  private mutating func rewrite(_ grouping: Grouping, bound: Set<String>)
+  private mutating func rewrite(_ grouping: Grouping, bound: Locals)
       -> Grouping {
     switch grouping {
     case let .keys(keys):
@@ -1049,7 +1317,7 @@ private struct Lift {
 
   /// An ORDER BY's sort-key expressions rewritten — an ordinal key carried
   /// through, a value key's expression rewritten (its `output` kept).
-  private mutating func rewrite(_ order: Order?, bound: Set<String>) -> Order? {
+  private mutating func rewrite(_ order: Order?, bound: Locals) -> Order? {
     guard let order else { return nil }
     return Order(keys: order.keys.map { key in
       guard case let .expression(expression) = key.sort else { return key }
@@ -1064,35 +1332,46 @@ private struct Lift {
   /// A window specification's `PARTITION BY` keys and `ORDER BY` values
   /// rewritten, the base/parenthesized flags and frame carried through — the
   /// frame's bounds hold no column reference `collect(free:bound:)` descends.
-  private mutating func rewrite(_ spec: WindowSpec, bound: Set<String>)
+  private mutating func rewrite(_ spec: WindowSpec, bound: Locals)
       -> WindowSpec {
     WindowSpec(base: spec.base, parenthesized: spec.parenthesized,
                partition: rewrite(spec.partition, bound: bound),
                order: rewrite(spec.order, bound: bound), frame: spec.frame)
   }
 
-  /// This expression's free qualified group-key references rewritten — the
-  /// transforming twin of `Expression.collect(free:bound:)`. A `.column` leaf
-  /// decides by qualifier (rewrite a non-local group-key reference, mark an
-  /// unqualified key-colliding one `blocked`, leave the rest); every other node
+  /// This expression's free group-key references rewritten — the transforming
+  /// twin of `Expression.collect(free:bound:)`. A `.column` leaf decides by
+  /// qualifier and local membership (rewrite a non-local group-key reference,
+  /// leave a locally-bound one, block an undecidable one); every other node
   /// keeps its structure and recurses its operands, descending a scalar
   /// `.subquery`'s body and a window's operands so a correlation nested at any
   /// depth is rewritten.
-  private mutating func rewrite(_ expression: Expression, bound: Set<String>)
+  private mutating func rewrite(_ expression: Expression, bound: Locals)
       -> Expression {
     switch expression {
     case let .column(column):
+      let name = column.name.lowercased()
       guard let qualifier = column.qualifier else {
-        // An unqualified body reference to a group key is undecidable pre-
-        // schema (it might be a local base column), so it blocks and the
-        // subquery arm-lifts. A carrier `ORDER BY` reference (`riding`) instead
-        // binds the set-op output by ISO output-alias/ordinal precedence — a
-        // local output, never a correlation — left verbatim without blocking.
-        if !riding, keys.contains(column.name.lowercased()) { blocked = true }
-        return expression
+        // A carrier `ORDER BY` reference (`riding`) binds the set-op output by
+        // ISO output-alias/ordinal precedence, and a non-key name is no
+        // correlation — both left verbatim. Otherwise decide by inner-scope
+        // precedence against the local relations: a name a determinate local
+        // exposes (real or virtual) binds there, left verbatim; a name absent
+        // from every determinate local with no opaque local in scope is the
+        // outer group key, rewritten to its `*gwN` union column; a name absent
+        // from the determinate locals but possibly hiding in an opaque local
+        // (a `SELECT *` derived table) is undecidable, so it blocks and the
+        // subquery arm-lifts.
+        guard !riding, keys.contains(name) else { return expression }
+        if bound.names.contains(name) { return expression }
+        guard !bound.opaque else {
+          blocked = true
+          return expression
+        }
+        return reference(.column(column))
       }
-      guard !bound.contains(qualifier.lowercased()),
-          keys.contains(column.name.lowercased()) else { return expression }
+      guard !bound.aliases.contains(qualifier.lowercased()),
+          keys.contains(name) else { return expression }
       return reference(.column(column))
     case .literal:
       return expression
@@ -1134,7 +1413,7 @@ private struct Lift {
 
   /// This window function's operands' free qualified group-key references
   /// rewritten — transforming twin of `WindowFunction.collect(free:bound:)`.
-  private mutating func rewrite(_ function: WindowFunction, bound: Set<String>)
+  private mutating func rewrite(_ function: WindowFunction, bound: Locals)
       -> WindowFunction {
     switch function {
     case .number, .rank, .dense, .ntile, .percent, .cumulative:
@@ -1167,7 +1446,7 @@ private struct Lift {
   /// transforming twin of `Predicate.collect(free:bound:)`, descending its
   /// operand expressions, nested predicates, and every `EXISTS`/`IN`/quantified
   /// subquery body (which extends `bound` with its own aliases).
-  private mutating func rewrite(_ predicate: Predicate, bound: Set<String>)
+  private mutating func rewrite(_ predicate: Predicate, bound: Locals)
       -> Predicate {
     switch predicate {
     case let .exists(query, negated):
@@ -1221,14 +1500,14 @@ private struct Lift {
   /// A `LIKE`/`BETWEEN` operand's free references rewritten — an expression
   /// recursed, a `:parameter` carried through.
   private mutating func rewrite(_ operand: Predicate.Operand,
-                                bound: Set<String>) -> Predicate.Operand {
+                                bound: Locals) -> Predicate.Operand {
     guard case let .expression(expression) = operand else { return operand }
     return .expression(rewrite(expression, bound: bound))
   }
 
   /// Each expression of `expressions` rewritten, in order.
   private mutating func rewrite(_ expressions: Array<Expression>,
-                                bound: Set<String>) -> Array<Expression> {
+                                bound: Locals) -> Array<Expression> {
     expressions.map { rewrite($0, bound: bound) }
   }
 
@@ -1477,6 +1756,65 @@ extension Expression {
       false
     }
   }
+
+  /// This expression canonicalised for the grouping-key membership test — the
+  /// pre-scope approximation of the resolved identity grouped lowering matches
+  /// a key by. `Grouped.term` equates a projection/`HAVING`/`ORDER BY`
+  /// expression with a `GROUP BY` key when the two lower to the same `Term`
+  /// under `scope.term`, which resolves a column's qualifier to its ordinal (so
+  /// `T.A` and `A` collapse) and case-folds every identifier (so `A` and `a`
+  /// collapse, and a scalar-call name lowercases), then compares structurally.
+  /// With no scope here to resolve an ordinal, this mirrors those two
+  /// normalisations syntactically: each column drops its qualifier and
+  /// lowercases its name, each scalar-call name lowercases, and the rest of the
+  /// tree recurses structurally — so a computed grouping key spelled `T.A + 1`,
+  /// `A + 1`, or `a + 1` canonicalises to one form the member set matches,
+  /// exactly as the arm's real `Grouped.term` equates them once it has a scope.
+  ///
+  /// Dropping the qualifier can over-collapse two distinct relations' same-
+  /// named columns (`R.A` vs `S.A`) the resolved term keeps apart, but that
+  /// only lifts a whole non-key expression the arm's grouped resolver then
+  /// rejects with the same `.grouping` fault, never a wrong success. A guard
+  /// `Predicate` inside a `CASE`, a scalar `subquery` body, and a `window`
+  /// specification recurse no further (none is a legal grouping-key operand the
+  /// arm would accept), so a qualifier or case variance buried in one is a
+  /// residual matched only verbatim — a conservative under-match that forgoes
+  /// the whole-key lift and descends, as before.
+  fileprivate var canonical: Expression {
+    switch self {
+    case let .column(column):
+      return .column(Column(name: column.name.lowercased()))
+    case .literal:
+      return self
+    case let .call(name, arguments):
+      return .call(name: name.lowercased(),
+                   arguments: arguments.map { $0.canonical })
+    case let .binary(operation, lhs, rhs):
+      return .binary(operation, lhs.canonical, rhs.canonical)
+    case let .cast(operand, type):
+      return .cast(operand.canonical, type)
+    case let .coalesce(arguments):
+      return .coalesce(arguments.map { $0.canonical })
+    case let .nullif(lhs, rhs):
+      return .nullif(lhs.canonical, rhs.canonical)
+    case let .aggregate(aggregate, operand, distinct, filter):
+      let canonical: Aggregand = switch operand {
+      case .star:
+        .star
+      case let .expression(expression):
+        .expression(expression.canonical)
+      }
+      return .aggregate(aggregate, of: canonical, distinct: distinct,
+                        filter: filter)
+    case let .grouping(arguments):
+      return .grouping(arguments.map { $0.canonical })
+    case let .case(whens, otherwise):
+      let branches = whens.map { When(when: $0.when, then: $0.then.canonical) }
+      return .case(branches, else: otherwise?.canonical)
+    case .subquery, .window:
+      return self
+    }
+  }
 }
 
 extension Query {
@@ -1524,18 +1862,24 @@ extension Select {
   /// alias, or unqualified (undecidable pre-schema, so conservatively free), is
   /// collected. It descends into its FROM/JOIN derived bodies and `ON`s,
   /// predicate, projection, grouping keys, HAVING, ORDER BY, and named-window
-  /// specifications under that extended scope.
+  /// specifications.
+  ///
+  /// It builds the join prefix in source order, mirroring `rewrite(_ select:)`
+  /// and compilation: a join's derived body sees the PRECEDING aliases (itself
+  /// excluded), its `ON` the prefix extended with its own alias, and the
+  /// remaining clauses the full scope — so a reference qualified by a
+  /// later-joined alias is free in an earlier `ON`, exactly as prefix-scoped
+  /// resolution binds it.
   fileprivate func collect(free names: inout Set<String>, bound: Set<String>) {
-    var locals = bound
-    locals.insert((from.alias ?? from.name).lowercased())
+    from.collect(free: &names, bound: bound)
+    var prefix = bound
+    prefix.insert((from.alias ?? from.name).lowercased())
     for join in joins {
-      locals.insert((join.relation.alias ?? join.relation.name).lowercased())
+      join.relation.collect(free: &names, bound: prefix)
+      prefix.insert((join.relation.alias ?? join.relation.name).lowercased())
+      join.on.collect(free: &names, bound: prefix)
     }
-    from.collect(free: &names, bound: locals)
-    for join in joins {
-      join.relation.collect(free: &names, bound: locals)
-      join.on.collect(free: &names, bound: locals)
-    }
+    let locals = prefix
     predicate?.collect(free: &names, bound: locals)
     switch projection {
     case .all:

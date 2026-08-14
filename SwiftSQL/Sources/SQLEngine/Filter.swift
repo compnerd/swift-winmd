@@ -1326,7 +1326,8 @@ extension Catalog where Self: ~Escapable {
     // re-materialises its schema-only derived layer — the parity a top-level
     // `run` gets. Without this a correlated windowed grouping-sets body scanned
     // the schema-only source once, dropping the arm rows.
-    if let union = try key.query.union(windowed: context.routines) {
+    if let union = try key.query.union(windowed: context.routines,
+                                       schemas: schemas(context.relations)) {
       return try execute(plan, carrying: union, context.revealed())
     }
     // A SET-operation subquery augments per ARM (arm-local derived aliases the
@@ -1456,7 +1457,8 @@ extension Catalog where Self: ~Escapable {
     // re-materialising its schema-only derived layer — the parity a top-level
     // `run` gets. Without this a `(windowed grouping-sets) UNION …` arm scanned
     // the schema-only source once, dropping its per-group rows.
-    if let union = try query.union(windowed: context.routines) {
+    if let union = try query.union(windowed: context.routines,
+                                   schemas: schemas(context.relations)) {
       return try execute(plan, carrying: union, context.revealed())
     }
     // An arm that is itself a suffix-bearing parenthesised set operation

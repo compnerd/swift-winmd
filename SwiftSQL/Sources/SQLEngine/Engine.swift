@@ -148,7 +148,8 @@ extension Catalog where Self: ~Escapable {
     // reads those rows and runs the `.window` over the lone grouped arm. Both
     // forks decide the single-arm shape by one predicate, so a future routing
     // change cannot handle the multi-arm case yet miss the single arm.
-    if let union = try query.union(windowed: context.routines) {
+    if let union = try query.union(windowed: context.routines,
+                                   schemas: schemas(context.relations)) {
       return try execute(plan, carrying: union, augmented.revealed())
           .map(\.values)
     }

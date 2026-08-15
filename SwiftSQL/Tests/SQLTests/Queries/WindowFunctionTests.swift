@@ -3548,18 +3548,16 @@ struct WindowOverGroupedTests {
     }
   }
 
-  @Test func `a window with GROUPING SETS is deferred`() throws {
-    // A window over a `GROUPING SETS` arm would see only that arm's grouped
-    // rows, not the union ISO prescribes, so it is deferred — faulting the
-    // feature diagnostic on both the run and validate paths.
-    let sql = "SELECT dept, SUM(sal), RANK() OVER (ORDER BY SUM(sal)) " +
-              "FROM Emp GROUP BY GROUPING SETS ((dept), ())"
-    let fault = SQLError.state(
-        "0A000", "a window function with GROUPING SETS is not yet supported")
-    try fixture().expect(sql, fails: fault)
-    #expect(throws: fault) {
-      _ = try fixture().columns(of: parse(query: sql), validate: true)
-    }
+  @Test func `a window over GROUPING SETS sees every set's rows`() throws {
+    // A window over a `GROUPING SETS` query numbers across the union of every
+    // set's rows (ISO 9075), not one arm's grouped rows — the per-dept totals
+    // (dept 1 300, dept 2 600, dept 3 500) AND the grand total (1400), ranked
+    // together by `SUM(sal)`: 300 → 1, 500 → 2, 600 → 3, 1400 → 4. The former
+    // `0A000` deferral is gone — the window rides above the union of arms.
+    try fixture().expect(
+        "SELECT dept, SUM(sal), ROW_NUMBER() OVER (ORDER BY SUM(sal)) " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept), ())",
+        yields: [[1, 300, 1], [2, 600, 3], [3, 500, 2], [nil, 1400, 4]])
   }
 
   @Test func `an aggregate in a grouped window FILTER is rejected`() throws {
@@ -3696,5 +3694,1666 @@ struct WindowOverGroupedTests {
     try fixture().expect(sql, yields: [[1]])
     #expect(try fixture().columns(of: parse(query: sql), validate: true)
                 .count == 1)
+  }
+}
+
+@Suite("Window functions over GROUPING SETS / ROLLUP / CUBE output")
+struct WindowOverGroupingSetsTests {
+  // Groups: dept 1 sums 300, dept 2 sums 600, dept 3 sums 500; the grand total
+  // is 1400. A window over a grouping-sets query sees all of them — the per-set
+  // grouped rows and the NULL-extended super-aggregate rows — as one result.
+  private func fixture() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("Emp", ["dept": .integer, "sal": .integer]) {
+        Row(1, 100)
+        Row(1, 200)
+        Row(2, 300)
+        Row(2, 300)
+        Row(3, 500)
+      }
+    }
+  }
+
+  // A two-dimensional relation for the ROLLUP/CUBE and partition cases.
+  // Per-(Region, Product): East/A 15, East/B 20, West/A 7, West/B 3. Per-Region
+  // East 35, West 10; per-Product A 22, B 23; grand total 45.
+  private func sales() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("Sales", ["Region": .text, "Product": .text, "Qty": .integer]) {
+        Row("East", "A", 10)
+        Row("East", "A", 5)
+        Row("East", "B", 20)
+        Row("West", "A", 7)
+        Row("West", "B", 3)
+      }
+    }
+  }
+
+  @Test func `ROW_NUMBER numbers across every set's rows`() throws {
+    // The window orders the union of the `(dept)` rows and the `()` grand-total
+    // row by `SUM(sal)`, numbering across all four: 300 → 1, 500 → 2, 600 → 3,
+    // 1400 → 4. The output stays in union order (the per-dept arm, then the
+    // grand total), each row carrying its number.
+    try fixture().expect(
+        "SELECT dept, SUM(sal), ROW_NUMBER() OVER (ORDER BY SUM(sal)) " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept), ())",
+        yields: [[1, 300, 1], [2, 600, 3], [3, 500, 2], [nil, 1400, 4]])
+  }
+
+  @Test func `an aggregate-argument window reads the union`() throws {
+    // `SUM(SUM(sal)) OVER ()` sums the grouped totals across the whole result —
+    // the three per-dept totals and the grand total, 300 + 600 + 500 + 1400 =
+    // 2800 — over each row. The inner `SUM(sal)` is a column the union already
+    // computed; the outer window reads it and does not re-aggregate.
+    try fixture().expect(
+        "SELECT dept, SUM(SUM(sal)) OVER () " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept), ())",
+        yields: [[1, 2800], [2, 2800], [3, 2800], [nil, 2800]])
+  }
+
+  @Test func `an ordered frame accumulates over the union`() throws {
+    // A running `ROWS UNBOUNDED PRECEDING → CURRENT ROW` frame over the union,
+    // ordered by `SUM(sal)` (300, 500, 600, 1400), runs the cumulative total;
+    // each row reports the sum up to its ordered position — dept 1 300, dept 3
+    // 800, dept 2 1400, the grand total 2800 — output in union order.
+    try fixture().expect(
+        """
+        SELECT dept, SUM(sal), SUM(SUM(sal)) OVER (ORDER BY SUM(sal)
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+        FROM Emp GROUP BY GROUPING SETS ((dept), ())
+        """,
+        yields: [[1, 300, 300], [2, 600, 1400], [3, 500, 800],
+                 [nil, 1400, 2800]])
+  }
+
+  @Test func `a window partitions by a grouping-set key`() throws {
+    // `COUNT(*) OVER (PARTITION BY Region)` partitions the union by Region: the
+    // two East `(Region, Product)` rows form one partition (count 2), the two
+    // West rows another (count 2), and the NULL-extended grand-total row — its
+    // Region rolled up to NULL — its own partition (count 1). A super-aggregate
+    // NULL is an ordinary partition value, not skipped.
+    try sales().expect(
+        "SELECT Region, Product, SUM(Qty), COUNT(*) OVER (PARTITION BY Region) "
+        + "FROM Sales GROUP BY GROUPING SETS ((Region, Product), ())",
+        yields: [["East", "A", 15, 2], ["East", "B", 20, 2],
+                 ["West", "A", 7, 2], ["West", "B", 3, 2],
+                 [nil, nil, 45, 1]])
+  }
+
+  @Test func `a ROLLUP output feeds a window`() throws {
+    // `ROLLUP(Region, Product)` unions the full grouping, the per-Region level
+    // (Product a super-aggregate NULL), and the grand total. `ROW_NUMBER() OVER
+    // (ORDER BY SUM(Qty))` numbers across all seven rows by their total: 3 → 1,
+    // 7 → 2, 10 → 3, 15 → 4, 20 → 5, 35 → 6, 45 → 7, output in level order.
+    try sales().expect(
+        "SELECT Region, Product, SUM(Qty), "
+        + "ROW_NUMBER() OVER (ORDER BY SUM(Qty)) "
+        + "FROM Sales GROUP BY ROLLUP(Region, Product)",
+        yields: [["East", "A", 15, 4], ["East", "B", 20, 5],
+                 ["West", "A", 7, 2], ["West", "B", 3, 1],
+                 ["East", nil, 35, 6], ["West", nil, 10, 3],
+                 [nil, nil, 45, 7]])
+  }
+
+  @Test func `a CUBE output feeds a window`() throws {
+    // `CUBE(Region, Product)` unions all four subsets — `(Region, Product)`,
+    // `(Product)`, `(Region)`, `()` — nine rows. `ROW_NUMBER() OVER (ORDER BY
+    // SUM(Qty))` numbers across every one by its total: 3 → 1, 7 → 2, 10 → 3,
+    // 15 → 4, 20 → 5, 22 → 6, 23 → 7, 35 → 8, 45 → 9, output in subset order.
+    try sales().expect(
+        "SELECT Region, Product, SUM(Qty), "
+        + "ROW_NUMBER() OVER (ORDER BY SUM(Qty)) "
+        + "FROM Sales GROUP BY CUBE(Region, Product)",
+        yields: [["East", "A", 15, 4], ["East", "B", 20, 5],
+                 ["West", "A", 7, 2], ["West", "B", 3, 1],
+                 [nil, "A", 22, 6], [nil, "B", 23, 7],
+                 ["East", nil, 35, 8], ["West", nil, 10, 3],
+                 [nil, nil, 45, 9]])
+  }
+
+  @Test func `the query ORDER BY sorts on the window output`() throws {
+    // The query orders by the window number descending (aliased `n`), so the
+    // union rows come out grand total (4), dept 2 (3), dept 3 (2), dept 1 (1).
+    try fixture().expect(
+        "SELECT dept, SUM(sal), ROW_NUMBER() OVER (ORDER BY SUM(sal)) AS n " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept), ()) ORDER BY n DESC",
+        yields: [[nil, 1400, 4], [2, 600, 3], [3, 500, 2], [1, 300, 1]])
+  }
+
+  @Test func `run and validate agree on a windowed GROUPING SETS`() throws {
+    // Both paths enter `Query.expanded`, so they drive the one rewrite over the
+    // union: the schema path types the same three-column shape the run
+    // produces, no grouping-sets deferral surviving on either.
+    let sql = "SELECT dept, SUM(sal), ROW_NUMBER() OVER (ORDER BY SUM(sal)) " +
+              "FROM Emp GROUP BY GROUPING SETS ((dept), ())"
+    #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                .count == 3)
+    try fixture().expect(sql,
+                         yields: [[1, 300, 1], [2, 600, 3], [3, 500, 2],
+                                  [nil, 1400, 4]])
+  }
+
+  @Test func `an unaliased windowed aggregate keeps its positional header`()
+      throws {
+    // The outer projection surfaces the same ISO output headers the unwrapped
+    // grouped form does — a bare group column its name, an unnamed aggregate
+    // its positional `column N` — never the internal `*gwN` name the lowering
+    // gives the derived union it reads. The window's own unnamed output takes
+    // the next positional header.
+    let windowed = "SELECT dept, SUM(sal), " +
+                   "ROW_NUMBER() OVER (ORDER BY SUM(sal)) FROM Emp " +
+                   "GROUP BY GROUPING SETS ((dept), ())"
+    let grouped = "SELECT dept, SUM(sal) FROM Emp " +
+                  "GROUP BY GROUPING SETS ((dept), ())"
+    let headers = try fixture().columns(of: parse(query: windowed),
+                                        validate: true).map(\.name)
+    let plain = try fixture().columns(of: parse(query: grouped),
+                                      validate: true).map(\.name)
+    // The first two headers match the non-windowed grouped form exactly.
+    #expect(Array(headers.prefix(2)) == plain)
+    #expect(headers == ["dept", "column 2", "column 3"])
+  }
+
+  @Test func `an aliased windowed aggregate keeps its alias header`() throws {
+    // An explicit `AS` on a projected aggregate keeps its alias, and a bare
+    // group column keeps its name — the outer projection carries the original
+    // ISO output name, not the derived `*gwN` column it reads.
+    let sql = "SELECT dept, SUM(sal) AS total, " +
+              "ROW_NUMBER() OVER (ORDER BY SUM(sal)) AS n FROM Emp " +
+              "GROUP BY GROUPING SETS ((dept), ())"
+    let headers = try fixture().columns(of: parse(query: sql),
+                                        validate: true).map(\.name)
+    #expect(headers == ["dept", "total", "n"])
+  }
+
+  @Test func `a non-grouped operand over GROUPING SETS is rejected`() throws {
+    // A window `ORDER BY` naming a column neither grouped nor aggregated has no
+    // grouped value in any arm — the standard grouping rule rejects it as it
+    // does on the plain grouped path, on both the run and validate paths.
+    let sql = "SELECT dept, RANK() OVER (ORDER BY sal) " +
+              "FROM Emp GROUP BY GROUPING SETS ((dept), ())"
+    try fixture().expect(sql, fails: .grouping("sal"))
+    #expect(throws: SQLError.grouping("sal")) {
+      _ = try fixture().columns(of: parse(query: sql), validate: true)
+    }
+  }
+
+  @Test func `a window FILTER over GROUPING SETS is deferred`() throws {
+    // An aggregate window's `FILTER` is a per-row `Predicate` no derived union
+    // column stands in for, so it remains deferred — faulting the feature
+    // diagnostic on both the run and validate paths, in parity.
+    let sql = "SELECT dept, SUM(sal) FILTER (WHERE sal > 0) OVER () " +
+              "FROM Emp GROUP BY GROUPING SETS ((dept), ())"
+    let fault = SQLError.state(
+        "0A000", "a window FILTER with GROUPING SETS is not yet supported")
+    try fixture().expect(sql, fails: fault)
+    #expect(throws: fault) {
+      _ = try fixture().columns(of: parse(query: sql), validate: true)
+    }
+  }
+
+  @Test func `an incomparable outer wrapper over GROUPING SETS faults`()
+      throws {
+    // A scalar wrapping a window — `NULLIF(ROW_NUMBER() OVER (), 'x')` — lives
+    // in the outer window layer, its window operand lifted to a `*gwN` union
+    // column. The wrapper's implicit `window = 'x'` compares an integer to
+    // text, incomparable (42804). The direct lowering type-checks the arm
+    // union but once skipped the outer layer, so the run reached `matches` and
+    // faulted while `columns(of:validate:)` accepted it. Both paths now fault
+    // over the union scope, matching the ordinary grouped-window form.
+    let sql = "SELECT NULLIF(ROW_NUMBER() OVER (), 'x') " +
+              "FROM Emp GROUP BY GROUPING SETS ((dept), ())"
+    let fault = SQLError.state(
+        "42804", "cannot compare integer with character varying")
+    try fixture().expect(sql, fails: fault)
+    #expect(throws: fault) {
+      _ = try fixture().columns(of: parse(query: sql), validate: true)
+    }
+  }
+
+  @Test func `an incomparable ORDER BY wrapper over GROUPING SETS faults`()
+      throws {
+    // The same mismatch in a query `ORDER BY` wrapper — the lowering lifts the
+    // sort key over the union too, so its comparability is validated over the
+    // union scope exactly as the projection's is, faulting 42804 on both paths.
+    let sql = "SELECT dept FROM Emp GROUP BY GROUPING SETS ((dept), ()) " +
+              "ORDER BY NULLIF(ROW_NUMBER() OVER (), 'x')"
+    let fault = SQLError.state(
+        "42804", "cannot compare integer with character varying")
+    try fixture().expect(sql, fails: fault)
+    #expect(throws: fault) {
+      _ = try fixture().columns(of: parse(query: sql), validate: true)
+    }
+  }
+
+  @Test func `a comparable outer wrapper over GROUPING SETS is accepted`()
+      throws {
+    // The outer validation must not over-reject a well-typed wrapper: comparing
+    // the integer window to an integer is comparable, so `NULLIF(ROW_NUMBER()
+    // OVER (), 5)` runs — numbering the four union rows 1…4 (none equal 5, so
+    // each stays), accepted by both paths.
+    let sql = "SELECT NULLIF(ROW_NUMBER() OVER (), 5) " +
+              "FROM Emp GROUP BY GROUPING SETS ((dept), ())"
+    #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                .count == 1)
+    try fixture().expect(sql, yields: [[1], [2], [3], [4]])
+  }
+
+  @Test func `an outer wrapper faults the same over sets and plain grouping`()
+      throws {
+    // Parity: the ordinary (non-grouping-sets) grouped-window form of the same
+    // incomparable wrapper faults identically, so the direct sets lowering does
+    // not diverge from the grouped path it mirrors.
+    let sets = "SELECT NULLIF(ROW_NUMBER() OVER (), 'x') " +
+               "FROM Emp GROUP BY GROUPING SETS ((dept), ())"
+    let plain = "SELECT NULLIF(ROW_NUMBER() OVER (), 'x') " +
+                "FROM Emp GROUP BY dept"
+    let fault = SQLError.state(
+        "42804", "cannot compare integer with character varying")
+    try fixture().expect(sets, fails: fault)
+    try fixture().expect(plain, fails: fault)
+    #expect(throws: fault) {
+      _ = try fixture().columns(of: parse(query: sets), validate: true)
+    }
+    #expect(throws: fault) {
+      _ = try fixture().columns(of: parse(query: plain), validate: true)
+    }
+  }
+
+  @Test func `a capped output-referencing sort validates the projection`()
+      throws {
+    // A row-dropping cap leaves the projection above it unreachable — but an
+    // `ORDER BY 1` names that output, pulling its projection below the sort
+    // (below the cap), where the run still evaluates it. The incomparable
+    // `NULLIF(ROW_NUMBER() OVER (), 'x')` (integer versus text) faults
+    // 42804 on the run under `FETCH FIRST 0`, and validate must fault
+    // identically: the outer layer inherits the ordinary path's sort-output
+    // resolution, so the ordinal key resolves to the projection expression the
+    // sort recomputes and validates it even where the projection block is
+    // skipped. A bespoke skip of the ordinal key accepted the query — the
+    // run ≠ validate hole this closes.
+    let sql = "SELECT NULLIF(ROW_NUMBER() OVER (), 'x') FROM Emp " +
+              "GROUP BY GROUPING SETS ((dept), ()) ORDER BY 1 " +
+              "FETCH FIRST 0 ROWS ONLY"
+    let fault = SQLError.state(
+        "42804", "cannot compare integer with character varying")
+    try fixture().expect(sql, fails: fault)
+    #expect(throws: fault) {
+      _ = try fixture().columns(of: parse(query: sql), validate: true)
+    }
+  }
+
+  @Test func `a capped unreferenced projection stays unreachable`() throws {
+    // The companion guarding against over-rejection: the same incomparable
+    // wrapper under `FETCH FIRST 0` but with no output-referencing sort. The
+    // projection sits above the cap and no sort names it, so it stays
+    // unreachable — the run drops every row without evaluating it, yielding the
+    // empty page, and validate accepts its one column rather than faulting a
+    // wrapper the run never reaches.
+    let sql = "SELECT NULLIF(ROW_NUMBER() OVER (), 'x') FROM Emp " +
+              "GROUP BY GROUPING SETS ((dept), ()) FETCH FIRST 0 ROWS ONLY"
+    try fixture().empty(sql)
+    #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                .count == 1)
+  }
+
+  // A parent `T` and a keyed child `U`, so a correlated LATERAL body's grouping
+  // varies per outer row: Id 1 has two children (100, 101), Id 2 one (200), and
+  // Id 3 none. The child keys reach back to `T.Id`, the correlation a once-
+  // materialised derived table would sever.
+  private func correlated() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("T", ["Id": .integer]) {
+        Row(1)
+        Row(2)
+        Row(3)
+      }
+      Relation("U", ["k": .integer, "v": .integer]) {
+        Row(1, 100)
+        Row(1, 101)
+        Row(2, 200)
+      }
+    }
+  }
+
+  @Test func `a correlated LATERAL windowed GROUPING SETS resolves the outer`()
+      throws {
+    // The windowed grouping-sets query is a correlated LATERAL body: its arms
+    // reference the enclosing `T.Id`, so the union rides a LATERAL apply that
+    // retains that correlation rather than an uncorrelated derived table. Per
+    // `T` row, `ROLLUP(T.Id)` over the children keyed on `T.Id` yields a
+    // per-group row and the grand total, and `ROW_NUMBER() OVER (ORDER BY
+    // SUM(U.v))` numbers them: Id 1 → two rows summing 201 numbered 1, 2; Id
+    // 2 → two rows summing 200 numbered 1, 2; Id 3 → its lone grand total (no
+    // children) numbered 1.
+    try correlated().expect(
+        "SELECT T.Id, d.n FROM T JOIN LATERAL (" +
+        "SELECT ROW_NUMBER() OVER (ORDER BY SUM(U.v)) AS n " +
+        "FROM U WHERE U.k = T.Id GROUP BY ROLLUP(T.Id)) AS d ON 1 = 1 " +
+        "ORDER BY T.Id, d.n",
+        yields: [[1, 1], [1, 2], [2, 1], [2, 2], [3, 1]])
+  }
+
+  @Test func `run and validate agree on a correlated LATERAL windowed query`()
+      throws {
+    // Both paths enter `Query.expanded` and drive the one lateral-apply
+    // rewrite, so the schema path types the same two-column shape a run
+    // produces — the correlated body resolving `T.Id` on both.
+    let sql = "SELECT T.Id, d.n FROM T JOIN LATERAL (" +
+              "SELECT ROW_NUMBER() OVER (ORDER BY SUM(U.v)) AS n " +
+              "FROM U WHERE U.k = T.Id GROUP BY ROLLUP(T.Id)) AS d ON 1 = 1"
+    #expect(try correlated().columns(of: parse(query: sql), validate: true)
+                .count == 2)
+    try correlated().expect(
+        sql + " ORDER BY T.Id, d.n",
+        yields: [[1, 1], [1, 2], [2, 1], [2, 2], [3, 1]])
+  }
+
+  @Test func `a non-windowed LATERAL GROUPING SETS returns the same grouping`()
+      throws {
+    // The parity the windowed form must match: the same correlated body without
+    // the window resolves `T.Id` identically, one row per group per outer row —
+    // Id 1 and Id 2 their per-group sum and grand total (equal here), Id 3 only
+    // its grand-total NULL. The windowed form numbers exactly these rows.
+    try correlated().expect(
+        "SELECT T.Id, d.s FROM T JOIN LATERAL (" +
+        "SELECT SUM(U.v) AS s FROM U WHERE U.k = T.Id " +
+        "GROUP BY ROLLUP(T.Id)) AS d ON 1 = 1 ORDER BY T.Id, d.s",
+        yields: [[1, 201], [1, 201], [2, 200], [2, 200], [3, nil]])
+  }
+
+  @Test func `an unused WINDOW faults over a windowed GROUPING SETS query`()
+      throws {
+    // A used `ROW_NUMBER()` window beside an unused named window whose ORDER BY
+    // names a non-existent column. The rewrite carries the original WINDOW
+    // clause onto the arm union, so the arm's front validates every definition
+    // against the grouped source before dropping it — faulting the undefined
+    // `nonesuch` on both the run and validate paths, as the ordinary and
+    // non-windowed aggregate forms do, rather than silently accepting it.
+    let sql = "SELECT dept, ROW_NUMBER() OVER () FROM Emp " +
+              "GROUP BY GROUPING SETS ((dept), ()) " +
+              "WINDOW bad AS (ORDER BY nonesuch)"
+    try fixture().expect(sql, fails: .column("nonesuch"))
+    #expect(throws: SQLError.column("nonesuch")) {
+      _ = try fixture().columns(of: parse(query: sql), validate: true)
+    }
+  }
+
+  @Test func `an unused WINDOW faults over a single-set GROUPING SETS`()
+      throws {
+    // A single grouping set takes the fast path that reconstructs an ordinary
+    // grouped `Select`; that reconstruction must carry the `WINDOW` clause, or
+    // an unused definition naming a non-existent column is silently accepted
+    // where the multi-set path and the ordinary grouped query both reject it.
+    let sql = "SELECT dept, ROW_NUMBER() OVER () FROM Emp " +
+              "GROUP BY GROUPING SETS ((dept)) " +
+              "WINDOW bad AS (ORDER BY nonesuch)"
+    try fixture().expect(sql, fails: .column("nonesuch"))
+    #expect(throws: SQLError.column("nonesuch")) {
+      _ = try fixture().columns(of: parse(query: sql), validate: true)
+    }
+  }
+
+  @Test func `a directly-built negative limit faults over GROUPING SETS`()
+      throws {
+    // The windowed grouping-sets lowering validates the row limit before its
+    // early return; else a public-AST-built negative `Limit` reaches the
+    // executor's slice and precondition-traps, where the ordinary path faults
+    // the query error. Run and validate fault identically.
+    let query = try parse(
+        query: "SELECT dept, ROW_NUMBER() OVER () FROM Emp " +
+               "GROUP BY GROUPING SETS ((dept), ())")
+    guard case let .select(base) = query.body else {
+      Issue.record("expected a single SELECT")
+      return
+    }
+    func rebuilt(_ limit: Limit) -> Select {
+      Select(distinct: base.distinct, projection: base.projection,
+             from: base.from, joins: base.joins, predicate: base.predicate,
+             grouping: base.grouping, having: base.having,
+             window: base.window, order: base.order, limit: limit)
+    }
+    let offset: Query = .select(rebuilt(Limit(count: 1, offset: -1)))
+    #expect(throws:
+        SQLError.state("2201X", "OFFSET row count must be non-negative")) {
+      try fixture().run(offset)
+    }
+    #expect(throws:
+        SQLError.state("2201X", "OFFSET row count must be non-negative")) {
+      _ = try fixture().columns(of: offset, validate: true)
+    }
+    let count: Query = .select(rebuilt(Limit(count: -1)))
+    #expect(throws:
+        SQLError.state("2201W", "FETCH row count must be non-negative")) {
+      try fixture().run(count)
+    }
+  }
+
+  @Test func `a valid unused WINDOW definition is accepted and dropped`()
+      throws {
+    // An unused named window whose ORDER BY names a real column is well-formed,
+    // so it validates and is dropped — the query runs exactly as it would with
+    // no WINDOW clause, matching the ordinary grouped path's treatment of an
+    // unused definition.
+    let sql = "SELECT dept, ROW_NUMBER() OVER (ORDER BY SUM(sal)) FROM Emp " +
+              "GROUP BY GROUPING SETS ((dept), ()) WINDOW w AS (ORDER BY dept)"
+    try fixture().expect(sql, yields: [[1, 1], [2, 3], [3, 2], [nil, 4]])
+  }
+
+  @Test func `a stateful leaf evaluates independently at each site`() throws {
+    // A non-deterministic `tick()` in the projection and in the window `ORDER
+    // BY` is not collapsed onto one shared union column: each site evaluates
+    // independently — six calls over the three groups, not three — matching the
+    // plain grouped-window path, not reading one shared value. Under grounded-
+    // outer the projection `tick()` is group-independent, so it stays in the
+    // outer projection and evaluates after the window; only the window key
+    // `tick()` lifts to an arm column (`*gw0`) and evaluates before it. The arm
+    // evaluates its lone key per group (1, 2, 3), the window numbers by that
+    // ascending key (ranks 1, 2, 3), and the outer projection then evaluates
+    // its own `tick()` per output row (4, 5, 6) — the same values, and the same
+    // six calls, the ordinary `GROUP BY dept` companion below reports.
+    let counter = Counter()
+    let routines = try Routines.standard
+        .registering("tick", returns: .integer, deterministic: false) { _ in
+          .integer(counter.next())
+        }
+    try fixture().expect(
+        "SELECT tick(), ROW_NUMBER() OVER (ORDER BY tick()) " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept))",
+        yields: [[4, 1], [5, 2], [6, 3]], routines: routines)
+    #expect(counter.count == 6)
+  }
+
+  @Test func `the single set matches the ordinary grouped-window path`()
+      throws {
+    // The grounded-outer oracle: the single-set `GROUPING SETS ((dept))`
+    // spelling of the query above must observe exactly what the ordinary `GROUP
+    // BY dept` windowed query does — the window key `tick()` evaluated first as
+    // the ranking input (1, 2, 3), the projection `tick()` evaluated after the
+    // window (4, 5, 6), six calls in all. This is the reference the grouping-
+    // sets form is pinned to; before grounded-outer the grouping-sets form
+    // reported 1, 3, 5 (both `tick()`s in the arm), diverging from it.
+    let counter = Counter()
+    let routines = try Routines.standard
+        .registering("tick", returns: .integer, deterministic: false) { _ in
+          .integer(counter.next())
+        }
+    try fixture().expect(
+        "SELECT tick(), ROW_NUMBER() OVER (ORDER BY tick()) " +
+        "FROM Emp GROUP BY dept",
+        yields: [[4, 1], [5, 2], [6, 3]], routines: routines)
+    #expect(counter.count == 6)
+  }
+
+  @Test func `a capped projection-only fault drops with the page`() throws {
+    // #137: a projection-only pure scalar that would fault (`1 / 0`) is group-
+    // independent, so grounded-outer keeps it in the outer projection above the
+    // `Project(Limit(Sort))` cap rather than in an arm below it. A zero `FETCH`
+    // drops every row before the projection runs, so the division never
+    // happens and the query returns the empty page — matching the ordinary
+    // grouped-window path. Before grounded-outer the `1 / 0` lifted into the
+    // arm, dividing per group and faulting `.divide` even though no row
+    // survived. `columns(of: validate:)` agrees — the outer projection sits
+    // above the cap, so a dropped page leaves it unreachable and validate types
+    // its two columns rather than faulting a division the run never reaches.
+    let sql = "SELECT 1 / 0, ROW_NUMBER() OVER () FROM Emp " +
+              "GROUP BY GROUPING SETS ((dept)) FETCH FIRST 0 ROWS ONLY"
+    try fixture().empty(sql)
+    #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                .count == 2)
+  }
+
+  @Test func `a COALESCE over a window never reaches its guarded arm`()
+      throws {
+    // A window-free `COALESCE(ROW_NUMBER() OVER (), 1 / 0)` wraps the window in
+    // the outer projection, evaluated lazily per output row over the union. The
+    // row number is never NULL, so the guarded `1 / 0` is never reached and the
+    // division never happens — the union's rows number 1, 2, 3, matching the
+    // ordinary `GROUP BY dept` form. A window-free wrapper force-lifted into an
+    // arm would evaluate the whole `COALESCE` eagerly per group and fault
+    // `.divide`; kept outer and lazy, the dead arm stays unevaluated.
+    let sets = "SELECT COALESCE(ROW_NUMBER() OVER (), 1 / 0) " +
+               "FROM Emp GROUP BY GROUPING SETS ((dept))"
+    try fixture().expect(sets, yields: [[1], [2], [3]])
+    let plain = "SELECT COALESCE(ROW_NUMBER() OVER (), 1 / 0) " +
+                "FROM Emp GROUP BY dept"
+    try fixture().expect(plain, yields: [[1], [2], [3]])
+  }
+
+  @Test func `an ordinal-linked window key shares the reported leaf`() throws {
+    // The window `ORDER BY 1` names column 1 — the `tick()` value — so
+    // the ordinal links the key to that output: both must read one evaluation.
+    // The lifter shares its `*gwN` leaf across the projection and the ordinal-
+    // linked key, so `tick()` is evaluated once per group (1, 2, 3), the window
+    // orders on those, and the row numbered k reports `tick()` k — the ranking
+    // matching the reported column, three calls. Sharing only by determinism
+    // would give the ordinal its own leaf, evaluating `tick()` twice per group,
+    // ordering on 2, 4, 6 yet reporting 1, 3, 5 over six calls — the reported
+    // value diverging from the ranking, as the directly written key above does.
+    let counter = Counter()
+    let routines = try Routines.standard
+        .registering("tick", returns: .integer, deterministic: false) { _ in
+          .integer(counter.next())
+        }
+    try fixture().expect(
+        "SELECT tick(), ROW_NUMBER() OVER (ORDER BY 1) " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept))",
+        yields: [[1, 1], [2, 2], [3, 3]], routines: routines)
+    #expect(counter.count == 3)
+  }
+
+  @Test func `an unnamed windowed output stays an ordinal-only header`()
+      throws {
+    // An originally-unnamed windowed grouping-sets output feeding an outer
+    // set-op carrier keeps its synthesized `column N` display header and stays
+    // ordinal-only: a delimited `ORDER BY "column N"` binds no output — the
+    // synthesized header is not a spellable name — so it faults `.column`, as
+    // it does over any derived union, not the outer carrier capturing it.
+    let arm = "SELECT SUM(sal), ROW_NUMBER() OVER () FROM Emp " +
+              "GROUP BY GROUPING SETS ((dept))"
+    // The two outputs display as the positional headers, marked synthesized.
+    let headers = try fixture().columns(of: parse(query: arm), validate: true)
+        .map(\.name)
+    #expect(headers == ["column 1", "column 2"])
+    // Feeding an outer UNION, a delimited-name ORDER BY on either synthesized
+    // header faults; the ordinal still orders that output.
+    let union = "\(arm) UNION SELECT dept, dept FROM Emp"
+    try fixture().expect("\(union) ORDER BY \"column 1\"",
+                         fails: .column("column 1"))
+    try fixture().expect("\(union) ORDER BY \"column 2\"",
+                         fails: .column("column 2"))
+    #expect(throws: SQLError.column("column 1")) {
+      _ = try fixture().columns(of: parse(query:
+          "\(union) ORDER BY \"column 1\""), validate: true)
+    }
+  }
+
+  @Test func `an unused WINDOW faults over a single-set windowed query`()
+      throws {
+    // A single grouping set takes `expand`'s fast path, which reconstructs a
+    // plain grouped select rather than a union. It carries the WINDOW clause
+    // onto that select as the multi-set arms do, so the arm compile validates
+    // every definition against the grouped source — the undefined `nonesuch`
+    // faulting on both the run and validate paths, as the multi-set and
+    // ordinary grouped forms do, not silently accepted on a one-set query.
+    let sql = "SELECT dept, ROW_NUMBER() OVER () FROM Emp " +
+              "GROUP BY GROUPING SETS ((dept)) " +
+              "WINDOW bad AS (ORDER BY nonesuch)"
+    try fixture().expect(sql, fails: .column("nonesuch"))
+    #expect(throws: SQLError.column("nonesuch")) {
+      _ = try fixture().columns(of: parse(query: sql), validate: true)
+    }
+  }
+
+  @Test func `a valid unused WINDOW is accepted over a single-set query`()
+      throws {
+    // The companion: a single-set windowed grouping-sets query with a well-
+    // formed unused named window validates and drops it, running exactly as it
+    // would with no WINDOW clause. The fast path carries the definition through
+    // validation, not around it — so a valid one is accepted, not rejected.
+    let sql = "SELECT dept, ROW_NUMBER() OVER (ORDER BY SUM(sal)) FROM Emp " +
+              "GROUP BY GROUPING SETS ((dept)) WINDOW w AS (ORDER BY dept)"
+    try fixture().expect(sql, yields: [[1, 1], [2, 3], [3, 2]])
+  }
+
+  @Test func `an unused WINDOW faults over a non-windowed single set`()
+      throws {
+    // The single-set fast path is shared by the non-windowed grouping-sets
+    // form, so an ordinary single-set grouping-sets query with a bad unused
+    // WINDOW definition validates it too — faulting `nonesuch` on both paths,
+    // as the multi-set and ordinary grouped forms do, rather than dropping the
+    // clause unvalidated because there is only one set.
+    let sql = "SELECT dept FROM Emp GROUP BY GROUPING SETS ((dept)) " +
+              "WINDOW bad AS (ORDER BY nonesuch)"
+    try fixture().expect(sql, fails: .column("nonesuch"))
+    #expect(throws: SQLError.column("nonesuch")) {
+      _ = try fixture().columns(of: parse(query: sql), validate: true)
+    }
+  }
+
+  @Test func `a negative OFFSET over a windowed GROUPING SETS faults`() throws {
+    // The parser cannot spell a negative count, but a directly built `Limit`
+    // can. The windowed grouping-sets lowering used to take its early return
+    // before the row-limit guard, passing the negative offset to `limited`,
+    // where the negative slice precondition-traps; the guard now runs ahead of
+    // that return, so the query faults 2201X on both the run and validate
+    // paths, as an ordinary select does, rather than crashing the process.
+    let base = try parse(select:
+        "SELECT dept, ROW_NUMBER() OVER (ORDER BY SUM(sal)) FROM Emp " +
+        "GROUP BY GROUPING SETS ((dept), ())")
+    let select = Select(projection: base.projection, from: base.from,
+                        grouping: base.grouping,
+                        limit: Limit(count: 1, offset: -1))
+    let query = Query.select(select)
+    let catalog = try fixture()
+    let fault = SQLError.state("2201X", "OFFSET row count must be non-negative")
+    let ran: SQLError?
+    do {
+      _ = try catalog.run(query)
+      ran = nil
+    } catch let raised {
+      ran = raised
+    }
+    #expect(ran == fault)
+    let derived: SQLError?
+    do {
+      _ = try catalog.columns(of: query, validate: true)
+      derived = nil
+    } catch let raised {
+      derived = raised
+    }
+    #expect(derived == fault)
+  }
+
+  @Test func `a negative FETCH over a windowed GROUPING SETS faults`() throws {
+    // The same guard covers a negative FETCH count: a directly built `Limit`
+    // with a negative count reaches the windowed grouping-sets lowering and
+    // used to trap in `limited`'s prefix; it now faults 2201W ahead of the
+    // early return, on both the run and validate paths, as an ordinary select
+    // does.
+    let base = try parse(select:
+        "SELECT dept, ROW_NUMBER() OVER (ORDER BY SUM(sal)) FROM Emp " +
+        "GROUP BY GROUPING SETS ((dept), ())")
+    let select = Select(projection: base.projection, from: base.from,
+                        grouping: base.grouping, limit: Limit(count: -1))
+    let query = Query.select(select)
+    let catalog = try fixture()
+    let fault = SQLError.state("2201W", "FETCH row count must be non-negative")
+    let ran: SQLError?
+    do {
+      _ = try catalog.run(query)
+      ran = nil
+    } catch let raised {
+      ran = raised
+    }
+    #expect(ran == fault)
+    let derived: SQLError?
+    do {
+      _ = try catalog.columns(of: query, validate: true)
+      derived = nil
+    } catch let raised {
+      derived = raised
+    }
+    #expect(derived == fault)
+  }
+
+  @Test func `a capped projection CASE fault drops with the page`() throws {
+    // #137, the `CASE` shape: a projection-only `CASE` whose result would fault
+    // (`CASE WHEN 1 = 1 THEN 1 / 0 END`) is group-independent — its `WHEN`
+    // guard and `THEN` result name no grouped data — so grounded-outer keeps it
+    // in the outer projection above the `Project(Limit(Sort))` cap, not an arm
+    // below it. A zero `FETCH` drops every row before the projection runs, so
+    // the division never happens and the query returns the empty page, matching
+    // the ordinary `GROUP BY dept` companion. Before this the `CASE` was hard-
+    // coded grounded and lifted into the arm, dividing per group and faulting
+    // even though no row survived. `columns(of: validate:)` agrees over the
+    // union scope, typing its two columns rather than faulting a division no
+    // run reaches.
+    let sql = "SELECT CASE WHEN 1 = 1 THEN 1 / 0 END, ROW_NUMBER() OVER () " +
+              "FROM Emp GROUP BY GROUPING SETS ((dept)) FETCH FIRST 0 ROWS ONLY"
+    try fixture().empty(sql)
+    #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                .count == 2)
+    let plain = "SELECT CASE WHEN 1 = 1 THEN 1 / 0 END, ROW_NUMBER() OVER () " +
+                "FROM Emp GROUP BY dept FETCH FIRST 0 ROWS ONLY"
+    try fixture().empty(plain)
+  }
+
+  @Test func `a projection-only CASE evaluates in the outer projection`()
+      throws {
+    // A stateful `CASE WHEN 1 = 1 THEN tick() END` in the projection is group-
+    // independent, so it stays in the outer projection and evaluates after the
+    // window — its `tick()` per output row — while the window `ORDER BY tick()`
+    // lifts to an arm column evaluated per group before it. Six calls over the
+    // three groups: the arm key 1, 2, 3 (the ranking input), then the
+    // projection 4, 5, 6, matching the ordinary `GROUP BY dept` companion.
+    let counter = Counter()
+    let routines = try Routines.standard
+        .registering("tick", returns: .integer, deterministic: false) { _ in
+          .integer(counter.next())
+        }
+    try fixture().expect(
+        "SELECT CASE WHEN 1 = 1 THEN tick() END, " +
+        "ROW_NUMBER() OVER (ORDER BY tick()) " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept))",
+        yields: [[4, 1], [5, 2], [6, 3]], routines: routines)
+    #expect(counter.count == 6)
+  }
+
+  @Test func `the single-set CASE matches the ordinary grouped-window path`()
+      throws {
+    // The oracle for the `CASE` above: the ordinary `GROUP BY dept` windowed
+    // form observes exactly the same values — the arm key `tick()` 1, 2, 3, the
+    // projection `CASE`'s `tick()` 4, 5, 6, six calls — the reference the
+    // grouping-sets form is pinned to.
+    let counter = Counter()
+    let routines = try Routines.standard
+        .registering("tick", returns: .integer, deterministic: false) { _ in
+          .integer(counter.next())
+        }
+    try fixture().expect(
+        "SELECT CASE WHEN 1 = 1 THEN tick() END, " +
+        "ROW_NUMBER() OVER (ORDER BY tick()) FROM Emp GROUP BY dept",
+        yields: [[4, 1], [5, 2], [6, 3]], routines: routines)
+    #expect(counter.count == 6)
+  }
+
+  @Test func `a grounded CASE keeps its structure in the outer projection`()
+      throws {
+    // A grounded window-free `CASE` — `CASE WHEN dept = 1 THEN SUM(sal) ELSE 0
+    // END` — keeps its `CASE` structure in the outer projection and lifts only
+    // the grouped values its guard and branches reference: the `dept` guard
+    // column and the `SUM(sal)` branch each become a `*gwN` arm column, the
+    // `CASE` itself evaluated outer above the window. Over the single set dept
+    // 1 yields SUM 300, dept 2 and 3 the `ELSE` 0 (their guard false), each
+    // numbered, matching the ordinary `GROUP BY dept` form. Before this fix the
+    // whole `CASE` lifted into the arm; the values are the same here, but the
+    // capped finding below shows why keeping the structure outer matters.
+    let sets = "SELECT CASE WHEN dept = 1 THEN SUM(sal) ELSE 0 END, " +
+               "ROW_NUMBER() OVER () FROM Emp GROUP BY GROUPING SETS ((dept))"
+    try fixture().expect(sets, yields: [[300, 1], [0, 2], [0, 3]])
+    let plain = "SELECT CASE WHEN dept = 1 THEN SUM(sal) ELSE 0 END, " +
+                "ROW_NUMBER() OVER () FROM Emp GROUP BY dept"
+    try fixture().expect(plain, yields: [[300, 1], [0, 2], [0, 3]])
+  }
+
+  @Test func `a grounded CASE above a zero FETCH drops with the page`() throws {
+    // The finding: a grounded `CASE` whose branch would fault — `CASE WHEN dept
+    // = 1 THEN 1 / 0 END` — keeps its structure in the outer projection above
+    // the `Project(Limit(Sort))` cap, only its `dept` guard column lifted to a
+    // `*gwN` arm. A zero `FETCH` drops every row before the outer `CASE` runs,
+    // so the division never happens and the query returns the empty page,
+    // matching the ordinary `GROUP BY dept` companion. Before this fix the
+    // whole grounded `CASE` lifted into the arm below the cap, dividing per
+    // group and faulting `.divide` though no row survived. `columns(of:
+    // validate:)` agrees over the union scope — the outer `CASE` sits above the
+    // cap, so a dropped page leaves it unreachable and validate types its two
+    // columns rather than faulting a division the run never reaches.
+    let sql =
+        "SELECT CASE WHEN dept = 1 THEN 1 / 0 END, ROW_NUMBER() OVER () " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept)) FETCH FIRST 0 ROWS ONLY"
+    try fixture().empty(sql)
+    #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                .count == 2)
+    let plain =
+        "SELECT CASE WHEN dept = 1 THEN 1 / 0 END, ROW_NUMBER() OVER () " +
+        "FROM Emp GROUP BY dept FETCH FIRST 0 ROWS ONLY"
+    try fixture().empty(plain)
+  }
+
+  @Test func `a grounded CASE's stateful branch evaluates in the outer`()
+      throws {
+    // A grounded `CASE` with a grouped guard and a stateful branch — `CASE WHEN
+    // dept = 1 THEN tick() ELSE 0 END` — lifts only the `dept` guard column to
+    // an arm while the `tick()` branch stays outer, evaluated after the window
+    // per output row. The window `ORDER BY tick()` lifts its own `tick()` to a
+    // separate arm column evaluated per group before the window. So the arm
+    // ticks 1, 2, 3 (the ranking input, ranks 1, 2, 3) and the outer `CASE`'s
+    // branch ticks once for the dept-1 row (4) — four calls, matching the
+    // ordinary `GROUP BY dept` companion. Before this fix the whole `CASE`
+    // lifted into the arm, so its branch `tick()` evaluated before the window,
+    // reporting 1 rather than the outer 4.
+    let counter = Counter()
+    let routines = try Routines.standard
+        .registering("tick", returns: .integer, deterministic: false) { _ in
+          .integer(counter.next())
+        }
+    try fixture().expect(
+        "SELECT CASE WHEN dept = 1 THEN tick() ELSE 0 END, " +
+        "ROW_NUMBER() OVER (ORDER BY tick()) " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept))",
+        yields: [[4, 1], [0, 2], [0, 3]], routines: routines)
+    #expect(counter.count == 4)
+    let other = Counter()
+    let plain = try Routines.standard
+        .registering("tick", returns: .integer, deterministic: false) { _ in
+          .integer(other.next())
+        }
+    try fixture().expect(
+        "SELECT CASE WHEN dept = 1 THEN tick() ELSE 0 END, " +
+        "ROW_NUMBER() OVER (ORDER BY tick()) FROM Emp GROUP BY dept",
+        yields: [[4, 1], [0, 2], [0, 3]], routines: plain)
+    #expect(other.count == 4)
+  }
+
+  @Test func `a windowed CASE over GROUPING SETS is deferred`() throws {
+    // Preserving #136: a `CASE` nesting a window — `CASE WHEN dept = 1 THEN
+    // ROW_NUMBER() OVER () END` — is a per-row `Predicate`/window shape no
+    // `*gwN` column stands in for, so it still faults the feature diagnostic on
+    // both the run and validate paths, unchanged by the window-free `CASE`
+    // recursion this fix adds.
+    let sql = "SELECT CASE WHEN dept = 1 THEN ROW_NUMBER() OVER () END " +
+              "FROM Emp GROUP BY GROUPING SETS ((dept))"
+    let fault = SQLError.state(
+        "0A000", "a window in a CASE with GROUPING SETS is not yet supported")
+    try fixture().expect(sql, fails: fault)
+    #expect(throws: fault) {
+      _ = try fixture().columns(of: parse(query: sql), validate: true)
+    }
+  }
+
+  @Test func `a CASE nesting an uncorrelated subquery recurses`() throws {
+    // A window-free `CASE` whose branch nests an uncorrelated scalar subquery —
+    // `CASE WHEN T.Id = 1 THEN (SELECT SUM(U.v) FROM U) END` — recurses: the
+    // `T.Id` guard lifts to a `*gwN` arm column while the subquery stays outer,
+    // hosted by the union-scope `Resolution`, so the whole `CASE` sits in the
+    // outer projection above the cap rather than lifting whole to an arm. Over
+    // the single set `T.Id` 1 yields the subquery's 401, `T.Id` 2 and 3 the
+    // `ELSE` NULL (guard false), each numbered, matching the ordinary `GROUP BY
+    // T.Id` form.
+    let sets = "SELECT CASE WHEN T.Id = 1 THEN (SELECT SUM(U.v) FROM U) END, " +
+               "ROW_NUMBER() OVER () FROM T GROUP BY GROUPING SETS ((T.Id))"
+    try correlated().expect(sets, yields: [[401, 1], [nil, 2], [nil, 3]])
+    let plain =
+        "SELECT CASE WHEN T.Id = 1 THEN (SELECT SUM(U.v) FROM U) END, " +
+        "ROW_NUMBER() OVER () FROM T GROUP BY T.Id"
+    try correlated().expect(plain, yields: [[401, 1], [nil, 2], [nil, 3]])
+  }
+
+  @Test func `an uncorrelated scalar subquery hosts in the outer layer`()
+      throws {
+    // An uncorrelated scalar subquery in the projection is hosted in the outer
+    // window layer through the union-scope `Resolution`, not lifted to an arm,
+    // so it resolves against the union output and evaluates once per output
+    // row. `(SELECT SUM(U.v) FROM U)` sums every child, the same 401 for all
+    // groups, each numbered, matching the ordinary `GROUP BY T.Id` form.
+    let sets = "SELECT T.Id, (SELECT SUM(U.v) FROM U), ROW_NUMBER() OVER () " +
+               "FROM T GROUP BY GROUPING SETS ((T.Id))"
+    try correlated().expect(sets, yields: [[1, 401, 1], [2, 401, 2],
+                                           [3, 401, 3]])
+    // The validate twin resolves the hosted subquery over the union scope too,
+    // so `columns(of: validate:)` types its three columns rather than faulting
+    // a subquery it cannot host — run ≡ validate over the outer layer.
+    #expect(try correlated().columns(of: parse(query: sets), validate: true)
+                .count == 3)
+    let plain = "SELECT T.Id, (SELECT SUM(U.v) FROM U), ROW_NUMBER() OVER () " +
+                "FROM T GROUP BY T.Id"
+    try correlated().expect(plain, yields: [[1, 401, 1], [2, 401, 2],
+                                            [3, 401, 3]])
+  }
+
+  @Test func `an uncorrelated subquery hosts over multiple sets`() throws {
+    // The multi-set companion: with two grouping sets the arm union is a real
+    // `UNION ALL`, and the uncorrelated `(SELECT SUM(U.v) FROM U)` is hosted in
+    // the outer layer over that union — evaluated once per output row, the same
+    // 401 for every per-set row and the NULL-extended grand-total row alike.
+    // `SUM(T.Id)` groups to each `T.Id` per set and to 6 for the grand total,
+    // the window numbering across all four union rows.
+    let sets = "SELECT SUM(T.Id), (SELECT SUM(U.v) FROM U), " +
+               "ROW_NUMBER() OVER () FROM T GROUP BY GROUPING SETS ((T.Id), ())"
+    try correlated().expect(sets, yields: [[1, 401, 1], [2, 401, 2],
+                                           [3, 401, 3], [6, 401, 4]])
+  }
+
+  @Test func `a correlated subquery still resolves in the arm`() throws {
+    // Approach (B): a scalar subquery correlated to a group key —
+    // `(SELECT SUM(U.v) FROM U WHERE U.k = T.Id)` — names the enclosing `T.Id`,
+    // a group key, so the lifter keeps it arm-lifted (a `*gwN` column) rather
+    // than hosting it outer, resolving `T.Id` in the arm's grouped scope; a
+    // correlated outer host awaits a follow-up (the union scope would have to
+    // expose the group key for the subquery to correlate against). Over the
+    // single set `T.Id` 1 sums its children 201, `T.Id` 2 sums 200, `T.Id` 3
+    // has none (NULL), each numbered, matching the ordinary `GROUP BY T.Id`
+    // form.
+    let sets = "SELECT T.Id, (SELECT SUM(U.v) FROM U WHERE U.k = T.Id), " +
+               "ROW_NUMBER() OVER () FROM T GROUP BY GROUPING SETS ((T.Id))"
+    try correlated().expect(sets, yields: [[1, 201, 1], [2, 200, 2],
+                                           [3, nil, 3]])
+    let plain = "SELECT T.Id, (SELECT SUM(U.v) FROM U WHERE U.k = T.Id), " +
+                "ROW_NUMBER() OVER () FROM T GROUP BY T.Id"
+    try correlated().expect(plain, yields: [[1, 201, 1], [2, 200, 2],
+                                            [3, nil, 3]])
+  }
+
+  @Test func `a stateful derived source materialises per arm`() throws {
+    // The finding: a windowed grouping-sets over a stateful derived table must
+    // materialise that source per arm — as the non-windowed grouping-sets over
+    // the same source does — not once for both arms. The window layer rides
+    // above the arm union, so the query keeps a `.select` body and once took
+    // the ordinary executor, which materialises the derived `d` a single time
+    // and scans those rows in every arm. Routed through the carrier-aware
+    // executor, the `.window` descent carries the union to the setop leaf,
+    // where each arm augments its own `d` — so `tick()` runs afresh per arm.
+    //
+    // The `(x)` arm ticks 1..5, each its own group summing to itself; the `()`
+    // arm ticks a fresh 6..10 summing to 40. Ten calls, the grand total 40 —
+    // where a single materialisation reused 1..5 and summed the grand total to
+    // 15 over five calls. The `tick()` count matches the non-windowed
+    // companion below, proving the `.window` carrier descent (dead before) is
+    // now reached.
+    let counter = Counter()
+    let routines = try Routines.standard
+        .registering("tick", returns: .integer, deterministic: false) { _ in
+          .integer(counter.next())
+        }
+    try fixture().expect(
+        "SELECT SUM(x), ROW_NUMBER() OVER () " +
+        "FROM (SELECT tick() AS x FROM Emp) d " +
+        "GROUP BY GROUPING SETS ((x), ())",
+        yields: [[1, 1], [2, 2], [3, 3], [4, 4], [5, 5], [40, 6]],
+        routines: routines)
+    #expect(counter.count == 10)
+  }
+
+  @Test func `the non-windowed form is the per-arm reference`() throws {
+    // The reference the windowed form is pinned to: the equivalent non-windowed
+    // grouping-sets over the same stateful derived source. It expands to a
+    // `UNION ALL` whose arms run per arm, so `tick()` runs afresh in each — the
+    // `(x)` arm 1..5, the `()` arm a fresh 6..10 summing to 40, ten calls. The
+    // windowed form above reports the same aggregate column and the same ten
+    // calls; the second column is the constant `0` here, `ROW_NUMBER()` there.
+    let counter = Counter()
+    let routines = try Routines.standard
+        .registering("tick", returns: .integer, deterministic: false) { _ in
+          .integer(counter.next())
+        }
+    try fixture().expect(
+        "SELECT SUM(x), 0 FROM (SELECT tick() AS x FROM Emp) d " +
+        "GROUP BY GROUPING SETS ((x), ())",
+        yields: [[1, 0], [2, 0], [3, 0], [4, 0], [5, 0], [40, 0]],
+        routines: routines)
+    #expect(counter.count == 10)
+  }
+
+  @Test func `a deterministic derived source is unchanged by the routing`()
+      throws {
+    // The no-regression guard: routing a windowed grouping-sets through the
+    // carrier-aware executor must not alter a deterministic source's rows.
+    // Materialising `sal` once or per arm yields the identical values, so the
+    // grouped sums and the row numbers are the same either way — the `(x)`
+    // groups 100, 200, 600 (the two 300s), 500 and the grand total 1400.
+    try fixture().expect(
+        "SELECT SUM(x), ROW_NUMBER() OVER () " +
+        "FROM (SELECT sal AS x FROM Emp) d " +
+        "GROUP BY GROUPING SETS ((x), ())",
+        yields: [[100, 1], [200, 2], [600, 3], [500, 4], [1400, 5]])
+  }
+
+  @Test func `a derived source under a capped sort executes per arm`() throws {
+    // A query `ORDER BY … FETCH n` over a windowed grouping-sets fuses into a
+    // `top` above the window: the generic optimiser a `.select`-bodied plan
+    // takes fuses a bounded limit over a sort, where the set-operation
+    // carrier's own optimise never does. The carrier-aware descent must carry
+    // the union through that `top` to the setop leaf — else the leaf scans a
+    // derived `d` the revealed context no longer binds and faults `.relation`,
+    // breaking run ≡ validate. Over a derived source ordered by the aggregate
+    // and paged to three rows, the head is 100, 200, 500 — the arms
+    // materialising `sal` per arm (the same deterministic values either way).
+    try fixture().expect(
+        "SELECT SUM(x), ROW_NUMBER() OVER (ORDER BY SUM(x)) " +
+        "FROM (SELECT sal AS x FROM Emp) d " +
+        "GROUP BY GROUPING SETS ((x), ()) ORDER BY 1 FETCH FIRST 3 ROWS ONLY",
+        yields: [[100, 1], [200, 2], [500, 3]])
+  }
+
+  @Test func `a single-set derived source materialises for the lone arm`()
+      throws {
+    // The finding: a single-set `GROUPING SETS ((x))` reduces to one grouped
+    // arm — `decompose` returns a plain `.select`, not a `.setop` — so its arm
+    // union is not carrier-routed. The per-arm carrier path assumes a setop and
+    // never materialises the lone arm's derived `d`, and the schema-only bind
+    // it pairs with drops `d`'s rows, so the query faulted an unknown relation.
+    // A single arm augments and runs through the ordinary per-query path
+    // instead: `d` materialises once (one arm, so per-arm and per-query
+    // coincide) and the grouped window reads it. The `(x)` groups are 100, 200,
+    // 600 (the two 300s), 500, numbered 1..4 — exactly the ordinary `GROUP BY
+    // x` companion below.
+    try fixture().expect(
+        "SELECT SUM(x), ROW_NUMBER() OVER () " +
+        "FROM (SELECT sal AS x FROM Emp) d " +
+        "GROUP BY GROUPING SETS ((x))",
+        yields: [[100, 1], [200, 2], [600, 3], [500, 4]])
+  }
+
+  @Test func `the ordinary derived companion is the single-set reference`()
+      throws {
+    // The reference the single-set form is pinned to: the ordinary `GROUP BY x`
+    // windowed query over the same derived source, which the mature grouped-
+    // window path has always handled. Its grouped sums and row numbers are the
+    // single-set spelling's, proving the single arm reaches this path.
+    try fixture().expect(
+        "SELECT SUM(x), ROW_NUMBER() OVER () " +
+        "FROM (SELECT sal AS x FROM Emp) d GROUP BY x",
+        yields: [[100, 1], [200, 2], [600, 3], [500, 4]])
+  }
+
+  @Test func `a stateful single-set derived source matches the ordinary form`()
+      throws {
+    // A single set has one arm, so per-arm and per-query materialisation
+    // coincide: the ordinary per-query path materialises the stateful `d` once
+    // and its lone arm reads those rows, the same as an arm materialising its
+    // own copy. `tick()` runs once per source row (five Emp rows, five calls),
+    // each `x` distinct so each groups alone summing to itself — 1..5, numbered
+    // 1..5 — the identical `tick()` count and rows the ordinary `GROUP BY x`
+    // companion yields.
+    let sets = Counter()
+    let plain = Counter()
+    func routines(_ counter: Counter) throws -> Routines {
+      try Routines.standard
+          .registering("tick", returns: .integer, deterministic: false) { _ in
+            .integer(counter.next())
+          }
+    }
+    try fixture().expect(
+        "SELECT SUM(x), ROW_NUMBER() OVER () " +
+        "FROM (SELECT tick() AS x FROM Emp) d " +
+        "GROUP BY GROUPING SETS ((x))",
+        yields: [[1, 1], [2, 2], [3, 3], [4, 4], [5, 5]],
+        routines: try routines(sets))
+    try fixture().expect(
+        "SELECT SUM(x), ROW_NUMBER() OVER () " +
+        "FROM (SELECT tick() AS x FROM Emp) d GROUP BY x",
+        yields: [[1, 1], [2, 2], [3, 3], [4, 4], [5, 5]],
+        routines: try routines(plain))
+    #expect(sets.count == 5)
+    #expect(plain.count == sets.count)
+  }
+
+  @Test func `a grand-total single set matches the implicit-group window`()
+      throws {
+    // The other single set: `GROUPING SETS (())`, the grand total. It too is
+    // one arm — `expand` returns the lone grouped `.select` — so it runs the
+    // ordinary per-query path over the derived source. The whole result is one
+    // group summing 1400, `ROW_NUMBER()` numbering the single row 1 — matching
+    // the `GROUP BY ()` implicit-group window companion below.
+    try fixture().expect(
+        "SELECT SUM(x), ROW_NUMBER() OVER () " +
+        "FROM (SELECT sal AS x FROM Emp) d " +
+        "GROUP BY GROUPING SETS (())",
+        yields: [[1400, 1]])
+    try fixture().expect(
+        "SELECT SUM(x), ROW_NUMBER() OVER () " +
+        "FROM (SELECT sal AS x FROM Emp) d GROUP BY ()",
+        yields: [[1400, 1]])
+  }
+
+  @Test func `a single-set GROUPING is zero over the derived source`() throws {
+    // In a single set every argument is a grouping key of the lone set, so
+    // `GROUPING(x)` is 0 for every group — the standard result when no column
+    // is rolled up, identical to the ordinary `GROUP BY x` companion. A window
+    // makes this the windowed single-arm shape, so it confirms the single arm
+    // reaching the ordinary path preserves `GROUPING`.
+    try fixture().expect(
+        "SELECT SUM(x), GROUPING(x), ROW_NUMBER() OVER () " +
+        "FROM (SELECT sal AS x FROM Emp) d " +
+        "GROUP BY GROUPING SETS ((x))",
+        yields: [[100, 0, 1], [200, 0, 2], [600, 0, 3], [500, 0, 4]])
+    try fixture().expect(
+        "SELECT SUM(x), GROUPING(x), ROW_NUMBER() OVER () " +
+        "FROM (SELECT sal AS x FROM Emp) d GROUP BY x",
+        yields: [[100, 0, 1], [200, 0, 2], [600, 0, 3], [500, 0, 4]])
+  }
+
+  @Test func `a grand-total set with an offset drops the unreachable wrapper`()
+      throws {
+    // The finding: the grand-total single set `GROUPING SETS (())` produces one
+    // whole-result row, so a positive `OFFSET` skips it and the outer
+    // projection never runs. `NULLIF(ROW_NUMBER() OVER (), 'x')` (integer
+    // versus text) would fault 42804 if reachable, but the cap discards the
+    // sole row first — the run returns the empty page and `columns(of:
+    // validate:)` accepts its one column. Deriving the outer layer's single-row
+    // flag from the decomposition (one arm, no keys) makes both paths treat the
+    // grand total as single-row, as the ordinary whole-result aggregate oracle
+    // below does. Before this the flag was hard-coded multi-row, so the offset
+    // left the projection reachable and the comparability preflight faulted
+    // 42804 though the run dropped the row before `NULLIF` could run.
+    let sql = "SELECT NULLIF(ROW_NUMBER() OVER (), 'x') " +
+              "FROM Emp GROUP BY GROUPING SETS (()) OFFSET 1 ROW"
+    try fixture().empty(sql)
+    #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                .count == 1)
+    // The ordinary single-row oracle: a whole-result aggregate makes the row
+    // count one, so the same offset skips the sole row and elides its
+    // projection alike, on both paths.
+    let plain = "SELECT NULLIF(ROW_NUMBER() OVER (), 'x'), SUM(sal) " +
+                "FROM Emp OFFSET 1 ROW"
+    try fixture().empty(plain)
+    #expect(try fixture().columns(of: parse(query: plain), validate: true)
+                .count == 2)
+  }
+
+  @Test func `a grand-total set without an offset still faults its wrapper`()
+      throws {
+    // The regression guard against over-sparing: the one grand-total row is
+    // produced with no cap, so the outer projection is reachable and the
+    // incomparable `NULLIF(ROW_NUMBER() OVER (), 'x')` faults 42804 on both
+    // paths — unchanged by the derivation, which spares the projection only
+    // when a row-dropping cap makes it unreachable.
+    let sql = "SELECT NULLIF(ROW_NUMBER() OVER (), 'x') " +
+              "FROM Emp GROUP BY GROUPING SETS (())"
+    let fault = SQLError.state(
+        "42804", "cannot compare integer with character varying")
+    try fixture().expect(sql, fails: fault)
+    #expect(throws: fault) {
+      _ = try fixture().columns(of: parse(query: sql), validate: true)
+    }
+  }
+
+  @Test func `a non-empty single set stays multi-row under an offset`()
+      throws {
+    // The regression guard against under-sparing: `GROUPING SETS ((dept))`
+    // groups by `dept` — three groups, so `OFFSET 1` leaves rows and the outer
+    // projection is reachable. The single-row flag is false for a non-empty
+    // single set (one arm, but keys present), so the incomparable wrapper still
+    // faults 42804 on both paths, unchanged.
+    let sql = "SELECT NULLIF(ROW_NUMBER() OVER (), 'x') " +
+              "FROM Emp GROUP BY GROUPING SETS ((dept)) OFFSET 1 ROW"
+    let fault = SQLError.state(
+        "42804", "cannot compare integer with character varying")
+    try fixture().expect(sql, fails: fault)
+    #expect(throws: fault) {
+      _ = try fixture().columns(of: parse(query: sql), validate: true)
+    }
+  }
+
+  @Test func `a valid grand-total window with an offset returns the page`()
+      throws {
+    // The derivation must not over-reject a well-typed grand total: `SUM(sal)`
+    // over the one whole-result group is 1400, `ROW_NUMBER() OVER ()` numbers
+    // it 1, and `OFFSET 1` skips that sole row — the empty page, on both paths,
+    // matching the ordinary whole-result aggregate window oracle below.
+    let sql = "SELECT SUM(sal), ROW_NUMBER() OVER () " +
+              "FROM Emp GROUP BY GROUPING SETS (()) OFFSET 1 ROW"
+    try fixture().empty(sql)
+    #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                .count == 2)
+    let plain = "SELECT SUM(sal), ROW_NUMBER() OVER () FROM Emp OFFSET 1 ROW"
+    try fixture().empty(plain)
+  }
+
+  @Test func `a windowed GROUPING SETS NULL arm infers the union's text`()
+      throws {
+    // The finding: a constant NULL in a windowed grouping-sets arm places no
+    // type constraint on the set-op's unified column, so the text arm decides
+    // it — column 1 infers text. The schema twin now derives the complete
+    // `ResolvedColumn` (type AND `unconstrained` mask) through the ordinary
+    // projection-output logic, so it no longer hand-stamps the NULL a
+    // constrained integer the merge rejects against the text arm (42804). The
+    // text arm is a `VALUES` row — this dialect projects a computed row through
+    // `VALUES`, not a FROM-less `SELECT`.
+    let sql = "SELECT NULL, ROW_NUMBER() OVER () " +
+              "FROM Emp GROUP BY GROUPING SETS ((dept)) " +
+              "UNION ALL VALUES ('x', 1)"
+    #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                .map(\.type) == [.text, .integer])
+    try fixture().expect(sql,
+                         yields: [[nil, 1], [nil, 2], [nil, 3], ["x", 1]])
+    // The oracle: the equivalent ordinary grouped-window arm of the same shape
+    // infers the same types and rows — the windowed grouping-sets arm must
+    // resolve exactly as its `GROUP BY dept` companion does.
+    let plain = "SELECT NULL, ROW_NUMBER() OVER () " +
+                "FROM Emp GROUP BY dept UNION ALL VALUES ('x', 1)"
+    #expect(try fixture().columns(of: parse(query: plain), validate: true)
+                .map(\.type) == [.text, .integer])
+    try fixture().expect(plain,
+                         yields: [[nil, 1], [nil, 2], [nil, 3], ["x", 1]])
+  }
+
+  @Test func `a windowed GROUPING SETS arm second still infers text`()
+      throws {
+    // The windowed arm as the second operand: the leading text arm still
+    // unifies with the trailing NULL, so column 1 infers text regardless of
+    // arm order — the trailing windowed arm's NULL stays unconstrained through
+    // the merge, not a hand-stamped integer that would fault 42804.
+    let sql = "VALUES ('x', 1) UNION ALL " +
+              "SELECT NULL, ROW_NUMBER() OVER () " +
+              "FROM Emp GROUP BY GROUPING SETS ((dept))"
+    #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                .map(\.type) == [.text, .integer])
+    try fixture().expect(sql,
+                         yields: [["x", 1], [nil, 1], [nil, 2], [nil, 3]])
+  }
+
+  @Test func `a constrained windowed GROUPING SETS rejects a text union`()
+      throws {
+    // The regression guard against over-relaxing: `ROW_NUMBER() OVER ()` is a
+    // genuine constrained integer, not a constant NULL, so column 1 keeps its
+    // integer constraint and the text arm is irreconcilable — the merge faults
+    // 42804 on both paths, unchanged by the mask-preserving derivation.
+    let sql = "SELECT ROW_NUMBER() OVER (), 1 " +
+              "FROM Emp GROUP BY GROUPING SETS ((dept)) " +
+              "UNION ALL VALUES ('x', 1)"
+    let fault = SQLError.operand("UNION arms have irreconcilable types")
+    try fixture().expect(sql, fails: fault)
+    #expect(throws: fault) {
+      _ = try fixture().columns(of: parse(query: sql), validate: true)
+    }
+  }
+
+  @Test func `an unused LEAD default never evaluates over GROUPING SETS`()
+      throws {
+    // The finding: a `LEAD` whose offset always lands on an existing row —
+    // offset 0 reads the current row — never needs its default, so the default
+    // must not evaluate. `Window.position` evaluates a `LEAD`/`LAG` default
+    // only for an out-of-range target, so force-lifting the `1 / 0` default
+    // into a `*gwN` arm column, evaluated eagerly per group, wrongly raised
+    // division-by-zero. Kept in the outer window function — only its grouped
+    // values lifted — the default rides the executor's conditional evaluation,
+    // so offset 0 never divides and each group's `dept` is returned, matching
+    // the ordinary `GROUP BY dept` companion. Before the fix the grouping-sets
+    // form faulted `.divide` while the ordinary form did not. (The finding's
+    // bare `OVER ()` faults `0A000` first — `LEAD` requires an `ORDER BY` — so
+    // the window carries the order the offset reads along.)
+    let sets = "SELECT LEAD(dept, 0, 1 / 0) OVER (ORDER BY dept) " +
+               "FROM Emp GROUP BY GROUPING SETS ((dept))"
+    try fixture().expect(sets, yields: [[1], [2], [3]])
+    let plain = "SELECT LEAD(dept, 0, 1 / 0) OVER (ORDER BY dept) " +
+                "FROM Emp GROUP BY dept"
+    try fixture().expect(plain, yields: [[1], [2], [3]])
+  }
+
+  @Test func `an unused LEAD default subquery never evaluates`() throws {
+    // The subquery half of the finding: a `LEAD` default nesting a scalar
+    // subquery — `LEAD(dept, 0, (SELECT SUM(sal) / 0 FROM Emp))` — is
+    // hosted in the outer window function, not force-lifted to an arm, so it
+    // rides the executor's conditional evaluation exactly as a scalar default
+    // does. Offset 0 always lands on the current row, so the default never
+    // evaluates and the subquery never divides — each group's `dept` is
+    // returned, matching the ordinary `GROUP BY dept` companion. Were the
+    // subquery arm-lifted (evaluated eagerly per group) the division would
+    // fault, as it would for a `1 / 0` default.
+    let sets =
+        "SELECT LEAD(dept, 0, (SELECT SUM(sal) / 0 FROM Emp)) " +
+        "OVER (ORDER BY dept) FROM Emp GROUP BY GROUPING SETS ((dept))"
+    try fixture().expect(sets, yields: [[1], [2], [3]])
+    let plain =
+        "SELECT LEAD(dept, 0, (SELECT SUM(sal) / 0 FROM Emp)) " +
+        "OVER (ORDER BY dept) FROM Emp GROUP BY dept"
+    try fixture().expect(plain, yields: [[1], [2], [3]])
+  }
+
+  @Test func `an uncorrelated subquery under a zero FETCH is not evaluated`()
+      throws {
+    // #138: an uncorrelated scalar subquery in the projection is hosted in the
+    // outer layer above the `Project(Limit(Sort))` cap — not in an arm below it
+    // — so a zero `FETCH` that drops every row leaves it unreached and the
+    // subquery never evaluates. `(SELECT SUM(sal) / 0 FROM Emp)` never divides,
+    // the query returns the empty page, matching the ordinary `GROUP BY dept`
+    // companion. `columns(of: validate:)` agrees — the outer projection sits
+    // above the cap, so a dropped page leaves it unreachable and validate types
+    // its two columns rather than faulting a division no run reaches.
+    let sql =
+        "SELECT (SELECT SUM(sal) / 0 FROM Emp), ROW_NUMBER() OVER () " +
+        "FROM Emp " +
+        "GROUP BY GROUPING SETS ((dept)) FETCH FIRST 0 ROWS ONLY"
+    try fixture().empty(sql)
+    #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                .count == 2)
+    let plain =
+        "SELECT (SELECT SUM(sal) / 0 FROM Emp), ROW_NUMBER() OVER () " +
+        "FROM Emp " +
+        "GROUP BY dept FETCH FIRST 0 ROWS ONLY"
+    try fixture().empty(plain)
+  }
+
+  @Test func `a needed LEAD default still returns over GROUPING SETS`()
+      throws {
+    // The default still works when the offset genuinely runs off the partition:
+    // offset 100 lands past every row, so `Window.position` evaluates the
+    // default for each. Keeping the default in the outer window layer preserves
+    // that path — every group takes the default `99` — matching the ordinary
+    // `GROUP BY dept` companion, so the outer default is used exactly when the
+    // executor needs it. A non-faulting default also validates cleanly over
+    // the union scope, so run and validate agree, as the ordinary form does.
+    let sets = "SELECT LEAD(dept, 100, 99) OVER (ORDER BY dept) " +
+               "FROM Emp GROUP BY GROUPING SETS ((dept))"
+    try fixture().expect(sets, yields: [[99], [99], [99]])
+    #expect(try fixture().columns(of: parse(query: sets), validate: true)
+                .count == 1)
+    let plain = "SELECT LEAD(dept, 100, 99) OVER (ORDER BY dept) " +
+                "FROM Emp GROUP BY dept"
+    try fixture().expect(plain, yields: [[99], [99], [99]])
+    #expect(try fixture().columns(of: parse(query: plain), validate: true)
+                .count == 1)
+  }
+
+  @Test func `a stateful LEAD default evaluates once per out-of-range target`()
+      throws {
+    // A stateful default `tick()` must evaluate once per out-of-range target,
+    // not once per group. The window orders the three groups by `dept` (1, 2,
+    // 3); `LEAD(dept, 1, …)` reads the next group for the first two (2, 3) and
+    // runs off the end for the last, evaluating the default once — `tick()`
+    // yields 1 — so the rows are 2, 3, 1 over one call. Force-lifting the
+    // default into the arm evaluated it per group (three calls) and reported
+    // the arm's per-group tick (…, 3) rather than the single outer evaluation,
+    // diverging from the ordinary `GROUP BY dept` companion, which evaluates
+    // the default once (1). Kept outer, the two forms agree in rows and count.
+    let counter = Counter()
+    let routines = try Routines.standard
+        .registering("tick", returns: .integer, deterministic: false) { _ in
+          .integer(counter.next())
+        }
+    try fixture().expect(
+        "SELECT LEAD(dept, 1, tick()) OVER (ORDER BY dept) " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept))",
+        yields: [[2], [3], [1]], routines: routines)
+    #expect(counter.count == 1)
+    let other = Counter()
+    let plain = try Routines.standard
+        .registering("tick", returns: .integer, deterministic: false) { _ in
+          .integer(other.next())
+        }
+    try fixture().expect(
+        "SELECT LEAD(dept, 1, tick()) OVER (ORDER BY dept) " +
+        "FROM Emp GROUP BY dept",
+        yields: [[2], [3], [1]], routines: plain)
+    #expect(other.count == 1)
+  }
+
+  @Test func `a grouped-dependent LEAD default lifts only its grouped value`()
+      throws {
+    // A default depending on a grouped value — `SUM(sal)` — lifts that value
+    // to a `*gwN` arm column while the default expression itself stays in the
+    // outer window function. Offset 100 runs off the partition, so each group
+    // takes its own `SUM(sal)` default — 300, 600, 500 — the grouped value
+    // computed in the arm and read by the conditionally evaluated outer
+    // default, matching the ordinary `GROUP BY dept` companion. The default
+    // validates cleanly over the union scope (its grouped leaf resolved in the
+    // arm), so run and validate agree, as the ordinary form does.
+    let sets = "SELECT LEAD(dept, 100, SUM(sal)) OVER (ORDER BY dept) " +
+               "FROM Emp GROUP BY GROUPING SETS ((dept))"
+    try fixture().expect(sets, yields: [[300], [600], [500]])
+    #expect(try fixture().columns(of: parse(query: sets), validate: true)
+                .count == 1)
+    let plain = "SELECT LEAD(dept, 100, SUM(sal)) OVER (ORDER BY dept) " +
+                "FROM Emp GROUP BY dept"
+    try fixture().expect(plain, yields: [[300], [600], [500]])
+    #expect(try fixture().columns(of: parse(query: plain), validate: true)
+                .count == 1)
+  }
+
+  @Test func `an unused LEAD default never evaluates over multiple sets`()
+      throws {
+    // The multi-set companion of the finding: with two grouping sets the arm
+    // union is a genuine `UNION ALL`, and the outer window still holds the
+    // conditionally evaluated `1 / 0` default. Offset 0 reads each row's own
+    // `dept` — the grand-total row's rolled-up NULL included — so at run the
+    // default never evaluates and no division occurs. Before the fix the arm's
+    // eager `1 / 0` faulted `.divide`. (Validate constant-folds the `1 / 0`
+    // default and faults it identically to the ordinary grouped-window form —
+    // a pre-existing property of the validator shared by both paths — so this
+    // asserts only the run; the non-faulting defaults above cover run ≡
+    // validate over the union scope.)
+    let sql = "SELECT dept, LEAD(dept, 0, 1 / 0) OVER (ORDER BY dept) " +
+              "FROM Emp GROUP BY GROUPING SETS ((dept), ())"
+    try fixture().expect(sql, yields: [[1, 1], [2, 2], [3, 3], [nil, nil]])
+  }
+
+  // The finding's body: a window over two grouping sets, reading a derived
+  // source `d`. The carrier-aware routing that per-arm re-materialises `d`
+  // lived only in the top-level `run`; a view body and a correlated subquery
+  // reached their own executor entry points, which recognised a union only by
+  // a `.setop` body and so scanned the schema-only `d` once — dropping the arm
+  // rows. Every entry point now consults the one `union(windowed:)` decision.
+  private var body: String {
+    "SELECT SUM(x), ROW_NUMBER() OVER () " +
+    "FROM (SELECT sal AS x FROM Emp) d GROUP BY GROUPING SETS ((x), ())"
+  }
+
+  // The finding's body over an `Emp` beside a view `v` whose body is exactly
+  // it, so a run of the view and a run of the body share one catalog.
+  private func viewed() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("Emp", ["dept": .integer, "sal": .integer]) {
+        Row(1, 100)
+        Row(1, 200)
+        Row(2, 300)
+        Row(2, 300)
+        Row(3, 500)
+      }
+      try View("v", body, as: ["s", "n"])
+    }
+  }
+
+  @Test func `a windowed GROUPING SETS view matches the top-level result`()
+      throws {
+    // Selecting from the view returns the same groups running the body at top
+    // level does — the per-arm materialised union, not an empty schema-only
+    // `d`. Both run the same plan, so the row order coincides.
+    try viewed().expect("SELECT s, n FROM v", equals: body)
+  }
+
+  @Test func `a windowed GROUPING SETS view yields the per-set groups`()
+      throws {
+    // The concrete groups: the `(x)` arm sums each distinct salary (100, 200,
+    // 500, and the two 300s to 600) and the `()` arm the grand total 1400. The
+    // window numbers them by that ascending sum, so ordering the view output by
+    // it reads out 100, 200, 500, 600, 1400 numbered 1 through 5.
+    let ordered = "SELECT SUM(x) AS s, "
+                + "ROW_NUMBER() OVER (ORDER BY SUM(x)) AS n "
+                + "FROM (SELECT sal AS x FROM Emp) d "
+                + "GROUP BY GROUPING SETS ((x), ())"
+    let catalog = try Catalog {
+      Relation("Emp", ["dept": .integer, "sal": .integer]) {
+        Row(1, 100)
+        Row(1, 200)
+        Row(2, 300)
+        Row(2, 300)
+        Row(3, 500)
+      }
+      try View("v", ordered, as: ["s", "n"])
+    }
+    try catalog.expect(
+        "SELECT s, n FROM v ORDER BY s",
+        yields: [[100, 1], [200, 2], [500, 3], [600, 4], [1400, 5]])
+  }
+
+  @Test func `a correlated LATERAL windowed GROUPING SETS over a source`()
+      throws {
+    // The body as a correlated LATERAL over a derived source `d`: `d` reads all
+    // of `U`, and a body-level `WHERE d.k = T.Id` correlates to the enclosing
+    // row, so the apply runs through `executed` per outer row. Per `T` row the
+    // arms re-materialise `d` and filter it to that row's children: Id 1 sums
+    // 100, 101 and the total 201; Id 2 sums 200 and the equal total; Id 3 has
+    // no children, so only its grand-total NULL. Before the fix `executed`
+    // scanned the schema-only `d` and dropped the arm rows.
+    try correlated().expect(
+        "SELECT T.Id, d.s, d.n FROM T JOIN LATERAL (" +
+        "SELECT SUM(x) AS s, ROW_NUMBER() OVER (ORDER BY SUM(x)) AS n " +
+        "FROM (SELECT k, v AS x FROM U) d WHERE d.k = T.Id " +
+        "GROUP BY GROUPING SETS ((x), ())) AS d ON 1 = 1 " +
+        "ORDER BY T.Id, d.n",
+        yields: [[1, 100, 1], [1, 101, 2], [1, 201, 3],
+                 [2, 200, 1], [2, 200, 2], [3, nil, 1]])
+  }
+
+  @Test func `a stateful source re-materialises per arm in a view`() throws {
+    // A counting `tick()` in the derived source over the single-row `T` fires
+    // once per arm materialisation: the two grouping sets drive two arms, so
+    // both a top-level run and a view run invoke it twice. Before the fix the
+    // view scanned the schema-only source, never materialising it — zero calls,
+    // the arm rows dropped.
+    let sql = "SELECT SUM(x), ROW_NUMBER() OVER () " +
+              "FROM (SELECT tick() AS x FROM T) d " +
+              "GROUP BY GROUPING SETS ((x), ())"
+    let top = Counter()
+    let plain = try Catalog { Relation("T", ["v": .integer]) { Row(0) } }
+    try plain.expect(sql, yields: [[1, 1], [2, 2]],
+                     routines: ticking(top))
+    #expect(top.count == 2)
+    let counter = Counter()
+    let catalog = try Catalog {
+      Relation("T", ["v": .integer]) { Row(0) }
+      try View("v", sql, as: ["s", "n"])
+    }
+    try catalog.expect("SELECT s, n FROM v", yields: [[1, 1], [2, 2]],
+                       routines: ticking(counter))
+    #expect(counter.count == 2)
+  }
+
+  // The windowed grouping-sets arm reading a derived source, its window ordered
+  // so the row number is a function of the sum.
+  private var arm: String {
+    "SELECT SUM(x) AS s, ROW_NUMBER() OVER (ORDER BY SUM(x)) AS r " +
+    "FROM (SELECT sal AS x FROM Emp) d GROUP BY GROUPING SETS ((x), ())"
+  }
+
+  @Test func `a windowed GROUPING SETS UNION arm keeps its groups`() throws {
+    // The windowed grouping-sets body as an explicit `UNION ALL` arm carried by
+    // an outer `ORDER BY`, so the arm descends through `arms` — the recursive
+    // twin of `executed`. Its per-set sums (100, 200, 500, 600 and the grand
+    // total 1400) must survive beside the plain second arm's rows, not collapse
+    // to the lone schema-only grand total the unfixed `arms` leaf produced.
+    try fixture().expect(
+        "(\(arm)) UNION ALL (SELECT dept, dept FROM Emp) ORDER BY s, r",
+        yields: [[1, 1], [1, 1], [2, 2], [2, 2], [3, 3],
+                 [100, 1], [200, 2], [500, 3], [600, 4], [1400, 5]])
+  }
+
+  @Test func `a view union with a windowed GROUPING SETS arm keeps groups`()
+      throws {
+    // The same union as a view body, so the arm descends through the view-body
+    // `setop` twin. Selecting from the view returns the per-set groups beside
+    // the plain arm, matching the top-level union.
+    let catalog = try Catalog {
+      Relation("Emp", ["dept": .integer, "sal": .integer]) {
+        Row(1, 100)
+        Row(1, 200)
+        Row(2, 300)
+        Row(2, 300)
+        Row(3, 500)
+      }
+      try View("v", "(\(arm)) UNION ALL (SELECT dept, dept FROM Emp)",
+               as: ["s", "r"])
+    }
+    try catalog.expect(
+        "SELECT s, r FROM v ORDER BY s, r",
+        yields: [[1, 1], [1, 1], [2, 2], [2, 2], [3, 3],
+                 [100, 1], [200, 2], [500, 3], [600, 4], [1400, 5]])
+  }
+
+  @Test func `a CASE IN guard over a windowed grouping set maps its key`()
+      throws {
+    // The window (`ROW_NUMBER() OVER (ORDER BY SUM(sal))`) routes the select
+    // through the arm-lift `substitute`, and the `CASE WHEN dept IN (VALUES
+    // (1))` guard tests the group key `dept` — which the lift must substitute
+    // to its `*gwN` arm slot, the same rewrite the bare `dept` projection
+    // takes — while the uncorrelated `VALUES (1)` subquery stays hosted whole.
+    // Before the fix the subquery-bearing guard rebuilt unchanged, leaving a
+    // bare `dept` the union scope could not bind (`unknown column dept`). The
+    // single grouping set is the ordinary windowed `GROUP BY dept` twin, so
+    // both forms guard dept 1 to 1 and the rest to 0, numbering by the sum
+    // (300, 500, 600 → dept 1, 3, 2).
+    let over = "CASE WHEN dept IN (VALUES (1)) THEN 1 ELSE 0 END, "
+             + "ROW_NUMBER() OVER (ORDER BY SUM(sal))"
+    let sets = "SELECT dept, \(over) "
+             + "FROM Emp GROUP BY GROUPING SETS ((dept))"
+    let twin = "SELECT dept, \(over) FROM Emp GROUP BY dept"
+    try fixture().expect(sets, yields: [[1, 1, 1], [2, 0, 3], [3, 0, 2]])
+    try fixture().expect(twin, yields: [[1, 1, 1], [2, 0, 3], [3, 0, 2]])
+    #expect(try fixture().columns(of: parse(query: sets), validate: true)
+                .count == 3)
+  }
+
+  /// A non-deterministic routine set whose `tick()` returns `counter`'s next
+  /// value, so a run counts how many times the source it sits in materialised.
+  private func ticking(_ counter: Counter) throws -> Routines {
+    try Routines.standard
+        .registering("tick", returns: .integer, deterministic: false) { _ in
+          .integer(counter.next())
+        }
+  }
+
+  @Test func `a CASE grouping key matches a qualifier-variant guard`() throws {
+    // Finding 1: the grouping key is `CASE WHEN T.A = 1 …`, the projection the
+    // same `CASE` with the unqualified guard `A = 1`. Grouped lowering equates
+    // the two — `T.A` and `A` resolve to one ordinal, so both `CASE`s lower to
+    // one `Term` — so the whole-key member match must too. `Expression
+    // .canonical` once copied the guard `Predicate` verbatim, so the key's
+    // `T.A = 1` and the projection's `A = 1` canonicalised apart, the whole-key
+    // match missed, and the walk descended into the guard, lifting a bare `A`
+    // the `(T.A = 1)` arm rejected `.grouping`. Canonicalising the guard by
+    // `Predicate.canonical` collapses the two spellings, so the whole `CASE`
+    // lifts to its `*gw0` arm column — the exact key the arm groups on. The
+    // guard groups are 1 (the dept-1 rows) and 0 (dept-2), the total NULLs the
+    // key; run ≡ validate over the union, matching the ordinary form.
+    let sql = "SELECT CASE WHEN A = 1 THEN 1 ELSE 0 END, " +
+              "ROW_NUMBER() OVER () FROM N AS T GROUP BY " +
+              "GROUPING SETS ((CASE WHEN T.A = 1 THEN 1 ELSE 0 END), ())"
+    try nums().expect(sql, yields: [[1, 1], [0, 2], [nil, 3]])
+    #expect(try nums().columns(of: parse(query: sql), validate: true)
+                .count == 2)
+    try nums().expect(
+        "SELECT CASE WHEN A = 1 THEN 1 ELSE 0 END FROM N AS T GROUP BY " +
+        "GROUPING SETS ((CASE WHEN T.A = 1 THEN 1 ELSE 0 END), ())",
+        yields: [[1], [0], [nil]])
+  }
+
+  @Test func `a CASE grouping key matches a case-variant guard`() throws {
+    // The same over a case-folded guard: the projection's `CASE WHEN a = 1 …`
+    // must match the key's `CASE WHEN A = 1 …`. `Predicate.canonical` folds
+    // each guard column exactly as `Expression.canonical` does its results, so
+    // the whole `CASE` lifts whole rather than descending to a bare `a` the arm
+    // rejects. Same groups as the qualifier-variant form; run ≡ validate.
+    let sql = "SELECT CASE WHEN a = 1 THEN 1 ELSE 0 END, " +
+              "ROW_NUMBER() OVER () FROM N GROUP BY " +
+              "GROUPING SETS ((CASE WHEN A = 1 THEN 1 ELSE 0 END), ())"
+    try nums().expect(sql, yields: [[1, 1], [0, 2], [nil, 3]])
+    #expect(try nums().columns(of: parse(query: sql), validate: true)
+                .count == 2)
+    try nums().expect(
+        "SELECT CASE WHEN a = 1 THEN 1 ELSE 0 END FROM N GROUP BY " +
+        "GROUPING SETS ((CASE WHEN A = 1 THEN 1 ELSE 0 END), ())",
+        yields: [[1], [0], [nil]])
+  }
+
+  // A single-column-keyed relation grouped on the computed key `A + 1`: A = 1,
+  // 1, 2, so `A + 1` = 2, 2, 3 — two groups the arithmetic key defines, exactly
+  // as a plain `GROUP BY A + 1` would. `V` gives the arms an aggregate to sum.
+  private func nums() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("N", ["A": .integer, "V": .integer]) {
+        Row(1, 100)
+        Row(1, 50)
+        Row(2, 30)
+      }
+    }
+  }
+
+  @Test func `a computed grouping-set key lifts whole under a window`() throws {
+    // The grouping key is the arithmetic expression `A + 1`, not a bare column,
+    // so the lifter must lift the whole `A + 1` to one `*gw0` arm column — the
+    // arm then projects `A + 1`, its actual GROUP BY key, which the grouped arm
+    // accepts. Recursing the operands would lift the bare `A`, which the arm
+    // rejects with `.grouping("A")` — only `A + 1` is a key. The `(A + 1)` arm
+    // groups 2 (summing 150) and 3 (summing 30); the `()` grand total sums 180
+    // with the key NULLed; `ROW_NUMBER() OVER ()` numbers the union in row
+    // order. It matches the ordinary non-windowed twin below.
+    let sql = "SELECT A + 1, SUM(V), ROW_NUMBER() OVER () " +
+              "FROM N GROUP BY GROUPING SETS ((A + 1), ())"
+    try nums().expect(sql, yields: [[2, 150, 1], [3, 30, 2], [nil, 180, 3]])
+    #expect(try nums().columns(of: parse(query: sql), validate: true)
+                .count == 3)
+    // The ordinary `GROUP BY GROUPING SETS ((A + 1), ())` twin the windowed
+    // form must equal on its shared columns — the equivalent query the plain
+    // grouped path already supports.
+    try nums().expect(
+        "SELECT A + 1, SUM(V) FROM N GROUP BY GROUPING SETS ((A + 1), ())",
+        yields: [[2, 150], [3, 30], [nil, 180]])
+  }
+
+  @Test func `a relation-qualified computed key matches the projection`()
+      throws {
+    // The grouping key is qualified by the relation name, `N.A + 1`, the
+    // projection the unqualified `A + 1`. Grouped lowering equates them — `N.A`
+    // and `A` resolve to one ordinal — so the whole-key member match must too,
+    // keyed by canonical (qualifier-stripped) identity rather than raw
+    // structure. Matched, the whole `A + 1` lifts to its `*gw0` arm column and
+    // the arm projects the `N.A + 1` key it groups on. Raw `Expression`
+    // equality treated `A + 1` and `N.A + 1` apart and recursed to the bare `A`
+    // the arm rejects with `.grouping("A")`. The `(N.A + 1)` arm groups 2
+    // (summing 150) and 3 (summing 30); the `()` grand total sums 180 with the
+    // key NULLed; `ROW_NUMBER() OVER ()` numbers the union.
+    let sql = "SELECT A + 1, SUM(V), ROW_NUMBER() OVER () " +
+              "FROM N GROUP BY GROUPING SETS ((N.A + 1), ())"
+    try nums().expect(sql, yields: [[2, 150, 1], [3, 30, 2], [nil, 180, 3]])
+    #expect(try nums().columns(of: parse(query: sql), validate: true)
+                .count == 3)
+    // Equal on its columns to the unqualified-member twin — both canonicalise
+    // to one member the whole key lifts against.
+    try nums().expect(
+        "SELECT A + 1, SUM(V), ROW_NUMBER() OVER () " +
+        "FROM N GROUP BY GROUPING SETS ((A + 1), ())",
+        yields: [[2, 150, 1], [3, 30, 2], [nil, 180, 3]])
   }
 }

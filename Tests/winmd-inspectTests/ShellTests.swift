@@ -121,8 +121,28 @@ struct ShellTests {
     let render = Render(" IFoo com ")
     #expect(render.interface == "IFoo")
     #expect(render.template == "com")
+    #expect(!render.closure)
     #expect(Render("IFoo").interface.isEmpty)
     #expect(Render("").template.isEmpty)
+  }
+
+  @Test func `.render parses the --closure flag in any position`() {
+    // `--closure` is a flag, not an operand: it is filtered out before the two
+    // remaining whitespace fields are read as interface and template, so it may
+    // precede, separate, or follow them and the operands still parse.
+    let trailing = Render(" IFoo com --closure ")
+    #expect(trailing.interface == "IFoo")
+    #expect(trailing.template == "com")
+    #expect(trailing.closure)
+    // The flag ahead of the operands parses the same interface and template.
+    let leading = Render(" --closure IFoo com ")
+    #expect(leading.interface == "IFoo")
+    #expect(leading.template == "com")
+    #expect(leading.closure)
+    // Without the flag `closure` is false, and the flag alone (no two operands)
+    // still leaves the operands empty for `execute` to reject.
+    #expect(!Render(" IFoo com ").closure)
+    #expect(Render(" --closure ").interface.isEmpty)
   }
 
   @Test func `.bind parses its name and types its value`() {

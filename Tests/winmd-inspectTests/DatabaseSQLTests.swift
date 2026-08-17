@@ -183,6 +183,10 @@ struct DatabaseSQLTests {
                 wide: 0, stride: 6),
     WinMD.Table(Metadata.Tables.CustomAttribute.self, rows: 1, range: 86 ..< 92,
                 wide: 0, stride: 6),
+    // No `NestedClass` table: this fixture has no nested types, so a real
+    // `.winmd` would omit it from the tables stream. The `requires` recursive
+    // CTE still names it, so the adapter synthesises an empty relation for the
+    // absent optional table rather than faulting the CTE.
   ]
 
   private static let valid: UInt64 =
@@ -634,6 +638,22 @@ struct DatabaseSQLTests {
         }
 
         """)
+    }
+  }
+
+  @Test func `--closure over an interface whose bases are not local interfaces renders only it`() throws {
+    // `IMyInterface`'s `InterfaceImpl` rows name `IInspectable` (an external
+    // `TypeRef` with no local `TypeDef`) and `INotGuid` (a local `TypeDef` that
+    // is no interface — it carries no `GuidAttribute`, so the `interfaces` view
+    // excludes it). Neither resolves to a local interface row, so the closure
+    // walk stops at the root: the closure output is exactly the flat render,
+    // the same per-interface body, proving the worklist reuses `emit`.
+    try DatabaseSQLTests.with { catalog in
+      let shell = Shell(catalog)
+      let closed = try shell.render(closure: "IMyInterface", template: "com")
+      let flat = try shell.render("IMyInterface", template: "com")
+      #expect(closed == flat)
+      #expect(closed.contains("public protocol IMyInterface: IInspectable {"))
     }
   }
 

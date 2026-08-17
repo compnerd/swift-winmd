@@ -3820,6 +3820,44 @@ struct WindowOverGroupingSetsTests {
         yields: [[nil, 1400, 4], [2, 600, 3], [3, 500, 2], [1, 300, 1]])
   }
 
+  @Test func `a user alias colliding with a lifted column cannot capture it`()
+      throws {
+    // The lifted union columns a windowed `GROUPING SETS` rewrite reads are
+    // named `*gwN`. A user may quote that exact spelling as an output alias
+    // (`AS "*gw0"`), so the query-level `ORDER BY dept` — rewritten to the
+    // lifted `dept` union column — must not bind to that alias by output-alias
+    // precedence. The lifted reference is a synthetic `Column` identity the
+    // parser can never mint, so it binds structurally to its union column:
+    // `ORDER BY dept ASC` sorts on `dept`, numbering by `dept DESC` (3 → 1,
+    // 2 → 2, 1 → 3), so the rows come out `dept` 1, 2, 3 carrying 3, 2, 1.
+    try fixture().expect(
+        "SELECT ROW_NUMBER() OVER (ORDER BY dept DESC) AS \"*gw0\" " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept)) ORDER BY dept ASC",
+        yields: [[3], [2], [1]])
+  }
+
+  @Test func `a non-colliding alias yields the same lifted ordering`() throws {
+    // The oracle for the colliding case: the identical query with an ordinary
+    // alias behaves the same, since `ORDER BY dept` always names the lifted
+    // `dept` union column, never the row-number output. The two results agree.
+    try fixture().expect(
+        "SELECT ROW_NUMBER() OVER (ORDER BY dept DESC) AS x " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept)) ORDER BY dept ASC",
+        yields: [[3], [2], [1]])
+  }
+
+  @Test func `a user reference to a colliding alias still binds it`() throws {
+    // The synthetic-reference bypass is surgical: only the engine's lifted
+    // references skip output-alias precedence. A user naming their own quoted
+    // `"*gw0"` alias in the query `ORDER BY` still binds it, so ordering by the
+    // aliased row number descending (`dept` 1 → 1, 2 → 2, 3 → 3, sorted
+    // descending) yields `dept` 3, 2, 1 carrying 3, 2, 1.
+    try fixture().expect(
+        "SELECT dept, ROW_NUMBER() OVER (ORDER BY dept) AS \"*gw0\" " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept)) ORDER BY \"*gw0\" DESC",
+        yields: [[3, 3], [2, 2], [1, 1]])
+  }
+
   @Test func `run and validate agree on a windowed GROUPING SETS`() throws {
     // Both paths enter `Query.expanded`, so they drive the one rewrite over the
     // union: the schema path types the same three-column shape the run
@@ -4012,6 +4050,23 @@ struct WindowOverGroupingSetsTests {
         Row(1, 100)
         Row(1, 101)
         Row(2, 200)
+      }
+    }
+  }
+
+  // A `T` with a zero group beside a `c` whose lone real column is `Id`. `c`
+  // also vends the universal virtual `Id`, so a real and a virtual `Id` share
+  // the name — the pair the Exposure once collapsed. Its virtual `Id` is the
+  // 1-based row index (1, 2), both positive.
+  private func renamed() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("T", ["Id": .integer]) {
+        Row(0)
+        Row(1)
+      }
+      Relation("c", ["Id": .integer]) {
+        Row(10)
+        Row(20)
       }
     }
   }
@@ -4250,6 +4305,23 @@ struct WindowOverGroupingSetsTests {
     try fixture().empty(sql)
     #expect(try fixture().columns(of: parse(query: sql), validate: true)
                 .count == 2)
+  }
+
+  @Test func `a COALESCE over a window never reaches its guarded arm`()
+      throws {
+    // A window-free `COALESCE(ROW_NUMBER() OVER (), 1 / 0)` wraps the window in
+    // the outer projection, evaluated lazily per output row over the union. The
+    // row number is never NULL, so the guarded `1 / 0` is never reached and the
+    // division never happens — the union's rows number 1, 2, 3, matching the
+    // ordinary `GROUP BY dept` form. A window-free wrapper force-lifted into an
+    // arm would evaluate the whole `COALESCE` eagerly per group and fault
+    // `.divide`; kept outer and lazy, the dead arm stays unevaluated.
+    let sets = "SELECT COALESCE(ROW_NUMBER() OVER (), 1 / 0) " +
+               "FROM Emp GROUP BY GROUPING SETS ((dept))"
+    try fixture().expect(sets, yields: [[1], [2], [3]])
+    let plain = "SELECT COALESCE(ROW_NUMBER() OVER (), 1 / 0) " +
+                "FROM Emp GROUP BY dept"
+    try fixture().expect(plain, yields: [[1], [2], [3]])
   }
 
   @Test func `an ordinal-linked window key shares the reported leaf`() throws {
@@ -4924,6 +4996,26 @@ struct WindowOverGroupingSetsTests {
                          yields: [[1, 1], [2, 1], [3, 1], [4, 1], [5, 1]])
   }
 
+  @Test func `a synthetic ORDER BY key does not bind a colliding alias`()
+      throws {
+    // F6: a windowed GROUPING SETS query lifts its `ORDER BY dept` to the
+    // synthetic `*gw0` union column. The shared `orderKeys` resolver — driving
+    // both the run compile and the validate typecheck — must let that synthetic
+    // key bind structurally, as `Windowed.order` does, not capture a user
+    // projection aliased `"*gw0"`. Here that alias is `NULLIF(ROW_NUMBER() OVER
+    // (), 'x')`, an invalid integer-versus-text compare; resolving the sort key
+    // to it type-checked the `NULLIF` and raised a spurious 42804. `FETCH FIRST
+    // 0 ROWS` drops every row, so the `NULLIF` never evaluates — both the run
+    // and `columns(of: validate:)` succeed on the empty page. Before the fix
+    // both faulted 42804.
+    let sql = "SELECT NULLIF(ROW_NUMBER() OVER (), 'x') AS \"*gw0\" " +
+              "FROM Emp GROUP BY GROUPING SETS ((dept)) " +
+              "ORDER BY dept FETCH FIRST 0 ROWS ONLY"
+    try fixture().empty(sql)
+    #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                .count == 1)
+  }
+
   @Test func `a correlated EXISTS CASE guard hosts outer over the union`()
       throws {
     // Finding 1: a correlated predicate subquery in a `CASE` guard — `EXISTS
@@ -5123,62 +5215,54 @@ struct WindowOverGroupingSetsTests {
     try colliding().expect(plain, yields: [[1, 1], [1, 2], [0, 3]])
   }
 
-  @Test func `a self-correlating CASE over non-identical sets faults`() throws {
-    // An `EXISTS` guard correlating an unqualified `dept` — a group key —
-    // through the opaque derived `(SELECT * FROM U) o` blocks hosting and
-    // stalls the walk, so this window-free `CASE` arm-lifts whole in place.
-    // Under `GROUPING SETS ((dept), ())` the sets genuinely super-aggregate:
-    // the grand-total `()` arm omits `dept`, so the arm-lifted guard's
-    // correlation to it has no arm column and once trapped `Index out of
-    // range`. The guard now faults `0A000` on both the run and validate paths.
+  @Test func `a self-correlating CASE over non-identical sets resolves`()
+      throws {
+    // At this slice the derived `(SELECT * FROM U) o` is derivable — `starred`
+    // exposes its real `{v}` — so the `EXISTS` guard's unqualified `dept`, a
+    // group key absent from it, is decided the outer key, rewritten to its
+    // `*gwN` union column and the guard hosted outer. There is no in-place
+    // arm-lift, so the grand-total `()` arm NULL-extends `dept` rather than
+    // trapping (the merged slice, unable to derive the `SELECT *`, must instead
+    // fault `0A000` here). `dept` 1, 2, 3 each match a `U.v` (guard 1); the
+    // super-aggregate row's `dept` is NULL, matching none (guard 0); the window
+    // numbers across all four union rows, on both the run and validate paths.
     let sets =
         "SELECT CASE WHEN EXISTS (" +
         "SELECT 1 FROM (SELECT * FROM U) o WHERE o.v = dept) " +
         "THEN 1 ELSE 0 END, ROW_NUMBER() OVER () " +
         "FROM Emp GROUP BY GROUPING SETS ((dept), ())"
-    let fault = SQLError.state(
-        "0A000", "a correlated predicate over an opaque local with " +
-                 "GROUPING SETS is not yet supported")
-    try colliding().expect(sets, fails: fault)
-    #expect(throws: fault) {
-      _ = try colliding().columns(of: parse(query: sets), validate: true)
-    }
-    // The single-set form has no super-aggregate arm to omit the key, so the
-    // in-place arm-lift stays value-correct and the guard permits it: each
-    // `dept` finds a matching `U.v`, so the `CASE` yields 1, each numbered.
-    let single =
+    try colliding().expect(sets, yields: [[1, 1], [1, 2], [1, 3], [0, 4]])
+    #expect(try colliding().columns(of: parse(query: sets), validate: true)
+                .count == 2)
+    // The ordinary `GROUP BY dept` twin gives the per-set rows the sets query
+    // reproduces, the `()` super-aggregate row the only addition.
+    let plain =
         "SELECT CASE WHEN EXISTS (" +
         "SELECT 1 FROM (SELECT * FROM U) o WHERE o.v = dept) " +
-        "THEN 1 ELSE 0 END, ROW_NUMBER() OVER () " +
-        "FROM Emp GROUP BY GROUPING SETS ((dept))"
-    try colliding().expect(single, yields: [[1, 1], [1, 2], [1, 3]])
+        "THEN 1 ELSE 0 END, ROW_NUMBER() OVER () FROM Emp GROUP BY dept"
+    try colliding().expect(plain, yields: [[1, 1], [1, 2], [1, 3]])
   }
 
-  @Test func `a self-correlating scalar over non-identical sets faults`()
+  @Test func `a self-correlating scalar over non-identical sets resolves`()
       throws {
     // The scalar twin: `(SELECT SUM(o.v) FROM (SELECT * FROM U) o WHERE o.v =
-    // dept)` correlates an unqualified `dept` over the opaque derived table, so
-    // `host` returns nil and it arm-lifts in place. Under `GROUPING SETS
-    // ((dept), ())` that lift trapped on the grand-total `()` arm's omitted
-    // `dept`; it now faults `0A000` on both the run and validate paths.
+    // dept)` correlates the outer `dept` over the now-derivable derived table,
+    // so `host` rewrites it to `*gwN` and hosts the subquery outer over the
+    // union rather than arm-lifting it in place (the merged slice faults
+    // `0A000` here instead). The `()` arm NULL-extends the key. `dept` 1, 2, 3
+    // sum their lone matching `U.v` (1, 2, 3); the super-aggregate row matches
+    // none (NULL); the window numbers across all four, on run and validate.
     let sets =
         "SELECT (SELECT SUM(o.v) FROM (SELECT * FROM U) o " +
         "WHERE o.v = dept), ROW_NUMBER() OVER () " +
         "FROM Emp GROUP BY GROUPING SETS ((dept), ())"
-    let fault = SQLError.state(
-        "0A000", "a correlated subquery over an opaque local with " +
-                 "GROUPING SETS is not yet supported")
-    try colliding().expect(sets, fails: fault)
-    #expect(throws: fault) {
-      _ = try colliding().columns(of: parse(query: sets), validate: true)
-    }
-    // The single-set form arm-lifts value-correctly and the guard permits it:
-    // each `dept` sums its lone matching `U.v`, each numbered.
-    let single =
+    try colliding().expect(sets, yields: [[1, 1], [2, 2], [3, 3], [nil, 4]])
+    #expect(try colliding().columns(of: parse(query: sets), validate: true)
+                .count == 2)
+    let plain =
         "SELECT (SELECT SUM(o.v) FROM (SELECT * FROM U) o " +
-        "WHERE o.v = dept), ROW_NUMBER() OVER () " +
-        "FROM Emp GROUP BY GROUPING SETS ((dept))"
-    try colliding().expect(single, yields: [[1, 1], [2, 2], [3, 3]])
+        "WHERE o.v = dept), ROW_NUMBER() OVER () FROM Emp GROUP BY dept"
+    try colliding().expect(plain, yields: [[1, 1], [2, 2], [3, 3]])
   }
 
   @Test func `an absent key LEAD fallback over a zero group stays lazy`()
@@ -5964,49 +6048,6 @@ struct WindowOverGroupingSetsTests {
         }
   }
 
-  @Test func `a CASE grouping key matches a qualifier-variant guard`() throws {
-    // Finding 1: the grouping key is `CASE WHEN T.A = 1 …`, the projection the
-    // same `CASE` with the unqualified guard `A = 1`. Grouped lowering equates
-    // the two — `T.A` and `A` resolve to one ordinal, so both `CASE`s lower to
-    // one `Term` — so the whole-key member match must too. `Expression
-    // .canonical` once copied the guard `Predicate` verbatim, so the key's
-    // `T.A = 1` and the projection's `A = 1` canonicalised apart, the whole-key
-    // match missed, and the walk descended into the guard, lifting a bare `A`
-    // the `(T.A = 1)` arm rejected `.grouping`. Canonicalising the guard by
-    // `Predicate.canonical` collapses the two spellings, so the whole `CASE`
-    // lifts to its `*gw0` arm column — the exact key the arm groups on. The
-    // guard groups are 1 (the dept-1 rows) and 0 (dept-2), the total NULLs the
-    // key; run ≡ validate over the union, matching the ordinary form.
-    let sql = "SELECT CASE WHEN A = 1 THEN 1 ELSE 0 END, " +
-              "ROW_NUMBER() OVER () FROM N AS T GROUP BY " +
-              "GROUPING SETS ((CASE WHEN T.A = 1 THEN 1 ELSE 0 END), ())"
-    try nums().expect(sql, yields: [[1, 1], [0, 2], [nil, 3]])
-    #expect(try nums().columns(of: parse(query: sql), validate: true)
-                .count == 2)
-    try nums().expect(
-        "SELECT CASE WHEN A = 1 THEN 1 ELSE 0 END FROM N AS T GROUP BY " +
-        "GROUPING SETS ((CASE WHEN T.A = 1 THEN 1 ELSE 0 END), ())",
-        yields: [[1], [0], [nil]])
-  }
-
-  @Test func `a CASE grouping key matches a case-variant guard`() throws {
-    // The same over a case-folded guard: the projection's `CASE WHEN a = 1 …`
-    // must match the key's `CASE WHEN A = 1 …`. `Predicate.canonical` folds
-    // each guard column exactly as `Expression.canonical` does its results, so
-    // the whole `CASE` lifts whole rather than descending to a bare `a` the arm
-    // rejects. Same groups as the qualifier-variant form; run ≡ validate.
-    let sql = "SELECT CASE WHEN a = 1 THEN 1 ELSE 0 END, " +
-              "ROW_NUMBER() OVER () FROM N GROUP BY " +
-              "GROUPING SETS ((CASE WHEN A = 1 THEN 1 ELSE 0 END), ())"
-    try nums().expect(sql, yields: [[1, 1], [0, 2], [nil, 3]])
-    #expect(try nums().columns(of: parse(query: sql), validate: true)
-                .count == 2)
-    try nums().expect(
-        "SELECT CASE WHEN a = 1 THEN 1 ELSE 0 END FROM N GROUP BY " +
-        "GROUPING SETS ((CASE WHEN A = 1 THEN 1 ELSE 0 END), ())",
-        yields: [[1], [0], [nil]])
-  }
-
   // A single-column relation grouped on a computed key `A + 1`: A = 1, 1, 2, so
   // `A + 1` = 2, 2, 3 — two groups the arithmetic key defines, exactly as a
   // plain `GROUP BY A + 1` would.
@@ -6179,6 +6220,49 @@ struct WindowOverGroupingSetsTests {
         yields: [[2], [3], [nil]])
   }
 
+  @Test func `a CASE grouping key matches a qualifier-variant guard`() throws {
+    // Finding 1: the grouping key is `CASE WHEN T.A = 1 …`, the projection the
+    // same `CASE` with the unqualified guard `A = 1`. Grouped lowering equates
+    // the two — `T.A` and `A` resolve to one ordinal, so both `CASE`s lower to
+    // one `Term` — so the whole-key member match must too. `Expression
+    // .canonical` once copied the guard `Predicate` verbatim, so the key's
+    // `T.A = 1` and the projection's `A = 1` canonicalised apart, the whole-key
+    // match missed, and the walk descended into the guard, lifting a bare `A`
+    // the `(T.A = 1)` arm rejected `.grouping`. Canonicalising the guard by
+    // `Predicate.canonical` collapses the two spellings, so the whole `CASE`
+    // lifts to its `*gw0` arm column — the exact key the arm groups on. The
+    // guard groups are 1 (the dept-1 rows) and 0 (dept-2), the total NULLs the
+    // key; run ≡ validate over the union, matching the ordinary form.
+    let sql = "SELECT CASE WHEN A = 1 THEN 1 ELSE 0 END, " +
+              "ROW_NUMBER() OVER () FROM N AS T GROUP BY " +
+              "GROUPING SETS ((CASE WHEN T.A = 1 THEN 1 ELSE 0 END), ())"
+    try nums().expect(sql, yields: [[1, 1], [0, 2], [nil, 3]])
+    #expect(try nums().columns(of: parse(query: sql), validate: true)
+                .count == 2)
+    try nums().expect(
+        "SELECT CASE WHEN A = 1 THEN 1 ELSE 0 END FROM N AS T GROUP BY " +
+        "GROUPING SETS ((CASE WHEN T.A = 1 THEN 1 ELSE 0 END), ())",
+        yields: [[1], [0], [nil]])
+  }
+
+  @Test func `a CASE grouping key matches a case-variant guard`() throws {
+    // The same over a case-folded guard: the projection's `CASE WHEN a = 1 …`
+    // must match the key's `CASE WHEN A = 1 …`. `Predicate.canonical` folds
+    // each guard column exactly as `Expression.canonical` does its results, so
+    // the whole `CASE` lifts whole rather than descending to a bare `a` the arm
+    // rejects. Same groups as the qualifier-variant form; run ≡ validate.
+    let sql = "SELECT CASE WHEN a = 1 THEN 1 ELSE 0 END, " +
+              "ROW_NUMBER() OVER () FROM N GROUP BY " +
+              "GROUPING SETS ((CASE WHEN A = 1 THEN 1 ELSE 0 END), ())"
+    try nums().expect(sql, yields: [[1, 1], [0, 2], [nil, 3]])
+    #expect(try nums().columns(of: parse(query: sql), validate: true)
+                .count == 2)
+    try nums().expect(
+        "SELECT CASE WHEN a = 1 THEN 1 ELSE 0 END FROM N GROUP BY " +
+        "GROUPING SETS ((CASE WHEN A = 1 THEN 1 ELSE 0 END), ())",
+        yields: [[1], [0], [nil]])
+  }
+
   // A grouped `Emp` beside the three relations a hosted subquery joins in
   // prefix order — `P` a single carrier row, `Q` keyed on the group key `dept`
   // (its `id` the dept's value ×100), and `R` joined on `Q.id` and, crucially,
@@ -6341,6 +6425,197 @@ struct WindowOverGroupingSetsTests {
         """
     #expect(try catalog.run(Statement(parsing: plain), routines) == expected)
     #expect(counter.count == 0)
+  }
+
+  @Test func `a SELECT-star derived table binds a group key locally`() throws {
+    // Finding 2: a `LEAD` default nests `(SELECT tick() FROM (SELECT * FROM
+    // Emp) e WHERE dept = dept)`. The engine's `*` expansion projects `Emp`'s
+    // real columns, so `e` exposes `dept` — the unqualified `dept` binds
+    // locally, the subquery is uncorrelated and hosts lazily in the outer
+    // `LEAD`. Offset 0 always lands on the current row, so the default never
+    // evaluates and `tick()` never runs. `outputs(of:)` once returned nil for a
+    // `SELECT *` body, marking `e` opaque, so the `dept` reference blocked and
+    // the whole subquery arm-lifted — running `tick()` eagerly per group.
+    // Deriving the star output binds `dept` locally, matching `GROUP BY dept`.
+    // (A literal `1 / 0` default the union scope could stand in for constant-
+    // folds at compile whether hosted or lifted, so a non-deterministic
+    // `tick()` with a call counter is the observable a hosted default is lazy.)
+    let counter = Counter()
+    let routines = try Routines.standard
+        .registering("tick", returns: .integer, deterministic: false) { _ in
+          .integer(counter.next())
+        }
+    let sets = "SELECT dept, LEAD(dept, 0, (SELECT tick() " +
+               "FROM (SELECT * FROM Emp) e WHERE dept = dept)) " +
+               "OVER (ORDER BY dept) FROM Emp GROUP BY GROUPING SETS ((dept))"
+    try fixture().expect(sets, yields: [[1, 1], [2, 2], [3, 3]],
+                         routines: routines)
+    #expect(counter.count == 0)
+    #expect(try fixture().columns(of: parse(query: sets), routines: routines,
+                                  validate: true).count == 2)
+    let plain = "SELECT dept, LEAD(dept, 0, (SELECT tick() " +
+                "FROM (SELECT * FROM Emp) e WHERE dept = dept)) " +
+                "OVER (ORDER BY dept) FROM Emp GROUP BY dept"
+    try fixture().expect(plain, yields: [[1, 1], [2, 2], [3, 3]],
+                         routines: routines)
+    #expect(counter.count == 0)
+  }
+
+  @Test func `a SELECT-star over a join binds a group key locally`() throws {
+    // The join variant: the star spans `(VALUES (0)) AS z JOIN Emp`, so `*`
+    // concatenates each source's real columns — `z`'s `column1` and `Emp`'s
+    // `dept`/`sal` — and `e` exposes `dept` from the joined-in relation, not
+    // just the FROM. The unqualified `dept` binds locally, the subquery hosts
+    // lazily, and offset 0 never evaluates `tick()`. `starred` unions the FROM
+    // and every join's real columns; without the join half `dept` would block
+    // and the subquery arm-lift, ticking per group. Matches the ordinary form.
+    let counter = Counter()
+    let routines = try Routines.standard
+        .registering("tick", returns: .integer, deterministic: false) { _ in
+          .integer(counter.next())
+        }
+    let sets = "SELECT dept, LEAD(dept, 0, (SELECT tick() FROM " +
+               "(SELECT * FROM (VALUES (0)) AS z JOIN Emp ON 1 = 1) e " +
+               "WHERE dept = dept)) OVER (ORDER BY dept) " +
+               "FROM Emp GROUP BY GROUPING SETS ((dept))"
+    try fixture().expect(sets, yields: [[1, 1], [2, 2], [3, 3]],
+                         routines: routines)
+    #expect(counter.count == 0)
+    #expect(try fixture().columns(of: parse(query: sets), routines: routines,
+                                  validate: true).count == 2)
+  }
+
+  @Test func `a SELECT-star keeps a qualified outer correlation outer`()
+      throws {
+    // Soundness: deriving `e`'s columns from `SELECT * FROM Emp` exposes
+    // `dept`, but a reference qualified by the outer alias — `T.dept` — is
+    // still the outer correlation, never `e`'s local column, so the qualifier
+    // check keeps it rewritten to the `*gwN` union key rather than falsely
+    // binding it local. The subquery counts `e`'s rows whose `dept` is below
+    // the group's `T.dept` — dept-1 sees 0, dept-2 sees 2 (the two dept-1
+    // rows), dept-3 sees 4 (the dept-1 and dept-2 rows) — a genuine
+    // correlation, matching `GROUP BY dept`.
+    let sets = "SELECT dept, (SELECT COUNT(*) FROM (SELECT * FROM Emp) e " +
+               "WHERE e.dept < T.dept), ROW_NUMBER() OVER () " +
+               "FROM Emp AS T GROUP BY GROUPING SETS ((dept))"
+    try fixture().expect(sets, yields: [[1, 0, 1], [2, 2, 2], [3, 4, 3]])
+    #expect(try fixture().columns(of: parse(query: sets), validate: true)
+                .count == 3)
+    let plain = "SELECT dept, (SELECT COUNT(*) FROM (SELECT * FROM Emp) e " +
+                "WHERE e.dept < T.dept), ROW_NUMBER() OVER () " +
+                "FROM Emp AS T GROUP BY dept"
+    try fixture().expect(plain, yields: [[1, 0, 1], [2, 2, 2], [3, 4, 3]])
+  }
+
+  @Test func `a SELECT-star merged USING column binds a group key locally`()
+      throws {
+    // A hosted subquery's derived `(SELECT * FROM U JOIN W USING (fk)) e`
+    // merges a virtual foreign key `fk` that both `U` and `W` expose. The
+    // engine's `*` emits that merged column once (`Scope.expansion`), so `e`
+    // exposes `fk` and the bare `fk` inside `MIN(fk)` binds locally to it (99),
+    // leaving the subquery uncorrelated and hosted outer. Deriving `e`'s output
+    // from the inputs' real columns alone dropped the merged virtual `fk`, so
+    // the bare `fk` was misclassified as the outer grouping key and rewritten
+    // to its `*gwN` union column — returning the group value (1, 2) rather than
+    // 99. The window `ROW_NUMBER() OVER ()` engages the lift, and the result
+    // matches the ordinary `GROUP BY fk` form. The `USING (Id)` shape is masked
+    // — the derived-table path backfills `Id` — so `fk` is a distinct virtual
+    // foreign key, exposed here through a custom catalog the fixture cannot.
+    let catalog = KeyedCatalog([
+      "O": KeyedRelation(columns: [(name: "fk", type: .integer)], extras: [],
+                         rows: [[.integer(1)], [.integer(2)]], keys: [[], []]),
+      "U": KeyedRelation(columns: [(name: "u", type: .integer)],
+                         extras: ["fk"], rows: [[.integer(100)]],
+                         keys: [[.integer(99)]]),
+      "W": KeyedRelation(columns: [(name: "w", type: .integer)],
+                         extras: ["fk"], rows: [[.integer(200)]],
+                         keys: [[.integer(99)]]),
+    ])
+    let sets = "SELECT fk, (SELECT MIN(fk) FROM " +
+               "(SELECT * FROM U JOIN W USING (fk)) e), " +
+               "ROW_NUMBER() OVER () FROM O GROUP BY GROUPING SETS ((fk))"
+    let expected: Array<Array<Value>> =
+        [[.integer(1), .integer(99), .integer(1)],
+         [.integer(2), .integer(99), .integer(2)]]
+    #expect(try catalog.run(parse(query: sets)) == expected)
+    #expect(try catalog.columns(of: parse(query: sets), validate: true)
+                .count == 3)
+    let plain = "SELECT fk, (SELECT MIN(fk) FROM " +
+                "(SELECT * FROM U JOIN W USING (fk)) e), " +
+                "ROW_NUMBER() OVER () FROM O GROUP BY fk"
+    #expect(try catalog.run(parse(query: plain)) == expected)
+  }
+
+  @Test func `a SELECT-star NATURAL join does not merge a virtual key`()
+      throws {
+    // The `NATURAL` twin of the `USING` case: `U` and `W` share only the
+    // virtual foreign key `fk` (no common real column), so a `NATURAL` join
+    // merges nothing — the engine's common set is the real-only intersection,
+    // virtuals excluded — and the derived `(SELECT * FROM U NATURAL JOIN W) e`
+    // exposes just `u` and `w`, never `fk`. The bare `fk` inside `MIN(fk)` is
+    // therefore the outer group key, correlated and substituted to its `*gwN`
+    // union column, so it reports the group value (1, 2), matching the ordinary
+    // `GROUP BY fk` form. Before the fix `starred` intersected the bindable
+    // (real∪virtual) surfaces, wrongly merged `fk`, and classified the
+    // reference as a local column of `e` the derived `*` does not expose.
+    let catalog = KeyedCatalog([
+      "O": KeyedRelation(columns: [(name: "fk", type: .integer)], extras: [],
+                         rows: [[.integer(1)], [.integer(2)]], keys: [[], []]),
+      "U": KeyedRelation(columns: [(name: "u", type: .integer)],
+                         extras: ["fk"], rows: [[.integer(100)]],
+                         keys: [[.integer(99)]]),
+      "W": KeyedRelation(columns: [(name: "w", type: .integer)],
+                         extras: ["fk"], rows: [[.integer(200)]],
+                         keys: [[.integer(99)]]),
+    ])
+    let sets = "SELECT fk, (SELECT MIN(fk) FROM " +
+               "(SELECT * FROM U NATURAL JOIN W) e), " +
+               "ROW_NUMBER() OVER () FROM O GROUP BY GROUPING SETS ((fk))"
+    let expected: Array<Array<Value>> =
+        [[.integer(1), .integer(1), .integer(1)],
+         [.integer(2), .integer(2), .integer(2)]]
+    #expect(try catalog.run(parse(query: sets)) == expected)
+    #expect(try catalog.columns(of: parse(query: sets), validate: true)
+                .count == 3)
+    let plain = "SELECT fk, (SELECT MIN(fk) FROM " +
+                "(SELECT * FROM U NATURAL JOIN W) e), " +
+                "ROW_NUMBER() OVER () FROM O GROUP BY fk"
+    #expect(try catalog.run(parse(query: plain)) == expected)
+  }
+
+  @Test func `a renamed relation's virtual Id binds a bare key locally`()
+      throws {
+    // Finding H: `c`'s lone real column is `Id`, and `c` also vends the
+    // universal virtual `Id`. Renamed `FROM c AS t(x)`, the engine renames the
+    // real `Id` to `x` while `Schema.renamed` keeps the virtual `Id`
+    // addressable, so the bare `Id` in `WHERE Id > 0` binds `t`'s local virtual
+    // — the subquery counts `c`'s two rows, uncorrelated and constant. The
+    // Exposure derived its virtuals as `bindable − real`, which drops a name
+    // both real and virtual, so `expose` recorded only `{x}` and the bare `Id`
+    // was misclassified as the outer group key `T.Id`, correlating to its
+    // `*gwN` column and counting zero for the `T.Id = 0` group. Holding the
+    // virtuals explicitly keeps the virtual `Id`, so both groups count two,
+    // matching the ordinary `GROUP BY T.Id` form on both run and validate.
+    let sets = "SELECT (SELECT COUNT(*) FROM c AS t(x) WHERE Id > 0) AS n, " +
+               "ROW_NUMBER() OVER () FROM T GROUP BY GROUPING SETS ((T.Id))"
+    try renamed().expect(sets, yields: [[2, 1], [2, 2]])
+    #expect(try renamed().columns(of: parse(query: sets), validate: true)
+                .count == 2)
+    let plain = "SELECT (SELECT COUNT(*) FROM c AS t(x) WHERE Id > 0) AS n, " +
+                "ROW_NUMBER() OVER () FROM T GROUP BY T.Id"
+    try renamed().expect(plain, yields: [[2, 1], [2, 2]])
+  }
+
+  @Test func `the public Column initialiser mints a non-synthetic reference`() {
+    // `Column.synthetic` is minted only by the engine's internal initialiser
+    // (the windowed `GROUPING SETS` lift); the public initialiser no longer
+    // accepts the flag, so every user-constructed reference stays non-
+    // synthetic. The alias-collision cases above prove the internal minting
+    // still yields a distinct `synthetic` identity a quoted `"*gw0"` alias
+    // cannot forge.
+    #expect(Column(name: "dept").synthetic == false)
+    #expect(Column(qualifier: "e", name: "dept").synthetic == false)
+    #expect(Column("e.dept").synthetic == false)
   }
 
   // A single integer column whose name is literally `column 1` — the spelling
@@ -6626,5 +6901,149 @@ struct WindowOverGroupingSetsTests {
     try fixture().expect(sql, yields: [[1, 1], [2, 2], [3, 3], [nil, 4]])
     #expect(try fixture().columns(of: parse(query: sql), validate: true)
                 .count == 2)
+  }
+
+  // A relation to correlate over from a hosted subquery, and a relation whose
+  // input order differs from its name order so a mis-resolved ORDER BY is
+  // observable: input `Zed`, `Amy` sorts by name to `Amy`, `Zed`.
+  private func staffed() throws -> FixtureCatalog {
+    try Catalog {
+      Relation("employees", ["dept": .integer]) {
+        Row(1)
+        Row(2)
+      }
+      Relation("staff", ["name": .text]) {
+        Row("Zed")
+        Row("Amy")
+      }
+    }
+  }
+
+  @Test func `a hosted subquery ORDER BY on a lifted key ignores an alias`()
+      throws {
+    // The subquery's own `ORDER BY outer_q.dept` correlates the outer group
+    // key, rewritten to the synthetic `*gw0` union column; the subquery also
+    // projects a quoted `AS "*gw0"` alias spelling that same name. The ordinary
+    // and grouped output-alias resolvers once captured the alias and sorted by
+    // `s.name` — a run diverging from the validate walks (`Select.orderKeys`
+    // and `Windowed.order`), which skip a synthetic reference — picking `Amy`.
+    // Skipping alias capture for a synthetic key binds it structurally, so the
+    // constant group key orders `staff` in input order and `FETCH FIRST 1 ROW`
+    // takes `Zed`, matching the ordinary `GROUP BY dept` twin whose qualified
+    // `outer_q.dept` never rewrites and never collides.
+    let sets = "SELECT (SELECT s.name AS \"*gw0\" FROM staff s " +
+               "ORDER BY outer_q.dept FETCH FIRST 1 ROW ONLY), " +
+               "ROW_NUMBER() OVER () " +
+               "FROM employees AS outer_q GROUP BY GROUPING SETS ((dept))"
+    try staffed().expect(sets, yields: [["Zed", 1], ["Zed", 2]])
+    #expect(try staffed().columns(of: parse(query: sets), validate: true)
+                .count == 2)
+    let plain = "SELECT (SELECT s.name AS \"*gw0\" FROM staff s " +
+                "ORDER BY outer_q.dept FETCH FIRST 1 ROW ONLY), " +
+                "ROW_NUMBER() OVER () " +
+                "FROM employees AS outer_q GROUP BY dept"
+    try staffed().expect(sets, equals: plain)
+  }
+}
+
+/// A base relation exposing real columns plus optional extra virtual columns
+/// beyond the universal `Id` — a virtual foreign key a `USING`/`NATURAL` join
+/// merges, which the `SQLTestSupport` fixture (whose only virtual is `Id`)
+/// cannot express. Each row carries its real cells (`rows`) and its extra
+/// virtual cells (`keys`, aligned to `extras`).
+private struct KeyedRelation: Sendable {
+  let columns: Array<(name: String, type: ValueType)>
+  let extras: Array<String>
+  let rows: Array<Array<Value>>
+  let keys: Array<Array<Value>>
+}
+
+/// A catalog over `KeyedRelation`s, resolved case-insensitively by name.
+private struct KeyedCatalog: SQLEngine.Catalog {
+  let store: Array<(name: String, relation: KeyedRelation)>
+
+  init(_ store: Dictionary<String, KeyedRelation>) {
+    self.store = store.map { (name: $0.key, relation: $0.value) }
+  }
+
+  borrowing func table(named name: String) -> KeyedTable? {
+    let folded = name.lowercased()
+    for entry in store where entry.name.lowercased() == folded {
+      return KeyedTable(entry.relation)
+    }
+    return nil
+  }
+
+  borrowing func relations() -> Array<String> { store.map(\.name) }
+}
+
+/// A table over one `KeyedRelation` — its real columns at ordinals `0 ..<
+/// width`, the universal virtual `Id` at `width`, and each extra virtual at
+/// `width + 1 + i`.
+private struct KeyedTable: SQLEngine.Table {
+  let relation: KeyedRelation
+
+  init(_ relation: KeyedRelation) { self.relation = relation }
+
+  var width: Int { relation.columns.count }
+  var names: Array<String> { relation.columns.map(\.name) }
+  var types: Array<ValueType> { relation.columns.map(\.type) }
+  var virtuals: Array<String> { ["Id"] + relation.extras }
+  var extent: Int { width + 1 + relation.extras.count }
+
+  func ordinal(of name: String) -> Int? {
+    let folded = name.lowercased()
+    if let index = relation.columns.firstIndex(where: {
+          $0.name.lowercased() == folded }) {
+      return index
+    }
+    if folded == "id" { return width }
+    if let extra = relation.extras.firstIndex(where: {
+          $0.lowercased() == folded }) {
+      return width + 1 + extra
+    }
+    return nil
+  }
+
+  func bound(_ column: Int, _ value: Int, strict: Bool) -> Int? { nil }
+
+  borrowing func cursor() -> KeyedCursor { KeyedCursor(relation) }
+}
+
+/// An index-addressed cursor over a `KeyedRelation`'s rows.
+private struct KeyedCursor: SQLEngine.Cursor {
+  let relation: KeyedRelation
+
+  init(_ relation: KeyedRelation) { self.relation = relation }
+
+  var count: Int { relation.rows.count }
+
+  borrowing func row(_ index: Int) -> KeyedRow? {
+    index < relation.rows.count ? KeyedRow(relation, index) : nil
+  }
+}
+
+/// A positional view over one `KeyedRelation` row's cells — real, then the
+/// virtual `Id`, then each extra virtual.
+private struct KeyedRow: SQLEngine.Row {
+  let relation: KeyedRelation
+  let index: Int
+
+  init(_ relation: KeyedRelation, _ index: Int) {
+    self.relation = relation
+    self.index = index
+  }
+
+  subscript(_ column: Int) -> Value {
+    borrowing get {
+      let width = relation.columns.count
+      if column < width { return relation.rows[index][column] }
+      if column == width { return .integer(index + 1) }
+      let extra = column - width - 1
+      if extra < relation.keys[index].count {
+        return relation.keys[index][extra]
+      }
+      return .null
+    }
   }
 }

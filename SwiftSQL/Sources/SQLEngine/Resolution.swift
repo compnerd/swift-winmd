@@ -1772,7 +1772,14 @@ internal func order(_ order: Order, _ projection: Array<Term>,
       resolved = projection[position - 1]
       column = position - 1
     case let .expression(expression):
+      // A synthetic `*gwN` reference — a windowed GROUPING SETS lift key a
+      // hosted subquery's own ORDER BY carries — bypasses output-alias
+      // precedence and lowers structurally, as `Select.orderKeys` and
+      // `Windowed.order` resolve it; a user alias spelled `*gwN` must not
+      // capture it here (its `Column` identity is distinct), or the run would
+      // sort by the aliased scalar where validate binds the correlated key.
       if case let .column(name) = expression, name.qualifier == nil,
+          !name.synthetic,
           let index = names.firstIndex(where: {
             $0?.lowercased() == name.name.lowercased()
           }) {

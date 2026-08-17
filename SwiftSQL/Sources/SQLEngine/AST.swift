@@ -695,8 +695,10 @@ public struct Select: Hashable, Sendable {
 /// windowed grouping-sets outer layer share, so the sort-output model cannot
 /// drift. An ordinal names the `position`-th item (1-based); a bare
 /// unqualified name binds a matching output `named` before an input column (the
-/// ISO precedence); any other key keeps its own expression. An out-of-range
-/// ordinal is `compile`'s fault to raise, so it is skipped here.
+/// ISO precedence), unless it is synthetic — a `*gwN` lift key binds
+/// structurally and keeps its own expression, as `Windowed.order` does; any
+/// other key keeps its own expression. An out-of-range ordinal is `compile`'s
+/// fault to raise, so it is skipped here.
 internal func orderKeys(_ items: Array<Projected>, _ order: Order?,
                         named: KeyPath<Projected, String?>)
     -> Array<Expression> {
@@ -709,7 +711,14 @@ internal func orderKeys(_ items: Array<Projected>, _ order: Order?,
         expressions.append(items[position - 1].expression)
       }
     case let .expression(expression):
+      // A synthetic `*gwN` reference — a windowed GROUPING SETS lift key —
+      // bypasses output-alias precedence and keeps its own expression, binding
+      // structurally as the run path's `Windowed.order` resolves it; a
+      // colliding user alias spelled `*gwN` must not capture it here (its
+      // `Column` identity is distinct), or validate would type a projection the
+      // run never evaluates and raise a spurious datatype fault.
       if case let .column(column) = expression, column.qualifier == nil,
+          !column.synthetic,
           let item = items.first(where: {
             $0[keyPath: named]?.lowercased() == column.name.lowercased()
           }) {
@@ -917,9 +926,32 @@ public struct Column: Hashable, Sendable, ExpressibleByStringLiteral {
   /// The column name.
   public let name: String
 
+  /// Whether this is an engine-synthesized internal reference no user
+  /// identifier can mint — the lifted `*gwN` union columns a windowed
+  /// `GROUPING SETS` rewrite addresses (`GroupingSets`). It rides the
+  /// reference's identity so a quoted user alias spelled exactly `"*gw0"`
+  /// stays distinct from the internal `*gw0`: the parser only ever mints a
+  /// non-synthetic reference, and this flag participates in equality, so the
+  /// two never compare equal. The query-level `ORDER BY` binds a synthetic
+  /// reference to its union column structurally (against the arm-synthesized
+  /// union scope) rather than by output-alias precedence, so a colliding user
+  /// alias cannot capture it (`Windowed.order`).
+  public let synthetic: Bool
+
   public init(qualifier: String? = nil, name: String) {
     self.qualifier = qualifier
     self.name = name
+    self.synthetic = false
+  }
+
+  /// Mints a reference, `synthetic` or not — internal to the engine so no user
+  /// identifier can forge a `synthetic` column. Only the windowed `GROUPING
+  /// SETS` lift (`GroupingSets`) mints a `synthetic: true` reference; every
+  /// public entry leaves it `false`.
+  internal init(qualifier: String? = nil, name: String, synthetic: Bool) {
+    self.qualifier = qualifier
+    self.name = name
+    self.synthetic = synthetic
   }
 
   /// Parses a reference from its dotted spelling: the text before the last dot
@@ -942,6 +974,7 @@ public struct Column: Hashable, Sendable, ExpressibleByStringLiteral {
       self.qualifier = nil
       self.name = spelling
     }
+    self.synthetic = false
   }
 
   public init(stringLiteral value: String) {

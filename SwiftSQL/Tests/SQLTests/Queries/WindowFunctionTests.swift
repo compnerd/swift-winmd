@@ -3916,14 +3916,128 @@ struct WindowOverGroupingSetsTests {
     }
   }
 
-  @Test func `a window FILTER over GROUPING SETS is deferred`() throws {
-    // An aggregate window's `FILTER` is a per-row `Predicate` no derived union
-    // column stands in for, so it remains deferred — faulting the feature
-    // diagnostic on both the run and validate paths, in parity.
-    let sql = "SELECT dept, SUM(sal) FILTER (WHERE sal > 0) OVER () " +
+  @Test func `a window FILTER over GROUPING SETS lifts its group keys`()
+      throws {
+    // An aggregate window's `FILTER` recurses the arm-union substitution walk:
+    // its grounded group-key atoms lift to `*gwN` arm columns, the outer window
+    // reading the lifted predicate over the union. `SUM(SUM(sal)) FILTER (WHERE
+    // dept <> 2) OVER ()` sums the per-set totals whose `dept` is not 2 — dept
+    // 1 (300) and dept 3 (500), 800 — over every union row; the super-aggregate
+    // `()` row, its `dept` rolled up to NULL, is UNKNOWN under `dept <> 2` and
+    // excluded, but the window value is 800 across all four rows, each numbered
+    // by the second window.
+    try fixture().expect(
+        "SELECT dept, SUM(SUM(sal)) FILTER (WHERE dept <> 2) OVER (), " +
+        "ROW_NUMBER() OVER () FROM Emp GROUP BY GROUPING SETS ((dept), ())",
+        yields: [[1, 800, 1], [2, 800, 2], [3, 800, 3], [nil, 800, 4]])
+    let sql = "SELECT dept, SUM(SUM(sal)) FILTER (WHERE dept <> 2) OVER (), " +
+              "ROW_NUMBER() OVER () " +
               "FROM Emp GROUP BY GROUPING SETS ((dept), ())"
-    let fault = SQLError.state(
-        "0A000", "a window FILTER with GROUPING SETS is not yet supported")
+    #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                .count == 3)
+  }
+
+  @Test func `a single-set window FILTER matches the ordinary GROUP BY`()
+      throws {
+    // Over a single set the grouping-sets union is the ordinary `GROUP BY`
+    // relation, so a group-key `FILTER` resolves identically — `FILTER (WHERE
+    // dept = 1)` gates the window input to dept 1's row (300), the window
+    // reporting 300 for every group. The sets form and its plain twin agree row
+    // for row, on the run path and (the tripwire) the validate path.
+    let sets = "SELECT SUM(SUM(sal)) FILTER (WHERE dept = 1) OVER () " +
+               "FROM Emp GROUP BY GROUPING SETS ((dept))"
+    let plain = "SELECT SUM(SUM(sal)) FILTER (WHERE dept = 1) OVER () " +
+                "FROM Emp GROUP BY dept"
+    try fixture().expect(sets, equals: plain)
+    #expect(try fixture().columns(of: parse(query: sets), validate: true)
+                .count == 1)
+  }
+
+  @Test func `a super-aggregate window FILTER on a lifted key resolves`()
+      throws {
+    // The grand-total `()` arm NULL-extends the lifted key, so a `FILTER (WHERE
+    // dept = 1)` over `((dept), ())` gates on the lifted `dept` in every arm
+    // including the super-aggregate one — whose `dept` is NULL, UNKNOWN under
+    // `dept = 1` and excluded, exactly as the ordinary `GROUP BY dept` twin
+    // gates its own rows. The window sums dept 1's lone passing total (300)
+    // over all four union rows; the twin, lacking the `()` row, reports the
+    // three per-set rows the sets form reproduces.
+    try fixture().expect(
+        "SELECT dept, SUM(SUM(sal)) FILTER (WHERE dept = 1) OVER () " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept), ())",
+        yields: [[1, 300], [2, 300], [3, 300], [nil, 300]])
+    try fixture().expect(
+        "SELECT dept, SUM(SUM(sal)) FILTER (WHERE dept = 1) OVER () " +
+        "FROM Emp GROUP BY dept",
+        yields: [[1, 300], [2, 300], [3, 300]])
+  }
+
+  @Test func `a window FILTER under an explicit frame accumulates`() throws {
+    // A `FILTER` composes with an explicit frame over the union: a running
+    // `ROWS UNBOUNDED PRECEDING → CURRENT ROW` frame ordered by the lifted
+    // `dept` accumulates only the rows the `FILTER (WHERE dept <> 2)` admits.
+    // NULLs order first, so the super-aggregate `()` row leads: its own
+    // contribution is UNKNOWN (excluded), leaving its running sum empty (NULL);
+    // dept 1 adds 300, dept 2 is excluded (still 300), dept 3 adds 500 (800) —
+    // reported in union output order.
+    try fixture().expect(
+        """
+        SELECT dept, SUM(SUM(sal)) FILTER (WHERE dept <> 2) OVER (ORDER BY dept
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+        FROM Emp GROUP BY GROUPING SETS ((dept), ())
+        """,
+        yields: [[1, 300], [2, 300], [3, 800], [nil, nil]])
+  }
+
+  @Test func `a window FILTER partitions by a lifted key`() throws {
+    // A `FILTER` composes with `PARTITION BY` a lifted key: each `dept` is its
+    // own partition, so `SUM(SUM(sal)) FILTER (WHERE dept <> 2)` sums only the
+    // admitted row within each partition. Dept 1 (300) and dept 3 (500) each
+    // report their own total; dept 2's partition admits no row (SUM over the
+    // empty set is NULL); the super-aggregate `()` partition, its NULL `dept`
+    // UNKNOWN under the filter, is empty too.
+    try fixture().expect(
+        "SELECT dept, SUM(SUM(sal)) FILTER (WHERE dept <> 2) " +
+        "OVER (PARTITION BY dept) FROM Emp GROUP BY GROUPING SETS ((dept), ())",
+        yields: [[1, 300], [2, nil], [3, 500], [nil, nil]])
+  }
+
+  @Test func `a correlated window FILTER subquery hosts over the union`()
+      throws {
+    // A `FILTER` nesting an `EXISTS` correlated to the group key hosts through
+    // the union-scope `Resolution`, its qualified-free `dept` rewritten to the
+    // lifted union column — the same host the ordinary path takes. Over the
+    // determinable local `(SELECT * FROM U) o`, `dept` decides the outer key,
+    // so each per-set arm gates on its own `dept` (all of 1, 2, 3 match a
+    // `U.v`, admitting 100, 300, 500) while the super-aggregate `()` row's NULL
+    // matches none; the window sums the admitted totals, 900, over each row.
+    // The ordinary `GROUP BY dept` twin reproduces the per-set rows.
+    let body = "EXISTS (SELECT 1 FROM (SELECT * FROM U) o WHERE o.v = dept)"
+    let sets = "SELECT dept, SUM(SUM(sal)) FILTER (WHERE \(body)) OVER () " +
+               "FROM Emp GROUP BY GROUPING SETS ((dept), ())"
+    try colliding().expect(sets,
+                           yields: [[1, 900], [2, 900], [3, 900], [nil, 900]])
+    #expect(try colliding().columns(of: parse(query: sets), validate: true)
+                .count == 2)
+    try colliding().expect(
+        "SELECT dept, SUM(SUM(sal)) FILTER (WHERE \(body)) OVER () " +
+        "FROM Emp GROUP BY dept",
+        yields: [[1, 900], [2, 900], [3, 900]])
+  }
+
+  @Test func `an aggregate in a window FILTER over GROUPING SETS is rejected`()
+      throws {
+    // The parity the lift preserves: a `FILTER` may not itself contain an
+    // aggregate (ISO forbids one in a filter's search condition). The
+    // substitution rewrites a group-key atom to a `*gwN` column, so the outer
+    // `WindowFunction.check` would no longer see the aggregate; the lift
+    // enforces the rule on the original predicate instead, faulting 42803 as
+    // the ordinary grouped-window path does, on both the run and validate
+    // paths.
+    let sql = "SELECT SUM(SUM(sal)) FILTER (WHERE SUM(sal) > 400) OVER () " +
+              "FROM Emp GROUP BY GROUPING SETS ((dept), ())"
+    let fault = SQLError.state("42803",
+                               "an aggregate is not allowed in a FILTER")
     try fixture().expect(sql, fails: fault)
     #expect(throws: fault) {
       _ = try fixture().columns(of: parse(query: sql), validate: true)

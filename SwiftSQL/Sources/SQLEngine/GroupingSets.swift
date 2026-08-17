@@ -2008,19 +2008,45 @@ private struct Lift {
     case .number, .rank, .dense, .ntile, .percent, .cumulative:
       return function
     case let .aggregate(aggregate, operand, distinct, filter):
-      // A `FILTER` search condition is a `Predicate` no derived column stands
-      // in for; defer it rather than leave a base column unresolved.
-      guard filter == nil else {
-        throw .state("0A000",
-                     "a window FILTER with GROUPING SETS is not yet supported")
-      }
       let lifted: Aggregand = switch operand {
       case .star:
         .star
       case let .expression(expression):
         try .expression(substitute(expression))
       }
-      return .aggregate(aggregate, of: lifted, distinct: distinct)
+      // A `FILTER` search condition recurses through `substitute`, lifting its
+      // grounded group-key atoms to `*gwN` arm columns while literals and
+      // `:parameter`s ride inline — the same walk a `CASE` guard takes, so the
+      // lifted predicate threads back into the outer function. A `FILTER` may
+      // not itself contain an aggregate (`WindowFunction.check` faults the
+      // ordinary window path 42803); that check runs on the outer layer only
+      // after substitution, where the aggregate has become a `*gwN` column, so
+      // enforce the rule here on the original predicate to keep the two paths
+      // in parity. A subquery correlated to an opaque local cannot arm-lift — a
+      // window aggregate owns no arm slot — so it stalls the walk; fault
+      // cleanly then rather than emit an unresolved base column. The stall
+      // save/reset isolates this gate from an enclosing `CASE` catching its own
+      // stall.
+      let gate: Predicate?
+      if let filter {
+        guard !filter.aggregated else {
+          throw .state("42803", "an aggregate is not allowed in a FILTER")
+        }
+        let outer = stalled
+        stalled = false
+        let lowered = try substitute(filter)
+        guard !stalled else {
+          throw .state("0A000",
+                       "a window FILTER correlated to an opaque local with " +
+                       "GROUPING SETS is not yet supported")
+        }
+        stalled = outer
+        gate = lowered
+      } else {
+        gate = nil
+      }
+      return .aggregate(aggregate, of: lifted, distinct: distinct,
+                        filter: gate)
     case let .lead(value, offset, fallback):
       return try .lead(substitute(value), offset: offset,
                        default: substitute(fallback))

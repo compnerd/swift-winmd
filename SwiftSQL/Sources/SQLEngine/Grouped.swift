@@ -575,8 +575,13 @@ internal struct Grouped {
                                 ascending: key.ascending,
                                 column: position - 1))
       case let .expression(expression):
+        // A synthetic `*gwN` reference — a windowed GROUPING SETS lift key a
+        // hosted grouped subquery's own ORDER BY carries — bypasses output-
+        // alias precedence and lowers structurally, as `Select.orderKeys` and
+        // `Windowed.order` resolve it; a user alias spelled `*gwN` must not
+        // capture it (its `Column` identity is distinct).
         if case let .column(reference) = expression,
-            reference.qualifier == nil {
+            reference.qualifier == nil, !reference.synthetic {
           let name = reference.name.lowercased()
           // A name two projections share has no single term to order on —
           // reject it as ambiguous rather than pick the last, matching the

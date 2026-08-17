@@ -1747,8 +1747,13 @@ internal struct Windowed {
                                 ascending: key.ascending,
                                 column: position - 1))
       case let .expression(expression):
+        // A synthetic reference — the lifted `*gwN` union column a windowed
+        // `GROUPING SETS` rewrite addresses — bypasses output-alias precedence
+        // and binds structurally against the arm-synthesized union scope
+        // (`term`), so a colliding user alias spelled `"*gwN"` in this
+        // projection cannot capture it (its `Column` identity is distinct).
         if case let .column(reference) = expression,
-            reference.qualifier == nil {
+            reference.qualifier == nil, !reference.synthetic {
           let name = reference.name.lowercased()
           if ambiguous.contains(name) { throw .ambiguous(reference.name) }
           if let alias = aliases[name] {

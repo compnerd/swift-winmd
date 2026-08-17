@@ -1647,6 +1647,31 @@ extension Catalog where Self: ~Escapable {
     // a same-named derived alias here shadows stays visible. The layered
     // overlay never overwrote the CTE, so no separate pre-augment context runs.
     let context = try augment(context, for: .select(select), rows: false)
+    // Validate the row limit ahead of any lowering — including the windowed
+    // grouping-sets early return below, which else bypasses it. The parser
+    // yields only non-negative counts (a `-` is its own token), but a direct
+    // `Limit(count:offset:)` may carry negatives the executor's skip and take
+    // would trap on, so a public-AST-built negative offset/count must fault the
+    // query error here on every path (ordinary and windowed-sets alike), rather
+    // than reach `limited` and precondition-trap on a negative slice.
+    if let limit = select.limit {
+      guard limit.offset >= 0 else {
+        throw .state("2201X", "OFFSET row count must be non-negative")
+      }
+      guard (limit.count ?? 0) >= 0 else {
+        throw .state("2201W", "FETCH row count must be non-negative")
+      }
+    }
+    // A windowed `GROUP BY GROUPING SETS` select lowers directly here — the
+    // window node above the arm union's `setop` plan, over the union-output
+    // scope — rather than through a derived-table AST rewrite. `Query.expanded`
+    // leaves it un-desugared for this seam (a non-windowed one it desugars to
+    // its `UNION ALL` before reaching here). The union compiles in this
+    // enclosing `context`, so a correlated arm reference (an enclosing LATERAL
+    // `T.Id`) resolves natively.
+    if select.windows, case let .sets(sets) = select.grouping {
+      return try windowed(sets: select, sets, context)
+    }
     let relation = select.from
     // A LATERAL first FROM item has no preceding relation to correlate against,
     // so it is meaningless (and ISO forbids it) — fault rather than resolve a
@@ -1656,19 +1681,6 @@ extension Catalog where Self: ~Escapable {
                    "a LATERAL derived table needs a preceding FROM item")
     }
     let from = try resolve(relation, context)
-
-    if let limit = select.limit {
-      // The parser yields only non-negative counts (a `-` is its own token),
-      // but a direct `Limit(count:offset:)` may carry negatives the executor's
-      // skip and take would trap on. Reject them as a query error rather than
-      // crash.
-      guard limit.offset >= 0 else {
-        throw .state("2201X", "OFFSET row count must be non-negative")
-      }
-      guard (limit.count ?? 0) >= 0 else {
-        throw .state("2201W", "FETCH row count must be non-negative")
-      }
-    }
 
     // A window function is allowed only in the SELECT list and `ORDER BY` (ISO
     // 9075); one in a WHERE, HAVING, GROUP BY, or JOIN ON has no per-row meaning
@@ -2105,6 +2117,138 @@ extension Catalog where Self: ~Escapable {
     let hoisted = SQLEngine.materialise(windowed.windowings, projection,
                                         order, width: combined.count,
                                         below: chain)
+    let node = Plan.window(hoisted.windowings, hoisted.chain)
+    return node.shaped(distinct: select.distinct,
+                       projection: hoisted.projection, filter: nil,
+                       order: hoisted.order, limit: select.limit)
+  }
+
+  /// Compiles a windowed `GROUP BY GROUPING SETS` `select` into a window over
+  /// the arm union — the window layer riding above the union of arm-aggregate
+  /// nodes rather than inside any one arm, so the window sees the whole result
+  /// set (the per-set grouped rows and the NULL-extended super-aggregate rows
+  /// alike, ISO 9075) in one compilation, with no derived-table boundary.
+  ///
+  /// `decompose` splits the query into the window-free arm `union` and the
+  /// outer window layer's `projection`/`order` over it (each window-free
+  /// operand a window or the surviving projection reads lifted to a synthetic
+  /// `*gwN` union column). This seam then:
+  ///
+  ///   - compiles the `union` to a `setop` plan in the enclosing `context`, so
+  ///     a correlated arm reference (an enclosing LATERAL `T.Id`) resolves
+  ///     natively — no `VALUES (1)` unit or LATERAL apply is needed;
+  ///   - builds the union-output `Scope` over its `0 ..< arity` slots, keyed by
+  ///     the empty alias (as the `ordered` set-op carrier does), so a bare
+  ///     `*gwN` resolves against it by name;
+  ///   - drives the same `Windowed` machinery the plain window path and the
+  ///     grouped-window path drive — an identity slot map, the union output the
+  ///     slot space — validating each window's function/frame against the union
+  ///     scope and lowering the outer projection and query `ORDER BY` against
+  ///     the widened window slots;
+  ///   - stacks `materialise` → `Plan.window` → `.shaped`, so the query-level
+  ///     DISTINCT / `ORDER BY` / OFFSET·FETCH cap layers `Project(Limit(Sort))`
+  ///     over the window, as the plain window path does.
+  ///
+  /// The schema-derive twin (`columns(windowed:sets:_:)`) lowers the same outer
+  /// window layer over the union-output schema, and the executor descends a
+  /// `.window` carrier over the setop leaf, so run ≡ validate.
+  internal borrowing func windowed(sets select: Select,
+                                   _ sets: Array<Array<Expression>>,
+                                   _ context: Context)
+      throws(SQLError) -> Plan {
+    let routines = context.routines
+    let parts = try decompose(windowed: select, sets: sets, routines,
+                              schemas(context.relations))
+    // Compile the window-free arm union in the enclosing context and derive its
+    // output columns — the `*gwN`-named, type-unified result columns the window
+    // layer reads. The union plan's output sits at slots `0 ..< arity` (a
+    // `setop`'s output is its arm-0 projection), so the window resolves and
+    // stacks in that identity space, exactly as the `ordered` carrier does over
+    // a set operation.
+    let plan = try compile(parts.union, context)
+    let cols = try columns(unifying: parts.union, context)
+    let arity = cols.count
+    let schema = Schema(from: cols, names: cols.map(\.name), extent: arity,
+                        virtuals: [])
+    // The union-output scope is keyed by the empty alias, so a bare `*gwN`
+    // resolves unqualified over `schema`; its inner query is inspected nowhere,
+    // so the union's arm-0 `SELECT` stands in for the derived relation.
+    let scope = Scope([(Relation(derived: parts.union.arm, as: ""), schema)])
+    // The outer layer hosts every subquery the `Lift` kept out of the arms — an
+    // uncorrelated one it did not push into a `*gwN` column — resolved against
+    // the union scope, so a `LEAD` default or a `CASE` branch nesting a
+    // subquery stays lazy above the cap. Build the same `Resolution` the schema
+    // twin builds, over the outer projection and `ORDER BY`, keyed by the
+    // enclosing select's own subquery roles.
+    var hosted = Array<Query>()
+    for item in parts.projection {
+      item.expression.collect(subqueries: &hosted)
+    }
+    for key in parts.order?.keys ?? [] {
+      if case let .expression(expression) = key.sort {
+        expression.collect(subqueries: &hosted)
+      }
+    }
+    let outer = try subquery(hosted, roles: { parts.roles(of: $0) }, context,
+                             within: scope)
+
+    // The distinct windows the outer layer computes, gathered from the lifted
+    // projection and `ORDER BY`. An unsupported function or frame faults the
+    // feature diagnostic in parity with the schema type derive, exactly as the
+    // plain window path gates them.
+    var expressions = Array<Expression>()
+    for item in parts.projection {
+      item.expression.collect(windows: &expressions)
+    }
+    for key in parts.order?.keys ?? [] {
+      if case let .expression(expression) = key.sort {
+        expression.collect(windows: &expressions)
+      }
+    }
+    for expression in expressions {
+      guard case let .window(function, spec) = expression else {
+        throw .state("XX000", "expected a window function")
+      }
+      guard function.supported else {
+        throw .state("0A000", "\(function.keyword) is not yet supported")
+      }
+      try function.require(order: spec)
+      if let frame = spec.frame {
+        let ordering = try frame.measured
+            ? scope.ordering(spec, routines, subquery: outer)
+            : nil
+        try frame.reject(for: function, order: ordering)
+      }
+    }
+
+    // The union output is the window's slot space, so the slot map is the
+    // identity over `0 ..< arity`: a `*gwN` reference reads its own union slot,
+    // and each windowing appends one slot past the source width (`arity + j`).
+    let identity =
+        Dictionary(uniqueKeysWithValues: (0 ..< arity).map { ($0, $0) })
+    var windowed = Windowed(scope, identity, width: arity)
+    let projection = try windowed.terms(.expressions(parts.projection),
+                                        routines, subquery: outer)
+    var order = Array<SortKey>()
+    if let clause = parts.order {
+      order = try windowed.order(clause, projection, routines,
+                                 subquery: outer)
+    }
+    // Under DISTINCT every `ORDER BY` key must be a select-list value (see
+    // `distinct`); the keys and projection are in the window's output slot
+    // space, aligned with the AST keys index-for-index.
+    if select.distinct, let clause = parts.order {
+      order = try distinct(clause.keys, order, projection)
+    }
+
+    // Materialise each window ORDER BY value the projection also reports once
+    // below the window (a stateful ordinal-named value evaluated once, the
+    // ranking matching the reported column), then stack the window over the
+    // setop plan and shape the query-level DISTINCT / ORDER BY / OFFSET·FETCH —
+    // `shaped` layers `Project(Limit(Sort(_)))`, exactly as the plain window
+    // path shapes its own window node.
+    let hoisted = SQLEngine.materialise(windowed.windowings, projection,
+                                        order, width: arity, below: plan)
     let node = Plan.window(hoisted.windowings, hoisted.chain)
     return node.shaped(distinct: select.distinct,
                        projection: hoisted.projection, filter: nil,

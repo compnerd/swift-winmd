@@ -651,7 +651,6 @@ public struct Select: Hashable, Sendable {
   /// caller picks to mirror the resolver's lowering (see `orderKeys`).
   private func keys(named output: KeyPath<Projected, String?>)
       -> Array<Expression> {
-    guard let order else { return [] }
     // Only an `expressions` list carries a projection expression an ordinal or
     // an output-name key could reach; a `*` or bare-column projection names
     // plain column slots compilation already resolves.
@@ -661,32 +660,7 @@ public struct Select: Hashable, Sendable {
     } else {
       items = []
     }
-    var expressions = Array<Expression>()
-    for key in order.keys {
-      switch key.sort {
-      case let .ordinal(position):
-        // An ordinal names the `position`-th projected output (1-based); the
-        // sort recomputes that item's expression below the limit. An
-        // out-of-range ordinal is `compile`'s fault to raise, so skip it here.
-        if position >= 1, position <= items.count {
-          expressions.append(items[position - 1].expression)
-        }
-      case let .expression(expression):
-        // A bare unqualified name binds a matching projection output name
-        // before an input column (the ISO precedence), resolving to that
-        // item's expression — the output surface (`output`) mirrors the
-        // resolver's lowering for this query shape.
-        if case let .column(column) = expression, column.qualifier == nil,
-            let item = items.first(where: {
-              $0[keyPath: output]?.lowercased() == column.name.lowercased()
-            }) {
-          expressions.append(item.expression)
-        } else {
-          expressions.append(expression)
-        }
-      }
-    }
-    return expressions
+    return SQLEngine.orderKeys(items, order, named: output)
   }
 
   /// The projection and ORDER BY expressions the select evaluates, for routing
@@ -714,6 +688,38 @@ public struct Select: Hashable, Sendable {
     }
     return evaluated
   }
+}
+
+/// The `order` sort keys resolved to the value expression each sort evaluates,
+/// over the projected `items` — the one resolver a select's `orderKeys` and a
+/// windowed grouping-sets outer layer share, so the sort-output model cannot
+/// drift. An ordinal names the `position`-th item (1-based); a bare
+/// unqualified name binds a matching output `named` before an input column (the
+/// ISO precedence); any other key keeps its own expression. An out-of-range
+/// ordinal is `compile`'s fault to raise, so it is skipped here.
+internal func orderKeys(_ items: Array<Projected>, _ order: Order?,
+                        named: KeyPath<Projected, String?>)
+    -> Array<Expression> {
+  guard let order else { return [] }
+  var expressions = Array<Expression>()
+  for key in order.keys {
+    switch key.sort {
+    case let .ordinal(position):
+      if position >= 1, position <= items.count {
+        expressions.append(items[position - 1].expression)
+      }
+    case let .expression(expression):
+      if case let .column(column) = expression, column.qualifier == nil,
+          let item = items.first(where: {
+            $0[keyPath: named]?.lowercased() == column.name.lowercased()
+          }) {
+        expressions.append(item.expression)
+      } else {
+        expressions.append(expression)
+      }
+    }
+  }
+  return expressions
 }
 
 /// A relation in a `FROM` or `JOIN`: a base relation named by an identifier, or

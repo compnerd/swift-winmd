@@ -335,11 +335,17 @@ extension Catalog where Self: ~Escapable {
     switch query.body {
     case let .select(select):
       // A `GROUP BY GROUPING SETS (…)` derives its schema through the same
-      // `UNION ALL` expansion the compile path uses, so the run and the derived
-      // columns cannot diverge (`run ≡ columns(of:)`): the arms' NULL-padded
-      // columns type through the set-operation `merge` exactly as the run's do.
+      // lowering the compile path uses, so the run and the derived columns
+      // cannot diverge (`run ≡ columns(of:)`). A windowed one derives the outer
+      // window layer over the arm union's schema — the schema twin of the
+      // direct compile lowering (`compile(windowed sets:)`) — while a
+      // non-windowed one derives its `UNION ALL` expansion, whose arms'
+      // NULL-padded columns type through the set-operation `merge` as the run's
+      // do.
       if case let .sets(sets) = select.grouping {
-        cols = try columns(unifying: expand(select, sets: sets), context)
+        cols = select.windows
+            ? try columns(windowed: select, sets: sets, context)
+            : try columns(unifying: expand(select, sets: sets), context)
       } else {
         cols = try arms(of: select, context)
       }
@@ -933,6 +939,28 @@ extension Catalog where Self: ~Escapable {
 
   private borrowing func typecheck(_ select: Select, _ context: Context)
       throws(SQLError) {
+    // A windowed `GROUP BY GROUPING SETS` select lowers to a window over the
+    // arm union (`compile(windowed sets:)`): every window-free operand — a
+    // group key, an aggregate, a `GROUPING(…)`, a scalar over them — lives in
+    // the arm union, while the outer window layer keeps the windows and the
+    // scalars wrapping them (`NULLIF(ROW_NUMBER() OVER (), 'x')`, a
+    // comparison, a `CASE`), reading the arm columns as `*gwN` union
+    // references. Type-check (and, on the run's comparability walk, compare)
+    // the arm union so a reachable-operand or cross-kind-comparison fault
+    // inside a lifted operand surfaces exactly as a run does, then the lifted
+    // outer projection and `ORDER BY` over the union-output scope so a
+    // wrapper's operand incomparability faults `42804` here rather than only
+    // at execution (`matches`) — both in the mode this `context` carries,
+    // keeping run ≡ validate. The window structure itself (its function,
+    // frame, and slot positions) is validated by `compile`, the parity gate
+    // both paths run before this.
+    if select.windows, case let .sets(sets) = select.grouping {
+      let parts = try decompose(windowed: select, sets: sets,
+                                context.routines, schemas(context.relations))
+      try typecheck(parts.union, context)
+      try typecheck(outer: parts, select, context)
+      return
+    }
     // The run's comparability walk visits every reachable comparison surface of
     // this select for the ISO comparability rule — its WHERE, join `ON`s,
     // HAVING, projection, `GROUP BY` and `ORDER BY` keys, aggregate `FILTER`s,
@@ -1028,6 +1056,165 @@ extension Catalog where Self: ~Escapable {
       for reach in on.visited {
         try typecheck(shape(of: reach), revealed.with(outer: scope))
       }
+    }
+  }
+
+  /// Type-checks the outer window layer of a windowed `GROUP BY GROUPING SETS`
+  /// select — its lifted projection and query `ORDER BY` — against the arm
+  /// union's output scope, so a scalar wrapping a window
+  /// (`NULLIF(ROW_NUMBER() OVER (), 'x')`, a comparison, a `CASE`) whose
+  /// operands are incomparable faults exactly as the ordinary grouped-window
+  /// path faults it, on both the run's comparability walk and the strict
+  /// validate path.
+  ///
+  /// The direct lowering (`decompose`) keeps the window functions in the outer
+  /// layer, their window-free operands lifted to `*gwN` references of the union
+  /// output. The arm union (type-checked by the caller) validates those
+  /// operands in their grouped scope, but the outer wrappers that combine the
+  /// windows resolve only over the union output — a hole through which a
+  /// wrapper's operand-comparability mismatch reaches `matches` at execution
+  /// (`42804`) while `columns(of:validate:)` accepts it. Resolving each lifted
+  /// outer expression over the same union-output scope the compile seam builds
+  /// (`windowed(sets:)`) closes it, in the mode this `context` carries — the
+  /// run's comparability finder (`comparisons`, only a `42804` escaping) or the
+  /// strict validate type-check (`validate`) — the same two surfaces `walk` and
+  /// `comparability(of:)` drive over an ordinary select's projection and sort.
+  private borrowing func typecheck(outer parts: WindowedSets,
+                                   _ select: Select, _ context: Context)
+      throws(SQLError) {
+    // The union-output scope keyed by the empty alias — the `*gwN`-named,
+    // type-unified arm columns the outer layer reads — built exactly as the
+    // compile seam and the schema derive build it, so a lifted outer
+    // expression resolves its window operands (`*gwN`) as the run lowers them.
+    let inner = try columns(unifying: parts.union, context)
+    let schema = Schema(from: inner, names: inner.map(\.name),
+                        extent: inner.count, virtuals: [])
+    let scope = Scope([(Relation(derived: parts.union.arm, as: ""), schema)])
+    // The outer layer hosts every subquery the `Lift` kept out of the arms,
+    // resolved against the union scope. Build the `SubqueryCheck` twin of the
+    // run's `Resolution` — each hosted subquery's cursor-free width and single-
+    // column type derived once (ahead of the walk), a scalar occurrence's
+    // operand check deferred to the walk — so validate types a hosted subquery
+    // exactly as the run lowers it, keeping run ≡ validate. A subquery
+    // correlates against the union scope stacked past this query's own outer,
+    // as the run's `subquery(_:_:_:within:)` correlates it.
+    let revealed = context.revealed()
+    let nested = (context.outer ?? Outer()).nested(under: scope)
+    var widths = Dictionary<Query, Int>()
+    var types = Dictionary<Query, ValueType>()
+    // The scalar-position subqueries classified over the rewritten outer
+    // projection and `order` — not the original select — so a correlated
+    // subquery the lifter rewrote to reference `*gwN` is recognised as the very
+    // `Query` the union-scope check hosts, its arity enforced and its reached
+    // body deferred exactly as the run lowers it (run ≡ validate).
+    let scalar = parts.scalar
+    var hosted = Array<Query>()
+    for item in parts.projection {
+      item.expression.collect(subqueries: &hosted)
+    }
+    for key in parts.order?.keys ?? [] {
+      if case let .expression(expression) = key.sort {
+        expression.collect(subqueries: &hosted)
+      }
+    }
+    for query in hosted {
+      try width(query, scalar, revealed, nested, &widths, &types)
+    }
+    let check = SubqueryCheck(widths, types, deferred: scalar,
+                              outer: context.outer)
+    // The projection sits above the query-level cap (`Project(Limit(Sort))`),
+    // so a zero `FETCH` that drops every output row leaves it unreachable;
+    // validate it only when reachable, as the ordinary walk does, while a
+    // DISTINCT evaluates it before the cap. The layer is a window over the arm
+    // union — cardinality-preserving — so its row count is the union's, and the
+    // union is statically single-row iff it reduces to one arm with no group
+    // keys: the grand-total single set `GROUPING SETS (())` (`.sets([[]])`),
+    // which yields exactly one whole-result row. A multi-arm union
+    // (`sets.count > 1`, e.g. `((), ())`) is ≥2 rows; a non-empty single set
+    // groups by its keys. So a positive `OFFSET` elides the projection only for
+    // that grand total, exactly as an ordinary whole-result aggregate
+    // (`aggregates && no keys`) is skipped by a positive `OFFSET`. Derive that
+    // single-row flag from the decomposition rather than hard-coding `false`.
+    // (`||` with a `borrowing self` autoclosure needs the two-statement form.)
+    let single: Bool
+    if case let .sets(sets) = select.grouping {
+      single = sets.count == 1 && sets[0].isEmpty
+    } else {
+      single = false
+    }
+    // The window node sits below the FETCH cap (window under sort under limit),
+    // so it evaluates its operands over every union row before the page drops
+    // them — validate them unconditionally, even where the projection wrapper
+    // above the cap is unreachable, so validate agrees with run, mirroring the
+    // compile twin `columns(windowed:)`'s own `collect(windows:)` gather.
+    for item in parts.projection {
+      var windows = Array<Expression>()
+      item.expression.collect(windows: &windows)
+      for window in windows {
+        try validate(outer: window, scope, context, subquery: check)
+      }
+    }
+    var reachable = select.distinct
+    if !reachable { reachable = !drops(select.limit, single: single) }
+    if reachable {
+      for item in parts.projection {
+        try validate(outer: item.expression, scope, context, subquery: check)
+      }
+    }
+    // The sort sits below the cap (`Sort` under `Limit`), so every ORDER BY key
+    // runs over the union before the cap pages the rows. Resolve each key
+    // to the value the sort evaluates through the one `orderKeys` resolver the
+    // ordinary path uses (`Select.orderKeys`): an ordinal or an output name —
+    // bound over the output surface the run's `windowed.order` records, an
+    // alias else a bare column's name (`\.name`) — names a projected expression
+    // the sort recomputes below the cap, so an output-referencing sort pulls
+    // that projection into reach and validates it even where the projection
+    // block above is skipped under a row-dropping cap (`FETCH FIRST 0` with
+    // `ORDER BY 1`), the hole the bespoke ordinal/column skip left. A directly
+    // written wrapper (a `NULLIF` over a window) keeps its expression and is
+    // validated too; a bare `*gwN` reference resolves cleanly against the union
+    // scope. Inheriting the resolver, not re-implementing it, keeps the sort-
+    // output model from drifting from the run's.
+    for expression in orderKeys(parts.projection, parts.order, named: \.name) {
+      try validate(outer: expression, scope, context, subquery: check)
+    }
+    // Validate the body of each hosted subquery the walk reached — a scalar or
+    // an `IN`/`EXISTS`/quantified one — in its own reached role's run shape (an
+    // `existential` reach the cardinality probe, a `scalar`/`valued` reach the
+    // original), so a reached throwing body faults exactly as the run
+    // evaluates it while an unreached one (a dropped page, a lazy `LEAD`
+    // default the walk never records) does not. A subquery's own FROM sees the
+    // revealed base, its correlation the union scope stacked past this query's
+    // outer — the same context the run re-executes it under.
+    let recursion =
+        revealed.with(outer: (context.outer ?? Outer()).nested(under: scope))
+    for reach in check.visited {
+      try typecheck(shape(of: reach), recursion)
+      // Re-fold a reached set-operation subquery's operand compatibility (the
+      // width pre-pass deferred it through `shaping()`), so a reached scalar or
+      // `IN` with irreconcilable arm types faults `SQLError.operand`; an
+      // `EXISTS`/`lateral` reach doesn't read the unified arm type, so skip it.
+      switch reach.role {
+      case .scalar, .valued:
+        _ = try columns(unifying: reach.query, recursion)
+      case .existential, .lateral:
+        break
+      }
+    }
+  }
+
+  /// Validates one lifted outer window-layer `expression` over the union
+  /// `scope` in the mode `context` carries — the run's comparability finder
+  /// (only a `42804` escaping) or the strict validate type-check — resolving a
+  /// hosted subquery through the union-scope `subquery` check.
+  private borrowing func validate(outer expression: Expression, _ scope: Scope,
+                                  _ context: Context,
+                                  subquery: SubqueryCheck) throws(SQLError) {
+    if context.comparability {
+      try scope.comparisons(in: expression, context.routines,
+                            subquery: subquery)
+    } else {
+      _ = try scope.validate(expression, context.routines, subquery: subquery)
     }
   }
 
@@ -1790,6 +1977,81 @@ extension Catalog where Self: ~Escapable {
     return (terms, { expression throws(SQLError) in
       try grouped.resolve(expression, routines, subquery: subquery)
     })
+  }
+
+  /// The result columns of a windowed `GROUP BY GROUPING SETS` `select` — the
+  /// schema twin of the direct compile lowering (`compile(windowed sets:)`), so
+  /// validate types exactly the shape run computes (run ≡ columns(of:)).
+  ///
+  /// It reuses the same `decompose` the compile seam does — the window-free arm
+  /// union and the outer window layer's `projection` over it — derives the arm
+  /// union's output schema (its `*gwN`-named, type-unified columns), builds the
+  /// union-output `Scope` over that schema, and resolves each lifted outer item
+  /// against it through the ordinary projection-output logic (`output(_:at:)`),
+  /// so each output carries the complete `ResolvedColumn` — type AND
+  /// `unconstrained` mask — that an ordinary grouped-window select yields as a
+  /// set-op arm: a `*gwN` reference by the union column's type and mask (a
+  /// passed-through constant-NULL source column stays unconstrained), a
+  /// constant NULL kept outer unconstrained, a window by its constrained result
+  /// (a ranking function `.integer`, an aggregate window from its `*gwN`
+  /// argument), the shape the compiled `Windowed` surface lowers it to. Keeping
+  /// only the type (hand-stamped constrained) would mis-type a constant-NULL
+  /// output as a constrained integer, so an outer set-op merge would reject the
+  /// integer/text pair (`42804`) the ordinary companion accepts.
+  ///
+  /// Each output then re-takes its name and synthesized-header provenance from
+  /// the original projected item — an alias, else a bare column's name, else a
+  /// positional `column N` an unnamed expression takes (marked synthesized), so
+  /// an unnamed windowed output feeding an outer set-op carrier stays
+  /// ordinal-only (not name-bindable), never the internal `*gwN` name it reads.
+  borrowing func columns(windowed select: Select,
+                         sets: Array<Array<Expression>>, _ context: Context)
+      throws(SQLError) -> Array<ResolvedColumn> {
+    let routines = context.routines
+    let parts = try decompose(windowed: select, sets: sets, routines,
+                              schemas(context.relations))
+    // The arm union's output schema — the same columns the compile seam builds
+    // its window-source scope from — derived through the shared `columns
+    // (unifying:)` fold, so the arms' NULL-padded columns type through the
+    // set-operation `merge` exactly as at compile.
+    let inner = try columns(unifying: parts.union, context)
+    let arity = inner.count
+    let schema = Schema(from: inner, names: inner.map(\.name), extent: arity,
+                        virtuals: [])
+    let scope = Scope([(Relation(derived: parts.union.arm, as: ""), schema)])
+    // The outer layer hosts every subquery the `Lift` kept out of the arms,
+    // resolved against the union scope — the same `Resolution` the compile seam
+    // builds, so a hosted subquery derives its output column exactly as the run
+    // lowers it.
+    var hosted = Array<Query>()
+    for item in parts.projection {
+      item.expression.collect(subqueries: &hosted)
+    }
+    for key in parts.order?.keys ?? [] {
+      if case let .expression(expression) = key.sort {
+        expression.collect(subqueries: &hosted)
+      }
+    }
+    // Classify each hosted subquery's role over the rewritten outer items,
+    // not the original select: the lifter may rewrite a correlated subquery's
+    // free group-key references to `*gwN` before hosting it, so the `Query` the
+    // `Resolution` compiles differs from the select's original spelling.
+    let outer = try subquery(hosted, roles: { parts.roles(of: $0) }, context,
+                             within: scope)
+    // Resolve each outer window-layer item over the union scope through the
+    // ordinary projection-output logic, so its `unconstrained` mask comes from
+    // the same resolution as its type (a constant NULL unconstrained, a window
+    // constrained, a passed-through `*gwN` column by its source mask), then
+    // re-stamp the name and synthesized-header provenance from the original
+    // item — an inferable name, else a synthesized `column N`.
+    return try parts.items.indices.map { index throws(SQLError) in
+      let name = parts.items[index].name ?? "column \(index + 1)"
+      let resolved = try scope.output(parts.projection[index], at: index,
+                                      routines, subquery: outer)
+      return ResolvedColumn(OutputColumn(name: name, type: resolved.type),
+                            unconstrained: resolved.unconstrained,
+                            synthesized: parts.items[index].name == nil)
+    }
   }
 
   /// Whether `limit` drops the one row a `single`-row result would yield,

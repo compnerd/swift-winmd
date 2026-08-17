@@ -308,10 +308,30 @@ extension Catalog where Self: ~Escapable {
     // them as one derived layer that shadows an outer CTE or derived alias of
     // the same name in the scope this SELECT resolves its own references
     // against (projection/WHERE/JOIN-ON/GROUP/HAVING).
+    //
+    // A multi-set windowed `GROUP BY GROUPING SETS` select keeps a `.select`
+    // body but its FROM/JOIN derived tables are arm-scoped: the window rides
+    // above the arm union, and each expanded arm re-materialises the source
+    // (the carrier-aware executor per-arm augments it), matching the non-
+    // windowed grouping-sets over the same source. Bind the schema here — the
+    // optimiser needs the derived alias resolvable for its seek/nest rewrite —
+    // but not the rows: a stateful source materialised once at the query level
+    // would have every arm reuse those rows, diverging from the non-windowed
+    // form (whose `.setop` body carries no query-level derivation at all, so
+    // its arms materialise per arm). The run reveals this schema layer before
+    // the carrier-aware execute, so each arm re-materialises the rows.
+    //
+    // A single-set spelling has no arm union (`unioned` is false): one
+    // arm, so per-arm and per-query materialisation coincide. Materialise its
+    // rows here (not arm-scoped) so the ordinary per-query executor the run
+    // routes it through reads them — the `run` carrier fork keys on the same
+    // `unioned`, so the two decide the single-arm shape together.
+    let deferred = query.unioned
     var layer = Dictionary<String, RelationInstance>()
     for (alias, inner, columns) in derivations {
       layer[alias.lowercased()] =
-          try materialise(inner, scope, rows: rows, columns: columns)
+          try materialise(inner, scope, rows: rows && !deferred,
+                          columns: columns)
     }
     return context.scoping(augmented.pushing(layer))
   }

@@ -4734,16 +4734,117 @@ struct WindowOverGroupingSetsTests {
     #expect(other.count == 4)
   }
 
-  @Test func `a windowed CASE over GROUPING SETS is deferred`() throws {
-    // Preserving #136: a `CASE` nesting a window — `CASE WHEN dept = 1 THEN
-    // ROW_NUMBER() OVER () END` — is a per-row `Predicate`/window shape no
-    // `*gwN` column stands in for, so it still faults the feature diagnostic on
-    // both the run and validate paths, unchanged by the window-free `CASE`
-    // recursion this fix adds.
-    let sql = "SELECT CASE WHEN dept = 1 THEN ROW_NUMBER() OVER () END " +
-              "FROM Emp GROUP BY GROUPING SETS ((dept))"
+  @Test func `a windowed CASE over GROUPING SETS keeps its window outer`()
+      throws {
+    // A `CASE` nesting a window keeps its structure outer, its guards and
+    // branches recursed so only their grounded atoms lift to arm columns; the
+    // window sits in the outer projection, gathered by `collect(windows:)`.
+    // `CASE WHEN dept = 1 THEN ROW_NUMBER() OVER () END` lifts the guard's
+    // `dept` to a `*gwN` arm column and computes the window over the union: the
+    // per-set rows number 1, 2, 3 and the super-aggregate `()` row 4, but the
+    // branch value is taken only where `dept = 1` — dept 1's row (1), the rest
+    // NULL, the `()` row's NULL `dept` matching none. The ordinary `GROUP BY
+    // dept` twin reproduces the per-set rows.
+    try fixture().expect(
+        "SELECT CASE WHEN dept = 1 THEN ROW_NUMBER() OVER () END, dept " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept), ())",
+        yields: [[1, 1], [nil, 2], [nil, 3], [nil, nil]])
+    try fixture().expect(
+        "SELECT CASE WHEN dept = 1 THEN ROW_NUMBER() OVER () END, dept " +
+        "FROM Emp GROUP BY dept",
+        yields: [[1, 1], [nil, 2], [nil, 3]])
+    let sql = "SELECT CASE WHEN dept = 1 THEN ROW_NUMBER() OVER () END, dept " +
+              "FROM Emp GROUP BY GROUPING SETS ((dept), ())"
+    #expect(try fixture().columns(of: parse(query: sql), validate: true)
+                .count == 2)
+  }
+
+  @Test func `a windowed CASE guard evaluates the window over the union`()
+      throws {
+    // The window may live in the guard, not only a branch: `CASE WHEN
+    // ROW_NUMBER() OVER () > 1 THEN dept ELSE 0 END` numbers the union rows
+    // 1..4 and tests each against 1. The first union row (dept 1) is not
+    // greater, taking the `ELSE 0`; the rest take `dept` — dept 2, dept 3, and
+    // the super-aggregate `()` row's NULL. The ordinary `GROUP BY dept` twin
+    // reproduces the per-set rows.
+    try fixture().expect(
+        "SELECT CASE WHEN ROW_NUMBER() OVER () > 1 THEN dept ELSE 0 END " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept), ())",
+        yields: [[0], [2], [3], [nil]])
+    try fixture().expect(
+        "SELECT CASE WHEN ROW_NUMBER() OVER () > 1 THEN dept ELSE 0 END " +
+        "FROM Emp GROUP BY dept",
+        yields: [[0], [2], [3]])
+  }
+
+  @Test func `a single-set windowed CASE matches the ordinary GROUP BY`()
+      throws {
+    // Over a single set the grouping-sets union is the ordinary `GROUP BY`
+    // relation, so a windowed `CASE` resolves identically. The sets form and
+    // its plain twin agree row for row, on the run path and (the tripwire) the
+    // validate path.
+    let sets = "SELECT CASE WHEN dept = 1 THEN ROW_NUMBER() OVER () END " +
+               "FROM Emp GROUP BY GROUPING SETS ((dept))"
+    let plain = "SELECT CASE WHEN dept = 1 THEN ROW_NUMBER() OVER () END " +
+                "FROM Emp GROUP BY dept"
+    try fixture().expect(sets, equals: plain)
+    #expect(try fixture().columns(of: parse(query: sets), validate: true)
+                .count == 1)
+  }
+
+  @Test func `a windowed CASE mixes an aggregate and a window branch`() throws {
+    // A `CASE` whose branches mix an aggregate and a window lifts each in its
+    // own channel: `CASE WHEN dept = 1 THEN SUM(sal) ELSE ROW_NUMBER() OVER ()
+    // END` lifts `SUM(sal)` to a `*gwN` arm column and computes the window over
+    // the union. Dept 1 takes its total (300); the rest, including the super-
+    // aggregate `()` row whose NULL `dept` matches none, take their union row
+    // number (2, 3, 4). The ordinary `GROUP BY dept` twin reproduces the per-
+    // set rows.
+    try fixture().expect(
+        "SELECT dept, CASE WHEN dept = 1 THEN SUM(sal) " +
+        "ELSE ROW_NUMBER() OVER () END " +
+        "FROM Emp GROUP BY GROUPING SETS ((dept), ())",
+        yields: [[1, 300], [2, 2], [3, 3], [nil, 4]])
+    try fixture().expect(
+        "SELECT dept, CASE WHEN dept = 1 THEN SUM(sal) " +
+        "ELSE ROW_NUMBER() OVER () END FROM Emp GROUP BY dept",
+        yields: [[1, 300], [2, 2], [3, 3]])
+  }
+
+  @Test func `a correlated windowed CASE guard hosts over the union`() throws {
+    // A windowed `CASE` whose guard nests an `EXISTS` correlated to the group
+    // key hosts through the union-scope `Resolution`, its qualified-free `dept`
+    // rewritten to the lifted union column — the same host the ordinary path
+    // takes over the determinable local `(SELECT * FROM U) o`. Each per-set arm
+    // gates on its own `dept` (all of 1, 2, 3 match a `U.v`, taking the row
+    // number) while the super-aggregate `()` row's NULL matches none (NULL);
+    // the window numbers across the union. The `GROUP BY dept` twin reproduces
+    // the per-set rows.
+    let body = "EXISTS (SELECT 1 FROM (SELECT * FROM U) o WHERE o.v = dept)"
+    let sets = "SELECT CASE WHEN \(body) THEN ROW_NUMBER() OVER () END " +
+               "FROM Emp GROUP BY GROUPING SETS ((dept), ())"
+    try colliding().expect(sets, yields: [[1], [2], [3], [nil]])
+    #expect(try colliding().columns(of: parse(query: sets), validate: true)
+                .count == 1)
+    try colliding().expect(
+        "SELECT CASE WHEN \(body) THEN ROW_NUMBER() OVER () END " +
+        "FROM Emp GROUP BY dept",
+        yields: [[1], [2], [3]])
+  }
+
+  @Test func `a rejected frame in a windowed CASE faults on both paths`()
+      throws {
+    // The compile-vs-validate parity gate: the compile path runs an explicit
+    // window frame check, and the validate twin must reach it too. A frame
+    // ending at UNBOUNDED PRECEDING is malformed; nested in a windowed `CASE`
+    // over GROUPING SETS it faults `42601` on the run path, and
+    // `columns(of:validate:true)` faults identically rather than accepting a
+    // shape the run rejects — parity holding without a validate-twin change.
+    let sql = "SELECT CASE WHEN dept = 1 THEN ROW_NUMBER() OVER (ORDER BY dept "
+            + "ROWS BETWEEN CURRENT ROW AND UNBOUNDED PRECEDING) END "
+            + "FROM Emp GROUP BY GROUPING SETS ((dept), ())"
     let fault = SQLError.state(
-        "0A000", "a window in a CASE with GROUPING SETS is not yet supported")
+        "42601", "a window frame cannot end at UNBOUNDED PRECEDING")
     try fixture().expect(sql, fails: fault)
     #expect(throws: fault) {
       _ = try fixture().columns(of: parse(query: sql), validate: true)
@@ -5430,8 +5531,9 @@ struct WindowOverGroupingSetsTests {
     // its own `Emp`, an uncorrelated subquery, not the group key. Every group's
     // `dept` is in the subquery's `{1, 2, 3}`, so `CASE` yields 1 per group,
     // each numbered, matching the ordinary `GROUP BY dept` companion on run and
-    // validate. The windowed CASE value that still defers (#136) is covered by
-    // `a windowed CASE over GROUPING SETS is deferred` above.
+    // validate. A windowed CASE value now lowers too (#136), its window kept
+    // outer, covered by `a windowed CASE over GROUPING SETS keeps its window
+    // outer` above.
     let sets =
         "SELECT CASE WHEN dept IN (SELECT dept FROM Emp) " +
         "THEN 1 ELSE 0 END, ROW_NUMBER() OVER () " +

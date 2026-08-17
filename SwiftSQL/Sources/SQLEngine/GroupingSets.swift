@@ -1123,16 +1123,14 @@ private struct Lift {
     case let .nullif(lhs, rhs):
       return try .nullif(substitute(lhs), substitute(rhs))
     case let .case(whens, otherwise):
-      // A CASE nesting a window carries a per-row Predicate/window shape no
-      // `*gwN` column stands in for (#136), so defer it; a window-free CASE
-      // keeps its structure outer, its guards and branches recursed so only
-      // their grounded atoms lift to arm columns.
+      // A CASE keeps its structure outer, its guards and branches recursed so
+      // only their grounded atoms lift to arm columns. A nested window keeps
+      // that structure too: the window sits in the outer projection, gathered
+      // by the outer `collect(windows:)`, so the same recursion lowers it
+      // (#136) — the only shape it cannot handle is the stall fallback below,
+      // which arm-lifts the whole CASE to one grounded slot no window occupies.
       let windowed = whens.contains { $0.when.windowed || $0.then.windowed }
           || (otherwise?.windowed ?? false)
-      if windowed {
-        throw .state("0A000", "a window in a CASE with GROUPING SETS is not " +
-                              "yet supported")
-      }
       // A guard predicate's subquery whose bare group key is undecidable over
       // an opaque local blocks hosting and stalls the walk. No `*gwN` column
       // stands in for a whole predicate, so its own rewrite is moot; instead
@@ -1167,6 +1165,14 @@ private struct Lift {
         self.leaves = leaves
         self.index = index
         self.linked = linked
+        // The stall would arm-lift the whole CASE to one grounded slot, but no
+        // arm slot can hold a window — the arm's grouped scope computes one
+        // value per output, with no per-row window channel — so a windowed
+        // CASE that stalls faults cleanly rather than sinking one into an arm.
+        guard !windowed else {
+          throw .state("0A000", "a window in a CASE correlated to an opaque " +
+                       "local with GROUPING SETS is not yet supported")
+        }
         // The window-free CASE would arm-lift whole in place. Under genuinely
         // super-aggregating sets that lift traps — the grand-total `()` arm
         // carries no value for the omitted key the guard's correlation reads —

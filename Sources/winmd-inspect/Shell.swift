@@ -171,8 +171,14 @@ internal struct Bind: Metacommand {
   }
 }
 
-/// `.render <interface> <template>` — render a COM interface (or `*` for every
-/// interface) through a bundled Mustache template.
+/// `.render <interface> <template> [--closure]` — render a COM interface (or
+/// `*` for every interface) through a bundled Mustache template.
+///
+/// Without `--closure` the render is the interface's own surface, exactly as
+/// before. With `--closure` and a concrete interface, the render is that
+/// interface plus the transitive closure of its plain (`spec IS NULL`) base and
+/// required interfaces (the E1 edges). `*` keeps meaning the flat enumeration of
+/// every interface, so `--closure` with `*` is the same flat enumeration.
 internal struct Render: Metacommand {
   internal static let spelling = ".render"
 
@@ -182,22 +188,38 @@ internal struct Render: Metacommand {
   /// The template to render it through.
   internal let template: String
 
+  /// Whether to render the interface's transitive base/required-interface
+  /// closure (the `--closure` flag) rather than the interface alone. Ignored for
+  /// `*`, which stays the flat enumeration of every interface.
+  internal let closure: Bool
+
   internal init(_ arguments: Substring) {
     let fields = arguments.split(whereSeparator: \.isWhitespace)
-    if fields.count == 2 {
-      interface = String(fields[0])
-      template = String(fields[1])
+    // The `--closure` flag may appear in any position; the two remaining
+    // whitespace fields are still the interface and template, so a missing
+    // operand leaves them empty and `execute` rejects the command.
+    let operands = fields.filter { $0 != "--closure" }
+    if operands.count == 2 {
+      interface = String(operands[0])
+      template = String(operands[1])
     } else {
       interface = ""
       template = ""
     }
+    closure = fields.contains { $0 == "--closure" }
   }
 
   internal func execute(against shell: inout Shell) throws {
     if interface.isEmpty || template.isEmpty {
       throw Shell.MetaError.unknown(Render.spelling)
     }
-    print(try shell.render(interface, template: template))
+    // A concrete interface under `--closure` renders its base closure; `*`
+    // stays the flat enumeration even when the flag is present.
+    if closure && interface != "*" {
+      print(try shell.render(closure: interface, template: template))
+    } else {
+      print(try shell.render(interface, template: template))
+    }
   }
 }
 
@@ -310,6 +332,7 @@ internal struct Shell: ~Escapable {
     .schema <query>         print a query's result columns without running it
     .read <path>            run a file of `;`-separated SQL statements
     .render <iface> <tmpl>  render an interface (or `*`) through a template
+    .render … --closure     also render the interface's base-interface closure
     .bind <name> <value>    bind a `:name` parameter (no value clears it)
     .template <name> '…'    define an inline Mustache template (multiline
                             single-quoted; `''` for a literal quote; declare
@@ -459,7 +482,7 @@ internal struct Shell: ~Escapable {
     // (`WHERE TypeName = :name OR '*' = :name`). Choosing which rows to emit is
     // the query's job, so render just iterates whatever it returns.
     let selection =
-        try Shell.select(Shell.query(named: "interfaces", search: search))
+        try Shell.statement(Shell.query(named: "interfaces", search: search))
     let interfaces = try session.run(selection, routines,
                                      bindings: ["name": .text(interface)])
     guard interface == "*" || !interfaces.isEmpty else {
@@ -470,87 +493,175 @@ internal struct Shell: ~Escapable {
     var sources = Array<String>()
     sources.reserveCapacity(interfaces.count)
     for found in interfaces {
-      let id = found[0]
-      // The interface's ordered declared generic-parameter names, through the
-      // `generics` view bound by its `Id` — empty for a non-generic interface.
-      // A generic interface declares at least one; its own name then carries a
-      // CLR arity suffix, stripped below. The names thread into the
-      // method/parameter/return decode so a `VAR` spells its declared name
-      // (`Element`) rather than a positional placeholder (`T0`).
-      let names = try declarations(of: id, routines, search: search)
-      // The names supplied to decode when the interface is generic; `nil`
-      // otherwise, so a non-generic interface decodes exactly as before.
-      let generics: Array<String>? = names.isEmpty ? nil : names
-      // The interface's own methods, decoded with its generic names so a `VAR`
-      // spells its declared name. A generic interface that HAS a base renders
-      // only its own surface here; forwarding a base's inherited methods onto
-      // the wrapper is a follow-up.
-      let methods = try self.methods(of: id, routines, search: search,
-                                     generics: generics, in: dialect,
-                                     language: language)
-      // The interface's named base, via the `bases` view bound by its `Id`. The
-      // render query projects only the plain (`TypeRef`/`TypeDef`) bases, whose
-      // simple `TypeName` is keyword-escaped here the way the interface's own
-      // name is; a generic (`TypeSpec`) base is resolved by the `bases` view
-      // but omitted from the render, pending the WinRT generic-inheritance
-      // projection redesign. A rootless interface defaults to the spec's COM
-      // root, except the root interface itself — which inherits nothing, so it
-      // never becomes its own base; an empty `root` applies no default.
-      let lineage =
-          try Shell.select(Shell.query(named: "bases", search: search))
-      let bases = try session.run(lineage, routines,
-                                  bindings: ["parent": id])
-      let base: String? = if let inherited = bases.first {
-        language.escape(inherited[0].text)
-      } else if language.root.isEmpty || found[2].text == language.root {
-        nil
-      } else {
-        language.root
-      }
-      // A generic interface's own `TypeName` carries the CLR arity suffix
-      // (`IVector``1`); strip it — the decode tier strips it only for a
-      // `GENERICINST` use, so the declaration name must be stripped here — so
-      // the emitted name is `IVector`, its `<T>` clause supplied separately.
-      // The keyword escape (`SANITIZE`) is applied HERE, on the STRIPPED name,
-      // not in the `interfaces` query: escaping the suffixed name would spare a
-      // generic whose stripped name is a keyword (`protocol``1` is not the
-      // reserved word `protocol`), leaving `public struct protocol` to be
-      // emitted. Escaping after the strip is why the query projects the raw
-      // `TypeName` — the interface's own name is the one identifier the strip
-      // must precede the escape for, so its escape lives in Swift, not the SQL.
-      let stripped = String(found[2].text.prefix { $0 != "`" })
-      let name = language.escape(stripped)
-      // The ABI-protocol name is the wrapper's own name suffixed with `ABI`,
-      // used for BOTH the ABI protocol's declaration and the wrapper's `base:
-      // any …ABI<…>` existential. The `ABI` suffix must precede the escape (the
-      // same order the base-name spelling uses): a keyword name's `<name>ABI`
-      // is never itself a keyword (no Swift keyword ends in `ABI`), so escaping
-      // the SUFFIXED name is a no-op yielding a plain `protocolABI` — whereas
-      // escaping FIRST then appending `ABI` would splice a backtick pair into
-      // the middle (`` `protocol`ABI ``), which Swift cannot parse.
-      let abi = language.escape(stripped + "ABI")
-      var context: Dictionary<String, Any> = [
-        "name": name,
-        "abi": abi,
-        "iid": found[3].text,
-        "namespace": found[1].text,
-        "methods": methods,
-      ]
-      // An absent `base` skips the template's `{{#base}}` inheritance clause.
-      if let base { context["base"] = base }
-      // A generic interface carries its `generic` flag and its ordered clause
-      // `generics` (each with a `last` flag for comma separation); a
-      // non-generic one carries neither, so the template's `{{#generic}}` guard
-      // leaves its output byte-identical to today's.
-      if let generics {
-        context["generic"] = true
-        context["generics"] = generics.enumerated().map { index, name in
-          ["name": name, "last": index == generics.count - 1]
-        }
-      }
-      sources.append(mustache.render(context))
+      sources.append(try emit(found, through: mustache, routines: routines,
+                              in: dialect, language: language, search: search))
     }
     return sources.joined(separator: "\n")
+  }
+
+  /// Renders the transitive closure of the interface named `root` and its plain
+  /// (`spec IS NULL`) base and required interfaces — the E1 edges — through the
+  /// named Mustache template.
+  ///
+  /// The setup is the flat render's: the template names its target language, and
+  /// the render resolves against the language spec's UDFs merged with the
+  /// session's routines. The root selection is the same `interfaces` query, so a
+  /// name no interface bears raises `RenderError.interface`; a simple name borne
+  /// by more than one namespace seeds each match. From each seed the walk visits
+  /// the base and required interfaces depth-first, emitting a base before the
+  /// interface that refines it, rendering each interface once (dedup by its local
+  /// `TypeDef` Id). The per-interface body is the one `emit` the flat render
+  /// runs, so the closure reuses the decode and emit rather than duplicating it.
+  internal borrowing func render(closure root: String,
+                                 template: String) throws -> String {
+    var body = try self.template(named: template, search: search)
+    let language = Shell.language(declaredIn: &body, search: search)
+    let routines = language.routines.merging(session.functions)
+    let dialect = language.dialect
+    let selection =
+        try Shell.statement(Shell.query(named: "interfaces", search: search))
+    let roots = try session.run(selection, routines,
+                                bindings: ["name": .text(root)])
+    guard !roots.isEmpty else { throw RenderError.interface(root) }
+
+    let mustache = try MustacheTemplate(string: body)
+    // The interfaces already emitted, keyed on their local `TypeDef` Id, so the
+    // mutually referential interface graph terminates and each renders once.
+    var visited = Set<Int>()
+    var sources = Array<String>()
+    for seed in roots {
+      try walk(seed, visited: &visited, into: &sources, through: mustache,
+               routines: routines, in: dialect, language: language,
+               search: search)
+    }
+    return sources.joined(separator: "\n")
+  }
+
+  /// Emits the interface `found` and, first, the transitive closure of its plain
+  /// (`spec IS NULL`) base and required interfaces — a depth-first post-order
+  /// over the E1 edges, so a base precedes the interface refining it.
+  ///
+  /// The `requires` query resolves each base and required interface to its local
+  /// interface `TypeDef` row keyed on namespace and name, so a base that resolves
+  /// to no local interface `TypeDef` — an external `TypeRef`-only frontier, or a
+  /// local type that is no interface — is not returned and the walk simply stops
+  /// there. The visited set (the local `TypeDef` Id) renders each interface once
+  /// and terminates a cycle; the bases are walked in a stable namespace-then-name
+  /// order so the emission is deterministic.
+  private borrowing func walk(_ found: Array<Value>, visited: inout Set<Int>,
+                              into sources: inout Array<String>,
+                              through mustache: MustacheTemplate,
+                              routines: Routines, in dialect: Dialect,
+                              language: Language,
+                              search: Array<String>) throws {
+    guard visited.insert(found[0].integer).inserted else { return }
+    let query =
+        try Shell.statement(Shell.query(named: "requires", search: search))
+    let bases = try session.run(query, routines,
+                                bindings: ["parent": found[0]])
+    let ordered = bases.sorted {
+      ($0[1].text, $0[2].text) < ($1[1].text, $1[2].text)
+    }
+    for base in ordered {
+      try walk(base, visited: &visited, into: &sources, through: mustache,
+               routines: routines, in: dialect, language: language,
+               search: search)
+    }
+    sources.append(try emit(found, through: mustache, routines: routines,
+                            in: dialect, language: language, search: search))
+  }
+
+  /// Renders the single interface `found` — its `Id`, namespace, name, and
+  /// `iid`, the row shape the `interfaces` and `requires` queries share —
+  /// through `mustache`, the per-interface body the flat render and the
+  /// `--closure` walk both run.
+  ///
+  /// Decoding the interface's declared generics, methods, and base is the same
+  /// work either path needs; wrapping it here is what lets the closure worklist
+  /// reuse the decode and emit rather than duplicate them.
+  private borrowing func emit(_ found: Array<Value>,
+                              through mustache: MustacheTemplate,
+                              routines: Routines, in dialect: Dialect,
+                              language: Language,
+                              search: Array<String>) throws -> String {
+    let id = found[0]
+    // The interface's ordered declared generic-parameter names, through the
+    // `generics` view bound by its `Id` — empty for a non-generic interface.
+    // A generic interface declares at least one; its own name then carries a
+    // CLR arity suffix, stripped below. The names thread into the
+    // method/parameter/return decode so a `VAR` spells its declared name
+    // (`Element`) rather than a positional placeholder (`T0`).
+    let names = try declarations(of: id, routines, search: search)
+    // The names supplied to decode when the interface is generic; `nil`
+    // otherwise, so a non-generic interface decodes exactly as before.
+    let generics: Array<String>? = names.isEmpty ? nil : names
+    // The interface's own methods, decoded with its generic names so a `VAR`
+    // spells its declared name. A generic interface that has a base renders
+    // only its own surface here; forwarding a base's inherited methods onto
+    // the wrapper is a follow-up.
+    let methods = try self.methods(of: id, routines, search: search,
+                                   generics: generics, in: dialect,
+                                   language: language)
+    // The interface's named base, via the `bases` view bound by its `Id`. The
+    // render query projects only the plain (`TypeRef`/`TypeDef`) bases, whose
+    // simple `TypeName` is keyword-escaped here the way the interface's own
+    // name is; a generic (`TypeSpec`) base is resolved by the `bases` view
+    // but omitted from the render, pending the WinRT generic-inheritance
+    // projection redesign. A rootless interface defaults to the spec's COM
+    // root, except the root interface itself — which inherits nothing, so it
+    // never becomes its own base; an empty `root` applies no default.
+    let lineage =
+        try Shell.statement(Shell.query(named: "bases", search: search))
+    let bases = try session.run(lineage, routines, bindings: ["parent": id])
+    let base: String? = if let inherited = bases.first {
+      language.escape(inherited[0].text)
+    } else if language.root.isEmpty || found[2].text == language.root {
+      nil
+    } else {
+      language.root
+    }
+    // A generic interface's own `TypeName` carries the CLR arity suffix
+    // (`IVector``1`); strip it — the decode tier strips it only for a
+    // `GENERICINST` use, so the declaration name must be stripped here — so
+    // the emitted name is `IVector`, its `<T>` clause supplied separately.
+    // The keyword escape (`SANITIZE`) is applied here, on the stripped name,
+    // not in the `interfaces` query: escaping the suffixed name would spare a
+    // generic whose stripped name is a keyword (`protocol``1` is not the
+    // reserved word `protocol`), leaving `public struct protocol` to be
+    // emitted. Escaping after the strip is why the query projects the raw
+    // `TypeName` — the interface's own name is the one identifier the strip
+    // must precede the escape for, so its escape lives in Swift, not the SQL.
+    let stripped = String(found[2].text.prefix { $0 != "`" })
+    let name = language.escape(stripped)
+    // The ABI-protocol name is the wrapper's own name suffixed with `ABI`,
+    // used for both the ABI protocol's declaration and the wrapper's `base:
+    // any …ABI<…>` existential. The `ABI` suffix must precede the escape (the
+    // same order the base-name spelling uses): a keyword name's `<name>ABI`
+    // is never itself a keyword (no Swift keyword ends in `ABI`), so escaping
+    // the suffixed name is a no-op yielding a plain `protocolABI` — whereas
+    // escaping first then appending `ABI` would splice a backtick pair into
+    // the middle (`` `protocol`ABI ``), which Swift cannot parse.
+    let abi = language.escape(stripped + "ABI")
+    var context: Dictionary<String, Any> = [
+      "name": name,
+      "abi": abi,
+      "iid": found[3].text,
+      "namespace": found[1].text,
+      "methods": methods,
+    ]
+    // An absent `base` skips the template's `{{#base}}` inheritance clause.
+    if let base { context["base"] = base }
+    // A generic interface carries its `generic` flag and its ordered clause
+    // `generics` (each with a `last` flag for comma separation); a
+    // non-generic one carries neither, so the template's `{{#generic}}` guard
+    // leaves its output byte-identical to today's.
+    if let generics {
+      context["generic"] = true
+      context["generics"] = generics.enumerated().map { index, name in
+        ["name": name, "last": index == generics.count - 1]
+      }
+    }
+    return mustache.render(context)
   }
 
   /// The template method entries for the interface at `id`, in declaration
@@ -568,12 +679,13 @@ internal struct Shell: ~Escapable {
                                  generics: Array<String>?, in dialect: Dialect,
                                  language: Language) throws
       -> Array<Dictionary<String, Any>> {
-    let plan = try Shell.select(Shell.query(named: "methods", search: search))
+    let plan =
+        try Shell.statement(Shell.query(named: "methods", search: search))
     let rows = try session.run(plan, routines, bindings: ["parent": id])
     var methods = Array<Dictionary<String, Any>>()
     methods.reserveCapacity(rows.count)
     for method in rows {
-      let selection = try Shell.select(Shell.query(named: "params",
+      let selection = try Shell.statement(Shell.query(named: "params",
                                                    search: search))
       let params = try session.run(selection, routines,
                                    bindings: ["parent": method[0]])
@@ -659,7 +771,7 @@ internal struct Shell: ~Escapable {
       -> Array<String> {
     if session.storage.opened("GenericParam") == nil { return [] }
     let clause =
-        try Shell.select(Shell.query(named: "generics", search: search))
+        try Shell.statement(Shell.query(named: "generics", search: search))
     let declared = try session.run(clause, routines, bindings: ["parent": id])
     return declared.map(\.first!.text)
   }
@@ -756,17 +868,24 @@ internal struct Shell: ~Escapable {
     return Headers.syntactic(of: statement, rows)
   }
 
-  /// Parses `text` as a `SELECT`, returning its `SQLEngine.Query`.
+  /// Parses `text` as a row-producing statement, returning its `Statement`.
   ///
-  /// The render's queries are static, well-formed `SELECT`s, so a parse failure
-  /// or a non-`SELECT` is a programming error; it surfaces as the thrown error.
-  /// The return type is spelled `SQLEngine.Query` — the module's own `Query` is
-  /// the `ParsableCommand` subcommand, not the SQL AST.
-  private static func select(_ text: String) throws -> SQLEngine.Query {
-    guard case let .select(query) = try Statement(parsing: text) else {
-      throw SQLError.incomplete(expected: "a SELECT")
+  /// The render's queries are static, well-formed row producers — a plain
+  /// `SELECT` or a `WITH` whose trailing query is one (`requires` resolves a
+  /// reference's scope chain through a recursive CTE) — so a parse failure or a
+  /// non-producing statement (a `CREATE`) is a programming error and surfaces as
+  /// the thrown error. A `Statement` is returned rather than a bare
+  /// `SQLEngine.Query` so the `run(_:routines:bindings:)` Statement overload
+  /// keeps a `WITH`'s CTEs in scope for its trailing query; a plain `SELECT`
+  /// runs identically through it.
+  private static func statement(_ text: String) throws -> SQLEngine.Statement {
+    let parsed = try SQLEngine.Statement(parsing: text)
+    switch parsed {
+    case .select, .with:
+      return parsed
+    case .create, .function, .explain:
+      throw SQLError.incomplete(expected: "a query")
     }
-    return query
   }
 
   /// The target-language spec a template body declares, consuming its leading

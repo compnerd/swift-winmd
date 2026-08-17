@@ -54,6 +54,20 @@ public import WinMD
 // MARK: - Catalog
 
 extension WinMD.Storage: SQLEngine.Catalog {
+  /// The optional tables the bundled queries reference — tables ECMA-335 lets a
+  /// database omit from the tables stream (`TypeSpec` §II.22.39 when nothing is
+  /// generic-instantiated, `NestedClass` §II.22.32 when nothing nests) that a
+  /// bundled view or the closure walk still names. `table(named:)` resolves an
+  /// absent one to an empty relation and `relations()` enumerates it, so a
+  /// `SELECT … FROM` such a table reads no rows rather than faulting on a
+  /// missing relation. Only these are synthesised — not the whole table
+  /// registry — so `INFORMATION_SCHEMA` still enumerates exactly the
+  /// physically-present tables plus the referenced optionals.
+  private static var optionals: Array<(name: String, schema: TableSchema.Type)> {
+    [(name: "TypeSpec", schema: Metadata.Tables.TypeSpec.self),
+     (name: "NestedClass", schema: Metadata.Tables.NestedClass.self)]
+  }
+
   /// The relation named `name`, resolved case-insensitively against the open
   /// tables' schema names.
   ///
@@ -68,41 +82,38 @@ extension WinMD.Storage: SQLEngine.Catalog {
         return WinMDRelation(self, tables[index])
       }
     }
-    // `TypeSpec` (ECMA-335 §II.22.39) is an optional table — a database with no
-    // generic instantiation omits it from the tables stream — yet the bundled
-    // `identities`/`bases` views union a `TypeSpec` arm. Resolve an absent
-    // `TypeSpec` to an empty relation so such a view reads no rows rather than
-    // faulting on a missing relation.
-    if name.caseInsensitiveCompare("TypeSpec") == .orderedSame {
-      return WinMDRelation(self, .empty(Metadata.Tables.TypeSpec.self))
+    // An optional table (see `optionals`) the tables stream omits resolves to
+    // an empty relation, so a bundled view or the closure walk that names it
+    // reads no rows rather than faulting on a missing relation.
+    for entry in WinMD.Storage.optionals
+        where name.caseInsensitiveCompare(entry.name) == .orderedSame {
+      return WinMDRelation(self, .empty(entry.schema))
     }
     return nil
   }
 
   /// The schema names of every base relation — the `INFORMATION_SCHEMA`
   /// overlay's base-relation enumeration, mapped from the database's open
-  /// tables, plus the synthetic `TypeSpec` when the physical table is absent.
+  /// tables, plus each synthetic optional (see `optionals`) whose physical
+  /// table is absent.
   ///
-  /// `table(named:)` resolves an absent `TypeSpec` (ECMA-335 §II.22.39, an
-  /// optional table) to an empty relation, so the enumeration must name it too:
-  /// `relations()` must list every base relation `table(named:)` resolves, or
-  /// `INFORMATION_SCHEMA` would omit a `TypeSpec` a `SELECT … FROM TypeSpec`
-  /// still reads. A database with a generic instantiation has the table
-  /// physically and needs no synthetic entry — appended only when absent, so
-  /// the name is never duplicated.
+  /// `table(named:)` resolves an absent optional table to an empty relation, so
+  /// the enumeration must name it too: `relations()` must list every base
+  /// relation `table(named:)` resolves, or `INFORMATION_SCHEMA` would omit a
+  /// table a `SELECT … FROM` it still reads. A database that has the physical
+  /// table needs no synthetic entry — a name is appended only when absent, so it
+  /// is never duplicated.
   public borrowing func relations() -> Array<String> {
     var names = Array<String>()
-    names.reserveCapacity(tables.count + 1)
-    var spec = false
+    names.reserveCapacity(tables.count + WinMD.Storage.optionals.count)
     for index in 0 ..< tables.count {
       names.append("\(tables[index].description)")
-      if tables[index].description.caseInsensitiveCompare("TypeSpec")
-          == .orderedSame {
-        spec = true
-      }
     }
-    if !spec {
-      names.append("TypeSpec")
+    for entry in WinMD.Storage.optionals
+        where !names.contains(where: {
+          $0.caseInsensitiveCompare(entry.name) == .orderedSame
+        }) {
+      names.append(entry.name)
     }
     return names
   }

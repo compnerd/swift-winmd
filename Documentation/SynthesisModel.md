@@ -20,14 +20,15 @@ it.
 | Layer | Role (ANSI-SPARC) | What it is | Where it lives |
 | --- | --- | --- | --- |
 | Physical / internal | Internal schema | ECMA-335 tables, heaps, coded indices | `Sources/WinMD/` |
-| Conceptual | Conceptual schema | metadata as relations: real columns + `Id`/owner FK + decoded join keys | `Sources/winmd-inspect/Database+SQL.swift` |
-| External | External schema | COM-interface *views* (`interfaces`/`methods`/`params`/`bases`) | `Sources/winmd-inspect/Resources/Queries/*.sql` |
+| Conceptual | Conceptual schema | metadata as relations: real columns + `Id`/owner FK + decoded join keys | `Sources/SQLEngineWinMD/Database+SQL.swift` |
+| External | External schema | COM-interface *views* (`interfaces`/`methods`/`params`/`bases`/`generics`) | `Sources/SQLEngineWinMD/Resources/Queries/*.sql` |
 | Federation | Component-schema codecs | signature → type spelling; GuidAttribute blob → IID; coded index → join key | `Sources/WinMDSynthesis/`, the decoded columns in `Database+SQL.swift` |
 | Presentation | — | Mustache template rendering rows to source | `Sources/winmd-inspect/Shell.swift` |
 
-Underneath all of it is a **generic SQL engine** (`Sources/SQL/`) that knows
-nothing of WinMD. It plans and executes against four adapter protocols; WinMD is
-just one `Catalog` it happens to run over.
+Underneath all of it is a **generic SQL engine** — the `SQLEngine` module in the
+nested `SwiftSQL` package — that knows nothing of WinMD. It plans and executes
+against four adapter protocols; WinMD is just one `Catalog` it happens to run
+over.
 
 ```
   COM interface source                      .render  (Mustache template)
@@ -58,9 +59,10 @@ strides. It has no notion of what a COM interface is.
 
 ## The generic SQL engine
 
-`Sources/SQL/` is a standalone relational engine — lexer, parser, operator
-algebra — that never imports `WinMD`. It runs entirely against four
-`~Escapable` adapter protocols (`Sources/SQL/Adapter.swift`):
+The `SQLEngine` module (`SwiftSQL/Sources/SQLEngine/`) is a standalone
+relational engine — lexer, parser, operator algebra — that never imports
+`WinMD`. It runs entirely against four `~Escapable` adapter protocols
+(`SwiftSQL/Sources/SQLEngine/Adapter.swift`):
 
 - **`Catalog`** resolves a relation `name` to a `Table` (and a `view(named:)`
   for registered views).
@@ -73,8 +75,10 @@ algebra — that never imports `WinMD`. It runs entirely against four
   for the synthesis path: a `GuidAttribute`'s value arrives as a `#Blob`, and
   the render's `GUID` UDF (below) turns that blob into an IID string.
 
-`Engine.run(_:_:_:bindings:)` (`Sources/SQL/Engine.swift`) plans and executes a
-`Query` in three phases — **compile → optimise → execute**:
+`Catalog.run(_:_:bindings:)` — a `Catalog` extension method in
+`SwiftSQL/Sources/SQLEngine/Engine.swift`, called as `catalog.run(query,
+routines, bindings:)` — plans and executes a `Query` in three phases —
+**compile → optimise → execute**:
 
 1. **Compile** shapes a logical operator tree in dense slot space:
    `Project(Sort(Select(Scan)))` for a single relation, the same over a
@@ -94,35 +98,40 @@ layer relies on:
 
 - **Three-valued logic.** `NULL` on either side of a comparison yields UNKNOWN;
   Kleene `AND`/`OR`/`NOT`; admission requires a definite `true`
-  (`Sources/SQL/Filter.swift`). `IS [NOT] NULL` (`Predicate.null`) is a definite
-  test, never UNKNOWN — load-bearing for the `params` view (below).
+  (`SwiftSQL/Sources/SQLEngine/Filter.swift`). `IS [NOT] NULL`
+  (`Predicate.null`) is a definite test, never UNKNOWN — load-bearing for the
+  `params` view (below).
 - **Multi-way joins** built as a left-deep chain, each `ON` equality optimised
   into an index-nested-loop join over a seekable key.
 - **`CREATE VIEW`** (`Statement.create(name:view:)`) registers a named `Query`
   that the catalog resolves and the engine compiles as a derived sub-plan,
   shadowing a base table of the same name.
-- **`UNION` / `UNION ALL`** (`Query.union(_:_:all:)`), concatenating arms with
-  optional deduplication.
+- **`UNION` / `UNION ALL`** (`Query.Body.setop(.union, _, _, all:)`, the node
+  the `INTERSECT`/`EXCEPT` operators share), concatenating arms with optional
+  deduplication.
 - **Bound parameters** (`:name`, `Predicate.bound`) supplied through the
   `bindings: Bindings` argument — the engine's **correlated-subquery primitive**:
   binding a parent row's key into a child query is how the render walks a
   one-to-many relationship one level at a time.
-- **Registered scalar functions** (`Routines`, `Sources/SQL/Function.swift`) —
+- **Registered scalar functions** (`Routines`,
+  `SwiftSQL/Sources/SQLEngine/Function.swift`) —
   the engine's extension point. Two kinds matter here: the WinMD-domain
   `GUID(blob)` UDF, which decodes a `GuidAttribute` value blob to the UUID it
   names (the `interfaces` view spells its `iid` through it), and the
   target-language `SANITIZE` UDF (below). Both are values a query projects rather
   than logic in the binary. A registered aggregate (`COUNT`/`SUM`/`MIN`/`MAX`/
-  `AVG`, `Sources/SQL/Aggregate.swift`) exists for interactive use but the
+  `AVG`, `SwiftSQL/Sources/SQLEngine/Aggregate.swift`) exists for interactive
+  use but the
   synthesis views do not lean on it.
 
 The engine yields typed `Value` rows, never rendered text.
 
 ## Conceptual schema — the WinMD → SQL adapter
 
-`Sources/winmd-inspect/Database+SQL.swift` makes a `WinMD.Storage` an
-`SQL.Catalog` directly: the borrowed storage *is* the catalog, `WinMDRelation`
-is a `Table`, `WinMDCursor` a `Cursor`, `WinMDRow` a `Row`. This is the
+`Sources/SQLEngineWinMD/Database+SQL.swift` makes a `WinMD.Storage` an
+`SQLEngine.Catalog` directly: the borrowed storage *is* the catalog,
+`WinMDRelation` is a `Table`, `WinMDCursor` a `Cursor`, `WinMDRow` a `Row`. This
+is the
 conceptual schema — the metadata presented as relations a query can navigate.
 
 A relation's **real columns** are its ECMA-335 fields (a `#Strings` cell typed
@@ -217,8 +226,8 @@ relationships, and so they are not expressed in SQL.
 ## External schema — the COM-interface views
 
 This is where the logical schema lives. The bundled views — the
-`Resources/Queries/*.sql` that `Shell.bundled()` parses and registers — express,
-*as SQL*, what a COM interface is in terms of the conceptual schema:
+`Resources/Queries/*.sql` that `Session.bundled(search:)` parses and registers —
+express, *as SQL*, what a COM interface is in terms of the conceptual schema:
 
 - **`interfaces`** — an interface's IID *is the GuidAttribute it carries*. The
   view navigates `TypeDef → CustomAttribute` to the attribute, then on to its
@@ -245,6 +254,15 @@ This is where the logical schema lives. The bundled views — the
   two `UNION`ed: `i.Interface_TypeRef → TypeRef` for a cross-file base and
   `i.Interface_TypeDef → TypeDef` for a same-file one, each projecting the base
   type's `TypeName` as `base`.
+- **`generics`** — a generic interface's declared type parameters are its
+  `GenericParam` rows. Unlike `methods`/`params`, `GenericParam` is not
+  list-owned: its `Owner` is a `TypeOrMethodDef` coded index, so the view
+  correlates `:parent` against the coded-index arm `Owner_TypeDef` (that
+  index's `TypeDef` arm, the same `<Column>_<Target>` decode `bases` joins
+  through) — `WHERE Owner_TypeDef = :parent` — selecting each parameter's
+  `Name` and `Number` ordered by `Number`, so the render can spell a `VAR` by
+  its declared name rather than a positional placeholder — empty for a
+  non-generic interface.
 
 The point: "an interface's IID is the GuidAttribute it carries" and "its base is
 its InterfaceImpl" are **joins and filters in SQL**, not facts hardcoded in
@@ -277,17 +295,24 @@ no code change.
 
 1. Run `interfaces` for every interface's `Id`, namespace, `SANITIZE`d name, and
    `iid`, then keep the one whose name matches (or all of them for `*`).
-2. Bind that `Id` as `:parent` and run `methods` (each `Name` `SANITIZE`d) and
+2. Bind that `Id` as `:parent` and run `generics` for the interface's declared
+   type-parameter names, ordered by `Number` — empty for a non-generic
+   interface. These names thread into the signature decode of the next step, so
+   a `VAR` spells its declared name (`Element`) rather than a positional
+   placeholder (`T0`), and they enter the template context as the interface's
+   generic parameter list.
+3. Against the same `:parent`, run `methods` (each `Name` `SANITIZE`d) and
    decode each method's return type from its signature with the `Dialect`,
-   omitting the clause when it is the spec's no-value `void`; then bind *its*
-   `Id` as `:parent` and run `params` — the correlated walk down the
-   one-to-many relationships, one bound-parameter level at a time. The return
-   pseudo-parameter (`Sequence == 0`) is dropped, and each real parameter's type
-   is decoded at render time from its signature position.
-3. Bind the interface's `Id` and run `bases`; a rootless interface defaults to
+   threading the step-2 generic names, and omitting the clause when it is the
+   spec's no-value `void`; then bind *its* `Id` as `:parent` and run `params` —
+   the correlated walk down the one-to-many relationships, one bound-parameter
+   level at a time. The return pseudo-parameter (`Sequence == 0`) is dropped,
+   and each real parameter's type is decoded at render time from its signature
+   position with the same generic names.
+4. Bind the interface's `Id` and run `bases`; a rootless interface defaults to
    the spec's COM `root`, except the root interface itself, which inherits
    nothing (so `IUnknown` never becomes its own base).
-4. Render the context through the template, which emits the `@com(interface:)`
+5. Render the context through the template, which emits the `@com(interface:)`
    attribute, `public protocol <name>` with an optional `: <base>` clause, and
    one `func` requirement per method with an optional ` -> <returns>` clause —
    each optional driven off the value's *presence* (`{{#base}}`/`{{#returns}}`),

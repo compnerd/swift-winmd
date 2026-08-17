@@ -6,7 +6,10 @@
 /// The grammar is the minimal dialect, extended with a chain of joins:
 ///
 /// ```
-/// statement      := with | query | create
+/// statement      := explain | with | query | create
+/// explain        := EXPLAIN query  // renders the query's physical plan
+///                   // instead of running it; query-scoped, so a WITH or
+///                   // CREATE after EXPLAIN faults as a trailing token
 /// create         := CREATE (view | function)
 /// view           := VIEW identifier
 ///                   ['(' identifier (',' identifier)* ')'] AS query
@@ -34,7 +37,7 @@
 /// tuple          := '(' expression (',' expression)* ')'
 /// select         := SELECT [DISTINCT | ALL] projection
 ///                   [FROM relation (join)*
-///                    [where] [group] [having]]
+///                    [where] [group] [having] [windows]]
 /// relation       := (identifier | [LATERAL] derived) [AS identifier]
 ///                   // LATERAL is legal only on a derived table in a join
 /// derived        := '(' query ')' AS identifier  // a derived table (aliased);
@@ -94,8 +97,8 @@
 /// additive       := multiplicative (('+' | '-' | '||') multiplicative)*
 /// multiplicative := factor (('*' | '/') factor)*
 /// factor         := subquery | '(' expression ')' | case | cast | coalesce
-///                 | nullif | position | overlay | literal | aggregate | call
-///                 | column
+///                 | nullif | position | overlay | literal | aggregate
+///                 | windowfn | call | column
 /// subquery       := '(' query ')'  // scalar: yields <= 1 row x 1 col at run
 /// case           := CASE [expression] (WHEN (predicate | expression) THEN
 ///                     expression)+ [ELSE expression] END
@@ -111,6 +114,32 @@
 ///                 | (COUNT | SUM | MIN | MAX | AVG)
 ///                     '(' [DISTINCT | ALL] expression ')' [filter]
 /// filter         := FILTER '(' WHERE predicate ')'
+/// windowfn       := ( ROW_NUMBER '(' ')' | RANK '(' ')' | DENSE_RANK '(' ')'
+///                   | (LEAD | LAG) '(' expression [',' integer
+///                                                   [',' expression]] ')'
+///                   | (FIRST_VALUE | LAST_VALUE) '(' expression ')'
+///                   | NTH_VALUE '(' expression ',' integer ')'   // n >= 1
+///                   | NTILE '(' integer ')'                      // count >= 1
+///                   | (PERCENT_RANK | CUME_DIST) '(' ')'
+///                   | aggregate ) over
+///                   // the ranking/offset/positional/distribution names are
+///                   // context identifiers, recognised only bare (a delimited
+///                   // "RANK" is a scalar name); an aggregate gains a window
+///                   // when over follows, else it collapses its group instead
+/// over           := OVER (identifier | windowspec)
+///                   // OVER name uses a WINDOW definition wholesale; a
+///                   // parenthesised spec may name a base window it refines
+/// windowspec     := '(' [identifier]
+///                       [PARTITION BY expression (',' expression)*]
+///                       [order] [frame] ')'
+/// windows        := WINDOW definition (',' definition)*  // a SELECT's named
+///                   // window clause; an OVER name resolves to one of these
+/// definition     := identifier AS windowspec
+/// frame          := (ROWS | RANGE | GROUPS)
+///                     (BETWEEN bound AND bound | bound)
+///                   // a single bound is BETWEEN bound AND CURRENT ROW
+/// bound          := UNBOUNDED PRECEDING | UNBOUNDED FOLLOWING | CURRENT ROW
+///                 | integer PRECEDING | integer FOLLOWING   // integer >= 0
 /// order          := ORDER BY key (',' key)*
 /// key            := (integer | expression) [ASC | DESC]
 /// limit          := [OFFSET integer ROWS]

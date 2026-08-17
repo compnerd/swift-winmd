@@ -25,17 +25,19 @@ independent:
 
 Three layers keep the textual surface decoupled from any data source:
 
-- A standalone, **generic `SQL` module** — a lexer and parser producing a SQL
-  abstract syntax tree, plus the operator algebra (compiler, optimiser,
+- A standalone, **generic `SQLEngine` module** — a lexer and parser producing a
+  SQL abstract syntax tree, plus the operator algebra (compiler, optimiser,
   executor) that runs a `SELECT` against a set of adapter protocols. It knows
   nothing of WinMD: it plans and executes entirely against `Catalog`, `Table`,
-  `Cursor`, and `Row`, never importing `WinMD`, and is reusable on its own.
+  `Cursor`, and `Row`, never importing `WinMD`, and is reusable on its own. It
+  lives in the nested `SwiftSQL` package, a local path dependency of the root.
 - The **WinMD module** — cursors, typed rows, and foreign-key navigation. It is
-  SQL-agnostic: it never imports the `SQL` module and is fully usable through
-  the Swift combinators alone.
-- **`winmd-inspect`** binds the two: `Database+SQL.swift` makes a WinMD database
-  conform to the `SQL` engine's source protocols, and the `query` subcommand
-  parses the input, runs it on the engine, and renders the resulting values.
+  SQL-agnostic: it never imports the `SQLEngine` module and is fully usable
+  through the Swift combinators alone.
+- The **`SQLEngineWinMD` adapter** binds the two: `Database+SQL.swift` makes a
+  WinMD database conform to the `SQLEngine` source protocols. `winmd-inspect`'s
+  `query` subcommand then parses the input, runs it on the engine over that
+  adapter, and renders the resulting values.
 
 ## The escape boundary
 
@@ -81,16 +83,23 @@ protocols (below), which the WinMD database conforms to.
 
 ## Textual SQL (the engine)
 
-The generic `SQL` module lexes and parses the text into a SQL AST. The dialect
-is a portable subset of ISO SQL — the authoritative grammar is the doc-comment
-atop `Sources/SQL/Parser.swift`. It covers `SELECT` with a projection (`*`, bare
-columns, or expressions with an `AS` alias, optionally `DISTINCT`), an optional
-predicate tree (`= <> < > <= >=`, `IS [NOT] NULL`, composed with
-`AND`/`OR`/`NOT`), `JOIN … ON`, `GROUP BY`/`HAVING`, `ORDER BY` (multi-key), and
-the ISO `OFFSET`/`FETCH` row-limiting clauses; aggregates
-(`COUNT`/`SUM`/`MIN`/`MAX`/`AVG`); `WITH [RECURSIVE]` CTEs and `UNION [ALL]`; and
-the `CREATE VIEW`/`CREATE FUNCTION` definitional statements. Its values are
-integer, double, text, boolean, and blob:
+The generic `SQLEngine` module lexes and parses the text into a SQL AST. The
+dialect tracks ISO-9075 rather than a bespoke grammar — the authoritative
+grammar is the doc-comment atop `SwiftSQL/Sources/SQLEngine/Parser.swift`. It
+covers `SELECT` with a projection (`*`, bare columns, or expressions with an
+`AS` alias, optionally `DISTINCT`), a predicate tree (`= <> < > <= >=`, `IS
+[NOT] NULL`, `IS [NOT] DISTINCT FROM`, `[NOT] LIKE`/`BETWEEN`/`IN`, quantified
+`ANY`/`ALL`/`SOME` and `EXISTS` subqueries, composed with `AND`/`OR`/`NOT`), the
+join family (`[INNER] JOIN … ON`/`USING`, `LEFT`/`RIGHT`/`FULL [OUTER]`,
+`NATURAL`, `CROSS`, and `LATERAL` derived tables), `GROUP BY`/`HAVING` including
+`GROUPING SETS`/`ROLLUP`/`CUBE`, window functions (`OVER` with `PARTITION BY`,
+ordering, and `ROWS`/`RANGE`/`GROUPS` frames), `ORDER BY` (multi-key), and the
+ISO `OFFSET`/`FETCH` row-limiting clauses; aggregates
+(`COUNT`/`SUM`/`MIN`/`MAX`/`AVG`, each with an optional `FILTER`); `VALUES` and
+`TABLE` primaries; `WITH [RECURSIVE]` CTEs and the `UNION`/`INTERSECT`/`EXCEPT
+[ALL]` set operations; the `CREATE VIEW`/`CREATE FUNCTION` definitional
+statements; and `EXPLAIN`. Its values are integer, double, text, boolean, and
+blob:
 
 ```sql
 SELECT TypeName, TypeNamespace FROM TypeDef

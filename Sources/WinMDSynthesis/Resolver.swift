@@ -22,6 +22,61 @@ public struct Identity: Sendable, Hashable {
   }
 }
 
+/// A signature-referenced type paired with the coded-index row the signature
+/// named it through — the `TypeDefOrRef` `rawValue` (its tag and 1-based row).
+///
+/// The `identity` still spells the type (namespace and name); the `token` is
+/// what lets a closure walk resolve the reference to a local definition by
+/// binding the exact `TypeRef`/`TypeDef` Id rather than matching on the name. A
+/// bare name mislocates: two nested types share the empty namespace and a bare
+/// name, and an external `TypeRef` may share a local type's (namespace, name)
+/// yet resolve elsewhere. Binding the row instead routes a `TypeDef` straight to
+/// its definition and a `TypeRef` through the scope-chain resolution the local
+/// resolution needs. A `TypeSpec` names no identity, so a `Resolver` never holds
+/// one — every `Referent` is a `TypeDef` or a `TypeRef`.
+public struct Referent: Sendable, Hashable {
+  /// Which table the coded index names — a local `TypeDef` a caller resolves by
+  /// its Id directly, or a `TypeRef` it resolves through the scope chain. A
+  /// `Resolver` never holds a `TypeSpec` (which names no identity), so a
+  /// reference is one or the other.
+  public enum Kind: Sendable, Hashable {
+    case definition
+    case reference
+  }
+
+  /// The resolved spelling identity — the type's namespace and name.
+  public let identity: Identity
+
+  /// The `TypeDefOrRef` coded-index raw value the signature named the type
+  /// through; `kind` and `row` decode it.
+  public let token: Int
+
+  public init(identity: Identity, token: Int) {
+    self.identity = identity
+    self.token = token
+  }
+
+  /// The decoded coded index — its `tag` selects the table and its `row` is the
+  /// 1-based Id a caller binds to resolve the reference to a local definition.
+  public var coded: TypeDefOrRef {
+    TypeDefOrRef(rawValue: token)
+  }
+
+  /// Whether the reference names a local `TypeDef` directly or a `TypeRef` the
+  /// caller resolves through the scope chain, keyed off the coded index's
+  /// selected table rather than a hard-coded tag.
+  public var kind: Kind {
+    TypeDefOrRef.tables[coded.tag]?.number == Metadata.Tables.TypeDef.number
+        ? .definition : .reference
+  }
+
+  /// The 1-based Id the reference names in the table `kind` selects — the
+  /// `TypeDef` Id for a definition, the `TypeRef` Id for a reference.
+  public var row: Int {
+    coded.row
+  }
+}
+
 /// Resolves a `TypeDefOrRef` (with its `NamedKind`) to an `Identity`.
 ///
 /// The decode tier is injected with a resolver so it needs no live database: a
@@ -68,6 +123,34 @@ public struct Resolver: TypeResolver {
     var table = Dictionary<Int, Identity>()
     try collect(signature, into: &table, with: storage)
     self.init(table)
+  }
+
+  /// Builds the `rawValue → Identity` table from a decoded field signature,
+  /// resolved against a borrowed `Storage` — the field-signature sibling of the
+  /// method-signature initializer.
+  ///
+  /// A field carries a single `type`, so this reuses the same `collect` walk the
+  /// method initializer runs over each parameter, resolving every `TypeDefOrRef`
+  /// the field's type names (directly or nested under a pointer, array, or
+  /// instantiation). A closure walk over a struct's fields (edge E6) resolves a
+  /// field's named value type exactly the way it resolves a method parameter.
+  package init(of signature: FieldSignature,
+               with storage: borrowing Storage) throws(WinMDError) {
+    var table = Dictionary<Int, Identity>()
+    try collect(signature.type, into: &table, with: storage)
+    self.init(table)
+  }
+
+  /// The distinct references the table holds — every type a signature named,
+  /// each paired with the coded-index row it was named through.
+  ///
+  /// The table keys by coded-index raw value, so one `Referent` is yielded per
+  /// distinct `TypeDefOrRef` the signature carries; two uses of the same coded
+  /// row collapse to one. A closure walk reads this to enumerate a signature's
+  /// referenced types without re-walking it, then resolves each — by its `token`
+  /// row, not its name — to a local `TypeDef` and enqueues the unvisited.
+  public var identities: Set<Referent> {
+    Set(table.map { Referent(identity: $0.value, token: $0.key) })
   }
 
   public func resolve(_ reference: TypeDefOrRef, kind: NamedKind) -> Identity? {

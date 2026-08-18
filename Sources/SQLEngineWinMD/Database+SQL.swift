@@ -1114,4 +1114,168 @@ extension WinMD.Storage {
         .decode(parameter: name, generics: generics, with: resolver,
                 dialect: dialect)
   }
+
+  /// The decoded type spelling of the `FieldDef` at 1-based `field` `Id`, in
+  /// `dialect`, or `nil` when the row or its signature does not decode.
+  ///
+  /// The `decode(return:in:)`/`decode(parameter:for:)` sibling for a field: it
+  /// opens the `FieldDef` row, decodes its `declaration` signature, builds a
+  /// `Resolver` over the storage, and spells the field's single `type`. The
+  /// render spells a struct's field (edge E6) and an enum's `value__` underlying
+  /// type through it. `nil` mirrors the same undecodable contract — an absent
+  /// row, an undecodable signature, or an unresolvable one — so the walk can
+  /// treat a malformed field as a frontier.
+  package borrowing func decode(field: Int, in dialect: Dialect) -> String? {
+    guard let table = opened("FieldDef") else { return nil }
+    let cursor = WinMD.Cursor(copy self, table)
+    guard let tuple = cursor[field - 1],
+        let row = Row<Metadata.Tables.FieldDef>(tuple),
+        let signature = try? row.declaration,
+        let resolver = try? Resolver(of: signature, with: self) else {
+      return nil
+    }
+    return signature.type.decode(with: resolver, dialect: dialect)
+  }
+
+  /// The distinct type identities named in the signature of the `MethodDef` at
+  /// 1-based `method` `Id` — the referenced-type set the closure walk enqueues
+  /// (edges E3/E7).
+  ///
+  /// It builds the same per-method `Resolver` the return/parameter decode does,
+  /// but returns the resolved references rather than a text spelling — each an
+  /// identity paired with the coded-index row it was named through, so the walk
+  /// resolves it to a local definition by its exact Id. An absent row, an
+  /// undecodable signature, or an unresolvable one yields the empty set, the
+  /// natural frontier — the walk enqueues nothing for it.
+  package borrowing func identities(method: Int) -> Set<Referent> {
+    guard let table = opened("MethodDef") else { return [] }
+    let cursor = WinMD.Cursor(copy self, table)
+    guard let tuple = cursor[method - 1],
+        let row = Row<Metadata.Tables.MethodDef>(tuple),
+        let signature = try? row.prototype,
+        let resolver = try? Resolver(of: signature, with: self) else {
+      return []
+    }
+    return resolver.identities
+  }
+
+  /// The distinct type identities named in the signature of the `FieldDef` at
+  /// 1-based `field` `Id` — the referenced-type set a struct's field contributes
+  /// to the closure walk (edge E6).
+  ///
+  /// The field sibling of `identities(method:)`: it builds a `Resolver` over
+  /// the field's `declaration` signature and returns its references, the empty
+  /// set on any undecodable row.
+  package borrowing func identities(field: Int) -> Set<Referent> {
+    guard let table = opened("FieldDef") else { return [] }
+    let cursor = WinMD.Cursor(copy self, table)
+    guard let tuple = cursor[field - 1],
+        let row = Row<Metadata.Tables.FieldDef>(tuple),
+        let signature = try? row.declaration,
+        let resolver = try? Resolver(of: signature, with: self) else {
+      return []
+    }
+    return resolver.identities
+  }
+
+  /// The decimal text of the `Constant` row keyed to the `FieldDef` at 1-based
+  /// `field` `Id` — an enum member's raw value (ECMA-335 §II.22.9) — or `nil`
+  /// when the field bears no constant or its value does not decode.
+  ///
+  /// An enum's member fields each carry a `Constant` row whose `Parent`
+  /// (`HasConstant`) coded index names the `FieldDef` and whose `Value` `#Blob`
+  /// holds the literal, typed by the row's `Type` element type. The match is
+  /// the row whose `Parent` decodes to the `FieldDef` tag and the field's `Id`,
+  /// its little-endian value blob formatted signed or unsigned per the element
+  /// type — so an unsigned 64-bit member with bit 63 set stays a positive
+  /// `UInt64` decimal, not a negative `Int` the generated `UInt64` raw value
+  /// would reject. A field with no matching row — every non-literal field —
+  /// yields `nil`.
+  ///
+  /// `Parent` is the table's sort key (§II.22.9), so when this database stores
+  /// the table sorted the match is found by a binary search on the raw coded
+  /// `Parent` column rather than a full scan: a `FieldDef` `Id` `field` encodes
+  /// to the raw cell `(field << HasConstant.bits) | 0` — the tag of `FieldDef`
+  /// within `HasConstant` is `0` — and the sorted column's lower bound lands on
+  /// its unique row. The encoding is a bijection, so the bounded row is the
+  /// exact match; the found row's tag and row are re-verified regardless (a
+  /// belt-and-braces check that also rejects the near-miss the lower bound
+  /// returns when no row encodes `field`). An unsorted table falls back to the
+  /// linear scan, so behaviour is identical either way — a pure speedup.
+  package borrowing func value(field: Int) -> String? {
+    guard let table = opened("Constant") else { return nil }
+    let cursor = WinMD.Cursor(copy self, table)
+    let count = Int(table.rows)
+    // The decoded literal of the `Constant` row at `index` when its `Parent`
+    // names this `FieldDef` — `nil` when it names another member or its value
+    // blob does not decode.
+    func constant(at index: Int) -> String? {
+      guard let tuple = cursor[index],
+          let parent = tuple.ordinal(for: "Parent") else { return nil }
+      // `HasConstant` selects `FieldDef` at tag 0; the row is the 1-based Id.
+      let coded = HasConstant(rawValue: tuple[parent])
+      guard coded.tag == 0, coded.row == field else { return nil }
+      guard let column = tuple.ordinal(for: "Type"),
+          let payload = tuple.ordinal(for: "Value"),
+          let bytes = try? tuple.bytes(of: payload) else {
+        return nil
+      }
+      let element =
+          CorElementType(rawValue: UInt8(truncatingIfNeeded: tuple[column]))
+      return Storage.literal(bytes, of: element)
+    }
+    // Sorted on the raw coded `Parent` key: seek the unique row that encodes
+    // this field (tag 0), matching the quantity the table is physically ordered
+    // by, then re-verify the decoded key on the bounded row.
+    if let key = table.schema.key,
+        sorted & (1 << table.schema.number) != 0 {
+      let encoded = (field << HasConstant.bits) | 0
+      let lower = bound(table, key, encoded, count, strict: false)
+      guard lower < count else { return nil }
+      return constant(at: lower)
+    }
+    // Unsorted: scan the whole table for the field's row.
+    for index in 0 ..< count {
+      if let value = constant(at: index) { return value }
+    }
+    return nil
+  }
+
+  /// The decimal text of the little-endian integer a constant `Value` blob's
+  /// `bytes` encode for the `element` type — an enum member's raw value spelled
+  /// for the generated `rawValue:` literal. It is formatted signed or unsigned
+  /// per the element type, not funnelled through `Int`: an unsigned 64-bit
+  /// value with bit 63 set stays a positive `UInt64` decimal rather than
+  /// turning into a negative `Int` a `UInt64` raw value could not accept.
+  /// `nil` for a non-integer element type or a blob too short for the type's
+  /// width.
+  private static func literal(_ bytes: Array<UInt8>,
+                              of element: CorElementType) -> String? {
+    let width: Int
+    let signed: Bool
+    if element == .etInt1 { (width, signed) = (1, true) }
+    else if element == .etBoolean || element == .etUInt1 {
+      (width, signed) = (1, false)
+    } else if element == .etInt2 { (width, signed) = (2, true) }
+    else if element == .etChar || element == .etUInt2 {
+      (width, signed) = (2, false)
+    } else if element == .etInt4 { (width, signed) = (4, true) }
+    else if element == .etUInt4 { (width, signed) = (4, false) }
+    else if element == .etInt8 { (width, signed) = (8, true) }
+    else if element == .etUInt8 { (width, signed) = (8, false) }
+    else { return nil }
+    guard bytes.count >= width else { return nil }
+    var value: UInt64 = 0
+    for byte in 0 ..< width {
+      value |= UInt64(bytes[byte]) << (8 * byte)
+    }
+    if signed, width < 8, value & (1 << (width * 8 - 1)) != 0 {
+      value |= ~UInt64(0) << (width * 8)
+    }
+    // Format per signedness: a signed element reinterprets the (sign-extended)
+    // bits as `Int64`, so a negative value spells with its minus sign; an
+    // unsigned one spells the `UInt64` directly, so a high-bit-set value stays
+    // positive rather than becoming a negative `Int` a `UInt64` rejects.
+    return signed ? String(Int64(bitPattern: value)) : String(value)
+  }
 }

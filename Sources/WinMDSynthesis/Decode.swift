@@ -426,11 +426,30 @@ extension TypeDefOrRef {
     if identity == kGuid {
       return classification(parameter, dialect: dialect)
     }
-    // A named type's simple name is a bare identifier that may collide with a
-    // target keyword (`protocol`, `repeat`); escape it as the render escapes a
-    // declaration name. A well-known spelling is curated and never a keyword.
-    return dialect.known[identity] ?? dialect.escape(identity.name)
+    // A well-known spelling (a Win32 primitive, curated and never a keyword)
+    // wins first, keyed on the `Identity` — so a known value type keeps its
+    // target name rather than a namespace-qualified path. Otherwise the type
+    // spells through its kind-aware path: a local value type's
+    // namespace-qualified `Namespace.…Name` (from `resolver.spelling(of:)`), or
+    // — for a protocol, a runtime class, or an unresolvable reference the
+    // resolver holds no spelling for — the bare `Identity` name it did before.
+    // Either is a possibly dot-pathed identifier escaped per component
+    // (`dialect.escape` escapes one identifier, so a keyword component like
+    // `repeat` is delimited within the path rather than the whole treated as a
+    // single name); a top-level name has no dot and escapes unchanged.
+    if let known = dialect.known[identity] { return known }
+    return qualify(resolver.spelling(of: self) ?? identity.name, dialect)
   }
+}
+
+/// Escapes a possibly dot-pathed named-type spelling per component through
+/// `dialect`, rejoining with `.` — so a nested type (`Foo.repeat`) escapes each
+/// identifier in turn (`` Foo.`repeat` ``) rather than the path as a whole. A
+/// top-level name (no dot) escapes as the single identifier it is.
+private func qualify(_ name: String, _ dialect: Dialect) -> String {
+  name.split(separator: ".", omittingEmptySubsequences: false)
+      .map { dialect.escape(String($0)) }
+      .joined(separator: ".")
 }
 
 /// The `System.Guid` identity that decodes to `IID`/`CLSID`.
@@ -467,10 +486,21 @@ extension SignatureType {
     // opaque pointer; a generic over it is meaningless, so degrade to that
     // opaque pointer rather than emit `UnsafeMutableRawPointer<…>`.
     if base == dialect.opaque { return base }
-    // Strip the CLR arity suffix, THEN escape the base identifier: the full
-    // `Foo``1` never matches a keyword, so a keyword base (`protocol``1`) must
-    // be escaped after the strip, not before, to spell `` `protocol`<…> ``.
-    let name = dialect.escape(String(base.prefix { $0 != "`" }))
+    // Strip the CLR arity suffix from the base's leaf component, then escape
+    // each dotted component independently through the same `qualify` discipline
+    // the non-generic path uses: the full `Foo``1` never matches a keyword, so
+    // a keyword base must be escaped after the strip, not before. Escaping the
+    // whole dotted string would spare a keyword leaf under a namespace-qualified
+    // base (`Outer.protocol``1` strips to `Outer.protocol`, which is not itself
+    // a keyword), spelling the invalid `Outer.protocol<…>`; escaping per
+    // component delimits the leaf (`Outer.`protocol`<…>`), so the generic and
+    // non-generic paths escape identically.
+    var components =
+        base.split(separator: ".", omittingEmptySubsequences: false)
+            .map(String.init)
+    components[components.count - 1] =
+        String(components[components.count - 1].prefix { $0 != "`" })
+    let name = qualify(components.joined(separator: "."), dialect)
     let arguments = arguments
         .map { $0.decode(parameter: parameter, generics: generics,
                          with: resolver, dialect: dialect) }

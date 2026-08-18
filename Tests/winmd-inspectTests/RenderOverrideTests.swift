@@ -574,6 +574,38 @@ struct RenderCacheTests {
   }
 }
 
+/// Coverage of the flat renderer's top-level template context. The closure work
+/// nests each per-kind projection under a `kind` key (`interface`/`struct`/…)
+/// so one sectioned template renders every kind. That must not regress the flat
+/// renderer, documented as unchanged: an inline or `-I` template written for it
+/// — reading top-level fields such as `{{name}}` — kept working. The fix exposes
+/// the interface projection at the template root for a flat render (`nested`
+/// false), while still binding it under `interface` so the bundled sectioned
+/// template renders too; the closure walk stays sectioned. Pre-fix, a flat
+/// render supplied only the `interface` key, so a top-level `{{name}}` resolved
+/// to the empty string.
+struct RenderFlatTemplateTests {
+  @Test func `a flat render exposes interface fields at the template root`() throws {
+    try RenderOverrideTests.withDirectory { directory in
+      let manager = FileManager.default
+      let templates = URL(fileURLWithPath: "\(directory)/Templates")
+      try manager.createDirectory(at: templates,
+                                  withIntermediateDirectories: true)
+      // A template written for the flat renderer, reading top-level fields.
+      let flat = "{{! language: swift }}\ninterface {{name}}: {{iid}}"
+      try Data(flat.utf8)
+          .write(to: templates.appendingPathComponent("flat.mustache"))
+      try RenderOverrideTests.with { catalog in
+        let shell = Shell(catalog, search: [directory])
+        let rendered = try shell.render("IDerived", template: "flat")
+        // The top-level `{{name}}` resolves to the interface's name, not "" —
+        // the documented flat behaviour the closure nesting must preserve.
+        #expect(rendered.hasPrefix("interface IDerived: "))
+      }
+    }
+  }
+}
+
 /// Coverage of the `.render *` empty-seed guard: a metadata file whose `TypeDef`
 /// rows are all non-interface produces no seed, so `.render *` emits nothing.
 /// The batch shortcuts must not fire in that case — `guids` expands the

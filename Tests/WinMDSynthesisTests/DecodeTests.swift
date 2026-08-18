@@ -249,6 +249,23 @@ struct DecodeTests {
                 == "`protocol`<CInt>")
   }
 
+  @Test func `a nested generic base escapes its keyword leaf per component`() {
+    // A nested generic definition spells its base namespace-qualified by its
+    // enclosing dot-path (`Outer.protocol``1`): the arity suffix must be
+    // stripped from the leaf and each component escaped independently. Escaping
+    // the whole dotted `Outer.protocol` as one spares the keyword leaf (it is
+    // not itself a keyword), spelling the invalid `Outer.protocol<CInt>`; the
+    // per-component escape delimits the leaf, matching the non-generic path.
+    let base = TypeDefOrRef(rawValue: 1)
+    let resolver = Resolver([
+      base.rawValue: Identity(namespace: "NS", name: "Outer.protocol`1"),
+    ])
+    let instance = SignatureType.instance(.named(kind: .class, base),
+                                          [.primitive(.int4)])
+    #expect(instance.decode(with: resolver, dialect: dialect)
+                == "Outer.`protocol`<CInt>")
+  }
+
   @Test func `a generic argument keeps the parameter-name class-ID hint`() {
     let base = TypeDefOrRef(rawValue: 1)
     let guid = TypeDefOrRef(rawValue: 2)

@@ -316,6 +316,14 @@ internal struct Shell: ~Escapable {
   /// varies per execution, so only the parse is shared, changing no result.
   private let queries = Cache()
 
+  /// The namespace-qualification sets the render keys off — the ambiguous
+  /// `TypeName`s the decode spells qualified and the value-type `TypeDef` `Id`s
+  /// the emit wraps in a namespace `enum` — memoised for the shell's lifetime
+  /// (see `Storage.collisions()`). They are a pure function of the immutable
+  /// database, so unlike the per-render `queries` memo they are computed once on
+  /// first use and reused across every render.
+  private let ambiguities = Ambiguities()
+
   /// A batch decode bucketed by owning row `Id` — the `.render *` maps that
   /// replace a per-owner query (`roster` for an interface's methods,
   /// `signatures` for a method's parameters): each owner `Id` maps to the rows
@@ -378,6 +386,21 @@ internal struct Shell: ~Escapable {
     /// No render-query resource of the requested name resolved — neither a `-I`
     /// directory's `Render/<name>.sql` nor the bundled one.
     case query(String)
+    /// Two or more distinct local protocols (interfaces or delegates) of the
+    /// one simple `name`, borne by the listed `namespaces`, would emit as bare
+    /// top-level declarations — a duplicate, uncompilable clash. A protocol
+    /// cannot nest in a namespace `enum` the way a value type disambiguates, so
+    /// the render rejects the closure rather than emit two `public protocol
+    /// <name>`; the request must name one qualified.
+    case ambiguous(String, Array<String>)
+    /// A fabricated namespace `enum` container of `name` — a CLR namespace
+    /// segment of an ambiguous value type the render wraps — collides with an
+    /// emitted top-level declaration of that same `name`, two `public`
+    /// declarations Swift rejects as a redeclaration. Only a value type can be
+    /// namespace-wrapped to disambiguate, so a namespace segment that shadows
+    /// an emitted protocol or bare type has no fallback; the render rejects the
+    /// closure rather than emit the clash.
+    case collision(String)
   }
 
   // MARK: - Execute
@@ -479,6 +502,15 @@ internal struct Shell: ~Escapable {
     // where an override edited between renders was silently ignored while
     // templates and language specs reloaded, is dropped.
     queries.statements.removeAll()
+    // The flat render emits only the requested interface (or, for `*`, every
+    // interface) — never the value-type declarations a signature names, and
+    // never the fabricated namespace `enum` containers a closure wraps an
+    // ambiguous value type in. So it must not namespace-qualify a value-type
+    // reference: a qualified `A.Point` would name a container this render does
+    // not emit. Qualification is a closure-render concern (which both qualifies
+    // and emits the container); the flat render spells every value type bare,
+    // through empty qualification sets.
+    ambiguities.sets = ([], [])
     // The template names its own target language through a leading `{{! language:
     // <name> }}` directive; stripping it yields the body and loads the matching
     // spec, whose render UDF (`SANITIZE`) makes identifier escaping the
@@ -562,7 +594,7 @@ internal struct Shell: ~Escapable {
     for found in interfaces {
       sources.append(try emit(found, through: mustache, routines: routines,
                               in: dialect, language: language, search: search,
-                              inherits: inherits, roster: roster,
+                              nested: false, inherits: inherits, roster: roster,
                               signatures: signatures, sanitized: sanitized))
     }
     return sources.joined(separator: "\n")
@@ -588,6 +620,11 @@ internal struct Shell: ~Escapable {
     // clear it so each named query re-resolves its resource once, honouring an
     // override edited since the last render, then is reused within this one.
     queries.statements.removeAll()
+    // Each render fixes its own qualification sets: a closure restricts them to
+    // its reached declarations (below), so a set an earlier render memoised — a
+    // flat render's empty sets, or a different root's reached ones — must not
+    // leak into this one.
+    ambiguities.sets = nil
     var body = try self.template(named: template, search: search)
     let language = Shell.language(declaredIn: &body, search: search)
     let routines = language.routines.merging(session.functions)
@@ -596,16 +633,401 @@ internal struct Shell: ~Escapable {
     guard !roots.isEmpty else { throw RenderError.interface(root) }
 
     let mustache = try MustacheTemplate(string: body)
-    // The interfaces already emitted, keyed on their local `TypeDef` Id, so the
-    // mutually referential interface graph terminates and each renders once.
+    // The types already walked, keyed on their local `TypeDef` Id, so the
+    // mutually referential type graph terminates and each is visited once. The
+    // walk gathers each reachable type's row and records its spelled-reference
+    // edges, but defers rendering a body: the qualification sets a body is
+    // spelled through are not fixed until the reached set is known (after the
+    // prune), so emitting happens below, once, over the kept nodes.
     var visited = Set<Int>()
-    var sources = Array<String>()
+    var nodes = Array<Array<Value>>()
+    var edges = Dictionary<Int, Array<Int>>()
     for seed in roots {
-      try walk(seed, visited: &visited, into: &sources, through: mustache,
-               routines: routines, in: dialect, language: language,
-               search: search)
+      try walk(seed, visited: &visited, into: &nodes, edges: &edges,
+               routines: routines, in: dialect, search: search)
     }
-    return sources.joined(separator: "\n")
+    // Prune orphan nodes: keep only a type reachable from the seeds through
+    // declarations the closure actually renders. A frontier — a metadata-nested
+    // protocol, or a value type whose enclosing chain is not an emitted
+    // container — is not emittable, so its own dependencies do not propagate,
+    // and a type reached only through it is dropped rather than rendered as an
+    // unreferenced orphan (which can fault collision checks). The enclosing
+    // chain of a kept nested type is kept too, so its container survives.
+    let kept = try prune(nodes, edges: edges,
+                         seeds: roots.map { $0[0].integer })
+    // Fix the qualification sets over the reached declarations alone
+    // (`Storage.collisions(among:)`), so an unreachable same-named type neither
+    // wraps nor faults a reached value type. The closure emit and nest both
+    // read them through `qualifying()`, so a body is spelled with the same set
+    // that nests it, and the reached-only tally is shared by the two.
+    ambiguities.sets =
+        try session.storage.collisions(among: Set(kept.map { $0[0].integer }))
+    // Render each kept node's body now that the reached-only sets are fixed, in
+    // the post-order the walk gathered them, so a dependency precedes the type
+    // naming it and `nest` can fold the flat sequence into its containment
+    // tree.
+    var emissions = Array<Emission>()
+    for node in kept {
+      // A generic interface or delegate — its `TypeName` carries the CLR arity
+      // suffix — additionally declares an `internal protocol <name>ABI` beside
+      // its wrapper; its synthesized name is the arity-stripped name suffixed
+      // with `ABI` and escaped as the wrapper's own name is (`interface`), so
+      // the collision check can count it. A non-generic type synthesizes none.
+      let raw = node[2].text
+      let abi = (node[4].text == "interface" || node[4].text == "delegate")
+          && raw.contains("`")
+          ? language.escape(String(raw.prefix { $0 != "`" }) + "ABI")
+          : nil
+      emissions.append(Emission(id: node[0].integer,
+                                name: Shell.name(node, language),
+                                kind: node[4].text,
+                                abi: abi,
+                                body: try emit(node, through: mustache,
+                                               routines: routines, in: dialect,
+                                               language: language,
+                                               search: search)))
+    }
+    // A nested type is spelled fully qualified in every signature that names it
+    // (`Foo.Bar`), so its declaration must actually nest under its encloser for
+    // the two spellings to agree and for two same-named nested types under
+    // different enclosers not to collide as duplicate top-level declarations.
+    // Fold the flat post-order emission into real Swift nesting, wrapping only
+    // an ambiguous value type in its fabricated namespace `enum` containers.
+    return try nest(emissions, language: language,
+                    wrapping: qualifying().ids)
+  }
+
+  /// The namespace-qualification sets the render keys off for this render: the
+  /// ambiguous `TypeName`s the decode spells qualified, and the value-type
+  /// `Id`s the emit wraps in a namespace `enum`. The decode spelling and the
+  /// emit nesting share this one source, so a reference is spelled with the
+  /// same set that decides whether its container is emitted.
+  ///
+  /// Each render fixes the sets up front, before any emit: the closure render
+  /// to its reached declarations (`Storage.collisions(among:)`), the flat
+  /// render to the empty sets — it emits no value-type or container
+  /// declarations, so it qualifies nothing and spells every value type bare. An
+  /// unset memo therefore never reaches an emit; it defaults to the empty
+  /// (bare) sets rather than qualifying against a tally no declaration backs.
+  private borrowing func qualifying() -> (names: Set<String>, ids: Set<Int>) {
+    ambiguities.sets ?? ([], [])
+  }
+
+  /// Keeps only the emissions reachable from the `seeds` through the emitted
+  /// declarations' spelled references (`edges`), dropping the orphans a
+  /// discarded frontier — or a reference the output never spells (a static
+  /// field, a custom modifier) — leaves behind. An emission that cannot itself
+  /// be emitted (a metadata-nested protocol, or a value type whose enclosing
+  /// chain is not an emitted value-type container) is a frontier: it renders no
+  /// declaration, so its own references do not propagate and a type reached
+  /// only through it is dropped rather than rendered unreferenced (which can
+  /// fault collision checks). The enclosing chain of a kept nested type is kept
+  /// too, so the container that holds it survives.
+  private borrowing func prune(_ nodes: Array<Array<Value>>,
+                               edges: Dictionary<Int, Array<Int>>,
+                               seeds: Array<Int>) throws
+      -> Array<Array<Value>> {
+    var kind = Dictionary<Int, String>(minimumCapacity: nodes.count)
+    for node in nodes { kind[node[0].integer] = node[4].text }
+    // Whether the emission's declaration renders, so its references propagate:
+    // an interface or delegate only at top level (a protocol cannot nest), a
+    // value type only when every enclosing level is an emitted value-type
+    // container — the test `nest` applies before folding a type into the tree.
+    func emittable(_ id: Int) throws -> Bool {
+      guard let leaf = kind[id] else { return false }
+      let chain = try session.storage.nesting(of: id)
+      if leaf == "interface" || leaf == "delegate" { return chain.isEmpty }
+      return chain.allSatisfy {
+        kind[$0.id] == "struct" || kind[$0.id] == "enum"
+      }
+    }
+    var kept = Set<Int>()
+    var queue = seeds
+    while let node = queue.popLast() {
+      guard kept.insert(node).inserted else { continue }
+      for level in try session.storage.nesting(of: node) {
+        queue.append(level.id)
+      }
+      if try emittable(node) { queue.append(contentsOf: edges[node] ?? []) }
+    }
+    return nodes.filter { kept.contains($0[0].integer) }
+  }
+
+  /// Assembles the flat post-order `emissions` into nested Swift declarations —
+  /// an ambiguous value type wrapped under the namespace `enum`s its
+  /// fully-qualified spelling names, every value type nested under its enclosing
+  /// types, each nested protocol dropped — so a declaration's path matches the
+  /// spelling its signatures carry and two same-named types stay distinct.
+  ///
+  /// `ambiguous` is the set of value-type `Id`s the decode spells
+  /// namespace-qualified (`Storage.collisions()`): an ambiguous top-level value
+  /// type is spelled fully qualified — `Windows.Win32.Foundation.Point`,
+  /// `A.B.Outer.Inner` — so its declaration must nest that deep for the two to
+  /// agree, while an unambiguous one spells bare and is a plain root. The
+  /// CLR-namespace segments of an ambiguous type are fabricated as real Swift
+  /// `enum` namespaces above its enclosing chain: unlike a type encloser, a
+  /// namespace is not a real `TypeDef`, so fabricating an `enum` per segment is
+  /// sound here (a real Win32 namespace segment — `Windows`/`Win32`/… — is never
+  /// itself a projected type name; a collision with an emitted type of that name
+  /// is possible in principle but does not arise). The set shares one source
+  /// with the decode, so a nested ambiguous type and its enclosing chain wrap
+  /// together — the outermost encloser of any ambiguous type is itself in
+  /// `ambiguous` — keeping the emitted path and the spelled path in agreement.
+  /// A nested value type (`Foo.Bar`) nests under its immediate encloser, which
+  /// must be
+  /// a real emitted value-type container — an encloser this closure emitted as a
+  /// `struct`/`enum`, never a fabricated namespace `enum` (a fabricated encloser
+  /// would misrepresent an emitted `protocol`, which cannot hold a value type,
+  /// or shadow a runtime `class` the encloser names). Each value type's
+  /// enclosing chain (`storage.nesting(of:)`) is tested end to end: it nests
+  /// only when every level is an emitted value-type container, so `Foo.Bar.Baz`
+  /// nests only if both `Foo` and `Bar` are; a chain with any non-container
+  /// level — a `protocol`, an excluded runtime `class`, or a level not emitted —
+  /// makes it a dropped frontier the consumer defines.
+  ///
+  /// An interface or delegate emits as a Swift `protocol`, which cannot nest in
+  /// any container and is never namespace-qualified: only a top-level one (an
+  /// empty enclosing chain) is a legal root, spelled bare. A metadata-nested
+  /// protocol is a dropped frontier — a bare top-level declaration would neither
+  /// match its metadata-nested spelling nor tell two same-named nested protocols
+  /// apart — so it renders nothing, exactly as a value type with an unusable
+  /// enclosing chain does.
+  ///
+  /// The kept roots — the outermost namespace `enum`s and the top-level
+  /// protocols — render in the post-order the walk emitted them (a container at
+  /// its earliest-emitted descendant), so a dependency precedes the type naming
+  /// it and a top-level type keeps its position. A namespace `enum`'s members
+  /// keep that same earliest order; a real value-type container's nested types
+  /// render in name order for determinism.
+  private borrowing func nest(_ emissions: Array<Emission>,
+                              language: Language,
+                              wrapping ambiguous: Set<Int>) throws -> String {
+    // A node in the containment forest: a real emitted `TypeDef` (keyed by its
+    // local Id) or a fabricated CLR-namespace container (keyed by its raw dotted
+    // path, so every value type in that namespace shares the one container).
+    enum Node: Hashable {
+      case type(Int)
+      case space(String)
+    }
+    // The rendered body, declaration name, and emission position of each emitted
+    // type, keyed by its local `TypeDef` Id.
+    var bodies = Dictionary<Int, String>(minimumCapacity: emissions.count)
+    var declared = Dictionary<Int, String>(minimumCapacity: emissions.count)
+    var index = Dictionary<Int, Int>(minimumCapacity: emissions.count)
+    // The Ids emitted as value-type containers — a `struct` or `enum` — the only
+    // kinds a nested type may legally nest inside.
+    var container = Set<Int>()
+    // The synthesized ABI-protocol name of each generic interface/delegate — an
+    // `internal protocol <name>ABI` the body declares that its label does not
+    // name — so the per-scope collision check counts it alongside the labels.
+    var abi = Dictionary<Int, String>(minimumCapacity: emissions.count)
+    for (position, emission) in emissions.enumerated() {
+      bodies[emission.id] = emission.body
+      declared[emission.id] = emission.name
+      index[emission.id] = position
+      if emission.kind == "struct" || emission.kind == "enum" {
+        container.insert(emission.id)
+      }
+      if let name = emission.abi { abi[emission.id] = name }
+    }
+    // The containment forest: the roots (namespace `enum`s and top-level
+    // protocols), each node's direct children. A dropped frontier is recorded
+    // nowhere, so it never renders.
+    var roots = Array<Node>()
+    var children = Dictionary<Node, Array<Node>>()
+    // The namespace nodes already linked into the forest, so a shared namespace
+    // is fabricated once.
+    var linked = Set<Node>()
+    // Fabricates the namespace-container chain for `segments` (raw, outermost
+    // first), linking each level under the previous — the outermost a root — and
+    // returns the deepest node, the immediate parent of a top-level value type.
+    func space(_ segments: Array<Substring>) -> Node {
+      var path = ""
+      var parent: Node?
+      var node = Node.space("")
+      for segment in segments {
+        path = path.isEmpty ? String(segment) : path + "." + segment
+        node = .space(path)
+        if linked.insert(node).inserted {
+          if let parent {
+            children[parent, default: []].append(node)
+          } else {
+            roots.append(node)
+          }
+        }
+        parent = node
+      }
+      return node
+    }
+    for emission in emissions {
+      let chain = try session.storage.nesting(of: emission.id)
+      guard container.contains(emission.id) else {
+        // An interface or delegate emits as a `protocol`: a top-level one is a
+        // root, a metadata-nested one a dropped frontier.
+        if chain.isEmpty { roots.append(.type(emission.id)) }
+        continue
+      }
+      // A value type nests only when every enclosing level is an emitted
+      // value-type container; any other level makes it a dropped frontier.
+      guard chain.allSatisfy({ container.contains($0.id) }) else { continue }
+      if let inner = chain.last {
+        children[.type(inner.id), default: []].append(.type(emission.id))
+      } else if ambiguous.contains(emission.id) {
+        // An ambiguous top-level value type nests under its CLR-namespace
+        // `enum`s, matching the namespace-qualified spelling its references
+        // carry; an empty namespace (the global namespace) leaves it a plain
+        // root.
+        let raw = try session.storage.namespace(of: emission.id)
+        let segments = raw.split(separator: ".",
+                                 omittingEmptySubsequences: false)
+        if segments.isEmpty {
+          roots.append(.type(emission.id))
+        } else {
+          children[space(segments), default: []].append(.type(emission.id))
+        }
+      } else {
+        // An unambiguous top-level value type spells bare, so it needs no
+        // fabricated namespace container: it is a plain root.
+        roots.append(.type(emission.id))
+      }
+    }
+    // The declaration label of a node — a type's escaped name, or a namespace
+    // segment escaped the same way the decode escapes a namespace component, so
+    // the fabricated `enum` name matches the qualified spelling.
+    func label(_ node: Node) -> String {
+      switch node {
+      case let .type(id):
+        return declared[id] ?? ""
+      case let .space(path):
+        return language.escape(String(path.split(separator: ".").last ?? ""))
+      }
+    }
+    // Every scope in the forest — the top-level roots and each container's
+    // direct children — is one Swift declaration scope, so its members must
+    // bear distinct labels: a duplicate at any level is an uncompilable
+    // redeclaration, not only among the roots. Nesting can place a real value
+    // type and a fabricated namespace `enum` of the one name inside the same
+    // container (`enum A` holding both a real `B` and the `B` namespace of an
+    // `A.B.…` type), which a root-only check misses. The first clash in
+    // sorted-label order across all scopes faults, so the fault is
+    // deterministic.
+    var clash: (label: String, nodes: Array<Node>, abi: Bool)?
+    for scope in [roots] + Array(children.values) {
+      var byLabel = Dictionary<String, Array<Node>>()
+      // The synthesized ABI-protocol names declared in this scope, and how many
+      // generic types declare each (normally one), so an `internal protocol
+      // <name>ABI` counts as an occupant even though no node bears its label.
+      var abiCount = Dictionary<String, Int>()
+      for node in scope {
+        byLabel[label(node), default: []].append(node)
+        if case let .type(id) = node, let name = abi[id] {
+          abiCount[name, default: 0] += 1
+        }
+      }
+      for (name, nodes) in byLabel where nodes.count >= 2 {
+        if clash == nil || name < clash!.label { clash = (name, nodes, false) }
+      }
+      // A synthesized ABI-protocol name a real declaration (or another
+      // generic's ABI protocol) in the same scope also bears: an invalid
+      // redeclaration the emission labels alone do not surface.
+      for (name, count) in abiCount {
+        let total = (byLabel[name]?.count ?? 0) + count
+        if total >= 2, clash == nil || name < clash!.label {
+          clash = (name, byLabel[name] ?? [], true)
+        }
+      }
+    }
+    if let clash {
+      // A generic type's synthesized `<name>ABI` colliding with a declaration
+      // of that name is always a `collision`: the internal ABI protocol is not
+      // a namespace-qualifiable public one, so it never reads as `ambiguous`.
+      if clash.abi { throw RenderError.collision(clash.label) }
+      // Same-named top-level protocols — a `.type` node that is not an emitted
+      // value-type container, the one clash a namespace `enum` cannot
+      // disambiguate — yield `ambiguous`, named by their namespaces. Any other
+      // clash is a fabricated namespace container shadowing an emitted type
+      // (only a value type can be wrapped), a `collision`; a nested `.type` is
+      // always a value-type container, so a nested clash is never `ambiguous`.
+      let protocols = clash.nodes.allSatisfy { node in
+        if case let .type(id) = node { !container.contains(id) } else { false }
+      }
+      if protocols {
+        let namespaces = try clash.nodes.map { node -> String in
+          guard case let .type(id) = node else { return "" }
+          return try session.storage.namespace(of: id)
+        }
+        throw RenderError.ambiguous(clash.label, namespaces.sorted())
+      }
+      throw RenderError.collision(clash.label)
+    }
+    // The earliest emission position anywhere in a node's subtree, so a
+    // container sorts at its earliest-emitted descendant — a top-level type at
+    // its own position, a container at its earliest-emitted member. A fabricated
+    // namespace node has no position of its own.
+    func earliest(_ node: Node) -> Int {
+      var least = if case let .type(id) = node { index[id] ?? Int.max }
+                  else { Int.max }
+      for child in children[node] ?? [] { least = min(least, earliest(child)) }
+      return least
+    }
+    // The rendered text of a node: a type's body with its nested children folded
+    // in before its closing brace, or a fabricated `public enum` wrapping its
+    // members. A real container orders its children by name; a namespace `enum`
+    // keeps its members in emission (earliest) order, so it preserves the
+    // post-order a top-level value type held before it was wrapped.
+    func rendered(_ node: Node) -> String {
+      let kids = children[node] ?? []
+      switch node {
+      case let .type(id):
+        guard let body = bodies[id] else { return "" }
+        guard !kids.isEmpty else { return body }
+        let block = kids.sorted { label($0) < label($1) }
+            .map { Shell.indent(rendered($0)) }.joined(separator: "\n")
+        return Shell.inject(block, into: body)
+      case .space:
+        let block = kids.sorted { earliest($0) < earliest($1) }
+            .map { Shell.indent(rendered($0)) }.joined(separator: "\n")
+        return Shell.inject(block, into: "public enum \(label(node)) {\n}")
+      }
+    }
+    roots.sort { earliest($0) < earliest($1) }
+    return roots.map { rendered($0) }.joined(separator: "\n")
+  }
+
+  /// Indents every non-empty line of `text` by one four-space level — the step
+  /// a nested declaration is inset under its container. A blank line stays
+  /// blank so no line carries trailing whitespace.
+  private static func indent(_ text: String) -> String {
+    text.split(separator: "\n", omittingEmptySubsequences: false)
+        .map { $0.isEmpty ? "" : "    \($0)" }
+        .joined(separator: "\n")
+  }
+
+  /// Splices the nested-declaration `block` into `body` just before its real
+  /// closing brace, so a rendered container (a struct or enum) carries its
+  /// nested types inside its own body.
+  ///
+  /// The closer is located as the last line whose sole content is `}`
+  /// (indentation aside), not merely the body's last line: a custom or `-I`
+  /// container template may emit a footer after the brace — a trailing comment
+  /// or any text on its own line — which the body's last line would then be, so
+  /// splicing before that line would leave the child a sibling after the real
+  /// brace and spill it out of the container. Anchoring on the brace nests the
+  /// child inside and keeps a footer a line past the closer. Trailing blank
+  /// lines are dropped first, the same trailing-blank trim the bundled template
+  /// relied on, so a bundled struct or enum body — brace on its own last line —
+  /// injects byte-identically. A body with no brace-only line (an unusual
+  /// container) falls back to splicing before its last line.
+  private static func inject(_ block: String, into body: String) -> String {
+    var lines = body.split(separator: "\n", omittingEmptySubsequences: false)
+        .map(String.init)
+    while let last = lines.last, last.allSatisfy(\.isWhitespace) {
+      lines.removeLast()
+    }
+    guard !lines.isEmpty else { return body }
+    let closer = lines.lastIndex { $0.trimmed == "}" } ?? lines.count - 1
+    lines.insert(block, at: closer)
+    return lines.joined(separator: "\n")
   }
 
   /// Whether any render query or view the `.render *` batch shortcuts is
@@ -665,8 +1087,15 @@ internal struct Shell: ~Escapable {
 
   /// The seed rows for `name` — the interface `TypeDef` rows the render
   /// `interfaces` query scans — resolved to the full render row shape (`Id`,
-  /// namespace, name, `iid`), dropping an interface whose `GuidAttribute`
-  /// resolves nothing.
+  /// namespace, name, `iid`, and a literal `kind` of `interface`), dropping an
+  /// interface whose `GuidAttribute` resolves nothing.
+  ///
+  /// The `interfaces.sql` seed projects three columns (`Id`, namespace, name);
+  /// the `iid` is fetched here and the `interface` kind tag appended in Swift
+  /// (index 4), so the seed row carries the same kind-tagged shape the
+  /// `requires`/`references` closure selections carry — `emit` and `walk` both
+  /// dispatch on that `kind` — while the seed query keeps its three-column
+  /// contract, unchanged for a flat render or a `-I` override.
   ///
   /// The scan seeks the interface `TypeDef` rows by name (`interfaces.sql`), and
   /// the `iid` is fetched separately so a concrete seed does not materialise the
@@ -710,7 +1139,8 @@ internal struct Shell: ~Escapable {
       let iid = if let iids { iids[row[0].integer] }
                 else { try guid(of: row[0], routines, search: search) }
       guard let iid else { continue }
-      interfaces.append([row[0], row[1], row[2], .text(iid)])
+      interfaces.append([row[0], row[1], row[2], .text(iid),
+                         .text("interface")])
     }
     return interfaces
   }
@@ -889,57 +1319,313 @@ internal struct Shell: ~Escapable {
     return rows.first.map { $0[0].text }
   }
 
-  /// Emits the interface `found` and, first, the transitive closure of its plain
-  /// (`spec IS NULL`) base and required interfaces — a depth-first post-order
-  /// over the E1 edges, so a base precedes the interface refining it.
+  /// Emits the type `found` and, first, the transitive closure of every local
+  /// type it depends on — a depth-first post-order, so a dependency precedes the
+  /// type naming it. `found` is a kind-tagged row (`Id`, namespace, name, `iid`,
+  /// and a `kind` of `interface`/`struct`/`enum`/`delegate`), the shape the
+  /// `interfaces`, `requires`, and `references` selections share.
   ///
-  /// The `requires` query resolves each base and required interface to its local
-  /// interface `TypeDef` row keyed on namespace and name, so a base that resolves
-  /// to no local interface `TypeDef` — an external `TypeRef`-only frontier, or a
-  /// local type that is no interface — is not returned and the walk simply stops
-  /// there. The visited set (the local `TypeDef` Id) renders each interface once
-  /// and terminates a cycle; the bases are walked in a stable namespace-then-name
-  /// order so the emission is deterministic.
+  /// The adjacency depends on the node's kind. An interface first closes over
+  /// its plain (`spec IS NULL`) base and required interfaces — the E1 edges,
+  /// through the `requires` query, each resolved to its local interface `TypeDef`
+  /// row keyed on namespace and name — then over the value-type and delegate
+  /// types its methods name (E3/E7). A struct closes over its fields' types
+  /// (E6), a delegate over its `Invoke` signature (E7), and an enum is a leaf.
+  /// Each signature-named type resolves through the `references` query to a local
+  /// `types` row; a runtime `class` stays a frontier, and an external
+  /// `TypeRef`-only reference resolves to no row and simply drops. The visited
+  /// set (the local `TypeDef` Id) renders each type once across all kinds and
+  /// terminates a cycle; the neighbours are walked in a stable
+  /// namespace-then-name order so the emission is deterministic.
   private borrowing func walk(_ found: Array<Value>, visited: inout Set<Int>,
-                              into sources: inout Array<String>,
-                              through mustache: MustacheTemplate,
+                              into nodes: inout Array<Array<Value>>,
+                              edges: inout Dictionary<Int, Array<Int>>,
                               routines: Routines, in dialect: Dialect,
-                              language: Language,
                               search: Array<String>) throws {
     guard visited.insert(found[0].integer).inserted else { return }
-    let query = try statement(named: "requires")
-    let bases = try session.run(query, routines,
-                                bindings: ["parent": found[0]])
-    let ordered = bases.sorted {
-      ($0[1].text, $0[2].text) < ($1[1].text, $1[2].text)
+    // Frontier a reached dependency the language import already provides — a
+    // type whose Identity `(namespace, name)` is a key in the dialect's `known`
+    // bridge table (`HRESULT`, `BOOL`, `PWSTR`, …): emit no wrapper for it and
+    // do not walk its members, exactly as the layout-reject and nested-protocol
+    // frontiers do. A reference to it still spells through `dialect.known` (its
+    // bridged name), so the consumer's imported type satisfies the signature.
+    // The seeds are interfaces, which the `known` table never names, so only
+    // reached dependencies are frontiered here.
+    if dialect.known[Identity(namespace: found[1].text,
+                              name: found[2].text)] != nil {
+      return
     }
-    for base in ordered {
-      try walk(base, visited: &visited, into: &sources, through: mustache,
-               routines: routines, in: dialect, language: language,
-               search: search)
+    // Reject a value type whose ABI layout `@frozen` cannot reproduce — an
+    // explicit layout (a union or offset-placed fields), a non-default packing,
+    // or a declared class size (tail padding to a fixed extent) — rather than
+    // project a wrong-sized struct: emit nothing and do not walk its fields,
+    // leaving it a frontier the consumer defines. The `layout` query returns a
+    // row only for such a type; a naturally-laid struct returns none and renders
+    // normally. (`ClassLayout` is an optional table, resolved empty when absent,
+    // so a database with no laid-out type reads no packing or size row.)
+    if found[4].text == "struct",
+        try session.run(statement(named: "layout"), routines,
+                        bindings: ["parent": found[0]]).first != nil {
+      return
     }
-    sources.append(try emit(found, through: mustache, routines: routines,
-                            in: dialect, language: language, search: search))
+    // The types this node's rendered declaration spells: its base and required
+    // interfaces (E1) and its signature-named value/delegate types (E3/E6/E7).
+    // Recorded as its `edges` so a post-walk reachability prune can drop a type
+    // reachable only through a declaration the closure discards (a frontier) as
+    // an orphan that would render unreferenced and fault collision validation.
+    var neighbors = Array<Int>()
+    // An interface closes over its base and required interfaces first (E1),
+    // before the signature-named types, so an inherited surface precedes the
+    // refinement naming it.
+    if found[4].text == "interface" {
+      let query = try statement(named: "requires")
+      let bases = try session.run(query, routines,
+                                  bindings: ["parent": found[0]])
+      neighbors.append(contentsOf: bases.map { $0[0].integer })
+      for base in bases.sorted(by: Shell.precedes) {
+        try walk(base, visited: &visited, into: &nodes, edges: &edges,
+                 routines: routines, in: dialect, search: search)
+      }
+    }
+    // The value-type and delegate types the node's signatures name (E3/E6/E7),
+    // resolved to their local rows and walked before the terminal emit.
+    let referenced = try adjacency(of: found, routines, in: dialect,
+                                   search: search)
+    neighbors.append(contentsOf: referenced.map { $0[0].integer })
+    edges[found[0].integer] = neighbors
+    for neighbor in referenced.sorted(by: Shell.precedes) {
+      try walk(neighbor, visited: &visited, into: &nodes, edges: &edges,
+               routines: routines, in: dialect, search: search)
+    }
+    // A nested value type spells fully qualified through its enclosing chain
+    // (`Outer.Inner`), so its immediate enclosing value type must be emitted
+    // too — as the real `struct`/`enum` container `Inner` nests inside — even
+    // when no signature names `Outer` directly. Walk that encloser (its own
+    // walk climbs the rest of the chain); prune keeps it as a kept nested
+    // type's enclosing level, but only if its emission exists, so it is walked,
+    // not merely retained. A non-value encloser is left unwalked: a
+    // `protocol`/`class` cannot hold a value type, so `Inner` stays a frontier
+    // the prune drops.
+    if found[4].text == "struct" || found[4].text == "enum",
+        let outer = try session.storage.nesting(of: found[0].integer).last {
+      let plan =
+          try Shell.statement(Shell.query(named: "references", search: search))
+      let rows = try session.run(plan, routines,
+                                 bindings: ["ref": .null,
+                                            "def": .integer(outer.id)])
+      if let row = rows.first,
+          row[4].text == "struct" || row[4].text == "enum" {
+        try walk(row, visited: &visited, into: &nodes, edges: &edges,
+                 routines: routines, in: dialect, search: search)
+      }
+    }
+    // The walked row, deferred for a body render once the reached-only
+    // qualification sets are fixed; its local `TypeDef` Id, namespace, name,
+    // and kind let `prune` and `nest` classify it and fold it under a parent.
+    nodes.append(found)
   }
 
-  /// Renders the single interface `found` — its `Id`, namespace, name, and
-  /// `iid`, the row shape the `interfaces` and `requires` queries share —
-  /// through `mustache`, the per-interface body the flat render and the
-  /// `--closure` walk both run.
+  /// The local `types` rows the signatures of `found` name — the node's
+  /// signature-driven adjacency (E3/E6/E7). An interface contributes every type
+  /// its methods name, a struct every type its fields name, a delegate the types
+  /// its `Invoke` signature names; an enum contributes none. Each referenced
+  /// type resolves through the `references` query — by the exact `TypeRef`/
+  /// `TypeDef` row it was named through, not by name — to a local `types` row,
+  /// dropping a runtime `class` (which stays a frontier) and an external
+  /// `TypeRef`-only reference (which resolves to no row).
+  private borrowing func adjacency(of found: Array<Value>,
+                                   _ routines: Routines, in dialect: Dialect,
+                                   search: Array<String>) throws
+      -> Array<Array<Value>> {
+    // The referenced types, gathered from the node's method or field signatures
+    // per its kind — each a `Referent` carrying the coded-index row it was named
+    // through, so it resolves to a local definition by its exact Id.
+    var references = Set<Referent>()
+    switch found[4].text {
+    case "interface":
+      let plan =
+          try Shell.statement(Shell.query(named: "methods", search: search))
+      let rows = try session.run(plan, routines,
+                                 bindings: ["parent": found[0]])
+      for row in rows {
+        let method = row[0].integer
+        references.formUnion(session.storage.identities(method: method))
+      }
+    case "struct":
+      let plan =
+          try Shell.statement(Shell.query(named: "fields", search: search))
+      let rows = try session.run(plan, routines,
+                                 bindings: ["parent": found[0]])
+      // Only instance fields close over their types: a static or literal field
+      // (the `fdStatic` 0x10 bit) is dropped from the emitted declaration by
+      // `structure`, so walking its type would enqueue a type the struct never
+      // references — an orphan that renders anyway and can fault namespace or
+      // collision validation on a member that was omitted. The walk applies the
+      // same filter as the emit so the two agree on which fields count.
+      for row in rows where row[2].integer & 0x10 == 0 {
+        let field = row[0].integer
+        references.formUnion(session.storage.identities(field: field))
+      }
+    case "delegate":
+      let plan =
+          try Shell.statement(Shell.query(named: "invoke", search: search))
+      let rows = try session.run(plan, routines,
+                                 bindings: ["parent": found[0]])
+      for row in rows {
+        let method = row[0].integer
+        references.formUnion(session.storage.identities(method: method))
+      }
+    default:
+      return []
+    }
+    // Resolve each reference to its local row by the exact Id it names — a
+    // `TypeRef` through the shared scope-chain `resolved` CTE (bound `:ref`), a
+    // `TypeDef` by its Id directly (bound `:def`) — leaving the other key NULL so
+    // one arm matches. A runtime `class` (a reference type, outside the value
+    // closure) is dropped, as is a reference that resolves to no local row.
+    let plan =
+        try Shell.statement(Shell.query(named: "references", search: search))
+    var neighbors = Array<Array<Value>>()
+    for reference in references {
+      let (ref, def): (Value, Value) = switch reference.kind {
+      case .reference: (.integer(reference.row), .null)
+      case .definition: (.null, .integer(reference.row))
+      }
+      let rows = try session.run(plan, routines,
+                                 bindings: ["ref": ref, "def": def])
+      for row in rows where row[4].text != "class" {
+        // A nongeneric delegate projects an `@com` interface keyed on its static
+        // GUID, so one bearing no `GuidAttribute` — no static IID — is a
+        // frontier: dropped rather than emitted as a GUID-less `@com` shape. A
+        // generic (parameterised) delegate legitimately bears no static IID (a
+        // per-instantiation PIID), so it is kept and emitted through the generic
+        // `{{#generic}}` arm (which omits `@com`), the way a generic interface is
+        // kept below; it is told apart by its declared generic parameters, since
+        // `guid(of:)` returns nil for both, so the nongeneric gate precedes it.
+        if row[4].text == "delegate",
+            try declarations(of: row[0], routines, search: search).isEmpty,
+            try guid(of: row, routines, search: search) == nil { continue }
+        // A nongeneric interface with no `GuidAttribute` has no static IID: its
+        // `references` LEFT JOIN yields a NULL iid, which the template would
+        // spell as `@com(interface: "")` — unusable source. Drop it, the way the
+        // normal `interfaces` view (an INNER join on the GUID) excludes it. A
+        // generic interface legitimately bears no static IID (a per-instantiation
+        // PIID), so a NULL iid there is expected and the row is kept — its
+        // template branch omits `@com` — distinguished by its declared generic
+        // parameters, exactly as `guid(of:)` tells a parameterised delegate apart.
+        if row[4].text == "interface", row[3].text.isEmpty,
+            try declarations(of: row[0], routines, search: search).isEmpty {
+          continue
+        }
+        neighbors.append(row)
+      }
+    }
+    return neighbors
+  }
+
+  /// The static GUID the delegate `found` bears through its `GuidAttribute`,
+  /// decoded through the `guid` query the way the `interfaces` view spells an
+  /// interface's `iid`. A WinRT delegate is a COM interface — IUnknown plus a
+  /// single `Invoke` — so `@com` needs its IUnknown-derived IID.
   ///
-  /// Decoding the interface's declared generics, methods, and base is the same
-  /// work either path needs; wrapping it here is what lets the closure worklist
-  /// reuse the decode and emit rather than duplicate them.
+  /// `nil` marks a delegate the walk treats as a frontier: a parameterised
+  /// delegate computes its PIID per instantiation and bears no static GUID, and
+  /// a delegate carrying no `GuidAttribute` resolves nothing through the query.
+  /// Either way the render drops it rather than emitting a GUID-less `@com`
+  /// protocol.
+  private borrowing func guid(of found: Array<Value>, _ routines: Routines,
+                              search: Array<String>) throws -> String? {
+    guard try declarations(of: found[0], routines, search: search).isEmpty
+    else { return nil }
+    let plan = try Shell.statement(Shell.query(named: "guid", search: search))
+    let rows = try session.run(plan, routines, bindings: ["parent": found[0]])
+    guard let row = rows.first, row[0] != .null else { return nil }
+    return row[0].text
+  }
+
+  /// The stable namespace-then-name order the walk emits siblings in, so a
+  /// closure renders deterministically regardless of the order the adjacency
+  /// queries (or the referenced-identity set) yield rows. The local `Id` breaks
+  /// a namespace-and-name tie — two nested types share the empty namespace and
+  /// may share a bare name under different enclosers, so name alone is not a
+  /// total order and the emission (hence the nesting) would otherwise vary.
+  private static func precedes(_ lhs: Array<Value>,
+                               _ rhs: Array<Value>) -> Bool {
+    (lhs[1].text, lhs[2].text, lhs[0].integer)
+        < (rhs[1].text, rhs[2].text, rhs[0].integer)
+  }
+
+  /// Renders the single type `found` through `mustache`, the per-node body the
+  /// flat render and the `--closure` walk both run.
+  ///
+  /// `found` is a kind-tagged row; its `kind` selects the template section and
+  /// the context shape. An interface renders its `@com` protocol (or generic
+  /// wrapper), a struct its fields, an enum its native cases, a delegate its
+  /// `Invoke` signature — each under exactly one of the template's
+  /// `{{#interface}}`/`{{#struct}}`/`{{#enum}}`/`{{#delegate}}` sections, so one
+  /// template renders every kind. The interface context is unchanged, nested
+  /// under `interface` for the sectioned closure template. A flat render
+  /// (`nested` false) additionally exposes the interface's fields at the
+  /// template root, the documented pre-closure behaviour a bare `{{name}}`
+  /// template reads, so an inline or `-I` template written for the flat renderer
+  /// keeps working. Wrapping the decode here is what lets the closure walk reuse
+  /// it across kinds rather than duplicate it.
   private borrowing func emit(_ found: Array<Value>,
                               through mustache: MustacheTemplate,
                               routines: Routines, in dialect: Dialect,
                               language: Language,
-                              search: Array<String>,
+                              search: Array<String>, nested: Bool = true,
                               inherits: Dictionary<Int, String>? = nil,
                               roster: Buckets? = nil,
                               signatures: Buckets? = nil,
                               sanitized: Dictionary<String, String>? = nil)
       throws -> String {
+    let context: Dictionary<String, Any>
+    switch found[4].text {
+    case "struct":
+      context = ["struct": try structure(found, routines, in: dialect,
+                                         language: language, search: search)]
+    case "enum":
+      context = ["enum": try enumeration(found, routines, in: dialect,
+                                         language: language, search: search)]
+    case "delegate":
+      context = ["delegate": try delegation(found, routines, in: dialect,
+                                            language: language, search: search)]
+    default:
+      let projection = try interface(found, routines, in: dialect,
+                                     language: language, search: search,
+                                     inherits: inherits, roster: roster,
+                                     signatures: signatures,
+                                     sanitized: sanitized)
+      if nested {
+        context = ["interface": projection]
+      } else {
+        // The flat render only ever emits interfaces; expose the projection at
+        // the root (the documented top-level fields) and under `interface` (so
+        // the bundled sectioned template's `{{#interface}}` still renders). The
+        // closure walk emits mixed kinds, so it stays sectioned (`nested`).
+        var root = projection
+        root["interface"] = projection
+        context = root
+      }
+    }
+    return mustache.render(context)
+  }
+
+  /// The template context for the interface `found` — its `Id`, namespace, name,
+  /// and `iid` decoded into the declared generics, methods, and base the
+  /// `{{#interface}}` section reads. This is the interface half of `emit`, its
+  /// dictionary now the value of the context's `interface` key. The `.render *`
+  /// batch maps (`inherits`/`roster`/`signatures`/`sanitized`) thread through so
+  /// the wildcard batch reuses this decode; each is `nil` on the per-node path.
+  private borrowing func interface(_ found: Array<Value>, _ routines: Routines,
+                                   in dialect: Dialect, language: Language,
+                                   search: Array<String>,
+                                   inherits: Dictionary<Int, String>? = nil,
+                                   roster: Buckets? = nil,
+                                   signatures: Buckets? = nil,
+                                   sanitized: Dictionary<String, String>? = nil)
+      throws -> Dictionary<String, Any> {
     let id = found[0]
     // The interface's ordered declared generic-parameter names, through the
     // `generics` view bound by its `Id` — empty for a non-generic interface.
@@ -1022,11 +1708,207 @@ internal struct Shell: ~Escapable {
     // leaves its output byte-identical to today's.
     if let generics {
       context["generic"] = true
+      // The generic parameter names are keyword-escaped for the declaration —
+      // the primary-associated-type clause and each `associatedtype` — the way
+      // the decode escapes their uses in the `Invoke` signature, so a parameter
+      // whose metadata name is a Swift keyword declares and reads under the one
+      // escaped spelling. The raw `generics` still feed the decode, which
+      // escapes on use.
       context["generics"] = generics.enumerated().map { index, name in
-        ["name": name, "last": index == generics.count - 1]
+        ["name": language.escape(name), "last": index == generics.count - 1]
       }
     }
-    return mustache.render(context)
+    return context
+  }
+
+  /// The template context for the struct `found` — its keyword-escaped name and
+  /// its fields, each a `name` and the `type` spelled at render time from its
+  /// `FieldDef` signature (edge E6). The `fields` render query projects each
+  /// field's already-escaped name and its `Id`, which `decode(field:)` navigates
+  /// to the field's type in the target `Dialect`.
+  private borrowing func structure(_ found: Array<Value>, _ routines: Routines,
+                                   in dialect: Dialect, language: Language,
+                                   search: Array<String>) throws
+      -> Dictionary<String, Any> {
+    let plan = try Shell.statement(Shell.query(named: "fields", search: search))
+    let rows = try session.run(plan, routines, bindings: ["parent": found[0]])
+    // Only instance fields are the struct's ABI storage. A static or literal
+    // field (the `fdStatic` 0x10 bit of `FieldDef.Flags`) is not laid out in an
+    // instance, so emitting it as a stored `var` would add a nonexistent field
+    // and shift every following offset, corrupting a by-value native call. Enum
+    // members — also static literal fields — are rendered separately (`members`),
+    // so dropping the static fields here does not affect them.
+    let instances = rows.filter { $0[2].integer & 0x10 == 0 }
+    // Each field carries a `last` flag (computed over the retained instance
+    // fields) so the template's public memberwise initialiser can comma-separate
+    // its parameters — the synthesised memberwise init stays internal even for a
+    // public struct, so a cross-module caller could not otherwise construct it.
+    let names = qualifying().names
+    let fields =
+        instances.enumerated().map { index, row -> Dictionary<String, Any> in
+      let type = session.storage.decode(field: row[0].integer, in: dialect,
+                                        qualifying: names) ?? ""
+      return ["name": row[1].text, "type": type,
+              "last": index == instances.count - 1]
+    }
+    return ["name": Shell.name(found, language), "fields": fields]
+  }
+
+  /// The template context for the enum `found` — its keyword-escaped name, the
+  /// `underlying` raw-value type, a `flags` marking, and its members, each a
+  /// `name` and the integer `value` from the `Constant` table. The underlying
+  /// type is the `value__` field's decoded type (falling back to the dialect's
+  /// `i4` spelling when it does not decode).
+  ///
+  /// The projection mirrors how ClangImporter imports a C enum. A regular enum
+  /// becomes a native fixed-size Swift `enum` over the `underlying` type, so a
+  /// change to that width is a (correct) ABI break the projection surfaces. A
+  /// `[flags]` enum — one bearing a `System.FlagsAttribute`, detected through
+  /// the overridable `flags` query — becomes an `OptionSet` instead: a native
+  /// `enum` case is a single value and cannot name a bitmask combination
+  /// (`a | b` is no `case`), while the `[flags]` contract is exactly that its
+  /// members combine, so a set type is the faithful projection (the shape Clang
+  /// gives an `NS_OPTIONS` C enum). The `flags` key drives that branch in the
+  /// template.
+  ///
+  /// A Win32 enum aliases raw values — two member names for one value — which a
+  /// native `enum` cannot express (`case a = 5; case b = 5` does not compile),
+  /// so the native-enum members are deduplicated by value in declaration order:
+  /// the first member of each distinct value is a `case` (`alias` false), and
+  /// each later member sharing an already-seen value is an alias (`alias` true)
+  /// carrying the `canonical` name of the case it repeats, which the template
+  /// spells as a `static var` returning that case rather than a duplicate
+  /// `case`. An `OptionSet` has no such constraint — its members are `static
+  /// let`s, which tolerate a repeated raw value — so a `[flags]` enum keeps
+  /// every member as a plain member with no aliasing.
+  ///
+  /// The name is carried a second time under `owner`, the enum's own type for
+  /// the `Owner(rawValue: …)` an `OptionSet` member spells and the `.member` an
+  /// alias returns: inside the `{{#members}}` section `{{{name}}}` binds the
+  /// member's own name, so the enclosing type is looked up under a distinct key
+  /// the member context does not shadow.
+  private borrowing func enumeration(_ found: Array<Value>, _ routines: Routines,
+                                     in dialect: Dialect, language: Language,
+                                     search: Array<String>) throws
+      -> Dictionary<String, Any> {
+    let all = try Shell.statement(Shell.query(named: "fields", search: search))
+    let fields = try session.run(all, routines, bindings: ["parent": found[0]])
+    let names = qualifying().names
+    // The `value__` storage field is found by its raw metadata name (column 3),
+    // not the escaped `Name`: a `SANITIZE` override (an active language spec or
+    // session UDF) can respell `value__`, and matching the escaped spelling
+    // would then miss it and silently fall back to `i4`, emitting an enum
+    // backed by a wider type (a `UInt64`) with the wrong ABI representation.
+    let underlying = fields.first { $0[3].text == "value__" }
+        .flatMap { session.storage.decode(field: $0[0].integer, in: dialect,
+                                          qualifying: names) }
+        ?? (dialect.primitives["i4"] ?? "i4")
+    // A `[flags]` enum bears a `System.FlagsAttribute`; the overridable `flags`
+    // query returns a row for it and none for a plain enum. A fixture missing
+    // the attribute rows simply yields no row, so the enum reads as not flags.
+    let mark = try statement(named: "flags")
+    let flags =
+        !(try session.run(mark, routines, bindings: ["parent": found[0]])
+            .isEmpty)
+    let plan = try Shell.statement(Shell.query(named: "members", search: search))
+    let rows = try session.run(plan, routines, bindings: ["parent": found[0]])
+    let name = Shell.name(found, language)
+    let members = rows.map { row -> Dictionary<String, Any> in
+      // `value(field:)` already formats the constant signed or unsigned per
+      // its element type, so an unsigned 64-bit member with bit 63 set spells a
+      // positive `UInt64` decimal the generated raw value accepts. Both arms
+      // project each member as a `static let` on the stored newtype, so a
+      // repeated raw value (a Win32 alias) is simply two named constants — no
+      // deduplication is needed the way a native enum's `case`s would demand.
+      let value = session.storage.value(field: row[0].integer) ?? "0"
+      return ["name": row[1].text, "value": value]
+    }
+    return ["name": name, "owner": name, "underlying": underlying,
+            "flags": flags, "members": members]
+  }
+
+  /// The template context for the delegate `found` — its keyword-escaped name,
+  /// its static `iid`, the `params` its `Invoke` signature carries, and the
+  /// `returns` that signature yields (edge E7). A WinRT delegate is a COM
+  /// interface (IUnknown plus a single `Invoke`), so the projection is an
+  /// `@com(interface:)` protocol carrying just `Invoke` and `@com` generates the
+  /// IUnknown-based vtable from it — the same ABI-faithful shape an interface
+  /// projects.
+  ///
+  /// The `invoke` query selects the delegate's one `Invoke` method, whose
+  /// parameters and return decode exactly as an interface method's do — the
+  /// return set only when it is value-carrying (`returned(_:)` yields `nil` for
+  /// `void`), so `{{#returns}}` renders nothing for a `void` `Invoke`. The
+  /// walk enqueues only a delegate that bears a static GUID, so `guid(of:)`
+  /// resolves the same IID here.
+  private borrowing func delegation(_ found: Array<Value>, _ routines: Routines,
+                                    in dialect: Dialect, language: Language,
+                                    search: Array<String>) throws
+      -> Dictionary<String, Any> {
+    let plan = try Shell.statement(Shell.query(named: "invoke", search: search))
+    let invoke = try session.run(plan, routines, bindings: ["parent": found[0]])
+    // The delegate's own declared generic-parameter names (its `GenericParam`
+    // rows), so a `VAR` in its `Invoke` signature spells its declared name
+    // (`TSender`) rather than a positional placeholder (`T0`); `nil` for a
+    // non-generic delegate, which decodes exactly as before.
+    let names = try declarations(of: found[0], routines, search: search)
+    let generics: Array<String>? = names.isEmpty ? nil : names
+    var params = Array<Dictionary<String, Any>>()
+    var returns: String?
+    if let method = invoke.first {
+      let selection =
+          try Shell.statement(Shell.query(named: "params", search: search))
+      let raw = try session.run(selection, routines,
+                                bindings: ["parent": method[0]])
+      let kept = raw.filter { $0[2] != .integer(0) }
+      let qualified = qualifying().names
+      let types = kept.map {
+        session.storage.decode(parameter: $0[0].integer, generics: generics,
+                               for: dialect, qualifying: qualified) ?? ""
+      }
+      params = Shell.parameters(kept.map(\.[1].text), types: types)
+      if let spelled =
+          session.storage.decode(return: method[0].integer, generics: generics,
+                                 in: dialect, qualifying: qualified) {
+        returns = language.returned(spelled)
+      }
+    }
+    // A generic delegate strips its own name's CLR arity suffix (`Handler``2`)
+    // the way an interface does, and its `ABI` protocol name suffixes the
+    // stripped name before the escape (no Swift keyword ends in `ABI`).
+    let stripped = String(found[2].text.prefix { $0 != "`" })
+    var context: Dictionary<String, Any> = [
+      "name": language.escape(stripped),
+      "abi": language.escape(stripped + "ABI"),
+      "iid": try guid(of: found, routines, search: search) ?? "",
+      "params": params,
+    ]
+    // A value-carrying `Invoke` renders its `-> Type`; a `void` one omits it.
+    if let returns { context["returns"] = returns }
+    // A generic delegate carries its ordered clause and `generic` flag, so its
+    // template branch declares each `associatedtype` and omits `@com` (its IID
+    // is a per-instantiation PIID) exactly as a generic interface; a non-generic
+    // one carries neither, so its output is byte-identical to today's.
+    if let generics {
+      context["generic"] = true
+      // The generic parameter names are keyword-escaped for the declaration the
+      // way the decode escapes their uses, so a parameter whose name is a Swift
+      // keyword declares and reads under one escaped spelling. The raw
+      // `generics` still feed the decode, which escapes on use.
+      context["generics"] = generics.enumerated().map { index, name in
+        ["name": language.escape(name), "last": index == generics.count - 1]
+      }
+    }
+    return context
+  }
+
+  /// The keyword-escaped declaration name of the type `found` — its raw
+  /// `TypeName` stripped of any CLR arity suffix, then escaped through the
+  /// target language's keyword rule, the same order the interface's own name
+  /// uses so a value type named for a keyword still spells compilably.
+  private static func name(_ found: Array<Value>, _ language: Language)
+      -> String {
+    language.escape(String(found[2].text.prefix { $0 != "`" }))
   }
 
   /// The template method entries for the interface at `id`, in declaration
@@ -1067,6 +1949,7 @@ internal struct Shell: ~Escapable {
     }
     var methods = Array<Dictionary<String, Any>>()
     methods.reserveCapacity(rows.count)
+    let qualified = qualifying().names
     for method in rows {
       // The method's parameters: from the batch `signatures` map for `*`, else
       // a per-method `params` query. Both return the same rows in the same
@@ -1080,7 +1963,7 @@ internal struct Shell: ~Escapable {
       let kept = params.filter { $0[2] != .integer(0) }
       let types = kept.map {
         session.storage.decode(parameter: $0[0].integer, generics: generics,
-                               for: dialect) ?? ""
+                               for: dialect, qualifying: qualified) ?? ""
       }
       let parameters = Shell.parameters(kept.map { escaped($0[1].text) },
                                         types: types)
@@ -1089,7 +1972,8 @@ internal struct Shell: ~Escapable {
         "params": parameters,
       ]
       let returned = session.storage.decode(return: method[0].integer,
-                                            generics: generics, in: dialect)
+                                            generics: generics, in: dialect,
+                                            qualifying: qualified)
       if let returned, let clause = language.returned(returned) {
         entry["returns"] = clause
       }
@@ -1205,8 +2089,8 @@ internal struct Shell: ~Escapable {
   /// name (a `-I` directory's copy shadowing the bundle's), the same way the
   /// template is. A name no search directory and no bundle resolves is a
   /// packaging error, raised as `RenderError.query`.
-  private static func query(named name: String,
-                            search: Array<String>) throws -> String {
+  internal static func query(named name: String,
+                             search: Array<String>) throws -> String {
     guard let url = resource(name, "sql", kind: "Render", search: search)
     else { throw RenderError.query(name) }
     let data = try Data(contentsOf: url)
@@ -1335,6 +2219,38 @@ internal struct Shell: ~Escapable {
   }
 }
 
+/// One type the `--closure` walk emitted — its rendered body tagged with the
+/// local `TypeDef` `Id`, declaration name, and kind the nesting assembly folds
+/// it by. A nested type is grouped under its enclosing type through the `Id`;
+/// the name orders siblings within a container; the kind decides whether the
+/// type is a legal value-type container a child may nest inside. It holds only
+/// value types, borrowing no database storage, so a `~Escapable` `Shell` may
+/// collect it.
+private struct Emission {
+  /// The emitted type's local `TypeDef` `Id`.
+  let id: Int
+
+  /// The type's escaped declaration name — the sibling sort key within a
+  /// container.
+  let name: String
+
+  /// The type's render kind — `struct`/`enum`/`interface`/`delegate`. Only a
+  /// `struct` or `enum` renders as a value-type container a nested type may
+  /// legally nest inside; an `interface`/`delegate` renders as a Swift
+  /// `protocol`, which cannot contain a nested type.
+  let kind: String
+
+  /// The synthesized ABI-protocol name a generic interface or delegate declares
+  /// alongside its wrapper (`internal protocol <name>ABI`), `nil` for a
+  /// non-generic type. The declaration `name` does not name it, so the
+  /// collision check counts it too, lest a co-emitted metadata type of that
+  /// name become an invalid redeclaration.
+  let abi: String?
+
+  /// The rendered declaration text.
+  let body: String
+}
+
 /// A per-render memo of parsed render queries, keyed by name. A reference type
 /// so a `borrowing` render method populates it (and clears it at each render's
 /// start) through the reference; it holds only value-type `Statement`s,
@@ -1342,6 +2258,18 @@ internal struct Shell: ~Escapable {
 private final class Cache {
   /// The parsed render queries loaded so far, keyed by name.
   var statements: Dictionary<String, SQLEngine.Statement> = [:]
+}
+
+/// A shell-lifetime memo of the render's namespace-qualification sets
+/// (`Storage.collisions()`): the ambiguous `TypeName`s the decode spells
+/// qualified and the value-type `Id`s the emit wraps in a namespace `enum`. A
+/// reference type so a `borrowing` render method fills it through the reference;
+/// it holds only value-type sets, borrowing none of the database storage, so a
+/// `~Escapable` `Shell` may own it. The sets are a pure function of the
+/// immutable database, so they are computed once and never invalidated.
+private final class Ambiguities {
+  /// The computed sets, or `nil` until first use.
+  var sets: (names: Set<String>, ids: Set<Int>)?
 }
 
 /// Locates resource `<name>.<ext>` of the given `kind` (`Render`, `Queries`,

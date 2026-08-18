@@ -160,6 +160,230 @@ struct RenderClosureTests {
       #expect(closed.contains("public protocol IDerived: IBase {"))
     }
   }
+
+  @Test func `--closure pulls in a struct a method returns, before the interface`() throws {
+    // `IRoot.Make` returns the local struct `Point` (edge E3, value arm). The
+    // closure decodes the method signature, resolves `Point` to its local
+    // `struct` `TypeDef`, and emits it before `IRoot`, the type naming it — the
+    // post-order the walk holds. The flat render of `IRoot` alone pulls nothing
+    // in.
+    try ClosureFixture.with { catalog in
+      let shell = Shell(catalog)
+      let closed = try shell.render(closure: "IRoot", template: "com")
+      // `@frozen` fixes the ABI layout so the projected struct is the C/C++
+      // record it mirrors field for field.
+      #expect(closed.contains("@frozen public struct Point {"))
+      #expect(closed.contains("public var value: CInt"))
+      let structure = try #require(closed.range(of: "public struct Point"))
+      let interface = try #require(closed.range(of: "public protocol IRoot"))
+      #expect(structure.lowerBound < interface.lowerBound)
+
+      let flat = try shell.render("IRoot", template: "com")
+      #expect(!flat.contains("public struct Point"))
+    }
+  }
+
+  @Test func `--closure projects an enum a method names as an open struct newtype`() throws {
+    // `IRoot.Paint(Color)` names the local enum `Color`. The closure projects it
+    // as an open struct newtype, not a native Swift enum: an `@frozen` struct
+    // holding the `value__` underlying type (`CInt`) directly, whose members are
+    // static constants read from the `Constant` table — `Red = 5`, `Green = 7`.
+    // A native enum is not ABI-transparent and traps on an undeclared value; the
+    // newtype holds any ABI value. It is deliberately not RawRepresentable — its
+    // `init(rawValue:)` is total, never the closed-set `init?`.
+    try ClosureFixture.with { catalog in
+      let shell = Shell(catalog)
+      let closed = try shell.render(closure: "IRoot", template: "com")
+      #expect(closed.contains("@frozen public struct Color: Hashable, Sendable {"))
+      #expect(closed.contains("public var rawValue: CInt"))
+      #expect(closed.contains(
+          "public init(rawValue: CInt) { self.rawValue = rawValue }"))
+      #expect(closed.contains("public static let Red = Color(rawValue: 5)"))
+      #expect(closed.contains("public static let Green = Color(rawValue: 7)"))
+      // Not a native enum, and no failable closed-set initializer declaration.
+      #expect(!closed.contains("enum Color"))
+      #expect(!closed.contains("public init?"))
+    }
+  }
+
+  @Test func `the projected enum newtype holds an out-of-range raw value without trapping`() {
+    // Why the newtype beats a native enum: an undeclared raw value — a
+    // forward-compatible or `[flags]` value no member names — is representable
+    // and does not trap. This mirrors the exact shape the render emits for
+    // `Color` and constructs it with a value outside {5, 7}; a native enum's
+    // `Color(rawValue: 999)!` would trap on the same input.
+    struct Color: Hashable {
+      var rawValue: CInt
+      init(rawValue: CInt) { self.rawValue = rawValue }
+      static let Red = Color(rawValue: 5)
+      static let Green = Color(rawValue: 7)
+    }
+    let undeclared = Color(rawValue: 999)
+    #expect(undeclared.rawValue == 999)
+    #expect(undeclared != .Red)
+    #expect(undeclared != .Green)
+  }
+
+  @Test func `--closure projects a delegate a method names as a com protocol`() throws {
+    // `IRoot.Listen(Handler)` names the local delegate `Handler`. A WinRT
+    // delegate is a COM interface (IUnknown plus a single `Invoke`), so the
+    // closure projects it as an `@com(interface:)` protocol carrying just
+    // `Invoke` — its own static IID decoded through the `guid` query — not a
+    // Swift closure typealias. `void Invoke(i4)` renders a void return (no
+    // arrow) over a single `CInt` parameter.
+    try ClosureFixture.with { catalog in
+      let shell = Shell(catalog)
+      let closed = try shell.render(closure: "IRoot", template: "com")
+      #expect(closed.contains(
+          "@com(interface: \"DEADBEEF-CAFE-BABE-F00D-1234567890AB\")"))
+      #expect(closed.contains("public protocol Handler {"))
+      #expect(closed.contains("func Invoke(_ : CInt)"))
+      // Not a closure typealias.
+      #expect(!closed.contains("typealias Handler"))
+    }
+  }
+
+  @Test func `--closure enqueues an interface a method names, emitting it`() throws {
+    // `IRoot.Chain(IOther)` names another local interface. A signature-named
+    // interface routes through the interface path — enqueued, then emitted
+    // through the `{{#interface}}` section, its own IID intact — before `IRoot`.
+    try ClosureFixture.with { catalog in
+      let shell = Shell(catalog)
+      let closed = try shell.render(closure: "IRoot", template: "com")
+      #expect(closed.contains("public protocol IOther: IUnknown {"))
+      let other = try #require(closed.range(of: "public protocol IOther"))
+      let root = try #require(closed.range(of: "public protocol IRoot"))
+      #expect(other.lowerBound < root.lowerBound)
+    }
+  }
+}
+
+/// A metadata fixture whose root interface `IRoot` names, across its method
+/// signatures, one of each closure-reachable value kind — a struct it returns,
+/// an enum and a delegate it takes, and another interface — so the `--closure`
+/// walk pulls each in through the E3/E6/E7 edges and renders it through its own
+/// template section. Ten tables packed back to back in table-number order; a
+/// stored index `N` names the 0-based row `N - 1`, and a `TypeDefOrRef` token is
+/// `(row << 2) | tag` (tag 0 `TypeDef`, tag 1 `TypeRef`).
+///
+///   TypeRef[0]: `Windows.Win32.Foundation.Metadata.GuidAttribute` — the IID
+///               attribute the `interfaces` view keys on.
+///   TypeRef[1..3]: `System.ValueType`/`System.Enum`/`System.MulticastDelegate`
+///               — the bases the `types` view classifies a struct/enum/delegate
+///               `TypeDef` by.
+///   TypeDef[0]: `IRoot` (interface, `GuidAttribute`) owning the four methods.
+///   TypeDef[1]: `Point` (struct, `Extends` ValueType) with one `i4` field.
+///   TypeDef[2]: `Color` (enum, `Extends` Enum) with `value__` and the members
+///               `Red`/`Green`, whose values live in the `Constant` table.
+///   TypeDef[3]: `Handler` (delegate, `Extends` MulticastDelegate, its own
+///               `GuidAttribute`) owning `Invoke` — a WinRT delegate is a COM
+///               interface, so it carries a static IID the `@com` projection
+///               reads.
+///   TypeDef[4]: `IOther` (interface, `GuidAttribute`) — the signature-named
+///               interface.
+///   CustomAttribute[0..2]: the `GuidAttribute` rows for `IRoot`, `Handler`,
+///               and `IOther`, in `Parent`-sorted order.
+///   MethodDef[0..3]: `IRoot`'s `Make` (returns `Point`), `Paint(Color)`,
+///               `Listen(Handler)`, `Chain(IOther)`.
+///   MethodDef[4]: `Handler`'s `Invoke(i4)`.
+private enum ClosureFixture {
+  private static let bytes: Array<UInt8> = [
+    0x00, 0x00, 0x23, 0x00, 0x01, 0x00, 0x00, 0x00, 0x38, 0x00, 0x31, 0x00,
+    0x00, 0x00, 0x42, 0x00, 0x31, 0x00, 0x00, 0x00, 0x47, 0x00, 0x31, 0x00,
+    0x21, 0x00, 0x00, 0x00, 0x5c, 0x00, 0x59, 0x00, 0x00, 0x00, 0x01, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x62, 0x00, 0x59, 0x00, 0x09, 0x00,
+    0x01, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x68, 0x00, 0x59, 0x00,
+    0x0d, 0x00, 0x02, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x6e, 0x00,
+    0x59, 0x00, 0x11, 0x00, 0x05, 0x00, 0x05, 0x00, 0x21, 0x00, 0x00, 0x00,
+    0x76, 0x00, 0x59, 0x00, 0x00, 0x00, 0x05, 0x00, 0x06, 0x00, 0x00, 0x00,
+    0x8f, 0x00, 0x1d, 0x00, 0x00, 0x00, 0x7d, 0x00, 0x1d, 0x00, 0x00, 0x00,
+    0x85, 0x00, 0x1d, 0x00, 0x00, 0x00, 0x89, 0x00, 0x1d, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x95, 0x00, 0x01, 0x00, 0x01, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x9a, 0x00, 0x06, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xa0, 0x00,
+    0x0c, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xa7, 0x00, 0x12, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0xad, 0x00, 0x18, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x08, 0x00, 0x0c, 0x00, 0x35, 0x00, 0x08, 0x00, 0x10, 0x00,
+    0x3a, 0x00, 0x23, 0x00, 0x0b, 0x00, 0x20, 0x00, 0x83, 0x00, 0x0b, 0x00,
+    0x3f, 0x00, 0xa3, 0x00, 0x0b, 0x00, 0x20, 0x00,
+  ]
+
+  private static let strings: Array<UInt8> = [
+    0x00, 0x57, 0x69, 0x6e, 0x64, 0x6f, 0x77, 0x73, 0x2e, 0x57, 0x69, 0x6e,
+    0x33, 0x32, 0x2e, 0x46, 0x6f, 0x75, 0x6e, 0x64, 0x61, 0x74, 0x69, 0x6f,
+    0x6e, 0x2e, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x00, 0x47,
+    0x75, 0x69, 0x64, 0x41, 0x74, 0x74, 0x72, 0x69, 0x62, 0x75, 0x74, 0x65,
+    0x00, 0x53, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x00, 0x56, 0x61, 0x6c, 0x75,
+    0x65, 0x54, 0x79, 0x70, 0x65, 0x00, 0x45, 0x6e, 0x75, 0x6d, 0x00, 0x4d,
+    0x75, 0x6c, 0x74, 0x69, 0x63, 0x61, 0x73, 0x74, 0x44, 0x65, 0x6c, 0x65,
+    0x67, 0x61, 0x74, 0x65, 0x00, 0x4e, 0x53, 0x00, 0x49, 0x52, 0x6f, 0x6f,
+    0x74, 0x00, 0x50, 0x6f, 0x69, 0x6e, 0x74, 0x00, 0x43, 0x6f, 0x6c, 0x6f,
+    0x72, 0x00, 0x48, 0x61, 0x6e, 0x64, 0x6c, 0x65, 0x72, 0x00, 0x49, 0x4f,
+    0x74, 0x68, 0x65, 0x72, 0x00, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x5f, 0x5f,
+    0x00, 0x52, 0x65, 0x64, 0x00, 0x47, 0x72, 0x65, 0x65, 0x6e, 0x00, 0x76,
+    0x61, 0x6c, 0x75, 0x65, 0x00, 0x4d, 0x61, 0x6b, 0x65, 0x00, 0x50, 0x61,
+    0x69, 0x6e, 0x74, 0x00, 0x4c, 0x69, 0x73, 0x74, 0x65, 0x6e, 0x00, 0x43,
+    0x68, 0x61, 0x69, 0x6e, 0x00, 0x49, 0x6e, 0x76, 0x6f, 0x6b, 0x65, 0x00,
+  ]
+
+  // The `#Blob` heap: the empty blob, the five method signatures, the shared
+  // `i4` field signature, the 20-byte interface `GuidAttribute` value (blob@32),
+  // the two i4 constant values `5` and `7`, and the delegate's distinct 20-byte
+  // `GuidAttribute` value (blob@63, `DEADBEEF-CAFE-BABE-F00D-1234567890AB`).
+  private static let blob: Array<UInt8> = [
+    0x00, 0x04, 0x20, 0x00, 0x11, 0x08, 0x05, 0x20, 0x01, 0x01, 0x11, 0x0c,
+    0x05, 0x20, 0x01, 0x01, 0x12, 0x10, 0x05, 0x20, 0x01, 0x01, 0x12, 0x14,
+    0x04, 0x20, 0x01, 0x01, 0x08, 0x02, 0x06, 0x08, 0x14, 0x01, 0x00, 0x30,
+    0x3a, 0x73, 0x0c, 0x1c, 0x2a, 0xce, 0x11, 0xad, 0xe5, 0x00, 0xaa, 0x00,
+    0x44, 0x77, 0x3d, 0x00, 0x00, 0x04, 0x05, 0x00, 0x00, 0x00, 0x04, 0x07,
+    0x00, 0x00, 0x00, 0x14, 0x01, 0x00, 0xef, 0xbe, 0xad, 0xde, 0xfe, 0xca,
+    0xbe, 0xba, 0xf0, 0x0d, 0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0x00, 0x00,
+  ]
+
+  private static let empty = Array<UInt8>()
+
+  private static let relations: Array<WinMD.Table> = [
+    WinMD.Table(Metadata.Tables.TypeRef.self, rows: 4, range: 0 ..< 24,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 5, range: 24 ..< 94,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.FieldDef.self, rows: 4, range: 94 ..< 118,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.MethodDef.self, rows: 5, range: 118 ..< 188,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.Param.self, rows: 4, range: 188 ..< 212,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.InterfaceImpl.self, rows: 0, range: 212 ..< 212,
+                wide: 0, stride: 4),
+    WinMD.Table(Metadata.Tables.MemberRef.self, rows: 1, range: 212 ..< 218,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.Constant.self, rows: 2, range: 218 ..< 230,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.CustomAttribute.self, rows: 3, range: 230 ..< 248,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeSpec.self, rows: 0, range: 248 ..< 248,
+                wide: 0, stride: 2),
+    // No `NestedClass` table: this fixture has no nested types, so a real
+    // `.winmd` would omit it from the tables stream. The `references` recursive
+    // `resolved` CTE still names it, so the adapter synthesises an empty
+    // relation for the absent optional table; the fixture names its referenced
+    // types through top-level, module-scoped refs regardless.
+  ]
+
+  private static let valid: UInt64 =
+      (1 << 1) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 8) | (1 << 9)
+          | (1 << 10) | (1 << 11) | (1 << 12) | (1 << 27)
+
+  /// Runs `body` over a `Storage` catalog bound to the assembled metadata.
+  static func with(_ body: (borrowing Storage) throws -> Void) rethrows {
+    let storage = Storage(bytes: bytes.span.bytes, relations: relations.span,
+                          strings: strings.span.bytes, blob: blob.span.bytes,
+                          guid: empty.span.bytes, valid: valid, sorted: 0)
+    try body(storage)
+  }
 }
 
 /// Coverage of the `requires` TypeRef arm's scope gate: an `InterfaceImpl` base
@@ -639,6 +863,169 @@ struct RenderClosureNestedConflationTests {
       #expect(!closed.contains("11111111-1111-1111-1111-111111111111"))
       let count = closed.components(separatedBy: "public protocol Widget").count
       #expect(count == 2) // one split ⇒ exactly one occurrence
+    }
+  }
+}
+
+/// Coverage of the `references` TypeRef arm's scope-chain walk over a *nested*
+/// external reference named by a method signature (edge E3) — the references-side
+/// mirror of the requires-side nested-external test. The fixture assembles a root
+/// `IRoot` whose one method `Get` returns a nested `TypeRef` `Widget` whose
+/// immediate `ResolutionScope` is another `TypeRef` (`Outer`), whose own scope is
+/// an external `AssemblyRef`. Its chain terminates externally, so `resolved`
+/// never reaches its anchor and the reference drops. A local nested interface
+/// `Widget` (empty namespace, under a local `Host`) shares the bare name, so the
+/// pre-fix name-only join would have enqueued and emitted `public protocol
+/// Widget`; binding the referenced `TypeRef` row keeps that unrelated declaration
+/// out while `IRoot.Get` still names `Widget` in its signature.
+struct RenderReferencesNestedExternalTests {
+  // Nine tables packed back to back in table-number order — TypeRef (#1, 3
+  // rows), TypeDef (#2, 3 rows), MethodDef (#6, 1 row), Param (#8, empty),
+  // InterfaceImpl (#9, empty), MemberRef (#10, 1 row), CustomAttribute (#12, 2
+  // rows), AssemblyRef (#35, 1 row), NestedClass (#41, 1 row) — every index
+  // narrow (2-byte). ECMA-335 rows are 1-based; a coded index is
+  // `(row << bits) | tag`, and a signature's `TypeDefOrRef` is compressed the
+  // same way (tag 0 `TypeDef`, tag 1 `TypeRef`).
+  //
+  //   TypeRef[0]:  ResolutionScope=0, TypeName="GuidAttribute"(35),
+  //                TypeNamespace="Windows.Win32.Foundation.Metadata"(1).
+  //   TypeRef[1]:  ResolutionScope(AssemblyRef row 1)=(1<<2)|2=6,
+  //                TypeName="Outer"(63), TypeNamespace="NS"(49) — the external
+  //                enclosing reference.
+  //   TypeRef[2]:  ResolutionScope(TypeRef row 2)=(2<<2)|3=11,
+  //                TypeName="Widget"(69), TypeNamespace=empty(0) — nested under
+  //                `Outer`; the chain terminates at the `AssemblyRef`.
+  //   TypeDef[0]:  Flags=0x21 (tdInterface), TypeName="IRoot"(52),
+  //                TypeNamespace="NS"(49), MethodList=1 — owns `Get`.
+  //   TypeDef[1]:  Flags=0 (a plain class), TypeName="Host"(58),
+  //                TypeNamespace="NS"(49), MethodList=2 — a local enclosing.
+  //   TypeDef[2]:  Flags=0x21, TypeName="Widget"(69), TypeNamespace=empty(0),
+  //                MethodList=2 — a local nested interface sharing the bare name.
+  //   MethodDef[0]: TypeName="Get"(76), Signature=blob[1] — `Widget Get()`, its
+  //                return the nested external `TypeRef` `Widget`
+  //                (`TypeDefOrRef`=(3<<2)|1=13).
+  //   MemberRef[0]: Class=MemberRefParent(TypeRef row 1)=(1<<3)|1=9 — the
+  //                `GuidAttribute` ctor.
+  //   CustomAttribute[0]: Parent=HasCustomAttribute(TypeDef row 1)=(1<<5)|3=35,
+  //                Type=CustomAttributeType(MemberRef row 1)=(1<<3)|3=11,
+  //                Value=blob[6] — `IRoot`'s IID.
+  //   CustomAttribute[1]: Parent=HasCustomAttribute(TypeDef row 3)=(3<<5)|3=99,
+  //                Type=11, Value=blob[6] — the local `Widget`'s IID.
+  //   AssemblyRef[0]: all-zero (an empty external assembly the chain scopes to).
+  //   NestedClass[0]: NestedClass=3 (TypeDef row 3, Widget), EnclosingClass=2
+  //                (TypeDef row 2, Host) — the local `Widget` is nested.
+  private static let bytes: Array<UInt8> = [
+    // TypeRef[0] (GuidAttribute)
+    0x00, 0x00, 0x23, 0x00, 0x01, 0x00,
+    // TypeRef[1] (external Outer ref)
+    0x06, 0x00, 0x3f, 0x00, 0x31, 0x00,
+    // TypeRef[2] (nested Widget ref under Outer)
+    0x0b, 0x00, 0x45, 0x00, 0x00, 0x00,
+    // TypeDef[0] (IRoot): Flags, Name, Namespace, Extends, FieldList, MethodList
+    0x21, 0x00, 0x00, 0x00, 0x34, 0x00, 0x31, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
+    // TypeDef[1] (Host)
+    0x00, 0x00, 0x00, 0x00, 0x3a, 0x00, 0x31, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x02, 0x00,
+    // TypeDef[2] (local nested Widget)
+    0x21, 0x00, 0x00, 0x00, 0x45, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x02, 0x00,
+    // MethodDef[0] (Get): RVA, ImplFlags, Flags, Name, Signature, ParamList
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x4c, 0x00, 0x01, 0x00, 0x01, 0x00,
+    // MemberRef[0]
+    0x09, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // CustomAttribute[0]
+    0x23, 0x00, 0x0b, 0x00, 0x06, 0x00,
+    // CustomAttribute[1]
+    0x63, 0x00, 0x0b, 0x00, 0x06, 0x00,
+    // AssemblyRef[0]
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // NestedClass[0]
+    0x03, 0x00, 0x02, 0x00,
+  ]
+
+  // "\0Windows.Win32.Foundation.Metadata\0GuidAttribute\0NS\0IRoot\0Host\0Outer\0
+  //  Widget\0Get\0": GuidNamespace@1, GuidName@35, NS@49, IRoot@52, Host@58,
+  // Outer@63, Widget@69, Get@76.
+  private static let strings: Array<UInt8> = [
+    0x00,
+    0x57, 0x69, 0x6e, 0x64, 0x6f, 0x77, 0x73, 0x2e, 0x57, 0x69, 0x6e, 0x33,
+    0x32, 0x2e, 0x46, 0x6f, 0x75, 0x6e, 0x64, 0x61, 0x74, 0x69, 0x6f, 0x6e,
+    0x2e, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x00,
+    0x47, 0x75, 0x69, 0x64, 0x41, 0x74, 0x74, 0x72, 0x69, 0x62, 0x75, 0x74,
+    0x65, 0x00,
+    0x4e, 0x53, 0x00,
+    0x49, 0x52, 0x6f, 0x6f, 0x74, 0x00,
+    0x48, 0x6f, 0x73, 0x74, 0x00,
+    0x4f, 0x75, 0x74, 0x65, 0x72, 0x00,
+    0x57, 0x69, 0x64, 0x67, 0x65, 0x74, 0x00,
+    0x47, 0x65, 0x74, 0x00,
+  ]
+
+  // The blob heap: offset 0 the empty blob; offset 1 the `Get` method signature
+  // (length 4: HASTHIS, 0 params, return `ELEMENT_TYPE_CLASS` naming the
+  // `TypeDefOrRef` 13 — the nested `Widget` reference); offset 6 the 20-byte
+  // `GuidAttribute` value (the well-known GUID), preceded by its length 0x14.
+  private static let blob: Array<UInt8> = [
+    0x00,
+    0x04, 0x20, 0x00, 0x12, 0x0d,
+    0x14, 0x01, 0x00, 0x30, 0x3a, 0x73, 0x0c, 0x1c, 0x2a, 0xce, 0x11,
+    0xad, 0xe5, 0x00, 0xaa, 0x00, 0x44, 0x77, 0x3d, 0x00, 0x00,
+  ]
+
+  private static let empty = Array<UInt8>()
+
+  private static let relations: Array<WinMD.Table> = [
+    WinMD.Table(Metadata.Tables.TypeRef.self, rows: 3, range: 0 ..< 18,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 3, range: 18 ..< 60,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.MethodDef.self, rows: 1, range: 60 ..< 74,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.Param.self, rows: 0, range: 74 ..< 74,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.InterfaceImpl.self, rows: 0, range: 74 ..< 74,
+                wide: 0, stride: 4),
+    WinMD.Table(Metadata.Tables.MemberRef.self, rows: 1, range: 74 ..< 80,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.CustomAttribute.self, rows: 2, range: 80 ..< 92,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.AssemblyRef.self, rows: 1, range: 92 ..< 112,
+                wide: 0, stride: 20),
+    WinMD.Table(Metadata.Tables.NestedClass.self, rows: 1, range: 112 ..< 116,
+                wide: 0, stride: 4),
+  ]
+
+  private static let valid: UInt64 =
+      (1 << 1) | (1 << 2) | (1 << 6) | (1 << 8) | (1 << 9) | (1 << 10)
+          | (1 << 12) | (1 << 35) | (1 << 41)
+
+  /// Runs `body` over a `Storage` catalog bound to the assembled metadata.
+  private static func with(_ body: (borrowing Storage) throws -> Void)
+      rethrows {
+    let storage = Storage(bytes: bytes.span.bytes, relations: relations.span,
+                          strings: strings.span.bytes, blob: blob.span.bytes,
+                          guid: empty.span.bytes, valid: valid, sorted: 0)
+    try body(storage)
+  }
+
+  @Test func `--closure drops a nested external type a signature names`() throws {
+    // `IRoot.Get` returns a nested `TypeRef` `Widget` whose immediate scope is
+    // another `TypeRef` (so the pre-fix immediate-scope gate would pass) but
+    // whose chain terminates at an `AssemblyRef`. Binding the referenced row
+    // resolves it through the scope-chain CTE to no local row, so the local
+    // nested `Widget` sharing the bare name is not enqueued: `Get` names
+    // `Widget` in its signature yet no `Widget` declaration is emitted.
+    try RenderReferencesNestedExternalTests.with { catalog in
+      let shell = Shell(catalog)
+      let closed = try shell.render(closure: "IRoot", template: "com")
+      #expect(closed.contains("public protocol IRoot"))
+      // The edge is genuine (the method names `Widget`) …
+      #expect(closed.contains("-> Widget"))
+      // … but the nested external ref is a frontier, so no `Widget` declaration.
+      #expect(!closed.contains("public protocol Widget"))
     }
   }
 }

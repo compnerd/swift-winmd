@@ -1,4 +1,5 @@
 {{! language: swift }}
+{{#interface}}
 {{#generic}}
 // A WinRT parameterised interface has no static IID: its IID is a
 // per-instantiation PIID computed at runtime from the type
@@ -30,3 +31,36 @@ public protocol {{{name}}}{{#base}}: {{{.}}}{{/base}} {
 {{/methods}}
 }
 {{/generic}}
+{{/interface}}
+{{#struct}}
+// @frozen fixes the ABI layout, so the projected struct is the C/C++ record it
+// mirrors field for field — the transparent layout interop passes by value.
+@frozen public struct {{{name}}} {
+{{#fields}}
+    public var {{{name}}}: {{{type}}}
+{{/fields}}
+}
+{{/struct}}
+{{#enum}}
+// An open struct newtype, not a native enum: a native enum is not
+// ABI-transparent and traps on an undeclared or `[flags]` value, so the
+// projection holds the raw value directly and the members are named constants.
+// It is deliberately not RawRepresentable — a failable `init?(rawValue:)` would
+// reintroduce closed-set semantics; this newtype holds any ABI value.
+@frozen public struct {{{name}}}: Hashable, Sendable {
+    public var rawValue: {{{underlying}}}
+    public init(rawValue: {{{underlying}}}) { self.rawValue = rawValue }
+{{#members}}
+    public static let {{{name}}} = {{{owner}}}(rawValue: {{{value}}})
+{{/members}}
+}
+{{/enum}}
+{{#delegate}}
+// A WinRT delegate is a COM interface — IUnknown plus a single `Invoke` — so
+// `@com` generates the IUnknown-based vtable from this Invoke-only protocol,
+// the same ABI-faithful shape an interface projects, not a Swift closure.
+@com(interface: "{{{iid}}}")
+public protocol {{{name}}} {
+    func Invoke({{#params}}_ {{{name}}}: {{{type}}}{{^last}}, {{/last}}{{/params}}){{#returns}} -> {{{.}}}{{/returns}}
+}
+{{/delegate}}

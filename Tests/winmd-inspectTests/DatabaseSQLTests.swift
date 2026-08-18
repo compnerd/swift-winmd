@@ -953,9 +953,12 @@ struct DatabaseSQLTests {
     // interface through it. The fixture's `IMyInterface` renders through a
     // minimal inline template (no language directive — the identity language
     // leaves the body verbatim), proving the inline template feeds the render.
+    // The render feeds a kind-tagged context, so the template reads an
+    // interface's fields under its `{{#interface}}` section.
     try DatabaseSQLTests.with { catalog in
       var shell = Shell(catalog)
-      try shell.execute(".template mine 'interface {{name}}'")
+      try shell.execute(
+          ".template mine '{{#interface}}interface {{name}}{{/interface}}'")
       let rendered = try shell.render("IMyInterface", template: "mine")
       #expect(rendered == "interface IMyInterface")
     }
@@ -1012,7 +1015,9 @@ struct DatabaseSQLTests {
         ],
       ],
     ]
-    #expect(template.render(context) == """
+    // The context is kind-tagged: an interface's fields nest under the
+    // `interface` key, the shape the template's `{{#interface}}` section reads.
+    #expect(template.render(["interface": context]) == """
       // A WinRT parameterised interface has no static IID: its IID is a
       // per-instantiation PIID computed at runtime from the type
       // arguments, so no `@com(interface:)` is emitted on the ABI protocol
@@ -1216,7 +1221,9 @@ struct DatabaseSQLTests {
         ],
       ],
     ]
-    #expect(template.render(context) == """
+    // The context is kind-tagged: an interface's fields nest under the
+    // `interface` key, the shape the template's `{{#interface}}` section reads.
+    #expect(template.render(["interface": context]) == """
       // A WinRT parameterised interface has no static IID: its IID is a
       // per-instantiation PIID computed at runtime from the type
       // arguments, so no `@com(interface:)` is emitted on the ABI protocol

@@ -613,6 +613,55 @@ struct DatabaseSQLTests {
     }
   }
 
+  @Test func `the render decode spells a struct field's type from its signature`() {
+    // A struct field's type is decoded at render time from its `FieldDef`
+    // signature (edge E6): the `corner` field (Id 4) is a `VALUETYPE` naming the
+    // local `Point`, decoding to `Point`, while the enum's `value__` underlying
+    // field (Id 1) is an `i4`, decoding to `CInt`.
+    MembersFixture.with { catalog in
+      #expect(catalog.decode(field: 4, in: .swift) == "Point")
+      #expect(catalog.decode(field: 1, in: .swift) == "CInt")
+    }
+  }
+
+  @Test func `a method's referenced identities collect its named signature types`() {
+    // `identities(method:)` returns every distinct type a method signature
+    // names, each an identity paired with the coded row it was named through and
+    // deduplicated by that row: `void Method(Guid, Guid)` names the one
+    // `System.Guid` reference twice, collapsing to a single `Reference`. A
+    // primitive-only signature (`void Method(i4, string)`) names none — the
+    // empty frontier.
+    GuidParamFixture.with { catalog in
+      #expect(Set(catalog.identities(method: 1).map(\.identity))
+                  == [Identity(namespace: "System", name: "Guid")])
+    }
+    DatabaseSQLTests.with { catalog in
+      #expect(catalog.identities(method: 1).isEmpty)
+    }
+  }
+
+  @Test func `a field's referenced identities collect its named signature type`() {
+    // `identities(field:)` returns the types a field signature names: the
+    // `corner` field (Id 4) names the local `Point` value type; the primitive
+    // `value__` field (Id 1) names none.
+    MembersFixture.with { catalog in
+      #expect(Set(catalog.identities(field: 4).map(\.identity))
+                  == [Identity(namespace: "NS", name: "Point")])
+      #expect(catalog.identities(field: 1).isEmpty)
+    }
+  }
+
+  @Test func `an enum member's constant value decodes from the Constant table`() {
+    // Each enum member field carries a `Constant` row whose `Value` blob holds
+    // its raw value: `Red` (Id 2) is 5 and `Green` (Id 3) is 7. The `value__`
+    // underlying field (Id 1) bears no constant, so it yields `nil`.
+    MembersFixture.with { catalog in
+      #expect(catalog.value(field: 2) == 5)
+      #expect(catalog.value(field: 3) == 7)
+      #expect(catalog.value(field: 1) == nil)
+    }
+  }
+
   @Test func `the bundled bases view yields the interface's derived bases`() throws {
     // `IMyInterface` is `TypeDef` Id 1; binding `:parent` to its Id
     // navigates `InterfaceImpl.Class = :parent`, and the view UNIONs both arms
@@ -1931,6 +1980,95 @@ private enum RootInterfaceFixture {
 
   private static let valid: UInt64 =
       (1 << 1) | (1 << 2) | (1 << 6) | (1 << 9) | (1 << 10) | (1 << 12)
+
+  /// Runs `body` over a `Storage` catalog bound to the assembled metadata.
+  static func with(_ body: (borrowing Storage) throws -> Void) rethrows {
+    let storage = Storage(bytes: bytes.span.bytes, relations: relations.span,
+                          strings: strings.span.bytes, blob: blob.span.bytes,
+                          guid: empty.span.bytes, valid: valid, sorted: 0)
+    try body(storage)
+  }
+}
+
+/// A metadata fixture of a struct's and an enum's fields — the value-type
+/// signature edges the closure walk pulls in (E6) and the `Constant`-table
+/// member values a native enum projection needs. Three narrow (all-index
+/// 2-byte) tables packed back to back in table-number order — `TypeRef` (#1),
+/// `FieldDef` (#4), `Constant` (#11) — with no owning `TypeDef` linkage, since
+/// the storage helpers key on a `FieldDef` `Id` directly. A stored index `N`
+/// names the 0-based row `N - 1`; a `TypeDefOrRef`/`HasConstant` coded token is
+/// `(row << bits) | tag`.
+///
+///   TypeRef[0]:  ResolutionScope=0, TypeName="Point"(4), TypeNamespace="NS"(1)
+///                — the named value type the `corner` field references.
+///   FieldDef[0]: Name="value__"(10), Signature=blob[1] (an `i4`) — an enum's
+///                underlying storage field, its type spelling the raw-value type.
+///   FieldDef[1]: Name="Red"(18), Signature=blob[1] — an enum member; its raw
+///                value lives in the `Constant` table.
+///   FieldDef[2]: Name="Green"(22), Signature=blob[1] — a second enum member.
+///   FieldDef[3]: Name="corner"(28), Signature=blob[4] (a `VALUETYPE` naming
+///                `TypeRef` row 1, `Point`) — a struct field of a named value
+///                type.
+///   Constant[0]: Type=I4, Parent=HasConstant(FieldDef row 2)=(2<<2)|0=8,
+///                Value=blob[8] (the little-endian i4 `5`) — `Red`'s value.
+///   Constant[1]: Type=I4, Parent=HasConstant(FieldDef row 3)=(3<<2)|0=12,
+///                Value=blob[13] (the little-endian i4 `7`) — `Green`'s value.
+private enum MembersFixture {
+  private static let bytes: Array<UInt8> = [
+    // TypeRef[0] — Point
+    0x00, 0x00, 0x04, 0x00, 0x01, 0x00,
+    // FieldDef[0] — value__
+    0x00, 0x00, 0x0a, 0x00, 0x01, 0x00,
+    // FieldDef[1] — Red
+    0x00, 0x00, 0x12, 0x00, 0x01, 0x00,
+    // FieldDef[2] — Green
+    0x00, 0x00, 0x16, 0x00, 0x01, 0x00,
+    // FieldDef[3] — corner
+    0x00, 0x00, 0x1c, 0x00, 0x04, 0x00,
+    // Constant[0] — Red = 5
+    0x08, 0x00, 0x08, 0x00, 0x08, 0x00,
+    // Constant[1] — Green = 7
+    0x08, 0x00, 0x0c, 0x00, 0x0d, 0x00,
+  ]
+
+  // "\0NS\0Point\0value__\0Red\0Green\0corner\0": NS@1, Point@4, value__@10,
+  // Red@18, Green@22, corner@28.
+  private static let strings: Array<UInt8> = [
+    0x00,
+    0x4e, 0x53, 0x00,
+    0x50, 0x6f, 0x69, 0x6e, 0x74, 0x00,
+    0x76, 0x61, 0x6c, 0x75, 0x65, 0x5f, 0x5f, 0x00,
+    0x52, 0x65, 0x64, 0x00,
+    0x47, 0x72, 0x65, 0x65, 0x6e, 0x00,
+    0x63, 0x6f, 0x72, 0x6e, 0x65, 0x72, 0x00,
+  ]
+
+  // A `#Blob` heap: the reserved empty blob at 0, then the field signatures and
+  // the constant value blobs, each length-prefixed.
+  //   @1:  [0x02] FIELD(0x06) I4(0x08) — the `i4` field signature.
+  //   @4:  [0x03] FIELD(0x06) VALUETYPE(0x11) TypeRef#1(token 0x05) — `Point`.
+  //   @8:  [0x04] 05 00 00 00 — the little-endian i4 constant `5`.
+  //   @13: [0x04] 07 00 00 00 — the little-endian i4 constant `7`.
+  private static let blob: Array<UInt8> = [
+    0x00,
+    0x02, 0x06, 0x08,
+    0x03, 0x06, 0x11, 0x05,
+    0x04, 0x05, 0x00, 0x00, 0x00,
+    0x04, 0x07, 0x00, 0x00, 0x00,
+  ]
+
+  private static let empty = Array<UInt8>()
+
+  private static let relations: Array<WinMD.Table> = [
+    WinMD.Table(Metadata.Tables.TypeRef.self, rows: 1, range: 0 ..< 6,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.FieldDef.self, rows: 4, range: 6 ..< 30,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.Constant.self, rows: 2, range: 30 ..< 42,
+                wide: 0, stride: 6),
+  ]
+
+  private static let valid: UInt64 = (1 << 1) | (1 << 4) | (1 << 11)
 
   /// Runs `body` over a `Storage` catalog bound to the assembled metadata.
   static func with(_ body: (borrowing Storage) throws -> Void) rethrows {

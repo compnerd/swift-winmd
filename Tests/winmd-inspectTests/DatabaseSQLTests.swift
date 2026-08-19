@@ -209,9 +209,29 @@ struct DatabaseSQLTests {
   /// from a `generics` view override the caller registers, so the table need
   /// hold no rows (an empty range past the last real table); the shared
   /// fixture omits it (no generics), which the render treats as no generics.
+  ///
+  /// The interface `TypeDef`'s `TypeName` is repointed at `named`, appended to
+  /// the string heap: the render seeds from a `TypeName = :name` `TypeDef` scan
+  /// (not the `interfaces` view a caller may override), so the fixture's
+  /// IID-bearing interface `TypeDef` Id 1 — `tdInterface`, its `GuidAttribute`
+  /// chain intact — must carry the generic name the render is asked for. Its
+  /// stored `iid` is the well-known GUID; the render's generic arm emits no
+  /// `@com(interface:)`, so the iid is ignored and the rendered output is the
+  /// same the `interfaces`-view override produced.
   private static func withGenerics(
+      named name: String,
       _ body: (borrowing Storage) throws -> Void) rethrows {
     var relations = DatabaseSQLTests.relations
+    var bytes = DatabaseSQLTests.bytes
+    var strings = DatabaseSQLTests.strings
+    // Append `name` (NUL-terminated) to the string heap and repoint TypeDef[0]
+    // (`TypeName` is the `u16` at byte 16 — the TypeDef table opens at byte 12,
+    // a row is Flags(4) then TypeName(2)) at it.
+    let offset = strings.count
+    strings.append(contentsOf: Array(name.utf8))
+    strings.append(0)
+    bytes[16] = UInt8(offset & 0xff)
+    bytes[17] = UInt8(offset >> 8)
     relations.append(WinMD.Table(Metadata.Tables.GenericParam.self, rows: 0,
                                  range: bytes.count ..< bytes.count,
                                  wide: 0, stride: 8))
@@ -994,18 +1014,12 @@ struct DatabaseSQLTests {
     // Swift cannot parse. The wrapper `struct` keeps the escaped bare name
     // (`` `protocol`<Element> ``); the ABI protocol's declaration and the
     // wrapper's `base: any …<Element>` existential both spell `protocolABI`.
-    // Overriding `interfaces` to yield a suffixed keyword name over the
-    // fixture's generic-aware storage drives the render's generic arm;
-    // `methods` and `bases` are emptied so the output is the declaration shell
-    // alone.
-    try DatabaseSQLTests.withGenerics { catalog in
+    // The fixture's interface `TypeDef` carries the suffixed keyword name, so
+    // the render's `TypeName = :name` seed finds it and its generic-aware
+    // storage drives the generic arm; `methods` and `bases` are emptied so the
+    // output is the declaration shell alone.
+    try DatabaseSQLTests.withGenerics(named: "protocol`1") { catalog in
       var shell = Shell(catalog)
-      let interfaces = """
-        CREATE VIEW interfaces AS
-        SELECT Id, TypeNamespace, 'protocol`1' AS TypeName,
-               '00000000-0000-0000-0000-000000000000' AS iid
-        FROM TypeDef WHERE Id = 1
-        """
       let generics = """
         CREATE VIEW generics AS
         SELECT 'Element' AS Name, 0 AS Number FROM TypeDef WHERE Id = :parent
@@ -1018,7 +1032,7 @@ struct DatabaseSQLTests {
         CREATE VIEW bases AS
         SELECT '' AS base, NULL AS spec FROM TypeDef WHERE 0 = 1
         """
-      for query in [interfaces, generics, methods, bases] {
+      for query in [generics, methods, bases] {
         let (name, view) = try DatabaseSQLTests.create(query)
         shell.session.register(name, view)
       }
@@ -1047,15 +1061,11 @@ struct DatabaseSQLTests {
     // names that base UNCHANGED (`: IInspectable`, no `ABI` suffix and no
     // arguments): the base is already a protocol and carries no wrapper/ABI
     // split. The `bases` override supplies the plain name; `methods` are
-    // emptied so the output is the declaration shell.
-    try DatabaseSQLTests.withGenerics { catalog in
+    // emptied so the output is the declaration shell. The fixture's interface
+    // `TypeDef` carries `IVector``1`, so the render's `TypeName = :name` seed
+    // finds it.
+    try DatabaseSQLTests.withGenerics(named: "IVector`1") { catalog in
       var shell = Shell(catalog)
-      let interfaces = """
-        CREATE VIEW interfaces AS
-        SELECT Id, TypeNamespace, 'IVector`1' AS TypeName,
-               '00000000-0000-0000-0000-000000000000' AS iid
-        FROM TypeDef WHERE Id = 1
-        """
       let generics = """
         CREATE VIEW generics AS
         SELECT 'Element' AS Name, 0 AS Number FROM TypeDef WHERE Id = :parent
@@ -1069,7 +1079,7 @@ struct DatabaseSQLTests {
         SELECT 'IInspectable' AS base, NULL AS spec
         FROM TypeDef WHERE Id = :parent
         """
-      for query in [interfaces, generics, methods, bases] {
+      for query in [generics, methods, bases] {
         let (name, view) = try DatabaseSQLTests.create(query)
         shell.session.register(name, view)
       }
@@ -1104,21 +1114,15 @@ struct DatabaseSQLTests {
     // it. The `bases` view still resolves the generic base for queries and
     // tooling; only the render omits it. `Widget`'s sole declared base is the
     // generic one, so with it omitted the interface falls to the COM root
-    // default (`IUnknown`).
-    // `interfaces`/`methods` are overridden to name `Widget` without a
-    // `GuidAttribute` chain and to emit no requirements.
+    // default (`IUnknown`). `Widget` is a `tdInterface` `TypeDef` bearing a
+    // (placeholder) `GuidAttribute`, so the render's `TypeName = :name` seed
+    // finds it; `methods` is overridden to emit no requirements.
     try GenericBaseFixture.with { catalog in
       var shell = Shell(catalog)
-      let interfaces = """
-        CREATE VIEW interfaces AS
-        SELECT Id, TypeNamespace, TypeName,
-               '00000000-0000-0000-0000-000000000000' AS iid
-        FROM TypeDef WHERE Id = 1
-        """
       let methods = """
         CREATE VIEW methods AS SELECT Id, '' AS Name FROM TypeDef WHERE 0 = 1
         """
-      for query in [interfaces, methods] {
+      for query in [methods] {
         let (name, view) = try DatabaseSQLTests.create(query)
         shell.session.register(name, view)
       }
@@ -1193,18 +1197,13 @@ struct DatabaseSQLTests {
     // named one keeps its name, so a mix renders `_ arg0: …, _ named: …, _
     // arg2: …`. A single blank parameter forwards as `base.M(arg0)` — no empty
     // argument — and a named parameter is untouched. The fixture's storage
-    // decodes the parameter types; `interfaces`/`methods`/`params` are
-    // overridden so the one method takes a blank then a named parameter over
-    // the fixture's `MethodDef` signature. The forwarding call passes both
-    // locals.
-    try DatabaseSQLTests.withGenerics { catalog in
+    // decodes the parameter types; `methods`/`params` are overridden so the one
+    // method takes a blank then a named parameter over the fixture's
+    // `MethodDef` signature. The fixture's interface `TypeDef` carries
+    // `IThing``1`, so the render's `TypeName = :name` seed finds it. The
+    // forwarding call passes both locals.
+    try DatabaseSQLTests.withGenerics(named: "IThing`1") { catalog in
       var shell = Shell(catalog)
-      let interfaces = """
-        CREATE VIEW interfaces AS
-        SELECT Id, TypeNamespace, 'IThing`1' AS TypeName,
-               '00000000-0000-0000-0000-000000000000' AS iid
-        FROM TypeDef WHERE Id = 1
-        """
       let generics = """
         CREATE VIEW generics AS
         SELECT 'Element' AS Name, 0 AS Number FROM TypeDef WHERE Id = :parent
@@ -1233,7 +1232,7 @@ struct DatabaseSQLTests {
         CREATE VIEW bases AS
         SELECT '' AS base, NULL AS spec FROM TypeDef WHERE 0 = 1
         """
-      for query in [interfaces, generics, methods, params, bases] {
+      for query in [generics, methods, params, bases] {
         let (name, view) = try DatabaseSQLTests.create(query)
         shell.session.register(name, view)
       }
@@ -1943,67 +1942,109 @@ private enum RootInterfaceFixture {
 }
 
 /// A metadata fixture whose interface inherits a generic base — the render's
-/// generic-base decode. Four narrow (all-index 2-byte) tables packed back to
-/// back in table-number order; a stored index `N` names the 0-based row
-/// `N - 1`, and a `TypeDefOrRef` coded token is `(row << 2) | tag`, tag 1
-/// selecting `TypeRef` and tag 2 selecting `TypeSpec`.
+/// generic-base decode. Narrow (all-index 2-byte) tables packed back to back in
+/// table-number order; a stored index `N` names the 0-based row `N - 1`, and a
+/// `TypeDefOrRef` coded token is `(row << 2) | tag`, tag 1 selecting `TypeRef`
+/// and tag 2 selecting `TypeSpec`.
 ///
 ///   TypeRef[0]:  ResolutionScope=0, TypeName="IVector`1"(4),
 ///                TypeNamespace="NS"(1) — the generic base interface, its name
 ///                carrying the CLR arity suffix the decode strips.
-///   TypeDef[0]:  Flags=0, TypeName="Widget"(14), TypeNamespace="NS"(1),
-///                null Extends/Field/Method — the interface implementing the
-///                generic base.
+///   TypeRef[1]:  ResolutionScope=0, TypeName="GuidAttribute"(55),
+///                TypeNamespace="Windows.Win32.Foundation.Metadata"(21) — the
+///                attribute type `Widget`'s `GuidAttribute` names, so the
+///                seed's `guid` fetch resolves an IID and keeps `Widget`.
+///   TypeDef[0]:  Flags=0x20 (tdInterface), TypeName="Widget"(14),
+///                TypeNamespace="NS"(1), null Extends/Field/Method — the
+///                interface implementing the generic base. The render seeds
+///                from a `tdInterface` `TypeName = :name` `TypeDef` scan, so
+///                `Widget` is flagged an interface and bears a `GuidAttribute`.
 ///   InterfaceImpl[0]: Class=1 (TypeDef row 1, Widget),
 ///                Interface=6 ((1 << 2) | 2 — TypeSpec row 1).
+///   MemberRef[0]: Class=(2 << 3) | 1 = 0x11 — the ctor whose declaring type is
+///                the `GuidAttribute` TypeRef (row 2).
+///   CustomAttribute[0]: Parent=(1 << 5) | 3 = 0x23 (TypeDef row 1, Widget),
+///                Type=(1 << 3) | 3 = 0x0b (MemberRef row 1), Value=blob[7] —
+///                `Widget`'s (placeholder) GUID value.
 ///   TypeSpec[0]: Signature=1 (blob offset 1 — GENERICINST of TypeRef row 1
 ///                over one STRING argument, i.e. `IVector<String>`).
 private enum GenericBaseFixture {
   private static let bytes: Array<UInt8> = [
     // TypeRef[0]: ResolutionScope, TypeName=4, TypeNamespace=1.
     0x00, 0x00, 0x04, 0x00, 0x01, 0x00,
-    // TypeDef[0]: Flags, TypeName=14, TypeNamespace=1, Extends, FieldList,
+    // TypeRef[1]: ResolutionScope, TypeName=55, TypeNamespace=21.
+    0x00, 0x00, 0x37, 0x00, 0x15, 0x00,
+    // TypeDef[0]: Flags=0x20, TypeName=14, TypeNamespace=1, Extends, FieldList,
     // MethodList.
-    0x00, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x01, 0x00,
+    0x20, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x01, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     // InterfaceImpl[0]: Class=1, Interface=6.
     0x01, 0x00, 0x06, 0x00,
+    // MemberRef[0]: Class=0x11, Name, Signature.
+    0x11, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // CustomAttribute[0]: Parent=0x23, Type=0x0b, Value=7.
+    0x23, 0x00, 0x0b, 0x00, 0x07, 0x00,
     // TypeSpec[0]: Signature=1.
     0x01, 0x00,
   ]
 
-  // "\0NS\0IVector`1\0Widget\0": NS@1, IVector`1@4, Widget@14.
+  // "\0NS\0IVector`1\0Widget\0Windows.Win32.Foundation.Metadata\0GuidAttribute
+  // \0": NS@1, IVector`1@4, Widget@14, GuidNamespace@21, GuidName@55.
   private static let strings: Array<UInt8> = [
     0x00,
     0x4e, 0x53, 0x00,
     0x49, 0x56, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x60, 0x31, 0x00,
     0x57, 0x69, 0x64, 0x67, 0x65, 0x74, 0x00,
+    0x57, 0x69, 0x6e, 0x64, 0x6f, 0x77, 0x73, 0x2e, 0x57, 0x69, 0x6e, 0x33,
+    0x32, 0x2e, 0x46, 0x6f, 0x75, 0x6e, 0x64, 0x61, 0x74, 0x69, 0x6f, 0x6e,
+    0x2e, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x00,
+    0x47, 0x75, 0x69, 0x64, 0x41, 0x74, 0x74, 0x72, 0x69, 0x62, 0x75, 0x74,
+    0x65, 0x00,
   ]
 
-  // The blob heap: the empty blob at 0, then one length-prefixed signature.
+  // The blob heap: the empty blob at 0, then one length-prefixed signature,
+  // then the `GuidAttribute` value.
   //   @1: [0x05] GENERICINST(0x15) CLASS(0x12) TypeRef#1(token 0x05) 1 arg
   //       STRING(0x0e) — `IVector<String>`, its base TypeRef row 1.
+  //   @7: [0x14] the 20-byte GuidAttribute value — prolog 0x0001, an all-zero
+  //       placeholder GUID, then NumNamed 0. The render's generic-omitting path
+  //       ignores the iid, so the value is a placeholder.
   private static let blob: Array<UInt8> = [
     0x00,
     0x05, 0x15, 0x12, 0x05, 0x01, 0x0e,
+    0x14, 0x01, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00,
   ]
 
   private static let empty = Array<UInt8>()
 
   private static let relations: Array<WinMD.Table> = [
-    WinMD.Table(Metadata.Tables.TypeRef.self, rows: 1, range: 0 ..< 6,
+    WinMD.Table(Metadata.Tables.TypeRef.self, rows: 2, range: 0 ..< 12,
                 wide: 0, stride: 6),
-    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 1, range: 6 ..< 20,
+    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 1, range: 12 ..< 26,
                 wide: 0, stride: 14),
-    WinMD.Table(Metadata.Tables.InterfaceImpl.self, rows: 1, range: 20 ..< 24,
+    // An empty `MethodDef` (this fixture has no methods) so the render seed's
+    // `guid` fetch — whose `MethodDef`-ctor arm joins it — plans over a present
+    // relation rather than faulting on an absent one.
+    WinMD.Table(Metadata.Tables.MethodDef.self, rows: 0, range: 44 ..< 44,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.InterfaceImpl.self, rows: 1, range: 26 ..< 30,
                 wide: 0, stride: 4),
-    WinMD.Table(Metadata.Tables.TypeSpec.self, rows: 1, range: 24 ..< 26,
+    WinMD.Table(Metadata.Tables.MemberRef.self, rows: 1, range: 30 ..< 36,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.CustomAttribute.self, rows: 1, range: 36 ..< 42,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeSpec.self, rows: 1, range: 42 ..< 44,
                 wide: 0, stride: 2),
   ]
 
-  // TypeRef (#1), TypeDef (#2), InterfaceImpl (#9), TypeSpec (#27).
+  // TypeRef (#1), TypeDef (#2), MethodDef (#6), InterfaceImpl (#9),
+  // MemberRef (#10), CustomAttribute (#12), TypeSpec (#27).
   private static let valid: UInt64 =
-      (1 << 1) | (1 << 2) | (1 << 9) | (1 << 27)
+      (1 << 1) | (1 << 2) | (1 << 6) | (1 << 9) | (1 << 10) | (1 << 12)
+          | (1 << 27)
 
   /// Runs `body` over a `Storage` catalog bound to the assembled metadata.
   static func with(_ body: (borrowing Storage) throws -> Void) rethrows {

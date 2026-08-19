@@ -163,7 +163,7 @@ struct EngineNonEquiJoinTests {
           JOIN Child ON Parent.Id < Child.Pid
         """)
     let compiled = try catalog.compile(select)
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(!joined(plan))
     #expect(residue(plan))
   }
@@ -194,7 +194,7 @@ struct EngineNonEquiJoinTests {
           JOIN Child ON Child.Pid = Parent.Id AND Parent.Name < Child.Name
         """)
     let compiled = try catalog.compile(select)
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(joined(plan))
   }
 
@@ -218,7 +218,7 @@ struct EngineNonEquiJoinTests {
           JOIN Child ON Child.Pid = Parent.Id + 1
         """)
     let compiled = try catalog.compile(select)
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(!joined(plan))
     #expect(residue(plan))
   }
@@ -279,7 +279,7 @@ struct EngineNonEquiJoinTests {
         SELECT A.k FROM A JOIN B ON (1 / A.x) = 0 AND A.k = B.k
         """)
     let compiled = try catalog.compile(select)
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(!joined(plan))
     #expect(residue(plan))
   }
@@ -300,7 +300,7 @@ struct EngineNonEquiJoinTests {
     let compiled = try catalog.compile(parse("""
         SELECT A.k FROM A JOIN B ON A.k = B.k AND (1 / A.x) = 0
         """))
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(!joined(plan))
     #expect(residue(plan))
   }
@@ -322,7 +322,7 @@ struct EngineNonEquiJoinTests {
     let compiled = try catalog.compile(parse("""
         SELECT A.k FROM A JOIN B ON A.k = B.k AND (1 / A.x) = 0
         """))
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(!joined(plan))
     #expect(residue(plan))
     #expect(throws: SQLError.divide) {
@@ -372,7 +372,7 @@ struct EngineNonEquiJoinTests {
     let rows = try catalog.run(parse(text))
     #expect(rows == [[.integer(1), .integer(8)]])
     let compiled = try catalog.compile(parse(text))
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(joined(plan))
   }
 
@@ -385,7 +385,7 @@ struct EngineNonEquiJoinTests {
           JOIN Child ON Child.Pid = Parent.Id
         """)
     let compiled = try catalog.compile(select)
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(joined(plan))
   }
 
@@ -405,7 +405,7 @@ struct EngineNonEquiJoinTests {
     ])
     let text = "SELECT A.k FROM A JOIN B ON A.k < B.k WHERE (1 / A.x) = 0"
     let compiled = try catalog.compile(parse(text))
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(separated(plan))
     #expect(residue(plan))
     #expect(try catalog.run(parse(text)).isEmpty)
@@ -471,7 +471,7 @@ struct EngineNonEquiJoinTests {
           JOIN B ON A.k1 = B.k1 AND A.k2 = B.k2 WHERE (1 / A.x) = 0
         """
     let compiled = try catalog.compile(parse(text))
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     // The equi key still hash-joins; the leftover match gates above it, and the
     // `WHERE` is a separate `select` above that gate, not fused with the match.
     #expect(joined(plan))
@@ -529,7 +529,7 @@ struct EngineNonEquiJoinTests {
           JOIN B ON A.k1 = B.k1 AND A.k2 = B.k2 WHERE A.tag = 'keep'
         """
     let compiled = try catalog.compile(parse(text))
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(joined(plan))
     #expect(try catalog.run(parse(text)) == [[.text("keep"), .text("bee")]])
   }
@@ -552,7 +552,7 @@ struct EngineNonEquiJoinTests {
     ])
     let text = "SELECT A.k FROM A JOIN B ON A.k = B.k WHERE (1 / A.x) = 1"
     let compiled = try catalog.compile(parse(text))
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(joined(plan))
     #expect(try catalog.run(parse(text)) == [[.integer(1)]])
   }
@@ -686,7 +686,7 @@ struct EngineOuterJoinTests {
           LEFT JOIN Child ON Child.Pid = Parent.Id
         """)
     let compiled = try catalog.compile(select)
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(outers(plan))
     #expect(!joined(plan))
   }

@@ -502,7 +502,7 @@ struct LikeSafetyTests {
     let compiled = try mismatched().compile(parse(query: """
         SELECT A.K FROM A JOIN B ON A.K = B.K AND A.Name LIKE 'a%' ESCAPE A.E
         """))
-    let plan = try mismatched().optimise(compiled.pushdown(), [:])
+    let plan = try mismatched().optimise(compiled.pushdown([:]), [:])
     #expect(!joins(plan))
     #expect(residual(plan))
   }
@@ -532,7 +532,7 @@ struct LikeSafetyTests {
         SELECT A.K FROM A JOIN B ON A.K = B.K AND A.Name LIKE 'a%' ESCAPE 'ab'
         """
     let compiled = try mismatched().compile(parse(query: sql))
-    let plan = try mismatched().optimise(compiled.pushdown(), [:])
+    let plan = try mismatched().optimise(compiled.pushdown([:]), [:])
     #expect(!joins(plan))
     #expect(residual(plan))
     try mismatched().expect(sql,
@@ -553,7 +553,7 @@ struct LikeSafetyTests {
     let compiled = try catalog.compile(parse(query: """
         SELECT Id FROM S WHERE Name LIKE '_%' ESCAPE '\\' AND Id = 2
         """))
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(seeks(plan))
 
     // …and it still matches correctly: only row 2 has `Id = 2`, and its
@@ -577,7 +577,7 @@ struct LikeSafetyTests {
     let compiled = try catalog.compile(parse(query: """
         SELECT Id FROM S WHERE Name LIKE 'x%' AND Id = 2
         """))
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(seeks(plan))
     try catalog.expect("SELECT Id FROM S WHERE Name LIKE 'x%' AND Id = 2",
                        yields: [[2]])
@@ -781,7 +781,7 @@ struct LikeParameterTests {
       return
     }
     let compiled = try catalog.compile(query)
-    let plan = try catalog.optimise(compiled.pushdown(),
+    let plan = try catalog.optimise(compiled.pushdown([:]),
                                     ["e": .text("\\")])
     #expect(!seeks(plan))
   }
@@ -842,7 +842,7 @@ struct LikeParameterisedTests {
     let compiled = try catalog.compile(parse(query: """
         SELECT x FROM V WHERE 'x' LIKE :p AND (1 / y) = 0
         """))
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
 
     // The parameterised LIKE floats above the derived leaf rather than riding
     // into the view below the unsafe division.

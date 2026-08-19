@@ -808,7 +808,7 @@ extension Catalog where Self: ~Escapable {
 /// hoist it to the straddling `.match`, where its comparability is decided.
 private func equated(_ conjunct: Filter, to parameter: String) -> Int? {
   var conjunct = conjunct
-  if case let .incomparable(inner) = conjunct { conjunct = inner }
+  if case let .incomparable(inner, _) = conjunct { conjunct = inner }
   guard case let .compare(lhs, .equal, rhs) = conjunct else { return nil }
   switch (lhs, rhs) {
   case let (.slot(slot), .parameter(name)) where name == parameter:

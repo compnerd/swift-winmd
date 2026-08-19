@@ -172,7 +172,15 @@ internal indirect enum Filter: Equatable, Sendable {
   /// Evaluating it evaluates the inner, which faults `42804` at run exactly as
   /// the un-optimised plan does — never dropped over an emptied seek, never
   /// pushed past a row-dropping operator.
-  case incomparable(Filter)
+  ///
+  /// A stamped `.bound(column, =, :parameter)` carries the column operand's
+  /// `Comparability` in `kind`; every other stamped leaf carries `nil`. The
+  /// recorded class lets `neutral` re-run the stamper's own `reconcile` at
+  /// pushdown — against the run binding this time — so a bound conjunct proven
+  /// throw-neutral for the run may ride to a seek leaf without carrying the
+  /// type information the physical layer lacks. A `nil` kind is never
+  /// re-reconciled, so a non-bound cross-kind leaf stays unsafe always.
+  case incomparable(Filter, kind: Comparability?)
 
   /// The lowered pattern or escape operand of a `Filter.like`: a `Term`
   /// evaluated per row, or a run-time `:parameter` resolved from the engine's
@@ -737,11 +745,12 @@ extension Filter {
       .or(lhs.remapped(through: slot), rhs.remapped(through: slot))
     case let .not(operand):
       .not(operand.remapped(through: slot))
-    case let .incomparable(inner):
+    case let .incomparable(inner, kind):
       // Slot renumbering never changes comparability, so re-wrap the remapped
-      // inner rather than reclassifying — the carried bit travels verbatim
-      // through the combined-space remap the optimiser applies.
-      .incomparable(inner.remapped(through: slot))
+      // inner rather than reclassifying — the carried bit (and the recorded
+      // column class) travels verbatim through the combined-space remap the
+      // optimiser applies.
+      .incomparable(inner.remapped(through: slot), kind: kind)
     }
   }
 
@@ -861,6 +870,33 @@ extension Filter {
     }
   }
 
+  /// Whether this conjunct is throw-neutral under `bindings` — a bound
+  /// `column = :parameter` equality whose comparison cannot fault `42804` this
+  /// run, so selection pushdown may ride it anywhere a `safe` conjunct rides
+  /// (a cross-product input, a derived body, a seek leaf) without ever
+  /// suppressing or introducing a fault.
+  ///
+  /// It is the stamper's own verdict, deferred to the point the binding is
+  /// known: the leaf is `.incomparable(.bound(column, =, :parameter))` carrying
+  /// the recorded column class `kind`, and it is neutral iff `reconcile(kind,
+  /// comparability(of: bindings[parameter]))` — the identical `reconcile` the
+  /// stamp ran, now against the run binding (an absent or NULL binding is
+  /// `.null`, comparable against anything; a non-NULL value its `.known` kind).
+  /// So a bound conjunct is neutral exactly when the stamper would not have
+  /// wrapped it incomparable had it known the binding — a comparable integer
+  /// binding, a widening double against an integer column, or an unbound/NULL
+  /// parameter (UNKNOWN, never a fault) — and non-neutral for a cross-kind
+  /// binding, which stays the always-evaluated residual at its lazy-fault
+  /// position and faults exactly as the un-pushed plan does. A non-equality
+  /// bound, a non-slot column, or any non-`.bound` leaf is never neutral.
+  internal func neutral(_ bindings: Bindings) -> Bool {
+    guard case let .incomparable(inner, .some(kind)) = self,
+        case let .bound(.slot(_), .equal, parameter) = inner else {
+      return false
+    }
+    return reconcile(kind, comparability(of: bindings[parameter]))
+  }
+
   /// Whether this predicate is guaranteed FALSE or UNKNOWN whenever every slot
   /// in `nulled` is NULL — a null-rejecting predicate on that side, so a WHERE
   /// carrying it drops every row an outer join NULL-extends across `nulled`. It
@@ -961,7 +997,7 @@ extension Filter {
     // A stamped leaf wraps a scalar/row comparison that reads its components'
     // slots, so it is never slotless-UNKNOWN — derive from the inner, which is
     // false for every case `incomparable` wraps.
-    case let .incomparable(inner): inner.contingent
+    case let .incomparable(inner, _): inner.contingent
     }
   }
 
@@ -1012,7 +1048,7 @@ extension Filter {
     case let .or(lhs, rhs): lhs.parameterised || rhs.parameterised
     case let .not(operand): operand.parameterised
     // A stamped leaf is parameterised exactly when the comparison it wraps is.
-    case let .incomparable(inner): inner.parameterised
+    case let .incomparable(inner, _): inner.parameterised
     }
   }
 
@@ -1080,7 +1116,7 @@ extension Filter {
       // `IS <truth>` is a definite two-valued test, but only when the inner's
       // value is itself statically decided; an undecidable inner leaves `nil`.
       inner.constant == nil ? nil : tested(inner.constant, value, negated)
-    case let .incomparable(inner):
+    case let .incomparable(inner, _):
       // A provably cross-kind comparison is undecidable (`nil`, from the inner)
       // — never folded to a constant, so the optimiser keeps it and its `42804`
       // fault surfaces at run rather than folding to true/false.

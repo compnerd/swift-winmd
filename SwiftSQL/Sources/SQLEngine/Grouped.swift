@@ -735,7 +735,7 @@ extension Filter {
       rhs.references(into: &ordinals)
     case let .not(operand):
       operand.references(into: &ordinals)
-    case let .incomparable(inner):
+    case let .incomparable(inner, _):
       inner.references(into: &ordinals)
     }
   }

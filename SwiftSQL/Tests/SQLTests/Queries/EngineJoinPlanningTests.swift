@@ -277,7 +277,7 @@ struct EngineStreamingProductTests {
           JOIN Adults ON Adults.Key = Child.Pid
         """)
     let compiled = try catalog.compile(select)
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(residue(plan))
   }
 

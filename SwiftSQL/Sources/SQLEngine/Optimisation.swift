@@ -504,7 +504,7 @@ private func comparison(_ filter: Filter, _ bindings: Bindings)
   // stamp — faults `42804` at run), while the stamp still bars a sibling from
   // seeking past this conjunct through `Filter.safe`.
   var filter = filter
-  if case let .incomparable(inner) = filter { filter = inner }
+  if case let .incomparable(inner, _) = filter { filter = inner }
   switch filter {
   case let .compare(.slot(slot), op, .constant(.integer(value))):
     return (slot, op, value)
@@ -537,7 +537,7 @@ private func range(_ filter: Filter, _ bindings: Bindings) -> (Int, Int, Int)? {
   // integer against the sort key — so a cross-kind binding scans and the
   // stamped residual faults `42804`, as `comparison` does for a `bound`.
   var filter = filter
-  if case let .incomparable(inner) = filter { filter = inner }
+  if case let .incomparable(inner, _) = filter { filter = inner }
   guard case let .between(.slot(slot), lower, upper, negated: false) = filter,
       let low = integer(lower, bindings),
       let high = integer(upper, bindings) else {

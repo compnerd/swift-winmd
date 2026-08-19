@@ -537,17 +537,24 @@ internal struct Shell: ~Escapable {
     return sources.joined(separator: "\n")
   }
 
-  /// Emits the interface `found` and, first, the transitive closure of its plain
-  /// (`spec IS NULL`) base and required interfaces — a depth-first post-order
-  /// over the E1 edges, so a base precedes the interface refining it.
+  /// Emits the type `found` and, first, the transitive closure of every local
+  /// type it depends on — a depth-first post-order, so a dependency precedes the
+  /// type naming it. `found` is a kind-tagged row (`Id`, namespace, name, `iid`,
+  /// and a `kind` of `interface`/`struct`/`enum`/`delegate`), the shape the
+  /// `interfaces`, `requires`, and `references` selections share.
   ///
-  /// The `requires` query resolves each base and required interface to its local
-  /// interface `TypeDef` row keyed on namespace and name, so a base that resolves
-  /// to no local interface `TypeDef` — an external `TypeRef`-only frontier, or a
-  /// local type that is no interface — is not returned and the walk simply stops
-  /// there. The visited set (the local `TypeDef` Id) renders each interface once
-  /// and terminates a cycle; the bases are walked in a stable namespace-then-name
-  /// order so the emission is deterministic.
+  /// The adjacency depends on the node's kind. An interface first closes over
+  /// its plain (`spec IS NULL`) base and required interfaces — the E1 edges,
+  /// through the `requires` query, each resolved to its local interface `TypeDef`
+  /// row keyed on namespace and name — then over the value-type and delegate
+  /// types its methods name (E3/E7). A struct closes over its fields' types
+  /// (E6), a delegate over its `Invoke` signature (E7), and an enum is a leaf.
+  /// Each signature-named type resolves through the `references` query to a local
+  /// `types` row; a runtime `class` stays a frontier, and an external
+  /// `TypeRef`-only reference resolves to no row and simply drops. The visited
+  /// set (the local `TypeDef` Id) renders each type once across all kinds and
+  /// terminates a cycle; the neighbours are walked in a stable
+  /// namespace-then-name order so the emission is deterministic.
   private borrowing func walk(_ found: Array<Value>, visited: inout Set<Int>,
                               into sources: inout Array<String>,
                               through mustache: MustacheTemplate,
@@ -555,15 +562,26 @@ internal struct Shell: ~Escapable {
                               language: Language,
                               search: Array<String>) throws {
     guard visited.insert(found[0].integer).inserted else { return }
-    let query =
-        try Shell.statement(Shell.query(named: "requires", search: search))
-    let bases = try session.run(query, routines,
-                                bindings: ["parent": found[0]])
-    let ordered = bases.sorted {
-      ($0[1].text, $0[2].text) < ($1[1].text, $1[2].text)
+    // An interface closes over its base and required interfaces first (E1),
+    // before the signature-named types, so an inherited surface precedes the
+    // refinement naming it.
+    if found[4].text == "interface" {
+      let query =
+          try Shell.statement(Shell.query(named: "requires", search: search))
+      let bases = try session.run(query, routines,
+                                  bindings: ["parent": found[0]])
+      for base in bases.sorted(by: Shell.precedes) {
+        try walk(base, visited: &visited, into: &sources, through: mustache,
+                 routines: routines, in: dialect, language: language,
+                 search: search)
+      }
     }
-    for base in ordered {
-      try walk(base, visited: &visited, into: &sources, through: mustache,
+    // The value-type and delegate types the node's signatures name (E3/E6/E7),
+    // resolved to their local rows and walked before the terminal emit.
+    let referenced = try adjacency(of: found, routines, in: dialect,
+                                   search: search)
+    for neighbor in referenced.sorted(by: Shell.precedes) {
+      try walk(neighbor, visited: &visited, into: &sources, through: mustache,
                routines: routines, in: dialect, language: language,
                search: search)
     }
@@ -571,19 +589,152 @@ internal struct Shell: ~Escapable {
                             in: dialect, language: language, search: search))
   }
 
-  /// Renders the single interface `found` — its `Id`, namespace, name, and
-  /// `iid`, the row shape the `interfaces` and `requires` queries share —
-  /// through `mustache`, the per-interface body the flat render and the
-  /// `--closure` walk both run.
+  /// The local `types` rows the signatures of `found` name — the node's
+  /// signature-driven adjacency (E3/E6/E7). An interface contributes every type
+  /// its methods name, a struct every type its fields name, a delegate the types
+  /// its `Invoke` signature names; an enum contributes none. Each referenced
+  /// type resolves through the `references` query — by the exact `TypeRef`/
+  /// `TypeDef` row it was named through, not by name — to a local `types` row,
+  /// dropping a runtime `class` (which stays a frontier) and an external
+  /// `TypeRef`-only reference (which resolves to no row).
+  private borrowing func adjacency(of found: Array<Value>,
+                                   _ routines: Routines, in dialect: Dialect,
+                                   search: Array<String>) throws
+      -> Array<Array<Value>> {
+    // The referenced types, gathered from the node's method or field signatures
+    // per its kind — each a `Referent` carrying the coded-index row it was named
+    // through, so it resolves to a local definition by its exact Id.
+    var references = Set<Referent>()
+    switch found[4].text {
+    case "interface":
+      let plan =
+          try Shell.statement(Shell.query(named: "methods", search: search))
+      let rows = try session.run(plan, routines,
+                                 bindings: ["parent": found[0]])
+      for row in rows {
+        let method = row[0].integer
+        references.formUnion(session.storage.identities(ofMethod: method))
+      }
+    case "struct":
+      let plan =
+          try Shell.statement(Shell.query(named: "fields", search: search))
+      let rows = try session.run(plan, routines,
+                                 bindings: ["parent": found[0]])
+      for row in rows {
+        let field = row[0].integer
+        references.formUnion(session.storage.identities(ofField: field))
+      }
+    case "delegate":
+      let plan =
+          try Shell.statement(Shell.query(named: "invoke", search: search))
+      let rows = try session.run(plan, routines,
+                                 bindings: ["parent": found[0]])
+      for row in rows {
+        let method = row[0].integer
+        references.formUnion(session.storage.identities(ofMethod: method))
+      }
+    default:
+      return []
+    }
+    // Resolve each reference to its local row by the exact Id it names — a
+    // `TypeRef` through the shared scope-chain `resolved` CTE (bound `:ref`), a
+    // `TypeDef` by its Id directly (bound `:def`) — leaving the other key NULL so
+    // one arm matches. A runtime `class` (a reference type, outside the value
+    // closure) is dropped, as is a reference that resolves to no local row.
+    let plan =
+        try Shell.statement(Shell.query(named: "references", search: search))
+    var neighbors = Array<Array<Value>>()
+    for reference in references {
+      let (ref, def): (Value, Value) = switch reference.kind {
+      case .reference: (.integer(reference.row), .null)
+      case .definition: (.null, .integer(reference.row))
+      }
+      let rows = try session.run(plan, routines,
+                                 bindings: ["ref": ref, "def": def])
+      for row in rows where row[4].text != "class" {
+        // A delegate projects an `@com` interface keyed on its static GUID, so a
+        // parameterised or GUID-less delegate — no static IID — is a frontier:
+        // dropped rather than emitted as a GUID-less `@com` shape, the way a
+        // parameterised interface omits its static `@com(interface:)`.
+        if row[4].text == "delegate",
+            try guid(of: row, routines, search: search) == nil { continue }
+        neighbors.append(row)
+      }
+    }
+    return neighbors
+  }
+
+  /// The static GUID the delegate `found` bears through its `GuidAttribute`,
+  /// decoded through the `guid` query the way the `interfaces` view spells an
+  /// interface's `iid`. A WinRT delegate is a COM interface — IUnknown plus a
+  /// single `Invoke` — so `@com` needs its IUnknown-derived IID.
   ///
-  /// Decoding the interface's declared generics, methods, and base is the same
-  /// work either path needs; wrapping it here is what lets the closure worklist
-  /// reuse the decode and emit rather than duplicate them.
+  /// `nil` marks a delegate the walk treats as a frontier: a parameterised
+  /// delegate computes its PIID per instantiation and bears no static GUID, and
+  /// a delegate carrying no `GuidAttribute` resolves nothing through the query.
+  /// Either way the render drops it rather than emitting a GUID-less `@com`
+  /// protocol.
+  private borrowing func guid(of found: Array<Value>, _ routines: Routines,
+                              search: Array<String>) throws -> String? {
+    guard try declarations(of: found[0], routines, search: search).isEmpty
+    else { return nil }
+    let plan = try Shell.statement(Shell.query(named: "guid", search: search))
+    let rows = try session.run(plan, routines, bindings: ["parent": found[0]])
+    guard let row = rows.first, row[0] != .null else { return nil }
+    return row[0].text
+  }
+
+  /// The stable namespace-then-name order the walk emits siblings in, so a
+  /// closure renders deterministically regardless of the order the adjacency
+  /// queries (or the referenced-identity set) yield rows.
+  private static func precedes(_ lhs: Array<Value>,
+                               _ rhs: Array<Value>) -> Bool {
+    (lhs[1].text, lhs[2].text) < (rhs[1].text, rhs[2].text)
+  }
+
+  /// Renders the single type `found` through `mustache`, the per-node body the
+  /// flat render and the `--closure` walk both run.
+  ///
+  /// `found` is a kind-tagged row; its `kind` selects the template section and
+  /// the context shape. An interface renders its `@com` protocol (or generic
+  /// wrapper), a struct its fields, an enum its native cases, a delegate its
+  /// `Invoke` signature — each under exactly one of the template's
+  /// `{{#interface}}`/`{{#struct}}`/`{{#enum}}`/`{{#delegate}}` sections, so one
+  /// template renders every kind. The interface context is unchanged, now nested
+  /// under `interface`, so its section renders byte-identically to the flat
+  /// per-interface output. Wrapping the decode here is what lets the closure walk
+  /// reuse it across kinds rather than duplicate it.
   private borrowing func emit(_ found: Array<Value>,
                               through mustache: MustacheTemplate,
                               routines: Routines, in dialect: Dialect,
                               language: Language,
                               search: Array<String>) throws -> String {
+    let context: Dictionary<String, Any>
+    switch found[4].text {
+    case "struct":
+      context = ["struct": try structure(found, routines, in: dialect,
+                                         language: language, search: search)]
+    case "enum":
+      context = ["enum": try enumeration(found, routines, in: dialect,
+                                         language: language, search: search)]
+    case "delegate":
+      context = ["delegate": try delegation(found, routines, in: dialect,
+                                            language: language, search: search)]
+    default:
+      context = ["interface": try interface(found, routines, in: dialect,
+                                            language: language, search: search)]
+    }
+    return mustache.render(context)
+  }
+
+  /// The template context for the interface `found` — its `Id`, namespace, name,
+  /// and `iid` decoded into the declared generics, methods, and base the
+  /// `{{#interface}}` section reads. This is the interface half of `emit`, its
+  /// dictionary now the value of the context's `interface` key.
+  private borrowing func interface(_ found: Array<Value>, _ routines: Routines,
+                                   in dialect: Dialect, language: Language,
+                                   search: Array<String>) throws
+      -> Dictionary<String, Any> {
     let id = found[0]
     // The interface's ordered declared generic-parameter names, through the
     // `generics` view bound by its `Id` — empty for a non-generic interface.
@@ -661,7 +812,115 @@ internal struct Shell: ~Escapable {
         ["name": name, "last": index == generics.count - 1]
       }
     }
-    return mustache.render(context)
+    return context
+  }
+
+  /// The template context for the struct `found` — its keyword-escaped name and
+  /// its fields, each a `name` and the `type` spelled at render time from its
+  /// `FieldDef` signature (edge E6). The `fields` render query projects each
+  /// field's already-escaped name and its `Id`, which `decode(field:)` navigates
+  /// to the field's type in the target `Dialect`.
+  private borrowing func structure(_ found: Array<Value>, _ routines: Routines,
+                                   in dialect: Dialect, language: Language,
+                                   search: Array<String>) throws
+      -> Dictionary<String, Any> {
+    let plan = try Shell.statement(Shell.query(named: "fields", search: search))
+    let rows = try session.run(plan, routines, bindings: ["parent": found[0]])
+    let fields = rows.map { row -> Dictionary<String, Any> in
+      let type =
+          session.storage.decode(field: row[0].integer, in: dialect) ?? ""
+      return ["name": row[1].text, "type": type]
+    }
+    return ["name": Shell.name(found, language), "fields": fields]
+  }
+
+  /// The template context for the enum `found` — its keyword-escaped name, the
+  /// `underlying` raw-value type, and its members, each a `name` and the integer
+  /// `value` from the `Constant` table. The underlying type is the `value__`
+  /// field's decoded type (falling back to the dialect's `i4` spelling when it
+  /// does not decode); the members are the enum's other fields, each paired with
+  /// its constant value so the projection is an open struct newtype whose static
+  /// constants name the members.
+  ///
+  /// The name is carried a second time under `owner`, the newtype's type for the
+  /// `public static let X = Owner(rawValue: …)` initializer the member section
+  /// spells: inside the `{{#members}}` section `{{{name}}}` binds the member's
+  /// own name, so the enclosing type name is looked up under a distinct key the
+  /// member context does not shadow.
+  private borrowing func enumeration(_ found: Array<Value>, _ routines: Routines,
+                                     in dialect: Dialect, language: Language,
+                                     search: Array<String>) throws
+      -> Dictionary<String, Any> {
+    let all = try Shell.statement(Shell.query(named: "fields", search: search))
+    let fields = try session.run(all, routines, bindings: ["parent": found[0]])
+    let underlying = fields.first { $0[1].text == "value__" }
+        .flatMap { session.storage.decode(field: $0[0].integer, in: dialect) }
+        ?? (dialect.primitives["i4"] ?? "i4")
+    let plan = try Shell.statement(Shell.query(named: "members", search: search))
+    let rows = try session.run(plan, routines, bindings: ["parent": found[0]])
+    let members = rows.map { row -> Dictionary<String, Any> in
+      let value = session.storage.value(ofField: row[0].integer) ?? 0
+      return ["name": row[1].text, "value": String(value)]
+    }
+    let name = Shell.name(found, language)
+    return ["name": name, "owner": name, "underlying": underlying,
+            "members": members]
+  }
+
+  /// The template context for the delegate `found` — its keyword-escaped name,
+  /// its static `iid`, the `params` its `Invoke` signature carries, and the
+  /// `returns` that signature yields (edge E7). A WinRT delegate is a COM
+  /// interface (IUnknown plus a single `Invoke`), so the projection is an
+  /// `@com(interface:)` protocol carrying just `Invoke` and `@com` generates the
+  /// IUnknown-based vtable from it — the same ABI-faithful shape an interface
+  /// projects.
+  ///
+  /// The `invoke` query selects the delegate's one `Invoke` method, whose
+  /// parameters and return decode exactly as an interface method's do — the
+  /// return set only when it is value-carrying (`returned(_:)` yields `nil` for
+  /// `void`), so `{{#returns}}` renders nothing for a `void` `Invoke`. The
+  /// walk enqueues only a delegate that bears a static GUID, so `guid(of:)`
+  /// resolves the same IID here.
+  private borrowing func delegation(_ found: Array<Value>, _ routines: Routines,
+                                    in dialect: Dialect, language: Language,
+                                    search: Array<String>) throws
+      -> Dictionary<String, Any> {
+    let plan = try Shell.statement(Shell.query(named: "invoke", search: search))
+    let invoke = try session.run(plan, routines, bindings: ["parent": found[0]])
+    var params = Array<Dictionary<String, Any>>()
+    var returns: String?
+    if let method = invoke.first {
+      let selection =
+          try Shell.statement(Shell.query(named: "params", search: search))
+      let raw = try session.run(selection, routines,
+                                bindings: ["parent": method[0]])
+      let kept = raw.filter { $0[2] != .integer(0) }
+      let types = kept.map {
+        session.storage.decode(parameter: $0[0].integer, for: dialect) ?? ""
+      }
+      params = Shell.parameters(kept.map(\.[1].text), types: types)
+      if let spelled = session.storage.decode(return: method[0].integer,
+                                              in: dialect) {
+        returns = language.returned(spelled)
+      }
+    }
+    var context: Dictionary<String, Any> = [
+      "name": Shell.name(found, language),
+      "iid": try guid(of: found, routines, search: search) ?? "",
+      "params": params,
+    ]
+    // A value-carrying `Invoke` renders its `-> Type`; a `void` one omits it.
+    if let returns { context["returns"] = returns }
+    return context
+  }
+
+  /// The keyword-escaped declaration name of the type `found` — its raw
+  /// `TypeName` stripped of any CLR arity suffix, then escaped through the
+  /// target language's keyword rule, the same order the interface's own name
+  /// uses so a value type named for a keyword still spells compilably.
+  private static func name(_ found: Array<Value>, _ language: Language)
+      -> String {
+    language.escape(String(found[2].text.prefix { $0 != "`" }))
   }
 
   /// The template method entries for the interface at `id`, in declaration

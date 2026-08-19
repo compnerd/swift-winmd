@@ -545,7 +545,7 @@ extension FixtureCatalog {
   fileprivate func run(bare select: Select)
       throws(SQLError) -> Array<Array<Value>> {
     let context = Context().validating(false).resolving(Subqueries())
-    let plan = try compile(select, context).demoted().pushdown()
+    let plan = try compile(select, context).demoted().pushdown([:])
     return try execute(optimise(plan, context), context).map(\.values)
   }
 }

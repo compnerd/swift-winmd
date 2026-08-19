@@ -90,7 +90,7 @@ struct EngineCrossJoinTests {
     let catalog = try family()
     let select = try parse("SELECT * FROM Parent CROSS JOIN Child")
     let compiled = try catalog.compile(select)
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(product(plan))
   }
 }

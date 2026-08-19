@@ -310,7 +310,7 @@ private func subquery(_ filter: Filter) -> Bool {
     return subquery(lhs) || subquery(rhs)
   case let .not(operand):
     return subquery(operand)
-  case let .incomparable(inner):
+  case let .incomparable(inner, _):
     // A comparison whose subquery operand makes it provably throwable is
     // wrapped, so see through the wrapper to the underlying operands.
     return subquery(inner)
@@ -329,7 +329,7 @@ extension Catalog where Self: ~Escapable {
   fileprivate borrowing func optimised(_ sql: String) throws -> Plan {
     let parsed = try parse(query: sql)
     let context = Context().resolving(Subqueries())
-    let logical = try compile(parsed, context.validating(false)).pushdown()
+    let logical = try compile(parsed, context.validating(false)).pushdown([:])
     let augmented = try augment(context.validating(false), for: parsed,
                                 rows: true)
     augmented.subqueries.record(overlay: augmented.revealed().relations,

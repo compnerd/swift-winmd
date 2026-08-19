@@ -745,7 +745,7 @@ struct EnginePushdownTests {
           WHERE Parent.Name = 'Ada'
         """)
     let compiled = try catalog.compile(select)
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(pushed(plan))
   }
 
@@ -758,7 +758,7 @@ struct EnginePushdownTests {
           WHERE Parent.Id = 2
         """)
     let compiled = try catalog.compile(select)
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(sought(plan))
     #expect(pushed(plan))
   }
@@ -784,7 +784,7 @@ struct EnginePushdownTests {
         SELECT Name FROM T WHERE Name <> 'x' AND Age > 0 AND Id = 5
         """)
     let compiled = try catalog.compile(select)
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(sought(plan))
   }
 
@@ -811,7 +811,7 @@ struct EnginePushdownTests {
 
     // The unsafe `(1 / x) = 0` residual bars the `id < 0` seek — the plan scans.
     let compiled = try catalog.compile(select)
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(!sought(plan))
 
     // …and the scan raises the division rather than seeking past the empty run.
@@ -841,7 +841,7 @@ struct EnginePushdownTests {
           JOIN Parent ON Parent.Id = Child.Pid WHERE Parent.Name <> 'zz'
         """)
     let compiled = try catalog.compile(select)
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(joined(plan))
 
     // …and it returns the correct rows: every child with a matching parent,
@@ -866,7 +866,7 @@ struct EnginePushdownTests {
           JOIN Child ON Child.Pid = Parent.Id WHERE Parent.Name <> Child.Name
         """)
     let compiled = try catalog.compile(select)
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(joined(plan))
     #expect(floating(plan))
 
@@ -994,7 +994,7 @@ struct EnginePushdownTests {
     let catalog = try spanned()
     let select = try parse("SELECT Tag FROM Both WHERE Key = 2")
     let compiled = try catalog.compile(select)
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(injected(plan))
     #expect(sought(plan))
 
@@ -1066,7 +1066,7 @@ struct EnginePushdownTests {
     // `A.x = 1` is nullable and precedes the unsafe division, so it is NOT
     // pushed to the `A` leaf — it floats at the product level.
     let compiled = try catalog.compile(select)
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(!pushed(plan))
     #expect(floating(plan))
 
@@ -1095,7 +1095,7 @@ struct EnginePushdownTests {
     // `x = 1` is nullable and precedes the unsafe division, so it is NOT
     // injected into the view — it floats above the derived leaf.
     let compiled = try catalog.compile(select)
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(floating(plan))
 
     // …and the query raises rather than silently dropping the row.
@@ -1125,7 +1125,7 @@ struct EnginePushdownTests {
     // the unsafe division, so it is NOT injected into the view — it floats above
     // the derived leaf.
     let compiled = try catalog.compile(select)
-    let plan = try catalog.optimise(compiled.pushdown(), [:])
+    let plan = try catalog.optimise(compiled.pushdown([:]), [:])
     #expect(floating(plan))
 
     // …and the query raises rather than silently dropping the row.

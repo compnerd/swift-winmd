@@ -415,7 +415,7 @@ extension Catalog where Self: ~Escapable {
       }
     case let .not(operand):
       try evaluate(row, operand, context).map { !$0 }
-    case let .incomparable(inner):
+    case let .incomparable(inner, _):
       // The stamp is a compile-time reordering barrier only; evaluating it is
       // evaluating the comparison it wraps, which faults `42804` at run through
       // `matches`/`relate`/`like` for a non-NULL cross-kind pair (a NULL

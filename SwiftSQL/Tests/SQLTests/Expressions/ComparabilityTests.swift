@@ -556,7 +556,7 @@ struct OptimiserComparabilitySafetyTests {
     // pair rather than a hash key dropping the pairs first.
     let sql = "SELECT L.Id FROM L JOIN R ON L.N = R.T AND L.N = R.M"
     let compiled = try bucketed().compile(parse(query: sql))
-    let plan = try bucketed().optimise(compiled.pushdown(), [:])
+    let plan = try bucketed().optimise(compiled.pushdown([:]), [:])
     #expect(!joins(plan))
     #expect(residual(plan))
   }
@@ -572,7 +572,7 @@ struct OptimiserComparabilitySafetyTests {
     // test pins is order-independent.)
     let sql = "SELECT L.Id FROM L JOIN R ON L.N = R.M AND L.N = R.T"
     let compiled = try bucketed().compile(parse(query: sql))
-    let plan = try bucketed().optimise(compiled.pushdown(), [:])
+    let plan = try bucketed().optimise(compiled.pushdown([:]), [:])
     #expect(!joins(plan))
     #expect(residual(plan))
     #expect(throws: intVsText) { try bucketed().columns(of: parse(query: sql)) }
@@ -592,7 +592,7 @@ struct OptimiserComparabilitySafetyTests {
   @Test func `a cross-kind LIKE ON conjunct bars key extraction`() throws {
     let sql = "SELECT L.Id FROM L JOIN R ON L.N LIKE R.T AND L.N = R.M"
     let compiled = try bucketed().compile(parse(query: sql))
-    let plan = try bucketed().optimise(compiled.pushdown(), [:])
+    let plan = try bucketed().optimise(compiled.pushdown([:]), [:])
     #expect(!joins(plan))
     #expect(residual(plan))
   }
@@ -603,7 +603,7 @@ struct OptimiserComparabilitySafetyTests {
     // perf-defeating over-classification would force a nested-loop residual.
     let sql = "SELECT L.Id FROM L JOIN R ON L.N = R.K"
     let compiled = try bucketed().compile(parse(query: sql))
-    let plan = try bucketed().optimise(compiled.pushdown(), [:])
+    let plan = try bucketed().optimise(compiled.pushdown([:]), [:])
     #expect(joins(plan))
     #expect(!residual(plan))
     try bucketed().expect(sql, yields: [[1], [2]])
@@ -615,7 +615,7 @@ struct OptimiserComparabilitySafetyTests {
     // not fall back to a nested-loop residual when nothing can fault.
     let sql = "SELECT L.Id FROM L JOIN R ON L.N = R.K AND L.N = R.M"
     let compiled = try bucketed().compile(parse(query: sql))
-    let plan = try bucketed().optimise(compiled.pushdown(), [:])
+    let plan = try bucketed().optimise(compiled.pushdown([:]), [:])
     #expect(joins(plan))
   }
 }

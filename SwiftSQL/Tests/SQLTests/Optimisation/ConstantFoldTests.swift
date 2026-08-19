@@ -276,7 +276,7 @@ struct ConstantSelectFoldTests {
     let catalog = try numbers()
     let plan = try catalog.optimise(
         catalog.compile(parse(query: "SELECT COUNT(*) FROM N WHERE 1 = 0"))
-            .pushdown(), [:])
+            .pushdown([:]), [:])
     #expect(empties(plan))
   }
 
@@ -299,7 +299,7 @@ struct ConstantSelectFoldTests {
     let catalog = EngineMemory(base.catalog, views: views.registered)
     let plan = try catalog.optimise(
         catalog.compile(parse(query: "SELECT q FROM Bad WHERE 1 = 0"))
-            .pushdown(), [:])
+            .pushdown([:]), [:])
     #expect(!empties(plan))
     catalog.expect("SELECT q FROM Bad WHERE 1 = 0", fails: .divide)
   }

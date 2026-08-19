@@ -789,9 +789,9 @@ extension Catalog where Self: ~Escapable {
           // conjunct carrying a correlated `Term.parameter` as nullable, so it
           // never rides ahead of a later unsafe conjunct the inner `AND` still
           // owes.
-          context.subqueries.record(plan: try recorded.pushdown(),
-                                    for: Subkey(scope, query, role),
-                                    nested.correlation)
+          context.subqueries.record(
+              plan: try recorded.pushdown(context.bindings),
+              for: Subkey(scope, query, role), nested.correlation)
         }
       }
     }
@@ -1129,8 +1129,8 @@ extension Catalog where Self: ~Escapable {
     let inner = revealed.validating(false)
     let plan = try compile(body, inner)
     let key = Subkey(context.subscope, body, .lateral)
-    context.subqueries.record(plan: try plan.pushdown(), for: key,
-                              nested.correlation)
+    context.subqueries.record(plan: try plan.pushdown(context.bindings),
+                              for: key, nested.correlation)
     // The per-outer-row apply re-runs this plan under the occurrence scope's
     // recorded revealed overlay (`revealed(under:)`), which the run stores as
     // `revealed().relations` for `key.scope` — the same revealed base compiled

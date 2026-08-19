@@ -176,7 +176,7 @@ struct DistinctFoldTests {
   /// compile/pushdown/optimise pipeline the executor runs.
   private func optimised(_ catalog: borrowing FixtureCatalog, _ sql: String)
       throws -> Plan {
-    try catalog.optimise(catalog.compile(parse(query: sql)).pushdown(), [:])
+    try catalog.optimise(catalog.compile(parse(query: sql)).pushdown([:]), [:])
   }
 
   @Test func `DISTINCT over a GROUP BY drops the redundant dedup`() throws {

@@ -390,7 +390,7 @@ extension Filter {
       return "(\(lhs.rendered) OR \(rhs.rendered))"
     case let .not(operand):
       return "NOT \(operand.rendered)"
-    case let .incomparable(inner):
+    case let .incomparable(inner, _):
       return "incomparable(\(inner.rendered))"
     }
   }

@@ -21,7 +21,12 @@ extension Plan {
   /// below the view's own joins. A `union` pushes into every arm. The pass is a
   /// pure logical rewrite; `optimise` runs after it and still sees the
   /// `select`s the seek and nest rewrites match.
-  internal func pushdown() throws(SQLError) -> Plan {
+  ///
+  /// `bindings` — the run's `:parameter` values — thread through so a bound
+  /// `column = :parameter` equality proven throw-neutral for this run
+  /// (`Filter.neutral`) rides down beside a `safe` conjunct to its seek leaf,
+  /// while a cross-kind one stays the always-evaluated residual that faults.
+  internal func pushdown(_ bindings: Bindings) throws(SQLError) -> Plan {
     switch self {
     // Pushdown runs before optimise, the only producer of `.empty`, so a plan
     // reaching here never carries one; the arm keeps the switch exhaustive. A
@@ -29,16 +34,16 @@ extension Plan {
     case .single, .empty, .values, .scan, .join:
       self
     case let .derived(name, sub, ordinals, seek):
-      try .derived(name: name, plan: sub.pushdown(), ordinals: ordinals,
+      try .derived(name: name, plan: sub.pushdown(bindings), ordinals: ordinals,
                    seek: seek)
     case let .select(filter, source):
-      try source.pushdown().distribute(filter.conjuncts)
+      try source.pushdown(bindings).distribute(filter.conjuncts, bindings)
     case let .project(terms, source):
-      try .project(terms, source.pushdown())
+      try .project(terms, source.pushdown(bindings))
     case let .sort(keys, source):
-      try .sort(keys: keys, source.pushdown())
+      try .sort(keys: keys, source.pushdown(bindings))
     case let .product(left, right):
-      try .product(left.pushdown(), right.pushdown())
+      try .product(left.pushdown(bindings), right.pushdown(bindings))
     case let .outer(left, right, on, kind):
       // Push down within each side (its own joins/filters rewrite), but the
       // outer node is a pushdown barrier: a `WHERE` conjunct above it never
@@ -47,7 +52,8 @@ extension Plan {
       // it would change which rows match, so — preferring correctness — the
       // whole `WHERE` stays above (`distribute`'s default keeps it a `select`
       // over this node).
-      try .outer(left.pushdown(), right.pushdown(), on: on, kind: kind)
+      try .outer(left.pushdown(bindings), right.pushdown(bindings), on: on,
+                 kind: kind)
     case let .semijoin(left, right, on, anti):
       // Push down within each side (its own joins/filters rewrite), but the
       // semijoin node is a pushdown barrier: a `WHERE` conjunct above it never
@@ -57,7 +63,8 @@ extension Plan {
       // (`distribute`'s default keeps it a `select` over this node). Pushdown
       // runs before decorrelate, so this arm handles only a semijoin a nested
       // pass produced; a top-level plan never carries one at this point.
-      try .semijoin(left.pushdown(), right.pushdown(), on: on, anti: anti)
+      try .semijoin(left.pushdown(bindings), right.pushdown(bindings), on: on,
+                    anti: anti)
     case let .apply(left, key, correlation, ordinals, on, kind):
       // Push down within the left side (its own joins/filters rewrite), but the
       // apply is a pushdown barrier: its right side is not a static sub-plan
@@ -65,43 +72,45 @@ extension Plan {
       // rides into it (mirroring the `.outer` gate — `distribute`'s default
       // keeps the conjunct a `select` over this node). The recorded body plan
       // was already pushed down at its compile.
-      try .apply(left.pushdown(), key: key, correlation: correlation,
+      try .apply(left.pushdown(bindings), key: key, correlation: correlation,
                  ordinals: ordinals, on: on, kind: kind)
     case let .setop(kind, left, right, all, types, widened):
-      try .setop(kind, left.pushdown(), right.pushdown(), all: all,
-                 types: types, widened: widened)
+      try .setop(kind, left.pushdown(bindings), right.pushdown(bindings),
+                 all: all, types: types, widened: widened)
     case let .distinct(source):
       // A `distinct` sits above the projection, so no `WHERE` conjunct reaches
       // it to push down; it recurses transparently. A filter must never cross a
       // dedup — filtering before or after it yields different rows — and none
       // can, since it sits above the projection like the cap.
-      try .distinct(source.pushdown())
+      try .distinct(source.pushdown(bindings))
     case let .aggregate(keys, aggregates, source):
       // An aggregate reshapes rows into a fresh grouped slot space, so it is a
       // pushdown barrier: a `HAVING`/projection filter above it is in grouped
       // space and stays there (`distribute`'s default keeps it as a `select`
       // over the aggregate), while the WHERE below it — already placed under
       // the aggregate at compile — pushes down within the source as usual.
-      try .aggregate(keys: keys, aggregates: aggregates, source.pushdown())
+      try .aggregate(keys: keys, aggregates: aggregates,
+                     source.pushdown(bindings))
     case let .window(windowings, source):
       // A window node appends the window results to a fresh output slot space,
       // so it is a pushdown barrier: a projection filter above it is in that
       // widened space and stays there (`distribute`'s default keeps it a
       // `select` over the window), while the WHERE below it — already placed
       // under the window at compile — pushes down within the source as usual.
-      try .window(windowings, source.pushdown())
+      try .window(windowings, source.pushdown(bindings))
     case let .limit(count, offset, source):
       // A `limit` is the outermost operator, so no `WHERE` conjunct ever
       // reaches it to push down; it recurses transparently, its source pushed
       // as usual. A filter must never cross it — capping before or after a
       // filter yields different rows — and none can, since the cap sits above
       // the projection.
-      try .limit(count: count, offset: offset, source.pushdown())
+      try .limit(count: count, offset: offset, source.pushdown(bindings))
     case let .top(keys, offset, count, source):
       // `top` is produced by `optimise`, which runs after pushdown, so a plan
       // reaching here never carries one; the arm recurses transparently to keep
       // the switch exhaustive, mirroring the `limit`/`sort` it fuses.
-      try .top(keys: keys, offset: offset, count: count, source.pushdown())
+      try .top(keys: keys, offset: offset, count: count,
+               source.pushdown(bindings))
     }
   }
 
@@ -132,7 +141,7 @@ extension Plan {
   /// match keys fold down so `nest` can join under the gate. At a `derived`
   /// leaf the conjuncts push into the view; at a base `scan` they land right
   /// above it. A conjunct that cannot descend is re-conjoined here.
-  private func distribute(_ conjuncts: Array<Filter>)
+  private func distribute(_ conjuncts: Array<Filter>, _ bindings: Bindings)
       throws(SQLError) -> Plan {
     switch self {
     case let .product(left, right):
@@ -165,7 +174,14 @@ extension Plan {
         // nullable, no unsafe successor — rides down.
         let hazard =
             conjunct.nullable && conjuncts[(index + 1)...].contains { !$0.safe }
-        if barrier || slots.isEmpty || !conjunct.safe || hazard {
+        // A throw-neutral bound conjunct rides down beside a `safe` one: it
+        // cannot fault this run, so pushing it can only drop rows, never
+        // suppress a throw. The barrier/hazard bracket is unchanged — it is
+        // driven by `safe` alone, so a neutral conjunct still sets the barrier
+        // (a later conjunct sees it), and a nullable neutral conjunct still
+        // stays here when a later conjunct is unsafe (its own `hazard`).
+        let rides = conjunct.safe || conjunct.neutral(bindings)
+        if barrier || slots.isEmpty || !rides || hazard {
           here.append(conjunct)
         } else if slots.allSatisfy({ $0 < base }) {
           down.append(conjunct)
@@ -178,8 +194,9 @@ extension Plan {
         if !conjunct.safe { barrier = true }
       }
       let product =
-          Plan.product(try left.distribute(down),
-                       try right.distribute(over.map { $0.shifted(by: base) }))
+          Plan.product(try left.distribute(down, bindings),
+                       try right.distribute(over.map { $0.shifted(by: base) },
+                                            bindings))
       return product.residual(here)
     case let .select(gate, source):
       // A join's `ON` gate straddles both sides, so it never captures a
@@ -235,17 +252,24 @@ extension Plan {
       for (index, conjunct) in conjuncts.enumerated() {
         let hazard =
             conjunct.nullable && conjuncts[(index + 1)...].contains { !$0.safe }
-        if conjunct.safe && !barrier && !hazard {
+        // A throw-neutral bound conjunct descends below the gate beside a
+        // `safe` one — it never faults, so it can only drop rows, not suppress
+        // a leftover `ON` conjunct's throw — under the same unchanged barrier/
+        // hazard bracket (a WHERE conjunct always follows the `ON` residual in
+        // the descent list, so a throwing `ON` residual sets the barrier ahead
+        // of it).
+        let rides = conjunct.safe || conjunct.neutral(bindings)
+        if rides && !barrier && !hazard {
           safe.append(conjunct)
         } else {
           above.append(conjunct)
         }
         if !conjunct.safe { barrier = true }
       }
-      let gated = try source.distribute(matches + residual + safe)
+      let gated = try source.distribute(matches + residual + safe, bindings)
       return gated.residual(above)
     case .derived:
-      return try into(conjuncts)
+      return try into(conjuncts, bindings)
     default:
       return residual(conjuncts)
     }
@@ -283,7 +307,8 @@ extension Plan {
   /// later unsafe one suppresses a throw: the non-short-circuiting `AND` runs
   /// the later conjunct even for the UNKNOWN row, but the injected conjunct
   /// drops that row first (`x = 1 AND (1 / y) = 0`, `x` NULL and `y = 0`).
-  private func into(_ conjuncts: Array<Filter>) throws(SQLError) -> Plan {
+  private func into(_ conjuncts: Array<Filter>, _ bindings: Bindings)
+      throws(SQLError) -> Plan {
     guard case let .derived(name, plan, ordinals, seek) = self else {
       return residual(conjuncts)
     }
@@ -300,8 +325,12 @@ extension Plan {
       // `x`/`y`, `x` NULL and `y = 0`).
       let hazard =
           conjunct.nullable && conjuncts[(index + 1)...].contains { !$0.safe }
-      if barrier || !conjunct.safe || hazard
-          || !plan.pushable(conjunct, ordinals) {
+      // A throw-neutral bound conjunct injects into the view beside a `safe`
+      // one — it cannot fault this run, so seeking or filtering the view body
+      // by it drops rows without suppressing a throw — under the same unchanged
+      // barrier/hazard bracket and the same `pushable` structural gate.
+      let rides = conjunct.safe || conjunct.neutral(bindings)
+      if barrier || !rides || hazard || !plan.pushable(conjunct, ordinals) {
         outer.append(conjunct)
       } else {
         inner.append(conjunct)
@@ -309,7 +338,8 @@ extension Plan {
       // An unsafe conjunct bars every later conjunct from riding past it.
       if !conjunct.safe { barrier = true }
     }
-    let sub = inner.isEmpty ? plan : try plan.inject(inner, ordinals)
+    let sub =
+        inner.isEmpty ? plan : try plan.inject(inner, ordinals, bindings)
     let leaf = Plan.derived(name: name, plan: sub, ordinals: ordinals,
                             seek: seek)
     return leaf.residual(outer)
@@ -363,16 +393,17 @@ extension Plan {
   /// single pre-rebased filter cannot serve them all; the rebase must happen
   /// per arm. `pushable` has already vetted every conjunct against every arm,
   /// so the per-arm `rebase` is guaranteed non-nil.
-  private func inject(_ conjuncts: Array<Filter>, _ ordinals: Array<Int>)
-      throws(SQLError) -> Plan {
+  private func inject(_ conjuncts: Array<Filter>, _ ordinals: Array<Int>,
+                      _ bindings: Bindings) throws(SQLError) -> Plan {
     switch self {
     case let .project(terms, body):
       try .project(terms,
-                   body.distribute(conjuncts.map { rebase($0, ordinals)! }))
+                   body.distribute(conjuncts.map { rebase($0, ordinals)! },
+                                   bindings))
     case let .setop(kind, left, right, all, types, widened):
-      try .setop(kind, left.inject(conjuncts, ordinals),
-                 right.inject(conjuncts, ordinals), all: all, types: types,
-                 widened: widened)
+      try .setop(kind, left.inject(conjuncts, ordinals, bindings),
+                 right.inject(conjuncts, ordinals, bindings), all: all,
+                 types: types, widened: widened)
     default:
       // A view sub-plan is always a `project` (or a `union` of them); anything
       // else keeps the conjuncts as an outer `select` rather than dropping

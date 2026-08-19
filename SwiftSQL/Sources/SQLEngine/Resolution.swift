@@ -1284,17 +1284,23 @@ internal func stamped(_ filter: Filter,
   switch filter {
   case let .compare(lhs, _, rhs):
     return reconcile(kind(of: lhs, typeAt), kind(of: rhs, typeAt))
-        ? filter : .incomparable(filter)
+        ? filter : .incomparable(filter, kind: nil)
   case let .comparison(lhs, _, rhs):
     return zip(lhs, rhs).allSatisfy { reconcile(kind(of: $0, typeAt),
                                                  kind(of: $1, typeAt)) }
-        ? filter : .incomparable(filter)
+        ? filter : .incomparable(filter, kind: nil)
   case let .bound(term, _, _):
     // `term op :parameter`: the parameter side is a per-run `.opaque` value, so
     // the comparison is safe only when the term side is a constant NULL — else
-    // the run can fault `42804` on a non-NULL incomparable binding.
-    return reconcile(kind(of: term, typeAt), .opaque)
-        ? filter : .incomparable(filter)
+    // the run can fault `42804` on a non-NULL incomparable binding. Record the
+    // term's column class on the wrapper so pushdown can re-reconcile it
+    // against the run binding (`Filter.neutral`): a bound conjunct whose column
+    // class reconciles with the binding's cannot fault this run, so it is safe
+    // to push anywhere — the stamper's own rule, deferred to the point the
+    // binding is known.
+    let column = kind(of: term, typeAt)
+    return reconcile(column, .opaque)
+        ? filter : .incomparable(filter, kind: column)
   case let .membership(operand, elements, _):
     let operandKind = kind(of: operand, typeAt)
     var comparable = true
@@ -1309,7 +1315,7 @@ internal func stamped(_ filter: Filter,
       if element == operand && stable(operand) { break }
       if Filter(compare: operand, .equal, element).constant == true { break }
     }
-    return comparable ? filter : .incomparable(filter)
+    return comparable ? filter : .incomparable(filter, kind: nil)
   case let .memberships(lhs, rows, _):
     let left = constants(lhs)
     var comparable = true
@@ -1327,7 +1333,7 @@ internal func stamped(_ filter: Filter,
         break
       }
     }
-    return comparable ? filter : .incomparable(filter)
+    return comparable ? filter : .incomparable(filter, kind: nil)
   case let .between(test, lower, upper, _):
     // `x BETWEEN a AND b` compares `x` against both bounds, honouring the run's
     // short-circuit exactly as `Scope.check`'s `.between` does: `ranged`
@@ -1341,11 +1347,11 @@ internal func stamped(_ filter: Filter,
     // and is stamped incomparable.
     let testKind = kind(of: test, typeAt)
     guard reconcile(testKind, kind(of: lower, typeAt)) else {
-      return .incomparable(filter)
+      return .incomparable(filter, kind: nil)
     }
     if settled(test, lower) { return filter }
     return reconcile(testKind, kind(of: upper, typeAt))
-        ? filter : .incomparable(filter)
+        ? filter : .incomparable(filter, kind: nil)
   case let .like(operand, pattern, escape, _):
     // `x LIKE p ESCAPE e` reads a NULL — pattern, escape, or subject — as
     // UNKNOWN before its non-character fallback, so a NULL-determined operand
@@ -1363,7 +1369,7 @@ internal func stamped(_ filter: Filter,
     if case .null = kind(of: operand, typeAt) { return filter }
     return character(kind(of: operand, typeAt))
         && character(kind(of: pattern, typeAt))
-        ? filter : .incomparable(filter)
+        ? filter : .incomparable(filter, kind: nil)
   case .match, .null, .distinct, .exists, .within, .quantified:
     return filter
   case let .truth(inner, value, negated):
@@ -1384,7 +1390,13 @@ internal func stamped(_ filter: Filter,
 /// `reconcile` folds into a per-pair verdict. It refines the former
 /// `ValueType?`, whose `nil` conflated two opposite cases: a constant NULL
 /// (safe) and a run-time value of undecidable kind (unsafe).
-private enum Comparability {
+///
+/// A stamped `.bound` carries the column operand's class on its
+/// `Filter.incomparable` wrapper, so pushdown can re-reconcile it against the
+/// run binding's class (`Filter.neutral`) without the type information the
+/// physical layer lacks — hence `internal`, `Hashable`, and `Sendable` (the
+/// `Filter.incomparable` payload rides through the plan).
+internal enum Comparability: Hashable, Sendable {
   /// A statically-known non-NULL value kind — a slot's declared type, a
   /// non-NULL constant, a `GROUPING` integer. Two known kinds are comparable
   /// iff they unify (`ValueType.unified`).
@@ -1425,12 +1437,28 @@ private func kind(of operand: Filter.Operand,
   }
 }
 
+/// The `Comparability` of a run-time binding — the operand the stamper treated
+/// as `.opaque` at lowering, now known for this run. An absent binding (the
+/// `:parameter` unbound) or one bound to NULL is `.null` (its comparison is
+/// UNKNOWN, never a `42804` fault), and a non-NULL value is its `.known` kind.
+/// `Filter.neutral` reconciles a stamped `.bound`'s recorded column class
+/// against this, deciding a bound conjunct throw-neutral for this run exactly
+/// where the stamper would not have wrapped it had it known the binding.
+internal func comparability(of value: Value?) -> Comparability {
+  guard let value else { return .null }
+  return value.kind.map(Comparability.known) ?? .null
+}
+
 /// Whether a comparison of operands of these classes cannot fault `42804` — the
 /// throwability rule `stamped` shares with the run's `matches`/`relate` and
 /// `Scope.check`. A NULL-involved pair is UNKNOWN, never a fault (safe); two
 /// known kinds are safe iff they unify; an `.opaque` operand against a non-NULL
 /// operand may be a non-NULL incomparable pair the run faults on (unsafe).
-private func reconcile(_ lhs: Comparability, _ rhs: Comparability) -> Bool {
+///
+/// `internal` (not `private`) so `Filter.neutral` can re-run the identical
+/// verdict at pushdown, reconciling a stamped `.bound`'s recorded column class
+/// against the run binding's class.
+internal func reconcile(_ lhs: Comparability, _ rhs: Comparability) -> Bool {
   switch (lhs, rhs) {
   case (.null, _), (_, .null):
     true

@@ -435,15 +435,16 @@ internal struct Shell: ~Escapable {
   /// through the named Mustache template.
   ///
   /// The data tier is the session's bundled views, read through the
-  /// bundled `Resources/Render/*.sql` queries (not Swift literals): the
-  /// `interfaces` query selects the one named interface, or every
-  /// interface for `*` (its `WHERE TypeName = :name OR '*' = :name`), then
-  /// for each its `methods` bound by the interface's `Id`, each
-  /// method's `params` bound by the method's `Id`, and its `bases`
+  /// bundled `Resources/Render/*.sql` queries (not Swift literals): the seed
+  /// (`seeds`) scans the interface `TypeDef` rows the `interfaces` query names —
+  /// the one named interface, or every one for `*` — and fetches each `iid`
+  /// through the seekable `guid` query rather than materialising the whole
+  /// `interfaces` view, then for each its `methods` bound by the interface's
+  /// `Id`, each method's `params` bound by the method's `Id`, and its `bases`
   /// bound by the interface's `Id`. The presentation tier is the named
-  /// template loaded from `Resources/Templates`. A single interface that
-  /// no view names raises `RenderError.interface`; a missing template
-  /// resource raises `RenderError.template`.
+  /// template loaded from `Resources/Templates`. A single interface no seed
+  /// resolves raises `RenderError.interface`; a missing template resource
+  /// raises `RenderError.template`.
   ///
   /// The base inheritance is derived through the `bases` view (the interface's
   /// `InterfaceImpl` rows navigated to their base type names); a rootless
@@ -477,14 +478,13 @@ internal struct Shell: ~Escapable {
     // SQL layer — spells a return/parameter, navigating the signature with the
     // storage's `decode(return:in:)`/`decode(parameter:for:)` methods.
     let dialect = language.dialect
-    // The rows to render come straight from the bundled selection query, bound
-    // by `:name`: it returns the one named interface, or — for `*` — every one
-    // (`WHERE TypeName = :name OR '*' = :name`). Choosing which rows to emit is
-    // the query's job, so render just iterates whatever it returns.
-    let selection =
-        try Shell.statement(Shell.query(named: "interfaces", search: search))
-    let interfaces = try session.run(selection, routines,
-                                     bindings: ["name": .text(interface)])
+    // The rows to render come from the seed scan bound by `:name`: the one
+    // named interface, or — for `*` — every one. `seeds` scans the interface
+    // `TypeDef` rows directly and fetches each `iid` through the seekable `guid`
+    // query, dropping a guid-less interface, so it reproduces the `interfaces`
+    // view's rows without materialising the whole view. Choosing which rows to
+    // emit is the seed's job, so render just iterates whatever it returns.
+    let interfaces = try seeds(interface, routines, search: search)
     guard interface == "*" || !interfaces.isEmpty else {
       throw RenderError.interface(interface)
     }
@@ -505,9 +505,10 @@ internal struct Shell: ~Escapable {
   ///
   /// The setup is the flat render's: the template names its target language, and
   /// the render resolves against the language spec's UDFs merged with the
-  /// session's routines. The root selection is the same `interfaces` query, so a
-  /// name no interface bears raises `RenderError.interface`; a simple name borne
-  /// by more than one namespace seeds each match. From each seed the walk visits
+  /// session's routines. The root selection is the same `seeds` scan the flat
+  /// render uses, so a name no interface bears raises `RenderError.interface`; a
+  /// simple name borne by more than one namespace seeds each match. From each
+  /// seed the walk visits
   /// the base and required interfaces depth-first, emitting a base before the
   /// interface that refines it, rendering each interface once (dedup by its local
   /// `TypeDef` Id). The per-interface body is the one `emit` the flat render
@@ -518,10 +519,7 @@ internal struct Shell: ~Escapable {
     let language = Shell.language(declaredIn: &body, search: search)
     let routines = language.routines.merging(session.functions)
     let dialect = language.dialect
-    let selection =
-        try Shell.statement(Shell.query(named: "interfaces", search: search))
-    let roots = try session.run(selection, routines,
-                                bindings: ["name": .text(root)])
+    let roots = try seeds(root, routines, search: search)
     guard !roots.isEmpty else { throw RenderError.interface(root) }
 
     let mustache = try MustacheTemplate(string: body)
@@ -535,6 +533,53 @@ internal struct Shell: ~Escapable {
                search: search)
     }
     return sources.joined(separator: "\n")
+  }
+
+  /// The seed rows for `name` — the interface `TypeDef` rows the render
+  /// `interfaces` query scans — resolved to the full render row shape (`Id`,
+  /// namespace, name, `iid`) by fetching each interface's `iid` through the
+  /// seekable `guid` query, dropping an interface whose `GuidAttribute` resolves
+  /// nothing.
+  ///
+  /// The scan replaces materialising the `interfaces` view (a three-way UNION
+  /// over the whole `CustomAttribute` table) for the one seed: the view's
+  /// `:name` predicate does not push into it, so it GUID-decodes every interface
+  /// before filtering. This seeks the `TypeDef` rows and fetches only the
+  /// matched interfaces' IIDs. Dropping a guid-less interface reproduces the
+  /// view's INNER-join membership exactly — a `tdInterface` `TypeDef` with no
+  /// decodable `GuidAttribute` is absent from the view and so is not rendered —
+  /// and the query's `ORDER BY Id` preserves the view's ascending-`Id` row
+  /// order, so the emitted set and its order stay byte-identical.
+  private borrowing func seeds(_ name: String, _ routines: Routines,
+                               search: Array<String>) throws
+      -> Array<Array<Value>> {
+    let selection =
+        try Shell.statement(Shell.query(named: "interfaces", search: search))
+    let rows = try session.run(selection, routines,
+                               bindings: ["name": .text(name)])
+    var interfaces = Array<Array<Value>>()
+    interfaces.reserveCapacity(rows.count)
+    for row in rows {
+      guard let iid = try guid(of: row[0], routines, search: search)
+      else { continue }
+      interfaces.append([row[0], row[1], row[2], .text(iid)])
+    }
+    return interfaces
+  }
+
+  /// The interface `iid` the `TypeDef` at `id` bears through its
+  /// `GuidAttribute`, decoded through the seekable `guid` query keyed by the
+  /// interface's `Id` — the same three attribute encodings the `interfaces` view
+  /// spells its `iid` through, but seeking `CustomAttribute.Parent_TypeDef`
+  /// rather than materialising the whole view. `nil` when the interface bears no
+  /// decodable `GuidAttribute`, the signal the seed drops it to match the view's
+  /// INNER-join membership.
+  private borrowing func guid(of id: Value, _ routines: Routines,
+                              search: Array<String>) throws -> String? {
+    let query =
+        try Shell.statement(Shell.query(named: "guid", search: search))
+    let rows = try session.run(query, routines, bindings: ["parent": id])
+    return rows.first.map { $0[0].text }
   }
 
   /// Emits the interface `found` and, first, the transitive closure of its plain

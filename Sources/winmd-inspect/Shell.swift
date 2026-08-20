@@ -509,29 +509,61 @@ internal struct Shell: ~Escapable {
     // query, dropping a guid-less interface, so it reproduces the `interfaces`
     // view's rows without materialising the whole view. Choosing which rows to
     // emit is the seed's job, so render just iterates whatever it returns.
-    let interfaces = try seeds(interface, routines, search: search)
+    // The `*` batch reads raw tables and the `interfaces` view, bypassing the
+    // overridable per-node render queries (`methods`/`params`/`bases`/`guid`)
+    // and the `methods`/`params`/`bases` views they read. When any of those is
+    // overridden — a `-I` file or a session `CREATE VIEW` — the batch would
+    // ignore the override and `*` would diverge from `.render <interface>`, so
+    // `*` falls back to the per-node emit (which honours both override layers).
+    // A LATERAL batch that honoured the override was rejected: `:parent` lives
+    // inside the views, LATERAL cannot correlate a parameter, and a view-body
+    // LATERAL does not decorrelate. Overriding and rendering `*` is rare, so
+    // the fallback's per-node cost is acceptable; with nothing overridden the
+    // fast batch stands.
+    let batched = interface == "*" && !overridden(search: search)
+    let interfaces = try seeds(interface, routines, search: search,
+                               batch: batched)
     guard interface == "*" || !interfaces.isEmpty else {
       throw RenderError.interface(interface)
     }
 
     let mustache = try MustacheTemplate(string: body)
-    // For `*`, decode every interface's first plain base, its methods, and
-    // every method's parameters once (`inherits`/`roster`/`signatures`),
-    // bucketed by owner Id, rather than a `bases`/`methods` query per interface
-    // and a `params` query per method; a concrete render emits one interface,
-    // so it stays per-node. The maps only supply the same base name, method
-    // rows, and parameter rows the per-node queries would — the emit is
-    // otherwise unchanged.
-    let inherits = interface == "*" ? try self.inherits(routines) : nil
-    let roster = interface == "*" ? try self.roster(routines) : nil
-    let signatures = interface == "*" ? try self.signatures(routines) : nil
+    // For `*` with nothing overridden, decode every interface's first plain
+    // base, its methods, and every method's parameters once
+    // (`inherits`/`roster`/`signatures`), bucketed by owner Id, rather than a
+    // `bases`/`methods` query per interface and a `params` query per method; a
+    // concrete render emits one interface, so it stays per-node. The maps only
+    // supply the same base name and method/parameter rows the per-node queries
+    // would — the batch rows carrying raw names the emitted-only `sanitized` map
+    // escapes below — so the emit is otherwise unchanged. When a batch-shortcut
+    // query or view is overridden, the maps are `nil` so `emit` runs the
+    // per-node queries, honouring the override. An empty seed skips them too: a
+    // wildcard that matched no interface emits nothing, and these batches expand
+    // views over `InterfaceImpl`/`MethodDef`/`Param` a valid interface-free file
+    // may omit, so decoding them would fault where there is nothing to render.
+    let expand = batched && !interfaces.isEmpty
+    let inherits = expand ? try self.inherits(routines) : nil
+    let roster = expand ? try self.roster(routines) : nil
+    let signatures = expand ? try self.signatures(routines) : nil
+    // The batch scans carry raw names; escape only the emitted set through the
+    // active `SANITIZE` UDF in one query, keyed raw→escaped, so the emit spells
+    // an emitted name exactly as the per-node `SANITIZE(Name)` would while a
+    // custom UDF is never invoked on a non-emitted name. `nil` in the per-node
+    // path, whose `methods`/`params` queries `SANITIZE` their own rows.
+    let sanitized: Dictionary<String, String>?
+    if let roster, let signatures {
+      sanitized = try self.sanitized(interfaces, roster: roster,
+                                     signatures: signatures, routines)
+    } else {
+      sanitized = nil
+    }
     var sources = Array<String>()
     sources.reserveCapacity(interfaces.count)
     for found in interfaces {
       sources.append(try emit(found, through: mustache, routines: routines,
                               in: dialect, language: language, search: search,
                               inherits: inherits, roster: roster,
-                              signatures: signatures))
+                              signatures: signatures, sanitized: sanitized))
     }
     return sources.joined(separator: "\n")
   }
@@ -576,6 +608,61 @@ internal struct Shell: ~Escapable {
     return sources.joined(separator: "\n")
   }
 
+  /// Whether any render query or view the `.render *` batch shortcuts is
+  /// overridden — a `-I` file over one of them, or a session `CREATE VIEW` of
+  /// one of their names. When true, `.render *` abandons the batch (which reads
+  /// raw `MethodDef`/`Param`/`InterfaceImpl` and the `interfaces` view) for the
+  /// per-node emit, so it honours the override exactly as `.render <interface>`
+  /// does; when false the fast batch stands.
+  ///
+  /// The batch bypasses the per-node `methods`/`params`/`bases`/`guid` render
+  /// queries AND the `methods`/`params`/`bases` views those queries read, so an
+  /// override of any of them makes the batch and per-node paths diverge: a `-I`
+  /// directory carrying `Render/<name>.sql` (a render query) or
+  /// `Queries/<name>.sql` (a view), or a session `CREATE VIEW` of a view name.
+  /// The `interfaces` view is a batch shortcut too — `guids` reads it while the
+  /// per-node path reads `Render/guid.sql` — so its override counts as well.
+  /// Only these specific names trip the predicate: an unrelated `-I` directory
+  /// or a `CREATE VIEW myhelper` does not, so a session with no relevant
+  /// override keeps the fast batch.
+  private borrowing func overridden(search: Array<String>) -> Bool {
+    // A `-I` file over a batch-shortcut render query, shadowing the bundle.
+    // `interfaces` is the seed query itself: the batch assumes the stock
+    // interface-only seed, so overriding it (to name a type the bundled
+    // `interfaces` view's flag gate drops but the ungated per-node `guid.sql`
+    // resolves) must fall `*` back to per-node too.
+    for name in ["methods", "params", "bases", "guid", "interfaces"]
+    where Shell.shadowed(name, "sql", kind: "Render", search: search) {
+      return true
+    }
+    // A `-I` file over a batch-shortcut view, shadowing the bundle.
+    for name in ["methods", "params", "bases", "interfaces"]
+    where Shell.shadowed(name, "sql", kind: "Queries", search: search) {
+      return true
+    }
+    // A session `CREATE VIEW` of a batch-shortcut view name — a user override
+    // of the bundled view, told from the seed by `session.authored`.
+    for name in ["methods", "params", "bases", "interfaces"]
+    where session.authored.contains(name) {
+      return true
+    }
+    return false
+  }
+
+  /// Whether a search directory carries `<name>.<ext>` of the given `kind` — a
+  /// `-I` override shadowing the bundle, checked the same last-first way
+  /// `resource(_:_:kind:search:)` resolves it, but reporting only whether a
+  /// search dir (not the bundle) has it: a search-dir hit is the override the
+  /// `.render *` batch fallback keys off.
+  private static func shadowed(_ name: String, _ ext: String, kind: String,
+                               search: Array<String>) -> Bool {
+    for directory in search.reversed() {
+      let path = "\(directory)/\(kind)/\(name).\(ext)"
+      if FileManager.default.fileExists(atPath: path) { return true }
+    }
+    return false
+  }
+
   /// The seed rows for `name` — the interface `TypeDef` rows the render
   /// `interfaces` query scans — resolved to the full render row shape (`Id`,
   /// namespace, name, `iid`), dropping an interface whose `GuidAttribute`
@@ -595,7 +682,7 @@ internal struct Shell: ~Escapable {
   /// ascending-`Id` row order, so the emitted set and its order stay
   /// byte-identical.
   private borrowing func seeds(_ name: String, _ routines: Routines,
-                               search: Array<String>) throws
+                               search: Array<String>, batch: Bool = true) throws
       -> Array<Array<Value>> {
     let selection = try statement(named: "interfaces")
     let rows = try session.run(selection, routines,
@@ -606,8 +693,17 @@ internal struct Shell: ~Escapable {
     // per interface `Id`, so a lookup here returns exactly the iid a per-
     // interface `guid` query's `.first` would — the emit set and order still
     // come from the `interfaces` scan above (`ORDER BY Id`). A concrete seed
-    // stays per-node: it seeks one interface, not the whole view.
-    let iids = name == "*" ? try guids(routines) : nil
+    // stays per-node: it seeks one interface, not the whole view. When `batch`
+    // is false — an override makes the batch and per-node paths diverge, so `*`
+    // falls back to per-node — each `iid` is fetched through the per-interface
+    // `guid` query, which honours a `Render/guid.sql` override the batch view
+    // read would bypass. An empty scan skips the batch entirely: with no
+    // interface `TypeDef` to render there is no `iid` to look up, and expanding
+    // the `interfaces` view (a three-way UNION over `CustomAttribute`/
+    // `MemberRef`) would fault on a valid file that omits a relation the view
+    // reads but a file with no interfaces need not carry.
+    let iids = name == "*" && batch && !rows.isEmpty
+             ? try guids(routines) : nil
     var interfaces = Array<Array<Value>>()
     interfaces.reserveCapacity(rows.count)
     for row in rows {
@@ -672,16 +768,19 @@ internal struct Shell: ~Escapable {
   /// batch — the `.render *` path's replacement for the per-method `params`
   /// query.
   ///
-  /// It projects the same `Id`, `SANITIZE(Name)`, and `Sequence` the per-method
-  /// render query does — over the whole `Param` table at once, bucketed by the
-  /// owning `MethodDef` in table (declaration) order — so a method's parameter
-  /// list here is identical, row for row, to what its own `params` query
-  /// returns. The return pseudo-parameter (`Sequence = 0`) rides along and is
+  /// It projects the same `Id`, raw `Name`, and `Sequence` the per-method render
+  /// query reads — over the whole `Param` table at once, bucketed by the owning
+  /// `MethodDef` in table (declaration) order — so a method's parameter list
+  /// here is identical, row for row, to what its own `params` query returns. As
+  /// with `roster`, the name is raw, not `SANITIZE`d: this batch scans every
+  /// parameter, including those of methods `.render *` never emits, so escaping
+  /// is deferred to `sanitized(_:roster:signatures:_:)` over the emitted names
+  /// only. The return pseudo-parameter (`Sequence = 0`) rides along and is
   /// dropped by the caller's filter, exactly as in the per-method path; a `Param`
   /// row's `Id` is the signature position the caller decodes the type from.
   private borrowing func signatures(_ routines: Routines) throws -> Buckets {
     let batch = try Shell.statement("""
-      SELECT MethodDef, Id, SANITIZE(Name) AS Name, Sequence
+      SELECT MethodDef, Id, Name, Sequence
       FROM Param
       """)
     let rows = try session.run(batch, routines, bindings: [:])
@@ -696,15 +795,19 @@ internal struct Shell: ~Escapable {
   /// batch — the `.render *` path's replacement for the per-interface `methods`
   /// query.
   ///
-  /// It projects the same `Id` and `SANITIZE(Name)` the per-interface render
-  /// query does — over the whole `MethodDef` table at once, bucketed by the
-  /// owning `TypeDef` in table (declaration) order — so an interface's method
-  /// list here is identical, row for row, to what its own `methods` query
-  /// returns. A method's `Id` is the signature the caller decodes its return
-  /// and parameters from.
+  /// It projects the same `Id` and raw `Name` the per-interface render query
+  /// reads — over the whole `MethodDef` table at once, bucketed by the owning
+  /// `TypeDef` in table (declaration) order — so an interface's method list here
+  /// is identical, row for row, to what its own `methods` query returns. The
+  /// name is deliberately raw, not `SANITIZE`d: the per-node `methods` query
+  /// runs the UDF over its (emitted-only) rows, but this batch scans every
+  /// method, including methods of types `.render *` never emits — so escaping is
+  /// deferred to `sanitized(_:roster:signatures:_:)`, which runs the active UDF
+  /// over only the emitted names. A method's `Id` is the signature the caller
+  /// decodes its return and parameters from.
   private borrowing func roster(_ routines: Routines) throws -> Buckets {
     let batch = try Shell.statement("""
-      SELECT TypeDef, Id, SANITIZE(Name) AS Name
+      SELECT TypeDef, Id, Name
       FROM MethodDef
       """)
     let rows = try session.run(batch, routines, bindings: [:])
@@ -713,6 +816,63 @@ internal struct Shell: ~Escapable {
       roster[row[0].integer, default: []].append([row[1], row[2]])
     }
     return roster
+  }
+
+  /// The raw→escaped name map for exactly the emitted interfaces' method and
+  /// parameter names — the `.render *` batch's single application of the active
+  /// `SANITIZE` UDF, run over only the names that will be emitted.
+  ///
+  /// The batch `roster`/`signatures` scans carry raw names, so the UDF never
+  /// runs over a method or parameter of a type `.render *` does not emit (a
+  /// class, a guid-less interface). A session `CREATE FUNCTION SANITIZE` (or a
+  /// language-spec UDF) that is value-sensitive — one that would fault on such a
+  /// non-emitted name — therefore no longer aborts the render. The emitted names
+  /// are each emitted interface's methods (from `roster`) and those methods'
+  /// non-return (`Sequence != 0`) parameters (from `signatures`), deduped and
+  /// escaped through the same `routines` the per-node path resolves (a session
+  /// `CREATE FUNCTION SANITIZE` included), so an emitted name's escape is
+  /// byte-identical to the per-node path's. `interfaces` is the post-guid-drop
+  /// emitted set (`seeds`), so a guid-less interface — dropped in Swift — is
+  /// absent here even though its `TypeDef` bears the interface flag. An empty
+  /// emitted set runs no query.
+  private borrowing func sanitized(_ interfaces: Array<Array<Value>>,
+                                   roster: Buckets, signatures: Buckets,
+                                   _ routines: Routines) throws
+      -> Dictionary<String, String> {
+    var names = Set<String>()
+    for found in interfaces {
+      for method in roster[found[0].integer] ?? [] {
+        names.insert(method[1].text)
+        for parameter in signatures[method[0].integer] ?? []
+        where parameter[2] != .integer(0) {
+          names.insert(parameter[1].text)
+        }
+      }
+    }
+    guard !names.isEmpty else { return [:] }
+    // One `SELECT n, SANITIZE(n) FROM (VALUES …) AS t(n)` over the deduped
+    // emitted names — sorted for a deterministic query text — so the UDF runs
+    // exactly once per distinct emitted name. A name is a SQL string literal,
+    // so a contained `'` is doubled.
+    let tuples = names.sorted().map { "(\(Shell.literal($0)))" }
+        .joined(separator: ", ")
+    let batch = try Shell.statement(
+        "SELECT n, SANITIZE(n) FROM (VALUES \(tuples)) AS t(n)")
+    let rows = try session.run(batch, routines, bindings: [:])
+    var map = Dictionary<String, String>(minimumCapacity: rows.count)
+    for row in rows { map[row[0].text] = row[1].text }
+    return map
+  }
+
+  /// `text` as a single-quoted SQL string literal, a contained `'` doubled — so
+  /// a name spliced into a `VALUES` list stays one literal.
+  private static func literal(_ text: String) -> String {
+    var quoted = "'"
+    for character in text {
+      if character == "'" { quoted += "''" } else { quoted.append(character) }
+    }
+    quoted += "'"
+    return quoted
   }
 
   /// The interface `iid` the `TypeDef` at `id` bears through its
@@ -777,7 +937,8 @@ internal struct Shell: ~Escapable {
                               search: Array<String>,
                               inherits: Dictionary<Int, String>? = nil,
                               roster: Buckets? = nil,
-                              signatures: Buckets? = nil)
+                              signatures: Buckets? = nil,
+                              sanitized: Dictionary<String, String>? = nil)
       throws -> String {
     let id = found[0]
     // The interface's ordered declared generic-parameter names, through the
@@ -797,7 +958,7 @@ internal struct Shell: ~Escapable {
     let methods = try self.methods(of: id, routines, search: search,
                                    generics: generics, in: dialect,
                                    language: language, roster: roster,
-                                   signatures: signatures)
+                                   signatures: signatures, sanitized: sanitized)
     // The interface's named base, via the `bases` view bound by its `Id`. The
     // render query projects only the plain (`TypeRef`/`TypeDef`) bases, whose
     // simple `TypeName` is keyword-escaped here the way the interface's own
@@ -883,8 +1044,18 @@ internal struct Shell: ~Escapable {
                                  generics: Array<String>?, in dialect: Dialect,
                                  language: Language,
                                  roster: Buckets? = nil,
-                                 signatures: Buckets? = nil) throws
-      -> Array<Dictionary<String, Any>> {
+                                 signatures: Buckets? = nil,
+                                 sanitized: Dictionary<String, String>? = nil)
+      throws -> Array<Dictionary<String, Any>> {
+    // The batch scans (`roster`/`signatures`) carry raw names escaped through
+    // the emitted-only `sanitized` map; the per-node queries `SANITIZE` their
+    // own rows, so their names arrive already escaped. `escaped` bridges the
+    // two: it looks a name up in the batch map (present iff batching), else
+    // returns it unchanged — so a per-node name is spelled as-is and a batch
+    // name is escaped exactly as the per-node `SANITIZE(Name)` would spell it.
+    func escaped(_ raw: String) -> String {
+      sanitized.map { $0[raw] ?? raw } ?? raw
+    }
     // The interface's methods: from the batch `roster` map for `*`, else a
     // per-interface `methods` query. Both return the same `Id`/`Name` rows in
     // the same (declaration) order, so the emitted method list is unchanged.
@@ -911,9 +1082,10 @@ internal struct Shell: ~Escapable {
         session.storage.decode(parameter: $0[0].integer, generics: generics,
                                for: dialect) ?? ""
       }
-      let parameters = Shell.parameters(kept.map(\.[1].text), types: types)
+      let parameters = Shell.parameters(kept.map { escaped($0[1].text) },
+                                        types: types)
       var entry: Dictionary<String, Any> = [
-        "name": method[1].text,
+        "name": escaped(method[1].text),
         "params": parameters,
       ]
       let returned = session.storage.decode(return: method[0].integer,

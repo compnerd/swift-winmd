@@ -306,6 +306,22 @@ internal struct Shell: ~Escapable {
   /// earlier one and the bundle (the last `-I` wins).
   private let search: Array<String>
 
+  /// The parsed render queries memoised by name for the span of one render (see
+  /// `Cache`). Each `Render/<name>.sql` is loaded and parsed once per render,
+  /// then reused on every interface a `.render *` emits rather than re-loaded
+  /// and re-parsed per call. Each top-level render clears the memo first
+  /// (`queries.statements.removeAll()`), so a `-I`/`CREATE VIEW` override edited
+  /// between renders is re-resolved on the next render rather than served stale
+  /// from a shell-lifetime cache — while a `:parent`/`:name` binding still
+  /// varies per execution, so only the parse is shared, changing no result.
+  private let queries = Cache()
+
+  /// A batch decode bucketed by owning row `Id` — the `.render *` maps that
+  /// replace a per-owner query (`roster` for an interface's methods,
+  /// `signatures` for a method's parameters): each owner `Id` maps to the rows
+  /// its own per-owner query would return, in the same order.
+  private typealias Buckets = Dictionary<Int, Array<Array<Value>>>
+
   /// Opens a shell over `storage`, seeding the session's bundled views.
   /// `strict` defaults to the forgiving shell policy; an explicit batch passes
   /// `true`. `search` is the `-I` override directories, tried before the
@@ -454,6 +470,15 @@ internal struct Shell: ~Escapable {
   /// decided in Swift (`returned(_:)`) — neither is baked into the binary.
   internal borrowing func render(_ interface: String,
                                  template: String) throws -> String {
+    // Scope the parsed-query memo to this single render: clear it so every
+    // named query re-resolves its resource once here — picking up a `-I`
+    // `Render/<name>.sql`/`Queries/<name>.sql` override (or a `CREATE VIEW`)
+    // added or edited since the last render — then is reused within this
+    // render. The within-render dedup (the reason the memo exists — the `*`
+    // batch parses each query once) survives; only cross-render staleness,
+    // where an override edited between renders was silently ignored while
+    // templates and language specs reloaded, is dropped.
+    queries.statements.removeAll()
     // The template names its own target language through a leading `{{! language:
     // <name> }}` directive; stripping it yields the body and loads the matching
     // spec, whose render UDF (`SANITIZE`) makes identifier escaping the
@@ -490,11 +515,23 @@ internal struct Shell: ~Escapable {
     }
 
     let mustache = try MustacheTemplate(string: body)
+    // For `*`, decode every interface's first plain base, its methods, and
+    // every method's parameters once (`inherits`/`roster`/`signatures`),
+    // bucketed by owner Id, rather than a `bases`/`methods` query per interface
+    // and a `params` query per method; a concrete render emits one interface,
+    // so it stays per-node. The maps only supply the same base name, method
+    // rows, and parameter rows the per-node queries would — the emit is
+    // otherwise unchanged.
+    let inherits = interface == "*" ? try self.inherits(routines) : nil
+    let roster = interface == "*" ? try self.roster(routines) : nil
+    let signatures = interface == "*" ? try self.signatures(routines) : nil
     var sources = Array<String>()
     sources.reserveCapacity(interfaces.count)
     for found in interfaces {
       sources.append(try emit(found, through: mustache, routines: routines,
-                              in: dialect, language: language, search: search))
+                              in: dialect, language: language, search: search,
+                              inherits: inherits, roster: roster,
+                              signatures: signatures))
     }
     return sources.joined(separator: "\n")
   }
@@ -515,6 +552,10 @@ internal struct Shell: ~Escapable {
   /// runs, so the closure reuses the decode and emit rather than duplicating it.
   internal borrowing func render(closure root: String,
                                  template: String) throws -> String {
+    // Scope the parsed-query memo to this single render (see the flat render):
+    // clear it so each named query re-resolves its resource once, honouring an
+    // override edited since the last render, then is reused within this one.
+    queries.statements.removeAll()
     var body = try self.template(named: template, search: search)
     let language = Shell.language(declaredIn: &body, search: search)
     let routines = language.routines.merging(session.functions)
@@ -537,34 +578,141 @@ internal struct Shell: ~Escapable {
 
   /// The seed rows for `name` — the interface `TypeDef` rows the render
   /// `interfaces` query scans — resolved to the full render row shape (`Id`,
-  /// namespace, name, `iid`) by fetching each interface's `iid` through the
-  /// seekable `guid` query, dropping an interface whose `GuidAttribute` resolves
-  /// nothing.
+  /// namespace, name, `iid`), dropping an interface whose `GuidAttribute`
+  /// resolves nothing.
   ///
-  /// The scan replaces materialising the `interfaces` view (a three-way UNION
-  /// over the whole `CustomAttribute` table) for the one seed: the view's
-  /// `:name` predicate does not push into it, so it GUID-decodes every interface
-  /// before filtering. This seeks the `TypeDef` rows and fetches only the
-  /// matched interfaces' IIDs. Dropping a guid-less interface reproduces the
-  /// view's INNER-join membership exactly — a `tdInterface` `TypeDef` with no
-  /// decodable `GuidAttribute` is absent from the view and so is not rendered —
-  /// and the query's `ORDER BY Id` preserves the view's ascending-`Id` row
-  /// order, so the emitted set and its order stay byte-identical.
+  /// The scan seeks the interface `TypeDef` rows by name (`interfaces.sql`), and
+  /// the `iid` is fetched separately so a concrete seed does not materialise the
+  /// whole `interfaces` view (a three-way UNION over the whole `CustomAttribute`
+  /// table): the view's `:name` predicate does not push into it, so it
+  /// GUID-decodes every interface before filtering. A concrete seed fetches only
+  /// the matched interface's IID through the seekable `guid` query; `*`, which
+  /// needs them all, decodes them in one batch over the `interfaces` view
+  /// (`guids`) rather than a `guid` query per interface. Either way, dropping a
+  /// guid-less interface reproduces the view's INNER-join membership exactly — a
+  /// `tdInterface` `TypeDef` with no decodable `GuidAttribute` is absent and so
+  /// is not rendered — and the scan's `ORDER BY Id` preserves the view's
+  /// ascending-`Id` row order, so the emitted set and its order stay
+  /// byte-identical.
   private borrowing func seeds(_ name: String, _ routines: Routines,
                                search: Array<String>) throws
       -> Array<Array<Value>> {
-    let selection =
-        try Shell.statement(Shell.query(named: "interfaces", search: search))
+    let selection = try statement(named: "interfaces")
     let rows = try session.run(selection, routines,
                                bindings: ["name": .text(name)])
+    // For `*`, decode every interface's `iid` in one batch over the `interfaces`
+    // view rather than a `guid` query per interface. The view is the same
+    // three-arm `GuidAttribute` union in the same arm order and yields one row
+    // per interface `Id`, so a lookup here returns exactly the iid a per-
+    // interface `guid` query's `.first` would — the emit set and order still
+    // come from the `interfaces` scan above (`ORDER BY Id`). A concrete seed
+    // stays per-node: it seeks one interface, not the whole view.
+    let iids = name == "*" ? try guids(routines) : nil
     var interfaces = Array<Array<Value>>()
     interfaces.reserveCapacity(rows.count)
     for row in rows {
-      guard let iid = try guid(of: row[0], routines, search: search)
-      else { continue }
+      let iid = if let iids { iids[row[0].integer] }
+                else { try guid(of: row[0], routines, search: search) }
+      guard let iid else { continue }
       interfaces.append([row[0], row[1], row[2], .text(iid)])
     }
     return interfaces
+  }
+
+  /// Every interface's `iid`, keyed by its `TypeDef` `Id`, decoded in one batch
+  /// over the `interfaces` view — the `.render *` path's replacement for a
+  /// per-interface `guid` query.
+  ///
+  /// The view is the same three-arm `GuidAttribute` union in the same arm order
+  /// the per-interface `guid` query walks, and it yields one row per interface
+  /// (one iid per `Id`), so a lookup here returns exactly the iid that query's
+  /// `.first` would — decoding all interfaces once instead of thousands of
+  /// times. The first iid per `Id` is kept (defensively, though the view's Ids
+  /// are already distinct), matching the per-interface `.first`.
+  private borrowing func guids(_ routines: Routines) throws
+      -> Dictionary<Int, String> {
+    let batch = try Shell.statement("SELECT Id, iid FROM interfaces")
+    let rows = try session.run(batch, routines, bindings: [:])
+    var iids = Dictionary<Int, String>(minimumCapacity: rows.count)
+    for row in rows where iids[row[0].integer] == nil {
+      iids[row[0].integer] = row[1].text
+    }
+    return iids
+  }
+
+  /// Every interface's first plain (`TypeRef`/`TypeDef`) base interface name,
+  /// keyed by its `TypeDef` `Id`, decoded in one batch — the `.render *` path's
+  /// replacement for the per-interface `bases` query.
+  ///
+  /// It mirrors the two plain (`spec IS NULL`) arms of the `bases` view over
+  /// every `InterfaceImpl` at once, in the same arm order (a `TypeRef` base
+  /// before a `TypeDef` one), keeping the first base per interface `Id` —
+  /// exactly the `bases.first` the per-interface render query yields. A generic
+  /// (`TypeSpec`) base is excluded here as the render's `spec IS NULL` excludes
+  /// it there, so the emitted inheritance is unchanged. `i.Class` is the
+  /// interface's own 1-based `Id` (a simple index, stored directly).
+  private borrowing func inherits(_ routines: Routines) throws
+      -> Dictionary<Int, String> {
+    let batch = try Shell.statement("""
+      SELECT i.Class AS parent, b.TypeName AS base
+      FROM InterfaceImpl i JOIN TypeRef b ON i.Interface_TypeRef = b.Id
+      UNION
+      SELECT i.Class AS parent, d.TypeName AS base
+      FROM InterfaceImpl i JOIN TypeDef d ON i.Interface_TypeDef = d.Id
+      """)
+    let rows = try session.run(batch, routines, bindings: [:])
+    var inherits = Dictionary<Int, String>(minimumCapacity: rows.count)
+    for row in rows where inherits[row[0].integer] == nil {
+      inherits[row[0].integer] = row[1].text
+    }
+    return inherits
+  }
+
+  /// Every method's parameters, keyed by its `MethodDef` `Id`, decoded in one
+  /// batch — the `.render *` path's replacement for the per-method `params`
+  /// query.
+  ///
+  /// It projects the same `Id`, `SANITIZE(Name)`, and `Sequence` the per-method
+  /// render query does — over the whole `Param` table at once, bucketed by the
+  /// owning `MethodDef` in table (declaration) order — so a method's parameter
+  /// list here is identical, row for row, to what its own `params` query
+  /// returns. The return pseudo-parameter (`Sequence = 0`) rides along and is
+  /// dropped by the caller's filter, exactly as in the per-method path; a `Param`
+  /// row's `Id` is the signature position the caller decodes the type from.
+  private borrowing func signatures(_ routines: Routines) throws -> Buckets {
+    let batch = try Shell.statement("""
+      SELECT MethodDef, Id, SANITIZE(Name) AS Name, Sequence
+      FROM Param
+      """)
+    let rows = try session.run(batch, routines, bindings: [:])
+    var signatures = Buckets()
+    for row in rows {
+      signatures[row[0].integer, default: []].append([row[1], row[2], row[3]])
+    }
+    return signatures
+  }
+
+  /// Every interface's methods, keyed by its `TypeDef` `Id`, decoded in one
+  /// batch — the `.render *` path's replacement for the per-interface `methods`
+  /// query.
+  ///
+  /// It projects the same `Id` and `SANITIZE(Name)` the per-interface render
+  /// query does — over the whole `MethodDef` table at once, bucketed by the
+  /// owning `TypeDef` in table (declaration) order — so an interface's method
+  /// list here is identical, row for row, to what its own `methods` query
+  /// returns. A method's `Id` is the signature the caller decodes its return
+  /// and parameters from.
+  private borrowing func roster(_ routines: Routines) throws -> Buckets {
+    let batch = try Shell.statement("""
+      SELECT TypeDef, Id, SANITIZE(Name) AS Name
+      FROM MethodDef
+      """)
+    let rows = try session.run(batch, routines, bindings: [:])
+    var roster = Buckets()
+    for row in rows {
+      roster[row[0].integer, default: []].append([row[1], row[2]])
+    }
+    return roster
   }
 
   /// The interface `iid` the `TypeDef` at `id` bears through its
@@ -576,8 +724,7 @@ internal struct Shell: ~Escapable {
   /// INNER-join membership.
   private borrowing func guid(of id: Value, _ routines: Routines,
                               search: Array<String>) throws -> String? {
-    let query =
-        try Shell.statement(Shell.query(named: "guid", search: search))
+    let query = try statement(named: "guid")
     let rows = try session.run(query, routines, bindings: ["parent": id])
     return rows.first.map { $0[0].text }
   }
@@ -600,8 +747,7 @@ internal struct Shell: ~Escapable {
                               language: Language,
                               search: Array<String>) throws {
     guard visited.insert(found[0].integer).inserted else { return }
-    let query =
-        try Shell.statement(Shell.query(named: "requires", search: search))
+    let query = try statement(named: "requires")
     let bases = try session.run(query, routines,
                                 bindings: ["parent": found[0]])
     let ordered = bases.sorted {
@@ -628,7 +774,11 @@ internal struct Shell: ~Escapable {
                               through mustache: MustacheTemplate,
                               routines: Routines, in dialect: Dialect,
                               language: Language,
-                              search: Array<String>) throws -> String {
+                              search: Array<String>,
+                              inherits: Dictionary<Int, String>? = nil,
+                              roster: Buckets? = nil,
+                              signatures: Buckets? = nil)
+      throws -> String {
     let id = found[0]
     // The interface's ordered declared generic-parameter names, through the
     // `generics` view bound by its `Id` — empty for a non-generic interface.
@@ -646,7 +796,8 @@ internal struct Shell: ~Escapable {
     // the wrapper is a follow-up.
     let methods = try self.methods(of: id, routines, search: search,
                                    generics: generics, in: dialect,
-                                   language: language)
+                                   language: language, roster: roster,
+                                   signatures: signatures)
     // The interface's named base, via the `bases` view bound by its `Id`. The
     // render query projects only the plain (`TypeRef`/`TypeDef`) bases, whose
     // simple `TypeName` is keyword-escaped here the way the interface's own
@@ -655,11 +806,19 @@ internal struct Shell: ~Escapable {
     // projection redesign. A rootless interface defaults to the spec's COM
     // root, except the root interface itself — which inherits nothing, so it
     // never becomes its own base; an empty `root` applies no default.
-    let lineage =
-        try Shell.statement(Shell.query(named: "bases", search: search))
-    let bases = try session.run(lineage, routines, bindings: ["parent": id])
-    let base: String? = if let inherited = bases.first {
-      language.escape(inherited[0].text)
+    // The first plain base name: from the batch `inherits` map for `*`, else a
+    // per-interface `bases` query (the concrete/closure seed). Both yield the
+    // same first `spec IS NULL` base — the batch mirrors the two plain arms of
+    // the `bases` view in the same arm order — so the emitted inheritance stays
+    // byte-identical.
+    let inherited: String? = if let inherits {
+      inherits[id.integer]
+    } else {
+      try session.run(statement(named: "bases"), routines,
+                      bindings: ["parent": id]).first?[0].text
+    }
+    let base: String? = if let inherited {
+      language.escape(inherited)
     } else if language.root.isEmpty || found[2].text == language.root {
       nil
     } else {
@@ -722,18 +881,31 @@ internal struct Shell: ~Escapable {
   private borrowing func methods(of id: Value, _ routines: Routines,
                                  search: Array<String>,
                                  generics: Array<String>?, in dialect: Dialect,
-                                 language: Language) throws
+                                 language: Language,
+                                 roster: Buckets? = nil,
+                                 signatures: Buckets? = nil) throws
       -> Array<Dictionary<String, Any>> {
-    let plan =
-        try Shell.statement(Shell.query(named: "methods", search: search))
-    let rows = try session.run(plan, routines, bindings: ["parent": id])
+    // The interface's methods: from the batch `roster` map for `*`, else a
+    // per-interface `methods` query. Both return the same `Id`/`Name` rows in
+    // the same (declaration) order, so the emitted method list is unchanged.
+    let rows = if let roster {
+      roster[id.integer] ?? []
+    } else {
+      try session.run(statement(named: "methods"), routines,
+                      bindings: ["parent": id])
+    }
     var methods = Array<Dictionary<String, Any>>()
     methods.reserveCapacity(rows.count)
     for method in rows {
-      let selection = try Shell.statement(Shell.query(named: "params",
-                                                   search: search))
-      let params = try session.run(selection, routines,
-                                   bindings: ["parent": method[0]])
+      // The method's parameters: from the batch `signatures` map for `*`, else
+      // a per-method `params` query. Both return the same rows in the same
+      // (declaration) order, so the decoded parameter list is unchanged.
+      let params = if let signatures {
+        signatures[method[0].integer] ?? []
+      } else {
+        try session.run(statement(named: "params"), routines,
+                        bindings: ["parent": method[0]])
+      }
       let kept = params.filter { $0[2] != .integer(0) }
       let types = kept.map {
         session.storage.decode(parameter: $0[0].integer, generics: generics,
@@ -815,8 +987,7 @@ internal struct Shell: ~Escapable {
                                       search: Array<String>) throws
       -> Array<String> {
     if session.storage.opened("GenericParam") == nil { return [] }
-    let clause =
-        try Shell.statement(Shell.query(named: "generics", search: search))
+    let clause = try statement(named: "generics")
     let declared = try session.run(clause, routines, bindings: ["parent": id])
     return declared.map(\.first!.text)
   }
@@ -933,6 +1104,25 @@ internal struct Shell: ~Escapable {
     }
   }
 
+  /// The parsed render query named `name`, memoised in `queries`: on the first
+  /// request within a render it loads the resource (a `-I` directory's
+  /// `Render/<name>.sql` then the bundle) and parses it, and on every later one
+  /// in that render it returns the cached `Statement`. A `.render *` runs each
+  /// query once per interface — thousands of times — yet the text never changes
+  /// within a render, so re-loading and re-parsing it per call was pure
+  /// repetition; the parse now happens once per name per render. The memo is
+  /// cleared at the start of each top-level render, so a resource edited between
+  /// renders is re-resolved rather than served stale. Only the parse is shared:
+  /// each execution still binds fresh `:parent`/`:name` values, so the memo
+  /// changes no result.
+  private borrowing func statement(named name: String) throws
+      -> SQLEngine.Statement {
+    if let cached = queries.statements[name] { return cached }
+    let parsed = try Shell.statement(Shell.query(named: name, search: search))
+    queries.statements[name] = parsed
+    return parsed
+  }
+
   /// The target-language spec a template body declares, consuming its leading
   /// `{{! language: <name> }}` directive.
   ///
@@ -971,6 +1161,15 @@ internal struct Shell: ~Escapable {
     }
     return Language(parsing: String(decoding: data, as: UTF8.self))
   }
+}
+
+/// A per-render memo of parsed render queries, keyed by name. A reference type
+/// so a `borrowing` render method populates it (and clears it at each render's
+/// start) through the reference; it holds only value-type `Statement`s,
+/// borrowing none of the database storage, so a `~Escapable` `Shell` may own it.
+private final class Cache {
+  /// The parsed render queries loaded so far, keyed by name.
+  var statements: Dictionary<String, SQLEngine.Statement> = [:]
 }
 
 /// Locates resource `<name>.<ext>` of the given `kind` (`Render`, `Queries`,

@@ -243,6 +243,14 @@ struct TypesViewTests {
         Issue.record("table(named: \"TypeSpec\") did not resolve")
         return
       }
+      // A delimited name that is a Unicode case-fold equivalent resolves the
+      // same, per the catalog's case-insensitive contract: `ſ` folds to `s`, so
+      // `Typeſpec` must reach `TypeSpec`. The name registry keys on a case-fold
+      // (not `lowercased()`, which leaves `ſ` unchanged) to preserve this.
+      guard catalog.table(named: "Typeſpec") != nil else {
+        Issue.record("table(named: \"Typeſpec\") did not resolve (case-fold)")
+        return
+      }
     }
   }
 

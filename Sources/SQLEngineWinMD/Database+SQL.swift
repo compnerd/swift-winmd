@@ -68,25 +68,31 @@ extension WinMD.Storage: SQLEngine.Catalog {
      (name: "NestedClass", schema: Metadata.Tables.NestedClass.self)]
   }
 
-  /// The relation named `name`, resolved case-insensitively against the open
-  /// tables' schema names.
+  /// The relation named `name`, resolved case-insensitively against the
+  /// registered tables' schema names.
   ///
-  /// A `WinMD.Table`'s description is its schema name (e.g. "TypeDef"); a name
-  /// the database has no table for yields `nil`, which the engine reports as
+  /// A `WinMD.Table`'s schema name (e.g. "TypeDef") is its identity, and each
+  /// schema carries a distinct CIL table `number`. Rather than reflect every
+  /// open table's schema through `String(describing:)` per call — this is hit
+  /// tens of thousands of times over a query, and massively during a render —
+  /// the name resolves through the once-built `Metadata.Tables.number(named:)`
+  /// map to that number, then the open tables are matched on their cheap
+  /// `schema.number`. This is order-independent, exactly as the former
+  /// description scan was, so a `Storage` whose tables are not in number order
+  /// resolves identically. A name no registered table bears, or a present table
+  /// the number does not name, yields `nil`, which the engine reports as
   /// `SQLError.relation`.
   @_lifetime(borrow self)
   public borrowing func table(named name: String) -> WinMDRelation? {
-    for index in 0 ..< tables.count {
-      if tables[index].description.caseInsensitiveCompare(name)
-          == .orderedSame {
-        return WinMDRelation(self, tables[index])
-      }
+    guard let number = Metadata.Tables.number(named: name) else { return nil }
+    for index in 0 ..< tables.count
+        where tables[index].schema.number == number {
+      return WinMDRelation(self, tables[index])
     }
     // An optional table (see `optionals`) the tables stream omits resolves to
     // an empty relation, so a bundled view or the closure walk that names it
     // reads no rows rather than faulting on a missing relation.
-    for entry in WinMD.Storage.optionals
-        where name.caseInsensitiveCompare(entry.name) == .orderedSame {
+    for entry in WinMD.Storage.optionals where entry.schema.number == number {
       return WinMDRelation(self, .empty(entry.schema))
     }
     return nil

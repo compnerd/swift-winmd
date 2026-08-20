@@ -1,10 +1,50 @@
 // Copyright © 2020 Saleem Abdulrasool <compnerd@compnerd.org>. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
+import Foundation
+
 extension Metadata {
   public enum Tables {
   }
 }
+
+/// The case-insensitive fold that keys the name registry — Foundation's
+/// case-folding (e.g. `ſ` folds to `s`), matching the `caseInsensitiveCompare`
+/// the by-name scan used before, so a delimited relation name resolves the same.
+private func folded(_ name: String) -> String {
+  name.folding(options: .caseInsensitive, locale: nil)
+}
+
+extension Metadata.Tables {
+  /// The CIL table number a schema named `name` carries (case-insensitively),
+  /// or `nil` for a name no registered table bears.
+  ///
+  /// A once-built, reflection-free name resolution. The registry's schema names
+  /// are reflected through `String(describing:)` a single time to seed
+  /// `registry`, so a caller resolving a relation by name — the SQL adapter's
+  /// `table(named:)`, hit tens of thousands of times over a query — consults a
+  /// hashed lookup rather than reflecting every open table's schema per call.
+  /// The map is schema-universal (a table's number does not vary by database),
+  /// so it lives as a module-level `let`, not on a borrowed value.
+  package static func number(named name: String) -> Int? {
+    registry[folded(name)]
+  }
+}
+
+/// The case-folded schema name → CIL table number map, built once over the
+/// registered tables. The one place `String(describing:)` reflects a schema
+/// name; every by-name resolution reads this hashed map thereafter. Keying on
+/// `folded` (not `lowercased`) preserves the case-insensitive contract for a
+/// Unicode case-fold equivalent — e.g. a delimited `"Typeſpec"` resolves to
+/// `TypeSpec` because `ſ` folds to `s`, which `lowercased()` leaves unchanged.
+private let registry: Dictionary<String, Int> = {
+  var registry =
+      Dictionary<String, Int>(minimumCapacity: kRegisteredTables.count)
+  for schema in kRegisteredTables {
+    registry[folded("\(schema)")] = schema.number
+  }
+  return registry
+}()
 
 @usableFromInline
 internal let kRegisteredTables: Array<TableSchema.Type> = [

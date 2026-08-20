@@ -141,6 +141,18 @@ package struct Session: SQLEngine.Catalog, ~Escapable {
   /// The views the session has registered, keyed case-folded.
   package var registered: Dictionary<String, View>
 
+  /// The names of the views a session `CREATE VIEW` has registered this
+  /// session, keyed case-folded — the subset of `registered` the user authored,
+  /// distinct from the bundled seed. `registered` folds the two together (a
+  /// `CREATE VIEW` shadows a bundled view of the same name), so a caller that
+  /// must tell a user override of a bundled view (`methods`, `interfaces`, …)
+  /// apart from the seed reads this instead: `register(_:_:)` — the sole
+  /// `CREATE VIEW` path — records the name here, while the `init` seed writes
+  /// `registered` directly and leaves it empty. The `.render *` batch consults
+  /// it to fall back to the per-node emit when a batch-shortcut view is
+  /// overridden.
+  package private(set) var authored: Set<String> = []
+
   /// The routines the session resolves a call against — the WinMD-domain UDFs
   /// and the standard prelude (`Session.routines`), plus every scalar function a
   /// `CREATE FUNCTION` has defined this session. A `SELECT` and the schema
@@ -170,9 +182,12 @@ package struct Session: SQLEngine.Catalog, ~Escapable {
   }
 
   /// Registers `view` under `name` (case-folded, the way `view(named:)`
-  /// resolves it) — the `CREATE VIEW` path.
+  /// resolves it) — the `CREATE VIEW` path. The name is also recorded in
+  /// `authored`, so a user override of a bundled view is distinguishable from
+  /// the seed.
   package mutating func register(_ name: String, _ view: View) {
     registered[name.lowercased()] = view
+    authored.insert(name.lowercased())
   }
 
   /// Registers the defined scalar `function` under `name` (case-folded) into the

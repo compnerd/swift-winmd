@@ -148,8 +148,17 @@ extension Catalog where Self: ~Escapable {
     // reads those rows and runs the `.window` over the lone grouped arm. Both
     // forks decide the single-arm shape by one predicate, so a future routing
     // change cannot handle the multi-arm case yet miss the single arm.
-    if let union = try query.union(windowed: context.routines,
-                                   schemas: schemas(context.relations)) {
+    //
+    // Gate the `union(windowed:)` consult on the cheap structural `unioned`
+    // predicate first: `union(windowed:)` itself returns nil for any query that
+    // is not a multi-set windowed grouping-sets select, and building `schemas`
+    // over every base relation (each resolved by name, its columns and virtuals
+    // reflected) is the dominant per-run cost. A non-`unioned` query — every
+    // ordinary SELECT/UNION the engine runs — skips that build entirely and
+    // takes the plain execute below, unchanged in result.
+    if query.unioned,
+        let union = try query.union(windowed: context.routines,
+                                    schemas: schemas(context.relations)) {
       return try execute(plan, carrying: union, augmented.revealed())
           .map(\.values)
     }

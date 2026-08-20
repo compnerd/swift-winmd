@@ -1039,7 +1039,13 @@ extension Catalog where Self: ~Escapable {
     }
     let rows: Array<Record>
     let view = resolve(view: name)
-    if let view,
+    // Gate the `union(windowed:)` consult on the cheap structural `unioned`
+    // predicate (as the top-level `run` does): only a multi-set windowed
+    // grouping-sets view body needs the arm-union recovery, and building
+    // `schemas` over every base relation to feed it is the dominant per-derive
+    // cost. An ordinary view body skips that build and derives through the
+    // plain branches below, unchanged in result.
+    if let view, view.query.unioned,
         let union = try view.query.union(windowed: context.routines,
                                          schemas: schemas(overlay.relations)) {
       // A windowed `GROUP BY GROUPING SETS` view body keeps a `.select` body
@@ -1138,9 +1144,12 @@ extension Catalog where Self: ~Escapable {
     // descends it carrier-aware over the `overlay` revealed, per-arm
     // re-materialising its schema-only derived layer. Without this a view body
     // `(windowed grouping-sets) UNION …` scanned the schema-only source once,
-    // dropping its per-group rows.
-    if let union = try query.union(windowed: overlay.routines,
-                                   schemas: schemas(overlay.relations)) {
+    // dropping its per-group rows. Gate on the cheap structural `unioned`
+    // predicate first, so an ordinary arm skips the per-relation `schemas`
+    // build `union(windowed:)` would otherwise force.
+    if query.unioned,
+        let union = try query.union(windowed: overlay.routines,
+                                    schemas: schemas(overlay.relations)) {
       return try execute(plan, carrying: union, overlay.revealed())
     }
     if case let .setop(kind, left, right, all, types, _) = plan,

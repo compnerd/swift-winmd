@@ -50,6 +50,9 @@ guid-clsid CLSID
 # The well-known projection of resolved CLR types to `COM` module symbols.
 wellknown Windows.Win32.Foundation.HRESULT HRESULT
 wellknown Windows.Win32.Foundation.BOOL BOOL
+# `_` is the wildcard pattern, not a name: a metadata identifier spelled `_`
+# must be backtick-escaped (`` `_` ``) to project as a usable declaration.
+keyword _
 keyword Any
 keyword as
 keyword associatedtype

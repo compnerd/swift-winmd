@@ -191,6 +191,36 @@ struct RenderOverrideTests {
     }
   }
 
+  // A `-I` override supplying the former four-column `Render/requires.sql`
+  // (`Id`, namespace, name, `iid` — no trailing `kind`) must not trap the
+  // closure walk, which reads each base's kind from `found[4]`. Render-query
+  // shadowing is a supported extension point, so a copied override carrying the
+  // pre-`kind` shape resolves `IDerived`'s base `IBase` and emits both.
+  @Test func `a four-column requires override walks the base without trapping`() throws {
+    try RenderOverrideTests.withDirectory { directory in
+      let manager = FileManager.default
+      let render = URL(fileURLWithPath: "\(directory)/Render")
+      try manager.createDirectory(at: render,
+                                  withIntermediateDirectories: true)
+      let requires = """
+        SELECT n.Id, n.TypeNamespace, n.TypeName, n.iid
+        FROM InterfaceImpl i
+        JOIN interfaces n ON n.Id = i.Interface_TypeDef
+        WHERE i.Class = :parent
+        """
+      try Data(requires.utf8)
+          .write(to: render.appendingPathComponent("requires.sql"))
+      try RenderOverrideTests.with { catalog in
+        let shell = Shell(catalog, search: [directory])
+        let closed = try shell.render(closure: "IDerived", template: "com")
+        // The base `IBase`, reached through the four-column requires, emits
+        // rather than trapping on the absent `kind` column.
+        #expect(closed.contains("protocol IBase"))
+        #expect(closed.contains("protocol IDerived"))
+      }
+    }
+  }
+
   @Test func `* honours a CREATE VIEW override, matching the per-interface renders`() throws {
     // A session `CREATE VIEW bases` renames `IDerived`'s base to `IOverridden`.
     // `.render <interface>` runs the per-node `bases` query and honours it; the

@@ -682,6 +682,36 @@ struct DatabaseSQLTests {
     }
   }
 
+  @Test func `a flags OptionSet member named RawValue keeps a distinct support type`() throws {
+    // A `[flags]` enum with a member legitimately named `RawValue` renders it
+    // a `static var RawValue` accessor. The OptionSet arm must not spell an
+    // explicit `typealias RawValue`, or the two `RawValue`s are an invalid
+    // redeclaration Swift rejects (`RawValue` is no keyword, so `SANITIZE` does
+    // not escape it apart). Typing `rawValue` directly leaves the OptionSet
+    // `RawValue` associated type inferred, so the member stays the only
+    // `RawValue` declaration. Renders the real bundled `com` template's `flags`
+    // arm with a member named `RawValue`.
+    let body = try DatabaseSQLTests.template(named: "com")
+    let template = try MustacheTemplate(string: body)
+    let context: [String: Any] = [
+      "name": "FileAccess",
+      "owner": "FileAccess",
+      "underlying": "UInt32",
+      "flags": true,
+      "members": [
+        ["name": "RawValue", "value": "1"],
+        ["name": "Write", "value": "2"],
+      ],
+    ]
+    let rendered = template.render(["enum": context])
+    // No explicit support `typealias` to collide with the member.
+    #expect(!rendered.contains("typealias RawValue"))
+    #expect(rendered.contains("public let rawValue: UInt32"))
+    // The member renders as a static accessor of the inferred raw type.
+    #expect(rendered.contains(
+        "@_transparent public static var RawValue: FileAccess"))
+  }
+
   @Test func `renders the fixture interface's @com protocol from the views`() throws {
     // The render joins the bundled views — `interfaces` → `methods` → `params`
     // → `bases` — and the Mustache template into the `@com` protocol source.

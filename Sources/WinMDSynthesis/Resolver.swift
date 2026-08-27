@@ -22,6 +22,61 @@ public struct Identity: Sendable, Hashable {
   }
 }
 
+/// A signature-referenced type paired with the coded-index row the signature
+/// named it through — the `TypeDefOrRef` `rawValue` (its tag and 1-based row).
+///
+/// The `identity` still spells the type (namespace and name); the `token` is
+/// what lets a closure walk resolve the reference to a local definition by
+/// binding the exact `TypeRef`/`TypeDef` Id rather than matching on the name. A
+/// bare name mislocates: two nested types share the empty namespace and a bare
+/// name, and an external `TypeRef` may share a local type's (namespace, name)
+/// yet resolve elsewhere. Binding the row instead routes a `TypeDef` straight to
+/// its definition and a `TypeRef` through the scope-chain resolution the local
+/// resolution needs. A `TypeSpec` names no identity, so a `Resolver` never holds
+/// one — every `Referent` is a `TypeDef` or a `TypeRef`.
+public struct Referent: Sendable, Hashable {
+  /// Which table the coded index names — a local `TypeDef` a caller resolves by
+  /// its Id directly, or a `TypeRef` it resolves through the scope chain. A
+  /// `Resolver` never holds a `TypeSpec` (which names no identity), so a
+  /// reference is one or the other.
+  public enum Kind: Sendable, Hashable {
+    case definition
+    case reference
+  }
+
+  /// The resolved spelling identity — the type's namespace and name.
+  public let identity: Identity
+
+  /// The `TypeDefOrRef` coded-index raw value the signature named the type
+  /// through; `kind` and `row` decode it.
+  public let token: Int
+
+  public init(identity: Identity, token: Int) {
+    self.identity = identity
+    self.token = token
+  }
+
+  /// The decoded coded index — its `tag` selects the table and its `row` is the
+  /// 1-based Id a caller binds to resolve the reference to a local definition.
+  public var coded: TypeDefOrRef {
+    TypeDefOrRef(rawValue: token)
+  }
+
+  /// Whether the reference names a local `TypeDef` directly or a `TypeRef` the
+  /// caller resolves through the scope chain, keyed off the coded index's
+  /// selected table rather than a hard-coded tag.
+  public var kind: Kind {
+    TypeDefOrRef.tables[coded.tag]?.number == Metadata.Tables.TypeDef.number
+        ? .definition : .reference
+  }
+
+  /// The 1-based Id the reference names in the table `kind` selects — the
+  /// `TypeDef` Id for a definition, the `TypeRef` Id for a reference.
+  public var row: Int {
+    coded.row
+  }
+}
+
 /// Resolves a `TypeDefOrRef` (with its `NamedKind`) to an `Identity`.
 ///
 /// The decode tier is injected with a resolver so it needs no live database: a
@@ -46,8 +101,35 @@ public struct Resolver: TypeResolver {
   /// The pre-resolved `rawValue → Identity` table.
   private let table: Dictionary<Int, Identity>
 
+  /// The pre-resolved `rawValue → namespace-qualified spelling` table — an
+  /// ambiguous value type's full namespace path alone (see
+  /// `Storage.spelling(of:qualifying:)`). A reference absent here — a
+  /// non-ambiguous value type, a protocol/class, a database-free resolver, or
+  /// one built over an unresolvable reference — spells by its `Identity` name,
+  /// the bare-or-enclosing behaviour that predates namespace preservation.
+  private let spellings: Dictionary<Int, String>
+
+  /// The coded indices `table` holds that occur *only* as a custom modifier,
+  /// never as an ordinary type — kept in `table` for the decode's `IsConst`
+  /// resolution but excluded from `identities`, since the generated signature
+  /// never spells a modifier type. A token that also occurs ordinarily is not
+  /// here, so its ordinary occurrence still enqueues its declaration.
+  private let modifiers: Set<Int>
+
   public init(_ table: Dictionary<Int, Identity>) {
     self.table = table
+    self.spellings = [:]
+    self.modifiers = []
+  }
+
+  /// Builds a resolver over the pre-resolved tables — the storage-backed
+  /// initializers' shared destination.
+  private init(_ table: Dictionary<Int, Identity>,
+               _ spellings: Dictionary<Int, String>,
+               _ modifiers: Set<Int>) {
+    self.table = table
+    self.spellings = spellings
+    self.modifiers = modifiers
   }
 
   /// Builds the `rawValue → Identity` table from a decoded signature, resolved
@@ -63,15 +145,63 @@ public struct Resolver: TypeResolver {
   /// (which resolves a single method's signature on demand) share one
   /// collection. A reference that does not resolve — a `TypeSpec`, a null index
   /// — is left out, and `Decode` renders an opaque pointer for it.
-  package init(of signature: MethodSignature,
-               with storage: borrowing Storage) throws(WinMDError) {
+  package init(of signature: MethodSignature, with storage: borrowing Storage,
+               qualifying: Set<String> = []) throws(WinMDError) {
     var table = Dictionary<Int, Identity>()
-    try collect(signature, into: &table, with: storage)
-    self.init(table)
+    var spellings = Dictionary<Int, String>()
+    var spelled = Set<Int>()
+    var modifiers = Set<Int>()
+    try collect(signature, into: &table, spelling: &spellings,
+                spelled: &spelled, modifiers: &modifiers, with: storage,
+                qualifying: qualifying)
+    self.init(table, spellings, modifiers.subtracting(spelled))
+  }
+
+  /// Builds the `rawValue → Identity` table from a decoded field signature,
+  /// resolved against a borrowed `Storage` — the field-signature sibling of the
+  /// method-signature initializer.
+  ///
+  /// A field carries a single `type`, so this reuses the same `collect` walk the
+  /// method initializer runs over each parameter, resolving every `TypeDefOrRef`
+  /// the field's type names (directly or nested under a pointer, array, or
+  /// instantiation). A closure walk over a struct's fields (edge E6) resolves a
+  /// field's named value type exactly the way it resolves a method parameter.
+  package init(of signature: FieldSignature, with storage: borrowing Storage,
+               qualifying: Set<String> = []) throws(WinMDError) {
+    var table = Dictionary<Int, Identity>()
+    var spellings = Dictionary<Int, String>()
+    var spelled = Set<Int>()
+    var modifiers = Set<Int>()
+    try collect(signature.type, into: &table, spelling: &spellings,
+                spelled: &spelled, modifiers: &modifiers, with: storage,
+                qualifying: qualifying)
+    self.init(table, spellings, modifiers.subtracting(spelled))
+  }
+
+  /// The distinct references the table holds — every type a signature named,
+  /// each paired with the coded-index row it was named through.
+  ///
+  /// The table keys by coded-index raw value, so one `Referent` is yielded per
+  /// distinct `TypeDefOrRef` the signature carries; two uses of the same coded
+  /// row collapse to one. A closure walk reads this to enumerate a signature's
+  /// referenced types without re-walking it, then resolves each — by its `token`
+  /// row, not its name — to a local `TypeDef` and enqueues the unvisited.
+  public var identities: Set<Referent> {
+    Set(table.filter { !modifiers.contains($0.key) }
+        .map { Referent(identity: $0.value, token: $0.key) })
   }
 
   public func resolve(_ reference: TypeDefOrRef, kind: NamedKind) -> Identity? {
     table[reference.rawValue]
+  }
+
+  /// The namespace-qualified render spelling `reference` was pre-resolved to,
+  /// or `nil` when it names no ambiguous local value type (or the resolver
+  /// carries no spellings) — the signal the decode falls back to the
+  /// reference's bare-or-enclosing `Identity` name. Populated only by the
+  /// storage-backed initializers, from `Storage.spelling(of:qualifying:)`.
+  public func spelling(of reference: TypeDefOrRef) -> String? {
+    spellings[reference.rawValue]
   }
 }
 
@@ -94,47 +224,115 @@ extension Tuple {
   }
 }
 
-/// Resolves every `TypeDefOrRef` `signature` names into `table`.
+/// Resolves every `TypeDefOrRef` `signature` names into the tables, recording
+/// each ordinary (spelled) occurrence in `spelled` and each custom-modifier
+/// occurrence in `modifiers`.
 private func collect(_ signature: MethodSignature,
                      into table: inout Dictionary<Int, Identity>,
-                     with storage: borrowing Storage) throws(WinMDError) {
-  try collect(signature.returns, into: &table, with: storage)
+                     spelling spellings: inout Dictionary<Int, String>,
+                     spelled: inout Set<Int>, modifiers: inout Set<Int>,
+                     with storage: borrowing Storage,
+                     qualifying: Set<String>) throws(WinMDError) {
+  try collect(signature.returns, into: &table, spelling: &spellings,
+              spelled: &spelled, modifiers: &modifiers, with: storage,
+              qualifying: qualifying)
   for parameter in signature.parameters {
-    try collect(parameter, into: &table, with: storage)
+    try collect(parameter, into: &table, spelling: &spellings,
+                spelled: &spelled, modifiers: &modifiers, with: storage,
+                qualifying: qualifying)
   }
 }
 
-/// Resolves every `TypeDefOrRef` `type` names into `table`, recursively.
+/// Resolves every `TypeDefOrRef` `type` names into the tables, recursively,
+/// recording each ordinary occurrence in `spelled` and each custom-modifier
+/// occurrence in `modifiers`, so the closure walk can omit a token used *only*
+/// as a modifier: such a type stays in `table` for the decode's `IsConst`
+/// check, but the generated signature never names it (a non-`IsConst` modifier
+/// is
+/// ignored, `IsConst` only changes pointer constness), so enqueuing it would
+/// emit an orphan. A token that also occurs as an ordinary type is spelled and
+/// so kept — subtracting every token ever seen as a modifier would drop it.
 private func collect(_ type: SignatureType,
                      into table: inout Dictionary<Int, Identity>,
-                     with storage: borrowing Storage) throws(WinMDError) {
+                     spelling spellings: inout Dictionary<Int, String>,
+                     spelled: inout Set<Int>, modifiers: inout Set<Int>,
+                     with storage: borrowing Storage,
+                     qualifying: Set<String>) throws(WinMDError) {
   switch type {
   case .primitive, .variable, .function:
     break
   case let .pointer(pointee), let .reference(pointee),
        let .array(pointee), let .matrix(pointee, _):
-    try collect(pointee, into: &table, with: storage)
+    try collect(pointee, into: &table, spelling: &spellings, spelled: &spelled,
+                modifiers: &modifiers, with: storage, qualifying: qualifying)
   case let .named(_, reference):
-    try record(reference, into: &table, with: storage)
+    try record(reference, into: &table, spelling: &spellings, with: storage,
+               qualifying: qualifying)
+    spelled.insert(reference.rawValue)
   case let .instance(base, arguments):
-    try collect(base, into: &table, with: storage)
+    try collect(base, into: &table, spelling: &spellings, spelled: &spelled,
+                modifiers: &modifiers, with: storage, qualifying: qualifying)
     for argument in arguments {
-      try collect(argument, into: &table, with: storage)
+      try collect(argument, into: &table, spelling: &spellings,
+                  spelled: &spelled, modifiers: &modifiers, with: storage,
+                  qualifying: qualifying)
     }
-  case let .modified(inner, modifiers):
-    try collect(inner, into: &table, with: storage)
-    for modifier in modifiers {
-      try record(modifier.type, into: &table, with: storage)
+  case let .modified(inner, modifiers: mods):
+    try collect(inner, into: &table, spelling: &spellings, spelled: &spelled,
+                modifiers: &modifiers, with: storage, qualifying: qualifying)
+    for modifier in mods {
+      try record(modifier.type, into: &table, spelling: &spellings,
+                 with: storage, qualifying: qualifying)
+      modifiers.insert(modifier.type.rawValue)
     }
   }
 }
 
-/// Resolves a single `TypeDefOrRef` to its `Identity` and records it.
+/// Resolves a single `TypeDefOrRef` to its `Identity` and its kind-aware
+/// spelling and records both.
 private func record(_ reference: TypeDefOrRef,
                     into table: inout Dictionary<Int, Identity>,
-                    with storage: borrowing Storage) throws(WinMDError) {
+                    spelling spellings: inout Dictionary<Int, String>,
+                    with storage: borrowing Storage,
+                    qualifying: Set<String>) throws(WinMDError) {
   guard table[reference.rawValue] == nil else { return }
   guard let tuple = try storage.resolve(reference) else { return }
   guard let identity = try tuple.identity else { return }
-  table[reference.rawValue] = identity
+  // The `Identity` still carries the type's own namespace and the enclosing
+  // dot-path (`Foo.Bar`), the key the decode's well-known and `System.Guid`
+  // lookups resolve on — and the bare-or-enclosing spelling the decode falls
+  // back to when no namespace-qualified spelling rides alongside. A spelling is
+  // recorded only for an ambiguous value type (its name in `qualifying`): its
+  // full namespace-qualified path (`Storage.spelling(of:qualifying:)`), which
+  // the decode prefers. A non-ambiguous type, a protocol/class, and an external
+  // `TypeRef` record no spelling and keep spelling by this `Identity` name — the
+  // bare-or-enclosing behaviour that predates namespaces.
+  let name = try storage.qualified(tuple)
+  table[reference.rawValue] =
+      Identity(namespace: identity.namespace, name: name)
+  // Only a value type whose (outermost encloser's) name is ambiguous is spelled
+  // namespace-qualified; the bare-or-enclosing `name` above serves every other
+  // type. `Storage.spelling(of:qualifying:)` is the single source of that
+  // decision — it applies the O(1) ambiguity test and, only then, resolves the
+  // reference to confirm its definition is a value type (a protocol, a runtime
+  // class, or an external `TypeRef` sharing the ambiguous name stays bare). An
+  // earlier inline fast path here recomputed the top-level case from the
+  // `identity` alone and, spelling it directly, skipped that value-type check,
+  // qualifying a same-named protocol or class to a phantom `NS.Point`.
+  //
+  // The guard here is only a pre-filter on *whether* to call `spelling`, never a
+  // second copy of the decision: a top-level reference (a non-empty own
+  // namespace) whose leaf name is not ambiguous cannot qualify — `spelling`
+  // tests that very name first and would return `nil` — so skipping the call is
+  // exactly equivalent and spares the resolution for the common bare reference.
+  // A nested or global reference (an empty own namespace) qualifies off its
+  // outermost encloser's name, which the leaf `identity.name` does not reveal,
+  // so it always defers to `spelling`'s chain walk.
+  guard identity.namespace.isEmpty || qualifying.contains(identity.name) else {
+    return
+  }
+  if let spelling =
+      try storage.spelling(of: reference, qualifying: qualifying) {
+    spellings[reference.rawValue] = spelling
+  }
 }

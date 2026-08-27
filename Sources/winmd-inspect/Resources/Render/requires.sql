@@ -54,7 +54,8 @@ SELECT
   n.Id,
   n.TypeNamespace,
   n.TypeName,
-  n.iid
+  n.iid,
+  'interface' AS kind
 FROM
   InterfaceImpl i
   JOIN resolved rv ON rv.ref = i.Interface_TypeRef
@@ -66,7 +67,8 @@ SELECT
   n.Id,
   n.TypeNamespace,
   n.TypeName,
-  n.iid
+  n.iid,
+  'interface' AS kind
 FROM
   InterfaceImpl i
   JOIN interfaces n ON n.Id = i.Interface_TypeDef

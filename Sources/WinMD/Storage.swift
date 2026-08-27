@@ -224,4 +224,333 @@ public struct Storage: ~Escapable {
     }
     return nil
   }
+
+  // MARK: - Nesting
+
+  /// The lexically enclosing type of the type `tuple` names — its immediate
+  /// encloser — or `nil` when the type is top-level.
+  ///
+  /// A `TypeRef` nests through its `ResolutionScope`: a scope that is itself a
+  /// `TypeRef` is the enclosing reference, and any other scope (a `Module`, a
+  /// `ModuleRef`, or an `AssemblyRef`) makes the reference top-level. A
+  /// `TypeDef` nests through the `NestedClass` table (§II.22.32) — the
+  /// `EnclosingClass` of the row whose `NestedClass` names this definition,
+  /// found by binary search when the table is stored sorted on its key and by a
+  /// linear scan otherwise. Any other table has no enclosing and yields `nil`.
+  /// It is `package` so the synthesis decode and the render adapter compose one
+  /// nested type's dot-path from the same walk.
+  @_lifetime(copy self)
+  package func enclosing(_ tuple: borrowing Tuple)
+      throws(WinMDError) -> Tuple? {
+    // The enclosing tuple is opened off `self` (not off the borrowed `tuple`)
+    // so its lifetime tracks the storage rather than the shorter-lived
+    // argument, which is what a recursive walk returns through.
+    switch tuple.table.number {
+    case Metadata.Tables.TypeRef.number:
+      guard let scope = tuple.ordinal(for: "ResolutionScope") else {
+        return nil
+      }
+      // Tag 3 of `ResolutionScope` selects `TypeRef`: a scope that is itself a
+      // `TypeRef` is the enclosing reference; a `Module`/`ModuleRef`/
+      // `AssemblyRef` scope makes the reference top-level.
+      let coded = ResolutionScope(rawValue: tuple[scope])
+      guard coded.tag == 3, coded.row != 0 else { return nil }
+      return try self.tuple(coded.row - 1,
+                            of: Metadata.Tables.TypeRef.self)
+    case Metadata.Tables.TypeDef.number:
+      guard let table = opened(Metadata.Tables.NestedClass.number) else {
+        return nil
+      }
+      // The `NestedClass` (ordinal 0) column holds the 1-based `TypeDef` Id of
+      // the nested type; `EnclosingClass` (ordinal 1) its encloser.
+      let child = tuple.row + 1
+      let count = Int(table.rows)
+      if sorted & (1 << Metadata.Tables.NestedClass.number) != 0 {
+        let lower = bound(table, 0, child, count, strict: false)
+        guard lower < count, Tuple(lower, table, self)[0] == child else {
+          return nil
+        }
+        return try self.tuple(Tuple(lower, table, self)[1] - 1,
+                              of: Metadata.Tables.TypeDef.self)
+      }
+      for index in 0 ..< count where Tuple(index, table, self)[0] == child {
+        return try self.tuple(Tuple(index, table, self)[1] - 1,
+                              of: Metadata.Tables.TypeDef.self)
+      }
+      return nil
+    default:
+      return nil
+    }
+  }
+
+  /// The dot-path name of the type `tuple` names, from its outermost encloser —
+  /// `Foo.Bar` for a `Bar` nested under `Foo`, `Foo.Bar.Baz` for a deeper
+  /// nesting — or the bare `TypeName` for a top-level type.
+  ///
+  /// The components are joined raw (unescaped); a caller that spells the path
+  /// as target source escapes each component separately, so a keyword component
+  /// is delimited within the path rather than treated as one identifier.
+  package func qualified(_ tuple: borrowing Tuple)
+      throws(WinMDError) -> String {
+    // Each component is a declaration name spelled arity-stripped: a generic
+    // encloser `Outer``1` nests as `Outer` and the generic decode strips the
+    // leaf, so strip every component of the enclosing path here — a signature
+    // spelling `Outer.Inner`, not the unresolved `Outer``1.Inner`. The suffix
+    // marks only a generic definition, which is never a `known` bridge or
+    // `System.Guid` (both non-generic), so the identity this feeds still
+    // matches those lookups, and a top-level component is already projected at
+    // the seam that qualifies it.
+    let name = try projected(bare(tuple))
+    guard let outer = try enclosing(tuple) else { return name }
+    return try qualified(outer) + "." + name
+  }
+
+  /// As `qualified`, but the *leaf* component keeps its CLR generic-arity
+  /// suffix (`` Box`1 ``) while the enclosing path stays arity-stripped. The
+  /// decode's well-known lookup keys on this raw leaf — the spec maps a
+  /// generic type by its raw name (`Box1`) — while the projected spelling still
+  /// strips the suffix, so the two agree on a non-generic type and diverge only
+  /// where a generic's arity is the difference between hitting and missing the
+  /// configured bridge.
+  package func identifier(_ tuple: borrowing Tuple)
+      throws(WinMDError) -> String {
+    let leaf = try bare(tuple)
+    guard let outer = try enclosing(tuple) else { return leaf }
+    return try qualified(outer) + "." + leaf
+  }
+
+  /// Whether any *enclosing* type of `tuple` is generic — its raw `TypeName`
+  /// carries the CLR arity suffix (a backtick). Such a nesting has no valid
+  /// unqualified spelling: a member of `Outer``1` is `Outer<T>.Inner`, which
+  /// needs the enclosing specialization, while both `qualified`'s arity-stripped
+  /// `Outer.Inner` and appending the generic arguments to the leaf misname it.
+  /// Projecting the WinRT generic-nesting specialization is a deferred redesign,
+  /// so a reference into such a type is an unsupported frontier the caller drops
+  /// rather than spelling. Only an *encloser*'s arity matters: the leaf's own
+  /// generic arity is stripped and supplied by the decode's own clause.
+  package func enclosedByGeneric(_ tuple: borrowing Tuple)
+      throws(WinMDError) -> Bool {
+    guard let outer = try enclosing(tuple) else { return false }
+    if try bare(outer).contains("`") { return true }
+    return try enclosedByGeneric(outer)
+  }
+
+  /// The dot-path name of the `TypeDef` at 1-based `id` — the `qualified`
+  /// spelling addressed by `Id` rather than by an already-fetched `Tuple`, for
+  /// a caller (the render's inheritance clause) that holds only the resolved
+  /// base `Id`. A missing row spells empty, the same absent-name the caller's
+  /// bare fallback would.
+  package func qualified(of id: Int) throws(WinMDError) -> String {
+    guard let tuple = try self.tuple(id - 1, of: Metadata.Tables.TypeDef.self)
+    else {
+      return ""
+    }
+    return try qualified(tuple)
+  }
+
+  /// The enclosing `TypeDef` chain of the `TypeDef` at 1-based `id`, outermost
+  /// first — each an `(id, name)` pair — for the render to group a nested type
+  /// under a container per level. An empty array for a top-level type.
+  package func nesting(of id: Int)
+      throws(WinMDError) -> Array<(id: Int, name: String)> {
+    guard let tuple = try self.tuple(id - 1, of: Metadata.Tables.TypeDef.self),
+        let outer = try enclosing(tuple) else {
+      return []
+    }
+    return try nesting(of: outer.row + 1) + [(outer.row + 1, bare(outer))]
+  }
+
+  // MARK: - Kind and qualification
+
+  /// The projection kind of a named type — how the render spells and nests it.
+  ///
+  /// The partition is the one the SQL `types` view draws: an `interface` (the
+  /// `tdInterface` flag), a `delegate`/`structure`/`enumeration` (told apart by
+  /// the base its `Extends` names — `System.MulticastDelegate`/`System.ValueType`
+  /// /`System.Enum`), or a runtime `class` (anything else). Only a `structure`
+  /// or `enumeration` is a value type, spelled fully namespace-qualified and
+  /// nested; the rest spell by their bare name.
+  package enum Kind: Sendable, Equatable {
+    case interface
+    case delegate
+    case structure
+    case enumeration
+    case `class`
+
+    /// Whether the kind is a value type — a `structure` or an `enumeration` —
+    /// the render namespace-qualifies and nests, as opposed to a `protocol`
+    /// (`interface`/`delegate`) or a runtime `class` it spells bare.
+    package var value: Bool {
+      self == .structure || self == .enumeration
+    }
+  }
+
+  /// The projection kind of the `TypeDef` the `tuple` names, classified exactly
+  /// as the SQL `types` view does so the decode spelling and the emit nesting
+  /// agree from one source.
+  ///
+  /// The `tdInterface` flag (`0x20`) marks an interface regardless of its base;
+  /// otherwise the base type the `Extends` coded index names classifies the row
+  /// — `System.Enum` an enumeration, `System.MulticastDelegate` a delegate,
+  /// `System.ValueType` a structure, anything else (or no base) a runtime class.
+  package func kind(_ tuple: borrowing Tuple) throws(WinMDError) -> Kind {
+    if let flags = tuple.ordinal(for: "Flags"), tuple[flags] & 0x20 == 0x20 {
+      return .interface
+    }
+    guard let extends = tuple.ordinal(for: "Extends") else { return .class }
+    let base = TypeDefOrRef(rawValue: tuple[extends])
+    guard let parent = try resolve(base) else { return .class }
+    switch try names(parent) {
+    case ("System", "Enum"):              return .enumeration
+    case ("System", "MulticastDelegate"): return .delegate
+    case ("System", "ValueType"):         return .structure
+    default:                              return .class
+    }
+  }
+
+  /// The outermost encloser of the type `tuple` names — the top of its nesting
+  /// chain, itself when top-level — reached by climbing `enclosing`. The result
+  /// is opened off `self`, so its lifetime tracks the storage.
+  @_lifetime(copy self)
+  private func outermost(_ tuple: borrowing Tuple)
+      throws(WinMDError) -> Tuple {
+    guard let up = try enclosing(tuple) else {
+      return Tuple(tuple.row, tuple.table, self)
+    }
+    return try outermost(up)
+  }
+
+  /// The local `TypeDef` the named type `reference` resolves to, or `nil` when
+  /// it names no local definition.
+  ///
+  /// A `TypeDef` reference already names a local definition. A `TypeRef` resolves
+  /// through its `ResolutionScope` chain — a module-scoped reference to the
+  /// non-nested `TypeDef` of the same (namespace, name), a `TypeRef`-scoped
+  /// (nested) reference to the nested `TypeDef` under the local definition its
+  /// enclosing reference resolves to — exactly the walk the render's `references`
+  /// CTE performs. A reference whose chain terminates at a `ModuleRef` or
+  /// `AssemblyRef` (an external assembly) resolves to nothing; a `TypeSpec`
+  /// names no definition.
+  @_lifetime(copy self)
+  package func definition(of reference: TypeDefOrRef)
+      throws(WinMDError) -> Tuple? {
+    guard let tuple = try resolve(reference) else { return nil }
+    switch tuple.table.number {
+    case Metadata.Tables.TypeDef.number:
+      return tuple
+    case Metadata.Tables.TypeRef.number:
+      return try definition(reference: tuple)
+    default:
+      return nil
+    }
+  }
+
+  /// The local `TypeDef` the `TypeRef` `tuple` resolves to through its
+  /// `ResolutionScope` chain, or `nil` when the reference is external.
+  @_lifetime(copy self)
+  private func definition(reference tuple: borrowing Tuple)
+      throws(WinMDError) -> Tuple? {
+    guard let ordinal = tuple.ordinal(for: "ResolutionScope") else {
+      return nil
+    }
+    let scope = ResolutionScope(rawValue: tuple[ordinal])
+    let target = try names(tuple)
+    // A `TypeRef`-scoped (tag 3) reference is nested: resolve its enclosing
+    // reference to a local `TypeDef`, then match the nested `TypeDef` directly
+    // under it by `TypeName` — a nested type's namespace is empty, so the match
+    // is by name under the encloser, never by namespace.
+    if scope.tag == 3, scope.row != 0 {
+      guard let enclosing = try self.tuple(scope.row - 1,
+                                           of: Metadata.Tables.TypeRef.self),
+          let encloser = try definition(reference: enclosing) else {
+        return nil
+      }
+      return try nested(target.name, in: encloser.row + 1)
+    }
+    // A `Module`-scoped (tag 0) reference is local and top-level; any other
+    // scope — a `ModuleRef`/`AssemblyRef`, or a null scope — is external.
+    guard scope.tag == 0, scope.row != 0 else { return nil }
+    return try toplevel(target.namespace, target.name)
+  }
+
+  /// The non-nested local `TypeDef` named (`namespace`, `name`), or `nil` — the
+  /// anchor a module-scoped reference resolves to.
+  @_lifetime(copy self)
+  private func toplevel(_ namespace: String, _ name: String)
+      throws(WinMDError) -> Tuple? {
+    guard let table = opened(Metadata.Tables.TypeDef.number) else { return nil }
+    for row in 0 ..< Int(table.rows) {
+      let tuple = Tuple(row, table, self)
+      let (space, simple) = try names(tuple)
+      guard space == namespace, simple == name else { continue }
+      // A nested type shares a bare (namespace, name) with a top-level one only
+      // by coincidence, and the empty namespace collapses every nested type's
+      // pair — so the module-scoped reference names the non-nested definition.
+      switch try enclosing(tuple) {
+      case .none: return tuple
+      case .some: continue
+      }
+    }
+    return nil
+  }
+
+  /// The local nested `TypeDef` named `name` directly under the `TypeDef` at
+  /// 1-based `encloser` `Id`, or `nil` — the nested reference's resolution step.
+  @_lifetime(copy self)
+  private func nested(_ name: String, in encloser: Int)
+      throws(WinMDError) -> Tuple? {
+    guard let table = opened(Metadata.Tables.NestedClass.number) else {
+      return nil
+    }
+    // The `NestedClass` column (ordinal 0) is the nested `TypeDef` Id, the
+    // `EnclosingClass` column (ordinal 1) its encloser.
+    for index in 0 ..< Int(table.rows) {
+      let link = Tuple(index, table, self)
+      guard link[1] == encloser else { continue }
+      guard let child = try self.tuple(link[0] - 1,
+                                       of: Metadata.Tables.TypeDef.self) else {
+        continue
+      }
+      if try bare(child) == name { return child }
+    }
+    return nil
+  }
+
+  /// The bare `TypeName` of the type `tuple` names — the empty string when it
+  /// carries no such column.
+  private func bare(_ tuple: borrowing Tuple) throws(WinMDError) -> String {
+    guard let name = tuple.ordinal(for: "TypeName") else { return "" }
+    return try tuple.string(name)
+  }
+
+  /// A `TypeName` with its CLR generic-arity suffix removed — the projected
+  /// declaration name the render actually emits and the decode spells. The
+  /// suffix is a backtick and an arity count (`Foo` backtick `1`), which the
+  /// projection strips, so a generic `Foo` and a non-generic `Foo` project to
+  /// the one Swift name and collide. The collision tally and the qualification
+  /// identity key off this projected name so they match the emission; a name
+  /// without the suffix is returned unchanged.
+  private func projected(_ name: String) -> String {
+    String(name.prefix { $0 != "`" })
+  }
+
+  /// The (namespace, name) the `TypeDef`/`TypeRef` `tuple` names — the empty
+  /// string for either column it lacks.
+  private func names(_ tuple: borrowing Tuple)
+      throws(WinMDError) -> (namespace: String, name: String) {
+    let name = try bare(tuple)
+    guard let space = tuple.ordinal(for: "TypeNamespace") else {
+      return ("", name)
+    }
+    return (try tuple.string(space), name)
+  }
+
+  /// The open table numbered `number`, or `nil` when the database omits it —
+  /// the population-count slot lookup `rows(of:)`/`tuple(_:of:)` share, reduced
+  /// to the `Table` for a direct row read.
+  private func opened(_ number: Int) -> Table? {
+    guard valid & (1 << number) != 0 else { return nil }
+    let slot = (valid & ((1 << number) - 1)).nonzeroBitCount
+    return tables[slot]
+  }
 }

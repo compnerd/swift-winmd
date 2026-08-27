@@ -796,7 +796,8 @@ struct DatabaseSQLTests {
       var shell = Shell(catalog)
       let query = """
         CREATE VIEW bases AS
-        SELECT 'protocol' AS base, NULL AS spec FROM TypeDef WHERE Id = :parent
+        SELECT 'protocol' AS base, NULL AS spec
+        FROM TypeDef WHERE Id = :parent
         """
       let (name, view) = try DatabaseSQLTests.create(query)
       shell.session.register(name, view)
@@ -1024,6 +1025,98 @@ struct DatabaseSQLTests {
 
         """)
     }
+  }
+
+  @Test func `the bundled flags query detects a System FlagsAttribute`() throws {
+    // The overridable `flags` query returns a row for an enum `TypeDef` bearing a
+    // `System.FlagsAttribute` custom attribute and no row for one that does not —
+    // the `[flags]` marking `enumeration` reads to project an `OptionSet` rather
+    // than a native Swift `enum`. `Flagged` (`TypeDef` Id 1) bears the attribute
+    // through a `MemberRef` naming the `System.FlagsAttribute` `TypeRef` (the
+    // encoding real metadata uses); `Plain` (Id 2) bears none. This runs the real
+    // bundled `Render/flags.sql`, so it pins its (namespace, name) match and its
+    // three attribute-encoding arms. Born with the query: pre-change there is no
+    // `flags` query to load, and it correctly discriminates the two enums.
+    let flags = try Shell.query(named: "flags", search: [])
+    try FlagsFixture.with { catalog in
+      let flagged = try DatabaseSQLTests.run(flags, [:], catalog,
+                                             ["parent": .integer(1)])
+      #expect(!flagged.isEmpty)
+      let plain = try DatabaseSQLTests.run(flags, [:], catalog,
+                                           ["parent": .integer(2)])
+      #expect(plain.isEmpty)
+    }
+  }
+
+  @Test func `the bundled com template renders a flags enum as an OptionSet`() throws {
+    // A `[flags]` enum renders through the `{{#flags}}` arm of the real bundled
+    // `com` enum section: an `OptionSet` whose `RawValue` is the `value__`
+    // underlying type, each member a `@_transparent` accessor folding to its raw
+    // constant — the projection that faithfully models a bitmask, which a native
+    // `enum` case (a single value) cannot. The context is the one `enumeration`
+    // assembles for a `[flags]` enum: `flags` true, and members carrying no alias
+    // (the accessors tolerate a repeated raw value). Pre-change the enum section
+    // had only the struct-newtype arm, so this OptionSet shape is born with the
+    // `{{#flags}}` branch.
+    let body = try DatabaseSQLTests.template(named: "com")
+    let template = try MustacheTemplate(string: body)
+    let context: [String: Any] = [
+      "name": "FileAccess", "owner": "FileAccess",
+      "underlying": "CUnsignedInt", "flags": true,
+      "members": [
+        ["name": "read", "value": "1", "alias": false],
+        ["name": "write", "value": "2", "alias": false],
+      ],
+    ]
+    let rendered = template.render(["enum": context])
+    #expect(rendered.contains("@frozen public struct FileAccess: OptionSet {"))
+    // `rawValue` is typed as the underlying directly; the OptionSet `RawValue`
+    // associated type is inferred, spelled as no explicit support `typealias`.
+    #expect(!rendered.contains("typealias RawValue"))
+    #expect(rendered.contains("public let rawValue: CUnsignedInt"))
+    #expect(rendered.contains(
+        "@inlinable public init(rawValue: CUnsignedInt) { self.rawValue = rawValue }"))
+    #expect(rendered.contains(
+        "@_transparent public static var read: FileAccess { FileAccess(rawValue: 1) }"))
+    #expect(rendered.contains(
+        "@_transparent public static var write: FileAccess { FileAccess(rawValue: 2) }"))
+    // No emitted `[flags]` explanation — the template comment is non-rendering.
+    #expect(!rendered.contains("[flags]"))
+    // Not a native enum: the OptionSet models the bitmask a `case` cannot.
+    #expect(!rendered.contains("enum FileAccess"))
+    #expect(!rendered.contains("case read"))
+  }
+
+  @Test func `the bundled com template renders a regular enum as a raw-value struct newtype`() throws {
+    // A regular enum renders through the `{{^flags}}` arm: an explicitly-stored
+    // raw-value struct newtype over its `value__` underlying type, its members
+    // named constants — not a native Swift `enum`, whose compact representation
+    // would not carry the raw type's ABI width (a two-case `enum E: UInt32` is
+    // one byte, not four). A repeated raw value (a Win32 alias) is simply two
+    // `@_transparent` accessors the stored newtype tolerates, where a native
+    // enum's `case`s could not. The context is the one `enumeration` assembles:
+    // `flags` false.
+    let body = try DatabaseSQLTests.template(named: "com")
+    let template = try MustacheTemplate(string: body)
+    let context: [String: Any] = [
+      "name": "Palette", "owner": "Palette", "underlying": "CInt",
+      "flags": false,
+      "members": [
+        ["name": "Red", "value": "5"],
+        ["name": "Green", "value": "5"],
+      ],
+    ]
+    let rendered = template.render(["enum": context])
+    #expect(rendered.contains(
+        "@frozen public struct Palette: Hashable, Sendable {"))
+    #expect(rendered.contains("public var rawValue: CInt"))
+    #expect(rendered.contains(
+        "@_transparent public static var Red: Palette { Palette(rawValue: 5) }"))
+    #expect(rendered.contains(
+        "@_transparent public static var Green: Palette { Palette(rawValue: 5) }"))
+    // Not a native enum (the wrong ABI width) nor the `[flags]` OptionSet.
+    #expect(!rendered.contains("enum Palette"))
+    #expect(!rendered.contains("OptionSet"))
   }
 
   @Test func `a generic base interface omits the generic base from the rendered inheritance`() throws {
@@ -1782,6 +1875,63 @@ private enum RootInterfaceFixture {
 ///                Value=blob[8] (the little-endian i4 `5`) — `Red`'s value.
 ///   Constant[1]: Type=I4, Parent=HasConstant(FieldDef row 3)=(3<<2)|0=12,
 ///                Value=blob[13] (the little-endian i4 `7`) — `Green`'s value.
+private enum FlagsFixture {
+  private static let bytes: Array<UInt8> = [
+    // TypeRef[0] — System.FlagsAttribute
+    0x00, 0x00, 0x08, 0x00, 0x01, 0x00,
+    // TypeDef[0] — Flagged
+    0x00, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x17, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
+    // TypeDef[1] — Plain
+    0x00, 0x00, 0x00, 0x00, 0x22, 0x00, 0x17, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
+    // MemberRef[0] — the FlagsAttribute ctor
+    0x09, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // CustomAttribute[0] — Flagged's FlagsAttribute
+    0x23, 0x00, 0x0b, 0x00, 0x00, 0x00,
+  ]
+
+  // "\0System\0FlagsAttribute\0NS\0Flagged\0Plain\0": System@1, FlagsAttribute@8,
+  // NS@23, Flagged@26, Plain@34.
+  private static let strings: Array<UInt8> = [
+    0x00,
+    0x53, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x00,
+    0x46, 0x6c, 0x61, 0x67, 0x73, 0x41, 0x74, 0x74, 0x72, 0x69, 0x62, 0x75,
+    0x74, 0x65, 0x00,
+    0x4e, 0x53, 0x00,
+    0x46, 0x6c, 0x61, 0x67, 0x67, 0x65, 0x64, 0x00,
+    0x50, 0x6c, 0x61, 0x69, 0x6e, 0x00,
+  ]
+
+  private static let blob: Array<UInt8> = [0x00]
+
+  private static let empty = Array<UInt8>()
+
+  private static let relations: Array<WinMD.Table> = [
+    WinMD.Table(Metadata.Tables.TypeRef.self, rows: 1, range: 0 ..< 6,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 2, range: 6 ..< 34,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.MethodDef.self, rows: 0, range: 34 ..< 34,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.MemberRef.self, rows: 1, range: 34 ..< 40,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.CustomAttribute.self, rows: 1, range: 40 ..< 46,
+                wide: 0, stride: 6),
+  ]
+
+  private static let valid: UInt64 =
+      (1 << 1) | (1 << 2) | (1 << 6) | (1 << 10) | (1 << 12)
+
+  /// Runs `body` over a `Storage` catalog bound to the assembled metadata.
+  static func with(_ body: (borrowing Storage) throws -> Void) rethrows {
+    let storage = Storage(bytes: bytes.span.bytes, relations: relations.span,
+                          strings: strings.span.bytes, blob: blob.span.bytes,
+                          guid: empty.span.bytes, valid: valid, sorted: 0)
+    try body(storage)
+  }
+}
+
 private enum MembersFixture {
   private static let bytes: Array<UInt8> = [
     // TypeRef[0] — Point

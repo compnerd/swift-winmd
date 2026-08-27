@@ -426,11 +426,65 @@ extension TypeDefOrRef {
     if identity == kGuid {
       return classification(parameter, dialect: dialect)
     }
-    // A named type's simple name is a bare identifier that may collide with a
-    // target keyword (`protocol`, `repeat`); escape it as the render escapes a
-    // declaration name. A well-known spelling is curated and never a keyword.
-    return dialect.known[identity] ?? dialect.escape(identity.name)
+    // A well-known spelling (a Win32 primitive, curated and never a keyword)
+    // wins first — so a known value type keeps its target name rather than an
+    // enclosing dot-path. It is keyed on the type's *own* identity, the raw
+    // name its metadata bears, not the enclosing dot-path the resolver
+    // qualifies it to: a nested `Outer.Inner` mapped `wellknown Inner …`
+    // resolves on `("", "Inner")`, so the lookup keys on the identity's *leaf*
+    // component (a top-level name has no dot and is its own leaf) — matching
+    // the raw name the walk suppresses the declaration on, so a bridged nested
+    // type is not spelled `Outer.Inner` while its declaration was frontiered.
+    // Otherwise the type spells by its `Identity` name, the enclosing dot-path
+    // a nested type resolves to (`Outer.Inner`) or the bare name a top-level
+    // one does, escaped per component (`dialect.escape` escapes one identifier,
+    // so a keyword component like `repeat` is delimited within the path rather
+    // than the whole treated as a single name).
+    let components = identity.name
+        .split(separator: ".", omittingEmptySubsequences: false)
+        .map(String.init)
+    // The type's own well-known bridge, keyed on its raw leaf with only the
+    // arity backtick removed (`` Box`1 `` → `Box1`): `identifier`
+    // keeps that suffix so a generic type keys on the raw name the spec maps,
+    // while the projected spelling still strips it.
+    let leaf = String((components.last ?? identity.name).filter { $0 != "`" })
+    if let known = dialect.known[Identity(namespace: identity.namespace,
+                                          name: leaf)] {
+      return known
+    }
+    // A nested reference under a known-bridged *encloser* spells through the
+    // encloser's bridge, not its suppressed local name: `Outer` mapped
+    // `wellknown Outer OuterBridge` makes `Outer.Inner` spell
+    // `OuterBridge.Inner`, resolving against the imported type not an
+    // unemitted `Outer`.
+    if components.count > 1,
+        let bridge = dialect.known[Identity(namespace: identity.namespace,
+                                            name: components[0])]
+            ?? dialect.known[Identity(namespace: "", name: components[0])] {
+      return ([bridge] + components.dropFirst().map { qualify($0, dialect) })
+          .joined(separator: ".")
+    }
+    return qualify(identity.name, dialect)
   }
+}
+
+/// Escapes a possibly dot-pathed named-type spelling per component through
+/// `dialect`, rejoining with `.` — so a nested type (`Foo.repeat`) escapes each
+/// identifier in turn (`` Foo.`repeat` ``) rather than the path as a whole. A
+/// top-level name (no dot) escapes as the single identifier it is.
+///
+/// Each component's CLR arity suffix (`` `1 ``) is stripped before it is
+/// escaped: the strip must precede the escape, since the suffixed `protocol``1`
+/// never matches a keyword while the stripped `protocol` does, and doing it
+/// here — the single seam every spelling escapes through — keeps a storage
+/// spelling (whose path `Storage.qualified` already stripped) and a
+/// directly-resolved one (whose identity still carries the suffix) escaping
+/// identically, so a generic instantiation's base needs no separate strip that
+/// would cut this escape.
+private func qualify(_ name: String, _ dialect: Dialect) -> String {
+  name.split(separator: ".", omittingEmptySubsequences: false)
+      .map { dialect.escape(String($0.prefix { $0 != "`" })) }
+      .joined(separator: ".")
 }
 
 /// The `System.Guid` identity that decodes to `IID`/`CLSID`.
@@ -467,15 +521,18 @@ extension SignatureType {
     // opaque pointer; a generic over it is meaningless, so degrade to that
     // opaque pointer rather than emit `UnsafeMutableRawPointer<…>`.
     if base == dialect.opaque { return base }
-    // Strip the CLR arity suffix, THEN escape the base identifier: the full
-    // `Foo``1` never matches a keyword, so a keyword base (`protocol``1`) must
-    // be escaped after the strip, not before, to spell `` `protocol`<…> ``.
-    let name = dialect.escape(String(base.prefix { $0 != "`" }))
+    // The base already spells the generic definition ready to compose: the
+    // per-component arity strip lives at the escape seam (`qualify`), before
+    // the escape, since the suffixed `Foo``1` never matches a keyword — so a
+    // keyword leaf reads `` `protocol` `` and a namespace-qualified one
+    // `Outer.`protocol` `. Re-stripping the arity here would scan to that
+    // escape backtick and empty the leaf (`` `protocol` `` → `<…>`), so the
+    // base composes with the arguments as it stands.
     let arguments = arguments
         .map { $0.decode(parameter: parameter, generics: generics,
                          with: resolver, dialect: dialect) }
         .joined(separator: ", ")
-    return "\(name)\(dialect.generic.open)\(arguments)\(dialect.generic.close)"
+    return "\(base)\(dialect.generic.open)\(arguments)\(dialect.generic.close)"
   }
 }
 

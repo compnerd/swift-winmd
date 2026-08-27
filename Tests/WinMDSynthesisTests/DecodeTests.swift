@@ -40,6 +40,18 @@ extension Dialect {
               ? "`\(keyword)`" : keyword
         })
   }
+
+  /// The Swift dialect with `extra` well-known mappings merged in, for a test
+  /// that exercises a custom `wellknown` bridge.
+  static func swift(known extra: Dictionary<Identity, String>) -> Dialect {
+    let base = Dialect.swift
+    return Dialect(primitives: base.primitives, pointer: base.pointer,
+                   optional: base.optional, generic: base.generic,
+                   variable: base.variable, opaque: base.opaque,
+                   guid: base.guid,
+                   known: base.known.merging(extra) { _, new in new },
+                   escape: base.escape)
+  }
 }
 
 struct DecodeTests {
@@ -213,6 +225,37 @@ struct DecodeTests {
                 == "IReference<CInt>")
   }
 
+  @Test func `a generic type spells its well-known bridge by its raw name`() {
+    // `wellknown NS.Box1 BoxBridge` maps the generic `Box`1`; the lookup keys
+    // on the raw leaf (arity backtick removed, digit kept), so the
+    // instantiation spells the configured bridge, not the projected `Box<…>`.
+    let reference = TypeDefOrRef(rawValue: 1)
+    let resolver = Resolver([
+      reference.rawValue: Identity(namespace: "NS", name: "Box`1"),
+    ])
+    let dialect = Dialect.swift(known:
+        [Identity(namespace: "NS", name: "Box1"): "BoxBridge"])
+    let instance = SignatureType.instance(.named(kind: .class, reference),
+                                          [.primitive(.int4)])
+    #expect(instance.decode(with: resolver, dialect: dialect)
+                == "BoxBridge<CInt>")
+  }
+
+  @Test func `a nested type under a known-bridged encloser spells the bridge`() {
+    // `wellknown Outer OuterBridge` bridges the encloser; a reference to the
+    // nested `Outer.Inner` spells `OuterBridge.Inner`, not an unresolvable
+    // `Outer.Inner` whose `Outer` the closure suppressed as imported.
+    let reference = TypeDefOrRef(rawValue: 1)
+    let resolver = Resolver([
+      reference.rawValue: Identity(namespace: "", name: "Outer.Inner"),
+    ])
+    let dialect = Dialect.swift(known:
+        [Identity(namespace: "", name: "Outer"): "OuterBridge"])
+    #expect(SignatureType.named(kind: .value, reference)
+                .decode(with: resolver, dialect: dialect)
+                == "OuterBridge.Inner")
+  }
+
   @Test func `a generic over an unresolved base degrades to the opaque pointer`() {
     // The base reference resolves to nothing (e.g. a TypeSpec with no
     // identity): the empty resolver leaves it unresolved.
@@ -242,6 +285,22 @@ struct DecodeTests {
     let base = TypeDefOrRef(rawValue: 1)
     let resolver = Resolver([
       base.rawValue: Identity(namespace: "NS", name: "protocol`1"),
+    ])
+    let instance = SignatureType.instance(.named(kind: .class, base),
+                                          [.primitive(.int4)])
+    #expect(instance.decode(with: resolver, dialect: dialect)
+                == "`protocol`<CInt>")
+  }
+
+  @Test func `a generic base already stripped of its arity keeps its escape`() {
+    // A storage-backed spelling has already stripped the arity — the escape
+    // seam strips each component before escaping — so the base's identity
+    // spells the bare keyword `protocol`, which decode then escapes.
+    // Composing the instantiation must not re-strip: scanning to that escape
+    // backtick would empty the leaf and spell the invalid `<CInt>`.
+    let base = TypeDefOrRef(rawValue: 1)
+    let resolver = Resolver([
+      base.rawValue: Identity(namespace: "NS", name: "protocol"),
     ])
     let instance = SignatureType.instance(.named(kind: .class, base),
                                           [.primitive(.int4)])

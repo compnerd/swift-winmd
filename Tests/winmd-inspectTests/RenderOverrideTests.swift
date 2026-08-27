@@ -148,6 +148,49 @@ struct RenderOverrideTests {
     try body(directory.path)
   }
 
+  @Test func `a flat render exposes interface fields at the template root`() throws {
+    try RenderOverrideTests.withDirectory { directory in
+      let manager = FileManager.default
+      let templates = URL(fileURLWithPath: "\(directory)/Templates")
+      try manager.createDirectory(at: templates,
+                                  withIntermediateDirectories: true)
+      // A template written for the flat renderer, reading top-level fields.
+      let flat = "{{! language: swift }}\ninterface {{name}}: {{iid}}"
+      try Data(flat.utf8)
+          .write(to: templates.appendingPathComponent("flat.mustache"))
+      try RenderOverrideTests.with { catalog in
+        let shell = Shell(catalog, search: [directory])
+        let rendered = try shell.render("IDerived", template: "flat")
+        // The top-level `{{name}}` resolves to the interface's name, not "" —
+        // the documented flat behaviour the sectioned template must preserve.
+        #expect(rendered.hasPrefix("interface IDerived: "))
+      }
+    }
+  }
+
+  @Test func `a closure render exposes interface fields at the template root`() throws {
+    try RenderOverrideTests.withDirectory { directory in
+      let manager = FileManager.default
+      let templates = URL(fileURLWithPath: "\(directory)/Templates")
+      try manager.createDirectory(at: templates,
+                                  withIntermediateDirectories: true)
+      // The same top-level template a flat render uses, now under `--closure`.
+      let flat = "{{! language: swift }}\ninterface {{name}}: {{iid}}"
+      try Data(flat.utf8)
+          .write(to: templates.appendingPathComponent("flat.mustache"))
+      try RenderOverrideTests.with { catalog in
+        let shell = Shell(catalog, search: [directory])
+        let rendered = try shell.render(closure: "IDerived", template: "flat")
+        // A `--closure` emission exposes the same top-level context as the flat
+        // path, so a template reading `{{name}}` resolves each type's name
+        // rather than "" — the closure over `IDerived` names both `IBase` and
+        // `IDerived`, not two blank `interface : ` lines.
+        #expect(rendered.contains("interface IBase: "))
+        #expect(rendered.contains("interface IDerived: "))
+      }
+    }
+  }
+
   @Test func `* honours a CREATE VIEW override, matching the per-interface renders`() throws {
     // A session `CREATE VIEW bases` renames `IDerived`'s base to `IOverridden`.
     // `.render <interface>` runs the per-node `bases` query and honours it; the

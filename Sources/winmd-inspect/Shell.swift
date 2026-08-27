@@ -941,22 +941,11 @@ internal struct Shell: ~Escapable {
                               sanitized: Dictionary<String, String>? = nil)
       throws -> String {
     let id = found[0]
-    // The interface's ordered declared generic-parameter names, through the
-    // `generics` view bound by its `Id` — empty for a non-generic interface.
-    // A generic interface declares at least one; its own name then carries a
-    // CLR arity suffix, stripped below. The names thread into the
-    // method/parameter/return decode so a `VAR` spells its declared name
-    // (`Element`) rather than a positional placeholder (`T0`).
-    let names = try declarations(of: id, routines, search: search)
-    // The names supplied to decode when the interface is generic; `nil`
-    // otherwise, so a non-generic interface decodes exactly as before.
-    let generics: Array<String>? = names.isEmpty ? nil : names
-    // The interface's own methods, decoded with its generic names so a `VAR`
-    // spells its declared name. A generic interface that has a base renders
-    // only its own surface here; forwarding a base's inherited methods onto
-    // the wrapper is a follow-up.
+    // A pure-COM interface is never generic (a parameterised interface is a
+    // WinRT projection, out of scope), so its methods decode with no generic
+    // parameter names threaded.
     let methods = try self.methods(of: id, routines, search: search,
-                                   generics: generics, in: dialect,
+                                   generics: nil, in: dialect,
                                    language: language, roster: roster,
                                    signatures: signatures, sanitized: sanitized)
     // The interface's named base, via the `bases` view bound by its `Id`. The
@@ -985,48 +974,28 @@ internal struct Shell: ~Escapable {
     } else {
       language.root
     }
-    // A generic interface's own `TypeName` carries the CLR arity suffix
-    // (`IVector``1`); strip it — the decode tier strips it only for a
-    // `GENERICINST` use, so the declaration name must be stripped here — so
-    // the emitted name is `IVector`, its `<T>` clause supplied separately.
-    // The keyword escape (`SANITIZE`) is applied here, on the stripped name,
-    // not in the `interfaces` query: escaping the suffixed name would spare a
-    // generic whose stripped name is a keyword (`protocol``1` is not the
-    // reserved word `protocol`), leaving `public struct protocol` to be
-    // emitted. Escaping after the strip is why the query projects the raw
-    // `TypeName` — the interface's own name is the one identifier the strip
-    // must precede the escape for, so its escape lives in Swift, not the SQL.
-    let stripped = String(found[2].text.prefix { $0 != "`" })
-    let name = language.escape(stripped)
-    // The ABI-protocol name is the wrapper's own name suffixed with `ABI`,
-    // used for both the ABI protocol's declaration and the wrapper's `base:
-    // any …ABI<…>` existential. The `ABI` suffix must precede the escape (the
-    // same order the base-name spelling uses): a keyword name's `<name>ABI`
-    // is never itself a keyword (no Swift keyword ends in `ABI`), so escaping
-    // the suffixed name is a no-op yielding a plain `protocolABI` — whereas
-    // escaping first then appending `ABI` would splice a backtick pair into
-    // the middle (`` `protocol`ABI ``), which Swift cannot parse.
-    let abi = language.escape(stripped + "ABI")
+    // The interface's own name, keyword-escaped so a `protocol`-named interface
+    // spells compilably.
+    let name = language.escape(found[2].text)
     var context: Dictionary<String, Any> = [
       "name": name,
-      "abi": abi,
       "iid": found[3].text,
       "namespace": found[1].text,
       "methods": methods,
     ]
     // An absent `base` skips the template's `{{#base}}` inheritance clause.
     if let base { context["base"] = base }
-    // A generic interface carries its `generic` flag and its ordered clause
-    // `generics` (each with a `last` flag for comma separation); a
-    // non-generic one carries neither, so the template's `{{#generic}}` guard
-    // leaves its output byte-identical to today's.
-    if let generics {
-      context["generic"] = true
-      context["generics"] = generics.enumerated().map { index, name in
-        ["name": name, "last": index == generics.count - 1]
-      }
-    }
-    return mustache.render(context)
+    // The interface projection is the value of the template context's
+    // `interface` key, so the bundled template's `{{#interface}}` section
+    // renders it, and it is exposed at the template root too — the documented
+    // top-level context a bare `{{name}}` template reads. Both the flat render
+    // and the `--closure` walk expose it the same way, so a template written
+    // for one path keeps working under the other: a `-I` template reading
+    // top-level fields is not silently blanked when `--closure` is used. The
+    // bundled sectioned template ignores the root fields, so output is unchanged.
+    var root = context
+    root["interface"] = context
+    return mustache.render(root)
   }
 
   /// The template method entries for the interface at `id`, in declaration

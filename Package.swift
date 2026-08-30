@@ -23,6 +23,8 @@ let _ =
                        from: "1.5.0"),
               .package(url: "https://github.com/hummingbird-project/swift-mustache",
                        from: "2.0.0"),
+              .package(url: "https://github.com/swiftlang/swift-syntax",
+                       branch: "main"),
             ],
             targets: [
               .target(name: "CPE", dependencies: []),
@@ -102,6 +104,10 @@ let _ =
                                            package: "swift-argument-parser"),
                                   .product(name: "Mustache",
                                            package: "swift-mustache"),
+                                  .product(name: "SwiftSyntax",
+                                           package: "swift-syntax"),
+                                  .product(name: "SwiftParser",
+                                           package: "swift-syntax"),
                                 ],
                                 resources: [
                                   .copy("Resources"),

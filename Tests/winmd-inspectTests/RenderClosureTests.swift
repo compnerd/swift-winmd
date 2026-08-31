@@ -1989,6 +1989,191 @@ struct RenderClosureNestedInClassTests {
   }
 }
 
+/// Coverage of Finding B: two top-level value types that share the bare
+/// `TypeName` `Point` in different CLR namespaces must both emit, each under a
+/// fabricated namespace `enum` container, distinct and non-colliding, and each
+/// signature must spell them fully namespace-qualified. The fixture assembles a
+/// root `IRoot` whose three methods return `A.Point` (namespace `A`), `B.Point`
+/// (namespace `B`), and `C.D.Point` (a dotted namespace `C.D`), each a local
+/// struct (`Extends System.ValueType`) with one `i4` field. Pre-fix all three
+/// spelled the bare `Point` and emitted a single ambiguous top-level `struct
+/// Point`; the namespaces disambiguate them.
+struct RenderClosureNamespaceTests {
+  // Nine tables in table-number order — TypeRef (#1, 2 rows), TypeDef (#2, 4
+  // rows), FieldDef (#4, 3 rows), MethodDef (#6, 3 rows), Param (#8, empty),
+  // MemberRef (#10, 1 row), CustomAttribute (#12, 1 row), TypeSpec (#27, empty),
+  // NestedClass (#41, empty) — every index narrow (2-byte). ECMA-335 rows are
+  // 1-based; a `TypeDefOrRef` is `(row << 2) | tag` (tag 0 `TypeDef`, 1
+  // `TypeRef`).
+  //
+  //   TypeRef[0]:  ResolutionScope=0, TypeName="GuidAttribute"(35),
+  //                TypeNamespace="Windows.Win32.Foundation.Metadata"(1).
+  //   TypeRef[1]:  ResolutionScope=0, TypeName="ValueType"(56),
+  //                TypeNamespace="System"(49) — the struct base.
+  //   TypeDef[0]:  Flags=0x21 (tdInterface), TypeName="IRoot"(74),
+  //                TypeNamespace=empty(0), MethodList=1 — the root, owns
+  //                `GetA`/`GetB`/`GetC`.
+  //   TypeDef[1]:  Flags=0, TypeName="Point"(80), TypeNamespace="A"(66),
+  //                Extends=ValueType((2<<2)|1=9), FieldList=1, MethodList=4.
+  //   TypeDef[2]:  Flags=0, TypeName="Point"(80), TypeNamespace="B"(68),
+  //                Extends=9, FieldList=2, MethodList=4.
+  //   TypeDef[3]:  Flags=0, TypeName="Point"(80), TypeNamespace="C.D"(70),
+  //                Extends=9, FieldList=3, MethodList=4.
+  //   FieldDef[0..2]: each `x`(86) with the shared `i4` signature (blob@16).
+  //   MethodDef[0]: "GetA"(88), Signature=blob@1 — return `A.Point` (VALUETYPE
+  //                `TypeDefOrRef`=(2<<2)|0=8).
+  //   MethodDef[1]: "GetB"(93), Signature=blob@6 — return `B.Point` (=(3<<2)=12).
+  //   MethodDef[2]: "GetC"(98), Signature=blob@11 — return `C.D.Point`
+  //                (=(4<<2)=16).
+  //   MemberRef[0]: Class=MemberRefParent(TypeRef row 1)=(1<<3)|1=9 — the ctor.
+  //   CustomAttribute[0]: Parent=HasCustomAttribute(TypeDef row 1)=(1<<5)|3=35,
+  //                Type=CustomAttributeType(MemberRef row 1)=(1<<3)|3=11,
+  //                Value=blob@19 — `IRoot`'s well-known IID.
+  private static let bytes: Array<UInt8> = [
+    // TypeRef[0] (GuidAttribute)
+    0x00, 0x00, 0x23, 0x00, 0x01, 0x00,
+    // TypeRef[1] (System.ValueType)
+    0x00, 0x00, 0x38, 0x00, 0x31, 0x00,
+    // TypeDef[0] (IRoot): Flags, Name, Namespace, Extends, FieldList, MethodList
+    0x21, 0x00, 0x00, 0x00, 0x4a, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
+    // TypeDef[1] (A.Point): sequential layout
+    0x08, 0x00, 0x00, 0x00, 0x50, 0x00, 0x42, 0x00,
+    0x09, 0x00, 0x01, 0x00, 0x04, 0x00,
+    // TypeDef[2] (B.Point): sequential layout
+    0x08, 0x00, 0x00, 0x00, 0x50, 0x00, 0x44, 0x00,
+    0x09, 0x00, 0x02, 0x00, 0x04, 0x00,
+    // TypeDef[3] (C.D.Point): sequential layout
+    0x08, 0x00, 0x00, 0x00, 0x50, 0x00, 0x46, 0x00,
+    0x09, 0x00, 0x03, 0x00, 0x04, 0x00,
+    // FieldDef[0] (A.Point.x)
+    0x00, 0x00, 0x56, 0x00, 0x10, 0x00,
+    // FieldDef[1] (B.Point.x)
+    0x00, 0x00, 0x56, 0x00, 0x10, 0x00,
+    // FieldDef[2] (C.D.Point.x)
+    0x00, 0x00, 0x56, 0x00, 0x10, 0x00,
+    // MethodDef[0] (GetA): RVA, ImplFlags, Flags, Name, Signature, ParamList
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x58, 0x00, 0x01, 0x00, 0x01, 0x00,
+    // MethodDef[1] (GetB)
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x5d, 0x00, 0x06, 0x00, 0x01, 0x00,
+    // MethodDef[2] (GetC)
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x62, 0x00, 0x0b, 0x00, 0x01, 0x00,
+    // MemberRef[0]
+    0x09, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // CustomAttribute[0]
+    0x23, 0x00, 0x0b, 0x00, 0x13, 0x00,
+  ]
+
+  // "\0Windows.Win32.Foundation.Metadata\0GuidAttribute\0System\0ValueType\0A\0
+  //  B\0C.D\0IRoot\0Point\0x\0GetA\0GetB\0GetC\0": GuidNamespace@1, GuidName@35,
+  // System@49, ValueType@56, A@66, B@68, C.D@70, IRoot@74, Point@80, x@86,
+  // GetA@88, GetB@93, GetC@98.
+  private static let strings: Array<UInt8> = [
+    0x00,
+    0x57, 0x69, 0x6e, 0x64, 0x6f, 0x77, 0x73, 0x2e, 0x57, 0x69, 0x6e, 0x33,
+    0x32, 0x2e, 0x46, 0x6f, 0x75, 0x6e, 0x64, 0x61, 0x74, 0x69, 0x6f, 0x6e,
+    0x2e, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x00,
+    0x47, 0x75, 0x69, 0x64, 0x41, 0x74, 0x74, 0x72, 0x69, 0x62, 0x75, 0x74,
+    0x65, 0x00,
+    0x53, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x00,
+    0x56, 0x61, 0x6c, 0x75, 0x65, 0x54, 0x79, 0x70, 0x65, 0x00,
+    0x41, 0x00,
+    0x42, 0x00,
+    0x43, 0x2e, 0x44, 0x00,
+    0x49, 0x52, 0x6f, 0x6f, 0x74, 0x00,
+    0x50, 0x6f, 0x69, 0x6e, 0x74, 0x00,
+    0x78, 0x00,
+    0x47, 0x65, 0x74, 0x41, 0x00,
+    0x47, 0x65, 0x74, 0x42, 0x00,
+    0x47, 0x65, 0x74, 0x43, 0x00,
+  ]
+
+  // The blob heap: offset 0 the empty blob; offset 1/6/11 the three method
+  // signatures (each length 4: HASTHIS, 0 params, return `ELEMENT_TYPE_VALUETYPE`
+  // naming the `TypeDefOrRef` 8/12/16 — `A.Point`/`B.Point`/`C.D.Point`); offset
+  // 16 the shared `i4` field signature; offset 19 the 20-byte well-known
+  // `GuidAttribute` value.
+  private static let blob: Array<UInt8> = [
+    0x00,
+    0x04, 0x20, 0x00, 0x11, 0x08,
+    0x04, 0x20, 0x00, 0x11, 0x0c,
+    0x04, 0x20, 0x00, 0x11, 0x10,
+    0x02, 0x06, 0x08,
+    0x14, 0x01, 0x00, 0x30, 0x3a, 0x73, 0x0c, 0x1c, 0x2a, 0xce, 0x11,
+    0xad, 0xe5, 0x00, 0xaa, 0x00, 0x44, 0x77, 0x3d, 0x00, 0x00,
+  ]
+
+  private static let empty = Array<UInt8>()
+
+  private static let relations: Array<WinMD.Table> = [
+    WinMD.Table(Metadata.Tables.TypeRef.self, rows: 2, range: 0 ..< 12,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 4, range: 12 ..< 68,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.FieldDef.self, rows: 3, range: 68 ..< 86,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.MethodDef.self, rows: 3, range: 86 ..< 128,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.Param.self, rows: 0, range: 128 ..< 128,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.InterfaceImpl.self, rows: 0, range: 128 ..< 128,
+                wide: 0, stride: 4),
+    WinMD.Table(Metadata.Tables.MemberRef.self, rows: 1, range: 128 ..< 134,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.CustomAttribute.self, rows: 1, range: 134 ..< 140,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeSpec.self, rows: 0, range: 140 ..< 140,
+                wide: 0, stride: 2),
+    WinMD.Table(Metadata.Tables.NestedClass.self, rows: 0, range: 140 ..< 140,
+                wide: 0, stride: 4),
+  ]
+
+  private static let valid: UInt64 =
+      (1 << 1) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 8) | (1 << 9)
+          | (1 << 10) | (1 << 12) | (1 << 27) | (1 << 41)
+
+  private static func with(_ body: (borrowing Storage) throws -> Void)
+      rethrows {
+    let storage = Storage(bytes: bytes.span.bytes, relations: relations.span,
+                          strings: strings.span.bytes, blob: blob.span.bytes,
+                          guid: empty.span.bytes, valid: valid, sorted: 0)
+    try body(storage)
+  }
+
+  @Test func `--closure preserves the namespace of same-named value types`() throws {
+    // `IRoot.GetA`/`GetB`/`GetC` return `A.Point`, `B.Point`, and `C.D.Point` —
+    // three local structs sharing the bare name `Point` across three CLR
+    // namespaces. The closure must wrap each in fabricated `public enum`
+    // namespace containers (`enum C { enum D { … } }` for the dotted one) and
+    // spell each return fully qualified, so the three declarations are distinct
+    // and each signature names the right one.
+    try RenderClosureNamespaceTests.with { catalog in
+      let shell = Shell(catalog)
+      let closed = try shell.render(closure: "IRoot", template: "com")
+      // A namespace `enum` per distinct segment; the dotted `C.D` nests `D`
+      // inside `C`.
+      #expect(closed.contains("public enum A {"))
+      #expect(closed.contains("public enum B {"))
+      #expect(closed.contains("public enum C {"))
+      #expect(closed.contains("public enum D {"))
+      // The three same-named structs each nest under their namespace — three
+      // `Point` declarations, never one ambiguous top-level `struct Point`.
+      #expect(closed.components(separatedBy: "public struct Point {").count == 4)
+      #expect(!closed.contains("\n@frozen public struct Point"))
+      // Each return is spelled fully namespace-qualified, the dotted one down
+      // both segments.
+      #expect(closed.contains("-> A.Point"))
+      #expect(closed.contains("-> B.Point"))
+      #expect(closed.contains("-> C.D.Point"))
+      // The root interface itself still emits, top-level and unqualified.
+      #expect(closed.contains("public protocol IRoot"))
+    }
+  }
+}
+
 /// Coverage of Finding A: a metadata-nested interface reached by a signature is
 /// a dropped frontier — a `@com` protocol cannot legally nest, and a bare
 /// top-level declaration would neither match its metadata-nested spelling nor
@@ -2324,6 +2509,373 @@ struct RenderNestedBaseTests {
   }
 }
 
+/// Coverage of Finding 4: two same-named top-level protocols emit as duplicate,
+/// uncompilable `public protocol` declarations, and a protocol cannot nest in a
+/// namespace `enum` the way a value type disambiguates — so the render rejects
+/// the closure rather than emit them. The fixture assembles two top-level
+/// interfaces `A.IFoo` and `B.IFoo`, each a `tdInterface` `TypeDef` bearing its
+/// own `GuidAttribute`, sharing the bare name `IFoo` across two CLR namespaces.
+/// A `--closure` over the simple name `IFoo` seeds both (the ambiguous root),
+/// so the walk emits two top-level `IFoo` protocols and `nest` — which sees
+/// every emitted protocol — must throw `RenderError.ambiguous` naming the two
+/// namespaces. A signature reaching two same-named protocols mid-closure faults
+/// through the identical detection point.
+struct RenderClosureAmbiguousProtocolTests {
+  // Ten tables in table-number order — TypeRef (#1, 1 row), TypeDef (#2, 2
+  // rows), FieldDef (#4, empty), MethodDef (#6, empty), Param (#8, empty),
+  // InterfaceImpl (#9, empty), MemberRef (#10, 1 row), CustomAttribute (#12, 2
+  // rows), TypeSpec (#27, empty), NestedClass (#41, empty) — every index narrow
+  // (2-byte). ECMA-335 rows are 1-based; a coded index is `(row << bits) | tag`.
+  //
+  //   TypeRef[0]:  ResolutionScope=0, TypeName="GuidAttribute"(35),
+  //                TypeNamespace="Windows.Win32.Foundation.Metadata"(1).
+  //   TypeDef[0]:  Flags=0x21 (tdInterface), TypeName="IFoo"(53),
+  //                TypeNamespace="A"(49) — the first same-named interface.
+  //   TypeDef[1]:  Flags=0x21, TypeName="IFoo"(53), TypeNamespace="B"(51) — the
+  //                second, same bare name under a different namespace.
+  //   MemberRef[0]: Class=MemberRefParent(TypeRef row 1)=(1<<3)|1=9 — the ctor.
+  //   CustomAttribute[0]: Parent=HasCustomAttribute(TypeDef row 1)=(1<<5)|3=35,
+  //                Type=CustomAttributeType(MemberRef row 1)=(1<<3)|3=11,
+  //                Value=blob@1 — `A.IFoo`'s IID (the well-known GUID).
+  //   CustomAttribute[1]: Parent=HasCustomAttribute(TypeDef row 2)=(2<<5)|3=67,
+  //                Type=11, Value=blob@22 — `B.IFoo`'s IID (all-0x11), distinct.
+  private static let bytes: Array<UInt8> = [
+    // TypeRef[0] (GuidAttribute)
+    0x00, 0x00, 0x23, 0x00, 0x01, 0x00,
+    // TypeDef[0] (A.IFoo): Flags, Name, Namespace, Extends, FieldList, MethodList
+    0x21, 0x00, 0x00, 0x00, 0x35, 0x00, 0x31, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
+    // TypeDef[1] (B.IFoo)
+    0x21, 0x00, 0x00, 0x00, 0x35, 0x00, 0x33, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
+    // MemberRef[0]
+    0x09, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // CustomAttribute[0]
+    0x23, 0x00, 0x0b, 0x00, 0x01, 0x00,
+    // CustomAttribute[1]
+    0x43, 0x00, 0x0b, 0x00, 0x16, 0x00,
+  ]
+
+  // "\0Windows.Win32.Foundation.Metadata\0GuidAttribute\0A\0B\0IFoo\0":
+  // GuidNamespace@1, GuidName@35, A@49, B@51, IFoo@53.
+  private static let strings: Array<UInt8> = [
+    0x00,
+    0x57, 0x69, 0x6e, 0x64, 0x6f, 0x77, 0x73, 0x2e, 0x57, 0x69, 0x6e, 0x33,
+    0x32, 0x2e, 0x46, 0x6f, 0x75, 0x6e, 0x64, 0x61, 0x74, 0x69, 0x6f, 0x6e,
+    0x2e, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x00,
+    0x47, 0x75, 0x69, 0x64, 0x41, 0x74, 0x74, 0x72, 0x69, 0x62, 0x75, 0x74,
+    0x65, 0x00,
+    0x41, 0x00,
+    0x42, 0x00,
+    0x49, 0x46, 0x6f, 0x6f, 0x00,
+  ]
+
+  // The blob heap: offset 0 the empty blob; offset 1 the well-known 20-byte
+  // `GuidAttribute` value (`0C733A30-…`, `A.IFoo`); offset 22 the all-0x11 value
+  // (`B.IFoo`), so the two IIDs are distinct.
+  private static let blob: Array<UInt8> = [
+    0x00,
+    0x14, 0x01, 0x00, 0x30, 0x3a, 0x73, 0x0c, 0x1c, 0x2a, 0xce, 0x11,
+    0xad, 0xe5, 0x00, 0xaa, 0x00, 0x44, 0x77, 0x3d, 0x00, 0x00,
+    0x14, 0x01, 0x00, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+    0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x00, 0x00,
+  ]
+
+  private static let empty = Array<UInt8>()
+
+  private static let relations: Array<WinMD.Table> = [
+    WinMD.Table(Metadata.Tables.TypeRef.self, rows: 1, range: 0 ..< 6,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 2, range: 6 ..< 34,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.FieldDef.self, rows: 0, range: 34 ..< 34,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.MethodDef.self, rows: 0, range: 34 ..< 34,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.Param.self, rows: 0, range: 34 ..< 34,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.InterfaceImpl.self, rows: 0, range: 34 ..< 34,
+                wide: 0, stride: 4),
+    WinMD.Table(Metadata.Tables.MemberRef.self, rows: 1, range: 34 ..< 40,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.CustomAttribute.self, rows: 2, range: 40 ..< 52,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeSpec.self, rows: 0, range: 52 ..< 52,
+                wide: 0, stride: 2),
+    WinMD.Table(Metadata.Tables.NestedClass.self, rows: 0, range: 52 ..< 52,
+                wide: 0, stride: 4),
+  ]
+
+  private static let valid: UInt64 =
+      (1 << 1) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 8) | (1 << 9)
+          | (1 << 10) | (1 << 12) | (1 << 27) | (1 << 41)
+
+  private static func with(_ body: (borrowing Storage) throws -> Void)
+      rethrows {
+    let storage = Storage(bytes: bytes.span.bytes, relations: relations.span,
+                          strings: strings.span.bytes, blob: blob.span.bytes,
+                          guid: empty.span.bytes, valid: valid, sorted: 0)
+    try body(storage)
+  }
+
+  @Test func `--closure rejects an ambiguous top-level protocol`() throws {
+    // `A.IFoo` and `B.IFoo` share the bare name `IFoo`, so a closure over the
+    // simple name `IFoo` seeds both. A protocol cannot nest in a namespace
+    // `enum`, so the two would emit as duplicate top-level `public protocol
+    // IFoo` — the render rejects it instead, naming the two namespaces sorted.
+    RenderClosureAmbiguousProtocolTests.with { catalog in
+      let shell = Shell(catalog)
+      #expect(throws: Shell.RenderError.ambiguous("IFoo", ["A", "B"])) {
+        _ = try shell.render(closure: "IFoo", template: "com")
+      }
+    }
+  }
+}
+
+/// A value type and an interface bearing the one simple name in different
+/// namespaces — `A.Shape` (a struct) and `B.Shape` (an interface). The flat
+/// Win32 surface never lands a value-type name on a same-named protocol, so this
+/// hand-built pair pins the cross-kind collision the closure must resolve: the
+/// value type is namespace-qualified and wrapped, the protocol stays bare.
+@Suite struct RenderCrossKindCollisionTests {
+  @Test func `a value type colliding with a same-named protocol wraps while the protocol stays bare`() throws {
+    // `Shape` is ambiguous across kinds — the struct `A.Shape` (token 4) and the
+    // interface `B.Shape` (token 8) both bear it — so the value type must be
+    // disambiguated even though it is the only value type of the name. Only the
+    // struct wraps and qualifies to `A.Shape`; the protocol stays bare.
+    let b = WinMDBuilder()
+    b.structure("A.Shape")
+    b.interface("B.Shape")
+    try b.with { storage in
+      let (names, ids) = try storage.collisions()
+      #expect(names.contains("Shape"))
+      #expect(ids.contains(1))
+      #expect(!ids.contains(2))
+      #expect(try storage.spelling(of: TypeDefOrRef(rawValue: 4),
+                                   qualifying: names) == "A.Shape")
+      #expect(try storage.spelling(of: TypeDefOrRef(rawValue: 8),
+                                   qualifying: names) == nil)
+    }
+  }
+}
+
+/// The whole closure emit disambiguates a value type from a same-named emitted
+/// *non-value* declaration. `R.IRoot.Use` reaches the struct `A.Point` and the
+/// interface `B.Point` (then, separately, the delegate `B.Point`); both project
+/// to bare `Point`. The contention tally counts a reached declaration of any
+/// kind, so `Point` is ambiguous and the value type wraps under a fabricated
+/// `enum A` and qualifies to `A.Point`, while the protocol (or delegate) stays
+/// a bare top-level `Point` — one `struct Point` nested under `enum A`, no
+/// redeclaration. Counting only value types would leave `A.Point` an unwrapped
+/// bare `struct Point` clashing with the emitted `protocol Point`, which `nest`
+/// then faults `.collision("Point")`.
+@Suite struct RenderValueNonValueCollisionTests {
+  @Test func `a value type wraps against a same-named emitted protocol`() throws {
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .method("Use", [("a", .value("A.Point")), ("b", .object("B.Point"))])
+    b.structure("A.Point")
+    b.interface("B.Point", guid: 0xFEEDFACE)
+    try b.with { catalog in
+      let closed = try Shell(catalog).render(closure: "IRoot", template: "com")
+      #expect(closed.contains("public enum A {"))
+      let structs = closed.components(separatedBy: "struct Point").count - 1
+      let protocols = closed.components(separatedBy: "protocol Point").count - 1
+      #expect(structs == 1)
+      #expect(protocols == 1)
+    }
+  }
+
+  @Test func `a value type wraps against a same-named emitted delegate`() throws {
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .method("Use", [("a", .value("A.Point")), ("b", .object("B.Point"))])
+    b.structure("A.Point")
+    b.delegate("B.Point", guid: 0xFEEDFACE)
+    try b.with { catalog in
+      let closed = try Shell(catalog).render(closure: "IRoot", template: "com")
+      #expect(closed.contains("public enum A {"))
+      #expect(closed.components(separatedBy: "struct Point").count - 1 == 1)
+    }
+  }
+}
+
+/// A non-generic value type `A.Foo` and a generic interface `B.Foo` (its `TypeName`
+/// the CLR spelling `Foo` + arity suffix) — projected, both are the one Swift name
+/// `Foo`, so they collide even though their raw metadata names differ. The tally
+/// must strip the arity suffix, the same normalization the emission applies, or
+/// the value type is left an unwrapped bare `struct Foo` clashing with the generic
+/// interface's `struct Foo` wrapper.
+@Suite struct RenderGenericArityCollisionTests {
+  @Test func `a value type and a generic type collide on their arity-stripped name`() throws {
+    // The value type `A.Foo` (token 4) and the generic interface `B.Foo`1`
+    // (token 8) project to the one name `Foo`, so it is ambiguous and only the
+    // value type wraps; the raw names (`Foo` vs `Foo` + arity) would read as
+    // distinct and leave the struct an unwrapped bare root.
+    let b = WinMDBuilder()
+    b.structure("A.Foo")
+    b.interface("B.Foo").generic("T")
+    try b.with { storage in
+      let (names, ids) = try storage.collisions()
+      #expect(names.contains("Foo"))
+      #expect(ids.contains(1))
+      #expect(!ids.contains(2))
+      #expect(try storage.spelling(of: TypeDefOrRef(rawValue: 4),
+                                   qualifying: names) == "A.Foo")
+      #expect(try storage.spelling(of: TypeDefOrRef(rawValue: 8),
+                                   qualifying: names) == nil)
+    }
+  }
+}
+
+@Suite struct RenderSameNamespaceArityCollisionTests {
+  @Test func `a same-namespace value type and generic type collide on arity`() throws {
+    // The value type `A.Foo` (token 4) and same-namespace generic interface
+    // `A.Foo`1` (token 8) project to the one `Foo`, so the value type wraps and
+    // qualifies to `A.Foo`; the identity keys off the raw name, so the
+    // protocol's suffixed `A.Foo`1` never enters and it stays bare.
+    let b = WinMDBuilder()
+    b.structure("A.Foo")
+    b.interface("A.Foo").generic("T")
+    try b.with { storage in
+      let (names, ids) = try storage.collisions()
+      #expect(names.contains("Foo"))
+      #expect(names.contains("A.Foo"))
+      #expect(!names.contains("A.Foo`1"))
+      #expect(ids.contains(1))
+      #expect(!ids.contains(2))
+      #expect(try storage.spelling(of: TypeDefOrRef(rawValue: 4),
+                                   qualifying: names) == "A.Foo")
+      #expect(try storage.spelling(of: TypeDefOrRef(rawValue: 8),
+                                   qualifying: names) == nil)
+    }
+  }
+}
+
+/// A closure whose fabricated namespace container shadows an emitted type. The
+/// root interface `R.A` (simple name `A`) returns `A.Point`, whose instance
+/// field is a `B.Point`, so the closure reaches both value types and `Point` is
+/// ambiguous *among the reached declarations* — the collision the reached-only
+/// tally counts. The render wraps `A.Point` under a fabricated `enum A`, which
+/// collides with the bare `protocol A` the root itself emits. Only a value type
+/// can be namespace-wrapped, so the namespace segment has no fallback and the
+/// render must fault rather than emit `enum A` beside `protocol A`. (The field
+/// reaching `B.Point` is what keeps the ambiguity reachable: an unreachable
+/// `B.Point` would leave `Point` unique and the closure bare and valid — the
+/// case `RenderUnreachableCollisionTests` pins.)
+@Suite struct RenderNamespaceShadowTests {
+  private static let bytes: Array<UInt8> = [
+    0x00, 0x00, 0x23, 0x00, 0x01, 0x00, 0x00, 0x00, 0x38, 0x00, 0x31, 0x00,
+    0x21, 0x00, 0x00, 0x00, 0x44, 0x00, 0x42, 0x00, 0x00, 0x00, 0x01, 0x00,
+    0x01, 0x00, 0x08, 0x00, 0x00, 0x00, 0x46, 0x00, 0x44, 0x00, 0x09, 0x00,
+    0x01, 0x00, 0x02, 0x00, 0x08, 0x00, 0x00, 0x00, 0x46, 0x00, 0x4c, 0x00,
+    0x09, 0x00, 0x02, 0x00, 0x02, 0x00, 0x00, 0x00, 0x59, 0x00, 0x0c, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc6, 0x05, 0x54, 0x00, 0x01, 0x00,
+    0x01, 0x00, 0x09, 0x00, 0x4e, 0x00, 0x06, 0x00, 0x23, 0x00, 0x0b, 0x00,
+    0x10, 0x00,
+  ]
+
+  private static let strings: Array<UInt8> = [
+    0x00, 0x57, 0x69, 0x6e, 0x64, 0x6f, 0x77, 0x73, 0x2e, 0x57, 0x69, 0x6e,
+    0x33, 0x32, 0x2e, 0x46, 0x6f, 0x75, 0x6e, 0x64, 0x61, 0x74, 0x69, 0x6f,
+    0x6e, 0x2e, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x00, 0x47,
+    0x75, 0x69, 0x64, 0x41, 0x74, 0x74, 0x72, 0x69, 0x62, 0x75, 0x74, 0x65,
+    0x00, 0x53, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x00, 0x56, 0x61, 0x6c, 0x75,
+    0x65, 0x54, 0x79, 0x70, 0x65, 0x00, 0x52, 0x00, 0x41, 0x00, 0x50, 0x6f,
+    0x69, 0x6e, 0x74, 0x00, 0x42, 0x00, 0x2e, 0x63, 0x74, 0x6f, 0x72, 0x00,
+    0x4d, 0x61, 0x6b, 0x65, 0x00, 0x6f, 0x72, 0x69, 0x67, 0x69, 0x6e, 0x00,
+  ]
+
+  private static let blob: Array<UInt8> = [
+    0x00, 0x04, 0x20, 0x00, 0x11, 0x08, 0x05, 0x20, 0x02, 0x01, 0x08, 0x0f,
+    0x03, 0x06, 0x11, 0x0c, 0x14, 0x01, 0x00, 0xef, 0xbe, 0xad, 0xde, 0xfe,
+    0xca, 0xbe, 0xba, 0xf0, 0x0d, 0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0x00,
+    0x00,
+  ]
+
+  private static let empty = Array<UInt8>()
+
+  // The tables the render's views touch, ascending by table number; the empty
+  // ones carry no rows but must be present so a view resolves the relation.
+  private static let relations: Array<WinMD.Table> = [
+    WinMD.Table(Metadata.Tables.TypeRef.self, rows: 2, range: 0 ..< 12,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 3, range: 12 ..< 54,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.FieldDef.self, rows: 1, range: 54 ..< 60,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.MethodDef.self, rows: 1, range: 60 ..< 74,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.Param.self, rows: 0, range: 74 ..< 74,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.InterfaceImpl.self, rows: 0, range: 74 ..< 74,
+                wide: 0, stride: 4),
+    WinMD.Table(Metadata.Tables.MemberRef.self, rows: 1, range: 74 ..< 80,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.Constant.self, rows: 0, range: 80 ..< 80,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.CustomAttribute.self, rows: 1, range: 80 ..< 86,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeSpec.self, rows: 0, range: 86 ..< 86,
+                wide: 0, stride: 2),
+    WinMD.Table(Metadata.Tables.NestedClass.self, rows: 0, range: 86 ..< 86,
+                wide: 0, stride: 4),
+  ]
+
+  private static let valid: UInt64 =
+      (1 << 1) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 8) | (1 << 9)
+          | (1 << 10) | (1 << 11) | (1 << 12) | (1 << 27) | (1 << 41)
+
+  static func with(_ body: (borrowing Storage) throws -> Void) rethrows {
+    let storage = Storage(bytes: bytes.span.bytes, relations: relations.span,
+                          strings: strings.span.bytes, blob: blob.span.bytes,
+                          guid: empty.span.bytes, valid: valid, sorted: 0)
+    try body(storage)
+  }
+
+  @Test func `a fabricated namespace container shadowing an emitted type faults`() {
+    RenderNamespaceShadowTests.with { catalog in
+      let shell = Shell(catalog)
+      #expect(throws: Shell.RenderError.collision("A")) {
+        _ = try shell.render(closure: "A", template: "com")
+      }
+    }
+  }
+}
+
+/// A closure whose nesting places a real type and a fabricated namespace
+/// container of the one name inside the same container. `IRoot` returns `A.B` (a
+/// value type ambiguous with `D.B`) and `A.B.Point` (ambiguous with `C.Point`).
+/// `A.B` carries an instance field of `D.B` and `A.B.Point` a field of
+/// `C.Point`, so the closure reaches all four and both names are ambiguous
+/// *among the reached declarations*. The render wraps `A.B` as a real `B` under
+/// `enum A` and wraps `A.B.Point` under a fabricated `enum A.enum B` — two
+/// children named `B` inside `enum A`. A root-only claims check passes (the
+/// roots are just `enum A`); the clash is a level down, so the emit must
+/// validate every container's children, not only the roots.
+@Suite struct RenderNestedShadowTests {
+  @Test func `a namespace container shadowing a type inside another container faults`() {
+    // `IRoot` returns `A.B` (a value type ambiguous with `D.B`) and `A.B.Point`
+    // (ambiguous with `C.Point`), each reached through a field, so `A.B` wraps
+    // as a real `B` under `enum A` while `A.B.Point` wraps under a fabricated
+    // `enum A.enum B` — two children named `B` inside `enum A`, a clash a level
+    // below the roots that a root-only claims check would miss.
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .method("Make", returns: .value("A.B"))
+        .method("Get", returns: .value("A.B.Point"))
+    b.structure("A.B").field("low", .value("D.B"))
+    b.structure("A.B.Point").field("tip", .value("C.Point"))
+    b.structure("D.B")
+    b.structure("C.Point")
+    b.with { catalog in
+      let shell = Shell(catalog)
+      #expect(throws: Shell.RenderError.collision("B")) {
+        _ = try shell.render(closure: "IRoot", template: "com")
+      }
+    }
+  }
+}
 /// A closure that reaches a value type only through its metadata-nested member.
 /// `R.IRoot.Make` returns `Outer.Inner` (`Inner` nested in `Outer` via
 /// `NestedClass`), and no signature names `Outer` directly. The walk must walk
@@ -2623,6 +3175,396 @@ struct RenderNestedBaseTests {
   }
 }
 
+/// A closure whose sole reached `Point` is unique: an unreachable same-named
+/// type must not make it ambiguous. `R.A.Make` returns `A.Point`; `B.Point`
+/// exists but nothing reaches it, so `Point` stays bare — no fabricated
+/// `enum A` shadowing `protocol A` — and the closure renders. Counting the
+/// ambiguity over the whole assembly (rather than the reached declarations)
+/// would wrongly wrap `A.Point` and fault; this is the pre-rework shape of the
+/// shadow fixture.
+@Suite struct RenderUnreachableCollisionTests {
+  private static let bytes: Array<UInt8> = [
+    0x00, 0x00, 0x23, 0x00, 0x01, 0x00, 0x00, 0x00, 0x38, 0x00, 0x31, 0x00,
+    0x21, 0x00, 0x00, 0x00, 0x44, 0x00, 0x42, 0x00, 0x00, 0x00, 0x01, 0x00,
+    0x01, 0x00, 0x08, 0x00, 0x00, 0x00, 0x46, 0x00, 0x44, 0x00, 0x09, 0x00,
+    0x01, 0x00, 0x02, 0x00, 0x08, 0x00, 0x00, 0x00, 0x46, 0x00, 0x4c, 0x00,
+    0x09, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xc6, 0x05, 0x54, 0x00, 0x01, 0x00, 0x01, 0x00, 0x09, 0x00, 0x4e, 0x00,
+    0x06, 0x00, 0x23, 0x00, 0x0b, 0x00, 0x0c, 0x00,
+  ]
+
+  private static let strings: Array<UInt8> = [
+    0x00, 0x57, 0x69, 0x6e, 0x64, 0x6f, 0x77, 0x73, 0x2e, 0x57, 0x69, 0x6e,
+    0x33, 0x32, 0x2e, 0x46, 0x6f, 0x75, 0x6e, 0x64, 0x61, 0x74, 0x69, 0x6f,
+    0x6e, 0x2e, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x00, 0x47,
+    0x75, 0x69, 0x64, 0x41, 0x74, 0x74, 0x72, 0x69, 0x62, 0x75, 0x74, 0x65,
+    0x00, 0x53, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x00, 0x56, 0x61, 0x6c, 0x75,
+    0x65, 0x54, 0x79, 0x70, 0x65, 0x00, 0x52, 0x00, 0x41, 0x00, 0x50, 0x6f,
+    0x69, 0x6e, 0x74, 0x00, 0x42, 0x00, 0x2e, 0x63, 0x74, 0x6f, 0x72, 0x00,
+    0x4d, 0x61, 0x6b, 0x65, 0x00,
+  ]
+
+  private static let blob: Array<UInt8> = [
+    0x00, 0x04, 0x20, 0x00, 0x11, 0x08, 0x05, 0x20, 0x02, 0x01, 0x08, 0x0f,
+    0x14, 0x01, 0x00, 0xef, 0xbe, 0xad, 0xde, 0xfe, 0xca, 0xbe, 0xba, 0xf0,
+    0x0d, 0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0x00, 0x00,
+  ]
+
+  private static let empty = Array<UInt8>()
+
+  private static let relations: Array<WinMD.Table> = [
+    WinMD.Table(Metadata.Tables.TypeRef.self, rows: 2, range: 0 ..< 12,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 3, range: 12 ..< 54,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.FieldDef.self, rows: 0, range: 54 ..< 54,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.MethodDef.self, rows: 1, range: 54 ..< 68,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.Param.self, rows: 0, range: 68 ..< 68,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.InterfaceImpl.self, rows: 0, range: 68 ..< 68,
+                wide: 0, stride: 4),
+    WinMD.Table(Metadata.Tables.MemberRef.self, rows: 1, range: 68 ..< 74,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.Constant.self, rows: 0, range: 74 ..< 74,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.CustomAttribute.self, rows: 1, range: 74 ..< 80,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeSpec.self, rows: 0, range: 80 ..< 80,
+                wide: 0, stride: 2),
+    WinMD.Table(Metadata.Tables.NestedClass.self, rows: 0, range: 80 ..< 80,
+                wide: 0, stride: 4),
+  ]
+
+  private static let valid: UInt64 =
+      (1 << 1) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 8) | (1 << 9)
+          | (1 << 10) | (1 << 11) | (1 << 12) | (1 << 27) | (1 << 41)
+
+  static func with(_ body: (borrowing Storage) throws -> Void) rethrows {
+    let storage = Storage(bytes: bytes.span.bytes, relations: relations.span,
+                          strings: strings.span.bytes, blob: blob.span.bytes,
+                          guid: empty.span.bytes, valid: valid, sorted: 0)
+    try body(storage)
+  }
+
+  @Test func `an unreachable same-named type does not qualify a reached value type`() throws {
+    try RenderUnreachableCollisionTests.with { catalog in
+      let shell = Shell(catalog)
+      let closed = try shell.render(closure: "A", template: "com")
+      // `Point` is unique among the reached {A.Point}, so it stays bare: no
+      // fabricated `enum A` to shadow `protocol A`, and the return spells bare.
+      #expect(closed.contains("public protocol A"))
+      #expect(closed.contains("@frozen public struct Point {"))
+      #expect(!closed.contains("enum A"))
+      #expect(!closed.contains("A.Point"))
+    }
+  }
+
+  @Test func `a flat render does not qualify a value type it does not emit`() throws {
+    try RenderUnreachableCollisionTests.with { catalog in
+      let shell = Shell(catalog)
+      let flat = try shell.render("A", template: "com")
+      // `Point` is ambiguous across the whole assembly (`A.Point`/`B.Point`),
+      // but the flat render emits only `protocol A` — no value type, no
+      // fabricated `enum A` — so it must spell the return bare, not `A.Point`,
+      // which would name a container this render never emits.
+      #expect(flat.contains("public protocol A"))
+      #expect(!flat.contains("A.Point"))
+      #expect(!flat.contains("enum A"))
+      #expect(!flat.contains("struct Point"))
+    }
+  }
+}
+
+/// A closure whose reached value type shares a bare name with a frontier the
+/// signature also references. `R.IRoot.Use` takes a local value type `A.Point`
+/// and an *external* `B.Point` — a `TypeRef` scoped to an `AssemblyRef`, so it
+/// resolves to no local row and the closure spells it bare `Point` without
+/// emitting it. The reached tally sees only the emitted `A.Point`, so `Point`
+/// reads as unique and `A.Point` would spell bare `Point` too — capturing the
+/// frontier's reference. The frontier name must bump the ambiguity decision, so
+/// `A.Point` wraps under a fabricated `enum A` and the two `Point`s stay
+/// distinct (`A.Point` vs the consumer's `Point`).
+@Suite struct RenderReachedExternalTests {
+  @Test func `a reached value type wraps against a frontier of the same name`() throws {
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .method("Use", [("a", .value("A.Point")), ("b", .external("Point"))])
+    b.structure("A.Point")
+    try b.with { catalog in
+      let shell = Shell(catalog)
+      let rendered = try shell.render(closure: "IRoot", template: "com")
+      #expect(rendered.contains("public enum A {"))
+      #expect(rendered.contains("struct Point"))
+    }
+  }
+}
+/// A closure whose reached value type shares a bare name with a
+/// *layout-rejected* frontier. `R.IRoot.Use` takes local value types `A.Point`
+/// (sequential layout, which renders) and `B.Point` (explicit layout, which the
+/// `layout` query rejects — a frontier the walk drops and does not emit).
+/// Adjacency keeps `B.Point` (a valid struct row) and the walk rejects it only
+/// afterward, so its `Point` reaches the contention set only if recorded at the
+/// keep. Without it
+/// the reached tally sees only `A.Point`, spells it bare `Point`, and captures
+/// the frontier's reference; the layout-reject contention bumps `A.Point` so it
+/// wraps under a fabricated `enum A`.
+@Suite struct RenderLayoutContendedTests {
+  @Test func `a reached value type wraps against a layout-rejected frontier`() throws {
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .method("Use", [("a", .value("A.Point")), ("b", .value("B.Point"))])
+    b.structure("A.Point")
+    b.structure("B.Point").layout(.explicit)
+    try b.with { catalog in
+      let shell = Shell(catalog)
+      let rendered = try shell.render(closure: "IRoot", template: "com")
+      #expect(rendered.contains("public enum A {"))
+      #expect(rendered.contains("struct Point"))
+    }
+  }
+}
+
+/// A closure whose reached value type shares a bare name with an *external
+/// base* the interface refines. `R.IRoot`'s base is an external `TypeRef`
+/// `Point`
+/// (`AssemblyRef` scope), so `bases` emits `protocol IRoot: Point` while the
+/// `requires` walk never sees it, and `R.IRoot.Use` takes a local value type
+/// `A.Point`. Recording the base name only in the shadow set leaves `A.Point`
+/// bare, so `protocol IRoot: Point` binds to the emitted struct rather than the
+/// external protocol; the base name must also enter the contention set so
+/// `A.Point` wraps under `enum A` and the base stays the consumer's `Point`.
+@Suite struct RenderBaseContendedTests {
+  private static let bytes: Array<UInt8> = [
+    0x00, 0x00, 0x23, 0x00, 0x01, 0x00, 0x06, 0x00, 0x4a, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x38, 0x00, 0x31, 0x00, 0x21, 0x00, 0x00, 0x00, 0x44, 0x00,
+    0x42, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x08, 0x00, 0x00, 0x00,
+    0x4a, 0x00, 0x50, 0x00, 0x0d, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0xc6, 0x05, 0x58, 0x00, 0x01, 0x00, 0x01, 0x00,
+    0x01, 0x00, 0x09, 0x00, 0x09, 0x00, 0x52, 0x00, 0x07, 0x00, 0x23, 0x00,
+    0x0b, 0x00, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  ]
+
+  private static let strings: Array<UInt8> = [
+    0x00, 0x57, 0x69, 0x6e, 0x64, 0x6f, 0x77, 0x73, 0x2e, 0x57, 0x69, 0x6e,
+    0x33, 0x32, 0x2e, 0x46, 0x6f, 0x75, 0x6e, 0x64, 0x61, 0x74, 0x69, 0x6f,
+    0x6e, 0x2e, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x00, 0x47,
+    0x75, 0x69, 0x64, 0x41, 0x74, 0x74, 0x72, 0x69, 0x62, 0x75, 0x74, 0x65,
+    0x00, 0x53, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x00, 0x56, 0x61, 0x6c, 0x75,
+    0x65, 0x54, 0x79, 0x70, 0x65, 0x00, 0x52, 0x00, 0x49, 0x52, 0x6f, 0x6f,
+    0x74, 0x00, 0x50, 0x6f, 0x69, 0x6e, 0x74, 0x00, 0x41, 0x00, 0x2e, 0x63,
+    0x74, 0x6f, 0x72, 0x00, 0x55, 0x73, 0x65, 0x00,
+  ]
+
+  private static let blob: Array<UInt8> = [
+    0x00, 0x05, 0x20, 0x01, 0x01, 0x11, 0x08, 0x05, 0x20, 0x02, 0x01, 0x08,
+    0x0f, 0x14, 0x01, 0x00, 0xef, 0xbe, 0xad, 0xde, 0xfe, 0xca, 0xbe, 0xba,
+    0xf0, 0x0d, 0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0x00, 0x00,
+  ]
+
+  private static let empty = Array<UInt8>()
+
+  private static let relations: Array<WinMD.Table> = [
+    WinMD.Table(Metadata.Tables.TypeRef.self, rows: 3, range: 0 ..< 18,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 2, range: 18 ..< 46,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.FieldDef.self, rows: 0, range: 46 ..< 46,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.MethodDef.self, rows: 1, range: 46 ..< 60,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.Param.self, rows: 0, range: 60 ..< 60,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.InterfaceImpl.self, rows: 1, range: 60 ..< 64,
+                wide: 0, stride: 4),
+    WinMD.Table(Metadata.Tables.MemberRef.self, rows: 1, range: 64 ..< 70,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.Constant.self, rows: 0, range: 70 ..< 70,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.CustomAttribute.self, rows: 1, range: 70 ..< 76,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeSpec.self, rows: 0, range: 76 ..< 76,
+                wide: 0, stride: 2),
+    WinMD.Table(Metadata.Tables.AssemblyRef.self, rows: 1, range: 76 ..< 96,
+                wide: 0, stride: 20),
+    WinMD.Table(Metadata.Tables.NestedClass.self, rows: 0, range: 96 ..< 96,
+                wide: 0, stride: 4),
+  ]
+
+  private static let valid: UInt64 =
+      (1 << 1) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 8) | (1 << 9)
+          | (1 << 10) | (1 << 11) | (1 << 12) | (1 << 27) | (1 << 35)
+          | (1 << 41)
+
+  static func with(_ body: (borrowing Storage) throws -> Void) rethrows {
+    let storage = Storage(bytes: bytes.span.bytes, relations: relations.span,
+                          strings: strings.span.bytes, blob: blob.span.bytes,
+                          guid: empty.span.bytes, valid: valid, sorted: 0)
+    try body(storage)
+  }
+
+  @Test func `a reached value type wraps against an external base of the same name`() throws {
+    try RenderBaseContendedTests.with { catalog in
+      let shell = Shell(catalog)
+      let rendered = try shell.render(closure: "IRoot", template: "com")
+      // `A.Point` wraps under `enum A`, so `protocol IRoot: Point` names the
+      // external base rather than a bare local `struct Point`. Without the base
+      // in the contention set the local stays bare and the base binds to it.
+      #expect(rendered.contains("public enum A {"))
+      #expect(rendered.contains(": Point"))
+    }
+  }
+}
+
+/// A closure whose signature names a value type nested under a *generic*
+/// encloser. `R.IRoot.Use` takes `Inner`, a value type nested in a generic
+/// runtime class `Outer`1` — a frontier the closure spells but does not emit.
+/// Its enclosing dot-path must strip the CLR arity suffix from *every*
+/// component, spelling `Outer.Inner`; preserving the encloser's suffix would
+/// emit the unresolved `Outer`1.Inner`, which names no declaration (the
+/// encloser projects as `Outer`).
+@Suite struct RenderGenericNestingTests {
+  private static let bytes: Array<UInt8> = [
+    0x00, 0x00, 0x23, 0x00, 0x01, 0x00, 0x00, 0x00, 0x38, 0x00, 0x31, 0x00,
+    0x00, 0x00, 0x3f, 0x00, 0x31, 0x00, 0x21, 0x00, 0x00, 0x00, 0x4b, 0x00,
+    0x49, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x54, 0x00, 0x51, 0x00, 0x09, 0x00, 0x01, 0x00, 0x02, 0x00, 0x08, 0x00,
+    0x00, 0x00, 0x5c, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x01, 0x00, 0x02, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc6, 0x05, 0x68, 0x00, 0x01, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x6c, 0x00, 0x09, 0x00, 0x62, 0x00,
+    0x07, 0x00, 0x23, 0x00, 0x0b, 0x00, 0x0d, 0x00, 0x03, 0x00, 0x02, 0x00,
+  ]
+
+  private static let strings: Array<UInt8> = [
+    0x00, 0x57, 0x69, 0x6e, 0x64, 0x6f, 0x77, 0x73, 0x2e, 0x57, 0x69, 0x6e,
+    0x33, 0x32, 0x2e, 0x46, 0x6f, 0x75, 0x6e, 0x64, 0x61, 0x74, 0x69, 0x6f,
+    0x6e, 0x2e, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x00, 0x47,
+    0x75, 0x69, 0x64, 0x41, 0x74, 0x74, 0x72, 0x69, 0x62, 0x75, 0x74, 0x65,
+    0x00, 0x53, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x00, 0x4f, 0x62, 0x6a, 0x65,
+    0x63, 0x74, 0x00, 0x56, 0x61, 0x6c, 0x75, 0x65, 0x54, 0x79, 0x70, 0x65,
+    0x00, 0x52, 0x00, 0x49, 0x52, 0x6f, 0x6f, 0x74, 0x00, 0x4e, 0x53, 0x00,
+    0x4f, 0x75, 0x74, 0x65, 0x72, 0x60, 0x31, 0x00, 0x49, 0x6e, 0x6e, 0x65,
+    0x72, 0x00, 0x2e, 0x63, 0x74, 0x6f, 0x72, 0x00, 0x55, 0x73, 0x65, 0x00,
+    0x76, 0x61, 0x6c, 0x75, 0x65, 0x00,
+  ]
+
+  private static let blob: Array<UInt8> = [
+    0x00, 0x05, 0x20, 0x01, 0x01, 0x11, 0x0c, 0x05, 0x20, 0x02, 0x01, 0x08,
+    0x0f, 0x14, 0x01, 0x00, 0xef, 0xbe, 0xad, 0xde, 0xfe, 0xca, 0xbe, 0xba,
+    0xf0, 0x0d, 0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0x00, 0x00,
+  ]
+
+  private static let empty = Array<UInt8>()
+
+  private static let relations: Array<WinMD.Table> = [
+    WinMD.Table(Metadata.Tables.TypeRef.self, rows: 3, range: 0 ..< 18,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 3, range: 18 ..< 60,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.FieldDef.self, rows: 0, range: 60 ..< 60,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.MethodDef.self, rows: 1, range: 60 ..< 74,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.Param.self, rows: 1, range: 74 ..< 80,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.InterfaceImpl.self, rows: 0, range: 80 ..< 80,
+                wide: 0, stride: 4),
+    WinMD.Table(Metadata.Tables.MemberRef.self, rows: 1, range: 80 ..< 86,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.Constant.self, rows: 0, range: 86 ..< 86,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.CustomAttribute.self, rows: 1, range: 86 ..< 92,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeSpec.self, rows: 0, range: 92 ..< 92,
+                wide: 0, stride: 2),
+    WinMD.Table(Metadata.Tables.NestedClass.self, rows: 1, range: 92 ..< 96,
+                wide: 0, stride: 4),
+  ]
+
+  private static let valid: UInt64 =
+      (1 << 1) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 8) | (1 << 9)
+          | (1 << 10) | (1 << 11) | (1 << 12) | (1 << 27) | (1 << 41)
+
+  static func with(_ body: (borrowing Storage) throws -> Void) rethrows {
+    let storage = Storage(bytes: bytes.span.bytes, relations: relations.span,
+                          strings: strings.span.bytes, blob: blob.span.bytes,
+                          guid: empty.span.bytes, valid: valid, sorted: 0)
+    try body(storage)
+  }
+
+  @Test func `a by-value reference under a generic encloser drops its declaration`() throws {
+    try RenderGenericNestingTests.with { catalog in
+      let shell = Shell(catalog)
+      let rendered = try shell.render(closure: "IRoot", template: "com")
+      // `IRoot.Use` names the by-value `Inner`, nested under the generic
+      // `Outer`1`. That reference has no valid unqualified spelling — a member
+      // of `Outer`1` is `Outer<T>.Inner`, needing the enclosing specialization
+      // the projection does not yet emit — and rendering it as an opaque pointer
+      // would silently change the by-value ABI. So the whole containing
+      // declaration `IRoot` is dropped rather than misrendered; neither the
+      // arity-stripped `Outer.Inner` nor the raw `Outer`1` appears.
+      #expect(!rendered.contains("protocol IRoot"))
+      #expect(!rendered.contains("Outer.Inner"))
+      #expect(!rendered.contains("Outer`1"))
+    }
+  }
+}
+
+/// A closure whose reached value type shares a name with a `known`-bridged
+/// frontier's *target* spelling. `R.IRoot.Use` takes `NS.Known` — a value type
+/// a `wellknown NS.Known Bridge` line maps to the imported `Bridge`, so the
+/// walk frontiers it and a reference spells `Bridge` — and a local value type
+/// `A.Bridge` (name `Bridge`). The frontier's bridge name must contend, so
+/// `A.Bridge` wraps under `enum A` rather than spelling bare `Bridge` and
+/// capturing the imported type.
+@Suite struct RenderKnownContendedTests {
+  @Test func `a reached value type wraps against a known bridge name`() throws {
+    let bridge = "wellknown NS.Known Bridge"
+    try RenderClosureTests.withLanguage(adding: bridge) { directory in
+      let b = WinMDBuilder()
+      b.interface("R.IRoot", guid: 0xDEADBEEF)
+          .method("Use", [("a", .value("NS.Known")), ("b", .value("A.Bridge"))])
+      b.structure("NS.Known")
+      b.structure("A.Bridge")
+      try b.with { catalog in
+        let shell = Shell(catalog, search: [directory])
+        let rendered = try shell.render(closure: "IRoot", template: "com")
+        #expect(rendered.contains("public enum A {"))
+        #expect(rendered.contains("struct Bridge"))
+      }
+    }
+  }
+}
+/// A frontier reference to a *nested* type bridged `known` reserves its bridge
+/// leaf name, not its dotted enclosing root. `R.IRoot.Use` takes `Outer.Inner`,
+/// bridged to the leaf `InnerBridge`, and a local `A.InnerBridge`. The bridge
+/// keys on the identity's leaf (`Inner`), as the decode does, so the reserved
+/// frontier is `InnerBridge`; the reached `A.InnerBridge` bears that projected
+/// name and must wrap under `enum A` rather than spell bare and capture the
+/// frontier's reference. Keying the bridge on the qualified `Outer.Inner`
+/// misses it and reserves the root `Outer`, leaving `A.InnerBridge` free.
+@Suite struct RenderNestedKnownContendedTests {
+  @Test func `a nested known bridge reserves its leaf frontier name`() throws {
+    try RenderClosureTests.withLanguage(adding: "wellknown Inner InnerBridge") {
+      directory in
+      let b = WinMDBuilder()
+      b.interface("R.IRoot", guid: 0xDEADBEEF)
+          .method("Use", [("a", .value("Outer.Inner")),
+                          ("b", .value("A.InnerBridge"))])
+      b.structure("Outer")
+      b.structure("Inner", nested: "Outer")
+      b.structure("A.InnerBridge")
+      try b.with { catalog in
+        let shell = Shell(catalog, search: [directory])
+        let rendered = try shell.render(closure: "IRoot", template: "com")
+        #expect(rendered.contains("public enum A {"))
+        #expect(rendered.contains("struct InnerBridge"))
+      }
+    }
+  }
+}
 /// A closure whose signature reaches an interface nested in an emitted
 /// value-type container. `R.IRoot.Use` takes `IChild`, an interface nested in
 /// `struct Outer`. Swift permits a protocol nested in a non-generic value type
@@ -2714,24 +3656,22 @@ struct RenderNestedBaseTests {
     }
   }
 }
-
-/// A closure whose signature names a value type nested under a *generic*
-/// encloser. `R.IRoot.Use` takes `Inner`, a value type nested in a generic
-/// runtime class `Outer`1` — a frontier the closure spells but does not emit.
-/// Its enclosing dot-path must strip the CLR arity suffix from *every*
-/// component, spelling `Outer.Inner`; preserving the encloser's suffix would
-/// emit the unresolved `Outer`1.Inner`, which names no declaration (the
-/// encloser projects as `Outer`).
-@Suite struct RenderGenericNestingTests {
+/// A closure whose ambiguous value type is in the global CLR namespace, which
+/// no fabricated container can qualify. `R.IRoot.Use` takes a local `Point` in
+/// the global namespace and a local `A.Point`. Both project to `Point`, so both
+/// are ambiguous: `A.Point` wraps under `enum A`, but the global `Point` has no
+/// namespace segment to wrap under, so its references would stay bare and
+/// capture the other's; the render must fault the residual collision
+/// rather than emit a plain bare root.
+@Suite struct RenderGlobalAmbiguousTests {
   private static let bytes: Array<UInt8> = [
     0x00, 0x00, 0x23, 0x00, 0x01, 0x00, 0x00, 0x00, 0x38, 0x00, 0x31, 0x00,
-    0x00, 0x00, 0x3f, 0x00, 0x31, 0x00, 0x21, 0x00, 0x00, 0x00, 0x4b, 0x00,
-    0x49, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x54, 0x00, 0x51, 0x00, 0x09, 0x00, 0x01, 0x00, 0x02, 0x00, 0x08, 0x00,
-    0x00, 0x00, 0x5c, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x01, 0x00, 0x02, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc6, 0x05, 0x68, 0x00, 0x01, 0x00,
-    0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x6c, 0x00, 0x09, 0x00, 0x62, 0x00,
-    0x07, 0x00, 0x23, 0x00, 0x0b, 0x00, 0x0d, 0x00, 0x03, 0x00, 0x02, 0x00,
+    0x21, 0x00, 0x00, 0x00, 0x44, 0x00, 0x42, 0x00, 0x00, 0x00, 0x01, 0x00,
+    0x01, 0x00, 0x08, 0x00, 0x00, 0x00, 0x4a, 0x00, 0x00, 0x00, 0x09, 0x00,
+    0x01, 0x00, 0x02, 0x00, 0x08, 0x00, 0x00, 0x00, 0x4a, 0x00, 0x50, 0x00,
+    0x09, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xc6, 0x05, 0x58, 0x00, 0x01, 0x00, 0x01, 0x00, 0x09, 0x00, 0x52, 0x00,
+    0x09, 0x00, 0x23, 0x00, 0x0b, 0x00, 0x0f, 0x00,
   ]
 
   private static let strings: Array<UInt8> = [
@@ -2739,44 +3679,42 @@ struct RenderNestedBaseTests {
     0x33, 0x32, 0x2e, 0x46, 0x6f, 0x75, 0x6e, 0x64, 0x61, 0x74, 0x69, 0x6f,
     0x6e, 0x2e, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x00, 0x47,
     0x75, 0x69, 0x64, 0x41, 0x74, 0x74, 0x72, 0x69, 0x62, 0x75, 0x74, 0x65,
-    0x00, 0x53, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x00, 0x4f, 0x62, 0x6a, 0x65,
-    0x63, 0x74, 0x00, 0x56, 0x61, 0x6c, 0x75, 0x65, 0x54, 0x79, 0x70, 0x65,
-    0x00, 0x52, 0x00, 0x49, 0x52, 0x6f, 0x6f, 0x74, 0x00, 0x4e, 0x53, 0x00,
-    0x4f, 0x75, 0x74, 0x65, 0x72, 0x60, 0x31, 0x00, 0x49, 0x6e, 0x6e, 0x65,
-    0x72, 0x00, 0x2e, 0x63, 0x74, 0x6f, 0x72, 0x00, 0x55, 0x73, 0x65, 0x00,
-    0x76, 0x61, 0x6c, 0x75, 0x65, 0x00,
+    0x00, 0x53, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x00, 0x56, 0x61, 0x6c, 0x75,
+    0x65, 0x54, 0x79, 0x70, 0x65, 0x00, 0x52, 0x00, 0x49, 0x52, 0x6f, 0x6f,
+    0x74, 0x00, 0x50, 0x6f, 0x69, 0x6e, 0x74, 0x00, 0x41, 0x00, 0x2e, 0x63,
+    0x74, 0x6f, 0x72, 0x00, 0x55, 0x73, 0x65, 0x00,
   ]
 
   private static let blob: Array<UInt8> = [
-    0x00, 0x05, 0x20, 0x01, 0x01, 0x11, 0x0c, 0x05, 0x20, 0x02, 0x01, 0x08,
-    0x0f, 0x14, 0x01, 0x00, 0xef, 0xbe, 0xad, 0xde, 0xfe, 0xca, 0xbe, 0xba,
-    0xf0, 0x0d, 0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0x00, 0x00,
+    0x00, 0x07, 0x20, 0x02, 0x01, 0x11, 0x08, 0x11, 0x0c, 0x05, 0x20, 0x02,
+    0x01, 0x08, 0x0f, 0x14, 0x01, 0x00, 0xef, 0xbe, 0xad, 0xde, 0xfe, 0xca,
+    0xbe, 0xba, 0xf0, 0x0d, 0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0x00, 0x00,
   ]
 
   private static let empty = Array<UInt8>()
 
   private static let relations: Array<WinMD.Table> = [
-    WinMD.Table(Metadata.Tables.TypeRef.self, rows: 3, range: 0 ..< 18,
+    WinMD.Table(Metadata.Tables.TypeRef.self, rows: 2, range: 0 ..< 12,
                 wide: 0, stride: 6),
-    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 3, range: 18 ..< 60,
+    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 3, range: 12 ..< 54,
                 wide: 0, stride: 14),
-    WinMD.Table(Metadata.Tables.FieldDef.self, rows: 0, range: 60 ..< 60,
+    WinMD.Table(Metadata.Tables.FieldDef.self, rows: 0, range: 54 ..< 54,
                 wide: 0, stride: 6),
-    WinMD.Table(Metadata.Tables.MethodDef.self, rows: 1, range: 60 ..< 74,
+    WinMD.Table(Metadata.Tables.MethodDef.self, rows: 1, range: 54 ..< 68,
                 wide: 0, stride: 14),
-    WinMD.Table(Metadata.Tables.Param.self, rows: 1, range: 74 ..< 80,
+    WinMD.Table(Metadata.Tables.Param.self, rows: 0, range: 68 ..< 68,
                 wide: 0, stride: 6),
-    WinMD.Table(Metadata.Tables.InterfaceImpl.self, rows: 0, range: 80 ..< 80,
+    WinMD.Table(Metadata.Tables.InterfaceImpl.self, rows: 0, range: 68 ..< 68,
                 wide: 0, stride: 4),
-    WinMD.Table(Metadata.Tables.MemberRef.self, rows: 1, range: 80 ..< 86,
+    WinMD.Table(Metadata.Tables.MemberRef.self, rows: 1, range: 68 ..< 74,
                 wide: 0, stride: 6),
-    WinMD.Table(Metadata.Tables.Constant.self, rows: 0, range: 86 ..< 86,
+    WinMD.Table(Metadata.Tables.Constant.self, rows: 0, range: 74 ..< 74,
                 wide: 0, stride: 6),
-    WinMD.Table(Metadata.Tables.CustomAttribute.self, rows: 1, range: 86 ..< 92,
+    WinMD.Table(Metadata.Tables.CustomAttribute.self, rows: 1, range: 74 ..< 80,
                 wide: 0, stride: 6),
-    WinMD.Table(Metadata.Tables.TypeSpec.self, rows: 0, range: 92 ..< 92,
+    WinMD.Table(Metadata.Tables.TypeSpec.self, rows: 0, range: 80 ..< 80,
                 wide: 0, stride: 2),
-    WinMD.Table(Metadata.Tables.NestedClass.self, rows: 1, range: 92 ..< 96,
+    WinMD.Table(Metadata.Tables.NestedClass.self, rows: 0, range: 80 ..< 80,
                 wide: 0, stride: 4),
   ]
 
@@ -2791,20 +3729,111 @@ struct RenderNestedBaseTests {
     try body(storage)
   }
 
-  @Test func `a reference under a generic encloser is an unsupported frontier`() throws {
-    try RenderGenericNestingTests.with { catalog in
+  @Test func `an ambiguous global value type faults rather than spelling bare`() {
+    RenderGlobalAmbiguousTests.with { catalog in
       let shell = Shell(catalog)
+      #expect(throws: Shell.RenderError.collision("Point")) {
+        _ = try shell.render(closure: "IRoot", template: "com")
+      }
+    }
+  }
+}
+
+/// A closure whose frontier reference is owned by a declaration prune keeps but
+/// does not emit. `R.IRoot.Use` takes `A.Point`/`B.Point` (ambiguous `Point` →
+/// fabricate `enum A`/`enum B`) and `Inner`, a value type nested under a
+/// runtime class `C` — prune keeps it reached, but `nest` drops it (an
+/// unemittable frontier). `Inner`'s field is typed `A` (an external class), so
+/// the walk
+/// records that reference *owned by* `Inner`. No emitted source spells it, so
+/// it must not become a frontier `A` that the fabricated `enum A` would shadow:
+/// the render must succeed, wrapping `A.Point`, not fault.
+@Suite struct RenderPrunedOwnerTests {
+  private static let bytes: Array<UInt8> = [
+    0x00, 0x00, 0x23, 0x00, 0x01, 0x00, 0x00, 0x00, 0x38, 0x00, 0x31, 0x00,
+    0x00, 0x00, 0x42, 0x00, 0x31, 0x00, 0x06, 0x00, 0x51, 0x00, 0x00, 0x00,
+    0x21, 0x00, 0x00, 0x00, 0x4b, 0x00, 0x49, 0x00, 0x00, 0x00, 0x01, 0x00,
+    0x01, 0x00, 0x08, 0x00, 0x00, 0x00, 0x53, 0x00, 0x51, 0x00, 0x09, 0x00,
+    0x01, 0x00, 0x02, 0x00, 0x08, 0x00, 0x00, 0x00, 0x53, 0x00, 0x59, 0x00,
+    0x09, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5e, 0x00,
+    0x5b, 0x00, 0x0d, 0x00, 0x01, 0x00, 0x02, 0x00, 0x08, 0x00, 0x00, 0x00,
+    0x60, 0x00, 0x00, 0x00, 0x09, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00,
+    0x66, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc6, 0x05,
+    0x6e, 0x00, 0x01, 0x00, 0x01, 0x00, 0x09, 0x00, 0x68, 0x00, 0x0b, 0x00,
+    0x23, 0x00, 0x0b, 0x00, 0x15, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x05, 0x00, 0x04, 0x00,
+  ]
+
+  private static let strings: Array<UInt8> = [
+    0x00, 0x57, 0x69, 0x6e, 0x64, 0x6f, 0x77, 0x73, 0x2e, 0x57, 0x69, 0x6e,
+    0x33, 0x32, 0x2e, 0x46, 0x6f, 0x75, 0x6e, 0x64, 0x61, 0x74, 0x69, 0x6f,
+    0x6e, 0x2e, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x00, 0x47,
+    0x75, 0x69, 0x64, 0x41, 0x74, 0x74, 0x72, 0x69, 0x62, 0x75, 0x74, 0x65,
+    0x00, 0x53, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x00, 0x56, 0x61, 0x6c, 0x75,
+    0x65, 0x54, 0x79, 0x70, 0x65, 0x00, 0x4f, 0x62, 0x6a, 0x65, 0x63, 0x74,
+    0x00, 0x52, 0x00, 0x49, 0x52, 0x6f, 0x6f, 0x74, 0x00, 0x41, 0x00, 0x50,
+    0x6f, 0x69, 0x6e, 0x74, 0x00, 0x42, 0x00, 0x4e, 0x53, 0x00, 0x43, 0x00,
+    0x49, 0x6e, 0x6e, 0x65, 0x72, 0x00, 0x61, 0x00, 0x2e, 0x63, 0x74, 0x6f,
+    0x72, 0x00, 0x55, 0x73, 0x65, 0x00,
+  ]
+
+  private static let blob: Array<UInt8> = [
+    0x00, 0x09, 0x20, 0x03, 0x01, 0x11, 0x08, 0x11, 0x0c, 0x11, 0x14, 0x05,
+    0x20, 0x02, 0x01, 0x08, 0x0f, 0x03, 0x06, 0x12, 0x11, 0x14, 0x01, 0x00,
+    0xef, 0xbe, 0xad, 0xde, 0xfe, 0xca, 0xbe, 0xba, 0xf0, 0x0d, 0x12, 0x34,
+    0x56, 0x78, 0x90, 0xab, 0x00, 0x00,
+  ]
+
+  private static let empty = Array<UInt8>()
+
+  private static let relations: Array<WinMD.Table> = [
+    WinMD.Table(Metadata.Tables.TypeRef.self, rows: 4, range: 0 ..< 24,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 5, range: 24 ..< 94,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.FieldDef.self, rows: 1, range: 94 ..< 100,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.MethodDef.self, rows: 1, range: 100 ..< 114,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.Param.self, rows: 0, range: 114 ..< 114,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.InterfaceImpl.self, rows: 0, range: 114 ..< 114,
+                wide: 0, stride: 4),
+    WinMD.Table(Metadata.Tables.MemberRef.self, rows: 1, range: 114 ..< 120,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.Constant.self, rows: 0, range: 120 ..< 120,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.CustomAttribute.self, rows: 1, range: 120 ..< 126,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeSpec.self, rows: 0, range: 126 ..< 126,
+                wide: 0, stride: 2),
+    WinMD.Table(Metadata.Tables.AssemblyRef.self, rows: 1, range: 126 ..< 146,
+                wide: 0, stride: 20),
+    WinMD.Table(Metadata.Tables.NestedClass.self, rows: 1, range: 146 ..< 150,
+                wide: 0, stride: 4),
+  ]
+
+  private static let valid: UInt64 =
+      (1 << 1) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 8) | (1 << 9)
+          | (1 << 10) | (1 << 11) | (1 << 12) | (1 << 27) | (1 << 35)
+          | (1 << 41)
+
+  static func with(_ body: (borrowing Storage) throws -> Void) rethrows {
+    let storage = Storage(bytes: bytes.span.bytes, relations: relations.span,
+                          strings: strings.span.bytes, blob: blob.span.bytes,
+                          guid: empty.span.bytes, valid: valid, sorted: 0)
+    try body(storage)
+  }
+
+  @Test func `a reference owned by a pruned frontier is not a frontier`() throws {
+    try RenderPrunedOwnerTests.with { catalog in
+      let shell = Shell(catalog)
+      // `A.Point` wraps under `enum A` normally; the stale `A` reference owned
+      // by the unemitted `Inner` does not shadow it. Without the owner filter,
+      // that stale label faults `.collision("A")`.
       let rendered = try shell.render(closure: "IRoot", template: "com")
-      // `IRoot.Use` names `Inner`, nested under the generic `Outer`1`. That
-      // reference has no valid unqualified spelling — a member of `Outer`1` is
-      // `Outer<T>.Inner`, needing the enclosing specialization the projection
-      // does not yet emit — so it is dropped as an unsupported frontier rather
-      // than spelled. Neither the arity-stripped `Outer.Inner` (which misbinds
-      // if the consumer supplies the generic `Outer`) nor the raw `Outer`1`
-      // appears; `IRoot` still emits.
-      #expect(rendered.contains("public protocol IRoot"))
-      #expect(!rendered.contains("Outer.Inner"))
-      #expect(!rendered.contains("Outer`1"))
+      #expect(rendered.contains("public enum A {"))
     }
   }
 }
@@ -3271,6 +4300,61 @@ struct RenderNestedBaseTests {
   }
 }
 
+/// A local, ambiguous value type's identity must not qualify an external
+/// reference of the same `(namespace, name)`. `A.Point` and `B.Point` are local
+/// value types, so `A.Point` is ambiguous; an `AssemblyRef`-scoped external
+/// `A.Point` shares that identity but is nonlocal, so it must spell bare (the
+/// consumer supplies it), not bind the local `A.Point` wrapper.
+@Suite struct RenderExternalReferenceQualifyTests {
+  private static let bytes: Array<UInt8> = [
+    0x00, 0x00, 0x08, 0x00, 0x01, 0x00, 0x06, 0x00, 0x12, 0x00, 0x18, 0x00,
+    0x08, 0x00, 0x00, 0x00, 0x12, 0x00, 0x18, 0x00, 0x05, 0x00, 0x01, 0x00,
+    0x01, 0x00, 0x08, 0x00, 0x00, 0x00, 0x12, 0x00, 0x1a, 0x00, 0x05, 0x00,
+    0x01, 0x00, 0x01, 0x00,
+  ]
+
+  private static let strings: Array<UInt8> = [
+    0x00, 0x53, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x00, 0x56, 0x61, 0x6c, 0x75,
+    0x65, 0x54, 0x79, 0x70, 0x65, 0x00, 0x50, 0x6f, 0x69, 0x6e, 0x74, 0x00,
+    0x41, 0x00, 0x42, 0x00,
+  ]
+
+  private static let blob = Array<UInt8>([0x00])
+  private static let empty = Array<UInt8>()
+
+  private static let relations: Array<WinMD.Table> = [
+    WinMD.Table(Metadata.Tables.TypeRef.self, rows: 2, range: 0 ..< 12,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 2, range: 12 ..< 40,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.NestedClass.self, rows: 0, range: 40 ..< 40,
+                wide: 0, stride: 4),
+  ]
+
+  private static let valid: UInt64 = (1 << 1) | (1 << 2) | (1 << 41)
+
+  static func with(_ body: (borrowing Storage) throws -> Void) rethrows {
+    let storage = Storage(bytes: bytes.span.bytes, relations: relations.span,
+                          strings: strings.span.bytes, blob: blob.span.bytes,
+                          guid: empty.span.bytes, valid: valid, sorted: 0)
+    try body(storage)
+  }
+
+  @Test func `a qualifying identity does not qualify an external same-named reference`() throws {
+    try RenderExternalReferenceQualifyTests.with { storage in
+      let (names, _) = try storage.collisions()
+      #expect(names.contains("A.Point"))
+      // The local `A.Point` (a `TypeDef`, token 4) qualifies to its namespace
+      // path; the external `AssemblyRef`-scoped `A.Point` (a `TypeRef`, token 9)
+      // shares the identity but is nonlocal, so it spells bare (nil).
+      #expect(try storage.spelling(of: TypeDefOrRef(rawValue: 4),
+                                   qualifying: names) == "A.Point")
+      #expect(try storage.spelling(of: TypeDefOrRef(rawValue: 9),
+                                   qualifying: names) == nil)
+    }
+  }
+}
+
 /// A metadata-nested value type mapped by a well-known line must spell its
 /// bridge, not its enclosing dot-path. `IRoot.Make` returns `Outer.Inner`;
 /// `wellknown Inner InnerBridge` keys the nested type's own raw identity
@@ -3315,6 +4399,485 @@ struct RenderNestedBaseTests {
       // as instance storage, so the override's `value` field renders.
       #expect(closed.contains("@frozen public struct Point {"))
       #expect(closed.contains("public var value"))
+    }
+  }
+}
+/// Emittedness and ABI-occupant detection read the *code* a template renders,
+/// not its complete text: per-type boilerplate outside any kind section, and
+/// declaration-like text inside comments or string literals, name nothing.
+@Suite struct RenderDeclarationDetectionTests {
+  private static func withTemplate(_ name: String, _ body: String,
+                                   _ test: (String) throws -> Void) throws {
+    let manager = FileManager.default
+    let directory =
+        manager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let templates = directory.appendingPathComponent("Templates")
+    try manager.createDirectory(at: templates,
+                                withIntermediateDirectories: true)
+    defer { try? manager.removeItem(at: directory) }
+    try Data(body.utf8)
+        .write(to: templates.appendingPathComponent("\(name).mustache"))
+    try test(directory.path)
+  }
+
+
+  // A template with per-type boilerplate (here a `// generated for {{name}}`
+  // comment) outside its kind sections but no struct section renders a body
+  // that differs from the empty-context skeleton for every reached struct, yet
+  // declares no struct. Emittedness must find the struct's actual declaration,
+  // not diff the whole text, or the phantom struct enters the emitted set and
+  // two same-named value types fabricate `enum A`/`enum B`, qualifying the
+  // interface's parameter to an undeclared `A.Point`.
+  @Test func `a boilerplate comment does not mark an undeclared struct emitted`() throws {
+    let template = """
+      {{! language: swift }}
+      // generated for {{{name}}}
+      {{#interface}}
+      public protocol {{{name}}} {
+      {{#methods}}
+          func {{{name}}}({{#params}}_ {{{name}}}: {{{type}}}{{^last}}, {{/last}}{{/params}})
+      {{/methods}}
+      }
+      {{/interface}}
+      """
+    try Self.withTemplate("boiler", template) { dir in
+      let b = WinMDBuilder()
+      b.interface("R.IRoot", guid: 0xDEADBEEF)
+          .method("Use", [("a", .value("A.Point")), ("b", .value("B.Point"))])
+      b.structure("A.Point")
+      b.structure("B.Point")
+      try b.with { catalog in
+        let shell = Shell(catalog, search: [dir])
+        let rendered = try shell.render(closure: "IRoot", template: "boiler")
+        // The structs declare nothing, so `Point` is unambiguous among the
+        // emitted set and the parameter spells bare — no fabricated container,
+        // no undeclared `A.Point`.
+        #expect(rendered.contains("_ a: Point"))
+        #expect(!rendered.contains("A.Point"))
+        #expect(!rendered.contains("enum A"))
+      }
+    }
+  }
+
+  // A generic type whose template documents `protocol FooABI` in a comment but
+  // omits the actual helper declares no ABI occupant. Detecting the helper by a
+  // raw text scan would find the comment; when the closure also emits a real
+  // `FooABI`, the phantom occupant then faults a spurious `collision("FooABI")`
+  // though the rendered source has no redeclaration.
+  @Test func `an ABI helper named only in a comment is not an occupant`() throws {
+    let template = """
+      {{! language: swift }}
+      {{#interface}}
+      @com(interface: "{{{iid}}}")
+      public protocol {{{name}}} {
+      {{#methods}}
+          func {{{name}}}({{#params}}_ {{{name}}}: {{{type}}}{{^last}}, {{/last}}{{/params}})
+      {{/methods}}
+      }
+      {{/interface}}
+      {{#delegate}}
+      {{#generic}}
+      // mentions protocol {{{name}}}ABI in a comment but omits the helper
+      public struct {{{name}}}<{{#generics}}{{{name}}}{{^last}}, {{/last}}{{/generics}}> {
+      }
+      {{/generic}}
+      {{/delegate}}
+      {{#struct}}
+      @frozen public struct {{{name}}} {
+      }
+      {{/struct}}
+      """
+    try Self.withTemplate("doc", template) { dir in
+      let b = WinMDBuilder()
+      b.interface("R.IRoot", guid: 0xDEADBEEF)
+          .method("Use", [("f", .object("Foo")), ("g", .value("FooABI"))])
+      b.delegate("Foo").generic("T")
+          .method("Invoke", [("v", .primitive(0x08))])
+      b.structure("FooABI")
+      try b.with { catalog in
+        let shell = Shell(catalog, search: [dir])
+        let rendered = try shell.render(closure: "IRoot", template: "doc")
+        // The comment's `FooABI` is not a declaration, so the real struct is
+        // the only `FooABI` occupant and no collision faults.
+        #expect(rendered.contains("struct FooABI"))
+      }
+    }
+  }
+
+  // Shared `let {{name}} = 0` boilerplate names the type in a *value*
+  // declaration — a variable of the type's name, not a type — so a reached
+  // struct with no struct section is not emitted. Only a type-declaration
+  // keyword before the name counts; crediting any identifier that follows
+  // another (here `Point` after `let`) would readmit the phantom struct and
+  // fabricate an undeclared `A.Point`.
+  @Test func `a value declaration of the type's name does not emit the struct`() throws {
+    let template = """
+      {{! language: swift }}
+      let {{{name}}} = 0
+      {{#interface}}
+      public protocol {{{name}}} {
+      {{#methods}}
+          func {{{name}}}({{#params}}_ {{{name}}}: {{{type}}}{{^last}}, {{/last}}{{/params}})
+      {{/methods}}
+      }
+      {{/interface}}
+      """
+    try Self.withTemplate("value", template) { dir in
+      let b = WinMDBuilder()
+      b.interface("R.IRoot", guid: 0xDEADBEEF)
+          .method("Use", [("a", .value("A.Point")), ("b", .value("B.Point"))])
+      b.structure("A.Point")
+      b.structure("B.Point")
+      try b.with { catalog in
+        let shell = Shell(catalog, search: [dir])
+        let rendered = try shell.render(closure: "IRoot", template: "value")
+        #expect(rendered.contains("_ a: Point"))
+        #expect(!rendered.contains("A.Point"))
+        #expect(!rendered.contains("enum A"))
+      }
+    }
+  }
+
+  // A template that declares the metadata name only *inside* a helper —
+  // `struct Helper { typealias {{name}} = CInt }` — declares no top-level type
+  // of that name. Only a declaration at brace depth zero establishes
+  // emittedness; a `typealias Point` nested in `Helper`'s body would otherwise
+  // (its keyword being a type keyword) mark the struct emitted and fabricate an
+  // undeclared `A.Point`.
+  @Test func `a nested member declaration does not emit the struct`() throws {
+    let template = """
+      {{! language: swift }}
+      {{#interface}}
+      public protocol {{{name}}} {
+      {{#methods}}
+          func {{{name}}}({{#params}}_ {{{name}}}: {{{type}}}{{^last}}, {{/last}}{{/params}})
+      {{/methods}}
+      }
+      {{/interface}}
+      {{#struct}}
+      struct Helper { typealias {{{name}}} = CInt }
+      {{/struct}}
+      """
+    try Self.withTemplate("helper", template) { dir in
+      let b = WinMDBuilder()
+      b.interface("R.IRoot", guid: 0xDEADBEEF)
+          .method("Use", [("a", .value("A.Point")), ("b", .value("B.Point"))])
+      b.structure("A.Point")
+      b.structure("B.Point")
+      try b.with { catalog in
+        let shell = Shell(catalog, search: [dir])
+        let rendered = try shell.render(closure: "IRoot", template: "helper")
+        #expect(rendered.contains("_ a: Point"))
+        #expect(!rendered.contains("A.Point"))
+        #expect(!rendered.contains("enum A"))
+      }
+    }
+  }
+
+  // Swift block comments nest, so a declaration between the inner and outer
+  // `*/` of `/* outer /* inner */ struct {{name}} */` stays commented out. A
+  // boolean comment flag would exit at the inner `*/` and record the struct,
+  // marking a type the template never declares emitted and fabricating an
+  // undeclared `A.Point`; the scanner must balance comment nesting depth.
+  @Test func `a declaration inside a nested block comment is not emitted`() throws {
+    let template = """
+      {{! language: swift }}
+      {{#interface}}
+      public protocol {{{name}}} {
+      {{#methods}}
+          func {{{name}}}({{#params}}_ {{{name}}}: {{{type}}}{{^last}}, {{/last}}{{/params}})
+      {{/methods}}
+      }
+      {{/interface}}
+      {{#struct}}
+      /* outer /* inner */ struct {{{name}}} */
+      {{/struct}}
+      """
+    try Self.withTemplate("nested", template) { dir in
+      let b = WinMDBuilder()
+      b.interface("R.IRoot", guid: 0xDEADBEEF)
+          .method("Use", [("a", .value("A.Point")), ("b", .value("B.Point"))])
+      b.structure("A.Point")
+      b.structure("B.Point")
+      try b.with { catalog in
+        let shell = Shell(catalog, search: [dir])
+        let rendered = try shell.render(closure: "IRoot", template: "nested")
+        #expect(rendered.contains("_ a: Point"))
+        #expect(!rendered.contains("A.Point"))
+        #expect(!rendered.contains("enum A"))
+      }
+    }
+  }
+
+  // An auxiliary top-level declaration a template emits beside the primary type
+  // — here `struct A` beside `protocol IRoot` — is a scope occupant. When the
+  // same closure fabricates the namespace container `enum A` (wrapping the
+  // ambiguous `A.Point`/`B.Point`), the two top-level `A` declarations are an
+  // invalid redeclaration. The collision scan must see every name the tokenizer
+  // found, not only the primary and the generic ABI helper, and fault.
+  @Test func `an auxiliary declaration colliding with a fabricated namespace faults`() throws {
+    let template = """
+      {{! language: swift }}
+      {{#interface}}
+      public protocol {{{name}}} {
+      {{#methods}}
+          func {{{name}}}({{#params}}_ {{{name}}}: {{{type}}}{{^last}}, {{/last}}{{/params}})
+      {{/methods}}
+      }
+      struct A {}
+      {{/interface}}
+      {{#struct}}
+      @frozen public struct {{{name}}} {}
+      {{/struct}}
+      """
+    try Self.withTemplate("aux", template) { dir in
+      let b = WinMDBuilder()
+      b.interface("R.IRoot", guid: 0xDEADBEEF)
+          .method("Use", [("a", .value("A.Point")), ("b", .value("B.Point"))])
+      b.structure("A.Point")
+      b.structure("B.Point")
+      b.with { catalog in
+        let shell = Shell(catalog, search: [dir])
+        #expect(throws: Shell.RenderError.collision("A")) {
+          _ = try shell.render(closure: "IRoot", template: "aux")
+        }
+      }
+    }
+  }
+
+  // A custom template frames its value type with a file-scope `import` header
+  // and an `extension` footer. When the type collides and is wrapped in a
+  // fabricated namespace `enum`, only its primary declaration is wrapped: Swift
+  // permits `import`/`extension` only at file scope, so they are hoisted back
+  // outside the enum rather than indented into it, which would not compile.
+  @Test func `file-scope content stays outside a fabricated namespace enum`() throws {
+    let template = """
+      {{! language: swift }}
+      {{#interface}}
+      public protocol {{{name}}} {
+      {{#methods}}
+          func {{{name}}}({{#params}}_ {{{name}}}: {{{type}}}{{^last}}, {{/last}}{{/params}})
+      {{/methods}}
+      }
+      {{/interface}}
+      {{#struct}}
+      import Foundation
+      @frozen public struct {{{name}}} {}
+      extension Helper {}
+      {{/struct}}
+      """
+    try Self.withTemplate("framed", template) { dir in
+      let b = WinMDBuilder()
+      b.interface("R.IRoot", guid: 0xDEADBEEF)
+          .method("Use", [("a", .value("A.Point")), ("b", .value("B.Point"))])
+      b.structure("A.Point")
+      b.structure("B.Point")
+      try b.with { catalog in
+        let shell = Shell(catalog, search: [dir])
+        let rendered = try shell.render(closure: "IRoot", template: "framed")
+        #expect(rendered.contains("public enum A {"))
+        #expect(rendered.contains("struct Point"))
+        // The `import`/`extension` are at file scope, never indented into the
+        // enum.
+        #expect(!rendered.contains("    import Foundation"))
+        #expect(!rendered.contains("    extension Helper"))
+      }
+    }
+  }
+
+  // Two ambiguous value types each wrap in their own fabricated `enum`, and the
+  // template appends a `struct Helper {}` auxiliary that `partition` hoists to
+  // file scope. The two hoisted `Helper` declarations are a file-scope
+  // redeclaration: a per-enum auxiliary check misses it (each `Helper` sits
+  // under a different namespace), so the hoisted helpers are attributed to the
+  // root scope and fault `collision("Helper")`.
+  @Test func `hoisted auxiliaries collide at the root scope`() throws {
+    let template = """
+      {{! language: swift }}
+      {{#interface}}
+      public protocol {{{name}}} {
+      {{#methods}}
+          func {{{name}}}({{#params}}_ {{{name}}}: {{{type}}}{{^last}}, {{/last}}{{/params}})
+      {{/methods}}
+      }
+      {{/interface}}
+      {{#struct}}
+      @frozen public struct {{{name}}} {}
+      struct Helper {}
+      {{/struct}}
+      """
+    try Self.withTemplate("helpers", template) { dir in
+      let b = WinMDBuilder()
+      b.interface("R.IRoot", guid: 0xDEADBEEF)
+          .method("Use", [("a", .value("A.Point")), ("b", .value("B.Point"))])
+      b.structure("A.Point")
+      b.structure("B.Point")
+      b.with { catalog in
+        let shell = Shell(catalog, search: [dir])
+        #expect(throws: Shell.RenderError.collision("Helper")) {
+          _ = try shell.render(closure: "IRoot", template: "helpers")
+        }
+      }
+    }
+  }
+
+  // A template omits `{{#struct}}` but renders `{{#enum}}`. `IRoot` reaches the
+  // struct `Point`, and a `Point` field reaches the enum `Widget`. The first
+  // prune keeps `Widget` (reached through the metadata-emittable `Point`), but
+  // the template declares no `Point`, so `Widget` — reached only through that
+  // omitted node — is an orphan the emitted source never references. Re-pruning
+  // against the bodied set before filtering drops it rather than rendering an
+  // unattached `struct Widget`.
+  @Test func `an orphan reached through an omitted declaration is dropped`() throws {
+    let template = """
+      {{! language: swift }}
+      {{#interface}}
+      public protocol {{{name}}} {
+      {{#methods}}
+          func {{{name}}}({{#params}}_ {{{name}}}: {{{type}}}{{^last}}, {{/last}}{{/params}})
+      {{/methods}}
+      }
+      {{/interface}}
+      {{#enum}}
+      @frozen public struct {{{name}}}: Hashable {}
+      {{/enum}}
+      """
+    try Self.withTemplate("omit-struct", template) { dir in
+      let b = WinMDBuilder()
+      b.interface("R.IRoot", guid: 0xDEADBEEF)
+          .method("Use", [("v", .value("Point"))])
+      b.structure("Point").field("w", .value("Widget"))
+      b.enumeration("Widget")
+      try b.with { catalog in
+        let shell = Shell(catalog, search: [dir])
+        let rendered = try shell.render(closure: "IRoot",
+                                        template: "omit-struct")
+        #expect(rendered.contains("public protocol IRoot"))
+        #expect(!rendered.contains("struct Widget"))
+      }
+    }
+  }
+
+  // A *metadata-nested* value type (`Outer.Inner`) whose custom template frames
+  // it with file-scope content: when `Inner` nests into the real `Outer`
+  // container, its `import`/`extension` must hoist to file scope, not be
+  // indented into `struct Outer` — Swift permits them only at file scope. The
+  // `.type` container partitions and hoists a child's file-scope content just
+  // as the fabricated `.space` namespace does.
+  @Test func `a real nested child hoists its file-scope content`() throws {
+    let template = """
+      {{! language: swift }}
+      {{#interface}}
+      public protocol {{{name}}} {
+      {{#methods}}
+          func {{{name}}}({{#params}}_ {{{name}}}: {{{type}}}{{^last}}, {{/last}}{{/params}})
+      {{/methods}}
+      }
+      {{/interface}}
+      {{#struct}}
+      import Foundation
+      @frozen public struct {{{name}}} {}
+      extension Helper {}
+      {{/struct}}
+      """
+    try Self.withTemplate("nested-scope", template) { dir in
+      let b = WinMDBuilder()
+      b.interface("R.IRoot", guid: 0xDEADBEEF)
+          .method("Use", [("v", .value("Outer.Inner"))])
+      b.structure("Outer")
+      b.structure("Inner", nested: "Outer")
+      try b.with { catalog in
+        let shell = Shell(catalog, search: [dir])
+        let rendered = try shell.render(closure: "IRoot",
+                                        template: "nested-scope")
+        #expect(rendered.contains("struct Outer {"))
+        #expect(rendered.contains("struct Inner {"))
+        // `Inner`'s `import`/`extension` are at file scope, never indented into
+        // `struct Outer`.
+        #expect(!rendered.contains("    import Foundation"))
+        #expect(!rendered.contains("    extension Helper"))
+      }
+    }
+  }
+}
+/// A closure whose two separately-wrapped containers each hold a metadata-nested
+/// child that hoists a same-named helper to file scope. `R.IRoot.Use` names
+/// `A.Outer.Inner` and `B.Outer.Inner2` (ambiguous `Outer`, so both `Outer`s
+/// wrap under fabricated `enum A`/`enum B`); the template renders each nested
+/// enum with an extra `struct Helper {}` beside it, which — being only a
+/// primary declaration's file-scope neighbour — hoists out through its `Outer`
+/// and the enum to the root file scope. Both helpers land at file scope, an
+/// invalid redeclaration; the tally must count auxiliaries of a wrapped
+/// container's descendants, not just its direct children, and fault
+/// `.collision("Helper")`.
+@Suite struct RenderDescendantHoistTests {
+  @Test func `descendants of wrapped containers hoisting a shared helper fault`() throws {
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .method("Use", [("a", .value("A.Outer.Inner")),
+                        ("b", .value("B.Outer.Inner2"))])
+    b.structure("A.Outer")
+    b.structure("B.Outer")
+    b.enumeration("Inner", nested: "A.Outer")
+    b.enumeration("Inner2", nested: "B.Outer")
+    b.with { catalog in
+      var shell = Shell(catalog)
+      shell.templates["helper"] = """
+        {{! language: swift }}
+        {{#interface}}
+        public protocol {{{name}}} {
+        {{#methods}}
+            func {{{name}}}({{#params}}_ {{{name}}}: {{{type}}}{{^last}}, {{/last}}{{/params}})
+        {{/methods}}
+        }
+        {{/interface}}
+        {{#struct}}
+        public struct {{{name}}} {}
+        {{/struct}}
+        {{#enum}}
+        public struct {{{name}}} {}
+        public struct Helper {}
+        {{/enum}}
+        """
+      #expect(throws: Shell.RenderError.collision("Helper")) {
+        _ = try shell.render(closure: "IRoot", template: "helper")
+      }
+    }
+  }
+}
+/// A referent named in *both* a method's return and a parameter collapses to
+/// one `Referent`, so it must carry both categories. `R.IRoot.Use` returns an
+/// external `A` and takes a local `X.A` plus that same external `A`; the
+/// template renders parameters but omits returns. The external `A` reference is
+/// spelled (as a parameter), so it must contend the local value type `X.A` —
+/// which wraps under `enum X` — even though it also occurs in the omitted
+/// return. A return-or-parameter categorization that recorded only `.returned`
+/// would treat it as unrendered and leave `X.A` bare to capture the external
+/// parameter.
+@Suite struct RenderReturnParameterCategoryTests {
+  @Test func `a return-and-parameter referent contends when only parameters render`() throws {
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .method("Use", returns: .external("A"),
+                [("a", .value("X.A")), ("b", .external("A"))])
+    b.structure("X.A")
+    try b.with { catalog in
+      var shell = Shell(catalog)
+      shell.templates["params"] = """
+        {{! language: swift }}
+        {{#interface}}
+        public protocol {{{name}}} {
+        {{#methods}}
+            func {{{name}}}({{#params}}_ {{{name}}}: {{{type}}}{{^last}}, {{/last}}{{/params}})
+        {{/methods}}
+        }
+        {{/interface}}
+        {{#struct}}
+        public struct {{{name}}} {}
+        {{/struct}}
+        """
+      let rendered = try shell.render(closure: "IRoot", template: "params")
+      #expect(rendered.contains("public enum X {"))
     }
   }
 }

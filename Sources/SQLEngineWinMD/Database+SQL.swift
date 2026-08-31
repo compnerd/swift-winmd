@@ -56,8 +56,10 @@ public import WinMD
 extension WinMD.Storage: SQLEngine.Catalog {
   /// The optional tables the bundled queries reference — tables ECMA-335 lets a
   /// database omit from the tables stream (`TypeSpec` §II.22.39 when nothing is
-  /// generic-instantiated, `NestedClass` §II.22.32 when nothing nests) that a
-  /// bundled view or the closure walk still names. `table(named:)` resolves an
+  /// generic-instantiated, `NestedClass` §II.22.32 when nothing nests,
+  /// `ClassLayout` §II.22.8 when no type declares an explicit layout or packing)
+  /// that a bundled view or the closure walk still names. `table(named:)`
+  /// resolves an
   /// absent one to an empty relation and `relations()` enumerates it, so a
   /// `SELECT … FROM` such a table reads no rows rather than faulting on a
   /// missing relation. Only these are synthesised — not the whole table
@@ -1058,13 +1060,15 @@ extension WinMD.Storage {
   /// undecodable signature, or an unresolvable one.
   package borrowing func decode(return method: Int,
                                  generics: Array<String>? = nil,
-                                 in dialect: Dialect) -> String? {
+                                 in dialect: Dialect,
+                                 qualifying: Set<String> = []) -> String? {
     guard let table = opened("MethodDef") else { return nil }
     let cursor = WinMD.Cursor(copy self, table)
     guard let tuple = cursor[method - 1],
         let row = Row<Metadata.Tables.MethodDef>(tuple),
         let signature = try? row.prototype,
-        let resolver = try? Resolver(of: signature, with: self) else {
+        let resolver = try? Resolver(of: signature, with: self,
+                                     qualifying: qualifying) else {
       return nil
     }
     return signature.returns.decode(generics: generics, with: resolver,
@@ -1087,7 +1091,8 @@ extension WinMD.Storage {
   /// it, so threading it is always safe.
   package borrowing func decode(parameter: Int,
                                  generics: Array<String>? = nil,
-                                 for dialect: Dialect) -> String? {
+                                 for dialect: Dialect,
+                                 qualifying: Set<String> = []) -> String? {
     guard let table = opened("Param") else { return nil }
     let params = WinMD.Cursor(copy self, table)
     guard let param = params[parameter - 1],
@@ -1107,7 +1112,8 @@ extension WinMD.Storage {
     guard position >= 1, position <= signature.parameters.count else {
       return nil
     }
-    guard let resolver = try? Resolver(of: signature, with: self) else {
+    guard let resolver = try? Resolver(of: signature, with: self,
+                                       qualifying: qualifying) else {
       return nil
     }
     let name = param.ordinal(for: "Name").flatMap { try? param.string($0) }
@@ -1126,13 +1132,15 @@ extension WinMD.Storage {
   /// type through it. `nil` mirrors the same undecodable contract — an absent
   /// row, an undecodable signature, or an unresolvable one — so the walk can
   /// treat a malformed field as a frontier.
-  package borrowing func decode(field: Int, in dialect: Dialect) -> String? {
+  package borrowing func decode(field: Int, in dialect: Dialect,
+                                qualifying: Set<String> = []) -> String? {
     guard let table = opened("FieldDef") else { return nil }
     let cursor = WinMD.Cursor(copy self, table)
     guard let tuple = cursor[field - 1],
         let row = Row<Metadata.Tables.FieldDef>(tuple),
         let signature = try? row.declaration,
-        let resolver = try? Resolver(of: signature, with: self) else {
+        let resolver = try? Resolver(of: signature, with: self,
+                                     qualifying: qualifying) else {
       return nil
     }
     return signature.type.decode(with: resolver, dialect: dialect)
@@ -1158,6 +1166,40 @@ extension WinMD.Storage {
       return []
     }
     return resolver.identities
+  }
+
+  /// The type identities the `MethodDef` at 1-based `method` `Id` names in its
+  /// *return* position — the return-spelled subset of `identities(method:)`, so
+  /// the closure walk categorizes a method's references as returned or
+  /// parameter. A reference named in both positions is in both subsets. An
+  /// absent or undecodable row yields the empty set.
+  package borrowing func returned(method: Int) -> Set<Referent> {
+    guard let table = opened("MethodDef") else { return [] }
+    let cursor = WinMD.Cursor(copy self, table)
+    guard let tuple = cursor[method - 1],
+        let row = Row<Metadata.Tables.MethodDef>(tuple),
+        let signature = try? row.prototype,
+        let resolver = try? Resolver(of: signature, with: self) else {
+      return []
+    }
+    return resolver.returned
+  }
+
+  /// The type identities the `MethodDef` at 1-based `method` `Id` names in its
+  /// *parameter* positions — the parameter-spelled subset of
+  /// `identities(method:)`; a reference named in both a return and a parameter
+  /// is in `returned(method:)` too. An absent or undecodable row yields the
+  /// empty set.
+  package borrowing func parameters(method: Int) -> Set<Referent> {
+    guard let table = opened("MethodDef") else { return [] }
+    let cursor = WinMD.Cursor(copy self, table)
+    guard let tuple = cursor[method - 1],
+        let row = Row<Metadata.Tables.MethodDef>(tuple),
+        let signature = try? row.prototype,
+        let resolver = try? Resolver(of: signature, with: self) else {
+      return []
+    }
+    return resolver.parameters
   }
 
   /// The distinct type identities named in the signature of the `FieldDef` at

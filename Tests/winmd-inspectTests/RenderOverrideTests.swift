@@ -154,8 +154,10 @@ struct RenderOverrideTests {
       let templates = URL(fileURLWithPath: "\(directory)/Templates")
       try manager.createDirectory(at: templates,
                                   withIntermediateDirectories: true)
-      // A template written for the flat renderer, reading top-level fields.
-      let flat = "{{! language: swift }}\ninterface {{name}}: {{iid}}"
+      // A template written for the flat renderer, reading top-level fields. A
+      // COM interface projects to a Swift `protocol`, so the template spells
+      // one — the emittedness gate reads the rendered body as Swift.
+      let flat = "{{! language: swift }}\nprotocol {{name}}: {{iid}} {}"
       try Data(flat.utf8)
           .write(to: templates.appendingPathComponent("flat.mustache"))
       try RenderOverrideTests.with { catalog in
@@ -163,7 +165,7 @@ struct RenderOverrideTests {
         let rendered = try shell.render("IDerived", template: "flat")
         // The top-level `{{name}}` resolves to the interface's name, not "" —
         // the documented flat behaviour the sectioned template must preserve.
-        #expect(rendered.hasPrefix("interface IDerived: "))
+        #expect(rendered.hasPrefix("protocol IDerived: "))
       }
     }
   }
@@ -175,7 +177,7 @@ struct RenderOverrideTests {
       try manager.createDirectory(at: templates,
                                   withIntermediateDirectories: true)
       // The same top-level template a flat render uses, now under `--closure`.
-      let flat = "{{! language: swift }}\ninterface {{name}}: {{iid}}"
+      let flat = "{{! language: swift }}\nprotocol {{name}}: {{iid}} {}"
       try Data(flat.utf8)
           .write(to: templates.appendingPathComponent("flat.mustache"))
       try RenderOverrideTests.with { catalog in
@@ -184,9 +186,9 @@ struct RenderOverrideTests {
         // A `--closure` emission exposes the same top-level context as the flat
         // path, so a template reading `{{name}}` resolves each type's name
         // rather than "" — the closure over `IDerived` names both `IBase` and
-        // `IDerived`, not two blank `interface : ` lines.
-        #expect(rendered.contains("interface IBase: "))
-        #expect(rendered.contains("interface IDerived: "))
+        // `IDerived`, not two blank `protocol : ` lines.
+        #expect(rendered.contains("protocol IBase: "))
+        #expect(rendered.contains("protocol IDerived: "))
       }
     }
   }
@@ -221,6 +223,40 @@ struct RenderOverrideTests {
     }
   }
 
+  // A `-I` `Queries/bases.sql` override predating the `ref`/`def` provenance
+  // columns supplies the former `(base, spec)` view shape. The bundled render
+  // reads `b.def`/`b.ref`, so it faults on the missing column; the fallback
+  // re-runs a legacy shape that spells every base bare, so the override still
+  // renders `IBase`/`IDerived` rather than failing with an unknown column.
+  @Test func `a legacy bases view override without provenance still renders`() throws {
+    try RenderOverrideTests.withDirectory { directory in
+      let manager = FileManager.default
+      let queries = URL(fileURLWithPath: "\(directory)/Queries")
+      try manager.createDirectory(at: queries,
+                                  withIntermediateDirectories: true)
+      let view = """
+        CREATE VIEW bases AS
+        SELECT b.TypeName AS base, NULL AS spec
+        FROM InterfaceImpl i
+        JOIN TypeRef b ON i.Interface_TypeRef = b.Id
+        WHERE i.Class = :parent
+        UNION
+        SELECT d.TypeName AS base, NULL AS spec
+        FROM InterfaceImpl i
+        JOIN TypeDef d ON i.Interface_TypeDef = d.Id
+        WHERE i.Class = :parent
+        """
+      try Data(view.utf8)
+          .write(to: queries.appendingPathComponent("bases.sql"))
+      try RenderOverrideTests.with { catalog in
+        let shell = Shell(catalog, search: [directory])
+        let closed = try shell.render(closure: "IDerived", template: "com")
+        #expect(closed.contains("protocol IBase"))
+        #expect(closed.contains("protocol IDerived"))
+      }
+    }
+  }
+
   @Test func `* honours a CREATE VIEW override, matching the per-interface renders`() throws {
     // A session `CREATE VIEW bases` renames `IDerived`'s base to `IOverridden`.
     // `.render <interface>` runs the per-node `bases` query and honours it; the
@@ -233,7 +269,7 @@ struct RenderOverrideTests {
       var shell = Shell(catalog)
       try shell.execute("""
         CREATE VIEW bases AS
-        SELECT 'IOverridden' AS base, NULL AS spec
+        SELECT 'IOverridden' AS base, NULL AS ref, NULL AS def, NULL AS spec
         FROM InterfaceImpl WHERE Class = :parent
         """)
       let star = try shell.render("*", template: "com")

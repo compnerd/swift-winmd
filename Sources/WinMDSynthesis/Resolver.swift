@@ -101,8 +101,24 @@ public struct Resolver: TypeResolver {
   /// The pre-resolved `rawValue → Identity` table.
   private let table: Dictionary<Int, Identity>
 
+  /// The coded indices `table` holds that occur *only* as a custom modifier,
+  /// never as an ordinary type — kept in `table` for the decode's `IsConst`
+  /// resolution but excluded from `identities`, since the generated signature
+  /// never spells a modifier type. A token that also occurs ordinarily is not
+  /// here, so its ordinary occurrence still enqueues its declaration.
+  private let modifiers: Set<Int>
+
   public init(_ table: Dictionary<Int, Identity>) {
     self.table = table
+    self.modifiers = []
+  }
+
+  /// Builds a resolver over the pre-resolved tables — the storage-backed
+  /// initializers' shared destination.
+  private init(_ table: Dictionary<Int, Identity>,
+               _ modifiers: Set<Int>) {
+    self.table = table
+    self.modifiers = modifiers
   }
 
   /// Builds the `rawValue → Identity` table from a decoded signature, resolved
@@ -121,8 +137,11 @@ public struct Resolver: TypeResolver {
   package init(of signature: MethodSignature,
                with storage: borrowing Storage) throws(WinMDError) {
     var table = Dictionary<Int, Identity>()
-    try collect(signature, into: &table, with: storage)
-    self.init(table)
+    var spelled = Set<Int>()
+    var modifiers = Set<Int>()
+    try collect(signature, into: &table, spelled: &spelled,
+                modifiers: &modifiers, with: storage)
+    self.init(table, modifiers.subtracting(spelled))
   }
 
   /// Builds the `rawValue → Identity` table from a decoded field signature,
@@ -137,8 +156,11 @@ public struct Resolver: TypeResolver {
   package init(of signature: FieldSignature,
                with storage: borrowing Storage) throws(WinMDError) {
     var table = Dictionary<Int, Identity>()
-    try collect(signature.type, into: &table, with: storage)
-    self.init(table)
+    var spelled = Set<Int>()
+    var modifiers = Set<Int>()
+    try collect(signature.type, into: &table, spelled: &spelled,
+                modifiers: &modifiers, with: storage)
+    self.init(table, modifiers.subtracting(spelled))
   }
 
   /// The distinct references the table holds — every type a signature named,
@@ -150,7 +172,8 @@ public struct Resolver: TypeResolver {
   /// referenced types without re-walking it, then resolves each — by its `token`
   /// row, not its name — to a local `TypeDef` and enqueues the unvisited.
   public var identities: Set<Referent> {
-    Set(table.map { Referent(identity: $0.value, token: $0.key) })
+    Set(table.filter { !modifiers.contains($0.key) }
+        .map { Referent(identity: $0.value, token: $0.key) })
   }
 
   public func resolve(_ reference: TypeDefOrRef, kind: NamedKind) -> Identity? {
@@ -177,37 +200,57 @@ extension Tuple {
   }
 }
 
-/// Resolves every `TypeDefOrRef` `signature` names into `table`.
+/// Resolves every `TypeDefOrRef` `signature` names into the table, recording
+/// each ordinary (spelled) occurrence in `spelled` and each custom-modifier
+/// occurrence in `modifiers`.
 private func collect(_ signature: MethodSignature,
                      into table: inout Dictionary<Int, Identity>,
+                     spelled: inout Set<Int>, modifiers: inout Set<Int>,
                      with storage: borrowing Storage) throws(WinMDError) {
-  try collect(signature.returns, into: &table, with: storage)
+  try collect(signature.returns, into: &table, spelled: &spelled,
+              modifiers: &modifiers, with: storage)
   for parameter in signature.parameters {
-    try collect(parameter, into: &table, with: storage)
+    try collect(parameter, into: &table, spelled: &spelled,
+                modifiers: &modifiers, with: storage)
   }
 }
 
-/// Resolves every `TypeDefOrRef` `type` names into `table`, recursively.
+/// Resolves every `TypeDefOrRef` `type` names into the table, recursively,
+/// recording each ordinary occurrence in `spelled` and each custom-modifier
+/// occurrence in `modifiers`, so the closure walk can omit a token used *only*
+/// as a modifier: such a type stays in `table` for the decode's `IsConst`
+/// check, but the generated signature never names it (a non-`IsConst` modifier
+/// is
+/// ignored, `IsConst` only changes pointer constness), so enqueuing it would
+/// emit an orphan. A token that also occurs as an ordinary type is spelled and
+/// so kept — subtracting every token ever seen as a modifier would drop it.
 private func collect(_ type: SignatureType,
                      into table: inout Dictionary<Int, Identity>,
+                     spelled: inout Set<Int>, modifiers: inout Set<Int>,
                      with storage: borrowing Storage) throws(WinMDError) {
   switch type {
   case .primitive, .variable, .function:
     break
   case let .pointer(pointee), let .reference(pointee),
        let .array(pointee), let .matrix(pointee, _):
-    try collect(pointee, into: &table, with: storage)
+    try collect(pointee, into: &table, spelled: &spelled,
+                modifiers: &modifiers, with: storage)
   case let .named(_, reference):
     try record(reference, into: &table, with: storage)
+    spelled.insert(reference.rawValue)
   case let .instance(base, arguments):
-    try collect(base, into: &table, with: storage)
+    try collect(base, into: &table, spelled: &spelled,
+                modifiers: &modifiers, with: storage)
     for argument in arguments {
-      try collect(argument, into: &table, with: storage)
+      try collect(argument, into: &table, spelled: &spelled,
+                  modifiers: &modifiers, with: storage)
     }
-  case let .modified(inner, modifiers):
-    try collect(inner, into: &table, with: storage)
-    for modifier in modifiers {
+  case let .modified(inner, modifiers: mods):
+    try collect(inner, into: &table, spelled: &spelled,
+                modifiers: &modifiers, with: storage)
+    for modifier in mods {
       try record(modifier.type, into: &table, with: storage)
+      modifiers.insert(modifier.type.rawValue)
     }
   }
 }
@@ -218,6 +261,20 @@ private func record(_ reference: TypeDefOrRef,
                     with storage: borrowing Storage) throws(WinMDError) {
   guard table[reference.rawValue] == nil else { return }
   guard let tuple = try storage.resolve(reference) else { return }
+  // A reference into a type nested under a *generic* encloser has no valid
+  // unqualified spelling (`Outer``1.Inner` needs the enclosing specialization,
+  // `Outer<T>.Inner`), so leave it unrecorded — an unsupported frontier the
+  // decode then omits — rather than spell an uncompilable `Outer.Inner`.
+  guard try !storage.enclosedByGeneric(tuple) else { return }
   guard let identity = try tuple.identity else { return }
-  table[reference.rawValue] = identity
+  // The `Identity` carries the type's own namespace and its enclosing dot-path
+  // (`Foo.Bar`), the key the decode's well-known and `System.Guid` lookups
+  // resolve on and the name the decode spells. The enclosing path is
+  // arity-stripped so a nested value type spells `Outer.Inner`, not
+  // `Outer``1.Inner`; the *leaf* keeps its arity suffix so the decode's
+  // well-known lookup can key on a generic's raw name (`Box1`) — the decode
+  // strips the leaf suffix when it spells the projected `Box<…>`.
+  let name = try storage.identifier(tuple)
+  table[reference.rawValue] =
+      Identity(namespace: identity.namespace, name: name)
 }

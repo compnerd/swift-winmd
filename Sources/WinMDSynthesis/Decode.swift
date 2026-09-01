@@ -427,26 +427,19 @@ extension TypeDefOrRef {
       return classification(parameter, dialect: dialect)
     }
     // A well-known spelling (a Win32 primitive, curated and never a keyword)
-    // wins first — so a known value type keeps its target name rather than an
-    // enclosing dot-path. It is keyed on the type's *own* identity, the raw
-    // name its metadata bears, not the enclosing dot-path the resolver
-    // qualifies it to: a nested `Outer.Inner` mapped `wellknown Inner …`
-    // resolves on `("", "Inner")`, so the lookup keys on the identity's *leaf*
-    // component (a top-level name has no dot and is its own leaf) — matching
-    // the raw name the walk suppresses the declaration on, so a bridged nested
-    // type is not spelled `Outer.Inner` while its declaration was frontiered.
-    // Otherwise the type spells by its `Identity` name, the enclosing dot-path
-    // a nested type resolves to (`Outer.Inner`) or the bare name a top-level
-    // one does, escaped per component (`dialect.escape` escapes one identifier,
-    // so a keyword component like `repeat` is delimited within the path rather
-    // than the whole treated as a single name).
+    // wins first. It is keyed on a type's *own* raw identity, not the
+    // enclosing dot-path the resolver qualifies a nested type to: the lookup
+    // keys on the identity's leaf component (a top-level name has no dot and
+    // is its own leaf), matching the raw name the walk suppresses the
+    // declaration on, so a bridged nested type is not spelled `Outer.Inner`
+    // while its declaration was frontiered.
     let components = identity.name
         .split(separator: ".", omittingEmptySubsequences: false)
         .map(String.init)
-    // The type's own well-known bridge, keyed on its raw leaf with only the
-    // arity backtick removed (`` Box`1 `` → `Box1`): `identifier`
-    // keeps that suffix so a generic type keys on the raw name the spec maps,
-    // while the projected spelling still strips it.
+    // The type's own bridge keys on its raw leaf with only the arity backtick
+    // removed (`` Box`1 `` → `Box1`): `identifier` keeps that suffix so a
+    // generic keys on the raw name the spec maps, while the projected spelling
+    // still strips it.
     let leaf = String((components.last ?? identity.name).filter { $0 != "`" })
     if let known = dialect.known[Identity(namespace: identity.namespace,
                                           name: leaf)] {
@@ -464,7 +457,11 @@ extension TypeDefOrRef {
       return ([bridge] + components.dropFirst().map { qualify($0, dialect) })
           .joined(separator: ".")
     }
-    return qualify(identity.name, dialect)
+    // Otherwise the type spells through its kind-aware path: a local value
+    // type's namespace-qualified `Namespace.…Name` (from
+    // `resolver.spelling(of:)`), else the `Identity` name, escaped per
+    // component so a keyword component like `repeat` is delimited in the path.
+    return qualify(resolver.spelling(of: self) ?? identity.name, dialect)
   }
 }
 

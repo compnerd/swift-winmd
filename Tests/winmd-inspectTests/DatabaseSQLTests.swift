@@ -761,7 +761,8 @@ struct DatabaseSQLTests {
       var shell = Shell(catalog)
       let query = """
         CREATE VIEW bases AS
-        SELECT b.TypeName AS base, NULL AS spec FROM InterfaceImpl i
+        SELECT b.TypeName AS base, NULL AS ref, NULL AS def, NULL AS spec
+        FROM InterfaceImpl i
         JOIN TypeRef b ON i.Interface_TypeRef = b.Id
         WHERE i.Class = :parent AND i.Class = 0
         """
@@ -796,7 +797,7 @@ struct DatabaseSQLTests {
       var shell = Shell(catalog)
       let query = """
         CREATE VIEW bases AS
-        SELECT 'protocol' AS base, NULL AS spec
+        SELECT 'protocol' AS base, NULL AS ref, NULL AS def, NULL AS spec
         FROM TypeDef WHERE Id = :parent
         """
       let (name, view) = try DatabaseSQLTests.create(query)

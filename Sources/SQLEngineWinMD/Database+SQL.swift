@@ -65,7 +65,8 @@ extension WinMD.Storage: SQLEngine.Catalog {
   /// physically-present tables plus the referenced optionals.
   private static var optionals: Array<(name: String, schema: TableSchema.Type)> {
     [(name: "TypeSpec", schema: Metadata.Tables.TypeSpec.self),
-     (name: "NestedClass", schema: Metadata.Tables.NestedClass.self)]
+     (name: "NestedClass", schema: Metadata.Tables.NestedClass.self),
+     (name: "ClassLayout", schema: Metadata.Tables.ClassLayout.self)]
   }
 
   /// The relation named `name`, resolved case-insensitively against the

@@ -710,7 +710,11 @@ internal struct Shell: ~Escapable {
       let iid = if let iids { iids[row[0].integer] }
                 else { try guid(of: row[0], routines, search: search) }
       guard let iid else { continue }
-      interfaces.append([row[0], row[1], row[2], .text(iid)])
+      // A seed is always an interface; tag its kind at index 4 so the walk and
+      // emit dispatch on the same column a `references`/`requires` row carries,
+      // keeping the flat 3-column seed shape the perf batch relies on otherwise.
+      interfaces.append([row[0], row[1], row[2], .text(iid),
+                         .text("interface")])
     }
     return interfaces
   }
@@ -889,6 +893,136 @@ internal struct Shell: ~Escapable {
     return rows.first.map { $0[0].text }
   }
 
+  /// The static GUID the delegate `found` bears through its `GuidAttribute`,
+  /// decoded through the `guid` query the way the `interfaces` view spells an
+  /// interface's `iid`. A WinRT delegate is a COM interface — IUnknown plus a
+  /// single `Invoke` — so `@com` needs its IUnknown-derived IID.
+  ///
+  /// `nil` marks a delegate the walk treats as a frontier: a parameterised
+  /// delegate computes its PIID per instantiation and bears no static GUID (it
+  /// has `GenericParam` rows, so `declarations` is non-empty), and a delegate
+  /// carrying no `GuidAttribute` resolves nothing through the query.
+  private borrowing func guid(of found: Array<Value>, _ routines: Routines,
+                              search: Array<String>) throws -> String? {
+    guard try declarations(of: found[0], routines, search: search).isEmpty
+    else { return nil }
+    let plan = try Shell.statement(Shell.query(named: "guid", search: search))
+    let rows = try session.run(plan, routines, bindings: ["parent": found[0]])
+    guard let row = rows.first, row[0] != .null else { return nil }
+    return row[0].text
+  }
+
+  /// The local `types` rows the signatures of `found` name — the node's
+  /// signature-driven adjacency (E3/E6/E7). An interface contributes every type
+  /// its methods name, a struct every type its instance fields name, a delegate
+  /// the types its `Invoke` signature names; an enum contributes none. Each
+  /// referenced type resolves through the `references` query — by the exact
+  /// `TypeRef`/`TypeDef` row it was named through, not by name — to a local
+  /// `types` row, dropping a runtime `class` (which stays a frontier the
+  /// consumer supplies) and an external `TypeRef`-only reference (which resolves
+  /// to no row).
+  private borrowing func adjacency(of found: Array<Value>,
+                                   _ routines: Routines, in dialect: Dialect,
+                                   search: Array<String>) throws
+      -> Array<Array<Value>> {
+    // The referenced types, gathered from the node's method or field signatures
+    // per its kind — each a `Referent` carrying the coded-index row it was named
+    // through, so it resolves to a local definition by its exact Id.
+    var references = Set<Referent>()
+    switch found[4].text {
+    case "interface":
+      let plan =
+          try Shell.statement(Shell.query(named: "methods", search: search))
+      let rows = try session.run(plan, routines,
+                                 bindings: ["parent": found[0]])
+      for row in rows {
+        let method = row[0].integer
+        references.formUnion(session.storage.identities(method: method))
+      }
+    case "struct":
+      let plan =
+          try Shell.statement(Shell.query(named: "fields", search: search))
+      let rows = try session.run(plan, routines,
+                                 bindings: ["parent": found[0]])
+      // Only instance fields close over their types: a static or literal field
+      // (the `fdStatic` 0x10 bit) is dropped from the emitted declaration by
+      // `structure`, so walking its type would enqueue a type the struct never
+      // references — an unreferenced orphan. The walk applies the same filter as
+      // the emit so the two agree on which fields count.
+      // A `-I` override may supply the former two-column `fields` query (`Id`,
+      // `Name`, no `Flags`); tolerate it rather than trapping on a missing
+      // column — a field with no `Flags` counts as instance storage, the
+      // pre-`Flags` behaviour a copied override expects.
+      for row in rows where row.count <= 2 || row[2].integer & 0x10 == 0 {
+        let field = row[0].integer
+        references.formUnion(session.storage.identities(field: field))
+      }
+    case "delegate":
+      let plan =
+          try Shell.statement(Shell.query(named: "invoke", search: search))
+      let rows = try session.run(plan, routines,
+                                 bindings: ["parent": found[0]])
+      for row in rows {
+        let method = row[0].integer
+        references.formUnion(session.storage.identities(method: method))
+      }
+    default:
+      return []
+    }
+    // Resolve each reference to its local row by the exact Id it names — a
+    // `TypeRef` through the shared scope-chain `resolved` CTE (bound `:ref`), a
+    // `TypeDef` by its Id directly (bound `:def`) — leaving the other key NULL
+    // so one arm matches. A runtime `class` (a reference type, outside the value
+    // closure) is dropped, as is a reference that resolves to no local row.
+    let plan =
+        try Shell.statement(Shell.query(named: "references", search: search))
+    var neighbors = Array<Array<Value>>()
+    for reference in references {
+      let (ref, def): (Value, Value) = switch reference.kind {
+      case .reference: (.integer(reference.row), .null)
+      case .definition: (.null, .integer(reference.row))
+      }
+      let rows = try session.run(plan, routines,
+                                 bindings: ["ref": ref, "def": def])
+      for row in rows where row[4].text != "class" {
+        // A nongeneric delegate projects an `@com` interface keyed on its static
+        // GUID, so one bearing no `GuidAttribute` — no static IID — is a
+        // frontier: dropped rather than emitted as a GUID-less `@com` shape. A
+        // generic (parameterised) delegate legitimately bears no static IID (a
+        // per-instantiation PIID), so it is kept and emitted through the generic
+        // `{{#generic}}` arm (which omits `@com`), the way a generic interface
+        // is kept below; it is told apart by its declared generic parameters,
+        // since `guid(of:)` returns nil for both, so the nongeneric gate first.
+        if row[4].text == "delegate",
+            try declarations(of: row[0], routines, search: search).isEmpty,
+            try guid(of: row, routines, search: search) == nil { continue }
+        // A nongeneric interface with no `GuidAttribute` has no static IID: its
+        // `references` LEFT JOIN yields a NULL iid, which the template would
+        // spell as `@com(interface: "")` — unusable source. Drop it, the way the
+        // normal `interfaces` view (an INNER join on the GUID) excludes it. A
+        // generic interface legitimately bears no static IID (a per-instantiation
+        // PIID), so a NULL iid there is expected and the row is kept — its
+        // template branch omits `@com` — told apart by its generic parameters.
+        if row[4].text == "interface", row[3].text.isEmpty,
+            try declarations(of: row[0], routines, search: search).isEmpty {
+          continue
+        }
+        neighbors.append(row)
+      }
+    }
+    return neighbors
+  }
+
+  /// The stable namespace-then-name order the walk emits siblings in, so a
+  /// closure renders deterministically regardless of the order the adjacency
+  /// queries (or the referenced-identity set) yield rows. The local `Id` breaks
+  /// a namespace-and-name tie.
+  private static func precedes(_ lhs: Array<Value>,
+                               _ rhs: Array<Value>) -> Bool {
+    (lhs[1].text, lhs[2].text, lhs[0].integer)
+        < (rhs[1].text, rhs[2].text, rhs[0].integer)
+  }
+
   /// Emits the interface `found` and, first, the transitive closure of its plain
   /// (`spec IS NULL`) base and required interfaces — a depth-first post-order
   /// over the E1 edges, so a base precedes the interface refining it.
@@ -907,14 +1041,58 @@ internal struct Shell: ~Escapable {
                               language: Language,
                               search: Array<String>) throws {
     guard visited.insert(found[0].integer).inserted else { return }
-    let query = try statement(named: "requires")
-    let bases = try session.run(query, routines,
-                                bindings: ["parent": found[0]])
-    let ordered = bases.sorted {
-      ($0[1].text, $0[2].text) < ($1[1].text, $1[2].text)
+    // A parameterised (generic) type is a WinRT projection, out of scope for
+    // the pure-COM closure — its `TypeName` carries an arity suffix (`` Foo`1
+    // ``). Frontier it: emit no wrapper and do not walk its members. A COM
+    // interface or delegate is never generic, so this reaches only a WinRT
+    // dependency; a reference to it still spells through the decode, so the
+    // consumer's type satisfies the signature.
+    if found[2].text.contains("`") { return }
+    // Frontier a reached dependency the language import already provides — a
+    // type whose Identity `(namespace, name)` is a key in the dialect's `known`
+    // bridge table (`HRESULT`, `BOOL`, `PWSTR`, …): emit no wrapper for it and
+    // do not walk its members. A reference to it still spells through
+    // `dialect.known` (its bridged name), so the consumer's imported type
+    // satisfies the signature. The seeds are interfaces, which the `known` table
+    // never names, so only reached dependencies are frontiered here.
+    if dialect.known[Identity(namespace: found[1].text,
+                              name: found[2].text)] != nil {
+      return
     }
-    for base in ordered {
-      try walk(base, visited: &visited, into: &sources, through: mustache,
+    // Reject a value type whose ABI layout `@frozen` cannot reproduce — an
+    // explicit layout, a non-default packing, or a declared class size — rather
+    // than project a wrong-sized struct: emit nothing and do not walk its
+    // fields, leaving it a frontier the consumer defines. The `layout` query
+    // returns a row only for such a type; a naturally-laid struct returns none.
+    if found[4].text == "struct",
+        try session.run(statement(named: "layout"), routines,
+                        bindings: ["parent": found[0]]).first != nil {
+      return
+    }
+    // An interface closes over its base and required interfaces first (E1),
+    // before the signature-named types, so an inherited surface precedes the
+    // refinement naming it. A value type or delegate has no such bases.
+    if found[4].text == "interface" {
+      let bases = try session.run(try statement(named: "requires"), routines,
+                                  bindings: ["parent": found[0]])
+      for base in bases.sorted(by: Shell.precedes) {
+        // A `requires.sql` override copied from the earlier bundled query
+        // returns four columns (Id, namespace, name, iid) with no trailing
+        // `kind`, which the walk and emit read from `found[4]`. Render-query
+        // shadowing is a supported extension point, so pad a short row to the
+        // interface shape an `InterfaceImpl` base always has rather than trap.
+        let resolved = base.count > 4 ? base : base + [.text("interface")]
+        try walk(resolved, visited: &visited, into: &sources, through: mustache,
+                 routines: routines, in: dialect, language: language,
+                 search: search)
+      }
+    }
+    // The value-type and delegate types the node's signatures name (E3/E6/E7),
+    // resolved to their local rows and walked before the terminal emit.
+    let referenced = try adjacency(of: found, routines, in: dialect,
+                                   search: search)
+    for neighbor in referenced.sorted(by: Shell.precedes) {
+      try walk(neighbor, visited: &visited, into: &sources, through: mustache,
                routines: routines, in: dialect, language: language,
                search: search)
     }
@@ -922,14 +1100,15 @@ internal struct Shell: ~Escapable {
                             in: dialect, language: language, search: search))
   }
 
-  /// Renders the single interface `found` — its `Id`, namespace, name, and
-  /// `iid`, the row shape the `interfaces` and `requires` queries share —
-  /// through `mustache`, the per-interface body the flat render and the
-  /// `--closure` walk both run.
-  ///
-  /// Decoding the interface's declared generics, methods, and base is the same
-  /// work either path needs; wrapping it here is what lets the closure worklist
-  /// reuse the decode and emit rather than duplicate them.
+  /// Renders the single type `found` through `mustache` — the per-node body the
+  /// flat render and the `--closure` walk both run. Its kind (`found[4]`)
+  /// selects the projection and the template section: an interface (or generic
+  /// wrapper), a struct, an enum, or a delegate, each built by its own half and
+  /// rendered under exactly one of the template's
+  /// `{{#interface}}`/`{{#struct}}`/`{{#enum}}`/`{{#delegate}}` sections, so one
+  /// template renders every kind. The projection is the value of that section's
+  /// key and is exposed at the template root too, so a top-level template
+  /// (`{{name}}`) reads the same context under both the flat and closure paths.
   private borrowing func emit(_ found: Array<Value>,
                               through mustache: MustacheTemplate,
                               routines: Routines, in dialect: Dialect,
@@ -940,6 +1119,44 @@ internal struct Shell: ~Escapable {
                               signatures: Buckets? = nil,
                               sanitized: Dictionary<String, String>? = nil)
       throws -> String {
+    let (key, projection): (String, Dictionary<String, Any>) =
+        switch found[4].text {
+    case "struct":
+      ("struct", try structure(found, routines, in: dialect,
+                               language: language, search: search))
+    case "enum":
+      ("enum", try enumeration(found, routines, in: dialect,
+                               language: language, search: search))
+    case "delegate":
+      ("delegate", try delegation(found, routines, in: dialect,
+                                  language: language, search: search))
+    default:
+      ("interface", try interface(found, routines, in: dialect,
+                                  language: language, search: search,
+                                  inherits: inherits, roster: roster,
+                                  signatures: signatures, sanitized: sanitized))
+    }
+    // The projection renders under its own section and is exposed at the
+    // template root too; the bundled sectioned template ignores the root fields.
+    var root = projection
+    root[key] = projection
+    return mustache.render(root)
+  }
+
+  /// The template context for the interface `found` — its `Id`, namespace, name,
+  /// and `iid` decoded into the declared generics, methods, and base the
+  /// `{{#interface}}` section reads. This is the interface half of `emit`, its
+  /// dictionary the value of the context's `interface` key. The `.render *`
+  /// batch maps (`inherits`/`roster`/`signatures`/`sanitized`) thread through so
+  /// the wildcard batch reuses this decode; each is `nil` on the per-node path.
+  private borrowing func interface(_ found: Array<Value>, _ routines: Routines,
+                                   in dialect: Dialect, language: Language,
+                                   search: Array<String>,
+                                   inherits: Dictionary<Int, String>? = nil,
+                                   roster: Buckets? = nil,
+                                   signatures: Buckets? = nil,
+                                   sanitized: Dictionary<String, String>? = nil)
+      throws -> Dictionary<String, Any> {
     let id = found[0]
     // A pure-COM interface is never generic (a parameterised interface is a
     // WinRT projection, out of scope), so its methods decode with no generic
@@ -985,17 +1202,173 @@ internal struct Shell: ~Escapable {
     ]
     // An absent `base` skips the template's `{{#base}}` inheritance clause.
     if let base { context["base"] = base }
-    // The interface projection is the value of the template context's
-    // `interface` key, so the bundled template's `{{#interface}}` section
-    // renders it, and it is exposed at the template root too — the documented
-    // top-level context a bare `{{name}}` template reads. Both the flat render
-    // and the `--closure` walk expose it the same way, so a template written
-    // for one path keeps working under the other: a `-I` template reading
-    // top-level fields is not silently blanked when `--closure` is used. The
-    // bundled sectioned template ignores the root fields, so output is unchanged.
-    var root = context
-    root["interface"] = context
-    return mustache.render(root)
+    return context
+  }
+
+  /// The template context for the struct `found` — its keyword-escaped name and
+  /// its instance fields, each a `name` and a `type` decoded from the field's
+  /// signature in the target `Dialect`.
+  private borrowing func structure(_ found: Array<Value>, _ routines: Routines,
+                                   in dialect: Dialect, language: Language,
+                                   search: Array<String>) throws
+      -> Dictionary<String, Any> {
+    let plan = try Shell.statement(Shell.query(named: "fields", search: search))
+    let rows = try session.run(plan, routines, bindings: ["parent": found[0]])
+    // Only instance fields are the struct's ABI storage. A static or literal
+    // field (the `fdStatic` 0x10 bit of `FieldDef.Flags`) is not laid out in an
+    // instance, so emitting it as a stored `var` would add a nonexistent field
+    // and shift every following offset, corrupting a by-value native call. Enum
+    // members — also static literal fields — are rendered separately
+    // (`members`), so dropping the static fields here does not affect them.
+    // Tolerate a `-I` override's former two-column `fields` query (no `Flags`):
+    // a field with no `Flags` column counts as instance storage.
+    let instances = rows.filter { $0.count <= 2 || $0[2].integer & 0x10 == 0 }
+    // Each field carries a `last` flag (computed over the retained instance
+    // fields) so the template's public memberwise initialiser can comma-separate
+    // its parameters — the synthesised memberwise init stays internal even for a
+    // public struct, so a cross-module caller could not otherwise construct it.
+    //
+    // A field spelled `` `self` `` — a metadata field literally named `self`,
+    // the one escaped identifier that cannot also be an init parameter name —
+    // takes an `aliased` collision-free `local` — reused as the parameter's
+    // internal name and the assignment's right-hand side — so the init reads
+    // `` init(`self` arg0:) { self.`self` = arg0 } `` rather than reusing the
+    // field spelling, whose leading `self` the assignment would bind to the
+    // parameter instead of the struct instance. Every other field keeps
+    // `local == name`, so its parameter and assignment spell exactly as before.
+    let reserved = language.escape("self")
+    var taken = Set(instances.map { $0[1].text })
+    var next = 0
+    let fields =
+        instances.enumerated().map { index, row -> Dictionary<String, Any> in
+      let type = session.storage.decode(field: row[0].integer,
+                                        in: dialect) ?? ""
+      let name = row[1].text
+      let aliased = name == reserved
+      let local: String
+      if aliased {
+        while taken.contains("arg\(next)") { next += 1 }
+        local = "arg\(next)"
+        taken.insert(local)
+        next += 1
+      } else {
+        local = name
+      }
+      return ["name": name, "local": local, "aliased": aliased, "type": type,
+              "last": index == instances.count - 1]
+    }
+    return ["name": Shell.name(found, language), "fields": fields]
+  }
+
+  /// The template context for the enum `found` — its keyword-escaped name, the
+  /// `underlying` raw-value type, a `flags` marking, and its members, each a
+  /// `name` and the decimal `value` from the `Constant` table. The underlying
+  /// type is the `value__` field's decoded type (falling back to the dialect's
+  /// `i4` spelling when it does not decode).
+  ///
+  /// The projection mirrors how ClangImporter imports a C enum. A regular enum
+  /// projects to an explicitly-stored raw-value struct newtype over the
+  /// `underlying` type; a `[flags]` enum — one bearing a `System.FlagsAttribute`,
+  /// detected through the overridable `flags` query — projects to an `OptionSet`
+  /// instead, since a native `case` (a single value) cannot name a bitmask
+  /// combination. Both project each member as a `static` accessor on the stored
+  /// newtype, so a repeated raw value (a Win32 alias) is simply two named
+  /// constants. The name is carried again under `owner`, the enum's own type an
+  /// `OptionSet` member spells `Owner(rawValue: …)` through, so the member
+  /// context's `{{{name}}}` does not shadow it.
+  private borrowing func enumeration(_ found: Array<Value>, _ routines: Routines,
+                                     in dialect: Dialect, language: Language,
+                                     search: Array<String>) throws
+      -> Dictionary<String, Any> {
+    let all = try Shell.statement(Shell.query(named: "fields", search: search))
+    let fields = try session.run(all, routines, bindings: ["parent": found[0]])
+    // The `value__` storage field is found by its raw metadata name (column 3),
+    // not the escaped `Name`: a `SANITIZE` override (an active language spec or
+    // session UDF) can respell `value__`, and matching the escaped spelling
+    // would then miss it and silently fall back to `i4`, emitting an enum
+    // backed by a wider type (a `UInt64`) with the wrong ABI representation.
+    // Column 3 is the raw (unsanitized) name; a two-column override has none,
+    // so fall back to the escaped `Name` (column 1) — `value__` is no keyword.
+    let underlying = fields.first {
+      ($0.count > 3 ? $0[3].text : $0[1].text) == "value__"
+    }
+        .flatMap { session.storage.decode(field: $0[0].integer, in: dialect) }
+        ?? (dialect.primitives["i4"] ?? "i4")
+    // A `[flags]` enum bears a `System.FlagsAttribute`; the overridable `flags`
+    // query returns a row for it and none for a plain enum. A fixture missing
+    // the attribute rows simply yields no row, so the enum reads as not flags.
+    let mark = try statement(named: "flags")
+    let flags =
+        !(try session.run(mark, routines, bindings: ["parent": found[0]])
+            .isEmpty)
+    let plan = try Shell.statement(Shell.query(named: "members", search: search))
+    let rows = try session.run(plan, routines, bindings: ["parent": found[0]])
+    let name = Shell.name(found, language)
+    let members = rows.map { row -> Dictionary<String, Any> in
+      // `value(field:)` already formats the constant signed or unsigned per its
+      // element type, so an unsigned 64-bit member with bit 63 set spells a
+      // positive `UInt64` decimal the generated raw value accepts. Each member
+      // projects as a `static` accessor on the stored newtype, so a repeated raw
+      // value (a Win32 alias) is simply two named constants.
+      let value = session.storage.value(field: row[0].integer) ?? "0"
+      return ["name": row[1].text, "value": value]
+    }
+    return ["name": name, "owner": name, "underlying": underlying,
+            "flags": flags, "members": members]
+  }
+
+  /// The template context for the delegate `found` — its keyword-escaped name,
+  /// its static `iid`, the `params` its `Invoke` signature carries, and the
+  /// `returns` that signature yields (edge E7). A WinRT delegate is a COM
+  /// interface (IUnknown plus a single `Invoke`), so the projection is an
+  /// `@com(interface:)` protocol carrying just `Invoke`, and `@com` generates
+  /// the IUnknown-based vtable from it — the same ABI-faithful shape an interface
+  /// projects.
+  private borrowing func delegation(_ found: Array<Value>, _ routines: Routines,
+                                    in dialect: Dialect, language: Language,
+                                    search: Array<String>) throws
+      -> Dictionary<String, Any> {
+    let plan = try Shell.statement(Shell.query(named: "invoke", search: search))
+    let invoke = try session.run(plan, routines, bindings: ["parent": found[0]])
+    // A pure-COM delegate is never parameterised (a generic delegate is a WinRT
+    // projection, out of scope), so its `Invoke` names no `VAR`: the signature
+    // decodes with no generic names threaded.
+    var params = Array<Dictionary<String, Any>>()
+    var returns: String?
+    if let method = invoke.first {
+      let selection =
+          try Shell.statement(Shell.query(named: "params", search: search))
+      let raw = try session.run(selection, routines,
+                                bindings: ["parent": method[0]])
+      let kept = raw.filter { $0[2] != .integer(0) }
+      let types = kept.map {
+        session.storage.decode(parameter: $0[0].integer, generics: nil,
+                               for: dialect) ?? ""
+      }
+      params = Shell.parameters(kept.map(\.[1].text), types: types)
+      if let spelled =
+          session.storage.decode(return: method[0].integer, generics: nil,
+                                 in: dialect) {
+        returns = language.returned(spelled)
+      }
+    }
+    var context: Dictionary<String, Any> = [
+      "name": language.escape(found[2].text),
+      "iid": try guid(of: found, routines, search: search) ?? "",
+      "params": params,
+    ]
+    // A value-carrying `Invoke` renders its `-> Type`; a `void` one omits it.
+    if let returns { context["returns"] = returns }
+    return context
+  }
+
+  /// The keyword-escaped declaration name of the type `found` — its raw
+  /// `TypeName` stripped of any CLR arity suffix, then escaped through the
+  /// target language's keyword rule, the same order the interface's own name
+  /// uses so a value type named for a keyword still spells compilably.
+  private static func name(_ found: Array<Value>, _ language: Language)
+      -> String {
+    language.escape(String(found[2].text.prefix { $0 != "`" }))
   }
 
   /// The template method entries for the interface at `id`, in declaration

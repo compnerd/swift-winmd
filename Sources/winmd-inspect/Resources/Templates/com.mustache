@@ -7,3 +7,69 @@ public protocol {{{name}}}{{#base}}: {{{.}}}{{/base}} {
 {{/methods}}
 }
 {{/interface}}
+{{#struct}}
+// @frozen fixes the ABI layout, so the projected struct is the C/C++ record it
+// mirrors field for field — the transparent layout interop passes by value.
+@frozen public struct {{{name}}} {
+{{#fields}}
+    public var {{{name}}}: {{{type}}}
+{{/fields}}
+
+    // The synthesized memberwise initializer is internal even for a public
+    // struct, so an explicit public one lets a caller outside the generated
+    // module construct the value type to pass to a native API.
+    public init({{#fields}}{{{name}}}{{#aliased}} {{{local}}}{{/aliased}}: {{{type}}}{{^last}}, {{/last}}{{/fields}}) {
+{{#fields}}
+        self.{{{name}}} = {{{local}}}
+{{/fields}}
+    }
+}
+{{/struct}}
+{{#enum}}
+{{#flags}}
+{{! A `[flags]` enum projects to an OptionSet the way ClangImporter imports an
+    NS_OPTIONS C enum: its members combine as a bitmask, which a native `enum`
+    case — a single value — cannot name. `rawValue` is typed as the enum's
+    `value__` underlying type directly — the OptionSet `RawValue` associated
+    type is inferred from it rather than spelled as an explicit `typealias`, so
+    a member legitimately named `RawValue` (not a keyword `SANITIZE` escapes)
+    stays a `static var` and does not collide with a support typealias. The set
+    is thus the ABI-exact width of the C enum, and each `@_transparent` member
+    folds to its raw constant at the use site with no static storage; a repeated
+    raw value across members is fine here. }}
+@frozen public struct {{{name}}}: OptionSet {
+    public let rawValue: {{{underlying}}}
+    @inlinable public init(rawValue: {{{underlying}}}) { self.rawValue = rawValue }
+{{#members}}
+    @_transparent public static var {{{name}}}: {{{owner}}} { {{{owner}}}(rawValue: {{{value}}}) }
+{{/members}}
+}
+{{/flags}}
+{{^flags}}
+// A regular enum projects to an explicitly-stored raw-value struct newtype, not
+// a native Swift enum: a native `enum E: {{{underlying}}}` does not carry the ABI
+// layout of its raw type — `@frozen` freezes the compact representation Swift
+// chooses, and the raw type is only a `RawRepresentable` conversion, so a
+// two-case `enum E: UInt32` is one byte, not four, and the signature would pass
+// the wrong width to native code. The newtype stores the `value__` underlying
+// type directly, so it is the ABI-exact width of the C enum; its members are
+// named constants and it holds any ABI value (an undeclared or aliased one)
+// where a native enum would be the wrong size and trap.
+@frozen public struct {{{name}}}: Hashable, Sendable {
+    public var rawValue: {{{underlying}}}
+    @inlinable public init(rawValue: {{{underlying}}}) { self.rawValue = rawValue }
+{{#members}}
+    @_transparent public static var {{{name}}}: {{{owner}}} { {{{owner}}}(rawValue: {{{value}}}) }
+{{/members}}
+}
+{{/flags}}
+{{/enum}}
+{{#delegate}}
+// A delegate is a COM interface — IUnknown plus a single `Invoke` — so `@com`
+// generates the IUnknown-based vtable from this Invoke-only protocol, the same
+// ABI-faithful shape an interface projects, not a Swift closure.
+@com(interface: "{{{iid}}}")
+public protocol {{{name}}} {
+    func Invoke({{#params}}_ {{{name}}}: {{{type}}}{{^last}}, {{/last}}{{/params}}){{#returns}} -> {{{.}}}{{/returns}}
+}
+{{/delegate}}

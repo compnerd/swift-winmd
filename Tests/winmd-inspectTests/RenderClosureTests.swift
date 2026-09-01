@@ -2876,6 +2876,42 @@ struct RenderClosureAmbiguousProtocolTests {
     }
   }
 }
+
+/// Coverage of Finding 2 (inner-namespace shadow of a descendant reference): a
+/// fabricated *inner* segment shadows a bare frontier reference owned by a type
+/// within its subtree. `R.IRoot.Get` returns `A.B`.Point, a value type in CLR
+/// namespace `A.B` whose fields are `C.Point` (a local value type, reached so
+/// `Point` is ambiguous among `{A.B.Point, C.Point}` → `A.B`.Point wraps under a
+/// fabricated `enum A.enum B`) and the *external top-level* `B` (an
+/// AssemblyRef-scoped `TypeRef`, a frontier the closure spells bare). Inside
+/// `enum A.enum B` the bare `B` binds to the inner fabricated segment, not the
+/// external type, so the render must fault `.collision("B")`. A root-only shadow
+/// check (which only reserves the outermost `enum A`) misses it, since `B` is an
+/// inner segment reachable as a bare name only from `A.B`.Point's own scope — the
+/// distinction from an unrelated top-level `B`, which stays unshadowed.
+@Suite struct RenderInnerShadowTests {
+  @Test func `an inner namespace segment shadowing a descendant's frontier reference faults`() {
+    // `R.IRoot.Get` returns `A.B`.Point (a value type in CLR namespace `A.B`),
+    // whose fields are `C.Point` (local, reached — so `Point` is ambiguous and
+    // `A.B`.Point wraps under a fabricated `enum A.enum B`) and the external
+    // top-level `B` (a frontier). Inside `enum A.enum B` the bare `B` binds to
+    // the inner segment, not the external type, so the render faults.
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .method("Get", returns: .value("A.B.Point"))
+    b.structure("A.B.Point")
+        .field("tip", .value("C.Point"))
+        .field("edge", .external("B"))
+    b.structure("C.Point")
+    b.with { catalog in
+      let shell = Shell(catalog)
+      #expect(throws: Shell.RenderError.collision("B")) {
+        _ = try shell.render(closure: "IRoot", template: "com")
+      }
+    }
+  }
+}
+
 /// A closure that reaches a value type only through its metadata-nested member.
 /// `R.IRoot.Make` returns `Outer.Inner` (`Inner` nested in `Outer` via
 /// `NestedClass`), and no signature names `Outer` directly. The walk must walk
@@ -3277,6 +3313,68 @@ struct RenderClosureAmbiguousProtocolTests {
   }
 }
 
+/// A closure whose fabricated namespace container shadows a signature-
+/// referenced frontier type. `R.IRoot.Use` takes value types `A.Point` and
+/// `B.Point` (ambiguous `Point`, so both wrap and fabricate `enum A`/`enum B`)
+/// plus a runtime class `X.A` — a frontier the closure spells bare `A` but does
+/// not emit. The fabricated `enum A` would shadow the bare `A` reference
+/// (binding it to the generated container rather than the consumer's type), so
+/// the emit must reserve the namespace label against the referenced frontier
+/// and fault `.collision("A")` — a clash the emitted-label scope check alone
+/// misses, since the frontier `A` is absent from the emitted set.
+@Suite struct RenderFrontierShadowTests {
+  @Test func `a fabricated namespace container shadowing a frontier type faults`() {
+    // `IRoot.Use` takes value types `A.Point` and `B.Point` (ambiguous `Point`,
+    // so both wrap and fabricate `enum A`/`enum B`) plus a runtime class `X.A` —
+    // a frontier the closure spells bare `A` but does not emit. The fabricated
+    // `enum A` would shadow that bare `A`, so the emit reserves the namespace
+    // label against the referenced frontier and faults, a clash the
+    // emitted-label scope check alone misses.
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .method("Use", [("a", .value("A.Point")), ("b", .value("B.Point")),
+                        ("x", .object("X.A"))])
+    b.structure("A.Point")
+    b.structure("B.Point")
+    b.klass("X.A")
+    b.with { catalog in
+      let shell = Shell(catalog)
+      #expect(throws: Shell.RenderError.collision("A")) {
+        _ = try shell.render(closure: "IRoot", template: "com")
+      }
+    }
+  }
+}
+
+/// A closure whose fabricated namespace container shadows the enclosing root of
+/// a *nested* frontier's spelling. `R.IRoot.Use` takes value types `A.Point`
+/// and `B.Point` (ambiguous `Point`, so both wrap and fabricate `enum A` and
+/// `enum B`) plus `Inner`, a value type nested in a runtime class `X.A` — a
+/// frontier the
+/// closure spells `A.Inner` (its enclosing dot-path) but does not emit. The
+/// fabricated `enum A` would shadow the `A` in that `A.Inner` reference, so the
+/// emit must reserve the top-level component `A` of the dotted frontier path —
+/// not the whole `A.Inner`, which no namespace segment matches — and fault
+/// `.collision("A")`.
+@Suite struct RenderNestedFrontierShadowTests {
+  @Test func `a fabricated container shadowing a nested frontier's root faults`() throws {
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .method("Use", [("a", .value("A.Point")), ("b", .value("B.Point")),
+                        ("c", .value("X.A.Inner"))])
+    b.structure("A.Point")
+    b.structure("B.Point")
+    b.klass("X.A")
+    b.structure("Inner", nested: "X.A")
+    b.with { catalog in
+      let shell = Shell(catalog)
+      #expect(throws: Shell.RenderError.collision("A")) {
+        _ = try shell.render(closure: "IRoot", template: "com")
+      }
+    }
+  }
+}
+
 /// A closure whose reached value type shares a bare name with a frontier the
 /// signature also references. `R.IRoot.Use` takes a local value type `A.Point`
 /// and an *external* `B.Point` — a `TypeRef` scoped to an `AssemblyRef`, so it
@@ -3300,6 +3398,38 @@ struct RenderClosureAmbiguousProtocolTests {
     }
   }
 }
+
+/// A closure whose fabricated namespace container shadows an external interface
+/// base. `R.IRoot`'s base is named through an external `TypeRef` `A`
+/// (`AssemblyRef` scope), so the `bases` view emits `protocol IRoot: A` while
+/// the `requires` walk — local interfaces only — never sees it. `R.IRoot.Use`
+/// takes local value types `A.Point` and `B.Point` (ambiguous `Point`), so both
+/// wrap and fabricate `enum A`/`enum B`. The fabricated `enum A` would shadow
+/// the external base `A`, binding the inheritance to the generated container
+/// rather than the consumer's protocol — so the emitted base name must be
+/// reserved in the frontier set and nest must fault `.collision("A")`.
+@Suite struct RenderExternalBaseShadowTests {
+  @Test func `a fabricated container shadowing an external base faults`() {
+    // `R.IRoot`'s base is an external `A` (an `AssemblyRef`-scoped `TypeRef`), so
+    // the `bases` view emits `protocol IRoot: A` though the local-only requires
+    // walk never sees it. `IRoot.Use` takes local `A.Point` and `B.Point`
+    // (ambiguous `Point`), so both wrap and fabricate `enum A`/`enum B`; the
+    // `enum A` would shadow the external base `A`, so the render must fault.
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .refines(external: "A")
+        .method("Use", [("a", .value("A.Point")), ("b", .value("B.Point"))])
+    b.structure("A.Point")
+    b.structure("B.Point")
+    b.with { catalog in
+      let shell = Shell(catalog)
+      #expect(throws: Shell.RenderError.collision("A")) {
+        _ = try shell.render(closure: "IRoot", template: "com")
+      }
+    }
+  }
+}
+
 /// A closure whose reached value type shares a bare name with a
 /// *layout-rejected* frontier. `R.IRoot.Use` takes local value types `A.Point`
 /// (sequential layout, which renders) and `B.Point` (explicit layout, which the
@@ -3565,6 +3695,36 @@ struct RenderClosureAmbiguousProtocolTests {
     }
   }
 }
+
+/// A closure whose emitted nested `Foo.A` must not un-frontier an external
+/// top-level `A`. `R.IRoot.Use` takes an external `A` (`AssemblyRef` scope, a
+/// frontier), ambiguous `A.Point`/`B.Point` (which fabricate `enum A`/`enum
+/// B`), and `Foo.A` — a value type `A` nested in an emitted container `Foo`. A
+/// global name subtraction would drop `A` from the frontier set because
+/// `Foo.A`'s leaf is `A`, letting the fabricated `enum A` shadow the external
+/// base; scoping the frontier to the emitted-set complement keeps `A` a
+/// frontier (its top-level
+/// bearer is unemitted, `Foo.A`'s root `Foo` is not `A`), so nest faults
+/// `.collision("A")`.
+@Suite struct RenderNestedSubtractTests {
+  @Test func `an emitted nested type does not un-frontier an external base`() throws {
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .method("Use", [("a", .external("A")), ("b", .value("A.Point")),
+                        ("c", .value("B.Point")), ("d", .value("Foo.A"))])
+    b.structure("A.Point")
+    b.structure("B.Point")
+    b.structure("Foo")
+    b.structure("A", nested: "Foo")
+    b.with { catalog in
+      let shell = Shell(catalog)
+      #expect(throws: Shell.RenderError.collision("A")) {
+        _ = try shell.render(closure: "IRoot", template: "com")
+      }
+    }
+  }
+}
+
 /// A closure whose signature reaches an interface nested in an emitted
 /// value-type container. `R.IRoot.Use` takes `IChild`, an interface nested in
 /// `struct Outer`. Swift permits a protocol nested in a non-generic value type
@@ -3656,6 +3816,91 @@ struct RenderClosureAmbiguousProtocolTests {
     }
   }
 }
+
+/// A closure whose fabricated namespace container shadows the implicit root.
+/// `R.IRoot` has no plain metadata base, so it renders `protocol IRoot:
+/// IUnknown`,
+/// the language's fallback root. `R.IRoot.Use` takes `IUnknown.Point` and
+/// `B.Point` (ambiguous `Point`, so both wrap and fabricate `enum IUnknown` and
+/// `enum B`). The fabricated `enum IUnknown` would shadow the implicit root, so
+/// the emitted root name must be reserved and nest faults `.collision`.
+@Suite struct RenderImplicitRootShadowTests {
+  private static let bytes: Array<UInt8> = [
+    0x00, 0x00, 0x23, 0x00, 0x01, 0x00, 0x00, 0x00, 0x38, 0x00, 0x31, 0x00,
+    0x21, 0x00, 0x00, 0x00, 0x44, 0x00, 0x42, 0x00, 0x00, 0x00, 0x01, 0x00,
+    0x01, 0x00, 0x08, 0x00, 0x00, 0x00, 0x53, 0x00, 0x4a, 0x00, 0x09, 0x00,
+    0x01, 0x00, 0x02, 0x00, 0x08, 0x00, 0x00, 0x00, 0x53, 0x00, 0x59, 0x00,
+    0x09, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xc6, 0x05, 0x61, 0x00, 0x01, 0x00, 0x01, 0x00, 0x09, 0x00, 0x5b, 0x00,
+    0x09, 0x00, 0x23, 0x00, 0x0b, 0x00, 0x0f, 0x00,
+  ]
+
+  private static let strings: Array<UInt8> = [
+    0x00, 0x57, 0x69, 0x6e, 0x64, 0x6f, 0x77, 0x73, 0x2e, 0x57, 0x69, 0x6e,
+    0x33, 0x32, 0x2e, 0x46, 0x6f, 0x75, 0x6e, 0x64, 0x61, 0x74, 0x69, 0x6f,
+    0x6e, 0x2e, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x00, 0x47,
+    0x75, 0x69, 0x64, 0x41, 0x74, 0x74, 0x72, 0x69, 0x62, 0x75, 0x74, 0x65,
+    0x00, 0x53, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x00, 0x56, 0x61, 0x6c, 0x75,
+    0x65, 0x54, 0x79, 0x70, 0x65, 0x00, 0x52, 0x00, 0x49, 0x52, 0x6f, 0x6f,
+    0x74, 0x00, 0x49, 0x55, 0x6e, 0x6b, 0x6e, 0x6f, 0x77, 0x6e, 0x00, 0x50,
+    0x6f, 0x69, 0x6e, 0x74, 0x00, 0x42, 0x00, 0x2e, 0x63, 0x74, 0x6f, 0x72,
+    0x00, 0x55, 0x73, 0x65, 0x00,
+  ]
+
+  private static let blob: Array<UInt8> = [
+    0x00, 0x07, 0x20, 0x02, 0x01, 0x11, 0x08, 0x11, 0x0c, 0x05, 0x20, 0x02,
+    0x01, 0x08, 0x0f, 0x14, 0x01, 0x00, 0xef, 0xbe, 0xad, 0xde, 0xfe, 0xca,
+    0xbe, 0xba, 0xf0, 0x0d, 0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0x00, 0x00,
+  ]
+
+  private static let empty = Array<UInt8>()
+
+  private static let relations: Array<WinMD.Table> = [
+    WinMD.Table(Metadata.Tables.TypeRef.self, rows: 2, range: 0 ..< 12,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeDef.self, rows: 3, range: 12 ..< 54,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.FieldDef.self, rows: 0, range: 54 ..< 54,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.MethodDef.self, rows: 1, range: 54 ..< 68,
+                wide: 0, stride: 14),
+    WinMD.Table(Metadata.Tables.Param.self, rows: 0, range: 68 ..< 68,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.InterfaceImpl.self, rows: 0, range: 68 ..< 68,
+                wide: 0, stride: 4),
+    WinMD.Table(Metadata.Tables.MemberRef.self, rows: 1, range: 68 ..< 74,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.Constant.self, rows: 0, range: 74 ..< 74,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.CustomAttribute.self, rows: 1, range: 74 ..< 80,
+                wide: 0, stride: 6),
+    WinMD.Table(Metadata.Tables.TypeSpec.self, rows: 0, range: 80 ..< 80,
+                wide: 0, stride: 2),
+    WinMD.Table(Metadata.Tables.NestedClass.self, rows: 0, range: 80 ..< 80,
+                wide: 0, stride: 4),
+  ]
+
+  private static let valid: UInt64 =
+      (1 << 1) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 8) | (1 << 9)
+          | (1 << 10) | (1 << 11) | (1 << 12) | (1 << 27) | (1 << 41)
+
+  static func with(_ body: (borrowing Storage) throws -> Void) rethrows {
+    let storage = Storage(bytes: bytes.span.bytes, relations: relations.span,
+                          strings: strings.span.bytes, blob: blob.span.bytes,
+                          guid: empty.span.bytes, valid: valid, sorted: 0)
+    try body(storage)
+  }
+
+  @Test func `a fabricated container shadowing the implicit root faults`() {
+    RenderImplicitRootShadowTests.with { catalog in
+      let shell = Shell(catalog)
+      #expect(throws: Shell.RenderError.collision("IUnknown")) {
+        _ = try shell.render(closure: "IRoot", template: "com")
+      }
+    }
+  }
+}
+
 /// A closure whose ambiguous value type is in the global CLR namespace, which
 /// no fabricated container can qualify. `R.IRoot.Use` takes a local `Point` in
 /// the global namespace and a local `A.Point`. Both project to `Point`, so both
@@ -4402,6 +4647,222 @@ struct RenderClosureAmbiguousProtocolTests {
     }
   }
 }
+
+/// Coverage of the PR350/PR351 identity/visibility findings, each stated through
+/// the fluent builder.
+@Suite struct RenderResolutionFindingsTests {
+  // A by-value type nested beneath a generic encloser has no valid spelling, so
+  // its containing declaration is dropped rather than rendered with an
+  // ABI-changing opaque pointer.
+  @Test func `a by-value type under a generic encloser drops its containing declaration`() throws {
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .method("Use", [("v", .value("Outer.Inner"))])
+    b.klass("Outer").generic("T")
+    b.structure("Inner", nested: "Outer")
+    try b.with { catalog in
+      let closed = try Shell(catalog).render(closure: "IRoot", template: "com")
+      #expect(!closed.contains("protocol IRoot"))
+    }
+  }
+
+  // The same by-value-under-generic-encloser drop, but the value type is named
+  // through a local `TypeRef` chain rather than a direct `TypeDef` token. Its
+  // kind must be read off the *resolved* definition (a struct), not the
+  // reference row — which carries neither `Flags` nor `Extends` and would
+  // misclassify as a class, letting the poison miss it — so the containing
+  // declaration is still dropped.
+  @Test func `a by-value type named through a TypeRef under a generic encloser drops its declaration`() throws {
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .method("Use", [("v", .reference("Outer.Inner"))])
+    b.klass("Outer").generic("T")
+    b.structure("Inner", nested: "Outer")
+    try b.with { catalog in
+      let closed = try Shell(catalog).render(closure: "IRoot", template: "com")
+      #expect(!closed.contains("protocol IRoot"))
+    }
+  }
+
+  // The same value type under a generic encloser, but named only *behind a
+  // pointer*: `Use(Ptr<Outer`1.Inner>)` does not embed `Inner`'s layout — it
+  // renders as an opaque pointer — so the owner is not poisoned. `Inner` must
+  // stay *unresolved*, so the parameter is the opaque pointer, not an
+  // uncompilable `UnsafeMutablePointer<Outer.Inner>` naming a type the closure
+  // never emits (its generic runtime-class encloser is dropped).
+  @Test func `a pointer to a by-value type under a generic encloser keeps its owner`() throws {
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .method("Use", [("v", .pointer(.value("Outer.Inner")))])
+    b.klass("Outer").generic("T")
+    b.structure("Inner", nested: "Outer")
+    try b.with { catalog in
+      let closed = try Shell(catalog).render(closure: "IRoot", template: "com")
+      #expect(closed.contains("protocol IRoot"))
+      #expect(!closed.contains("Outer.Inner"))
+      #expect(!closed.contains("Outer`1"))
+      #expect(closed.contains("UnsafeMutableRawPointer"))
+    }
+  }
+
+  // An external base sharing a bare name with a local nested interface must
+  // spell bare — resolved by identity, not correlated by name to the local one.
+  @Test func `an external base sharing a nested interface's name spells bare`() throws {
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .refines(external: "IChild")
+        .refines("Outer.IChild")
+    b.klass("Outer")
+    b.interface("IChild", guid: 0xFEEDFACE, nested: "Outer")
+    try b.with { catalog in
+      let closed = try Shell(catalog).render(closure: "IRoot", template: "com")
+      #expect(closed.contains("public protocol IRoot: IChild {"))
+      #expect(!closed.contains("Outer.IChild"))
+    }
+  }
+
+  // A bare frontier reference whose name a co-emitted top-level protocol also
+  // bears binds to the protocol, which cannot be namespace-wrapped away, so it
+  // faults.
+  @Test func `a frontier reference colliding with an emitted protocol faults`() throws {
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .refines("R.Point")
+        .method("Use", [("p", .external("Point"))])
+    b.interface("R.Point", guid: 0xFEEDFACE)
+    b.with { catalog in
+      let shell = Shell(catalog)
+      #expect(throws: Shell.RenderError.collision("Point")) {
+        _ = try shell.render(closure: "IRoot", template: "com")
+      }
+    }
+  }
+
+  // A bare frontier reference resolves to a *sibling* fabricated container
+  // visible through a shared ancestor: `A.B.Point`, wrapped under `enum A.enum
+  // B`, names bare `C`, which binds to the sibling `enum A.enum C` (wrapping
+  // `A.C.Widget`) through the enclosing `enum A` — the wrong type — so it faults.
+  @Test func `a frontier reference bound to a sibling container faults`() throws {
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .method("Make", returns: .value("A.B.Point"))
+        .method("Get", returns: .value("A.C.Widget"))
+    b.structure("A.B.Point").field("tip", .value("X.Point"))
+        .field("edge", .external("C"))
+    b.structure("X.Point")
+    b.structure("A.C.Widget").field("tip", .value("Y.Widget"))
+    b.structure("Y.Widget")
+    b.with { catalog in
+      let shell = Shell(catalog)
+      #expect(throws: Shell.RenderError.collision("C")) {
+        _ = try shell.render(closure: "IRoot", template: "com")
+      }
+    }
+  }
+
+  // The inheritance clause spells a nested local base through its enclosing path
+  // (`Outer.IChild`), so a fabricated top-level container `Outer` — from an
+  // ambiguous `Outer.Point` — shadows the base's leading `Outer`. The reserved
+  // frontier label is that leading component, not the leaf `IChild`, so it
+  // faults rather than binding the inheritance to the container.
+  @Test func `a fabricated container shadowing a nested base's root faults`() throws {
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .refines("Outer.IChild")
+        .method("Use", [("a", .value("Outer.Point")), ("b", .value("B.Point"))])
+    b.klass("Outer")
+    b.interface("IChild", guid: 0xFEEDFACE, nested: "Outer")
+    b.structure("Outer.Point")
+    b.structure("B.Point")
+    b.with { catalog in
+      let shell = Shell(catalog)
+      #expect(throws: Shell.RenderError.collision("Outer")) {
+        _ = try shell.render(closure: "IRoot", template: "com")
+      }
+    }
+  }
+
+  // A nested interface base whose value-type encloser is wrapped for a name
+  // collision must spell through the wrapped namespace. `A.Outer` (a struct)
+  // collides with `B.Outer`, so both wrap under fabricated `enum A`/`enum B`;
+  // `Root` refines `A.Outer.IChild`, nested in the wrapped `A.Outer`. The
+  // inheritance clause must use the same qualification a signature decode does
+  // — `A.Outer.IChild` — not the bare enclosing `Outer.IChild`, which now
+  // resolves to nothing: `Outer` is a fabricated container, not a top type.
+  @Test func `a nested base under a wrapped encloser spells its namespace`() throws {
+    let b = WinMDBuilder()
+    b.interface("R.Root", guid: 0xDEADBEEF)
+        .refines("A.Outer.IChild")
+        .method("Use", [("v", .value("B.Outer"))])
+    b.structure("A.Outer")
+    b.interface("IChild", guid: 0xFEEDFACE, nested: "A.Outer")
+    b.structure("B.Outer")
+    try b.with { catalog in
+      let closed = try Shell(catalog).render(closure: "Root", template: "com")
+      #expect(closed.contains("A.Outer.IChild"))
+      #expect(!closed.contains(": Outer.IChild"))
+    }
+  }
+
+  // A rootless interface's fallback root (`IUnknown`) that a signature also
+  // reaches as a GUID-bearing local interface binds to that co-emitted
+  // definition, not an external frontier. Recording the fallback with a nil Id
+  // read it as external, so the emitted `IUnknown` protocol false-shadowed it
+  // and faulted `.collision("IUnknown")`; resolving the fallback to the local
+  // Id keeps it out of the frontier set, and `protocol IRoot: IUnknown` binds to
+  // the co-emitted root.
+  @Test func `a fallback root binds to a co-emitted local interface`() throws {
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .method("Use", [("v", .object("IUnknown"))])
+    b.interface("IUnknown", guid: 0xFEEDFACE)
+    try b.with { catalog in
+      let closed = try Shell(catalog).render(closure: "IRoot", template: "com")
+      #expect(closed.contains("public protocol IRoot: IUnknown {"))
+      #expect(closed.contains("public protocol IUnknown {"))
+    }
+  }
+
+  // Two GUID-bearing local interfaces named `IUnknown` in different namespaces:
+  // `IRoot` reaches the second through a signature, so it — not the first by Id
+  // — is emitted. The fallback root must resolve against the *emitted*
+  // candidate: an ascending-Id `.first` pick would attach to the unemitted
+  // `A.IUnknown` and fault `.collision("IUnknown")` against the emitted
+  // protocol even though `IRoot: IUnknown` binds to it.
+  @Test func `a fallback root resolves against the emitted candidate`() throws {
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .method("Use", [("v", .object("B.IUnknown"))])
+    b.interface("A.IUnknown", guid: 0x11111111)
+    b.interface("B.IUnknown", guid: 0x22222222)
+    try b.with { catalog in
+      let closed = try Shell(catalog).render(closure: "IRoot", template: "com")
+      #expect(closed.contains("public protocol IRoot: IUnknown {"))
+      #expect(closed.contains("public protocol IUnknown {"))
+    }
+  }
+
+  // An *explicit* external `IUnknown` reference is not the synthesized fallback
+  // root: it stays a frontier even when a local `IUnknown` is emitted. `Foo`
+  // takes a local `N.IUnknown` (emitted as `protocol IUnknown`) and an external
+  // `IUnknown` parameter; the external one would bind to the co-emitted local
+  // protocol — the wrong type — so it faults. Exempting every reference of the
+  // root's name (not just the fallback) would silently project the wrong type.
+  @Test func `an explicit external root reference stays a frontier`() throws {
+    let b = WinMDBuilder()
+    b.interface("R.Foo", guid: 0xDEADBEEF)
+        .method("Use", [("a", .object("N.IUnknown")),
+                        ("b", .external("IUnknown"))])
+    b.interface("N.IUnknown", guid: 0xFEEDFACE)
+    b.with { catalog in
+      let shell = Shell(catalog)
+      #expect(throws: Shell.RenderError.collision("IUnknown")) {
+        _ = try shell.render(closure: "Foo", template: "com")
+      }
+    }
+  }
+}
+
 /// Emittedness and ABI-occupant detection read the *code* a template renders,
 /// not its complete text: per-type boilerplate outside any kind section, and
 /// declaration-like text inside comments or string literals, name nothing.
@@ -4800,6 +5261,89 @@ struct RenderClosureAmbiguousProtocolTests {
     }
   }
 }
+
+/// A closure whose selected template frames a signature type in an array, so
+/// the frontier's identifier sits behind a `[` rather than right after the `:`.
+/// `R.IRoot.Use` takes value types `A.Point` and `B.Point` (ambiguous `Point`,
+/// so both wrap and fabricate `enum A`/`enum B`) plus a runtime class `X.A` — a
+/// frontier the closure spells bare `A` but does not emit. The reservation
+/// reads the rendered `[A]` as spelling `A`, so the fabricated `enum A` faults
+/// `.collision("A")`; a check keyed on an identifier abutting the delimiter
+/// misses the array-wrapped frontier and lets the enum shadow it.
+@Suite struct RenderWrappedFrontierReservationTests {
+  @Test func `a frontier a template wraps in an array is reserved`() throws {
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .method("Use", [("a", .value("A.Point")), ("b", .value("B.Point")),
+                        ("x", .object("X.A"))])
+    b.structure("A.Point")
+    b.structure("B.Point")
+    b.klass("X.A")
+    b.with { catalog in
+      var shell = Shell(catalog)
+      shell.templates["array"] = """
+        {{! language: swift }}
+        {{#interface}}
+        public protocol {{{name}}} {
+        {{#methods}}
+            func {{{name}}}({{#params}}_ {{{name}}}: [{{{type}}}]{{^last}}, {{/last}}{{/params}})
+        {{/methods}}
+        }
+        {{/interface}}
+        {{#struct}}
+        public struct {{{name}}} {}
+        {{/struct}}
+        """
+      #expect(throws: Shell.RenderError.collision("A")) {
+        _ = try shell.render(closure: "IRoot", template: "array")
+      }
+    }
+  }
+}
+
+/// A closure that hoists a wrapped value type's auxiliary to file scope, where
+/// a frontier of that helper's name — spelled by an unrelated root — must see
+/// it. `R.IRoot` refines the interface `B.Shape` and takes the struct `A.Shape`
+/// (cross-kind `Shape`, so the struct wraps under a fabricated `enum A` while
+/// the protocol stays bare) plus an external `ShapeStorage`. The struct's arm
+/// declares a `ShapeStorage` helper beside it, which leaves the `enum A` and
+/// lands at file scope. `IRoot` — a root the outward walk never reaches the
+/// `enum A` from — spells the frontier `ShapeStorage` bare, so the hoisted
+/// helper shadows it and the render must fault `.collision("ShapeStorage")`;
+/// seeding the visibility set with only the roots' own occupants misses the
+/// hoisted helper and lets the frontier bind to it.
+@Suite struct RenderHoistedHelperShadowTests {
+  @Test func `a hoisted helper shadows a same-named frontier reference`() throws {
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .refines("B.Shape")
+        .method("Use", [("a", .value("A.Shape")),
+                        ("s", .external("ShapeStorage"))])
+    b.structure("A.Shape")
+    b.interface("B.Shape")
+    b.with { catalog in
+      var shell = Shell(catalog)
+      shell.templates["helper"] = """
+        {{! language: swift }}
+        {{#interface}}
+        public protocol {{{name}}}{{#base}}: {{{.}}}{{/base}} {
+        {{#methods}}
+            func {{{name}}}({{#params}}_ {{{name}}}: {{{type}}}{{^last}}, {{/last}}{{/params}})
+        {{/methods}}
+        }
+        {{/interface}}
+        {{#struct}}
+        public struct {{{name}}} {}
+        public struct {{{name}}}Storage {}
+        {{/struct}}
+        """
+      #expect(throws: Shell.RenderError.collision("ShapeStorage")) {
+        _ = try shell.render(closure: "IRoot", template: "helper")
+      }
+    }
+  }
+}
+
 /// A closure whose two separately-wrapped containers each hold a metadata-nested
 /// child that hoists a same-named helper to file scope. `R.IRoot.Use` names
 /// `A.Outer.Inner` and `B.Outer.Inner2` (ambiguous `Outer`, so both `Outer`s
@@ -4841,6 +5385,81 @@ struct RenderClosureAmbiguousProtocolTests {
         """
       #expect(throws: Shell.RenderError.collision("Helper")) {
         _ = try shell.render(closure: "IRoot", template: "helper")
+      }
+    }
+  }
+}
+
+/// A closure where a type nested under a real value-type container hoists a
+/// helper to file scope, and a frontier of that helper's name — spelled by an
+/// unrelated root — must see it. `R.IRoot.Use` names `Outer.Inner` (a nested
+/// enum under the top-level, unwrapped `Outer`) plus an external `Helper`; the
+/// nested enum's template declares a `struct Helper {}` beside it, which hoists
+/// through `Outer` to file scope. `IRoot` spells the frontier `Helper` bare, so
+/// the hoisted helper shadows it and the render must fault
+/// `.collision("Helper")`; a file-scope visibility set seeded only from the
+/// `.space` nodes' direct children misses a helper hoisted from under a real
+/// container.
+@Suite struct RenderRealContainerHoistShadowTests {
+  @Test func `a helper hoisted from under a real container shadows a frontier`() throws {
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .method("Use", [("v", .value("Outer.Inner")),
+                        ("h", .external("Helper"))])
+    b.structure("Outer")
+    b.enumeration("Inner", nested: "Outer")
+    b.with { catalog in
+      var shell = Shell(catalog)
+      shell.templates["helper"] = """
+        {{! language: swift }}
+        {{#interface}}
+        public protocol {{{name}}} {
+        {{#methods}}
+            func {{{name}}}({{#params}}_ {{{name}}}: {{{type}}}{{^last}}, {{/last}}{{/params}})
+        {{/methods}}
+        }
+        {{/interface}}
+        {{#struct}}
+        public struct {{{name}}} {}
+        {{/struct}}
+        {{#enum}}
+        public struct {{{name}}} {}
+        public struct Helper {}
+        {{/enum}}
+        """
+      #expect(throws: Shell.RenderError.collision("Helper")) {
+        _ = try shell.render(closure: "IRoot", template: "helper")
+      }
+    }
+  }
+}
+
+/// A closure that emits a metadata-nested `Outer.IUnknown` while fabricating a
+/// top-level `enum IUnknown`. `R.IRoot` is rootless, so its base is the
+/// synthesized fallback root `IUnknown`; `Use` takes `IUnknown.Point` and
+/// `B.Point` (ambiguous `Point`, so both wrap and fabricate `enum
+/// IUnknown`/`enum B`) plus the nested value type `Outer.IUnknown`. The
+/// fabricated top-level `enum IUnknown` would shadow the bare `protocol IRoot:
+/// IUnknown` base, so the fallback must stay a frontier and nest must fault
+/// `.collision("IUnknown")`. The nested `Outer.IUnknown` must not satisfy the
+/// fallback exemption — a bare `IUnknown` cannot resolve to it — so an
+/// emitted-name check that ignores nesting would suppress the frontier and let
+/// the base bind to the enum.
+@Suite struct RenderNestedRootExemptionTests {
+  @Test func `a nested root does not exempt the fabricated container's shadow`() throws {
+    let b = WinMDBuilder()
+    b.interface("R.IRoot", guid: 0xDEADBEEF)
+        .method("Use", [("a", .value("IUnknown.Point")),
+                        ("b", .value("B.Point")),
+                        ("c", .value("Outer.IUnknown"))])
+    b.structure("IUnknown.Point")
+    b.structure("B.Point")
+    b.structure("Outer")
+    b.structure("IUnknown", nested: "Outer")
+    b.with { catalog in
+      let shell = Shell(catalog)
+      #expect(throws: Shell.RenderError.collision("IUnknown")) {
+        _ = try shell.render(closure: "IRoot", template: "com")
       }
     }
   }

@@ -1169,6 +1169,64 @@ internal struct Shell: ~Escapable {
         }
       }
     }
+    // A signature spells a frontier reference — a type the closure names bare
+    // but does not emit (a runtime class, an external or `known` type, an
+    // inherited external base) — by its outermost component. Swift resolves that
+    // bare identifier by walking outward from the referencing declaration's
+    // scope through each enclosing scope to the top level, binding it to the
+    // first member of that name it finds. So an emitted declaration or a
+    // fabricated namespace `enum` of that name in ANY scope enclosing the
+    // reference's owner captures it — a top-level protocol or container, the
+    // fabricated segment wrapping the owner, or a *sibling* container visible
+    // through a shared ancestor (the `C` of `enum A.enum C` seen from
+    // `A.B.Point` through `enum A`). The bound-to type is not the consumer's, so
+    // the clash faults `collision`; a protocol cannot be namespace-wrapped away
+    // to avoid it. This mirrors the language's own name lookup, so it neither
+    // misses a shadow a narrower check would nor faults an unrelated same-named
+    // type in a scope the reference cannot see.
+    var enclosing = Dictionary<Node, Node>(minimumCapacity: children.count)
+    for (container, members) in children {
+      for member in members { enclosing[member] = container }
+    }
+    // A scope's occupants are its members' spelled labels *and* every auxiliary
+    // top-level name the template declares alongside them — a generic type's
+    // `<name>ABI` helper, or a custom template's extra helper — so a frontier
+    // reference resolving bare to any of them is shadowed just as one resolving
+    // to a member declaration is. A `.space` node contributes only its own
+    // segment label: its wrapped members' auxiliaries do not stay in the enum,
+    // they hoist to the root file scope, so they are seeded into `top` below.
+    func occupants(of node: Node) -> [String] {
+      guard case let .type(id) = node else { return [label(node)] }
+      return [label(node)] + (auxiliaries[id] ?? [])
+    }
+    // The file scope holds every root's occupants *and* every nested type's
+    // hoisted helper (`hoisted`, already tallied for the redeclaration check),
+    // so a frontier reference resolving bare to a hoisted helper is shadowed
+    // even when its owner sits in an unrelated root subtree the outward walk
+    // never reaches the helper's container from.
+    let top = Set(roots.flatMap(occupants)).union(hoisted.keys)
+    // A frontier reference is spelled in its owner's own declaration — the
+    // metadata places it in the owner's signature, and the template spells it
+    // there — so it resolves outward from the owner's nested scope: the roots,
+    // each enclosing container's members, and the hoisted file-scope helpers.
+    // A fabricated or emitted occupant of that name in an enclosing scope binds
+    // the bare reference to the wrong type, so the render faults.
+    var shadows = Set<String>()
+    for reference in frontier {
+      var visible = top
+      var scope: Node? = .type(reference.owner)
+      while let current = scope {
+        for member in children[current] ?? [] {
+          for name in occupants(of: member) { visible.insert(name) }
+        }
+        scope = enclosing[current]
+      }
+      if visible.contains(reference.label) { shadows.insert(reference.label) }
+    }
+    let shadow = shadows.min()
+    if let shadow, clash == nil || shadow < clash!.label {
+      throw RenderError.collision(shadow)
+    }
     if let clash {
       // An auxiliary declaration (a generic type's `<name>ABI`, or a custom
       // template's extra helper) colliding with a declaration of that name is
